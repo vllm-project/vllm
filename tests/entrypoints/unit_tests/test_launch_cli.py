@@ -349,10 +349,48 @@ def test_lookup_key_keys_dpkg_dists_by_deb_revision(monkeypatch):
 
     monkeypatch.setattr(snapshot_module, "_entry_state", {})
     monkeypatch.setattr(
-        snapshot_module.importlib.metadata, "distributions", lambda: [FakeDpkgDist()]
+        snapshot_module.importlib.metadata,
+        "distributions",
+        lambda **_kwargs: [FakeDpkgDist()],
     )
     monkeypatch.setattr(snapshot_module.subprocess, "run", fake_run)
     first = snapshot_module.lookup_key(creation_env())["dists_digest"]
     deb["version"] = "3.12.4-1ubuntu7.22.04.2"
     second = snapshot_module.lookup_key(creation_env())["dists_digest"]
     assert first != second
+
+
+def _make_dist(site, name):
+    info = site / f"{name}-1.0.dist-info"
+    info.mkdir(parents=True)
+    (info / "METADATA").write_text(
+        f"Metadata-Version: 2.1\nName: {name}\nVersion: 1.0\n"
+    )
+    (info / "RECORD").write_text(f"{name}/__init__.py,,\n")
+
+
+def test_lookup_key_ignores_sys_path_growth_after_entry(monkeypatch, tmp_path):
+    # `snapshot create` keys after the eager CLI imports while the restore
+    # hook keys before them, and importing the serve envelope grows sys.path
+    # (setuptools appends its _vendor directory). The dists digest must walk
+    # the captured entry path, or create and restore disagree forever.
+    import vllm.entrypoints.snapshot as snapshot_module
+
+    base = tmp_path / "base-site"
+    extra = tmp_path / "extra-site"
+    _make_dist(base, "basepkg")
+    _make_dist(extra, "extrapkg")
+    monkeypatch.setattr(sys, "path", [str(base)])
+    monkeypatch.setattr(sys, "argv", ["vllm", "snapshot"])
+    monkeypatch.setattr(snapshot_module, "_entry_state", {})
+    maybe_restore_serve()  # captures entry state, the public hook's job
+    first = snapshot_module.lookup_key(creation_env())["dists_digest"]
+    sys.path.append(str(extra))
+    second = snapshot_module.lookup_key(creation_env())["dists_digest"]
+    assert first == second
+    # negative control: the extra dir does change the digest once it is part
+    # of the captured entry state, so the equality above is not vacuous
+    monkeypatch.setattr(snapshot_module, "_entry_state", {})
+    maybe_restore_serve()
+    third = snapshot_module.lookup_key(creation_env())["dists_digest"]
+    assert third != first

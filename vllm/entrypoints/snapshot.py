@@ -449,7 +449,12 @@ def _distributions_digest() -> str:
     triples: list[list[str]] = []
     offenders: list[str] = []
     dpkg_pending: list[tuple[str, str, str]] = []
-    for dist in importlib.metadata.distributions():
+    # Walk the ENTRY sys.path, not the live one: create keys after the eager
+    # CLI imports while the restore hook keys before them, and importing the
+    # serve envelope grows sys.path (setuptools appends its _vendor directory,
+    # nine distributions the pre-import walk never sees). Keying the live path
+    # makes create and restore disagree forever in the official image.
+    for dist in importlib.metadata.distributions(path=_entry_sys_path()):
         name = dist.metadata["Name"] or dist.name or "?"
         if _is_editable(dist):
             offenders.append(f"{name} (editable)")
