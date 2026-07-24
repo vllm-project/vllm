@@ -307,7 +307,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.model_memory_usage = m.consumed_memory
         logger.info(
-            "Model loading took %s GiB and %.6f seconds",
+            "Model loading took %s GiB memory and %.6f seconds",
             format_gib(m.consumed_memory),
             time_after_load - time_before_load,
         )
@@ -1609,6 +1609,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
         torch.accelerator.synchronize()
+        self.cudagraph_manager = None
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()
         if hasattr(self, "attn_groups"):

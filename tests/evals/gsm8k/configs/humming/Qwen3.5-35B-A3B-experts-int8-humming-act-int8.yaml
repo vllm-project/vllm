@@ -8,5 +8,6 @@ server_args: >-
   --max-model-len 8192
   --moe-backend humming
   --quantization experts_int8
+  --gpu-memory-utilization 0.85
 env:
   VLLM_HUMMING_INPUT_QUANT_CONFIG: '{"dtype":"int8"}'

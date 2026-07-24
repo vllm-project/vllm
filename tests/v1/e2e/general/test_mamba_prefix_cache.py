@@ -840,6 +840,10 @@ def get_mamba_prefix_cache_step_configs(
 def _run_mamba_prefix_cache_mrv1(
     monkeypatch: pytest.MonkeyPatch, async_scheduling: bool
 ):
+    # This test patches the V1 model runner, so pin V1 explicitly: MoE/hybrid
+    # models like Qwen3-Next now default to the V2 runner.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    envs.disable_envs_cache()
     global async_scheduling_mode
     async_scheduling_mode = async_scheduling
     run_ref_mamba_state_in_subprocess()
