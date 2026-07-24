@@ -1,5 +1,6 @@
 #pragma once
 
+#include <bit>
 #include <cstdint>
 #include <string>
 #include <tuple>
@@ -182,7 +183,7 @@ class ScalarType {
   constexpr bool has_bias() const { return bias != 0; }
 
  private:
-  double _floating_point_max() const {
+  constexpr double _floating_point_max() const {
     STD_TORCH_CHECK(mantissa <= 52 && exponent <= 11,
                     "Cannot represent max/min as a double for type ", str());
 
@@ -216,7 +217,7 @@ class ScalarType {
     uint64_t double_raw =
         (max_mantissa << (52 - mantissa)) | (max_exponent_double << 52);
 
-    return *reinterpret_cast<double*>(&double_raw);
+    return std::bit_cast<double>(double_raw);
   }
 
   constexpr std::variant<int64_t, double> _raw_max() const {
@@ -234,12 +235,8 @@ class ScalarType {
       STD_TORCH_CHECK(
           is_signed(),
           "We currently assume all floating point types are signed");
-      constexpr uint64_t sign_bit_double = (uint64_t(1) << 63);
-
-      double max = _floating_point_max();
-      uint64_t max_raw = *reinterpret_cast<uint64_t*>(&max);
-      uint64_t min_raw = max_raw | sign_bit_double;
-      return {*reinterpret_cast<double*>(&min_raw)};
+      // For symmetric IEEE-754 float types, min is just the negation of max.
+      return {-_floating_point_max()};
     } else {
       STD_TORCH_CHECK(!is_signed() || size_bits() <= 64,
                       "Cannot represent min as a int64_t");
