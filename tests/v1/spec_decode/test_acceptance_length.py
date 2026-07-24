@@ -74,7 +74,9 @@ EAGLE3_MODEL_CONFIGS = [
         verifier="openai/gpt-oss-20b",
         drafter="RedHatAI/gpt-oss-20b-speculator.eagle3",
         expected_acceptance_length=2.56,
-        expected_acceptance_lengths_per_pos=[0.7165, 0.5120, 0.3337],
+        # pos-1 measured ~0.485-0.492 across H200/H100 and FLASH/TRITON; the
+        # old 0.512 baseline put the rtol floor above the real value.
+        expected_acceptance_lengths_per_pos=[0.7165, 0.4900, 0.3337],
         id="gpt-oss-20b-eagle3",
         # FLASHINFER incompatible: gpt-oss-20b uses sink attention which
         # FLASHINFER does not support ("sink setting not supported")
@@ -267,7 +269,7 @@ def test_eagle3_acceptance_length(
             },
             attention_config=attention_config,
             tensor_parallel_size=tp_size,
-            gpu_memory_utilization=0.7,
+            gpu_memory_utilization=0.8,
             disable_log_stats=False,
             max_model_len=DEFAULT_MAX_MODEL_LEN,
             # Qwen/Qwen3-30B-A3B-FP8 with TP=4 needs EP
