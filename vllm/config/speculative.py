@@ -916,6 +916,15 @@ class SpeculativeConfig:
                         f"Unsupported speculative method: '{self.method}'"
                     )
 
+                # DeepSeek's self-contained Qwen3 drafts share one arch for the
+                # DSpark and DFlash variants; route a "dflash" method to DSpark so
+                # it is not EAGLE-renamed to an unregistered arch (issue #49614).
+                self.method = self._route_self_contained_qwen3_dspark(
+                    self.method,
+                    self.draft_model_config.architectures,
+                    self.draft_model_config.model,
+                )
+
                 # Replace hf_config for EAGLE draft_model
                 if self.method in ("eagle", "eagle3", "dflash"):
                     from vllm.transformers_utils.configs.eagle import EAGLEConfig
@@ -1054,6 +1063,35 @@ class SpeculativeConfig:
                     )
                 )
         return self
+
+    @staticmethod
+    def _route_self_contained_qwen3_dspark(
+        method: "SpeculativeMethod | None",
+        draft_architectures: list[str],
+        model_name: str,
+    ) -> "SpeculativeMethod | None":
+        """Pick the speculative method for DeepSeek's self-contained Qwen3 drafts.
+
+        DeepSeek ships the SAME ``Qwen3DSparkModel`` architecture for both the
+        DSpark (``markov_rank > 0``) and the DFlash (``markov_rank == 0``)
+        checkpoints, and ``Qwen3DSparkForCausalLM`` serves both (its Markov head
+        is a no-op at ``markov_rank == 0``). A ``method`` of ``"dflash"`` — set
+        explicitly or inferred from a ``"dflash"`` model name (e.g.
+        ``deepseek-ai/dflash_qwen3_4b_block7``) — would otherwise be EAGLE-renamed
+        to the unregistered ``"DFlashQwen3DSparkModel"`` and fail to load, so
+        route it to the DSpark path instead.
+
+        See https://github.com/vllm-project/vllm/issues/49614.
+        """
+        if method == "dflash" and "Qwen3DSparkModel" in draft_architectures:
+            logger.warning_once(
+                "Draft model %s ships the self-contained Qwen3DSparkModel "
+                "architecture; using method='dspark' (which serves both DSpark "
+                "and markov_rank==0 DFlash checkpoints) instead of 'dflash'.",
+                model_name,
+            )
+            return "dspark"
+        return method
 
     def _validate_suffix_decoding(self):
         if not has_arctic_inference():
