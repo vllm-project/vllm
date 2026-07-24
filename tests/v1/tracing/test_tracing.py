@@ -31,8 +31,8 @@ def test_traces(
         m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
         sampling_params = SamplingParams(
-            temperature=0.01,
-            top_p=0.1,
+            temperature=0.0,
+            top_p=1.0,
             max_tokens=256,
         )
         model = "facebook/opt-125m"
