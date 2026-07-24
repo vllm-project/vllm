@@ -52,10 +52,7 @@ from vllm.distributed.parallel_state import (
     is_global_first_rank,
     prepare_communication_buffer_for_model,
 )
-from vllm.forward_context import (
-    BatchDescriptor,
-    set_forward_context,
-)
+from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.model_executor.layers.attention import Attention, MLAAttention
@@ -71,6 +68,8 @@ from vllm.model_executor.layers.rotary_embedding import (
     MRotaryEmbedding,
     XDRotaryEmbedding,
 )
+from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+from vllm.model_executor.layers.sparse_attn_indexer_capturer import IndexerTopkCapturer
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload import (
     finalize_layerwise_reload,
@@ -95,11 +94,7 @@ from vllm.model_executor.models.interfaces_base import (
     is_pooling_model,
     is_text_generation_model,
 )
-from vllm.model_executor.offloader import (
-    create_offloader,
-    get_offloader,
-    set_offloader,
-)
+from vllm.model_executor.offloader import create_offloader, get_offloader, set_offloader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import (
@@ -140,9 +135,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
-from vllm.v1.attention.backends.linear_attn import (
-    BailingLinearAttentionMetadataBuilder,
-)
+from vllm.v1.attention.backends.linear_attn import BailingLinearAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
@@ -174,6 +167,8 @@ from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
     DraftTokenIds,
     ECConnectorOutput,
+    IndexerTopkLists,
+    IndexerTopkTensors,
     KVConnectorOutput,
     LogprobsLists,
     LogprobsTensors,
@@ -266,6 +261,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         async_output_copy_stream: torch.cuda.Stream,
         vocab_size: int,
         routed_experts: RoutedExpertsTensors | None = None,
+        indexer_topk: IndexerTopkTensors | None = None,
         check_ep_fault: bool = False,
     ):
         self._model_runner_output = model_runner_output
@@ -281,6 +277,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         self.vocab_size = vocab_size
         self._logprobs_tensors = logprobs_tensors
         self._routed_experts = routed_experts
+        self._indexer_topk = indexer_topk
         self._has_fault: torch.Tensor | None = None
 
         # Initiate the copy on a separate stream, but do not synchronize it.
@@ -298,6 +295,11 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
             self._routed_experts_cpu = (
                 self._routed_experts.to_cpu_nonblocking()
                 if self._routed_experts is not None
+                else None
+            )
+            self._indexer_topk_cpu = (
+                self._indexer_topk.to_cpu_nonblocking()
+                if self._indexer_topk is not None
                 else None
             )
             if check_ep_fault:
@@ -338,6 +340,10 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         if self._routed_experts_cpu is not None:
             output.routed_experts = self._routed_experts_cpu.tolists()
         del self._routed_experts
+
+        if self._indexer_topk_cpu is not None:
+            output.indexer_topk = self._indexer_topk_cpu.tolists()
+        del self._indexer_topk
 
         if self._has_fault is not None and self._has_fault.item():
             mask = get_ep_all2all_manager().query_active_mask()
@@ -496,6 +502,8 @@ class GPUModelRunner(
         # Set to True after init_routed_experts_capturer() completes.
         # Prevents routed experts code from running during profiling/dummy run.
         self.routed_experts_initialized = False
+        # Set to True after init_indexer_topk_capturer() completes.
+        self.indexer_topk_initialized = False
         self.max_model_len = model_config.max_model_len
 
         # Always set to false after the first forward pass
@@ -2350,6 +2358,13 @@ class GPUModelRunner(
                 slot_mapping_attn[:num_tokens]
             )
 
+        if self.indexer_topk_initialized:
+            attn_gid = self.routed_experts_attn_gid
+            slot_mapping_attn = slot_mappings[attn_gid]
+            self.indexer_topk_slot_mapping_device[:num_tokens].copy_(
+                slot_mapping_attn[:num_tokens]
+            )
+
         num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
             :num_reqs_padded
         ]
@@ -3768,6 +3783,15 @@ class GPUModelRunner(
                     non_blocking=True,
                 )
 
+            if self.indexer_topk_initialized:
+                buf = self.indexer_topk_capturer.get_device_buffer()
+                total = scheduler_output.total_num_scheduled_tokens
+                self.indexer_topk_cpu[:total].copy_(buf[:total], non_blocking=True)
+                self.indexer_topk_slot_mapping_cpu[:total].copy_(
+                    self.indexer_topk_slot_mapping_device[:total],
+                    non_blocking=True,
+                )
+
             # Get the valid generated tokens.
             max_gen_len = sampled_token_ids.shape[-1]
             if max_gen_len == 1:
@@ -4169,6 +4193,9 @@ class GPUModelRunner(
 
         if self.routed_experts_initialized:
             self.routed_experts_capturer.clear_buffer()
+
+        if self.indexer_topk_initialized:
+            self.indexer_topk_capturer.clear_buffer()
 
         # If ngram_gpu is used, we need to copy the scheduler_output to avoid
         # the modification has influence on the scheduler_output in engine core process.
@@ -4781,6 +4808,12 @@ class GPUModelRunner(
                     routing_data=self.routed_experts_cpu[:total].numpy(),
                     slot_mapping=self.routed_experts_slot_mapping_cpu[:total].numpy(),
                 )
+            if self.indexer_topk_initialized:
+                total = scheduler_output.total_num_scheduled_tokens
+                output.indexer_topk = IndexerTopkLists(
+                    topk_data=self.indexer_topk_cpu[:total].numpy(),
+                    slot_mapping=self.indexer_topk_slot_mapping_cpu[:total].numpy(),
+                )
             return output
 
         with record_function_or_nullcontext(
@@ -4809,6 +4842,15 @@ class GPUModelRunner(
                     ].clone(),
                 )
 
+            indexer_topk_snapshot = None
+            if self.indexer_topk_initialized:
+                buf = self.indexer_topk_capturer.get_device_buffer()
+                total = scheduler_output.total_num_scheduled_tokens
+                indexer_topk_snapshot = IndexerTopkTensors(
+                    topk_data=buf[:total].clone(),
+                    slot_mapping=self.indexer_topk_slot_mapping_device[:total].clone(),
+                )
+
             async_output = AsyncGPUModelRunnerOutput(
                 model_runner_output=output,
                 sampled_token_ids=sampler_output.sampled_token_ids,
@@ -4817,6 +4859,7 @@ class GPUModelRunner(
                 async_output_copy_stream=self._get_or_create_async_output_copy_stream(),
                 vocab_size=self.input_batch.vocab_size,
                 routed_experts=routed_experts_snapshot,
+                indexer_topk=indexer_topk_snapshot,
                 check_ep_fault=self.check_ep_fault,
             )
         with record_function_or_nullcontext(
@@ -6597,9 +6640,7 @@ class GPUModelRunner(
             SupportsEncoderCudaGraph,
             supports_encoder_cudagraph,
         )
-        from vllm.v1.worker.encoder_cudagraph import (
-            EncoderCudaGraphManager,
-        )
+        from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
         raw_model = self.get_model()
         if not supports_encoder_cudagraph(raw_model):
@@ -7715,9 +7756,7 @@ class GPUModelRunner(
         from vllm.model_executor.layers.fused_moe.modular_kernel import (
             FusedMoEExpertsMonolithic,
         )
-        from vllm.model_executor.layers.fused_moe.router.base_router import (
-            BaseRouter,
-        )
+        from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
         for module in self.model.modules():
             if not isinstance(module, MoERunner):
@@ -7744,6 +7783,75 @@ class GPUModelRunner(
                 fused_experts.set_capture_fn(_capture_fn)
             elif isinstance(module.router, BaseRouter):
                 module.router.set_capture_fn(_capture_fn)
+
+    def init_indexer_topk_capturer(self):
+        """Initialize the indexer topk capturer and bind it to all
+        :class:`SparseAttnIndexer` modules in the model.
+
+        Mirrors :meth:`init_routed_experts_capturer` but for sparse-
+        attention topk indices. The device buffer uses a *compact* layer
+        dimension (only indexer layers, not all ``num_hidden_layers``),
+        so we assign sequential indices during binding.
+        """
+        logger.info(
+            "Initializing indexer topk capturer, enable_return_indexer_topk: %s",
+            self.model_config.enable_return_indexer_topk,
+        )
+        # Discover all SparseAttnIndexer instances and build compact mapping.
+        indexer_modules: list[SparseAttnIndexer] = []
+        for module in self.model.modules():
+            if isinstance(module, SparseAttnIndexer):
+                indexer_modules.append(module)
+        num_indexer_layers = len(indexer_modules)
+        if num_indexer_layers == 0:
+            logger.warning(
+                "No SparseAttnIndexer layers found, IndexerTopkCapturer disabled"
+            )
+            return
+        index_topk = indexer_modules[0].topk_tokens
+
+        self.indexer_topk_capturer = IndexerTopkCapturer(
+            max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
+            num_indexer_layers=num_indexer_layers,
+            index_topk=index_topk,
+            device=self.device,
+        )
+        # Bind capture functions with compact layer indices.
+        for compact_idx, module in enumerate(indexer_modules):
+
+            def _capture_fn(
+                topk_indices,
+                _idx=compact_idx,
+                _capturer=self.indexer_topk_capturer,
+            ):
+                _capturer.capture(_idx, topk_indices)
+
+            module.capture_fn = _capture_fn
+
+        # Reuse the same attention gid for slot mapping as routed_experts.
+        if not hasattr(self, "routed_experts_attn_gid"):
+            self.routed_experts_attn_gid = self._get_attention_kv_cache_gid()
+
+        # Pinned CPU buffer for non-blocking D2H.
+        self.indexer_topk_cpu = torch.empty(
+            self.indexer_topk_capturer.device_buffer.shape,
+            dtype=self.indexer_topk_capturer.device_buffer.dtype,
+            device="cpu",
+            pin_memory=PIN_MEMORY,
+        )
+        max_tokens = self.scheduler_config.max_num_batched_tokens
+        self.indexer_topk_slot_mapping_cpu = torch.empty(
+            (max_tokens,),
+            dtype=torch.int64,
+            device="cpu",
+            pin_memory=PIN_MEMORY,
+        )
+        self.indexer_topk_slot_mapping_device = torch.empty(
+            (max_tokens,),
+            dtype=torch.int64,
+            device=self.device,
+        )
+        self.indexer_topk_initialized = True
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """

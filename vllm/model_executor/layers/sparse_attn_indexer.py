@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom Sparse Attention Indexer layers."""
 
+from collections.abc import Callable
+
 import torch
 
 import vllm.envs as envs
@@ -14,9 +16,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.attention.pcp import maybe_gather_indexer_k
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    get_fp8_min_max,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
@@ -31,9 +31,7 @@ from vllm.utils.torch_utils import (
     _resolve_layer_name,
     direct_register_custom_op,
 )
-from vllm.v1.attention.backends.mla.indexer import (
-    DeepseekV32IndexerMetadata,
-)
+from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -739,6 +737,10 @@ class SparseAttnIndexer(CustomOp):
         self.topk_indices_buffer = topk_indices_buffer
         self.skip_k_cache_insert = skip_k_cache_insert
         self.use_fp4_cache = use_fp4_cache
+        # Optional capture callback set by GPUModelRunner when
+        # ``enable_return_indexer_topk`` is active. Called with the
+        # topk-indices slice after each forward.
+        self.capture_fn: Callable[[torch.Tensor], None] | None = None
         # DCP scalars are constant for the run; resolve them here (config is set
         # during model construction) and pass them into the custom op, rather
         # than threading them through per-step metadata.
@@ -783,7 +785,7 @@ class SparseAttnIndexer(CustomOp):
             q_values, q_scale = q_quant
         else:
             q_values, q_scale = q_quant, None
-        return torch.ops.vllm.sparse_attn_indexer(
+        result = torch.ops.vllm.sparse_attn_indexer(
             hidden_states,
             _encode_layer_name(self.k_cache.prefix),
             self.k_cache.kv_cache,
@@ -805,6 +807,13 @@ class SparseAttnIndexer(CustomOp):
             self.dcp_world_size,
             self.cp_kv_cache_interleave_size,
         )
+        # Capture topk indices for return_indexer_topk if enabled.
+        # The op writes into ``topk_indices_buffer[:num_tokens, :topk_tokens]``;
+        # we slice to the actual token count and forward to the capturer.
+        if self.capture_fn is not None:
+            num_tokens = hidden_states.shape[0]
+            self.capture_fn(self.topk_indices_buffer[:num_tokens, : self.topk_tokens])
+        return result
 
     def forward_xpu(
         self,
@@ -827,7 +836,7 @@ class SparseAttnIndexer(CustomOp):
             "AMD sparse_attn_indexer expects a single FP8 q_quant tensor"
         )
         if rocm_aiter_ops.is_enabled():
-            return torch.ops.vllm.rocm_aiter_sparse_attn_indexer(
+            result = torch.ops.vllm.rocm_aiter_sparse_attn_indexer(
                 hidden_states,
                 _encode_layer_name(self.k_cache.prefix),
                 self.k_cache.kv_cache,
@@ -843,6 +852,12 @@ class SparseAttnIndexer(CustomOp):
                 self.topk_indices_buffer,
                 skip_k_cache_insert=self.skip_k_cache_insert,
             )
+            if self.capture_fn is not None:
+                num_tokens = hidden_states.shape[0]
+                self.capture_fn(
+                    self.topk_indices_buffer[:num_tokens, : self.topk_tokens]
+                )
+            return result
         raise RuntimeError(
             "Sparse attention indexer ROCm path is only supported on AITER. "
             "Please enable aiter with VLLM_ROCM_USE_AITER=1"

@@ -332,6 +332,10 @@ class SamplingParams(
     already-returned prefix to avoid duplicating routing for prompt tokens
     covered by earlier turns. Default 0 returns routing for all prompt
     tokens."""
+    indexer_topk_prompt_start: int = 0
+    """When enable_return_indexer_topk is active, skip the first
+    indexer_topk_prompt_start prompt tokens from the returned topk
+    indices. Same semantics as routed_experts_prompt_start."""
 
     # Fields used for bad words
     bad_words: list[str] | None = None
@@ -384,6 +388,8 @@ class SamplingParams(
         skip_clone: bool = False,
         repetition_detection: RepetitionDetectionParams | None = None,
         logprob_token_ids: list[int] | None = None,
+        routed_experts_prompt_start: int = 0,
+        indexer_topk_prompt_start: int = 0,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Fast path uses a dict comprehension; on failure we iterate once
@@ -445,6 +451,8 @@ class SamplingParams(
             extra_args=extra_args,
             skip_clone=skip_clone,
             repetition_detection=repetition_detection,
+            routed_experts_prompt_start=routed_experts_prompt_start,
+            indexer_topk_prompt_start=indexer_topk_prompt_start,
         )
 
     def __post_init__(self) -> None:

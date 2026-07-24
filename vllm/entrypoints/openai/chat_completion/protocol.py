@@ -111,6 +111,15 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     # or (b) ``enable_return_routed_experts`` is off server-side.
     routed_experts: str | None = None
 
+    # Per-token indexer topk indices (sparse-attention selected KV
+    # slots), base64-encoded ``.npy`` bytes. Shape after decode:
+    #   (num_tokens, num_indexer_layers, index_topk)  dtype int32
+    # Decode:
+    #   np.load(io.BytesIO(base64.b64decode(s)))
+    # ``None`` if (a) the request was aborted before any forward pass,
+    # or (b) ``enable_return_indexer_topk`` is off server-side.
+    indexer_topk: str | None = None
+
 
 class ChatCompletionResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"chatcmpl-{random_uuid()}")
@@ -395,6 +404,22 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "only in the first chunk, and token_ids contains the delta tokens "
             "for each chunk. This is useful for debugging or when you "
             "need to map generated text back to input tokens."
+        ),
+    )
+    routed_experts_prompt_start: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "When enable_return_routed_experts is active, skip the first "
+            "N prompt tokens from the returned routing data."
+        ),
+    )
+    indexer_topk_prompt_start: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "When enable_return_indexer_topk is active, skip the first "
+            "N prompt tokens from the returned indexer topk indices."
         ),
     )
     return_token_offsets: bool | None = Field(
@@ -698,6 +723,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
             repetition_detection=self.repetition_detection,
+            routed_experts_prompt_start=self.routed_experts_prompt_start,
+            indexer_topk_prompt_start=self.indexer_topk_prompt_start,
         )
 
     @model_validator(mode="before")
