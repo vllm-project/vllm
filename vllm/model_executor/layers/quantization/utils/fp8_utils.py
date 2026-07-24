@@ -1123,6 +1123,13 @@ def deepgemm_post_process_fp8_weight_block(
         r = wq.size(0) // g
         wq = wq.view(g, r, d)
         ws = ws.view(g, r // quant_block_shape[0], d // quant_block_shape[1])
+        # SM12x consumer Blackwell: DeepGEMM's fp8_einsum consumes raw
+        # row-major f32 block scales there (its own SM120 test convention)
+        # and produces NaNs on the SM100-style packed layout — skip the
+        # packing transform (cf. compute_fp8_einsum_recipe in
+        # models/deepseek_v4/nvidia/ops/o_proj.py).
+        if current_platform.is_device_capability_family(120):
+            return wq, ws.contiguous()
         dg_ws = deepgemm_post_process_weight_scale_block(
             ws=ws,
             mn=r,
