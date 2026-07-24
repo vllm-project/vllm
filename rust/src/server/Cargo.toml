@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+arc-swap.workspace = true
 asynk-strim-attr.workspace = true
 auto_enums.workspace = true
 axum.workspace = true
@@ -18,6 +19,7 @@ indexmap.workspace = true
 itertools.workspace = true
 libc.workspace = true
 llm-multimodal.workspace = true
+notify.workspace = true
 openssl.workspace = true
 prost.workspace = true
 prost-types.workspace = true
