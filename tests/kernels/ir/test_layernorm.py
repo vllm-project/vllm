@@ -19,6 +19,19 @@ from vllm.platforms import current_platform
 rms_norm_native = ir.ops.rms_norm.impls["native"].impl_fn
 
 
+@pytest.fixture(autouse=True)
+def reset_default_torch_device():
+    """Override tests/kernels/conftest.py's fixture of the same name.
+
+    The conftest fixture resets it to None after every test, leaving later
+    tests in the same class with CPU-default tensors against GPU-only
+    kernels. Restore the GPU default here instead of clearing it.
+    """
+    torch.set_default_device(current_platform.device_type)
+    yield
+    torch.set_default_device(current_platform.device_type)
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
     reason="Currently only kernels on CUDA, ROCm and XPU",
@@ -50,10 +63,6 @@ def test_rms_norm_registration():
     reason="Currently only kernels on CUDA, ROCm and XPU",
 )
 class TestRMSNorm:
-    @classmethod
-    def setup_class(cls, **kwargs):
-        torch.set_default_device(current_platform.device_type)
-
     def test_native_semantics(self, dtype, n_tokens, hidden_size, epsilon):
         x, weight, epsilon = ir.ops.rms_norm.generate_inputs(
             num_tokens=4, hidden_size=8, dtype=dtype, epsilon=epsilon
@@ -227,10 +236,6 @@ def test_vllm_c_fused_add_rms_norm_accepts_nd_input():
     reason="Currently only kernels on CUDA, ROCm and XPU",
 )
 class TestFusedAddRMSNorm:
-    @classmethod
-    def setup_class(cls, **kwargs):
-        torch.set_default_device(current_platform.device_type)
-
     def test_native_semantics(self, dtype, n_tokens, hidden_size, epsilon):
         x, x_residual, weight, eps = ir.ops.fused_add_rms_norm.generate_inputs(
             num_tokens=4, hidden_size=8, dtype=dtype, epsilon=epsilon
