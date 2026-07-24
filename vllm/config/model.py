@@ -376,6 +376,7 @@ class ModelConfig:
     interleave_mm_strings: InitVar[bool | None] = None
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
+    video_retention_ratio: InitVar[float | None] = None
     mm_tensor_ipc: InitVar[MMTensorIPC] = None
     mm_ipc_gpu_memory_gb: InitVar[float | None] = None
 
@@ -504,6 +505,7 @@ class ModelConfig:
         interleave_mm_strings: bool | None,
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
+        video_retention_ratio: float | None,
         mm_tensor_ipc: MMTensorIPC,
         mm_ipc_gpu_memory_gb: float | None,
     ) -> None:
@@ -732,6 +734,7 @@ class ModelConfig:
                 interleave_mm_strings=interleave_mm_strings,
                 skip_mm_profiling=skip_mm_profiling,
                 video_pruning_rate=video_pruning_rate,
+                video_retention_ratio=video_retention_ratio,
                 mm_tensor_ipc=mm_tensor_ipc,
                 mm_ipc_gpu_memory_gb=mm_ipc_gpu_memory_gb,
             )
@@ -741,6 +744,19 @@ class ModelConfig:
             }
 
             self.multimodal_config = MultiModalConfig(**mm_config_kwargs)  # type: ignore[arg-type]
+
+            pruning_spec = self.multimodal_config.get_video_pruning_spec()
+            supported_pruning = self._model_info.supported_video_pruning_methods
+            if (
+                pruning_spec is not None
+                and supported_pruning
+                and pruning_spec[0] not in supported_pruning
+            ):
+                raise ValueError(
+                    f"Video pruning method '{pruning_spec[0]}' is not "
+                    f"supported by {self._model_info.architecture} "
+                    f"(supported methods: {supported_pruning})."
+                )
 
             if (
                 self.renderer_num_workers > 1
