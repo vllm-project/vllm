@@ -228,6 +228,122 @@ def dequant_mxfp8_to_bf16(x: torch.Tensor, scales: torch.Tensor) -> torch.Tensor
     return dequantized.to(torch.bfloat16)
 
 
+def _quantize_block_fp8_ocp(
+    weight: torch.Tensor,
+    block_size: tuple[int, int],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize a matrix to OCP E4M3 with per-block FP32 scales."""
+    block_m, block_k = block_size
+    n, k = weight.shape
+    padded_n = ((n + block_m - 1) // block_m) * block_m
+    padded_k = ((k + block_k - 1) // block_k) * block_k
+    padded = torch.zeros(
+        (padded_n, padded_k),
+        dtype=torch.float32,
+        device=weight.device,
+    )
+    padded[:n, :k] = weight.float()
+
+    blocks = padded.view(
+        padded_n // block_m,
+        block_m,
+        padded_k // block_k,
+        block_k,
+    )
+    amax = blocks.abs().amax(dim=(1, 3), keepdim=True).clamp(min=1e-4)
+    scales = amax / torch.finfo(torch.float8_e4m3fn).max
+    quantized = (blocks / scales).to(torch.float8_e4m3fn)
+    return (
+        quantized.view(padded_n, padded_k)[:n, :k].contiguous(),
+        scales.view(padded_n // block_m, padded_k // block_k).contiguous(),
+    )
+
+
+def convert_mxfp8_to_block_fp8(
+    weight: torch.Tensor,
+    scales: torch.Tensor,
+    block_size: tuple[int, int] = (128, 128),
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Convert MXFP8 matrices to block-scaled FP8.
+
+    Each matrix is dequantized and requantized independently to bound the
+    temporary BF16 memory used while loading MoE weights.
+    """
+    from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+        normalize_e4m3fn_to_e4m3fnuz,
+    )
+    from vllm.platforms import current_platform
+
+    if weight.ndim < 2:
+        raise ValueError(
+            f"MXFP8 weight must have at least 2 dimensions, got {weight.ndim}."
+        )
+    if weight.dtype != MXFP8_VALUE_DTYPE:
+        raise ValueError(
+            f"MXFP8 weight must use {MXFP8_VALUE_DTYPE}, got {weight.dtype}."
+        )
+    if scales.dtype != MXFP8_SCALE_DTYPE:
+        raise ValueError(
+            f"MXFP8 scales must use {MXFP8_SCALE_DTYPE}, got {scales.dtype}."
+        )
+    if weight.shape[-1] % MXFP8_BLOCK_SIZE != 0:
+        raise ValueError(
+            f"MXFP8 weight K dimension must be divisible by {MXFP8_BLOCK_SIZE}, "
+            f"got {weight.shape[-1]}."
+        )
+
+    expected_scale_shape = (*weight.shape[:-1], weight.shape[-1] // MXFP8_BLOCK_SIZE)
+    if scales.shape != expected_scale_shape:
+        raise ValueError(
+            f"Expected MXFP8 scale shape {expected_scale_shape}, "
+            f"got {tuple(scales.shape)}."
+        )
+
+    block_m, block_k = block_size
+    if block_m <= 0 or block_k <= 0:
+        raise ValueError(f"Block dimensions must be positive, got {block_size}.")
+
+    n, k = weight.shape[-2:]
+    scale_shape = (
+        *weight.shape[:-2],
+        (n + block_m - 1) // block_m,
+        (k + block_k - 1) // block_k,
+    )
+    quantized = torch.empty_like(weight, dtype=current_platform.fp8_dtype())
+    block_scales = torch.empty(
+        scale_shape,
+        dtype=torch.float32,
+        device=weight.device,
+    )
+
+    weight_view = weight.reshape(-1, n, k)
+    scales_view = scales.reshape(-1, n, k // MXFP8_BLOCK_SIZE)
+    quantized_view = quantized.reshape(-1, n, k)
+    block_scales_view = block_scales.reshape(
+        -1,
+        scale_shape[-2],
+        scale_shape[-1],
+    )
+    for matrix_idx in range(weight_view.shape[0]):
+        dequantized = dequant_mxfp8_to_bf16(
+            weight_view[matrix_idx],
+            scales_view[matrix_idx],
+        )
+        matrix, matrix_scales = _quantize_block_fp8_ocp(
+            dequantized,
+            block_size=(block_m, block_k),
+        )
+        if current_platform.is_fp8_fnuz():
+            matrix, matrix_scales, _ = normalize_e4m3fn_to_e4m3fnuz(
+                matrix,
+                matrix_scales,
+            )
+        quantized_view[matrix_idx].copy_(matrix)
+        block_scales_view[matrix_idx].copy_(matrix_scales)
+
+    return quantized.contiguous(), block_scales.contiguous()
+
+
 def mxfp8_e4m3_quantize_fake(
     x: torch.Tensor,
     is_sf_swizzled_layout: bool = False,

@@ -8,6 +8,7 @@ tests assert the two agree within tolerance:
   * Gemma RMSNorm (plain + fused-add-residual)  -> fp32 PyTorch normalize
   * SwiGLU-OAI (split layout)                    -> fp32 PyTorch elementwise
   * Fused MXFP8 activation quant (Triton)        -> _mxfp8_e4m3_quantize_torch
+  * MXFP8-to-block-FP8 weight conversion         -> dequantized MXFP8 weights
   * Native MXFP8 linear (dot_scaled)             -> dequant-to-bf16 @ matmul
   * Native MXFP8 MoE (dot_scaled grouped GEMM)   -> dequant-to-bf16 MoE math
 
@@ -18,11 +19,13 @@ regression there fails these tests loudly.
 
 Hardware scope: the whole module is ROCm-only (these are the AMD path; NVIDIA
 uses the FlashInfer kernels). The norm/activation/quant kernels run on any ROCm
-arch; the native MXFP8 ``dot_scaled`` linear/MoE tests are additionally gated to
-CDNA4 gfx95x (``@requires_gfx950``) since gfx942 uses the BF16 emulation path.
+arch; block-FP8 conversion is gated to CDNA3 gfx94x, while native MXFP8
+``dot_scaled`` linear/MoE tests are gated to CDNA4 gfx95x.
 
 Run:  pytest tests/kernels/test_minimax_m3_amd_ops.py -v
 """
+
+from dataclasses import replace
 
 import pytest
 import torch
@@ -37,6 +40,7 @@ if not torch.cuda.is_available():
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (  # noqa: E402
     _mxfp8_e4m3_quantize_torch,
     _mxfp8_e4m3_quantize_triton,
+    convert_mxfp8_to_block_fp8,
     dequant_mxfp8_to_bf16,
 )
 from vllm.models.minimax_m3.amd.ops import (  # noqa: E402
@@ -58,14 +62,16 @@ def _gcn_arch() -> str:
 
 
 # The pure-Triton norm/activation/quant kernels run on any ROCm arch (CDNA3
-# gfx942 and CDNA4 gfx950). The native MXFP8 ``dot_scaled`` GEMMs (linear + MoE)
-# use CDNA4 hardware microscaling and are gated to gfx95x in the source
-# (``RocmDotScaledMxfp8LinearKernel.is_supported``; the MoE oracle routes gfx942
-# to the BF16 emulation path instead) — so those tests are gfx950-only.
+# gfx942 and CDNA4 gfx950). gfx942 converts MXFP8 MoE weights to block FP8,
+# while native MXFP8 ``dot_scaled`` GEMMs are available only on gfx95x.
+requires_gfx94x = pytest.mark.skipif(
+    "gfx94" not in _gcn_arch(),
+    reason="MXFP8-to-block-FP8 conversion is used on CDNA3 (gfx94x).",
+)
 requires_gfx950 = pytest.mark.skipif(
     "gfx95" not in _gcn_arch(),
     reason="native MXFP8 dot_scaled is a CDNA4 (gfx95x) feature; "
-    "gfx942 uses the BF16 emulation path instead.",
+    "gfx942 uses block FP8 instead.",
 )
 
 
@@ -186,6 +192,152 @@ def test_mxfp8_quant_triton_matches_torch(shape, dtype):
     deq_t = dequant_mxfp8_to_bf16(xq_t, s_t)
     deq_k = dequant_mxfp8_to_bf16(xq_k, s_k)
     assert _relerr(deq_k, deq_t) < 1e-2
+
+
+# --------------------------------------------------------------------------- #
+# MXFP8 checkpoint weights -> 128x128 block FP8
+# --------------------------------------------------------------------------- #
+@requires_gfx94x
+@pytest.mark.parametrize("shape", [(2, 256, 256), (3, 384, 128)])
+@torch.inference_mode()
+def test_mxfp8_to_block_fp8_conversion(shape):
+    torch.manual_seed(0)
+    source = torch.randn(*shape, device=DEVICE, dtype=torch.bfloat16) * 0.1
+    weight, scales = _mxfp8_e4m3_quantize_torch(
+        source,
+        is_sf_swizzled_layout=False,
+    )
+
+    block_weight, block_scales = convert_mxfp8_to_block_fp8(weight, scales)
+
+    assert block_weight.shape == weight.shape
+    assert block_weight.dtype == torch.float8_e4m3fnuz
+    assert block_scales.shape == (
+        shape[0],
+        (shape[1] + 127) // 128,
+        (shape[2] + 127) // 128,
+    )
+    assert block_scales.dtype == torch.float32
+
+    reference = dequant_mxfp8_to_bf16(weight, scales)
+    block = 128
+    padded_n = ((shape[-2] + block - 1) // block) * block
+    padded_k = ((shape[-1] + block - 1) // block) * block
+    padded = torch.zeros(
+        (shape[0], padded_n, padded_k),
+        dtype=torch.float32,
+        device=DEVICE,
+    )
+    padded[:, : shape[-2], : shape[-1]] = reference.float()
+    blocks = padded.view(
+        shape[0],
+        padded_n // block,
+        block,
+        padded_k // block,
+        block,
+    )
+    ocp_scales = blocks.abs().amax(dim=(2, 4), keepdim=True).clamp(min=1e-4)
+    ocp_scales /= torch.finfo(torch.float8_e4m3fn).max
+    ocp_weight = (blocks / ocp_scales).to(torch.float8_e4m3fn)
+    expected_bits = ocp_weight.view(torch.int8)
+    expected_bits[expected_bits == -128] = 0
+    expected_weight = expected_bits.view(torch.float8_e4m3fnuz)
+    expected_weight = expected_weight.view(shape[0], padded_n, padded_k)
+    expected_weight = expected_weight[:, : shape[-2], : shape[-1]].contiguous()
+    expected_scales = ocp_scales.view(
+        shape[0],
+        padded_n // block,
+        padded_k // block,
+    )
+    expected_scales = expected_scales * 2.0
+
+    assert torch.equal(
+        block_weight.view(torch.int8),
+        expected_weight.view(torch.int8),
+    )
+    torch.testing.assert_close(block_scales, expected_scales, rtol=0, atol=0)
+
+    expanded_scales = block_scales.repeat_interleave(128, dim=-2)
+    expanded_scales = expanded_scales.repeat_interleave(128, dim=-1)
+    expanded_scales = expanded_scales[..., : shape[-2], : shape[-1]]
+    converted = block_weight.float() * expanded_scales
+    assert _relerr(converted, reference.float()) < 5e-2
+
+
+@requires_gfx94x
+@pytest.mark.parametrize("use_ep", [False, True], ids=["tp", "ep"])
+def test_mxfp8_gfx94x_selects_block_fp8_backend(use_ep):
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.mxfp8_emulation_moe import (
+        Mxfp8EmulationTritonExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
+        TritonExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+        Fp8MoeBackend,
+        make_fp8_moe_quant_config,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
+        select_mxfp8_moe_backend,
+    )
+
+    parallel_config = FusedMoEParallelConfig.make_no_parallel()
+    if use_ep:
+        parallel_config = replace(
+            parallel_config,
+            ep_size=8,
+            use_ep=True,
+        )
+
+    config = FusedMoEConfig(
+        num_experts=8,
+        experts_per_token=2,
+        hidden_dim=256,
+        intermediate_size=512,
+        num_local_experts=1 if use_ep else 8,
+        num_logical_experts=8,
+        moe_parallel_config=parallel_config,
+        activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        in_dtype=torch.bfloat16,
+        device=DEVICE,
+        routing_method=RoutingMethodType.TopK,
+        max_num_tokens=128,
+    )
+
+    backend, experts_cls = select_mxfp8_moe_backend(
+        config,
+        block_fp8_on_fnuz=True,
+    )
+
+    assert backend == Fp8MoeBackend.TRITON
+    assert experts_cls is TritonExperts
+
+    weight_scale = torch.ones(1, 2, 2, device=DEVICE, dtype=torch.float32)
+    quant_config = make_fp8_moe_quant_config(
+        fp8_backend=backend,
+        w1_scale=weight_scale,
+        w2_scale=weight_scale,
+        a1_scale=None,
+        a2_scale=None,
+        block_shape=[128, 128],
+        swiglu_limit=7.0,
+        gemm1_alpha=1.702,
+        gemm1_beta=1.0,
+    )
+    assert quant_config.gemm1_clamp_limit == 7.0
+    assert quant_config.gemm1_alpha == 1.702
+    assert quant_config.gemm1_beta == 1.0
+
+    backend, experts_cls = select_mxfp8_moe_backend(config)
+
+    assert backend == Fp8MoeBackend.EMULATION
+    assert experts_cls is Mxfp8EmulationTritonExperts
 
 
 # --------------------------------------------------------------------------- #
