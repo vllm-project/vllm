@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import queue
 import sys
+import time
 import uuid
 import weakref
 from abc import ABC, abstractmethod
@@ -613,24 +614,8 @@ class MPClient(EngineCoreClient):
             ]
 
             # Wait for ready messages from each engine on the input socket.
-            identities = set(self.core_engines)
             sync_input_socket = zmq.Socket.shadow(self.input_socket)
-            while identities:
-                if not sync_input_socket.poll(
-                    timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000  # convert to ms
-                ):
-                    raise TimeoutError(
-                        f"Timed out waiting for engine core processes to "
-                        f"start. This is often caused by slow weight loading "
-                        f"for large models. Waited "
-                        f"{VLLM_ENGINE_READY_TIMEOUT_S}s (configured by "
-                        f"VLLM_ENGINE_READY_TIMEOUT_S). To increase the "
-                        f"timeout, set the environment variable: "
-                        f"VLLM_ENGINE_READY_TIMEOUT_S=<seconds>"
-                    )
-                identity, payload = sync_input_socket.recv_multipart()
-                identities.remove(identity)
-                self._apply_ready_response(payload)
+            self._wait_for_engine_ready(sync_input_socket)
 
             self.core_engine: EngineIdentity = self.core_engines[0]
             self.utility_results: dict[int, AnyFuture] = {}
@@ -710,6 +695,61 @@ class MPClient(EngineCoreClient):
         Thread(
             target=monitor_engine_cores, daemon=True, name="MPClientEngineMonitor"
         ).start()
+
+    def _wait_for_engine_ready(self, sync_input_socket: zmq.Socket) -> None:
+        """Wait for a ready message from each engine on the input socket.
+
+        Locally-managed engine proc sentinels are polled alongside the socket
+        so that an engine that dies during startup (e.g. OOM-killed while
+        JIT-compiling kernels on first load) fails fast with the real cause,
+        instead of blocking for the full ready timeout and then being
+        misreported as slow weight loading. The engine core monitor only
+        starts after this wait completes, so the death would otherwise go
+        unnoticed here.
+        """
+        identities = set(self.core_engines)
+        ready_poller = zmq.Poller()
+        ready_poller.register(sync_input_socket, zmq.POLLIN)
+        local_proc_manager = (
+            self.resources.engine_manager
+            if isinstance(self.resources.engine_manager, CoreEngineProcManager)
+            else None
+        )
+        if local_proc_manager is not None:
+            for sentinel in local_proc_manager.sentinels():
+                ready_poller.register(sentinel, zmq.POLLIN)
+        wait_start = time.monotonic()
+        while identities:
+            events = ready_poller.poll(
+                timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000  # convert to ms
+            )
+            if not events:
+                raise TimeoutError(
+                    f"Timed out waiting for engine core processes to start, "
+                    f"after {time.monotonic() - wait_start:.0f}s (limit "
+                    f"{VLLM_ENGINE_READY_TIMEOUT_S}s, configured by "
+                    f"VLLM_ENGINE_READY_TIMEOUT_S). This is often caused by "
+                    f"slow weight loading for large models or cold JIT "
+                    f"kernel compilation (e.g. FlashInfer on new GPU "
+                    f"architectures). To increase the timeout, set the "
+                    f"environment variable: "
+                    f"VLLM_ENGINE_READY_TIMEOUT_S=<seconds>"
+                )
+            if any(sock is not sync_input_socket for sock, _ in events):
+                # A locally-managed engine core process exited before
+                # reporting ready.
+                finished = (
+                    local_proc_manager.finished_procs() if local_proc_manager else {}
+                )
+                raise RuntimeError(
+                    f"Engine core proc(s) exited before reporting ready "
+                    f"(after {time.monotonic() - wait_start:.0f}s), see root "
+                    f"cause above. Exited proc name -> exit code: "
+                    f"{finished or 'unknown (exit code not yet visible)'}"
+                )
+            identity, payload = sync_input_socket.recv_multipart()
+            identities.remove(identity)
+            self._apply_ready_response(payload)
 
     def _apply_ready_response(self, payload: bytes) -> None:
         """Decode an EngineCoreReadyResponse and sync any post-initialization
