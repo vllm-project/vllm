@@ -3,8 +3,8 @@ set -xe
 
 # Parse command line arguments
 KV_BUFFER_DEVICE="cuda"  # Default to cuda
-PREFILL_GPU_ID=4         # Default GPU IDs
-DECODE_GPU_ID=5
+PREFILL_GPU_ID="${PREFILL_GPU_ID:-4}"  # Default GPU IDs
+DECODE_GPU_ID="${DECODE_GPU_ID:-5}"
 while [[ $# -gt 0 ]]; do
   case $1 in
     --kv_buffer_device)
@@ -70,6 +70,7 @@ run_tests_for_model() {
   --port $PREFILL_PORT \
   --enforce-eager \
   --gpu-memory-utilization 0.2 \
+  --max-model-len 8192 \
   --kv-transfer-config '$KV_CONFIG'"
 
   FULL_CMD="$BASE_CMD"
@@ -84,6 +85,7 @@ run_tests_for_model() {
   --port $DECODE_PORT \
   --enforce-eager \
   --gpu-memory-utilization 0.2 \
+  --max-model-len 8192 \
   --kv-transfer-config '$KV_CONFIG'"
 
   FULL_CMD="$BASE_CMD"

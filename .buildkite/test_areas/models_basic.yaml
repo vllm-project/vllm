@@ -70,7 +70,8 @@ steps:
   - vllm/
   - tests/models/test_utils.py
   - tests/models/test_vision.py
+  - tests/models/test_adapters.py
   - tests/models/transformers/fusers/
   device: cpu-small
   commands:
-    - pytest -v -s models/test_utils.py models/test_vision.py models/transformers/fusers/
+    - pytest -v -s models/test_utils.py models/test_vision.py models/test_adapters.py models/transformers/fusers/

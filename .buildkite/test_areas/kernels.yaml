@@ -61,9 +61,47 @@ steps:
   source_file_dependencies:
   - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
   - vllm/models/deepseek_v4/common/ops/
+  - vllm/models/deepseek_v4/nvidia/
   - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+  - tests/models/test_deepseek_v4_mega_moe.py
   commands:
     - pytest -v -s kernels/test_fused_deepseek_v4_*.py
+    - pytest -v -s models/test_deepseek_v4_mega_moe.py
+
+# Catch-all for test files at the tests/kernels root. This job collects
+# the whole root so new files are wired by default.
+# Files with dedicated jobs elsewhere in this file are excluded via --ignore
+# (test_kda, test_bf16x3_router_gemm_cutedsl and test_ll_bf16_gemm run in
+# their own jobs / Kernels (B200)).
+- label: Kernels Root Misc Test (B200)
+  key: kernels-root-misc-test-b200
+  timeout_in_minutes: 45
+  device: b200-k8s
+  source_file_dependencies:
+  - csrc/
+  - vllm/
+  - tests/kernels/
+  commands:
+    - pytest -v -s kernels/
+        --ignore=kernels/attention
+        --ignore=kernels/core
+        --ignore=kernels/helion
+        --ignore=kernels/ir
+        --ignore=kernels/mamba
+        --ignore=kernels/moe
+        --ignore=kernels/quantization
+        --ignore=kernels/test_concat_mla_q.py
+        --ignore=kernels/test_fused_qk_norm_rope_gate.py
+        --ignore=kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+        --ignore=kernels/test_top_k_per_row.py
+        --ignore=kernels/test_kda.py
+        --ignore=kernels/test_bf16x3_router_gemm_cutedsl.py
+        --ignore=kernels/test_ll_bf16_gemm.py
+        --ignore=kernels/test_mhc_kernels.py
+        --ignore=kernels/test_shuffle_rows.py
+    # BROKEN on main, pending kernel fixes (B200):
+    #   test_mhc_kernels.py (3: test_hc_prenorm_gemm_tilelang)
+    #   test_shuffle_rows.py (1: test_shuffle_rows_edge_cases)
 
 - label: Kernels Attention Test %N
   key: kernels-attention-test
