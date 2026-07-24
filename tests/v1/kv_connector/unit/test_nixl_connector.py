@@ -9,6 +9,7 @@ import textwrap
 import time
 import uuid
 from collections import defaultdict
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -2757,6 +2758,79 @@ def test_failed_request_skips_kv_postprocessing(
     # Blocks should have been marked as invalid.
     invalid_blocks = connector.get_block_ids_with_load_errors()
     assert invalid_blocks == {1, 2, 3}
+
+
+def _set_test_speculative_config(
+    vllm_config,
+    *,
+    method: str = "eagle3",
+    model: str = "test/eagle3-drafter",
+    revision: str | None = None,
+    code_revision: str | None = None,
+    num_speculative_tokens: int = 1,
+    parallel_drafting: bool = False,
+    kv_cache_dtype: str | None = None,
+    attention_backend: str | None = None,
+    auxiliary_layer_ids: tuple[int, ...] = (2, 16, 29),
+) -> None:
+    draft_model_config = SimpleNamespace(
+        model=model,
+        revision=revision,
+        code_revision=code_revision,
+        hf_config=SimpleNamespace(eagle_aux_hidden_state_layer_ids=auxiliary_layer_ids),
+    )
+    vllm_config.speculative_config = SimpleNamespace(
+        method=method,
+        draft_model_config=draft_model_config,
+        num_speculative_tokens=num_speculative_tokens,
+        parallel_drafting=parallel_drafting,
+        kv_cache_dtype=kv_cache_dtype,
+        attention_backend=attention_backend,
+        use_eagle=lambda: True,
+    )
+
+
+@pytest.mark.parametrize(
+    "remote_overrides,should_match",
+    [
+        ({}, True),
+        ({"num_speculative_tokens": 2}, True),
+        ({"method": "mtp"}, False),
+        ({"model": "test/different-drafter"}, False),
+        ({"revision": "different-revision"}, False),
+        ({"parallel_drafting": True}, False),
+        ({"kv_cache_dtype": "fp8"}, False),
+        ({"attention_backend": "FLASHINFER"}, False),
+        ({"auxiliary_layer_ids": (2, 16, 30)}, False),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_speculative_config_compatibility_hash(
+    remote_overrides: dict[str, Any], should_match: bool
+):
+    local_config = create_vllm_config()
+    remote_config = create_vllm_config()
+    _set_test_speculative_config(local_config)
+    _set_test_speculative_config(remote_config, **remote_overrides)
+
+    local_hash = compute_nixl_compatibility_hash(local_config, "FLASH_ATTN", False)
+    remote_hash = compute_nixl_compatibility_hash(remote_config, "FLASH_ATTN", False)
+
+    assert (local_hash == remote_hash) is should_match
+
+
+@pytest.mark.skip_global_cleanup
+def test_missing_speculative_config_changes_compatibility_hash():
+    regular_config = create_vllm_config()
+    speculative_config = create_vllm_config()
+    _set_test_speculative_config(speculative_config)
+
+    regular_hash = compute_nixl_compatibility_hash(regular_config, "FLASH_ATTN", False)
+    speculative_hash = compute_nixl_compatibility_hash(
+        speculative_config, "FLASH_ATTN", False
+    )
+
+    assert regular_hash != speculative_hash
 
 
 @pytest.mark.parametrize(
