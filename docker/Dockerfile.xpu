@@ -105,8 +105,6 @@ ARG ONECCL_INSTALLER="intel-oneccl-2021.15.9.14_offline.sh"
 RUN wget "https://github.com/uxlfoundation/oneCCL/releases/download/2021.15.9/${ONECCL_INSTALLER}" && \
     bash "${ONECCL_INSTALLER}" -a --silent --eula accept && \
     rm "${ONECCL_INSTALLER}" && \
-    echo "source /opt/intel/oneapi/setvars.sh --force" >> /root/.bashrc && \
-    echo "source /opt/intel/oneapi/ccl/2021.15/env/vars.sh --force" >> /root/.bashrc && \
     rm -f /opt/intel/oneapi/ccl/latest && \
     ln -s /opt/intel/oneapi/ccl/2021.15 /opt/intel/oneapi/ccl/latest && \
     printf '%s\n' \
@@ -116,8 +114,32 @@ RUN wget "https://github.com/uxlfoundation/oneCCL/releases/download/2021.15.9/${
     > /etc/ld.so.conf.d/oneapi-ccl.conf && \
     ldconfig
 
+# Cover different docker launch scenarios to ensure oneAPI envs sourced
+#   - /etc/bash.bashrc + /root/.bashrc : interactive non-login (`docker exec -it c bash`)
+#   - /etc/profile.d/zz-oneapi.sh      : login shells (`bash -l`)
+#   - /root/.bash_profile              : login shells that read ~/.bash_profile
+#   - $BASH_ENV                        : non-interactive bash (`bash -c ...`, scripts)
+#   - ENTRYPOINT wrapper               : `docker run <img> <cmd>`
+RUN printf '%s\n' \
+    'source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1 || true' \
+    'source /opt/intel/oneapi/ccl/2021.15/env/vars.sh --force >/dev/null 2>&1 || true' \
+    > /etc/oneapi-env.sh && \
+    echo 'source /etc/oneapi-env.sh' >> /etc/bash.bashrc && \
+    echo 'source /etc/oneapi-env.sh' >> /root/.bashrc && \
+    printf '%s\n' 'source /etc/oneapi-env.sh' > /etc/profile.d/zz-oneapi.sh && \
+    printf '%s\n' '[ -f ~/.bashrc ] && source ~/.bashrc' > /root/.bash_profile && \
+    printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'source /etc/oneapi-env.sh' \
+    'exec "$@"' \
+    > /usr/local/bin/oneapi-entrypoint.sh && \
+    chmod +x /usr/local/bin/oneapi-entrypoint.sh
+
+ENV BASH_ENV=/etc/oneapi-env.sh
+
 SHELL ["bash", "-c"]
-CMD ["bash", "-c", "source /root/.bashrc && exec bash"]
+ENTRYPOINT ["/usr/local/bin/oneapi-entrypoint.sh"]
+CMD ["/bin/bash"]
 
 WORKDIR /workspace/vllm
 
@@ -242,4 +264,4 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -e tests/vllm_test_utils
 
-ENTRYPOINT ["vllm", "serve"]
+ENTRYPOINT ["/usr/local/bin/oneapi-entrypoint.sh", "vllm", "serve"]
