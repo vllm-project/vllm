@@ -212,3 +212,210 @@ def test_ngram_proposer():
     assert len(result[0]) == 2
     assert np.array_equal(result[0], np.array([middle_integer + 2, middle_integer + 3]))
     assert np.array_equal(result[1], np.array([]))
+
+
+def test_ngram_global_cache_proposer():
+    model_config = ModelConfig(model="facebook/opt-125m")
+    proposer = NgramProposer(
+        vllm_config=VllmConfig(
+            model_config=model_config,
+            speculative_config=SpeculativeConfig(
+                prompt_lookup_min=2,
+                prompt_lookup_max=2,
+                prompt_lookup_cache_scope="global",
+                prompt_lookup_global_branch_length=6,
+                num_speculative_tokens=3,
+                method="ngram",
+            ),
+        )
+    )
+
+    first_request_tokens = np.array([[1, 2, 3, 4, 5, 6]], dtype=np.int32)
+    proposer.propose(
+        sampled_token_ids=[[6]],
+        num_tokens_no_spec=np.array([first_request_tokens.shape[1]], dtype=np.int32),
+        token_ids_cpu=first_request_tokens,
+        req_ids=["req-0"],
+    )
+
+    second_request_tokens = np.array([[9, 8, 3, 4]], dtype=np.int32)
+    result = proposer.propose(
+        sampled_token_ids=[[4]],
+        num_tokens_no_spec=np.array([second_request_tokens.shape[1]], dtype=np.int32),
+        token_ids_cpu=second_request_tokens,
+        req_ids=["req-1"],
+    )
+
+    assert result == [[5, 6]]
+
+
+def test_ngram_global_cache_respects_max_model_len():
+    model_config = ModelConfig(model="facebook/opt-125m", max_model_len=6)
+    proposer = NgramProposer(
+        vllm_config=VllmConfig(
+            model_config=model_config,
+            speculative_config=SpeculativeConfig(
+                prompt_lookup_min=2,
+                prompt_lookup_max=2,
+                prompt_lookup_cache_scope="global",
+                prompt_lookup_global_branch_length=6,
+                num_speculative_tokens=3,
+                method="ngram",
+            ),
+        )
+    )
+
+    first_request_tokens = np.array([[1, 2, 3, 4, 5]], dtype=np.int32)
+    proposer.propose(
+        sampled_token_ids=[[5]],
+        num_tokens_no_spec=np.array([first_request_tokens.shape[1]], dtype=np.int32),
+        token_ids_cpu=first_request_tokens,
+        req_ids=["req-0"],
+    )
+
+    second_request_tokens = np.array([[9, 8, 1, 2]], dtype=np.int32)
+    result = proposer.propose(
+        sampled_token_ids=[[2]],
+        num_tokens_no_spec=np.array([second_request_tokens.shape[1]], dtype=np.int32),
+        token_ids_cpu=second_request_tokens,
+        req_ids=["req-1"],
+    )
+
+    assert result == [[3, 4]]
+
+
+def test_ngram_global_cache_evicts_old_entries():
+    model_config = ModelConfig(model="facebook/opt-125m")
+    proposer = NgramProposer(
+        vllm_config=VllmConfig(
+            model_config=model_config,
+            speculative_config=SpeculativeConfig(
+                prompt_lookup_min=1,
+                prompt_lookup_max=1,
+                prompt_lookup_cache_scope="global",
+                prompt_lookup_global_branch_length=3,
+                prompt_lookup_global_max_entries=1,
+                num_speculative_tokens=1,
+                method="ngram",
+            ),
+        )
+    )
+
+    proposer.propose(
+        sampled_token_ids=[[3]],
+        num_tokens_no_spec=np.array([3], dtype=np.int32),
+        token_ids_cpu=np.array([[1, 2, 3]], dtype=np.int32),
+        req_ids=["req-0"],
+    )
+    proposer.propose(
+        sampled_token_ids=[[6]],
+        num_tokens_no_spec=np.array([3], dtype=np.int32),
+        token_ids_cpu=np.array([[4, 5, 6]], dtype=np.int32),
+        req_ids=["req-1"],
+    )
+
+    result = proposer.propose(
+        sampled_token_ids=[[1]],
+        num_tokens_no_spec=np.array([1], dtype=np.int32),
+        token_ids_cpu=np.array([[1]], dtype=np.int32),
+        req_ids=["req-2"],
+    )
+
+    assert result == [[]]
+
+
+def test_ngram_global_cache_does_not_fallback_to_local():
+    model_config = ModelConfig(model="facebook/opt-125m")
+    proposer = NgramProposer(
+        vllm_config=VllmConfig(
+            model_config=model_config,
+            speculative_config=SpeculativeConfig(
+                prompt_lookup_min=2,
+                prompt_lookup_max=2,
+                prompt_lookup_cache_scope="global",
+                prompt_lookup_global_branch_length=3,
+                num_speculative_tokens=2,
+                method="ngram",
+            ),
+        )
+    )
+
+    token_ids_cpu = np.array([[0, 0, 0]], dtype=np.int32)
+    proposer.propose(
+        sampled_token_ids=[[0]],
+        num_tokens_no_spec=np.array([3], dtype=np.int32),
+        token_ids_cpu=token_ids_cpu,
+        req_ids=["req-0"],
+    )
+
+    # Local ngram would find the earlier [1, 2] in the complete context and
+    # propose [3, 4]. Global mode only indexes the configured suffix window
+    # after the first full-context insert, so this remains a cache miss.
+    token_ids_cpu = np.array([[0, 0, 0, 1, 2, 3, 4, 5, 1, 2]], dtype=np.int32)
+    result = proposer.propose(
+        sampled_token_ids=[[2]],
+        num_tokens_no_spec=np.array([10], dtype=np.int32),
+        token_ids_cpu=token_ids_cpu,
+        req_ids=["req-0"],
+    )
+
+    assert result == [[]]
+
+
+def test_ngram_global_cache_indexes_full_context_once():
+    model_config = ModelConfig(model="facebook/opt-125m")
+    proposer = NgramProposer(
+        vllm_config=VllmConfig(
+            model_config=model_config,
+            speculative_config=SpeculativeConfig(
+                prompt_lookup_min=2,
+                prompt_lookup_max=2,
+                prompt_lookup_cache_scope="global",
+                prompt_lookup_global_branch_length=3,
+                num_speculative_tokens=2,
+                method="ngram",
+            ),
+        )
+    )
+
+    # The earlier [1, 2] is outside the configured suffix window of length 3.
+    # The first time a request is indexed, global mode still inserts the full
+    # visible context so prompt-local matches can be reused without a local
+    # fallback scan.
+    token_ids_cpu = np.array([[1, 2, 3, 4, 5, 1, 2]], dtype=np.int32)
+    result = proposer.propose(
+        sampled_token_ids=[[2]],
+        num_tokens_no_spec=np.array([7], dtype=np.int32),
+        token_ids_cpu=token_ids_cpu,
+        req_ids=["req-0"],
+    )
+
+    assert result == [[3, 4]]
+
+
+def test_ngram_global_cache_skips_full_context_when_cache_is_small():
+    model_config = ModelConfig(model="facebook/opt-125m")
+    proposer = NgramProposer(
+        vllm_config=VllmConfig(
+            model_config=model_config,
+            speculative_config=SpeculativeConfig(
+                prompt_lookup_min=2,
+                prompt_lookup_max=2,
+                prompt_lookup_cache_scope="global",
+                prompt_lookup_global_branch_length=3,
+                prompt_lookup_global_max_entries=1,
+                num_speculative_tokens=2,
+                method="ngram",
+            ),
+        )
+    )
+
+    token_ids_cpu = np.array([[1, 2, 3, 4, 5, 1, 2]], dtype=np.int32)
+    result = proposer.propose(
+        sampled_token_ids=[[2]],
+        num_tokens_no_spec=np.array([7], dtype=np.int32),
+        token_ids_cpu=token_ids_cpu,
+        req_ids=["req-0"],
+    )
+
+    assert result == [[]]
