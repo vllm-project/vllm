@@ -26,6 +26,8 @@ from vllm.parser.deepseek_v4 import (
     DSML_INVOKE_NAME_END,
     DSML_INVOKE_PREFIX,
     DSML_PARAM_CLOSE,
+    DSML_TOOL_END,
+    DSML_TOOL_START,
     _dsml_arg_converter,
     _unwrap_wrapper_args,
 )
@@ -59,6 +61,8 @@ def deepseek_v32_config() -> ParserEngineConfig:
             "INVOKE_NAME_END": DSML_INVOKE_NAME_END,
             "INVOKE_END": DSML_INVOKE_END,
             "PARAM_CLOSE": DSML_PARAM_CLOSE,
+            "FOREIGN_START": DSML_TOOL_START,
+            "FOREIGN_END": DSML_TOOL_END,
         },
         token_id_terminals={
             "TOOL_START": DSML_FUNC_START,
@@ -68,6 +72,26 @@ def deepseek_v32_config() -> ParserEngineConfig:
             (ParserState.CONTENT, "TOOL_START"): Transition(
                 ParserState.TOOL_PREAMBLE,
                 (),
+            ),
+            # Orphan invoke: at long context the model may omit the
+            # <｜DSML｜function_calls> wrapper and emit the invoke
+            # directly.  The invoke marker has no dedicated special
+            # token, so hold events and validate the parsed name
+            # before committing.
+            (ParserState.CONTENT, "INVOKE_PREFIX"): Transition(
+                ParserState.TOOL_NAME,
+                (EventType.TOOL_CALL_START,),
+                validate_tool_name=True,
+            ),
+            # V4-style tool_calls wrapper is foreign to V3.2: pass it
+            # and its contents through as plain content
+            (ParserState.CONTENT, "FOREIGN_START"): Transition(
+                ParserState.FOREIGN_BLOCK,
+                (EventType.TEXT_CHUNK,),
+            ),
+            (ParserState.FOREIGN_BLOCK, "FOREIGN_END"): Transition(
+                ParserState.CONTENT,
+                (EventType.TEXT_CHUNK,),
             ),
             (ParserState.TOOL_PREAMBLE, "INVOKE_PREFIX"): Transition(
                 ParserState.TOOL_NAME,
@@ -99,6 +123,7 @@ def deepseek_v32_config() -> ParserEngineConfig:
             ParserState.CONTENT: EventType.TEXT_CHUNK,
             ParserState.TOOL_NAME: EventType.TOOL_NAME,
             ParserState.TOOL_ARGS: EventType.ARG_VALUE_CHUNK,
+            ParserState.FOREIGN_BLOCK: EventType.TEXT_CHUNK,
         },
         arg_converter=_dsml_arg_converter,
         arg_structural_chars=frozenset(">"),

@@ -29,6 +29,7 @@ from vllm.parser.engine.parser_engine_config import ParserEngineConfig, ParserSt
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
 from vllm.tool_parsers.utils import (
     coerce_to_schema_type,
+    collect_tool_names,
     extract_types_from_schema,
     find_tool_name,
     find_tool_properties,
@@ -107,6 +108,7 @@ class ParserEngine(Parser):
         self._engine = StreamingParserEngine(
             parser_engine_config, tokenizer, vocab=self.vocab
         )
+        self._engine.allowed_tool_names = self._declared_tool_names()
 
         self._has_reasoning = (
             "THINK_END" in parser_engine_config.token_id_terminals
@@ -398,6 +400,11 @@ class ParserEngine(Parser):
 
     # ── Private helpers ─────────────────────────────────────────────
 
+    def _declared_tool_names(self) -> frozenset[str] | None:
+        if not self._tools:
+            return None
+        return collect_tool_names(self._tools) or None
+
     def _check_skip_tool_parsing(
         self,
         request: ChatCompletionRequest | ResponsesRequest,
@@ -405,6 +412,7 @@ class ParserEngine(Parser):
         tools = getattr(request, "tools", None)
         if tools:
             self._tools = tools
+            self._engine.allowed_tool_names = self._declared_tool_names()
         if not self.skip_tool_parsing and not self._suppress_tool_calls:
             tool_choice = getattr(request, "tool_choice", None)
             if tool_choice == "none" and tools:

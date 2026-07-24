@@ -289,6 +289,23 @@ def find_tool_properties(
     return {}
 
 
+def collect_tool_names(tools: list[Tool] | None) -> frozenset[str]:
+    """Collect the names of all declared function tools."""
+    if not tools:
+        return frozenset()
+    names: set[str] = set()
+    for tool in tools:
+        if isinstance(tool, (FunctionTool, NamespaceTool)):
+            for name, _ in iter_response_function_tool_info(tool):
+                names.add(name)
+            continue
+        if not _is_function_tool(tool):
+            continue
+        name, _ = _extract_tool_info(tool)
+        names.add(name)
+    return frozenset(names)
+
+
 def find_tool_name(
     tools: list[Tool] | None,
     tool_name: str,
