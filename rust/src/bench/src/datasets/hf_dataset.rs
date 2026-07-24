@@ -51,18 +51,19 @@ enum ColumnFormat {
 
 /// Make a GET request with retry logic (3 retries with exponential backoff).
 /// Returns the parsed JSON response.
-fn get_with_retry(
-    client: &reqwest::blocking::Client,
+async fn get_with_retry(
+    client: &reqwest::Client,
     url: &str,
     label: &str,
 ) -> Result<serde_json::Value> {
     let max_retries = 3;
     for attempt in 0..=max_retries {
-        let resp = match client.get(url).send() {
+        let resp = match client.get(url).send().await {
             Ok(r) => r,
             Err(e) => {
                 if attempt < max_retries {
-                    std::thread::sleep(std::time::Duration::from_secs(2 * (attempt as u64 + 1)));
+                    tokio::time::sleep(std::time::Duration::from_secs(2 * (attempt as u64 + 1)))
+                        .await;
                     continue;
                 }
                 return Err(BenchError::Config(format!(
@@ -81,7 +82,7 @@ fn get_with_retry(
         }
 
         if status.is_server_error() && attempt < max_retries {
-            std::thread::sleep(std::time::Duration::from_secs(2 * (attempt as u64 + 1)));
+            tokio::time::sleep(std::time::Duration::from_secs(2 * (attempt as u64 + 1))).await;
             continue;
         }
 
@@ -93,6 +94,7 @@ fn get_with_retry(
 
         let data: serde_json::Value = resp
             .json()
+            .await
             .map_err(|e| BenchError::Config(format!("Failed to parse {label} response: {e}")))?;
         return Ok(data);
     }
@@ -106,7 +108,7 @@ fn get_with_retry(
 /// If both `subset` and `split` are provided, the `/info` call is skipped as an optimization.
 /// Paginated download fetches rows in pages of 100 until `num_rows_needed` are collected
 /// or the dataset is exhausted.
-pub fn download_hf_dataset(
+pub async fn download_hf_dataset(
     dataset: &str,
     subset: Option<&str>,
     split: Option<&str>,
@@ -116,7 +118,7 @@ pub fn download_hf_dataset(
         url::form_urlencoded::byte_serialize(dataset.as_bytes()).collect();
 
     let mut client_builder =
-        reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(120));
+        reqwest::Client::builder().timeout(std::time::Duration::from_secs(120));
 
     // Add HF_TOKEN auth header if available
     if let Ok(token) = std::env::var("HF_TOKEN") {
@@ -139,7 +141,7 @@ pub fn download_hf_dataset(
         // Call /info to discover available configs and splits
         let info_url =
             format!("https://datasets-server.huggingface.co/info?dataset={encoded_dataset}");
-        let info = get_with_retry(&client, &info_url, "HF dataset /info")?;
+        let info = get_with_retry(&client, &info_url, "HF dataset /info").await?;
 
         let dataset_info =
             info.get("dataset_info").and_then(|d| d.as_object()).ok_or_else(|| {
@@ -252,7 +254,7 @@ pub fn download_hf_dataset(
              &length={page_size}"
         );
 
-        let data = get_with_retry(&client, &url, "HF dataset /rows")?;
+        let data = get_with_retry(&client, &url, "HF dataset /rows").await?;
 
         let rows = data["rows"]
             .as_array()
@@ -1035,8 +1037,10 @@ mod tests {
 
     /// Build a gpt2 tokenizer using built-in tiktoken encoding (no network required).
     fn builtin_tokenizer() -> crate::tokenizer::TokenizerKind {
-        crate::tokenizer::load_tokenizer("gpt2", false, None)
-            .expect("gpt2 built-in tiktoken should always load without network")
+        crate::tokenizer::TokenizerKind::Tiktoken(
+            crate::tiktoken::load_builtin_tiktoken("gpt2")
+                .expect("gpt2 built-in tiktoken should always load without network"),
+        )
     }
 
     /// Write JSON data to a unique temp file and return the path string.

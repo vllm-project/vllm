@@ -6,7 +6,6 @@ Unit tests for the breakable cudagraph primitives.
 
 from __future__ import annotations
 
-import os
 import threading
 from contextlib import nullcontext
 from unittest.mock import patch
@@ -14,7 +13,21 @@ from unittest.mock import patch
 import pytest
 import torch
 
-os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
+
+@pytest.fixture(autouse=True)
+def _enable_breakable_cudagraph(monkeypatch: pytest.MonkeyPatch):
+    """Enable breakable cudagraphs for this module's tests only.
+
+    eager_break_during_capture reads the env at decoration time, which
+    happens inside the test bodies, so a per-test fixture suffices.
+    monkeypatch restores the env so other test files running in the same
+    pytest process are unaffected (a module-level os.environ assignment
+    used to leak into test_cudagraph_dispatch.py and break it).
+    """
+    import vllm.envs as envs
+
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
+    envs.disable_envs_cache()
 
 
 def test_piecewise_capture_builds_fresh_metadata_for_both_passes():
@@ -86,10 +99,19 @@ def cuda_capture_stream():
     """
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
+    from vllm.utils.torch_utils import _current_stream_tls
+
+    prev_stream = getattr(_current_stream_tls, "value", None)
     stream = torch.cuda.Stream()
     with torch.cuda.stream(stream):
         yield stream
     torch.cuda.current_stream().wait_stream(stream)
+    # Exiting torch.cuda.stream() records the default stream in vllm's
+    # patched set_stream cache. A later CUDAGraphWrapper capture in the same
+    # process would then run on the default stream, which cannot capture
+    # (this broke test_cudagraph_dispatch.py when run in-process after this
+    # file). Restore the pre-fixture value so this module leaves no trace.
+    _current_stream_tls.value = prev_stream
 
 
 # ---------------------------------------------------------------------------
