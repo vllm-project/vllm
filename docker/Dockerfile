@@ -1065,13 +1065,40 @@ ENTRYPOINT ["./sagemaker-entrypoint.sh"]
 
 FROM vllm-openai-base AS vllm-openai
 
+# CRIU for the default-on imports-snapshot entrypoint (see
+# docker/entrypoints/vllm-snapshot-entrypoint.sh). Jammy's archive criu is
+# 3.16.x, below the >=3.17 floor `vllm snapshot` enforces at runtime (and
+# noble's archive has no criu at all), so install from the CRIU team's PPA and
+# fail the build if the floor is not met. The keyring is written manually
+# (same pattern as the deadsnakes mirror branch above): add-apt-repository is
+# unusable at this stage because /usr/bin/python3 now points at the deadsnakes
+# python, which has no apt_pkg module.
+RUN mkdir -p -m 0755 /etc/apt/keyrings \
+    && curl -fsSL --retry 3 --retry-all-errors \
+        "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x4E2A48715C45AEEC077B48169B29EEC9246B6CE2" \
+        | gpg --dearmor > /etc/apt/keyrings/criu-ppa.gpg \
+    && chmod 644 /etc/apt/keyrings/criu-ppa.gpg \
+    && . /etc/os-release \
+    && echo "deb [signed-by=/etc/apt/keyrings/criu-ppa.gpg] https://ppa.launchpadcontent.net/criu/ppa/ubuntu ${VERSION_CODENAME} main" \
+        > /etc/apt/sources.list.d/criu-ppa.list \
+    && apt-get update -y \
+    && apt-get install -y --no-install-recommends criu \
+    && rm -rf /var/lib/apt/lists/* \
+    && CRIU_VERSION=$(criu --version | awk '/^Version:/ {print $2}') \
+    && { dpkg --compare-versions "$CRIU_VERSION" ge 3.17 \
+         || { echo "criu >= 3.17 required, got: ${CRIU_VERSION:-none}"; exit 1; }; }
+
+COPY docker/entrypoints/vllm-snapshot-entrypoint.sh \
+    /usr/local/bin/vllm-snapshot-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/vllm-snapshot-entrypoint.sh
+
 # To run the image as non-root, either build the `vllm-openai-nonroot` target
 # below, or in a derived Dockerfile uncomment the following line and ensure
 # any additional layers chgrp-0 / chmod-g+rwX paths they write to. The `vllm`
 # user (UID 2000, GID 0) is already created in the `vllm-base` stage.
 # See docs/deployment/docker.md.
 # USER vllm
-ENTRYPOINT ["vllm", "serve"]
+ENTRYPOINT ["/usr/local/bin/vllm-snapshot-entrypoint.sh"]
 #################### OPENAI API SERVER ####################
 
 #################### OPENAI API SERVER (NON-ROOT, OPT-IN) ####################

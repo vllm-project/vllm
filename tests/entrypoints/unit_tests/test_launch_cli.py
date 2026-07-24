@@ -3,6 +3,8 @@
 """Unit tests for the `vllm launch` CLI subcommand."""
 
 import argparse
+import json
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -11,6 +13,14 @@ from vllm.entrypoints.cli.launch import (
     LaunchSubcommand,
     RenderSubcommand,
     cmd_init,
+)
+from vllm.entrypoints.cli.snapshot import SnapshotSubcommand
+from vllm.entrypoints.snapshot import (
+    creation_env,
+    environment_miss,
+    environment_record,
+    key_from,
+    maybe_restore_serve,
 )
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -109,3 +119,287 @@ def test_launch_registered_in_main():
     assert hasattr(launch_module, "cmd_init")
     subcmds = launch_module.cmd_init()
     assert any(s.name == "launch" for s in subcmds)
+
+
+# -- `vllm snapshot` subcommand (folded here per the no-new-test-file rule; this
+#    file now also covers the snapshot CLI surface) --
+
+
+@pytest.fixture
+def snapshot_parser():
+    parser = FlexibleArgumentParser(description="test")
+    subparsers = parser.add_subparsers(required=False, dest="subparser")
+    SnapshotSubcommand().subparser_init(subparsers)
+    return parser
+
+
+def test_snapshot_registered_in_main():
+    import vllm.entrypoints.cli.snapshot as snapshot_module
+
+    assert hasattr(snapshot_module, "cmd_init")
+    subcmds = snapshot_module.cmd_init()
+    assert any(s.name == "snapshot" for s in subcmds)
+
+
+def test_parse_snapshot_create_flags(snapshot_parser):
+    args = snapshot_parser.parse_args(["snapshot", "create", "--dry-run", "--force"])
+    assert args.dry_run is True
+    assert args.force is True
+
+
+def test_restore_hook_noop_when_disabled(monkeypatch, caplog):
+    monkeypatch.delenv("VLLM_SNAPSHOT", raising=False)
+    with caplog.at_level("INFO", logger="vllm.entrypoints.snapshot"):
+        assert maybe_restore_serve() is None
+    assert not any(
+        "snapshot restore" in record.getMessage() for record in caplog.records
+    )
+
+
+def test_restore_hook_cold_fallback_logs_miss(monkeypatch, caplog, tmp_path):
+    # Enabled + `serve` + no matching snapshot: the hook must fall back to a cold
+    # start (return None) and log exactly one miss line. Platform is pinned so
+    # the linux-only gate runs off-linux too, and the lookup key is stubbed so
+    # the test stays on the no-snapshot path even in editable or RECORD-less
+    # environments where key computation itself would refuse.
+    import vllm.entrypoints.snapshot as snapshot_module
+
+    monkeypatch.setattr(snapshot_module, "_entry_state", {})
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(sys, "argv", ["vllm", "serve", "some-model"])
+    monkeypatch.setenv("VLLM_SNAPSHOT", "1")
+    monkeypatch.delenv("VLLM_SNAPSHOT_RESTORED", raising=False)
+    monkeypatch.delenv("PYTHONHASHSEED", raising=False)
+    monkeypatch.setenv("VLLM_SNAPSHOT_ROOT", str(tmp_path))
+    monkeypatch.setattr(snapshot_module, "lookup_key", lambda env: {"stub": 1})
+    with caplog.at_level("INFO", logger="vllm.entrypoints.snapshot"):
+        assert maybe_restore_serve() is None
+    misses = [
+        record
+        for record in caplog.records
+        if "snapshot restore miss" in record.getMessage()
+    ]
+    assert len(misses) == 1
+    assert "no snapshot" in misses[0].getMessage()
+
+
+def test_restore_hook_refuses_pythonhashseed(monkeypatch, caplog):
+    # A restored interpreter keeps its create-time hash seed, so a requested
+    # PYTHONHASHSEED can never be honored: the hook must miss explicitly,
+    # before any key lookup.
+    import vllm.entrypoints.snapshot as snapshot_module
+
+    monkeypatch.setattr(snapshot_module, "_entry_state", {})
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(sys, "argv", ["vllm", "serve", "some-model"])
+    monkeypatch.setenv("VLLM_SNAPSHOT", "1")
+    monkeypatch.delenv("VLLM_SNAPSHOT_RESTORED", raising=False)
+    monkeypatch.setenv("PYTHONHASHSEED", "0")
+    with caplog.at_level("INFO", logger="vllm.entrypoints.snapshot"):
+        assert maybe_restore_serve() is None
+    misses = [
+        record
+        for record in caplog.records
+        if "snapshot restore miss" in record.getMessage()
+    ]
+    assert len(misses) == 1
+    assert "PYTHONHASHSEED" in misses[0].getMessage()
+
+
+def test_creation_env_drops_secrets_keeps_policy_vars():
+    # Credentials never reach the dumped helper; policy vars that merely end
+    # in _TOKEN (import-affecting) stay in the keyed env. Shell bookkeeping
+    # (SHLVL moves between a wrapper's create child and its exec'd serve)
+    # is scrubbed so it can never key or miss a snapshot.
+    env = {
+        "HF_TOKEN": "hf_secret",
+        "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1",
+        "PATH": "/usr/bin",
+        "SHLVL": "1",
+        "_": "/usr/local/bin/vllm",
+        "HOSTNAME": "9f2c81d0e4a7",
+    }
+    values = creation_env(env)
+    assert "HF_TOKEN" not in values
+    assert values["HF_HUB_DISABLE_IMPLICIT_TOKEN"] == "1"
+    assert "SHLVL" not in values
+    assert "_" not in values
+    assert "HOSTNAME" not in values
+
+
+def test_environment_miss_ignores_secrets_not_policy_vars():
+    # A live secret absent from the create-side record must not cold-fallback
+    # the restore; a policy-var difference must still be named.
+    recorded = environment_record({"PATH": "/usr/bin"})["values"]
+    live_with_secret = {"PATH": "/usr/bin", "HF_TOKEN": "hf_live"}
+    assert environment_miss(recorded, live_with_secret, frozenset()) is None
+    live_with_policy = {
+        "PATH": "/usr/bin",
+        "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1",
+    }
+    assert (
+        environment_miss(recorded, live_with_policy, frozenset())
+        == "env.HF_HUB_DISABLE_IMPLICIT_TOKEN"
+    )
+
+
+def test_pgid_empty_reads_the_process_table(monkeypatch):
+    # Emptiness comes from /proc, not pgrep (absent on slim images); a zombie
+    # still occupies its group until reaped.
+    import vllm.entrypoints.snapshot as snapshot_module
+
+    table = {10: (1, 42, 100, "Z")}
+    monkeypatch.setattr(snapshot_module, "process_table", lambda: table)
+    assert snapshot_module.pgid_empty(42) is False
+    assert snapshot_module.pgid_empty(43) is True
+
+
+def _prime_snapshot_dir(root, key, shared_objects=()):
+    # A minimal on-disk snapshot the module treats as restorable: exact-key
+    # manifest whose env record matches the live creation env and whose work
+    # assets exist.
+    directory = root / key
+    (directory / "work").mkdir(parents=True)
+    (directory / "work" / "stdin.null").touch()
+    manifest = {
+        "env": environment_record(creation_env()),
+        "shared_objects": list(shared_objects),
+        "work_assets": ["stdin.null"],
+    }
+    (directory / "MANIFEST.json").write_text(json.dumps(manifest))
+    return directory
+
+
+def test_snapshot_create_early_exit_when_snapshot_current(monkeypatch, tmp_path):
+    # Bare `vllm snapshot create` with a layer2-valid exact-key snapshot on
+    # disk must exit 3 ("already exists") before the eager CLI imports; the
+    # lookup key is stubbed as in the cold-fallback test so key computation
+    # never refuses in editable environments.
+    import vllm.entrypoints.snapshot as snapshot_module
+
+    monkeypatch.setattr(snapshot_module, "_entry_state", {})
+    monkeypatch.setattr(sys, "argv", ["vllm", "snapshot", "create"])
+    monkeypatch.delenv("VLLM_SNAPSHOT", raising=False)
+    monkeypatch.setenv("VLLM_SNAPSHOT_ROOT", str(tmp_path))
+    monkeypatch.setattr(snapshot_module, "lookup_key", lambda env: {"stub": 1})
+    _prime_snapshot_dir(tmp_path, key_from({"stub": 1}))
+    with pytest.raises(SystemExit) as excinfo:
+        maybe_restore_serve()
+    assert excinfo.value.code == 3
+
+
+def test_snapshot_create_falls_through_on_stale_manifest(monkeypatch, tmp_path):
+    # A stale exact-key manifest (a recorded .so that no longer matches) must
+    # NOT early-exit: the hook returns and the slow path re-primes in place.
+    import vllm.entrypoints.snapshot as snapshot_module
+
+    monkeypatch.setattr(snapshot_module, "_entry_state", {})
+    monkeypatch.setattr(sys, "argv", ["vllm", "snapshot", "create"])
+    monkeypatch.delenv("VLLM_SNAPSHOT", raising=False)
+    monkeypatch.setenv("VLLM_SNAPSHOT_ROOT", str(tmp_path))
+    monkeypatch.setattr(snapshot_module, "lookup_key", lambda env: {"stub": 1})
+    _prime_snapshot_dir(
+        tmp_path,
+        key_from({"stub": 1}),
+        shared_objects=[{"path": "/nonexistent.so", "id": "sha256:0"}],
+    )
+    assert maybe_restore_serve() is None
+
+
+def test_snapshot_create_flags_skip_early_exit(monkeypatch, tmp_path):
+    # Any token beyond the bare two-token form (--force here, but equally
+    # --dry-run/--help/typos) must reach argparse on the slow path even when
+    # a current snapshot exists.
+    import vllm.entrypoints.snapshot as snapshot_module
+
+    monkeypatch.setattr(snapshot_module, "_entry_state", {})
+    monkeypatch.setattr(sys, "argv", ["vllm", "snapshot", "create", "--force"])
+    monkeypatch.delenv("VLLM_SNAPSHOT", raising=False)
+    monkeypatch.setenv("VLLM_SNAPSHOT_ROOT", str(tmp_path))
+    monkeypatch.setattr(snapshot_module, "lookup_key", lambda env: {"stub": 1})
+    _prime_snapshot_dir(tmp_path, key_from({"stub": 1}))
+    assert maybe_restore_serve() is None
+
+
+def test_lookup_key_keys_dpkg_dists_by_deb_revision(monkeypatch):
+    # A RECORD-less dpkg-managed dist (Debian ships apt python packages
+    # without RECORD) must not refuse the snapshot key, and must be keyed by
+    # the dpkg package version: a security update bumps only the Debian
+    # revision, so the digest has to change with it.
+    import pathlib
+
+    import vllm.entrypoints.snapshot as snapshot_module
+
+    class FakeDpkgDist:
+        name = "protobuf"
+        version = "3.12.4"
+        metadata = {"Name": "protobuf"}
+        _path = pathlib.Path("/usr/lib/python3/dist-packages/protobuf-3.12.4.egg-info")
+
+        def read_text(self, _name):
+            return None
+
+    deb = {"version": "3.12.4-1ubuntu7"}
+
+    def fake_run(argv, **_kwargs):
+        class Result:
+            returncode = 0
+            stderr = ""
+            stdout = ""
+
+        result = Result()
+        if argv[0] == "criu":
+            result.stdout = "Version: 4.2"
+        elif argv[0] == "dpkg":
+            result.stdout = f"python3-protobuf: {argv[-1]}\n"
+        else:  # dpkg-query
+            result.stdout = f"python3-protobuf {deb['version']}\n"
+        return result
+
+    monkeypatch.setattr(snapshot_module, "_entry_state", {})
+    monkeypatch.setattr(
+        snapshot_module.importlib.metadata,
+        "distributions",
+        lambda **_kwargs: [FakeDpkgDist()],
+    )
+    monkeypatch.setattr(snapshot_module.subprocess, "run", fake_run)
+    first = snapshot_module.lookup_key(creation_env())["dists_digest"]
+    deb["version"] = "3.12.4-1ubuntu7.22.04.2"
+    second = snapshot_module.lookup_key(creation_env())["dists_digest"]
+    assert first != second
+
+
+def _make_dist(site, name):
+    info = site / f"{name}-1.0.dist-info"
+    info.mkdir(parents=True)
+    (info / "METADATA").write_text(
+        f"Metadata-Version: 2.1\nName: {name}\nVersion: 1.0\n"
+    )
+    (info / "RECORD").write_text(f"{name}/__init__.py,,\n")
+
+
+def test_lookup_key_ignores_sys_path_growth_after_entry(monkeypatch, tmp_path):
+    # `snapshot create` keys after the eager CLI imports while the restore
+    # hook keys before them, and importing the serve envelope grows sys.path
+    # (setuptools appends its _vendor directory). The dists digest must walk
+    # the captured entry path, or create and restore disagree forever.
+    import vllm.entrypoints.snapshot as snapshot_module
+
+    base = tmp_path / "base-site"
+    extra = tmp_path / "extra-site"
+    _make_dist(base, "basepkg")
+    _make_dist(extra, "extrapkg")
+    monkeypatch.setattr(sys, "path", [str(base)])
+    monkeypatch.setattr(sys, "argv", ["vllm", "snapshot"])
+    monkeypatch.setattr(snapshot_module, "_entry_state", {})
+    maybe_restore_serve()  # captures entry state, the public hook's job
+    first = snapshot_module.lookup_key(creation_env())["dists_digest"]
+    sys.path.append(str(extra))
+    second = snapshot_module.lookup_key(creation_env())["dists_digest"]
+    assert first == second
+    # negative control: the extra dir does change the digest once it is part
+    # of the captured entry state, so the equality above is not vacuous
+    monkeypatch.setattr(snapshot_module, "_entry_state", {})
+    maybe_restore_serve()
+    third = snapshot_module.lookup_key(creation_env())["dists_digest"]
+    assert third != first
