@@ -28,6 +28,9 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
     deepseek_v4_sparse_mla_attention_warmup,
     flashinfer_sparse_mla_decode_autotune_warmup,
 )
+from vllm.model_executor.warmup.hybrid_mamba_warmup import (
+    hybrid_mamba_triton_warmup,
+)
 from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
 from vllm.model_executor.warmup.sparse_mla_triton_warmup import (
     sparse_mla_triton_warmup,
@@ -84,6 +87,11 @@ def kernel_warmup(worker: "Worker"):
             worker.scheduler_config.max_num_batched_tokens,
         )
     qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
+
+    # Hybrid Mamba2 models (e.g. NemotronH): warm the prefill causal-conv1d,
+    # zero-kv-blocks, and slot-mapping kernels the JIT monitor reports on the
+    # first request. No-op for models without MambaMixer2 layers.
+    hybrid_mamba_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
 
     # DSv4 mHC TileLang kernels (hc_pre/hc_post/hc_head_op) run every decoder
     # layer per token; warm them across token sizes first so the first real
