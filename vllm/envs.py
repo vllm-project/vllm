@@ -171,6 +171,9 @@ if TYPE_CHECKING:
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_RAY_DP_PACK_STRATEGY: Literal["strict", "fill", "span"] = "strict"
     VLLM_RAY_DP_PLACEMENT_NODE_IPS: str = ""
+    VLLM_RAY_PG_STRATEGY: Literal["PACK", "SPREAD", "STRICT_PACK", "STRICT_SPREAD"] = (
+        "PACK"
+    )
     VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY: str = ""
     VLLM_RAY_EXTRA_ENV_VARS_TO_COPY: str = ""
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
@@ -1411,6 +1414,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # This environment variable is ignored if data-parallel-backend is not Ray.
     "VLLM_RAY_DP_PLACEMENT_NODE_IPS": lambda: os.getenv(
         "VLLM_RAY_DP_PLACEMENT_NODE_IPS", ""
+    ),
+    # Placement group strategy used by initialize_ray_cluster
+    # (ray_utils.py).  Distinct from VLLM_RAY_DP_PACK_STRATEGY which
+    # controls the strategy for data-parallel placement groups
+    # (create_dp_placement_groups in utils.py).  Ray placement group
+    # strategies: PACK (default, best-effort — packs resources as much
+    # as possible; may span nodes if a single node lacks capacity),
+    # SPREAD (bundles across different nodes), STRICT_PACK (guarantees
+    # single-node, fails if impossible), STRICT_SPREAD.
+    "VLLM_RAY_PG_STRATEGY": env_with_choices(
+        "VLLM_RAY_PG_STRATEGY",
+        "PACK",
+        ["PACK", "SPREAD", "STRICT_PACK", "STRICT_SPREAD"],
+        case_sensitive=True,
     ),
     # Comma-separated *additional* prefixes of env vars to copy from the
     # driver to Ray workers.  These are merged with the built-in defaults
