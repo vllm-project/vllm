@@ -3,10 +3,10 @@ depends_on:
   - image-build-xpu
 steps:
 - label: Basic Models Tests (Initialization)
-  timeout_in_minutes: 25
   device: intel_gpu
-  no_plugin: true
+  timeout_in_minutes: 25
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -29,8 +29,8 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 100
   parallelism: 4
-  no_plugin: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -52,8 +52,8 @@ steps:
 - label: Basic Models Tests (Other)
   device: intel_gpu
   timeout_in_minutes: 35
-  no_plugin: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -73,3 +73,27 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py || true'
+- label: Inkling Unit Tests (B200)
+  device: intel_gpu
+  timeout_in_minutes: 40
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s models/inkling
+  source_file_dependencies:
+  - vllm/models/inkling/
+  - vllm/cute_utils/
+  - cmake/external_projects/tml_fa4.cmake
+  - tests/models/inkling/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s models/inkling || true'
