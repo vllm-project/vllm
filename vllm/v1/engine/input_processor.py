@@ -389,7 +389,7 @@ class InputProcessor:
         prompt_len: int,
         prompt_type: Literal["encoder", "decoder"],
     ):
-        if self.skip_prompt_length_check:
+        if self.skip_prompt_length_check and prompt_type == "encoder":
             return
 
         if prompt_len == 0 and prompt_type == "decoder":
