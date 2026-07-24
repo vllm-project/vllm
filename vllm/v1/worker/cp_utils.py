@@ -9,6 +9,7 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backends.registry import get_dcp_capable_backend_names
 from vllm.v1.attention.backends.utils import split_decodes_prefills_and_extends
 
 if TYPE_CHECKING:
@@ -42,13 +43,19 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                     "MTP with cp_kv_cache_interleave_size > 1 is not "
                     f"supported in {layer_impl.__class__.__name__}."
                 )
-            if dcp_size > 1:
-                assert layer_impl.need_to_return_lse_for_decode, (
+            if dcp_size > 1 and not layer_impl.need_to_return_lse_for_decode:
+                compatible = get_dcp_capable_backend_names()
+                suggestion = (
+                    f" Backends that support DCP: {', '.join(compatible)}."
+                    if compatible
+                    else ""
+                )
+                raise AssertionError(
                     "Decode Context Parallelism (DCP) requires attention "
-                    "implementations to return the softmax LSE during decode, "
-                    f"but {layer_impl.__class__.__name__} does not. "
-                    "Try a different backend by setting "
-                    "--attention-backend or disable DCP."
+                    "implementations to return the softmax LSE during "
+                    f"decode, but {layer_impl.__class__.__name__} does "
+                    f"not.{suggestion} Try a different backend by "
+                    "setting --attention-backend, or disable DCP."
                 )
 
 
