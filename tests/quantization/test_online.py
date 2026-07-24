@@ -16,11 +16,25 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerTensorOnlineLinearMethod,
     Fp8PerTensorOnlineMoEMethod,
 )
+from vllm.model_executor.layers.quantization.online.mxfp4 import (
+    Mxfp4OnlineLinearMethod,
+    Mxfp4OnlineMoEMethod,
+)
 from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
+
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx942, on_gfx950
+else:
+
+    def on_gfx950() -> bool:
+        return False
+
+    def on_gfx942() -> bool:
+        return False
 
 
 @pytest.mark.skipif(
@@ -64,6 +78,12 @@ from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
             Fp8PerTensorOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
         ),
+        (
+            "mxfp4",
+            None,
+            Mxfp4OnlineLinearMethod,
+            Mxfp4OnlineMoEMethod,
+        ),
     ],
 )
 @pytest.mark.parametrize(
@@ -85,6 +105,13 @@ def test_online_quantization(
 
     Does not test performance, peak memory usage, etc.
     """
+
+    if quant_scheme == "mxfp4" and not (
+        on_gfx950() or on_gfx942() or current_platform.is_cuda()
+    ):
+        pytest.skip(
+            "mxfp4 online quantization is only tested on cuda, or AMD gfx942, gfx950."
+        )
 
     if use_rocm_aiter:
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
@@ -121,7 +148,10 @@ def test_online_quantization(
             if moe is not None:
                 assert isinstance(moe._quant_method, expected_moe_cls)
 
-            if current_platform.is_cuda():
+            if quant_scheme == "mxfp4":
+                # Packed e2m1 values, two per byte.
+                assert o_proj.weight.dtype == torch.uint8
+            elif current_platform.is_cuda():
                 assert o_proj.weight.dtype == torch.float8_e4m3fn
             elif current_platform.is_rocm():
                 assert o_proj.weight.dtype == current_platform.fp8_dtype()

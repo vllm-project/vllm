@@ -20,6 +20,20 @@ llm = LLM("meta-llama/Llama-3.1-8B", quantization="fp8_per_block")
 
 # MXFP8 quantization for weights and activations
 llm = LLM("meta-llama/Llama-3.1-8B", quantization="mxfp8")
+
+# MXFP4 weight quantization (1x32 per-block FP4_E2M1 with E8M0 scale)
+# Activation format depends on the selected linear/MoE backend
+llm = LLM("meta-llama/Llama-3.1-8B", quantization="mxfp4")
+
+# MXFP4 weight; activation quantization depends on the `linear_backend` picked
+llm = LLM("meta-llama/Llama-3.1-8B", quantization="mxfp4")
+
+# MXFP4 MOE-only weight and activation quantization
+llm = LLM(
+    "Qwen/Qwen3.5-35B-A3B",
+    quantization="mxfp4",
+    quantization_config={"linear": {"activation": None, "weight": None}}
+)
 ```
 
 Or with the CLI:
@@ -28,7 +42,10 @@ Or with the CLI:
 vllm serve meta-llama/Llama-3.1-8B --quantization fp8_per_tensor
 vllm serve meta-llama/Llama-3.1-8B --quantization fp8_per_block
 vllm serve meta-llama/Llama-3.1-8B --quantization mxfp8
-```
+vllm serve meta-llama/Llama-3.1-8B --quantization mxfp4
+
+vllm serve Qwen/Qwen3.5-35B-A3B --quantization mxfp4 \
+    --quantization-config '{"linear":{"activation":null,"weight":null}}'
 
 ## Supported Schemes
 
@@ -37,6 +54,7 @@ vllm serve meta-llama/Llama-3.1-8B --quantization mxfp8
 | `fp8_per_tensor` | fp8_e4m3 data, fp32 per-tensor scale | fp8_e4m3 data, fp32 per-tensor scale | On some GPUs (Ada, Hopper) linear activations use per-token scaling for better performance |
 | `fp8_per_block` | fp8_e4m3 data, fp32 per-128x128-block scale | fp8_e4m3 data, fp32 per-1x128-block scale | |
 | `mxfp8` | fp8_e4m3 data, e8m0 per-1x32-block scale | fp8_e4m3 data, e8m0 per-1x32-block scale | Requires SM 100+ (Blackwell or newer) for w8a8, other GPUs use a w8a16 fallback |
+| `mxfp4` | fp4_e2m1 data, e8m0 per-1x32-block scale ([OCP MX specs](https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf)) | - linear: fp4_e2m1 data, e8m0 per-1x32-block scale in some backends, or BF16. <br> - MOE: fp4_e2m1 data, e8m0 per-1x32-block scale. | Linear MXFP4 backend is auto-selected per platform, not enforcing activation dtype. Some use BF16 activation. Use `--linear-backend` to pin one (e.g. `--linear-backend flashinfer`). |
 
 ## Advanced Configuration
 

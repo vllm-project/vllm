@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kInt8StaticChannelSym,
     kMxfp4Dynamic,
+    kMxfp4Static,
     kMxfp8Dynamic,
     kNvfp4Static,
 )
@@ -30,7 +31,8 @@ QUANT_KEY_NAMES: dict[str, QuantKey] = {
     "fp8_per_block_static": kFp8Static128BlockSym,
     "fp8_per_block_dynamic": kFp8Dynamic128Sym,
     "mxfp8": kMxfp8Dynamic,
-    "mxfp4": kMxfp4Dynamic,
+    "mxfp4_static": kMxfp4Static,
+    "mxfp4_dynamic": kMxfp4Dynamic,
     "int8_per_channel_static": kInt8StaticChannelSym,
 }
 
@@ -130,6 +132,10 @@ _ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
     "mxfp8": QuantizationConfigArgs(
         linear=QuantSpec(weight=kMxfp8Dynamic),
         moe=QuantSpec(weight=kMxfp8Dynamic),
+    ),
+    "mxfp4": QuantizationConfigArgs(
+        linear=QuantSpec(weight=kMxfp4Static),
+        moe=QuantSpec(weight=kMxfp4Static),
     ),
     # INT8 weight-only on MoE; linear stays unquantized (no `linear` field).
     "int8_per_channel_weight_only": QuantizationConfigArgs(
