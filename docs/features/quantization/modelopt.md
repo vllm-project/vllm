@@ -102,6 +102,23 @@ vllm serve <path_to_exported_checkpoint> \
   --host 0.0.0.0 --port 8000
 ```
 
+For large safetensors checkpoints, such as Llama 4 FP8 ModelOpt exports, startup
+time can be dominated by weight loading. If the default safetensors loader is
+the bottleneck, try an accelerated load format:
+
+```bash
+vllm serve <path_to_exported_checkpoint> \
+  --quantization modelopt \
+  --load-format instanttensor
+```
+
+`--load-format fastsafetensors` is another option for environments where
+`fastsafetensors` is already installed and configured. See
+[Loading Model Weights with InstantTensor](../../models/extensions/instanttensor.md)
+and
+[Loading model weights with fastsafetensors](../../models/extensions/fastsafetensor.md)
+for installation requirements and backend-specific details.
+
 ## Testing (local checkpoints)
 
 vLLM's ModelOpt unit tests are gated by local checkpoint paths and are skipped
