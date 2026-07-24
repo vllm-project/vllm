@@ -25,7 +25,7 @@ steps:
     amd:
       dind: false
       device: mi300_1
-      timeout_in_minutes: 75
+      timeout_in_minutes: 50
       depends_on:
       - image-build-amd
 
@@ -59,7 +59,9 @@ steps:
     - pytest -v -s v1/test_outputs.py
   mirror:
     amd:
-      device: mi325_1
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 70
       depends_on:
       - image-build-amd
 
@@ -113,8 +115,9 @@ steps:
     - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
   mirror:
     amd:
-      device: mi325_1
-      timeout_in_minutes: 75
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 65
       depends_on:
       - image-build-amd
 
@@ -233,7 +236,9 @@ steps:
     - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
   mirror:
     amd:
-      device: mi325_1
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 75
       source_file_dependencies:
       - vllm/entrypoints
       - vllm/multimodal
@@ -269,10 +274,11 @@ steps:
   - pytest -v -s v1/tracing
   mirror:
     amd:
-      device: mi325_2
+      dind: false
+      device: mi300_2
+      timeout_in_minutes: 30
       depends_on:
       - image-build-amd
-      optional: true
 
 - label: Python-only Installation
   key: python-only-installation
@@ -287,8 +293,8 @@ steps:
   - bash standalone_tests/python_only_compile.sh
   mirror:
     amd:
-      device: mi325_1
-      timeout_in_minutes: 45
+      device: mi250_1
+      timeout_in_minutes: 55
       depends_on:
       - image-build-amd
       source_file_dependencies:
