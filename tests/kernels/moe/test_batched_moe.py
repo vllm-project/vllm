@@ -362,7 +362,11 @@ _TD_SHAPES = [
     (4, 256, 1024, 2048),
 ]
 
-_TD_CONFIG = {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 64}
+
+def _td_supported() -> bool:
+    return current_platform.is_xpu() or (
+        current_platform.is_cuda() and current_platform.has_device_capability(90)
+    )
 
 
 def _run_td(A, B, num_expert_tokens, use_td: bool):
@@ -378,6 +382,11 @@ def _run_td(A, B, num_expert_tokens, use_td: bool):
     from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
         batched_triton_kernel,
     )
+
+    if use_td:
+        from vllm.triton_utils.allocation import set_triton_allocator
+
+        set_triton_allocator(A.device)
 
     E = A.shape[0]
     max_tokens = A.shape[1]
@@ -427,6 +436,8 @@ def _run_td(A, B, num_expert_tokens, use_td: bool):
 
 @pytest.mark.parametrize("num_experts,max_tokens_per_expert,K,N", _TD_SHAPES)
 def test_batched_mm_td_matches_plain(num_experts, max_tokens_per_expert, K, N):
+    if not _td_supported():
+        pytest.skip("TD requires XPU or CUDA sm_90+")
     set_random_seed(42)
     device = current_platform.device_type
     A = (
@@ -451,6 +462,8 @@ def test_batched_mm_td_matches_plain(num_experts, max_tokens_per_expert, K, N):
 
 
 def test_batched_mm_td_zero_expert_tokens():
+    if not _td_supported():
+        pytest.skip("TD requires XPU or CUDA sm_90+")
     set_random_seed(42)
     device = current_platform.device_type
     E, M, K, N = 8, 32, 256, 256
@@ -511,17 +524,14 @@ def test_batched_experts_end_to_end(m, n, k, e, topk):
     torch.testing.assert_close(triton_output, baseline_output, atol=3e-2, rtol=2e-2)
 
 
-def test_xpu_priority_backends_batched_triton_opt_in():
-    """On XPU the batched-triton opt-in flips the priority backend from the
-    default XPUExperts to BatchedTritonExperts (moe_mmk TD path)."""
+def test_batched_triton_backend_mapping():
     from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
         UnquantizedMoeBackend,
-        xpu_priority_backends,
+        map_unquantized_backend,
     )
 
-    assert xpu_priority_backends(use_batched_triton=False) == [
-        UnquantizedMoeBackend.XPU
-    ]
-    assert xpu_priority_backends(use_batched_triton=True) == [
-        UnquantizedMoeBackend.BATCHED_TRITON
-    ]
+    assert (
+        map_unquantized_backend("batched_triton")
+        == UnquantizedMoeBackend.BATCHED_TRITON
+    )
+    assert map_unquantized_backend("triton") == UnquantizedMoeBackend.TRITON
