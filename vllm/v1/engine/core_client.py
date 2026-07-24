@@ -596,7 +596,10 @@ class MPClient(EngineCoreClient):
             dp_size = parallel_config.data_parallel_size
             dp_rank = parallel_config.data_parallel_index
             dp_local_size = parallel_config.data_parallel_size_local
-            offline_mode = parallel_config.data_parallel_rank_local is not None
+            offline_mode = (
+                parallel_config.data_parallel_rank_local is not None
+                and not parallel_config.data_parallel_external_lb
+            )
             # Client manages local+remote EngineCores in pure internal LB case.
             # Client manages local EngineCores in hybrid and external LB case.
             num_ranks = dp_local_size if parallel_config.local_engines_only else dp_size

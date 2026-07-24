@@ -113,6 +113,16 @@ CUDA_VISIBLE_DEVICES=1 vllm serve $MODEL --data-parallel-size 2 --data-parallel-
                                          --port 8001
 ```
 
+Alternatively, each rank can be launched with all GPUs on its node visible (no `CUDA_VISIBLE_DEVICES` narrowing) by passing `--data-parallel-rank-local` to tell each rank which GPU slot on its node to use:
+
+```bash
+# Both ranks see all GPUs; rank 0 picks cuda:0, rank 1 picks cuda:1.
+vllm serve $MODEL --data-parallel-size 2 --data-parallel-rank 0 --data-parallel-rank-local 0 \
+                  --port 8000
+vllm serve $MODEL --data-parallel-size 2 --data-parallel-rank 1 --data-parallel-rank-local 1 \
+                  --port 8001
+```
+
 For multi-node cases, the address/port of rank 0 must also be specified:
 
 ```bash
@@ -121,6 +131,21 @@ vllm serve $MODEL --data-parallel-size 2 --data-parallel-rank 0 \
                   --data-parallel-address 10.99.48.128 --data-parallel-rpc-port 13345
 # Rank 1
 vllm serve $MODEL --data-parallel-size 2 --data-parallel-rank 1 \
+                  --data-parallel-address 10.99.48.128 --data-parallel-rpc-port 13345
+```
+
+`--data-parallel-rank-local` extends naturally to multi-node — each rank's value is its position on its own node:
+
+```bash
+# Node A (10.99.48.128), 2 GPUs visible to both processes
+vllm serve $MODEL --data-parallel-size 4 --data-parallel-rank 0 --data-parallel-rank-local 0 \
+                  --data-parallel-address 10.99.48.128 --data-parallel-rpc-port 13345
+vllm serve $MODEL --data-parallel-size 4 --data-parallel-rank 1 --data-parallel-rank-local 1 \
+                  --data-parallel-address 10.99.48.128 --data-parallel-rpc-port 13345
+# Node B, 2 GPUs visible to both processes
+vllm serve $MODEL --data-parallel-size 4 --data-parallel-rank 2 --data-parallel-rank-local 0 \
+                  --data-parallel-address 10.99.48.128 --data-parallel-rpc-port 13345
+vllm serve $MODEL --data-parallel-size 4 --data-parallel-rank 3 --data-parallel-rank-local 1 \
                   --data-parallel-address 10.99.48.128 --data-parallel-rpc-port 13345
 ```
 
