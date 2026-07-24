@@ -554,8 +554,10 @@ class DeepseekV32Attention(MLAAttention):
                 self.indexer.max_model_len,
                 self.indexer.max_total_seq_len,
                 self.topk_indices_buffer,
-                True,  # skip_k_cache_insert
-                False,  # use_fp4_cache
+                skip_k_cache_insert=True,
+                use_pcp=False,
+                dense_mha_metadata_layer_name="",
+                use_fp4_cache=False,
                 # fused_norm_rope already cleared the topk buffer this forward.
                 skip_topk_buffer_clear=True,
             )
