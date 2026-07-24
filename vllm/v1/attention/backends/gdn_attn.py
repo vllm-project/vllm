@@ -82,6 +82,11 @@ class GDNAttentionMetadata:
     # for the CuTeDSL verify+flush kernel. None on the triton backend.
     spec_hist_len_d: torch.Tensor | None = None  # shape: [batch,] int32
     spec_state_indices_col0_d: torch.Tensor | None = None  # shape: [batch,] int32
+    # CUDA-graph padded row count of this step's bucket (None when eager).
+    # The layer pads the ucache spec call to THIS (bucket-aware) instead of
+    # the static max: zero-copy pad claims then fit the bucket's buffers and
+    # the kernel grid matches the bucket.
+    spec_padded_rows: int | None = None
 
     # Pre-computed FLA chunk metadata (avoids GPU->CPU sync in prepare_chunk_indices)
     chunk_indices: torch.Tensor | None = None
@@ -525,6 +530,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         spec_is_flush_d = None
         spec_hist_len_d = None
         spec_state_indices_col0_d = None
+        spec_padded_rows = None
         if self.use_cached_kernel and spec_sequence_masks is None and num_decodes > 0:
             num_prompt_tokens_cpu = m.num_prompt_tokens_cpu
             num_computed_tokens_cpu = m._num_computed_tokens_cpu
@@ -720,13 +726,16 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_accepted_tokens[num_spec_decodes:].fill_(1)
 
             if self.gdn_spec_backend == "flashinfer_ucache":
+                spec_padded_rows = batch_size
                 # Padded rows: negative sentinel -> the kernel retires the
                 # whole CTA at entry (pad-skip), so under-bucket batches cost
                 # ~nothing instead of a full T-step verify per padded row.
                 # Requires kernel commit with _exit_cta_if_neg (455b0f6+);
                 # on older kernels use 0 (P=0 verify against null page 0).
-                # Fill to the END of the fixed buffers: rows beyond the live
-                # batch must read hist=0 / idx=-1 on graph replay. One eager
+                # Fill to the END of the fixed buffers (not just the graph
+                # bucket): the layer passes bucket-length PRE-PADDED slices
+                # to the adapter (skipping its per-layer re-staging), and the
+                # adapter's pad_to may exceed the current bucket. One eager
                 # fill over <=max_bs int32 per step — free.
                 self.spec_hist_len_gathered[num_spec_decodes:].fill_(0)
                 self.spec_state_indices_col0[num_spec_decodes:].fill_(
@@ -792,6 +801,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_is_flush_d=spec_is_flush_d,
             spec_hist_len_d=spec_hist_len_d,
             spec_state_indices_col0_d=spec_state_indices_col0_d,
+            spec_padded_rows=spec_padded_rows,
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,

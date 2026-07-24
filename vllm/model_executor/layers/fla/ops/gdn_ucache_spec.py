@@ -111,6 +111,23 @@ def load_ucache_kernel_module(strided_qkv: bool = True):
     return mod
 
 
+# A_log/dt_bias must reach the kernel wrappers as STABLE tensor objects:
+# their fp32->bf16 cast cache is keyed by object identity, and calling
+# .detach() per call creates a fresh object every time -> cache miss ->
+# one cast kernel per tensor per layer per step (measured ~2 x 1.9us x 36
+# layers/step). Detach ONCE per parameter here; the parameter object owns
+# the entry lifetime.
+_DETACHED: dict = {}
+
+
+def _detached(t: torch.Tensor) -> torch.Tensor:
+    d = _DETACHED.get(id(t))
+    if d is None:
+        d = t.detach()
+        _DETACHED[id(t)] = d
+    return d
+
+
 _PAD_BUFS: dict = {}
 
 
@@ -143,6 +160,7 @@ def gdn_ucache_spec_verify(
     scale: float,
     strided_qkv: bool = True,
     pad_to: int | None = None,
+    output: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Run the fused verify+flush kernel; returns [total_spec, HV, V] view.
 
@@ -175,32 +193,77 @@ def gdn_ucache_spec_verify(
     if _io is not mixed_qkv_spec.dtype:
         mixed_qkv_spec = mixed_qkv_spec.to(_io)
 
+    # Caller-provided destination ([real_total, HV, V], the layer's
+    # core_attn_out slice): kernels STG directly into it (wrapper
+    # alias) and the layer skips its slice-assign (the 2.7us
+    # DtoD per layer). Only usable when the padded batch exactly covers it
+    # and dtypes match (fp16-IO mode casts, so it falls back there).
+    _dest = output
+    if (
+        _dest is not None
+        and (_io is not _out_dtype or _dest.dtype is not _out_dtype
+             or not _dest.is_contiguous())
+    ):
+        _dest = None
+
     real_total = total_spec
     if pad_to is not None and B < pad_to:
         dev = mixed_qkv_spec.device
         qkv_dim = mixed_qkv_spec.shape[1]
-        packed = _pad_scratch(
-            ("qkv", dev), (pad_to * T, qkv_dim), mixed_qkv_spec.dtype, dev
-        )
-        packed[:total_spec].copy_(mixed_qkv_spec)
-        a_buf = _pad_scratch(("a", dev), (pad_to * T, HV), a.dtype, dev)
-        b_buf = _pad_scratch(("b", dev), (pad_to * T, HV), b.dtype, dev)
-        a_buf[:total_spec].copy_(a[:total_spec])
-        b_buf[:total_spec].copy_(b[:total_spec])
-        mixed_qkv_spec, a, b = packed, a_buf, b_buf
-        # Stage hist/idx into fixed pad_to-length scratch (pad rows:
-        # hist=0, state index=-1 pad-skip sentinel).
-        hist_buf = _pad_scratch(("hist", dev), (pad_to,), torch.int32, dev)
-        hist_buf[:B].copy_(hist_len)
-        hist_buf[B:].fill_(0)
-        hist_len = hist_buf
-        idx_buf = _pad_scratch(
-            ("idx", dev), (pad_to,), state_indices.dtype, dev,
-            fill=UCACHE_PAD_ROW_ID
-        )
-        idx_buf[:B].copy_(state_indices)
-        idx_buf[B:].fill_(UCACHE_PAD_ROW_ID)
-        state_indices = idx_buf
+        def _claimable(t, rows, cols):
+            need = (t.storage_offset() + (rows - 1) * t.stride(0)
+                    + (cols - 1) * t.stride(1) + 1)
+            return (t.untyped_storage().nbytes() // t.element_size()) >= need
+
+        if (
+            os.environ.get("VLLM_GDN_UCACHE_ZEROCOPY_PAD") == "1"
+            and _claimable(mixed_qkv_spec, pad_to * T, qkv_dim)
+            and _claimable(a, pad_to * T, HV)
+            and _claimable(b, pad_to * T, HV)
+        ):
+            # ZERO-COPY padding: claim bucket-shaped views over the REAL
+            # (possibly strided) tensors via as_strided. Rows beyond
+            # total_spec are phantom — their addresses land in descriptors
+            # but are NEVER dereferenced: the pad sentinel (-1) in the
+            # bucket-length index buffers retires those CTAs at kernel
+            # entry before any load/TMA/cp.async. Kills the per-layer
+            # direct_copy (packed qkv) + 2 DtoD (a/b) in drain-bucket
+            # steps. Env-gated: out-of-bounds-by-contract addressing.
+            mixed_qkv_spec = mixed_qkv_spec.as_strided(
+                (pad_to * T, qkv_dim), mixed_qkv_spec.stride()
+            )
+            a = a.as_strided((pad_to * T, HV), a.stride())
+            b = b.as_strided((pad_to * T, HV), b.stride())
+        else:
+            packed = _pad_scratch(
+                ("qkv", dev), (pad_to * T, qkv_dim), mixed_qkv_spec.dtype, dev
+            )
+            packed[:total_spec].copy_(mixed_qkv_spec)
+            a_buf = _pad_scratch(("a", dev), (pad_to * T, HV), a.dtype, dev)
+            b_buf = _pad_scratch(("b", dev), (pad_to * T, HV), b.dtype, dev)
+            a_buf[:total_spec].copy_(a[:total_spec])
+            b_buf[:total_spec].copy_(b[:total_spec])
+            mixed_qkv_spec, a, b = packed, a_buf, b_buf
+        # hist/idx tensors arriving PRE-PADDED at bucket length (the
+        # builder fills pad rows each step) are used as-is — no per-layer
+        # copies/fills. Shorter tensors take the legacy staging path.
+        if hist_len.shape[0] >= pad_to:
+            hist_len = hist_len[:pad_to]
+        else:
+            hist_buf = _pad_scratch(("hist", dev), (pad_to,), torch.int32, dev)
+            hist_buf[:B].copy_(hist_len)
+            hist_buf[B:].fill_(0)
+            hist_len = hist_buf
+        if state_indices.shape[0] >= pad_to:
+            state_indices = state_indices[:pad_to]
+        else:
+            idx_buf = _pad_scratch(
+                ("idx", dev), (pad_to,), state_indices.dtype, dev,
+                fill=UCACHE_PAD_ROW_ID
+            )
+            idx_buf[:B].copy_(state_indices)
+            idx_buf[B:].fill_(UCACHE_PAD_ROW_ID)
+            state_indices = idx_buf
         B = pad_to
         total_spec = B * T
 
@@ -210,22 +273,29 @@ def gdn_ucache_spec_verify(
     q = qkv[..., : HK * K].unflatten(-1, (HK, K))
     k = qkv[..., HK * K : 2 * HK * K].unflatten(-1, (HK, K))
     v = qkv[..., 2 * HK * K :].unflatten(-1, (HV, V))
-    # a/b are chunk() views (token stride 2*HV); rows [0:total_spec] is the
-    # exact window the Triton spec kernel reads (parity). Materialize
-    # contiguous copies for the kernel wrappers.
-    a_spec = a[:total_spec].contiguous().reshape(B, T, HV)
-    b_spec = b[:total_spec].contiguous().reshape(B, T, HV)
+    # a/b are chunk() views with token stride 2*HV; rows [0:total_spec] is the
+    # exact window the Triton spec kernel reads (parity). reshape is a pure
+    # VIEW here (regular token stride), and the wrappers' strided-a/b mode
+    # (ab_t_stride, kernel repo) reads it directly -- the two per-layer
+    # .contiguous() copies (~3us x 36 layers/step) are gone. Wrappers fall
+    # back to staging automatically if the stride pattern is irregular.
+    a_spec = a[:total_spec].reshape(B, T, HV)
+    b_spec = b[:total_spec].reshape(B, T, HV)
 
     if _io is not a_spec.dtype:
         a_spec = a_spec.to(_io)
         b_spec = b_spec.to(_io)
 
+    _fused_out = None
+    if _dest is not None and _dest.shape[0] == B * T:
+        _fused_out = _dest.view(B, T, HV, V)
     out = mod.gated_delta_rule_mtp_ucache_flush(
         # nn.Parameters carry requires_grad=True, which DLPack refuses to
-        # export; detach() shares storage.
-        A_log=A_log.detach(),
+        # export; detach() shares storage so the wrapper's identity-keyed
+        # bf16 cast cache still hits.
+        A_log=_detached(A_log),
         a=a_spec,
-        dt_bias=dt_bias.detach(),
+        dt_bias=_detached(dt_bias),
         q=q,
         k=k,
         v=v,
@@ -238,6 +308,8 @@ def gdn_ucache_spec_verify(
         hist_len=hist_len,
         scale=scale,
         use_qk_l2norm_in_kernel=True,
+        # caller-destination alias when available, else zero-copy view
+        output=_fused_out,
         flush_min=ucache_flush_min(T),
         restart_hist_on_flush=False,  # builder-owned restart (see module doc)
     )

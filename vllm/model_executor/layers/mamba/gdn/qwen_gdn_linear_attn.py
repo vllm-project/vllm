@@ -1556,6 +1556,23 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             assert attn_metadata.spec_hist_len_d is not None
             assert attn_metadata.spec_state_indices_col0_d is not None
             n = attn_metadata.num_spec_decodes
+            _pb = attn_metadata.spec_padded_rows
+            _slice_rows = max(
+                n, _pb if _pb is not None
+                else (self.gdn_spec_ucache_pad_b or 0)
+            )
+            _spec_dest = None
+            if (
+                attn_metadata.num_prefills == 0
+                and attn_metadata.num_decodes == 0
+            ):
+                # Graph steps: hand the PADDED extent so the kernels write
+                # in place at the bucket size (padded rows are discarded
+                # downstream, same as every other padded activation).
+                _spec_dest = core_attn_out[
+                    : (_pb * self.max_spec_len)
+                    if _pb is not None else num_actual_tokens
+                ]
             core_attn_out_spec = gdn_ucache_spec_verify(
                 mixed_qkv_spec=mixed_qkv_spec,
                 a=a,
@@ -1566,8 +1583,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 u_cache=self_kv_cache[2],
                 k_cache=self_kv_cache[3],
                 g_cache=self_kv_cache[4],
-                hist_len=attn_metadata.spec_hist_len_d[:n],
-                state_indices=attn_metadata.spec_state_indices_col0_d[:n],
+                # Bucket-length PRE-PADDED slices (builder fills pad rows:
+                # hist=0, idx=-1): the adapter skips its per-layer hist/idx
+                # staging copies+fills entirely.
+                hist_len=attn_metadata.spec_hist_len_d[:_slice_rows],
+                state_indices=attn_metadata.spec_state_indices_col0_d[
+                    :_slice_rows
+                ],
+                output=_spec_dest,
                 num_spec_decodes=n,
                 max_spec_len=self.max_spec_len,
                 num_k_heads=self.num_k_heads // self.tp_size,
@@ -1575,7 +1598,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 head_v_dim=self.head_v_dim,
                 scale=self.head_k_dim**-0.5,
                 strided_qkv=self.gdn_spec_ucache_strided,
-                pad_to=self.gdn_spec_ucache_pad_b,
+                pad_to=(
+                    _pb if _pb is not None else self.gdn_spec_ucache_pad_b
+                ),
             ).unsqueeze(0)
             last_recurrent_state = None
         elif spec_sequence_masks is not None and self.use_cache_spec_kernel:
@@ -1776,7 +1801,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             merged_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
             core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
         elif spec_sequence_masks is not None:
-            core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
+            _spec_flat = core_attn_out_spec.squeeze(0)
+            if _spec_flat.data_ptr() != core_attn_out.data_ptr():
+                core_attn_out[:num_actual_tokens] = _spec_flat
         else:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
 
