@@ -75,7 +75,7 @@ def test_full_graph(
     monkeypatch: pytest.MonkeyPatch,
     model: str,
     model_kwargs: dict[str, Any],
-    compilation_mode: int,
+    compilation_mode: CompilationMode,
 ):
     if (
         "w8a8" in model
@@ -197,7 +197,7 @@ def test_custom_compile_config(
     ],
 )
 def test_fp8_kv_scale_compile(
-    compilation_mode: int,
+    compilation_mode: CompilationMode,
     model: str,
     backend: AttentionBackendEnum | None,
 ):
@@ -213,7 +213,9 @@ def test_fp8_kv_scale_compile(
     run_model(compilation_mode, model, **model_kwargs)
 
 
-def run_model(compile_config: int | CompilationConfig, model: str, **model_kwargs):
+def run_model(
+    compile_config: CompilationMode | CompilationConfig, model: str, **model_kwargs
+):
     compilation_config = (
         compile_config
         if isinstance(compile_config, CompilationConfig)

@@ -61,7 +61,7 @@ async def test_run_eagle_dp(monkeypatch: pytest.MonkeyPatch, attn_backend: str):
         data_parallel_backend="mp",  # ray takes more time
         trust_remote_code=True,
         max_model_len=16384,
-        attention_config={"backend": attn_backend},
+        attention_config={"backend": attn_backend},  # type: ignore[arg-type]
     )
 
     eagle_engine_args = replace(
