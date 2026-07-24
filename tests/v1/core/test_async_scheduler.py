@@ -372,3 +372,97 @@ def test_no_placeholder_underflow_on_discarded_spec_frame():
     assert req.num_computed_tokens == computed_before
     assert req.async_tokens_to_discard == num_spec - 1
     assert req.status == RequestStatus.RUNNING
+
+
+def test_streaming_session_update_recomputes_changed_block_hash():
+    """Regression test for GitHub issue #49449.
+
+    When Scheduler._update_request_as_session() modifies tokens that belong
+    to a block with an already-computed hash, the old block hash must be
+    invalidated/recomputed.  Otherwise stale hashes are registered in the
+    prefix cache and later retrieved by other requests, silently producing
+    wrong model outputs even with deterministic sampling.
+    """
+    from vllm.sampling_params import SamplingParams
+    from vllm.utils.hashing import sha256
+    from vllm.v1.core.kv_cache_utils import (
+        get_request_block_hasher,
+        hash_block_tokens,
+        init_none_hash,
+    )
+    from vllm.v1.core.sched.scheduler import Scheduler
+    from vllm.v1.request import Request, StreamingUpdate
+
+    block_size = 4
+    hash_fn = sha256
+    init_none_hash(hash_fn)
+    block_hasher = get_request_block_hasher(block_size, hash_fn)
+
+    def compute_block_hash(tokens, prev_hash=None):
+        return hash_block_tokens(hash_fn, prev_hash, tokens, None)
+
+    class _MockSched:
+        num_waiting_for_streaming_input = 0
+        log_stats = False
+
+    # P = [10, 10, 10] (3 tokens, one short of a full 4-token block).
+    prompt_token_ids = [10, 10, 10]
+    sampling_params = SamplingParams(max_tokens=1)
+    sampling_params.update_from_generation_config({}, 50256)
+
+    req = Request(
+        request_id="test-streaming-0",
+        prompt_token_ids=prompt_token_ids,
+        sampling_params=sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=block_hasher,
+    )
+
+    # --- Simulate post-decode state ---
+    req.num_computed_tokens = len(prompt_token_ids)  # 3
+    req.append_output_token_ids(28)
+    # _all_token_ids = [10,10,10,28] → 1 full block → block hash set.
+
+    old_hash = compute_block_hash([10, 10, 10, 28])
+    assert req.block_hashes == [old_hash], (
+        "pre-condition: expected one block hash for P || X"
+    )
+
+    # --- Streaming session update replacing X=28 with Y=11 ---
+    update_sampling_params = SamplingParams(max_tokens=100)
+    update_sampling_params.update_from_generation_config({}, 50256)
+    update = StreamingUpdate(
+        mm_features=None,
+        prompt_token_ids=[11],
+        max_tokens=100,
+        arrival_time=req.arrival_time,
+        sampling_params=update_sampling_params,
+    )
+
+    # Exercise the production code path.
+    Scheduler._update_request_as_session(_MockSched(), req, update)
+
+    # Tokens must be P || Y.
+    expected_tokens = [10, 10, 10, 11]
+    assert list(req.all_token_ids) == expected_tokens, (
+        f"Expected tokens {expected_tokens}, got {list(req.all_token_ids)}"
+    )
+
+    expected_new_hash = compute_block_hash(expected_tokens)
+    assert old_hash != expected_new_hash, (
+        "Sanity check: different tokens must produce different hashes"
+    )
+
+    # --- Core regression assertions ---
+    assert req.block_hashes, "block_hashes must not be empty after session update"
+    assert req.block_hashes[0] != old_hash, (
+        f"Regression #49449: stale block hash {old_hash.hex()[:16]}... was "
+        f"not invalidated. Hash still represents [10,10,10,28] but tokens "
+        f"are {expected_tokens}. Expected hash {expected_new_hash.hex()[:16]}..."
+    )
+    assert req.block_hashes[0] == expected_new_hash, (
+        f"block_hashes[0] ({req.block_hashes[0].hex()[:16]}...) "
+        f"!= expected {expected_new_hash.hex()[:16]}... "
+        f"for tokens {expected_tokens}"
+    )

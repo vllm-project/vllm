@@ -1301,7 +1301,10 @@ class Scheduler(SchedulerInterface):
 
         session._all_token_ids.extend(update.prompt_token_ids or ())
         session.prompt_token_ids.extend(update.prompt_token_ids or ())
-        # Update block hashes for the new tokens.
+        # The token history was modified non-append-only above (deleted
+        # then extended), so previously-computed block hashes are stale.
+        session.block_hashes.clear()
+        # Recompute block hashes for the updated token sequence.
         session.update_block_hashes()
         session.num_prompt_tokens = len(session.prompt_token_ids)
         session.arrival_time = update.arrival_time
