@@ -32,6 +32,9 @@ class MiniCPMRobotTrackConfig(PretrainedConfig):
         xy_scale: float = 2.0,
         use_tanh_actions: bool = True,
         backbone_dtype: str = "bfloat16",
+        dino_model: str = "facebook/dinov3-vits16-pretrain-lvd1689m",
+        siglip_model: str = "google/siglip-so400m-patch14-384",
+        image_size: int = 384,
         **kwargs: Any,
     ) -> None:
         self.backbone_config = self._wrap_backbone_config(backbone_config)
@@ -47,6 +50,14 @@ class MiniCPMRobotTrackConfig(PretrainedConfig):
         self.xy_scale = float(xy_scale)
         self.use_tanh_actions = bool(use_tanh_actions)
         self.backbone_dtype = str(backbone_dtype)
+        # In-tree vision tower (pixels-in path). The frozen DINOv3 + SigLIP
+        # encoders are external to the RobotTrack checkpoint, so their weights
+        # are loaded from these paths (HF hub ids or local dirs, e.g. via
+        # ``hf_overrides``). Unused by the precomputed-features (pixels-out)
+        # path, which never builds the tower's inputs.
+        self.dino_model = str(dino_model)
+        self.siglip_model = str(siglip_model)
+        self.image_size = int(image_size)
         super().__init__(**kwargs)
 
     @staticmethod
