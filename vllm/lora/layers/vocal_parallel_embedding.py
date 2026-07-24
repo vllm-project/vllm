@@ -12,12 +12,14 @@ from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmb
 from vllm.platforms import current_platform
 
 from .base import BaseLayerWithLoRA
+from .utils import _get_lora_device
 
 
 class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
     def __init__(self, base_layer: VocabParallelEmbedding) -> None:
         super().__init__()
         self.base_layer = base_layer
+        self.device = _get_lora_device(self.base_layer)
         self.embeddings_slice: tuple[int, int] | None
         self.embeddings_weights: torch.Tensor | None
 
@@ -71,8 +73,8 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         )
 
     def reset_lora(self, index: int):
-        self.lora_a_stacked[index] = 0
-        self.lora_b_stacked[index] = 0
+        self.lora_a_stacked[index].zero_()
+        self.lora_b_stacked[index].zero_()
 
     def set_lora(
         self,
@@ -94,6 +96,8 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # synchronizing lora load
+        self._sync_lora_loads()
         # NB: Don't use torch.narrow here. torch.narrow triggers some
         # Dynamic Shape specialization in torch.compile
         num_tokens = x.shape[0]
