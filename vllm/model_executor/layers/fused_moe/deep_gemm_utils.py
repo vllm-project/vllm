@@ -391,7 +391,7 @@ def _fwd_kernel_ep_gather(
             if expert_id >= 0:
                 source_token_index = tl.load(
                     input_index + cur_token * input_index_stride0 + topk_index
-                )
+                ).to(tl.int64)
                 acc_weight = tl.load(
                     recv_topk_weight + cur_token * recv_topk_weight_stride0 + topk_index
                 )
@@ -405,7 +405,7 @@ def _fwd_kernel_ep_gather(
 
         tl.store(
             output_tensor
-            + cur_token * output_tensor_stride0
+            + cur_token.to(tl.int64) * output_tensor_stride0
             + cur_block * BLOCK_D
             + off_d,
             accumulator.to(output_tensor.dtype.element_ty),
