@@ -621,7 +621,7 @@ class TestAudioChunking:
         # 10 seconds of audio at 16kHz
         audio = np.linspace(-1.0, 1.0, 160000, dtype=np.float32)
 
-        chunks = split_audio(
+        chunks, offsets = split_audio(
             audio_data=audio,
             sample_rate=16000,
             max_clip_duration_s=30.0,
@@ -629,6 +629,7 @@ class TestAudioChunking:
             min_energy_window_size=1600,
         )
 
+        assert offsets[0] == 0.0
         assert len(chunks) == 1
         np.testing.assert_array_equal(chunks[0], audio)
 
@@ -638,7 +639,7 @@ class TestAudioChunking:
         # Exactly 30 seconds at 16kHz
         audio = np.linspace(-1.0, 1.0, 480000, dtype=np.float32)
 
-        chunks = split_audio(
+        chunks, offsets = split_audio(
             audio_data=audio,
             sample_rate=16000,
             max_clip_duration_s=30.0,
@@ -655,7 +656,7 @@ class TestAudioChunking:
         # 65 seconds of audio at 16kHz
         audio = np.linspace(-1.0, 1.0, 1040000, dtype=np.float32)
 
-        chunks = split_audio(
+        chunks, offsets = split_audio(
             audio_data=audio,
             sample_rate=16000,
             max_clip_duration_s=30.0,
@@ -675,7 +676,7 @@ class TestAudioChunking:
         # 65 seconds of audio at 16kHz
         audio = np.linspace(-1.0, 1.0, 1040000, dtype=np.float32)
 
-        chunks = split_audio(
+        chunks, offsets = split_audio(
             audio_data=audio,
             sample_rate=16000,
             max_clip_duration_s=30.0,
@@ -749,7 +750,7 @@ class TestAudioChunking:
 
         audio = np.arange(1120000, dtype=np.float32)  # 70s at 16kHz
 
-        chunks = split_audio(
+        chunks, offsets = split_audio(
             audio_data=audio,
             sample_rate=16000,
             max_clip_duration_s=30.0,
@@ -759,6 +760,13 @@ class TestAudioChunking:
 
         assert chunks[0][0] == audio[0]
         assert chunks[-1][-1] == audio[-1]
+        # Offsets must be the actual start time (samples / sample_rate) of each
+        # chunk, not an evenly-spaced nominal ``idx * max_clip_duration_s``.
+        assert offsets[0] == 0.0
+        assert len(offsets) == len(chunks)
+        for chunk, offset in zip(chunks, offsets):
+            start_sample = int(round(offset * 16000))
+            assert chunk[0] == audio[start_sample]
 
     def test_find_split_point_nan_input(self):
         """find_split_point must not return 0 for all-NaN input."""
@@ -783,7 +791,7 @@ class TestAudioChunking:
         # 31 seconds of NaN at 16kHz — longer than max_clip_duration_s
         nan_audio = np.full(16000 * 31, float("nan"), dtype=np.float32)
 
-        chunks = split_audio(
+        chunks, offsets = split_audio(
             audio_data=nan_audio,
             sample_rate=16000,
             max_clip_duration_s=30.0,
@@ -802,7 +810,7 @@ class TestAudioChunking:
         # 40 seconds at 8kHz
         audio_8k = np.linspace(-1.0, 1.0, 320000, dtype=np.float32)
 
-        chunks = split_audio(
+        chunks, offsets = split_audio(
             audio_data=audio_8k,
             sample_rate=8000,
             max_clip_duration_s=30.0,

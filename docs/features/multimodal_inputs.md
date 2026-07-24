@@ -369,13 +369,15 @@ from vllm.multimodal.media.audio import load_audio
 audio, sr = load_audio("long_audio.wav", sr=16000)
 
 # Split into chunks at low-energy (quiet) regions
-chunks = split_audio(
+chunks, offsets = split_audio(
     audio_data=audio,
     sample_rate=sr,
     max_clip_duration_s=30.0,      # Maximum chunk length in seconds
     overlap_duration_s=1.0,         # Search window for finding quiet split points
     min_energy_window_size=1600,    # Window size for energy calculation (~100ms at 16kHz)
 )
+# ``offsets`` gives the real start time (in seconds) of each chunk in the
+# original audio; chunks are split at quiet points, not at even boundaries.
 
 # Initialize Whisper model
 llm = LLM(model="openai/whisper-large-v3-turbo")
