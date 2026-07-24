@@ -739,7 +739,7 @@ class LoRAModelManager:
 
     def _create_merged_loras_inplace(self, lora_model: LoRAModel) -> None:
         for module_name, new_module_names in self.packed_modules.items():
-            # For 2D FusedMoEFactory modules with EP, narrow the per-expert
+            # For 2D RoutedExperts modules with EP, narrow the per-expert
             # sub-module list to this rank's owned experts so pack_moe
             # produces a tensor sized to local_num_experts directly.
             packed_module_names = new_module_names
