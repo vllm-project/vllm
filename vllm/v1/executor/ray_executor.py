@@ -15,7 +15,8 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils.network_utils import (
-    get_distributed_init_method,
+    get_ray_node_ip,
+   get_distributed_init_method,
     get_ip,
     get_open_port,
 )
@@ -187,7 +188,11 @@ class RayDistributedExecutor(Executor):
             bundle_indices = bundle_indices[: self.parallel_config.world_size]
 
         worker_metadata: list[RayWorkerMetaData] = []
-        driver_ip = get_ip()
+        # VLLM_HOST_IP takes precedence; otherwise prefer Ray's
+        # NodeManagerAddress (see get_ray_node_ip docstring for the
+        # multi-NIC rationale).
+        import vllm.envs as envs
+        driver_ip = envs.VLLM_HOST_IP or get_ray_node_ip() or get_ip()
         for rank, bundle_id in enumerate(bundle_indices):
             scheduling_strategy = PlacementGroupSchedulingStrategy(
                 placement_group=placement_group,

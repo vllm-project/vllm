@@ -16,7 +16,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils.network_utils import get_ip
+from vllm.utils.network_utils import get_ip, get_ray_node_ip
 from vllm.v1.outputs import AsyncModelRunnerOutput
 from vllm.v1.serial_utils import run_method
 from vllm.v1.worker.worker_base import WorkerWrapperBase
@@ -91,6 +91,18 @@ try:
                 raise e
 
         def get_node_ip(self) -> str:
+            # VLLM_HOST_IP takes precedence (user explicit override).
+            # Otherwise prefer Ray's authoritative NodeManagerAddress,
+            # which matches `ray start --node-ip-address`. Multi-NIC
+            # nodes (e.g. WiFi + Mellanox) need this because
+            # get_ip()'s socket(8.8.8.8) fallback returns the
+            # default-route IP, not the cluster IP.
+            import vllm.envs as envs
+            if envs.VLLM_HOST_IP:
+                return envs.VLLM_HOST_IP
+            ip = get_ray_node_ip()
+            if ip:
+                return ip
             return get_ip()
 
         def get_node_and_physical_gpu_ids(self) -> tuple[str, list[int]]:
