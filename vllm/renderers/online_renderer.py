@@ -41,6 +41,7 @@ from vllm.renderers.inputs.preprocess import (
     parse_model_prompt,
     prompt_to_seq,
 )
+from vllm.utils.async_utils import make_async
 from vllm.utils.mistral import is_mistral_tokenizer, is_mistral_tool_parser
 from vllm.utils.mistral import mt as _mt
 
@@ -71,6 +72,9 @@ class OnlineRenderer:
         self.enable_auto_tools = enable_auto_tools
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
         self.use_harmony = model_config.hf_config.model_type == "gpt_oss"
+        self._make_request_with_harmony_async = make_async(
+            self._make_request_with_harmony, executor=renderer._executor
+        )
         self.parser: type[Parser] | None = ParserManager.get_parser(
             tool_parser_name=tool_parser,
             reasoning_parser_name=reasoning_parser,
@@ -174,7 +178,7 @@ class OnlineRenderer:
         else:
             # For GPT-OSS.
             should_include_tools = tool_dicts is not None
-            conversation, engine_inputs = self._make_request_with_harmony(
+            conversation, engine_inputs = await self._make_request_with_harmony_async(
                 request, should_include_tools
             )
 
