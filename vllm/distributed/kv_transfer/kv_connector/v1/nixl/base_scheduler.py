@@ -186,6 +186,8 @@ class NixlBaseConnectorScheduler:
         port = params.get("remote_port")
         tp_size = params.get("tp_size")
         pp_size = params.get("pp_size", 1)
+        dcp_size = params.get("dcp_size", 1)
+        pcp_size = params.get("pcp_size", 1)
         if (
             remote_engine_id is None
             or remote_request_id is None
@@ -201,6 +203,8 @@ class NixlBaseConnectorScheduler:
                 port=port,
                 tp_size=tp_size,
                 pp_size=pp_size,
+                dcp_size=dcp_size,
+                pcp_size=pcp_size,
             )
         self._heartbeat_by_engine[remote_engine_id].req_ids.add(remote_request_id)
         self._heartbeat_req_engine[request.request_id] = (
@@ -256,18 +260,18 @@ class NixlBaseConnectorScheduler:
         """
         encoded_data: dict[tuple[int, int], bytes] = {}
         encoder = msgspec.msgpack.Encoder()
-        for (pp_rank, tp_rank), rank_metadata in metadata.items():
+        for (pp_rank, flat_idx), rank_metadata in metadata.items():
             if not isinstance(rank_metadata, NixlHandshakePayload):
                 raise ValueError(
                     "NixlConnectorScheduler expects NixlHandshakePayload for "
                     "handshake metadata."
                 )
-            encoded_data[(pp_rank, tp_rank)] = encoder.encode(rank_metadata)
+            encoded_data[(pp_rank, flat_idx)] = encoder.encode(rank_metadata)
             logger.debug(
-                "PP rank %d, TP rank %d: encoded NixlHandshakePayload size: %s bytes",
+                "PP rank %d, flat rank %d: encoded NixlHandshakePayload size: %s bytes",
                 pp_rank,
-                tp_rank,
-                str(len(encoded_data[(pp_rank, tp_rank)])),
+                flat_idx,
+                str(len(encoded_data[(pp_rank, flat_idx)])),
             )
 
         # Only start the listener when we have metadata to serve.
@@ -313,12 +317,12 @@ class NixlBaseConnectorScheduler:
                     if stop_event.is_set():
                         break
                     continue
-                # Decode (GET_META_MSG, pp_rank, tp_rank).
-                msg, target_pp_rank, target_tp_rank = msgspec.msgpack.decode(msg)
+                # Decode (GET_META_MSG, pp_rank, flat_idx).
+                msg, target_pp_rank, target_flat_idx = msgspec.msgpack.decode(msg)
                 logger.debug(
-                    "Received message for pp rank %s, tp rank %s",
+                    "Received message for pp rank %s, flat rank %s",
                     target_pp_rank,
-                    target_tp_rank,
+                    target_flat_idx,
                 )
                 if msg != GET_META_MSG:
                     logger.warning("Connection listener got unexpected message %s", msg)
@@ -328,7 +332,7 @@ class NixlBaseConnectorScheduler:
                 # expiry deadline (`_reqs_need_send`).
                 ts = msgspec.msgpack.encode(time.perf_counter())
                 sock.send_multipart(
-                    (identity, b"", encoded_data[(target_pp_rank, target_tp_rank)], ts)
+                    (identity, b"", encoded_data[(target_pp_rank, target_flat_idx)], ts)
                 )
 
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:

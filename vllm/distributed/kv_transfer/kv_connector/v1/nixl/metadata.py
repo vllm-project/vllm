@@ -17,6 +17,7 @@ logger = init_logger(__name__)
 
 TransferHandle = int
 ReqId = str
+RemoteWorkerKey = tuple[int, int]
 
 GET_META_MSG = b"get_meta_msg"
 
@@ -41,8 +42,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   4: Add KV block lease renewal through heartbeats
 #   5: Add remote_blocks_expiry_time to kv_transfer_params + handshake
 #      clock-sync timestamp
+#   6: Add DCP/PCP rank metadata for context-parallel KV transfer
 #
-NIXL_CONNECTOR_VERSION: int = 5
+NIXL_CONNECTOR_VERSION: int = 6
 
 
 @dataclass
@@ -58,6 +60,13 @@ class NixlAgentMetadata:
     ssm_sizes: tuple[int, int]
     attn_backend_name: str
     physical_blocks_per_logical_kv_block: int
+    dcp_rank: int = 0
+    tp_size: int = 1
+    dcp_size: int = 1
+    pcp_size: int = 1
+    num_kv_heads: int = 0
+    tp_rank: int = 0
+    pcp_rank: int = 0
 
 
 @dataclass
@@ -150,6 +159,8 @@ class HeartbeatInfo:
     port: int
     tp_size: int
     pp_size: int = 1
+    dcp_size: int = 1
+    pcp_size: int = 1
 
 
 @dataclass
@@ -168,6 +179,8 @@ class ReqMeta:
     # To be used when logical block size does not match the kernel block size
     local_physical_block_ids: BlockIds
     tp_size: int
+    dcp_size: int = 1
+    pcp_size: int = 1
     remote: RemoteMeta | None = None
     # Remote block size, discovered during NIXL handshake (push mode).
     remote_block_size: int | None = None
@@ -199,10 +212,12 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         return ReqMeta(
             local_block_ids=local_block_ids,
             local_physical_block_ids=local_block_ids,
-            # P workers don't need to receive tp_size from proxy here.
+            # P workers don't need to receive these from proxy here.
             tp_size=kv_transfer_params.get("tp_size", 1),
             remote_block_size=kv_transfer_params.get("remote_block_size"),
             pp_size=kv_transfer_params.get("pp_size", 1),
+            dcp_size=kv_transfer_params.get("dcp_size", 1),
+            pcp_size=kv_transfer_params.get("pcp_size", 1),
         )
 
     def add_new_req_to_save(

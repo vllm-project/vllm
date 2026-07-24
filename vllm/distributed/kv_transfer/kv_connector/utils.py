@@ -395,6 +395,12 @@ class EngineTransferInfo:
     end_layer: int = 0
     """Exclusive global index after the last layer owned by this PP rank."""
 
+    remote_dcp_size: int = 1
+    """Remote decode context parallel size."""
+
+    remote_pcp_size: int = 1
+    """Remote prefill context parallel size."""
+
 
 # ---- Transfer topology ----
 
@@ -411,6 +417,9 @@ class TransferTopology:
     is_mamba: bool
     total_num_kv_heads: int
     attn_backends: list[type[AttentionBackend]]
+    dcp_rank: int = 0
+    dcp_size: int = 1
+    pcp_size: int = 1
     tensor_shape: torch.Size | None = None
 
     def __post_init__(self):
@@ -592,6 +601,58 @@ class TransferTopology:
         abs_ratio = -tp_ratio
         return [self.tp_rank * abs_ratio + i for i in range(abs_ratio)]
 
+    def get_target_remote_worker_keys(
+        self,
+        remote_tp_size: int,
+        remote_dcp_size: int,
+        remote_pcp_size: int,
+    ) -> list[tuple[int, int]]:
+        if remote_dcp_size != self.dcp_size:
+            raise ValueError(
+                "NIXL requires matching DCP sizes, but got "
+                f"local_dcp_size={self.dcp_size} and "
+                f"remote_dcp_size={remote_dcp_size}."
+            )
+        worker_keys = []
+        for remote_tp_rank in self.handshake_target_ranks(remote_tp_size):
+            remote_pcp_rank = (
+                self.dcp_rank - remote_tp_rank * remote_pcp_size
+            ) % self.dcp_size
+            if remote_pcp_rank < remote_pcp_size:
+                worker_keys.append((remote_tp_rank, self.dcp_rank))
+        return worker_keys
+
+    def calculate_local_consumer_count(
+        self,
+        remote_engine_id: EngineId,
+        remote_worker_key: tuple[int, int],
+        remote_pp_rank: int = 0,
+    ) -> int:
+        """Count local workers that will notify a remote worker."""
+        info = self._engines[(remote_engine_id, remote_pp_rank)]
+        remote_tp_rank, remote_dcp_rank = remote_worker_key
+        if info.remote_dcp_size != self.dcp_size:
+            raise ValueError(
+                "NIXL requires matching DCP sizes, but got "
+                f"local_dcp_size={self.dcp_size} and "
+                f"remote_dcp_size={info.remote_dcp_size}."
+            )
+        tp_ratio = self.tp_ratio(info.remote_tp_size)
+
+        def target_tp_ranks(local_tp_rank: int) -> range:
+            if tp_ratio > 0:
+                remote_tp_rank = local_tp_rank // tp_ratio
+                return range(remote_tp_rank, remote_tp_rank + 1)
+            first = local_tp_rank * -tp_ratio
+            return range(first, first - tp_ratio)
+
+        return sum(
+            remote_tp_rank in target_tp_ranks(local_tp_rank)
+            and (remote_dcp_rank - local_tp_rank * self.pcp_size) % self.dcp_size
+            < self.pcp_size
+            for local_tp_rank in range(self.tp_size)
+        )
+
     def describe(self, remote_engine_id: EngineId, remote_pp_rank: int = 0) -> str:
         """One-line summary of transfer config for logging."""
         info = self._engines[(remote_engine_id, remote_pp_rank)]
@@ -602,6 +663,9 @@ class TransferTopology:
             f"local_tp={self.tp_size}, "
             f"remote_tp={info.remote_tp_size}, "
             f"remote_pp={remote_pp_rank}, "
+            f"local_dcp={self.dcp_size}, "
+            f"remote_dcp={info.remote_dcp_size}, "
+            f"remote_pcp={info.remote_pcp_size}, "
             f"local_rank={self.tp_rank}, "
             f"remote_block_len={info.remote_block_len})"
         )

@@ -27,6 +27,8 @@ def _make_topology(
     tp_rank: int = 1,
     tp_size: int = 4,
     total_num_kv_heads: int = 8,
+    dcp_rank: int = 0,
+    dcp_size: int = 1,
 ) -> TransferTopology:
     return TransferTopology(
         tp_rank=tp_rank,
@@ -37,6 +39,8 @@ def _make_topology(
         is_mamba=False,
         total_num_kv_heads=total_num_kv_heads,
         attn_backends=[_FakeAttentionBackend],
+        dcp_rank=dcp_rank,
+        dcp_size=dcp_size,
     )
 
 
@@ -144,3 +148,46 @@ def test_engine_info_fields_have_backward_compatible_defaults() -> None:
     assert registered.remote_pp_rank == 0
     assert registered.start_layer == 0
     assert registered.end_layer == 0
+
+
+@pytest.mark.parametrize(
+    ("local_tp_size", "local_tp_rank", "remote_tp_size", "remote_pcp_size"),
+    [
+        (2, 0, 1, 2),
+        (2, 1, 1, 2),
+        (4, 0, 2, 2),
+        (4, 1, 2, 2),
+        (4, 2, 2, 2),
+        (4, 3, 2, 2),
+    ],
+)
+def test_target_remote_worker_preserves_dcp_rank(
+    local_tp_size: int,
+    local_tp_rank: int,
+    remote_tp_size: int,
+    remote_pcp_size: int,
+) -> None:
+    topology = _make_topology(
+        tp_rank=local_tp_rank,
+        tp_size=local_tp_size,
+        total_num_kv_heads=1,
+        dcp_rank=local_tp_rank,
+        dcp_size=local_tp_size,
+    )
+
+    assert topology.get_target_remote_worker_keys(
+        remote_tp_size=remote_tp_size,
+        remote_dcp_size=local_tp_size,
+        remote_pcp_size=remote_pcp_size,
+    ) == [(local_tp_rank * remote_tp_size // local_tp_size, local_tp_rank)]
+
+
+def test_target_remote_worker_requires_matching_dcp_size() -> None:
+    topology = _make_topology(tp_rank=0, tp_size=2, dcp_size=2)
+
+    with pytest.raises(ValueError, match="matching DCP sizes"):
+        topology.get_target_remote_worker_keys(
+            remote_tp_size=1,
+            remote_dcp_size=1,
+            remote_pcp_size=1,
+        )

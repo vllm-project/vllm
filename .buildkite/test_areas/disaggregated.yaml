@@ -28,6 +28,25 @@ steps:
         - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
         - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
+- label: Prefill PCP NixlConnector PD accuracy (4 GPUs)
+  key: prefill-pcp-nixlconnector-pd-accuracy-4-gpus
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 4
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+    - tests/v1/kv_connector/nixl_integration/
+  env:
+    GPU_MEMORY_UTILIZATION: "0.8"
+    PREFILLER_PCP_SIZE: "2"
+    PREFILLER_TP_SIZE: "1"
+    DECODER_TP_SIZE: "1"
+    MODEL_NAMES: "deepseek-ai/DeepSeek-V2-Lite-Chat"
+    VLLM_SERVE_EXTRA_ARGS: "--max-model-len,4096,--max-num-seqs,128,--max-num-batched-tokens,32768,--trust-remote-code,--enable-expert-parallel"
+  commands:
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
+
 - label: Distributed FlashInfer NixlConnector PD accuracy (4 GPUs)
   key: distributed-flashinfer-nixlconnector-pd-accuracy-4-gpus
   timeout_in_minutes: 55

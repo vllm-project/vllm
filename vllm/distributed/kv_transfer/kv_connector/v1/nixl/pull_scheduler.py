@@ -158,7 +158,6 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                     local_block_ids = self.get_sw_clipped_blocks(
                         unhashed_local_block_ids
                     )
-
                     # Get unhashed blocks to pull from remote. Mind that a full prefix
                     # cache hit is indicated with an empty list.
                     self._reqs_need_recv[request.request_id] = (
@@ -275,6 +274,8 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             remote_host=self.side_channel_host,
             remote_port=self.side_channel_port,
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
+            dcp_size=self.vllm_config.parallel_config.decode_context_parallel_size,
+            pcp_size=self.vllm_config.parallel_config.prefill_context_parallel_size,
             remote_num_tokens=remote_num_tokens,
             remote_blocks_expiry_time=blocks_expiry_time,
         )
