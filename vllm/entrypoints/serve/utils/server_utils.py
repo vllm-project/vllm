@@ -9,6 +9,7 @@ from argparse import Namespace
 from collections.abc import Awaitable
 from contextlib import asynccontextmanager
 from http import HTTPStatus
+from typing import ClassVar
 
 import pydantic
 import regex as re
@@ -91,6 +92,108 @@ class AuthenticationMiddleware:
             response = JSONResponse(content={"error": "Unauthorized"}, status_code=401)
             return response(scope, receive, send)
         return self.app(scope, receive, send)
+
+
+class UnicodeFilterMiddleware:
+    """
+    Pure ASGI middleware that sanitizes incoming request payloads by
+    stripping characters in the Unicode "Tags" block (U+E0020 to U+E007F)
+    from request bodies sent to LLM completion endpoints.
+
+    These characters are invisible to humans but are tokenized by language
+    models, which can lead to unpredictable responses. The middleware is
+    intended to clean up requests from clients that emit unwanted Unicode
+    content. Normal Unicode, including emojis, is left untouched. Only
+    POST requests whose path matches :attr:`ROUTES_TO_FILTER` are
+    inspected; all other traffic passes through unchanged.
+
+    Filtering is performed directly on UTF-8 bytes: every codepoint in
+    the Tags block encodes to a 4-byte sequence with one of two 3-byte
+    prefixes (``F3 A0 80`` or ``F3 A0 81``), so a single bytes-regex
+    covers the entire block without a decode/encode round-trip, and the
+    common (clean) case is ruled out by two ``in`` checks that skip the
+    regex when neither prefix is present.
+    """
+
+    ROUTES_TO_FILTER: ClassVar[frozenset[str]] = frozenset(
+        {"/v1/chat/completions", "/v1/completions"}
+    )
+
+    # UTF-8 encodings of U+E0020..U+E007F:
+    #   U+E0020..U+E003F -> F3 A0 80 [A0-BF]
+    #   U+E0040..U+E007F -> F3 A0 81 [80-BF]
+    TAGS_BLOCK_PATTERN: ClassVar[re.Pattern[bytes]] = re.compile(
+        b"\xf3\xa0(?:\x80[\xa0-\xbf]|\x81[\x80-\xbf])"
+    )
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or scope.get("method") != "POST":
+            await self.app(scope, receive, send)
+            return
+
+        root_path = scope.get("root_path", "")
+        path = scope["path"].removeprefix(root_path)
+        if path not in self.ROUTES_TO_FILTER:
+            await self.app(scope, receive, send)
+            return
+
+        # Buffer the entire request body so we can rewrite it before
+        # forwarding to downstream handlers.
+        body = bytearray()
+        disconnected = False
+        more_body = True
+        while more_body:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                disconnected = True
+                break
+            body.extend(message.get("body", b""))
+            more_body = message.get("more_body", False)
+
+        if disconnected:
+
+            async def disconnect_receive() -> Message:
+                return {"type": "http.disconnect"}
+
+            await self.app(scope, disconnect_receive, send)
+            return
+
+        body_bytes = bytes(body)
+        if b"\xf3\xa0\x80" in body_bytes or b"\xf3\xa0\x81" in body_bytes:
+            filtered = self.TAGS_BLOCK_PATTERN.sub(b"", body_bytes)
+            if filtered != body_bytes:
+                logger.debug(
+                    "UnicodeFilterMiddleware stripped tag-block characters from %s",
+                    path,
+                )
+                body_bytes = filtered
+
+        # Keep Content-Length consistent with the (possibly rewritten) body.
+        new_headers = [
+            (k, v)
+            for k, v in scope.get("headers", [])
+            if k.lower() != b"content-length"
+        ]
+        new_headers.append((b"content-length", str(len(body_bytes)).encode()))
+        scope = {**scope, "headers": new_headers}
+
+        body_sent = False
+
+        async def replay_receive() -> Message:
+            nonlocal body_sent
+            if body_sent:
+                return {"type": "http.disconnect"}
+            body_sent = True
+            return {
+                "type": "http.request",
+                "body": body_bytes,
+                "more_body": False,
+            }
+
+        await self.app(scope, replay_receive, send)
 
 
 class XRequestIdMiddleware:
