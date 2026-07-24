@@ -213,7 +213,7 @@ PYNVVIDEOCODEC_VIDEO_BACKEND: Literal["pynvvideocodec"] = "pynvvideocodec"
 # Per-decoder upper bound reserved for persistent PyNvVideoCodec surfaces.
 PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES = 128 * MiB_bytes
 PYNVVIDEOCODEC_DECODER_CACHE_SIZE = 2
-PYNVVIDEOCODEC_DEFAULT_HW_DECODERS = 1
+PYNVVIDEOCODEC_DEFAULT_HW_DECODERS = 2
 # Per-API-server CUDA context and driver allocation, measured with
 # PyNvVideoCodec 2.0.4 on H100.
 PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES = int(1.8 * 1024 * MiB_bytes)
@@ -1053,7 +1053,7 @@ class VideoBackend(
                 https://meta-pytorch.org/torchcodec/stable/generated_examples/decoding/approximate_mode.html
                 for details.
             hw_decoders: Maximum number of concurrent PyNvVideoCodec decoder
-                slots. Must be a positive integer.
+                slots. Defaults to 2 and must be a positive integer.
 
         Returns:
             Tuple of ``(frames_array, metadata_dict)``.

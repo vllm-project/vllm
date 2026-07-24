@@ -18,7 +18,6 @@ from vllm.multimodal.gpu_ipc_memory import (
 from vllm.multimodal.video import (
     PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES,
     PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES,
-    PYNVVIDEOCODEC_DEFAULT_HW_DECODERS,
     PYNVVIDEOCODEC_VIDEO_BACKEND,
 )
 from vllm.utils.mem_constants import GiB_bytes
@@ -44,7 +43,7 @@ def _mm_config(
 
 def _pynvvideocodec_decoder_budget(
     api_process_count: int = 1,
-    hw_decoders: int = PYNVVIDEOCODEC_DEFAULT_HW_DECODERS,
+    hw_decoders: int = 2,
 ) -> int:
     return api_process_count * (
         PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES * hw_decoders

@@ -859,14 +859,16 @@ vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
 **PyNvVideoCodec-specific parameters:**
 
 - `hw_decoders`: Maximum number of concurrent hardware decoder slots retained
-  by each API server process. It must be a positive integer and defaults to `1`.
+  by each API server process. It must be a positive integer and defaults to `2`,
+  which is the recommended starting point for concurrent video workloads.
   Because vLLM reserves GPU memory for these slots at startup, this value cannot
-  be overridden per request.
+  be overridden per request. Benchmark before increasing it because each
+  additional slot increases the GPU memory reservation.
 
 ```bash
-# Example: PyNvVideoCodec with 4 concurrent hardware decoders
+# Example: explicitly use the recommended 2 hardware decoders
 vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
-  --media-io-kwargs '{"video": {"backend": "pynvvideocodec", "hw_decoders": 4}}'
+  --media-io-kwargs '{"video": {"backend": "pynvvideocodec", "hw_decoders": 2}}'
 ```
 
 #### Video Frame Recovery
