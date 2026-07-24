@@ -267,24 +267,37 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
 
     @abstractmethod
     def start_weight_update(self) -> None:
-        """
-        Prepare the engine for a new weight update.
-
-        Engines that receive weights in checkpoint format initialize layerwise reloading
-        here, else this is typically a no-op.
-        See: https://docs.vllm.ai/en/latest/training/layerwise/ for more details.
-        """
+        """Prepare the engine for a new weight update."""
         raise NotImplementedError
 
     @abstractmethod
     def finish_weight_update(self) -> None:
-        """
-        Finalize the current weight update.
-
-        Checkpoint-format engines finalize layerwise reloading here; engines
-        that apply weights in place leave this as a no-op.
-        """
+        """Finalize the current weight update."""
         raise NotImplementedError
+
+    def _start_checkpoint_weight_update(self) -> None:
+        from vllm.model_executor.model_loader.load_session import WeightLoadSession
+
+        WeightLoadSession(self.model).prepare()
+
+    def _finish_checkpoint_weight_update(self) -> None:
+        from vllm.model_executor.model_loader.load_session import (
+            get_active_weight_load_session,
+        )
+
+        session = get_active_weight_load_session(self.model)
+        if session is None:
+            raise RuntimeError("start_weight_update must be called before finish")
+        session.finish(self.model_config)
+
+    def _abort_checkpoint_weight_update(self) -> None:
+        from vllm.model_executor.model_loader.load_session import (
+            get_active_weight_load_session,
+        )
+
+        session = get_active_weight_load_session(self.model)
+        if session is not None:
+            session.abort()
 
     def update_weights(self, update_info: dict[str, Any]) -> None:
         """
@@ -293,11 +306,15 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         Args:
             update_info: Dictionary containing backend-specific update info
         """
-        typed_update_info = self.parse_update_info(update_info)
-        self.receive_weights(typed_update_info)
-        # NCCL broadcast / IPC paths may be asynchronous. Synchronize here so the
-        # next step uses the new weights.
-        torch.accelerator.synchronize()
+        try:
+            typed_update_info = self.parse_update_info(update_info)
+            self.receive_weights(typed_update_info)
+            # NCCL broadcast / IPC paths may be asynchronous. Synchronize here so the
+            # next step uses the new weights.
+            torch.accelerator.synchronize()
+        except BaseException:
+            self._abort_checkpoint_weight_update()
+            raise
 
     @abstractmethod
     def receive_weights(self, update_info: TUpdateInfo) -> None:

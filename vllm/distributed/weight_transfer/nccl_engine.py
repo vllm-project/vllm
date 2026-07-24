@@ -135,20 +135,10 @@ class NCCLWeightTransferEngine(
         )
 
     def start_weight_update(self) -> None:
-        """Initialize layerwise reloading for the incoming checkpoint weights."""
-        from vllm.model_executor.model_loader.reload import (
-            initialize_layerwise_reload,
-        )
-
-        initialize_layerwise_reload(self.model)
+        self._start_checkpoint_weight_update()
 
     def finish_weight_update(self) -> None:
-        """Finalize layerwise reloading after all weights have been received."""
-        from vllm.model_executor.model_loader.reload import (
-            finalize_layerwise_reload,
-        )
-
-        finalize_layerwise_reload(self.model, self.model_config)
+        self._finish_checkpoint_weight_update()
 
     def receive_weights(self, update_info: NCCLWeightTransferUpdateInfo) -> None:
         """

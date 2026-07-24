@@ -5,7 +5,7 @@
 import pickle
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import pybase64 as base64
 import ray
@@ -14,15 +14,11 @@ import torch
 from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 
 from vllm import envs
-from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
     WeightTransferInitInfo,
     WeightTransferUpdateInfo,
 )
-
-if TYPE_CHECKING:
-    from vllm.config import VllmConfig
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     packed_ipc_consumer,
@@ -147,24 +143,6 @@ class IPCWeightTransferEngine(
     init_info_cls = IPCWeightTransferInitInfo
     update_info_cls = IPCWeightTransferUpdateInfo
 
-    def __init__(
-        self,
-        config: WeightTransferConfig,
-        vllm_config: "VllmConfig",
-        device: torch.device,
-        model: torch.nn.Module,
-    ) -> None:
-        """
-        Initialize the IPC weight transfer engine.
-
-        Args:
-            config: The configuration for the weight transfer engine
-            vllm_config: The full vLLM config
-            device: The device this worker's model lives on
-            model: The local model instance which will receive the weights
-        """
-        super().__init__(config, vllm_config, device, model)
-
     def parse_update_info(
         self, update_dict: dict[str, Any]
     ) -> IPCWeightTransferUpdateInfo:
@@ -207,20 +185,10 @@ class IPCWeightTransferEngine(
         pass
 
     def start_weight_update(self) -> None:
-        """Initialize layerwise reloading for the incoming checkpoint weights."""
-        from vllm.model_executor.model_loader.reload import (
-            initialize_layerwise_reload,
-        )
-
-        initialize_layerwise_reload(self.model)
+        self._start_checkpoint_weight_update()
 
     def finish_weight_update(self) -> None:
-        """Finalize layerwise reloading after all weights have been received."""
-        from vllm.model_executor.model_loader.reload import (
-            finalize_layerwise_reload,
-        )
-
-        finalize_layerwise_reload(self.model, self.model_config)
+        self._finish_checkpoint_weight_update()
 
     def receive_weights(self, update_info: IPCWeightTransferUpdateInfo) -> None:
         """
