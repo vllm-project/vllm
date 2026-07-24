@@ -1067,17 +1067,8 @@ class AsyncLLM(EngineClient):
         Args:
             request: Weight transfer initialization request with backend-specific info
         """
-        from vllm.distributed.weight_transfer.base import (
-            WeightTransferInitRequest,
-        )
-
-        if isinstance(request, WeightTransferInitRequest):
-            init_info_dict = request.init_info
-        else:
-            raise TypeError(f"Expected WeightTransferInitRequest, got {type(request)}")
-
         await self.collective_rpc(
-            "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
+            "init_weight_transfer_engine", kwargs={"init_info": request.init_info}
         )
 
     async def start_weight_update(self) -> None:
@@ -1095,16 +1086,8 @@ class AsyncLLM(EngineClient):
         Args:
             request: Weight update request with backend-specific update info
         """
-
-        if isinstance(request, WeightTransferUpdateRequest):
-            update_info_dict = request.update_info
-        else:
-            raise TypeError(
-                f"Expected WeightTransferUpdateRequest, got {type(request)}"
-            )
-
         await self.collective_rpc(
-            "update_weights", kwargs={"update_info": update_info_dict}
+            "update_weights", kwargs={"update_info": request.update_info}
         )
 
     async def finish_weight_update(self) -> None:

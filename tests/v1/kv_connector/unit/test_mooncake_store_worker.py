@@ -655,6 +655,68 @@ def test_store_sending_thread_delta_saves_only_new_masked_chunks():
     assert masked_hashes == [b"a2".hex()]
 
 
+def test_store_sending_thread_prepares_missing_chunks_once_per_group():
+    store = MagicMock()
+    store.batch_is_exist.return_value = [0, 1, 0, 1, 0, 0]
+    store.batch_put_from_multi_buffers.return_value = [256, 256, 512, 512]
+    coord = SimpleNamespace(
+        lcm_block_size=16,
+        store_mask=lambda token_len, start_token, num_prompt_tokens=None: (
+            None,
+            None,
+        ),
+    )
+
+    db0 = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
+        block_size=16,
+    )
+    db0.set_kv_caches_base_addr([0x1000])
+    db0.set_block_len([256])
+    db0.prepare_values = MagicMock(wraps=db0.prepare_values)
+    db0.prepare_value = MagicMock(side_effect=AssertionError("scalar path called"))
+
+    db1 = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
+        block_size=16,
+    )
+    db1.set_kv_caches_base_addr([0x2000])
+    db1.set_block_len([512])
+    db1.prepare_values = MagicMock(wraps=db1.prepare_values)
+    db1.prepare_value = MagicMock(side_effect=AssertionError("scalar path called"))
+
+    thread = _make_store_sending_thread(
+        store,
+        coord=coord,
+        token_databases=[db0, db1],
+    )
+    thread.add_stored_request("req-a")
+    thread._handle_request(
+        ReqMeta(
+            req_id="req-a",
+            token_len_chunk=48,
+            block_ids=([0, 1, 2], [2, 1, 0]),
+            block_hashes=[b"a0", b"a1", b"a2"],
+            can_save=True,
+        )
+    )
+
+    db0.prepare_value.assert_not_called()
+    db1.prepare_value.assert_not_called()
+    db0.prepare_values.assert_called_once_with([(0, 16), (32, 48)], [0, 1, 2])
+    db1.prepare_values.assert_called_once_with([(16, 32), (32, 48)], [2, 1, 0])
+
+    keys, addrs, sizes, _ = store.batch_put_from_multi_buffers.call_args.args
+    assert [key.rsplit("@", 1)[-1] for key in keys] == [
+        "6130",
+        "6132",
+        "6131",
+        "6132",
+    ]
+    assert addrs == [[0x1000], [0x1200], [0x2200], [0x2000]]
+    assert sizes == [[256], [256], [512], [512]]
+
+
 def test_store_sending_thread_only_skips_on_no_available_handle():
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
@@ -1675,6 +1737,61 @@ def test_lookup_partial_prefix_returns_first_hit_length():
     assert worker.lookup(48, [b"a0", b"a1", b"a2"]) == 32
 
 
+def test_lookup_full_hit_reuses_existing_boundary():
+    """A full hit is re-derived below the request end without another RPC."""
+    worker = _make_bare_worker(block_size=16)
+    worker.store.batch_is_exist.return_value = [1, 1]
+
+    assert worker.lookup(32, [b"h0", b"h1"]) == 16
+    assert worker.store.batch_is_exist.call_count == 1
+
+
+def test_lookup_full_hit_with_eagle_pops_once_not_twice():
+    """Eagle already leaves the last block for the drafter, so a
+    full-prompt re-derivation must never fire for eagle-governed hits:
+    firing would anchor the search one block lower and pop a second
+    block, regressing the hit by an extra producer boundary."""
+    worker = _make_bare_worker(block_size=16)
+    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        worker._kv_cache_groups,
+        scheduler_block_size=16,
+        hash_block_size=16,
+        use_eagle=True,
+    )
+    worker.store.batch_is_exist.return_value = [1, 1, 1, 1]
+
+    # 64-token exact-multiple prompt, all 4 blocks stored: one eagle pop
+    # gives 48; a spurious re-derivation (anchored at 48) would pop again
+    # and return 32.
+    assert worker.lookup(64, [b"h0", b"h1", b"h2", b"h3"]) == 48
+    assert worker.store.batch_is_exist.call_count == 1
+
+
+def test_lookup_full_hit_swa_degrades_when_no_stored_boundary_is_usable():
+    """The motivating livelock: the producer of a 64-token prompt stored
+    only its SWA tail window (blocks 2-3). The old arithmetic clamp turned
+    the full hit into 48, whose SWA window needs the never-written block 1,
+    so every load failed and the recompute re-entered the same lookup. The
+    re-derivation must report that no stored boundary below the request end
+    is usable."""
+    from vllm.v1.kv_cache_interface import KVCacheGroupSpec, SlidingWindowSpec
+
+    worker = _make_bare_worker(block_size=16)
+    swa = SlidingWindowSpec(
+        block_size=16, num_kv_heads=8, head_size=64, dtype=None, sliding_window=32
+    )
+    worker._kv_cache_groups = [KVCacheGroupSpec(["layer0"], swa)]
+    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        worker._kv_cache_groups,
+        scheduler_block_size=worker.hash_block_size,
+        hash_block_size=worker.hash_block_size,
+    )
+    worker.store.batch_is_exist.return_value = [0, 0, 1, 1]
+
+    assert worker.lookup(64, [b"h0", b"h1", b"h2", b"h3"]) == 0
+    assert worker.store.batch_is_exist.call_count == 1
+
+
 def test_lookup_swa_single_group_returns_full_when_tail_window_present():
     """Single-SWA, sliding_window=32 (= 2 blocks): producer stored only the
     tail. Coordinator-driven lookup returns full prefix even though the
@@ -1692,7 +1809,7 @@ def test_lookup_swa_single_group_returns_full_when_tail_window_present():
         hash_block_size=worker.hash_block_size,
     )
     worker.store.batch_is_exist.return_value = [0, 0, 1, 1]
-    assert worker.lookup(64, [b"h0", b"h1", b"h2", b"h3"]) == 64
+    assert worker.lookup(65, [b"h0", b"h1", b"h2", b"h3"]) == 64
 
 
 def test_lookup_checks_all_potential_swa_hit_boundaries():
@@ -2157,7 +2274,7 @@ def test_lookup_records_mooncake_metrics():
     worker = _make_bare_worker()
     worker.store.batch_is_exist.return_value = [1, 1]
 
-    result = worker.lookup(32, [b"a0", b"a1"])
+    result = worker.lookup(33, [b"a0", b"a1"])
     stats = worker.get_kv_connector_stats()
 
     assert result == 32
