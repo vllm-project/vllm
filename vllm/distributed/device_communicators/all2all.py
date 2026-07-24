@@ -860,6 +860,20 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
                 self.mapping = None
                 self.initialized = False
 
+    def checkpoint_prepare(self) -> None:
+        if self.initialized:
+            assert self.moe_alltoall is not None
+            self.moe_alltoall.checkpoint_prepare()
+
+    def checkpoint_restore(self) -> None:
+        if self.initialized:
+            assert self.moe_alltoall is not None
+            from vllm.distributed.device_communicators.mnnvl_compat import (
+                CustomCommunicator,
+            )
+
+            self.moe_alltoall.checkpoint_restore(CustomCommunicator(self.cpu_group))
+
 
 class MoriAll2AllManager(All2AllManagerBase):
     def __init__(self, cpu_group, all2all_backend: str):

@@ -104,7 +104,7 @@ def _can_use_flashinfer(hidden_states: torch.Tensor, tp_size: int) -> tuple[bool
         max_token_num=max_token_num,
         hidden_dim=hidden_size,
         dtype=hidden_states.dtype,
-        group=get_tp_group().device_group,
+        group=get_tp_group().cpu_group,
     )
     if workspace is None:
         return False, 0

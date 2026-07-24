@@ -7,7 +7,10 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
+from vllm.logger import init_logger
 from vllm.utils import is_moe_layer
+
+logger = init_logger(__name__)
 
 
 class Cache:
@@ -117,6 +120,18 @@ class All2AllManagerBase:
     def max_sms_used(self) -> int | None:
         return None  # None means it could use the whole GPU
 
+    def checkpoint_prepare(self) -> None:
+        logger.warning_once(
+            "%s.checkpoint_prepare is not implemented; skipping.",
+            type(self).__name__,
+        )
+
+    def checkpoint_restore(self) -> None:
+        logger.warning_once(
+            "%s.checkpoint_restore is not implemented; skipping.",
+            type(self).__name__,
+        )
+
     def combine(self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False):
         raise NotImplementedError
 
@@ -195,6 +210,12 @@ class DeviceCommunicatorBase:
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         dist.all_reduce(input_, group=self.device_group)
         return input_
+
+    def checkpoint_prepare(self) -> None:
+        """Prepare reclaimable communicator state for checkpoint (default: no-op)."""
+
+    def checkpoint_restore(self) -> None:
+        """Restore communicator state after checkpoint (default: no-op)."""
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         if dim < 0:
