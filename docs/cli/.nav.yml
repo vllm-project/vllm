@@ -1,12 +1,8 @@
 nav:
-  - README.md
-  - serve.md
-  - chat.md
-  - complete.md
-  - run-batch.md
+  - "*.md"
   - bench:
     - bench/*.md
     - sweep:
-      - bench/sweep/**/*.md
+      - bench/sweep/*.md
   - launch:
-    - launch/**/*.md
+    - launch/*.md
