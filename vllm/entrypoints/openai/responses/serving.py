@@ -8,7 +8,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Se
 from contextlib import AsyncExitStack
 from copy import copy
 from http import HTTPStatus
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from fastapi import Request
 from openai.types.responses import (
@@ -22,6 +22,7 @@ from openai.types.responses import (
 from openai.types.responses.response_output_text import Logprob, LogprobTopLogprob
 from openai.types.responses.tool import Mcp, Tool
 from openai_harmony import Message as OpenAIHarmonyMessage
+from openai_harmony import Role
 from pydantic import TypeAdapter
 
 from vllm import envs
@@ -1148,39 +1149,44 @@ class OpenAIServingResponses(GenerateBaseServing):
     ) -> list[OpenAIHarmonyMessage]:
         messages: list[OpenAIHarmonyMessage] = []
         request_input = request.input
+        instructions = request.instructions
+        if instructions is None and isinstance(request_input, list):
+            instructions, request_input = extract_instructions_from_messages(
+                request_input
+            )
+
+        tool_types = extract_tool_types(request.tools)
+        with_custom_tools = has_custom_tools(tool_types)
+        tool_descriptions = self._get_harmony_builtin_tool_descriptions(
+            request, tool_types
+        )
+        tools = request.tools if with_custom_tools else None
+        messages.extend(
+            build_harmony_preamble(
+                instructions=instructions,
+                tools=tools,
+                reasoning_effort=(
+                    request.reasoning.effort if request.reasoning else None
+                ),
+                with_custom_tools=with_custom_tools,
+                **tool_descriptions,
+            )
+        )
+
         if prev_response is None:
             # New conversation.
-            tool_types = extract_tool_types(request.tools)
-            with_custom_tools = has_custom_tools(tool_types)
-            instructions = request.instructions
-            if instructions is None and isinstance(request_input, list):
-                instructions, request_input = extract_instructions_from_messages(
-                    request_input
-                )
-            tool_descriptions = self._get_harmony_builtin_tool_descriptions(
-                request, tool_types
-            )
-            tools = request.tools if with_custom_tools else None
-            messages.extend(
-                build_harmony_preamble(
-                    instructions=instructions,
-                    tools=tools,
-                    reasoning_effort=(
-                        request.reasoning.effort if request.reasoning else None
-                    ),
-                    with_custom_tools=with_custom_tools,
-                    **tool_descriptions,
-                )
-            )
             messages += construct_harmony_previous_input_messages(request)
 
         else:
             # Continue the previous conversation.
-            # FIXME(woosuk): Currently, request params like reasoning and
-            # instructions are ignored.
-            prev_msgs = self.msg_store[prev_response.id]
-
-            messages.extend(prev_msgs)
+            prev_msgs = cast(
+                list[OpenAIHarmonyMessage], self.msg_store[prev_response.id]
+            )
+            messages.extend(
+                msg
+                for msg in prev_msgs
+                if msg.author.role not in (Role.SYSTEM, Role.DEVELOPER)
+            )
         # Append the new input.
         # Responses API supports simple text inputs without chat format.
         if isinstance(request_input, str):
