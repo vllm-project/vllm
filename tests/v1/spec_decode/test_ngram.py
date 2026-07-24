@@ -1,8 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
+
 import numpy as np
+import pytest
+import torch
 
 from vllm.config import (
+    CompilationConfig,
+    CompilationMode,
     ModelConfig,
     SpeculativeConfig,
     VllmConfig,
@@ -212,3 +218,48 @@ def test_ngram_proposer():
     assert len(result[0]) == 2
     assert np.array_equal(result[0], np.array([middle_integer + 2, middle_integer + 3]))
     assert np.array_equal(result[1], np.array([]))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_ngram_gpu_proposer_respects_max_model_len():
+    from vllm.v1.spec_decode.ngram_proposer_gpu import NgramGPUKernel
+
+    device = torch.device("cuda")
+    k = 2
+    max_model_len = 6
+    vllm_config = SimpleNamespace(
+        compilation_config=CompilationConfig(mode=CompilationMode.NONE),
+        speculative_config=SimpleNamespace(
+            prompt_lookup_min=2,
+            prompt_lookup_max=2,
+            num_speculative_tokens=k,
+        ),
+        model_config=SimpleNamespace(max_model_len=max_model_len),
+        scheduler_config=SimpleNamespace(max_num_seqs=3),
+    )
+    kernel = NgramGPUKernel(vllm_config=vllm_config, device=device)
+
+    token_ids_gpu = torch.tensor(
+        [
+            [1, 2, 3, 1, 2, 3],
+            [1, 2, 3, 1, 2, 0],
+            [1, 2, 1, 2, 0, 0],
+        ],
+        dtype=torch.int32,
+        device=device,
+    )
+    num_tokens_no_spec = torch.tensor([6, 5, 4], dtype=torch.int32, device=device)
+    combined_mask = torch.ones(3, dtype=torch.bool, device=device)
+
+    draft_tokens, num_valid_draft_tokens = kernel(
+        num_tokens_no_spec,
+        token_ids_gpu,
+        combined_mask,
+    )
+
+    assert draft_tokens.cpu().tolist() == [
+        [-1, -1],
+        [3, -1],
+        [1, 2],
+    ]
+    assert num_valid_draft_tokens.cpu().tolist() == [0, 1, 2]
