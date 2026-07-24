@@ -122,7 +122,7 @@ def use_aiter_triton_gemm(n, m, k, dtype):
 def rocm_unquantized_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
-    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx950
+    from vllm.platforms.rocm import on_gfx1250, on_gfx1x, on_gfx9, on_gfx950
 
     n = x.numel() // x.size(-1)
     m = weight.shape[0]
@@ -164,7 +164,13 @@ def rocm_unquantized_gemm_impl(
     if use_skinny_reduce_counting:
         return ops.wvSplitKrc(x, weight, cu_count, bias)
 
-    if use_aiter_triton_gemm(n, m, k, x.dtype):
+    # gfx1250's aiter gemm_a16w16 uses the gluon backend, which requires
+    # K % 256 == 0 (it walks K with fixed-size descriptors and won't pad a
+    # partial last tile). Some whitelisted shapes have K=2880 (e.g. gpt-oss-120b
+    # hidden), so skip aiter there and fall back to the torch GEMM path below.
+    if use_aiter_triton_gemm(n, m, k, x.dtype) and not (
+        on_gfx1250() and k % 256 != 0
+    ):
         from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
 
         return gemm_a16w16(x, weight, bias)
@@ -172,6 +178,8 @@ def rocm_unquantized_gemm_impl(
     use_skinny = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and (on_gfx9() or on_gfx1x())
+        # build (gfx9/gfx11 ISA); fall back to torch GEMM there.
+        # TODO GFX1250: Include once skinny GEMM is supported on gfx1250
         and x.dtype in [torch.float16, torch.bfloat16]
         and k % 8 == 0
     )

@@ -52,7 +52,7 @@ IS_AITER_FOUND = is_aiter_found()
 def is_aiter_found_and_supported() -> bool:
     """Check if AITER library is available and platform supports it.
 
-    Checks: platform (ROCm), device arch (gfx9), and library existence.
+    Checks: platform (ROCm), device arch is CDNA 3 or better, and library existence.
     Does NOT check environment variables - that's handled by rocm_aiter_ops.is_enabled().
 
     This function determines if aiter CAN be used, not if it SHOULD be used.
@@ -66,9 +66,9 @@ def is_aiter_found_and_supported() -> bool:
     VLLM_ROCM_USE_AITER=0, while preventing unwanted JIT warnings for auto-discovery.
     """
     if current_platform.is_rocm() and IS_AITER_FOUND:
-        from vllm.platforms.rocm import on_mi3xx
+        from vllm.platforms.rocm import get_cdna_version
 
-        return on_mi3xx()
+        return get_cdna_version() > 2
     return False
 
 
@@ -1698,16 +1698,21 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_fp4bmm_enabled(cls) -> bool:
-        from vllm.platforms.rocm import on_gfx950
+        from vllm.platforms.rocm import get_cdna_version
 
-        return cls._AITER_ENABLED and cls._FP4BMM_ENABLED and on_gfx950()
+        # TODO GFX1250: Enable for cdna 4+ when aiter supports batched_gemm_a16wfp4 on gfx1250
+        return cls._AITER_ENABLED and cls._FP4BMM_ENABLED and get_cdna_version() == 4
 
     @classmethod
     @if_aiter_supported
     def is_linear_hipbmm_enabled(cls) -> bool:
-        from vllm.platforms.rocm import on_mi3xx
+        from vllm.platforms.rocm import get_cdna_version
 
-        return cls.is_linear_enabled() and on_mi3xx() and cls._LINEAR_HIPBMM_ENABLED
+        return (
+            cls.is_linear_enabled()
+            and (get_cdna_version() > 2)
+            and cls._LINEAR_HIPBMM_ENABLED
+        )
 
     @classmethod
     @if_aiter_supported

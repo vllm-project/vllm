@@ -231,10 +231,26 @@ def _log_triton_jit_compile(fn_name: str, kwargs) -> None:
 
 
 def _setup_triton_jit_hook() -> None:
-    """Register a ``jit_post_compile_hook`` that warns on compilation."""
+    """Register a jit_post_compile_hook that warns on compilation."""
     if not HAS_TRITON:
         return
-    from triton import knobs  # type: ignore[import-untyped]
+    from triton import knobs
+    from triton.runtime import jit as _triton_jit
+
+    # kernels pass non-JSON-serializable constexprs
+    # make that serialization non-fatal
+    _orig = _triton_jit.serialize_specialization_data
+    if not getattr(_orig, "_vllm_guarded", False):
+
+        @functools.wraps(_orig)
+        def _guarded(*args, **kwargs):
+            try:
+                return _orig(*args, **kwargs)
+            except (TypeError, ValueError):
+                return None  # best-effort metadata; monitor ignores it
+
+        _guarded._vllm_guarded = True
+        _triton_jit.serialize_specialization_data = _guarded
 
     existing_hook = knobs.runtime.jit_post_compile_hook
 

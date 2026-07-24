@@ -758,13 +758,13 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
     ) -> bool:
         p = current_platform
         if p.is_rocm():
-            from vllm.platforms.rocm import on_gfx9
+            from vllm.platforms.rocm import get_cdna_version
 
-            is_rocm_on_gfx9 = on_gfx9()
+            _rocm_support_fp8 = get_cdna_version() > 2
         else:
-            is_rocm_on_gfx9 = False
+            _rocm_support_fp8 = False
 
-        device_supports_fp8 = is_rocm_on_gfx9 or (
+        device_supports_fp8 = _rocm_support_fp8 or (
             p.is_cuda() and p.has_device_capability((8, 9))
         )
 

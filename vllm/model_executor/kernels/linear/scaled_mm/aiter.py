@@ -370,9 +370,14 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         super().__init__(config)
         n, k = config.weight_shape
 
-        self.use_triton = (
-            not current_platform.is_fp8_fnuz()
-            and rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k)
+        _on_gfx1250 = False
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx1250
+
+            _on_gfx1250 = on_gfx1250()
+
+        self.use_triton = not current_platform.is_fp8_fnuz() and (
+            rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k) or _on_gfx1250
         )
 
     @classmethod

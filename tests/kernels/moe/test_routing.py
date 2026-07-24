@@ -19,13 +19,13 @@ from vllm.platforms import current_platform
 
 
 def _is_aiter_capable() -> bool:
-    """Check if the platform supports AITER (gfx942/gfx950)."""
+    """Check if the platform supports AITER (gfx942/gfx950/gfx1250)."""
     if not current_platform.is_rocm():
         return False
     try:
-        from vllm.platforms.rocm import _ON_MI3XX
+        from vllm.platforms.rocm import get_cdna_version
 
-        return _ON_MI3XX
+        return get_cdna_version() > 2
     except ImportError:
         return False
 

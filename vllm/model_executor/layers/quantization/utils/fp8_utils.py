@@ -909,10 +909,40 @@ def w8a8_triton_block_scaled_mm(
         Bs: The per-block quantization scale for `B`.
         block_size: The block size for per-block quantization. It should
         be 2-dim, e.g., [128, 128].
-        output_dtype: The dtype of the returned tensor.
+        output_dytpe: The dtype of the returned tensor.
     Returns:
         torch.Tensor: The result of matmul.
     """
+
+    from vllm.platforms.rocm import on_gfx1250
+
+    if on_gfx1250():
+        # Torch upcast reference: dequantize A,B to fp32 and matmul in fp32.
+        # Avoids the gfx1250 native-fp8 block GEMM NaN bug. Correct but slow.
+        _bn, _bk = block_size[0], block_size[1]
+        _As = (
+            _upcast_e8m0_to_fp32(As)
+            if As.dtype == torch.float8_e8m0fnu
+            else As.to(torch.float32)
+        )
+        _Bs = (
+            _upcast_e8m0_to_fp32(Bs)
+            if Bs.dtype == torch.float8_e8m0fnu
+            else Bs.to(torch.float32)
+        )
+        _K = A.shape[-1]
+        _N = B.shape[0]
+        _Af = A.to(torch.float32).reshape(-1, _K)
+        _Asf = (
+            _As.to(torch.float32)
+            .reshape(-1, _As.shape[-1])
+            .repeat_interleave(_bk, dim=1)[:, :_K]
+        )
+        _Bf = B.to(torch.float32)
+        _Bsf = _Bs.repeat_interleave(_bn, dim=0).repeat_interleave(_bk, dim=1)[:_N, :_K]
+        _out = (_Af * _Asf) @ (_Bf * _Bsf).t()
+        return _out.to(output_dtype).reshape(*A.shape[:-1], _N)
+
     assert len(block_size) == 2
     block_n, block_k = block_size[0], block_size[1]
 
