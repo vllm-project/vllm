@@ -246,6 +246,11 @@ def qwen3vl_vision_lora_files():
 
 
 @pytest.fixture(scope="session")
+def gemma4_vision_lora_files():
+    return snapshot_download(repo_id="EpochEcho/gemma4-e2b-it-lora-pokemon")
+
+
+@pytest.fixture(scope="session")
 def qwen3_meowing_lora_files():
     """Download Qwen3 Meow LoRA files once per test session."""
     return snapshot_download(repo_id="Jackmin108/Qwen3-0.6B-Meow-LoRA")

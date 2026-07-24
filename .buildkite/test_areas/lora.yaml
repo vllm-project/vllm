@@ -47,3 +47,4 @@ steps:
     - pytest -v -s -x lora/test_olmoe_tp.py
     - pytest -v -s -x lora/test_gptoss_tp.py
     - pytest -v -s -x lora/test_qwen35_densemodel_lora.py
+    - pytest -v -s -x lora/test_gemma4_tp.py
