@@ -147,7 +147,7 @@ at::Tensor causal_conv1d_fwd_cpu(
 at::Tensor causal_conv1d_update_cpu(
     const at::Tensor& x, const at::Tensor& conv_states,
     const at::Tensor& weight, const std::optional<at::Tensor>& bias,
-    bool silu_activation, const std::optional<at::Tensor>& cache_seqlens,
+    bool silu_activation, const std::optional<at::Tensor>& num_accepted_tokens,
     const std::optional<at::Tensor>& conv_state_indices, int64_t pad_slot_id,
     bool is_vnni);
 
@@ -502,7 +502,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "causal_conv1d_update_cpu(Tensor x, Tensor(a!) conv_states, Tensor "
       "weight, Tensor? bias, bool silu_activation,"
-      "Tensor? cache_seqlens, Tensor? conv_state_indices, int pad_slot_id, "
+      "Tensor? num_accepted_tokens, Tensor? conv_state_indices, int "
+      "pad_slot_id, "
       "bool is_vnni) -> Tensor");
   ops.impl("causal_conv1d_update_cpu", torch::kCPU, &causal_conv1d_update_cpu);
 #endif
