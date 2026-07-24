@@ -7,6 +7,7 @@ from abc import abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from functools import cached_property
+from typing import Any
 
 from openai.types.responses import ToolChoiceFunction
 from pydantic import TypeAdapter, ValidationError
@@ -368,6 +369,35 @@ class Parser:
         """
 
 
+def _get_response_format_schema(
+    request: ChatCompletionRequest | ResponsesRequest,
+) -> dict[str, Any] | bool | None:
+    """Read the schema off a request's response_format, chat or Responses shaped.
+
+    Returns the JSON schema dict, ``True`` for a bare json_object (any JSON is
+    valid), or ``None`` when the request has no schema-bearing response_format.
+    """
+    if isinstance(request, ResponsesRequest):
+        text_format = request.text.format if request.text is not None else None
+        if text_format is None:
+            return None
+        if text_format.type == "json_schema":
+            return text_format.schema_
+        if text_format.type == "json_object":
+            return True
+        return None
+
+    response_format = request.response_format
+    if response_format is None:
+        return None
+    if response_format.type == "json_object":
+        return True
+    if response_format.type == "json_schema":
+        json_schema = response_format.json_schema
+        return json_schema.json_schema if json_schema is not None else None
+    return None
+
+
 class DelegatingParser(Parser):
     """
     A Parser implementation that delegates to separate ReasoningParser and
@@ -529,6 +559,26 @@ class DelegatingParser(Parser):
         ):
             return request
 
+        # An auto tool_choice with a response_format wants both: the freedom
+        # to call a tool, and a final answer constrained to the schema. Only
+        # try this for non-reasoning requests, since a think preamble would
+        # not match the schema answer branch.
+        if request.tool_choice == "auto" and self._reasoning_parser is None:
+            response_format_schema = _get_response_format_schema(request)
+            if response_format_schema is not None:
+                from vllm.tool_parsers.structural_tag_registry import (
+                    get_composed_structural_tag,
+                )
+
+                composed_tag = get_composed_structural_tag(
+                    model=self._tool_parser.structural_tag_model,
+                    tools=request.tools,
+                    tool_choice=request.tool_choice,
+                    response_format_schema=response_format_schema,
+                )
+                if composed_tag is not None:
+                    return self._set_structural_tag(request, composed_tag)
+
         need_tool_calling = (
             request.tool_choice == "auto"
             or request.tool_choice == "required"
@@ -547,6 +597,13 @@ class DelegatingParser(Parser):
         if structure_tag is None:
             return request
 
+        return self._set_structural_tag(request, structure_tag)
+
+    def _set_structural_tag(
+        self,
+        request: ChatCompletionRequest | ResponsesRequest,
+        structure_tag: Any,
+    ) -> ChatCompletionRequest | ResponsesRequest:
         structural_tag = json.dumps(structure_tag.model_dump())
         request.structured_outputs = StructuredOutputsParams(
             structural_tag=structural_tag,
