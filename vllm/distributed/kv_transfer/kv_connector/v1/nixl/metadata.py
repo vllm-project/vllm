@@ -160,6 +160,7 @@ class HeartbeatInfo:
     tp_size: int
     dcp_size: int = 1
     pcp_size: int = 1
+    pp_size: int = 1
 
 
 @dataclass
@@ -218,6 +219,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             remote_block_size=kv_transfer_params.get("remote_block_size"),
             dcp_size=kv_transfer_params.get("dcp_size", 1),
             pcp_size=kv_transfer_params.get("pcp_size", 1),
+            pp_size=kv_transfer_params.get("pp_size", 1),
             local_num_computed_tokens=local_num_computed_tokens,
         )
 

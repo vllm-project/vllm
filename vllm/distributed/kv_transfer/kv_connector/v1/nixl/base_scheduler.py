@@ -187,6 +187,7 @@ class NixlBaseConnectorScheduler:
         tp_size = params.get("tp_size")
         dcp_size = params.get("dcp_size", 1)
         pcp_size = params.get("pcp_size", 1)
+        pp_size = params.get("pp_size", 1)
         if (
             remote_engine_id is None
             or remote_request_id is None
@@ -203,6 +204,7 @@ class NixlBaseConnectorScheduler:
                 tp_size=tp_size,
                 dcp_size=dcp_size,
                 pcp_size=pcp_size,
+                pp_size=pp_size,
             )
         self._heartbeat_by_engine[remote_engine_id].req_ids.add(remote_request_id)
         self._heartbeat_req_engine[request.request_id] = (

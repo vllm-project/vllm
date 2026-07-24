@@ -1729,7 +1729,8 @@ class NixlBaseConnectorWorker:
             )
             return self._remote_agents[engine_id][remote_worker_key]
 
-        # Number of physical regions registered locally (one per layer/tensor).
+        # Compare physical regions, not self.num_regions (doubled by
+        # FlashInfer's virtual K/V split).
         num_local_regions = len(self.block_len_per_layer)
         if (
             self.pp_size > 1
@@ -2485,6 +2486,8 @@ class NixlBaseConnectorWorker:
                     hb_info.tp_size,
                     hb_info.dcp_size,
                     hb_info.pcp_size,
+                    hb_info.pp_size,
+                    self._hb_handshake_notif_only and hb_info.pp_size > 1,
                 )
                 is not None
             ):
