@@ -608,10 +608,6 @@ _OV2_FRAME_FACTOR = 2
 _OV2_FPS_MIN_FRAMES = 4
 
 
-def _round_by_factor(n: float, factor: int) -> int:
-    return round(n / factor) * factor
-
-
 def _ceil_by_factor(n: float, factor: int) -> int:
     import math as _math
 
