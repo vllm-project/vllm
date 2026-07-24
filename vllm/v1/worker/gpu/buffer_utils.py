@@ -186,16 +186,24 @@ class StagedWriteTensor:
         )
 
         # Write diffs to the GPU buffer
-        _apply_write_kernel[(n,)](
-            self.gpu,
-            self.gpu.stride(0),
-            indices_uva,
-            starts_uva,
+        # _apply_write_kernel[(n,)](
+        #     self.gpu,
+        #     self.gpu.stride(0),
+        #     indices_uva,
+        #     starts_uva,
+        #     write_contents,
+        #     cu_lens_uva,
+        #     None,
+        #     BLOCK_SIZE=1024,
+        #     MULTI_GROUP=False,
+        # )
+        _apply_write(
+            [(self.gpu, self.gpu.stride(0))],
+            self._staged_write_indices,
+            self._staged_write_starts,
             write_contents,
-            cu_lens_uva,
+            self._staged_write_cu_lens,
             None,
-            BLOCK_SIZE=1024,
-            MULTI_GROUP=False,
         )
         # Clear the staged writes
         self.clear_staged_writes()
@@ -256,20 +264,58 @@ class FusedStagedWriter:
         cu_lens_uva = self.cu_lens.copy_to_uva(cu_lens)
         contents_gpu = async_tensor_h2d(contents, device=self.device, dtype=torch.int32)
 
-        _apply_write_kernel[(len(group_ids),)](
-            output_ptrs,
-            output_strides,
-            indices_uva,
-            starts_uva,
+        # _apply_write_kernel[(len(group_ids),)](
+        #     output_ptrs,
+        #     output_strides,
+        #     indices_uva,
+        #     starts_uva,
+        #     contents_gpu,
+        #     cu_lens_uva,
+        #     group_ids_uva,
+        #     BLOCK_SIZE=1024,
+        #     MULTI_GROUP=True,
+        # )
+        _apply_write(
+            [(t.gpu, t.gpu.stride(0)) for t in tensors],
+            indices,
+            starts,
             contents_gpu,
-            cu_lens_uva,
-            group_ids_uva,
-            BLOCK_SIZE=1024,
-            MULTI_GROUP=True,
+            cu_lens,
+            group_ids,
         )
         for t in tensors:
             t.clear_staged_writes()
 
+def _apply_write(
+    outputs: Sequence[tuple[torch.Tensor, int]],
+    write_indices: Sequence[int],
+    write_starts: Sequence[int],
+    write_contents: torch.Tensor,
+    write_cu_lens: Sequence[int],
+    write_group_ids: Sequence[int] | None,
+) -> None:
+    """Pure-torch replacement for the Triton `_apply_write_kernel`.
+
+    For each staged write `pid`, copies `write_contents[cu_start:cu_end]` into the
+    target output row. When `write_group_ids` is None all writes target the single
+    output in `outputs`; otherwise `write_group_ids[pid]` selects the output tensor
+    (KV cache group). Each output is a `(tensor, row_stride)` pair, matching the
+    flat pointer arithmetic `row_idx * row_stride + start_idx` of the kernel.
+    """
+    for pid in range(len(write_indices)):
+        cu_start = write_cu_lens[pid - 1] if pid > 0 else 0
+        cu_end = write_cu_lens[pid]
+        content_len = cu_end - cu_start
+        if content_len == 0:
+            continue
+
+        group_id = 0 if write_group_ids is None else write_group_ids[pid]
+        out_tensor, row_stride = outputs[group_id]
+
+        offset = write_indices[pid] * row_stride + write_starts[pid]
+        out_tensor.view(-1)[offset : offset + content_len] = write_contents[
+            cu_start:cu_end
+        ]
 
 @triton.jit
 def _apply_write_kernel(

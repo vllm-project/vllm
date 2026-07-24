@@ -65,20 +65,44 @@ class StructuredOutputsWorker:
         vocab_size = logits.shape[-1]
         BLOCK_SIZE = 8192
         grid = (num_masks, triton.cdiv(vocab_size, BLOCK_SIZE))
-        _apply_grammar_bitmask_kernel[grid](
+        # _apply_grammar_bitmask_kernel[grid](
+        #     logits,
+        #     logits.stride(0),
+        #     logits_indices,
+        #     bitmask,
+        #     bitmask.stride(0),
+        #     vocab_size,
+        #     BLOCK_SIZE=BLOCK_SIZE,
+        # )
+        _apply_grammar_bitmask_torch(
             logits,
-            logits.stride(0),
             logits_indices,
             bitmask,
-            bitmask.stride(0),
             vocab_size,
-            BLOCK_SIZE=BLOCK_SIZE,
         )
 
         # Ensure the copy stream waits for the device tensors to finish being used
         # before it re-uses or deallocates them
         self.copy_stream.wait_stream(current_stream)
 
+def _apply_grammar_bitmask_torch(
+    logits: torch.Tensor,
+    logits_indices: torch.Tensor,
+    bitmask: torch.Tensor,
+    vocab_size: int,
+) -> None:
+    num_masks = bitmask.shape[0]
+    device = logits.device
+    shifts = torch.arange(32, device=device, dtype=torch.int32)
+
+    bits = (bitmask.unsqueeze(-1) >> shifts) & 1  # [num_masks, num_words, 32]
+    allowed = bits.reshape(num_masks, -1)[:, :vocab_size].to(torch.bool)
+    disallowed = ~allowed
+
+    rows = logits_indices.long()
+    sub = logits.index_select(0, rows)
+    sub[disallowed] = -float("inf")
+    logits.index_copy_(0, rows, sub)
 
 # Adapted from
 # https://github.com/mlc-ai/xgrammar/blob/main/python/xgrammar/kernels/apply_token_bitmask_inplace_triton.py

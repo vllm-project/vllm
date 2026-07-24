@@ -141,6 +141,24 @@ class PromptLogprobsWorker:
             prompt_logprobs_dict[req_id] = logprobs
         return prompt_logprobs_dict
 
+def _prompt_logprobs_token_ids_torch(
+    token_ids: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+    all_token_ids: torch.Tensor,
+) -> None:
+    num_reqs = idx_mapping.shape[0]
+    for batch_idx in range(num_reqs):
+        req = int(idx_mapping[batch_idx])
+        q_start = int(query_start_loc[batch_idx])
+        q_end = int(query_start_loc[batch_idx + 1])
+        q_len = q_end - q_start
+        if q_len <= 0:
+            continue
+        num_computed = int(num_computed_tokens[req])
+        src_start = num_computed + 1
+        token_ids[q_start:q_end] = all_token_ids[req][src_start : src_start + q_len]
 
 @triton.jit
 def _prompt_logprobs_token_ids_kernel(
@@ -184,14 +202,21 @@ def get_prompt_logprobs_token_ids(
 ) -> torch.Tensor:
     token_ids = torch.empty(num_tokens, dtype=torch.int64, device=idx_mapping.device)
     num_reqs = idx_mapping.shape[0]
-    _prompt_logprobs_token_ids_kernel[(num_reqs,)](
+    # _prompt_logprobs_token_ids_kernel[(num_reqs,)](
+    #     token_ids,
+    #     query_start_loc,
+    #     idx_mapping,
+    #     num_computed_tokens,
+    #     all_token_ids,
+    #     all_token_ids.stride(0),
+    #     BLOCK_SIZE=1024,
+    # )
+    _prompt_logprobs_token_ids_torch(
         token_ids,
         query_start_loc,
         idx_mapping,
         num_computed_tokens,
         all_token_ids,
-        all_token_ids.stride(0),
-        BLOCK_SIZE=1024,
     )
     return token_ids
 
