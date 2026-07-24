@@ -10,6 +10,7 @@ from PIL import Image as PILImage
 from vllm.model_executor.models.gemma4_mm import (
     Gemma4ForConditionalGeneration,
     Gemma4ImagePixelInputs,
+    _pad_and_stack,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
@@ -50,6 +51,43 @@ def test_gemma4_image_batching_keeps_variable_patch_counts_unstacked():
         torch.Size([10080, 768]),
         torch.Size([2520, 768]),
     ]
+
+
+def test_gemma4_audio_batching_keeps_variable_lengths_unstacked():
+    field = MultiModalFieldConfig.batched("audio").field
+    elems = field.build_elems(
+        "audio",
+        "input_features_padded",
+        [torch.randn(3, 80), torch.randn(5, 80)],
+    )
+
+    reduced = field.reduce_data(list(elems))
+
+    # Clips of differing frame counts can't be stacked, so batched() hands the
+    # model a plain list -- the input that used to crash _process_audio_input
+    # via `list.squeeze(1)`.
+    assert isinstance(reduced, list)
+    assert [tensor.shape for tensor in reduced] == [
+        torch.Size([3, 80]),
+        torch.Size([5, 80]),
+    ]
+
+
+def test_gemma4_pad_and_stack_pads_variable_length_audio_to_batch_max():
+    features = [torch.randn(3, 80), torch.randn(5, 80)]
+    masks = [
+        torch.ones(3, dtype=torch.bool),
+        torch.ones(5, dtype=torch.bool),
+    ]
+
+    padded_features = _pad_and_stack(features)
+    padded_masks = _pad_and_stack(masks)
+
+    assert padded_features.shape == (2, 5, 80)
+    assert torch.equal(padded_features[0, :3], features[0])  # real frames kept
+    assert torch.all(padded_features[0, 3:] == 0)  # short clip zero-padded
+    assert padded_masks.shape == (2, 5)
+    assert padded_masks[0].tolist() == [True, True, True, False, False]  # pad=False
 
 
 @pytest.mark.parametrize(
