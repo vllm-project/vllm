@@ -38,8 +38,12 @@ from vllm.v1.structured_output import StructuredOutputManager
 EOS_TOKEN_ID = 50256
 
 
-def mock_kv(matched_tokens: int, is_async: bool):
-    return MockKVConfig(matched_tokens=matched_tokens, is_async=is_async)
+def mock_kv(matched_tokens: int, is_async: bool, num_defers_before_matching: int = 0):
+    return MockKVConfig(
+        matched_tokens=matched_tokens,
+        is_async=is_async,
+        num_defers_before_matching=num_defers_before_matching,
+    )
 
 
 def create_scheduler(
@@ -115,6 +119,9 @@ def create_scheduler(
             kv_connector_extra_config={
                 "matched_tokens": use_kv_connector.matched_tokens,
                 "is_async": use_kv_connector.is_async,
+                "num_defers_before_matching": (
+                    use_kv_connector.num_defers_before_matching
+                ),
             },
         )
     elif isinstance(use_kv_connector, str):
