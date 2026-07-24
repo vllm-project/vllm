@@ -37,7 +37,7 @@ if current_platform.is_cuda_alike():
     from .fusion.attn_quant_fusion import AttnQuantFusionPass
     from .fusion.mla_attn_quant_fusion import MLAAttnQuantFusionPass
     from .fusion.mla_rope_kvcache_cat_fusion import MLARoPEKVCacheCatFusionPass
-    from .fusion.qk_norm_rope_fusion import QKNormRoPEFusionPass
+    from .fusion.qk_norm_rope_fusion import QKNormMRoPEFusionPass, QKNormRoPEFusionPass
     from .fusion.qk_norm_rope_kvcache_fusion import QkNormRopeKvCacheFusionPass
     from .fusion.rms_quant_fusion import RMSNormQuantFusionPass
     from .fusion.rope_kvcache_fusion import RopeKVCacheFusionPass
@@ -195,6 +195,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
             if self.pass_config.enable_qk_norm_rope_fusion:
                 self.passes += [SplitCoalescingPass(config)]
                 self.passes += [QKNormRoPEFusionPass(config)]
+                self.passes += [QKNormMRoPEFusionPass(config)]
 
             self.ir_lowering = VllmIRLoweringPass(config)
             self.clone_elimination = UnsafeCloneEliminationPass(config)
