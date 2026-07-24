@@ -64,7 +64,9 @@ steps:
   commands:
     # Install fast path packages for testing against transformers
     # Note: also needed to run plamo2 model in vLLM
-    - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
+    # torch>=2.14 nightly requires C++20 for ATen headers (pytorch/pytorch#178150);
+    # mamba@v2.3.0 pins -std=c++17, so build from a patched checkout instead of the git URL.
+    - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && uv pip install --system --no-build-isolation /tmp/mamba-src
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     # Shard the hybrid language model tests that are numerically stable on Hopper.
     - pytest -v -s models/language/generation -m hybrid_model -k 'not granite-4.0-tiny-preview' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
@@ -91,7 +93,9 @@ steps:
   - vllm/
   - tests/models/language/generation
   commands:
-    - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
+    # torch>=2.14 nightly requires C++20 for ATen headers (pytorch/pytorch#178150);
+    # mamba@v2.3.0 pins -std=c++17, so build from a patched checkout instead of the git URL.
+    - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && uv pip install --system --no-build-isolation /tmp/mamba-src
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     - pytest -v -s models/language/generation -m hybrid_model -k 'granite-4.0-tiny-preview'
 
@@ -106,7 +110,9 @@ steps:
   commands:
     # Install fast path packages for testing against transformers
     # Note: also needed to run plamo2 model in vLLM
-    - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
+    # torch>=2.14 nightly requires C++20 for ATen headers (pytorch/pytorch#178150);
+    # mamba@v2.3.0 pins -std=c++17, so build from a patched checkout instead of the git URL.
+    - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && uv pip install --system --no-build-isolation /tmp/mamba-src
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
