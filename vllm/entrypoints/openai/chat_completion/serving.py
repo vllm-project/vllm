@@ -1075,6 +1075,7 @@ class OpenAIServingChat(GenerateBaseServing):
             kv_transfer_params=final_res.kv_transfer_params,
             ec_transfer_params=final_res.ec_transfer_params,
             metrics=per_request_metrics,
+            pruned_token_indices=final_res.pruned_token_indices,
         )
 
         # Log complete response if output logging is enabled

@@ -191,6 +191,10 @@ class Request:
         # indicates that the output is corrupted
         self.num_nans_in_logits = 0
 
+        # HiPrune: per-image pruned soft-token indices reported by the
+        # model runner; held until emitted in an EngineCoreOutput.
+        self.pruned_token_indices: list[list[int] | None] | None = None
+
         # The number of times this request has been preempted by the scheduler.
         self.num_preemptions = 0
 

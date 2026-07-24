@@ -179,6 +179,10 @@ class RequestState:
         # Routed experts accumulation (prompt + sample chunks)
         self.routed_experts_chunks: list[np.ndarray] = []
 
+        # HiPrune: per-image pruned soft-token indices (sent once by the
+        # engine core; attached to every subsequent RequestOutput).
+        self.pruned_token_indices: list[list[int] | None] | None = None
+
         # Stream Interval
         self.stream_interval = stream_interval
         self.sent_tokens_offset = 0  # Offset of sent tokens
@@ -380,6 +384,7 @@ class RequestState:
             num_cached_tokens=self.num_cached_tokens,
             num_cache_creation_tokens=self.num_cache_creation_tokens,
             metrics=self.stats,
+            pruned_token_indices=self.pruned_token_indices,
         )
 
     def _new_completion_output(
@@ -634,6 +639,10 @@ class OutputProcessor:
             if engine_core_output.routed_experts is not None:
                 req_state.routed_experts_chunks.append(
                     engine_core_output.routed_experts
+                )
+            if engine_core_output.pruned_token_indices is not None:
+                req_state.pruned_token_indices = (
+                    engine_core_output.pruned_token_indices
                 )
 
             if req_state.is_prefilling:

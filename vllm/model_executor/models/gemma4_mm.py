@@ -47,6 +47,13 @@ from vllm.model_executor.models.gemma4 import (
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.transformers.utils import recursive_replace_linear
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.hiprune import (
+    GEMMA4_OBJECT_LAYER,
+    aggregate_patch_attention,
+    compute_retained_tokens_count,
+    compute_soft_token_grid,
+    hiprune_select,
+)
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
@@ -110,6 +117,70 @@ def _get_max_soft_tokens(
     return None, False
 
 
+def _shrink_image_token_runs(
+    input_ids: torch.Tensor,
+    image_token_id: int,
+    hiprune_ratio: float,
+) -> torch.Tensor:
+    """Shrink each contiguous run of image placeholder tokens to the
+    HiPrune retained-token budget.
+
+    The HF Gemma4 processor expands ``<|image|>`` to the full soft-token
+    count in ``input_ids`` (so vLLM treats prompt updates as already
+    applied and only *finds* them). Under HiPrune the model emits fewer
+    soft tokens, so the placeholder runs must shrink to match the
+    reduced ``get_image_repl`` sequence, keeping find-and-validate
+    consistent.
+
+    Args:
+        input_ids: ``(1, seq_len)`` token IDs from the HF processor.
+        image_token_id: The ``<|image|>`` placeholder token ID.
+        hiprune_ratio: Retention ratio in ``(0, 1)``.
+    """
+    ids = input_ids[0]
+    is_img = ids == image_token_id
+    keep = torch.ones_like(ids, dtype=torch.bool)
+
+    run_start = None
+    for pos in range(len(ids) + 1):
+        inside = pos < len(ids) and bool(is_img[pos])
+        if inside and run_start is None:
+            run_start = pos
+        elif not inside and run_start is not None:
+            run_len = pos - run_start
+            kept = compute_retained_tokens_count(run_len, hiprune_ratio)
+            keep[run_start + kept : pos] = False
+            run_start = None
+
+    return ids[keep].unsqueeze(0)
+
+
+def _get_hiprune_ratio(merged_kwargs: Mapping[str, object]) -> float | None:
+    """Extract and validate the HiPrune retention ratio from mm kwargs.
+
+    The ratio is the fraction of image soft tokens KEPT (e.g. 0.14 keeps
+    14%). ``None`` or ``1.0`` disables pruning. Passed per-request via
+    ``mm_processor_kwargs={"hiprune_ratio": ...}`` (or the ``token_pruning``
+    chat-completions field, which maps onto it).
+    """
+    val = merged_kwargs.get("hiprune_ratio")
+    if val is None:
+        return None
+    ratio = float(val)
+    if not 0.0 < ratio <= 1.0:
+        raise ValueError(
+            f"hiprune_ratio must be in (0, 1], got {ratio}. It is the "
+            "fraction of image tokens to KEEP."
+        )
+    if ratio == 1.0:
+        return None
+    # Quantize to float32: the ratio travels to the model in a float32
+    # tensor, and compute_retained_tokens_count rounds, so the processor
+    # must use the exact same bits or the placeholder count can differ
+    # from the model's kept-token count near half-integer boundaries.
+    return float(torch.tensor(ratio, dtype=torch.float32).item())
+
+
 # ---------------------------------------------------------------------------
 # Input schema
 # ---------------------------------------------------------------------------
@@ -140,6 +211,12 @@ class Gemma4ImagePixelInputs(TensorSchema):
         torch.Tensor | list[torch.Tensor],
         TensorShape("bn", "np", 2, dynamic_dims={"np"}),
     ]
+    # HiPrune retention ratio per image (fraction of soft tokens kept),
+    # emitted by the processor only when pruning is requested.
+    hiprune_ratio: Annotated[
+        torch.Tensor | list[torch.Tensor] | None,
+        TensorShape("bn"),
+    ] = None
 
 
 class Gemma4AudioInputs(TensorSchema):
@@ -209,6 +286,9 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         return params
 
     def get_hf_processor(self, **kwargs: object) -> Gemma4Processor:
+        # hiprune_ratio is a vLLM-side kwarg; the HF processor constructor
+        # must never see it.
+        kwargs.pop("hiprune_ratio", None)
         return self.ctx.get_hf_processor(
             Gemma4Processor,
             **kwargs,
@@ -321,6 +401,7 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         image_height: int,
         processor: Gemma4Processor | None,
         max_soft_tokens: int | None = None,
+        hiprune_ratio: float | None = None,
     ) -> PromptUpdateDetails[list[int]]:
         """Return the dynamic image token sequence for this image.
 
@@ -330,6 +411,10 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         Args:
             max_soft_tokens: Override for the default token budget.
                 When *None*, falls back to the model config value.
+            hiprune_ratio: HiPrune retention ratio. When set, the
+                placeholder count is reduced to the retained-token
+                budget; the model keeps exactly that many soft tokens
+                at encode time (same count function on both sides).
         """
         if processor is None:
             processor = self.get_hf_processor()
@@ -339,6 +424,8 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
             image_height,
             max_soft_tokens=max_soft_tokens,
         )
+        if hiprune_ratio is not None:
+            num_soft = compute_retained_tokens_count(num_soft, hiprune_ratio)
         config = self.get_hf_config()
         token_ids = (
             [config.boi_token_id]
@@ -621,6 +708,9 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
 
                 # Process frames as images with max_soft_tokens=70
                 video_mm_kwargs = dict(mm_kwargs)
+                # HiPrune only applies to images, and the HF processor
+                # does not accept the kwarg.
+                video_mm_kwargs.pop("hiprune_ratio", None)
                 video_mm_kwargs["max_soft_tokens"] = _VIDEO_MAX_SOFT_TOKENS
 
                 dummy_prompt = ("\t" + processor.image_token) * len(frames)
@@ -723,6 +813,9 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         # HF side (Gemma4ProcessorKwargs.images_kwargs) so that
         # _merge_kwargs routes max_soft_tokens into images_kwargs.
         patched_mm_kwargs = dict(mm_kwargs)
+        # hiprune_ratio is consumed by vLLM (placeholder sizing + model
+        # selection); the HF processor does not know it.
+        patched_mm_kwargs.pop("hiprune_ratio", None)
         if val is not None and is_top_level_max_soft_tokens:
             patched_mm_kwargs["max_soft_tokens"] = val
 
@@ -738,6 +831,28 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         if "image_position_ids" in processed_outputs:
             processed_outputs["pixel_position_ids"] = processed_outputs.pop(
                 "image_position_ids"
+            )
+
+        # HiPrune: attach the retention ratio per image so it reaches the
+        # model at encode time (the engine-global EVS pattern does not work
+        # here because the ratio is per-request), and shrink the HF
+        # processor's expanded image-token runs to the retained budget so
+        # the prompt matches the reduced encoder output.
+        hiprune_ratio = _get_hiprune_ratio(merged_kwargs)
+        if hiprune_ratio is not None and "pixel_values" in processed_outputs:
+            num_images = len(processed_outputs["pixel_values"])
+            processed_outputs["hiprune_ratio"] = torch.full(
+                (num_images,), hiprune_ratio, dtype=torch.float32
+            )
+
+            processor = self.info.get_hf_processor()
+            input_ids = processed_outputs["input_ids"]
+            if not isinstance(input_ids, torch.Tensor):
+                input_ids = torch.tensor(input_ids)
+            processed_outputs["input_ids"] = _shrink_image_token_runs(
+                input_ids,
+                processor.image_token_id,
+                hiprune_ratio,
             )
 
         if "input_features" in processed_outputs:
@@ -771,6 +886,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         fields = dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
             pixel_position_ids=MultiModalFieldConfig.batched("image"),
+            hiprune_ratio=MultiModalFieldConfig.batched("image"),
             input_features_padded=MultiModalFieldConfig.batched("audio"),
             input_features_mask=MultiModalFieldConfig.batched("audio"),
         )
@@ -844,6 +960,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                     image_height=image_size.height,
                     processor=hf_processor,
                     max_soft_tokens=max_soft_tokens,
+                    hiprune_ratio=_get_hiprune_ratio(merged_kwargs),
                 )
 
             prompt_updates.append(
@@ -1136,6 +1253,11 @@ class Gemma4ForConditionalGeneration(
         gen_cfg = vllm_config.model_config.try_get_generation_config()
         self._suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
 
+        # HiPrune bookkeeping: pruned soft-token indices for the items of
+        # the most recent _process_image_input / embed_multimodal call.
+        self._hiprune_pruned_indices: list[list[int] | None] = []
+        self.hiprune_pruned_indices_per_item: list[list[int] | None] = []
+
     # ------------------------------------------------------------------ #
     # Input parsing
     # ------------------------------------------------------------------ #
@@ -1152,6 +1274,7 @@ class Gemma4ForConditionalGeneration(
         return Gemma4ImagePixelInputs(
             pixel_values=pixel_values,
             pixel_position_ids=pixel_position_ids,
+            hiprune_ratio=kwargs.pop("hiprune_ratio", None),
         )
 
     def _parse_and_validate_audio_input(
@@ -1245,6 +1368,55 @@ class Gemma4ForConditionalGeneration(
     # Image processing
     # ------------------------------------------------------------------ #
 
+    def _encode_chunk_capturing_attention(
+        self,
+        inputs_embeds: torch.Tensor,
+        pad_tensor: torch.Tensor,
+        pp_tensor: torch.Tensor,
+        capture_layer_idxs: tuple[int, ...],
+    ) -> tuple[torch.Tensor, dict[int, torch.Tensor]]:
+        """Run the vision encoder with eager attention, capturing the
+        post-softmax attention weights of the given layers.
+
+        HiPrune needs explicit attention weights from the object (middle)
+        and last encoder layers; SDPA returns none, so the attention
+        implementation is flipped to eager for this pass only.
+        """
+        vt = self.vision_tower
+        captured: dict[int, torch.Tensor] = {}
+
+        def _make_hook(layer_idx: int):
+            def _hook(module, args, output):
+                # Gemma4VisionAttention.forward returns
+                # (attn_output, attn_weights).
+                captured[layer_idx] = output[1]
+
+            return _hook
+
+        handles = [
+            vt.encoder.layers[i].self_attn.register_forward_hook(_make_hook(i))
+            for i in capture_layer_idxs
+        ]
+        prev_impl = vt.config._attn_implementation
+        vt.config._attn_implementation = "eager"
+        try:
+            encoder_outputs = vt.encoder(
+                inputs_embeds=inputs_embeds,
+                attention_mask=~pad_tensor,
+                pixel_position_ids=pp_tensor,
+            )
+        finally:
+            vt.config._attn_implementation = prev_impl
+            for handle in handles:
+                handle.remove()
+
+        for i in capture_layer_idxs:
+            assert captured.get(i) is not None, (
+                f"No attention captured from vision encoder layer {i}; "
+                "eager attention capture failed."
+            )
+        return encoder_outputs.last_hidden_state, captured
+
     def _process_image_input(
         self,
         image_input: Gemma4ImageInputs,
@@ -1255,13 +1427,22 @@ class Gemma4ForConditionalGeneration(
         encoder call processes a uniform-shape batch with no
         cross-resolution padding.  Pooling and projection are then
         applied over a single concatenated tensor for all images.
+
+        When a ``hiprune_ratio`` is attached to an image, the pooled
+        soft tokens are pruned with HiPrune selection: attention is
+        captured from the object and last encoder layers, aggregated
+        onto soft tokens with the pooler's kernel arithmetic, and only
+        the selected tokens are returned. The kept count matches the
+        placeholder count the processor emitted (both sides use
+        ``compute_retained_tokens_count``).
         """
         pixel_values = image_input["pixel_values"]
         pixel_position_ids = image_input["pixel_position_ids"]
 
         vt = self.vision_tower
         vision_cfg = self.config.vision_config
-        pooling_k2 = vision_cfg.pooling_kernel_size**2
+        pooling_k = vision_cfg.pooling_kernel_size
+        pooling_k2 = pooling_k**2
 
         # Concurrent requests with different image resolutions may
         # arrive as a list of per-image tensors, while same-resolution
@@ -1273,6 +1454,18 @@ class Gemma4ForConditionalGeneration(
             else pixel_values.shape[0]
         )
 
+        # Per-image HiPrune retention ratio (None = no pruning).
+        ratios: list[float | None] = [None] * total_images
+        hp_field = image_input.get("hiprune_ratio")
+        if hp_field is not None:
+            for idx in range(total_images):
+                ratio = float(hp_field[idx])
+                ratios[idx] = ratio if ratio < 1.0 else None
+        capture_layer_idxs = (
+            GEMMA4_OBJECT_LAYER - 1,
+            len(vt.encoder.layers) - 1,
+        )
+
         for idx in range(total_images):
             pv = pixel_values[idx]
             pp = pixel_position_ids[idx]
@@ -1282,6 +1475,8 @@ class Gemma4ForConditionalGeneration(
         # free memory per bucket because the previous bucket's encoder
         # pass has already allocated activations we should account for.
         last_hidden_states_map: dict[int, torch.Tensor] = {}
+        # orig_idx -> (shallow_scores, deep_scores, grid_w)
+        hiprune_scores_map: dict[int, tuple[torch.Tensor, torch.Tensor, int]] = {}
         for patches, items in buckets.items():
             free, total = torch.accelerator.get_memory_info()
             max_batch_size = min(
@@ -1291,8 +1486,21 @@ class Gemma4ForConditionalGeneration(
                 ),
             )
 
-            for chunk_idx in range(0, len(items), max_batch_size):
-                chunk_items = items[chunk_idx : chunk_idx + max_batch_size]
+            chunk_idx = 0
+            while chunk_idx < len(items):
+                # Eager attention capture materializes full
+                # (heads, patches, patches) attention matrices, which
+                # _encoder_chunk's SDPA-based cost model does not account
+                # for — so pruned images are encoded one at a time.
+                if ratios[items[chunk_idx][0]] is not None:
+                    chunk_items = [items[chunk_idx]]
+                else:
+                    chunk_items = []
+                    for item in items[chunk_idx : chunk_idx + max_batch_size]:
+                        if ratios[item[0]] is not None:
+                            break
+                        chunk_items.append(item)
+                chunk_idx += len(chunk_items)
 
                 pv_tensor = torch.cat(
                     [item[1].unsqueeze(0) for item in chunk_items], dim=0
@@ -1307,12 +1515,47 @@ class Gemma4ForConditionalGeneration(
                     pp_tensor,
                     pad_tensor,
                 ).to(self.model_dtype)
-                encoder_outputs = vt.encoder(
-                    inputs_embeds=inputs_embeds,
-                    attention_mask=~pad_tensor,
-                    pixel_position_ids=pp_tensor,
+
+                chunk_needs_pruning = any(
+                    ratios[item[0]] is not None for item in chunk_items
                 )
-                hidden_states = encoder_outputs.last_hidden_state
+                if chunk_needs_pruning:
+                    hidden_states, attn_by_layer = (
+                        self._encode_chunk_capturing_attention(
+                            inputs_embeds,
+                            pad_tensor,
+                            pp_tensor,
+                            capture_layer_idxs,
+                        )
+                    )
+                    for i, (orig_idx, _, _) in enumerate(chunk_items):
+                        if ratios[orig_idx] is None:
+                            continue
+                        valid, grid_w, grid_h, kernel_idx = compute_soft_token_grid(
+                            pp_tensor[i], pooling_k
+                        )
+                        num_soft = grid_w * grid_h
+                        shallow = aggregate_patch_attention(
+                            attn_by_layer[capture_layer_idxs[0]][i],
+                            valid,
+                            kernel_idx,
+                            num_soft,
+                        )
+                        deep = aggregate_patch_attention(
+                            attn_by_layer[capture_layer_idxs[1]][i],
+                            valid,
+                            kernel_idx,
+                            num_soft,
+                        )
+                        hiprune_scores_map[orig_idx] = (shallow, deep, grid_w)
+                    del attn_by_layer
+                else:
+                    encoder_outputs = vt.encoder(
+                        inputs_embeds=inputs_embeds,
+                        attention_mask=~pad_tensor,
+                        pixel_position_ids=pp_tensor,
+                    )
+                    hidden_states = encoder_outputs.last_hidden_state
 
                 for i, (orig_idx, _, _) in enumerate(chunk_items):
                     last_hidden_states_map[orig_idx] = hidden_states[i]
@@ -1320,6 +1563,7 @@ class Gemma4ForConditionalGeneration(
         # Pool per image to strip padding and reduce spatial resolution.
         all_valid_states: list[torch.Tensor] = [None] * total_images  # type: ignore[list-item]
         valid_lens = [0] * total_images
+        pruned_indices: list[list[int] | None] = [None] * total_images
 
         for orig_idx in range(total_images):
             chunk_hidden = last_hidden_states_map[orig_idx]
@@ -1340,8 +1584,26 @@ class Gemma4ForConditionalGeneration(
             if getattr(vt.config, "standardize", False):
                 valid_states = (valid_states - vt.std_bias) * vt.std_scale
 
+            ratio = ratios[orig_idx]
+            if ratio is not None:
+                shallow, deep, grid_w = hiprune_scores_map[orig_idx]
+                num_soft = valid_states.shape[0]
+                assert shallow.shape[0] == num_soft, (
+                    f"HiPrune score length {shallow.shape[0]} != pooled "
+                    f"soft-token count {num_soft}"
+                )
+                _, _, _, kept_mask = hiprune_select(
+                    shallow, deep, num_soft, grid_w, ratio
+                )
+                valid_states = valid_states[kept_mask]
+                pruned_indices[orig_idx] = (
+                    (~kept_mask).nonzero(as_tuple=True)[0].tolist()
+                )
+
             all_valid_states[orig_idx] = valid_states
             valid_lens[orig_idx] = valid_states.shape[0]
+
+        self._hiprune_pruned_indices = pruned_indices
 
         # Project all images in a single batched call.
         flat_valid_states = torch.cat(all_valid_states, dim=0).to(self.model_dtype)
@@ -1506,23 +1768,29 @@ class Gemma4ForConditionalGeneration(
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         multimodal_embeddings: list[torch.Tensor] = []
+        # Per returned item: soft-token indices pruned by HiPrune (None
+        # when the item was not pruned). The model runner reads this
+        # right after embed_multimodal to cache the indices alongside
+        # the encoder outputs.
+        pruned_per_item: list[list[int] | None] = []
 
         for modality, multimodal_input in mm_input_by_modality.items():
             if multimodal_input is None:
                 continue
             if modality == "image":
-                multimodal_embeddings.extend(
-                    self._process_image_input(multimodal_input)
-                )
+                image_embeddings = self._process_image_input(multimodal_input)
+                multimodal_embeddings.extend(image_embeddings)
+                pruned_per_item.extend(self._hiprune_pruned_indices)
             elif modality == "video":
-                multimodal_embeddings.extend(
-                    self._process_video_input(multimodal_input)
-                )
+                video_embeddings = self._process_video_input(multimodal_input)
+                multimodal_embeddings.extend(video_embeddings)
+                pruned_per_item.extend([None] * len(video_embeddings))
             elif modality == "audio":
-                multimodal_embeddings.extend(
-                    self._process_audio_input(multimodal_input)
-                )
+                audio_embeddings = self._process_audio_input(multimodal_input)
+                multimodal_embeddings.extend(audio_embeddings)
+                pruned_per_item.extend([None] * len(audio_embeddings))
 
+        self.hiprune_pruned_indices_per_item = pruned_per_item
         return multimodal_embeddings
 
     def embed_input_ids(
