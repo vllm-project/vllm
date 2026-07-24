@@ -21,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
     KVCacheSpec,
+    MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
@@ -320,7 +321,12 @@ class MooncakeStoreCoordinator:
 
                 drop_eagle_block = idx in eagle_indices and idx not in eagle_verified
                 _max_length = curr_hit_length
-                if drop_eagle_block:
+                # No eagle peek margin for a recurrent (Mamba) group: its
+                # finder never drops a block, so a widened max_length would let
+                # it match one block past the attention-verified hit and resume
+                # from speculation-written state (#43559). Mirrors the sibling
+                # gate in HybridKVCacheCoordinator.find_longest_cache_hit.
+                if drop_eagle_block and not isinstance(spec, MambaSpec):
                     _max_length = min(curr_hit_length + spec.block_size, max_length)
                 hashes = self.block_hashes_for_spec(block_hashes, spec)
                 hit_blocks, _new_hit_length = manager_cls.find_longest_cache_hit(
