@@ -591,39 +591,42 @@ class Gemma4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
         )
 
     def get_head_size(self) -> int:
-        # Gemma4 uses dual head dimensions: head_dim (sliding attention)
-        # and global_head_dim (full attention).  Return the largest so
-        # that attention backends allocate buffers large enough for both.
+        # Gemma4 uses different head dimensions for sliding attention and full
+        # attention. Return the largest so that attention backends allocate buffers
+        # large enough for both.
         text_config = self.hf_text_config
-        per_layer_attrs = getattr(text_config, "per_layer_attributes", None) or set()
-        if "head_dim" in per_layer_attrs:
-            # Newer configs declare the dual head dimensions per layer
-            # instead (huggingface/transformers#47384)
-            return max(layer.head_dim for layer in text_config.per_layer_config)
-        head_dim = getattr(text_config, "head_dim", 0)
-        global_head_dim = getattr(text_config, "global_head_dim", 0)
-        return max(head_dim, global_head_dim) or super().get_head_size()
+        if hasattr(text_config, "is_heterogeneous"):
+            # Transformers >= 5.15.0
+            head_dims = {
+                layer_type: text_config.per_layer_config[layer_type].head_dim
+                for layer_type in text_config.layer_types
+            }
+        else:
+            # Transformers < 5.15.0
+            head_dims = {
+                "sliding_attention": getattr(text_config, "head_dim", 0),
+                "full_attention": getattr(text_config, "global_head_dim", 0),
+            }
+        return max(head_dims.values()) or super().get_head_size()
 
     def get_total_num_kv_heads(self) -> int:
-        # When attention_k_eq_v is set, Gemma4 also varies KV heads per
-        # layer (num_key_value_heads / num_global_key_value_heads). Return
-        # the largest so KV cache buffers allocate large enough for every
-        # layer, mirroring get_head_size above.
+        # When attention_k_eq_v is set, Gemma4 also varies KV heads per layer.
+        # Return the largest so KV cache buffers allocate large enough for every layer,
+        # mirroring get_head_size above.
         text_config = self.hf_text_config
-        per_layer_attrs = getattr(text_config, "per_layer_attributes", None) or set()
-        if "num_key_value_heads" in per_layer_attrs:
-            # Newer configs declare the per-layer override instead
-            # (huggingface/transformers#47384)
-            return max(
-                layer.num_key_value_heads for layer in text_config.per_layer_config
-            )
-        num_key_value_heads = getattr(text_config, "num_key_value_heads", 0)
-        num_global_key_value_heads = getattr(
-            text_config, "num_global_key_value_heads", None
-        )
-        if num_global_key_value_heads:
-            return max(num_key_value_heads, num_global_key_value_heads)
-        return super().get_total_num_kv_heads()
+        if hasattr(text_config, "is_heterogeneous"):
+            # Transformers >= 5.15.0
+            num_key_value_heads = {
+                layer_type: text_config.per_layer_config[layer_type].num_key_value_heads
+                for layer_type in text_config.layer_types
+            }
+        else:
+            # Transformers < 5.15.0
+            num_key_value_heads = {
+                "sliding_attention": getattr(text_config, "num_key_value_heads", 0),
+                "full_attention": getattr(text_config, "num_global_key_value_heads", 0),
+            }
+        return max(num_key_value_heads.values()) or super().get_total_num_kv_heads()
 
 
 class MossAudioModelArchConfigConvertor(ModelArchConfigConvertorBase):
