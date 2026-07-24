@@ -5,6 +5,7 @@ from collections.abc import Iterable, Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING
 
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParser
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.tokenizers.mistral import MistralTokenizer
@@ -12,6 +13,23 @@ from vllm.tokenizers.mistral import MistralTokenizer
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+
+
+def _partial_delimiter_len(text: str, *delimiters: str) -> int:
+    """Length of the longest suffix of ``text`` that is a proper prefix of any
+    of ``delimiters``.
+
+    Used while streaming to hold back a trailing fragment that might still grow
+    into a ``[THINK]`` / ``[/THINK]`` marker (e.g. ``"...[/TH"``), so we never
+    emit half a delimiter as content.
+    """
+    best = 0
+    for delim in delimiters:
+        for k in range(min(len(text), len(delim) - 1), best, -1):
+            if text[-k:] == delim[:k]:
+                best = k
+                break
+    return best
 
 
 class MistralReasoningParser(BaseThinkingReasoningParser):
@@ -116,6 +134,83 @@ class MistralReasoningParser(BaseThinkingReasoningParser):
         #    well prompted and trained.
         else:
             return input_ids[:eot_token_index] + input_ids[eot_token_index + 1 :]
+
+    def _split_reasoning_content(self, text: str) -> tuple[str, str]:
+        """Split ``text`` into ``(reasoning, content)`` on the literal
+        ``[THINK]`` / ``[/THINK]`` delimiter strings.
+
+        The delimiters are dropped. A stray ``[/THINK]`` outside a reasoning
+        block is dropped too (matching :meth:`extract_reasoning`). A trailing
+        partial delimiter is held back so streaming never emits half a marker.
+        """
+        start, end = self.start_token, self.end_token
+        reasoning: list[str] = []
+        content: list[str] = []
+        in_think = False
+        i = 0
+        n = len(text)
+        while i < n:
+            if in_think:
+                j = text.find(end, i)
+                if j == -1:
+                    rest = text[i:]
+                    hold = _partial_delimiter_len(rest, end)
+                    reasoning.append(rest[: len(rest) - hold] if hold else rest)
+                    break
+                reasoning.append(text[i:j])
+                i = j + len(end)
+                in_think = False
+            else:
+                start_idx = text.find(start, i)
+                end_idx = text.find(end, i)
+                if start_idx != -1 and (end_idx == -1 or start_idx < end_idx):
+                    content.append(text[i:start_idx])
+                    i = start_idx + len(start)
+                    in_think = True
+                elif end_idx != -1:
+                    # Stray end-of-think with no matching begin — drop it.
+                    content.append(text[i:end_idx])
+                    i = end_idx + len(end)
+                else:
+                    rest = text[i:]
+                    hold = _partial_delimiter_len(rest, start, end)
+                    content.append(rest[: len(rest) - hold] if hold else rest)
+                    break
+        return "".join(reasoning), "".join(content)
+
+    def extract_reasoning_streaming(
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
+    ) -> DeltaMessage | None:
+        """Split reasoning from content by the literal ``[THINK]`` /
+        ``[/THINK]`` strings rather than the special-token ids.
+
+        The base implementation keys off the ``[THINK]`` / ``[/THINK]``
+        special-token ids. Mistral models sometimes emit those delimiters as
+        ordinary bracket *text* rather than the special tokens — most often a
+        second reasoning block after a tool call, which is out-of-distribution
+        for the prefilled opening ``[THINK]``. In that case the id-based path
+        misses them and the raw ``[THINK]...[/THINK]`` leaks into the visible
+        content. vLLM renders the special tokens as those same strings in the
+        detokenized text, so scanning the text handles both the special-token
+        and the literal-text forms uniformly — and keeps streaming consistent
+        with the (already string-based) :meth:`extract_reasoning`.
+        """
+        prev_reasoning, prev_content = self._split_reasoning_content(previous_text)
+        cur_reasoning, cur_content = self._split_reasoning_content(current_text)
+        delta_reasoning = cur_reasoning[len(prev_reasoning) :]
+        delta_content = cur_content[len(prev_content) :]
+        if not delta_reasoning and not delta_content:
+            return None
+        return DeltaMessage(
+            reasoning=delta_reasoning or None,
+            content=delta_content or None,
+        )
 
     def extract_reasoning(
         self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"

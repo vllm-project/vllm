@@ -346,3 +346,59 @@ def test_mistral_reasoning(
     else:
         content = parser.extract_content_ids(output_tokens)
         assert content == []
+
+
+LITERAL_THINK_CASES = [
+    pytest.param(
+        "The count is 3.[THINK]Wait, the name is capitalised.[/THINK]Final: 3.",
+        "Wait, the name is capitalised.",
+        "The count is 3.Final: 3.",
+        id="second_block_after_content",
+    ),
+    pytest.param(
+        "[THINK]Reason about it.[/THINK]The answer.",
+        "Reason about it.",
+        "The answer.",
+        id="leading_block",
+    ),
+    pytest.param(
+        "Before[THINK]a[/THINK]mid[THINK]b[/THINK]after",
+        "ab",
+        "Beforemidafter",
+        id="two_blocks",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "output, expected_reasoning, expected_content", LITERAL_THINK_CASES
+)
+def test_mistral_reasoning_literal_think_text_streaming(
+    output: str,
+    expected_reasoning: str,
+    expected_content: str,
+    mistral_tokenizer: MistralTokenizer,
+):
+    """`[THINK]`/`[/THINK]` emitted as ordinary *text* (not the special tokens).
+
+    This is the production leak: when the model writes the delimiters as
+    bracket text — e.g. a second reasoning block after a tool call — the
+    id-based base parser misclassified the whole block as content. Encoding the
+    output purely as text leaves no BEGIN_THINK/END_THINK ids in the stream, so
+    the parser must rely on the literal delimiter strings.
+    """
+    output_tokens = mistral_tokenizer.tokenizer.encode(output, bos=False, eos=False)
+    # Sanity-check the delimiters really are plain text, not the special tokens.
+    assert mistral_tokenizer.instruct.BEGIN_THINK not in output_tokens
+    assert mistral_tokenizer.instruct.END_THINK not in output_tokens
+
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        mistral_tokenizer
+    )
+
+    reasoning, content = run_reasoning_extraction_mistral(
+        parser, output_tokens, streaming=True
+    )
+
+    assert reasoning == expected_reasoning
+    assert content == expected_content
