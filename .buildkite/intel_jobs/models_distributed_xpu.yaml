@@ -3,10 +3,10 @@ depends_on:
   - image-build-xpu
 steps:
 - label: Distributed Model Tests (2 GPUs)
-  timeout_in_minutes: 60
-  working_dir: .
-  num_devices: 2
   device: intel_gpu
+  timeout_in_minutes: 60
+  num_devices: 2
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
