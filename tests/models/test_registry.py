@@ -134,6 +134,25 @@ def test_registry_is_pp(model_arch, is_pp, init_cuda):
             )
 
 
+@create_new_process_for_each_test()
+@pytest.mark.parametrize(
+    "model_arch,supported",
+    [
+        # ReplaySSM is opt-in per model; Nemotron-H (Mamba2) and Qwen3.5 (GDN)
+        # set the flag today.
+        ("NemotronHForCausalLM", True),
+        ("Qwen3_5ForConditionalGeneration", True),
+        ("Qwen3_5MoeForConditionalGeneration", True),
+        ("Mamba2ForCausalLM", False),
+        ("Zamba2ForCausalLM", False),
+    ],
+)
+def test_registry_supports_replayssm(model_arch, supported):
+    model_info = ModelRegistry._try_inspect_model_cls(model_arch)
+    assert model_info is not None
+    assert model_info.supports_replayssm is supported
+
+
 def test_lazy_modelinfo_package_hash_includes_submodules(tmp_path):
     package_dir = tmp_path / "model_package"
     package_dir.mkdir()

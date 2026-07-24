@@ -65,6 +65,11 @@ class GDNAttentionMetadata:
 
     num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
 
+    # Per-decode-row ring write position and flush flag for the cached decode
+    # kernel. shape: [num_decodes]; None unless use_replayssm is enabled.
+    write_pos_d: torch.Tensor | None = None
+    is_flush_d: torch.Tensor | None = None
+
     # Pre-computed FLA chunk metadata (avoids GPU->CPU sync in prepare_chunk_indices)
     chunk_indices: torch.Tensor | None = None
     chunk_offsets: torch.Tensor | None = None
@@ -165,6 +170,35 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             device=device,
         )
 
+        # Cached decode kernel: persistent per-decode-row write position and
+        # flush flag. write_pos is derived per request each step so recycled
+        # paged blocks need no zero-init.
+        self.use_replayssm: bool = vllm_config.cache_config.use_replayssm
+        self.replayssm_buffer_len: int | None = (
+            vllm_config.cache_config.replayssm_buffer_len
+            if self.use_replayssm
+            else None
+        )
+        if self.use_replayssm and vllm_config.mamba_config.enable_stochastic_rounding:
+            # The GDN cached decode kernel does not implement stochastic
+            # rounding yet (planned in the CuteDSL follow-up).
+            raise ValueError(
+                "--use-replayssm with --enable-mamba-cache-stochastic-rounding "
+                "is not supported for GDN models yet; use fp32 SSM state or drop "
+                "stochastic rounding."
+            )
+        if self.use_replayssm:
+            self.decode_write_pos_d: torch.Tensor = torch.empty(
+                (self.decode_cudagraph_max_bs,),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.decode_is_flush_d: torch.Tensor = torch.empty(
+                (self.decode_cudagraph_max_bs,),
+                dtype=torch.int8,
+                device=device,
+            )
+
     def build(  # type: ignore[override]
         self,
         common_prefix_len: int,
@@ -209,8 +243,13 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 )
 
         if spec_sequence_masks is None:
+            # ReplaySSM routes single-token prefill-as-decode rows to prefill.
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-                split_decodes_and_prefills(m, decode_threshold=1)
+                split_decodes_and_prefills(
+                    m,
+                    decode_threshold=1,
+                    treat_short_extends_as_decodes=not self.use_replayssm,
+                )
             )
             num_spec_decode_tokens = 0
             spec_token_indx = None
@@ -412,6 +451,68 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             f"num_decodes: {num_decodes}, num_spec_decodes: {num_spec_decodes}"
         )
 
+        # Cached decode kernel: write_pos = decode steps since the ring's last
+        # full-state write, mod replayssm_buffer_len. decode_base re-anchors after
+        # preemption; in align mode it also re-anchors at each block start so the
+        # ring restarts empty per block. is_flush is a kernel input, not derived.
+        write_pos_d = None
+        is_flush_d = None
+        if self.use_replayssm and spec_sequence_masks is None and num_decodes > 0:
+            decode_base_cpu = m.replayssm_decode_base_cpu
+            num_computed_tokens_cpu = m._num_computed_tokens_cpu
+            if decode_base_cpu is None or num_computed_tokens_cpu is None:
+                raise ValueError(
+                    "use_replayssm requires CPU decode-base and "
+                    "computed-token counts to derive decode write positions"
+                )
+            num_computed_d = num_computed_tokens_cpu[:num_decodes]
+            decode_base_d = decode_base_cpu[:num_decodes]
+            align_mode = self.vllm_config.cache_config.mamba_cache_mode == "align"
+            block_size = self.kv_cache_spec.block_size
+            if align_mode:
+                effective_base = torch.maximum(
+                    decode_base_d, (num_computed_d // block_size) * block_size
+                )
+            else:
+                effective_base = decode_base_d
+            decode_steps_cpu = num_computed_d - effective_base
+            query_lens_cpu = (
+                query_start_loc_cpu[1 : num_decodes + 1]
+                - query_start_loc_cpu[:num_decodes]
+            )
+            valid_decode_rows = query_lens_cpu > 0
+            # A single-token prefill row replayed as decode has decode_steps < 0;
+            # force a one-token flush (write_pos=0, is_flush=1) off the checkpoint.
+            leftover_prompt = valid_decode_rows & (decode_steps_cpu < 0)
+            decode_steps_cpu = torch.where(
+                valid_decode_rows & ~leftover_prompt,
+                decode_steps_cpu,
+                torch.zeros_like(decode_steps_cpu),
+            )
+            assert self.replayssm_buffer_len is not None
+            write_pos_cpu = torch.remainder(decode_steps_cpu, self.replayssm_buffer_len)
+            is_flush_cpu = (
+                write_pos_cpu == self.replayssm_buffer_len - 1
+            ) | leftover_prompt
+            if align_mode:
+                # Force a flush on the step completing a block so the boundary
+                # state is materialized for prefix caching.
+                is_flush_cpu = is_flush_cpu | (
+                    valid_decode_rows
+                    & ((num_computed_d + query_lens_cpu) % block_size == 0)
+                )
+            is_flush_cpu = is_flush_cpu.to(torch.int8)
+            write_pos_d = async_tensor_h2d(
+                write_pos_cpu.to(torch.int32).tolist(),
+                dtype=torch.int32,
+                device=query_start_loc.device,
+            )
+            is_flush_d = async_tensor_h2d(
+                is_flush_cpu.tolist(),
+                dtype=torch.int8,
+                device=query_start_loc.device,
+            )
+
         # Prepare per-request tensors for cudagraph. m.num_actual_tokens is
         # token-padded for FULL graph replay, but the GDN state/query/accepted
         # metadata below is indexed by request.
@@ -484,6 +585,21 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
             non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
 
+            if self.use_replayssm:
+                assert write_pos_d is not None and is_flush_d is not None
+                self.decode_write_pos_d[:num_decodes].copy_(
+                    write_pos_d, non_blocking=True
+                )
+                self.decode_is_flush_d[:num_decodes].copy_(
+                    is_flush_d, non_blocking=True
+                )
+                write_pos_d = self.decode_write_pos_d[:batch_size]
+                is_flush_d = self.decode_is_flush_d[:batch_size]
+                # Padded rows map to NULL_BLOCK_ID and hit the kernel's early
+                # return, so their values are never read; zero is fine.
+                write_pos_d[num_decodes:].fill_(0)
+                is_flush_d[num_decodes:].fill_(0)
+
         attn_metadata = GDNAttentionMetadata(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
@@ -506,6 +622,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_token_indx=spec_token_indx,
             non_spec_token_indx=non_spec_token_indx,
             num_accepted_tokens=num_accepted_tokens,
+            write_pos_d=write_pos_d,
+            is_flush_d=is_flush_d,
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,

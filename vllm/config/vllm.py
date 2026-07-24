@@ -38,7 +38,7 @@ from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
 from .load import LoadConfig
 from .lora import LoRAConfig
-from .mamba import MambaConfig
+from .mamba import MambaBackendEnum, MambaConfig
 from .model import ModelConfig
 from .observability import ObservabilityConfig
 from .offload import OffloadConfig
@@ -2300,6 +2300,38 @@ class VllmConfig:
         if mamba_block_size_is_set and not self.cache_config.enable_prefix_caching:
             raise ValueError(
                 "--mamba-block-size can only be set with --enable-prefix-caching"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_mamba_cached_kernel(self) -> "VllmConfig":
+        if not self.cache_config.use_replayssm:
+            return self
+        # ReplaySSM adds a 3-tensor ring to the mamba state; only models that
+        # opt in (supports_replayssm) build a consistent shape on both the layer
+        # and config paths. Reject others so the mamba page size cannot desync.
+        if self.model_config is not None and not self.model_config.supports_replayssm:
+            raise ValueError(
+                "--use-replayssm is only supported for models that declare "
+                "ReplaySSM support via the SupportsReplaySSM interface "
+                f"(got architecture {self.model_config.architecture!r})"
+            )
+        if self.cache_config.mamba_cache_mode == "all":
+            raise ValueError(
+                "--use-replayssm supports prefix caching only in align mode; "
+                "pass --mamba-cache-mode align"
+            )
+        if self.num_speculative_tokens > 0:
+            raise ValueError("--use-replayssm does not support speculative decoding")
+        if self.mamba_config.backend != MambaBackendEnum.TRITON:
+            raise ValueError("--use-replayssm requires --mamba-backend triton")
+        if (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.is_kv_transfer_instance
+        ):
+            raise ValueError(
+                "--use-replayssm is incompatible with KV connectors "
+                "(P/D disaggregation, KV cache offload)"
             )
         return self
 
