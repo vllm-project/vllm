@@ -8,6 +8,8 @@ from typing import Annotated, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
+import torchvision.transforms as T
+from PIL import Image
 from transformers import PretrainedConfig
 
 from vllm.config import VllmConfig
@@ -15,10 +17,13 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.siglip import SiglipVisionModel
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.image import convert_image_mode
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.internvl import (
     InternVLImageProcessor,
     InternVLProcessor,
+    dynamic_preprocess_internvl,
+    get_internvl_target_ratios,
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -34,6 +39,73 @@ from .internvl import (
     BaseInternVLProcessingInfo,
 )
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
+
+# SigLIP2 normalization constants (from preprocessor_config.json)
+SIGLIP2_MEAN = (0.5, 0.5, 0.5)
+SIGLIP2_STD = (0.5, 0.5, 0.5)
+
+
+def _build_eagle2_5_transform(input_size: int) -> T.Compose:
+    """Build image transform with SigLIP2 normalization for Eagle2.5-VL."""
+    return T.Compose(
+        [
+            T.Lambda(lambda img: convert_image_mode(img, "RGB")),
+            T.Resize(
+                (input_size, input_size), interpolation=T.InterpolationMode.BICUBIC
+            ),
+            T.ToTensor(),
+            T.Normalize(mean=SIGLIP2_MEAN, std=SIGLIP2_STD),
+        ]
+    )
+
+
+def _image_to_pixel_values_eagle2_5(
+    image: Image.Image,
+    *,
+    input_size: int,
+    min_num: int,
+    max_num: int,
+    use_thumbnail: bool,
+) -> torch.Tensor:
+    """Convert image to pixel values with SigLIP2 normalization."""
+    target_ratios = get_internvl_target_ratios(min_num, max_num)
+    transform = _build_eagle2_5_transform(input_size)
+    images = dynamic_preprocess_internvl(
+        image,
+        target_ratios=target_ratios,
+        image_size=input_size,
+        use_thumbnail=use_thumbnail,
+    )
+    return torch.stack([transform(img) for img in images])
+
+
+class Eagle2_5_VLImageProcessor(InternVLImageProcessor):
+    """Image processor for Eagle2.5-VL with SigLIP2 normalization."""
+
+    def _images_to_pixel_values_lst(
+        self,
+        images: list[Image.Image],
+        min_dynamic_patch: int | None = None,
+        max_dynamic_patch: int | None = None,
+        dynamic_image_size: bool | None = None,
+    ) -> list[torch.Tensor]:
+        min_num, max_num = self.resolve_min_max_num(
+            min_dynamic_patch=min_dynamic_patch,
+            max_dynamic_patch=max_dynamic_patch,
+            dynamic_image_size=dynamic_image_size,
+            use_thumbnail=False,  # Applied in _image_to_pixel_values_eagle2_5
+        )
+
+        return [
+            _image_to_pixel_values_eagle2_5(
+                image,
+                input_size=self.image_size,
+                min_num=min_num,
+                max_num=max_num,
+                use_thumbnail=self.use_thumbnail,
+            )
+            for image in images
+        ]
 
 
 class Eagle2_5_VLImagePixelInputs(TensorSchema):
@@ -84,7 +156,7 @@ class Eagle2_5_VLProcessingInfo(BaseInternVLProcessingInfo):
         kwargs.setdefault("dynamic_image_size", config.dynamic_image_size)
         kwargs.setdefault("use_thumbnail", config.use_thumbnail)
 
-        return InternVLImageProcessor(**kwargs)
+        return Eagle2_5_VLImageProcessor(**kwargs)
 
     def get_hf_processor(self, **kwargs) -> InternVLProcessor:
         config = self.get_hf_config()
