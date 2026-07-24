@@ -155,6 +155,17 @@ qwen3_a3b_fp8 = ModelFusionInfo(
     ),
 )
 
+qwen3_vl_2b = ModelFusionInfo(
+    model_name="Qwen/Qwen3-VL-2B-Instruct",
+    # Qwen3-VL is multimodal; reduce only the text decoder layers. It uses
+    # interleaved mRoPE + QK-norm, so it exercises norm_mrope_fusion.
+    hf_overrides=lambda n_layers: {"text_config": {"num_hidden_layers": n_layers}},
+    matches=lambda n_layers: Matches(
+        # One QK-norm + mRoPE fusion site per text decoder layer.
+        norm_mrope_fusion=n_layers,
+    ),
+)
+
 deepseek_coder_v2_lite_fp8 = ModelFusionInfo(
     model_name="RedHatAI/DeepSeek-Coder-V2-Lite-Instruct-FP8",
     matches=lambda n_layers: Matches(
