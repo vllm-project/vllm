@@ -146,10 +146,20 @@ def kernel_paged_attention_2d(
 
     num_blocks = cdiv_fn(seq_len, BLOCK_SIZE)
 
+    # Sliding-window decode: tokens below (seq_len - SLIDING_WINDOW) are fully
+    # masked out below, so their blocks cannot influence the output. Start the
+    # loop at the window edge so their K/V is never read; the score mask still
+    # trims the partial first block. Decode is bandwidth-bound, so this makes
+    # windowed-layer latency independent of context length.
+    if SLIDING_WINDOW > 0:
+        start_block = tl.maximum(seq_len - SLIDING_WINDOW, 0) // BLOCK_SIZE
+    else:
+        start_block = 0
+
     offs_n = tl.arange(0, BLOCK_SIZE)
     offs_d = tl.arange(0, HEAD_SIZE_PADDED)
     # iterate through tiles
-    for j in range(0, num_blocks):
+    for j in range(start_block, num_blocks):
         start_n = j * BLOCK_SIZE
         # Calculate the logical location within a non-standard physical block,
         # such as 544 in Qwen/Qwen3-Next-80B-A3B-Thinking.
