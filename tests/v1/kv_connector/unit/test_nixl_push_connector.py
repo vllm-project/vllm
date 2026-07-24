@@ -993,59 +993,90 @@ class TestPushWriterMlaReplication:
 
 class TestPushPrefixCaching:
     """Partial prefix-cache hit on D: D preallocates only its *uncomputed*
-    blocks (``get_unhashed_block_ids_all_groups``), so on a partial hit it
-    registers fewer blocks than P's full sequence. P must then WRITE only the
-    *tail* of its sequence into D's slots -- mirroring pull-mode
-    ``_apply_prefix_caching`` (end-trim), never a front-trim which would write
-    P's cached prefix into D's uncomputed suffix slots.
+    blocks, so on a partial hit it registers fewer blocks than P's full
+    sequence. P must WRITE only the *tail* of its sequence into D's slots --
+    mirroring pull-mode ``_apply_prefix_caching`` (end-trim), never a front-trim
+    which would write P's cached prefix into D's uncomputed suffix slots.
+
+    The trim runs inside ``_xfer_blocks``, so these tests drive the real
+    ``_xfer_blocks_for_req`` path and stub only the NIXL WRITE. With one region
+    and 1:1 ratios ``_compute_desc_ids`` is the identity map, so the descs
+    captured from ``make_prepped_xfer`` are exactly the (trimmed) block IDs.
     """
 
     @staticmethod
-    def _worker_capturing_xfer():
+    def _worker_driving_xfer(engine_id: str = "decode-engine"):
         from types import SimpleNamespace
+
+        from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
+            TPMapping,
+        )
 
         w = _StubWriterWorker.fresh()
         w._has_mamba = False
+        w.use_mla = False
+        w.block_size = 16
+        w.num_regions = 1
         w._physical_blocks_per_logical_kv_block = 1
-        # D's physical-per-logical ratio is read via transfer_topo in
-        # _do_start_push_kv; homogeneous ratio here.
+
         w.transfer_topo = MagicMock()
         w.transfer_topo.get_engine_info.return_value = SimpleNamespace(
-            remote_physical_blocks_per_logical=1
+            remote_physical_blocks_per_logical=1,
+            remote_block_size=16,
+            remote_tp_size=1,
         )
-        # Skip the real P->D handshake and logical->kernel expansion; we only
-        # care about the prefix-cache trim applied before the transfer.
+        w.transfer_topo.tp_ratio.return_value = 1
+        w.transfer_topo.block_size_ratio.return_value = 1
+        w.tp_mappings = {
+            engine_id: TPMapping(
+                source_ranks_per_group=((0,),),
+                all_source_ranks=(0,),
+                rank_to_attention_slot={0: 0},
+                rank_offset_factor=0,
+            )
+        }
+        w.dst_num_blocks = {engine_id: 10_000, w.engine_id: 10_000}
+        w.dst_xfer_side_handles = {engine_id: {0: 5000}}
+        w.src_xfer_handles_by_block_size = {16: 2000}
+
+        # Stub only the NIXL WRITE; kernel expansion, prefix-cache trim, desc
+        # computation and count assertions all run for real.
+        w.nixl_wrapper = MagicMock()
+        w.nixl_wrapper.make_prepped_xfer.return_value = 7
         w._ensure_d_handshake = lambda *a, **k: True
         w._logical_to_kernel_block_ids = lambda x: x
-        captured: dict[str, Any] = {}
-        w._xfer_blocks_for_req = lambda req_id, meta: captured.update(
-            req_id=req_id, meta=meta
-        )
-        return w, captured
+        w._logical_to_remote_kernel_block_ids = lambda block_ids, ratio: block_ids
+        return w, engine_id
+
+    @staticmethod
+    def _written_block_ids(w) -> tuple[list[int], list[int]]:
+        """Return the (local, remote) block IDs handed to the NIXL WRITE."""
+        args, _ = w.nixl_wrapper.make_prepped_xfer.call_args
+        # ("WRITE", local_handle, local_descs, remote_handle, remote_descs)
+        return list(args[2]), list(args[4])
 
     def test_partial_prefix_hit_end_trims_producer_blocks(self):
         """D registered only its 2 uncomputed suffix blocks; P finished the
-        full 5-block sequence. P must be trimmed to its LAST 2 blocks."""
-        w, captured = self._worker_capturing_xfer()
+        full 5-block sequence. P must WRITE its LAST 2 blocks into D's slots."""
+        w, _ = self._worker_driving_xfer()
         reg = _registration_data("req-pc", local_block_ids=([500, 501],))
 
-        # Call the real _do_start_push_kv (the stub subclass overrides it).
         NixlPushConnectorWorker._do_start_push_kv(
             w, "req-pc", ([10, 11, 12, 13, 14],), reg
         )
 
-        meta = captured["meta"]
+        local, remote = self._written_block_ids(w)
         # End-trim (suffix), NOT front-trim: [13, 14], not [10, 11].
-        assert list(meta.local_block_ids) == [[13, 14]]
-        assert meta.remote.block_ids == ([500, 501],)
+        assert local == [13, 14]
+        assert remote == [500, 501]
 
     def test_no_prefix_hit_leaves_blocks_untrimmed(self):
         """Equal counts (no prefix cache hit on D): nothing is trimmed."""
-        w, captured = self._worker_capturing_xfer()
+        w, _ = self._worker_driving_xfer()
         reg = _registration_data("req-full", local_block_ids=([500, 501, 502],))
 
         NixlPushConnectorWorker._do_start_push_kv(w, "req-full", ([10, 11, 12],), reg)
 
-        meta = captured["meta"]
-        assert list(meta.local_block_ids) == [[10, 11, 12]]
-        assert meta.remote.block_ids == ([500, 501, 502],)
+        local, remote = self._written_block_ids(w)
+        assert local == [10, 11, 12]
+        assert remote == [500, 501, 502]

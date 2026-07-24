@@ -410,22 +410,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         ):
             return
 
-        # Both sides are kept in logical form here; ``_xfer_blocks_for_req``
-        # expands each side using the appropriate ratio.
         logical_local = self._as_grouped_block_ids(local_block_ids)
         logical_remote = self._as_grouped_block_ids(remote_block_ids)
-
-        # Prefix caching: D allocated only uncached blocks, so on a partial hit it
-        # sends fewer than P's. End-trim P's blocks to that same suffix so we WRITE only
-        # the uncomputed tail into D's slots.
-        assert self.transfer_topo is not None
-        decode_info = self.transfer_topo.get_engine_info(decode_engine_id)
-        logical_remote, logical_local = self._apply_prefix_caching(
-            decode_block_ids=logical_remote,
-            prefill_block_ids=logical_local,
-            decode_physical_per_logical=decode_info.remote_physical_blocks_per_logical,
-            prefill_physical_per_logical=self._physical_blocks_per_logical_kv_block,
-        )
 
         physical_local = self._logical_to_kernel_block_ids(logical_local)
 
@@ -641,7 +627,14 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             logger.warning("No blocks to push for request %s", request_id)
             return None
 
-        # Per-group block counts are already aligned in `_apply_prefix_caching`
+        # Prefix caching runs here on kernel block IDs, after logical->kernel expansion
+        remote_block_ids, local_block_ids = self._apply_prefix_caching(
+            decode_block_ids=remote_block_ids,
+            prefill_block_ids=local_block_ids,
+            decode_physical_per_logical=remote_info.remote_physical_blocks_per_logical,
+            prefill_physical_per_logical=self._physical_blocks_per_logical_kv_block,
+        )
+
         local_block_ids = list(local_block_ids)
         remote_block_ids = list(remote_block_ids)
         assert len(local_block_ids) == len(remote_block_ids), (

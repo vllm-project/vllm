@@ -2208,6 +2208,10 @@ class NixlBaseConnectorWorker:
     ) -> tuple[BlockIds, BlockIds]:
         """Trim block ID lists so only the uncomputed suffix is transferred.
 
+        Inputs are *kernel* (physical) block IDs, already expanded from logical IDs
+        with each side's physical-per-logical ratio. Both pull and push call this after
+        that expansion so the trim happens at kernel granularity.
+
         The prefix-cache hit is always on the decode (D) side, so ``decode``
         holds only its uncomputed blocks while prefill (P) holds the full
         sequence. This is mode-independent: pull passes its own (D) blocks as
