@@ -1,0 +1,112 @@
+# =============================================================================
+# Model catalog for the vLLM disaggregated (P/D) inference CI.
+# -----------------------------------------------------------------------------
+# Loaded by vllm_disagg.sh for the selected MODEL_NAME. WIDE_EP_MODE selects the
+# flag set (0 -> tp keys, 1 -> ep keys):
+#   tp -> base_flags + prefill.tp / decode.tp
+#   ep -> base_flags + prefill.ep / decode.ep
+#
+# Keep ONLY model-specific perf flags here. The launcher owns everything
+# topological / mode-structural:
+#   - tp: --host/--port, --tensor-parallel-size, --kv-transfer-config
+#   - ep: --tp 1, --data-parallel-size[-local], --data-parallel-address/-rpc-port,
+#         --data-parallel-start-rank/--headless (children), --enable-expert-parallel,
+#         --all2all-backend mori, --no-enable-prefix-caching,
+#         --api-server-count + --kv-transfer-config (masters only)
+# Do NOT put any of those in this file.
+#
+# Format: a top-level `models:` list. The launcher selects the entry whose
+# `model:` matches MODEL_NAME. Each entry:
+#   model              : name (must match MODEL_NAME; also the dir under MODEL_DIR)
+#   env                : model/arch-specific environment variables. The launcher
+#                        exports these BEFORE `vllm serve`, but only if they are
+#                        not already set, so precedence is:
+#                            caller/inline env  >  models.yaml env:
+#                        (Transport/fabric/engine env stays in cluster.sh,
+#                         e.g. VLLM_MORIIO_CONNECTOR_READ_MODE, VLLM_USE_V1.)
+#   base_flags         : always applied (both roles, both modes)
+#   prefill/decode.<tp|ep> : role + mode specific perf flags
+#   experimental_flags : optional extra flags (omit if empty)
+# =============================================================================
+
+models:
+  - model: DeepSeek-V3
+    env:
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_USE_AITER_MLA: "1"
+      VLLM_ROCM_USE_AITER_MOE: "1"
+      VLLM_ROCM_USE_AITER_RMSNORM: "1"
+      VLLM_ROCM_USE_AITER_PAGED_ATTN: "0"
+      VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "0"
+      VLLM_USE_AITER_TRITON_SILU_MUL: "0"
+    base_flags: "--trust-remote-code --kv-cache-dtype fp8"
+    prefill:
+      tp: "--gpu-memory-utilization 0.85"
+      ep: "--gpu-memory-utilization 0.85 --enforce-eager"
+    decode:
+      tp: "--gpu-memory-utilization 0.85"
+      ep: '--gpu-memory-utilization 0.75 --enforce-eager'
+        #ep: '--gpu-memory-utilization 0.75 --compilation-config {"cudagraph_mode":"PIECEWISE","custom_ops":["+quant_fp8"]}'
+
+  - model: DeepSeek-V4-Pro
+    env:
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_USE_AITER_MLA: "1"
+      VLLM_ROCM_USE_AITER_MOE: "1"
+      VLLM_ROCM_USE_AITER_RMSNORM: "1"
+      VLLM_ROCM_USE_AITER_PAGED_ATTN: "0"
+      VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "0"
+      VLLM_USE_AITER_TRITON_SILU_MUL: "0"
+    base_flags: "--trust-remote-code --kv-cache-dtype fp8 --distributed-executor-backend mp --max-num-seqs 512 --max-num-batched-tokens 8192 --max-model-len 32768 --compilation-config {\"mode\":3,\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}"
+    prefill:
+      tp: "--gpu-memory-utilization 0.9"
+    decode:
+      tp: "--gpu-memory-utilization 0.9"
+
+  - model: MiniMax-M3-MXFP8
+    env:
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_USE_AITER_MOE: "1"
+      VLLM_ROCM_USE_AITER_RMSNORM: "1"
+    base_flags: "--trust-remote-code --attention-backend TRITON_ATTN --block-size 128"
+    prefill:
+      tp: "--gpu-memory-utilization 0.85"
+    decode:
+      tp: "--gpu-memory-utilization 0.85"
+
+  - model: DeepSeek-R1-MXFP4
+    env:
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_USE_AITER_MLA: "1"
+      VLLM_ROCM_USE_AITER_MOE: "1"
+      VLLM_ROCM_USE_AITER_RMSNORM: "1"
+    base_flags: "--trust-remote-code --kv-cache-dtype fp8"
+    prefill:
+      tp: "--gpu-memory-utilization 0.85"
+    decode:
+      tp: "--gpu-memory-utilization 0.85"
+
+  - model: Kimi-K2.5-MXFP4
+    env:
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_USE_AITER_MOE: "1"
+      VLLM_ROCM_USE_AITER_RMSNORM: "1"
+    base_flags: "--trust-remote-code"
+    prefill:
+      tp: "--gpu-memory-utilization 0.85"
+    decode:
+      tp: "--gpu-memory-utilization 0.85"
+
+  - model: Kimi-K2.6-MXFP4
+    env:
+      VLLM_ROCM_USE_AITER: "1"
+      AMDGCN_USE_BUFFER_OPS: "1"
+      VLLM_ROCM_USE_AITER_MLA: "1"
+      VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+      VLLM_ROCM_USE_SKINNY_GEMM: "0"
+      VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+    base_flags: "--trust-remote-code --kv-cache-dtype fp8 --mm-encoder-tp-mode data --block-size 1 --attention-backend ROCM_AITER_MLA"
+    prefill:
+      tp: "--gpu-memory-utilization 0.9"
+    decode:
+      tp: "--gpu-memory-utilization 0.9"
