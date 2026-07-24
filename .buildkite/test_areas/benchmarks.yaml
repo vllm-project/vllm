@@ -4,7 +4,7 @@ depends_on:
 steps:
 - label: Benchmarks CLI Test
   key: benchmarks-cli-test
-  timeout_in_minutes: 30
+  timeout_in_minutes: 45
   device: h200_18gb
   source_file_dependencies:
   - vllm/
@@ -13,7 +13,9 @@ steps:
   - pytest -v -s benchmarks/
   mirror:
     amd:
+      dind: false
       device: mi300_1
+      timeout_in_minutes: 40
       depends_on:
       - image-build-amd
 
