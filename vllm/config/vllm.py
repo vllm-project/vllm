@@ -1268,6 +1268,21 @@ class VllmConfig:
         self.kernel_config.set_platform_defaults(self)
 
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
+
+        # flashinfer_b12x only beats CUTLASS with autotuning, so guarantee it
+        # when explicitly requested instead of serving the slow fallback.
+        if "flashinfer_b12x" in (
+            self.kernel_config.linear_backend,
+            self.kernel_config.moe_backend,
+        ):
+            if self.kernel_config.enable_flashinfer_autotune is None:
+                self.kernel_config.enable_flashinfer_autotune = True
+            elif self.kernel_config.enable_flashinfer_autotune is False:
+                logger.warning(
+                    "flashinfer_b12x requested with autotuning off; expect "
+                    "~3.6x slower prefill from heuristic fallback tactics."
+                )
+
         self._apply_optimization_level_defaults(default_config)
         if self.kernel_config.enable_flashinfer_autotune is None:
             raise ValueError(
