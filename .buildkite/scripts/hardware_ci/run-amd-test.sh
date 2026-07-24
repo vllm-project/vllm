@@ -400,10 +400,6 @@ initialize_native_environment() {
   native_root="/tmp/vllm-native-${job_id}"
   TMPDIR="/tmp/vllm-${job_id_suffix}/tmp"
   VLLM_RPC_BASE_PATH="/tmp"
-  # Buildkite agent hooks pre-set VLLM_CACHE_ROOT (and friends) to the shared
-  # Hugging Face NFS mount. Use := only for model/checkpoint caches; compile
-  # artifacts must live on local disk or Inductor combo-kernel benchmarking can
-  # hit stale file handles during torch.compile (see MI300 spec decode failures).
   TORCHINDUCTOR_CACHE_DIR="${native_root}/cache/torchinductor"
   TRITON_CACHE_DIR="${native_root}/cache/triton"
   VLLM_CACHE_ROOT="${native_root}/cache/vllm"
