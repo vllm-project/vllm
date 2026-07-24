@@ -641,13 +641,6 @@ class TestHarmonyPreambleStreaming:
         type_names = [e.type for e in events]
         assert "response.output_text.done" not in type_names
 
-    @pytest.mark.xfail(
-        reason=(
-            "TODO: Ensure added/in-progress events are emitted for zero-delta items."
-            "So we can safely emit done events for zero-delta items."
-        ),
-        strict=True,
-    )
     def test_zero_delta_items_should_preserve_streaming_lifecycle(
         self,
     ) -> None:
