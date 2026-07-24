@@ -211,9 +211,7 @@ class NixlBaseConnectorWorker:
                     handle.append((addr + p_idx * chunk, chunk, dev))
             yield handle
 
-    def _needs_split_local_xfer_handles(
-        self, tp_ratio: int, plan: TPMapping
-    ) -> bool:
+    def _needs_split_local_xfer_handles(self, tp_ratio: int, plan: TPMapping) -> bool:
         """Whether reads need per-source slices of the local KV region.
 
         Pure MLA attention is replicated across TP ranks and writes the whole
@@ -222,9 +220,7 @@ class NixlBaseConnectorWorker:
         splitting the local region. Hybrid MLA+SSM is different: its mapping
         contains multiple source ranks for the sharded SSM state.
         """
-        return tp_ratio < 0 and (
-            not self.use_mla or len(plan.all_source_ranks) > 1
-        )
+        return tp_ratio < 0 and (not self.use_mla or len(plan.all_source_ranks) > 1)
 
     def _fa_desc_replicated(self, num_fa_descs: int) -> list[bool]:
         """Per-FA-descriptor replicate flag, in _build_fa_local emission order
@@ -649,6 +645,7 @@ class NixlBaseConnectorWorker:
             self.pp_rank,
             self.pp_size,
             remote_pp_size,
+            notif_only=notif_agents_only,
         )
         with zmq_ctx(zmq.REQ, path) as sock:
             for remote_pp_rank, remote_worker_key in itertools.product(
@@ -792,7 +789,10 @@ class NixlBaseConnectorWorker:
                 # Register Remote agent.
                 if notif_agents_only:
                     remote_agent_name = self._add_notif_only_remote_agent(
-                        metadata, remote_tp_size, remote_pp_rank
+                        metadata,
+                        remote_tp_size,
+                        remote_pp_rank,
+                        remote_pp_size,
                     )
                 else:
                     remote_agent_name = self.add_remote_agent(
@@ -830,6 +830,7 @@ class NixlBaseConnectorWorker:
         metadata: NixlAgentMetadata,
         remote_tp_size: int,
         remote_pp_rank: int = 0,
+        remote_pp_size: int = 1,
     ) -> str:
         """Load a remote agent for notifs only on the push-mode decode side.
 
@@ -848,6 +849,7 @@ class NixlBaseConnectorWorker:
                 remote_dcp_size=metadata.dcp_size,
                 remote_pcp_size=metadata.pcp_size,
                 remote_pp_rank=remote_pp_rank,
+                remote_pp_size=remote_pp_size,
             ),
         )
         return self.nixl_wrapper.add_remote_agent(metadata.agent_metadata)
@@ -1727,6 +1729,7 @@ class NixlBaseConnectorWorker:
             remote_dcp_size=remote_dcp_size,
             remote_pcp_size=remote_pcp_size,
             remote_pp_rank=remote_pp_rank,
+            remote_pp_size=remote_pp_size,
         )
         transfer_topo.register_remote_engine(engine_id, transfer_info)
         logger.info(

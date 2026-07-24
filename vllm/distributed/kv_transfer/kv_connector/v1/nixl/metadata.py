@@ -47,8 +47,10 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   5: Add remote_blocks_expiry_time to kv_transfer_params + handshake
 #      clock-sync timestamp
 #   6: Add DCP/PCP rank metadata for context-parallel KV transfer
+#   7: Add PP/PCP/DCP topology to push registration and interpret notification
+#      counts as physical producer/consumer counts
 #
-NIXL_CONNECTOR_VERSION: int = 6
+NIXL_CONNECTOR_VERSION: int = 7
 
 
 @dataclass

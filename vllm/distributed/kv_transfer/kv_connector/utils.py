@@ -390,6 +390,9 @@ class EngineTransferInfo:
     remote_pp_rank: int = 0
     """Remote producer PP rank for this engine."""
 
+    remote_pp_size: int = 1
+    """Number of pipeline stages in the remote engine."""
+
     start_layer: int = 0
     """Global index of the first layer owned by this PP rank."""
 
@@ -524,6 +527,8 @@ class TransferTopology:
         local_pp_rank: int,
         local_pp_size: int,
         remote_pp_size: int,
+        *,
+        notif_only: bool = False,
     ) -> list[int]:
         """Select remote PP stages whose layer regions match the local stage."""
         if local_pp_size <= 0 or remote_pp_size <= 0:
@@ -535,10 +540,27 @@ class TransferTopology:
             return [local_pp_rank]
         if remote_pp_size == 1:
             return [0]
+        if notif_only and local_pp_size == 1:
+            return list(range(remote_pp_size))
         raise NotImplementedError(
             "NIXL cannot map one local PP stage to multiple remote PP stages: "
             f"local_pp_rank={local_pp_rank}, local_pp_size={local_pp_size}, "
             f"remote_pp_size={remote_pp_size}"
+        )
+
+    @staticmethod
+    def get_local_pp_producer_count(
+        local_pp_size: int,
+        remote_pp_size: int,
+    ) -> int:
+        """Count local PP stages mapped to one remote PP stage."""
+        if local_pp_size == remote_pp_size:
+            return 1
+        if remote_pp_size == 1:
+            return local_pp_size
+        raise NotImplementedError(
+            "NIXL cannot map one local PP stage to multiple remote PP stages: "
+            f"local_pp_size={local_pp_size}, remote_pp_size={remote_pp_size}"
         )
 
     def unregister_remote_engine(self, remote_engine_id: EngineId) -> None:
