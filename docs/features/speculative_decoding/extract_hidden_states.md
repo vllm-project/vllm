@@ -110,6 +110,7 @@ The `kv_connector_extra_config` dict accepts these server-level options:
 | --- | --- | --- |
 | `shared_storage_path` | `/tmp` | Directory where hidden state files are saved (used when `hidden_states_path` is not set per-request) |
 | `allow_custom_save_path` | `False` | Allow API clients to specify custom file paths via `hidden_states_path`. When disabled, client-provided paths are ignored with a warning. Enable only with trusted clients — custom paths can write to arbitrary locations on the server. |
+| `max_device_staging_bytes` | `268435456` (256 MiB) | Maximum gathered hidden-state payload per device chunk. Reduce this value when exporting long contexts under tight device-memory headroom. Indexing may require additional backend-specific workspace. |
 | `num_writer_threads` | `8` | Thread pool size for async disk writes |
 | `use_synchronization_lock` | `True` | Use file locks so concurrent readers block until writes complete. Can be disabled for batch generation where synchronization is not needed. |
 
