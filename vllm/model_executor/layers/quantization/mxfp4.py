@@ -78,6 +78,7 @@ class Mxfp4Config(QuantizationConfig):
                 prefix=prefix,
                 ignored_layers=self.ignored_layers,
                 fused_mapping=self.packed_modules_mapping,
+                skip_with_substr=True,
             ):
                 return UnquantizedLinearMethod()
             logger.debug_once(
