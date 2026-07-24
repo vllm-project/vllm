@@ -686,7 +686,6 @@ class EngineArgs:
     override_attention_dtype: str | None = ModelConfig.override_attention_dtype
     attention_backend: AttentionBackendEnum | None = AttentionConfig.backend
 
-    calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
     kv_cache_dtype_skip_layers: list[str] = get_field(
         CacheConfig, "kv_cache_dtype_skip_layers"
     )
@@ -1176,9 +1175,6 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--prefix-caching-hash-algo", **cache_kwargs["prefix_caching_hash_algo"]
-        )
-        cache_group.add_argument(
-            "--calculate-kv-scales", **cache_kwargs["calculate_kv_scales"]
         )
         cache_group.add_argument(
             "--kv-cache-dtype-skip-layers", **cache_kwargs["kv_cache_dtype_skip_layers"]
@@ -1902,7 +1898,6 @@ class EngineArgs:
             sliding_window=sliding_window,
             enable_prefix_caching=self.enable_prefix_caching,
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
-            calculate_kv_scales=self.calculate_kv_scales,
             kv_cache_dtype_skip_layers=self.kv_cache_dtype_skip_layers,
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
             mamba_cache_dtype=self.mamba_cache_dtype,

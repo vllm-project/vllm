@@ -144,11 +144,6 @@ def set_default_quant_scales(layer: nn.Module, register_buffer: bool = False) ->
     layer._v_scale_cpu = torch.tensor(1.0, dtype=torch.float32)
     layer._prob_scale_float = 1.0
 
-    # Initialize q/k/v range constants used by calc_kv_scales
-    layer.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
-    layer.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
-    layer.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
-
 
 def _init_kv_cache_quant(
     layer: nn.Module,
@@ -270,10 +265,8 @@ class Attention(nn.Module, AttentionLayerBase):
         vllm_config = get_current_vllm_config()
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
-            calculate_kv_scales = cache_config.calculate_kv_scales
         else:
             kv_cache_dtype = "auto"
-            calculate_kv_scales = False
 
         # llm-compressor models declare an FP8 KV-cache scheme in their
         # checkpoint config. Honor it only when the user did not explicitly
@@ -284,10 +277,8 @@ class Attention(nn.Module, AttentionLayerBase):
         kv_cache_scheme = getattr(quant_config, "kv_cache_scheme", None)
         if kv_cache_scheme is not None and kv_cache_dtype == "auto":
             kv_cache_dtype = "fp8"
-            calculate_kv_scales = False
             if cache_config is not None:
                 cache_config.cache_dtype = "fp8"
-                cache_config.calculate_kv_scales = False
 
         # Check if per-head quant scales are required based on kv_cache_scheme
         use_per_head_quant_scales = (
@@ -312,7 +303,6 @@ class Attention(nn.Module, AttentionLayerBase):
                 skip = True
             if skip:
                 kv_cache_dtype = "auto"
-                calculate_kv_scales = False
             logger.debug(
                 "Layer %s: kv_cache_dtype=%s, sliding_window=%s",
                 prefix,
@@ -324,7 +314,6 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_cache_dtype, vllm_config.model_config
         )
         self.kv_cache_dtype = kv_cache_dtype
-        self.calculate_kv_scales = calculate_kv_scales
         if num_kv_heads is None:
             num_kv_heads = num_heads
         assert num_heads % num_kv_heads == 0, (
@@ -505,10 +494,6 @@ class Attention(nn.Module, AttentionLayerBase):
         context using
         `vllm.forward_context.get_forward_context().attn_metadata`.
         """
-        if self.calculate_kv_scales:
-            torch.ops.vllm.maybe_calc_kv_scales(
-                query, key, value, _encode_layer_name(self.layer_name)
-            )
         if output_dtype is None:
             output_dtype = query.dtype
         if self.query_quant is not None:
@@ -580,18 +565,6 @@ class Attention(nn.Module, AttentionLayerBase):
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
             )
         return output.view(-1, hidden_size)
-
-    def calc_kv_scales(self, query, key, value):
-        self._q_scale.copy_(torch.abs(query).max() / self.q_range)
-        self._k_scale.copy_(torch.abs(key).max() / self.k_range)
-        self._v_scale.copy_(torch.abs(value).max() / self.v_range)
-        self._q_scale_float = self._q_scale.item()
-        self._k_scale_float = self._k_scale.item()
-        self._v_scale_float = self._v_scale.item()
-        self._k_scale_cpu.fill_(self._k_scale_float)
-        self._v_scale_cpu.fill_(self._v_scale_float)
-        # We only calculate the scales once
-        self.calculate_kv_scales = False
 
     def extra_repr(self) -> str:
         s = f"head_size={self.impl.head_size}"  # type: ignore
@@ -691,41 +664,6 @@ class Attention(nn.Module, AttentionLayerBase):
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
             )
-
-
-def maybe_calc_kv_scales(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    layer_name: LayerNameType,
-) -> None:
-    layer_name = _resolve_layer_name(layer_name)
-    forward_context: ForwardContext = get_forward_context()
-    self = forward_context.no_compile_layers[layer_name]
-
-    # Only calculate if the layer's calculate_kv_scales flag is True
-    # This flag gets set to False after the first forward pass
-    if not self.calculate_kv_scales:
-        return
-
-    self.calc_kv_scales(query, key, value)
-
-
-def maybe_calc_kv_scales_fake(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    layer_name: LayerNameType,
-) -> None:
-    return
-
-
-direct_register_custom_op(
-    op_name="maybe_calc_kv_scales",
-    op_func=maybe_calc_kv_scales,
-    mutates_args=["query", "key", "value"],
-    fake_impl=maybe_calc_kv_scales_fake,
-)
 
 
 def get_attention_context(

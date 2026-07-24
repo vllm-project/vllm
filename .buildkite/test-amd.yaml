@@ -667,7 +667,7 @@ steps:
   - tests/compile
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s compile/fullgraph/test_full_graph.py -k 'not test_fp8_kv_scale_compile'
+  - pytest -v -s compile/fullgraph/test_full_graph.py
 
 - label: Pytorch Nightly Dependency Override Check # TBD
   timeout_in_minutes: 180
