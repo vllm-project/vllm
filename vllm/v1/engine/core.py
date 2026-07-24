@@ -1018,6 +1018,11 @@ class EngineCoreProc(EngineCore):
         )
 
         self.engine_index = engine_index
+        self.eep_scale_up_launch = envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
+        self.eep_notification_addresses: EngineZmqAddresses | None = None
+        self.eep_notification_socket_stack: ExitStack | None = None
+        self.eep_notification_socket: zmq.Socket | None = None
+        self.eep_notification_socket_address: str | None = None
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
         self.shutdown_state = EngineShutdownState.RUNNING
@@ -1165,6 +1170,16 @@ class EngineCoreProc(EngineCore):
                 #    (addresses).
                 # 2. Add front-end input/output addresses from colocated front-end
                 #    (client_addresses).
+                if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+                    self.eep_notification_addresses = EngineZmqAddresses(
+                        inputs=addresses.inputs.copy(),
+                        outputs=addresses.outputs.copy(),
+                        coordinator_input=addresses.coordinator_input,
+                        coordinator_output=addresses.coordinator_output,
+                        frontend_stats_publish_address=(
+                            addresses.frontend_stats_publish_address
+                        ),
+                    )
                 addresses.inputs = client_addresses.inputs
                 addresses.outputs = client_addresses.outputs
                 yield addresses
@@ -1207,6 +1222,10 @@ class EngineCoreProc(EngineCore):
             if vllm_config.parallel_config.data_parallel_size > 1:
                 ready_msg["parallel_config_hash"] = (
                     vllm_config.parallel_config.compute_hash()
+                )
+            if vllm_config.parallel_config.enable_elastic_ep:
+                ready_msg["coord_store_port"] = (
+                    vllm_config.parallel_config._coord_store_port
                 )
 
             handshake_socket.send(msgspec.msgpack.encode(ready_msg))
@@ -1636,6 +1655,9 @@ class EngineCoreProc(EngineCore):
                 kv_cache_max_concurrency=(
                     self.vllm_config.cache_config.kv_cache_max_concurrency
                 ),
+                coord_store_port=(self.vllm_config.parallel_config._coord_store_port),
+                coordinator_input_address=self.addresses.coordinator_input,
+                coordinator_output_address=self.addresses.coordinator_output,
             )
             ready_payload = msgspec.msgpack.encode(ready_response)
             for input_socket in input_sockets:
@@ -1910,6 +1932,7 @@ class DPEngineCoreProc(EngineCoreProc):
         self.dp_group, self.dp_store = dp_group, dp_store
 
     def shutdown(self):
+        self._close_eep_notification_socket()
         super().shutdown()
         if dp_group := getattr(self, "dp_group", None):
             stateless_destroy_torch_distributed_process_group(dp_group)
@@ -1931,6 +1954,13 @@ class DPEngineCoreProc(EngineCoreProc):
         self.engines_running = True
 
         return False
+
+    def _close_eep_notification_socket(self) -> None:
+        if self.eep_notification_socket_stack is not None:
+            self.eep_notification_socket_stack.close()
+        self.eep_notification_socket_stack = None
+        self.eep_notification_socket = None
+        self.eep_notification_socket_address = None
 
     def add_request(self, request: Request, request_wave: int = 0):
         super().add_request(request, request_wave)
@@ -2036,6 +2066,10 @@ class DPEngineCoreProc(EngineCoreProc):
                 if self.eep_scaling_state.is_complete():
                     if self.eep_scaling_state.worker_type == "removing":
                         raise SystemExit
+                    if self.eep_scaling_state.worker_type == "new":
+                        self.eep_scale_up_launch = False
+                        self.eep_notification_addresses = None
+                        self._close_eep_notification_socket()
                     self.process_input_queue_block = True
                     self.eep_scaling_state = None
 
@@ -2173,6 +2207,20 @@ class DPEngineCoreProc(EngineCoreProc):
         else:
             dp_rank = vllm_config.parallel_config.data_parallel_rank
         notification_data = (notification_type.value, dp_rank)
+        effective_config = vllm_config or self.vllm_config
+        if (
+            self.eep_scale_up_launch
+            and effective_config.parallel_config.data_parallel_external_lb
+        ):
+            from vllm.distributed.elastic_ep.external_elastic_ep import (
+                publish_external_eep_notification,
+            )
+
+            publish_external_eep_notification(
+                effective_config, notification_type, dp_rank
+            )
+            return
+
         outputs = EngineCoreOutputs(
             utility_output=UtilityOutput(
                 call_id=EEP_NOTIFICATION_CALL_ID,
@@ -2181,16 +2229,33 @@ class DPEngineCoreProc(EngineCoreProc):
         )
         outputs.engine_index = self.engine_index
 
-        if hasattr(self, "output_thread") and self.output_thread.is_alive():
+        notification_addresses = self.eep_notification_addresses
+        if notification_addresses is not None:
+            encoder = MsgpackEncoder()
+            address = notification_addresses.outputs[0]
+            if (
+                self.eep_notification_socket is None
+                or self.eep_notification_socket_address != address
+            ):
+                self._close_eep_notification_socket()
+                ctx = zmq.Context.instance()
+                stack = ExitStack()
+                self.eep_notification_socket = stack.enter_context(
+                    make_zmq_socket(ctx, address, zmq.PUSH, linger=4000)
+                )
+                self.eep_notification_socket_stack = stack
+                self.eep_notification_socket_address = address
+            socket = self.eep_notification_socket
+            assert socket is not None
+            socket.send_multipart(encoder.encode(outputs))
+        elif hasattr(self, "output_thread") and self.output_thread.is_alive():
             self.output_queue.put_nowait((0, outputs))
         else:
             encoder = MsgpackEncoder()
-            with (
-                zmq.Context() as ctx,
-                make_zmq_socket(
-                    ctx, self.addresses.outputs[0], zmq.PUSH, linger=4000
-                ) as socket,
-            ):
+            ctx = zmq.Context.instance()
+            with make_zmq_socket(
+                ctx, self.addresses.outputs[0], zmq.PUSH, linger=4000
+            ) as socket:
                 socket.send_multipart(encoder.encode(outputs))
 
     def eep_handle_engine_core_notification(
