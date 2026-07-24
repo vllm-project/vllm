@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable, Sequence
+from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -29,6 +30,7 @@ from vllm.config.model import (
 )
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.distributed.weight_transfer.base import (
+    LoRAWeightUpdateRequest,
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
 )
@@ -869,6 +871,13 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
     def start_draft_weight_update(self) -> None:
         """Start a new weight update targeting the speculative draft model."""
         self.llm_engine.collective_rpc("start_draft_weight_update")
+
+    def start_lora_weight_update(self, request: LoRAWeightUpdateRequest | dict) -> None:
+        """Start an update for an existing LoRA adapter."""
+        request_dict = request if isinstance(request, dict) else asdict(request)
+        self.llm_engine.collective_rpc(
+            "start_lora_weight_update", kwargs={"request": request_dict}
+        )
 
     def update_weights(self, request: WeightTransferUpdateRequest | dict) -> None:
         """

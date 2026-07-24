@@ -1149,6 +1149,41 @@ class LoRAModelManager:
         self._add_adapter(adapter)
         return True
 
+    def replace_adapter(self, adapter: LoRAModel) -> None:
+        adapter_id = adapter.id
+        old_adapter = self.get_adapter(adapter_id)
+        if old_adapter is None:
+            raise ValueError(f"LoRA adapter id {adapter_id} is not registered")
+
+        was_active = adapter_id in self._active_adapters
+        registered_cache = self._registered_adapters
+        active_cache = self._active_adapters
+        cpu_was_pinned = adapter_id in registered_cache.pinned_items
+        gpu_was_pinned = adapter_id in active_cache.pinned_items
+
+        self.remove_adapter(adapter_id)
+        try:
+            self._add_adapter(adapter)
+            if was_active:
+                self.activate_adapter(adapter_id)
+            if cpu_was_pinned:
+                registered_cache.pin(adapter_id)
+            if was_active and gpu_was_pinned:
+                active_cache.pin(adapter_id)
+        except Exception as update_error:
+            try:
+                self.remove_adapter(adapter_id)
+                registered_cache[adapter_id] = old_adapter
+                if cpu_was_pinned:
+                    registered_cache.pin(adapter_id)
+                if was_active:
+                    self.activate_adapter(adapter_id)
+                    if gpu_was_pinned:
+                        active_cache.pin(adapter_id)
+            except Exception as rollback_error:
+                raise rollback_error from update_error
+            raise
+
     def set_adapter_mapping(self, mapping: LoRAMapping) -> None:
         # The punica metadata derives from the slot layout as well as the
         # mapping: an out-of-band add_lora() can LRU-evict and reassign slots

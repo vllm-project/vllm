@@ -9,7 +9,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
 from types import NoneType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import regex as re
@@ -48,6 +48,7 @@ from vllm.distributed.weight_transfer import (
     WeightTransferEngine,
     WeightTransferEngineFactory,
 )
+from vllm.distributed.weight_transfer.base import LoRAWeightUpdateRequest
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
@@ -122,6 +123,29 @@ class AsyncIntermediateTensors(IntermediateTensors):
         return object.__getattribute__(self, name)
 
 
+class _LoRAWeightUpdateTarget:
+    def __init__(self, request: LoRAWeightUpdateRequest) -> None:
+        self.request = request
+        self.tensors: dict[str, torch.Tensor] = {}
+
+    def load_weights(self, weights: list[tuple[str, torch.Tensor]]) -> None:
+        for name, weight in weights:
+            if name in self.tensors:
+                raise ValueError(f"Received duplicate LoRA tensor {name!r}")
+            self.tensors[name] = weight.detach().clone()
+
+    def validate_manifest(self) -> None:
+        expected = set(self.request.tensor_names)
+        received = set(self.tensors)
+        if expected != received:
+            missing = sorted(expected - received)
+            unexpected = sorted(received - expected)
+            raise ValueError(
+                "Transferred LoRA tensor manifest mismatch: "
+                f"missing={missing}, unexpected={unexpected}"
+            )
+
+
 class Worker(WorkerBase):
     def __init__(
         self,
@@ -155,6 +179,7 @@ class Worker(WorkerBase):
         # is available, since the engine needs a reference to the model.
         self.weight_transfer_engine: WeightTransferEngine | None = None
         self._weight_update_active = False
+        self._lora_weight_update_target: _LoRAWeightUpdateTarget | None = None
 
         # Torch/CUDA profiler. Enabled and configured through profiler_config.
         # Profiler wrapper is created lazily in profile() when start is called,
@@ -1228,7 +1253,29 @@ class Worker(WorkerBase):
         with set_current_vllm_config(self.vllm_config):
             self._start_weight_update(is_draft=True)
 
-    def _start_weight_update(self, is_draft: bool = False) -> None:
+    def start_lora_weight_update(self, request: dict) -> None:
+        """Start an update for an existing LoRA adapter."""
+        lora_request = LoRAWeightUpdateRequest(**request)
+        self.model_runner._ensure_lora_enabled()
+        if (
+            lora_request.lora_int_id
+            not in self.model_runner.lora_manager.list_adapters()
+        ):
+            raise ValueError(
+                f"LoRA adapter id {lora_request.lora_int_id} must be loaded "
+                "before it can be updated"
+            )
+
+        target = _LoRAWeightUpdateTarget(lora_request)
+        with set_current_vllm_config(self.vllm_config):
+            self._start_weight_update(lora_target=target)
+        self._lora_weight_update_target = target
+
+    def _start_weight_update(
+        self,
+        is_draft: bool = False,
+        lora_target: _LoRAWeightUpdateTarget | None = None,
+    ) -> None:
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
 
@@ -1236,6 +1283,14 @@ class Worker(WorkerBase):
             raise RuntimeError(
                 f"{type(self.weight_transfer_engine).__name__} does not support "
                 "draft model weight updates."
+            )
+        if (
+            lora_target is not None
+            and not self.weight_transfer_engine.supports_lora_weight_update
+        ):
+            raise RuntimeError(
+                f"{type(self.weight_transfer_engine).__name__} does not support "
+                "LoRA weight updates."
             )
 
         if self._weight_update_active:
@@ -1247,11 +1302,26 @@ class Worker(WorkerBase):
         try:
             if is_draft:
                 self._set_draft_weight_update_target()
+            elif lora_target is not None:
+                self.weight_transfer_engine.set_weight_update_target(
+                    lora_target,
+                    self.model_config,
+                    requires_model_reload=False,
+                )
             self.weight_transfer_engine.start_weight_update()
         except BaseException:
-            self.weight_transfer_engine.reset_weight_update_target()
+            self._reset_weight_update_session()
             raise
         self._weight_update_active = True
+
+    def _reset_weight_update_session(self) -> None:
+        try:
+            cast(
+                WeightTransferEngine[Any, Any], self.weight_transfer_engine
+            ).reset_weight_update_target()
+        finally:
+            self._weight_update_active = False
+            self._lora_weight_update_target = None
 
     def update_weights(self, update_info: dict) -> None:
         """
@@ -1277,8 +1347,7 @@ class Worker(WorkerBase):
             try:
                 self.weight_transfer_engine.update_weights(update_info)
             except BaseException:
-                self._weight_update_active = False
-                self.weight_transfer_engine.reset_weight_update_target()
+                self._reset_weight_update_session()
                 raise
 
     def finish_weight_update(self) -> None:
@@ -1292,9 +1361,21 @@ class Worker(WorkerBase):
             )
 
         with set_current_vllm_config(self.vllm_config):
-            self.weight_transfer_engine.finish_weight_update()
-            self.weight_transfer_engine.reset_weight_update_target()
-            self._weight_update_active = False
+            try:
+                self.weight_transfer_engine.finish_weight_update()
+                target = self._lora_weight_update_target
+                if target is not None:
+                    target.validate_manifest()
+                    lora_request = target.request
+                    self.model_runner.lora_manager.replace_adapter_from_tensors(
+                        lora_int_id=lora_request.lora_int_id,
+                        tensors=target.tensors,
+                        peft_config=lora_request.peft_config,
+                        is_3d_lora_weight=lora_request.is_3d_lora_weight,
+                    )
+                    torch.accelerator.synchronize()
+            finally:
+                self._reset_weight_update_session()
 
     def shutdown(self) -> None:
         gc.unfreeze()

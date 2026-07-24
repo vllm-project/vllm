@@ -9,6 +9,7 @@ from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from vllm.distributed.weight_transfer.base import (
+    LoRAWeightUpdateRequest,
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
 )
@@ -182,6 +183,39 @@ async def start_weight_update(raw_request: Request):
 async def start_draft_weight_update(raw_request: Request):
     await engine_client(raw_request).start_draft_weight_update()
     return JSONResponse(content={"message": "Draft weight update started"})
+
+
+@router.post("/start_lora_weight_update")
+async def start_lora_weight_update(raw_request: Request):
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
+
+    request = body.get("lora_request")
+    if request is None:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail="Missing 'lora_request' in request body",
+        )
+    try:
+        lora_request = LoRAWeightUpdateRequest(**request)
+    except (TypeError, ValueError) as e:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail=str(e),
+        ) from e
+
+    engine = engine_client(raw_request)
+    if not await engine.is_paused():
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail=(
+                "LoRA weight updates require paused generation. Call /pause first."
+            ),
+        )
+    await engine.start_lora_weight_update(lora_request)
+    return JSONResponse(content={"message": "LoRA weight update started"})
 
 
 @router.post("/update_weights")

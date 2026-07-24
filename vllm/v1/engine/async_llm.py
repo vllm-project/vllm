@@ -7,6 +7,7 @@ import time
 import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
+from dataclasses import asdict
 from typing import Any
 
 import torch
@@ -15,6 +16,7 @@ import vllm.envs as envs
 from vllm import TokensPrompt
 from vllm.config import VllmConfig
 from vllm.distributed.weight_transfer.base import (
+    LoRAWeightUpdateRequest,
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
 )
@@ -1078,6 +1080,13 @@ class AsyncLLM(EngineClient):
     async def start_draft_weight_update(self) -> None:
         """Start a new weight update targeting the speculative draft model."""
         await self.collective_rpc("start_draft_weight_update")
+
+    async def start_lora_weight_update(self, request: LoRAWeightUpdateRequest) -> None:
+        """Start an update for an existing LoRA adapter."""
+        await self.collective_rpc(
+            "start_lora_weight_update",
+            kwargs={"request": asdict(request)},
+        )
 
     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
         """
