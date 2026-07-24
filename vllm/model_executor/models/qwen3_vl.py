@@ -1503,7 +1503,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             ),
             PromptReplacement(
                 modality="video",
-                target=video_target,
+                target=hf_processor.video_token,
                 replacement=get_video_replacement_qwen3vl,
             ),
         ]
