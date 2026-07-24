@@ -281,6 +281,7 @@ class TieringOffloadingManager(OffloadingManager):
         self,
         key: OffloadKey,
         req_context: ReqContext,
+        chunk_idx: int | None = None,
         *,
         exclude_tier: SecondaryTierManager | None = None,
     ) -> LookupResult:
@@ -296,6 +297,8 @@ class TieringOffloadingManager(OffloadingManager):
         Args:
             key: Block hash to look up.
             req_context: Per-request context.
+            chunk_idx: Absolute chunk index within the block's KV group, or
+                None when unavailable. Reserved for per-key provenance; unused.
 
         Returns:
             HIT       — block is ready in the primary tier.
@@ -313,7 +316,7 @@ class TieringOffloadingManager(OffloadingManager):
 
         req_state = self._req_state.get(req_context.req_id)
 
-        primary_hit = self.primary_tier.lookup(key, req_context)
+        primary_hit = self.primary_tier.lookup(key, req_context, chunk_idx)
         if primary_hit is LookupResult.HIT:
             return LookupResult.HIT
         if primary_hit is LookupResult.HIT_PENDING:
@@ -400,7 +403,7 @@ class TieringOffloadingManager(OffloadingManager):
         # Must happen immediately so primary.lookup() returns None (in-flight)
         # for this key on any subsequent lookup() call within the same step,
         # preventing duplicate promotion attempts.
-        primary_write_result = self.primary_tier.prepare_write([key], req_context)
+        primary_write_result = self.primary_tier.prepare_write(key, req_context)
 
         if primary_write_result is None:
             # Primary tier is full; caller should treat the block as unavailable
@@ -497,24 +500,29 @@ class TieringOffloadingManager(OffloadingManager):
 
     @override
     def prepare_store(
-        self, keys: Collection[OffloadKey], req_context: ReqContext
+        self,
+        key: OffloadKey,
+        req_context: ReqContext,
+        chunk_idx: int | None = None,
     ) -> PrepareStoreOutput | None:
         """
-        Prepare blocks to be stored from GPU to primary tier.
+        Prepare a single block to be stored from GPU to primary tier.
 
         CRITICAL: This method calls _maybe_process_finished_jobs() FIRST to ensure
         that any completed async transfers have their ref_cnt decremented
         before the primary tier makes eviction decisions.
 
-        For request-level tiers, blocks already present in the primary tier
-        are immediately cascaded via submit_store().
+        For request-level tiers, a block already present in the primary tier
+        is immediately cascaded via submit_store().
 
         Args:
-            keys: Blocks to prepare for storing.
+            key: Block to prepare for storing.
             req_context: Per-request context.
+            chunk_idx: Absolute chunk index within the block's KV group, or
+                None when unavailable. Reserved for per-key provenance; unused.
 
         Returns:
-            PrepareStoreOutput describing where to store blocks and what was
+            PrepareStoreOutput describing where to store the block and what was
             evicted, or None if store cannot proceed.
         """
         # Step 1: Poll for completed async jobs FIRST
@@ -529,30 +537,32 @@ class TieringOffloadingManager(OffloadingManager):
         # Both must be accounted for before the eviction decision below.
         self._maybe_process_finished_jobs()
 
-        # Step 2: Store to primary tier (new blocks only).
-        # Cascading of these newly-stored blocks to ALL secondary tiers
+        # Step 2: Store to primary tier (new block only).
+        # Cascading of the newly-stored block to ALL secondary tiers
         # happens later in complete_store(), after the GPU→Primary transfer
         # completes.
-        primary_result = self.primary_tier.prepare_store(keys, req_context)
+        primary_result = self.primary_tier.prepare_store(key, req_context, chunk_idx)
 
         if primary_result is None:
             return None
 
+        # Count one pending primary store per accepted key. complete_store
+        # decrements by the number of keys it completes, so the counter is
+        # balanced once the aggregated transfer job (which spans all accepted
+        # single-key prepares) completes.
         if primary_result.keys_to_store:
             state = self._req_state[req_context.req_id]
-            state.pending_primary_stores += 1
+            state.pending_primary_stores += len(primary_result.keys_to_store)
 
-        # Step 3: For request-level tiers, cascade blocks already in primary
+        # Step 3: For request-level tiers, cascade the block if it is already
+        # resident in primary. An empty keys_to_store means the key was already
+        # stored or skipped; _cascade filters to keys actually HIT in primary,
+        # so a below-threshold key that is not resident is a no-op.
         request_level_tiers = self._req_state[req_context.req_id].request_level_tiers
-        if request_level_tiers:
-            keys_to_store_set = set(primary_result.keys_to_store)
-            keys_already_in_primary = tuple(
-                k for k in keys if k not in keys_to_store_set
+        if request_level_tiers and not primary_result.keys_to_store:
+            self._cascade_existing_blocks_to_request_level_tiers(
+                (key,), req_context, request_level_tiers
             )
-            if keys_already_in_primary:
-                self._cascade_existing_blocks_to_request_level_tiers(
-                    keys_already_in_primary, req_context, request_level_tiers
-                )
 
         return primary_result
 
@@ -619,10 +629,13 @@ class TieringOffloadingManager(OffloadingManager):
 
         # Note: The async transfers are now in flight. Their completion is
         # tracked via get_finished_jobs() / _maybe_process_finished_jobs().
+        # Decrement by the number of keys completed: each was counted once at
+        # its single-key prepare_store, so the aggregated completion balances.
         req_id = req_context.req_id
         state = self._req_state[req_id]
-        assert state.pending_primary_stores > 0
-        state.pending_primary_stores -= 1
+        num_keys = len(keys)
+        assert state.pending_primary_stores >= num_keys
+        state.pending_primary_stores -= num_keys
         self._maybe_finalize_request(req_id)
 
     def create_store_job(

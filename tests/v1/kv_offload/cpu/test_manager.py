@@ -65,6 +65,39 @@ def to_keys(int_hashes: list[int]) -> list[OffloadKey]:
     return [to_key(i) for i in int_hashes]
 
 
+def batch_store(
+    manager: CPUOffloadingManager,
+    int_hashes: list[int],
+    ctx: ReqContext = _EMPTY_REQ_CTX,
+) -> PrepareStoreOutput | None:
+    """Admit keys one at a time via the single-key prepare_store API and
+    aggregate the per-key outputs (in admission order) into a batch-like
+    PrepareStoreOutput.
+
+    This mirrors how the scheduler aggregates accepted single-key stores into
+    one transfer job. Returns None if the first key hits an allocation failure
+    (parity with the old batch-atomic contract for the common test setups); a
+    failure after some keys are accepted keeps the accepted prefix.
+    """
+    keys_to_store: list[OffloadKey] = []
+    block_ids: list[int] = []
+    evicted_keys: list[OffloadKey] = []
+    for int_hash in int_hashes:
+        out = manager.prepare_store(to_key(int_hash), ctx)
+        if out is None:
+            if not keys_to_store and not evicted_keys:
+                return None
+            break
+        keys_to_store.extend(out.keys_to_store)
+        block_ids.extend(int(b) for b in out.store_spec.block_ids)
+        evicted_keys.extend(out.evicted_keys)
+    return PrepareStoreOutput(
+        keys_to_store=keys_to_store,
+        store_spec=CPULoadStoreSpec(block_ids),
+        evicted_keys=evicted_keys,
+    )
+
+
 def verify_store_output(
     prepare_store_output: PrepareStoreOutput | None,
     expected_prepare_store_output: ExpectedPrepareStoreOutput,
@@ -134,11 +167,11 @@ def test_cpu_eviction_removed_precedes_stored():
     """An eviction is announced before the store that reuses its capacity."""
     manager = make_cpu_manager(num_blocks=2, enable_events=True)
 
-    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    batch_store(manager, [1, 2])
     manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
     list(manager.take_events())
 
-    manager.prepare_store(to_keys([3]), _EMPTY_REQ_CTX)
+    batch_store(manager, [3])
     manager.complete_store(to_keys([3]), _EMPTY_REQ_CTX)
 
     events = list(manager.take_events())
@@ -149,54 +182,38 @@ def test_cpu_eviction_removed_precedes_stored():
     assert all(event.medium == manager.medium for event in events)
 
 
-@pytest.mark.parametrize("eviction_policy", ["lru", "arc"])
-def test_already_stored_block_not_evicted_during_prepare_store(eviction_policy):
+def test_single_key_admission_does_not_protect_skipped_already_stored_key():
+    """PR1 is intentionally not behavior-preserving: batch prepare_store used to
+    protect already-stored members from eviction within the call. With single-key
+    admission each key is admitted independently, so a later admission may reclaim
+    the block of an already-stored (skipped) key under pressure. This is a
+    cache-efficiency cost (the chunk is re-populated only when a future request
+    re-encounters the prefix), not a correctness issue — write-pending blocks
+    accepted earlier in the same transaction are still protected (see
+    test_single_key_admission_keeps_accepted_prefix_on_eviction_failure).
     """
-    Regression test: a block that is already stored must not be evicted
-    by prepare_store() when it needs to make room for new blocks.
-    Applies to both lru and arc policies.
+    manager = make_cpu_manager(num_blocks=4, cache_policy="lru", enable_events=True)
 
-    Scenario:
-        - Store blocks [1, 2] and complete.
-        - touch([1]) makes block 2 the LRU candidate.
-        - prepare_store([2, 3, 4, 5]):
-            * block 2 is filtered out as "already stored"
-            * but without the fix, block 2 would be evicted as the LRU
-              candidate to make room for [3, 4, 5]
-        - After complete_store([2, 3, 4, 5]), block 2 must still be present.
-    """
-    manager = make_cpu_manager(
-        num_blocks=4,
-        cache_policy=eviction_policy,
-        enable_events=True,
-    )
-
-    # store [1, 2] and complete
-    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    batch_store(manager, [1, 2])
     manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
 
-    # touch [1] to make block 2 the LRU candidate
+    # Make key 2 the LRU eviction candidate.
     manager.touch(to_keys([1]), _EMPTY_REQ_CTX)
 
-    # prepare_store([2, 3, 4, 5]):
-    #   - block 2 is already stored -> filtered out of keys_to_store
-    #   - block 2 must NOT be evicted even though it is the LRU candidate
-    #   - block 1 (ID 0) is evicted instead; new blocks [3,4,5] get IDs 2,3,0
-    prepare_store_output = manager.prepare_store(to_keys([2, 3, 4, 5]), _EMPTY_REQ_CTX)
-    verify_store_output(
-        prepare_store_output,
-        ExpectedPrepareStoreOutput(
-            keys_to_store=[3, 4, 5],
-            store_block_ids=[2, 3, 0],
-            evicted_keys=[1],  # block 1 evicted, not block 2
-        ),
-    )
+    # Admit [2, 3, 4, 5] one at a time: 2 is skipped (already stored), 3 and 4
+    # take the free blocks, and 5 must evict the LRU candidate — key 2, which is
+    # not protected because it is not part of this single-key admission.
+    outputs = [manager.prepare_store(to_key(h), _EMPTY_REQ_CTX) for h in [2, 3, 4, 5]]
+    assert outputs[0].keys_to_store == []
+    accepted = [k for out in outputs for k in out.keys_to_store]
+    assert accepted == to_keys([3, 4, 5])
+    evicted = [k for out in outputs for k in out.evicted_keys]
+    assert evicted == to_keys([2])
 
-    # complete_store must not silently drop block 2
-    manager.complete_store(to_keys([2, 3, 4, 5]), _EMPTY_REQ_CTX)
-
-    # block 2 must still be present in the cache
-    assert manager.lookup(to_key(2), _EMPTY_REQ_CTX) is LookupResult.HIT
+    manager.complete_store(accepted, _EMPTY_REQ_CTX)
+    assert manager.lookup(to_key(2), _EMPTY_REQ_CTX) is LookupResult.MISS
+    for resident in (1, 3, 4, 5):
+        assert manager.lookup(to_key(resident), _EMPTY_REQ_CTX) is LookupResult.HIT
 
 
 def test_filter_reused_manager_reports_stores_skipped_counter():
@@ -206,7 +223,7 @@ def test_filter_reused_manager_reports_stores_skipped_counter():
         store_threshold=2,
     )
 
-    prepare_store_output = manager.prepare_store(to_keys([1, 2, 3]), _EMPTY_REQ_CTX)
+    prepare_store_output = batch_store(manager, [1, 2, 3])
 
     verify_store_output(
         prepare_store_output,
@@ -241,11 +258,11 @@ def test_cpu_manager_reports_cache_usage_gauge():
     check_usage_stats(manager, 0.0)
 
     # After allocating 2 of 4 blocks: usage = 0.5
-    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    batch_store(manager, [1, 2])
     check_usage_stats(manager, 0.5)
 
     # After filling all 4 blocks: usage = 1.0
-    manager.prepare_store(to_keys([3, 4]), _EMPTY_REQ_CTX)
+    batch_store(manager, [3, 4])
     check_usage_stats(manager, 1.0)
 
     # After completing store, the blocks becomes evictable as it is not actively used
@@ -262,15 +279,18 @@ def test_cpu_manager_reports_cache_usage_gauge():
 def test_cpu_manager_reports_allocation_size_histogram():
     manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
 
-    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    batch_store(manager, [1, 2])
     manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
-    manager.prepare_store(to_keys([1, 2, 3]), _EMPTY_REQ_CTX)
+    batch_store(manager, [1, 2, 3])
 
     stats = manager.get_stats()
 
     assert stats is not None
     reduced = stats.reduce()
-    assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_count"] == 2
+    # Single-key admission records one allocation of size 1 per stored key:
+    # keys 1, 2 (first store) and key 3 (second store; 1 and 2 are already
+    # stored) -> 3 samples summing to 3.
+    assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_count"] == 3
     assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_sum"] == 3
 
     # The cache-usage gauge is always reported, so get_stats() never returns
@@ -291,23 +311,25 @@ def test_cpu_manager_reports_allocation_size_on_allocation_failure(monkeypatch):
     monkeypatch.setattr(manager, "_allocate_blocks", fail_allocate_blocks)
 
     with pytest.raises(RuntimeError, match="allocation failed"):
-        manager.prepare_store(to_keys([1, 2, 3]), _EMPTY_REQ_CTX)
+        manager.prepare_store(to_key(1), _EMPTY_REQ_CTX)
 
     stats = manager.get_stats()
 
     assert stats is not None
     reduced = stats.reduce()
+    # The single-key allocation size (1) is recorded before the failing
+    # _allocate_blocks call raises.
     assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_count"] == 1
-    assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_sum"] == 3
+    assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_sum"] == 1
 
 
 def test_cpu_manager_reports_allocation_size_on_eviction_failure():
     manager = make_cpu_manager(num_blocks=1, cache_policy="lru")
 
-    manager.prepare_store(to_keys([1]), _EMPTY_REQ_CTX)
+    manager.prepare_store(to_key(1), _EMPTY_REQ_CTX)
     manager.get_stats()
 
-    assert manager.prepare_store(to_keys([2]), _EMPTY_REQ_CTX) is None
+    assert manager.prepare_store(to_key(2), _EMPTY_REQ_CTX) is None
 
     stats = manager.get_stats()
 
@@ -321,7 +343,7 @@ def test_cpu_manager_reports_cache_write_and_read_usage_gauges():
     manager = make_cpu_manager(num_blocks=4)
 
     # Store path: pins write usage until complete_store.
-    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    batch_store(manager, [1, 2])
     check_split_usage_stats(manager, write=0.5, read=0.0, total=0.5)
 
     manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
@@ -336,7 +358,7 @@ def test_cpu_manager_reports_cache_write_and_read_usage_gauges():
     check_split_usage_stats(manager, write=0.0, read=0.0, total=0.0)
 
     # Concurrent write + read pins are both reflected and additive.
-    manager.prepare_store(to_keys([3, 4]), _EMPTY_REQ_CTX)
+    batch_store(manager, [3, 4])
     manager.prepare_load(to_keys([2]), _EMPTY_REQ_CTX)
     check_split_usage_stats(manager, write=0.5, read=0.25, total=0.75)
 
@@ -344,7 +366,7 @@ def test_cpu_manager_reports_cache_write_and_read_usage_gauges():
 def test_cpu_manager_clears_write_usage_after_failed_store():
     manager = make_cpu_manager(num_blocks=4)
 
-    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    batch_store(manager, [1, 2])
     check_split_usage_stats(manager, write=0.5, read=0.0, total=0.5)
 
     manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX, success=False)
@@ -353,118 +375,68 @@ def test_cpu_manager_clears_write_usage_after_failed_store():
 
 def test_cpu_manager():
     """
-    Tests CPUOffloadingManager with lru policy.
+    Single-key store / complete / lookup / evict / load lifecycle (LRU policy).
     """
     # initialize a CPU manager with a capacity of 4 blocks
     cpu_manager = make_cpu_manager(num_blocks=4, cache_policy="lru", enable_events=True)
 
-    # prepare store [1, 2]
-    prepare_store_output = cpu_manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    # Fill all 4 blocks with write-pending stores (not yet completed).
     verify_store_output(
-        prepare_store_output,
+        batch_store(cpu_manager, [1, 2, 3, 4]),
         ExpectedPrepareStoreOutput(
-            keys_to_store=[1, 2],
-            store_block_ids=[0, 1],
+            keys_to_store=[1, 2, 3, 4],
+            store_block_ids=[0, 1, 2, 3],
             evicted_keys=[],
         ),
     )
 
-    # lookup [1, 2] -> write in-flight, not yet ready
-    assert cpu_manager.lookup(to_key(1), _EMPTY_REQ_CTX) is LookupResult.HIT_PENDING
-    assert cpu_manager.lookup(to_key(2), _EMPTY_REQ_CTX) is LookupResult.HIT_PENDING
-
-    # no events so far
+    # In-flight writes are not yet readable and emit no events.
+    for resident in (1, 2, 3, 4):
+        assert (
+            cpu_manager.lookup(to_key(resident), _EMPTY_REQ_CTX)
+            is LookupResult.HIT_PENDING
+        )
     assert list(cpu_manager.take_events()) == []
 
-    # complete store [1, 2]
-    cpu_manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
-    verify_events(cpu_manager.take_events(), expected_stores=({1, 2},))
+    # Write-pending blocks are never eviction candidates: a 5th key cannot fit.
+    assert cpu_manager.prepare_store(to_key(5), _EMPTY_REQ_CTX) is None
 
-    # lookup [1, 2]
+    # Completion makes the blocks readable/evictable and emits one store event.
+    cpu_manager.complete_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
+    verify_events(cpu_manager.take_events(), expected_stores=({1, 2, 3, 4},))
     assert cpu_manager.lookup(to_key(1), _EMPTY_REQ_CTX) is LookupResult.HIT
-    assert cpu_manager.lookup(to_key(2), _EMPTY_REQ_CTX) is LookupResult.HIT
-    assert cpu_manager.lookup(to_key(3), _EMPTY_REQ_CTX) is LookupResult.MISS
+    assert cpu_manager.lookup(to_key(9), _EMPTY_REQ_CTX) is LookupResult.MISS
 
-    # prepare store [2, 3, 4, 5] -> evicts [1]
-    prepare_store_output = cpu_manager.prepare_store(
-        to_keys([2, 3, 4, 5]), _EMPTY_REQ_CTX
-    )
+    # Storing key 5 now evicts the LRU key 1 and reuses its block.
     verify_store_output(
-        prepare_store_output,
+        batch_store(cpu_manager, [5]),
         ExpectedPrepareStoreOutput(
-            keys_to_store=[3, 4, 5],
-            store_block_ids=[2, 3, 0],
+            keys_to_store=[5],
+            store_block_ids=[0],
             evicted_keys=[1],
         ),
     )
-
-    # verify eviction event
     verify_events(cpu_manager.take_events(), expected_evictions=({1},))
-
-    # prepare store with no space
-    assert cpu_manager.prepare_store(to_keys([1, 6]), _EMPTY_REQ_CTX) is None
-
-    # complete store [2, 3, 4, 5]
-    cpu_manager.complete_store(to_keys([2, 3, 4, 5]), _EMPTY_REQ_CTX)
-
-    # lookup (now that we have [2, 3, 4, 5])
+    cpu_manager.complete_store(to_keys([5]), _EMPTY_REQ_CTX)
+    verify_events(cpu_manager.take_events(), expected_stores=({5},))
     assert cpu_manager.lookup(to_key(1), _EMPTY_REQ_CTX) is LookupResult.MISS
-    assert cpu_manager.lookup(to_key(2), _EMPTY_REQ_CTX) is LookupResult.HIT
-    assert cpu_manager.lookup(to_key(3), _EMPTY_REQ_CTX) is LookupResult.HIT
-    assert cpu_manager.lookup(to_key(4), _EMPTY_REQ_CTX) is LookupResult.HIT
     assert cpu_manager.lookup(to_key(5), _EMPTY_REQ_CTX) is LookupResult.HIT
-    assert cpu_manager.lookup(to_key(0), _EMPTY_REQ_CTX) is LookupResult.MISS
 
-    # prepare load [2, 3]
+    # A concurrent load pins its blocks against eviction.
     prepare_load_output = cpu_manager.prepare_load(to_keys([2, 3]), _EMPTY_REQ_CTX)
     verify_load_output(prepare_load_output, [1, 2])
 
-    # prepare store with no space ([2, 3] is being loaded)
-    assert cpu_manager.prepare_store(to_keys([6, 7, 8]), _EMPTY_REQ_CTX) is None
+    # Evictable now: {4, 5}. Two single-key stores reclaim them; a third cannot
+    # be admitted because the remaining blocks are pinned or write-pending.
+    assert cpu_manager.prepare_store(to_key(6), _EMPTY_REQ_CTX) is not None
+    assert cpu_manager.prepare_store(to_key(7), _EMPTY_REQ_CTX) is not None
+    assert cpu_manager.prepare_store(to_key(8), _EMPTY_REQ_CTX) is None
 
-    # complete load [2, 3]. Load changes the eviction list, making 2, 3 recent.
-    cpu_manager.complete_load(to_keys([2, 3]), _EMPTY_REQ_CTX)
-
-    # prepare store [6, 7, 8] -> evicts [4, 5, 2] (oldest)
-    prepare_store_output = cpu_manager.prepare_store(to_keys([6, 7, 8]), _EMPTY_REQ_CTX)
-    verify_store_output(
-        prepare_store_output,
-        ExpectedPrepareStoreOutput(
-            keys_to_store=[6, 7, 8],
-            store_block_ids=[1, 0, 3],
-            evicted_keys=[4, 5, 2],
-        ),
-    )
-
-    # complete store [6, 7, 8]
-    cpu_manager.complete_store(to_keys([6, 7, 8]), _EMPTY_REQ_CTX)
-
-    # touch [3, 6, 7] (move to end of LRU order)
-    cpu_manager.touch(to_keys([3, 6, 7]), _EMPTY_REQ_CTX)
-
-    # prepare store [7, 9] -> evicts [8] (oldest following previous touch)
-    prepare_store_output = cpu_manager.prepare_store(to_keys([9]), _EMPTY_REQ_CTX)
-    verify_store_output(
-        prepare_store_output,
-        ExpectedPrepareStoreOutput(
-            keys_to_store=[9],
-            store_block_ids=[3],
-            evicted_keys=[8],
-        ),
-    )
-
-    # complete store [7, 9] with failure
-    cpu_manager.complete_store(to_keys([7, 9]), _EMPTY_REQ_CTX, success=False)
-
-    # assert [7] is still stored, but [9] is not
-    assert cpu_manager.lookup(to_key(7), _EMPTY_REQ_CTX) is LookupResult.HIT
-    assert cpu_manager.lookup(to_key(9), _EMPTY_REQ_CTX) is LookupResult.MISS
-
-    verify_events(
-        cpu_manager.take_events(),
-        expected_stores=({3, 4, 5}, {6, 7, 8}),
-        expected_evictions=({4, 5, 2}, {8}),
-    )
+    # success=False rolls back only not-yet-ready keys; completed keys remain.
+    cpu_manager.complete_store(to_keys([6]), _EMPTY_REQ_CTX)
+    cpu_manager.complete_store(to_keys([6, 7]), _EMPTY_REQ_CTX, success=False)
+    assert cpu_manager.lookup(to_key(6), _EMPTY_REQ_CTX) is LookupResult.HIT
+    assert cpu_manager.lookup(to_key(7), _EMPTY_REQ_CTX) is LookupResult.MISS
 
 
 def test_prepare_load_preserves_key_order():
@@ -473,8 +445,8 @@ def test_prepare_load_preserves_key_order():
 
     key_a, key_b, key_c = to_key(0), to_key(1), to_key(2)
 
-    # Store all three keys and learn their block ID assignments
-    store_output = manager.prepare_store([key_a, key_b, key_c], _EMPTY_REQ_CTX)
+    # Store all three keys (single-key admission) and learn their block IDs
+    store_output = batch_store(manager, [0, 1, 2])
     assert store_output is not None
     assert isinstance(store_output.store_spec, CPULoadStoreSpec)
     key_to_block_id = {
@@ -504,6 +476,52 @@ def test_prepare_load_preserves_key_order():
     manager.complete_load([key_a, key_b, key_c], _EMPTY_REQ_CTX)  # order irrelevant
 
 
+def test_single_key_store_specs_concatenate_to_batch():
+    """PR1 invariant (concat equivalence): admitting keys one at a time yields
+    per-key specs whose block ids, concatenated in admission order, equal the
+    contiguous array a single batch store would have produced, and each key
+    maps to its own block (co-indexed with a later batch load)."""
+    manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
+    keys = to_keys([1, 2, 3])
+
+    outputs = [manager.prepare_store(key, _EMPTY_REQ_CTX) for key in keys]
+    assert all(out is not None for out in outputs)
+
+    # Each accepted key yields exactly one block; concatenation is contiguous
+    # (0, 1, 2) — identical to what a batch prepare_store([1, 2, 3]) allocated.
+    per_key_block_ids = [int(out.store_spec.block_ids[0]) for out in outputs]
+    assert per_key_block_ids == [0, 1, 2]
+    assert [out.keys_to_store for out in outputs] == [[k] for k in keys]
+
+    manager.complete_store(keys, _EMPTY_REQ_CTX)
+
+    # The concatenated dst spec aligns per-key with a batch load spec, i.e. the
+    # aggregation the scheduler performs is co-indexed with the source blocks.
+    load_spec = manager.prepare_load(keys, _EMPTY_REQ_CTX)
+    assert isinstance(load_spec, CPULoadStoreSpec)
+    assert [int(b) for b in load_spec.block_ids] == per_key_block_ids
+
+
+def test_single_key_admission_keeps_accepted_prefix_on_eviction_failure():
+    """PR1 invariant (prefix-transactional): when the cache cannot fit the next
+    key, earlier accepted keys stay resident (write-pending blocks are never
+    eviction candidates), so the scheduler keeps the accepted prefix."""
+    manager = make_cpu_manager(num_blocks=2, cache_policy="lru")
+    keys = to_keys([1, 2, 3])
+
+    # First two keys are admitted (fill the 2-block cache).
+    assert manager.prepare_store(keys[0], _EMPTY_REQ_CTX) is not None
+    assert manager.prepare_store(keys[1], _EMPTY_REQ_CTX) is not None
+    # Third key cannot be admitted: both blocks are write-pending (not evictable).
+    assert manager.prepare_store(keys[2], _EMPTY_REQ_CTX) is None
+
+    # The accepted prefix survives the failed admission.
+    manager.complete_store(keys[:2], _EMPTY_REQ_CTX)
+    assert manager.lookup(keys[0], _EMPTY_REQ_CTX) is LookupResult.HIT
+    assert manager.lookup(keys[1], _EMPTY_REQ_CTX) is LookupResult.HIT
+    assert manager.lookup(keys[2], _EMPTY_REQ_CTX) is LookupResult.MISS
+
+
 class TestARCPolicy:
     """Unit tests for CPUOffloadingManager with ARC eviction policy."""
 
@@ -527,9 +545,7 @@ class TestARCPolicy:
         cpu_manager, arc_policy = self._make_manager()
 
         # prepare store [1, 2]
-        prepare_store_output = cpu_manager.prepare_store(
-            to_keys([1, 2]), _EMPTY_REQ_CTX
-        )
+        prepare_store_output = batch_store(cpu_manager, [1, 2])
         verify_store_output(
             prepare_store_output,
             ExpectedPrepareStoreOutput(
@@ -567,7 +583,7 @@ class TestARCPolicy:
         cpu_manager, arc_policy = self._make_manager(enable_events=False)
 
         # store and complete block 1
-        cpu_manager.prepare_store(to_keys([1]), _EMPTY_REQ_CTX)
+        batch_store(cpu_manager, [1])
         cpu_manager.complete_store(to_keys([1]), _EMPTY_REQ_CTX)
 
         # block 1 starts in T1 (recent)
@@ -589,11 +605,8 @@ class TestARCPolicy:
         cpu_manager, _ = self._make_manager()
 
         # prepare and complete store [1, 2, 3, 4]
-        prepare_store_output = cpu_manager.prepare_store(
-            to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX
-        )
         verify_store_output(
-            prepare_store_output,
+            batch_store(cpu_manager, [1, 2, 3, 4]),
             ExpectedPrepareStoreOutput(
                 keys_to_store=[1, 2, 3, 4],
                 store_block_ids=[0, 1, 2, 3],
@@ -606,21 +619,17 @@ class TestARCPolicy:
         prepare_load_output = cpu_manager.prepare_load(to_keys([2, 3]), _EMPTY_REQ_CTX)
         verify_load_output(prepare_load_output, [1, 2])
 
-        # prepare store [5, 6, 7] with [2, 3] being loaded
-        # should fail because [2, 3] have ref_cnt > 0
-        assert cpu_manager.prepare_store(to_keys([5, 6, 7]), _EMPTY_REQ_CTX) is None
+        # With [2, 3] pinned by the load, only 2 blocks are evictable: two new
+        # single-key stores succeed, but a third cannot evict a loaded block.
+        assert cpu_manager.prepare_store(to_key(5), _EMPTY_REQ_CTX) is not None
+        assert cpu_manager.prepare_store(to_key(6), _EMPTY_REQ_CTX) is not None
+        assert cpu_manager.prepare_store(to_key(7), _EMPTY_REQ_CTX) is None
 
-        # complete load [2, 3]
+        # Once the load completes, [2, 3] become evictable and a store succeeds.
         cpu_manager.complete_load(to_keys([2, 3]), _EMPTY_REQ_CTX)
-
-        # now prepare store [5, 6, 7] should succeed
-        # ARC will evict blocks one at a time from T1 as needed
-        prepare_store_output = cpu_manager.prepare_store(
-            to_keys([5, 6, 7]), _EMPTY_REQ_CTX
-        )
+        prepare_store_output = cpu_manager.prepare_store(to_key(7), _EMPTY_REQ_CTX)
         assert prepare_store_output is not None
-        # Should successfully evict enough blocks to make room (at least 1)
-        assert len(prepare_store_output.evicted_keys) >= 1
+        assert len(prepare_store_output.evicted_keys) == 1
 
     def test_adaptive_target(self):
         """
@@ -631,13 +640,13 @@ class TestARCPolicy:
         cpu_manager, arc_policy = self._make_manager(num_blocks=2, enable_events=False)
 
         # store blocks 1, 2 (fills cache)
-        cpu_manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+        batch_store(cpu_manager, [1, 2])
         cpu_manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
 
         initial_target = arc_policy.target_t1_size
 
         # store block 3, evicting block 1 (moves to B1 ghost list)
-        cpu_manager.prepare_store(to_keys([3]), _EMPTY_REQ_CTX)
+        batch_store(cpu_manager, [3])
         cpu_manager.complete_store(to_keys([3]), _EMPTY_REQ_CTX)
 
         # block 1 should be in B1 (ghost list)
@@ -658,7 +667,7 @@ class TestARCPolicy:
         cpu_manager, arc_policy = self._make_manager(enable_events=False)
 
         # store blocks 1, 2, 3, 4
-        cpu_manager.prepare_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
+        batch_store(cpu_manager, [1, 2, 3, 4])
         cpu_manager.complete_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
 
         # promote blocks 3, 4 to T2 by touching them
@@ -673,7 +682,7 @@ class TestARCPolicy:
         arc_policy.target_t1_size = 1
 
         # store block 5, should evict from T1 (block 1, LRU in T1)
-        output = cpu_manager.prepare_store(to_keys([5]), _EMPTY_REQ_CTX)
+        output = batch_store(cpu_manager, [5])
         assert output is not None
         assert to_keys([1]) == output.evicted_keys
 
@@ -692,12 +701,12 @@ class TestARCPolicy:
         cpu_manager, arc_policy = self._make_manager(num_blocks=2, enable_events=False)
 
         # fill cache with blocks 1, 2
-        cpu_manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+        batch_store(cpu_manager, [1, 2])
         cpu_manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
 
         # store many blocks to fill ghost lists
         for i in range(3, 20):
-            cpu_manager.prepare_store(to_keys([i]), _EMPTY_REQ_CTX)
+            batch_store(cpu_manager, [i])
             cpu_manager.complete_store(to_keys([i]), _EMPTY_REQ_CTX)
 
         # ghost lists should not exceed cache_capacity
@@ -712,7 +721,7 @@ class TestARCPolicy:
         cpu_manager, arc_policy = self._make_manager()
 
         # store blocks 1, 2, 3, 4
-        cpu_manager.prepare_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
+        batch_store(cpu_manager, [1, 2, 3, 4])
         cpu_manager.complete_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
 
         # promote 3, 4 to T2
@@ -727,7 +736,7 @@ class TestARCPolicy:
         assert len(arc_policy.t2) == 3
 
         # store block 5, should evict from T1 (block 2, only one in T1)
-        prepare_store_output = cpu_manager.prepare_store(to_keys([5]), _EMPTY_REQ_CTX)
+        prepare_store_output = batch_store(cpu_manager, [5])
         verify_store_output(
             prepare_store_output,
             ExpectedPrepareStoreOutput(
@@ -745,11 +754,11 @@ class TestARCPolicy:
         cpu_manager, arc_policy = self._make_manager()
 
         # store blocks 1, 2, 3, 4
-        cpu_manager.prepare_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
+        batch_store(cpu_manager, [1, 2, 3, 4])
         cpu_manager.complete_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
 
         # prepare store block 5 (will evict block 1)
-        prepare_store_output = cpu_manager.prepare_store(to_keys([5]), _EMPTY_REQ_CTX)
+        prepare_store_output = batch_store(cpu_manager, [5])
         assert prepare_store_output is not None
         assert len(prepare_store_output.evicted_keys) == 1
 
@@ -774,13 +783,11 @@ class TestARCPolicy:
         cpu_manager, arc_policy = self._make_manager()
 
         # store [1, 2]
-        cpu_manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+        batch_store(cpu_manager, [1, 2])
         cpu_manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
 
         # store [3, 4, 5] -> evicts [1]
-        prepare_store_output = cpu_manager.prepare_store(
-            to_keys([3, 4, 5]), _EMPTY_REQ_CTX
-        )
+        prepare_store_output = batch_store(cpu_manager, [3, 4, 5])
         assert prepare_store_output is not None
         assert len(prepare_store_output.evicted_keys) == 1
         cpu_manager.complete_store(to_keys([3, 4, 5]), _EMPTY_REQ_CTX)
@@ -793,7 +800,7 @@ class TestARCPolicy:
         assert len(arc_policy.t2) == 2
 
         # store [6] -> should evict from T1 (4 is oldest in T1)
-        prepare_store_output = cpu_manager.prepare_store(to_keys([6]), _EMPTY_REQ_CTX)
+        prepare_store_output = batch_store(cpu_manager, [6])
         assert prepare_store_output is not None
         cpu_manager.complete_store(to_keys([6]), _EMPTY_REQ_CTX)
 
@@ -823,7 +830,7 @@ def test_filter_reused_manager():
     assert manager.lookup(to_key(2), _EMPTY_REQ_CTX) is LookupResult.MISS
 
     # prepare store [1, 2] -> should be filtered
-    prepare_store_output = manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    prepare_store_output = batch_store(manager, [1, 2])
     assert prepare_store_output is not None
     assert prepare_store_output.keys_to_store == []
 
@@ -831,7 +838,7 @@ def test_filter_reused_manager():
     assert manager.lookup(to_key(1), _EMPTY_REQ_CTX) is LookupResult.MISS
 
     # prepare store [1, 2] -> [1] should be eligible, [2] should be filtered
-    prepare_store_output = manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    prepare_store_output = batch_store(manager, [1, 2])
     assert prepare_store_output is not None
     assert prepare_store_output.keys_to_store == to_keys([1])
 
@@ -848,7 +855,7 @@ def test_filter_reused_manager():
     assert manager.counts.get(to_keys([2])[0]) == 1
 
     # prepare store [2] -> should still be filtered out since count was reset
-    prepare_store_output = manager.prepare_store(to_keys([2]), _EMPTY_REQ_CTX)
+    prepare_store_output = batch_store(manager, [2])
     assert prepare_store_output is not None
     assert prepare_store_output.keys_to_store == []
 
@@ -869,7 +876,7 @@ def test_evictable_cache_block_count():
     # Initial cache state [x, x, x, x]
 
     # We get 3 blocks from the cache.
-    manager.prepare_store(to_keys([1, 2, 3]), _EMPTY_REQ_CTX)
+    batch_store(manager, [1, 2, 3])
     # cache state [1', 2', 3', x] <- 1', 2', 3' are actively being used.
     assert manager._num_evictable_cache_blocks == 0
 
@@ -897,9 +904,9 @@ def test_evictable_cache_block_count():
     assert manager._num_evictable_cache_blocks == 3
 
     # Eviction decrements idle count.
-    # Cache has 3 stored blocks and 1 free slot. Storing 3 new keys needs 2 eviction.
-    manager.prepare_store(to_keys([4, 5, 6]), _EMPTY_REQ_CTX)
-    # cache state [1, 4', 5', 6'] <- block 1 is idle
+    # Cache has 3 stored blocks and 1 free slot. Storing 3 new keys needs 2 evictions.
+    batch_store(manager, [4, 5, 6])
+    # cache state [1, 4', 5', 6'] <- one earlier block stays idle
     assert manager._num_evictable_cache_blocks == 1
 
     # Failed store does not increment idle count (block discarded from cache).
@@ -912,11 +919,11 @@ def test_evictable_cache_block_count():
     # cache state [x, x, x, x]
     assert manager._num_evictable_cache_blocks == 0
 
-    # setup 3 blocks with loads so idle count drops to 0.
-    manager.prepare_store(to_keys([10, 11, 12]), _EMPTY_REQ_CTX)
-    manager.complete_store(to_keys([10, 11, 12]), _EMPTY_REQ_CTX)
-    manager.prepare_load(to_keys([10, 11, 12]), _EMPTY_REQ_CTX)
-    # cache state [10', 11', 12', x]
+    # setup 4 blocks with loads so there is no free slot and idle count is 0.
+    batch_store(manager, [10, 11, 12, 13])
+    manager.complete_store(to_keys([10, 11, 12, 13]), _EMPTY_REQ_CTX)
+    manager.prepare_load(to_keys([10, 11, 12, 13]), _EMPTY_REQ_CTX)
+    # cache state [10', 11', 12', 13']
     assert manager._num_evictable_cache_blocks == 0
 
     # prepare_store requiring eviction must return None immediately (fast exit).
@@ -930,21 +937,21 @@ def test_evictable_cache_block_count():
         return original_evict(*args, **kwargs)
 
     manager._policy.evict = spy_evict  # type: ignore[method-assign]
-    # cache state [10', 11', 12', x] <- cannot evict anything
-    assert manager.prepare_store(to_keys([14, 15]), _EMPTY_REQ_CTX) is None
+    # No free slot and nothing evictable -> short-circuit before evict().
+    assert manager.prepare_store(to_key(14), _EMPTY_REQ_CTX) is None
     assert not evict_called, (
         "_num_evictable_cache_blocks==0 should short-circuit before evict()"
     )
 
     # After releasing the loads, eviction becomes possible again.
-    manager.complete_load(to_keys([10, 11, 12]), _EMPTY_REQ_CTX)
-    # cache state [10, 11, 12, x] <- 10, 11, 12 are idle
+    manager.complete_load(to_keys([10, 11, 12, 13]), _EMPTY_REQ_CTX)
+    # cache state [10, 11, 12, 13] <- all idle
+    assert manager._num_evictable_cache_blocks == 4
+    assert manager.prepare_store(to_key(14), _EMPTY_REQ_CTX) is not None
+    # cache state has one write-pending block (14) plus three idle blocks
     assert manager._num_evictable_cache_blocks == 3
-    assert manager.prepare_store(to_keys([14, 15]), _EMPTY_REQ_CTX) is not None
-    # cache state [10, 11, 14', 15'] <- 10, 11 are idle
-    assert manager._num_evictable_cache_blocks == 2
-    manager.complete_store(to_keys([14, 15]), _EMPTY_REQ_CTX)
-    # cache state [10, 11, 14, 15] <- all blocks idle
+    manager.complete_store(to_keys([14]), _EMPTY_REQ_CTX)
+    # all blocks idle again
     assert manager._num_evictable_cache_blocks == 4
 
 

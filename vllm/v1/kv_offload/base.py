@@ -89,6 +89,20 @@ class LoadStoreSpec:
     to load, and optionally also to store, blocks of KV data.
     """
 
+    @classmethod
+    def concat(cls, specs: Sequence["LoadStoreSpec"]) -> "LoadStoreSpec":
+        """Concatenate per-key specs, in order, into one spec of this type.
+
+        The scheduler uses this to aggregate the accepted single-key
+        ``prepare_store`` outputs of a step into one transfer job, in the
+        group-major order of the source GPU blocks. It does not change the
+        worker-facing spec shape. The block-id order is not guaranteed
+        byte-identical to a single batch store's spec (allocation can differ
+        under eviction pressure); the aggregated transfer is still correct
+        because the source and destination stay aligned per chunk.
+        """
+        raise NotImplementedError
+
 
 @dataclass
 class PrepareStoreOutput:
@@ -173,13 +187,21 @@ class OffloadingKVEventsConfig:
 
 class OffloadingManager(ABC):
     @abstractmethod
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+    def lookup(
+        self,
+        key: OffloadKey,
+        req_context: ReqContext,
+        chunk_idx: int | None = None,
+    ) -> LookupResult:
         """
         Checks whether a single block is offloaded and ready to be read.
 
         Args:
             key: the key identifying the block to lookup.
             req_context: per-request context (e.g. kv_transfer_params).
+            chunk_idx: absolute chunk index within the block's KV group, or
+                None for external lookups that cannot provide it. Reserved for
+                per-key provenance; unused by the current managers.
 
         Returns:
             HIT if the block is offloaded and ready, MISS if not found,
@@ -234,23 +256,31 @@ class OffloadingManager(ABC):
     @abstractmethod
     def prepare_store(
         self,
-        keys: Collection[OffloadKey],
+        key: OffloadKey,
         req_context: ReqContext,
+        chunk_idx: int | None = None,
     ) -> PrepareStoreOutput | None:
         """
-        Prepare the given blocks to be offloaded.
-        The given blocks will be protected from eviction until
-        complete_store is called.
+        Prepare a single block to be offloaded.
+        The block will be protected from eviction until complete_store is
+        called. Admission is single-key: callers issue one call per key and
+        aggregate the accepted specs into one transfer job (see Decision A in
+        the RFC). A returned empty ``keys_to_store`` means the key was skipped
+        (already stored or below the reuse threshold), which is distinct from
+        a ``None`` return that signals an allocation failure.
 
         Args:
-            keys: the keys identifying the blocks.
+            key: the key identifying the block.
             req_context: per-request context (e.g. kv_transfer_params).
+            chunk_idx: absolute chunk index within the block's KV group, or
+                None for external stores that cannot provide it. Reserved for
+                per-key provenance; unused by the current managers.
 
         Returns:
-            A PrepareStoreOutput indicating which blocks need storing,
-            where to store them (LoadStoreSpec), and list of blocks that
+            A PrepareStoreOutput indicating whether the block needs storing,
+            where to store it (LoadStoreSpec), and the list of blocks that
             were evicted as a result.
-            None is returned if the blocks cannot be stored.
+            None is returned if the block cannot be stored.
         """
         pass
 
@@ -358,6 +388,14 @@ class BlockIDsLoadStoreSpec(LoadStoreSpec, ABC):
 
     def __repr__(self) -> str:
         return repr(self.block_ids)
+
+    @classmethod
+    def concat(cls, specs: Sequence["LoadStoreSpec"]) -> "BlockIDsLoadStoreSpec":
+        block_ids: list[int] = []
+        for spec in specs:
+            assert isinstance(spec, BlockIDsLoadStoreSpec)
+            block_ids.extend(int(block_id) for block_id in spec.block_ids)
+        return cls(block_ids)
 
 
 class GPULoadStoreSpec(BlockIDsLoadStoreSpec):

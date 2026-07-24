@@ -39,6 +39,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
+    LoadStoreSpec,
     LookupResult,
     OffloadingManager,
     OffloadingSpec,
@@ -353,18 +354,6 @@ class RequestOffloadState:
         )
         return min(num_chunks, num_allocated_chunks)
 
-    def advance_stored_idx(self, num_offloadable_tokens: int) -> None:
-        # max(): at the prefill->decode transition of a chunk-aligned prompt,
-        # storable_chunks drops by one (the eagle exclusion kicks in), and the
-        # index must not move backwards past already-stored chunks.
-        for group_config, group_state in zip(
-            self.config.kv_group_configs, self.group_states
-        ):
-            group_state.next_stored_chunk_idx = max(
-                group_state.next_stored_chunk_idx,
-                self.storable_chunks(group_config, group_state, num_offloadable_tokens),
-            )
-
     def update_num_hit_chunks(self, num_cached_tokens: int) -> None:
         for group_config, group_state in zip(
             self.config.kv_group_configs, self.group_states
@@ -379,6 +368,22 @@ def _create_req_context(req: Request) -> ReqContext:
         req_id=req.request_id,
         kv_transfer_params=req.kv_transfer_params,
     )
+
+
+@dataclass(slots=True)
+class _StoreCandidate:
+    """A per-chunk store candidate considered during single-key admission.
+
+    ``sort_key`` determines admission order across KV groups; ``storable`` is
+    False for chunks that can never serve a load hit (SWA/SSM/EAGLE filtered or
+    a zeroed GPU block), which are skipped but still advance per-group progress.
+    """
+
+    sort_key: tuple[int, ...]
+    group_idx: int
+    chunk_idx: int
+    offload_key: OffloadKey
+    storable: bool
 
 
 class OffloadingConnectorScheduler:
@@ -990,93 +995,129 @@ class OffloadingConnectorScheduler:
                 req_status, num_tokens_after_batch
             )
 
-            # Filter out chunks skipped due to sliding window attention / SSM
-            # or unreachable by the load path's alignment constraints.
-            new_offload_keys: list[OffloadKey] = []
-            for group_config, group_state in zip(
-                self.config.kv_group_configs, req_status.group_states
+            # Build the per-request candidate chunk list across all KV groups.
+            # `storable` is False for chunks that can never serve a load hit
+            # (sliding-window / SSM / EAGLE filtered, or a zeroed GPU block);
+            # these are skipped but still advance per-group progress.
+            candidates: list[_StoreCandidate] = []
+            group_start: list[int] = []
+            group_num_chunks: list[int] = []
+            for group_idx, (group_config, group_state) in enumerate(
+                zip(self.config.kv_group_configs, req_status.group_states)
             ):
                 num_chunks = req_status.storable_chunks(
                     group_config, group_state, num_offloadable_tokens
                 )
-
                 start_chunk_idx = group_state.next_stored_chunk_idx
-                if num_chunks <= start_chunk_idx:
-                    continue
-                offload_keys = group_state.offload_keys[start_chunk_idx:num_chunks]
-                # For each chunk, take the last corresponding GPU block. For
-                # blocks_per_chunk=3 and GPU block IDs 1 5 6 7 2 4 9 3 8,
-                # this selects GPU blocks 6 4 8.
-                # A block_id of 0 means either a sliding window / SSM skip
-                # or a stale entry that was zeroed out — skip it either way.
-                offload_block_ids = group_state.block_ids[
-                    start_chunk_idx * blocks_per_chunk
-                    + blocks_per_chunk
-                    - 1 : num_chunks * blocks_per_chunk : blocks_per_chunk
-                ]
-                assert len(offload_keys) == len(offload_block_ids)
-
-                for key_idx, (offload_key, block_id) in enumerate(
-                    zip(offload_keys, offload_block_ids)
-                ):
-                    if block_id == 0:
-                        continue
-                    # Skip SWA chunks that can never serve a load hit:
-                    # within each full-attention alignment segment, only the
-                    # trailing chunks queried by _sliding_window_lookup are
-                    # reachable. EAGLE/MTP requires one additional chunk that
-                    # lookup later drops as its volatile draft tail.
-                    abs_chunk_idx = start_chunk_idx + key_idx
-                    if not is_store_reachable_swa_chunk(
-                        abs_chunk_idx,
+                group_start.append(start_chunk_idx)
+                group_num_chunks.append(num_chunks)
+                block_ids = group_state.block_ids
+                for chunk_idx in range(start_chunk_idx, num_chunks):
+                    offload_key = group_state.offload_keys[chunk_idx]
+                    # The last GPU block of the chunk. A block_id of 0 means a
+                    # sliding-window / SSM skip or a stale zeroed entry.
+                    last_block_id = block_ids[
+                        chunk_idx * blocks_per_chunk + blocks_per_chunk - 1
+                    ]
+                    # Skip SWA chunks that can never serve a load hit: within
+                    # each full-attention alignment segment, only the trailing
+                    # chunks queried by _sliding_window_lookup are reachable.
+                    # EAGLE/MTP requires one additional chunk that lookup later
+                    # drops as its volatile draft tail.
+                    storable = last_block_id != 0 and is_store_reachable_swa_chunk(
+                        chunk_idx,
                         num_chunks,
                         group_config.alignment_chunk_count,
                         group_config.sliding_window_size_in_chunks,
                         group_config.is_eagle_group,
-                    ):
-                        continue
-                    new_offload_keys.append(offload_key)
+                    )
+                    candidates.append(
+                        _StoreCandidate(
+                            # Order candidates across KV groups by the chunk's
+                            # ending token position so groups with different
+                            # block sizes advance evenly (Decision A).
+                            # (group_idx, chunk_idx) are deterministic
+                            # tie-breakers; within a group the ending position
+                            # is monotonic in chunk_idx, so the stable sort
+                            # preserves per-group chunk order.
+                            sort_key=(
+                                (chunk_idx + 1) * group_config.tokens_per_chunk,
+                                group_idx,
+                                chunk_idx,
+                            ),
+                            group_idx=group_idx,
+                            chunk_idx=chunk_idx,
+                            offload_key=offload_key,
+                            storable=storable,
+                        )
+                    )
 
-            if not new_offload_keys:
-                req_status.advance_stored_idx(num_offloadable_tokens)
-                self._maybe_cleanup_finished_req(req_id, req_status)
-                continue
+            candidates.sort(key=lambda c: c.sort_key)
 
-            store_output = self.manager.prepare_store(
-                new_offload_keys, req_status.req_context
-            )
-            if store_output is None:
+            # Single-key admission in sorted order. Keep the accepted prefix and
+            # stop this request at the first allocation failure of the step
+            # (Decision A). Already-stored / below-threshold keys are skips, not
+            # failures. Per-group progress advances only for processed
+            # (accepted or skipped) chunks, so the next step retries from the
+            # failed chunk.
+            group_next: list[int] = list(group_start)
+            key_to_spec: dict[OffloadKey, LoadStoreSpec] = {}
+            allocation_failed = False
+            for cand in candidates:
+                if not cand.storable:
+                    group_next[cand.group_idx] = cand.chunk_idx + 1
+                    continue
+                store_output = self.manager.prepare_store(
+                    cand.offload_key, req_status.req_context, cand.chunk_idx
+                )
+                if store_output is None:
+                    allocation_failed = True
+                    break
+                group_next[cand.group_idx] = cand.chunk_idx + 1
+                if store_output.keys_to_store:
+                    key_to_spec[cand.offload_key] = store_output.store_spec
+
+            # Advance per-group progress for processed chunks. next_stored_chunk_idx
+            # is monotonic, so max() guards the eagle prefill->decode transition
+            # where storable_chunks can momentarily drop by one.
+            for group_state, next_idx in zip(req_status.group_states, group_next):
+                group_state.next_stored_chunk_idx = max(
+                    group_state.next_stored_chunk_idx, next_idx
+                )
+
+            if allocation_failed:
                 self._connector_stats.increase_counter(
                     _ConnectorMetricName.ALLOCATION_FAILURE
                 )
-                logger.warning("Request %s: cannot store chunks", req_id)
-                self._maybe_cleanup_finished_req(req_id, req_status)
-                continue
 
-            if not store_output.keys_to_store:
-                req_status.advance_stored_idx(num_offloadable_tokens)
+            if not key_to_spec:
+                if allocation_failed:
+                    logger.warning("Request %s: cannot store chunks", req_id)
                 self._maybe_cleanup_finished_req(req_id, req_status)
                 continue
 
             self._touch(req_status)
 
-            keys_to_store = set(store_output.keys_to_store)
+            keys_to_store = set(key_to_spec)
 
+            # Group-major repack: aggregate the accepted single-key stores into
+            # one transfer job with the existing worker-facing shape — a
+            # GPULoadStoreSpec ordered by group and a dst spec (concatenation of
+            # the per-key specs) aligned per chunk with the GPU source blocks.
             group_sizes: list[int] = []
             block_indices: list[int] = []
             src_block_ids: list[int] = []
+            dst_specs: list[LoadStoreSpec] = []
             sliding_window_block_ids: list[int] = []
             non_sliding_window_block_ids: list[int] = []
-            for group_config, group_state in zip(
-                self.config.kv_group_configs, req_status.group_states
+            for group_idx, (group_config, group_state) in enumerate(
+                zip(self.config.kv_group_configs, req_status.group_states)
             ):
                 is_sliding_window = (
                     group_config.sliding_window_size_in_chunks is not None
                 )
-                num_chunks = req_status.storable_chunks(
-                    group_config, group_state, num_offloadable_tokens
-                )
-                start_chunk_idx = group_state.next_stored_chunk_idx
+                start_chunk_idx = group_start[group_idx]
+                num_chunks = group_num_chunks[group_idx]
                 block_ids = group_state.block_ids
                 num_group_blocks = 0
                 start_gpu_block_idx: int | None = None
@@ -1091,6 +1132,8 @@ class OffloadingConnectorScheduler:
                     self._events_tracker.record_store(
                         req, group_config, chunk_idx, offload_key
                     )
+
+                    dst_specs.append(key_to_spec[offload_key])
 
                     gpu_block_idx = chunk_idx * blocks_per_chunk
                     for i in range(blocks_per_chunk):
@@ -1108,14 +1151,11 @@ class OffloadingConnectorScheduler:
 
                 group_sizes.append(num_group_blocks)
                 block_indices.append(start_gpu_block_idx or 0)
-                group_state.next_stored_chunk_idx = max(
-                    group_state.next_stored_chunk_idx, num_chunks
-                )
 
             src_spec = GPULoadStoreSpec(
                 src_block_ids, group_sizes=group_sizes, block_indices=block_indices
             )
-            dst_spec = store_output.store_spec
+            dst_spec = type(dst_specs[0]).concat(dst_specs)
 
             job_id = self._generate_job_id()
             # a store can only be issued when no load is pending.
