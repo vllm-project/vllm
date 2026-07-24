@@ -1707,6 +1707,7 @@ class Qwen3VLForConditionalGeneration(
             "model.visual.": "visual.",
             "lm_head.": "language_model.lm_head.",
             "model.language_model.": "language_model.model.",
+            "model.": "language_model.model.",
         }
     )
 
