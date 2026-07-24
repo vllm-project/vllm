@@ -17,7 +17,7 @@ ARG NIC_BACKEND=all
 # Users can specify a custom version compatible with their host drivers.
 # The default version has been tested with ioinic-dkms=25.11.1.001
 ARG AINIC_VERSION=1.117.3-hydra
-ARG UBUNTU_CODENAME=jammy
+ARG UBUNTU_CODENAME=noble
 
 # Sccache configuration. Release builds use this today; CI can opt in when a
 # shared S3-compatible cache backend is available.
@@ -345,7 +345,6 @@ ARG NIXL_BRANCH="231d56753047c989062a5cb2ac703a1ad761c7d2"
 ARG NIXL_REPO="https://github.com/ai-dynamo/nixl.git"
 ARG UCX_BRANCH="96e58a16039f6d7d213bc967b8069238742c5194"
 ARG UCX_REPO="https://github.com/openucx/ucx.git"
-ENV ROCM_PATH=/opt/rocm
 ENV UCX_HOME=/usr/local/ucx
 ENV NIXL_HOME=/usr/local/nixl
 
@@ -395,6 +394,12 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 ENV PATH=/usr/local/ucx/bin:$PATH
 ENV LD_LIBRARY_PATH=${UCX_HOME}/lib:${LD_LIBRARY_PATH}
 
+# Remove old Abseil packages to allow NIXL to use its subproject fallback
+# Ubuntu 24.04's Abseil (20220623) is too old and lacks absl_log support
+RUN apt-get purge -y libabsl-dev libabsl20220623 || true && \
+    apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
+
 RUN --mount=type=cache,target=/root/.cache/ccache \
     git clone ${NIXL_REPO} /opt/nixl && \
     cd /opt/nixl && \
@@ -414,15 +419,11 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         >> /etc/ld.so.conf.d/nixl.conf && \
     ldconfig
 
-# Generate the ROCm NIXL wheel. Upstream's generic wheel helper detects CUDA,
-# so configure the ROCm wheel variant directly through Meson.
-# Exclude libcore and libpull from auditwheel: transitive dependencies
-# that are not shipped in the wheel and vary across base images.
+# Generate the ROCm NIXL wheel.
 RUN cd /opt/nixl && \
     ./contrib/tomlutil.py --wheel-name nixl-rocm pyproject.toml && \
     CC="ccache gcc" CXX="ccache g++" \
     uv build --wheel --no-build-isolation --out-dir /tmp/nixl_wheels \
-        --python ${PYTHON_VERSION} \
         -Csetup-args=-Ducx_path=${UCX_HOME} \
         -Csetup-args=-Dwheel_variant=rocm \
         -Csetup-args=-Dbuild_tests=false \
@@ -433,7 +434,7 @@ RUN cd /opt/nixl && \
         --exclude 'libcore*' \
         --exclude 'libpull*' \
         /tmp/nixl_wheels/nixl_rocm*.whl \
-        --plat manylinux_2_34_$(uname -m) \
+        --plat manylinux_2_39_$(uname -m) \
         --wheel-dir /tmp/nixl_wheels/repaired && \
     ./contrib/wheel_add_ucx_plugins.py \
         --ucx-plugins-dir ${UCX_HOME}/lib/ucx \
@@ -441,31 +442,13 @@ RUN cd /opt/nixl && \
         /tmp/nixl_wheels/repaired/*.whl && \
     cp /tmp/nixl_wheels/repaired/*.whl /app/install
 
-# ROCShmem build stage - split from DeepEP so changing DEEPEP_BRANCH does not
-# invalidate the slow ROCShmem build.
+# ROCShmem is provided by TheRock SDK (rocm[libraries,devel]) — no from-source
+# build needed. ROCSHMEM_DIR points to the SDK install path so DeepEP can find
+# the headers, static lib, and device bitcode.
 FROM base AS build_rocshmem
-ARG ROCSHMEM_BRANCH="f0acb0c6"
-ARG ROCSHMEM_REPO="https://github.com/ROCm/rocm-systems.git"
-# DeepEP only supports gfx942 and gfx950; build ROCShmem for the same set so
-# it can be linked against DeepEP without arch mismatches.
-ARG DEEPEP_ROCM_ARCH="gfx942;gfx950"
-ENV ROCM_PATH=/opt/rocm
-ENV ROCSHMEM_DIR=/opt/rocshmem
+ENV ROCSHMEM_DIR=${ROCM_PATH}
 
-RUN --mount=type=cache,target=/root/.cache/ccache \
-    git clone --no-checkout --filter=blob:none ${ROCSHMEM_REPO} \
- && cd rocm-systems \
- && git sparse-checkout set --cone projects/rocshmem \
- && git checkout ${ROCSHMEM_BRANCH} \
- && mkdir -p projects/rocshmem/build \
- && cd projects/rocshmem/build \
- && CC="ccache gcc" CXX="ccache g++" INSTALL_PREFIX=${ROCSHMEM_DIR} \
-    bash ../scripts/build_configs/all_backends \
-      -DROCM_PATH=${ROCM_PATH} \
-      -DGPU_TARGETS="${DEEPEP_ROCM_ARCH}" \
-      -DUSE_EXTERNAL_MPI=OFF
-
-# DeepEP build stage - depends on ROCShmem, builds the HIP kernel wheel.
+# DeepEP build stage - uses TheRock-provided ROCShmem.
 FROM build_rocshmem AS build_deepep
 ARG DEEPEP_BRANCH="a9ea9774"
 ARG DEEPEP_REPO="https://github.com/ROCm/DeepEP.git"
@@ -554,7 +537,7 @@ RUN mkdir -p /install
 # .keep file ensures directory always exists for COPY to work
 COPY docker/context/base-wheels/ /tmp/base-wheels/
 # This is how we know if we are building for a wheel release or not.
-# If there are not wheels found there, we are not building for a wheel release. 
+# If there are not wheels found there, we are not building for a wheel release.
 # So we exit with an error. To skip this stage.
 RUN if [ -n "$(ls /tmp/base-wheels/*.whl 2>/dev/null)" ]; then \
         echo "Found custom wheels - copying to /install"; \
@@ -685,9 +668,6 @@ RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \
     --mount=type=bind,from=build_deepep,src=/app/deep_install,target=/deep_install \
     uv pip install --system /nixl_install/*.whl /deep_install/*.whl
 
-# Copy ROCShmem runtime libraries.
-COPY --from=build_rocshmem /opt/rocshmem /opt/rocshmem
-
 # RDMA userspace libraries plus FFmpeg dev libs needed by torchcodec.
 RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
     librdmacm1 \
@@ -724,8 +704,9 @@ ENV PYTORCH_NVML_BASED_CUDA_CHECK=1
 
 # Pre-install vLLM test dependencies.
 COPY requirements/test/rocm.txt /tmp/rocm-test-reqs.txt
+# Set UV_SKIP_WHEEL_FILENAME_CHECK=1 for pre-release bitsandbytes.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r /tmp/rocm-test-reqs.txt
+    UV_SKIP_WHEEL_FILENAME_CHECK=1 uv pip install --system -r /tmp/rocm-test-reqs.txt
 
 # Rebuild fastsafetensors from source so its C++ extension is compiled with
 # USE_ROCM and can detect libamdhip64.so at runtime.

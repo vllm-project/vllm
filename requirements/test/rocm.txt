@@ -47,8 +47,7 @@ apache-tvm-ffi==0.1.10
     #   -c requirements/rocm.txt
     #   tilelang
     #   xgrammar
-arctic-inference==0.1.1
-    # via -r requirements/test/rocm.in
+    # TODO: revisit — arctic-inference removed: no cp314 wheel
 argcomplete==3.6.3
     # via datamodel-code-generator
 astor==0.8.1
@@ -72,7 +71,8 @@ azure-storage-blob==12.28.0
     # via runai-model-streamer-azure
 backoff==2.2.1
     # via -r requirements/test/rocm.in
-bitsandbytes==0.49.2
+# bitsandbytes 0.49.2 has broken ROCm .so naming; this commit (0.50.0.dev0) fixes it
+bitsandbytes @ git+https://github.com/bitsandbytes-foundation/bitsandbytes.git@672133342089ddd01ae247068d7963ff05bb306d
     # via -r requirements/test/rocm.in
 black==26.3.1
     # via datamodel-code-generator
@@ -104,7 +104,7 @@ certifi==2026.2.25
     #   httpx
     #   requests
     #   sentry-sdk
-cffi==1.17.1
+cffi==2.0.0
     # via
     #   cryptography
     #   soundfile
@@ -166,7 +166,8 @@ dataproperty==1.1.0
     # via
     #   pytablewriter
     #   tabledata
-datasets==3.6.0
+# TODO: revisit — datasets unpinned for cp314 compatibility
+datasets
     # via
     #   -r requirements/test/rocm.in
     #   evaluate
@@ -174,13 +175,14 @@ datasets==3.6.0
     #   mteb
 decorator==5.2.1
     # via librosa
-decord==0.6.0
-    # via -r requirements/test/rocm.in
-depyf==0.20.0
+    # TODO: revisit — decord removed: no cp314 wheel and no sdist
+# TODO: switch back to upstream depyf when Python 3.14 fix PR merges (thuml/depyf)
+depyf @ git+https://github.com/rasmith/depyf.git@c67f28ddbdb5c4922fb14530743d77cc6468da32
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-dill==0.3.8
+# TODO: revisit — dill unpinned for cp314 compatibility
+dill
     # via
     #   datasets
     #   depyf
@@ -391,7 +393,8 @@ inflect==7.5.0
     # via datamodel-code-generator
 iniconfig==2.3.0
     # via pytest
-instanttensor==0.1.9
+# TODO: revisit — instanttensor unpinned for cp314 compatibility
+instanttensor
     # via -r requirements/test/rocm.in
 interegular==0.3.3
     # via lm-format-enforcer
@@ -532,7 +535,8 @@ multidict==6.7.1
     # via
     #   aiohttp
     #   yarl
-multiprocess==0.70.16
+# TODO: revisit — multiprocess unpinned for cp314 compatibility
+multiprocess
     # via
     #   -r requirements/test/rocm.in
     #   datasets
@@ -556,7 +560,8 @@ numba==0.65.0
     #   -c requirements/rocm.txt
     #   -r requirements/test/rocm.in
     #   librosa
-numpy==2.2.6
+# TODO: revisit — numpy unpinned for cp314 compatibility
+numpy
     # via
     #   -r requirements/test/../common.txt
     #   accelerate
@@ -623,7 +628,7 @@ opencensus==0.11.4
     # via ray
 opencensus-context==0.1.3
     # via opencensus
-opencv-python-headless==4.13.0.92
+    # TODO: revisit — opencv-python-headless removed: no cp314 wheel and no sdist
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -712,7 +717,8 @@ packaging==26.0
     #   statsmodels
     #   transformers
     #   typepy
-pandas==3.0.1
+# TODO: revisit — pandas unpinned for cp314 compatibility
+pandas
     # via
     #   datasets
     #   evaluate
@@ -761,7 +767,8 @@ pluggy==1.6.0
     #   pytest-cov
 polars==1.39.3
     # via mteb
-polars-runtime-32==1.39.3
+# TODO: revisit — polars-runtime-32 unpinned for cp314 compatibility
+polars-runtime-32
     # via polars
 pooch==1.8.2
     # via librosa
@@ -824,7 +831,8 @@ pycountry==26.2.16
     # via pydantic-extra-types
 pycparser==3.0
     # via cffi
-pycryptodomex==3.23.0
+# TODO: revisit — pycryptodomex unpinned for cp314 compatibility
+pycryptodomex
     # via blobfile
 pydantic==2.12.5
     # via
@@ -870,7 +878,8 @@ pyparsing==3.3.2
     # via matplotlib
 pyrate-limiter==4.4.0
     # via schemathesis
-pystemmer==3.0.0
+# TODO: revisit — pystemmer unpinned for cp314 compatibility
+pystemmer
     # via mteb
 pytablewriter==1.2.1
     # via lm-eval
@@ -952,11 +961,12 @@ pyzmq==27.1.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-rapidfuzz==3.12.1
+# TODO: revisit — rapidfuzz unpinned for cp314 compatibility
+rapidfuzz
     # via
     #   -r requirements/test/rocm.in
     #   jiwer
-ray==2.54.0
+ray==2.56.0
     # via -r requirements/test/rocm.in
 redis==7.3.0
     # via tensorizer
@@ -1031,7 +1041,8 @@ s3transfer==0.16.0
     # via boto3
 sacrebleu==2.6.0
     # via lm-eval
-safetensors==0.8.0
+# TODO: revisit — safetensors unpinned for cp314 compatibility
+safetensors
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -1114,7 +1125,8 @@ soundfile==0.13.1
     #   genai-perf
     #   librosa
     #   mistral-common
-soxr==0.5.0.post1
+# TODO: revisit — soxr unpinned for cp314 compatibility
+soxr
     # via
     #   librosa
     #   mistral-common
@@ -1178,7 +1190,8 @@ tiktoken==0.12.0
     #   gpt-oss
     #   lm-eval
     #   mistral-common
-tilelang==0.1.10
+# TODO: revisit — tilelang unpinned for cp314 compatibility
+tilelang
     # via
     #   -c requirements/rocm.txt
     #   -r requirements/test/rocm.in
@@ -1188,7 +1201,8 @@ timm==1.0.17
     #   -r requirements/test/rocm.in
     #   open-clip-torch
     #   segmentation-models-pytorch
-tokenizers==0.22.2
+# TODO: revisit — tokenizers unpinned for cp314 compatibility
+tokenizers
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt

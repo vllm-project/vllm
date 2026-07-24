@@ -1,42 +1,29 @@
-ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2.3-complete
-ARG TRITON_BRANCH="0f380657"
-ARG TRITON_REPO="https://github.com/ROCm/triton.git"
-ARG PYTORCH_BRANCH="d0c8b1f3" # release/2.11 as of 6/09
-ARG PYTORCH_REPO="https://github.com/ROCm/pytorch.git"
-ARG PYTORCH_VISION_BRANCH="v0.24.1"
-ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
-ARG PYTORCH_AUDIO_BRANCH="v2.9.0"
-ARG PYTORCH_AUDIO_REPO="https://github.com/pytorch/audio.git"
+ARG BASE_IMAGE=ubuntu:24.04
+ARG TRITON_BRANCH="release/3.6.x"
+ARG TRITON_REPO="https://github.com/triton-lang/triton.git"
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
 ARG AITER_BRANCH="v0.1.16.post5"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
-ARG MORI_BRANCH="v1.1.0"
-ARG MORI_REPO="https://github.com/ROCm/mori.git"
 
-# Sccache configuration (only used in release pipeline)
-ARG USE_SCCACHE
+# Sccache configuration - LOCAL DISK MODE
 ARG SCCACHE_DOWNLOAD_URL
-ARG SCCACHE_ENDPOINT
-ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
-ARG SCCACHE_REGION_NAME=us-west-2
-ARG SCCACHE_S3_NO_CREDENTIALS=0
 
 FROM ${BASE_IMAGE} AS base
 
-ENV PATH=/opt/rocm/llvm/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ENV ROCM_PATH=/opt/rocm
-ENV LD_LIBRARY_PATH=/opt/rocm/lib:/usr/local/lib:
-ARG PYTORCH_ROCM_ARCH=gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151
-ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
-ENV AITER_ROCM_ARCH=gfx942;gfx950
-ENV MORI_GPU_ARCHS=gfx942;gfx950
+ARG PYTORCH_ROCM_ARCH="gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151"
+ENV PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH}"
+ARG AITER_ROCM_ARCH="gfx942;gfx950"
+ENV AITER_ROCM_ARCH="${AITER_ROCM_ARCH}"
+# Prebuild AITER kernels at wheel-build time (CDNA only). 1=on, 0=off.
+ARG PREBUILD_KERNELS=0
+ARG PYTHON_VERSION=3.14
+ENV PYTHON_VERSION=${PYTHON_VERSION}
+ARG MAX_JOBS=128
+ENV MAX_JOBS=${MAX_JOBS}
 
 # Required for RCCL in ROCm7.1
 ENV HSA_NO_SCRATCH_RECLAIM=1
-
-ARG PYTHON_VERSION=3.12
-ENV PYTHON_VERSION=${PYTHON_VERSION}
 
 RUN mkdir -p /app
 WORKDIR /app
@@ -44,66 +31,172 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Install Python and other dependencies
 RUN apt-get update -y \
-    && apt-get install -y software-properties-common git curl sudo vim less libgfortran5 libopenmpi-dev libpci-dev liblzma-dev pkg-config \
+    && apt-get install -y software-properties-common build-essential git curl sudo vim less libgfortran5 libopenmpi-dev libpci-dev liblzma-dev pkg-config libdrm-dev \
     && for i in 1 2 3; do \
         add-apt-repository -y ppa:deadsnakes/ppa && break || \
         { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
     done \
     && apt-get update -y \
     && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
-       python${PYTHON_VERSION}-lib2to3 python-is-python3  \
+       python-is-python3 \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
     && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 
-RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11 Cython
+RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11
 RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
 
-# Install sccache if USE_SCCACHE is enabled (for release builds)
-ARG USE_SCCACHE
+# Install sccache - always enabled for local disk caching
 ARG SCCACHE_DOWNLOAD_URL
-ARG SCCACHE_ENDPOINT
-ARG SCCACHE_BUCKET_NAME
-ARG SCCACHE_REGION_NAME
-ARG SCCACHE_S3_NO_CREDENTIALS
-RUN if [ "$USE_SCCACHE" = "1" ]; then \
-        echo "Installing sccache..." \
-        && SCCACHE_ARCH="x86_64" \
-        && SCCACHE_VERSION="v0.8.1" \
-        && SCCACHE_DL_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
-        && curl -L -o /tmp/sccache.tar.gz ${SCCACHE_DL_URL} \
-        && tar -xzf /tmp/sccache.tar.gz -C /tmp \
-        && mv /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
-        && chmod +x /usr/bin/sccache \
-        && rm -rf /tmp/sccache.tar.gz /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl \
-        && sccache --version; \
+RUN echo "Installing sccache for local disk caching..." \
+    && SCCACHE_ARCH="x86_64" \
+    && SCCACHE_VERSION="v0.14.0" \
+    && SCCACHE_DL_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
+    && curl -L -o /tmp/sccache.tar.gz ${SCCACHE_DL_URL} \
+    && tar -xzf /tmp/sccache.tar.gz -C /tmp \
+    && mv /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
+    && chmod +x /usr/bin/sccache \
+    && rm -rf /tmp/sccache.tar.gz /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl \
+    && sccache --version
+
+# NOTE: sccache wrappers are created AFTER TheRock ROCm install (below)
+# because clang++ path depends on rocm-sdk init
+
+# Configure sccache for LOCAL DISK mode
+# Cache will be mounted at build time via --mount=type=cache
+ENV SCCACHE_DIR=/sccache
+ENV SCCACHE_IDLE_TIMEOUT=0
+ENV SCCACHE_CACHE_SIZE="50G"
+
+###
+### TheROCK install
+###
+ARG PIP_EXTRA_INDEX_URL=https://repo.amd.com/rocm/whl-multi-arch/
+ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
+ARG ROCM_SDK_VERSION=7.14.0
+ARG TORCH_VERSION=2.11.0+rocm7.14.0
+ARG TORCHAUDIO_VERSION=2.11.0+rocm7.14.0
+ARG TORCHVISION_VERSION=0.26.0+rocm7.14.0
+# DEVICE_EXTRAS: set to install device-specific packages (e.g. "device-all" or
+# "gfx90a;gfx942;gfx950"). When unset, only base torch wheels are installed.
+ARG DEVICE_EXTRAS
+# Source build fallback repos (used when wheels are not available).
+ARG PYTORCH_REPO="https://github.com/ROCm/pytorch.git"
+ARG PYTORCH_BRANCH="release/2.11"
+ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
+ARG PYTORCH_VISION_BRANCH="v0.24.1"
+ARG PYTORCH_AUDIO_REPO="https://github.com/pytorch/audio.git"
+ARG PYTORCH_AUDIO_BRANCH="v2.9.0"
+
+# Install ROCm SDK
+RUN pip install --index-url ${PIP_EXTRA_INDEX_URL} \
+    "rocm[libraries,devel]${ROCM_SDK_VERSION:+==${ROCM_SDK_VERSION}}" \
+    && rocm-sdk init
+
+# Install PyTorch: try wheels first, build from source if not available.
+RUN set -e; \
+    TORCH_INSTALLED=0; \
+    if [ -n "${ROCM_SDK_VERSION}" ]; then \
+        echo "Trying PyTorch wheels from TheRock index..." \
+        && if pip install --index-url ${PIP_EXTRA_INDEX_URL} \
+                "torch==${TORCH_VERSION}" \
+                "torchaudio==${TORCHAUDIO_VERSION}" \
+                "torchvision==${TORCHVISION_VERSION}"; then \
+            echo "PyTorch wheels installed successfully"; \
+            python3 -c "import torch; print(f'  torch={torch.__version__}, hip={torch.version.hip}')"; \
+            TORCH_INSTALLED=1; \
+        else \
+            echo "PyTorch wheels not found, will build from source"; \
+        fi; \
+    fi; \
+    if [ "${TORCH_INSTALLED}" = "0" ]; then \
+        echo "Building PyTorch from source (${PYTORCH_REPO} @ ${PYTORCH_BRANCH})" \
+        && apt-get update && apt-get install -y pkg-config liblzma-dev \
+        && git clone ${PYTORCH_REPO} /tmp/pytorch \
+        && cd /tmp/pytorch && git checkout ${PYTORCH_BRANCH} \
+        && pip install -r requirements.txt && git submodule update --init --recursive \
+        && python3 tools/amd_build/build_amd.py \
+        && CMAKE_PREFIX_PATH=$(python3 -c 'import sys; print(sys.prefix)') \
+           python3 setup.py bdist_wheel --dist-dir=dist \
+        && pip install dist/*.whl \
+        && rm -rf /tmp/pytorch \
+        && echo "Building torchvision from source (${PYTORCH_VISION_REPO} @ ${PYTORCH_VISION_BRANCH})" \
+        && git clone ${PYTORCH_VISION_REPO} /tmp/vision \
+        && cd /tmp/vision && git checkout ${PYTORCH_VISION_BRANCH} \
+        && python3 setup.py bdist_wheel --dist-dir=dist \
+        && pip install dist/*.whl \
+        && rm -rf /tmp/vision \
+        && echo "Building torchaudio from source (${PYTORCH_AUDIO_REPO} @ ${PYTORCH_AUDIO_BRANCH})" \
+        && git clone ${PYTORCH_AUDIO_REPO} /tmp/audio \
+        && cd /tmp/audio && git checkout ${PYTORCH_AUDIO_BRANCH} \
+        && git submodule update --init --recursive \
+        && pip install -r requirements.txt \
+        && python3 setup.py bdist_wheel --dist-dir=dist \
+        && pip install dist/*.whl \
+        && rm -rf /tmp/audio; \
     fi
 
-# Setup sccache for HIP compilation via HIP_CLANG_PATH
-# This creates wrapper scripts in a separate directory and points HIP to use them
-# This avoids modifying the original ROCm binaries which can break detection
-# NOTE: HIP_CLANG_PATH is NOT set as ENV to avoid affecting downstream images (Dockerfile.rocm)
-# Instead, each build stage should export HIP_CLANG_PATH=/opt/sccache-wrappers if USE_SCCACHE=1
-RUN if [ "$USE_SCCACHE" = "1" ]; then \
-        echo "Setting up sccache wrappers for HIP compilation..." \
+# Install device-specific packages for each arch in PYTORCH_ROCM_ARCH
+SHELL ["/bin/bash", "-c"]
+RUN if [ -n "${ROCM_SDK_VERSION}" ] && [ -n "${PYTORCH_ROCM_ARCH}" ]; then \
+        TORCH_VER=$(python3 -c "import torch; print(torch.__version__)"); \
+        IFS=';' read -ra ARCHES <<< "${PYTORCH_ROCM_ARCH}"; \
+        PKGS=""; \
+        for arch in "${ARCHES[@]}"; do \
+            PKGS="${PKGS} amd-torch-device-${arch}==${TORCH_VER}"; \
+            PKGS="${PKGS} rocm-sdk-device-${arch}==${ROCM_SDK_VERSION}"; \
+        done; \
+        echo "Installing device packages for arches: ${PYTORCH_ROCM_ARCH}"; \
+        pip install --index-url ${PIP_EXTRA_INDEX_URL} ${PKGS}; \
+    fi
+SHELL ["/bin/sh", "-c"]
+
+ENV SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
+ENV ROCM_PATH="$SITE_PACKAGES/_rocm_sdk_devel" \
+    ROCM_HOME="$SITE_PACKAGES/_rocm_sdk_devel" \
+    HIP_PATH="$SITE_PACKAGES/_rocm_sdk_devel" \
+    HIP_CLANG_PATH="$SITE_PACKAGES/_rocm_sdk_devel/lib/llvm/bin" \
+    HIP_DEVICE_LIB_PATH="$SITE_PACKAGES/_rocm_sdk_core/lib/llvm/amdgcn/bitcode"
+ENV LD_LIBRARY_PATH="$SITE_PACKAGES/_rocm_sdk_devel/lib:$SITE_PACKAGES/_rocm_sdk_devel/lib/rocm_sysdeps/lib:$SITE_PACKAGES/_rocm_sdk_core/lib:$SITE_PACKAGES/_rocm_sdk_core/lib/rocm_sysdeps/lib"
+ENV PATH="$SITE_PACKAGES/_rocm_sdk_devel/bin:$SITE_PACKAGES/_rocm_sdk_devel/lib/llvm/bin:$SITE_PACKAGES/_rocm_sdk_core/bin:${PATH}"
+RUN cd $SITE_PACKAGES/_rocm_sdk_core/share/amd_smi && pip install .
+ENV PYTHONPATH=$SITE_PACKAGES/_rocm_sdk_core/share/amd_smi:$PYTHONPATH
+
+# Setup sccache wrappers for HIP compilation via HIP_CLANG_PATH
+# Must run AFTER rocm-sdk init so clang++ is installed
+RUN echo "Setting up sccache wrappers for HIP compilation..." \
         && mkdir -p /opt/sccache-wrappers \
-        && printf '#!/bin/bash\nexec sccache /opt/rocm/lib/llvm/bin/clang++ "$@"\n' > /opt/sccache-wrappers/clang++ \
+        && REAL_CLANGXX="" \
+        && for p in \
+             "${ROCM_PATH}/lib/llvm/bin/clang++" \
+             "${ROCM_PATH}/bin/clang++" \
+             "/opt/rocm/lib/llvm/bin/clang++" \
+             "/opt/rocm/llvm/bin/clang++" \
+             "$(which clang++ 2>/dev/null || true)"; do \
+             if [ -n "$p" ] && [ -x "$p" ]; then REAL_CLANGXX="$p"; break; fi; \
+           done \
+        && REAL_CLANG="" \
+        && for p in \
+             "${ROCM_PATH}/lib/llvm/bin/clang" \
+             "${ROCM_PATH}/bin/clang" \
+             "/opt/rocm/lib/llvm/bin/clang" \
+             "/opt/rocm/llvm/bin/clang" \
+             "$(which clang 2>/dev/null || true)"; do \
+             if [ -n "$p" ] && [ -x "$p" ]; then REAL_CLANG="$p"; break; fi; \
+           done \
+        && echo "Found clang++: ${REAL_CLANGXX}" \
+        && echo "Found clang:   ${REAL_CLANG}" \
+        && if [ -z "$REAL_CLANGXX" ]; then echo "ERROR: clang++ not found"; exit 1; fi \
+        && printf '#!/bin/bash\nsccache %s "$@"\nret=$?\nif [ $ret -eq 2 ] || [ $ret -eq 254 ]; then\n  exec %s "$@"\nfi\nexit $ret\n' \
+             "${REAL_CLANGXX}" "${REAL_CLANGXX}" > /opt/sccache-wrappers/clang++ \
         && chmod +x /opt/sccache-wrappers/clang++ \
-        && printf '#!/bin/bash\nexec sccache /opt/rocm/lib/llvm/bin/clang "$@"\n' > /opt/sccache-wrappers/clang \
+        && printf '#!/bin/bash\nsccache %s "$@"\nret=$?\nif [ $ret -eq 2 ] || [ $ret -eq 254 ]; then\n  exec %s "$@"\nfi\nexit $ret\n' \
+             "${REAL_CLANG}" "${REAL_CLANG}" > /opt/sccache-wrappers/clang \
         && chmod +x /opt/sccache-wrappers/clang \
-        && echo "sccache wrappers created in /opt/sccache-wrappers"; \
-    fi
-
-# Set sccache environment variables only when USE_SCCACHE=1
-# This prevents S3 config from leaking into images when sccache is not used
-ARG USE_SCCACHE
-ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET_NAME}}
-ENV SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION_NAME}}
-ENV SCCACHE_S3_NO_CREDENTIALS=${USE_SCCACHE:+${SCCACHE_S3_NO_CREDENTIALS}}
-ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
-
+        && echo "sccache wrappers created (with fallback):" \
+        && cat /opt/sccache-wrappers/clang++
 
 ###
 ### Triton Build
@@ -112,96 +205,9 @@ FROM base AS build_triton
 ARG TRITON_BRANCH
 ARG TRITON_REPO
 RUN git clone ${TRITON_REPO}
-# Cherry picking the following
-# https://github.com/triton-lang/triton/pull/8991
-RUN cd triton \
-    && git checkout ${TRITON_BRANCH} \
-    && git config --global user.email "you@example.com" && git config --global user.name "Your Name" \
-    && git cherry-pick 555d04f \
-    && if [ ! -f setup.py ]; then cd python; fi \
-    && python3 setup.py bdist_wheel --dist-dir=dist \
-    && mkdir -p /app/install && cp dist/*.whl /app/install
+RUN cd triton && git checkout ${TRITON_BRANCH} && mkdir -p /app/install
 RUN if [ -d triton/python/triton_kernels ]; then pip install build && cd triton/python/triton_kernels \
     && python3 -m build --wheel && cp dist/*.whl /app/install; fi
-
-
-###
-### AMD SMI Build
-###
-FROM base AS build_amdsmi
-RUN cd /opt/rocm/share/amd_smi \
-    && pip wheel . --wheel-dir=dist
-RUN mkdir -p /app/install && cp /opt/rocm/share/amd_smi/dist/*.whl /app/install
-
-
-###
-### Pytorch build
-###
-FROM base AS build_pytorch
-ARG PYTORCH_BRANCH
-ARG PYTORCH_VISION_BRANCH
-ARG PYTORCH_AUDIO_BRANCH
-ARG PYTORCH_REPO
-ARG PYTORCH_VISION_REPO
-ARG PYTORCH_AUDIO_REPO
-ARG USE_SCCACHE
-
-RUN apt-get update && apt-get install -y pkg-config liblzma-dev
-RUN git clone ${PYTORCH_REPO} pytorch
-RUN cd pytorch && git checkout ${PYTORCH_BRANCH}
-RUN cd pytorch \
-    && pip install -r requirements.txt && git submodule update --init --recursive
-RUN cd pytorch && python3 tools/amd_build/build_amd.py \
-    && if [ "$USE_SCCACHE" = "1" ]; then \
-           export HIP_CLANG_PATH=/opt/sccache-wrappers \
-           && export CMAKE_C_COMPILER_LAUNCHER=sccache \
-           && export CMAKE_CXX_COMPILER_LAUNCHER=sccache \
-           && sccache --show-stats; \
-       fi \
-    && CMAKE_PREFIX_PATH=$(python3 -c 'import sys; print(sys.prefix)') python3 setup.py bdist_wheel --dist-dir=dist \
-    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
-    && pip install dist/*.whl
-RUN git clone ${PYTORCH_VISION_REPO} vision
-RUN cd vision && git checkout ${PYTORCH_VISION_BRANCH} \
-    && if [ "$USE_SCCACHE" = "1" ]; then \
-           export HIP_CLANG_PATH=/opt/sccache-wrappers \
-           && export CMAKE_C_COMPILER_LAUNCHER=sccache \
-           && export CMAKE_CXX_COMPILER_LAUNCHER=sccache; \
-       fi \
-    && python3 setup.py bdist_wheel --dist-dir=dist \
-    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
-    && pip install dist/*.whl
-RUN git clone ${PYTORCH_AUDIO_REPO} audio
-RUN cd audio && git checkout ${PYTORCH_AUDIO_BRANCH} \
-    && git submodule update --init --recursive \
-    && pip install -r requirements.txt \
-    && if [ "$USE_SCCACHE" = "1" ]; then \
-           export HIP_CLANG_PATH=/opt/sccache-wrappers \
-           && export CMAKE_C_COMPILER_LAUNCHER=sccache \
-           && export CMAKE_CXX_COMPILER_LAUNCHER=sccache; \
-       fi \
-    && python3 setup.py bdist_wheel --dist-dir=dist \
-    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
-    && pip install dist/*.whl
-RUN mkdir -p /app/install && cp /app/pytorch/dist/*.whl /app/install \
-    && cp /app/vision/dist/*.whl /app/install \
-    && cp /app/audio/dist/*.whl /app/install
-
-
-###
-### MORI Build
-###
-FROM base AS build_mori
-ARG MORI_BRANCH
-ARG MORI_REPO
-RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
-    pip install /install/*.whl
-RUN git clone ${MORI_REPO}
-RUN cd mori \
-    && git checkout ${MORI_BRANCH} \
-    && git submodule update --init --recursive \
-    && python3 setup.py bdist_wheel --dist-dir=dist && ls /app/mori/dist/*.whl
-RUN mkdir -p /app/install && cp /app/mori/dist/*.whl /app/install
 
 
 ###
@@ -210,51 +216,60 @@ RUN mkdir -p /app/install && cp /app/mori/dist/*.whl /app/install
 FROM base AS build_fa
 ARG FA_BRANCH
 ARG FA_REPO
-ARG USE_SCCACHE
-RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
-    pip install /install/*.whl
 RUN git clone ${FA_REPO}
-RUN cd flash-attention \
+RUN --mount=type=cache,target=/sccache \
+    cd flash-attention \
     && git checkout ${FA_BRANCH} \
     && git submodule update --init \
-    && if [ "$USE_SCCACHE" = "1" ]; then \
-           export HIP_CLANG_PATH=/opt/sccache-wrappers \
-           && sccache --show-stats; \
+    && export HIP_CLANG_PATH=/opt/sccache-wrappers \
+    && echo "sccache stats before build:" \
+    && sccache --show-stats \
+    && FILTERED_ARCHS=$(echo ${PYTORCH_ROCM_ARCH} | sed -e 's/;*gfx1[0-9]\{3\}//g' -e 's/^gfx1[0-9]\{3\};*//g') \
+    && if [ -z "$FILTERED_ARCHS" ] || [ "$FILTERED_ARCHS" = ";" ]; then \
+           echo "RDNA-only build: building flash-attention without GPU_ARCHS (Triton backend)" \
+           && python3 setup.py bdist_wheel --dist-dir=dist; \
+       else \
+           echo "CDNA build: building flash-attention with GPU_ARCHS=$FILTERED_ARCHS" \
+           && GPU_ARCHS=$FILTERED_ARCHS python3 setup.py bdist_wheel --dist-dir=dist; \
        fi \
-    && GPU_ARCHS=$(echo ${PYTORCH_ROCM_ARCH} | sed -e 's/;gfx1[0-9]\{3\}//g') python3 setup.py bdist_wheel --dist-dir=dist \
-    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
+    && echo "sccache stats after build:" \
+    && sccache --show-stats
 RUN mkdir -p /app/install && cp /app/flash-attention/dist/*.whl /app/install
 
 
 ###
-### AITER Build
+### AITER Build (CDNA only -- skipped for RDNA targets)
 ###
 FROM base AS build_aiter
 ARG AITER_BRANCH
 ARG AITER_REPO
-ARG USE_SCCACHE
-RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
-    pip install /install/*.whl
-RUN git clone --recursive --branch ${AITER_BRANCH} ${AITER_REPO}
-RUN cd aiter \
-    && git submodule update --init --recursive \
-    && pip install -r requirements.txt
-RUN pip install pyyaml && cd aiter \
-    && if [ "$USE_SCCACHE" = "1" ]; then \
-           export HIP_CLANG_PATH=/opt/sccache-wrappers \
-           && sccache --show-stats; \
-       fi \
-    && PREBUILD_KERNELS=1 AITER_USE_SYSTEM_TRITON=1 GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist \
-    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
-    && ls /app/aiter/dist/*.whl
-RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
+RUN --mount=type=cache,target=/sccache \
+    mkdir -p /app/install && \
+    if [ -z "${AITER_ROCM_ARCH}" ] || echo "${AITER_ROCM_ARCH}" | grep -qvE "gfx9"; then \
+        echo "Skipping aiter build for RDNA target (AITER_ROCM_ARCH=${AITER_ROCM_ARCH})"; \
+    else \
+        git clone --recursive ${AITER_REPO} \
+        && cd aiter \
+        && git checkout ${AITER_BRANCH} \
+        && git submodule update --init --recursive \
+        && pip install -r requirements.txt \
+        && pip install pyyaml \
+        && export HIP_CLANG_PATH=/opt/sccache-wrappers \
+        && echo "sccache stats before build:" \
+        && sccache --show-stats \
+        && AITER_USE_SYSTEM_TRITON=1 PREBUILD_KERNELS=${PREBUILD_KERNELS} GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist \
+        && echo "sccache stats after build:" \
+        && sccache --show-stats \
+        && ls /app/aiter/dist/*.whl \
+        && cp /app/aiter/dist/*.whl /app/install/; \
+    fi
 
 
 ###
 ### Final Build
 ###
 
-# Wheel release stage - 
+# Wheel release stage -
 # only includes dependencies used by wheel release pipeline
 FROM base AS debs_wheel_release
 RUN mkdir /app/debs
@@ -262,60 +277,34 @@ RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
-RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
-RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
+    cp /install/*.whl /app/debs 2>/dev/null || echo "No aiter wheels (RDNA build)"
 
-# Full debs stage - includes Mori (used by Docker releases)
 FROM base AS debs
 RUN mkdir /app/debs
 RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
-RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
-RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
-RUN --mount=type=bind,from=build_mori,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
+    cp /install/*.whl /app/debs 2>/dev/null || echo "No aiter wheels (RDNA build)"
 
 FROM base AS final
+# --no-deps: torch/triton already in base from TheRock; don't re-resolve from PyPI
 RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
-    pip install /install/*.whl
+    pip install --no-deps /install/*.whl
 
 ARG BASE_IMAGE
 ARG TRITON_BRANCH
 ARG TRITON_REPO
-ARG PYTORCH_BRANCH
-ARG PYTORCH_VISION_BRANCH
-ARG PYTORCH_REPO
-ARG PYTORCH_VISION_REPO
-ARG PYTORCH_AUDIO_BRANCH
-ARG PYTORCH_AUDIO_REPO
 ARG FA_BRANCH
 ARG FA_REPO
 ARG AITER_BRANCH
 ARG AITER_REPO
-ARG MORI_BRANCH
-ARG MORI_REPO
 RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "TRITON_BRANCH: ${TRITON_BRANCH}" >> /app/versions.txt \
     && echo "TRITON_REPO: ${TRITON_REPO}" >> /app/versions.txt \
-    && echo "PYTORCH_BRANCH: ${PYTORCH_BRANCH}" >> /app/versions.txt \
-    && echo "PYTORCH_VISION_BRANCH: ${PYTORCH_VISION_BRANCH}" >> /app/versions.txt \
-    && echo "PYTORCH_REPO: ${PYTORCH_REPO}" >> /app/versions.txt \
-    && echo "PYTORCH_VISION_REPO: ${PYTORCH_VISION_REPO}" >> /app/versions.txt \
-    && echo "PYTORCH_AUDIO_BRANCH: ${PYTORCH_AUDIO_BRANCH}" >> /app/versions.txt \
-    && echo "PYTORCH_AUDIO_REPO: ${PYTORCH_AUDIO_REPO}" >> /app/versions.txt \
     && echo "FA_BRANCH: ${FA_BRANCH}" >> /app/versions.txt \
     && echo "FA_REPO: ${FA_REPO}" >> /app/versions.txt \
     && echo "AITER_BRANCH: ${AITER_BRANCH}" >> /app/versions.txt \
-    && echo "AITER_REPO: ${AITER_REPO}" >> /app/versions.txt \
-    && echo "MORI_BRANCH: ${MORI_BRANCH}" >> /app/versions.txt \
-    && echo "MORI_REPO: ${MORI_REPO}" >> /app/versions.txt
+    && echo "AITER_REPO: ${AITER_REPO}" >> /app/versions.txt
