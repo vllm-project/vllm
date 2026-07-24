@@ -15,6 +15,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.tracing import instrument
+from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
 
@@ -61,6 +62,39 @@ def _select_mhc_warmup_token_sizes(
     return _normalize_token_sizes(candidates, max_tokens=max_auto_tokens)
 
 
+def _select_mhc_split_key_token_sizes(
+    *,
+    max_tokens: int,
+    k_size: int,
+) -> list[int]:
+    """Select one representative token count per distinct n_splits compile key.
+
+    The MHC TileLang kernels compute n_splits at runtime via
+    ``compute_num_split(block_k, k_size, cdiv(tokens, block_k))``.  Because
+    ``n_splits`` is a TileLang compile-time parameter, every distinct value
+    produces a separate JIT compilation artifact.  This function returns
+    exactly one token per reachable ``n_splits`` value, stopping early when
+    ``n_splits`` drops to 1 (all remaining grid sizes map to n_splits=1).
+    """
+    from vllm.model_executor.kernels.mhc.tilelang_kernels import compute_num_split
+
+    block_k = 64
+    max_grid = cdiv(max_tokens, block_k)
+    reps: list[int] = []
+    seen: set[int] = set()
+    for g in range(1, max_grid + 1):
+        t = (g - 1) * block_k + 1
+        if t > max_tokens:
+            break
+        ns = compute_num_split(block_k, k_size, g)
+        if ns not in seen:
+            reps.append(t)
+            seen.add(ns)
+            if ns == 1:
+                break
+    return reps
+
+
 def _find_first_mhc_layer(model: torch.nn.Module) -> torch.nn.Module | None:
     for module in model.modules():
         if module.__class__.__name__ != "DeepseekV4DecoderLayer":
@@ -102,6 +136,16 @@ def _warmup_layer_mhc(
     hidden_size = int(layer.hidden_size)
     hc_mult = int(layer.hc_mult)
     device = layer.hc_attn_fn.device
+
+    # Union general token sizes with split-key reps for the non-broadcast
+    # MHC kernel (k_size = hc_mult * hidden_size).
+    k_size = hc_mult * hidden_size
+    split_key_sizes = _select_mhc_split_key_token_sizes(
+        max_tokens=max_tokens, k_size=k_size
+    )
+    all_sizes = sorted(set(token_sizes) | set(split_key_sizes))
+    max_tokens = max(all_sizes)
+
     residual = torch.zeros(
         max_tokens,
         hc_mult,
@@ -110,7 +154,7 @@ def _warmup_layer_mhc(
         device=device,
     )
 
-    for size in token_sizes:
+    for size in all_sizes:
         residual_slice = residual[:size]
         for fn, scale, base in (
             (layer.hc_attn_fn, layer.hc_attn_scale, layer.hc_attn_base),
@@ -161,6 +205,74 @@ def _warmup_hc_head(
         )
 
 
+def _warmup_broadcast_mhc(
+    model: torch.nn.Module,
+    token_sizes: list[int],
+) -> None:
+    """Warm up the first-layer broadcast MHC TileLang kernel.
+
+    The first ``DeepseekV4DecoderLayer`` uses
+    ``mhc_pre_broadcast_tilelang`` (2-D input, ``fn_broadcast`` weight)
+    instead of the 3-D ``mhc_pre_tilelang`` used by all subsequent layers.
+    ``fn_broadcast`` is set during ``finalize_mhc_broadcast_weights()`` and
+    only exists on the very first decoder layer.  No-op for models without a
+    broadcast-capable layer.
+
+    Unlike the generic per-layer MHC warmup (which covers power-of-two token
+    sizes), the broadcast kernel uses ``n_splits`` as a TileLang compile-time
+    parameter.  Different token counts can map to the same ``n_splits`` value;
+    this function selects one representative token per distinct compile key to
+    avoid redundant JIT compilations while covering every reachable key.
+    """
+    first_broadcast_layer = None
+    for module in model.modules():
+        if module.__class__.__name__ != "DeepseekV4DecoderLayer":
+            continue
+        fn_broadcast = getattr(module, "hc_attn_fn_broadcast", None)
+        if fn_broadcast is not None:
+            first_broadcast_layer = module
+            break
+    if first_broadcast_layer is None:
+        return
+
+    from vllm.model_executor.kernels.mhc.tilelang import mhc_pre_broadcast_tilelang
+
+    device = first_broadcast_layer.hc_attn_fn.device
+    if device.type != "cuda":
+        return
+
+    hidden_size = first_broadcast_layer.hidden_size
+    broadcast_token_sizes = _select_mhc_split_key_token_sizes(
+        max_tokens=max(token_sizes),
+        k_size=hidden_size,
+    )
+
+    x_2d = torch.zeros(
+        max(broadcast_token_sizes),
+        hidden_size,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    norm_weight = first_broadcast_layer.attn_norm.weight.data
+    norm_eps = first_broadcast_layer.attn_norm.variance_epsilon
+
+    for size in broadcast_token_sizes:
+        mhc_pre_broadcast_tilelang(
+            x_2d[:size],
+            first_broadcast_layer.hc_attn_fn,
+            first_broadcast_layer.hc_attn_scale,
+            first_broadcast_layer.hc_attn_base,
+            first_broadcast_layer.rms_norm_eps,
+            first_broadcast_layer.hc_eps,
+            first_broadcast_layer.hc_eps,
+            first_broadcast_layer.hc_post_alpha,
+            first_broadcast_layer.hc_sinkhorn_iters,
+            norm_weight=norm_weight,
+            norm_eps=norm_eps,
+            fn_broadcast=first_broadcast_layer.hc_attn_fn_broadcast,
+        )
+
+
 @instrument(span_name="DeepSeek V4 mHC warmup")
 def deepseek_v4_mhc_warmup(
     model: torch.nn.Module,
@@ -199,6 +311,7 @@ def deepseek_v4_mhc_warmup(
     )
     with torch.inference_mode():
         _warmup_layer_mhc(layer, token_sizes)
+        _warmup_broadcast_mhc(model, token_sizes)
         if deepseek_model is not None:
             _warmup_hc_head(deepseek_model, token_sizes)
         torch.accelerator.synchronize()
