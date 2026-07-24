@@ -72,7 +72,11 @@ DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
         "GraniteMoeForCausalLM",
         "InklingForCausalLM",
         "InklingForConditionalGeneration",
+        "LlamaForCausalLM",
         "LongcatFlashNgramForCausalLM",
+        "MistralForCausalLM",
+        "OrthrusForCausalLM",
+        "OrthrusLM",
         "Qwen2MoeForCausalLM",
     }
 )
@@ -1704,6 +1708,9 @@ class VllmConfig:
                 self.speculative_config.max_num_new_slots_for_drafting
                 * self.scheduler_config.max_num_seqs
             )
+            if scheduled_token_delta == 0:
+                return
+
             max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
             if self.scheduler_config.max_num_scheduled_tokens is None:
                 self.scheduler_config.max_num_scheduled_tokens = (
@@ -2165,16 +2172,17 @@ class VllmConfig:
                 "eagle3",
                 "mtp",
                 "dflash",
+                "orthrus",
                 "dspark",
             ):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 
             # V2 EagleSpeculator does not support parallel_drafting (for P-Eagle).
-            # DFlash and DSpark use parallel drafting natively in V2 via their
-            # own speculators.
+            # DFlash, DSpark, and Orthrus use parallel drafting natively in V2 via
+            # their own speculators.
             if (
                 speculative_config.parallel_drafting
-                and speculative_config.method not in ("dflash", "dspark")
+                and speculative_config.method not in ("dflash", "dspark", "orthrus")
             ):
                 unsupported.append("parallel drafting for EAGLE speculative decoding")
 
