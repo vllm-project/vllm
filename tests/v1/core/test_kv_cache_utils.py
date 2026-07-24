@@ -21,12 +21,14 @@ from vllm.multimodal.inputs import (
 )
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor
+from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     FreeKVCacheBlockQueue,
     KVCacheBlock,
+    _select_group_size,
     estimate_max_model_len,
     generate_block_hash_extra_keys,
     generate_scheduler_kv_cache_config,
@@ -1669,6 +1671,40 @@ def test_allocate_with_lookahead():
     assert len(blocks.get_block_ids()[0]) == 2
 
 
+@pytest.mark.parametrize(
+    "layer_counts,expected_group_size",
+    [
+        ([8], 8),  # single type -> one group
+        ([6, 30], 6),  # n:1 gcd, no padding (Gemma3 5:1)
+        ([8, 24], 8),
+        ([12, 13], 13),  # eagle: pad odd layer, don't split (13:12)
+        ([5, 6], 6),
+        ([2, 4], 2),
+        ([20, 30], 10),  # irregular ratio old heuristic got wrong
+        ([3, 7], 4),  # same padding, fewer groups
+    ],
+)
+def test_select_group_size(layer_counts, expected_group_size):
+    assert _select_group_size(layer_counts) == expected_group_size
+
+
+def test_select_group_size_ignores_single_layer_outlier():
+    # Qwen hybrid: 10 full + 1 differently-shaped draft full + 20 GDN + 5 SWA.
+    # The lone single-layer type made the old min-based heuristic pick
+    # group_size = min(counts) = 1, i.e. one group per layer (36 groups).
+    # `_select_group_size` keeps it at group_size 5 (8 groups).
+    counts = [10, 1, 20, 5]
+    group_size = _select_group_size(counts)
+    assert group_size == 5
+    assert sum(cdiv(n, group_size) for n in counts) == 8
+
+
+def test_select_group_size_padding_per_group_trades_padding_for_groups():
+    # Higher padding_per_group buys fewer groups with more padding.
+    assert _select_group_size([20, 30], padding_per_group=0.0) == 10
+    assert _select_group_size([20, 30], padding_per_group=10.0) == 30
+
+
 def test_get_kv_cache_config_one_worker():
     # pass max_model_len to pass check_enough_kv_cache_memory
     model_config = ModelConfig(max_model_len=16)
@@ -1787,7 +1823,8 @@ def test_get_kv_cache_config_one_worker():
         ],
     )
 
-    # 3 full + 7 sliding, pad to 3 full + 9 sliding
+    # 3 full + 7 sliding -> group_size 4: 3 groups (pad to 4 full, 8 sliding),
+    # one fewer group than group_size 3 for the same padding.
     kv_cache_specs_hybrid = {
         "layer_1": new_kv_cache_spec(),
         "layer_2": new_kv_cache_spec(),
@@ -1804,27 +1841,31 @@ def test_get_kv_cache_config_one_worker():
         vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 3 * 32]
     )[0]
     assert kv_cache_config_hybrid == KVCacheConfig(
-        num_blocks=32,
+        num_blocks=24,
         kv_cache_tensors=[
             KVCacheTensor(
-                size=mem_per_block_per_layer * 32,
-                shared_by=["layer_1", "layer_4", "layer_5", "layer_6"],
+                size=mem_per_block_per_layer * 24,
+                shared_by=["layer_1", "layer_4", "layer_5"],
             ),
             KVCacheTensor(
-                size=mem_per_block_per_layer * 32,
-                shared_by=["layer_2", "layer_7", "layer_8", "layer_9"],
+                size=mem_per_block_per_layer * 24,
+                shared_by=["layer_2", "layer_6", "layer_7"],
             ),
             KVCacheTensor(
-                size=mem_per_block_per_layer * 32, shared_by=["layer_3", "layer_10"]
+                size=mem_per_block_per_layer * 24,
+                shared_by=["layer_3", "layer_8", "layer_9"],
             ),
+            KVCacheTensor(size=mem_per_block_per_layer * 24, shared_by=["layer_10"]),
         ],
         kv_cache_groups=[
             KVCacheGroupSpec(["layer_1", "layer_2", "layer_3"], new_kv_cache_spec()),
             KVCacheGroupSpec(
-                ["layer_4", "layer_7", "layer_10"], new_sliding_window_spec()
+                ["layer_4", "layer_6", "layer_8", "layer_10"],
+                new_sliding_window_spec(),
             ),
-            KVCacheGroupSpec(["layer_5", "layer_8"], new_sliding_window_spec()),
-            KVCacheGroupSpec(["layer_6", "layer_9"], new_sliding_window_spec()),
+            KVCacheGroupSpec(
+                ["layer_5", "layer_7", "layer_9"], new_sliding_window_spec()
+            ),
         ],
     )
 
