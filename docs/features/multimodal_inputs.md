@@ -818,16 +818,18 @@ Full example: [examples/generate/multimodal/openai_chat_completion_client_for_mu
 
 #### Video Decoding Backend
 
-vLLM decodes video bytes into frames using a selectable decoding backend. Three
+vLLM decodes video bytes into frames using a selectable decoding backend. Five
 backends are supported:
 
 - `opencv` (default): OpenCV-based decoder.
 - `pyav`: PyAV decoder.
 - `torchcodec`: TorchCodec (PyTorch-native) decoder.
+- `pynvvideocodec`: NVIDIA PyNvVideoCodec GPU decoder.
+- `deepstream`: NVIDIA DeepStream GPU decoder.
 
-All three backends are ultimately backed by FFmpeg. `torchcodec` lets
-you choose which FFmpeg version is used while `opencv` and `pyav` rely on
-whichever FFmpeg build they were linked against.
+The three CPU backends are ultimately backed by FFmpeg. `torchcodec` lets you
+choose which FFmpeg version is used while `opencv` and `pyav` rely on whichever
+FFmpeg build they were linked against.
 
 Select the backend by passing the `backend` parameter via `--media-io-kwargs`:
 
@@ -879,11 +881,55 @@ vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
 
 Works with common video formats like MP4 when using OpenCV backends.
 
+#### GPU Video Decoding with PyNvVideoCodec (NVDEC)
+
+The `pynvvideocodec` backend uses NVIDIA NVDEC to decode the sampled video
+frames on the GPU before copying them into host memory for multimodal
+preprocessing. For workloads with large videos and relatively light inference,
+such as video tagging, this can alleviate bottlenecks in CPU-based video
+decoders.
+
+!!! warning
+    [CUDA Multi-Process Service (MPS)](https://docs.nvidia.com/deploy/mps/quick-start.html)
+    is required when using this backend. Video decoding runs in the API server
+    process while model serving runs in the engine process, so multiple CUDA
+    processes share the same GPU. Configure and start MPS before starting vLLM.
+
+You must also set a positive `--mm-ipc-gpu-memory-gb` value to reserve VRAM for
+video decoding. vLLM carves this budget out of the memory available to the KV
+cache and uses it to bound concurrent frontend decode allocations. If the
+budget is exhausted, decode work waits instead of consuming the engine's VRAM
+headroom and potentially causing an out-of-memory error while serving requests.
+
+Select the backend with an environment variable and specify a workload-appropriate
+VRAM budget. For example, to reserve 1 GiB:
+
+```bash
+export VLLM_VIDEO_LOADER_BACKEND=pynvvideocodec
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --mm-ipc-gpu-memory-gb 1
+```
+
+Alternatively, select it with `--media-io-kwargs`:
+
+```bash
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --media-io-kwargs '{"video": {"backend": "pynvvideocodec"}}' \
+  --mm-ipc-gpu-memory-gb 1
+```
+
+Choose a budget large enough for the largest sampled video that a single API
+server process must decode. When using multiple API server processes, vLLM
+divides the configured budget evenly among them.
+
+For streaming video sources, use the DeepStream backend instead.
+
 #### GPU Video Decoding with DeepStream (NVDEC)
 
 By default vLLM decodes video on the CPU. On NVIDIA GPUs you can instead decode
 directly on the hardware video engine (NVDEC) with the DeepStream backend, which
-keeps decoding off the CPU and can significantly increase video throughput.
+keeps decoding off the CPU and can significantly increase video throughput. It
+is the recommended GPU backend for streaming video sources.
 
 Install the backend (Linux x86-64 only):
 
