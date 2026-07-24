@@ -57,7 +57,13 @@ from vllm.v1.engine.utils import (
 )
 from vllm.v1.executor import Executor
 from vllm.v1.pool.late_interaction import get_late_interaction_engine_index
-from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
+from vllm.v1.serial_utils import (
+    DROP_FRAME,
+    MsgpackDecoder,
+    MsgpackEncoder,
+    bytestr,
+    try_decode_frame,
+)
 
 logger = init_logger(__name__)
 
@@ -823,7 +829,12 @@ class SyncMPClient(MPClient):
 
                     frames = out_socket.recv_multipart(copy=False)
                     resources.validate_alive(frames)
-                    outputs: EngineCoreOutputs = decoder.decode(frames)
+                    decoded = try_decode_frame(
+                        decoder.decode, frames, "engine output socket"
+                    )
+                    if decoded is DROP_FRAME:
+                        continue
+                    outputs: EngineCoreOutputs = decoded
                     if outputs.utility_output:
                         _process_utility_output(outputs.utility_output, utility_results)
                     else:
@@ -1007,7 +1018,12 @@ class AsyncMPClient(MPClient):
                 while True:
                     frames = await output_socket.recv_multipart(copy=False)
                     resources.validate_alive(frames)
-                    outputs: EngineCoreOutputs = decoder.decode(frames)
+                    decoded = try_decode_frame(
+                        decoder.decode, frames, "engine output socket"
+                    )
+                    if decoded is DROP_FRAME:
+                        continue
+                    outputs: EngineCoreOutputs = decoded
                     if outputs.utility_output:
                         if (
                             outputs.utility_output.call_id == EEP_NOTIFICATION_CALL_ID
@@ -1336,8 +1352,19 @@ class DPAsyncMPClient(AsyncMPClient):
                     if buf is None:
                         continue
 
-                    # Update local load-balancing state.
-                    counts, wave, running = msgspec.msgpack.decode(buf)
+                    # Update local load-balancing state. This XSUB socket is
+                    # bound to a routable TCP endpoint in multi-node DP, so a
+                    # malformed/garbage frame must drop rather than kill the
+                    # stats task (which would freeze load balancing). See #44486.
+                    decoded = try_decode_frame(
+                        msgspec.msgpack.decode,
+                        buf,
+                        "DP stats-update socket",
+                        expected_len=3,
+                    )
+                    if decoded is DROP_FRAME:
+                        continue
+                    counts, wave, running = decoded
                     self.current_wave = wave
                     self.engines_running = running
                     if counts is not None:

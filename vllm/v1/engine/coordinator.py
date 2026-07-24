@@ -14,7 +14,7 @@ from vllm.logger import init_logger
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import get_mp_context, set_process_title
 from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequestType
-from vllm.v1.serial_utils import MsgpackDecoder
+from vllm.v1.serial_utils import DROP_FRAME, MsgpackDecoder, try_decode_frame
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
 logger = init_logger(__name__)
@@ -303,12 +303,19 @@ class DPCoordinatorProc:
                         # Ignore subscription messages.
                         continue
 
-                    decoded = msgspec.msgpack.decode(buffer)
-                    if (
-                        isinstance(decoded, (list, tuple))
-                        and len(decoded) == 2
-                        and decoded[0] == "SCALE_ELASTIC_EP"
-                    ):
+                    # Front-end messages are 2-tuples (SCALE_ELASTIC_EP or a
+                    # new-request wave notification). expected_len guards the
+                    # unpack below against malformed/misshapen frames. See
+                    # issue #44486.
+                    decoded = try_decode_frame(
+                        msgspec.msgpack.decode,
+                        buffer,
+                        "DP coordinator front-end socket",
+                        expected_len=2,
+                    )
+                    if decoded is DROP_FRAME:
+                        continue
+                    if decoded[0] == "SCALE_ELASTIC_EP":
                         # Handle scale up notification
                         new_engine_count = decoded[1]
                         current_count = len(self.engines)
@@ -363,7 +370,14 @@ class DPCoordinatorProc:
                     # We received a message from one of the engines.
 
                     buffer = output_back.recv()
-                    outputs: EngineCoreOutputs = decoder.decode(buffer)
+                    decoded = try_decode_frame(
+                        decoder.decode,
+                        buffer,
+                        "DP coordinator engine output socket",
+                    )
+                    if decoded is DROP_FRAME:
+                        continue
+                    outputs: EngineCoreOutputs = decoded
 
                     assert not outputs.outputs
                     assert outputs.utility_output is None

@@ -82,6 +82,71 @@ def _log_insecure_serialization_warning():
     )
 
 
+# Sentinel returned by ``try_decode_frame`` when a frame cannot be decoded
+# or does not match the expected shape.
+DROP_FRAME: Any = object()
+
+
+def _warn_dropped_frame(source: str) -> None:
+    logger.warning_once(
+        "Discarding malformed frame(s) on %s (likely garbage input, e.g. from "
+        "a port scanner probing a bound endpoint); further such warnings for "
+        "this socket are suppressed.",
+        source,
+    )
+
+
+def try_decode_frame(
+    decode_fn: Callable[[Any], Any],
+    buf: Any,
+    source: str,
+    *,
+    expected_len: int | None = None,
+) -> Any:
+    """Decode a msgpack frame, dropping malformed or misshapen input.
+
+    Internal ZMQ sockets are meant to carry only trusted, well-formed
+    ``msgspec`` frames, but a socket bound to a routable TCP endpoint can still
+    receive junk (e.g. a security scanner probing the port). A single bad frame
+    must not take down the engine or the DP coordinator: on a ``msgspec``
+    ``ValidationError``/``DecodeError`` -- or, for untyped decodes, a shape
+    mismatch against ``expected_len`` -- this logs (throttled per ``source``)
+    and returns ``DROP_FRAME`` so the caller can skip the frame and keep
+    serving. Genuine internal protocol bugs are not swallowed. See #44486.
+
+    Args:
+        decode_fn: Callable performing the actual decode, invoked as
+            ``decode_fn(buf)`` (e.g. a ``MsgpackDecoder.decode`` bound method
+            or ``msgspec.msgpack.decode``).
+        buf: The raw frame to decode.
+        source: Short socket name, used for the warning and to throttle it
+            (one warning per distinct source).
+        expected_len: If set, require the decoded value to be a list/tuple of
+            this length; used for untyped decodes whose callers immediately
+            unpack a fixed-arity sequence. Typed decodes leave this ``None``
+            and rely on ``msgspec`` validation.
+
+    Returns:
+        The decoded object, or ``DROP_FRAME`` if it was undecodable or
+        misshapen.
+    """
+    try:
+        decoded = decode_fn(buf)
+    except (msgspec.ValidationError, msgspec.DecodeError) as e:
+        _warn_dropped_frame(source)
+        logger.debug("Undecodable frame on %s: %s", source, e)
+        return DROP_FRAME
+
+    if expected_len is not None and not (
+        isinstance(decoded, (list, tuple)) and len(decoded) == expected_len
+    ):
+        _warn_dropped_frame(source)
+        logger.debug("Misshapen frame on %s: %r", source, decoded)
+        return DROP_FRAME
+
+    return decoded
+
+
 def _typestr(val: Any) -> tuple[str, str] | None:
     if val is None:
         return None
