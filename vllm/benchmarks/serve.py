@@ -1449,7 +1449,12 @@ def compute_result_filename(
     Returns:
         The computed filename path or None if no result saving is requested
     """
-    if not (args.plot_timeline or args.save_result or args.append_result):
+    if not (
+        args.plot_timeline
+        or getattr(args, "plot_dataset_stats", False)
+        or args.save_result
+        or args.append_result
+    ):
         return None
 
     base_model_id = model_id.split("/")[-1]
