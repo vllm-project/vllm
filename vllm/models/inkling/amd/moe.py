@@ -545,7 +545,7 @@ class InklingMoE(nn.Module):
         )
         self._routed_sel = None
 
-        return out + sink_out
+        return out.add_(sink_out)
 
     # -- weight loading ----------------------------------------------------
 
