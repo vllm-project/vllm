@@ -167,6 +167,7 @@ impl ChatRequestProcessor {
             cache_salt: request.cache_salt,
             add_special_tokens: request.add_special_tokens,
             data_parallel_rank: request.data_parallel_rank,
+            session_id: request.session_id,
             reasoning_parser_kwargs,
             lora_request: request.lora_request,
             arrival_time: Some(arrival_time),
