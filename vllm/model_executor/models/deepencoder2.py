@@ -290,4 +290,3 @@ def build_qwen2_decoder_as_encoder(
     )
 
     return decoder_as_encoder
-
