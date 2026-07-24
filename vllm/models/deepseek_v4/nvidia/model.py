@@ -30,9 +30,6 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     fused_moe_make_expert_params_mapping,
 )
-from vllm.model_executor.layers.fused_moe.router.base_router import (
-    eplb_map_to_physical_and_record,
-)
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
 )
@@ -463,17 +460,16 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             assert eplb_state.expert_load_view is not None
             assert eplb_state.logical_replica_count is not None
             assert eplb_state.should_record_tensor is not None
+            assert eplb_state.map_and_record is not None
             if is_padding is not None:
                 topk_ids = torch.where(is_padding.unsqueeze(1), -1, topk_ids)
-            topk_ids = eplb_map_to_physical_and_record(
-                topk_ids=topk_ids,
-                expert_load_view=eplb_state.expert_load_view,
-                logical_to_physical_map=eplb_state.logical_to_physical_map,
-                logical_replica_count=eplb_state.logical_replica_count,
-                record_enabled=eplb_state.should_record_tensor,
-                num_unpadded_tokens=eplb_state.num_unpadded_tokens_tensors[
-                    dbo_current_ubatch_id()
-                ]
+            topk_ids = eplb_state.map_and_record(
+                topk_ids,
+                eplb_state.logical_to_physical_map,
+                eplb_state.logical_replica_count,
+                eplb_state.expert_load_view,
+                eplb_state.should_record_tensor,
+                eplb_state.num_unpadded_tokens_tensors[dbo_current_ubatch_id()]
                 if eplb_state.num_unpadded_tokens_tensors is not None
                 else None,
             )
