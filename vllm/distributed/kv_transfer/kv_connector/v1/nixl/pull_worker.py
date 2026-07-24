@@ -7,6 +7,9 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    BlockIds,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
@@ -131,9 +134,12 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             meta.local_num_computed_tokens // self._local_logical_block_size()
         ) * self.dcp_size
 
+        remote_tp_rank_count = len({key[0] for key in remote_worker_keys})
         launched_read = False
         for remote_worker_key in remote_worker_keys:
             remote_tp_rank, remote_dcp_rank = remote_worker_key
+            local_block_ids: BlockIds
+            remote_block_ids: BlockIds
             if len(logical_local_block_ids) == 0:
                 local_block_ids = []
                 remote_block_ids = []
@@ -173,7 +179,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 req_id,
             )
             # Get side handles.
-            if tp_ratio < 0 and (not self.use_mla or len(read_specs) > 1):
+            if tp_ratio < 0 and (not self.use_mla or remote_tp_rank_count > 1):
                 assert remote_block_size == self.block_size
                 # Remote tp_size > local tp_size: we must perform multiple
                 # reads. Get the memory chunk onto which we will write to.

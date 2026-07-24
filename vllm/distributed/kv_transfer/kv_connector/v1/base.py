@@ -669,10 +669,7 @@ class KVConnectorBase_V1(ABC):
         - Default implementation assumes pp_rank and pcp_rank are always 0
         - PP-aware connectors override this to consume all PP producer shards.
         """
-        if any(
-            pp_rank != 0 or pcp_rank != 0
-            for pp_rank, pcp_rank, _ in metadata
-        ):
+        if any(pp_rank != 0 or pcp_rank != 0 for pp_rank, pcp_rank, _ in metadata):
             raise ValueError(
                 f"{type(self).__name__} received PP/PCP-aware handshake metadata "
                 "but does not support PP/PCP-disaggregated KV transfer."

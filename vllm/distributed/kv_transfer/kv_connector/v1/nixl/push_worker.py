@@ -295,7 +295,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             return
 
         def _on_handshake(
-            f: Future[dict[RemoteWorkerKey, str]],
+            f: Future[tuple[dict[RemoteWorkerKey, str], float]],
             rid: str = req_id,
             rd: dict[str, Any] = reg_data,
         ) -> None:
@@ -517,17 +517,19 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             # collapses to one rank (fine for reads), but push must WRITE every
             # D rank or the rest decode stale KV; only the dst differs per rank.
             assert len(plan.all_source_ranks) == 1
+            mla_remote_worker_keys = list(self.dst_xfer_side_handles[engine_id])
             mla_local_ids = [list(ids) for ids in local_block_ids]
             mla_remote_ids = [list(ids) for ids in remote_block_ids]
             read_specs = [
                 ReadSpec(
-                    remote_rank=rank,
+                    remote_rank=remote_worker_key[0],
                     local_block_ids=mla_local_ids,
                     remote_block_ids=mla_remote_ids,
                 )
-                for rank in self.dst_xfer_side_handles[engine_id]
+                for remote_worker_key in mla_remote_worker_keys
             ]
         else:
+            mla_remote_worker_keys = []
             read_specs = [
                 ReadSpec(
                     remote_rank=rank,
@@ -566,7 +568,11 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     remote_block_size
                 ]
 
-            remote_worker_key: RemoteWorkerKey = (spec.remote_rank, 0)
+            remote_worker_key: RemoteWorkerKey = (
+                mla_remote_worker_keys[i]
+                if mla_remote_worker_keys
+                else (spec.remote_rank, 0)
+            )
             remote_xfer_side_handle = self.dst_xfer_side_handles[meta.remote.engine_id][
                 remote_worker_key
             ]
