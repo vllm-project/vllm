@@ -4,7 +4,7 @@
 import torch
 
 
-def select_direct_owner_slot_mapping(
+def select_owner_slot_mapping(
     mla_slot: torch.Tensor | None,
     *,
     owner_history_expected: bool,
@@ -41,7 +41,7 @@ def select_direct_owner_slot_mapping(
     return mla_slot.view(pcp_size, num_tokens, 2)[pcp_rank]
 
 
-def validate_direct_pcp_fused_cache_contract(
+def validate_owner_fused_cache_contract(
     *,
     mla_slot: torch.Tensor | None,
     indexer_slot: torch.Tensor | None,
@@ -51,12 +51,12 @@ def validate_direct_pcp_fused_cache_contract(
     """Validate the shared slot identity used by fused MLA/indexer writes."""
     if indexer_slot is not mla_slot:
         raise RuntimeError(
-            "Direct PCP fused publication requires the MLA and indexer caches "
+            "Owner-history fused publication requires the MLA and indexer caches "
             "to share one KV-cache group and the exact same slot tensor."
         )
     if indexer_peer_cache is None:
         raise RuntimeError(
-            "Direct PCP fused publication requires an indexer peer cache."
+            "Owner-history fused publication requires an indexer peer cache."
         )
     if (
         mla_peer_cache.ndim < 3
@@ -64,6 +64,6 @@ def validate_direct_pcp_fused_cache_contract(
         or mla_peer_cache.shape[2] != indexer_peer_cache.shape[2]
     ):
         raise RuntimeError(
-            "Direct PCP fused publication requires identical MLA and indexer "
+            "Owner-history fused publication requires identical MLA and indexer "
             "cache block sizes."
         )

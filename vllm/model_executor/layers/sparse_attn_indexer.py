@@ -779,12 +779,12 @@ def sparse_attn_indexer(
             if direct_peer_prefill:
                 if pcp_peer_kv_cache is None:
                     raise RuntimeError(
-                        "Direct PCP indexer prefill requires a global rank-major "
+                        "Owner-history indexer prefill requires a global rank-major "
                         "peer cache view."
                     )
                 if pcp_peer_block_stride is None or pcp_peer_block_stride <= 0:
                     raise RuntimeError(
-                        "Direct PCP indexer prefill requires a positive peer "
+                        "Owner-history indexer prefill requires a positive peer "
                         "block stride."
                     )
                 read_kv_cache = pcp_peer_kv_cache

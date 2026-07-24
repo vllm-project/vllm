@@ -61,9 +61,7 @@ FP8-to-BF16 kernel to materialize its request histories in a bounded, reused
 local workspace before FlashMLA. The kernel reads the peer VMM mappings
 directly and does not create a persistent full-history replica.
 `FLASHMLA_SPARSE` covers both sparse prefill and sparse KV decode in this path,
-matching the
-FlashMLA-prefill/FlashMLA-KV backend class used by the corresponding SGLang
-configuration.
+so one backend handles both owner-history attention phases.
 
 The owner-sharded sequence shows publication, bounded prefill history
 materialization, and the final PCP restore at their actual locations:

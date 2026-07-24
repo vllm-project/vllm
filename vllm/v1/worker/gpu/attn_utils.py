@@ -265,7 +265,7 @@ def _peer_cache_block_stride(
 
     if len(page_sizes) != 1:
         raise ValueError(
-            "Direct PCP peer-cache allocation requires one physical page "
+            "Owner-history peer-cache allocation requires one physical page "
             "stride per tensor; got "
             f"{sorted(page_sizes)} for layers {kv_cache_tensor.shared_by}."
         )
@@ -594,7 +594,7 @@ def init_kv_cache(
             try:
                 pcp_manager.close()
             except Exception:
-                logger.exception("Failed to roll back direct PCP KV allocations")
+                logger.exception("Failed to roll back owner-history KV allocations")
         raise
 
 

@@ -65,13 +65,11 @@ def _fp8_quant_and_cache_write(
     kv_cache_scale_ptr,
     cache_block_size,
     cache_block_stride,
-    cache_stride,
     cache_peer_stride,
     scale_peer_stride,
     owner_peer_rank,
     offsets,
     HEAD_DIM: tl.constexpr,
-    PEER_COUNT: tl.constexpr,
     OWNER_SHARDED_CACHE: tl.constexpr,
 ):
     k_fp8, scale = _fp8_ue8m0_quantize(vals)
@@ -155,7 +153,6 @@ def _fused_norm_rope_kernel(
     indexer_cache_scale_ptr,
     indexer_cache_block_size,
     indexer_cache_block_stride,
-    indexer_cache_stride,
     indexer_cache_peer_stride,
     indexer_cache_scale_peer_stride,
     # MLA KV cache (concat kv_c_normed + k_pe_roped)
@@ -481,13 +478,11 @@ def _fused_norm_rope_kernel(
             indexer_cache_scale_ptr,
             indexer_cache_block_size,
             indexer_cache_block_stride,
-            indexer_cache_stride,
             indexer_cache_peer_stride,
             indexer_cache_scale_peer_stride,
             owner_peer_rank,
             index_k_block,
             INDEX_K_DIM,
-            PCP_PEER_COUNT,
             OWNER_SHARDED_CACHE,
         )
 
@@ -514,7 +509,6 @@ def fused_norm_rope(
     mla_kv_cache: torch.Tensor | None = None,
     pcp_peer_indexer_k_cache: torch.Tensor | None = None,
     pcp_peer_mla_kv_cache: torch.Tensor | None = None,
-    pcp_rank: int = 0,
     pcp_size: int = 1,
     pcp_owner_slot_mapping: torch.Tensor | None = None,
     mla_kv_cache_dtype: str = "auto",
@@ -540,7 +534,7 @@ def fused_norm_rope(
     assert not (use_pcp_peer_cache and materialize_cache_inputs)
     assert not owner_sharded_cache or use_pcp_peer_cache
     if use_pcp_peer_cache:
-        assert pcp_size > 1 and 0 <= pcp_rank < pcp_size
+        assert pcp_size > 1
         assert pcp_peer_mla_kv_cache.shape[0] == pcp_size
         owner_slot_capacity = (
             pcp_peer_mla_kv_cache.shape[1] * pcp_peer_mla_kv_cache.shape[2]
@@ -586,7 +580,6 @@ def fused_norm_rope(
         idx_cache_scale_view = indexer_k_cache.view(torch.uint8).view(torch.float32)
         idx_cache_block_size = indexer_k_cache.shape[2]
         idx_cache_block_stride = indexer_k_cache.stride(1)
-        idx_cache_stride = indexer_k_cache.shape[3]
         idx_cache_peer_stride = indexer_k_cache.stride(0)
         idx_cache_scale_peer_stride = idx_cache_scale_view.stride(0)
         if indexer_k_cache.dtype == torch.uint8:
@@ -596,7 +589,6 @@ def fused_norm_rope(
         idx_cache_scale_view = indexer_k_cache.view(torch.uint8).view(torch.float32)
         idx_cache_block_size = indexer_k_cache.shape[1]
         idx_cache_block_stride = indexer_k_cache.stride(0)
-        idx_cache_stride = indexer_k_cache.shape[2]
         idx_cache_peer_stride = 0
         idx_cache_scale_peer_stride = 0
         if indexer_k_cache.dtype == torch.uint8:
@@ -608,7 +600,6 @@ def fused_norm_rope(
         indexer_k_cache = torch.empty(0, dtype=torch.float8_e4m3fn, device=device)
         idx_cache_block_size = 1
         idx_cache_block_stride = 1
-        idx_cache_stride = 1
         idx_cache_peer_stride = 0
         idx_cache_scale_peer_stride = 0
         if (
@@ -727,7 +718,6 @@ def fused_norm_rope(
         idx_cache_scale_view,
         idx_cache_block_size,
         idx_cache_block_stride,
-        idx_cache_stride,
         idx_cache_peer_stride,
         idx_cache_scale_peer_stride,
         # MLA KV cache (uses same slot_mapping)

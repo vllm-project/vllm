@@ -215,7 +215,7 @@ def _wait_fence_kernel(
 
 
 class PCPPeerCacheFence:
-    """Reusable release/acquire fence for one direct-store PCP group.
+    """Reusable release/acquire fence for one owner-history PCP group.
 
     Publication and waiting are separate kernels. Stream ordering therefore
     completes all producer cache stores before any CTA publishes its signal,

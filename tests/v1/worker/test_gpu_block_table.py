@@ -132,22 +132,7 @@ def test_block_tables_apply_staged_writes_single_group():
     )
 
 
-def _compact_rank_local_slots(rank_local_slots: torch.Tensor) -> torch.Tensor:
-    """Reference the removed DCP all-gather and compaction."""
-    # [dcp_rank, group, token] -> [group, token, dcp_rank]
-    owner_slots = rank_local_slots.permute(1, 2, 0).contiguous()
-    valid = owner_slots >= 0
-    owner_rank = valid.to(torch.int64).argmax(dim=-1)
-    owner_local_slot = owner_slots.gather(-1, owner_rank.unsqueeze(-1)).squeeze(-1)
-    is_valid = valid.sum(dim=-1) == 1
-    owner_rank = torch.where(is_valid, owner_rank, torch.full_like(owner_rank, -1))
-    owner_local_slot = torch.where(
-        is_valid, owner_local_slot, torch.full_like(owner_local_slot, -1)
-    )
-    return torch.stack((owner_rank, owner_local_slot), dim=-1)
-
-
-def test_compute_slot_mappings_emits_direct_owner_slots() -> None:
+def test_compute_slot_mappings_emits_owner_slots() -> None:
     device = torch.device("cuda")
     block_tables = BlockTables(
         block_sizes=[64, 64],
@@ -197,9 +182,57 @@ def test_compute_slot_mappings_emits_direct_owner_slots() -> None:
         owner_slots_by_rank.append(owner_out.clone())
 
     torch.accelerator.synchronize()
-    old_compacted = _compact_rank_local_slots(torch.stack(rank_local_slots))
+    expected_owner_slots = torch.tensor(
+        [
+            [
+                [0, 320],
+                [0, 383],
+                [1, 320],
+                [1, 383],
+                [3, 383],
+                [0, 448],
+                [0, 511],
+                [0, 736],
+                [1, 735],
+                [2, 767],
+                [0, 832],
+                [3, 895],
+                [-1, -1],
+                [-1, -1],
+                [-1, -1],
+                [-1, -1],
+            ],
+            [
+                [0, 3200],
+                [0, 3263],
+                [1, 3200],
+                [1, 3263],
+                [3, 3263],
+                [0, 4480],
+                [0, 4543],
+                [0, 7072],
+                [1, 7071],
+                [2, 7103],
+                [0, 8320],
+                [3, 8383],
+                [-1, -1],
+                [-1, -1],
+                [-1, -1],
+                [-1, -1],
+            ],
+        ],
+        dtype=torch.int64,
+        device=device,
+    )
     for owner_slots in owner_slots_by_rank:
-        torch.testing.assert_close(owner_slots, old_compacted)
+        torch.testing.assert_close(owner_slots, expected_owner_slots)
+    for rank, local_slots in enumerate(rank_local_slots):
+        expected_local_slots = torch.where(
+            expected_owner_slots[..., 0] == rank,
+            expected_owner_slots[..., 1],
+            -1,
+        )
+        torch.testing.assert_close(local_slots, expected_local_slots)
 
     noncontiguous_pairs = torch.empty(
         (2, 2, 16), dtype=torch.int64, device=device
@@ -214,7 +247,7 @@ def test_compute_slot_mappings_emits_direct_owner_slots() -> None:
             owner_slot_mappings_out=noncontiguous_pairs,
         )
 
-    # The kernel pads both ordinary and direct-owner metadata to the persistent
+    # The kernel pads both ordinary and owner metadata to the persistent
     # buffer boundary, including both fields in the owner pair.
-    assert torch.all(old_compacted[:, 12:] == -1)
+    assert torch.all(expected_owner_slots[:, 12:] == -1)
     assert torch.all(torch.stack(rank_local_slots)[:, :, 12:] == -1)
