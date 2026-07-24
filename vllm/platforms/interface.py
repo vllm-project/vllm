@@ -1050,6 +1050,11 @@ class Platform:
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
 
     @classmethod
+    def get_eplb_backend_cls(cls) -> str | None:
+        """Return the Platform Backend used to enable EPLB on this device."""
+        return None
+
+    @classmethod
     def is_integrated_gpu(cls, device_id: int = 0) -> bool:
         """
         Returns whether the GPU is an integrated (UMA) device that shares
