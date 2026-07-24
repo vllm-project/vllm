@@ -454,10 +454,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # how pull-mode transfers touch _engine_last_active in start_load_kv.
         self._engine_last_active[decode_engine_id] = time.perf_counter()
 
-        # Both sides stay logical here; ``_xfer_blocks_for_req`` converts each
-        # to physical with its own physical-blocks-per-logical ratio -- P uses
-        # ``self._physical_blocks_per_logical_kv_block``, D's is learned during
-        # the NIXL handshake.
         logical_local = self._as_grouped_block_ids(local_block_ids)
         logical_remote = self._as_grouped_block_ids(remote_block_ids)
 
@@ -640,7 +636,14 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             logger.warning("No blocks to push for request %s", request_id)
             return None
 
-        # Per-group block counts are already aligned in `_apply_prefix_caching`
+        # Prefix caching runs here on kernel block IDs, after logical->kernel expansion
+        remote_block_ids, local_block_ids = self._apply_prefix_caching(
+            decode_block_ids=remote_block_ids,
+            prefill_block_ids=local_block_ids,
+            decode_physical_per_logical=remote_info.remote_physical_blocks_per_logical,
+            prefill_physical_per_logical=self._physical_blocks_per_logical_kv_block,
+        )
+
         local_block_ids = list(local_block_ids)
         remote_block_ids = list(remote_block_ids)
         assert len(local_block_ids) == len(remote_block_ids), (
