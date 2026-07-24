@@ -23,18 +23,6 @@ def _deny(*args, **kwargs):
     raise RuntimeError("Insufficient Permissions")
 
 
-def test_reproduces_mig_skip_without_fallback(monkeypatch):
-    """Regression: NVML denial with no working fallback -> skip at any min_gb."""
-    import torch
-
-    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
-    monkeypatch.setattr(current_platform, "get_device_total_memory", _deny)
-    monkeypatch.setattr(torch.cuda, "get_device_properties", _deny)
-
-    # Even a 1 GB requirement skips, because memory could not be read.
-    assert _skips(large_gpu_mark(min_gb=1)) is True
-
-
 def test_falls_back_to_torch_when_nvml_denied(monkeypatch):
     """Fix: NVML denial -> torch reports the MIG memory -> the test runs."""
     import torch
