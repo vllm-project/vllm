@@ -13,7 +13,7 @@ REQUIREMENTS_FILE="${KV_CONNECTORS_REQUIREMENTS:-/vllm-workspace/requirements/kv
 
 uv pip install --system -r "${REQUIREMENTS_FILE}"
 
-NIXL_METADATA=$(python3 - <<'PY'
+KV_METADATA=$(python3 - <<'PY'
 import importlib.metadata as metadata
 
 import torch
@@ -22,10 +22,14 @@ cuda_version = torch.version.cuda
 if cuda_version is None:
     raise SystemExit("torch.version.cuda is not set")
 
-print(cuda_version.split(".", 1)[0], metadata.version("nixl"))
+print(
+    cuda_version.split(".", 1)[0],
+    metadata.version("nixl"),
+    metadata.version("mooncake-transfer-engine"),
+)
 PY
 )
-read -r CUDA_MAJOR NIXL_VERSION <<<"${NIXL_METADATA}"
+read -r CUDA_MAJOR NIXL_VERSION MOONCAKE_VERSION <<<"${KV_METADATA}"
 
 # nixl>=1.1.0 can install multiple CUDA wheel variants. Keep only the variant
 # matching this CI image so nixl_ep_cpp links against the available libcudart.
@@ -42,3 +46,21 @@ for package_name in ("nixl", "nixl-cu12", "nixl-cu13"):
         version = "not installed"
     print(f"{package_name}: {version}")
 PY
+
+# The default mooncake-transfer-engine PyPI wheel is built against CUDA 12; its
+# engine.so links libcudart.so.12, absent from the CUDA 13 runtime image. On a
+# CUDA 13 image, swap it for the cuda13 variant (same version), which links
+# libcudart.so.13. Both expose the `mooncake` package, so uninstall the CUDA 12
+# build first to avoid a clash.
+if [ "${CUDA_MAJOR}" = "13" ]; then
+    uv pip uninstall --system mooncake-transfer-engine 2>/dev/null || true
+    uv pip install --system "mooncake-transfer-engine-cuda13==${MOONCAKE_VERSION}"
+fi
+
+# Import canary: surface the real reason mooncake can't load here instead of the
+# silent "Mooncake is not available" at engine startup.
+if ! python3 -c "import mooncake.engine; print('mooncake.engine import OK')"; then
+    echo "mooncake import failed after install" >&2
+    uv pip list 2>/dev/null | grep -iE 'mooncake|nixl|cupy|lmcache' || true
+    exit 1
+fi
