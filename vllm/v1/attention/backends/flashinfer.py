@@ -2264,25 +2264,20 @@ class FlashInferImpl(AttentionImpl):
             # and value[:num_actual_tokens] because the reshape_and_cache_flash
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
-            if self.is_kvcache_nvfp4:
-                # (B, 2*H, N, full_dim) -> ((B, N, H, full_dim),
-                #                            (B, N, H, full_dim));
-                # K heads first, then V heads.
-                k_cache, v_cache = kv_cache.transpose(1, 2).split(
-                    self.num_kv_heads, dim=-2
-                )
-            else:
-                # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
-                k_cache, v_cache = kv_cache.transpose(1, 2).split(
-                    self.head_size, dim=-1
-                )
+            k_cache = kv_cache[:, 0]
+            v_cache = kv_cache[:, 1]
+            kv_cache_dtype = (
+                self.kv_cache_dtype
+                if is_quantized_kv_cache(self.kv_cache_dtype)
+                else "auto"
+            )
             torch.ops._C_cache_ops.reshape_and_cache_flash(
                 key,
                 value,
                 k_cache,
                 v_cache,
                 slot_mapping,
-                self.kv_cache_dtype,
+                kv_cache_dtype,
                 layer._k_scale,
                 layer._v_scale,
             )
