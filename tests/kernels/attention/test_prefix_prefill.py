@@ -488,6 +488,129 @@ def test_contexted_kv_attention_cached_kv(
 
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
+def test_contexted_kv_attention_cached_kv_block_table_boundary(device: str) -> None:
+    # Boundary guard for the KV_FROM_CACHE block-table load. With an
+    # exact-sized block table (row length == number of blocks for the
+    # sequence) and a query that ends the sequence, the last K/V tile has
+    # padded lanes whose absolute positions step past the sequence end. Those
+    # lanes must not read a block-table entry past this batch's row.
+    #
+    # seq_len is a whole number of blocks, so bn_logical for a padded lane
+    # lands exactly on num_blocks (one past the last valid row entry), and
+    # query_len is not tile-aligned so the overshoot is actually exercised.
+    # The result must still match a dense causal SDPA reference.
+    set_random_seed(0)
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+
+    dtype = torch.float16
+    kv_cache_dtype = "auto"
+    num_heads = 4
+    num_queries_per_kv = 1
+    num_kv_heads = num_heads // num_queries_per_kv
+    head_size = 32
+    block_size = 32
+    num_blocks = 4
+    seq_len = num_blocks * block_size  # 128 == exact multiple of block_size
+    query_len = 99  # < seq_len and not a multiple of the kernel tile
+    ctx_len = seq_len - query_len
+
+    query = torch.empty(query_len, num_heads, head_size, dtype=dtype)
+    query.uniform_(-1e-3, 1e-3)
+    output = torch.empty(query_len, num_heads, head_size, dtype=dtype)
+
+    kv = torch.empty(seq_len, 2, num_kv_heads, head_size, dtype=dtype)
+    kv.uniform_(-1e-3, 1e-3)
+    key, value = kv.unbind(dim=1)
+
+    k_cache = torch.zeros(
+        num_blocks, block_size, num_kv_heads, head_size, dtype=dtype
+    )
+    v_cache = torch.zeros(
+        num_blocks, block_size, num_kv_heads, head_size, dtype=dtype
+    )
+    # Exact-sized block table: row length == num_blocks (identity mapping).
+    block_table = torch.arange(num_blocks, dtype=torch.int32).view(1, num_blocks)
+    b_seq_len = torch.tensor([seq_len], dtype=torch.int32)
+    b_start_loc = torch.tensor([0, query_len], dtype=torch.int32)
+
+    # Write the whole sequence (context + current chunk) into the paged cache.
+    for cur in range(0, seq_len, block_size):
+        block_id = cur // block_size
+        end = min(cur + block_size, seq_len)
+        start_slot = block_table[0, block_id] * block_size
+        end_slot = start_slot + (end - cur)
+        k_cache.view(-1, num_kv_heads, head_size)[start_slot:end_slot].copy_(
+            key[cur:end]
+        )
+        v_cache.view(-1, num_kv_heads, head_size)[start_slot:end_slot].copy_(
+            value[cur:end]
+        )
+
+    k_cache = (
+        k_cache.view(-1, block_size, num_kv_heads, head_size // 8, 8)
+        .permute(0, 2, 3, 1, 4)
+        .contiguous()
+    )
+    v_cache = (
+        v_cache.view(-1, block_size, num_kv_heads, head_size)
+        .permute(0, 2, 3, 1)
+        .contiguous()
+    )
+    k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+
+    # Cached-K/V path: current-chunk k and v are None.
+    context_attention_fwd(
+        query,
+        None,
+        None,
+        output,
+        kv_cache_dtype,
+        k_cache,
+        v_cache,
+        block_table,
+        b_start_loc,
+        b_seq_len,
+        seq_len,
+        query_len,
+        k_scale,
+        v_scale,
+        sliding_window=0,
+    )
+    torch.accelerator.synchronize()
+
+    scale = float(1.0 / (head_size**0.5))
+    query_sdpa = query.view(query_len, num_kv_heads, num_queries_per_kv, head_size)
+    query_sdpa = query_sdpa.permute(1, 2, 0, 3).reshape(
+        1, num_heads, query_len, head_size
+    )
+    key_sdpa = key[:, :, None, :].expand(
+        seq_len, num_kv_heads, num_queries_per_kv, head_size
+    )
+    key_sdpa = key_sdpa.permute(1, 2, 0, 3).reshape(1, num_heads, seq_len, head_size)
+    value_sdpa = value[:, :, None, :].expand(
+        seq_len, num_kv_heads, num_queries_per_kv, head_size
+    )
+    value_sdpa = value_sdpa.permute(1, 2, 0, 3).reshape(1, num_heads, seq_len, head_size)
+
+    attn_mask = create_causal_attention_mask_for_sdpa(
+        [query_len], [seq_len], 0, device=device, dtype=dtype
+    )
+    output_ref = F.scaled_dot_product_attention(
+        query_sdpa,
+        key_sdpa,
+        value_sdpa,
+        attn_mask=attn_mask,
+        dropout_p=0.0,
+        scale=scale,
+    )
+    output_ref = output_ref.view(num_heads, query_len, head_size)
+    output_ref = output_ref.permute(1, 0, 2).contiguous()
+    torch.testing.assert_close(output, output_ref, atol=1e-4, rtol=0)
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
 def test_contexted_kv_attention_cached_kv_alibi_unsupported(device: str) -> None:
     # The cached-K/V (k=None) path is not supported together with ALiBi; the
     # entry point must reject it up-front with a clear NotImplementedError
