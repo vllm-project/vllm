@@ -2535,7 +2535,9 @@ def test_auto_fit_max_model_len_with_hybrid():
         "layer_2": new_kv_cache_spec(),
     }
 
-    available_memory = mem_per_block_per_layer * (1024 // 16 + 1 + gamma)
+    # 1024 // 16 blocks for the fit itself, +1 for BlockPool's reserved
+    # null block, +1 and +gamma for the mamba spec's speculative blocks.
+    available_memory = mem_per_block_per_layer * (1024 // 16 + 1 + gamma + 1)
     _kv_cache_configs = get_kv_cache_configs(
         vllm_config, [kv_cache_specs], [available_memory]
     )
@@ -2585,6 +2587,65 @@ def test_auto_fit_max_model_len_respects_num_gpu_blocks_override():
     # 32 blocks * block_size 16 = 512 token slots, so max_model_len must
     # auto-fit at or below that.
     assert 0 < vllm_config.model_config.max_model_len <= 32 * 16
+
+
+@pytest.mark.parametrize(
+    ("num_pool_blocks", "want_max_model_len"),
+    [
+        # Block-tight pools: the fit must land on num_blocks - 1 blocks
+        # because BlockPool permanently reserves one block as the null
+        # block; a request at a length needing every block is never
+        # schedulable and waits forever.
+        (32, 31 * 16),
+        (64, 63 * 16),
+        # One spare block: the full derived context fits as-is.
+        (65, 1024),
+    ],
+)
+def test_auto_fit_max_model_len_reserves_null_block(
+    num_pool_blocks, want_max_model_len
+):
+    """Auto-fit must size max_model_len to the schedulable blocks
+    (num_blocks - 1), not the raw pool size. The reservation affects the
+    fit only; the pool itself still allocates every block.
+    """
+    model_config = ModelConfig(max_model_len=1024)
+    model_config.original_max_model_len = -1  # request auto-fit
+    vllm_config = VllmConfig(model_config=model_config)
+
+    mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2
+    kv_cache_specs = {
+        "layer_1": new_kv_cache_spec(),  # block_size=16
+        "layer_2": new_kv_cache_spec(),
+    }
+    available_memory = mem_per_block_per_layer * 2 * num_pool_blocks
+
+    kv_cache_configs = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [available_memory]
+    )
+
+    assert vllm_config.model_config.max_model_len == want_max_model_len
+    assert kv_cache_configs[0].num_blocks == num_pool_blocks
+
+
+def test_auto_fit_max_model_len_rejects_null_block_only_pool():
+    """A pool with a single block holds only the null block, so not even one
+    token is schedulable: auto-fit must fail fast instead of fitting
+    max_model_len=16 and hanging at runtime.
+    """
+    model_config = ModelConfig(max_model_len=1024)
+    model_config.original_max_model_len = -1  # request auto-fit
+    vllm_config = VllmConfig(model_config=model_config)
+
+    mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2
+    kv_cache_specs = {
+        "layer_1": new_kv_cache_spec(),
+        "layer_2": new_kv_cache_spec(),
+    }
+    available_memory = mem_per_block_per_layer * 2 * 1
+
+    with pytest.raises(ValueError, match="Cannot auto-fit"):
+        get_kv_cache_configs(vllm_config, [kv_cache_specs], [available_memory])
 
 
 def test_check_enough_kv_cache_memory_respects_num_gpu_blocks_override():
