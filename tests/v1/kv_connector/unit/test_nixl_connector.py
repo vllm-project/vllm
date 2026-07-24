@@ -433,6 +433,8 @@ def test_kv_transfer_handshake(dist_init):
         )
         assert delay
 
+        assert "pp_size" in kv_connector_metadata
+        assert kv_connector_metadata["pp_size"] == 1
         # Decode connector will be able to create handshake with the prefill connector.
         decode_connector = NixlConnector(
             vllm_config, KVConnectorRole.WORKER, kv_cache_config
@@ -454,10 +456,12 @@ def test_kv_transfer_handshake(dist_init):
                 kv_connector_metadata["remote_engine_id"],
             )
 
-            received_metadata = mock_add_remote_agent.call_args.args
-            assert received_metadata[0] == expected_agent_metadata
-            assert received_metadata[1] == 0  # remote_tp_rank
-            assert received_metadata[2] == 1  # remote_tp_size
+            received_call = mock_add_remote_agent.call_args
+            assert received_call.args[0] == expected_agent_metadata
+            assert received_call.kwargs["remote_tp_rank"] == 0
+            assert received_call.kwargs["remote_tp_size"] == 1
+            assert received_call.kwargs["remote_pp_rank"] == 0
+            assert received_call.kwargs["remote_pp_size"] == 1
 
         # Need to shutdown the background thread to release NIXL side channel port
         scheduler_connector.shutdown()

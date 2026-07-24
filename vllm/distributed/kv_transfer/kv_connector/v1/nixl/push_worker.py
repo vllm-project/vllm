@@ -591,6 +591,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 remote_request_id=meta.remote.request_id,
                 local_xfer_side_handle=local_xfer_side_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
+                remote_pp_rank=remote_pp_rank,
             )
             if handle is not None:
                 handles.append(handle)
@@ -614,6 +615,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         remote_request_id: str,
         local_xfer_side_handle: int,
         remote_xfer_side_handle: int,
+        remote_pp_rank: int = 0,
     ) -> int | None:
         """Post a WRITE point-to-point xfer request.
 
@@ -625,7 +627,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         local_block_ids = read_spec.local_block_ids
         remote_block_ids = read_spec.remote_block_ids
 
-        remote_info = self.transfer_topo.get_engine_info(dst_engine_id)
+        remote_info = self.transfer_topo.get_engine_info(dst_engine_id, remote_pp_rank)
         block_size_ratio = self.transfer_topo.block_size_ratio(
             remote_info.remote_block_size
         )

@@ -519,6 +519,28 @@ class TransferTopology:
             f"local_pp_rank={local_pp_rank}, remote_pp_ranks={remote_pp_ranks}"
         )
 
+    @staticmethod
+    def get_target_remote_pp_ranks(
+        local_pp_rank: int,
+        local_pp_size: int,
+        remote_pp_size: int,
+    ) -> list[int]:
+        """Select remote PP stages whose layer regions match the local stage."""
+        if local_pp_size <= 0 or remote_pp_size <= 0:
+            raise ValueError(
+                "PP sizes must be positive, got "
+                f"local_pp_size={local_pp_size}, remote_pp_size={remote_pp_size}"
+            )
+        if local_pp_size == remote_pp_size:
+            return [local_pp_rank]
+        if remote_pp_size == 1:
+            return [0]
+        raise NotImplementedError(
+            "NIXL cannot map one local PP stage to multiple remote PP stages: "
+            f"local_pp_rank={local_pp_rank}, local_pp_size={local_pp_size}, "
+            f"remote_pp_size={remote_pp_size}"
+        )
+
     def unregister_remote_engine(self, remote_engine_id: EngineId) -> None:
         # Remove all pp_rank entries for the remote engine.
         for key in [k for k in self._engines if k[0] == remote_engine_id]:

@@ -630,9 +630,14 @@ class NixlBaseConnectorWorker:
         best_rtt = float("inf")
         best_offset: float | None = None
 
+        remote_pp_ranks = self.transfer_topo.get_target_remote_pp_ranks(
+            self.pp_rank,
+            self.pp_size,
+            remote_pp_size,
+        )
         with zmq_ctx(zmq.REQ, path) as sock:
             for remote_pp_rank, remote_worker_key in itertools.product(
-                range(remote_pp_size), remote_worker_keys
+                remote_pp_ranks, remote_worker_keys
             ):
                 remote_pcp_rank, remote_tp_rank = remote_worker_key
                 remote_dcp_rank = self.transfer_topo.get_dcp_rank(
@@ -784,6 +789,7 @@ class NixlBaseConnectorWorker:
                         remote_pcp_size=metadata.pcp_size,
                         remote_pcp_rank=metadata.pcp_rank,
                         remote_pp_rank=remote_pp_rank,
+                        remote_pp_size=remote_pp_size,
                     )
                 agent_key: RemoteAgentKey = (
                     remote_pp_rank,
@@ -1612,6 +1618,7 @@ class NixlBaseConnectorWorker:
         remote_pcp_size: int = 1,
         remote_pcp_rank: int = 0,
         remote_pp_rank: int = 0,
+        remote_pp_size: int = 1,
     ) -> str:
         """
         Add the remote NIXL agent and prepare the descriptors for reading cache
@@ -1677,6 +1684,7 @@ class NixlBaseConnectorWorker:
         num_local_regions = len(self.block_len_per_layer)
         if (
             self.pp_size > 1
+            and remote_pp_size == 1
             and len(nixl_agent_meta.kv_caches_base_addr) > num_local_regions
         ):
             # This worker holds a PP layer-slice; the PP=1 remote registered
@@ -1706,7 +1714,9 @@ class NixlBaseConnectorWorker:
             remote_pp_rank=remote_pp_rank,
         )
         transfer_topo.register_remote_engine(engine_id, transfer_info)
-        logger.info("Transfer plan: %s", transfer_topo.describe(engine_id))
+        logger.info(
+            "Transfer plan: %s", transfer_topo.describe(engine_id, remote_pp_rank)
+        )
 
         self.tp_mappings[engine_id] = compute_tp_mapping(
             transfer_topology=transfer_topo,
@@ -1738,6 +1748,7 @@ class NixlBaseConnectorWorker:
             nixl_agent_meta,
             remote_tp_size,
             remote_dcp_size,
+            remote_pp_rank,
             remote_pcp_size,
         )
 
@@ -1826,6 +1837,7 @@ class NixlBaseConnectorWorker:
         nixl_agent_meta: NixlAgentMetadata,
         remote_tp_size: int,
         remote_dcp_size: int = 1,
+        remote_pp_rank: int = 0,
         remote_pcp_size: int = 1,
     ):
         """
@@ -1835,7 +1847,9 @@ class NixlBaseConnectorWorker:
         remote_engine_id = nixl_agent_meta.engine_id
 
         assert self.transfer_topo is not None
-        remote_info = self.transfer_topo.get_engine_info(remote_engine_id)
+        remote_info = self.transfer_topo.get_engine_info(
+            remote_engine_id, remote_pp_rank
+        )
         assert remote_info.remote_tp_size == remote_tp_size
         assert remote_info.remote_dcp_size == remote_dcp_size
         assert remote_info.remote_pcp_size == remote_pcp_size
@@ -1849,7 +1863,10 @@ class NixlBaseConnectorWorker:
         # MLA models do not need to handle kv replication.
         if not self.use_mla and not self._has_mamba:
             assert not (
-                tp_ratio < 0 and self.transfer_topo.is_kv_replicated(remote_engine_id)
+                tp_ratio < 0
+                and self.transfer_topo.is_kv_replicated(
+                    remote_engine_id, remote_pp_rank
+                )
             )
 
         remote_physical_per_logical = (
@@ -1919,7 +1936,9 @@ class NixlBaseConnectorWorker:
         if (
             abs(tp_ratio) != 1
             and not self.use_mla
-            and not self.transfer_topo.is_kv_replicated(remote_engine_id)
+            and not self.transfer_topo.is_kv_replicated(
+                remote_engine_id, remote_pp_rank
+            )
             and kv_cache_layout != "HND"
             and not self.enable_permute_local_kv
         ):
@@ -2151,7 +2170,12 @@ class NixlBaseConnectorWorker:
                 self.sync_recved_kv_to_device(req_id, meta)
 
             # post processing for heteroblocksize
-            remote_info = self.transfer_topo.get_engine_info(meta.remote.engine_id)
+            remote_pp_rank = self.transfer_topo.resolve_remote_pp_rank(
+                meta.remote.engine_id, self.pp_rank
+            )
+            remote_info = self.transfer_topo.get_engine_info(
+                meta.remote.engine_id, remote_pp_rank
+            )
             block_size_ratio = self.transfer_topo.block_size_ratio(
                 remote_info.remote_block_size
             )
