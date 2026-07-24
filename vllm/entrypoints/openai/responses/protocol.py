@@ -133,6 +133,29 @@ ResponseInputOutputMessage: TypeAlias = (
 ResponseInputOutputItem: TypeAlias = ResponseInputItemParam | ResponseOutputItem
 
 
+def _normalize_chat_completions_image_parts(content: list) -> list:
+    """Normalize chat-completions image parts to the flat
+    ResponseInputImageParam schema (#46631).
+
+    Accepts the chat-style ``image_url`` type, nested ``image_url``
+    (``{"url": ...}``), and a missing ``detail``.
+    """
+    normalized = []
+    for part in content:
+        if isinstance(part, dict) and part.get("type") in (
+            "input_image",
+            "image_url",
+        ):
+            part = dict(part)
+            part["type"] = "input_image"
+            image_url = part.get("image_url")
+            if isinstance(image_url, dict) and "url" in image_url:
+                part["image_url"] = image_url["url"]
+            part.setdefault("detail", "auto")
+        normalized.append(part)
+    return normalized
+
+
 class ResponsesRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/responses/create
@@ -520,6 +543,13 @@ class ResponsesRequest(OpenAIBaseModel):
             if not isinstance(item, dict):
                 processed_input.append(item)
                 continue
+
+            content = item.get("content")
+            if isinstance(content, list):
+                item = {
+                    **item,
+                    "content": _normalize_chat_completions_image_parts(content),
+                }
 
             item_type = item.get("type")
 
