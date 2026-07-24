@@ -1618,11 +1618,6 @@ class rocm_aiter_ops:
         return cls.is_rdna_aiter_enabled() and cls._LINEAR_ENABLED
 
     @classmethod
-    def is_rdna_triton_rotary_embed_enabled(cls) -> bool:
-        """RDNA4 (gfx12) analog of is_triton_rotary_embed_enabled() (aiter Triton RoPE)."""
-        return cls.is_rdna_aiter_enabled() and cls._TRITON_ROTARY_EMBED
-
-    @classmethod
     @if_aiter_supported
     def is_linear_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._LINEAR_ENABLED
