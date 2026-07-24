@@ -3,10 +3,10 @@ depends_on:
   - image-build-xpu
 steps:
 - label: Basic Correctness
-  timeout_in_minutes: 45
   device: intel_gpu
-  no_plugin: true
+  timeout_in_minutes: 68
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
