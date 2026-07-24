@@ -104,6 +104,72 @@ def _get_trtllm_workspace_buffer():
     return trtllm_workspace_buffer
 
 
+def _pack_draft_block_bool_mask(
+    bool_mask: torch.Tensor, num_packed: int
+) -> torch.Tensor:
+    """Bit-pack a boolean draft-block mask into the XQA ``uint16`` layout.
+
+    ``bool_mask`` has shape ``[num_rows, num_packed * 32]`` (query columns padded
+    to a multiple of 32). Each group of 32 columns is packed into a ``uint32``
+    (bit ``i`` = column ``i``), then reinterpreted as two ``uint16`` words,
+    yielding ``[num_rows, num_packed * 2]``. Matches FlashInfer's XQA spec-decode
+    mask packing.
+    """
+    num_rows = bool_mask.shape[0]
+    bits = 1 << torch.arange(32, device=bool_mask.device, dtype=torch.int64)
+    mask_u32 = (
+        (bool_mask.view(num_rows, num_packed, 32).to(torch.int64) * bits)
+        .sum(dim=-1)
+        .to(torch.uint32)
+    )
+    return mask_u32.view(torch.uint16).reshape(num_rows, num_packed * 2)
+
+
+def make_xqa_draft_block_mask(
+    q_len: int, causal: bool, device: torch.device
+) -> torch.Tensor:
+    """Packed uint16 draft-block mask for one uniform request.
+
+    Returns ``[q_len, ((q_len + 31) // 32) * 2]``. A query token at row ``r``
+    attends to draft column ``c`` when the bit is set: ``c <= r`` for causal
+    (lower-triangular), all ``c < q_len`` for non-causal (full block). The KV
+    context outside the draft block is always fully attended by the kernel.
+    """
+    num_packed = (q_len + 31) // 32
+    padded = num_packed * 32
+    q_idx = torch.arange(q_len, device=device).unsqueeze(1)
+    kv_idx = torch.arange(padded, device=device).unsqueeze(0)
+    if causal:
+        bool_mask = (kv_idx <= q_idx) & (kv_idx < q_len)
+    else:
+        bool_mask = (kv_idx < q_len).expand(q_len, padded)
+    return _pack_draft_block_bool_mask(bool_mask, num_packed)
+
+
+def make_xqa_ragged_draft_block_mask(
+    q_lens: list[int], max_q_len: int, causal: bool, device: torch.device
+) -> torch.Tensor:
+    """Packed uint16 draft-block mask for a ragged (variable q_len) batch.
+
+    Returns ``[sum(q_lens), ((max_q_len + 31) // 32) * 2]``; each request's rows
+    cover its own draft length. Rows are stacked in request order to match the
+    XQA ragged-Q layout.
+    """
+    num_packed = (max_q_len + 31) // 32
+    padded = num_packed * 32
+    kv_idx = torch.arange(padded, device=device).unsqueeze(0)
+    rows = []
+    for q_len in q_lens:
+        q_idx = torch.arange(q_len, device=device).unsqueeze(1)
+        if causal:
+            m = (kv_idx <= q_idx) & (kv_idx < q_len)
+        else:
+            m = (kv_idx < q_len).expand(q_len, padded)
+        rows.append(m)
+    bool_mask = torch.cat(rows, dim=0)
+    return _pack_draft_block_bool_mask(bool_mask, num_packed)
+
+
 @triton.jit
 def _trtllm_prefill_attn_kvfp8_dequant(
     kv_cache_ptr,
@@ -687,7 +753,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.model_config.max_model_len, self.kv_cache_spec.block_size
         )
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+        self.max_num_reqs = max_num_reqs
         max_num_pages = max_num_reqs * max_num_pages_per_req
+        # Cache of packed uniform draft-block masks, keyed by (q_len, causal).
+        # The pattern is identical across requests, so a persistent
+        # [max_num_reqs, q_len, mask_size] buffer keeps a stable address for
+        # CUDA-graph capture; ragged masks are built eagerly.
+        self._decode_mask_cache: dict[tuple[int, bool], torch.Tensor] = {}
         speculative_config = vllm_config.speculative_config
         num_spec_tokens = (
             speculative_config.num_speculative_tokens
@@ -811,6 +883,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.supports_xqa_ragged_q = (
             self.flashinfer_trtllm_api_decode_kernel == FlashInferDecodeKernel.XQA
             and has_flashinfer_xqa_ragged_q()
+        )
+        # XQA can serve non-causal (DFlash/DSpark draft) decode via a full
+        # draft-block mask; trtllm-gen is causal-only. Requires the dedicated
+        # XQA decode API (which exposes the mask argument).
+        self.supports_xqa_noncausal_decode = (
+            self.flashinfer_trtllm_api_decode_kernel == FlashInferDecodeKernel.XQA
+            and has_flashinfer_xqa_decode()
         )
         self._init_reorder_batch_threshold(
             1,
@@ -953,8 +1032,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         Spec-decode CUDA graphs (UNIFORM_BATCH) require the TRTLLM decode API:
         trtllm-gen on SM100, and the dedicated XQA decode kernel on SM90/SM12x.
-        Both are causal-only here, so non-causal falls back to single-token
-        decode graphs. When the XQA decode API is unavailable, SM90/SM12x also
+        trtllm-gen is causal-only, so SM100 non-causal falls back to single-token
+        decode graphs; XQA captures non-causal draft decode via a full
+        draft-block mask. When the XQA decode API is unavailable, SM90/SM12x also
         fall back to single-token decode graphs.
         """
         # For UniformTypeKVCacheSpecs, check all contained specs
@@ -988,9 +1068,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if is_xqa_arch and not has_flashinfer_xqa_decode():
             has_uniform_batch_support = False
 
-        # trtllm-gen and XQA spec-decode graphs are causal-only.
+        # trtllm-gen spec-decode graphs are causal-only; XQA (SM90/SM12x) also
+        # captures non-causal draft decode via a full draft-block mask.
         use_non_causal = vllm_config.attention_config.use_non_causal
-        if has_uniform_batch_support and not use_non_causal:
+        if has_uniform_batch_support and (not use_non_causal or is_xqa_arch):
             return AttentionCGSupport.UNIFORM_BATCH
         else:
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
@@ -1071,6 +1152,44 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             q_len_per_req = int(nonzero[0].item()) if nonzero.numel() > 0 else 1
             return q_len_per_req, None
         return int(decode_q_lens.max().item()), qo_indptr[: num_decodes + 1]
+
+    def _get_decode_mask(
+        self,
+        q_len_per_req: int,
+        q_cu_seq_lens: torch.Tensor | None,
+        qo_indptr_cpu: torch.Tensor,
+        num_decodes: int,
+        causal: bool,
+    ) -> torch.Tensor | None:
+        """Packed draft-block mask for XQA spec decode, or ``None``.
+
+        The XQA kernel requires a mask whenever ``q_len_per_req > 1`` (causal
+        spec decode included). The mask encodes the draft-block (query-to-query)
+        attention pattern: causal (lower-triangular) or full (non-causal). The
+        KV context is always fully attended and is not part of the mask.
+        """
+        if q_len_per_req <= 1:
+            return None
+
+        if q_cu_seq_lens is None:
+            # Uniform: identical pattern per request. Cache a persistent
+            # [max_num_reqs, q_len, mask_size] buffer so the address is stable
+            # for CUDA-graph capture, and slice to the live batch.
+            key = (q_len_per_req, causal)
+            buf = self._decode_mask_cache.get(key)
+            if buf is None:
+                per_req = make_xqa_draft_block_mask(q_len_per_req, causal, self.device)
+                buf = (
+                    per_req.unsqueeze(0).expand(self.max_num_reqs, -1, -1).contiguous()
+                )
+                self._decode_mask_cache[key] = buf
+            return buf[:num_decodes]
+
+        # Ragged: variable per-request draft length (eager only).
+        decode_q_lens = qo_indptr_cpu[1 : num_decodes + 1] - qo_indptr_cpu[:num_decodes]
+        return make_xqa_ragged_draft_block_mask(
+            decode_q_lens.tolist(), q_len_per_req, causal, self.device
+        )
 
     def _get_prefill_wrapper(
         self,
@@ -1225,7 +1344,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         causal = common_attn_metadata.causal
-        if causal:
+        # XQA expresses non-causal (DFlash/DSpark draft) decode with a full
+        # draft-block mask, so those batches can take the decode path too. Every
+        # other decode API (trtllm-gen) is causal-only and runs non-causal
+        # entirely as native prefill.
+        route_decode = causal or self.supports_xqa_noncausal_decode
+        if route_decode:
             # XQA with ragged-Q accepts non-uniform decode query lengths, so we
             # do not force uniformity there; every other decode API (trtllm-gen,
             # or XQA without the ragged path) requires a single query length.
@@ -1237,8 +1361,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 )
             )
         else:
-            # FlashInfer decode/TRTLLM paths cannot express non-causal
-            # query-query attention, so DFlash runs as native prefill.
             num_decodes = 0
             num_prefills = num_reqs
             num_decode_tokens = 0
@@ -1274,7 +1396,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             has_sinks=self.has_sinks,
             has_spec=uses_spec_reorder,
         )
-        decode_with_flashinfer_trtllm_api = causal and self.use_trtllm_decode_attention
+        decode_with_flashinfer_trtllm_api = self.use_trtllm_decode_attention and (
+            causal or self.supports_xqa_noncausal_decode
+        )
 
         if not causal and self.use_dcp:
             raise NotImplementedError(
@@ -1568,6 +1692,21 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 q_len_per_req, q_cu_seq_lens = self._compute_decode_query_lens(
                     qo_indptr, qo_indptr_cpu, num_decodes, num_decode_tokens
                 )
+                # XQA requires a packed draft-block mask for every q_len > 1
+                # decode (causal or non-causal); trtllm-gen applies its own
+                # end-aligned causal mask and takes none.
+                decode_mask = None
+                if (
+                    self.flashinfer_trtllm_api_decode_kernel
+                    == FlashInferDecodeKernel.XQA
+                ):
+                    decode_mask = self._get_decode_mask(
+                        q_len_per_req,
+                        q_cu_seq_lens,
+                        qo_indptr_cpu,
+                        num_decodes,
+                        bool(causal),
+                    )
                 attn_metadata.decode = FlashInferTrtllmAPIDecode(
                     kernel=self.flashinfer_trtllm_api_decode_kernel,
                     block_tables=block_table_tensor[:num_decodes],
@@ -1575,6 +1714,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     max_seq_len=max_seq_len,
                     q_len_per_req=q_len_per_req,
                     q_cu_seq_lens=q_cu_seq_lens,
+                    mask=decode_mask,
                 )
             else:
                 assert seq_lens_cpu is not None
