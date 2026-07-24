@@ -186,7 +186,8 @@ def _manifest(
     )
     kernels = {
         (case["hidden_size"], case["group_size"], case["num_tokens"]): (
-            f"vllm.kernels.helion_generated.kernels.{platform}.{_module_name(case)}"
+            f"vllm.kernels.helion_generated.kernels.{platform}."
+            f"{KERNEL_NAME}.{_module_name(case)}"
         )
         for case in cases
     }
@@ -255,7 +256,8 @@ def generate(platform: str, check: bool) -> None:
             f"{len(cases)} common cases"
         )
 
-    output_dir = OUTPUT_ROOT / platform
+    platform_dir = OUTPUT_ROOT / platform
+    output_dir = platform_dir / KERNEL_NAME
     errors: list[str] = []
     expected = {"__init__.py", "manifest.py"}
     configured = per_token_group_fp8_quant.get_configured_op()._decorated_kernel
@@ -267,6 +269,7 @@ def generate(platform: str, check: bool) -> None:
         _write_or_check(output_dir / filename, content, check, errors)
 
     _write_or_check(output_dir / "__init__.py", _init_file(), check, errors)
+    _write_or_check(platform_dir / "__init__.py", _init_file(), check, errors)
     _write_or_check(
         output_dir / "manifest.py",
         _manifest(platform, cases, configs),

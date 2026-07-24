@@ -131,6 +131,7 @@ def test_generated_artifacts_have_stable_runtime_contract():
     ]
     module_paths = {path for kernels in MANIFESTS.values() for path in kernels.values()}
     assert len(module_paths) == 84
+    assert all(".per_token_group_fp8_quant." in path for path in module_paths)
 
     for module_path in module_paths:
         path = root / (module_path.replace(".", "/") + ".py")
