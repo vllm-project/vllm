@@ -356,9 +356,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         assert isinstance(gate_up_dim, int)
         assert isinstance(intermediate_dim, int)
         assert isinstance(K, int)
-        assert intermediate_dim == self.adjust_N_for_activation(
-            gate_up_dim, activation
-        )
+        assert intermediate_dim == self.adjust_N_for_activation(gate_up_dim, activation)
 
         # hidden_states
         # (-> quanted_gate_up_input) (if not BF16/FP16 activation)
