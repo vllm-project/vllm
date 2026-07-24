@@ -41,7 +41,7 @@ class AttentionLayerBase(ABC):
         peer_kv_cache: torch.Tensor,
         fence: Callable[[], None],
     ) -> None:
-        """Bind the rank-major peer view for direct PCP cache writes.
+        """Bind the rank-major peer view for owner-history cache writes.
 
         The ordinary ``kv_cache`` remains the rank-local consumer view. The
         peer view adds a leading PCP-rank dimension and is only present when

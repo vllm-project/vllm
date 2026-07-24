@@ -1271,7 +1271,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not (dummy_run and skip_attn_for_dummy_run):
             assert slot_mappings is not None
             forward_slot_mappings = (
-                self.pcp_manager.get_direct_owner_slot_mappings(slot_mappings)
+                self.pcp_manager.get_owner_slot_mappings(slot_mappings)
                 if self.pcp_manager is not None
                 else slot_mappings
             )

@@ -9,8 +9,8 @@ from vllm.models.deepseek_v32.nvidia.attention import (
     _owner_history_uses_peer_slots,
 )
 from vllm.v1.attention.backends.mla.owner_history import (
-    select_direct_owner_slot_mapping,
-    validate_direct_pcp_fused_cache_contract,
+    select_owner_slot_mapping,
+    validate_owner_fused_cache_contract,
 )
 
 
@@ -121,7 +121,7 @@ def _select(
 ) -> torch.Tensor | None:
     if device is None:
         device = torch.device("cpu")
-    return select_direct_owner_slot_mapping(
+    return select_owner_slot_mapping(
         mapping,
         owner_history_expected=expected,
         pcp_rank=rank,
@@ -191,7 +191,7 @@ def _peer_cache(block_size: int = 8) -> torch.Tensor:
 
 def test_fused_cache_contract_accepts_shared_slot_and_block_size() -> None:
     slot = torch.empty((12, 2), dtype=torch.int64)
-    validate_direct_pcp_fused_cache_contract(
+    validate_owner_fused_cache_contract(
         mla_slot=slot,
         indexer_slot=slot,
         mla_peer_cache=_peer_cache(),
@@ -202,7 +202,7 @@ def test_fused_cache_contract_accepts_shared_slot_and_block_size() -> None:
 def test_fused_cache_contract_rejects_value_equal_slot_clone() -> None:
     slot = torch.zeros((12, 2), dtype=torch.int64)
     with pytest.raises(RuntimeError, match="exact same slot tensor"):
-        validate_direct_pcp_fused_cache_contract(
+        validate_owner_fused_cache_contract(
             mla_slot=slot,
             indexer_slot=slot.clone(),
             mla_peer_cache=_peer_cache(),
@@ -213,7 +213,7 @@ def test_fused_cache_contract_rejects_value_equal_slot_clone() -> None:
 def test_fused_cache_contract_requires_indexer_peer_cache() -> None:
     slot = torch.empty((12, 2), dtype=torch.int64)
     with pytest.raises(RuntimeError, match="requires an indexer peer cache"):
-        validate_direct_pcp_fused_cache_contract(
+        validate_owner_fused_cache_contract(
             mla_slot=slot,
             indexer_slot=slot,
             mla_peer_cache=_peer_cache(),
@@ -224,7 +224,7 @@ def test_fused_cache_contract_requires_indexer_peer_cache() -> None:
 def test_fused_cache_contract_rejects_different_block_sizes() -> None:
     slot = torch.empty((12, 2), dtype=torch.int64)
     with pytest.raises(RuntimeError, match="identical MLA and indexer"):
-        validate_direct_pcp_fused_cache_contract(
+        validate_owner_fused_cache_contract(
             mla_slot=slot,
             indexer_slot=slot,
             mla_peer_cache=_peer_cache(8),

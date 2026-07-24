@@ -41,8 +41,8 @@ from vllm.v1.attention.backends.mla.owner_compute import (
     validate_owner_prefill_materialization_support,
 )
 from vllm.v1.attention.backends.mla.owner_history import (
-    select_direct_owner_slot_mapping,
-    validate_direct_pcp_fused_cache_contract,
+    select_owner_slot_mapping,
+    validate_owner_fused_cache_contract,
 )
 from vllm.v1.attention.backends.mla.owner_peer_slot_cache import (
     OwnerPeerSlotCache,
@@ -573,13 +573,13 @@ class DeepseekV32Attention(MLAAttention):
                     pcp_peer_indexer_k_cache = getattr(
                         self.indexer.k_cache, "pcp_peer_kv_cache", None
                     )
-                    validate_direct_pcp_fused_cache_contract(
+                    validate_owner_fused_cache_contract(
                         mla_slot=mla_slot,
                         indexer_slot=slot_mapping.get(self.indexer.k_cache.prefix),
                         mla_peer_cache=pcp_peer_mla_kv_cache,
                         indexer_peer_cache=pcp_peer_indexer_k_cache,
                     )
-                pcp_owner_slot_mapping = select_direct_owner_slot_mapping(
+                pcp_owner_slot_mapping = select_owner_slot_mapping(
                     mla_slot,
                     owner_history_expected=owner_history_expected,
                     pcp_rank=pcp_rank,
@@ -628,7 +628,6 @@ class DeepseekV32Attention(MLAAttention):
             mla_kv_cache=None if use_pcp_collective_cache_update else mla_kv_cache,
             pcp_peer_indexer_k_cache=pcp_peer_indexer_k_cache,
             pcp_peer_mla_kv_cache=pcp_peer_mla_kv_cache,
-            pcp_rank=pcp_rank,
             pcp_size=pcp_size,
             pcp_owner_slot_mapping=pcp_owner_slot_mapping,
             mla_kv_cache_dtype=self.kv_cache_dtype,

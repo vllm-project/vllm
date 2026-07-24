@@ -741,7 +741,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             self.cp_kv_cache_interleave_size != self.kv_cache_spec.block_size
         ):
             raise NotImplementedError(
-                "Direct PCP sparse-indexer prefill requires page-granular "
+                "Owner-history sparse-indexer prefill requires page-granular "
                 "ownership: cp_kv_cache_interleave_size must equal the indexer "
                 f"block size ({self.kv_cache_spec.block_size})."
             )

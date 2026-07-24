@@ -283,7 +283,7 @@ class PCPManager:
             )
         if parallel_config.cp_kv_cache_interleave_size != cache_config.block_size:
             raise NotImplementedError(
-                "Owner-sharded direct PCP history requires page-granular "
+                "Owner-sharded PCP history requires page-granular "
                 "ownership: cp_kv_cache_interleave_size must equal the KV "
                 f"block size ({cache_config.block_size})."
             )
@@ -311,7 +311,7 @@ class PCPManager:
             and type(layer).__name__ == "DeepseekV32Attention"
         ):
             raise NotImplementedError(
-                "Owner-sharded direct PCP history currently requires the "
+                "Owner-sharded PCP history currently requires the "
                 "FlashInfer sparse backend with fp8 or the FlashMLA sparse "
                 "backend with fp8_ds_mla."
             )
@@ -374,7 +374,7 @@ class PCPManager:
         _validate_owner_history_axis(self.pcp_world_size, self.dcp_world_size)
         return True
 
-    def get_direct_owner_slot_mappings(
+    def get_owner_slot_mappings(
         self, local_slot_mappings: torch.Tensor
     ) -> torch.Tensor:
         """Return precomputed ``[owner_rank, owner_local_slot]`` producer rows."""

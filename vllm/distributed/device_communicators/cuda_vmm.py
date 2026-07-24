@@ -219,7 +219,7 @@ def _validate_peer_capabilities(
                 )
                 if not native_atomics:
                     raise NotImplementedError(
-                        "Direct PCP KV requires native peer atomics, but CUDA "
+                        "Owner-history PCP requires native peer atomics, but CUDA "
                         f"device {device_id} cannot issue them to PCP rank "
                         f"{peer_rank} device {peer_device_id}."
                     )

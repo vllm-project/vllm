@@ -29,38 +29,7 @@ def _make_owner_slot_manager(max_num_tokens: int = 8) -> PCPManager:
     )
 
 
-def _old_gather_and_compact(
-    block_numbers: torch.Tensor,
-    positions: torch.Tensor,
-    block_size: int,
-    cp_size: int,
-    cp_interleave: int,
-) -> torch.Tensor:
-    """Reference the removed DCP mask -> all-gather -> compact path."""
-    block_offsets = positions % (block_size * cp_size)
-    owner_rank = block_offsets // cp_interleave % cp_size
-    rounds = block_offsets // (cp_interleave * cp_size)
-    local_offsets = rounds * cp_interleave + block_offsets % cp_interleave
-    owner_local_slots = block_numbers * block_size + local_offsets
-    rank_local_rows = torch.stack(
-        [
-            torch.where(
-                owner_rank == rank,
-                owner_local_slots,
-                torch.full_like(owner_local_slots, -1),
-            )
-            for rank in range(cp_size)
-        ]
-    )
-    valid = rank_local_rows >= 0
-    compacted_owner_rank = valid.to(torch.int64).argmax(dim=0)
-    compacted_local_slot = rank_local_rows.gather(
-        0, compacted_owner_rank.unsqueeze(0)
-    ).squeeze(0)
-    return torch.stack((compacted_owner_rank, compacted_local_slot), dim=-1)
-
-
-def test_direct_owner_math_matches_removed_dcp_compaction() -> None:
+def test_owner_math_maps_pages_and_offsets() -> None:
     block_size = 64
     cp_size = 4
     cp_interleave = 64
@@ -77,13 +46,26 @@ def test_direct_owner_math_matches_removed_dcp_compaction() -> None:
     owner_rank = block_offsets // cp_interleave % cp_size
     rounds = block_offsets // (cp_interleave * cp_size)
     local_offsets = rounds * cp_interleave + block_offsets % cp_interleave
-    direct = torch.stack(
+    owner_slots = torch.stack(
         (owner_rank, block_numbers * block_size + local_offsets), dim=-1
     )
-    old = _old_gather_and_compact(
-        block_numbers, positions, block_size, cp_size, cp_interleave
+    expected = torch.tensor(
+        [
+            [0, 320],
+            [0, 383],
+            [1, 320],
+            [1, 383],
+            [2, 320],
+            [2, 383],
+            [3, 320],
+            [3, 383],
+            [0, 448],
+            [0, 511],
+            [3, 511],
+        ],
+        dtype=torch.int64,
     )
-    torch.testing.assert_close(direct, old)
+    torch.testing.assert_close(owner_slots, expected)
 
 
 def test_owner_slots_expand_to_pcp_rank_major_layout_and_pad(monkeypatch) -> None:
@@ -138,7 +120,7 @@ def test_owner_slots_expand_to_pcp_rank_major_layout_and_pad(monkeypatch) -> Non
     )
     torch.testing.assert_close(gathered, expected)
     local_slots = torch.zeros((2, 8), dtype=torch.int64)
-    assert manager.get_direct_owner_slot_mappings(local_slots).data_ptr() == (
+    assert manager.get_owner_slot_mappings(local_slots).data_ptr() == (
         gathered.data_ptr()
     )
 
@@ -154,7 +136,7 @@ def test_dummy_owner_slots_keep_forward_shape_and_padding(monkeypatch) -> None:
         fail_if_collective_is_requested,
     )
     local_slots = manager.get_dummy_slot_mappings(num_tokens=3)
-    owner_slots = manager.get_direct_owner_slot_mappings(local_slots)
+    owner_slots = manager.get_owner_slot_mappings(local_slots)
 
     assert local_slots.shape == (2, 12)
     assert owner_slots.shape == (2, 12, 2)

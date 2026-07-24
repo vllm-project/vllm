@@ -1,17 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Compare sparse MLA kernels reading local and CUDA VMM peer KV.
+"""Compare sparse MLA owner-history reads with local materialization.
 
-The benchmark gives every rank byte-identical KV contents, then times the same
+The benchmark gives every owner rank distinct KV contents, then times the same
 query and selected token rows through:
 
-* a rank-local VMM view;
-* a rank-major view with pages striped across all ranks; and
-* peer rows gathered once into local scratch before attention.
+* a rank-major VMM view with pages striped across all ranks;
+* full-history materialization into local scratch followed by attention; and
+* attention alone on the already-materialized local history.
 
-This isolates an attention kernel's peer-read sensitivity from model and
-scheduler work. The staged path intentionally shares one selected set across
-all query rows, representing the favorable high-reuse regime for staging.
+This isolates the production owner-history choice between direct peer reads and
+bounded full-history materialization from model and scheduler work.
 
 Example::
 
@@ -76,10 +75,6 @@ def _parse_selection_patterns(value: str) -> list[str]:
     return _parse_choices(value, {"shared", "independent"}, "selection patterns")
 
 
-def _parse_stage_modes(value: str) -> list[str]:
-    return _parse_choices(value, {"selected", "history"}, "stage modes")
-
-
 def _percentile(values: list[float], quantile: float) -> float:
     ordered = sorted(values)
     position = (len(ordered) - 1) * quantile
@@ -123,37 +118,6 @@ def _slowest_rank_samples(
     return [max(values) for values in zip(*samples, strict=True)]
 
 
-def _make_selected_slots(
-    *,
-    query_tokens: int,
-    topk: int,
-    local_tokens: int,
-    rows_per_rank: int,
-    world_size: int,
-    selection_pattern: str,
-    device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    selected = torch.arange(topk, device=device, dtype=torch.int64)
-    if selection_pattern == "shared":
-        local = (selected * 8191 + 1234) % local_tokens
-        local = local.expand(query_tokens, -1).contiguous()
-    else:
-        query_offsets = torch.arange(
-            query_tokens, device=device, dtype=torch.int64
-        ).view(-1, 1)
-        local = (selected * 8191 + query_offsets * 2053 + 1234) % local_tokens
-    local = local.to(torch.int32)
-    owner = (
-        torch.arange(topk, device=device, dtype=torch.int32)
-        .expand(query_tokens, -1)
-        .contiguous()
-    )
-    owner += torch.arange(query_tokens, device=device, dtype=torch.int32).view(-1, 1)
-    owner %= world_size
-    peer = owner * (rows_per_rank * PAGE_SIZE) + local
-    return local, peer
-
-
 def _make_owner_history_slots(
     *,
     query_tokens: int,
@@ -191,9 +155,9 @@ def _make_owner_history_slots(
     )
 
 
-def _fill_flashinfer_cache(local_view: torch.Tensor) -> None:
+def _fill_flashinfer_cache(local_view: torch.Tensor, rank: int) -> None:
     generator = torch.Generator(device=local_view.device)
-    generator.manual_seed(5678)
+    generator.manual_seed(5678 + rank)
     values = torch.randn(
         local_view.shape,
         generator=generator,
@@ -203,10 +167,10 @@ def _fill_flashinfer_cache(local_view: torch.Tensor) -> None:
     local_view.copy_((values * 0.1).to(torch.float8_e4m3fn))
 
 
-def _fill_flashmla_cache(local_view: torch.Tensor) -> None:
+def _fill_flashmla_cache(local_view: torch.Tensor, rank: int) -> None:
     blocks, page, _ = local_view.shape
     generator = torch.Generator(device=local_view.device)
-    generator.manual_seed(5678)
+    generator.manual_seed(5678 + rank)
     nope = (
         torch.randn(
             (blocks, page, 512),
@@ -349,7 +313,6 @@ def _run_case(
     backend: str,
     query_tokens: int,
     selection_pattern: str,
-    stage_mode: str,
     args: argparse.Namespace,
     rank: int,
     world_size: int,
@@ -380,55 +343,27 @@ def _run_case(
         assert allocation.local_view is not None
         assert allocation.global_view is not None
         local_cache = allocation.local_view[:local_blocks]
-        fill_cache(local_cache)
+        fill_cache(local_cache, rank)
         dist.barrier(group=cpu_group)
 
-        if stage_mode == "selected":
-            local_slots, peer_slots = _make_selected_slots(
-                query_tokens=query_tokens,
-                topk=args.topk,
-                local_tokens=args.local_tokens,
-                rows_per_rank=allocation.rows_per_rank,
-                world_size=world_size,
-                selection_pattern=selection_pattern,
-                device=device,
-            )
-            local_indices = local_slots
-            peer_indices = peer_slots
-            staged_rows_count = (
-                args.topk if selection_pattern == "shared" else query_tokens * args.topk
-            )
-            if selection_pattern == "shared":
-                staged_indices = (
-                    torch.arange(args.topk, dtype=torch.int32, device=device)
-                    .expand(query_tokens, -1)
-                    .contiguous()
-                )
-                gather_slots = peer_slots[0]
-            else:
-                staged_indices = torch.arange(
-                    staged_rows_count, dtype=torch.int32, device=device
-                ).view(query_tokens, args.topk)
-                gather_slots = peer_slots.view(-1)
-        else:
-            history_tokens = args.local_tokens * world_size
-            local_indices, peer_indices, gather_slots = _make_owner_history_slots(
-                query_tokens=query_tokens,
-                topk=args.topk,
-                history_tokens=history_tokens,
-                rows_per_rank=allocation.rows_per_rank,
-                world_size=world_size,
-                selection_pattern=selection_pattern,
-                device=device,
-            )
-            staged_rows_count = history_tokens
-            staged_indices = local_indices
-        staged_cache = torch.empty(
-            (staged_rows_count // PAGE_SIZE, PAGE_SIZE, width),
+        history_tokens = args.local_tokens * world_size
+        local_indices, peer_indices, materialization_slots = _make_owner_history_slots(
+            query_tokens=query_tokens,
+            topk=args.topk,
+            history_tokens=history_tokens,
+            rows_per_rank=allocation.rows_per_rank,
+            world_size=world_size,
+            selection_pattern=selection_pattern,
+            device=device,
+        )
+        materialized_rows_count = history_tokens
+        materialized_indices = local_indices
+        materialized_cache = torch.empty(
+            (materialized_rows_count // PAGE_SIZE, PAGE_SIZE, width),
             dtype=dtype,
             device=device,
         )
-        staged_rows = staged_cache.view(staged_rows_count, width)
+        materialized_rows = materialized_cache.view(materialized_rows_count, width)
         peer_rows = allocation.global_view.view(-1, width)
 
         if backend == "flashinfer":
@@ -445,35 +380,40 @@ def _run_case(
                 device=device,
             )
 
-        def gather_peer_rows() -> None:
-            torch.index_select(peer_rows, 0, gather_slots.long(), out=staged_rows)
+        def materialize_history() -> None:
+            torch.index_select(
+                peer_rows,
+                0,
+                materialization_slots.long(),
+                out=materialized_rows,
+            )
 
         def run_local() -> torch.Tensor:
-            cache = staged_cache if stage_mode == "history" else local_cache
-            return run_attention(cache, local_indices)
+            return run_attention(materialized_cache, local_indices)
 
         def run_peer() -> torch.Tensor:
             return run_attention(allocation.global_view, peer_indices)
 
-        def run_staged() -> torch.Tensor:
-            gather_peer_rows()
-            return run_attention(staged_cache, staged_indices)
+        def run_materialized() -> torch.Tensor:
+            materialize_history()
+            return run_attention(materialized_cache, materialized_indices)
 
-        if stage_mode == "history":
-            gather_peer_rows()
-            torch.cuda.synchronize(device)
+        materialize_history()
+        torch.cuda.synchronize(device)
         local_output = run_local().clone()
         peer_output = run_peer().clone()
-        staged_output = run_staged().clone()
+        materialized_output = run_materialized().clone()
         torch.cuda.synchronize(device)
         peer_error = _assert_close(local_output, peer_output, "peer")
-        staged_error = _assert_close(local_output, staged_output, "staged")
+        materialized_error = _assert_close(
+            local_output, materialized_output, "materialized"
+        )
 
         operations = {
             "local": run_local,
             "peer": run_peer,
-            "gather_only": gather_peer_rows,
-            "gather_then_local": run_staged,
+            "materialization_only": materialize_history,
+            "materialization_then_local": run_materialized,
         }
         timings: dict[str, Any] = {}
         for name, operation in operations.items():
@@ -495,31 +435,32 @@ def _run_case(
 
         local_p50 = timings["local"]["latency"]["p50_us"]
         peer_p50 = timings["peer"]["latency"]["p50_us"]
-        staged_p50 = timings["gather_then_local"]["latency"]["p50_us"]
+        materialized_p50 = timings["materialization_then_local"]["latency"]["p50_us"]
         return {
             "backend": backend,
             "query_tokens": query_tokens,
             "selection_pattern": selection_pattern,
-            "stage_mode": stage_mode,
             "topk": args.topk,
             "local_history_tokens_per_rank": args.local_tokens,
             "remote_selected_fraction": (world_size - 1) / world_size,
             "selection_reuse_across_query_rows": (
                 query_tokens if selection_pattern == "shared" else 1
             ),
-            "staged_rows": staged_rows_count,
+            "materialized_rows": materialized_rows_count,
             "global_history_tokens": args.local_tokens * world_size,
             "correctness": {
                 "peer_vs_local": peer_error,
-                "staged_vs_local": staged_error,
+                "materialized_vs_local": materialized_error,
             },
             "timings": timings,
             "peer_over_local_slowdown_x": peer_p50 / local_p50,
             "peer_over_local_regression_percent": (peer_p50 / local_p50 - 1.0) * 100.0,
-            "staged_over_local_slowdown_x": staged_p50 / local_p50,
-            "staged_over_local_regression_percent": (staged_p50 / local_p50 - 1.0)
+            "materialized_over_local_slowdown_x": materialized_p50 / local_p50,
+            "materialized_over_local_regression_percent": (
+                materialized_p50 / local_p50 - 1.0
+            )
             * 100.0,
-            "staged_over_peer_speedup_x": peer_p50 / staged_p50,
+            "materialized_over_peer_speedup_x": peer_p50 / materialized_p50,
         }
     finally:
         if allocation is not None:
@@ -545,11 +486,6 @@ def _parse_args() -> argparse.Namespace:
         type=_parse_selection_patterns,
         default=_parse_selection_patterns("shared"),
     )
-    parser.add_argument(
-        "--stage-modes",
-        type=_parse_stage_modes,
-        default=_parse_stage_modes("selected"),
-    )
     parser.add_argument("--topk", type=int, default=2048)
     parser.add_argument("--local-tokens", type=int, default=32768)
     parser.add_argument("--warmup", type=int, default=10)
@@ -562,13 +498,8 @@ def _parse_args() -> argparse.Namespace:
         parser.error(f"--topk must be a positive multiple of {PAGE_SIZE}")
     if args.local_tokens % PAGE_SIZE != 0:
         parser.error(f"--local-tokens must be a multiple of {PAGE_SIZE}")
-    if "selected" in args.stage_modes and args.local_tokens < args.topk:
-        parser.error("--local-tokens must be >= topk for selected-row staging")
-    if (
-        "history" in args.stage_modes
-        and args.local_tokens * args.expected_world_size < args.topk
-    ):
-        parser.error("global history must be >= topk for full-history staging")
+    if args.local_tokens * args.expected_world_size < args.topk:
+        parser.error("global history must be >= topk for full-history materialization")
     if args.warmup < 0 or args.repetitions <= 0:
         parser.error("warmup must be nonnegative and repetitions must be positive")
     return args
@@ -593,31 +524,28 @@ def main() -> None:
     results: list[dict[str, Any]] = []
     try:
         for backend in args.backends:
-            for stage_mode in args.stage_modes:
-                for selection_pattern in args.selection_patterns:
-                    for query_tokens in args.query_tokens:
-                        if rank == 0:
-                            print(
-                                f"benchmarking backend={backend} "
-                                f"stage={stage_mode} "
-                                f"selection={selection_pattern} "
-                                f"query_tokens={query_tokens}",
-                                file=sys.stderr,
-                                flush=True,
-                            )
-                        result = _run_case(
-                            backend=backend,
-                            query_tokens=query_tokens,
-                            selection_pattern=selection_pattern,
-                            stage_mode=stage_mode,
-                            args=args,
-                            rank=rank,
-                            world_size=world_size,
-                            device=device,
-                            cpu_group=cpu_group,
+            for selection_pattern in args.selection_patterns:
+                for query_tokens in args.query_tokens:
+                    if rank == 0:
+                        print(
+                            f"benchmarking backend={backend} "
+                            f"selection={selection_pattern} "
+                            f"query_tokens={query_tokens}",
+                            file=sys.stderr,
+                            flush=True,
                         )
-                        if result is not None:
-                            results.append(result)
+                    result = _run_case(
+                        backend=backend,
+                        query_tokens=query_tokens,
+                        selection_pattern=selection_pattern,
+                        args=args,
+                        rank=rank,
+                        world_size=world_size,
+                        device=device,
+                        cpu_group=cpu_group,
+                    )
+                    if result is not None:
+                        results.append(result)
     finally:
         dist.barrier(group=cpu_group)
         dist.destroy_process_group(cpu_group)
@@ -631,8 +559,8 @@ def main() -> None:
             "warmup": args.warmup,
             "repetitions": args.repetitions,
             "scope": (
-                "same-query sparse MLA local versus rank-major CUDA VMM peer "
-                "reads; staged path reuses one selected set across query rows"
+                "same-query sparse MLA rank-major CUDA VMM peer reads versus "
+                "full owner-history materialization into local memory"
             ),
             "results": results,
         }

@@ -211,7 +211,7 @@ def test_pcp_dcp_route_capacity_allows_two_segments_per_global_request() -> None
     assert _flatten(chunks, "source_ranks").numel() == 6
 
 
-def test_direct_pcp_prefill_reads_global_peer_cache_without_dcp_merge(
+def test_owner_peer_prefill_reads_global_cache_without_dcp_merge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     layer_name = "model.layers.0.self_attn.indexer.k_cache"
