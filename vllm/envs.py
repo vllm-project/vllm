@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
+    VLLM_FLASHMLA_SPARSE_MAX_SCRATCH_MB: int = 512
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
@@ -1047,6 +1048,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default: 512 MB
     "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB": lambda: int(
         os.getenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "512")
+    ),
+    # Maximum size (in MB) for the scratch buffer in FlashMLA sparse mixed-batch path.
+    # Bounds how many tokens are sent to the kernel per call to prevent CUDA OOM
+    # on long prefill.
+    # Default: 512 MB
+    "VLLM_FLASHMLA_SPARSE_MAX_SCRATCH_MB": lambda: int(
+        os.getenv("VLLM_FLASHMLA_SPARSE_MAX_SCRATCH_MB", "512")
     ),
     # If set, the OpenAI API server will stay alive even after the underlying
     # AsyncLLMEngine errors and stops serving requests
