@@ -9,6 +9,7 @@ import torch.nn.functional as F
 
 from tests.v1.sample.utils import create_allowed_token_ids
 from vllm.platforms import current_platform
+from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (
@@ -127,6 +128,29 @@ def create_sampling_metadata(
         bad_words_token_ids={} if bad_words_token_ids is None else bad_words_token_ids,
         logitsprocs=LogitsProcessors(),
     )
+
+
+@pytest.mark.skip_global_cleanup
+def test_parse_output_filters_discarded_logprobs():
+    output_token_ids = torch.tensor([[11, 12], [21, PLACEHOLDER_TOKEN_ID]])
+    logprobs_tensors = LogprobsTensors(
+        logprob_token_ids=torch.tensor([[11], [12], [21], [0]], dtype=torch.int32),
+        logprobs=torch.tensor([[0.11], [0.12], [0.21], [0.0]]),
+        selected_token_ranks=torch.tensor([1, 1, 1, 0], dtype=torch.int32),
+    )
+
+    outputs, logprobs = RejectionSampler.parse_output(
+        output_token_ids,
+        vocab_size=100,
+        discard_req_indices=[0],
+        logprobs_tensors=logprobs_tensors,
+    )
+
+    assert outputs == [[], [21]]
+    assert logprobs is not None
+    assert logprobs.cu_num_generated_tokens == [0, 0, 1]
+    assert logprobs.logprob_token_ids.tolist() == [[21]]
+    assert logprobs.logprobs.tolist() == [[pytest.approx(0.21)]]
 
 
 ########################### Tests for Greedy Sampling ###################
