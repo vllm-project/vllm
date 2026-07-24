@@ -3,6 +3,7 @@
 
 import contextlib
 import os
+import signal
 import threading
 import weakref
 from collections.abc import Callable, Iterator
@@ -1222,6 +1223,26 @@ def launch_core_engines(
         )
 
 
+def describe_proc_exit(proc: BaseProcess) -> str:
+    """Human-readable exit status (pid + exit code or signal) for a proc.
+
+    A process' sentinel becomes ready the instant it dies, but ``exitcode`` is
+    only populated once the process has been reaped. Callers that want a useful
+    diagnostic should ``join`` the dead process briefly before calling this.
+    """
+    exitcode = proc.exitcode
+    if exitcode is None:
+        return f"pid={proc.pid} (still terminating, exit code unavailable)"
+    if exitcode < 0:
+        try:
+            sig = signal.Signals(-exitcode)
+            reason = f"killed by signal {sig.value} ({sig.name})"
+        except ValueError:
+            reason = f"killed by signal {-exitcode}"
+        return f"pid={proc.pid} {reason}"
+    return f"pid={proc.pid} exit code {exitcode}"
+
+
 def wait_for_engine_startup(
     handshake_socket: zmq.Socket,
     addresses: EngineZmqAddresses,
@@ -1266,13 +1287,27 @@ def wait_for_engine_startup(
             continue
         if len(events) > 1 or events[0][0] != handshake_socket:
             # One of the local core processes exited.
-            finished = proc_manager.finished_procs() if proc_manager else {}
-            if coord_process is not None and coord_process.exitcode is not None:
-                finished[coord_process.name] = coord_process.exitcode
+            candidate_procs: list[BaseProcess] = (
+                list(proc_manager.processes) if proc_manager else []
+            )
+            if coord_process is not None:
+                candidate_procs.append(coord_process)
+            # A sentinel becomes ready the instant the process dies, but its
+            # exitcode may not be populated until the process has been reaped,
+            # which is why the diagnostic could otherwise be an empty mapping.
+            # Briefly join any dead process so we can report a real exit
+            # code/signal (e.g. SIGKILL from an OOM during JIT compilation).
+            finished = {}
+            for proc in candidate_procs:
+                if proc.is_alive():
+                    continue
+                if proc.exitcode is None:
+                    proc.join(timeout=1)
+                finished[proc.name] = describe_proc_exit(proc)
             raise RuntimeError(
                 "Engine core initialization failed. "
                 "See root cause above. "
-                f"Failed core proc(s): {finished}"
+                f"Failed core proc(s): {finished or '{}'}"
             )
 
         # Receive HELLO and READY messages from the input socket.
