@@ -293,6 +293,17 @@ But you are sure that the model is in the [list of supported models](../models/s
 
 If you see an error like `RuntimeError: Failed to infer device type`, it means that vLLM failed to infer the device type of the runtime environment. You can check [the code](../../vllm/platforms/__init__.py) to see how vLLM infers the device type and why it is not working as expected. After [this PR](https://github.com/vllm-project/vllm/pull/14195), you can also set the environment variable `VLLM_LOGGING_LEVEL=DEBUG` to see more detailed logs to help debug the issue.
 
+On ROCm, a common cause is installing the default PyPI wheel instead of the ROCm wheel. The pre-built ROCm wheels currently support Python 3.12 only, and we recommend installing them with `uv pip` so the ROCm index takes priority over PyPI:
+
+```bash
+uv venv --python 3.12 --seed
+source .venv/bin/activate
+uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
+uv pip show vllm
+```
+
+If the reported version does not include a ROCm suffix such as `+rocm700` or `+rocm721`, recreate the environment and reinstall from the ROCm index.
+
 ## NCCL error: unhandled system error during `ncclCommInitRank`
 
 If your serving workload uses GPUDirect RDMA for distributed serving across multiple nodes and encounters an error during `ncclCommInitRank`, with no clear error message even with `NCCL_DEBUG=INFO` set, it might look like this:
