@@ -83,6 +83,13 @@ class MooncakeStoreScheduler:
         if request.num_tokens < self._block_size:
             return 0, False
 
+        max_usable_external_hit_tokens = (
+            (request.num_tokens - 1) // self._block_size * self._block_size
+        )
+        if num_computed_tokens >= max_usable_external_hit_tokens:
+            self.client.discard(request.request_id)
+            return 0, False
+
         num_external_hit_tokens = self.client.lookup(
             request.request_id,
             request.num_tokens,
