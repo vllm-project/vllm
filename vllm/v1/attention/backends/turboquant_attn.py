@@ -60,6 +60,18 @@ from vllm.v1.worker.workspace import (
 
 _HAS_FLASH_ATTN = is_flash_attn_varlen_func_available()
 if _HAS_FLASH_ATTN:
+    # FA2 requires compute capability >= 8.0 (Ampere+). On older GPUs
+    # (e.g. T4/Turing SM75), fall back to the SDPA prefill path.
+    try:
+        from vllm.platforms import current_platform
+        if current_platform.is_cuda():
+            cap = current_platform.get_device_capability()
+            if cap is not None and cap.major < 8:
+                _HAS_FLASH_ATTN = False
+    except Exception:
+        pass
+
+if _HAS_FLASH_ATTN:
     from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 
 # Continuation prefill: for small continuation chunks (q_len ≤ threshold),
