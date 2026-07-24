@@ -71,6 +71,13 @@ class LMCacheKVEvents(KVConnectorKVEvents):
 
 class LMCacheConnectorV1(KVConnectorBase_V1):
     @classmethod
+    def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
+        device_type = getattr(vllm_config.device_config, "device_type", None)
+        if device_type == "cpu":
+            return "HND"
+        return None
+
+    @classmethod
     def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
         """
         LMCache requires PIECEWISE CUDA graph mode when layerwise
