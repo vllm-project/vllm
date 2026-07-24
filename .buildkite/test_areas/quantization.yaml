@@ -26,6 +26,22 @@ steps:
   # parameter. It was not exercised by the previous L4 job.
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py -k 'not test_compressed_tensors_w4a8_fp8'
 
+- label: TurboQuant Native Store Test (H100)
+  key: turboquant-native-store-test-h100
+  timeout_in_minutes: 15
+  device: h100
+  source_file_dependencies:
+  - CMakeLists.txt
+  - csrc/libtorch_stable/quantization/turboquant/turboquant_store.cu
+  - csrc/libtorch_stable/ops.h
+  - csrc/libtorch_stable/torch_bindings.cpp
+  - vllm/_custom_ops.py
+  - vllm/envs.py
+  - vllm/v1/attention/ops/triton_turboquant_store.py
+  - tests/quantization/test_turboquant.py
+  commands:
+  - pytest -v -s quantization/test_turboquant.py::TestStoreDecodeRoundTrip::test_native_fp8_v4_store_matches_triton
+
 - label: Quantized Fusions
   device: h200_35gb
   key: quantized-fusions
