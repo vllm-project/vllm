@@ -160,13 +160,13 @@ def _warmup_layer_mhc(
             (layer.hc_attn_fn, layer.hc_attn_scale, layer.hc_attn_base),
             (layer.hc_ffn_fn, layer.hc_ffn_scale, layer.hc_ffn_base),
         ):
-            layer_input, post_mix, comb_mix = layer.hc_pre(
+            layer_input, post_mix, res_mix = layer.hc_pre(
                 residual_slice,
                 fn,
                 scale,
                 base,
             )
-            layer.hc_post(layer_input, residual_slice, post_mix, comb_mix)
+            layer.hc_post(layer_input, residual_slice, post_mix, res_mix)
 
 
 def _warmup_hc_head(
@@ -239,6 +239,18 @@ def _warmup_broadcast_mhc(
 
     device = first_broadcast_layer.hc_attn_fn.device
     if device.type != "cuda":
+        return
+
+    # Fail closed unless hc_attn_fn_broadcast is a tensor on the same CUDA
+    # device as hc_attn_fn.  A non-tensor, a CPU tensor, or a tensor on a
+    # different device index indicates a partially initialized or mismatched
+    # broadcast-weight setup that must not be warmed up.
+    fn_broadcast = first_broadcast_layer.hc_attn_fn_broadcast
+    if not isinstance(fn_broadcast, torch.Tensor):
+        return
+    if fn_broadcast.device.type != "cuda":
+        return
+    if fn_broadcast.device != device:
         return
 
     hidden_size = first_broadcast_layer.hidden_size
