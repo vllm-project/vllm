@@ -479,6 +479,44 @@ class Worker(WorkerBase):
                 getattr(self.parallel_config, "_api_process_count", 1),
             )
 
+        # Run FlashInfer MoE autotune before memory profiling to avoid OOM.
+        # This runs with skip_attn=True since KV cache is not yet allocated.
+        # Running it here ensures its memory usage is captured in the memory
+        # profiling baseline (before_profile), so it's accounted for in the
+        # available KV cache memory calculation.
+        if self.vllm_config.kernel_config.enable_flashinfer_autotune:
+            from vllm.model_executor.warmup.kernel_warmup import flashinfer_autotune
+            from vllm.utils.flashinfer import has_flashinfer
+
+            if has_flashinfer() and current_platform.has_device_capability(90):
+                logger.info(
+                    "=== STAGE 1: FlashInfer autotune (MoE, skip_attn=True, "
+                    "includes Inductor compilation) ==="
+                )
+                logger.info(
+                    "Running FlashInfer MoE autotune before memory profiling..."
+                )
+                import time
+
+                start = time.perf_counter()
+                flashinfer_autotune(self.model_runner, skip_attn=True)
+                duration = time.perf_counter() - start
+                # Reset peak stats so compilation peak doesn't inflate
+                # non_kv_cache_memory calculation, but persistent FlashInfer
+                # allocations remain and are captured in baseline.
+                torch.accelerator.reset_peak_memory_stats(self.device)
+                persistent_mem = (
+                    torch.accelerator.memory_allocated(self.device) / 1024**3
+                )
+                logger.info(
+                    "FlashInfer MoE autotune completed in %.1fs (persistent: %.2f GiB)",
+                    duration,
+                    persistent_mem,
+                )
+                logger.info(
+                    "=== STAGE 2: Memory profiling (Inductor compilation cached) ==="
+                )
+
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         with memory_profiling(

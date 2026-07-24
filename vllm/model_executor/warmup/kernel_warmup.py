@@ -37,7 +37,6 @@ from vllm.model_executor.warmup.v1_block_table_warmup import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
-from vllm.utils.flashinfer import has_flashinfer
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -113,15 +112,9 @@ def kernel_warmup(worker: "Worker"):
 
     minimax_m3_msa_warmup(worker)
 
-    enable_flashinfer_autotune = (
-        worker.vllm_config.kernel_config.enable_flashinfer_autotune
-    )
-    # FlashInfer autotune for Hopper (SM 9.0) and Blackwell (SM 10.0) GPUs
-    if enable_flashinfer_autotune is False:
-        logger.info("Skipping FlashInfer autotune because it is disabled.")
-    elif has_flashinfer() and current_platform.has_device_capability(90):
-        flashinfer_autotune(worker.model_runner)
-
+    # FlashInfer MoE autotune is now run in determine_available_memory()
+    # before memory profiling (with skip_attn=True).
+    # Here we only run FlashInfer attention warmup (skip_attn=False).
     if current_platform.has_device_capability(90):
         _warmup_ll_bf16_router_gemm()
 
@@ -187,7 +180,7 @@ def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
     return None
 
 
-def flashinfer_autotune(runner: "GPUModelRunner") -> None:
+def flashinfer_autotune(runner: "GPUModelRunner", skip_attn: bool = False) -> None:
     """
     Autotune FlashInfer operations.
     FlashInfer have many implementations for the same operation,
@@ -196,6 +189,12 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     future calls to FlashInfer will use the best implementation.
     Without autotuning, FlashInfer will rely on heuristics, which may
     be significantly slower.
+
+    Args:
+        runner: The GPU model runner (V1 or V2).
+        skip_attn: If True, skip attention layers (run MoE only).
+            Used when KV cache is not yet allocated (before memory profiling).
+            When False, runs full autotune including attention (used during warmup).
 
     Tuning is performed only on rank 0. The resulting cache is broadcast
     to every rank so all ranks dispatch the same kernel tactic.
@@ -218,13 +217,26 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     if get_world_group().world_size > 1:
         use_persistent_cache = False
 
+    # V1 runner (model_runner.py) uses `skip_attn` parameter.
+    # V2 runner (gpu_model_runner.py) uses `force_attention` parameter (inverted logic).
+    is_v2_runner = runner.__class__.__module__.endswith("gpu_model_runner")
+
     if not use_persistent_cache:
         with torch.inference_mode(), fi_utils.autotune(**autotune_kwargs):
-            runner._dummy_run(
-                num_tokens=runner.scheduler_config.max_num_batched_tokens,
-                skip_eplb=True,
-                is_profile=True,
-            )
+            if is_v2_runner:
+                runner._dummy_run(
+                    num_tokens=runner.scheduler_config.max_num_batched_tokens,
+                    skip_eplb=True,
+                    is_profile=True,
+                    force_attention=not skip_attn,
+                )
+            else:
+                runner._dummy_run(
+                    num_tokens=runner.scheduler_config.max_num_batched_tokens,
+                    skip_eplb=True,
+                    is_profile=True,
+                    skip_attn=skip_attn,
+                )
         get_world_group().barrier()
         return
 
@@ -244,6 +256,10 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         skip_eplb=True,
         is_profile=True,
     )
+    if is_v2_runner:
+        dummy_run_kwargs["force_attention"] = not skip_attn
+    else:
+        dummy_run_kwargs["skip_attn"] = skip_attn
 
     with torch.inference_mode():
         if is_leader:
@@ -274,6 +290,15 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         from flashinfer.autotuner import AutoTuner
 
         AutoTuner.get().load_configs(str(cache_path))
+        tuner = AutoTuner.get()
+        tuned_ops = len(tuner.get_tuned_ops()) if hasattr(tuner, "get_tuned_ops") else 0
+        op_names = tuner.get_tuned_ops() if hasattr(tuner, "get_tuned_ops") else []
+        logger.info(
+            "=== FlashInfer autotune summary: %d ops tuned (%s), cache: %s ===",
+            tuned_ops,
+            ", ".join(op_names) if op_names else "none",
+            cache_path,
+        )
         logger.info(
             "FlashInfer autotune cache loaded on rank %d from %s.",
             world.rank_in_group,
