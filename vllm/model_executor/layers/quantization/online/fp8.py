@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config
-from vllm.distributed import get_ep_group
+from vllm.distributed import get_ep_group, get_tp_group
 from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
 from vllm.model_executor.kernels.linear.scaled_mm import (
     CutlassFP8ScaledMMLinearKernel,
@@ -104,6 +104,24 @@ class _Fp8OnlineLinearBase(LinearMethodBase):
         initialize_online_processing(layer)
 
 
+def _quantize_linear_weight_per_tensor_fp8(
+    weight: torch.Tensor,
+    tp_group: torch.distributed.ProcessGroup | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize a dense weight using a TP-global scale when sharded."""
+    if tp_group is None:
+        return ops.scaled_fp8_quant(weight)
+
+    amax = weight.abs().amax().to(torch.float32).reshape(1)
+    torch.distributed.all_reduce(
+        amax,
+        op=torch.distributed.ReduceOp.MAX,
+        group=tp_group,
+    )
+    scale = amax / torch.finfo(current_platform.fp8_dtype()).max
+    return ops.scaled_fp8_quant(weight, scale=scale)
+
+
 class Fp8PerTensorOnlineLinearMethod(_Fp8OnlineLinearBase):
     """Online tensorwise FP8 linear quantization.
     Loads fp16/bf16 weights and quantizes them per-tensor during loading."""
@@ -157,7 +175,16 @@ class Fp8PerTensorOnlineLinearMethod(_Fp8OnlineLinearBase):
             return
 
         layer.input_scale = None
-        qweight, weight_scale = ops.scaled_fp8_quant(layer.weight, scale=None)
+        is_tp_sharded = (
+            layer.input_size_per_partition != layer.input_size
+            or layer.output_size_per_partition != layer.output_size
+        )
+        tp_group = (
+            get_tp_group().device_group if is_tp_sharded and layer.tp_size > 1 else None
+        )
+        qweight, weight_scale = _quantize_linear_weight_per_tensor_fp8(
+            layer.weight, tp_group
+        )
 
         # Update layer with new values.
         replace_parameter(layer, "weight", qweight.t().data)

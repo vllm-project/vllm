@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineMoEMethod,
     Fp8PerTensorOnlineLinearMethod,
     Fp8PerTensorOnlineMoEMethod,
+    _quantize_linear_weight_per_tensor_fp8,
     _quantize_moe_weight_per_tensor_fp8,
 )
 from vllm.model_executor.layers.quantization.online.nvfp4 import (
@@ -257,6 +258,39 @@ def test_online_moe_tp_weight_quant_matches_ep(
     if quantization == "nvfp4":
         assert torch.equal(tp_block_scale, expected_block_scale)
     assert torch.equal(tp_global_scale, ep_global_scale)
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("fp8"),
+    reason="FP8 is not supported on this GPU type.",
+)
+@pytest.mark.parametrize("shard_dim", [0, 1])
+def test_online_linear_tp_weight_quant_matches_unsharded(
+    monkeypatch, shard_dim: int
+) -> None:
+    """TP shards use the same FP8 scale and values as an unsharded weight."""
+    torch.manual_seed(0)
+    weight = torch.randn(32, 32, device="cuda", dtype=torch.bfloat16)
+    weight[-1, -1] = 64.0
+
+    full_weight, full_scale = _quantize_linear_weight_per_tensor_fp8(weight)
+    full_amax = weight.abs().amax().to(torch.float32).reshape(1)
+    tp_group = cast(torch.distributed.ProcessGroup, object())
+
+    def fake_all_reduce(tensor, op, group):
+        assert op == torch.distributed.ReduceOp.MAX
+        assert group is tp_group
+        tensor.copy_(full_amax)
+
+    monkeypatch.setattr(torch.distributed, "all_reduce", fake_all_reduce)
+
+    shard_size = weight.shape[shard_dim] // 2
+    shard = weight.narrow(shard_dim, 0, shard_size).contiguous()
+    tp_weight, tp_scale = _quantize_linear_weight_per_tensor_fp8(shard, tp_group)
+
+    expected_weight = full_weight.narrow(shard_dim, 0, shard_size)
+    assert torch.equal(tp_weight, expected_weight)
+    assert torch.equal(tp_scale, full_scale)
 
 
 @pytest.mark.skipif(
