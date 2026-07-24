@@ -3,7 +3,10 @@
 
 import sys
 import types
+from importlib.util import find_spec
 from unittest import mock
+
+import pytest
 
 from vllm.triton_utils.importing import TritonLanguagePlaceholder, TritonPlaceholder
 
@@ -75,6 +78,36 @@ def test_triton_placeholder_language_from_parent():
     triton = TritonPlaceholder()
     lang = triton.language
     assert isinstance(lang, TritonLanguagePlaceholder)
+
+
+def test_known_backends_skip_driver_is_active():
+    if find_spec("triton") is None:
+        pytest.skip("triton not installed")
+
+    def _poison():
+        drv = mock.MagicMock()
+        drv.is_active.side_effect = AssertionError(
+            "driver.is_active() must not be called for known backends"
+        )
+        b = mock.MagicMock()
+        b.driver = drv
+        return b
+
+    fake_backends = {"nvidia": _poison(), "amd": _poison(), "cpu": _poison()}
+
+    sys.modules.pop("vllm.triton_utils", None)
+    sys.modules.pop("vllm.triton_utils.importing", None)
+
+    with (
+        mock.patch("triton.backends.backends", fake_backends),
+        mock.patch("vllm.platforms.current_platform.is_cuda", return_value=True),
+        mock.patch("vllm.platforms.current_platform.is_rocm", return_value=False),
+        mock.patch("vllm.platforms.current_platform.is_cpu", return_value=False),
+    ):
+        import vllm.triton_utils.importing  # noqa: F401
+
+    for b in fake_backends.values():
+        b.driver.is_active.assert_not_called()
 
 
 def test_no_triton_fallback():
