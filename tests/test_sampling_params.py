@@ -48,3 +48,15 @@ def test_diffusion_accepts_top_k_top_p():
 def test_non_diffusion_models_unaffected():
     params = SamplingParams(temperature=0.7, top_k=10, seed=42)
     params.verify(MockModelConfig(), None, None, None)
+
+
+def test_non_int_top_k_raises_type_error_not_comparison_error():
+    """top_k's isinstance check must run before the `< -1` comparison.
+
+    Regression test: comparing a non-numeric top_k against -1 before the
+    type check raised a raw "'<' not supported between instances of 'str'
+    and 'int'" TypeError instead of the intended, clear
+    "top_k must be an integer, got str" message.
+    """
+    with pytest.raises(TypeError, match="top_k must be an integer, got str"):
+        SamplingParams(top_k="bad")

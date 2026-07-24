@@ -560,13 +560,17 @@ class SamplingParams(
                 value=self.top_p,
             )
         # quietly accept -1 as disabled, but prefer 0
-        if self.top_k < -1:
-            raise ValueError(
-                f"top_k must be 0 (disable), or at least 1, got {self.top_k}."
-            )
+        # Type check must come first: comparing a non-numeric top_k against
+        # -1 below raises a raw, confusing TypeError (e.g. "'<' not
+        # supported between instances of 'str' and 'int'") instead of the
+        # intended, clearer message.
         if not isinstance(self.top_k, int):
             raise TypeError(
                 f"top_k must be an integer, got {type(self.top_k).__name__}"
+            )
+        if self.top_k < -1:
+            raise ValueError(
+                f"top_k must be 0 (disable), or at least 1, got {self.top_k}."
             )
         if not 0.0 <= self.min_p <= 1.0:
             raise ValueError(f"min_p must be in [0, 1], got {self.min_p}.")
