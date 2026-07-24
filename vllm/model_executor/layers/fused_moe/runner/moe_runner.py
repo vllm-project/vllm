@@ -809,14 +809,25 @@ class MoERunner(MoERunnerInterface):
         self._maybe_sync_shared_experts_stream(shared_experts_input)
 
         # If the Runner holds the gate, apply it after the stream sync,
-        # so it can run overlapped with the
+        # so it can run overlapped with the shared expert.
         # NOTE: in future PR, MoE runner will always hold the gate.
         if self.gate is not None:
+            # For latent-MoE models the routed `hidden_states` has already been
+            # projected to `moe_latent_size` by `apply_routed_input_transform`,
+            # but the gate is defined on the original `hidden_size`. The
+            # pre-latent activations are preserved in `shared_experts_input`, so
+            # route the gate to those when present. Falls back to `hidden_states`
+            # for non-latent models (shared_experts_input is None or identical).
+            gate_input = (
+                shared_experts_input
+                if shared_experts_input is not None
+                else hidden_states
+            )
             if self._fse_fuse_gate:
                 self._maybe_fuse_gate_weights()
-                router_logits = F.linear(hidden_states, self._combined_gate_weight)
+                router_logits = F.linear(gate_input, self._combined_gate_weight)
             else:
-                router_logits, _ = self.gate(hidden_states)
+                router_logits, _ = self.gate(gate_input)
 
         with self._sequence_parallel_context():
             # TODO(bnell): parts of the dispatch/combine steps will go away once
