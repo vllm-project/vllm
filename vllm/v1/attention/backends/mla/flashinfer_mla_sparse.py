@@ -28,7 +28,6 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
-    phys_shadow,
     triton_convert_req_index_to_global_index,
     triton_filter_and_convert_dcp_index,
 )
@@ -37,6 +36,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
+    from vllm.v1.attention.backend import CommonAttentionMetadata
 
 logger = init_logger(__name__)
 
@@ -262,6 +262,9 @@ class FlashInferMLASparseMetadata(AttentionMetadata):
     block_size: int = 64
     topk_tokens: int = 2048
     cp_kv_cache_interleave_size: int = 1
+    physical_topk_indices: torch.Tensor | None = None
+    physical_topk_valid_counts: torch.Tensor | None = None
+    physical_topk_is_valid: bool = False
 
 
 class FlashInferMLASparseMetadataBuilder(
@@ -280,6 +283,17 @@ class FlashInferMLASparseMetadataBuilder(
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        self.physical_topk_indices = torch.empty(
+            (max_num_tokens, self.topk_tokens),
+            dtype=torch.int32,
+            device=device,
+        )
+        self.physical_topk_valid_counts = torch.empty(
+            max_num_tokens,
+            dtype=torch.int32,
+            device=device,
+        )
 
         num_q_heads = vllm_config.model_config.get_num_attention_heads(
             vllm_config.parallel_config
@@ -292,6 +306,19 @@ class FlashInferMLASparseMetadataBuilder(
             supports_spec_as_decode=True,
             supports_dcp_with_varlen=True,
         )
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: "CommonAttentionMetadata",
+        fast_build: bool = False,
+    ) -> FlashInferMLASparseMetadata:
+        metadata = super().build(
+            common_prefix_len, common_attn_metadata, fast_build
+        )
+        metadata.physical_topk_indices = self.physical_topk_indices
+        metadata.physical_topk_valid_counts = self.physical_topk_valid_counts
+        return metadata
 
 
 # Global workspace buffer (lazily initialized)
@@ -405,21 +432,23 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                 NUM_TOPK_TOKENS=topk_indices.shape[1],
                 return_valid_counts=True,
             )
-        elif (shadow := phys_shadow(self.topk_indices_buffer)) is not None:
+        elif (
+            attn_metadata.physical_topk_indices is not None
+            and attn_metadata.physical_topk_valid_counts is not None
+        ):
             # skip_topk layers reuse the previous fresh layer's PHYSICAL
             # indices: the logical top-k indices are shared (one buffer for
             # the whole forward) and block_table/req_id are per-step constant,
             # so re-converting them per layer produces identical output. This
             # covers both the backbone (index_topk_freq > 1) and MTP draft
-            # steps 1+ (index_share_for_mtp_iteration sets skip_topk; the
-            # draft compact re-arranges the shadow together with the logical
-            # buffer). The fresh/skip split is fixed per captured graph, so
-            # the branch is cudagraph-safe.
-            phys_buf, seq_buf = shadow
+            # steps 1+. New metadata starts invalid, so an all-skip MTP step
+            # converts once rather than reading the previous step's layout.
+            phys_buf = attn_metadata.physical_topk_indices
+            seq_buf = attn_metadata.physical_topk_valid_counts
             wrote_fresh = getattr(layer, "indexer", None) is not None and not getattr(
                 layer, "skip_topk", False
             )
-            if wrote_fresh:
+            if wrote_fresh or not attn_metadata.physical_topk_is_valid:
                 topk_indices_physical, seq_lens = (
                     triton_convert_req_index_to_global_index(
                         attn_metadata.req_id_per_token[:num_actual_toks],
@@ -432,6 +461,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                         valid_counts_out=seq_buf[:num_actual_toks],
                     )
                 )
+                attn_metadata.physical_topk_is_valid = True
             else:
                 topk_indices_physical = phys_buf[:num_actual_toks]
                 seq_lens = seq_buf[:num_actual_toks]
