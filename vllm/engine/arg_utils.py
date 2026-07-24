@@ -653,6 +653,8 @@ class EngineArgs:
     jit_monitor_mode: Literal["warn", "error"] = ObservabilityConfig.jit_monitor_mode
     jit_monitor_verbose: bool = ObservabilityConfig.jit_monitor_verbose
     enable_mm_processor_stats: bool = ObservabilityConfig.enable_mm_processor_stats
+    enable_zmq_metrics: bool = ObservabilityConfig.enable_zmq_metrics
+    zmq_metrics_port: int = ObservabilityConfig.zmq_metrics_port
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
 
@@ -1410,6 +1412,14 @@ class EngineArgs:
             "--jit-monitor-verbose",
             **observability_kwargs["jit_monitor_verbose"],
         )
+        observability_group.add_argument(
+            "--enable-zmq-metrics",
+            **observability_kwargs["enable_zmq_metrics"],
+        )
+        observability_group.add_argument(
+            "--zmq-metrics-port",
+            **observability_kwargs["zmq_metrics_port"],
+        )
 
         # Scheduler arguments
         scheduler_kwargs = get_kwargs(SchedulerConfig)
@@ -1833,6 +1843,8 @@ class EngineArgs:
             enable_logging_iteration_details=self.enable_logging_iteration_details,
             jit_monitor_mode=self.jit_monitor_mode,
             jit_monitor_verbose=self.jit_monitor_verbose,
+            enable_zmq_metrics=self.enable_zmq_metrics,
+            zmq_metrics_port=self.zmq_metrics_port,
         )
 
     def create_engine_config(

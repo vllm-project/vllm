@@ -561,3 +561,14 @@ class LoRARequestStates:
         for lora_name, stats in self.requests.items():
             scheduler_stats.waiting_lora_adapters[lora_name] = len(stats.waiting)
             scheduler_stats.running_lora_adapters[lora_name] = len(stats.running)
+
+
+@dataclass
+class ZmqMetricsStats:
+    """Snapshot of metrics published over ZMQ."""
+
+    num_requests_running: int = 0
+    num_requests_waiting: int = 0
+    kv_cache_usage_perc: float = 0.0
+    cache_config_info: dict[str, Any] | None = None
+    engine_id: str | None = None
