@@ -27,7 +27,7 @@
 import math
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from functools import partial
+from functools import cached_property, partial
 from itertools import chain
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -37,6 +37,10 @@ import torch.types
 from torch import nn
 from torch.nn.init import trunc_normal_
 from transformers import BatchFeature, PretrainedConfig
+from transformers.dynamic_module_utils import (
+    get_class_from_dynamic_module,
+    resolve_trust_remote_code,
+)
 from typing_extensions import TypeVar
 
 from vllm.config import VllmConfig
@@ -74,6 +78,8 @@ from vllm.multimodal.processing import BaseDummyInputsBuilder
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    MultiModalPromptUpdates,
+    PlaceholderFeaturesInfo,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
@@ -82,6 +88,11 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.processor import (
+    _merge_mm_kwargs,
+    cached_get_image_processor,
+)
+from vllm.transformers_utils.utils import convert_model_repo_to_path
 from vllm.utils.collection_utils import flatten_2d_lists
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import set_default_torch_dtype
@@ -541,16 +552,63 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
     image_pattern = "(<image>./</image>)"
     video_pattern = "(<video>./</video>)"
 
+    @cached_property
+    def _image_processor_cls(self):
+        model_config = self.ctx.model_config
+        model_path = convert_model_repo_to_path(model_config.model)
+
+        from transformers import ImageProcessingMixin
+
+        image_processor_config, _ = ImageProcessingMixin.get_image_processor_dict(
+            model_path,
+            revision=model_config.revision,
+            token=model_config.hf_token,
+        )
+
+        auto_map = image_processor_config.get("auto_map") or {}
+        class_ref = auto_map.get("AutoImageProcessor")
+        if not class_ref:
+            raise ValueError(
+                "Missing auto_map['AutoImageProcessor'] in image processor config "
+                f"for {model_config.model!r}"
+            )
+
+        resolve_trust_remote_code(
+            model_config.trust_remote_code,
+            model_config.model,
+            has_local_code=False,
+            has_remote_code=True,
+        )
+        return get_class_from_dynamic_module(
+            class_ref,
+            model_config.model,
+            revision=model_config.revision,
+        )
+
     def get_hf_config(self):
         return self.ctx.get_hf_config()
 
     def get_hf_processor(self, **kwargs: object):
+        model_config = self.ctx.model_config
+        processor_cls = self._image_processor_cls
+        merged_kwargs = _merge_mm_kwargs(model_config, processor_cls, **kwargs)
+
+        # AutoProcessor only for tokenizer; its image_processor is resolved by
+        # class name and can pick the wrong checkpoint across MiniCPM-V versions.
         hf_processor = self.ctx.get_hf_processor(**kwargs)
+
+        image_processor = cached_get_image_processor(
+            model_config.model,
+            revision=model_config.revision,
+            trust_remote_code=model_config.trust_remote_code,
+            processor_cls_overrides=processor_cls,
+            **merged_kwargs,
+        )
 
         from vllm.transformers_utils.processors.minicpmv import MiniCPMVProcessor
 
         vendored_processor = MiniCPMVProcessor(
-            image_processor=hf_processor.image_processor,
+            image_processor=image_processor,
             tokenizer=hf_processor.tokenizer,
             version=self.get_model_version(),
         )
@@ -558,7 +616,6 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
 
         # NumPy arrays are considered as Iterable but not Sequence in
         # https://github.com/huggingface/transformers/blob/main/src/transformers/image_transforms.py#L428
-        image_processor = hf_processor.image_processor  # type: ignore
         # transformers v5+ renamed `mean`/`std` -> `image_mean`/`image_std`
         for attr in ("mean", "std", "image_mean", "image_std"):
             val = getattr(image_processor, attr, None)
@@ -843,6 +900,57 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             **self.process_images(mm_data, mm_kwargs, tok_kwargs),
             **self.process_videos(mm_data, mm_kwargs, tok_kwargs),
         }
+
+    def _apply_prompt_updates(
+        self,
+        token_ids: list[int],
+        mm_prompt_updates: MultiModalPromptUpdates,
+    ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
+        """Apply multi-modal prompt updates to token IDs."""
+        tokenizer = self.info.get_tokenizer()
+
+        new_token_ids, match_result = self._apply_token_matches(
+            token_ids,
+            mm_prompt_updates,
+        )
+
+        # If the search text does not represent a special token,
+        # it may have different token IDs in the prompt, because
+        # the tokens may go across the boundaries of the search text.
+        # ----
+        # e.g. when searching for "foo" in "food", if "food" itself makes
+        # up a token, then the token ID of "foo" will not appear at all
+        # ----
+        # Since it is inefficient to search for all possible tokenizations
+        # of the search text in the prompt, we instead perform string-based
+        # updates on the decoded token IDs, then encode them back.
+        if not all(
+            all(update_idx is not None for update_idx in update_idxs)
+            for update_idxs in match_result.values()
+        ):
+            new_token_ids, match_result = self._apply_text_matches_as_segmented_tokens(
+                _seq2text(tokenizer, token_ids, use_cache=False),
+                mm_prompt_updates,
+            )
+
+        matched_updates = defaultdict[str, list[Sequence[ResolvedPromptUpdate]]](list)
+        for modality, update_idxs in match_result.items():
+            for item_idx, update_idx in enumerate(update_idxs):
+                assert update_idx is not None, (
+                    "Failed to apply prompt replacement for "
+                    f"mm_items[{modality!r}][{item_idx}]"
+                )
+
+                matched_updates[modality].append(
+                    [mm_prompt_updates[modality][item_idx][update_idx]]
+                )
+
+        placeholders = self._find_mm_placeholders(
+            new_token_ids,
+            dict(matched_updates),
+        )
+
+        return new_token_ids, placeholders
 
     def _base_call_hf_processor(
         self,
