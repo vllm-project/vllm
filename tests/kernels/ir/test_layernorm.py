@@ -18,20 +18,21 @@ from vllm.platforms import current_platform
 
 rms_norm_native = ir.ops.rms_norm.impls["native"].impl_fn
 
+IS_GPGPU_DEVICE = current_platform.is_cuda_alike() or current_platform.is_xpu()
+
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
+    not IS_GPGPU_DEVICE,
     reason="Currently only kernels on CUDA, ROCm and XPU",
 )
 def test_rms_norm_registration():
     expected = {
         "native": True,
-        "vllm_c": current_platform.is_cuda_alike(),
+        "vllm_c": IS_GPGPU_DEVICE,
         "aiter": current_platform.is_rocm(),
         "oink": current_platform.has_device_capability(100)
         and hasattr(torch.ops, "oink")
         and hasattr(torch.ops.oink, "rmsnorm"),
-        "xpu_kernels": current_platform.is_xpu(),
     }
 
     actual = {
@@ -46,7 +47,7 @@ def test_rms_norm_registration():
 @pytest.mark.parametrize("hidden_size", COMMON_HIDDEN_SIZES)
 @pytest.mark.parametrize("epsilon", [1e-6, 1e-5])
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
+    not IS_GPGPU_DEVICE,
     reason="Currently only kernels on CUDA, ROCm and XPU",
 )
 class TestRMSNorm:
@@ -117,7 +118,7 @@ class TestRMSNorm:
         out_unit_weight = impl.impl_fn(x, torch.ones_like(weight), eps)
         assert_close(ir.ops.rms_norm, out_no_weight, out_unit_weight)
 
-    @pytest.mark.parametrize("provider", ["vllm_c", "aiter", "xpu_kernels", "native"])
+    @pytest.mark.parametrize("provider", ["vllm_c", "aiter", "native"])
     def test_torch_opcheck(self, dtype, n_tokens, hidden_size, epsilon, provider):
         if not ir.ops.rms_norm.impls[provider].supported:
             pytest.skip(f"{provider} impl not supported on this platform")
@@ -180,18 +181,17 @@ fused_add_rms_norm_native = ir.ops.fused_add_rms_norm.impls["native"].impl_fn
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
+    not IS_GPGPU_DEVICE,
     reason="Currently only kernels on CUDA, ROCm and XPU",
 )
 def test_fused_add_rms_norm_registration():
     expected = {
         "native": True,
-        "vllm_c": current_platform.is_cuda_alike(),
+        "vllm_c": IS_GPGPU_DEVICE,
         "aiter": current_platform.is_rocm(),
         "oink": current_platform.has_device_capability(100)
         and hasattr(torch.ops, "oink")
         and hasattr(torch.ops.oink, "fused_add_rms_norm"),
-        "xpu_kernels": current_platform.is_xpu(),
     }
 
     actual = {
@@ -238,7 +238,7 @@ def test_vllm_c_fused_add_rms_norm_accepts_nd_input():
 @pytest.mark.parametrize("hidden_size", COMMON_HIDDEN_SIZES)
 @pytest.mark.parametrize("epsilon", [1e-6, 1e-5])
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
+    not IS_GPGPU_DEVICE,
     reason="Currently only kernels on CUDA, ROCm and XPU",
 )
 class TestFusedAddRMSNorm:
