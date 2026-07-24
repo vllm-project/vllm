@@ -508,7 +508,7 @@ impl EngineCoreClient {
                 "registered request to engine"
             );
 
-            self.inner.send_to_engine(&engine_id, EngineCoreRequestType::Add, &req).await?;
+            self.inner.send_request_to_engine(&engine_id, req).await?;
             Ok(())
         }
         .await;

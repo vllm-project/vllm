@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 
@@ -103,6 +104,41 @@ pub enum MmKwargValue {
     Int(i64),
     Float(f64),
     List(Vec<MmKwargValue>),
+}
+
+impl MmFeatureSpec {
+    pub(crate) fn extract_aux_frames(&mut self, aux_frames: &mut Vec<Bytes>, threshold: usize) {
+        if let Some(data) = &mut self.data {
+            for elem in data.values_mut() {
+                elem.extract_aux_frames(aux_frames, threshold);
+            }
+        }
+        if let Some(is_embed) = &mut self.mm_position.is_embed {
+            is_embed.extract_aux_frame(aux_frames, threshold);
+        }
+    }
+}
+
+impl MmFieldElem {
+    fn extract_aux_frames(&mut self, aux_frames: &mut Vec<Bytes>, threshold: usize) {
+        if let Some(data) = &mut self.data {
+            data.extract_aux_frames(aux_frames, threshold);
+        }
+    }
+}
+
+impl MmKwargValue {
+    fn extract_aux_frames(&mut self, aux_frames: &mut Vec<Bytes>, threshold: usize) {
+        match self {
+            Self::Tensor(tensor) => tensor.extract_aux_frame(aux_frames, threshold),
+            Self::List(values) => {
+                for value in values {
+                    value.extract_aux_frames(aux_frames, threshold);
+                }
+            }
+            Self::Int(_) | Self::Float(_) => {}
+        }
+    }
 }
 
 /// Defines how to interpret tensor data belonging to a keyword argument for
