@@ -375,6 +375,24 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             and rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k)
         )
 
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+            _upcast_e8m0_to_fp32,
+        )
+        from vllm.model_executor.utils import replace_parameter
+
+        from .BlockScaledMMLinearKernel import FP8BlockParams
+
+        super().process_weights_after_loading(layer)
+
+        params = FP8BlockParams.from_layer(layer)
+        if params.weight_scale_inv is not None:
+            ws, attr = params.weight_scale_inv, params.WEIGHT_SCALE_INV
+        else:
+            ws, attr = params.weight_scale, params.WEIGHT_SCALE
+        if ws is not None and ws.dtype == torch.float8_e8m0fnu:
+            replace_parameter(layer, attr, _upcast_e8m0_to_fp32(ws).contiguous())
+
     @classmethod
     def is_supported(cls, compute_capability=None):
         return (
@@ -415,10 +433,7 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             else:
                 As = As.to(torch.float32)
 
-            if Bs.dtype == torch.float8_e8m0fnu:
-                Bs = _upcast_e8m0_to_fp32(Bs).contiguous()
-            else:
-                Bs = Bs.to(torch.float32)
+            Bs = Bs.to(torch.float32)
 
         out_dtype = self.config.out_dtype
         if self.use_triton:
