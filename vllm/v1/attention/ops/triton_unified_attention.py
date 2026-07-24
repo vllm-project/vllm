@@ -534,12 +534,22 @@ def kernel_unified_attention(
 
         # S : (BLOCK_M, TILE_SIZE)
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
-        if USE_PER_TOKEN_HEAD_SCALES:
-            # Per-token-head quant: fuse softmax_scale with per-head k_scale
-            # to avoid a separate BLOCK_M × TILE_SIZE multiply on S.
-            S += tl.dot(Q, K) * (score_scale * k_token_head_scales[None, :])
-        else:
+        if USE_FP8_Q_DESCALE:
+            # fp8 query: score_scale = scale * q_scale * k_scale (~1e-2).
+            # Folding it into Q and casting back to Q.dtype (fp8) would
+            # requantize the product and destroy precision, so keep the
+            # scale on S here.
             S += score_scale * tl.dot(Q, K)
+        else:
+            # Reassociate so ``score_scale * Q`` is loop-invariant: the
+            # compiler hoists the multiply out of the tile loop instead of
+            # scaling the BLOCK_M × TILE_SIZE S matrix on every iteration.
+            Q_scaled = (Q * score_scale).to(Q.dtype)
+            if USE_PER_TOKEN_HEAD_SCALES:
+                # Per-token-head quant: per-head k_scale still multiplies S.
+                S += tl.dot(Q_scaled, K) * k_token_head_scales[None, :]
+            else:
+                S += tl.dot(Q_scaled, K)
 
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
