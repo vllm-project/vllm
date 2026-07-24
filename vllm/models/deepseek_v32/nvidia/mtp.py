@@ -9,6 +9,7 @@ import torch.nn as nn
 import vllm._custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
+from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -24,10 +25,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.deepseek_mtp import (
-    SharedHead,
-    _restore_full_token_layout_if_needed,
-)
+from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2MixtureOfExperts,
     DeepseekV2MoE,
@@ -120,12 +118,7 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         hidden_states, residual = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
         )
-        hidden_states, residual = _restore_full_token_layout_if_needed(
-            hidden_states,
-            residual,
-            positions.shape[0],
-            is_sequence_parallel=self.mtp_block.use_sequence_parallel_moe,
-        )
+        is_sequence_parallel = self.mtp_block.use_sequence_parallel_moe
         # Recycle the POST-final-norm hidden into the next draft step. The
         # residual-add is fused into the final RMSNorm so it is computed
         # exactly once, and the result is returned for both tuple positions:
@@ -136,8 +129,10 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         # is understood by both the V2 speculator (isinstance-tuple check) and
         # the legacy proposer (model_returns_tuple is True for the
         # DeepSeekMTPModel architecture).
-        if self.mtp_block.use_sequence_parallel_moe:
+        if is_sequence_parallel:
             hidden_states, _ = self.shared_head.norm(hidden_states, residual)
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            hidden_states = hidden_states[: positions.shape[0]]
         else:
             # The MoE output is left un-reduced; fuse its all-reduce into the
             # final norm, as the main model does at layer boundaries.
