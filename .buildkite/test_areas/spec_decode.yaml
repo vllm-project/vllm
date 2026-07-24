@@ -159,6 +159,13 @@ steps:
   commands:
     - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
     - pytest -v -s v1/spec_decode/test_speculators_correctness.py -m slow_test
+  mirror:
+    amd:
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 36
+      depends_on:
+      - image-build-amd
 
 - label: Spec Decode MTP hybrid (B200)
   timeout_in_minutes: 20

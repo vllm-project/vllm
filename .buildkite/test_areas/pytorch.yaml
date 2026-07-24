@@ -41,6 +41,16 @@ steps:
   # However, find does not normally propagate error codes, so we combine it with xargs
   # (using -0 for proper path handling)
   - "find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
+  mirror:
+    amd:
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 89
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/
+      - vllm/platforms/rocm.py
 
 - label: PyTorch Compilation Unit Tests (H100)
   key: pytorch-compilation-unit-tests-h100

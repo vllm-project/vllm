@@ -22,3 +22,29 @@ steps:
   - pytest models/multimodal/generation/test_phi4siglip.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_phi4siglip.py
   - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)'
+  mirror:
+    amd:
+      dind: false
+      device: mi300_2
+      timeout_in_minutes: 72
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/model_executor/model_loader/sharded_state_loader.py
+      - vllm/model_executor/models/
+      - vllm/model_executor/layers/
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - tests/basic_correctness/
+      - tests/model_executor/model_loader/test_sharded_state_loader.py
+      - tests/models/
+      commands:
+      - TARGET_TEST_SUITE=MI300 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
+      - HIP_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m '(not slow_test)'
+      - pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)'
+      - pytest models/language -v -s -m 'distributed(num_gpus=2)'
+      - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_phi4siglip.py
+      - pytest models/multimodal/generation/test_phi4siglip.py -v -s -m 'distributed(num_gpus=2)'
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)'
