@@ -11,7 +11,10 @@ import pytest
 import torch
 from utils import skip_unsupported
 
-from vllm.model_executor.layers.batch_invariant import matmul_batch_invariant
+from vllm.model_executor.layers.batch_invariant import (
+    _matmul_config,
+    matmul_batch_invariant,
+)
 from vllm.platforms import current_platform
 
 DEVICE_TYPE = current_platform.device_type
@@ -103,3 +106,51 @@ def test_matmul_batch_invariance(dtype):
     batch_output_a = batch_output[3]
 
     assert torch.equal(standard_output[0], batch_output_a)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_matmul_config_block_k_fixed_across_shapes(dtype):
+    """BLOCK_SIZE_K must not vary with M/N for a given dtype.
+
+    BLOCK_SIZE_K is the only tile parameter that changes the per-output-element
+    K-reduction order, so a shape-adaptive config that let it vary would break
+    batch invariance. Every other tile parameter is free to change.
+    """
+    block_ks = {
+        _matmul_config(M, N, dtype)["BLOCK_SIZE_K"]
+        for M in (1, 8, 16, 64, 128, 512, 2048)
+        for N in (64, 3584, 18944, 152064)
+    }
+    assert len(block_ks) == 1, f"BLOCK_SIZE_K varied across shapes: {block_ks}"
+
+
+@skip_unsupported
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+# n=3584 exercises the narrow-N (block_n=64) small-M branch; n=8192 exercises the
+# wide-N (block_n=256) branch, which selects a different tile from prefill.
+@pytest.mark.parametrize("n", [3584, 8192])
+def test_matmul_batch_invariance_across_config_buckets(dtype, n):
+    """A row's output is bitwise identical no matter what batch size it lands in.
+
+    In serving, M (number of batched tokens) changes every step, so the adaptive
+    config picks a different tile shape for decode (small M) than for prefill
+    (large M). The same row must still produce identical output across those
+    config buckets. This crosses every bucket boundary of ``_matmul_config``,
+    comparing against the row processed alone at M=1.
+    """
+    device = torch.device(DEVICE_TYPE)
+    torch.manual_seed(42)
+
+    k = 3584
+    b = torch.rand((k, n), dtype=dtype, device=device)
+    ref_row = torch.rand((1, k), dtype=dtype, device=device)
+    reference = matmul_batch_invariant(ref_row, b)[0]
+
+    for m in (1, 8, 9, 16, 17, 32, 64, 65, 128, 129, 256, 512):
+        a = torch.rand((m, k), dtype=dtype, device=device)
+        pos = m // 2
+        a[pos] = ref_row[0]
+        out = matmul_batch_invariant(a, b)[pos]
+        assert torch.equal(out, reference), (
+            f"batch invariance broke at M={m}, N={n} for dtype={dtype}"
+        )
