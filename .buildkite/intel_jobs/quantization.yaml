@@ -13,7 +13,7 @@ steps:
   working_dir: "."
   device: intel_gpu
   agent_tags:
-    label: production
+    label: debug_b50
     gpu: 1+
     mem: 16+
   source_file_dependencies:

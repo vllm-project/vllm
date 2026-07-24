@@ -6,7 +6,7 @@ steps:
   timeout_in_minutes: 45
   device: intel_gpu
   agent_tags:
-    label: production
+    label: debug_b50
     gpu: 2+
     mem: 16+
   no_plugin: true
@@ -35,7 +35,7 @@ steps:
   timeout_in_minutes: 45
   device: intel_gpu
   agent_tags:
-    label: production
+    label: debug_b50
     gpu: 1+
     mem: 24+
   no_plugin: true
