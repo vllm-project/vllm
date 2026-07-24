@@ -31,6 +31,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -173,9 +174,6 @@ def select_nvfp4_moe_backend(
     """
 
     # NOTE: the kernels are selected in the following order.
-    # FLASHINFER_B12X is intentionally excluded from auto-selection until
-    # the upstream CUTLASS SM121 MMA op guard is resolved; use
-    # moe_backend="flashinfer_b12x" to opt in explicitly.
     AVAILABLE_BACKENDS = [
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
         NvFp4MoeBackend.FLASHINFER_CUTEDSL,
@@ -186,6 +184,15 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.HUMMING,
         NvFp4MoeBackend.EMULATION,
     ]
+
+    # FLASHINFER_B12X auto-selects on SM120 only, just ahead of the Marlin
+    # weight-only fallback. SM121 (DGX Spark) stays opt-in via
+    # moe_backend="flashinfer_b12x" until validated end-to-end there (#40082).
+    if current_platform.is_device_capability((12, 0)):
+        AVAILABLE_BACKENDS.insert(
+            AVAILABLE_BACKENDS.index(NvFp4MoeBackend.MARLIN),
+            NvFp4MoeBackend.FLASHINFER_B12X,
+        )
 
     NVFP4_BACKENDS_WITH_CLAMP = {
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
