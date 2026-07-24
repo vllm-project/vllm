@@ -1096,7 +1096,7 @@ class LoRAModelManager:
 
     def _build_moe_ep_load_spec(self) -> MoEEPLoadSpec | None:
         """
-        Per-rank slicing metadata for 2D FusedMoEFactory LoRA modules.
+        Per-rank slicing metadata for 2D RoutedEXperts LoRA modules.
         """
         if not self._use_ep or not self._is_moe:
             return None
