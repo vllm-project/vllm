@@ -215,7 +215,7 @@ class TrtLlmMxfp4ExpertsMonolithic(
             intermediate_size=self.intermediate_size_per_partition,
             local_expert_offset=self.ep_rank * self.local_num_experts,
             local_num_experts=self.local_num_experts,
-            routed_scaling_factor=None,
+            routed_scaling_factor=routed_scaling_factor,
             routing_method_type=self.routing_method_type,
             do_finalize=True,
             tune_max_num_tokens=max(self.max_capture_size, 1),
