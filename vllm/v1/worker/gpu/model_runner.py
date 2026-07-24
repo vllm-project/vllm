@@ -504,6 +504,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # to its own attention support.
             self.speculator.init_cudagraph_manager(cudagraph_mode)
 
+        self.initialize_kv_cache_tensors()
+
+    def initialize_kv_cache_tensors(self) -> None:
         self.kv_caches: list[torch.Tensor] = []
         kv_caches_dict = init_kv_cache(
             self.kv_caches,
@@ -875,6 +878,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             out=self.req_states.num_computed_prefill_tokens,
         )
 
+        self._apply_kv_cache_memory_updates(scheduler_output)
+
+    def _apply_kv_cache_memory_updates(self, scheduler_output: SchedulerOutput) -> None:
         # Zero GPU memory for freshly allocated cache blocks to prevent
         # stale NaN/data from corrupting attention or SSM computation.
         if scheduler_output.new_block_ids_to_zero:
