@@ -1,13 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import ast
 import json
 
 import pytest
 
 from vllm.tool_parsers.utils import (
+    UnexpectedAstError,
     coerce_to_schema_type,
+    escape_ctrl_chars_in_strings,
     extract_types_from_schema,
+    get_parameter_value,
+    handle_single_tool,
+    make_valid_python,
+    rename_reserved_kwargs,
+    restore_reserved_kwarg_names,
 )
 
 
@@ -279,3 +287,227 @@ class TestExtractTypesFromSchema:
         }
         result = set(extract_types_from_schema(schema))
         assert result == {"integer", "null", "string"}
+
+
+class TestMakeValidPythonStringLiterals:
+    def test_bracket_inside_string_is_literal(self):
+        # A bracket inside a string argument must not be counted as a
+        # structural bracket. Regression: `]` inside the string popped the
+        # bracket stack and the whole call raised as mismatched.
+        text = "[exec(command='grep -F \"]\" log.txt')]"
+        assert make_valid_python(text) == (text, "")
+
+    def test_open_bracket_inside_string_is_literal(self):
+        # An unclosed `[` inside a string must not leave a phantom open
+        # bracket on the stack.
+        text = "[exec(command='grep [abc log.txt')]"
+        assert make_valid_python(text) == (text, "")
+
+    def test_partial_string_with_bracket_completes(self):
+        # Streaming prefix ending mid-string after a literal bracket closes
+        # with quote + paren + bracket.
+        result = make_valid_python('[exec(command=\'grep -F "]" lo')
+        assert result is not None
+        completed, added = result
+        assert added == "')]"
+        assert completed == "[exec(command='grep -F \"]\" lo')]"
+
+    def test_real_mismatched_bracket_still_raises(self):
+        with pytest.raises(UnexpectedAstError):
+            make_valid_python("[exec(command=data])")
+
+    def test_multiline_string_argument_recovers(self):
+        # A raw newline inside a string argument is invalid Python; the
+        # escaped-retry path must recover the call instead of returning None,
+        # and the escaped value must evaluate back to the original.
+        text = "[exec(command='line1\nline2')]"
+        result = make_valid_python(text)
+        assert result is not None
+        completed, added = result
+        assert added == ""
+        module = ast.parse(completed)
+        call = module.body[0].value.elts[0]
+        assert call.keywords[0].value.value == "line1\nline2"
+
+    def test_value_ending_in_backslash_recovers(self):
+        # A string value ending in a literal backslash: the closing quote follows
+        # an escaped backslash (an *even* run), so it closes the string. Checking
+        # only the single preceding char misread it as an escaped quote, left the
+        # string open, and make_valid_python returned None — dropping calls whose
+        # last argument ends in a backslash (common in regex like r'\b').
+        text = "[write(path='x', content='pattern \\\\')]"
+        assert make_valid_python(text) == (text, "")
+
+    def test_escaped_quote_odd_backslashes_stays_open(self):
+        # An escaped quote (an *odd* backslash run) must NOT close the string;
+        # only the final unescaped quote does. Value round-trips to it's fine.
+        text = "[say(msg='it\\'s fine')]"
+        assert make_valid_python(text) == (text, "")
+        module = ast.parse(text)
+        assert module.body[0].value.elts[0].keywords[0].value.value == "it's fine"
+
+
+class TestEscapeCtrlCharsInStrings:
+    def test_newline_inside_string_escaped(self):
+        assert escape_ctrl_chars_in_strings("f(cmd='a\nb')") == "f(cmd='a\\nb')"
+
+    def test_ctrl_chars_outside_strings_untouched(self):
+        assert escape_ctrl_chars_in_strings("f(a=1,\nb=2)") == "f(a=1,\nb=2)"
+
+    def test_existing_escapes_pass_through(self):
+        text = "f(cmd='a\\nb')"
+        assert escape_ctrl_chars_in_strings(text) == text
+
+    def test_escaped_quote_does_not_close_string(self):
+        assert escape_ctrl_chars_in_strings("f(cmd='a\\'\nb')") == "f(cmd='a\\'\\nb')"
+
+    def test_value_preserved_through_ast(self):
+        # The escaped text parses and evaluates back to the original value.
+        raw = "cat > f.py << EOF\nimport csv\nEOF\techo done"
+        escaped = escape_ctrl_chars_in_strings(f"f(cmd='{raw}')")
+        call = ast.parse(escaped).body[0].value
+        assert call.keywords[0].value.value == raw
+
+
+def _value_of(expr: str):
+    """Parse a single Python expression and run get_parameter_value on it."""
+    return get_parameter_value(ast.parse(expr, mode="eval").body)
+
+
+def _first_call(text: str) -> ast.Call:
+    """Parse ``[foo(...)]`` and return the single ast.Call node."""
+    return ast.parse(text).body[0].value.elts[0]
+
+
+class TestGetParameterValueNegativeNumbers:
+    # A negative number is parsed by Python as UnaryOp(USub, Constant(n)), not
+    # a plain Constant. Without explicit handling the entire tool call is
+    # dropped. Negative longitudes/deltas/offsets are extremely common tool
+    # arguments (e.g. every Western-hemisphere coordinate).
+    def test_negative_int(self):
+        assert _value_of("-1") == -1
+
+    def test_negative_float(self):
+        assert _value_of("-3.5") == -3.5
+
+    def test_explicit_positive_int(self):
+        assert _value_of("+7") == 7
+
+    def test_negative_longitude(self):
+        assert _value_of("-74.0046539") == -74.0046539
+
+    def test_negative_in_list(self):
+        assert _value_of("[-1, 2, -3]") == [-1, 2, -3]
+
+    def test_negative_in_dict(self):
+        assert _value_of('{"min": -5, "max": 5}') == {"min": -5, "max": 5}
+
+    def test_nested_negative(self):
+        assert _value_of('{"bbox": [-74.0, 40.7, -73.9]}') == {
+            "bbox": [-74.0, 40.7, -73.9]
+        }
+
+    def test_non_numeric_unary_still_raises(self):
+        # ``not x`` / ``~x`` are not literals and must still be rejected.
+        with pytest.raises(UnexpectedAstError):
+            _value_of("~5")
+        with pytest.raises(UnexpectedAstError):
+            _value_of("not True")
+
+
+class TestHandleSingleToolNegativeNumbers:
+    def test_negative_arg_end_to_end(self):
+        call = _first_call("[searchWeather(latitude=40.84, longitude=-74.0046539)]")
+        tool = handle_single_tool(call)
+        assert tool.function.name == "searchWeather"
+        assert json.loads(tool.function.arguments) == {
+            "latitude": 40.84,
+            "longitude": -74.0046539,
+        }
+
+    def test_negative_delta_end_to_end(self):
+        call = _first_call("[updateInventory(quantity_delta=-20)]")
+        tool = handle_single_tool(call)
+        assert json.loads(tool.function.arguments) == {"quantity_delta": -20}
+
+
+class TestGetParameterValueTuple:
+    # JSON has no tuple type, so a tuple argument is decoded as a list rather
+    # than dropping the whole call.
+    def test_tuple_becomes_list(self):
+        assert _value_of("(800, 600)") == [800, 600]
+
+    def test_nested_tuple(self):
+        assert _value_of("[(1, 2), (3, 4)]") == [[1, 2], [3, 4]]
+
+    def test_tuple_with_negative(self):
+        assert _value_of("(-74.0, 40.7)") == [-74.0, 40.7]
+
+    def test_tuple_end_to_end(self):
+        call = _first_call("[resize(size=(800, 600))]")
+        tool = handle_single_tool(call)
+        assert json.loads(tool.function.arguments) == {"size": [800, 600]}
+
+
+class TestRenameReservedKwargs:
+    # A parameter named after a Python keyword (`from=1`) is a SyntaxError
+    # that no escape/retry can recover; rename_reserved_kwargs rewrites it to
+    # a parseable name and restore_reserved_kwarg_names is its exact inverse.
+    def test_reserved_kwarg_renamed(self):
+        text, changed = rename_reserved_kwargs("[memory_get(from=1)]")
+        assert changed
+        assert text == "[memory_get(from_pyreservedkw_=1)]"
+        assert ast.parse(text)
+
+    def test_round_trip_restores_original_name(self):
+        renamed, _ = rename_reserved_kwargs("[memory_get(path='M.md', from=1)]")
+        call = ast.parse(renamed).body[0].value.elts[0]
+        tool = handle_single_tool(call)
+        restored = restore_reserved_kwarg_names(json.loads(tool.function.arguments))
+        assert restored == {"path": "M.md", "from": 1}
+
+    def test_multiple_reserved_kwargs(self):
+        text, changed = rename_reserved_kwargs('[search(in="docs/", from=0)]')
+        assert changed
+        args = json.loads(
+            handle_single_tool(ast.parse(text).body[0].value.elts[0])
+            .function.arguments
+        )
+        assert restore_reserved_kwarg_names(args) == {"in": "docs/", "from": 0}
+
+    def test_keyword_inside_string_untouched(self):
+        text, changed = rename_reserved_kwargs('[f(cmd="import x from y")]')
+        assert not changed
+        assert text == '[f(cmd="import x from y")]'
+
+    def test_keyword_with_from_eq_inside_string_untouched(self):
+        text, changed = rename_reserved_kwargs('[f(cmd="SELECT from=1")]')
+        assert not changed
+
+    def test_keyword_value_untouched(self):
+        # `x=True` has a keyword as *value*, not parameter name.
+        text, changed = rename_reserved_kwargs("[f(x=True, y=None)]")
+        assert not changed
+
+    def test_double_equals_untouched(self):
+        text, changed = rename_reserved_kwargs('[f(expr="a", cond=1)]')
+        assert not changed
+        # `in ==` comparison-like text is not kwarg position anyway, but the
+        # `==` guard also protects string-free edge text.
+        text, changed = rename_reserved_kwargs("[f(x=1)]")
+        assert not changed
+
+    def test_non_keyword_names_untouched(self):
+        text, changed = rename_reserved_kwargs("[f(fromage=1, classic=2)]")
+        assert not changed
+
+    def test_spaces_around_equals(self):
+        text, changed = rename_reserved_kwargs("[f( from = 1 )]")
+        assert changed
+        assert ast.parse(text)
+
+    def test_restore_leaves_normal_names_alone(self):
+        assert restore_reserved_kwarg_names({"path": "x", "from": 1}) == {
+            "path": "x",
+            "from": 1,
+        }
