@@ -38,14 +38,21 @@ class ECConnectorModelRunnerMixin:
     def maybe_get_ec_connector_output(
         scheduler_output: "SchedulerOutput",
         encoder_cache: dict[str, torch.Tensor],
+        enabled: bool = True,
+        save_new_caches: bool = False,
         **kwargs,
     ) -> AbstractContextManager[ECConnectorOutput | None]:
-        return (
-            ECConnectorModelRunnerMixin._get_ec_connector_output(
-                scheduler_output, encoder_cache, **kwargs
-            )
-            if has_ec_transfer()
-            else nullcontext()
+        if (
+            not enabled
+            or scheduler_output.ec_connector_metadata is None
+            or not has_ec_transfer()
+        ):
+            return nullcontext()
+        return ECConnectorModelRunnerMixin._get_ec_connector_output(
+            scheduler_output,
+            encoder_cache,
+            save_new_caches=save_new_caches,
+            **kwargs,
         )
 
     # This context manager must be used within an active forward context.
@@ -55,6 +62,7 @@ class ECConnectorModelRunnerMixin:
     def _get_ec_connector_output(
         scheduler_output: "SchedulerOutput",
         encoder_cache: dict[str, torch.Tensor],
+        save_new_caches: bool = False,
         **kwargs,
     ) -> Generator[ECConnectorOutput, None, None]:
         output = ECConnectorOutput()
@@ -68,8 +76,14 @@ class ECConnectorModelRunnerMixin:
         if ec_connector.is_consumer:
             ec_connector.start_load_caches(encoder_cache, **kwargs)
 
+        cached_hashes = set(encoder_cache) if save_new_caches else None
         try:
             yield output
+            if cached_hashes is not None:
+                for mm_hash in encoder_cache.keys() - cached_hashes:
+                    ec_connector.save_caches(
+                        encoder_cache=encoder_cache, mm_hash=mm_hash
+                    )
         finally:
             output.finished_sending, output.finished_recving = (
                 ec_connector.get_finished(scheduler_output.finished_req_ids)
