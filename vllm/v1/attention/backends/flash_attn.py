@@ -1151,6 +1151,15 @@ class FlashAttentionImpl(AttentionImpl):
         max_seqlen_q = attn_metadata.max_query_len
         block_table = attn_metadata.block_table
 
+        # For a non-quantized cache the K/V descales are 1.0 no-ops. Force them
+        # to None so the context flash call never validates a descale shape
+        # (num_reqs, self.num_kv_heads) against the cache head count, which can
+        # be larger for a DCP KV-head-replicated draft cache (cache_num_kv_heads
+        # > self.num_kv_heads; see qwen3_dflash.py). Quantized caches keep their
+        # descales (there the head counts always match).
+        if not is_quantized_kv_cache(self.kv_cache_dtype):
+            q_descale = k_descale = v_descale = None
+
         query = query.contiguous()
         if attn_metadata.max_dcp_context_kv_len == 0:
             flash_attn_varlen_func(

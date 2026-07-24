@@ -398,6 +398,9 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.max_num_reqs,
                 self.max_num_tokens,
                 self.max_model_len,
+                self.block_tables.cp_size,
+                self.block_tables.cp_rank,
+                self.block_tables.cp_interleave,
                 self.sample_from_anchor,
             )
 
@@ -470,6 +473,47 @@ class DFlashSpeculator(DraftModelSpeculator):
 
 
 @triton.jit
+def _pos_to_slot(
+    pos,
+    block_table_row_ptr,
+    block_table_stride,
+    mask,
+    block_size,
+    cp_rank,
+    CP_SIZE: tl.constexpr,
+    CP_INTERLEAVE: tl.constexpr,
+    PAD_SLOT_ID: tl.constexpr,
+    FORCE_PAD_UNDER_CP: tl.constexpr = False,
+):
+    # Under DCP (CP_SIZE > 1), one block-table entry covers block_size *
+    # CP_SIZE global positions, interleave-sharded across the DCP ranks;
+    # positions owned by other ranks map to PAD_SLOT_ID (KV writes skip them).
+    # Same layout as _compute_slot_mappings_kernel in gpu/block_table.py.
+    #
+    # FORCE_PAD_UNDER_CP maps *every* position to PAD when CP_SIZE > 1. The
+    # query tokens use it: the dense flash DCP path (_forward_with_dcp) attends
+    # the query block against the freshly-computed K/V directly, never the
+    # cache, so the query K/V must not be written (and writing the local
+    # num_kv_heads into a DCP-replicated cache would corrupt the head layout).
+    block_num = pos // (block_size * CP_SIZE)
+    block_off = pos % (block_size * CP_SIZE)
+    block_num = tl.minimum(block_num, block_table_stride - 1)
+    block_id = tl.load(block_table_row_ptr + block_num, mask=mask, other=0).to(tl.int64)
+    if CP_SIZE == 1:
+        return block_id * block_size + block_off
+    if FORCE_PAD_UNDER_CP:
+        # int64 tensor of PAD_SLOT_ID matching pos's block shape.
+        return block_id * 0 + PAD_SLOT_ID
+    is_local = block_off // CP_INTERLEAVE % CP_SIZE == cp_rank
+    local_off = (
+        block_off // (CP_INTERLEAVE * CP_SIZE) * CP_INTERLEAVE
+        + block_off % CP_INTERLEAVE
+    )
+    slot = block_id * block_size + local_off
+    return tl.where(is_local & mask, slot, PAD_SLOT_ID)
+
+
+@triton.jit
 def _prepare_dflash_inputs_kernel(
     # Outputs
     out_input_ids_ptr,
@@ -501,6 +545,9 @@ def _prepare_dflash_inputs_kernel(
     max_num_reqs,
     max_num_tokens,
     max_model_len,
+    cp_rank,
+    CP_SIZE: tl.constexpr,
+    CP_INTERLEAVE: tl.constexpr,
     SAMPLE_FROM_ANCHOR: tl.constexpr,
     PAD_SLOT_ID: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -535,14 +582,17 @@ def _prepare_dflash_inputs_kernel(
     # --- Context positions / slots ---
     ctx_pos_idx = ctx_start + tl.where(is_ctx, j, 0)
     ctx_pos = tl.load(target_positions_ptr + ctx_pos_idx, mask=is_ctx, other=0)
-    ctx_block_num = ctx_pos // block_size
-    ctx_block_num = tl.minimum(ctx_block_num, block_table_stride - 1)
-    ctx_block_id = tl.load(
-        block_table_ptr + req_idx * block_table_stride + ctx_block_num,
-        mask=is_ctx,
-        other=0,
-    ).to(tl.int64)
-    ctx_slot = ctx_block_id * block_size + (ctx_pos % block_size)
+    ctx_slot = _pos_to_slot(
+        ctx_pos,
+        block_table_ptr + req_idx * block_table_stride,
+        block_table_stride,
+        is_ctx,
+        block_size,
+        cp_rank,
+        CP_SIZE,
+        CP_INTERLEAVE,
+        PAD_SLOT_ID,
+    )
     tl.store(out_context_positions_ptr + ctx_start + j, ctx_pos, mask=is_ctx)
     tl.store(out_context_slot_mapping_ptr + ctx_start + j, ctx_slot, mask=is_ctx)
 
@@ -552,14 +602,18 @@ def _prepare_dflash_inputs_kernel(
     is_bonus = is_query & (query_off == 0)
     input_id = tl.where(is_bonus, bonus_token, parallel_drafting_token_id)
 
-    q_block_num = query_pos // block_size
-    q_block_num = tl.minimum(q_block_num, block_table_stride - 1)
-    q_block_id = tl.load(
-        block_table_ptr + req_idx * block_table_stride + q_block_num,
-        mask=is_query,
-        other=0,
-    ).to(tl.int64)
-    q_slot = q_block_id * block_size + (query_pos % block_size)
+    q_slot = _pos_to_slot(
+        query_pos,
+        block_table_ptr + req_idx * block_table_stride,
+        block_table_stride,
+        is_query,
+        block_size,
+        cp_rank,
+        CP_SIZE,
+        CP_INTERLEAVE,
+        PAD_SLOT_ID,
+        FORCE_PAD_UNDER_CP=True,
+    )
 
     tl.store(out_input_ids_ptr + query_idx, input_id, mask=is_query)
     clamped_query_pos = tl.minimum(query_pos, max_model_len - 1)
@@ -644,6 +698,9 @@ def prepare_dflash_inputs(
     max_num_reqs: int,
     max_num_tokens: int,
     max_model_len: int,
+    cp_size: int = 1,
+    cp_rank: int = 0,
+    cp_interleave: int = 1,
     sample_from_anchor: bool = False,
 ) -> None:
     num_reqs = input_batch.num_reqs
@@ -681,6 +738,9 @@ def prepare_dflash_inputs(
         max_num_reqs,
         max_num_tokens,
         max_model_len,
+        cp_rank,
+        CP_SIZE=cp_size,
+        CP_INTERLEAVE=cp_interleave,
         SAMPLE_FROM_ANCHOR=sample_from_anchor,
         PAD_SLOT_ID=PAD_SLOT_ID,
         BLOCK_SIZE=BLOCK_SIZE,
