@@ -996,6 +996,31 @@ def supports_mamba_prefix_caching(
 
 
 @runtime_checkable
+class SupportsReplaySSM(Protocol):
+    """The interface for models whose Mamba2 layers support ReplaySSM cached
+    standard decode.
+
+    This is currently experimental.
+    """
+
+    supports_replayssm: ClassVar[Literal[True]] = True
+
+
+@overload
+def supports_replayssm(model: object) -> TypeIs[SupportsReplaySSM]: ...
+
+
+@overload
+def supports_replayssm(model: type[object]) -> TypeIs[type[SupportsReplaySSM]]: ...
+
+
+def supports_replayssm(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsReplaySSM]] | TypeIs[SupportsReplaySSM]:
+    return getattr(model, "supports_replayssm", False)
+
+
+@runtime_checkable
 class SupportsCrossEncoding(Protocol):
     """The interface required for all models that support cross encoding."""
 
