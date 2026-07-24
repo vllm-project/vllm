@@ -70,6 +70,9 @@ class EPLBConfig:
     num_redundant_experts: int = Field(default=0, ge=0)
     """Number of redundant experts to use for expert parallelism."""
 
+    max_expert_redundancy: int = Field(default=1023, ge=0)
+    """Maximum redundant expert capacity reserved by EPLB state."""
+
     log_balancedness: bool = False
     """
     Log the balancedness each step of expert parallelism.
@@ -110,6 +113,13 @@ class EPLBConfig:
             )
         if self.log_balancedness and self.log_balancedness_interval <= 0:
             raise ValueError("log_balancedness_interval must be greater than 0.")
+        if self.num_redundant_experts > self.max_expert_redundancy:
+            raise ValueError(
+                "num_redundant_experts "
+                f"({self.num_redundant_experts}) must be <= "
+                "max_expert_redundancy "
+                f"({self.max_expert_redundancy})."
+            )
         return self
 
 
