@@ -17,6 +17,7 @@ steps:
     amd:
       dind: false
       device: mi300_1
+      timeout_in_minutes: 45
       depends_on:
       - image-build-amd
 
@@ -39,6 +40,7 @@ steps:
     amd:
       dind: false
       device: mi300_1
+      timeout_in_minutes: 40
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -69,8 +71,9 @@ steps:
   parallelism: 2
   mirror:
     amd:
-      device: mi325_1
-      timeout_in_minutes: 70
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 60
       depends_on:
       - image-build-amd
       commands:
@@ -130,14 +133,15 @@ steps:
     - pytest -v -s models/language/pooling -m 'not core_model'
   mirror:
     amd:
-      device: mi325_1
-      timeout_in_minutes: 120
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 95
       depends_on:
       - image-build-amd
 
 - label: Language Models Test (MTEB)
   key: language-models-test-mteb
-  timeout_in_minutes: 45
+  timeout_in_minutes: 68
   device: h200_18gb
   optional: true
   source_file_dependencies:
