@@ -661,7 +661,7 @@ __device__ void radix_topk(const float* __restrict__ row_input,
                            uint32_t* shared_scalars, uint32_t* shared_ordered,
                            RadixRowState* state, uint32_t cta_in_group,
                            uint32_t ctas_per_group, int& barrier_phase,
-                           uint32_t iter, uint32_t tx) {
+                           uint32_t radix_iter, uint32_t tx) {
   const uint32_t my_chunk_end = (my_chunk_start + chunk_size < seq_len)
                                     ? my_chunk_start + chunk_size
                                     : seq_len;
@@ -718,7 +718,7 @@ __device__ void radix_topk(const float* __restrict__ row_input,
 
   // -- Stage 2: 4 rounds of radix select --
   for (uint32_t round = 0; round < 4; round++) {
-    const uint32_t global_round = iter * 4 + round;
+    const uint32_t global_round = radix_iter * 4 + round;
     const uint32_t shift = 24 - round * 8;
     const uint32_t prefix = shared_scalars[0];
     const uint32_t remaining_k = shared_scalars[1];
@@ -898,6 +898,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2)
   RadixRowState* state = &params.row_states[group_id];
 
   int barrier_phase = 0;
+  uint32_t radix_iter = 0;
   const uint32_t total_iters = (params.num_rows + num_groups - 1) / num_groups;
 
   for (uint32_t iter = 0; iter < total_iters; iter++) {
@@ -930,7 +931,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2)
     radix_topk<TopK, VEC_SIZE>(
         row_input, row_output, seq_len, my_chunk_start, chunk_size,
         local_histogram, suffix_sum, shared_scalars, shared_ordered, state,
-        cta_in_group, ctas_per_group, barrier_phase, iter, tx);
+        cta_in_group, ctas_per_group, barrier_phase, radix_iter, tx);
+    radix_iter++;
   }
 }
 
