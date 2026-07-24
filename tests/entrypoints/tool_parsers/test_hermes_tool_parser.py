@@ -6,13 +6,13 @@ import json
 import openai
 import pytest
 import pytest_asyncio
-from huggingface_hub import snapshot_download
 from typing_extensions import TypedDict
 
 from tests.utils import RemoteOpenAIServer
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.granite4_tool_parser import Granite4ToolParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
+from vllm.transformers_utils.repo_utils import hf_api
 
 LORA_MODEL = "minpeter/LoRA-Llama-3.2-1B-tool-vllm-ci"
 
@@ -91,7 +91,7 @@ def server_config(request):
     config = CONFIGS[request.param]
 
     # download model and tokenizer using transformers
-    snapshot_download(config["model"])
+    hf_api().snapshot_download(config["model"])
     yield CONFIGS[request.param]
 
 

@@ -6,6 +6,13 @@ from dataclasses import dataclass, field
 
 import regex as re
 
+# Hub entry points that must go through the vLLM-tagged repo_utils helpers.
+_HF_NAMES = (
+    r"HfApi|HfFileSystem|hf_hub_download|snapshot_download"
+    r"|list_repo_files|file_exists|try_to_load_from_cache"
+    r"|list_repo_refs|repo_exists"
+)
+
 
 @dataclass
 class ForbiddenImport:
@@ -13,6 +20,7 @@ class ForbiddenImport:
     tip: str
     allowed_pattern: re.Pattern = re.compile(r"^$")  # matches nothing by default
     allowed_files: set[str] = field(default_factory=set)
+    allowed_dirs: set[str] = field(default_factory=set)
 
 
 CHECK_IMPORTS = {
@@ -83,6 +91,23 @@ CHECK_IMPORTS = {
         ),
         allowed_files={"vllm/triton_utils/importing.py"},
     ),
+    "huggingface_hub repo API": ForbiddenImport(
+        # Catch `from huggingface_hub import <fn>`, including parenthesized,
+        # multi-line imports.
+        pattern=(
+            r"^\s*from\s+huggingface_hub\s+import\s*\([^)]*\b(?:" + _HF_NAMES + r")\b"
+            r"|"
+            r"^\s*from\s+huggingface_hub\s+import\b[^\n]*\b(?:" + _HF_NAMES + r")\b"
+        ),
+        tip=(
+            "Use the shared, vLLM-tagged helpers from "
+            "vllm.transformers_utils.repo_utils (e.g. hf_api(), hf_fs(), "
+            "list_repo_files, file_exists) instead of calling "
+            "huggingface_hub directly."
+        ),
+        allowed_files={"vllm/transformers_utils/repo_utils.py"},
+        allowed_dirs={"examples/"},
+    ),
 }
 
 
@@ -95,10 +120,17 @@ def check_file(path: str) -> int:
         # Skip files that are allowed for this import
         if path in forbidden_import.allowed_files:
             continue
+        # Skip directories that are allowed for this import
+        if any(path.startswith(prefix) for prefix in forbidden_import.allowed_dirs):
+            continue
         # Search for forbidden imports
         for match in re.finditer(forbidden_import.pattern, content, re.MULTILINE):
             # Check if it's allowed
             if forbidden_import.allowed_pattern.match(match.group()):
+                continue
+            # Skip matches inside a comment
+            line_start = content.rfind("\n", 0, match.start()) + 1
+            if "#" in content[line_start : match.start()]:
                 continue
             # Calculate line number from match position
             line_num = content[: match.start() + 1].count("\n") + 1
@@ -119,7 +151,10 @@ def main():
 
 
 def test_regex():
-    test_cases = [
+    def matches(rule: str, content: str) -> bool:
+        return bool(re.search(CHECK_IMPORTS[rule].pattern, content, re.MULTILINE))
+
+    pickle_cases = [
         # Should match
         ("import pickle", True),
         ("import cloudpickle", True),
@@ -139,11 +174,47 @@ def test_regex():
         ("print('import pickle')", False),
         ("import pickleas as asdf", False),
     ]
-    for i, (line, should_match) in enumerate(test_cases):
-        result = bool(CHECK_IMPORTS["pickle/cloudpickle"].pattern.match(line))
+    for i, (content, should_match) in enumerate(pickle_cases):
+        result = matches("pickle/cloudpickle", content)
         assert result == should_match, (
-            f"Test case {i} failed: '{line}' (expected {should_match}, got {result})"
+            f"pickle case {i} failed: {content!r} "
+            f"(expected {should_match}, got {result})"
         )
+
+    hf_cases = [
+        # Should match
+        ("from huggingface_hub import snapshot_download", True),
+        ("from huggingface_hub import hf_hub_download", True),
+        ("from huggingface_hub import HfApi", True),
+        ("from huggingface_hub import HfFileSystem", True),
+        ("from huggingface_hub import list_repo_files", True),
+        ("from huggingface_hub import try_to_load_from_cache", True),
+        ("    from huggingface_hub import snapshot_download", True),
+        ("from huggingface_hub import PyTorchModelHubMixin, hf_hub_download", True),
+        ("from huggingface_hub import (snapshot_download)", True),
+        # Parenthesized multi-line import must not bypass the hook
+        ("from huggingface_hub import (\n    snapshot_download,\n)", True),
+        (
+            "from huggingface_hub import (\n    PyTorchModelHubMixin,\n    HfApi,\n)",
+            True,
+        ),
+        # Should not match
+        ("import huggingface_hub", False),
+        ("import huggingface_hub as hf", False),
+        ("from huggingface_hub import PyTorchModelHubMixin", False),
+        ("from huggingface_hub.constants import HF_HUB_CACHE", False),
+        ("from huggingface_hub.utils import EntryNotFoundError", False),
+        ("from vllm.transformers_utils.repo_utils import hf_api", False),
+        ("from huggingface_hub import (\n    PyTorchModelHubMixin,\n)", False),
+        ("# from huggingface_hub import snapshot_download", False),
+    ]
+    for i, (content, should_match) in enumerate(hf_cases):
+        result = matches("huggingface_hub repo API", content)
+        assert result == should_match, (
+            f"huggingface_hub case {i} failed: {content!r} "
+            f"(expected {should_match}, got {result})"
+        )
+
     print("All regex tests passed.")
 
 

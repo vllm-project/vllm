@@ -31,7 +31,7 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from huggingface_hub import snapshot_download
+from vllm.transformers_utils.repo_utils import hf_api
 from PIL import Image
 from transformers import (
     AutoConfig,
@@ -1496,7 +1496,7 @@ _dummy_gemma2_embedding_path = os.path.join(temp_dir, "dummy_gemma2_embedding")
 def dummy_opt_path():
     json_path = os.path.join(_dummy_opt_path, "config.json")
     if not os.path.exists(_dummy_opt_path):
-        snapshot_download(
+        hf_api().snapshot_download(
             repo_id="facebook/opt-125m",
             local_dir=_dummy_opt_path,
             ignore_patterns=["*.bin", "*.bin.index.json", "*.pt", "*.h5", "*.msgpack"],
@@ -1514,7 +1514,7 @@ def dummy_opt_path():
 def dummy_llava_path():
     json_path = os.path.join(_dummy_llava_path, "config.json")
     if not os.path.exists(_dummy_llava_path):
-        snapshot_download(
+        hf_api().snapshot_download(
             repo_id="llava-hf/llava-1.5-7b-hf",
             local_dir=_dummy_llava_path,
             ignore_patterns=[
@@ -1539,7 +1539,7 @@ def dummy_llava_path():
 def dummy_gemma2_embedding_path():
     json_path = os.path.join(_dummy_gemma2_embedding_path, "config.json")
     if not os.path.exists(_dummy_gemma2_embedding_path):
-        snapshot_download(
+        hf_api().snapshot_download(
             repo_id="BAAI/bge-multilingual-gemma2",
             local_dir=_dummy_gemma2_embedding_path,
             ignore_patterns=[

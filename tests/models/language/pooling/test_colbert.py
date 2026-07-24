@@ -126,10 +126,11 @@ def _load_hf_model(model_name: str, hf_spec: dict, device: torch.device):
 
 def _load_projection_weight(model_name: str, hf_spec: dict, device: torch.device):
     """Download and return the ColBERT linear projection weight."""
-    from huggingface_hub import hf_hub_download
     from safetensors.torch import load_file
 
-    path = hf_hub_download(model_name, filename=hf_spec["weights_file"])
+    from vllm.transformers_utils.repo_utils import hf_api
+
+    path = hf_api().hf_hub_download(model_name, filename=hf_spec["weights_file"])
     weights = load_file(path)
     return weights[hf_spec["weights_key"]].to(device)
 
