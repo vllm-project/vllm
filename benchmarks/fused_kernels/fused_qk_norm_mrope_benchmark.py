@@ -133,7 +133,9 @@ def make_fused(
     return fused
 
 
-def bench_fn(fn: Callable, label: str, sub_label: str, description: str) -> TMeasurement:
+def bench_fn(
+    fn: Callable, label: str, sub_label: str, description: str
+) -> TMeasurement:
     return TBenchmark.Timer(
         stmt="fn()",
         globals={"fn": fn},
@@ -177,9 +179,7 @@ def bench(p: bench_params_t, label: str, sub_label: str) -> Iterable[TMeasuremen
     ]
 
 
-def print_speedups(
-    params: list[bench_params_t], timers: list[TMeasurement]
-) -> None:
+def print_speedups(params: list[bench_params_t], timers: list[TMeasurement]) -> None:
     """Per-config unfused/fused speedup plus summary. timers are laid out as
     [unfused_0, fused_0, unfused_1, fused_1, ...] matching ``params`` order."""
     print("\n" + "=" * 80)

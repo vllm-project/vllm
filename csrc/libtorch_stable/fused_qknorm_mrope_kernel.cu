@@ -14,7 +14,8 @@
  * limitations under the License.
  */
 
-// Fused per-head QK RMSNorm + multimodal RoPE (mRoPE) for Qwen3-VL-class models.
+// Fused per-head QK RMSNorm + multimodal RoPE (mRoPE) for Qwen3-VL-class
+// models.
 //
 // This is the mRoPE analogue of fused_qknorm_rope_kernel.cu. The RMSNorm and
 // RoPE-rotation math is identical; the only difference is where cos/sin come
@@ -285,8 +286,8 @@ __global__ void fusedQKNormMRopeKernel(
           elements[idx1] = val0 * sin_val + val1 * cos_val;
         }
       } else {
-        // neox rotation style: pair element i with the element rotary_dim/2 away
-        // in the head, exchanged across the warp.
+        // neox rotation style: pair element i with the element rotary_dim/2
+        // away in the head, exchanged across the warp.
         __syncwarp();
         int pairOffset = (rotary_dim / 2) / numElemsPerThread;
 #pragma unroll
@@ -306,8 +307,8 @@ __global__ void fusedQKNormMRopeKernel(
           T_cache const* cache_ptr = cos_sin_cache + pos_id * rotary_dim;
           float cos_val =
               CacheConverter::convert(VLLM_LDG(cache_ptr + half_dim));
-          float sin_val =
-              CacheConverter::convert(VLLM_LDG(cache_ptr + embed_dim + half_dim));
+          float sin_val = CacheConverter::convert(
+              VLLM_LDG(cache_ptr + embed_dim + half_dim));
 
           elements[i] = elements[i] * cos_val + elements2[i] * sin_val;
         }
@@ -349,7 +350,8 @@ void launchFusedQKNormMRope(void* qkv, int const num_tokens,
                             void const* q_weight, void const* k_weight,
                             void const* cos_sin_cache, bool const interleave,
                             int64_t const* position_ids,
-                            int const mrope_section_t, int const mrope_section_h,
+                            int const mrope_section_t,
+                            int const mrope_section_h,
                             bool const mrope_interleaved, cudaStream_t stream) {
   constexpr int blockSize = 256;
   int const warpsPerBlock = blockSize / 32;
@@ -409,10 +411,10 @@ void fused_qk_norm_mrope(
                                            // rotary_dim]
     bool is_neox,  // Whether RoPE is applied in Neox style
     torch::stable::Tensor&
-        position_ids,          // mRoPE position IDs [3, num_tokens] (t/h/w)
-    int64_t mrope_section_t,   // mRoPE time-section size (in half-dims)
-    int64_t mrope_section_h,   // mRoPE height-section size (in half-dims)
-    bool mrope_interleaved     // Interleaved (Qwen3-VL) vs contiguous layout
+        position_ids,         // mRoPE position IDs [3, num_tokens] (t/h/w)
+    int64_t mrope_section_t,  // mRoPE time-section size (in half-dims)
+    int64_t mrope_section_h,  // mRoPE height-section size (in half-dims)
+    bool mrope_interleaved    // Interleaved (Qwen3-VL) vs contiguous layout
 ) {
   // Input validation
   CHECK_INPUT(qkv);
@@ -457,10 +459,9 @@ void fused_qk_norm_mrope(
       "QKV tensor size must match total number of heads and head dimension");
 
   int64_t const embed_dim = cos_sin_cache.size(1) / 2;
-  STD_TORCH_CHECK(
-      mrope_section_t >= 0 && mrope_section_h >= 0 &&
-          mrope_section_t + mrope_section_h <= embed_dim,
-      "mrope_section_t + mrope_section_h must be <= rotary_dim/2");
+  STD_TORCH_CHECK(mrope_section_t >= 0 && mrope_section_h >= 0 &&
+                      mrope_section_t + mrope_section_h <= embed_dim,
+                  "mrope_section_t + mrope_section_h must be <= rotary_dim/2");
 
   const torch::stable::accelerator::DeviceGuard device_guard(
       qkv.get_device_index());
@@ -486,7 +487,8 @@ void fused_qk_norm_mrope(
                   static_cast<int>(cos_sin_cache.size(1)),
                   static_cast<float>(eps), q_weight.data_ptr(),
                   k_weight.data_ptr(), cos_sin_cache.data_ptr(), !is_neox,
-                  reinterpret_cast<int64_t const*>(position_ids_contig.data_ptr()),
+                  reinterpret_cast<int64_t const*>(
+                      position_ids_contig.data_ptr()),
                   static_cast<int>(mrope_section_t),
                   static_cast<int>(mrope_section_h), mrope_interleaved, stream);
             });
