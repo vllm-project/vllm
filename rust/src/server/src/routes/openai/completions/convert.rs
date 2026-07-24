@@ -130,6 +130,9 @@ pub(super) fn prepare_completion_request(
             bad_words: None,
             logprob_token_ids: None,
             structured_outputs,
+            use_beam_search: request.use_beam_search,
+            n: request.n,
+            length_penalty: request.length_penalty,
             skip_reading_prefix_cache: None,
             vllm_xargs: merge_kv_transfer_params(
                 merge_ec_transfer_params(request.vllm_xargs, request.ec_transfer_params.as_ref()),

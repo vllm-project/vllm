@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
@@ -30,7 +31,7 @@ pub struct GenerateRequest {
     /// Sampling parameters forwarded to engine-core.
     pub sampling_params: EngineCoreSamplingParams,
     /// Optional multimodal features already prepared by `vllm-chat`.
-    pub mm_features: Option<MmFeatures>,
+    pub mm_features: Option<Arc<MmFeatures>>,
     /// Unix timestamp, in seconds, when this request arrived at the frontend.
     ///
     /// Stamped at the frontend entry, before render and tokenization, to match
@@ -129,6 +130,7 @@ impl PreparedGenerateRequest {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::Arc;
 
     use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
     use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
@@ -220,10 +222,10 @@ mod tests {
     #[test]
     fn prepare_forwards_multimodal_features() {
         let mut request = sample_request();
-        request.mm_features = Some(Vec::new());
+        request.mm_features = Some(Arc::new(Vec::new()));
 
         let prepared = request.prepare(false).unwrap();
 
-        assert_eq!(prepared.engine_request.mm_features, Some(Vec::new()));
+        assert_eq!(prepared.engine_request.mm_features, Some(Arc::new(Vec::new())));
     }
 }

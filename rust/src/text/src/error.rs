@@ -38,6 +38,8 @@ pub enum Error {
     Llm(#[from] LlmError),
     #[error(transparent)]
     EngineCore(#[from] EngineCoreError),
+    #[error("beam search engine returned an error")]
+    BeamSearchEngineError,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

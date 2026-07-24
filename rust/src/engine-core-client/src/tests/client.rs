@@ -6,6 +6,7 @@ use std::convert::TryFrom;
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
 use std::sync::Once;
 use std::time::Duration;
 
@@ -170,7 +171,7 @@ fn sample_multimodal_request() -> EngineCoreRequest {
     EngineCoreRequest {
         request_id: "req-mm".to_string(),
         prompt_token_ids: Some(vec![101, 102, 103, 104]),
-        mm_features: Some(vec![MmFeatureSpec {
+        mm_features: Some(Arc::new(vec![MmFeatureSpec {
             data: Some(BTreeMap::from([(
                 "pixel_values".to_string(),
                 MmFieldElem {
@@ -197,7 +198,7 @@ fn sample_multimodal_request() -> EngineCoreRequest {
                 is_embed: None,
             },
             mm_hash: Some("processor-hash".to_string()),
-        }]),
+        }])),
         sampling_params: None,
         pooling_params: None,
         arrival_time: 43.5,

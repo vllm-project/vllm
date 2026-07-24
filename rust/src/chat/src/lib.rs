@@ -30,6 +30,7 @@ pub use parser::reasoning::{
     ReasoningDelta, ReasoningError, ReasoningParser, ReasoningParserFactory,
 };
 pub use parser::tool::{ToolParser, ToolParserError, ToolParserFactory};
+pub use parser::unified::UnifiedParserFactory;
 pub use renderer::hf::ChatTemplateContentFormatOption;
 pub use renderer::{
     ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer,
@@ -41,6 +42,9 @@ pub use request::{
 };
 pub use stream::{ChatEventStream, ChatEventStreamTrait, CollectedAssistantMessage};
 pub use vllm_llm::FinishReason;
+pub use vllm_parser::unified::{
+    CombinedParser, UnifiedParser, UnifiedParserEvent, UnifiedParserOutput,
+};
 
 mod backend;
 mod error;
@@ -249,6 +253,16 @@ impl ChatLlm {
         self.text.model_id()
     }
 
+    /// Return the tool-call parser selection.
+    pub fn tool_call_parser(&self) -> &ParserSelection {
+        &self.tool_call_parser
+    }
+
+    /// Return the reasoning parser selection.
+    pub fn reasoning_parser(&self) -> &ParserSelection {
+        &self.reasoning_parser
+    }
+
     /// Expose the underlying engine-core client for low-level utility/admin
     /// calls.
     pub fn engine_core_client(&self) -> &EngineCoreClient {
@@ -295,6 +309,48 @@ impl ChatLlm {
             Prompt::TokenIds(ids) => ids,
         };
         Ok(token_ids)
+    }
+
+    /// Render, tokenize, and run beam search for one chat request.
+    ///
+    /// Reuses the same render → finalize → prompt extraction pipeline as
+    /// [`Self::chat`], but calls [`TextLlm::beam_search`] instead of
+    /// [`TextLlm::generate`].
+    pub async fn beam_search_chat(
+        &self,
+        request: ChatRequest,
+    ) -> Result<vllm_text::BeamSearchOutput> {
+        request.validate()?;
+
+        let arrival_time = vllm_llm::current_unix_timestamp_secs();
+
+        let rendered = self.backend.chat_renderer().render(&request)?;
+
+        let (prompt, mm_features) = multimodal::finalize_rendered_prompt(
+            &request,
+            rendered,
+            self.backend.multimodal_model_info(),
+            self.model_dtype,
+        )
+        .await?;
+
+        let text_request = TextRequest {
+            request_id: request.request_id.clone(),
+            prompt,
+            mm_features,
+            sampling_params: request.sampling_params,
+            decode_options: request.decode_options,
+            intermediate: false, // beam search is never streaming
+            priority: request.priority,
+            cache_salt: request.cache_salt,
+            add_special_tokens: request.add_special_tokens,
+            data_parallel_rank: request.data_parallel_rank,
+            reasoning_parser_kwargs: None,
+            lora_request: request.lora_request,
+            arrival_time: Some(arrival_time),
+        };
+
+        self.text.beam_search(text_request).await.map_err(Error::from)
     }
 
     /// Abort in-flight requests by their external (user-supplied) request ids.
