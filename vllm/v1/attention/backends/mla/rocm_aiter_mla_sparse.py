@@ -38,6 +38,24 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def sparse_mla_requires_persistent(
+    num_heads_per_head_k: int, kv_cache_dtype: str
+) -> bool:
+    """Whether the AITER sparse-MLA decode for this head grouping / KV dtype has
+    ONLY a persistent kernel (no non-persistent split-KV fallback).
+
+    AITER has no non-persistent kernel for ``gqa_ratio == 64`` fp8/fp8
+    (``asm_mla.cu:949``: "fp8/fp8 with gqa_ratio=64 only supports persistent
+    mode"). For such groupings the persistent work-stealing path is mandatory,
+    so any gate that would fall back to the non-persistent path (e.g. for
+    chunked-prefill continuations) must be skipped -- otherwise the prefill
+    worker crashes deterministically in the kernel.
+
+    See https://github.com/vllm-project/vllm/issues/49649.
+    """
+    return num_heads_per_head_k == 64 and kv_cache_dtype.startswith("fp8")
+
+
 @triton.jit
 def _convert_req_index_to_global_index_kernel(
     req_id_ptr,  # int32 [num_tokens]
@@ -720,6 +738,19 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
                 reduce_indptr=attn_metadata.reduce_indptr,
                 reduce_final_map=attn_metadata.reduce_final_map,
                 reduce_partial_map=attn_metadata.reduce_partial_map,
+            )
+        elif sparse_mla_requires_persistent(self.num_heads, self.kv_cache_dtype):
+            # gqa_ratio=64 fp8 has no non-persistent AITER kernel
+            # (asm_mla.cu:949). Persistent metadata is mandatory here; failing
+            # fast with a clear message beats the opaque kernel crash that a
+            # persistent-kernel gate (e.g. chunked-prefill fallback) would cause.
+            # See https://github.com/vllm-project/vllm/issues/49649
+            raise ValueError(
+                "AITER sparse-MLA for gqa_ratio=64 fp8 has no non-persistent "
+                "kernel (asm_mla.cu:949); persistent metadata (work_meta_data) "
+                "is required but was None. A persistent-kernel gate must be "
+                "skipped for this head grouping. See "
+                "https://github.com/vllm-project/vllm/issues/49649"
             )
 
         rocm_aiter_ops.mla_decode_fwd(
