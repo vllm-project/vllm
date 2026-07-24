@@ -586,10 +586,10 @@ class Platform:
         pass
 
     @classmethod
-    def _find_non_ssm_backend(
+    def _find_non_ssm_backends(
         cls, vllm_config: "VllmConfig"
-    ) -> "type[AttentionBackend] | None":
-        """Find the first non-SSM attention backend from model layers."""
+    ) -> "list[type[AttentionBackend]]":
+        """Find all distinct non-SSM attention backends from model layers."""
         from vllm.config.vllm import get_layers_from_vllm_config
         from vllm.model_executor.layers.attention_layer_base import (
             AttentionLayerBase,
@@ -599,11 +599,12 @@ class Platform:
             vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
+        backends: list[type[AttentionBackend]] = []
         for layer in attn_layers.values():
             b = layer.get_attn_backend()
-            if not b.is_ssm():
-                return b
-        return None
+            if not b.is_ssm() and b not in backends:
+                backends.append(b)
+        return backends
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
@@ -621,21 +622,31 @@ class Platform:
         if not model_config:
             return
 
-        backend_cls = cls._find_non_ssm_backend(vllm_config)
-        if backend_cls is None:
+        backend_classes = cls._find_non_ssm_backends(vllm_config)
+        if not backend_classes:
             return
+        backend_cls = backend_classes[0]
 
-        # Phase 1: Pick block size from backend (skip if user set --block-size)
+        # Phase 1: Pick block size from backends (skip if user set --block-size).
+        # Honor the strictest backend: e.g. the DeepSeek V3.2 indexer only
+        # supports block size 64 while the main sparse attention backend may
+        # accept the default.
         if not cache_config.user_specified_block_size:
+            preferred = CacheConfig.DEFAULT_BLOCK_SIZE
+            preferred_backend_cls = backend_cls
             with set_current_vllm_config(vllm_config):
-                preferred = backend_cls.get_preferred_block_size(
-                    CacheConfig.DEFAULT_BLOCK_SIZE
-                )
+                for backend in backend_classes:
+                    backend_preferred = backend.get_preferred_block_size(
+                        CacheConfig.DEFAULT_BLOCK_SIZE
+                    )
+                    if backend_preferred > preferred:
+                        preferred = backend_preferred
+                        preferred_backend_cls = backend
             if preferred != CacheConfig.DEFAULT_BLOCK_SIZE:
                 logger.info(
                     "Setting kv cache block size to %d for %s backend.",
                     preferred,
-                    backend_cls.get_name(),
+                    preferred_backend_cls.get_name(),
                 )
             cache_config.block_size = preferred
 

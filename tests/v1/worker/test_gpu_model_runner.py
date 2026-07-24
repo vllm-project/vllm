@@ -26,14 +26,16 @@ from vllm.distributed.parallel_state import (
 from vllm.lora.layers import LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.platforms import current_platform
+from vllm.platforms.interface import Platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
-from vllm.v1.attention.backend import MultipleOf
+from vllm.v1.attention.backend import AttentionBackend, MultipleOf
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
@@ -255,6 +257,53 @@ def test_select_common_block_size_uses_largest_shared_int():
 
     selected_size = select_common_block_size(256, [backend_a, backend_b])
     assert selected_size == 64
+
+
+def test_update_block_size_for_backend_honors_strictest_backend():
+    # A backend with a fixed block size requirement (e.g. the DeepSeek V3.2
+    # indexer, which only supports 64) must win over more permissive sibling
+    # backends when picking the cache block size.
+    class _FlexibleBackend(AttentionBackend):
+        @staticmethod
+        def get_name():
+            return "FLEXIBLE"
+
+        @staticmethod
+        def get_supported_kernel_block_sizes():
+            return [MultipleOf(16)]
+
+    class _StrictBackend(AttentionBackend):
+        @staticmethod
+        def get_name():
+            return "STRICT"
+
+        @staticmethod
+        def get_supported_kernel_block_sizes():
+            return [64]
+
+    class _FakeLayer(AttentionLayerBase):
+        def __init__(self, backend):
+            self._backend = backend
+
+        def get_attn_backend(self):
+            return self._backend
+
+        def get_kv_cache_spec(self, vllm_config):
+            return None
+
+    vllm_config = SimpleNamespace(
+        cache_config=CacheConfig(),
+        model_config=SimpleNamespace(is_hybrid=False),
+        compilation_config=SimpleNamespace(
+            static_forward_context={
+                "layers.0.attn": _FakeLayer(_FlexibleBackend),
+                "layers.0.indexer": _FakeLayer(_StrictBackend),
+            }
+        ),
+    )
+
+    Platform.update_block_size_for_backend(vllm_config)
+    assert vllm_config.cache_config.block_size == 64
 
 
 def test_reasoning_config_without_custom_logitsprocs_does_not_need_output_token_ids(
