@@ -57,6 +57,11 @@ buffer_type = ctypes.c_void_p
 ncclDataType_t = ctypes.c_int
 
 
+class ncclShrinkFlagEnum:
+    NCCL_SHRINK_DEFAULT = 0
+    NCCL_SHRINK_ABORT = 1
+
+
 class ncclDataTypeEnum:
     ncclInt8 = 0
     ncclChar = 0
@@ -160,6 +165,43 @@ class NCCLLibrary:
             "ncclCommInitRank",
             ncclResult_t,
             [ctypes.POINTER(ncclComm_t), ctypes.c_int, ncclUniqueId, ctypes.c_int],
+        ),
+        # ncclResult_t ncclCommShrink(
+        #   ncclComm_t comm, int* excludeRanks, int excludeCount,
+        #   ncclComm_t* newcomm, ncclConfig_t* config, int shrinkFlags);
+        Function(
+            "ncclCommShrink",
+            ncclResult_t,
+            [
+                ncclComm_t,
+                ctypes.POINTER(ctypes.c_int),
+                ctypes.c_int,
+                ctypes.POINTER(ncclComm_t),
+                ctypes.c_void_p,
+                ctypes.c_int,
+            ],
+        ),
+        # ncclResult_t ncclCommGetUniqueId(
+        #   ncclComm_t comm, ncclUniqueId* uniqueId);
+        Function(
+            "ncclCommGetUniqueId",
+            ncclResult_t,
+            [ncclComm_t, ctypes.POINTER(ncclUniqueId)],
+        ),
+        # ncclResult_t ncclCommGrow(
+        #   ncclComm_t comm, int nRanks, const ncclUniqueId* uniqueId,
+        #   int rank, ncclComm_t* newcomm, ncclConfig_t* config);
+        Function(
+            "ncclCommGrow",
+            ncclResult_t,
+            [
+                ncclComm_t,
+                ctypes.c_int,
+                ctypes.POINTER(ncclUniqueId),
+                ctypes.c_int,
+                ctypes.POINTER(ncclComm_t),
+                ctypes.c_void_p,
+            ],
         ),
         # ncclResult_t  ncclAllReduce(
         #   const void* sendbuff, void* recvbuff, size_t count,
@@ -359,10 +401,20 @@ class NCCLLibrary:
                     _funcs[func.name] = f
                 except AttributeError:
                     if func.name in [
+                        "ncclCommShrink",
+                        "ncclCommGetUniqueId",
+                        "ncclCommGrow",
                         "ncclCommWindowRegister",
                         "ncclCommWindowDeregister",
                     ]:
-                        if envs.VLLM_USE_NCCL_SYMM_MEM:
+                        if (
+                            func.name
+                            in [
+                                "ncclCommWindowRegister",
+                                "ncclCommWindowDeregister",
+                            ]
+                            and envs.VLLM_USE_NCCL_SYMM_MEM
+                        ):
                             logger.warning_once(
                                 "The symbol %s is not found in the NCCL "
                                 "library %s. To enable VLLM_USE_NCCL_SYMM_MEM "
@@ -374,6 +426,11 @@ class NCCLLibrary:
                         if current_platform.is_rocm():
                             # Having an exception here on ROCm platform is
                             # not allowed during graph capturing
+                            continue
+                        if func.name not in [
+                            "ncclCommWindowRegister",
+                            "ncclCommWindowDeregister",
+                        ]:
                             continue
                     raise
             NCCLLibrary.path_to_dict_mapping[so_file] = _funcs
@@ -425,6 +482,70 @@ class NCCLLibrary:
             )
         )
         return comm
+
+    def _require_func(self, name: str):
+        func = self._funcs.get(name)
+        if func is None:
+            raise RuntimeError(
+                f"The symbol {name} is not found in the NCCL library. "
+                "Please use an NCCL version that supports communicator "
+                "shrink/grow APIs."
+            )
+        return func
+
+    def has_comm_shrink_grow(self) -> bool:
+        return all(
+            name in self._funcs
+            for name in (
+                "ncclCommShrink",
+                "ncclCommGetUniqueId",
+                "ncclCommGrow",
+            )
+        )
+
+    def ncclCommShrink(
+        self,
+        comm: ncclComm_t,
+        exclude_ranks: list[int],
+        shrink_flags: int = ncclShrinkFlagEnum.NCCL_SHRINK_DEFAULT,
+    ) -> ncclComm_t:
+        newcomm = ncclComm_t()
+        exclude_count = len(exclude_ranks)
+        exclude_array = (ctypes.c_int * exclude_count)(*exclude_ranks)
+        func = self._require_func("ncclCommShrink")
+        self.NCCL_CHECK(
+            func(
+                comm,
+                exclude_array,
+                exclude_count,
+                ctypes.byref(newcomm),
+                None,
+                shrink_flags,
+            )
+        )
+        return newcomm
+
+    def ncclCommGetUniqueId(self, comm: ncclComm_t) -> ncclUniqueId:
+        unique_id = ncclUniqueId()
+        func = self._require_func("ncclCommGetUniqueId")
+        self.NCCL_CHECK(func(comm, ctypes.byref(unique_id)))
+        return unique_id
+
+    def ncclCommGrow(
+        self,
+        comm: ncclComm_t | None,
+        world_size: int,
+        unique_id: ncclUniqueId | None,
+        rank: int,
+    ) -> ncclComm_t:
+        newcomm = ncclComm_t()
+        comm_arg = comm if comm is not None else ncclComm_t()
+        unique_id_arg = ctypes.byref(unique_id) if unique_id is not None else None
+        func = self._require_func("ncclCommGrow")
+        self.NCCL_CHECK(
+            func(comm_arg, world_size, unique_id_arg, rank, ctypes.byref(newcomm), None)
+        )
+        return newcomm
 
     def ncclAllReduce(
         self,
@@ -582,6 +703,7 @@ __all__ = [
     "NCCLLibrary",
     "ncclDataTypeEnum",
     "ncclRedOpTypeEnum",
+    "ncclShrinkFlagEnum",
     "ncclUniqueId",
     "ncclComm_t",
     "cudaStream_t",

@@ -17,6 +17,7 @@ from vllm.distributed.device_communicators.pynccl_wrapper import (
     ncclComm_t,
     ncclDataTypeEnum,
     ncclRedOpTypeEnum,
+    ncclShrinkFlagEnum,
     ncclUniqueId,
 )
 from vllm.distributed.utils import StatelessProcessGroup
@@ -162,6 +163,140 @@ class PyNcclCommunicator:
             abort_thread.join(timeout=5.0)
             self.available = False
             self.disabled = True
+
+    def supports_comm_shrink_grow(self) -> bool:
+        return (
+            not self.disabled
+            and self.available
+            and self.nccl.has_comm_shrink_grow()
+        )
+
+    def _replace_comm(
+        self,
+        comm: ncclComm_t,
+        rank: int | None = None,
+        world_size: int | None = None,
+    ) -> None:
+        self.comm = comm
+        if rank is not None:
+            self.rank = rank
+        if world_size is not None:
+            self.world_size = world_size
+        self.available = True
+        self.disabled = False
+
+    def get_grow_unique_id(self) -> ncclUniqueId:
+        """Return an NCCL grow id generated from this communicator.
+
+        The caller must distribute this id to joining ranks with an out-of-band
+        mechanism such as the existing CPU group or RPC layer.
+        """
+        if self.disabled:
+            raise RuntimeError("Cannot get grow unique id from disabled communicator")
+        return self.nccl.ncclCommGetUniqueId(self.comm)
+
+    def shrink(
+        self,
+        exclude_ranks: list[int],
+        shrink_flags: int = ncclShrinkFlagEnum.NCCL_SHRINK_DEFAULT,
+        destroy_old: bool = False,
+    ) -> bool:
+        """Shrink this communicator in place.
+
+        Returns True if this rank is retained in the new communicator. Ranks in
+        ``exclude_ranks`` must not call ncclCommShrink per NCCL's contract; this
+        method therefore only marks them inactive and leaves parent communicator
+        cleanup to the caller's higher-level shutdown path.
+        """
+        if self.disabled:
+            raise RuntimeError("Cannot shrink disabled communicator")
+        excluded = sorted(set(int(rank) for rank in exclude_ranks))
+        invalid = [
+            rank for rank in excluded if rank < 0 or rank >= self.world_size
+        ]
+        if invalid:
+            raise ValueError(
+                f"exclude_ranks must be in [0, {self.world_size}), got {invalid}"
+            )
+        if not excluded:
+            return True
+        if len(excluded) == self.world_size:
+            raise ValueError("Cannot shrink communicator by excluding every rank")
+
+        torch.accelerator.synchronize()
+        if self.rank in excluded:
+            old_comm = self.comm
+            self.available = False
+            self.disabled = True
+            if destroy_old:
+                self.nccl.ncclCommDestroy(old_comm)
+            return False
+
+        old_comm = self.comm
+        new_comm = self.nccl.ncclCommShrink(old_comm, excluded, shrink_flags)
+        new_rank = self.rank - sum(rank < self.rank for rank in excluded)
+        new_world_size = self.world_size - len(excluded)
+        self._replace_comm(new_comm, rank=new_rank, world_size=new_world_size)
+        if destroy_old:
+            self.nccl.ncclCommDestroy(old_comm)
+        return True
+
+    def shrink_abort(
+        self,
+        exclude_ranks: list[int],
+        destroy_old: bool = False,
+    ) -> bool:
+        return self.shrink(
+            exclude_ranks,
+            shrink_flags=ncclShrinkFlagEnum.NCCL_SHRINK_ABORT,
+            destroy_old=destroy_old,
+        )
+
+    def grow(
+        self,
+        new_world_size: int,
+        grow_unique_id: ncclUniqueId | None = None,
+        new_rank: int = -1,
+        destroy_old: bool = True,
+    ) -> None:
+        """Grow this communicator in place.
+
+        Existing ranks call this with ``new_rank=-1`` and ``grow_unique_id=None``.
+        Joining ranks call it on a disabled placeholder with ``new_rank`` set to
+        their assigned rank and ``grow_unique_id`` received out of band.
+        """
+        if new_world_size <= 0:
+            raise ValueError(f"new_world_size must be positive, got {new_world_size}")
+
+        torch.accelerator.synchronize()
+        if new_rank == -1:
+            if self.disabled:
+                raise RuntimeError(
+                    "Existing rank grow requires an enabled parent communicator"
+                )
+            if new_world_size <= self.world_size:
+                raise ValueError(
+                    "Existing rank grow requires new_world_size greater than "
+                    f"current world_size ({self.world_size}), got {new_world_size}"
+                )
+            old_comm = self.comm
+            new_comm = self.nccl.ncclCommGrow(old_comm, new_world_size, None, -1)
+            self._replace_comm(new_comm, world_size=new_world_size)
+            if destroy_old:
+                self.nccl.ncclCommDestroy(old_comm)
+            return
+
+        if grow_unique_id is None:
+            raise ValueError("Joining rank grow requires grow_unique_id")
+        if new_rank < 0 or new_rank >= new_world_size:
+            raise ValueError(
+                f"new_rank must be in [0, {new_world_size}), got {new_rank}"
+            )
+
+        new_comm = self.nccl.ncclCommGrow(
+            None, new_world_size, grow_unique_id, new_rank
+        )
+        self._replace_comm(new_comm, rank=new_rank, world_size=new_world_size)
 
     def all_reduce(
         self,
