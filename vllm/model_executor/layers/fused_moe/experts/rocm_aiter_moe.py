@@ -271,7 +271,14 @@ def rocm_aiter_fused_experts(
     topk_weights = topk_weights.to(torch.float32)
     topk_ids = topk_ids.to(torch.int32)
 
-    expert_mask = expert_map if expert_map is not None else None
+    # AITER wants a 0/1 local-expert mask ([global_num_experts + 1], trailing
+    # sentinel); derive it from the canonical global->local expert_map (-1 for
+    # non-local).
+    expert_mask = (
+        None
+        if expert_map is None
+        else torch.cat([(expert_map >= 0).to(torch.int32), expert_map.new_zeros(1)])
+    )
 
     # w8a8 per-channel quantization
     if (

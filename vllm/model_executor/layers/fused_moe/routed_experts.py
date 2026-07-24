@@ -224,9 +224,7 @@ class RoutedExperts(PluggableLayer):
 
     @property
     def expert_map(self) -> torch.Tensor | None:
-        return (
-            self._expert_map if not self.rocm_aiter_fmoe_enabled else self.expert_mask
-        )
+        return self._expert_map
 
     def update_expert_map_info(self):
         # Update local attributes from ExpertMapManager

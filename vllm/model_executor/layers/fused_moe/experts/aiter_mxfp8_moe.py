@@ -153,18 +153,11 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
         limit = self.quant_config.gemm1_clamp_limit
         swiglu_limit = 0.0 if limit is None else float(limit)
 
-        # Under EP, aiter expects ``expert_mask``: a 0/1 *local-expert* mask over
-        # global ids with a trailing fake-expert sentinel slot (shape
-        # ``[global_num_experts + 1]``), from which it derives the global->local
-        # compaction. What ``RoutedExperts.expert_map`` hands us depends on the
-        # aiter master switch (``rocm_aiter_fmoe_enabled``).
-        # Branching on the (static) master flag — not the tensor contents —
-        # keeps this HIP-graph/torch.compile safe (no data-dependent sync).
-        # ``None`` under pure TP.
+        # Under EP, aiter expects a 0/1 *local-expert* mask over global ids with
+        # a trailing sentinel slot (shape [global_num_experts + 1]), derived
+        # from the canonical global->local expert_map (-1 for non-local).
         if expert_map is None:
             expert_mask = None
-        elif self.moe_config.rocm_aiter_fmoe_enabled:
-            expert_mask = expert_map
         else:
             local_mask = (expert_map >= 0).to(torch.int32)
             expert_mask = torch.cat([local_mask, local_mask.new_zeros(1)])
