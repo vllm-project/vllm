@@ -152,6 +152,12 @@ class Scheduler(SchedulerInterface):
             if multiple_inflight_batches and kv_transfer_config.is_kv_consumer:
                 self.defer_block_free = True
 
+        # Recompute a request preempted mid hand-off rather than dropping its
+        # KV (see _preempt_request).
+        self.requires_kv_delivery = (
+            self.connector is not None and self.connector.requires_kv_delivery
+        )
+
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
             self.parallel_config.data_parallel_index,
@@ -602,7 +608,11 @@ class Scheduler(SchedulerInterface):
                     else:
                         preempted_req = self.running.pop()
 
-                    self._preempt_request(preempted_req, scheduled_timestamp)
+                    self._preempt_request(
+                        preempted_req,
+                        scheduled_timestamp,
+                        discard_inflight_output=self.requires_kv_delivery,
+                    )
                     preempted_reqs.append(preempted_req)
                     if preempted_req == request:
                         # No more request to preempt. Cannot schedule this request.
@@ -1200,11 +1210,17 @@ class Scheduler(SchedulerInterface):
 
         return new_block_ids_to_zero or None
 
-    def _preempt_request(self, request: Request, timestamp: float) -> None:
+    def _preempt_request(
+        self, request: Request, timestamp: float, discard_inflight_output: bool = False
+    ) -> None:
         """Preempt a request and put it back to the waiting queue.
 
         NOTE: The request should be popped from the running queue outside of this
         method.
+
+        If discard_inflight_output is set, drop the stale in-flight async frame
+        (whose KV was just freed) so the request cleanly re-runs from the waiting
+        queue instead of finishing against freed blocks.
         """
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"
@@ -1214,6 +1230,9 @@ class Scheduler(SchedulerInterface):
         self._inflight_prefills.discard(request)
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
+        if discard_inflight_output:
+            request.async_tokens_to_discard = request.num_output_placeholders
+            request.num_output_placeholders = 0
         if request.spec_token_ids:
             request.spec_token_ids = []
         request.num_preemptions += 1
@@ -2336,15 +2355,8 @@ class Scheduler(SchedulerInterface):
             # running queue in FIFO order.
             while self.running:
                 request = self.running.pop()
-                self._preempt_request(request, timestamp)
-                # For async scheduling, any output frames already in flight at
-                # preemption time are now stale and must be discarded when they
-                # return. num_output_placeholders is exactly that count: 0 if
-                # the engine has drained (e.g. pause_generation(keep) waited
-                # for idle), 1 for vanilla async mid-step, or 1 + spec/PP frames
-                # otherwise.
-                request.async_tokens_to_discard = request.num_output_placeholders
-                request.num_output_placeholders = 0
+                # Force-preempt always invalidates KV; discard in-flight frames.
+                self._preempt_request(request, timestamp, discard_inflight_output=True)
 
             # Clear scheduled request ids cache. Since we are forcing preemption
             # + resumption in the same step, we must act as if these requests were

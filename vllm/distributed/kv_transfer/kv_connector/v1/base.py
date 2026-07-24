@@ -181,6 +181,16 @@ class KVConnectorBase_V1(ABC):
         """
         return False
 
+    @property
+    def requires_kv_delivery(self) -> bool:
+        """Whether this connector's KV must be reliably delivered.
+
+        If True (default), a request preempted while its hand-off is in flight
+        is recomputed rather than finished with no blocks to transfer (needed
+        for P/D). Best-effort caches return False to skip that recompute.
+        """
+        return True
+
     def __init__(
         self,
         vllm_config: "VllmConfig",

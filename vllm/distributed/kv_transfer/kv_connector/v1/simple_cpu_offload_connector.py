@@ -45,6 +45,11 @@ DEFAULT_CPU_CAPACITY_BYTES = 8 * (1024**3)
 class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
     """CPU KV cache offloading with custom kernel transfers and BlockPool LRU."""
 
+    @property
+    def requires_kv_delivery(self) -> bool:
+        # Best-effort cache: a dropped save is just a future cache miss.
+        return False
+
     def __init__(
         self,
         vllm_config: VllmConfig,
