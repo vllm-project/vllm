@@ -94,11 +94,29 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         # - skip input activation quantization (kernel applies scaling)
         self.use_deepseek_fp8_block_scale = quant_config.is_block_quantized
         self.gemm1_clamp_limit: torch.Tensor | None = None
-        if quant_config.gemm1_clamp_limit is not None:
+        # swiglu_limit_fallback: read from moe_config when quant_config lacks it
+        _clamp = quant_config.gemm1_clamp_limit
+        if _clamp is None:
+            _clamp = getattr(moe_config, "swiglu_limit", None)
+        if _clamp is not None:
             self.gemm1_clamp_limit = torch.tensor(
-                [quant_config.gemm1_clamp_limit] * self.num_experts,
+                [float(_clamp)] * self.num_experts,
                 dtype=torch.float32,
                 device=self.device,
+            )
+        _alpha = getattr(quant_config, "gemm1_alpha", None)
+        if _alpha is None:
+            _alpha = getattr(moe_config, "swiglu_alpha", None)
+        _beta = getattr(quant_config, "gemm1_beta", None)
+        if _beta is None:
+            _beta = getattr(moe_config, "swiglu_beta", None)
+        if _alpha is not None and not hasattr(self, "gemm1_alpha"):
+            self.gemm1_alpha = torch.tensor(
+                [float(_alpha)] * self.num_experts, dtype=torch.float32, device=self.device
+            )
+        if _beta is not None and not hasattr(self, "gemm1_beta"):
+            self.gemm1_beta = torch.tensor(
+                [float(_beta)] * self.num_experts, dtype=torch.float32, device=self.device
             )
 
         if quant_config.weight_quant_dtype == "mxfp4":
@@ -190,6 +208,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             MoEActivation.GELU_TANH,
             MoEActivation.RELU2_NO_MUL,
             MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
         ]
 
     @staticmethod
@@ -269,6 +288,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             MoEActivation.SILU: ActivationType.Swiglu,  # This is the default
             MoEActivation.GELU_TANH: ActivationType.Geglu,
             MoEActivation.SWIGLUOAI: ActivationType.Swiglu,  # gpt-oss alias
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE: ActivationType.Swiglu,
             MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
         }
         assert activation in activation_str_to_value_map, (
@@ -283,7 +303,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         swiglu_alpha = None
         swiglu_beta = None
         swiglu_limit = (
-            self.gemm1_clamp_limit if activation == MoEActivation.SILU else None
+            self.gemm1_clamp_limit if activation in (MoEActivation.SILU, MoEActivation.SWIGLUOAI_UNINTERLEAVE) else None
         )
         use_mxfp8_act_scaling = False
         use_w4_group_scaling = False
@@ -321,6 +341,10 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             # FlashInfer API requires weight to be long for nvfp4
             fc1_expert_weights = w1.view(torch.long)
             fc2_expert_weights = w2.view(torch.long)
+            if activation in (MoEActivation.SWIGLUOAI, MoEActivation.SWIGLUOAI_UNINTERLEAVE):
+                swiglu_limit = self.gemm1_clamp_limit
+                swiglu_alpha = getattr(self, "gemm1_alpha", None)
+                swiglu_beta = getattr(self, "gemm1_beta", None)
         elif self.weight_quant_dtype == "mxfp4":
             assert self.w1_scale is not None and self.w2_scale is not None
             assert w1.is_contiguous() and w2.is_contiguous()
