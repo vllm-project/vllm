@@ -174,6 +174,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.marlin import (
     MarlinFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
+    BlockWiseTorchFP8ScaledMMLinearKernel,
     ChannelWiseTorchFP8ScaledMMLinearKernel,
     PerTensorTorchFP8ScaledMMLinearKernel,
     RowWiseTorchFP8ScaledMMLinearKernel,
@@ -268,6 +269,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         PerTensorTorchFP8ScaledMMLinearKernel,
         ChannelWiseTorchFP8ScaledMMLinearKernel,
         RowWiseTorchFP8ScaledMMLinearKernel,
+        BlockWiseTorchFP8ScaledMMLinearKernel,
     },
     "aiter": {
         AiterInt8ScaledMMLinearKernel,
@@ -372,10 +374,10 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
     PlatformEnum.CPU: [
         CPUFp8BlockScaledMMKernel,
     ],
-    # TODO(zufang): to add torch as linear backend
     PlatformEnum.XPU: [
         XPUFp8BlockScaledMMKernel,
         TritonFp8BlockScaledMMKernel,
+        BlockWiseTorchFP8ScaledMMLinearKernel,
     ],
 }
 
