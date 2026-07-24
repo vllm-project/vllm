@@ -297,71 +297,6 @@ class AiterFusedAddRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
         pm.register_replacement(pattern, replacement, inputs, pm.fwd_only, pm_pass)
 
 
-class AiterFusedAddRMSFp8GroupQuantViewPattern(AiterRMSNormQuantPattern):
-    """View-tolerant fused-add RMSNorm + group FP8 quant pattern."""
-
-    FUSED_OP = rocm_aiter_ops.get_rmsnorm_group_add_fused_quant_op()
-
-    def __init__(
-        self,
-        epsilon: float,
-        quant_dtype: torch.dtype,
-        group_shape: GroupShape,
-        match_aiter_quant: bool = True,
-        symmetric: bool = True,
-    ) -> None:
-        scale = ScaleDesc(torch.float32, False, group_shape)
-        key = FusedRMSQuantKey(
-            fused_add=True,
-            quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
-        )
-        super().__init__(epsilon, key, match_aiter_quant)
-
-    def register(self, pm_pass: PatternMatcherPass) -> None:
-        def pattern(
-            input: torch.Tensor,
-            weight: torch.Tensor,
-            residual: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            result_rms, residual_out = torch.ops.vllm_ir.fused_add_rms_norm(
-                input, residual, weight, self.epsilon
-            )
-            result_rms_2d = result_rms.view(-1, result_rms.shape[-1])
-            result, scale = self.quant_matcher(result_rms_2d)
-            return result, residual_out, scale
-
-        def replacement(
-            input: torch.Tensor,
-            weight: torch.Tensor,
-            residual: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            return self.FUSED_OP(
-                x=input,
-                residual=residual,
-                weight=weight,
-                variance_epsilon=self.epsilon,
-                group_size=128,
-            )
-
-        def trace_with_view_to_reshape(*args: Any, **kwargs: Any) -> fx.GraphModule:
-            gm = pm.fwd_only(*args, **kwargs)
-            view_to_reshape(gm)
-            return gm
-
-        inputs = [
-            self.empty(5, 16),  # input
-            self.empty(16),  # weight
-            self.empty(5, 16),  # residual
-        ]
-        pm.register_replacement(
-            pattern,
-            replacement,
-            inputs,
-            trace_with_view_to_reshape,
-            pm_pass,
-        )
-
-
 class DoubleAiterRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
     """
     Pattern matching ``rms_norm`` whose output feeds *two* distinct
@@ -671,10 +606,6 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             ).register(self.patterns)
 
             # Fuse aiter fused_add_rms_norm + aiter dynamic group fp8 quant
-            AiterFusedAddRMSFp8GroupQuantViewPattern(
-                epsilon, FP8_DTYPE, GroupShape(1, 128)
-            ).register(self.patterns)
-
             AiterFusedAddRMSFp8GroupQuantPattern(
                 epsilon, FP8_DTYPE, GroupShape(1, 128)
             ).register(self.patterns)
@@ -733,7 +664,6 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             AiterFusedAddRMSNormDynamicQuantPattern,
             AiterRMSFp8GroupQuantPattern,
             AiterFusedAddRMSFp8GroupQuantPattern,
-            AiterFusedAddRMSFp8GroupQuantViewPattern,
             DoubleAiterRMSFp8GroupQuantPattern,
             DoubleAiterRMSFp8GroupQuantViewPattern,
             AiterRMSNormGatedFp8GroupQuantPattern,
