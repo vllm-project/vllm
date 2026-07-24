@@ -91,6 +91,10 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             self.device,
             cudagraph_mode,
             decode_query_len=1,
+            # Each autoregressive draft step processes exactly one token per
+            # request, regardless of the speculative token count selected by
+            # dynamic speculative decoding.
+            use_dynamic_decode_query_len=False,
         )
 
     def capture(self) -> None:
