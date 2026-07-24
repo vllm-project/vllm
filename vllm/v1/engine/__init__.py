@@ -119,6 +119,9 @@ class EngineCoreRequest(
     priority: int = 0
 
     trace_headers: Mapping[str, str] | None = None
+    # OTel GenAI `gen_ai.operation.name` for the originating endpoint
+    # (e.g. "chat", "text_completion"). Used only for request-span tracing.
+    operation_name: str | None = None
     resumable: bool = False
 
     # The user-provided request ID. This field is set internally,

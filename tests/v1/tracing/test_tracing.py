@@ -98,6 +98,69 @@ def test_traces(
             assert attributes.get(SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE) > 0
             assert attributes.get(SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN) > 0
             assert attributes.get(SpanAttributes.GEN_AI_LATENCY_E2E) > 0
+
+            # Without the semconv opt-in, none of the current GenAI attributes
+            # are emitted (default behavior unchanged).
+            assert attributes.get(SpanAttributes.GEN_AI_REQUEST_MODEL) is None
+            assert attributes.get(SpanAttributes.GEN_AI_OPERATION_NAME) is None
+        finally:
+            if llm is not None:
+                shutdown_timeout = 60.0 if current_platform.is_rocm() else 5.0
+                llm.llm_engine.engine_core.shutdown(timeout=shutdown_timeout)
+            cleanup_dist_env_and_memory()
+
+
+def test_traces_gen_ai_latest_semconv(
+    monkeypatch: pytest.MonkeyPatch,
+    trace_service: FakeTraceService,
+):
+    """With OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental, the span
+    additionally carries gen_ai.request.model while still emitting the legacy
+    attributes (non-breaking dual-emit).
+
+    This drives the offline LLM path, so gen_ai.operation.name (an
+    endpoint-level value) is not set and the span name stays "llm_request".
+    """
+    with monkeypatch.context() as m:
+        m.setenv(OTEL_EXPORTER_OTLP_TRACES_INSECURE, "true")
+        m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+        m.setenv("OTEL_SEMCONV_STABILITY_OPT_IN", "gen_ai_latest_experimental")
+
+        sampling_params = SamplingParams(temperature=0.01, top_p=0.1, max_tokens=256)
+        model = "facebook/opt-125m"
+        llm = None
+        try:
+            llm = LLM(
+                model=model,
+                otlp_traces_endpoint=FAKE_TRACE_SERVER_ADDRESS,
+                gpu_memory_utilization=0.3,
+                disable_log_stats=False,
+            )
+            outputs = llm.generate(
+                ["This is a short prompt"], sampling_params=sampling_params
+            )
+
+            timeout = 15
+            deadline = time.time() + timeout
+            llm_request_spans = []
+            while time.time() < deadline:
+                all_spans = trace_service.get_all_spans()
+                llm_request_spans = [s for s in all_spans if s["name"] == "llm_request"]
+                if llm_request_spans:
+                    break
+                time.sleep(0.5)
+
+            assert len(llm_request_spans) == 1
+            attributes = llm_request_spans[0]["attributes"]
+
+            # Current OTel GenAI semconv attribute is emitted...
+            assert attributes.get(SpanAttributes.GEN_AI_REQUEST_MODEL) == model
+            # ...alongside the legacy names (dual-emit, non-breaking).
+            assert attributes.get(SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS) == len(
+                outputs[0].prompt_token_ids
+            )
+            # Offline path: no endpoint -> operation.name unset, default span name.
+            assert attributes.get(SpanAttributes.GEN_AI_OPERATION_NAME) is None
         finally:
             if llm is not None:
                 shutdown_timeout = 60.0 if current_platform.is_rocm() else 5.0

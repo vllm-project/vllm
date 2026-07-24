@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from collections.abc import Mapping
 
 from vllm.logger import init_logger
@@ -10,6 +11,26 @@ logger = init_logger(__name__)
 
 # Standard W3C headers used for context propagation
 TRACE_HEADERS = ["traceparent", "tracestate"]
+
+# OTel semantic-convention stability opt-in (comma-separated env var). When it
+# contains this token, instrumentations emit the current (experimental) GenAI
+# conventions instead of / in addition to the legacy ones.
+# See: https://opentelemetry.io/docs/specs/semconv/gen-ai/
+OTEL_SEMCONV_STABILITY_OPT_IN = "OTEL_SEMCONV_STABILITY_OPT_IN"
+GEN_AI_LATEST_EXPERIMENTAL = "gen_ai_latest_experimental"
+
+
+def is_gen_ai_latest_semconv_enabled() -> bool:
+    """Whether to emit the current (experimental) OTel GenAI semconv attributes.
+
+    Gated by the standard OTel opt-in env var ``OTEL_SEMCONV_STABILITY_OPT_IN``
+    (a comma-separated list). When it contains ``gen_ai_latest_experimental``,
+    vLLM additionally emits the current spec attribute names and span name;
+    otherwise only the legacy attributes are emitted, so default behavior is
+    unchanged.
+    """
+    opt_in = os.environ.get(OTEL_SEMCONV_STABILITY_OPT_IN, "")
+    return GEN_AI_LATEST_EXPERIMENTAL in (token.strip() for token in opt_in.split(","))
 
 
 class SpanAttributes:
@@ -27,6 +48,13 @@ class SpanAttributes:
     GEN_AI_REQUEST_TOP_P = "gen_ai.request.top_p"
     GEN_AI_REQUEST_TEMPERATURE = "gen_ai.request.temperature"
     GEN_AI_RESPONSE_MODEL = "gen_ai.response.model"
+
+    # Current OTel GenAI semconv identity attributes. Emitted only when
+    # OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental is set.
+    # `operation.name` is Required by the spec; `request.model` conditionally
+    # required. (`response.model` above remains defined but is never emitted.)
+    GEN_AI_OPERATION_NAME = "gen_ai.operation.name"
+    GEN_AI_REQUEST_MODEL = "gen_ai.request.model"
 
     # Custom attributes added until they are standardized
     GEN_AI_REQUEST_ID = "gen_ai.request.id"
@@ -52,6 +80,31 @@ class LoadingSpanAttributes:
     CODE_FUNCTION = "code.function"
     CODE_FILEPATH = "code.filepath"
     CODE_LINENO = "code.lineno"
+
+
+def latest_gen_ai_semconv_attributes(
+    operation_name: str | None, model_name: str | None
+) -> tuple[dict[str, str], str | None]:
+    """Current OTel GenAI semconv identity attributes + span name.
+
+    Pure helper for the request span. Returns ``(attributes, span_name)`` where
+    ``span_name`` is the spec-recommended ``"{operation} {model}"`` or ``None``
+    when it can't be formed (operation or model unknown) and the caller should
+    keep its default span name.
+
+    Args:
+        operation_name: `gen_ai.operation.name` (e.g. "chat"), or None.
+        model_name: `gen_ai.request.model` (served model name), or None.
+    """
+    attributes: dict[str, str] = {}
+    if model_name is not None:
+        attributes[SpanAttributes.GEN_AI_REQUEST_MODEL] = model_name
+    if operation_name is not None:
+        attributes[SpanAttributes.GEN_AI_OPERATION_NAME] = operation_name
+    span_name = None
+    if operation_name is not None and model_name is not None:
+        span_name = f"{operation_name} {model_name}"
+    return attributes, span_name
 
 
 def contains_trace_headers(headers: Mapping[str, str]) -> bool:
