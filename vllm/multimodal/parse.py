@@ -553,6 +553,8 @@ class MultiModalDataParser:
         self,
         video: VideoItem,
     ) -> tuple[np.ndarray, dict[str, Any] | None]:
+        if isinstance(video, MediaWithBytes):
+            video = video.media
         if isinstance(video, tuple):
             return video
         if isinstance(video, list):
@@ -656,6 +658,11 @@ class MultiModalDataParser:
         new_videos = list[tuple[np.ndarray, dict[str, Any] | None]]()
         metadata_lst: list[dict[str, Any] | None] = []
         for data_item in data_items:
+            source_bytes = (
+                data_item.original_bytes
+                if isinstance(data_item, MediaWithBytes)
+                else None
+            )
             video, metadata = self._get_video_with_metadata(data_item)
             if self.video_needs_metadata:
                 if metadata is None:
@@ -663,10 +670,14 @@ class MultiModalDataParser:
                         "Video metadata is required but not found in mm input. "
                         "Please check your video input in `multi_modal_data`"
                     )
-                new_videos.append((video, metadata))
+                new_video: Any = (video, metadata)
                 metadata_lst.append(metadata)
             else:
-                new_videos.append(video)
+                new_video = video
+
+            if source_bytes is not None:
+                new_video = MediaWithBytes(new_video, source_bytes)
+            new_videos.append(new_video)
 
         if not self.video_needs_metadata:
             metadata = None

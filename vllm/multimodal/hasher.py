@@ -83,6 +83,14 @@ class MultiModalHasher:
 
             return cls.iter_item_to_bytes("image", obj.original_bytes)
 
+        if isinstance(obj, MediaWithBytes) and isinstance(obj.media, tuple):
+            frames, metadata = obj.media
+            if frames is not None and frames.nbytes < len(obj.original_bytes):
+                return cls.iter_item_to_bytes("video", obj.media)
+            return cls.iter_item_to_bytes(
+                "video", {"source": obj.original_bytes, "metadata": metadata}
+            )
+
         if isinstance(obj, torch.Tensor):
             tensor_obj: torch.Tensor = obj.cpu()
             tensor_dtype = tensor_obj.dtype
