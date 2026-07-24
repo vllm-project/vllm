@@ -23,11 +23,17 @@ def maybe_create_thinking_budget_state_holder(
     num_spec_tokens: int,
     device: torch.device,
     is_pin_memory: bool,
+    relaxed_thinking: bool = False,
 ) -> "ThinkingBudgetStateHolder | None":
     if reasoning_config is None:
         return None
     return ThinkingBudgetStateHolder(
-        reasoning_config, max_num_seqs, num_spec_tokens, device, is_pin_memory
+        reasoning_config,
+        max_num_seqs,
+        num_spec_tokens,
+        device,
+        is_pin_memory,
+        relaxed_thinking,
     )
 
 
@@ -44,11 +50,13 @@ class ThinkingBudgetStateHolder:
         num_spec_tokens: int,
         device: torch.device,
         is_pin_memory: bool,
+        relaxed_thinking: bool = False,
     ):
         _ = is_pin_memory  # API parity with logits processors
         max_num_reqs = max_num_seqs
         self.in_spec_mode = num_spec_tokens > 0
         self.num_spec_tokens = num_spec_tokens
+        self.relaxed_thinking = relaxed_thinking
 
         # No separate enable flag: a non-``None`` ``reasoning_config`` is the switch.
         self.is_enabled = reasoning_config is not None
@@ -72,11 +80,13 @@ class ThinkingBudgetStateHolder:
             self._mask_capacity = max_num_reqs
 
     def has_tracked_requests(self) -> bool:
-        """True when ``sync_batch`` has state for a ``thinking_token_budget`` row.
+        """True when ``sync_batch`` holds state for any tracked row.
 
+        Includes budgeted rows and, when ``relaxed_thinking`` is enabled, the
+        budget-less reasoning rows that carry a ``-1`` sentinel budget and are
+        tracked only for ``in_think`` (inert for end-token forcing).
         Used to decide whether sampling needs output-token rows and spec combining;
-        distinct from merely having a holder instance (reasoning may be on with no
-        budgeted requests in this batch).
+        distinct from merely having a holder instance.
         """
         return bool(self._state)
 
@@ -89,14 +99,24 @@ class ThinkingBudgetStateHolder:
 
         for index, params, prompt_tok_ids, output_tok_ids in batch_update.added:
             thinking_token_budget = params.thinking_token_budget
-            if thinking_token_budget is not None:
+            if thinking_token_budget is None:
+                if not self.relaxed_thinking:
+                    # Without a budget and without relaxed_thinking the row is
+                    # not tracked (preserves the original budget-only contract).
+                    self._state.pop(index, None)
+                    continue
+                # relaxed_thinking: track ``in_think`` only. The -1 sentinel
+                # keeps the entry inert for end-token forcing
+                # (``_update_think_state`` and ``_apply_forcing_to_logits`` both
+                # no-op on it) while ``_update_in_think`` maintains ``in_think``.
+                self._state[index] = self._init_state_entry(prompt_tok_ids, -1)
+                self._state[index]["in_end"] = False
+            else:
                 self._state[index] = self._init_state_entry(
                     prompt_tok_ids, thinking_token_budget
                 )
-                self._state[index]["output_tok_ids"] = output_tok_ids
-                self._state[index]["spec_token_ids"] = []
-            else:
-                self._state.pop(index, None)
+            self._state[index]["output_tok_ids"] = output_tok_ids
+            self._state[index]["spec_token_ids"] = []
 
         for i1, i2, direction in batch_update.moved:
             if direction == MoveDirectionality.SWAP:
@@ -159,6 +179,28 @@ class ThinkingBudgetStateHolder:
         spec_lists = spec_token_ids or []
         return self._apply_forcing_to_logits(logits, predict_bonus_token, spec_lists)
 
+    def refresh_in_think(self, output_token_ids: list[list[int]]) -> None:
+        """Recompute ``in_think`` for budget-less (relaxed) rows from committed
+        output, ahead of spec-decode verification. Budgeted rows are maintained
+        by ``_update_think_state`` and are left untouched here."""
+        if not self.is_enabled or not self._state:
+            return
+        for seq_idx, state in self._state.items():
+            if state.get("thinking_token_budget", -1) != -1:
+                continue
+            if seq_idx < len(output_token_ids):
+                state["output_tok_ids"] = output_token_ids[seq_idx]
+            self._update_in_think(state)
+
+    def in_think_mask(self, num_reqs: int, device: torch.device) -> torch.Tensor:
+        """Batch-row-aligned bool tensor of ``in_think`` for the first rows."""
+        mask = [False] * num_reqs
+        for i in range(num_reqs):
+            state = self._state.get(i)
+            if state is not None and state.get("in_think", False):
+                mask[i] = True
+        return async_tensor_h2d(mask, device=device, dtype=torch.bool)
+
     @staticmethod
     def _find_last_sequence_index(target_list: list[int], token_ids: list[int]) -> int:
         if not token_ids:
@@ -167,6 +209,16 @@ class ThinkingBudgetStateHolder:
             if target_list[i : i + len(token_ids)] == token_ids:
                 return i
         return -1
+
+    def _update_in_think(self, state: dict[str, Any]) -> None:
+        """Budget-independent ``in_think`` recompute over the committed sequence
+        (prompt + output), last-boundary-wins. Lets relaxed (budget-less) rows
+        track thinking spans without the forcing machinery in
+        ``_update_think_state``."""
+        tokens = (state.get("prompt_tok_ids") or []) + state.get("output_tok_ids", [])
+        last_start = self._find_last_sequence_index(tokens, self.think_start_token_ids)
+        last_end = self._find_last_sequence_index(tokens, self.think_end_token_ids)
+        state["in_think"] = last_start > last_end
 
     def _init_state_entry(
         self, prompt_tok_ids: list[int] | None, thinking_token_budget: int
