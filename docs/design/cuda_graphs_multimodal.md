@@ -39,9 +39,9 @@ class BudgetGraphMetadata:
     output_buffer: torch.Tensor      # encoder hidden states
 ```
 
-Budgets are auto-generated as power-of-2 levels from a model-provided range via `get_encoder_cudagraph_budget_range()`, with the maximum budget always included even if it does not fall on a power-of-2 boundary. Budgets can also be explicitly specified by the user via `encoder_cudagraph_token_budgets` in `CompilationConfig`.
+Budgets are auto-generated as power-of-2 levels from a model-provided range via `get_encoder_cudagraph_budget_range()`, with the maximum budget always included even if it does not fall on a power-of-2 boundary. Budgets can also be explicitly specified by the user via `encoder_cudagraph_token_budgets` in `CompilationConfig`. For dual-path models, users can additionally configure per-path budgets via `encoder_cudagraph_global_token_budgets` and `encoder_cudagraph_local_token_budgets`.
 
-When `EncoderCudaGraphConfig.enable_dual_path_graph` is `True`, the manager generates two independent budget lists — `global_token_budgets` (multiples of `global_token_per_image`) and `local_token_budgets` (multiples of `local_token_per_patch`) — and stores captured graphs under `budget_graphs["global"]` and `budget_graphs["local"]` respectively.
+When `EncoderCudaGraphConfig.enable_dual_path_graph` is `True`, the manager generates (or uses user-provided) two independent budget lists — `global_token_budgets` (multiples of `global_token_per_image`) and `local_token_budgets` (multiples of `local_token_per_patch`) — and stores captured graphs under `budget_graphs["global"]` and `budget_graphs["local"]` respectively.
 
 ### Greedy bin-packing at runtime
 
@@ -62,10 +62,10 @@ For two-tower vision encoders (e.g., DeepSeek-OCR), the `EncoderCudaGraphConfig`
 
 **Budget generation.** Two separate budget lists are generated:
 
-* `global_token_budgets` — power-of-2 multiples of `global_token_per_image` (e.g., `[272, 544, 1088, 2176, 4352, 8704, 13824]` for DeepSeek-OCR).
-* `local_token_budgets` — power-of-2 multiples of `local_token_per_patch` (e.g., `[0, 100, 200, 400, 800, 1600, 3200, 6400, 12800]` for DeepSeek-OCR). A budget of `0` is always included to handle images with no local patches (images ≤ 640×640 that produce only global features).
+* `global_token_budgets` — power-of-2 multiples of `global_token_per_image` (e.g., `[272, 544, 1088, 2176, 4352, 8704, 13824]` for DeepSeek-OCR). Can be overridden by the user via `encoder_cudagraph_global_token_budgets` in `CompilationConfig`.
+* `local_token_budgets` — power-of-2 multiples of `local_token_per_patch` (e.g., `[0, 100, 200, 400, 800, 1600, 3200, 6400, 12800]` for DeepSeek-OCR). Can be overridden by the user via `encoder_cudagraph_local_token_budgets` in `CompilationConfig`. When auto-generated, a budget of `0` is always included to handle images with no local patches (images ≤ 640×640 that produce only global features). When user-provided budgets are used, the `0` budget is **not** automatically inserted — users must include it themselves if needed.
 
-Both lists are capped at the same `max_budget`.
+Both lists are capped at the same `max_budget` (derived from the model's budget range or user-provided `encoder_cudagraph_token_budgets`).
 
 **Dual-path greedy packing.** Each `EncoderItemSpec` provides both `global_output_tokens` (constant per image) and `local_output_tokens` (proportional to the patch count). The dual-path packing algorithm constrains both budgets simultaneously:
 
@@ -145,14 +145,16 @@ Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGra
 
 ## Configuration
 
-Three fields in `CompilationConfig` control encoder CUDA Graphs:
+The following fields in `CompilationConfig` control encoder CUDA Graphs:
 
 * `cudagraph_mm_encoder` (`bool`, default `False`) — enable CUDA Graph capture for multimodal encoder. When enabled, captures the full encoder forward as a CUDA Graph for each token budget level.
 * `encoder_cudagraph_token_budgets` (`list[int]`, default `[]`) — token budget levels for capture. If empty (default), auto-inferred from model architecture as power-of-2 levels. User-provided values override auto-inference.
+* `encoder_cudagraph_global_token_budgets` (`list[int]`, default `[]`) — token budget levels for the **global** path in dual-path encoder CUDA Graph capture (e.g., DeepSeek-OCR). If non-empty, used directly instead of auto-generating from the model's `global_token_per_image`.
+* `encoder_cudagraph_local_token_budgets` (`list[int]`, default `[]`) — token budget levels for the **local** path in dual-path encoder CUDA Graph capture (e.g., DeepSeek-OCR). If non-empty, used directly instead of auto-generating from the model's `local_token_per_patch`.
 * `encoder_cudagraph_max_vision_items_per_batch` (`int`, default `0`) — maximum number of images/videos per batch during capture. If 0 (default), auto-inferred as `max_budget // min_budget`.
 * `encoder_cudagraph_max_frames_per_batch` (`int`, default `None`) — maximum number of video frames per batch during capture. If `None` (default), auto-inferred as `encoder_cudagraph_max_vision_items_per_batch * max_frames_per_video` (`max_frames_per_video` is a model-specific value from `EncoderCudaGraphConfig`, computed by `get_max_frames_per_video()` on the model). If we limit the video count per prompt to `0`, it will also be set to `0` (i.e., fall back to image-only mode).
 
-Dual-path mode is configured at the model level via `EncoderCudaGraphConfig` fields (`enable_dual_path_graph`, `global_token_per_image`, `local_token_per_patch`) — no additional user configuration is required. The manager automatically generates separate budget lists and routes to dual-path execution when the model opts in.
+Dual-path mode is enabled at the model level via `EncoderCudaGraphConfig` fields (`enable_dual_path_graph`, `global_token_per_image`, `local_token_per_patch`). The manager automatically generates separate budget lists and routes to dual-path execution when the model opts in. Users can override the auto-generated per-path budgets via `encoder_cudagraph_global_token_budgets` and `encoder_cudagraph_local_token_budgets`.
 
 ## Usage guide
 
@@ -199,6 +201,40 @@ model = vllm.LLM(
 ```
 
 The manager tracks hit/miss statistics and logs them periodically. A "hit" means an image was processed via CUDA Graph replay; a "miss" means eager fallback (image exceeded all budgets).
+
+### Dual-path inference (DeepSeek-OCR)
+
+For dual-path models like DeepSeek-OCR, use `encoder_cudagraph_global_token_budgets` and `encoder_cudagraph_local_token_budgets` to independently control the global and local path budgets:
+
+```bash
+vllm serve deepseek-ai/DeepSeek-OCR \
+  --compilation-config '{"cudagraph_mm_encoder": true, "encoder_cudagraph_global_token_budgets": [272], "encoder_cudagraph_local_token_budgets": [0, 100, 400, 800]}'
+```
+
+If omitted, both budget lists are auto-generated from the model's `global_token_per_image` and `local_token_per_patch` values:
+
+```bash
+vllm serve deepseek-ai/DeepSeek-OCR \
+  --compilation-config '{"cudagraph_mm_encoder": true}'
+# Auto-generated: global_budgets=[272, 544, 1088, ...], local_budgets=[0, 100, 200, 400, ...]
+```
+
+Python example:
+
+```python
+import vllm
+
+compilation_config = {
+    "cudagraph_mm_encoder": True,
+    "encoder_cudagraph_global_token_budgets": [272],
+    "encoder_cudagraph_local_token_budgets": [0, 100, 400, 800],
+}
+
+model = vllm.LLM(
+    model="deepseek-ai/DeepSeek-OCR",
+    compilation_config=compilation_config,
+)
+```
 
 ### Video inference
 
