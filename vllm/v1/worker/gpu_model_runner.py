@@ -5518,6 +5518,25 @@ class GPUModelRunner(
         # catch this (stale allocations stay bit-identical until reclaimed),
         # so identity is checked directly and failure is closed.
         arena_problems = verify_model_arenas(model, arena_snaps)
+
+        # Dual-run transition: the per-layer verification inside the layerwise
+        # pipeline (LayerReloadingInfo.arena_snapshot) now checks the same
+        # invariant closer to where each PWAL re-runs. While both run, compare
+        # them: the per-layer pass must not be narrower than this model-level
+        # one. A mismatch means the per-layer coverage has a hole (e.g. a
+        # module whose arena the layerwise walk does not reach), so keep the
+        # model-level gate authoritative and log the discrepancy rather than
+        # trusting the newer path prematurely.
+        from vllm.model_executor.model_loader.reload.layerwise import (
+            get_layer_arena_findings)
+        per_layer = get_layer_arena_findings()
+        if len(per_layer) != len(arena_problems):
+            logger.warning(
+                "Reload arena verification mismatch: model-level found %d, "
+                "per-layer found %d. Model-level: %s | Per-layer: %s",
+                len(arena_problems), len(per_layer),
+                arena_problems[:10], per_layer[:10])
+
         if arena_problems:
             gate = os.environ.get("VLLM_RELOAD_GATE", "strict")
             msg = ("Reload violated graph-visible storage identity on "
