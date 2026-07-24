@@ -4583,15 +4583,6 @@ class GPUModelRunner(
         self._update_states_after_model_execute(
             sampler_output.sampled_token_ids, scheduler_output
         )
-        if self.use_async_scheduling:
-            pp = get_pp_group()
-            # For torchrun external_launcher PP mode with broadcast_pp_output=True,
-            # PP outputs have been broadcasted to all ranks at logits computation.
-            # Therefore, here is no need to send sampled token ids again in this case.
-            if not self.broadcast_pp_output and pp.world_size > 1 and pp.is_last_rank:
-                self._pp_broadcast_prev_sampled_token_ids(
-                    sampler_output.sampled_token_ids
-                )
 
         self._draft_token_ids = None
         self._draft_probs = None
@@ -4662,6 +4653,18 @@ class GPUModelRunner(
                         self._copy_valid_sampled_token_count(
                             next_token_ids, valid_sampled_tokens_count
                         )
+                        if self.use_async_scheduling:
+                            pp = get_pp_group()
+
+                            prev_ids = self.input_batch.prev_sampled_token_ids
+                            assert prev_ids is not None
+
+                            if (
+                                not self.broadcast_pp_output
+                                and pp.world_size > 1
+                                and pp.is_last_rank
+                            ):
+                                self._pp_broadcast_prev_sampled_token_ids(prev_ids)
                     if self.parallel_config.data_parallel_size > 1:
                         # Prevent hang when DP ranks disagree on input_fits_in_drafter
                         self.drafter.dummy_run(num_tokens=1)
@@ -4687,6 +4690,18 @@ class GPUModelRunner(
                     self._copy_valid_sampled_token_count(
                         next_token_ids, valid_sampled_tokens_count
                     )
+                    if self.use_async_scheduling:
+                        pp = get_pp_group()
+
+                        prev_ids = self.input_batch.prev_sampled_token_ids
+                        assert prev_ids is not None
+
+                        if (
+                            not self.broadcast_pp_output
+                            and pp.world_size > 1
+                            and pp.is_last_rank
+                        ):
+                            self._pp_broadcast_prev_sampled_token_ids(prev_ids)
             else:
                 # These drafters consume CPU sampled tokens, so they run
                 # after bookkeeping.
