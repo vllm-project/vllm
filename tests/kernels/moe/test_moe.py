@@ -40,6 +40,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_permute_bias,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
+    _get_nvfp4_moe_padding,
     rand_marlin_weight_mxfp4_like,
     rand_marlin_weight_nvfp4_like,
 )
@@ -1162,6 +1163,95 @@ def test_fused_marlin_moe_non_gated(
         activation=activation,
     )
 
+    torch.testing.assert_close(marlin_output, torch_output, atol=1e-1, rtol=0)
+
+
+@pytest.mark.flaky(reruns=2)
+@pytest.mark.slow_test
+@pytest.mark.skipif(
+    not current_platform.is_device_capability(90),
+    reason="Requires an SM90 GPU for the NVFP4 Marlin wide-N target.",
+)
+@pytest.mark.usefixtures("default_vllm_config")
+def test_fused_marlin_moe_non_gated_wide_n_target():
+    """Compare the exact wide-N target with the independent Torch oracle."""
+    set_random_seed(42)
+
+    m, n, k, e, topk = 22, 1856, 2688, 128, 6
+    activation = MoEActivation.RELU2_NO_MUL
+    padded_n, use_wide_n_tile = _get_nvfp4_moe_padding(
+        num_experts=e,
+        hidden_size=k,
+        intermediate_size=n,
+        top_k=topk,
+        activation=activation,
+        is_act_and_mul=False,
+        is_sm90=True,
+    )
+    assert (padded_n, use_wide_n_tile) == (1920, True)
+
+    dtype = torch.bfloat16
+    quant_type = scalar_types.float4_e2m1f
+    a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+
+    w1 = torch.zeros((e, padded_n, k), device="cuda", dtype=dtype)
+    w1[:, :n].normal_().div_(10)
+    w1_data = MarlinMoEWeightData.make(
+        w=w1,
+        quant_type=quant_type,
+        group_size=16,
+        act_order=False,
+    )
+    del w1
+
+    w2 = torch.zeros((e, k, padded_n), device="cuda", dtype=dtype)
+    w2[:, :, :n].normal_().div_(10)
+    w2_data = MarlinMoEWeightData.make(
+        w=w2,
+        quant_type=quant_type,
+        group_size=16,
+        act_order=False,
+    )
+    del w2
+
+    expected_routes = torch.arange(m * topk, device="cuda").remainder(e)
+    expected_routes = expected_routes.view(m, topk)
+    score = torch.full((m, e), -100.0, device="cuda", dtype=dtype)
+    score.scatter_(1, expected_routes, 100.0)
+    topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
+    assert torch.unique(topk_ids).numel() == e
+
+    with set_current_vllm_config(vllm_config):
+        torch_output = torch_moe(
+            a,
+            w1_data.w_ref,
+            w2_data.w_ref,
+            score,
+            topk,
+            activation=activation,
+        )
+
+    marlin_output = fused_marlin_moe(
+        a,
+        w1_data.qweight,
+        w2_data.qweight,
+        None,
+        None,
+        w1_data.scales,
+        w2_data.scales,
+        topk_weights,
+        topk_ids,
+        global_num_experts=e,
+        expert_map=None,
+        global_scale1=w1_data.global_scale,
+        global_scale2=w2_data.global_scale,
+        quant_type_id=quant_type.id,
+        is_k_full=True,
+        activation=activation,
+    )
+
+    assert marlin_output.shape == (m, k)
+    assert torch.isfinite(marlin_output).all()
     torch.testing.assert_close(marlin_output, torch_output, atol=1e-1, rtol=0)
 
 

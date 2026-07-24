@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     GPTQ_MARLIN_TILE,
     apply_gptq_marlin_linear,
@@ -25,6 +26,10 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_zero_points,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
+    _get_nvfp4_moe_padding,
+    _nvfp4_compute_scale_factor,
+    _pad_nvfp4_moe_w2,
+    _pad_nvfp4_moe_w13,
     apply_fp4_marlin_linear,
     is_fp4_marlin_supported,
     prepare_fp4_layer_for_marlin,
@@ -184,6 +189,171 @@ def test_marlin_moe_pad_helpers_shapes():
     bias_shards = padded.view(E, 2, padded_N)
     assert torch.equal(bias_shards[..., :N], bias.view(E, 2, N))
     assert bias_shards[..., N:].abs().sum() == 0
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        pytest.param({}, (1920, True), id="panda-nano-sm90-relu2"),
+        pytest.param({"is_sm90": False}, (1856, False), id="non-sm90"),
+        pytest.param(
+            {
+                "activation": MoEActivation.RELU2,
+                "is_act_and_mul": True,
+            },
+            (1856, False),
+            id="gated",
+        ),
+        pytest.param(
+            {"activation": MoEActivation.GELU_NO_MUL},
+            (1856, False),
+            id="other-activation",
+        ),
+        pytest.param({"num_experts": 64}, (1856, False), id="other-num-experts"),
+        pytest.param({"hidden_size": 2816}, (1856, False), id="other-hidden-size"),
+        pytest.param(
+            {"intermediate_size": 1792},
+            (1792, False),
+            id="other-intermediate-size",
+        ),
+        pytest.param({"top_k": 4}, (1856, False), id="other-top-k"),
+        pytest.param(
+            {
+                "num_experts": 8,
+                "hidden_size": 256,
+                "intermediate_size": 97,
+                "top_k": 2,
+                "activation": MoEActivation.SILU,
+                "is_act_and_mul": True,
+            },
+            (128, False),
+            id="legacy-k128-tile",
+        ),
+        pytest.param(
+            {
+                "num_experts": 8,
+                "hidden_size": 192,
+                "intermediate_size": 129,
+                "top_k": 2,
+                "activation": MoEActivation.SILU,
+                "is_act_and_mul": True,
+            },
+            (256, False),
+            id="legacy-k64-tile",
+        ),
+    ],
+)
+def test_nvfp4_moe_padding_policy(overrides, expected):
+    params = {
+        "num_experts": 128,
+        "hidden_size": 2688,
+        "intermediate_size": 1856,
+        "top_k": 6,
+        "activation": MoEActivation.RELU2_NO_MUL,
+        "is_act_and_mul": False,
+        "is_sm90": True,
+    }
+    params.update(overrides)
+
+    assert _get_nvfp4_moe_padding(**params) == expected
+
+
+def test_nvfp4_moe_padding_rejects_unsupported_hidden_size():
+    with pytest.raises(AssertionError, match="hidden_size = 96"):
+        _get_nvfp4_moe_padding(
+            num_experts=8,
+            hidden_size=96,
+            intermediate_size=128,
+            top_k=2,
+            activation=MoEActivation.SILU,
+            is_act_and_mul=True,
+            is_sm90=True,
+        )
+
+
+@pytest.mark.parametrize("num_shards", [1, 2])
+def test_pad_nvfp4_moe_w13_preserves_shards(num_shards):
+    num_experts, intermediate_size, padded_size, columns = 2, 1856, 1920, 3
+    original = torch.arange(
+        num_experts * num_shards * intermediate_size * columns,
+        dtype=torch.float32,
+    ).reshape(num_experts, num_shards * intermediate_size, columns)
+
+    padded = _pad_nvfp4_moe_w13(
+        original,
+        num_experts=num_experts,
+        num_shards=num_shards,
+        intermediate_size=intermediate_size,
+        padded_intermediate_size=padded_size,
+    )
+
+    actual_shards = padded.view(num_experts, num_shards, padded_size, columns)
+    original_shards = original.view(num_experts, num_shards, intermediate_size, columns)
+    assert torch.equal(actual_shards[:, :, :intermediate_size], original_shards)
+    assert actual_shards[:, :, intermediate_size:].abs().sum() == 0
+    assert (
+        _pad_nvfp4_moe_w13(
+            original,
+            num_experts=num_experts,
+            num_shards=num_shards,
+            intermediate_size=intermediate_size,
+            padded_intermediate_size=intermediate_size,
+        )
+        is original
+    )
+
+
+@pytest.mark.parametrize("packing", [2, 16])
+def test_pad_nvfp4_moe_w2_preserves_packed_values(packing):
+    num_experts, rows = 2, 3
+    intermediate_size, padded_size = 1856, 1920
+    original = torch.arange(
+        num_experts * rows * intermediate_size // packing,
+        dtype=torch.float32,
+    ).reshape(num_experts, rows, intermediate_size // packing)
+
+    padded = _pad_nvfp4_moe_w2(
+        original,
+        intermediate_size=intermediate_size,
+        padded_intermediate_size=padded_size,
+        packing=packing,
+    )
+
+    original_columns = intermediate_size // packing
+    assert padded.shape == (num_experts, rows, padded_size // packing)
+    assert torch.equal(padded[:, :, :original_columns], original)
+    assert padded[:, :, original_columns:].abs().sum() == 0
+    assert (
+        _pad_nvfp4_moe_w2(
+            original,
+            intermediate_size=intermediate_size,
+            padded_intermediate_size=intermediate_size,
+            packing=packing,
+        )
+        is original
+    )
+
+
+def test_pad_nvfp4_moe_scales_preserves_global_normalization():
+    num_experts, intermediate_size, padded_size = 2, 1856, 1920
+    scales = torch.linspace(
+        0.25,
+        1.0,
+        num_experts * intermediate_size,
+        dtype=torch.float32,
+    ).reshape(num_experts, intermediate_size, 1)
+
+    padded = _pad_nvfp4_moe_w13(
+        scales,
+        num_experts=num_experts,
+        num_shards=1,
+        intermediate_size=intermediate_size,
+        padded_intermediate_size=padded_size,
+    )
+
+    assert _nvfp4_compute_scale_factor(
+        padded, torch.bfloat16
+    ) == _nvfp4_compute_scale_factor(scales, torch.bfloat16)
 
 
 def _gpu_marlin_unsupported() -> bool:
