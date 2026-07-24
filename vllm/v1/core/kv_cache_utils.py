@@ -1754,6 +1754,9 @@ def _annotate_eagle_groups_deepseek_v4(
     for group in kv_cache_groups:
         if last_layer in group.layer_names:
             group.is_eagle_group = True
+            group.eagle_group_is_veto_exempt = (
+                spec_config.has_ephemeral_draft_context()
+            )
             break
 
 
@@ -2065,6 +2068,8 @@ def _project_kv_cache_groups_to_worker(
                 worker_layer_names,
                 group_spec,
                 is_eagle_group=group.is_eagle_group and bool(worker_layer_names),
+                eagle_group_is_veto_exempt=group.eagle_group_is_veto_exempt
+                and bool(worker_layer_names),
             )
         )
     return projected_groups

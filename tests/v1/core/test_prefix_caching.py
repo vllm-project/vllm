@@ -4309,3 +4309,151 @@ def test_swa_shared_prefix_reuse_under_zero_retention(monkeypatch):
     assert last_req_hit(retention=0, pin=False) == 0
     # retention=0 with the pin keeps the junction window -> reuse restored.
     assert last_req_hit(retention=0, pin=True) == 4 * block_size
+
+
+def test_eagle_group_veto_exempt_does_not_poison_other_groups():
+    """A veto-exempt eagle group (KVCacheGroupSpec.eagle_group_is_veto_exempt,
+    e.g. DSpark's draft-context group per
+    SpeculativeConfig.has_ephemeral_draft_context()) whose lookup finds zero
+    matching blocks must not zero out another group's independently
+    confirmed hit. Regular eagle groups (EAGLE/EAGLE3/MTP/DFlash without the
+    veto-exempt flag) already zero the whole request on a miss, unchanged,
+    and are covered by test_prefill_hybrid_model_eagle and friends."""
+    block_size = 16
+    kv_cache_config = KVCacheConfig(
+        num_blocks=31,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer1"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["layer2"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=2 * block_size,
+                ),
+                is_eagle_group=True,
+                eagle_group_is_veto_exempt=True,
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        use_eagle=True,
+    )
+    hash_fn = sha256
+
+    # 4 full blocks (64 tokens), divisible by block_size for simplicity.
+    token_ids = [i for i in range(4) for _ in range(block_size)]
+    req0 = make_request("0", token_ids, block_size, hash_fn)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
+    assert num_computed_tokens == 0
+    manager.allocate_slots(req0, len(token_ids), num_computed_tokens, computed_blocks)
+    block_hashes = req0.block_hashes
+    manager.free(req0)
+
+    # New request with the same tokens: normally both groups would hit.
+    # Simulate the veto-exempt group's data being unavailable (e.g. DSpark's
+    # sparse, request-specific draft KV) by evicting all of ITS cached block
+    # hashes only, leaving the full-attention group's cache untouched.
+    req1 = make_request("1", token_ids, block_size, hash_fn)
+    group1_hashes = [make_block_hash_with_group_id(h, 1) for h in block_hashes]
+    cache = manager.block_pool.cached_block_hash_to_block._cache
+    backup = {h: cache.pop(h) for h in group1_hashes if h in cache}
+    try:
+        computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
+    finally:
+        for h, v in backup.items():
+            cache[h] = v
+
+    # Without the fix, the veto-exempt group's total miss would zero the
+    # whole request (num_computed_tokens == 0) despite the full-attention
+    # group having real, independently-confirmed data available. The
+    # presence of a sliding-window group reserves 1 token for logprobs
+    # (max_cache_hit_length = 63), so the full-attention group's hit aligns
+    # down to 3 blocks (48 tokens), not the full 4: that reservation is
+    # orthogonal to veto-exemption and applies regardless of this fix.
+    assert num_computed_tokens == 3 * block_size
+    assert len(computed_blocks.blocks[0]) == 3
+    # The veto-exempt group itself has nothing confirmed at this boundary.
+    assert len(computed_blocks.blocks[1]) == 0
+    manager.free(req1)
+
+
+def test_non_veto_exempt_eagle_group_miss_still_zeros_whole_request():
+    """Regression test: an eagle group WITHOUT eagle_group_is_veto_exempt
+    (the default, matching EAGLE/EAGLE3/MTP/DFlash) must still zero the
+    whole request on a total miss, exactly as before this change. Identical
+    setup to test_eagle_group_veto_exempt_does_not_poison_other_groups
+    except for the flag under test."""
+    block_size = 16
+    kv_cache_config = KVCacheConfig(
+        num_blocks=31,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer1"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["layer2"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=2 * block_size,
+                ),
+                is_eagle_group=True,
+                eagle_group_is_veto_exempt=False,
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        use_eagle=True,
+    )
+    hash_fn = sha256
+
+    token_ids = [i for i in range(4) for _ in range(block_size)]
+    req0 = make_request("0", token_ids, block_size, hash_fn)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
+    manager.allocate_slots(req0, len(token_ids), num_computed_tokens, computed_blocks)
+    block_hashes = req0.block_hashes
+    manager.free(req0)
+
+    req1 = make_request("1", token_ids, block_size, hash_fn)
+    group1_hashes = [make_block_hash_with_group_id(h, 1) for h in block_hashes]
+    cache = manager.block_pool.cached_block_hash_to_block._cache
+    backup = {h: cache.pop(h) for h in group1_hashes if h in cache}
+    try:
+        computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
+    finally:
+        for h, v in backup.items():
+            cache[h] = v
+
+    assert num_computed_tokens == 0
+    assert len(computed_blocks.blocks[0]) == 0
+    assert len(computed_blocks.blocks[1]) == 0
+    manager.free(req1)

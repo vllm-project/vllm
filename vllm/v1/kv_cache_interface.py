@@ -947,6 +947,14 @@ class KVCacheGroupSpec:
     kv_cache_spec: KVCacheSpec
     # Whether this group contains EAGLE/MTP draft attention layers.
     is_eagle_group: bool = False
+    # Only meaningful when is_eagle_group is True. Whether a cache-hit-lookup
+    # miss on this eagle group is NOT authoritative and must not veto the
+    # cache-hit boundary that other (non-exempt) groups independently
+    # confirmed. See SpeculativeConfig.has_ephemeral_draft_context(): set for
+    # eagle-family methods whose draft KV has no request-independent reuse
+    # value (DSpark today), as opposed to methods like EAGLE/EAGLE3/MTP
+    # whose draft KV is genuinely, incrementally reusable.
+    eagle_group_is_veto_exempt: bool = False
 
 
 @dataclass
