@@ -276,6 +276,25 @@ impl RoundtripCase {
             sort_json_keys: true,
         }
     }
+
+    /// HY3 with `<think>` / `</think>` reasoning tags. The template selects
+    /// thinking via the string `reasoning_effort` kwarg (default `no_think`)
+    /// and ignores the boolean thinking kwargs, so this fixture exercises the
+    /// no_think path, where the prompt ends with a prefilled `<think></think>`.
+    /// `tool_call_mix` cannot roundtrip: history rendering strips reasoning
+    /// (non-interleaved mode), and tool-call turns append eos while the final
+    /// text turn does not, which a single `assistant_stop_suffix` cannot express.
+    fn hy_v3() -> Self {
+        Self {
+            model_id: "tencent/Hy3-preview",
+            assistant_stop_suffix: "", // last assistant turn renders without eos
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Always { value: false },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+        }
+    }
 }
 
 macro_rules! roundtrip_tests {
@@ -314,6 +333,7 @@ roundtrip_tests! {
     kimi_k25 => [tool_call_mix], // Kimi K2.5 strips reasoning in history
     gpt_oss => [tool_call_mix], // Harmony strips reasoning in history if there's no tool call
     inkling => [reasoning_and_content, tool_call_mix],
+    hy_v3 => [reasoning_and_content], // template strips reasoning in history; no_think only
 }
 
 /// Run the fixed reasoning+content fixture for one model/parser case.

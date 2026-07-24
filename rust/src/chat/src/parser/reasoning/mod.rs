@@ -7,10 +7,10 @@ use std::sync::{Arc, LazyLock};
 
 pub use vllm_parser::reasoning::{
     CohereCmdReasoningParser, DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser,
-    DeepSeekV4ReasoningParser, Glm45ReasoningParser, KimiK2ReasoningParser, KimiReasoningParser,
-    MiniMaxM2ReasoningParser, MiniMaxM3ReasoningParser, NemotronV3ReasoningParser,
-    Qwen3ReasoningParser, ReasoningDelta, ReasoningError, ReasoningParser, SeedOssReasoningParser,
-    Step3ReasoningParser, Step3p5ReasoningParser,
+    DeepSeekV4ReasoningParser, Glm45ReasoningParser, HyV3ReasoningParser, KimiK2ReasoningParser,
+    KimiReasoningParser, MiniMaxM2ReasoningParser, MiniMaxM3ReasoningParser,
+    NemotronV3ReasoningParser, Qwen3ReasoningParser, ReasoningDelta, ReasoningError,
+    ReasoningParser, SeedOssReasoningParser, Step3ReasoningParser, Step3p5ReasoningParser,
 };
 use vllm_tokenizer::DynTokenizer;
 
@@ -25,6 +25,7 @@ pub mod names {
     pub const GEMMA4: &str = "gemma4";
     pub const INKLING: &str = "inkling";
     pub const GLM45: &str = "glm45";
+    pub const HY_V3: &str = "hy_v3";
     pub const KIMI: &str = "kimi";
     pub const KIMI_K2: &str = "kimi_k2";
     pub const MINIMAX_M2: &str = "minimax_m2";
@@ -66,6 +67,7 @@ impl ReasoningParserFactory {
             .register_unified_dummy(names::GEMMA4)
             .register_unified_dummy(names::INKLING)
             .register_parser::<Glm45ReasoningParser>(names::GLM45)
+            .register_parser::<HyV3ReasoningParser>(names::HY_V3)
             .register_parser::<KimiReasoningParser>(names::KIMI)
             .register_parser::<KimiK2ReasoningParser>(names::KIMI_K2)
             .register_parser::<MiniMaxM2ReasoningParser>(names::MINIMAX_M2)
@@ -88,6 +90,8 @@ impl ReasoningParserFactory {
             .register_pattern("glm-4.7", names::GLM45)
             .register_pattern("glm-4.6", names::GLM45)
             .register_pattern("glm-4.5", names::GLM45)
+            .register_pattern("hy3", names::HY_V3)
+            .register_pattern("hy_v3", names::HY_V3)
             .register_pattern("kimi-k2", names::KIMI_K2)
             .register_pattern("kimi", names::KIMI)
             // step3p5 patterns must precede `step3`: substring matching would
