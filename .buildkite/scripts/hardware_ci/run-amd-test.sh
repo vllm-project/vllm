@@ -407,6 +407,12 @@ initialize_native_environment() {
   : "${HF_HOME:=/home/buildkite-agent/huggingface}"
   : "${HF_HUB_DOWNLOAD_TIMEOUT:=300}"
   : "${HF_HUB_ETAG_TIMEOUT:=60}"
+  if [[ "${VLLM_CI_EXPECTED_GPU_COUNT:-1}" == "0" ]]; then
+    # CPU-only native jobs intentionally reuse the ROCm wheel. Make that target
+    # explicit so platform selection does not depend on wheel metadata.
+    VLLM_TARGET_DEVICE=cpu
+    export VLLM_TARGET_DEVICE
+  fi
   export TMPDIR VLLM_RPC_BASE_PATH
   export TORCHINDUCTOR_CACHE_DIR TRITON_CACHE_DIR VLLM_CACHE_ROOT XDG_CACHE_HOME
   export HF_HOME HF_HUB_DOWNLOAD_TIMEOUT HF_HUB_ETAG_TIMEOUT
