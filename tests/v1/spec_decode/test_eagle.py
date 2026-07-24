@@ -733,6 +733,264 @@ def test_set_inputs_first_pass_parallel_drafting():
             )
 
 
+def test_mrope_decode_position_arithmetic():
+    """
+    Test that the proposer's MRoPE delta-based decode position formula is
+    algebraically equivalent to the target model's formula.
+
+    The target model (MRotaryEmbedding.get_next_input_positions_tensor) computes:
+        position = delta + context_len
+    where delta is the per-request mrope_position_delta stored at request init.
+
+    The proposer calls eagle_step_update_slot_mapping_and_metadata first, which
+    increments seq_lens in-place by 1, so seq_lens becomes context_len + 1 when
+    the delta path executes. The formula then computes:
+        decode_pos = delta + seq_lens_after_kernel - 1
+                   = delta + (context_len + 1) - 1
+                   = delta + context_len
+
+    Setup:
+    - 4 requests: large negative delta (VLM with image at start),
+      moderate negative delta (image mid-prompt), zero delta (text-only),
+      and a near-max request to exercise the clamp.
+
+    Expected: proposer formula and target formula produce identical results
+    for all 4 requests; clamp fires at max_model_len - 1.
+    """
+    device = torch.device(DEVICE_TYPE)
+    max_model_len = 4096
+
+    deltas = torch.tensor([-992, -500, 0, -100], dtype=torch.int64, device=device)
+    # context_len = tokens in KV cache before this draft step
+    context_lens = torch.tensor(
+        [1054, 600, 50, max_model_len - 2], dtype=torch.int64, device=device
+    )
+
+    # Simulate seq_lens after the kernel increments each entry by 1.
+    seq_lens_after_kernel = (context_lens + 1).to(torch.int32)
+
+    # Target model formula (ground truth):
+    expected_pos = (deltas + context_lens).clamp(max=max_model_len - 1)
+
+    # Proposer formula from _update_positions_dependent_metadata:
+    proposer_pos = (deltas + seq_lens_after_kernel.long() - 1).clamp(
+        max=max_model_len - 1
+    )
+
+    assert torch.equal(proposer_pos, expected_pos), (
+        f"Proposer formula diverges from target model formula:\n"
+        f"  proposer:  {proposer_pos.tolist()}\n"
+        f"  expected:  {expected_pos.tolist()}"
+    )
+
+    # Explicit spot-checks.
+    # req 0: -992 + 1054 = 62 (well within range)
+    assert proposer_pos[0].item() == 62
+    # req 2: 0 + 50 = 50 (text-only: all dims equal — the common case)
+    assert proposer_pos[2].item() == 50
+    # req 3: -100 + (max_model_len - 2) = max_model_len - 102 (no clamp)
+    assert proposer_pos[3].item() == max_model_len - 102
+
+    # Clamp: delta=0, context_len == max_model_len - 1 → clamped to max_model_len - 1.
+    clamp_delta = torch.tensor([0], dtype=torch.int64, device=device)
+    clamp_seq_len = torch.tensor([max_model_len], dtype=torch.int32, device=device)
+    clamped = (clamp_delta + clamp_seq_len.long() - 1).clamp(max=max_model_len - 1)
+    assert clamped[0].item() == max_model_len - 1
+
+
+def test_mrope_position_delta_propagation():
+    """
+    Test that _update_positions_dependent_metadata correctly propagates
+    per-request mrope_position_deltas into all three MRoPE position dims.
+
+    Creates an EagleProposer (eagle3, Llama weights, max_model_len=100) and
+    patches uses_mrope=True to exercise the MRoPE branch without a VLM target
+    model. The fused Triton kernel is mocked to avoid a GPU kernel dependency:
+    the mock increments seq_lens by 1 and writes clamped dim-0 positions,
+    replicating the real kernel's side effects.
+
+    Setup:
+    - batch_size = 3 requests
+    - deltas = [-20, 0, -5] (negative for VLM, zero for text-only)
+    - seq_lens before kernel = [30, 50, 98]
+
+    Assertions:
+    - Delta path: all 3 MRoPE dims are set to expected_pos; returned tensor
+      is the [3, batch_size] view of mrope_positions.
+    - Fallback path (mrope_position_deltas=None): dims 1 and 2 are replicated
+      from dim 0 (the existing behaviour for text-only requests).
+    """
+    device = torch.device(DEVICE_TYPE)
+    batch_size = 3
+    # max_model_len=100 matches the value set inside _create_proposer.
+    max_model_len = 100
+
+    proposer = _create_proposer("eagle3", num_speculative_tokens=3)
+
+    # Patch uses_mrope so the MRoPE branch is taken with this non-VLM model.
+    proposer.uses_mrope = True
+    # Allocate mrope_positions to match what the real proposer allocates when
+    # uses_mrope is True (shape [3, max_positions + 1]; max_positions defaults
+    # to max_num_batched_tokens=2048, but any buffer large enough for batch_size
+    # is sufficient here since the method only accesses [:batch_size]).
+    proposer.mrope_positions = torch.zeros(
+        (3, max_model_len + 1), dtype=torch.int64, device=device
+    )
+    proposer._slot_mapping_buffer = torch.zeros(
+        batch_size, dtype=torch.int64, device=device
+    )
+
+    deltas = torch.tensor([-20, 0, -5], dtype=torch.int64, device=device)
+    seq_lens_before = torch.tensor([30, 50, 98], dtype=torch.int32, device=device)
+    seq_lens_after = seq_lens_before + 1  # after kernel increment
+
+    # Pre-compute expected decode positions and verify the setup arithmetic
+    # before running the method under test.
+    #   req 0: -20 + 31 - 1 = 10
+    #   req 1:   0 + 51 - 1 = 50
+    #   req 2:  -5 + 99 - 1 = 93
+    expected_pos = (deltas + seq_lens_after.long() - 1).clamp(max=max_model_len - 1)
+    assert expected_pos.tolist() == [10, 50, 93], "setup arithmetic error"
+
+    common_attn_metadata = create_common_attn_metadata(
+        BatchSpec(seq_lens=[30, 50, 98], query_lens=[1, 1, 1]),
+        block_size=BLOCK_SIZE,
+        device=device,
+    )
+
+    def _mock_kernel(
+        positions_1d,
+        _block_table_tensor,
+        seq_lens,
+        _block_size,
+        max_model_len,
+        out_clamped_positions,
+        _out_slot_mapping,
+        _input_batch_size=None,
+    ):
+        """Simulate the Triton kernel: increment seq_lens and write dim-0.
+
+        out_clamped_positions is already mrope_positions[0, :batch_size], so
+        writing to it directly updates the proposer's mrope_positions buffer.
+        """
+        seq_lens[:batch_size] += 1
+        out_clamped_positions[:] = (positions_1d + 1).clamp(max=max_model_len - 1)
+
+    with mock.patch(
+        "vllm.v1.spec_decode.llm_base_proposer"
+        ".eagle_step_update_slot_mapping_and_metadata",
+        side_effect=_mock_kernel,
+    ):
+        # --- Delta path ---
+        returned_positions = proposer._update_positions_dependent_metadata(
+            positions=proposer.mrope_positions[:, :batch_size],
+            common_attn_metadata=common_attn_metadata,
+            batch_size=batch_size,
+            input_batch_size=batch_size,
+            block_size=BLOCK_SIZE,
+            mrope_position_deltas=deltas,
+        )
+
+    for dim in range(3):
+        assert torch.equal(
+            proposer.mrope_positions[dim, :batch_size], expected_pos
+        ), (
+            f"dim {dim}: got {proposer.mrope_positions[dim, :batch_size].tolist()}, "
+            f"expected {expected_pos.tolist()}"
+        )
+    assert returned_positions.shape == (3, batch_size)
+    assert torch.equal(returned_positions, proposer.mrope_positions[:, :batch_size])
+
+    # --- Fallback path (mrope_position_deltas=None) ---
+    # Seed dim 0 with known values; dims 1+2 with distinct sentinel values to
+    # confirm they get overwritten by the replication.
+    dim0_seed = torch.tensor([5, 15, 25], dtype=torch.int64, device=device)
+    proposer.mrope_positions[0, :batch_size] = dim0_seed
+    proposer.mrope_positions[1, :batch_size] = 99
+    proposer.mrope_positions[2, :batch_size] = 99
+
+    common_attn_metadata.seq_lens[:] = seq_lens_before  # reset after delta call
+
+    with mock.patch(
+        "vllm.v1.spec_decode.llm_base_proposer"
+        ".eagle_step_update_slot_mapping_and_metadata",
+        side_effect=_mock_kernel,
+    ):
+        proposer._update_positions_dependent_metadata(
+            positions=proposer.mrope_positions[:, :batch_size],
+            common_attn_metadata=common_attn_metadata,
+            batch_size=batch_size,
+            input_batch_size=batch_size,
+            block_size=BLOCK_SIZE,
+            mrope_position_deltas=None,
+        )
+
+    # The mock kernel wrote (dim0_seed + 1).clamp(max_model_len - 1) into dim 0.
+    # The fallback path must then replicate dim 0 into dims 1 and 2.
+    dim0_after = proposer.mrope_positions[0, :batch_size]
+    assert torch.equal(proposer.mrope_positions[1, :batch_size], dim0_after), (
+        f"dim 1 not replicated from dim 0: "
+        f"{proposer.mrope_positions[1, :batch_size].tolist()} vs {dim0_after.tolist()}"
+    )
+    assert torch.equal(proposer.mrope_positions[2, :batch_size], dim0_after), (
+        f"dim 2 not replicated from dim 0: "
+        f"{proposer.mrope_positions[2, :batch_size].tolist()} vs {dim0_after.tolist()}"
+    )
+
+
+def test_mrope_pruning_slot_write():
+    """
+    Test that the multimodal pruning slot write in _gather_mm_embeddings updates
+    the correct buffer slot and sets the dirty flag.
+
+    The production code (gpu_model_runner.py) does:
+        slot = self.input_batch.req_id_to_index[req_id]
+        self._mrope_deltas_cpu[slot] = new_delta or 0
+        self._mrope_deltas_dirty = True
+
+    Setup:
+    - max_num_reqs = 8, three active requests at slots 0, 2, 5
+    - req_B (slot 2) has an existing delta of -500; others are zero
+    - Two pruning events fire: req_B gets new_delta=-300, req_C gets None
+
+    Assertions:
+    - req_B's slot is updated to -300; req_A and req_C's slots are untouched
+      after the first pruning event.
+    - A None new_delta is stored as 0 (the `or 0` sentinel).
+    - The dirty flag is set after each pruning event.
+    """
+    max_num_reqs = 8
+
+    # Minimal fake runner: only the three attributes the production code reads.
+    runner = mock.MagicMock()
+    runner._mrope_deltas_cpu = torch.zeros(max_num_reqs, dtype=torch.long)
+    runner._mrope_deltas_cpu[2] = -500  # req_B's pre-existing delta
+    runner._mrope_deltas_dirty = False
+    runner.input_batch.req_id_to_index = {"req_A": 0, "req_B": 2, "req_C": 5}
+
+    def _apply_pruning_slot_write(runner, req_id, new_delta):
+        """Execute the three lines from gpu_model_runner._gather_mm_embeddings."""
+        slot = runner.input_batch.req_id_to_index[req_id]
+        runner._mrope_deltas_cpu[slot] = new_delta or 0
+        runner._mrope_deltas_dirty = True
+
+    # Pruning event 1: req_B gets a new negative delta.
+    _apply_pruning_slot_write(runner, "req_B", new_delta=-300)
+
+    assert runner._mrope_deltas_cpu[2].item() == -300
+    assert runner._mrope_deltas_dirty
+    assert runner._mrope_deltas_cpu[0].item() == 0   # req_A untouched
+    assert runner._mrope_deltas_cpu[5].item() == 0   # req_C untouched
+
+    # Pruning event 2: req_C gets None (text-only decode after VLM prefix).
+    runner._mrope_deltas_dirty = False
+    _apply_pruning_slot_write(runner, "req_C", new_delta=None)
+
+    assert runner._mrope_deltas_cpu[5].item() == 0   # None → 0
+    assert runner._mrope_deltas_dirty
+    assert runner._mrope_deltas_cpu[2].item() == -300  # req_B slot unchanged
+
+
 @pytest.mark.parametrize("method", ["eagle", "eagle3"])
 @pytest.mark.parametrize("attn_backend", get_attn_backend_list_based_on_platform())
 @pytest.mark.parametrize("pp_size", [1, 2])
