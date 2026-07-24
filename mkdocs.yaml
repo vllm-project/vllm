@@ -86,6 +86,9 @@ plugins:
         - "vllm.transformers_utils.configs"
         - "vllm.transformers_utils.processors"
         - !ENV [API_AUTONAV_EXCLUDE, "re:^$"]  # Match nothing by default
+  - gen-files:
+      scripts:
+        - docs/mkdocs/plugins/gen_env_vars.py
   - mkdocstrings:
       handlers:
         python:

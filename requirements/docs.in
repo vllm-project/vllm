@@ -11,6 +11,7 @@ mkdocs-redirects
 regex
 ruff
 pydantic
+pydantic-settings  # required by docs/mkdocs/plugins/gen_env_vars.py
 
 # For generating argparse docs.
 # Adding requirements here should only be used as a last resort.

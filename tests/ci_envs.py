@@ -8,13 +8,18 @@ import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from vllm.envs import maybe_convert_bool
-
 if TYPE_CHECKING:
     VLLM_CI_NO_SKIP: bool = False
     VLLM_CI_DTYPE: str | None = None
     VLLM_CI_HEAD_DTYPE: str | None = None
     VLLM_CI_HF_DTYPE: str | None = None
+
+
+def _maybe_convert_bool(value: str | None) -> bool | None:
+    if value is None:
+        return None
+    return bool(int(value))
+
 
 environment_variables: dict[str, Callable[[], Any]] = {
     # A model family has many models with the same architecture.
@@ -28,7 +33,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Allow changing the head dtype used by transformers in tests
     "VLLM_CI_HF_DTYPE": lambda: os.getenv("VLLM_CI_HF_DTYPE", None),
     # Allow control over whether tests use enforce_eager
-    "VLLM_CI_ENFORCE_EAGER": lambda: maybe_convert_bool(
+    "VLLM_CI_ENFORCE_EAGER": lambda: _maybe_convert_bool(
         os.getenv("VLLM_CI_ENFORCE_EAGER", None)
     ),
 }
