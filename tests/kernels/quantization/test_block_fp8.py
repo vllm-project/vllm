@@ -120,6 +120,35 @@ def test_per_token_group_quant_fp8(
             assert scale.stride()[-1] == get_tma_aligned_size(num_tokens, 4)
 
 
+@pytest.mark.skipif(
+    current_platform.is_fp8_fnuz(),
+    reason="This platform supports e4m3fnuz, not e4m3fn.",
+)
+@torch.inference_mode()
+def test_per_token_group_quant_fp8_fp8_input():
+    group_size = 128
+    torch.manual_seed(0)
+    x_fp8 = torch.randn(8, 2 * group_size, dtype=torch.bfloat16).to(torch.float8_e4m3fn)
+
+    # fp8 -> float32 is lossless and mirrors the kernel's own upcast, so the
+    # native reference over the upcast values is an exact stand-in.
+    ref_out, ref_scale = native_per_token_group_quant_fp8(
+        x_fp8.to(torch.float32), group_size
+    )
+    out, scale = per_token_group_quant_fp8(x_fp8, group_size)
+
+    assert out.dtype == torch.float8_e4m3fn
+    if current_platform.is_rocm():
+        ulp = fp8_ulp_distance(out, ref_out)
+        assert (ulp <= 1).all()
+        assert float((ulp > 0).float().mean()) < 5e-4
+    else:
+        assert torch.allclose(
+            out.to(torch.float32), ref_out.to(torch.float32), rtol=0.15
+        )
+    assert torch.allclose(scale, ref_scale)
+
+
 @pytest.mark.parametrize(
     "M,N,K,block_size,out_dtype,seed",
     itertools.product(M, N, K, BLOCK_SIZE, OUT_DTYPES, SEEDS),
