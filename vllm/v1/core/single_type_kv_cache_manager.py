@@ -1298,6 +1298,15 @@ class MambaManager(SingleTypeKVCacheManager):
             return computed_blocks, hit_length
 
         max_num_blocks = max_length // block_size
+        if drop_eagle_block and max_num_blocks > 0:
+            # EAGLE/MTP: drop the final matched page. Its recurrent-state snapshot
+            # may have been taken over draft tokens that verification later rejects,
+            # so the state must be restored from the previous page boundary and
+            # recomputed forward. FullAttentionManager (see find_longest_cache_hit
+            # above) pops the last block; Mamba keeps only the rightmost real block
+            # with the prefix null-padded, so a literal pop would delete the state
+            # block itself -- lower the search ceiling by one page instead.
+            max_num_blocks -= 1
         # Search from right to left and early stop when a match is found.
         for i in range(max_num_blocks - 1, -1, -1):
             if cached_block := block_pool.get_cached_block(
