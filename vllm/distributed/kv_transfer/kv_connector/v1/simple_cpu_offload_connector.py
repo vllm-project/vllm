@@ -76,6 +76,12 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
 
         lazy_offload = bool(extra_config.get("lazy_offload", False))
 
+        disk_path = extra_config.get("disk_path", None) or None
+        disk_capacity_bytes = int(
+            extra_config.get("disk_capacity_bytes", 100 * (1024**3))
+        )
+        disk_buffer_slots = max(1, int(extra_config.get("disk_buffer_slots", 2)))
+
         self.scheduler_manager: SimpleCPUOffloadScheduler | None = None
         self.worker_handler: SimpleCPUOffloadWorker | None = None
 
@@ -88,11 +94,12 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
 
         logger.info(
             "SimpleCPUOffloadConnector: role=%s, "
-            "per_rank=%.2f GB, world_size=%d, mode=%s",
+            "per_rank=%.2f GB, world_size=%d, mode=%s, disk=%s",
             role.name,
             cpu_capacity_per_rank / (1024**3),
             world_size,
             "lazy" if lazy_offload else "eager",
+            disk_path or "none",
         )
 
         if role == KVConnectorRole.SCHEDULER:
@@ -109,10 +116,16 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 scheduler_block_size=scheduler_block_size,
                 hash_block_size=hash_block_size,
                 lazy_offload=lazy_offload,
+                disk_capacity_bytes=disk_capacity_bytes if disk_path else 0,
             )
         elif role == KVConnectorRole.WORKER:
             self.worker_handler = SimpleCPUOffloadWorker(
-                vllm_config, kv_cache_config, cpu_capacity_per_rank
+                vllm_config,
+                kv_cache_config,
+                cpu_capacity_per_rank,
+                disk_path=disk_path,
+                disk_capacity_bytes=disk_capacity_bytes,
+                disk_buffer_slots=disk_buffer_slots,
             )
 
     # --- Worker-side methods ---
