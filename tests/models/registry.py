@@ -1398,6 +1398,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "fixie-ai/ultravox-v0_5-llama-3_2-1b",
         trust_remote_code=True,
     ),
+    "VibeVoiceAsrForConditionalGeneration": _HfExamplesInfo(
+        "microsoft/VibeVoice-ASR-HF",
+        min_transformers_version="5.13.0",
+    ),
     "VoxtralForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Voxtral-Mini-3B-2507",
         tokenizer_mode="mistral",
