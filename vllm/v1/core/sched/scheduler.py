@@ -1213,6 +1213,26 @@ class Scheduler(SchedulerInterface):
         if request.spec_token_ids:
             request.spec_token_ids = []
         request.num_preemptions += 1
+        # #41190: any output frames already dispatched at preemption time
+        # are now stale and must be discarded when they eventually return
+        # via AsyncScheduler._update_request_with_output. We drain the
+        # entire placeholder budget into `async_tokens_to_discard`; each
+        # returning frame consumes exactly its own placeholder contribution
+        # (`num_sampled_tokens_per_step + num_scheduled_spec`) — the same
+        # units `num_output_placeholders` was accumulated in
+        # (`_update_after_schedule`) — so the counter reaches 0 precisely
+        # when the last in-flight frame has returned, regardless of how
+        # many spec tokens each frame carried or how many frames PP had in
+        # flight. Without this drain, stale frames would be appended onto a
+        # request whose `num_computed_tokens` is reset to 0, producing IMA
+        # a few decode steps after resume.
+        #
+        # Use +=, not =: a request may be re-preempted (e.g. again during
+        # post-resume prefill, when placeholders are still 0) before the
+        # previous wave of stale frames has returned. Assignment would
+        # wipe the leftover discard count and let those frames apply.
+        request.async_tokens_to_discard += request.num_output_placeholders
+        request.num_output_placeholders = 0
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
 
@@ -1709,7 +1729,9 @@ class Scheduler(SchedulerInterface):
             # Check for stop and update request status.
             if new_token_ids:
                 new_token_ids, stopped = self._update_request_with_output(
-                    request, new_token_ids
+                    request,
+                    new_token_ids,
+                    num_scheduled_spec=len(scheduled_spec_token_ids or ()),
                 )
             elif request.pooling_params and pooler_output is not None:
                 # Pooling stops as soon as there is output.
@@ -1993,8 +2015,15 @@ class Scheduler(SchedulerInterface):
         return False
 
     def _update_request_with_output(
-        self, request: Request, new_token_ids: list[int]
+        self,
+        request: Request,
+        new_token_ids: list[int],
+        num_scheduled_spec: int = 0,
     ) -> tuple[list[int], bool]:
+        # `num_scheduled_spec` is unused in the sync scheduler; it exists so
+        # AsyncScheduler can decrement `async_tokens_to_discard` by the exact
+        # placeholder budget that this frame occupied (see #41190 follow-up).
+        del num_scheduled_spec
         # Append generated tokens and check for stop. Note that if
         # a request is still being prefilled, we expect the model runner
         # to return empty token ids for the request.
@@ -2332,15 +2361,10 @@ class Scheduler(SchedulerInterface):
             # running queue in FIFO order.
             while self.running:
                 request = self.running.pop()
+                # _preempt_request centralizes the drain of in-flight async /
+                # spec-decode frames (num_output_placeholders ->
+                # async_tokens_to_discard) — see #41190.
                 self._preempt_request(request, timestamp)
-                # For async scheduling, any output frames already in flight at
-                # preemption time are now stale and must be discarded when they
-                # return. num_output_placeholders is exactly that count: 0 if
-                # the engine has drained (e.g. pause_generation(keep) waited
-                # for idle), 1 for vanilla async mid-step, or 1 + spec/PP frames
-                # otherwise.
-                request.async_tokens_to_discard = request.num_output_placeholders
-                request.num_output_placeholders = 0
 
             # Clear scheduled request ids cache. Since we are forcing preemption
             # + resumption in the same step, we must act as if these requests were

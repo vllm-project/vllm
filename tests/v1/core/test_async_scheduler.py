@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from collections import deque
 from unittest.mock import Mock
 
@@ -7,7 +8,7 @@ import pytest
 
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar
 from vllm.v1.utils import ConstantList
@@ -331,6 +332,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
 
 def test_no_placeholder_underflow_on_discarded_spec_frame():
     num_spec = 5
+    frame_size = 1 + num_spec
     scheduler = create_scheduler(
         async_scheduling=True,
         num_speculative_tokens=num_spec,
@@ -342,15 +344,16 @@ def test_no_placeholder_underflow_on_discarded_spec_frame():
     scheduler.running.append(req)
     req.status = RequestStatus.RUNNING
 
+    # A resumed frame is pending while a stale spec frame returns.
     req.num_output_placeholders = 1
-    req.async_tokens_to_discard = num_spec
+    req.async_tokens_to_discard = frame_size
     computed_before = req.num_computed_tokens
 
     scheduler_output = SchedulerOutput(
         scheduled_new_reqs=[],
         scheduled_cached_reqs=CachedRequestData.make_empty(),
-        num_scheduled_tokens={req.request_id: num_spec + 1},
-        total_num_scheduled_tokens=num_spec + 1,
+        num_scheduled_tokens={req.request_id: frame_size},
+        total_num_scheduled_tokens=frame_size,
         scheduled_encoder_inputs={},
         scheduled_spec_decode_tokens={req.request_id: [10] * num_spec},
         num_common_prefix_blocks=[],
@@ -370,5 +373,306 @@ def test_no_placeholder_underflow_on_discarded_spec_frame():
 
     assert req.num_output_placeholders == 1
     assert req.num_computed_tokens == computed_before
-    assert req.async_tokens_to_discard == num_spec - 1
+    assert req.async_tokens_to_discard == 0
     assert req.status == RequestStatus.RUNNING
+
+
+@pytest.mark.parametrize("num_spec", [0, 1, 3, 5])
+def test_preempt_drain_matches_inflight_frames(num_spec: int):
+    """A stale preempted frame must consume its full placeholder budget."""
+    kwargs: dict = dict(async_scheduling=True, max_num_seqs=4)
+    if num_spec > 0:
+        kwargs["num_speculative_tokens"] = num_spec
+        kwargs["speculative_method"] = "ngram_gpu"
+
+    scheduler = create_scheduler(**kwargs)
+    (req,) = create_requests(num_requests=1, num_tokens=8, max_tokens=32)
+    scheduler.add_request(req)
+
+    so_prefill = scheduler.schedule()
+    assert so_prefill.num_scheduled_tokens[req.request_id] == req.num_prompt_tokens
+    scheduler.update_from_output(so_prefill, _make_model_runner_output(so_prefill))
+    initial_output_len = len(req.output_token_ids)
+    assert initial_output_len == 1
+    assert req.num_output_placeholders == 0
+
+    if num_spec > 0:
+        scheduler.update_draft_token_ids(
+            DraftTokenIds([req.request_id], [list(range(100, 100 + num_spec))])
+        )
+
+    so_decode = scheduler.schedule()
+    expected_tokens = 1 + num_spec
+    assert so_decode.num_scheduled_tokens[req.request_id] == expected_tokens
+    assert req.num_output_placeholders == expected_tokens
+
+    scheduler.running.remove(req)
+    scheduler._preempt_request(req, time.monotonic())
+    assert req.status == RequestStatus.PREEMPTED
+    assert req.num_output_placeholders == 0
+    assert req.async_tokens_to_discard == expected_tokens
+
+    mro_stale = ModelRunnerOutput(
+        req_ids=[req.request_id],
+        req_id_to_index={req.request_id: 0},
+        sampled_token_ids=[[999] * expected_tokens],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(so_decode, mro_stale)
+    assert len(req.output_token_ids) == initial_output_len
+
+    assert req.async_tokens_to_discard == 0
+
+    so_re_prefill = scheduler.schedule()
+    assert so_re_prefill.num_scheduled_tokens.get(req.request_id, 0) > 0
+    scheduler.update_from_output(
+        so_re_prefill, _make_model_runner_output(so_re_prefill)
+    )
+    assert len(req.output_token_ids) == initial_output_len + 1
+
+    if num_spec > 0:
+        scheduler.update_draft_token_ids(
+            DraftTokenIds([req.request_id], [list(range(200, 200 + num_spec))])
+        )
+    so_decode2 = scheduler.schedule()
+    assert so_decode2.num_scheduled_tokens.get(req.request_id, 0) > 0
+    len_before = len(req.output_token_ids)
+    scheduler.update_from_output(so_decode2, _make_model_runner_output(so_decode2))
+    assert len(req.output_token_ids) > len_before
+
+
+def _make_spec_scheduler_output(
+    req_id: str, num_sampled: int, num_scheduled_spec: int
+) -> SchedulerOutput:
+    frame_size = num_sampled + num_scheduled_spec
+    return SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={req_id: frame_size},
+        total_num_scheduled_tokens=frame_size,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens=(
+            {req_id: [10] * num_scheduled_spec} if num_scheduled_spec else {}
+        ),
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+
+def test_preempt_with_zero_placeholders_is_noop():
+    """Preempting with no in-flight frame must not add a discard obligation."""
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        num_speculative_tokens=3,
+        speculative_method="ngram_gpu",
+    )
+    (req,) = create_requests(num_requests=1, num_tokens=8, max_tokens=32)
+    scheduler.add_request(req)
+
+    so_prefill = scheduler.schedule()
+    scheduler.update_from_output(so_prefill, _make_model_runner_output(so_prefill))
+    assert req.num_output_placeholders == 0
+    assert req.async_tokens_to_discard == 0
+
+    scheduler.running.remove(req)
+    scheduler._preempt_request(req, time.monotonic())
+
+    assert req.async_tokens_to_discard == 0
+    assert req.num_output_placeholders == 0
+
+
+def test_repreempt_accumulates_async_tokens_to_discard():
+    """Re-preemption must preserve the prior stale-frame discard obligation."""
+    num_spec = 3
+    frame_size = 1 + num_spec
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        num_speculative_tokens=num_spec,
+        speculative_method="ngram_gpu",
+    )
+    (req,) = create_requests(num_requests=1, num_tokens=8, max_tokens=64)
+    scheduler.add_request(req)
+
+    so_prefill = scheduler.schedule()
+    scheduler.update_from_output(so_prefill, _make_model_runner_output(so_prefill))
+    scheduler.update_draft_token_ids(
+        DraftTokenIds([req.request_id], [list(range(100, 100 + num_spec))])
+    )
+    scheduler.schedule()
+    assert req.num_output_placeholders == frame_size
+
+    scheduler.running.remove(req)
+    scheduler._preempt_request(req, time.monotonic())
+    assert req.async_tokens_to_discard == frame_size
+    assert req.num_output_placeholders == 0
+
+    so_resume = scheduler.schedule()
+    assert req.request_id in so_resume.num_scheduled_tokens
+    assert req.status == RequestStatus.RUNNING
+    leftover = req.async_tokens_to_discard
+    assert leftover == frame_size
+    new_placeholders = req.num_output_placeholders
+
+    scheduler.running.remove(req)
+    scheduler._preempt_request(req, time.monotonic())
+    assert req.async_tokens_to_discard == leftover + new_placeholders, (
+        f"expected {leftover + new_placeholders}, got {req.async_tokens_to_discard}"
+    )
+    assert req.num_output_placeholders == 0
+
+    req.status = RequestStatus.RUNNING
+    if req not in scheduler.running:
+        scheduler.running.append(req)
+    leftover = req.async_tokens_to_discard
+    req.num_output_placeholders = frame_size
+    scheduler.running.remove(req)
+    scheduler._preempt_request(req, time.monotonic())
+    assert req.async_tokens_to_discard == leftover + frame_size
+    assert req.num_output_placeholders == 0
+
+    before = req.async_tokens_to_discard
+    assert before > 0
+    req.status = RequestStatus.RUNNING
+    if req not in scheduler.running:
+        scheduler.running.append(req)
+    scheduler.running.remove(req)
+    scheduler._preempt_request(req, time.monotonic())
+    assert req.async_tokens_to_discard == before
+
+
+@pytest.mark.parametrize("num_spec", [0, 1, 3, 5])
+def test_preempt_drain_ignores_actual_token_count(num_spec: int):
+    """Discard accounting must use the scheduled frame size, not its output."""
+    kwargs: dict = dict(async_scheduling=True, max_num_seqs=4)
+    if num_spec > 0:
+        kwargs["num_speculative_tokens"] = num_spec
+        kwargs["speculative_method"] = "ngram_gpu"
+
+    scheduler = create_scheduler(**kwargs)
+    (req,) = create_requests(num_requests=1, num_tokens=8, max_tokens=32)
+    scheduler.add_request(req)
+
+    so_prefill = scheduler.schedule()
+    scheduler.update_from_output(so_prefill, _make_model_runner_output(so_prefill))
+    if num_spec > 0:
+        scheduler.update_draft_token_ids(
+            DraftTokenIds([req.request_id], [list(range(100, 100 + num_spec))])
+        )
+
+    so_decode = scheduler.schedule()
+    frame_size = 1 + num_spec
+    assert req.num_output_placeholders == frame_size
+
+    scheduler.running.remove(req)
+    scheduler._preempt_request(req, time.monotonic())
+    assert req.async_tokens_to_discard == frame_size
+
+    mro_partial = ModelRunnerOutput(
+        req_ids=[req.request_id],
+        req_id_to_index={req.request_id: 0},
+        sampled_token_ids=[[999]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(so_decode, mro_partial)
+
+    assert req.async_tokens_to_discard == 0
+
+
+@pytest.mark.parametrize("num_spec", [0, 3])
+def test_reset_prefix_cache_drains_spec_frames(num_spec: int):
+    """Prefix-cache reset must drain stale frames through preemption."""
+    kwargs: dict = dict(async_scheduling=True, max_num_seqs=4)
+    if num_spec > 0:
+        kwargs["num_speculative_tokens"] = num_spec
+        kwargs["speculative_method"] = "ngram_gpu"
+
+    scheduler = create_scheduler(**kwargs)
+    (req,) = create_requests(num_requests=1, num_tokens=8, max_tokens=32)
+    scheduler.add_request(req)
+
+    so_prefill = scheduler.schedule()
+    scheduler.update_from_output(so_prefill, _make_model_runner_output(so_prefill))
+    if num_spec > 0:
+        scheduler.update_draft_token_ids(
+            DraftTokenIds([req.request_id], [list(range(100, 100 + num_spec))])
+        )
+
+    so_decode = scheduler.schedule()
+    frame_size = 1 + num_spec
+    assert req.num_output_placeholders == frame_size
+
+    scheduler.reset_prefix_cache(reset_running_requests=True)
+    assert req.status == RequestStatus.PREEMPTED
+    assert req.async_tokens_to_discard == frame_size
+    assert req.num_output_placeholders == 0
+
+    mro_stale = ModelRunnerOutput(
+        req_ids=[req.request_id],
+        req_id_to_index={req.request_id: 0},
+        sampled_token_ids=[[999] * frame_size],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(so_decode, mro_stale)
+    assert req.async_tokens_to_discard == 0
+
+
+@pytest.mark.parametrize(
+    "frame_sizes",
+    [
+        [1, 1],
+        [4, 4],
+        [4, 1],
+        [1, 4],
+        [4, 4, 4],
+    ],
+    ids=[
+        "two_non_spec",
+        "two_spec",
+        "spec_then_non_spec",
+        "non_spec_then_spec",
+        "three_spec",
+    ],
+)
+def test_multi_inflight_frames_drain_by_own_frame_size(frame_sizes: list[int]):
+    """Each stale frame must consume its own scheduled placeholder budget."""
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        num_speculative_tokens=3,
+        speculative_method="ngram_gpu",
+    )
+    (req,) = create_requests(num_requests=1, max_tokens=20)
+    req.num_computed_tokens = req.num_tokens
+    scheduler.requests[req.request_id] = req
+    scheduler.running.append(req)
+    req.status = RequestStatus.RUNNING
+
+    req.num_output_placeholders = 0
+    req.async_tokens_to_discard = sum(frame_sizes)
+
+    running_total = req.async_tokens_to_discard
+    for frame_size in frame_sizes:
+        num_scheduled_spec = frame_size - 1
+        scheduler_output = _make_spec_scheduler_output(
+            req.request_id, num_sampled=1, num_scheduled_spec=num_scheduled_spec
+        )
+        model_runner_output = ModelRunnerOutput(
+            req_ids=[req.request_id],
+            req_id_to_index={req.request_id: 0},
+            sampled_token_ids=[[999] * frame_size],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        )
+        scheduler.update_from_output(scheduler_output, model_runner_output)
+        running_total -= frame_size
+        assert req.async_tokens_to_discard == running_total
+
+    assert req.async_tokens_to_discard == 0
+    assert req.num_output_placeholders == 0
