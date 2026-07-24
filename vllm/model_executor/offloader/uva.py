@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """UVA-based CPU offloading using Unified Virtual Addressing."""
 
-from collections.abc import Generator
+from collections.abc import Generator, Iterable
 
 import torch
 import torch.nn as nn
@@ -47,6 +47,40 @@ class UVAOffloader(BaseOffloader):
         self.uva_offloading = (
             is_uva_available() and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_UVA
         )
+
+    @staticmethod
+    def _named_state_tensors(module: nn.Module) -> tuple[tuple[str, torch.Tensor], ...]:
+        """Return the module tensors accepted by functional_call.
+
+        This mirrors the tensor set from state_dict() without invoking
+        state_dict() in forward, which is not torch.compile traceable.
+        """
+        state: list[tuple[str, torch.Tensor]] = []
+        state.extend(module.named_parameters(remove_duplicate=False))
+
+        non_persistent_buffers = set[str]()
+        for module_name, child_module in module.named_modules():
+            prefix = f"{module_name}." if module_name else ""
+            non_persistent_buffers.update(
+                prefix + name for name in child_module._non_persistent_buffers_set
+            )
+
+        state.extend(
+            (name, buffer)
+            for name, buffer in module.named_buffers(remove_duplicate=False)
+            if name not in non_persistent_buffers
+        )
+        return tuple(state)
+
+    @staticmethod
+    def _move_state_to_device(
+        state: Iterable[tuple[str, torch.Tensor]],
+        device: torch.device,
+        non_blocking: bool,
+    ) -> dict[str, torch.Tensor]:
+        return {
+            name: tensor.to(device, non_blocking=non_blocking) for name, tensor in state
+        }
 
     def wrap_modules(
         self,
@@ -109,16 +143,18 @@ class UVAOffloader(BaseOffloader):
 
         if offloaded_parameters and not self.uva_offloading:
             original_forward = module.forward
+            device_state_tensors = self._named_state_tensors(module)
+            non_blocking = self.pin_memory
 
             def forward(*args, **kwargs):
                 module.forward = original_forward
-                device_state = {
-                    # here we blindly call `to(device)`
-                    # if the parameter is already on the device,
-                    # it will be a no-op
-                    k: v.to(device, non_blocking=True)
-                    for k, v in module.state_dict().items()
-                }
+                # Here we blindly call `to(device)`. If the tensor is already on
+                # the device, it will be a no-op.
+                device_state = self._move_state_to_device(
+                    device_state_tensors,
+                    device,
+                    non_blocking=non_blocking,
+                )
 
                 # set `tie_weights=False` as tied weights in original model
                 # become untied when calling .to(device) individually
