@@ -8,6 +8,7 @@ from typing import Any
 import torch
 
 from vllm.config import CacheConfig
+from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
     get_conv_copy_spec,
@@ -21,6 +22,95 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
+
+logger = init_logger(__name__)
+
+# 16 saturates HBM on H100/GB200 across the reqs=8..128 range in
+# microbenchmarks
+_TEMPORAL_TILES = 16
+
+
+@triton.jit
+def _memcpy_u64_tiled(
+    src_addr,
+    dst_addr,
+    copy_size,
+    tile_idx,
+    COPY_BLOCK_SIZE: tl.constexpr,
+    NUM_TILES: tl.constexpr,
+):
+    """Head/body/tail memcpy with the u64 body split across ``NUM_TILES`` CTAs.
+
+    Fast path (``src`` and ``dst`` share sub-8B alignment): tile 0 owns the
+    byte head that lifts dst to 8B and the 0-7 byte tail; body tiles vectorize
+    as u64 over the aligned interior. ``NUM_TILES=1`` collapses to a single-
+    CTA memcpy. Production callers derive both addresses from the same
+    ``state_base_addr + block_id * stride`` and always take this path.
+
+    Slow path (mismatched sub-8B alignment): byte-wide tiled copy. Some
+    NVIDIA parts (e.g. GB200) reject misaligned u64 loads with
+    ``cudaErrorMisalignedAddress`` instead of accepting the misaligned-sector
+    cost, so we can't just let the fast path run with a misaligned src.
+    """
+    src_addr_i = src_addr.to(tl.int64)
+    dst_addr_i = dst_addr.to(tl.int64)
+
+    if ((src_addr_i ^ dst_addr_i) & 7) == 0:
+        head_bytes = tl.minimum(((-dst_addr_i) & 7).to(tl.int64), copy_size)
+        if tile_idx == 0:
+            head_off = tl.arange(0, 8)
+            head_mask = head_off < head_bytes
+            head_src = src_addr.to(tl.pointer_type(tl.uint8))
+            head_dst = dst_addr.to(tl.pointer_type(tl.uint8))
+            tl.store(
+                head_dst + head_off,
+                tl.load(head_src + head_off, mask=head_mask),
+                mask=head_mask,
+            )
+
+        # Body: u64 tiled. Rounding per_tile up to COPY_BLOCK_SIZE keeps every
+        # inner-loop iteration full-width vectorized; only the last non-empty
+        # tile can be masked. Late tiles fall off the end and iterate zero
+        # times.
+        body_bytes = copy_size - head_bytes
+        body_u64 = body_bytes // 8
+        per_tile_u64_raw = tl.cdiv(body_u64, NUM_TILES)
+        per_tile_u64 = tl.cdiv(per_tile_u64_raw, COPY_BLOCK_SIZE) * COPY_BLOCK_SIZE
+        tile_start = tile_idx.to(tl.int64) * per_tile_u64
+        tile_end = tl.minimum(tile_start + per_tile_u64, body_u64)
+
+        src_body_u64 = (src_addr + head_bytes).to(tl.pointer_type(tl.uint64))
+        dst_body_u64 = (dst_addr + head_bytes).to(tl.pointer_type(tl.uint64))
+        offsets = tl.arange(0, COPY_BLOCK_SIZE)
+        for i in range(tile_start, tile_end, COPY_BLOCK_SIZE):
+            mask = (i + offsets) < tile_end
+            data = tl.load(src_body_u64 + i + offsets, mask=mask)
+            tl.store(dst_body_u64 + i + offsets, data, mask=mask)
+
+        if tile_idx == 0:
+            tail_start = head_bytes + body_u64 * 8
+            tail_bytes = copy_size - tail_start
+            tail_off = tl.arange(0, 8)
+            tail_src = (src_addr + tail_start).to(tl.pointer_type(tl.uint8))
+            tail_dst = (dst_addr + tail_start).to(tl.pointer_type(tl.uint8))
+            tail_mask = tail_off < tail_bytes
+            tl.store(
+                tail_dst + tail_off,
+                tl.load(tail_src + tail_off, mask=tail_mask),
+                mask=tail_mask,
+            )
+    else:
+        src_u8 = src_addr.to(tl.pointer_type(tl.uint8))
+        dst_u8 = dst_addr.to(tl.pointer_type(tl.uint8))
+        per_tile_bytes_raw = tl.cdiv(copy_size, NUM_TILES)
+        per_tile_bytes = tl.cdiv(per_tile_bytes_raw, COPY_BLOCK_SIZE) * COPY_BLOCK_SIZE
+        tile_start = tile_idx.to(tl.int64) * per_tile_bytes
+        tile_end = tl.minimum(tile_start + per_tile_bytes, copy_size)
+        offsets = tl.arange(0, COPY_BLOCK_SIZE)
+        for i in range(tile_start, tile_end, COPY_BLOCK_SIZE):
+            mask = (i + offsets) < tile_end
+            data = tl.load(src_u8 + i + offsets, mask=mask)
+            tl.store(dst_u8 + i + offsets, data, mask=mask)
 
 
 @triton.jit
@@ -41,8 +131,10 @@ def _copy_mamba_state_block(
     # DS conv row metadata. Zero keeps the single-region copy path.
     state_dim_row_count_ptr,
     state_dim_row_stride_ptr,
+    tile_idx,
     COPY_BLOCK_SIZE: tl.constexpr,
     CONV_STATE_DIM_FIRST: tl.constexpr,
+    TEMPORAL_TILES: tl.constexpr,
 ):
     """Copy one (layer, state-type) mamba state block between block columns.
 
@@ -57,6 +149,13 @@ def _copy_mamba_state_block(
 
     The caller owns the decision logic (which columns, whether to copy); this
     device function only performs the byte copy for the given metadata slot.
+
+    ``tile_idx`` in ``[0, TEMPORAL_TILES)`` partitions the temporal state's
+    u64 range into ``TEMPORAL_TILES`` contiguous, COPY_BLOCK_SIZE-aligned
+    slices, giving more CTAs to fill the SMs at small batch (multi-MiB
+    temporal copies otherwise leave the GPU under-filled). Conv states are
+    small; only ``tile_idx == 0`` copies them. ``TEMPORAL_TILES == 1`` and
+    ``tile_idx == 0`` reproduces the untiled behavior.
     """
     state_base_addr = tl.load(state_base_addrs_ptr + state_idx)
     state_block_stride = tl.load(state_block_strides_ptr + state_idx)
@@ -81,6 +180,10 @@ def _copy_mamba_state_block(
     is_conv_state = conv_width > 0
 
     if CONV_STATE_DIM_FIRST and is_conv_state:
+        # Conv states are small; only tile 0 does the copy. Higher tiles
+        # early-return so they contribute nothing beyond a bounds check.
+        if tile_idx > 0:
+            return
         # DS conv layout: state_len is the slide axis; copy per dim row.
         src_block_id = tl.load(block_table_base + src_col).to(tl.int64)
         dim_rows = tl.load(state_dim_row_count_ptr + state_idx)
@@ -101,53 +204,46 @@ def _copy_mamba_state_block(
         return
 
     if is_conv_state:
+        if tile_idx > 0:
+            return
         # SD conv: copy
         #   state[bt[src_col], token_bias:] ->
         #   state[bt[dst_col], :conv_width - token_bias]
+        # Small per-block bytes (~60-80 KiB) make tiling degenerate, so
+        # conv runs as a single-CTA memcpy (NUM_TILES=1).
         src_block_id = tl.load(block_table_base + src_col).to(tl.int64)
         src_offset = token_bias.to(tl.int64) * state_inner_size * state_elem_size
         src_addr = state_base_addr + src_block_id * state_block_stride + src_offset
-        num_elems_to_copy = (conv_width - token_bias).to(tl.int64) * state_inner_size
-        copy_size = num_elems_to_copy * state_elem_size
-        offsets = tl.arange(0, COPY_BLOCK_SIZE)
-        for i in range(0, copy_size, COPY_BLOCK_SIZE):
-            mask = (i + offsets) < copy_size
-            curr_src = (src_addr + i + offsets).to(tl.pointer_type(tl.uint8))
-            curr_dst = (dst_addr + i + offsets).to(tl.pointer_type(tl.uint8))
-            data = tl.load(curr_src, mask=mask)
-            tl.store(curr_dst, data, mask=mask)
+        copy_size = (
+            (conv_width - token_bias).to(tl.int64) * state_inner_size * state_elem_size
+        )
+        _memcpy_u64_tiled(
+            src_addr,
+            dst_addr,
+            copy_size,
+            tile_idx,
+            COPY_BLOCK_SIZE=COPY_BLOCK_SIZE,
+            NUM_TILES=1,
+        )
         return
 
     # Temporal state: copy state[bt[src_col + token_bias]] -> state[bt[dst_col]]
+    # Body u64 range is partitioned across TEMPORAL_TILES CTAs to keep the
+    # SMs filled at small batch.
     actual_src_block_id = tl.load(block_table_base + src_col + token_bias).to(tl.int64)
     src_addr = state_base_addr + actual_src_block_id * state_block_stride
     # Use natural block data size (inner_size * elem_size), NOT
     # state_block_stride which is the page stride and can exceed the
     # actual data when the state tensor uses as_strided page padding.
     copy_size = state_inner_size * state_elem_size
-
-    # Vectorize via uint64 (8B per thread → LDG.64/STG.64): both temporal
-    # and SD conv produce src/dst addresses aligned to a full token slice
-    # (inner_size * elem_size) and a copy_size that's a multiple of it,
-    # which is 8B-aligned for all state dtypes in use. A masked byte tail
-    # covers any remaining 0-7 bytes (only reachable for sub-8B slices).
-    copy_size_u64 = copy_size // 8
-    src_u64 = src_addr.to(tl.pointer_type(tl.uint64))
-    dst_u64 = dst_addr.to(tl.pointer_type(tl.uint64))
-    offsets = tl.arange(0, COPY_BLOCK_SIZE)
-    for i in range(0, copy_size_u64, COPY_BLOCK_SIZE):
-        mask = (i + offsets) < copy_size_u64
-        data = tl.load(src_u64 + i + offsets, mask=mask)
-        tl.store(dst_u64 + i + offsets, data, mask=mask)
-
-    tail_start = copy_size_u64 * 8
-    tail_bytes = copy_size - tail_start
-    tail_off = tl.arange(0, 8)
-    tail_src = (src_addr + tail_start).to(tl.pointer_type(tl.uint8))
-    tail_dst = (dst_addr + tail_start).to(tl.pointer_type(tl.uint8))
-    tail_mask = tail_off < tail_bytes
-    tail_data = tl.load(tail_src + tail_off, mask=tail_mask)
-    tl.store(tail_dst + tail_off, tail_data, mask=tail_mask)
+    _memcpy_u64_tiled(
+        src_addr,
+        dst_addr,
+        copy_size,
+        tile_idx,
+        COPY_BLOCK_SIZE=COPY_BLOCK_SIZE,
+        NUM_TILES=TEMPORAL_TILES,
+    )
 
 
 @triton.jit
@@ -194,14 +290,20 @@ def postprocess_mamba_fused_kernel(
     # PRECOMPUTED_NEW_COMPUTED: when True, num_computed_tokens_ptr already holds
     # the post-step new_num_computed value (V2 supplies the advanced count).
     PRECOMPUTED_NEW_COMPUTED: tl.constexpr = False,
+    # TEMPORAL_TILES: when > 1, the temporal copy body is partitioned across
+    # TEMPORAL_TILES CTAs along the u64 inner range. Callers must launch a
+    # 3D grid (num_reqs, total_states, TEMPORAL_TILES). Default 1 preserves
+    # the existing 2D-grid contract.
+    TEMPORAL_TILES: tl.constexpr = 1,
 ):
     """
     Fused GPU kernel for postprocess_mamba that computes decisions AND performs
     mamba state copies without any CPU-GPU synchronization.
 
-    Grid: (num_reqs, num_layers * num_state_types)
+    Grid: (num_reqs, num_layers * num_state_types [, TEMPORAL_TILES])
     - program_id(0) = request/batch index
     - program_id(1) = state_idx (flattened index into layer/state_type metadata)
+    - program_id(2) = temporal-copy tile index (0 when TEMPORAL_TILES == 1)
 
     Note: num_layers and num_state_types are not passed as kernel parameters
     because the kernel indexes directly into pre-flattened metadata arrays
@@ -209,6 +311,7 @@ def postprocess_mamba_fused_kernel(
     """
     batch_idx = tl.program_id(0)
     state_idx = tl.program_id(1)
+    tile_idx = tl.program_id(2)
 
     # Bounds check
     if batch_idx >= num_reqs:
@@ -248,7 +351,9 @@ def postprocess_mamba_fused_kernel(
 
     # Update accepted-token count before early exits (per-request, so only
     # state_idx == 0 writes). V2 updates in place; V1 writes the _out buffer.
-    if src_block_idx == dest_block_idx and state_idx == 0:
+    # Also guard on tile_idx == 0 so tiles > 0 (when TEMPORAL_TILES > 1) do
+    # not duplicate the store.
+    if src_block_idx == dest_block_idx and state_idx == 0 and tile_idx == 0:
         if HAS_IDX_MAPPING:
             tl.store(num_accepted_tokens_ptr + req_idx, 1)
         else:
@@ -275,8 +380,10 @@ def postprocess_mamba_fused_kernel(
         state_group_indices_ptr,
         state_dim_row_count_ptr,
         state_dim_row_stride_ptr,
+        tile_idx,
         COPY_BLOCK_SIZE,
         CONV_STATE_DIM_FIRST,
+        TEMPORAL_TILES,
     )
 
 
@@ -348,6 +455,9 @@ def precopy_mamba_align_fused_kernel(
     num_reqs,
     COPY_BLOCK_SIZE: tl.constexpr,
     CONV_STATE_DIM_FIRST: tl.constexpr,
+    # TEMPORAL_TILES: see postprocess_mamba_fused_kernel. Default 1 preserves
+    # the 2D-grid contract; > 1 requires a 3D grid.
+    TEMPORAL_TILES: tl.constexpr = 1,
 ):
     """Pre-copy mamba "align" state across block boundaries on the V2 runner.
 
@@ -359,11 +469,13 @@ def precopy_mamba_align_fused_kernel(
     copy specs), but driven by the GPU-resident src columns so it needs no
     CPU-GPU sync (async-scheduling safe).
 
-    Grid: (num_reqs, num_layers * num_state_types); block tables are indexed by
-    batch row, per-request state by req_idx via idx_mapping (V2 layout).
+    Grid: (num_reqs, num_layers * num_state_types [, TEMPORAL_TILES]); block
+    tables are indexed by batch row, per-request state by req_idx via
+    idx_mapping (V2 layout).
     """
     batch_idx = tl.program_id(0)
     state_idx = tl.program_id(1)
+    tile_idx = tl.program_id(2)
     if batch_idx >= num_reqs:
         return
     req_idx = tl.load(idx_mapping_ptr + batch_idx)
@@ -395,8 +507,10 @@ def precopy_mamba_align_fused_kernel(
         state_group_indices_ptr,
         state_dim_row_count_ptr,
         state_dim_row_stride_ptr,
+        tile_idx,
         COPY_BLOCK_SIZE,
         CONV_STATE_DIM_FIRST,
+        TEMPORAL_TILES,
     )
 
 
@@ -695,23 +809,28 @@ class MambaSpecDecodeGPUContext:
                         self.state_inner_sizes[idx] = (
                             state[0].numel() if state.dim() > 1 else 1
                         )
-                        # Temporal copies are vectorized with uint64
-                        # loads/stores; base pointer and block stride must
-                        # be 8B-aligned (tail loop handles copy_size % 8).
+                        # Temporal copies vectorize with uint64 loads/stores.
+                        # The kernel's head/tail handles misalignment for
+                        # correctness, but unaligned base/stride costs in
+                        # throughput.
                         base_addr = state.data_ptr()
                         block_stride_bytes = block_stride_elems * state.element_size()
-                        assert base_addr % 8 == 0, (
-                            f"layer {layer_name}: state.data_ptr() = "
-                            f"{base_addr:#x} is not 8B-aligned; "
-                            f"_copy_mamba_state_block uint64 "
-                            f"vectorization requires it"
-                        )
-                        assert block_stride_bytes % 8 == 0, (
-                            f"layer {layer_name}: block stride = "
-                            f"{block_stride_bytes}B is not 8B-aligned; "
-                            f"_copy_mamba_state_block uint64 "
-                            f"vectorization requires it"
-                        )
+                        if base_addr % 8 != 0:
+                            logger.warning_once(
+                                "layer %s: state.data_ptr() = %#x is not "
+                                "8B-aligned; _memcpy_u64_tiled uint64 "
+                                "vectorization will pay misaligned load cost",
+                                layer_name,
+                                base_addr,
+                            )
+                        if block_stride_bytes % 8 != 0:
+                            logger.warning_once(
+                                "layer %s: block stride = %dB is not "
+                                "8B-aligned; _memcpy_u64_tiled uint64 "
+                                "vectorization will pay misaligned load cost",
+                                layer_name,
+                                block_stride_bytes,
+                            )
 
                     self.state_group_indices[idx] = group_local_idx
                     idx += 1
@@ -765,7 +884,7 @@ class MambaSpecDecodeGPUContext:
         )
 
         total_states = self.num_layers * self.num_state_types
-        grid = (num_reqs, total_states)
+        grid = (num_reqs, total_states, _TEMPORAL_TILES)
 
         postprocess_mamba_fused_kernel[grid](
             num_accepted_tokens_gpu,
@@ -789,6 +908,7 @@ class MambaSpecDecodeGPUContext:
             block_size=self.block_size,
             COPY_BLOCK_SIZE=1024,
             CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
+            TEMPORAL_TILES=_TEMPORAL_TILES,
         )
 
     def run_fused_precopy(
@@ -812,7 +932,7 @@ class MambaSpecDecodeGPUContext:
         if num_reqs == 0 or not self.is_initialized:
             return
         total_states = self.num_layers * self.num_state_types
-        grid = (num_reqs, total_states)
+        grid = (num_reqs, total_states, _TEMPORAL_TILES)
         precopy_mamba_align_fused_kernel[grid](
             state_idx_gpu,
             src_col_gpu,
@@ -831,6 +951,7 @@ class MambaSpecDecodeGPUContext:
             num_reqs,
             COPY_BLOCK_SIZE=1024,
             CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
+            TEMPORAL_TILES=_TEMPORAL_TILES,
         )
 
     def run_fused_postprocess_align(
@@ -852,7 +973,7 @@ class MambaSpecDecodeGPUContext:
         if num_reqs == 0 or not self.is_initialized:
             return
         total_states = self.num_layers * self.num_state_types
-        grid = (num_reqs, total_states)
+        grid = (num_reqs, total_states, _TEMPORAL_TILES)
         postprocess_mamba_fused_kernel[grid](
             num_accepted_tokens_gpu,
             state_idx_gpu,
@@ -877,6 +998,7 @@ class MambaSpecDecodeGPUContext:
             CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
             HAS_IDX_MAPPING=True,
             PRECOMPUTED_NEW_COMPUTED=True,
+            TEMPORAL_TILES=_TEMPORAL_TILES,
         )
 
 
