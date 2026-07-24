@@ -102,9 +102,10 @@ def build_offloading_config(
         )
         worker_kv_bytes_per_block = total_gpu_kv_bytes // kv_cache_config.num_blocks
 
-    # Only a single non-MLA full-attention group is parallelism-invariant:
-    # MLA latent KV is replicated per rank (never head-sharded), and the V2
-    # model runner's KV layout is not known to be parallelism-invariant.
+    # Only a single non-MLA full-attention group with genuinely head-sharded,
+    # unpacked pages is parallelism-invariant: replicated latent or GQA heads,
+    # per-token-head scales, CP token sharding, and the V2 model runner's
+    # layout are all excluded.
     single_group = (
         kv_cache_config.kv_cache_groups[0].kv_cache_spec
         if len(kv_cache_config.kv_cache_groups) == 1
@@ -115,6 +116,11 @@ def build_offloading_config(
         and single_group is not None
         and isinstance(single_group, FullAttentionSpec)
         and not isinstance(single_group, MLAAttentionSpec)
+        and single_group.num_kv_heads * parallel_config.tensor_parallel_size
+        == vllm_config.model_config.get_total_num_kv_heads()
+        and not single_group.kv_quant_mode.is_per_token_head
+        and parallel_config.decode_context_parallel_size == 1
+        and parallel_config.prefill_context_parallel_size == 1
     )
 
     kv_events_config = vllm_config.kv_events_config

@@ -31,7 +31,7 @@ def make_mapper_from_offloading_spec(**kwargs) -> FileMapper:
         ),
         worker_kv_bytes_per_block=0,
         enable_kv_cache_events=False,
-        extra_config={},
+        extra_config=kwargs.get("extra_config", {}),
         engine_id="test-engine",
         model=OffloadingModelConfig(
             name=kwargs.get("model_name", "test-model"),
@@ -186,3 +186,21 @@ def test_namespace_kept_without_parallel_agnostic_opt_in():
     )
     assert fm.fields["tp_size"] == 2
     assert fm.rank == 1
+
+
+def test_canonical_layout_changes_storage_namespace():
+    # Canonical bytes are not interchangeable with the legacy layout, so the
+    # schema id must fork the storage namespace.
+    from vllm.v1.attention.backends.utils import set_kv_cache_layout
+
+    set_kv_cache_layout("NHD")
+    try:
+        legacy = make_mapper_from_offloading_spec()
+        canonical = make_mapper_from_offloading_spec(
+            extra_config={"canonical_layout": True}
+        )
+    finally:
+        set_kv_cache_layout(None)
+    assert "canonical_schema" not in legacy.fields
+    assert canonical.fields["canonical_schema"] == "v1-nhd"
+    assert legacy.base_path != canonical.base_path

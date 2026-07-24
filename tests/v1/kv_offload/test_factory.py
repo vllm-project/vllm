@@ -137,6 +137,7 @@ def _make_layout_vllm_config(
     config.cache_config.prefix_match_unit = None
     config.cache_config.cache_dtype = torch.float16
     config.model_config.model = "test-model"
+    config.model_config.get_total_num_kv_heads.return_value = 4
     world_size = (
         tensor_parallel_size * pipeline_parallel_size * prefill_context_parallel_size
     )
