@@ -15,11 +15,11 @@ from vllm.multimodal.gpu_ipc_memory import (
     reserve_mm_ipc_gpu_memory,
     set_mm_gpu_ipc_pool,
 )
-from vllm.multimodal.video import (
+from vllm.multimodal.video_decoders import PYNVVIDEOCODEC_VIDEO_BACKEND
+from vllm.multimodal.video_decoders.pynvvideocodec import (
     PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES,
     PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES,
     PYNVVIDEOCODEC_MAX_RETAINED_DECODERS,
-    PYNVVIDEOCODEC_VIDEO_BACKEND,
 )
 from vllm.utils.mem_constants import GiB_bytes
 
