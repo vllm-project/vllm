@@ -1165,6 +1165,102 @@ def test_fused_marlin_moe_non_gated(
     torch.testing.assert_close(marlin_output, torch_output, atol=1e-1, rtol=0)
 
 
+@pytest.mark.parametrize(
+    "activation",
+    [
+        MoEActivation.SILU,
+        MoEActivation.RELU2_NO_MUL,
+    ],
+    ids=["gated", "non_gated"],
+)
+def test_humming_gated_non_gated_shape_contract(activation: MoEActivation):
+    pytest.importorskip("humming")
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        HummingIndexedExperts,
+    )
+    from vllm.model_executor.layers.quantization.utils import humming_utils
+    from vllm.utils import humming
+
+    top_k, num_experts = 6, 12
+    hidden_size, intermediate_size = 2688, 1856
+    gate_up_size = intermediate_size * 2 if activation.is_gated else intermediate_size
+    num_w13_stacks = 2 if activation.is_gated else 1
+    moe_config = make_dummy_moe_config(
+        num_experts=num_experts,
+        experts_per_token=top_k,
+        hidden_dim=hidden_size,
+        intermediate_size=intermediate_size,
+        activation=activation,
+    )
+
+    layer = torch.nn.Module()
+    layer.moe_config = moe_config
+    layer.params_dtype = torch.bfloat16
+
+    weight_schema = humming.ModeloptNvfp4WeightSchema()
+    for sublayer_name, shape_n, shape_k, stack_size in (
+        ("w13", gate_up_size, hidden_size, num_w13_stacks),
+        ("w2", hidden_size, intermediate_size, 1),
+    ):
+        tensor_attrs = weight_schema.get_tensors_attrs(
+            shape_n=shape_n,
+            shape_k=shape_k,
+            param_dtype=layer.params_dtype,
+            num_experts=num_experts,
+            stack_size=stack_size,
+        )
+        for tensor_name, attrs in tensor_attrs.items():
+            layer.register_parameter(
+                f"{sublayer_name}_{tensor_name}",
+                Parameter(
+                    torch.ones(
+                        attrs["shape"],
+                        dtype=attrs["dtype"],
+                        device="cuda",
+                    ),
+                    requires_grad=False,
+                ),
+            )
+
+    humming_utils.convert_to_humming_moe_kernel_format(
+        layer,
+        weight_schema=weight_schema,
+        input_schema=humming.HummingInputSchema(a_dtype=humming.dtypes.bfloat16),
+    )
+
+    w13_meta, w2_meta = (layer.humming_metas[name] for name in ("w13", "w2"))
+    for meta in (w13_meta, w2_meta):
+        assert meta.a_dtype == humming.dtypes.bfloat16
+        assert meta.b_dtype == humming.dtypes.float4e2m1
+
+    assert w13_meta.shape_n - w13_meta.pad_shape_n == gate_up_size
+    assert w2_meta.shape_k - w2_meta.pad_shape_k == intermediate_size
+
+    layer.local_num_experts = layer.global_num_experts = num_experts
+    layer.hidden_size = hidden_size
+    layer.intermediate_size_per_partition = intermediate_size
+    quant_config = humming_utils.get_humming_moe_quant_config(layer)
+    experts = HummingIndexedExperts(
+        layer,
+        moe_config,
+        quant_config,
+    )
+
+    buffer_metas, _ = experts.get_buffer_metas(
+        M=1,
+        topk=top_k,
+        activation=moe_config.activation,
+    )
+    assert buffer_metas["gate_up_output"]["shape"][-1] == gate_up_size
+    assert buffer_metas["activation_output"]["shape"][-1] == intermediate_size
+    assert experts.moe_problem_size(
+        a1=torch.empty(1, hidden_size),
+        w1=torch.empty(num_experts, 1),
+        w2=torch.empty(num_experts, 1),
+        topk_ids=torch.empty(1, top_k, dtype=torch.long),
+    ) == (num_experts, 1, intermediate_size, hidden_size, top_k)
+
+
 @pytest.mark.parametrize("ep_size", [1, 2])
 def test_moe_align_block_size_opcheck(ep_size):
     num_experts = 4
