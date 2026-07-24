@@ -964,6 +964,25 @@ def test_extract_tool_calls_streaming_v11_no_tools(
         pytest.param(
             "mistral_tool_parser",
             "mistral_tokenizer",
+            """I will help.[TOOL_CALLS]add{"a": 3.5, "b": 4}[TOOL_CALLS]multiply{"a": 3, "b": 6}""",  # noqa: E501
+            [
+                ToolCall(
+                    function=FunctionCall(
+                        name="add", arguments=json.dumps({"a": 3.5, "b": 4})
+                    )
+                ),
+                ToolCall(
+                    function=FunctionCall(
+                        name="multiply", arguments=json.dumps({"a": 3, "b": 6})
+                    )
+                ),
+            ],
+            "I will help.",
+            id="v11-content_before_multiple_tool_calls",
+        ),
+        pytest.param(
+            "mistral_tool_parser",
+            "mistral_tokenizer",
             """hi{hi[TOOL_CALLS]bash{"command": "print(\\"hello world!\\")\\nre.compile(r\'{}\')"}""",  # noqa: E501
             [
                 ToolCall(

@@ -428,10 +428,12 @@ class MistralToolParser(ToolParser):
             if self.bot_token not in delta_text:
                 return DeltaMessage(content=delta_text)
             if not delta_text.startswith(self.bot_token):
-                additional_content += delta_text.split(self.bot_token)[0]
-                delta_text = self.bot_token + "".join(
-                    delta_text.split(self.bot_token)[1:]
-                )
+                # split off the content before the first bot token only, so
+                # that any further bot tokens in the delta keep separating
+                # their tool calls
+                content, _, tool_calls_text = delta_text.partition(self.bot_token)
+                additional_content += content
+                delta_text = self.bot_token + tool_calls_text
 
         delta_tool_calls = self._generate_delta_tool_call(delta_text)
         if not additional_content and len(delta_tool_calls) == 0:
