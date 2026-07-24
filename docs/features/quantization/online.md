@@ -139,3 +139,69 @@ llm = LLM(
 
 !!! note
     For fused layers (e.g., `qkv_proj` which fuses `q_proj`, `k_proj`, `v_proj`), the ignore pattern must match the **unfused** shard names (`q_proj`, `k_proj`, `v_proj`), not the fused name.
+
+### Re-quantizing Unquantized Layers of a Pre-quantized Checkpoint
+
+Some pre-quantized checkpoints are *mixed precision*: they ship a subset of
+layers unquantized (fp16/bf16). For example a Quark MXFP4 MoE checkpoint stores
+its experts as MXFP4 but keeps the attention and dense-MLP projections in bf16.
+
+When a checkpoint is loaded with such a native quantization method (e.g.
+`quark`), you can pass a `quantization_config` overlay to online-requantize
+*only* the layers the checkpoint left unquantized, using the online schemes
+above. The overlay's `linear` spec selects the online method, and its `ignore`
+patterns scope which unquantized layers are re-quantized. Layers already
+quantized by the checkpoint, and any layer matched by `ignore`, are untouched.
+
+```python
+from vllm import LLM
+
+# Quark MXFP4 MoE checkpoint: experts stay MXFP4, bf16 attention / dense-MLP
+# projections are online-requantized to FP8 (per-token-activation,
+# per-channel-weight). The MoE gate and lm_head are left in bf16 via `ignore`
+# (exact names or `re:` regex, same as elsewhere on this page). MoE experts are
+# handled by the checkpoint and never routed here.
+llm = LLM(
+    "amd/Qwen3.5-35B-A3B-MXFP4",
+    quantization_config={
+        "linear": "fp8_per_channel",
+        "ignore": [
+            "lm_head",
+            "re:.*mlp\\.gate$",
+        ],
+    },
+)
+```
+
+The same overlay can be passed on the CLI:
+
+```bash
+vllm serve amd/Qwen3.5-35B-A3B-MXFP4 \
+  --quantization-config '{"linear":"fp8_per_channel","ignore":["lm_head","re:.*mlp\\.gate$"]}'
+```
+
+For MLA checkpoints (e.g. DeepSeek), the attention up-projection `kv_b_proj`
+is numerically sensitive and should stay in bf16, so add it to `ignore`
+alongside the router `gate` and `lm_head`:
+
+```python
+from vllm import LLM
+
+# Quark MXFP4 DeepSeek (MLA) checkpoint: experts stay MXFP4, the bf16 attention
+# / dense-MLP projections are online-requantized to FP8, while the router gate,
+# lm_head and the MLA kv_b_proj are kept in bf16 via `ignore`.
+llm = LLM(
+    "amd/DeepSeek-R1-0528-MXFP4",
+    quantization_config={
+        "linear": "fp8_per_channel",
+        "ignore": [
+            "lm_head",
+            "re:.*mlp\\.gate$",
+            "re:.*kv_b_proj.*",
+        ],
+    },
+)
+```
+
+!!! note
+    This path is opt-in: with no `quantization_config` overlay, the unquantized layers stay in their original checkpoint dtype.
