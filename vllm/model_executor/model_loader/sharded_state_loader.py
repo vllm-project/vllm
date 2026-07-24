@@ -154,6 +154,7 @@ class ShardedStateLoader(BaseModelLoader):
             param_data.copy_(tensor)
             state_dict.pop(key)
         counter_after_loading_weights = time.perf_counter()
+        # This log line is used for benchmarking. Please maintain the format
         logger.info_once(
             "Loading weights took %.2f seconds",
             counter_after_loading_weights - counter_before_loading_weights,

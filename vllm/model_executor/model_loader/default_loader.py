@@ -427,6 +427,7 @@ class DefaultModelLoader(BaseModelLoader):
         loaded_weights = model.load_weights(self.get_all_weights(model_config, model))
 
         self.counter_after_loading_weights = time.perf_counter()
+        # This log line is used for benchmarking. Please maintain the format
         logger.info_once(
             "Loading weights took %.2f seconds",
             self.counter_after_loading_weights - self.counter_before_loading_weights,
