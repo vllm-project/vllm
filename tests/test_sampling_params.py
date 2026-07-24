@@ -48,3 +48,19 @@ def test_diffusion_accepts_top_k_top_p():
 def test_non_diffusion_models_unaffected():
     params = SamplingParams(temperature=0.7, top_k=10, seed=42)
     params.verify(MockModelConfig(), None, None, None)
+
+
+def test_bad_words_accepts_valid_words():
+    SamplingParams(bad_words=["foo", " bar", "baz "])
+
+
+@pytest.mark.parametrize("bad_word", ["", " ", "  ", "\t", "\n", " \n\t "])
+def test_bad_words_rejects_empty_or_whitespace_only(bad_word: str):
+    # A whitespace-only bad word is reduced to "" by lstrip() in
+    # update_from_tokenizer, which then tokenizes to [] and raises an
+    # IndexError during request setup. Reject it up front instead.
+    with pytest.raises(ValueError, match="bad_words cannot contain"):
+        SamplingParams(bad_words=[bad_word])
+
+    with pytest.raises(ValueError, match="bad_words cannot contain"):
+        SamplingParams(bad_words=["valid", bad_word])
