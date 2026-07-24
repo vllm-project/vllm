@@ -304,10 +304,14 @@ class MistralToolParser(ToolParser):
                     continue
 
                 end_name = raw_tool_call.find("{")
-                tool_name, args = (
-                    raw_tool_call[:end_name],
-                    raw_tool_call[end_name:],
-                )
+                tool_name = raw_tool_call[:end_name]
+                args = raw_tool_call[end_name:]
+                try:
+                    parsed_args, _ = json.JSONDecoder().raw_decode(args)
+                except json.JSONDecodeError:
+                    pass
+                else:
+                    args = json.dumps(parsed_args, ensure_ascii=False)
 
                 # HF tokenizers may include [ARGS] in the text
                 tool_name = tool_name.replace("[ARGS]", "")
