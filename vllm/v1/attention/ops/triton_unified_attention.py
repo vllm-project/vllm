@@ -219,7 +219,7 @@ def kernel_unified_attention(
     USE_PER_SEQ_CAUSAL: tl.constexpr,  # bool
     per_seq_causal_ptr,  # [num_seqs] bool, or None
     USE_MM_PREFIX: tl.constexpr,  # bool
-    MAX_MM_RANGES: tl.constexpr,  # int
+    MAX_MM_RANGES: tl.constexpr,  # int, power-of-two bucket
     mm_prefix_range_ptr,
     rswa_prefix_lens_ptr,
     R_SWA_WINDOW: tl.constexpr,  # int
@@ -908,10 +908,18 @@ def unified_attention(
 
     use_mm_prefix = False
     max_mm_ranges = 0
+    max_mm_ranges_bucket = 0
     if mm_prefix_range is not None:
         if mm_prefix_range.ndim == 3:
-            use_mm_prefix = True
             max_mm_ranges = mm_prefix_range.shape[1]
+            if max_mm_ranges > 0:
+                use_mm_prefix = True
+                max_mm_ranges_bucket = 1 << (max_mm_ranges - 1).bit_length()
+                if max_mm_ranges != max_mm_ranges_bucket:
+                    mm_prefix_range = torch.nn.functional.pad(
+                        mm_prefix_range,
+                        (0, 0, 0, max_mm_ranges_bucket - max_mm_ranges),
+                    )
         else:
             raise ValueError(
                 f"Unsupported mm_prefix_range shape: {mm_prefix_range.shape}"
@@ -1130,7 +1138,7 @@ def unified_attention(
         USE_PER_SEQ_CAUSAL=use_per_seq_causal,
         per_seq_causal_ptr=per_seq_causal_ptr,
         USE_MM_PREFIX=use_mm_prefix,
-        MAX_MM_RANGES=max_mm_ranges,
+        MAX_MM_RANGES=max_mm_ranges_bucket,
         mm_prefix_range_ptr=mm_prefix_range,
         rswa_prefix_lens_ptr=rswa_prefix_lens if use_rswa else seqused_k,
         R_SWA_WINDOW=rswa_window or 0,
