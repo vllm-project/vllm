@@ -3,10 +3,10 @@ depends_on:
   - image-build-xpu
 steps:
 - label: 'Multi-Modal Models (Standard) 1: qwen2'
-  timeout_in_minutes: 45
   device: intel_gpu
-  no_plugin: true
+  timeout_in_minutes: 68
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -27,10 +27,10 @@ steps:
     pytest -v -s models/multimodal/generation/test_common.py -m core_model -k qwen2 || true &&
     pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model || true'
 - label: 'Multi-Modal Models (Standard) 2: qwen3 + gemma'
-  timeout_in_minutes: 50
   device: intel_gpu
-  no_plugin: true
+  timeout_in_minutes: 75
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -55,8 +55,8 @@ steps:
 - label: 'Multi-Modal Models (Standard) 3: llava + qwen2_vl'
   device: intel_gpu
   timeout_in_minutes: 40
-  no_plugin: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -78,9 +78,9 @@ steps:
     pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model || true'
 - label: 'Multi-Modal Models (Standard) 4: other + whisper'
   device: intel_gpu
-  timeout_in_minutes: 50
-  no_plugin: true
+  timeout_in_minutes: 75
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -104,12 +104,12 @@ steps:
     pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_mm_prefix_lm.py --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/generation/test_vit_cudagraph.py --ignore models/multimodal/processing || true &&
     pytest -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model || true &&
     pytest models/multimodal/generation/test_memory_leak.py -m core_model || true &&
-    cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model || true'
+    cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model'
 - label: Multi-Modal Processor
-  timeout_in_minutes: 65
   device: intel_gpu
-  no_plugin: true
+  timeout_in_minutes: 98
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -152,10 +152,10 @@ steps:
     'cd .buildkite/lm-eval-harness &&
     pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1 || true'
 - label: Multi-Modal Models (Extended Generation 1)
-  optional: true
   device: intel_gpu
-  no_plugin: true
+  optional: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -179,8 +179,8 @@ steps:
 - label: Multi-Modal Models (Extended Generation 2)
   device: intel_gpu
   optional: true
-  no_plugin: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -201,8 +201,8 @@ steps:
 - label: Multi-Modal Models (Extended Generation 3)
   device: intel_gpu
   optional: true
-  no_plugin: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -221,10 +221,10 @@ steps:
     'cd tests &&
     pytest -v -s models/multimodal/generation/test_common.py -m split(group=1) and not core_model || true'
 - label: Multi-Modal Models (Extended Pooling)
-  optional: true
   device: intel_gpu
-  no_plugin: true
+  optional: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo

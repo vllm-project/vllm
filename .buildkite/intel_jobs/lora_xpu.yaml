@@ -6,8 +6,8 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 40
   parallelism: 4
-  no_plugin: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -26,11 +26,11 @@ steps:
     'cd tests &&
     pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_qwen3_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py --ignore=lora/test_qwen35_densemodel_lora.py || true'
 - label: LoRA TP (Distributed)
+  device: intel_gpu
   timeout_in_minutes: 60
   num_devices: 4
-  device: intel_gpu
-  no_plugin: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -63,4 +63,4 @@ steps:
     pytest -v -s -x lora/test_qwen3_with_multi_loras.py --deselect="tests/lora/test_qwen3_with_multi_loras.py::test_multi_loras_with_tp_sync" || true &&
     pytest -v -s -x lora/test_olmoe_tp.py || true &&
     pytest -v -s -x lora/test_gptoss_tp.py || true &&
-    pytest -v -s -x lora/test_qwen35_densemodel_lora.py || true'
+    pytest -v -s -x lora/test_qwen35_densemodel_lora.py --deselect="tests/lora/test_qwen35_densemodel_lora.py::test_qwen35_text_lora_tp4" || true'

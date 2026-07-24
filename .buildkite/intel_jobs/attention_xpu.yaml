@@ -3,11 +3,11 @@ depends_on:
   - image-build-xpu
 steps:
 - label: V1 attention (H100-MI300)
-  timeout_in_minutes: 85
   device: intel_gpu
+  timeout_in_minutes: 85
   parallelism: 2
-  no_plugin: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo

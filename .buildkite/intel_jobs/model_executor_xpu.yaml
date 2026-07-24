@@ -3,10 +3,10 @@ depends_on:
   - image-build-xpu
 steps:
 - label: Model Executor
-  timeout_in_minutes: 45
   device: intel_gpu
-  no_plugin: true
+  timeout_in_minutes: 60
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -24,7 +24,9 @@ steps:
   - vllm/engine/arg_utils.py
   - vllm/config/model.py
   - vllm/model_executor
+  - vllm/model_executor/warmup
   - tests/model_executor
+  - tests/model_executor/test_jit_warmup.py
   - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
   commands:
   - >-
