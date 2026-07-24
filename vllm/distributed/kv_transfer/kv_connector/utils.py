@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+import numpy as np
 import torch
 
 from vllm.config import (
@@ -389,11 +390,20 @@ class EngineTransferInfo:
     remote_pp_rank: int = 0
     """Remote producer PP rank for this engine."""
 
+    remote_pp_size: int = 1
+    """Number of pipeline stages in the remote engine."""
+
     start_layer: int = 0
     """Global index of the first layer owned by this PP rank."""
 
     end_layer: int = 0
     """Exclusive global index after the last layer owned by this PP rank."""
+
+    remote_dcp_size: int = 1
+    """Remote decode context parallel size."""
+
+    remote_pcp_size: int = 1
+    """Remote prefill context parallel size."""
 
 
 # ---- Transfer topology ----
@@ -411,6 +421,9 @@ class TransferTopology:
     is_mamba: bool
     total_num_kv_heads: int
     attn_backends: list[type[AttentionBackend]]
+    dcp_rank: int = 0
+    dcp_size: int = 1
+    pcp_size: int = 1
     tensor_shape: torch.Size | None = None
 
     def __post_init__(self):
@@ -488,6 +501,67 @@ class TransferTopology:
         self, remote_engine_id: EngineId, remote_pp_rank: int = 0
     ) -> EngineTransferInfo:
         return self._engines[(remote_engine_id, remote_pp_rank)]
+
+    def resolve_remote_pp_rank(
+        self,
+        remote_engine_id: EngineId,
+        local_pp_rank: int,
+    ) -> int:
+        """Map a local PP stage to a compatible registered remote stage."""
+        remote_pp_ranks = sorted(
+            pp_rank
+            for engine_id, pp_rank in self._engines
+            if engine_id == remote_engine_id
+        )
+        if local_pp_rank in remote_pp_ranks:
+            return local_pp_rank
+        if len(remote_pp_ranks) == 1:
+            return remote_pp_ranks[0]
+        raise RuntimeError(
+            f"No unambiguous remote PP stage for engine {remote_engine_id}: "
+            f"local_pp_rank={local_pp_rank}, remote_pp_ranks={remote_pp_ranks}"
+        )
+
+    @staticmethod
+    def get_target_remote_pp_ranks(
+        local_pp_rank: int,
+        local_pp_size: int,
+        remote_pp_size: int,
+        *,
+        notif_only: bool = False,
+    ) -> list[int]:
+        """Select remote PP stages whose layer regions match the local stage."""
+        if local_pp_size <= 0 or remote_pp_size <= 0:
+            raise ValueError(
+                "PP sizes must be positive, got "
+                f"local_pp_size={local_pp_size}, remote_pp_size={remote_pp_size}"
+            )
+        if local_pp_size == remote_pp_size:
+            return [local_pp_rank]
+        if remote_pp_size == 1:
+            return [0]
+        if notif_only and local_pp_size == 1:
+            return list(range(remote_pp_size))
+        raise NotImplementedError(
+            "NIXL cannot map one local PP stage to multiple remote PP stages: "
+            f"local_pp_rank={local_pp_rank}, local_pp_size={local_pp_size}, "
+            f"remote_pp_size={remote_pp_size}"
+        )
+
+    @staticmethod
+    def get_local_pp_producer_count(
+        local_pp_size: int,
+        remote_pp_size: int,
+    ) -> int:
+        """Count local PP stages mapped to one remote PP stage."""
+        if local_pp_size == remote_pp_size:
+            return 1
+        if remote_pp_size == 1:
+            return local_pp_size
+        raise NotImplementedError(
+            "NIXL cannot map one local PP stage to multiple remote PP stages: "
+            f"local_pp_size={local_pp_size}, remote_pp_size={remote_pp_size}"
+        )
 
     def unregister_remote_engine(self, remote_engine_id: EngineId) -> None:
         # Remove all pp_rank entries for the remote engine.
@@ -578,19 +652,230 @@ class TransferTopology:
         return [self.tp_rank * abs_ratio + i for i in range(abs_ratio)]
 
     def target_remote_ranks(
-        self, remote_engine_id: EngineId, remote_pp_rank: int = 0
+        self,
+        remote_engine_id: EngineId,
+        remote_pp_rank: int = 0,
+        local_tp_rank: int | None = None,
     ) -> list[int]:
         """Get the remote TP rank(s) that the current local TP rank will
         read from.  When remote tp_size > local tp_size, reads from
         multiple remote ranks.
         """
         info = self._engines[(remote_engine_id, remote_pp_rank)]
+        if local_tp_rank is None:
+            local_tp_rank = self.tp_rank
         tp_ratio = self.tp_ratio(info.remote_tp_size)
         if tp_ratio > 0:
-            return [self.tp_rank // tp_ratio]
+            return [local_tp_rank // tp_ratio]
         # remote TP > local TP: read from |tp_ratio| remote workers
         abs_ratio = -tp_ratio
-        return [self.tp_rank * abs_ratio + i for i in range(abs_ratio)]
+        return [local_tp_rank * abs_ratio + i for i in range(abs_ratio)]
+
+    @staticmethod
+    def get_dcp_rank(
+        tp_rank: int,
+        pcp_rank: int,
+        pcp_size: int,
+        dcp_size: int,
+    ) -> int:
+        """Derive the DCP coverage rank from a physical PCP/TP worker."""
+        if dcp_size <= 0:
+            raise ValueError(f"dcp_size must be positive, got {dcp_size}")
+        return (tp_rank * pcp_size + pcp_rank) % dcp_size
+
+    @staticmethod
+    def get_valid_worker_keys(
+        tp_size: int,
+        dcp_size: int,
+        pcp_size: int,
+    ) -> list[tuple[int, int]]:
+        """Return physical ``(pcp_rank, tp_rank)`` worker keys.
+
+        DCP rank is a derived KV-coverage coordinate and cannot identify a
+        physical worker: multiple PCP ranks may map to the same DCP rank.
+        """
+        if dcp_size <= 0:
+            raise ValueError(f"dcp_size must be positive, got {dcp_size}")
+        return [
+            (pcp_rank, tp_rank)
+            for pcp_rank in range(pcp_size)
+            for tp_rank in range(tp_size)
+        ]
+
+    def has_kv_cache_overlap(
+        self,
+        remote_pcp_rank: int,
+        remote_tp_rank: int,
+        remote_tp_size: int,
+        remote_dcp_size: int,
+        remote_pcp_size: int,
+    ) -> bool:
+        """Return whether local and remote workers share KV coverage.
+
+        The check follows the PD disaggregation section in
+        docs/design/dcp_communication_patterns.md: both KV head coverage and
+        DCP token-slice coverage must overlap.
+        """
+        remote_dcp_rank = self.get_dcp_rank(
+            remote_tp_rank,
+            remote_pcp_rank,
+            remote_pcp_size,
+            remote_dcp_size,
+        )
+        return self._has_kv_cache_overlap_for_local_rank(
+            local_tp_rank=self.tp_rank,
+            local_dcp_rank=self.dcp_rank,
+            remote_tp_rank=remote_tp_rank,
+            remote_dcp_rank=remote_dcp_rank,
+            remote_tp_size=remote_tp_size,
+            remote_dcp_size=remote_dcp_size,
+            remote_pcp_size=remote_pcp_size,
+        )
+
+    def _has_kv_cache_overlap_for_local_rank(
+        self,
+        local_tp_rank: int,
+        local_dcp_rank: int,
+        remote_tp_rank: int,
+        remote_dcp_rank: int,
+        remote_tp_size: int,
+        remote_dcp_size: int,
+        remote_pcp_size: int,
+    ) -> bool:
+        # Condition H: KV head overlap. For MLA, TP ranks are KV replicas.
+        # When the remote layout has no DCP token split beyond PCP, choose the
+        # TP-mapped replica as the representative to avoid duplicate reads.
+        if self.is_mla and remote_pcp_size == remote_dcp_size:
+            tp_ratio = self.tp_ratio(remote_tp_size)
+            if tp_ratio > 0:
+                mapped_remote_ranks = [local_tp_rank // tp_ratio]
+            else:
+                abs_ratio = -tp_ratio
+                mapped_remote_ranks = [
+                    local_tp_rank * abs_ratio + i for i in range(abs_ratio)
+                ]
+            head_overlap = remote_tp_rank in mapped_remote_ranks
+        else:
+            local_eff_tp = min(self.tp_size, self.total_num_kv_heads)
+            remote_eff_tp = min(remote_tp_size, self.total_num_kv_heads)
+            local_kv_group = local_tp_rank * local_eff_tp // self.tp_size
+            remote_kv_group = remote_tp_rank * remote_eff_tp // remote_tp_size
+            head_overlap = (
+                local_kv_group * remote_eff_tp < (remote_kv_group + 1) * local_eff_tp
+                and remote_kv_group * local_eff_tp
+                < (local_kv_group + 1) * remote_eff_tp
+            )
+
+        # Condition T: token/interleave overlap.
+        common_dcp = np.gcd(self.dcp_size, remote_dcp_size)
+        token_overlap = local_dcp_rank % common_dcp == remote_dcp_rank % common_dcp
+        return head_overlap and token_overlap
+
+    def get_target_remote_worker_keys(
+        self,
+        remote_tp_size: int,
+        remote_dcp_size: int,
+        remote_pcp_size: int,
+    ) -> list[tuple[int, int]]:
+        return [
+            (remote_pcp_rank, remote_tp_rank)
+            for remote_pcp_rank, remote_tp_rank in self.get_valid_worker_keys(
+                remote_tp_size, remote_dcp_size, remote_pcp_size
+            )
+            if self.has_kv_cache_overlap(
+                remote_pcp_rank=remote_pcp_rank,
+                remote_tp_rank=remote_tp_rank,
+                remote_tp_size=remote_tp_size,
+                remote_dcp_size=remote_dcp_size,
+                remote_pcp_size=remote_pcp_size,
+            )
+        ]
+
+    def get_target_remote_worker_keys_from_engine_id(
+        self,
+        remote_engine_id: EngineId,
+        remote_pp_rank: int = 0,
+    ) -> list[tuple[int, int]]:
+        info = self._engines[(remote_engine_id, remote_pp_rank)]
+        return self.get_target_remote_worker_keys(
+            info.remote_tp_size,
+            info.remote_dcp_size,
+            info.remote_pcp_size,
+        )
+
+    def calculate_local_consumer_count(
+        self,
+        remote_engine_id: EngineId,
+        remote_worker_key: tuple[int, int],
+        remote_pp_rank: int = 0,
+    ) -> int:
+        """Count local workers that will notify a remote worker."""
+        info = self._engines[(remote_engine_id, remote_pp_rank)]
+        remote_pcp_rank, remote_tp_rank = remote_worker_key
+        remote_dcp_rank = self.get_dcp_rank(
+            remote_tp_rank,
+            remote_pcp_rank,
+            info.remote_pcp_size,
+            info.remote_dcp_size,
+        )
+        return sum(
+            self._has_kv_cache_overlap_for_local_rank(
+                local_tp_rank=local_tp_rank,
+                local_dcp_rank=self.get_dcp_rank(
+                    local_tp_rank, local_pcp_rank, self.pcp_size, self.dcp_size
+                ),
+                remote_tp_rank=remote_tp_rank,
+                remote_dcp_rank=remote_dcp_rank,
+                remote_tp_size=info.remote_tp_size,
+                remote_dcp_size=info.remote_dcp_size,
+                remote_pcp_size=info.remote_pcp_size,
+            )
+            for local_pcp_rank, local_tp_rank in self.get_valid_worker_keys(
+                self.tp_size, self.dcp_size, self.pcp_size
+            )
+        )
+
+    @staticmethod
+    def get_block_positions(block_num: int, dcp_size: int, dcp_rank: int) -> np.ndarray:
+        return np.arange(block_num) * dcp_size + dcp_rank
+
+    def get_matched_blocks(
+        self,
+        local_block_ids: BlockIds,
+        remote_block_ids: BlockIds,
+        remote_dcp_size: int,
+        remote_dcp_rank: int,
+        local_block_offset: int = 0,
+    ) -> tuple[BlockIds, BlockIds]:
+        """Filter local/remote block ids to their DCP global-position overlap."""
+        if len(local_block_ids) == 0:
+            return [], []
+
+        remote_positions = self.get_block_positions(
+            len(remote_block_ids[0]),
+            remote_dcp_size,
+            remote_dcp_rank,
+        )
+        local_positions = (
+            self.get_block_positions(
+                len(local_block_ids[0]),
+                self.dcp_size,
+                self.dcp_rank,
+            )
+            + local_block_offset
+        )
+        matched_positions = np.intersect1d(remote_positions, local_positions)
+        local_indices = (matched_positions - local_block_offset) // self.dcp_size
+        remote_indices = matched_positions // remote_dcp_size
+        local_matched = [
+            [block_ids[i] for i in local_indices if i < len(block_ids)]
+            for block_ids in local_block_ids
+        ]
+        remote_matched = [
+            [block_ids[i] for i in remote_indices if i < len(block_ids)]
+            for block_ids in remote_block_ids
+        ]
+        return local_matched, remote_matched
 
     def describe(self, remote_engine_id: EngineId, remote_pp_rank: int = 0) -> str:
         """One-line summary of transfer config for logging."""
@@ -602,6 +887,9 @@ class TransferTopology:
             f"local_tp={self.tp_size}, "
             f"remote_tp={info.remote_tp_size}, "
             f"remote_pp={remote_pp_rank}, "
+            f"local_dcp={self.dcp_size}, "
+            f"remote_dcp={info.remote_dcp_size}, "
+            f"remote_pcp={info.remote_pcp_size}, "
             f"local_rank={self.tp_rank}, "
             f"remote_block_len={info.remote_block_len})"
         )

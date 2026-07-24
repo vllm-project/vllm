@@ -471,7 +471,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             c.set_xfer_handshake_metadata(metadata)
 
     def set_xfer_handshake_metadata_pp_aware(
-        self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
+        self, metadata: dict[tuple[int, int, int], KVConnectorHandshakeMetadata]
     ) -> None:
         for c in self._connectors:
             c.set_xfer_handshake_metadata_pp_aware(metadata)

@@ -41,6 +41,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.parallel_state import (
     Handle,
+    get_pcp_group,
     get_pp_group,
     get_tp_group,
 )
@@ -596,10 +597,10 @@ class Worker(WorkerBase):
 
     def get_kv_connector_handshake_metadata(
         self,
-    ) -> dict[tuple[int, int], KVConnectorHandshakeMetadata] | None:
+    ) -> dict[tuple[int, int, int], KVConnectorHandshakeMetadata] | None:
         """Get KV connector metadata from this worker if available.
 
-        Returned dict is keyed by `(pp_rank, tp_rank)`.
+        Returned dict is keyed by `(pp_rank, pcp_rank, tp_rank)`.
         """
 
         if not has_kv_transfer_group():
@@ -613,7 +614,11 @@ class Worker(WorkerBase):
 
         pp_rank = get_pp_group().rank_in_group
         tp_rank = get_tp_group().rank_in_group
-        return {(pp_rank, tp_rank): metadata}
+        try:
+            pcp_rank = get_pcp_group().rank_in_group
+        except AssertionError:
+            pcp_rank = 0
+        return {(pp_rank, pcp_rank, tp_rank): metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()

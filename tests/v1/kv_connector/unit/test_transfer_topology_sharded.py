@@ -27,16 +27,23 @@ def _make_topology(
     tp_rank: int = 1,
     tp_size: int = 4,
     total_num_kv_heads: int = 8,
+    dcp_rank: int = 0,
+    dcp_size: int = 1,
+    pcp_size: int = 1,
+    is_mla: bool = False,
 ) -> TransferTopology:
     return TransferTopology(
         tp_rank=tp_rank,
         tp_size=tp_size,
         block_size=16,
         engine_id="local-engine",
-        is_mla=False,
+        is_mla=is_mla,
         is_mamba=False,
         total_num_kv_heads=total_num_kv_heads,
         attn_backends=[_FakeAttentionBackend],
+        dcp_rank=dcp_rank,
+        dcp_size=dcp_size,
+        pcp_size=pcp_size,
     )
 
 
@@ -144,3 +151,164 @@ def test_engine_info_fields_have_backward_compatible_defaults() -> None:
     assert registered.remote_pp_rank == 0
     assert registered.start_layer == 0
     assert registered.end_layer == 0
+
+
+def test_worker_keys_keep_pcp_workers_distinct_when_dcp_aliases() -> None:
+    keys = TransferTopology.get_valid_worker_keys(
+        tp_size=2,
+        dcp_size=1,
+        pcp_size=2,
+    )
+
+    assert keys == [(0, 0), (0, 1), (1, 0), (1, 1)]
+    assert len(keys) == 4
+
+
+@pytest.mark.parametrize(
+    ("pcp_rank", "tp_rank", "expected_dcp_rank"),
+    [
+        (0, 0, 0),
+        (1, 0, 1),
+        (0, 1, 0),
+        (1, 1, 1),
+    ],
+)
+def test_dcp_rank_is_derived_from_physical_worker_key(
+    pcp_rank: int,
+    tp_rank: int,
+    expected_dcp_rank: int,
+) -> None:
+    assert (
+        TransferTopology.get_dcp_rank(
+            tp_rank=tp_rank,
+            pcp_rank=pcp_rank,
+            pcp_size=2,
+            dcp_size=2,
+        )
+        == expected_dcp_rank
+    )
+
+
+def test_target_worker_keys_preserve_pcp_identity() -> None:
+    topology = _make_topology(
+        tp_rank=0,
+        tp_size=2,
+        total_num_kv_heads=2,
+        dcp_rank=0,
+        dcp_size=1,
+        pcp_size=2,
+    )
+
+    keys = topology.get_target_remote_worker_keys(
+        remote_tp_size=2,
+        remote_dcp_size=1,
+        remote_pcp_size=2,
+    )
+
+    assert keys == [(0, 0), (1, 0)]
+
+
+@pytest.mark.parametrize(
+    ("local_pcp_rank", "expected_keys"),
+    [
+        (0, [(0, 0)]),
+        (1, [(1, 0)]),
+    ],
+)
+def test_tp2_pcp2_dcp2_routes_by_head_and_interleave(
+    local_pcp_rank: int,
+    expected_keys: list[tuple[int, int]],
+) -> None:
+    topology = _make_topology(
+        tp_rank=0,
+        tp_size=2,
+        total_num_kv_heads=2,
+        dcp_rank=local_pcp_rank,
+        dcp_size=2,
+        pcp_size=2,
+    )
+
+    assert (
+        topology.get_target_remote_worker_keys(
+            remote_tp_size=2,
+            remote_dcp_size=2,
+            remote_pcp_size=2,
+        )
+        == expected_keys
+    )
+
+
+def test_mla_target_preserves_representative_and_dcp_slice() -> None:
+    topology = _make_topology(
+        tp_rank=0,
+        tp_size=2,
+        total_num_kv_heads=1,
+        dcp_rank=0,
+        dcp_size=2,
+        pcp_size=2,
+        is_mla=True,
+    )
+
+    # One representative TP replica is selected, and the PCP rank still
+    # follows the DCP token slice.
+    assert topology.get_target_remote_worker_keys(
+        remote_tp_size=2,
+        remote_dcp_size=2,
+        remote_pcp_size=2,
+    ) == [(0, 0)]
+
+
+@pytest.mark.parametrize(
+    ("local_pp_size", "remote_pp_size", "expected_count"),
+    [
+        (1, 1, 1),
+        (2, 2, 1),
+        (2, 1, 2),
+    ],
+)
+def test_local_pp_producer_count(
+    local_pp_size: int,
+    remote_pp_size: int,
+    expected_count: int,
+) -> None:
+    assert (
+        TransferTopology.get_local_pp_producer_count(
+            local_pp_size,
+            remote_pp_size,
+        )
+        == expected_count
+    )
+
+
+def test_pp_stage_routing_matches_equal_size_stage() -> None:
+    assert TransferTopology.get_target_remote_pp_ranks(
+        local_pp_rank=1,
+        local_pp_size=2,
+        remote_pp_size=2,
+    ) == [1]
+
+
+def test_pp_stage_routing_maps_sharded_local_to_unsharded_remote() -> None:
+    assert TransferTopology.get_target_remote_pp_ranks(
+        local_pp_rank=1,
+        local_pp_size=2,
+        remote_pp_size=1,
+    ) == [0]
+
+
+def test_pp_stage_routing_rejects_ambiguous_remote_stages() -> None:
+    with pytest.raises(NotImplementedError, match="multiple remote PP stages"):
+        TransferTopology.get_target_remote_pp_ranks(
+            local_pp_rank=0,
+            local_pp_size=1,
+            remote_pp_size=2,
+        )
+
+
+def test_notif_only_pp_routing_can_fan_out_to_remote_stages() -> None:
+    assert TransferTopology.get_target_remote_pp_ranks(
+        local_pp_rank=0,
+        local_pp_size=1,
+        remote_pp_size=2,
+        notif_only=True,
+    ) == [0, 1]

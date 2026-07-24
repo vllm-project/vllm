@@ -121,6 +121,10 @@ class EngineCore:
 
         self.log_stats = log_stats
 
+        # Normalize values cached by model layers before configs are copied to
+        # executor subprocesses and the model is loaded there.
+        vllm_config.adjust_dcp_kv_cache_interleave_size()
+
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
         self._pooler_config_logged = False
@@ -184,9 +188,9 @@ class EngineCore:
 
             if xfer_handshake_metadata:
                 # xfer_handshake_metadata is list of dicts from workers
-                # Each dict already has structure {(pp_rank, tp_rank): metadata}
+                # Each dict has {(pp_rank, pcp_rank, tp_rank): metadata}.
                 # Merge all worker dicts into a single dict
-                content: dict[tuple[int, int], Any] = {}
+                content: dict[tuple[int, int, int], Any] = {}
                 for worker_dict in xfer_handshake_metadata:
                     if worker_dict is not None:
                         content.update(worker_dict)

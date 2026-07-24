@@ -817,6 +817,33 @@ class TestPushWriterNegative:
         assert "req-unknown" not in w._reqs_to_send
 
 
+class TestPushTopologyHandshake:
+    def test_reverse_handshake_forwards_decode_topology(self):
+        w = _StubWriterWorker.fresh()
+        w._handshake_lock = threading.Lock()
+        w._nixl_handshake = MagicMock(return_value=({(0, 0, 0): "agent"}, 0.0))
+
+        assert w._ensure_d_handshake(
+            "decode-engine",
+            "10.0.0.2",
+            5602,
+            2,
+            "req",
+            decode_dcp_size=2,
+            decode_pcp_size=2,
+            decode_pp_size=2,
+        )
+        w._nixl_handshake.assert_called_once_with(
+            "10.0.0.2",
+            5602,
+            2,
+            "decode-engine",
+            remote_dcp_size=2,
+            remote_pcp_size=2,
+            remote_pp_size=2,
+        )
+
+
 # ----------------------------------------------------------------- #
 #  Pipeline-parallel producer (push-mode PP-disagg)                  #
 # ----------------------------------------------------------------- #
@@ -833,7 +860,9 @@ class TestPushPipelineParallel:
         w.transfer_topo = MagicMock()
         request_id = "req-pp-2"
         w._recving_metadata[request_id] = MagicMock(pp_size=2)
-        notif = f"{request_id}:1".encode()
+        # The notification payload carries the total physical producer count,
+        # including PP stages.
+        notif = f"{request_id}:2".encode()
 
         # First stage: counted, not yet done.
         w._pending_completion_notifs.put(notif)
@@ -925,13 +954,28 @@ class TestPushWriterMlaReplication:
         engine_id = "decode-engine"
         w = _StubWriterWorker.fresh()
         w.use_mla = True
+        w.pp_rank = 0
+        w.pp_size = 1
         w.nixl_wrapper = MagicMock()
         w.transfer_topo = MagicMock()
         w.transfer_topo.get_engine_info.return_value = SimpleNamespace(
             remote_tp_size=len(d_ranks),
+            remote_dcp_size=1,
+            remote_pcp_size=1,
+            remote_pp_size=1,
             remote_block_size=16,
             remote_physical_blocks_per_logical=1,
         )
+        w.transfer_topo.resolve_remote_pp_rank.return_value = 0
+        w.transfer_topo.get_target_remote_worker_keys_from_engine_id.return_value = [
+            (0, rank) for rank in d_ranks
+        ]
+        w.transfer_topo.get_dcp_rank.return_value = 0
+        w.transfer_topo.get_matched_blocks.side_effect = (
+            lambda local_ids, remote_ids, *_args: (local_ids, remote_ids)
+        )
+        w.transfer_topo.calculate_local_consumer_count.return_value = 1
+        w.transfer_topo.get_local_pp_producer_count.return_value = 1
         # D_TP > P_TP => negative ratio (one P rank feeds |ratio| D ranks).
         w.transfer_topo.tp_ratio.return_value = -len(d_ranks)
         # The tp-mapping collapses MLA to a single source rank (correct for
@@ -944,10 +988,12 @@ class TestPushWriterMlaReplication:
                 rank_offset_factor=0,
             )
         }
+        w._physical_blocks_per_logical_kv_block = 1
         w._logical_to_kernel_block_ids = lambda block_ids, ratio: block_ids
-        w.dst_xfer_side_handles = {engine_id: {r: 1000 + r for r in d_ranks}}
+        w._logical_to_remote_kernel_block_ids = lambda block_ids, ratio: block_ids
+        w.dst_xfer_side_handles = {engine_id: {(0, 0, r): 1000 + r for r in d_ranks}}
         w.src_xfer_handles_by_block_size = {16: 2000}
-        w._remote_agents = {engine_id: {(0, r): f"agent-{r}" for r in d_ranks}}
+        w._remote_agents = {engine_id: {(0, 0, r): f"agent-{r}" for r in d_ranks}}
         return w, engine_id
 
     def test_mla_hetero_tp_writes_every_d_rank(self):
