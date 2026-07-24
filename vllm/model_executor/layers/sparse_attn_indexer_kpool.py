@@ -152,10 +152,13 @@ def _scatter_decode_tokens_by_request(
     req_id = torch.repeat_interleave(
         torch.arange(num_requests, device=device, dtype=torch.int64), dl
     )
-    starts = torch.cumsum(
+    req_starts = torch.cumsum(
         torch.cat([torch.zeros(1, device=device, dtype=torch.int64), dl[:-1]]),
         dim=0,
     )
+    # Broadcast the per-request start offsets to per-token (length N == dl.sum())
+    # so each token's intra-request index subtracts its own request's start.
+    starts = torch.repeat_interleave(req_starts, dl)
     intra = torch.arange(tokens.shape[0], device=device, dtype=torch.int64) - starts
     out = torch.full(
         (num_requests, lmax, *tokens.shape[1:]),
@@ -511,32 +514,56 @@ def sparse_attn_indexer_kpool(
             and os.environ.get("VLLM_KPOOL_SKIP_DECODE_WRITE") != "1"
         ):
             num_requests = attn_metadata_narrowed.num_decodes
-            decode_lens_local = decode_metadata.decode_lens
-            if decode_metadata.requires_padding:
-                # Non-uniform decode_lens (mixed plain-decode + spec-verify):
-                # scatter actual tokens into a padded [B, lmax] layout. int32
-                # tensors can't go through pack_seq_triton (float/uint8 only).
-                lmax = int(decode_lens_local.max().item())
+            # The indexer's flatten decode path rewrites decode_lens to all-1s
+            # and reports requires_padding=False even for a variable MTP-verify
+            # batch (e.g. one request verifies 3 tokens while the rest verify
+            # 4). The logits read is fine with that, but the kpool WRITE must
+            # group tokens by their original request. Uniformity and the scatter
+            # lmax are precomputed on the host in build()
+            # (decode_is_uniform / write_max_decode_len), so this branch needs
+            # no runtime .item() -- a .item() under cudagraph capture forces a
+            # host sync and invalidates the stream.
+            per_req_lens = decode_metadata.per_req_decode_lens
+            if per_req_lens is not None:
+                use_uniform = (
+                    decode_metadata.decode_is_uniform
+                    and num_decode_tokens
+                    == num_requests * decode_metadata.write_max_decode_len
+                )
+                group_lens = per_req_lens
+                lmax = decode_metadata.write_max_decode_len
+            else:
+                # Legacy metadata without per-request lens: fall back to the
+                # host-side requires_padding flag. Unreached now (per-request
+                # lens is always populated for decode), kept defensive.
+                use_uniform = not decode_metadata.requires_padding
+                group_lens = decode_metadata.decode_lens
+                lmax = int(decode_metadata.decode_lens.max().item())
+            if not use_uniform:
+                # Non-uniform decode_lens (mixed plain-decode + spec-verify, or
+                # a variable MTP-verify batch): scatter actual tokens into a
+                # padded [B, lmax] layout. int32 tensors can't go through
+                # pack_seq_triton (float/uint8 only).
                 dec_k = _scatter_decode_tokens_by_request(
-                    k[:num_decode_tokens], decode_lens_local, num_requests, lmax, 0
+                    k[:num_decode_tokens], group_lens, num_requests, lmax, 0
                 )
                 dec_gate = _scatter_decode_tokens_by_request(
                     gate_score[:num_decode_tokens],
-                    decode_lens_local,
+                    group_lens,
                     num_requests,
                     lmax,
                     0,
                 )
                 dec_slot = _scatter_decode_tokens_by_request(
                     slot_mapping[:num_decode_tokens],
-                    decode_lens_local,
+                    group_lens,
                     num_requests,
                     lmax,
                     -1,
                 )
                 dec_pos = _scatter_decode_tokens_by_request(
                     positions[:num_decode_tokens].to(torch.int32),
-                    decode_lens_local,
+                    group_lens,
                     num_requests,
                     lmax,
                     -1,

@@ -30,6 +30,7 @@ from .kernels import fused_eh_norm
 from .model import (
     Glm5NextDecoderLayer,
     Glm5NextMoE,
+    _try_load_fp8_attn_proj,
     _try_load_fp8_indexer_wk,
     get_spec_layer_idx_from_weight_name,
 )
@@ -290,6 +291,12 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         _pending_wk_fp8: dict = {}
+        # GLM5-Next NoPE: checkpoint's kv_a_proj_with_mqa has only kv_lora_rank
+        # rows, but the model expects kv_lora_rank + qk_rope_head_dim rows. The
+        # FP8->BF16 dequant path (_try_load_fp8_attn_proj) pads the rope portion.
+        kv_a_pad_size = 0
+        if self.config.mla_nope and self.config.qk_rope_head_dim > 0:
+            kv_a_pad_size = self.config.qk_rope_head_dim
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -310,6 +317,21 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
                 _pending_wk_fp8,
                 params_dict,
                 loaded_params,
+            ):
+                continue
+
+            # FP8 checkpoint: dequantize the BF16-kept MLA projections
+            # (q_a_proj / kv_a_proj_with_mqa / o_proj) to BF16, mirroring the
+            # target model. The model holds fused_qkv_a_proj / o_proj in BF16,
+            # so the checkpoint's block-FP8 weight + weight_scale_inv for these
+            # has no param home and would KeyError without this dequant.
+            if _try_load_fp8_attn_proj(
+                name,
+                loaded_weight,
+                _pending_wk_fp8,
+                params_dict,
+                loaded_params,
+                kv_a_pad_size,
             ):
                 continue
 

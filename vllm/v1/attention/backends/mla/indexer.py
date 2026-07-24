@@ -418,6 +418,15 @@ class DeepSeekV32IndexerDecodeMetadata:
     requires_padding: bool
     schedule_metadata: torch.Tensor
     global_seq_lens: torch.Tensor | None = None
+    # Original per-request decode_lens (length num_decodes) captured before
+    # _prepare_decode_tensors rewrites decode_lens. The kpool decode-write path
+    # uses these to group tokens by request on a variable MTP-verify batch,
+    # which the flatten path represents as all-1s with requires_padding=False.
+    per_req_decode_lens: torch.Tensor | None = None
+    # Host-side (build-time) values so the kpool decode-write path can branch
+    # without a runtime .item() (which would break cudagraph capture).
+    decode_is_uniform: bool = True
+    write_max_decode_len: int = 0
 
 
 @dataclass
@@ -536,6 +545,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             next_n, device=self.device, dtype=torch.int32
         )
         self.decode_lens_buffer = torch.zeros(
+            (scheduler_config.max_num_batched_tokens,),
+            dtype=torch.int32,
+            device=self.device,
+        )
+        # Persistent mirror of the original per-request decode_lens (length
+        # num_decodes), captured in build() before _prepare_decode_tensors
+        # flattens decode_lens_buffer to all-1s. Persistent so FULL-cudagraph
+        # replay reads a stable pointer (a per-step clone would move address).
+        self.per_req_decode_lens_buffer = torch.zeros(
             (scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
             device=self.device,
@@ -922,6 +940,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 out=self.decode_lens_buffer[:num_decodes],
             )
             decode_lens = self.decode_lens_buffer[:num_decodes]
+            # Stash the original per-request decode_lens before
+            # _prepare_decode_tensors rewrites decode_lens_buffer (the flatten
+            # path sets every entry to 1 for the logits read). The kpool
+            # decode-write path uses these to scatter tokens by request on a
+            # variable MTP-verify batch.
+            self.per_req_decode_lens_buffer[:num_decodes].copy_(decode_lens)
             decode_lens_cpu = torch.diff(
                 common_attn_metadata.query_start_loc_cpu[: num_decodes + 1]
             )
@@ -941,6 +965,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             block_table = common_attn_metadata.block_table_tensor[:num_decodes, ...]
 
             max_decode_len = int(decode_lens_cpu.max().item())
+            min_decode_len = int(decode_lens_cpu.min().item())
+            # Host-side uniformity flag for the kpool decode-write path: the
+            # flatten path below rewrites decode_lens to all-1s and reports
+            # requires_padding=False even for a variable MTP-verify batch, so
+            # the write path can't reuse requires_padding. Compute it here (on
+            # the CPU copy, so no runtime .item() that would break cudagraph
+            # capture) and hand down max_decode_len as the scatter lmax.
+            write_is_uniform = min_decode_len == max_decode_len
             next_n = 1 + self.num_speculative_tokens
             use_native = not self.use_flattening and max_decode_len <= next_n
 
@@ -1043,6 +1075,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 requires_padding=requires_padding,
                 schedule_metadata=self.scheduler_metadata_buffer,
                 global_seq_lens=global_seq_lens_for_decode,
+                per_req_decode_lens=self.per_req_decode_lens_buffer[:num_decodes],
+                decode_is_uniform=write_is_uniform,
+                write_max_decode_len=max_decode_len,
             )
 
         attn_metadata = DeepseekV32IndexerMetadata(
