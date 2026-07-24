@@ -127,6 +127,7 @@ def make_fused(
             positions,
             ms[0],
             ms[1],
+            False,  # mrope_interleaved (section layout; irrelevant to timing)
         )
 
     return fused

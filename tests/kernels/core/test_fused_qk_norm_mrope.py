@@ -12,6 +12,7 @@ from vllm.utils.torch_utils import set_random_seed
 
 DTYPES = [torch.bfloat16, torch.float16]
 IS_NEOX = [True, False]
+MROPE_INTERLEAVED = [False, True]  # Qwen3-VL uses interleaved
 EPS_VALUES = [1e-5, 1e-6]
 SEEDS = [13]
 CUDA_DEVICES = ["cuda:0"]
@@ -59,6 +60,7 @@ def _apply_qk_norm_mrope(
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("is_neox", IS_NEOX)
+@pytest.mark.parametrize("mrope_interleaved", MROPE_INTERLEAVED)
 @pytest.mark.parametrize("eps", EPS_VALUES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("num_heads,num_kv_heads,head_dim,mrope_section", HEAD_CONFIGS)
@@ -68,6 +70,7 @@ def test_fused_qk_norm_mrope_matches_reference(
     device: str,
     dtype: torch.dtype,
     is_neox: bool,
+    mrope_interleaved: bool,
     eps: float,
     seed: int,
     num_heads: int,
@@ -102,7 +105,7 @@ def test_fused_qk_norm_mrope_matches_reference(
         is_neox_style=is_neox,
         dtype=dtype,
         mrope_section=mrope_section,
-        mrope_interleaved=False,
+        mrope_interleaved=mrope_interleaved,
     ).to(device)
 
     ref_result = _apply_qk_norm_mrope(
@@ -132,6 +135,7 @@ def test_fused_qk_norm_mrope_matches_reference(
             positions,
             mrope_section[0],
             mrope_section[1],
+            mrope_interleaved,
         ),
     )
 
@@ -149,6 +153,7 @@ def test_fused_qk_norm_mrope_matches_reference(
         positions,
         mrope_section[0],
         mrope_section[1],
+        mrope_interleaved,
     )
 
     if dtype == torch.float16:

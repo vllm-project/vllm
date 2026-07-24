@@ -320,11 +320,14 @@ def fused_qk_norm_mrope(
     position_ids: torch.Tensor,
     mrope_section_t: int,
     mrope_section_h: int,
+    mrope_interleaved: bool,
 ) -> None:
     """Fused per-head QK RMSNorm + multimodal RoPE (mRoPE), in-place on qkv.
 
     position_ids is [3, num_tokens] (time/height/width streams); mrope_section_t
     and mrope_section_h are the section sizes in half-dims (width is implied).
+    mrope_interleaved selects the [T H W T H W ...] section layout (Qwen3-VL)
+    vs. the contiguous [T..T H..H W..W] layout.
     """
     torch.ops._C.fused_qk_norm_mrope(
         qkv,
@@ -340,6 +343,7 @@ def fused_qk_norm_mrope(
         position_ids,
         mrope_section_t,
         mrope_section_h,
+        mrope_interleaved,
     )
 
 

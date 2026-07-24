@@ -435,7 +435,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "int num_heads_k, int num_heads_v, int head_dim, float eps, "
       "Tensor q_weight, Tensor k_weight, Tensor cos_sin_cache, "
       "bool is_neox, Tensor position_ids, "
-      "int mrope_section_t, int mrope_section_h) -> ()");
+      "int mrope_section_t, int mrope_section_h, "
+      "bool mrope_interleaved) -> ()");
 
   ops.def(
       "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert("

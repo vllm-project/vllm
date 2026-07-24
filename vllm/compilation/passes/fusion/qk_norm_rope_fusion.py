@@ -282,8 +282,8 @@ class QkNormMRopePattern:
     Matches Q/K RMSNorm followed by the multimodal-RoPE custom op
     (torch.ops.vllm.mrope) and replaces the pair with the fused
     fused_qk_norm_mrope op. mRoPE rotation is always neox-style, so the fused op
-    is invoked with is_neox=True. v1 supports the non-interleaved section layout
-    only (mrope_interleaved=False).
+    is invoked with is_neox=True. Both the interleaved (Qwen3-VL) and contiguous
+    section layouts are supported via the mrope_interleaved flag.
     """
 
     def __init__(
@@ -370,6 +370,7 @@ class QkNormMRopePattern:
                 position_ids=positions,
                 mrope_section_t=self.mrope_section[0],
                 mrope_section_h=self.mrope_section[1],
+                mrope_interleaved=self.mrope_interleaved,
             )
             result_qkv = result[1]
             return result_qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)  # type: ignore[no-any-return]
@@ -391,10 +392,10 @@ def _discover_mrope_configs(
 ) -> tuple[tuple[tuple[int, ...], bool], ...]:
     """Extract (mrope_section, mrope_interleaved) from the model's text config.
 
-    Returns an empty tuple when the model does not use mRoPE, uses the
-    interleaved section layout (unsupported in v1), or the config cannot be
-    read — in which case the fusion pass disables itself and the unfused mRoPE
-    path is used.
+    Returns an empty tuple when the model does not use mRoPE or the config
+    cannot be read — in which case the fusion pass disables itself and the
+    unfused mRoPE path is used. Both interleaved (Qwen3-VL) and contiguous
+    section layouts are supported.
     """
     try:
         model_config = config.model_config
@@ -408,12 +409,11 @@ def _discover_mrope_configs(
         )
         if not rope or "mrope_section" not in rope:
             return ()
-        if rope.get("mrope_interleaved", False):
-            return ()  # v1: non-interleaved section layout only
         section = tuple(int(x) for x in rope["mrope_section"])
         if len(section) != 3:
             return ()
-        return ((section, False),)
+        interleaved = bool(rope.get("mrope_interleaved", False))
+        return ((section, interleaved),)
     except Exception:  # noqa: BLE001 - defensive: any failure disables the pass
         return ()
 
