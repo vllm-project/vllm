@@ -96,6 +96,12 @@ class DeepSeekV3ToolParser(ToolParser):
                 # findall is an array of tuples where one is a function call and
                 # the other is None
                 function_call_tuples = self.tool_call_regex.findall(model_output)
+                if not function_call_tuples:
+                    return ExtractedToolCallInformation(
+                        tools_called=False,
+                        tool_calls=[],
+                        content=model_output,
+                    )
 
                 tool_calls = []
                 for match in function_call_tuples:
