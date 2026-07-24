@@ -40,6 +40,7 @@ def _paged_kv_cache_offsets(
     B_Loc,
     cur_batch,
     token_indices,
+    token_valid,
     offs_d,
     cur_kv_head,
     x,
@@ -55,6 +56,7 @@ def _paged_kv_cache_offsets(
     stride_v_cache_d,
     stride_v_cache_bl,
     PHYSICAL_BLOCK_SIZE: tl.constexpr,
+    MASK_BLOCK_TABLE: tl.constexpr = False,
 ):
     """Compute paged K/V cache element offsets for a tile of token positions.
 
@@ -65,11 +67,25 @@ def _paged_kv_cache_offsets(
       K cache: [num_blocks, num_kv_heads, head_size // x, block_size, x]
       V cache: [num_blocks, num_kv_heads, head_size, block_size]
     Returns `(off_k, off_v)` with shapes [D, N] and [N, D] respectively.
+
+    When `MASK_BLOCK_TABLE` is set, the block-table load is masked with
+    `token_valid` so padded lanes (a tile that extends past the end of the
+    sequence) cannot read a block-table entry past this batch's row. Invalid
+    lanes resolve to block 0 (always in-bounds) and are dropped by the caller's
+    later K/V load mask. When it is not set, `token_valid` is unused and the
+    load is emitted exactly as before.
     """
     bn_logical = token_indices // PHYSICAL_BLOCK_SIZE
-    bn = tl.load(B_Loc + cur_batch * stride_b_loc_b + bn_logical * stride_b_loc_s).to(
-        tl.int64
-    )
+    if MASK_BLOCK_TABLE:
+        bn = tl.load(
+            B_Loc + cur_batch * stride_b_loc_b + bn_logical * stride_b_loc_s,
+            mask=token_valid,
+            other=0,
+        ).to(tl.int64)
+    else:
+        bn = tl.load(
+            B_Loc + cur_batch * stride_b_loc_b + bn_logical * stride_b_loc_s
+        ).to(tl.int64)
     internal = token_indices % PHYSICAL_BLOCK_SIZE
     off_k = (
         bn[None, :] * stride_k_cache_bs
@@ -223,10 +239,15 @@ def _fwd_kernel(
         # (handles cross-block tiles via B_Loc). Same addressing is reused for
         # the current-chunk cache read below.
         token_indices = start_n + offs_bs_n
+        # Context tokens are always followed by the current chunk, so the tile
+        # never steps past this batch's block-table row; the block-table load
+        # stays unmasked (MASK_BLOCK_TABLE=False) and offs_bs_n is an unused
+        # placeholder for token_valid.
         off_k, off_v = _paged_kv_cache_offsets(
             B_Loc,
             cur_batch,
             token_indices,
+            offs_bs_n,
             offs_d,
             cur_kv_head,
             x,
@@ -358,10 +379,15 @@ def _fwd_kernel(
             # cache at their absolute positions [ctx_len, ctx_len + query_len),
             # reusing the same addressing as the context loop above.
             cache_token_idx = cur_batch_ctx_len + start_n + offs_n
+            # Padded lanes of the last tile can index past the sequence end;
+            # mask the block-table load so they don't read past this batch's
+            # row (they are dropped by the K/V load mask below anyway).
+            cache_token_valid = (start_n + offs_n) < cur_batch_query_len
             off_k_cur, off_v_cur = _paged_kv_cache_offsets(
                 B_Loc,
                 cur_batch,
                 cache_token_idx,
+                cache_token_valid,
                 offs_d,
                 cur_kv_head,
                 x,
@@ -377,6 +403,7 @@ def _fwd_kernel(
                 stride_v_cache_d,
                 stride_v_cache_bl,
                 PHYSICAL_BLOCK_SIZE,
+                MASK_BLOCK_TABLE=True,
             )
             k_cur_load = tl.load(
                 K_cache + off_k_cur,
@@ -809,7 +836,13 @@ def context_attention_fwd(
     # is re-attending an already-cached sequence with query only. In that case
     # derive the head dim / KV head count from the paged cache and use `q` as a
     # (never-dereferenced) placeholder for the dense K/V pointer arguments.
-    kv_from_cache = k is None or v is None
+    # k and v must be provided together: both None selects the cached-K/V path,
+    # both tensors the dense path. A partial input (only one None) is a caller
+    # bug and must not silently switch both sides to the cache.
+    assert (k is None) == (v is None), (
+        "k and v must both be None (cached-K/V path) or both be tensors"
+    )
+    kv_from_cache = k is None
     if kv_from_cache:
         if alibi_slopes is not None:
             raise NotImplementedError(
