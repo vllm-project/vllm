@@ -191,7 +191,7 @@ run_accuracy() {
       export HF_HUB_OFFLINE=0 HF_DATASETS_OFFLINE=0
       python3 -m lm_eval --model local-completions \
         --tasks "${ACCURACY_TASKS}" \
-        --model_args "model=${MODEL_PATH},base_url=${base_url},num_concurrent=${ACCURACY_NUM_CONCURRENT},max_retries=${ACCURACY_MAX_RETRIES},tokenized_requests=False,trust_remote_code=True" \
+        --model_args "model=${MODEL_PATH},base_url=${base_url},num_concurrent=${ACCURACY_NUM_CONCURRENT},max_retries=${ACCURACY_MAX_RETRIES},tokenized_requests=False,trust_remote_code=True,timeout=${ACCURACY_TIMEOUT:-3600}" \
         --output_path "${outdir}" \
         2>&1 | tee "${logf}"
     ) || eval_rc=$?
