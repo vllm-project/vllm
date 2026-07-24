@@ -29,6 +29,9 @@ SKIP_TENSORS: set[str] = {
     "expert_physical_to_global",
     "expert_local_to_global",
     "e_score_correction_bias",
+    # Built after create_weights(), so it is not tracked by the layerwise-reload
+    # trigger and would be re-materialized into uninitialized memory. Skip it.
+    "bias",
 }
 
 
