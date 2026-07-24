@@ -499,6 +499,26 @@ class TransferTopology:
     ) -> EngineTransferInfo:
         return self._engines[(remote_engine_id, remote_pp_rank)]
 
+    def resolve_remote_pp_rank(
+        self,
+        remote_engine_id: EngineId,
+        local_pp_rank: int,
+    ) -> int:
+        """Map a local PP stage to a compatible registered remote stage."""
+        remote_pp_ranks = sorted(
+            pp_rank
+            for engine_id, pp_rank in self._engines
+            if engine_id == remote_engine_id
+        )
+        if local_pp_rank in remote_pp_ranks:
+            return local_pp_rank
+        if len(remote_pp_ranks) == 1:
+            return remote_pp_ranks[0]
+        raise RuntimeError(
+            f"No unambiguous remote PP stage for engine {remote_engine_id}: "
+            f"local_pp_rank={local_pp_rank}, remote_pp_ranks={remote_pp_ranks}"
+        )
+
     def unregister_remote_engine(self, remote_engine_id: EngineId) -> None:
         # Remove all pp_rank entries for the remote engine.
         for key in [k for k in self._engines if k[0] == remote_engine_id]:
@@ -608,33 +628,40 @@ class TransferTopology:
         return [local_tp_rank * abs_ratio + i for i in range(abs_ratio)]
 
     @staticmethod
+    def get_dcp_rank(
+        tp_rank: int,
+        pcp_rank: int,
+        pcp_size: int,
+        dcp_size: int,
+    ) -> int:
+        """Derive the DCP coverage rank from a physical PCP/TP worker."""
+        if dcp_size <= 0:
+            raise ValueError(f"dcp_size must be positive, got {dcp_size}")
+        return (tp_rank * pcp_size + pcp_rank) % dcp_size
+
+    @staticmethod
     def get_valid_worker_keys(
         tp_size: int,
         dcp_size: int,
         pcp_size: int,
     ) -> list[tuple[int, int]]:
-        """Return valid ``(tp_rank, dcp_rank)`` keys for a TP x PCP layout.
+        """Return physical ``(pcp_rank, tp_rank)`` worker keys.
 
-        DCP groups follow docs/design/dcp_communication_patterns.md:
-        transpose to ``(tp, pcp)`` first, then flatten.  Thus
-        ``flat_idx = tp_rank * pcp_size + pcp_rank`` and
-        ``dcp_rank = flat_idx % dcp_size``.
+        DCP rank is a derived KV-coverage coordinate and cannot identify a
+        physical worker: multiple PCP ranks may map to the same DCP rank.
         """
-        valid_keys: list[tuple[int, int]] = []
-        seen: set[tuple[int, int]] = set()
-        for pcp_rank in range(pcp_size):
-            for tp_rank in range(tp_size):
-                flat_idx = tp_rank * pcp_size + pcp_rank
-                key = (tp_rank, flat_idx % dcp_size)
-                if key not in seen:
-                    seen.add(key)
-                    valid_keys.append(key)
-        return valid_keys
+        if dcp_size <= 0:
+            raise ValueError(f"dcp_size must be positive, got {dcp_size}")
+        return [
+            (pcp_rank, tp_rank)
+            for pcp_rank in range(pcp_size)
+            for tp_rank in range(tp_size)
+        ]
 
     def has_kv_cache_overlap(
         self,
+        remote_pcp_rank: int,
         remote_tp_rank: int,
-        remote_dcp_rank: int,
         remote_tp_size: int,
         remote_dcp_size: int,
         remote_pcp_size: int,
@@ -645,6 +672,12 @@ class TransferTopology:
         docs/design/dcp_communication_patterns.md: both KV head coverage and
         DCP token-slice coverage must overlap.
         """
+        remote_dcp_rank = self.get_dcp_rank(
+            remote_tp_rank,
+            remote_pcp_rank,
+            remote_pcp_size,
+            remote_dcp_size,
+        )
         return self._has_kv_cache_overlap_for_local_rank(
             local_tp_rank=self.tp_rank,
             local_dcp_rank=self.dcp_rank,
@@ -701,13 +734,13 @@ class TransferTopology:
         remote_pcp_size: int,
     ) -> list[tuple[int, int]]:
         return [
-            (remote_tp_rank, remote_dcp_rank)
-            for remote_tp_rank, remote_dcp_rank in self.get_valid_worker_keys(
+            (remote_pcp_rank, remote_tp_rank)
+            for remote_pcp_rank, remote_tp_rank in self.get_valid_worker_keys(
                 remote_tp_size, remote_dcp_size, remote_pcp_size
             )
             if self.has_kv_cache_overlap(
+                remote_pcp_rank=remote_pcp_rank,
                 remote_tp_rank=remote_tp_rank,
-                remote_dcp_rank=remote_dcp_rank,
                 remote_tp_size=remote_tp_size,
                 remote_dcp_size=remote_dcp_size,
                 remote_pcp_size=remote_pcp_size,
@@ -734,18 +767,26 @@ class TransferTopology:
     ) -> int:
         """Count local workers that will notify a remote worker."""
         info = self._engines[(remote_engine_id, remote_pp_rank)]
-        remote_tp_rank, remote_dcp_rank = remote_worker_key
+        remote_pcp_rank, remote_tp_rank = remote_worker_key
+        remote_dcp_rank = self.get_dcp_rank(
+            remote_tp_rank,
+            remote_pcp_rank,
+            info.remote_pcp_size,
+            info.remote_dcp_size,
+        )
         return sum(
             self._has_kv_cache_overlap_for_local_rank(
                 local_tp_rank=local_tp_rank,
-                local_dcp_rank=local_dcp_rank,
+                local_dcp_rank=self.get_dcp_rank(
+                    local_tp_rank, local_pcp_rank, self.pcp_size, self.dcp_size
+                ),
                 remote_tp_rank=remote_tp_rank,
                 remote_dcp_rank=remote_dcp_rank,
                 remote_tp_size=info.remote_tp_size,
                 remote_dcp_size=info.remote_dcp_size,
                 remote_pcp_size=info.remote_pcp_size,
             )
-            for local_tp_rank, local_dcp_rank in self.get_valid_worker_keys(
+            for local_pcp_rank, local_tp_rank in self.get_valid_worker_keys(
                 self.tp_size, self.dcp_size, self.pcp_size
             )
         )

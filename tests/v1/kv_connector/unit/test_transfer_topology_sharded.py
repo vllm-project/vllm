@@ -27,6 +27,9 @@ def _make_topology(
     tp_rank: int = 1,
     tp_size: int = 4,
     total_num_kv_heads: int = 8,
+    dcp_rank: int = 0,
+    dcp_size: int = 1,
+    pcp_size: int = 1,
 ) -> TransferTopology:
     return TransferTopology(
         tp_rank=tp_rank,
@@ -37,6 +40,9 @@ def _make_topology(
         is_mamba=False,
         total_num_kv_heads=total_num_kv_heads,
         attn_backends=[_FakeAttentionBackend],
+        dcp_rank=dcp_rank,
+        dcp_size=dcp_size,
+        pcp_size=pcp_size,
     )
 
 
@@ -144,3 +150,58 @@ def test_engine_info_fields_have_backward_compatible_defaults() -> None:
     assert registered.remote_pp_rank == 0
     assert registered.start_layer == 0
     assert registered.end_layer == 0
+
+
+def test_worker_keys_keep_pcp_workers_distinct_when_dcp_aliases() -> None:
+    keys = TransferTopology.get_valid_worker_keys(
+        tp_size=2,
+        dcp_size=1,
+        pcp_size=2,
+    )
+
+    assert keys == [(0, 0), (0, 1), (1, 0), (1, 1)]
+    assert len(keys) == 4
+
+
+@pytest.mark.parametrize(
+    ("pcp_rank", "tp_rank", "expected_dcp_rank"),
+    [
+        (0, 0, 0),
+        (1, 0, 1),
+        (0, 1, 0),
+        (1, 1, 1),
+    ],
+)
+def test_dcp_rank_is_derived_from_physical_worker_key(
+    pcp_rank: int,
+    tp_rank: int,
+    expected_dcp_rank: int,
+) -> None:
+    assert (
+        TransferTopology.get_dcp_rank(
+            tp_rank=tp_rank,
+            pcp_rank=pcp_rank,
+            pcp_size=2,
+            dcp_size=2,
+        )
+        == expected_dcp_rank
+    )
+
+
+def test_target_worker_keys_preserve_pcp_identity() -> None:
+    topology = _make_topology(
+        tp_rank=0,
+        tp_size=2,
+        total_num_kv_heads=2,
+        dcp_rank=0,
+        dcp_size=1,
+        pcp_size=2,
+    )
+
+    keys = topology.get_target_remote_worker_keys(
+        remote_tp_size=2,
+        remote_dcp_size=1,
+        remote_pcp_size=2,
+    )
+
+    assert keys == [(0, 0), (1, 0)]

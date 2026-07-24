@@ -15,7 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlConnectorMetadata,
-    RemoteWorkerKey,
+    RemoteAgentKey,
     ReqMeta,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
@@ -123,10 +123,15 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # Update last activity from this remote. Mind that cleanup is done on main
         # thread (this one), so we don't race on this structure.
         self._engine_last_active[engine_id] = time.perf_counter()
-        remote_info = self.transfer_topo.get_engine_info(engine_id)
+        remote_pp_rank = self.transfer_topo.resolve_remote_pp_rank(
+            engine_id, self.pp_rank
+        )
+        remote_info = self.transfer_topo.get_engine_info(engine_id, remote_pp_rank)
         tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
         remote_worker_keys = (
-            self.transfer_topo.get_target_remote_worker_keys_from_engine_id(engine_id)
+            self.transfer_topo.get_target_remote_worker_keys_from_engine_id(
+                engine_id, remote_pp_rank
+            )
         )
         logical_local_block_ids = meta.local_block_ids
         logical_remote_block_ids = meta.remote.block_ids
@@ -134,10 +139,17 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             meta.local_num_computed_tokens // self._local_logical_block_size()
         ) * self.dcp_size
 
-        remote_tp_rank_count = len({key[0] for key in remote_worker_keys})
+        remote_tp_rank_count = len({key[1] for key in remote_worker_keys})
         launched_read = False
         for remote_worker_key in remote_worker_keys:
-            remote_tp_rank, remote_dcp_rank = remote_worker_key
+            remote_pcp_rank, remote_tp_rank = remote_worker_key
+            remote_dcp_rank = self.transfer_topo.get_dcp_rank(
+                remote_tp_rank,
+                remote_pcp_rank,
+                remote_info.remote_pcp_size,
+                remote_info.remote_dcp_size,
+            )
+            remote_agent_key: RemoteAgentKey = (remote_pp_rank, *remote_worker_key)
             local_block_ids: BlockIds
             remote_block_ids: BlockIds
             if len(logical_local_block_ids) == 0:
@@ -193,13 +205,14 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     remote_block_size
                 ]
 
-            # Destination handle: remote_engine_id -> (tp_rank, dcp_rank) -> handle.
+            # Destination handle: engine -> (pp_rank, pcp_rank, tp_rank) -> handle.
             remote_xfer_side_handle = self.dst_xfer_side_handles[meta.remote.engine_id][
-                remote_worker_key
+                remote_agent_key
             ]
             expected_consumers = self.transfer_topo.calculate_local_consumer_count(
                 engine_id,
                 remote_worker_key,
+                remote_pp_rank,
             )
 
             self._read_blocks(
@@ -209,7 +222,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 remote_request_id=meta.remote.request_id,
                 local_xfer_side_handle=local_xfer_side_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
-                remote_worker_key=remote_worker_key,
+                remote_agent_key=remote_agent_key,
                 expected_consumers=expected_consumers,
             )
 
@@ -229,7 +242,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_request_id: str,
         local_xfer_side_handle: int,
         remote_xfer_side_handle: int,
-        remote_worker_key: RemoteWorkerKey | None = None,
+        remote_agent_key: RemoteAgentKey | None = None,
         expected_consumers: int | None = None,
     ):
         """
@@ -238,8 +251,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         """
         assert self.transfer_topo is not None
         remote_rank = read_spec.remote_rank
-        if remote_worker_key is None:
-            remote_worker_key = (remote_rank, 0)
+        if remote_agent_key is None:
+            remote_agent_key = (self.pp_rank, 0, remote_rank)
         if expected_consumers is None:
             expected_consumers = self.world_size
         local_block_ids = read_spec.local_block_ids
@@ -251,7 +264,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # just notify P worker that we have the blocks we need.
         if not any(len(group) > 0 for group in local_block_ids):
             # A full prefix cache hit is indicated with an empty list.
-            agent_name = self._remote_agents[dst_engine_id][remote_worker_key]
+            agent_name = self._remote_agents[dst_engine_id][remote_agent_key]
             try:
                 self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
             except Exception as e:
@@ -262,13 +275,15 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     req_id=request_id,
                     error=e,
                     dst_engine_id=dst_engine_id,
-                    remote_worker_key=remote_worker_key,
+                    remote_agent_key=remote_agent_key,
                     remote_agent_name=agent_name,
                 )
                 self.xfer_stats.record_failed_notification()
             return
 
-        remote_info = self.transfer_topo.get_engine_info(dst_engine_id)
+        remote_info = self.transfer_topo.get_engine_info(
+            dst_engine_id, remote_agent_key[0]
+        )
         block_size_ratio = self.transfer_topo.block_size_ratio(
             remote_info.remote_block_size
         )
@@ -361,7 +376,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 msg="Marking blocks as invalid",
                 error=e,
                 dst_engine_id=dst_engine_id,
-                remote_worker_key=remote_worker_key,
+                remote_agent_key=remote_agent_key,
             )
             self._handle_failed_transfer(request_id, handle)
 

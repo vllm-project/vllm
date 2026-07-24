@@ -45,8 +45,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
     NixlConnectorMetadata,
+    RemoteAgentKey,
     RemoteMeta,
-    RemoteWorkerKey,
     ReqId,
     ReqMeta,
     TransferHandle,
@@ -295,7 +295,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             return
 
         def _on_handshake(
-            f: Future[tuple[dict[RemoteWorkerKey, str], float]],
+            f: Future[tuple[dict[RemoteAgentKey, str], float]],
             rid: str = req_id,
             rd: dict[str, Any] = reg_data,
         ) -> None:
@@ -498,7 +498,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         assert meta.remote is not None and self.transfer_topo is not None
         engine_id = meta.remote.engine_id
         plan = self.tp_mappings[engine_id]
-        remote_info = self.transfer_topo.get_engine_info(engine_id)
+        remote_pp_rank = self.transfer_topo.resolve_remote_pp_rank(
+            engine_id, self.pp_rank
+        )
+        remote_info = self.transfer_topo.get_engine_info(engine_id, remote_pp_rank)
         tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
 
         # Expand D's logical IDs using the ratio learned during the
@@ -517,19 +520,23 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             # collapses to one rank (fine for reads), but push must WRITE every
             # D rank or the rest decode stale KV; only the dst differs per rank.
             assert len(plan.all_source_ranks) == 1
-            mla_remote_worker_keys = list(self.dst_xfer_side_handles[engine_id])
+            mla_remote_agent_keys = [
+                key
+                for key in self.dst_xfer_side_handles[engine_id]
+                if key[0] == remote_pp_rank
+            ]
             mla_local_ids = [list(ids) for ids in local_block_ids]
             mla_remote_ids = [list(ids) for ids in remote_block_ids]
             read_specs = [
                 ReadSpec(
-                    remote_rank=remote_worker_key[0],
+                    remote_rank=remote_agent_key[2],
                     local_block_ids=mla_local_ids,
                     remote_block_ids=mla_remote_ids,
                 )
-                for remote_worker_key in mla_remote_worker_keys
+                for remote_agent_key in mla_remote_agent_keys
             ]
         else:
-            mla_remote_worker_keys = []
+            mla_remote_agent_keys = []
             read_specs = [
                 ReadSpec(
                     remote_rank=rank,
@@ -568,13 +575,13 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     remote_block_size
                 ]
 
-            remote_worker_key: RemoteWorkerKey = (
-                mla_remote_worker_keys[i]
-                if mla_remote_worker_keys
-                else (spec.remote_rank, 0)
+            remote_agent_key: RemoteAgentKey = (
+                mla_remote_agent_keys[i]
+                if mla_remote_agent_keys
+                else (remote_pp_rank, 0, spec.remote_rank)
             )
             remote_xfer_side_handle = self.dst_xfer_side_handles[meta.remote.engine_id][
-                remote_worker_key
+                remote_agent_key
             ]
 
             handle = self._xfer_blocks(
@@ -588,11 +595,15 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             if handle is not None:
                 handles.append(handle)
 
+        if handles:
+            self._sending_transfers[req_id].extend(handles)
+
         if self.use_mla and tp_ratio < 0 and read_specs:
             notif_id = f"{meta.remote.request_id}:{self.world_size}".encode()
+            written_remote_ranks = {read_spec.remote_rank for read_spec in read_specs}
             remote_agents = self._remote_agents[meta.remote.engine_id]
             for rank_to_notify, agent in remote_agents.items():
-                if rank_to_notify[0] != read_specs[0].remote_rank:
+                if rank_to_notify[2] not in written_remote_ranks:
                     self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
 
     def _xfer_blocks(

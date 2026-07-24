@@ -925,6 +925,7 @@ class TestPushWriterMlaReplication:
         engine_id = "decode-engine"
         w = _StubWriterWorker.fresh()
         w.use_mla = True
+        w.pp_rank = 0
         w.nixl_wrapper = MagicMock()
         w.transfer_topo = MagicMock()
         w.transfer_topo.get_engine_info.return_value = SimpleNamespace(
@@ -932,6 +933,7 @@ class TestPushWriterMlaReplication:
             remote_block_size=16,
             remote_physical_blocks_per_logical=1,
         )
+        w.transfer_topo.resolve_remote_pp_rank.return_value = 0
         # D_TP > P_TP => negative ratio (one P rank feeds |ratio| D ranks).
         w.transfer_topo.tp_ratio.return_value = -len(d_ranks)
         # The tp-mapping collapses MLA to a single source rank (correct for
@@ -945,9 +947,9 @@ class TestPushWriterMlaReplication:
             )
         }
         w._logical_to_kernel_block_ids = lambda block_ids, ratio: block_ids
-        w.dst_xfer_side_handles = {engine_id: {r: 1000 + r for r in d_ranks}}
+        w.dst_xfer_side_handles = {engine_id: {(0, 0, r): 1000 + r for r in d_ranks}}
         w.src_xfer_handles_by_block_size = {16: 2000}
-        w._remote_agents = {engine_id: {(0, r): f"agent-{r}" for r in d_ranks}}
+        w._remote_agents = {engine_id: {(0, 0, r): f"agent-{r}" for r in d_ranks}}
         return w, engine_id
 
     def test_mla_hetero_tp_writes_every_d_rank(self):

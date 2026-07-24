@@ -36,7 +36,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlAgentMetadata,
     NixlConnectorMetadata,
     NixlHandshakePayload,
-    RemoteWorkerKey,
+    RemoteAgentKey,
     ReqId,
     ReqMeta,
     TransferHandle,
@@ -63,6 +63,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import
 from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
 from vllm.distributed.parallel_state import (
     get_pcp_group,
+    get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
@@ -344,8 +345,8 @@ class NixlBaseConnectorWorker:
             )
 
         self.nixl_wrapper = nixl_wrapper_cls(str(uuid.uuid4()), config)
-        # Map of engine_id -> {(tp_rank, dcp_rank): agent_name}.
-        self._remote_agents: dict[EngineId, dict[RemoteWorkerKey, str]] = defaultdict(
+        # Map of engine_id -> {(pp_rank, pcp_rank, tp_rank): agent_name}.
+        self._remote_agents: dict[EngineId, dict[RemoteAgentKey, str]] = defaultdict(
             dict
         )
         # Map of engine_id -> clock offset.
@@ -355,6 +356,10 @@ class NixlBaseConnectorWorker:
         self.engine_id: EngineId = engine_id
         self.tp_rank = get_tensor_model_parallel_rank()
         self.world_size = get_tensor_model_parallel_world_size()
+        try:
+            self.pp_rank = get_pp_group().rank_in_group
+        except AssertionError:
+            self.pp_rank = 0
         self.tp_size = self.world_size
         self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
         try:
@@ -364,7 +369,11 @@ class NixlBaseConnectorWorker:
             self.pcp_size = 1
             self.pcp_rank = 0
         self.dcp_rank = (self.tp_rank * self.pcp_size + self.pcp_rank) % self.dcp_size
-        self.local_worker_key: RemoteWorkerKey = (self.tp_rank, self.dcp_rank)
+        self.local_worker_key: RemoteAgentKey = (
+            self.pp_rank,
+            self.pcp_rank,
+            self.tp_rank,
+        )
 
         self.num_blocks = kv_cache_config.num_blocks
         self.enable_permute_local_kv = False
@@ -426,9 +435,9 @@ class NixlBaseConnectorWorker:
         # Map of engine_id -> kv_caches_base_addr. For TP case, each local
         self.device_id: int = 0
         # Current rank may pull from multiple remote TP workers.
-        # EngineId, dict[(tp_rank, dcp_rank), list[int]] -> base_addr_for_layer
+        # EngineId, dict[(pp_rank, pcp_rank, tp_rank), list[int]].
         self.kv_caches_base_addr = defaultdict[
-            EngineId, dict[RemoteWorkerKey, list[int]]
+            EngineId, dict[RemoteAgentKey, list[int]]
         ](dict)
 
         # Number of NIXL regions. Currently one region per cache
@@ -459,8 +468,9 @@ class NixlBaseConnectorWorker:
         # Populated dynamically during handshake based on remote configuration.
         # Keep track of regions at different tp_ratio values. tp_ratio->handles
         self.src_xfer_handles_by_tp_ratio: dict[int, list[int]] = {}
-        # Map of engine_id -> {(tp_rank, dcp_rank): nixl_prepped_dlist_handle}.
-        self.dst_xfer_side_handles = defaultdict[EngineId, dict[RemoteWorkerKey, int]](
+        # Map of engine_id -> {(pp_rank, pcp_rank, tp_rank):
+        # nixl_prepped_dlist_handle}.
+        self.dst_xfer_side_handles = defaultdict[EngineId, dict[RemoteAgentKey, int]](
             dict
         )
 
@@ -495,7 +505,7 @@ class NixlBaseConnectorWorker:
         )
         self._ready_requests = queue.Queue[tuple[ReqId, ReqMeta]]()
         self._handshake_futures: dict[
-            EngineId, Future[tuple[dict[RemoteWorkerKey, str], float]]
+            EngineId, Future[tuple[dict[RemoteAgentKey, str], float]]
         ] = {}
         # Protects _handshake_futures and _remote_agents.
         self._handshake_lock = threading.RLock()
@@ -589,7 +599,7 @@ class NixlBaseConnectorWorker:
         remote_pcp_size: int = 1,
         remote_pp_size: int = 1,
         notif_agents_only: bool = False,
-    ) -> tuple[dict[RemoteWorkerKey, str], float]:
+    ) -> tuple[dict[RemoteAgentKey, str], float]:
         """Do a NIXL handshake with a remote instance."""
 
         # the first time we connect to a remote agent.
@@ -612,7 +622,7 @@ class NixlBaseConnectorWorker:
             remote_dcp_size,
             remote_pcp_size,
         )
-        remote_worker_to_agent_name: dict[RemoteWorkerKey, str] = {}
+        remote_worker_to_agent_name: dict[RemoteAgentKey, str] = {}
         path = make_zmq_path("tcp", host, port)
         # Clock offset to the peer, estimated from the handshake round-trip.
         # Keep the lowest-RTT sample: hop cost is ~uniform across ranks, so a
@@ -624,10 +634,10 @@ class NixlBaseConnectorWorker:
             for remote_pp_rank, remote_worker_key in itertools.product(
                 range(remote_pp_size), remote_worker_keys
             ):
-                remote_tp_rank, remote_dcp_rank = remote_worker_key
-                remote_pcp_rank = self._tp_dcp_to_pcp_rank(
+                remote_pcp_rank, remote_tp_rank = remote_worker_key
+                remote_dcp_rank = self.transfer_topo.get_dcp_rank(
                     remote_tp_rank,
-                    remote_dcp_rank,
+                    remote_pcp_rank,
                     remote_pcp_size,
                     remote_dcp_size,
                 )
@@ -746,8 +756,8 @@ class NixlBaseConnectorWorker:
                         f"dcp_size={metadata.dcp_size})."
                     )
                 if not self.transfer_topo.has_kv_cache_overlap(
+                    metadata.pcp_rank,
                     metadata.tp_rank,
-                    metadata.dcp_rank,
                     metadata.tp_size,
                     metadata.dcp_size,
                     metadata.pcp_size,
@@ -762,24 +772,24 @@ class NixlBaseConnectorWorker:
                 # Register Remote agent.
                 if notif_agents_only:
                     remote_agent_name = self._add_notif_only_remote_agent(
-                        metadata, remote_tp_size
-                    )
-                    # Notification-only callers iterate over values; use a key
-                    # that remains unique across PP, PCP, and TP workers.
-                    agent_key: RemoteWorkerKey = (
-                        remote_pp_rank,
-                        remote_pcp_rank * remote_tp_size + remote_tp_rank,
+                        metadata, remote_tp_size, remote_pp_rank
                     )
                 else:
                     remote_agent_name = self.add_remote_agent(
                         metadata,
-                        metadata.tp_rank,
-                        metadata.tp_size,
-                        metadata.dcp_rank,
-                        metadata.dcp_size,
-                        metadata.pcp_size,
+                        remote_tp_rank=metadata.tp_rank,
+                        remote_tp_size=metadata.tp_size,
+                        remote_dcp_rank=metadata.dcp_rank,
+                        remote_dcp_size=metadata.dcp_size,
+                        remote_pcp_size=metadata.pcp_size,
+                        remote_pcp_rank=metadata.pcp_rank,
+                        remote_pp_rank=remote_pp_rank,
                     )
-                    agent_key = remote_worker_key
+                agent_key: RemoteAgentKey = (
+                    remote_pp_rank,
+                    remote_pcp_rank,
+                    remote_tp_rank,
+                )
                 setup_agent_time = time.perf_counter()
                 logger.debug(
                     "NIXL handshake: add agent took: %s",
@@ -795,7 +805,10 @@ class NixlBaseConnectorWorker:
         return remote_worker_to_agent_name, best_offset
 
     def _add_notif_only_remote_agent(
-        self, metadata: NixlAgentMetadata, remote_tp_size: int
+        self,
+        metadata: NixlAgentMetadata,
+        remote_tp_size: int,
+        remote_pp_rank: int = 0,
     ) -> str:
         """Load a remote agent for notifs only on the push-mode decode side.
 
@@ -811,35 +824,12 @@ class NixlBaseConnectorWorker:
                 remote_physical_blocks_per_logical=(
                     metadata.physical_blocks_per_logical_kv_block
                 ),
+                remote_dcp_size=metadata.dcp_size,
+                remote_pcp_size=metadata.pcp_size,
+                remote_pp_rank=remote_pp_rank,
             ),
         )
         return self.nixl_wrapper.add_remote_agent(metadata.agent_metadata)
-
-    @staticmethod
-    def _tp_dcp_to_pcp_rank(
-        tp_rank: int,
-        dcp_rank: int,
-        pcp_size: int,
-        dcp_size: int,
-    ) -> int:
-        if not 0 <= dcp_rank < dcp_size:
-            raise ValueError(f"Invalid dcp_rank={dcp_rank} for dcp_size={dcp_size}")
-
-        pcp_rank = (dcp_rank - tp_rank * pcp_size) % dcp_size
-        if pcp_rank < pcp_size:
-            # dcp_rank is derived from the explicit PCP/TP metadata key.
-            inferred_dcp_rank = (tp_rank * pcp_size + pcp_rank) % dcp_size
-            assert inferred_dcp_rank == dcp_rank
-            # A (tp_rank, dcp_rank) pair may map to multiple PCP ranks when
-            # pcp_size > dcp_size. Pick the smallest valid PCP rank for now.
-            # TODO: Choose among equivalent PCP ranks using load-balance
-            # signals instead of always choosing the smallest rank.
-            return pcp_rank
-
-        raise ValueError(
-            f"No valid pcp_rank for tp_rank={tp_rank}, dcp_rank={dcp_rank}, "
-            f"pcp_size={pcp_size}, dcp_size={dcp_size}"
-        )
 
     def initialize_host_xfer_buffer(self, kv_caches: dict[str, torch.Tensor]) -> None:
         """
@@ -957,7 +947,7 @@ class NixlBaseConnectorWorker:
         pcp_size: int = 1,
         pp_size: int = 1,
         notif_agents_only: bool = False,
-    ) -> Future[tuple[dict[RemoteWorkerKey, str], float]] | None:
+    ) -> Future[tuple[dict[RemoteAgentKey, str], float]] | None:
         """
         Ensure a handshake is in-flight (or already done) for *engine_id*.
 
@@ -988,7 +978,7 @@ class NixlBaseConnectorWorker:
             self._handshake_futures[engine_id] = fut
 
             def done_callback(
-                f: Future[tuple[dict[RemoteWorkerKey, str], float]],
+                f: Future[tuple[dict[RemoteAgentKey, str], float]],
                 eid=engine_id,
             ):
                 with self._handshake_lock:
@@ -1021,6 +1011,7 @@ class NixlBaseConnectorWorker:
             meta.tp_size,
             meta.dcp_size,
             meta.pcp_size,
+            meta.pp_size,
         )
         if fut is None:
             # Already handshaked — only happens if caller does not pre-check.
@@ -1619,6 +1610,8 @@ class NixlBaseConnectorWorker:
         remote_dcp_rank: int = 0,
         remote_dcp_size: int = 1,
         remote_pcp_size: int = 1,
+        remote_pcp_rank: int = 0,
+        remote_pp_rank: int = 0,
     ) -> str:
         """
         Add the remote NIXL agent and prepare the descriptors for reading cache
@@ -1664,7 +1657,11 @@ class NixlBaseConnectorWorker:
         tp_ratio < 0 (P_TP > D_TP) are supported by the 3-read transfer.
         """  # noqa: E501
         engine_id = nixl_agent_meta.engine_id
-        remote_worker_key: RemoteWorkerKey = (remote_tp_rank, remote_dcp_rank)
+        remote_worker_key: RemoteAgentKey = (
+            remote_pp_rank,
+            remote_pcp_rank,
+            remote_tp_rank,
+        )
         # TODO re-evaluate refreshing for scaling/recovery
         if remote_worker_key in self._remote_agents.get(engine_id, {}):
             logger.debug(
@@ -1706,6 +1703,7 @@ class NixlBaseConnectorWorker:
             remote_physical_blocks_per_logical=physical_blocks_per_logical,
             remote_dcp_size=remote_dcp_size,
             remote_pcp_size=remote_pcp_size,
+            remote_pp_rank=remote_pp_rank,
         )
         transfer_topo.register_remote_engine(engine_id, transfer_info)
         logger.info("Transfer plan: %s", transfer_topo.describe(engine_id))
