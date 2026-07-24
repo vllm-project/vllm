@@ -27,10 +27,13 @@ from vllm.distributed.weight_transfer import (
     WeightTransferTrainerFactory,
 )
 from vllm.distributed.weight_transfer.base import (
+    TrainerInitInfo,
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
 )
 from vllm.distributed.weight_transfer.ipc_engine import (
+    IPCTrainerInitInfo,
+    IPCTrainerWeightTransferEngine,
     IPCWeightTransferEngine,
     IPCWeightTransferInitInfo,
     IPCWeightTransferUpdateInfo,
@@ -1071,7 +1074,7 @@ def inference_receive_ipc_tensor(
 
     import torch
 
-    _set_ray_assigned_device()
+    device = _set_ray_assigned_device()
 
     from vllm.config.parallel import ParallelConfig
     from vllm.config.weight_transfer import WeightTransferConfig
@@ -1088,6 +1091,8 @@ def inference_receive_ipc_tensor(
             for name, tensor in weights:
                 self.received.append((name, tensor.clone()))
 
+    # Trainer sends unpacked IPC handles; the worker learns packed=False from
+    # the init handshake below (IPCWeightTransferInitInfo defaults to False).
     config = WeightTransferConfig(backend="ipc")
     vllm_config = MagicMock()
     parallel_config = MagicMock(spec=ParallelConfig)
@@ -1099,9 +1104,7 @@ def inference_receive_ipc_tensor(
     vllm_config.model_config = MagicMock()
 
     recorder = Recorder()
-    engine = IPCWeightTransferEngine(
-        config, vllm_config, _get_ray_assigned_device(), recorder
-    )
+    engine = IPCWeightTransferEngine(config, vllm_config, device, recorder)
     # Transport-only test: bypass the set_current_vllm_config context that
     # receive_weights enters, since vllm_config here is a mock.
     import vllm.config as _vllm_config_mod
@@ -1211,6 +1214,7 @@ def test_ipc_receive_weights_missing_gpu_uuid_raises():
         torch.device("cuda:0"),
         MagicMock(spec=torch.nn.Module),
     )
+    # No init handshake here, so the engine keeps its default packed=False.
 
     dummy_tensor = torch.ones(10, 10, device="cuda:0")
     _, ipc_handle = reduce_tensor(dummy_tensor)
@@ -1264,8 +1268,8 @@ class _DummyTrainerEngine(TrainerWeightTransferEngine):
     """Minimal concrete trainer engine to exercise base-class + factory."""
 
     @classmethod
-    def trainer_init(cls, config, init_info, *, client, source):
-        return cls(config, client=client, source=source)
+    def trainer_init(cls, init_info, *, client, source):
+        return cls(client=client, source=source)
 
     def send_weights(self):
         pass
@@ -1362,18 +1366,17 @@ class TestModuleSource:
 class TestTrainerFactory:
     """WeightTransferTrainerFactory registry mechanics."""
 
-    def test_builtin_registry_has_no_trainer_backends_yet(self):
-        # Concrete backends register in the per-backend migration PRs.
-        assert WeightTransferTrainerFactory._registry == {}
+    def test_registry_has_ipc(self):
+        # IPC is the first backend migrated to the trainer engine; NCCL /
+        # sparse NCCL register in later PRs.
+        assert "ipc" in WeightTransferTrainerFactory._registry
 
     def test_register_and_dispatch(self):
         saved = dict(WeightTransferTrainerFactory._registry)
         try:
             WeightTransferTrainerFactory.register_engine("dummy", _DummyTrainerEngine)
             engine = WeightTransferTrainerFactory.trainer_init(
-                "dummy",
-                WeightTransferConfig(backend="dummy"),
-                MagicMock(),
+                MagicMock(backend="dummy"),  # backend read from the init info
                 client=RecordingClient(),
                 source=ModuleSource(_module_with(("w", torch.zeros(2)))),
             )
@@ -1388,12 +1391,19 @@ class TestTrainerFactory:
     def test_unknown_backend_raises(self):
         with pytest.raises(ValueError, match="Invalid weight transfer backend"):
             WeightTransferTrainerFactory.trainer_init(
-                "nope",
-                WeightTransferConfig(backend="nope"),
-                MagicMock(),
+                MagicMock(backend="nope"),
                 client=RecordingClient(),
                 source=ModuleSource(_module_with(("w", torch.zeros(2)))),
             )
+
+    def test_ipc_init_info_declares_backend(self):
+        assert IPCTrainerInitInfo.backend == "ipc"
+
+    def test_trainer_init_info_subclass_must_set_backend(self):
+        with pytest.raises(TypeError, match="class-level `backend`"):
+
+            class _NoBackend(TrainerInitInfo):
+                pass
 
 
 class TestTrainerEngineBase:
@@ -1401,7 +1411,6 @@ class TestTrainerEngineBase:
 
     def test_source_stored_and_sender_by_default(self):
         engine = _DummyTrainerEngine(
-            WeightTransferConfig(backend="nccl"),
             client=RecordingClient(),
             source=ModuleSource(_module_with(("w", torch.zeros(2)))),
         )
@@ -1410,10 +1419,52 @@ class TestTrainerEngineBase:
 
     def test_shutdown_default_is_noop(self):
         engine = _DummyTrainerEngine(
-            WeightTransferConfig(backend="nccl"),
             client=RecordingClient(),
             source=ModuleSource(_module_with(("w", torch.zeros(2)))),
             is_sender=False,
         )
         assert engine.is_sender is False
         engine.shutdown()  # must not raise
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 1,
+    reason="Need at least 1 GPU (CUDA IPC handles).",
+)
+def test_ipc_trainer_send_weights_drives_client_in_order():
+    """send_weights issues start -> update -> finish and ships per-round metadata;
+    the packed wire param rides the init info, not the per-round update_info."""
+    client = RecordingClient()
+    engine = IPCTrainerWeightTransferEngine(
+        client=client,
+        source=ModuleSource(_module_with(("w", torch.ones(4, device="cuda")))),
+        packed=False,
+    )
+
+    engine.send_weights()
+
+    assert client.order == ["start", "update", "finish"]
+    assert client.last_update_info is not None
+    assert client.last_update_info["names"] == ["w"]
+    assert client.last_update_info["shapes"] == [[4]]
+    assert "packed" not in client.last_update_info
+
+
+def test_ipc_trainer_init_ships_packed_to_worker():
+    """trainer_init drives the inference-side init handshake and propagates the
+    must-agree `packed` flag to the worker."""
+    if torch.accelerator.device_count() < 1:
+        pytest.skip("Need at least 1 GPU (CUDA IPC handles).")
+
+    client = RecordingClient()
+    engine = WeightTransferTrainerFactory.trainer_init(
+        init_info=IPCTrainerInitInfo(rank=0, packed=True),  # backend from init info
+        client=client,
+        source=ModuleSource(_module_with(("w", torch.ones(4, device="cuda")))),
+    )
+
+    assert isinstance(engine, IPCTrainerWeightTransferEngine)
+    assert engine.is_sender is True
+    assert engine.packed is True
+    assert client.order == ["init"]
+    assert client.last_init_info == {"packed": True}
