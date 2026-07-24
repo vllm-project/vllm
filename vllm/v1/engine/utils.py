@@ -1014,6 +1014,12 @@ class CoreEngineActorManager:
         import ray
 
         self.manager_stopped.set()
+        # Skip actor/placement-group cleanup if Ray's atexit hook already
+        # disconnected this driver: both are reclaimed with the owning job,
+        # and these calls would auto-init a new Ray job and fail with
+        # ActorHandleNotFoundError (#45318).
+        if not ray.is_initialized():
+            return
         for actor in self.local_engine_actors + self.remote_engine_actors:
             ray.kill(actor)
         for pg in self.created_placement_groups:
