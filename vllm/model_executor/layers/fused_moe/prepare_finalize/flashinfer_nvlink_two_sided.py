@@ -10,8 +10,10 @@ from vllm.distributed.device_communicators.base_device_communicator import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
-from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
-from vllm.utils.flashinfer import nvfp4_block_scale_interleave
+from vllm.model_executor.layers.fused_moe.utils import (
+    moe_kernel_quantize_input,
+    restore_dispatched_scale_layout,
+)
 
 
 def get_local_sizes():
@@ -195,14 +197,9 @@ def flashinfer_alltoall_dispatch(
             )
 
         # Swizzle after the A2A if MoE kernel expects swizzled scales.
-        if (
-            x_sf is not None
-            and quant_config.quant_dtype == "nvfp4"
-            and quant_config.is_scale_swizzled
-        ):
-            if x_sf.element_size() == 1:
-                x_sf = x_sf.view(torch.uint8)
-            x_sf = nvfp4_block_scale_interleave(x_sf)
+        x_sf = restore_dispatched_scale_layout(
+            x_sf, quant_config.quant_dtype, quant_config.is_scale_swizzled
+        )
     else:
         # Block-scale path: pass activations through without quantization
         x_sf = None
