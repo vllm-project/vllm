@@ -133,6 +133,8 @@ class FusedAddRMSNormReshapePattern(VllmPatternReplacement):
 
 
 class AddRMSNormFusionPass(VllmFusionPatternMatcherPass):
+    """Fuse residual Add and RMSNorm emitted separately by the Transformers backend."""
+
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config, "add_rmsnorm_fusion_pass")
 
@@ -143,6 +145,10 @@ class AddRMSNormFusionPass(VllmFusionPatternMatcherPass):
 
 
 class RMSNormReshapeFusionPass(VllmFusionPatternMatcherPass):
+    """Move the Transformers backend's post-RMSNorm flatten before the norm
+    for downstream 2D fusions.
+    """
+
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config, "rmsnorm_reshape_fusion_pass")
 
