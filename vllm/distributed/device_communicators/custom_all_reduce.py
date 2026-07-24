@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from contextlib import contextmanager
 from typing import cast
 
@@ -119,6 +120,10 @@ class CustomAllreduce:
         # now `device` is a `torch.device` object
         assert isinstance(device, torch.device)
         self.device = device
+        if os.getenv("NCCL_P2P_DISABLE") == "1":
+            logger.warning("Custom allreduce is disabled because NCCL_P2P_DISABLE=1.")
+            return
+
         device_capability = current_platform.get_device_capability()
         if (
             current_platform.is_cuda()
