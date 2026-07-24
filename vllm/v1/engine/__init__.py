@@ -31,6 +31,8 @@ FINISH_REASON_STRINGS = ("stop", "length", "abort", "error", "repetition")
 
 EEP_NOTIFICATION_CALL_ID = -1
 
+FT_STATUS_CALL_ID = -2
+
 
 class EEPNotificationType(enum.Enum):
     NEW_CORE_ENGINES_INIT_READY = "NEW_CORE_ENGINES_INIT_READY"
@@ -282,3 +284,9 @@ class ReconfigureRankType(enum.IntEnum):
 
     KEEP_CURRENT_RANK = -1
     SHUTDOWN_CURRENT_RANK = -2
+
+
+class EngineStatusType(enum.IntEnum):
+    HEALTHY = 0
+    DEAD = 1
+    UNHEALTHY = 2

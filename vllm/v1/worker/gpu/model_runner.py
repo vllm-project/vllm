@@ -38,6 +38,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
@@ -174,6 +175,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Data parallelism.
         self.dp_size = self.parallel_config.data_parallel_size
         self.dp_rank = self.parallel_config.data_parallel_rank
+
+        # Detect EP all2all peer faults to prevent emitting corrupted output.
+        # Only meaningful for MoE + DP with an FT-capable all2all backend.
+        self.check_ep_fault = False
+        if self.dp_size > 1 and self.model_config.is_moe:
+            self.check_ep_fault = get_ep_all2all_manager().support_fault_tolerance
 
         # Decode context parallelism.
         self.dcp_size = self.parallel_config.decode_context_parallel_size
@@ -1488,6 +1495,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_sampled_tokens=num_sampled,
             main_stream=self.main_stream,
             copy_stream=self.output_copy_stream,
+            check_ep_fault=self.check_ep_fault,
         )
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None

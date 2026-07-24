@@ -42,6 +42,7 @@ from vllm.config import (
     DiffusionConfig,
     ECTransferConfig,
     EPLBConfig,
+    FaultToleranceConfig,
     KernelConfig,
     KVEventsConfig,
     KVTransferConfig,
@@ -720,6 +721,11 @@ class EngineArgs:
     optimization_level: OptimizationLevel = VllmConfig.optimization_level
     performance_mode: PerformanceMode = VllmConfig.performance_mode
 
+    fault_tolerance_config: FaultToleranceConfig = get_field(
+        ParallelConfig, "fault_tolerance_config"
+    )
+    enable_fault_tolerance: bool = ParallelConfig.enable_fault_tolerance
+
     kv_offloading_size: float | None = CacheConfig.kv_offloading_size
     kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
     tokens_only: bool = False
@@ -751,6 +757,16 @@ class EngineArgs:
         if isinstance(self.weight_transfer_config, dict):
             self.weight_transfer_config = WeightTransferConfig(
                 **self.weight_transfer_config
+            )
+        if isinstance(self.fault_tolerance_config, dict):
+            if not self.enable_fault_tolerance:
+                logger.warning(
+                    "--fault-tolerance-config was passed. Fault tolerance is being "
+                    "automatically enabled."
+                )
+                self.enable_fault_tolerance = True
+            self.fault_tolerance_config = FaultToleranceConfig(
+                **self.fault_tolerance_config
             )
         if isinstance(self.ir_op_priority, dict):
             self.ir_op_priority = IrOpPriorityConfig(**self.ir_op_priority)
@@ -1148,6 +1164,12 @@ class EngineArgs:
         parallel_group.add_argument("--worker-cls", **parallel_kwargs["worker_cls"])
         parallel_group.add_argument(
             "--worker-extension-cls", **parallel_kwargs["worker_extension_cls"]
+        )
+        parallel_group.add_argument(
+            "--enable-fault-tolerance", **parallel_kwargs["enable_fault_tolerance"]
+        )
+        parallel_group.add_argument(
+            "--fault-tolerance-config", **parallel_kwargs["fault_tolerance_config"]
         )
 
         # KV cache arguments
@@ -1611,6 +1633,7 @@ class EngineArgs:
     def from_cli_args(cls, args: argparse.Namespace):
         # Get the list of attributes of this dataclass.
         attrs = [attr.name for attr in dataclasses.fields(cls)]
+
         # Set the attributes from the parsed arguments.
         engine_args = cls(
             **{attr: getattr(args, attr) for attr in attrs if hasattr(args, attr)}
@@ -2014,6 +2037,12 @@ class EngineArgs:
         data_parallel_external_lb = (
             self.data_parallel_external_lb or self.data_parallel_rank is not None
         )
+        if self.enable_fault_tolerance and not data_parallel_external_lb:
+            raise ValueError(
+                "Fault tolerance requires external load balancer mode "
+                "(--data-parallel-external-lb or --data-parallel-rank). "
+                "Internal LB mode is not supported."
+            )
         if (
             self.data_parallel_size > 1
             and data_parallel_external_lb
@@ -2171,6 +2200,8 @@ class EngineArgs:
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
             assigned_physical_gpu_ids=self._resolve_device_ids(),
+            enable_fault_tolerance=self.enable_fault_tolerance,
+            fault_tolerance_config=self.fault_tolerance_config,
             numa_bind=self.numa_bind,
             numa_bind_nodes=self.numa_bind_nodes,
             numa_bind_cpus=self.numa_bind_cpus,

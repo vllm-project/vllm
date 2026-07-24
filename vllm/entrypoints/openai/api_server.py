@@ -269,6 +269,13 @@ def build_app(
 
         register_pooling_api_routers(app, supported_tasks, model_config)
 
+    if args.enable_fault_tolerance:
+        from vllm.entrypoints.serve.fault_tolerance.api_router import (
+            register_fault_tolerance_api_router,
+        )
+
+        register_fault_tolerance_api_router(app)
+
     # Endpoint plugins are attached last so their routes are registered after all core
     # routers. This runs even for the CPU only render server. A plugin eligible for
     # the `render` task still gets its routes registered. It receives
