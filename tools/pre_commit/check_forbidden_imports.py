@@ -13,6 +13,7 @@ class ForbiddenImport:
     tip: str
     allowed_pattern: re.Pattern = re.compile(r"^$")  # matches nothing by default
     allowed_files: set[str] = field(default_factory=set)
+    allowed_dirs: set[str] = field(default_factory=set)
 
 
 CHECK_IMPORTS = {
@@ -83,6 +84,26 @@ CHECK_IMPORTS = {
         ),
         allowed_files={"vllm/triton_utils/importing.py"},
     ),
+    "huggingface_hub repo API": ForbiddenImport(
+        # Catch both `from huggingface_hub import <fn>` and `huggingface_hub.<fn>`.
+        pattern=(
+            r"^\s*from\s+huggingface_hub\s+import\s+[^\n]*\b"
+            r"(?:HfApi|HfFileSystem|hf_hub_download|snapshot_download"
+            r"|list_repo_files|file_exists|try_to_load_from_cache"
+            r"|list_repo_refs|repo_exists)\b"
+            r"|\bhuggingface_hub\.(?:hf_hub_download|snapshot_download"
+            r"|list_repo_files|file_exists|try_to_load_from_cache"
+            r"|list_repo_refs|repo_exists)\b"
+        ),
+        tip=(
+            "Use the shared, vLLM-tagged helpers from "
+            "vllm.transformers_utils.repo_utils (e.g. hf_api(), hf_fs(), "
+            "list_repo_files, file_exists) instead of calling "
+            "huggingface_hub directly."
+        ),
+        allowed_files={"vllm/transformers_utils/repo_utils.py"},
+        allowed_dirs={"examples/"},
+    ),
 }
 
 
@@ -95,10 +116,17 @@ def check_file(path: str) -> int:
         # Skip files that are allowed for this import
         if path in forbidden_import.allowed_files:
             continue
+        # Skip directories that are allowed for this import
+        if any(path.startswith(prefix) for prefix in forbidden_import.allowed_dirs):
+            continue
         # Search for forbidden imports
         for match in re.finditer(forbidden_import.pattern, content, re.MULTILINE):
             # Check if it's allowed
             if forbidden_import.allowed_pattern.match(match.group()):
+                continue
+            # Skip matches inside a comment
+            line_start = content.rfind("\n", 0, match.start()) + 1
+            if "#" in content[line_start : match.start()]:
                 continue
             # Calculate line number from match position
             line_num = content[: match.start() + 1].count("\n") + 1

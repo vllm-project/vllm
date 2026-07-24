@@ -15,12 +15,12 @@ from unittest.mock import patch
 import pytest
 import torch
 import torch.distributed as dist
-from huggingface_hub import snapshot_download
 
 import vllm.envs as envs
 from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.platforms import current_platform
+from vllm.transformers_utils.repo_utils import hf_api
 from vllm.utils.network_utils import get_open_port
 
 pytestmark = pytest.mark.skipif(
@@ -210,11 +210,11 @@ def _log_prompt_summaries() -> None:
 @lru_cache(maxsize=1)
 def _get_model_path() -> str:
     try:
-        path = snapshot_download(repo_id=MODEL_NAME, local_files_only=True)
+        path = hf_api().snapshot_download(repo_id=MODEL_NAME, local_files_only=True)
         _log(f"using cached model snapshot: {path}")
         return path
     except Exception:
-        path = snapshot_download(repo_id=MODEL_NAME)
+        path = hf_api().snapshot_download(repo_id=MODEL_NAME)
         _log(f"downloaded model snapshot: {path}")
         return path
 

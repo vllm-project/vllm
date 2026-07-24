@@ -33,7 +33,6 @@ import pytest
 import requests
 import torch
 import torch.nn.functional as F
-from huggingface_hub import hf_hub_download
 from huggingface_hub.constants import HF_HUB_OFFLINE
 from openai.types.completion import Completion
 from typing_extensions import ParamSpec
@@ -57,6 +56,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.tokenizers import get_tokenizer
+from vllm.transformers_utils.repo_utils import hf_api
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GB_bytes
 from vllm.utils.network_utils import get_open_port
@@ -77,7 +77,7 @@ def prewarm_hf_cache(assets: list[tuple[str, str]]) -> None:
         return
     for repo_id, filename in assets:
         try:
-            hf_hub_download(repo_id=repo_id, filename=filename)
+            hf_api().hf_hub_download(repo_id=repo_id, filename=filename)
         except Exception as e:
             logger.warning(
                 "Failed to prefetch %s/%s: %r. Tests depending on this asset may fail.",

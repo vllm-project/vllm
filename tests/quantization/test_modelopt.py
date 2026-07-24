@@ -42,12 +42,12 @@ def _skip(msg: str) -> NoReturn:
 
 def _snapshot_download_or_skip(model_id: str) -> str:
     try:
-        from huggingface_hub import snapshot_download
+        from vllm.transformers_utils.repo_utils import hf_api
     except Exception as e:  # pragma: no cover
         _skip(f"huggingface_hub is required to download {model_id}: {e}")
 
     try:
-        return snapshot_download(
+        return hf_api().snapshot_download(
             repo_id=model_id,
             repo_type="model",
             # These checkpoints are already small; download full repo for simplicity.
