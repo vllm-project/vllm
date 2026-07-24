@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
-
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
-from huggingface_hub import snapshot_download
 
 from tests.conftest import AudioTestAssets
 from tests.utils import RemoteOpenAIServer
@@ -15,15 +12,14 @@ from tests.utils import RemoteOpenAIServer
 # separated to avoid OOM killing due to module-scoped servers, since we
 # need a multimodal model for these tests.
 
-# Contains a modality specific lora alongside the base model
-MULTIMODAL_MODEL_NAME = snapshot_download("microsoft/Phi-4-multimodal-instruct")
-AUDIO_LORA_PATH = os.path.join(MULTIMODAL_MODEL_NAME, "speech-lora")
-
 ACTIVE_MM_LORA_RESPONSE = "Spoken text: The first words I spoke in the original chronograph, a little piece of practical poetry. Mary had a little lamb, it slept with quite a snow, and everywhere that Mary went, the lamb was sure to go."  # noqa: E501
 
 
 @pytest.fixture(scope="module")
-def multimodal_server():
+def multimodal_server(
+    phi4_multimodal_model_path: str,
+    phi4_multimodal_audio_lora_path: str,
+):
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -34,7 +30,7 @@ def multimodal_server():
         # lora config below
         "--enable-lora",
         "--lora-modules",
-        f"speech={AUDIO_LORA_PATH}",
+        f"speech={phi4_multimodal_audio_lora_path}",
         "--max-lora-rank",
         "320",
         "--max-num-seqs",
@@ -43,11 +39,11 @@ def multimodal_server():
         "--gpu-memory-utilization",
         "0.8",
         "--default-mm-loras",
-        f'{{"audio": "{AUDIO_LORA_PATH}"}}',
+        f'{{"audio": "{phi4_multimodal_audio_lora_path}"}}',
     ]
 
     with RemoteOpenAIServer(
-        MULTIMODAL_MODEL_NAME, args, max_wait_seconds=480
+        phi4_multimodal_model_path, args, max_wait_seconds=480
     ) as remote_server:
         yield remote_server
 
@@ -62,13 +58,17 @@ async def multi_modal_client(multimodal_server):
 @pytest.mark.parametrize(
     # base model with default lora should give the same response as lora model
     "model_name",
-    [MULTIMODAL_MODEL_NAME, "speech"],
+    ["base", "speech"],
 )
 async def test_default_mm_lora_chat_completions(
     model_name: str,
     multi_modal_client: openai.AsyncOpenAI,
     audio_assets: AudioTestAssets,
+    phi4_multimodal_model_path: str,
 ):
+    served_model_name = (
+        phi4_multimodal_model_path if model_name == "base" else model_name
+    )
     messages = [
         {
             "role": "user",
@@ -86,7 +86,10 @@ async def test_default_mm_lora_chat_completions(
     ]
 
     chat_completion = await multi_modal_client.chat.completions.create(
-        model=model_name, messages=messages, max_completion_tokens=128, temperature=0.0
+        model=served_model_name,
+        messages=messages,
+        max_completion_tokens=128,
+        temperature=0.0,
     )
 
     assert len(chat_completion.choices) > 0

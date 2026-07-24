@@ -4,21 +4,15 @@
 Tests for applying default registered multimodal loras.
 """
 
-import os
 import unittest.mock as mock
 
 import pytest
-from huggingface_hub import snapshot_download
 
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 
 from ..conftest import AudioTestAssets, VllmRunner
 from ..utils import create_new_process_for_each_test
-
-MODEL_PATH = snapshot_download("microsoft/Phi-4-multimodal-instruct")
-AUDIO_LORA_PATH = os.path.join(MODEL_PATH, "speech-lora")
-IMAGE_LORA_PATH = os.path.join(MODEL_PATH, "vision-lora")
 
 AUDIO_PROMPT = "<|user|><|audio_1|>Can you transcribe this audio?<|end|><|assistant|>"  # noqa: E501
 
@@ -29,7 +23,6 @@ RESPONSE_SUFFIX_WITH_LORA = "Spoken text: The first words I spoke in the origina
 RESPONSE_SUFFIX_WITHOUT_LORA = "Certainly! Here is the transcription of the audio you provided:\n\nThe first words I spoke in the original phonograph record: A little piece of practical poetry. Mary had a little lamb; its fleece was white as snow, and everywhere that Mary went, the lamb was sure to go."  # noqa: E501
 
 VLLM_RUNNER_BASE_KWARGS = {
-    "model_name": MODEL_PATH,
     "dtype": "half",
     "enable_lora": "True",
     "max_num_seqs": 2,
@@ -43,14 +36,24 @@ VLLM_RUNNER_BASE_KWARGS = {
 
 
 def run_test(
-    vllm_runner, audio_assets, monkeypatch, lora_request, expected_suffix, **kwargs
+    vllm_runner,
+    audio_assets,
+    monkeypatch,
+    model_path,
+    lora_request,
+    expected_suffix,
+    **kwargs,
 ):
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
     inputs = [([AUDIO_PROMPT], [audio_assets[0].audio_and_sample_rate[0]])]
 
     # Apply any additional kwargs as overrides to the base kwargs
-    vllm_runner_kwargs = {**VLLM_RUNNER_BASE_KWARGS, **kwargs}
+    vllm_runner_kwargs = {
+        "model_name": model_path,
+        **VLLM_RUNNER_BASE_KWARGS,
+        **kwargs,
+    }
 
     with vllm_runner(**vllm_runner_kwargs) as vllm_model:
         vllm_outputs_with_default_lora = [
@@ -71,14 +74,17 @@ def test_active_default_mm_lora(
     vllm_runner: type[VllmRunner],
     audio_assets: AudioTestAssets,
     monkeypatch: pytest.MonkeyPatch,
+    phi4_multimodal_model_path: str,
+    phi4_multimodal_audio_lora_path: str,
 ):
     """Ensure that we can use the default audio lora."""
     run_test(
         vllm_runner,
         audio_assets,
         monkeypatch,
+        model_path=phi4_multimodal_model_path,
         lora_request=None,
-        default_mm_loras={"audio": AUDIO_LORA_PATH},
+        default_mm_loras={"audio": phi4_multimodal_audio_lora_path},
         expected_suffix=RESPONSE_SUFFIX_WITH_LORA,
     )
 
@@ -91,6 +97,8 @@ def test_inactive_default_mm_lora(
     vllm_runner: type[VllmRunner],
     audio_assets: AudioTestAssets,
     monkeypatch: pytest.MonkeyPatch,
+    phi4_multimodal_model_path: str,
+    phi4_multimodal_vision_lora_path: str,
 ):
     """Ensure that modalities are filtered properly."""
     # Default image lora won't be active since we only pass audio
@@ -98,8 +106,9 @@ def test_inactive_default_mm_lora(
         vllm_runner,
         audio_assets,
         monkeypatch,
+        model_path=phi4_multimodal_model_path,
         lora_request=None,
-        default_mm_loras={"image": IMAGE_LORA_PATH},
+        default_mm_loras={"image": phi4_multimodal_vision_lora_path},
         expected_suffix=RESPONSE_SUFFIX_WITHOUT_LORA,
     )
 
@@ -112,14 +121,17 @@ def test_default_mm_lora_succeeds_with_redundant_lora_request(
     vllm_runner: type[VllmRunner],
     audio_assets: AudioTestAssets,
     monkeypatch: pytest.MonkeyPatch,
+    phi4_multimodal_model_path: str,
+    phi4_multimodal_audio_lora_path: str,
 ):
     """Ensure that redundantly providing the lora works."""
     run_test(
         vllm_runner,
         audio_assets,
         monkeypatch,
-        lora_request=LoRARequest("audio", 1, AUDIO_LORA_PATH),
-        default_mm_loras={"audio": AUDIO_LORA_PATH},
+        model_path=phi4_multimodal_model_path,
+        lora_request=LoRARequest("audio", 1, phi4_multimodal_audio_lora_path),
+        default_mm_loras={"audio": phi4_multimodal_audio_lora_path},
         expected_suffix=RESPONSE_SUFFIX_WITH_LORA,
     )
 
@@ -132,6 +144,9 @@ def test_default_mm_lora_fails_with_overridden_lora_request(
     vllm_runner: type[VllmRunner],
     audio_assets: AudioTestAssets,
     monkeypatch: pytest.MonkeyPatch,
+    phi4_multimodal_model_path: str,
+    phi4_multimodal_audio_lora_path: str,
+    phi4_multimodal_vision_lora_path: str,
 ):
     """Ensure that if the lora_request conflicts with default_mm_loras,
     we use the lora_request."""
@@ -139,14 +154,20 @@ def test_default_mm_lora_fails_with_overridden_lora_request(
         vllm_runner,
         audio_assets,
         monkeypatch,
-        lora_request=LoRARequest("speech", 2, AUDIO_LORA_PATH),
-        default_mm_loras={"audio": IMAGE_LORA_PATH},
+        model_path=phi4_multimodal_model_path,
+        lora_request=LoRARequest("speech", 2, phi4_multimodal_audio_lora_path),
+        default_mm_loras={"audio": phi4_multimodal_vision_lora_path},
         expected_suffix=RESPONSE_SUFFIX_WITH_LORA,
     )
 
 
 @create_new_process_for_each_test()
-def test_default_mm_lora_does_not_expand_string_reqs(vllm_runner, monkeypatch):
+def test_default_mm_lora_does_not_expand_string_reqs(
+    vllm_runner,
+    monkeypatch,
+    phi4_multimodal_model_path: str,
+    phi4_multimodal_audio_lora_path: str,
+):
     # See run_test: force spawn to avoid the forked-child CUDA re-init crash.
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
@@ -156,8 +177,9 @@ def test_default_mm_lora_does_not_expand_string_reqs(vllm_runner, monkeypatch):
     # Regression test for ensuring default multimodal lora resolution
     # does not expand the lora req if the prompt type is a string.
     vllm_runner_kwargs = {
+        "model_name": phi4_multimodal_model_path,
         **VLLM_RUNNER_BASE_KWARGS,
-        **{"default_mm_loras": {"audio": AUDIO_LORA_PATH}},
+        **{"default_mm_loras": {"audio": phi4_multimodal_audio_lora_path}},
     }
 
     # Avoid the full generation call since these tests are expensive;

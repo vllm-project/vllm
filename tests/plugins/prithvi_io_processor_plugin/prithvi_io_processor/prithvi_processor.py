@@ -4,7 +4,6 @@
 import datetime
 import os
 import tempfile
-import urllib.request
 from collections.abc import Sequence
 from typing import Any
 
@@ -17,6 +16,7 @@ import torch
 from einops import rearrange
 from terratorch.datamodules import Sen1Floods11NonGeoDataModule
 
+from tests.utils import download_to_vllm_test_cache
 from vllm.config import VllmConfig
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
@@ -113,11 +113,7 @@ def read_geotiff(
 
         write_to_file = file_data
     elif file_path is not None and path_type == "url":
-        resp = urllib.request.urlopen(file_path)
-        # with tempfile.NamedTemporaryFile() as tmpfile:
-        #     tmpfile.write(resp.read())
-        #     path = tmpfile.name
-        write_to_file = resp.read()
+        path = str(download_to_vllm_test_cache(file_path, "prithvi"))
     elif file_path is not None and path_type == "path":
         path = file_path
     elif file_path is not None and path_type == "b64_json":

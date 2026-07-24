@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from functools import cache
+
 import pytest
 from transformers import AutoTokenizer
 
@@ -37,7 +39,10 @@ VL_EXPECTED_LORA_OUTPUT = [
     "A vibrant blue sky serves as a backdrop for the iconic Tokyo Skytree, partially obscured by the delicate pink blossoms of cherry trees in full bloom.",  # noqa: E501
 ]
 
-TOKENIZER = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
+
+@cache
+def get_tokenizer():
+    return AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
 
 
 def _assert_exact_outputs(
@@ -63,6 +68,7 @@ def _run_text_lora_sample(
     lora_path: str,
     lora_id: int,
 ) -> list[str]:
+    tokenizer = get_tokenizer()
     prompts = [
         TEXT_PROMPT_TEMPLATE.format(query="How many singers do we have?"),
         TEXT_PROMPT_TEMPLATE.format(
@@ -78,7 +84,7 @@ def _run_text_lora_sample(
     input_templates = []
     for prompt_text in prompts:
         messages = [{"role": "user", "content": prompt_text}]
-        prompt = TOKENIZER.apply_chat_template(
+        prompt = tokenizer.apply_chat_template(
             messages,
             tokenize=False,
             add_generation_prompt=True,
@@ -105,6 +111,7 @@ def _run_vl_lora_sample(
     lora_path: str | None = None,
     lora_id: int = 0,
 ) -> list[str]:
+    tokenizer = get_tokenizer()
     messages = [
         {
             "role": "user",
@@ -114,7 +121,7 @@ def _run_vl_lora_sample(
             ],
         }
     ]
-    prompt = TOKENIZER.apply_chat_template(
+    prompt = tokenizer.apply_chat_template(
         messages,
         tokenize=False,
         add_generation_prompt=True,
@@ -146,6 +153,7 @@ def _run_vl_lora_sample(
 
 
 def _build_text_prompts() -> list[str]:
+    tokenizer = get_tokenizer()
     prompts = [
         TEXT_PROMPT_TEMPLATE.format(query="How many singers do we have?"),
         TEXT_PROMPT_TEMPLATE.format(
@@ -161,7 +169,7 @@ def _build_text_prompts() -> list[str]:
     input_templates = []
     for prompt_text in prompts:
         messages = [{"role": "user", "content": prompt_text}]
-        prompt = TOKENIZER.apply_chat_template(
+        prompt = tokenizer.apply_chat_template(
             messages,
             tokenize=False,
             add_generation_prompt=True,
@@ -172,6 +180,7 @@ def _build_text_prompts() -> list[str]:
 
 
 def _build_vl_prompts() -> list[dict]:
+    tokenizer = get_tokenizer()
     messages = [
         {
             "role": "user",
@@ -181,7 +190,7 @@ def _build_vl_prompts() -> list[dict]:
             ],
         }
     ]
-    prompt = TOKENIZER.apply_chat_template(
+    prompt = tokenizer.apply_chat_template(
         messages,
         tokenize=False,
         add_generation_prompt=True,
@@ -318,7 +327,9 @@ def _assert_qwen35_text_vl_and_mixed_lora(
 )
 @create_new_process_for_each_test()
 def test_qwen35_text_lora(
-    qwen35_text_lora_files, qwen35_vl_lora_files, maybe_enable_lora_dual_stream
+    qwen35_text_lora_files,
+    qwen35_vl_lora_files,
+    maybe_enable_lora_dual_stream,
 ):
     llm = vllm.LLM(
         model=MODEL_PATH,
@@ -343,7 +354,9 @@ def test_qwen35_text_lora(
 
 @multi_gpu_test(num_gpus=4)
 def test_qwen35_text_lora_tp4(
-    qwen35_text_lora_files, qwen35_vl_lora_files, maybe_enable_lora_dual_stream
+    qwen35_text_lora_files,
+    qwen35_vl_lora_files,
+    maybe_enable_lora_dual_stream,
 ):
     llm = vllm.LLM(
         model=MODEL_PATH,
