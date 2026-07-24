@@ -443,6 +443,7 @@ def test_flashmla_dense_fp8_decode_unified_slot_view():
     layer = 1
 
     q = torch.randn(bs, 1, h_q, head_dim, device=dev, dtype=torch.bfloat16) * 0.1
+    q = q.to(torch.float8_e4m3fn)
     kv_data = (torch.randn(num_blocks, page, head_dim, device=dev) * 0.1).to(
         torch.float8_e4m3fn
     )
