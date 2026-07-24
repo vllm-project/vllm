@@ -155,6 +155,10 @@ class KVConnectorModelRunnerMixin:
         kv_cache_spec = attn_group.kv_cache_spec
         if not isinstance(kv_cache_spec, AttentionSpec):
             return False
+        # Per-token-head quant carves inline-scale views that assume per-layer
+        # contiguous KV buffers; the cross-layer layout breaks this and corrupts KV.
+        if kv_cache_spec.kv_quant_mode.is_per_token_head:
+            return False
         return kv_cache_spec.indexes_kv_by_block_stride
 
     @staticmethod
