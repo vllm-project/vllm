@@ -30,6 +30,10 @@ if rocm_aiter_ops.is_enabled():
     )
 
 if current_platform.is_cuda_alike() or current_platform.is_xpu():
+    from .fusion.add_rms_fusion import (
+        AddRMSNormFusionPass,
+        RMSNormReshapeFusionPass,
+    )
     from .fusion.sequence_parallelism import SequenceParallelismPass
 
 if current_platform.is_cuda_alike():
@@ -138,6 +142,16 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
     def configure(self, config: VllmConfig) -> None:
         self.pass_config = config.compilation_config.pass_config
+        model_config = config.model_config
+        enable_transformers_norm_canonicalization = (
+            (
+                self.pass_config.fuse_act_padding
+                or self.pass_config.fuse_allreduce_rms
+                or self.pass_config.fuse_norm_quant
+            )
+            and model_config is not None
+            and model_config.using_transformers_backend()
+        )
 
         # Set the current vllm config to allow tracing CustomOp instances
         with set_current_vllm_config(config, check_compile=False):
@@ -149,6 +163,9 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 if self.pass_config.fuse_gemm_comms:
                     self.passes += [AsyncTPPass(config)]
 
+            if enable_transformers_norm_canonicalization:
+                self.passes += [AddRMSNormFusionPass(config)]
+
             if self.pass_config.fuse_act_padding and rocm_aiter_ops.is_enabled():
                 # Run the more specific RMSNorm+router-pad fusion before
                 # AR+RMS, since both consume fused_add_rms_norm.
@@ -159,6 +176,11 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                     self.passes += [RocmAiterAllReduceFusionPass(config)]
                 else:
                     self.passes += [AllReduceFusionPass(config)]
+
+            if enable_transformers_norm_canonicalization:
+                # Let AR+RMS match before moving output reshapes ahead of the
+                # remaining RMSNorms, exposing them to RMS+Quant fusion.
+                self.passes += [RMSNormReshapeFusionPass(config)]
 
             if self.pass_config.fuse_norm_quant:
                 if rocm_aiter_ops.is_enabled():
