@@ -1264,9 +1264,9 @@ setup(
     install_requires=get_requirements(),
     extras_require={
         # AMD Zen CPU optimizations via zentorch
-        "zen": ["zentorch==2.11.0.0"],
+        "zen": ["zentorch==2.12.1.1"],
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
-        "tensorizer": ["tensorizer==2.10.1"],
+        "tensorizer": ["tensorizer==2.12.1"],
         "fastsafetensors": ["fastsafetensors >= 0.3.2"],
         "instanttensor": ["instanttensor >= 0.1.9"],
         "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.15.7"],
@@ -1286,7 +1286,7 @@ setup(
         # NOTE: When updating helion version, also update CI files:
         #   - .buildkite/test_areas/kernels.yaml
         #   - .buildkite/test-amd.yaml
-        "helion": ["helion==1.1.0"],
+        "helion": ["helion==1.2.0"],
         # Optional deps for gRPC server (vllm serve --grpc)
         "grpc": ["smg-grpc-servicer[vllm] >= 0.5.2"],
         # Optional deps for OpenTelemetry tracing
