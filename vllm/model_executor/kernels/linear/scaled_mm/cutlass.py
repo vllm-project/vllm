@@ -9,6 +9,9 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils import replace_parameter
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    _upcast_e8m0_to_fp32,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
@@ -307,7 +310,42 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 "Supports only dynamic per token group activation "
                 "quantization with group_shape=(1,128).",
             )
+
+        # The SM12x blockwise kernels reject problems whose weight output
+        # dim is not a multiple of 128 (CUTLASS can_implement fails for
+        # every tile config, e.g. the N=576 kv_a_proj in DeepSeek models);
+        # fall through to the next kernel for those layers.
+        if (
+            current_platform.is_device_capability_family(120)
+            and config.weight_shape[0] % 128 != 0
+        ):
+            return (
+                False,
+                "SM12x CUTLASS block FP8 requires the weight output "
+                f"dimension to be divisible by 128, got "
+                f"{config.weight_shape[0]}.",
+            )
         return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+        params = self._get_layer_params(layer)
+        weight_scale = (
+            params.weight_scale
+            if params.weight_scale_inv is None
+            else params.weight_scale_inv
+        )
+        # cutlass_scaled_mm requires fp32 scales; E8M0 (exponent-only)
+        # checkpoint scales upcast losslessly.
+        if weight_scale is not None and weight_scale.dtype == torch.float8_e8m0fnu:
+            scale_attr_name = (
+                params.WEIGHT_SCALE
+                if params.weight_scale_inv is None
+                else params.WEIGHT_SCALE_INV
+            )
+            replace_parameter(
+                layer, scale_attr_name, _upcast_e8m0_to_fp32(weight_scale)
+            )
 
     def apply_block_scaled_mm(
         self,

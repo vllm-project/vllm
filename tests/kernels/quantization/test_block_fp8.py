@@ -3,6 +3,7 @@
 
 # Adapted from https://github.com/sgl-project/sglang/pull/2575
 import itertools
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -13,10 +14,23 @@ from tests.kernels.quant_utils import (
 )
 from tests.kernels.utils import fp8_ulp_distance
 from vllm.config import VllmConfig
-from vllm.model_executor.kernels.linear.scaled_mm.cutlass import cutlass_scaled_mm
+from vllm.model_executor.kernels.linear.scaled_mm import (
+    cutlass as cutlass_kernel_module,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+    CutlassFp8BlockScaledMMKernel,
+    cutlass_scaled_mm,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
+    FP8ScaledMMLinearLayerConfig,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
     w8a8_triton_block_scaled_mm,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    create_fp8_quant_key,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
@@ -198,6 +212,132 @@ def test_w8a8_block_fp8_cutlass_matmul():
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))
     ) / torch.mean(torch.abs(ref_out.to(torch.float32)))
     assert rel_diff < 0.001
+
+
+@torch.inference_mode()
+def test_w8a8_block_fp8_matmul_e8m0_scales():
+    # DeepSeek-V4-style checkpoints store block scales in exponent-only
+    # E8M0, which Triton cannot bind directly; the kernel upcasts them to
+    # fp32 before launch. Regression test for
+    # https://github.com/vllm-project/vllm/issues/47818.
+    M, N, K = 83, 512, 7168
+    block_size = [128, 128]
+    out_dtype = torch.bfloat16
+    torch.manual_seed(0)
+
+    fp8_info = torch.finfo(torch.float8_e4m3fn)
+    fp8_max, fp8_min = fp8_info.max, fp8_info.min
+
+    A_fp32 = (torch.rand(M, K, dtype=torch.float32) - 0.5) * 2 * fp8_max
+    A_fp8 = A_fp32.clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
+    B_fp32 = (torch.rand(N, K, dtype=torch.float32) - 0.5) * 2 * fp8_max
+    B_fp8 = B_fp32.clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
+
+    n_tiles = (N + block_size[0] - 1) // block_size[0]
+    k_tiles = (K + block_size[1] - 1) // block_size[1]
+
+    # Power-of-two scales round-trip E8M0 <-> fp32 exactly.
+    As = torch.exp2(torch.randint(-8, 0, (M, k_tiles)).to(torch.float32))
+    Bs = torch.exp2(torch.randint(-8, 0, (n_tiles, k_tiles)).to(torch.float32))
+
+    ref_out = w8a8_triton_block_scaled_mm(A_fp8, B_fp8, As, Bs, block_size, out_dtype)
+    out = w8a8_triton_block_scaled_mm(
+        A_fp8,
+        B_fp8,
+        As.to(torch.float8_e8m0fnu),
+        Bs.to(torch.float8_e8m0fnu),
+        block_size,
+        out_dtype,
+    )
+    assert torch.equal(out, ref_out)
+
+
+def _block_fp8_linear_config(n: int, k: int) -> FP8ScaledMMLinearLayerConfig:
+    return FP8ScaledMMLinearLayerConfig(
+        weight_quant_key=create_fp8_quant_key(
+            static=True, group_shape=GroupShape(128, 128)
+        ),
+        activation_quant_key=create_fp8_quant_key(
+            static=False, group_shape=GroupShape(1, 128)
+        ),
+        input_dtype=torch.bfloat16,
+        out_dtype=torch.bfloat16,
+        weight_shape=(n, k),
+    )
+
+
+def test_cutlass_block_fp8_sm12x_declines_unaligned_n():
+    # The SM12x CUTLASS blockwise kernels cannot serve layers whose weight
+    # output dim is not a multiple of 128 (e.g. kv_a_proj N=576 in DeepSeek
+    # models), so can_implement must fall through to the next kernel.
+    with patch.object(
+        cutlass_kernel_module.current_platform,
+        "is_device_capability_family",
+        new=lambda family: family == 120,
+    ):
+        ok, _ = CutlassFp8BlockScaledMMKernel.can_implement(
+            _block_fp8_linear_config(512, 7168)
+        )
+        assert ok
+        ok, reason = CutlassFp8BlockScaledMMKernel.can_implement(
+            _block_fp8_linear_config(576, 7168)
+        )
+        assert not ok
+        assert "divisible by 128" in reason
+
+    with patch.object(
+        cutlass_kernel_module.current_platform,
+        "is_device_capability_family",
+        new=lambda family: False,
+    ):
+        ok, _ = CutlassFp8BlockScaledMMKernel.can_implement(
+            _block_fp8_linear_config(576, 7168)
+        )
+        assert ok
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="CUTLASS only supported on CUDA platform."
+)
+@torch.inference_mode()
+def test_cutlass_block_fp8_e8m0_weight_scale_upcast(default_vllm_config):
+    # cutlass_scaled_mm rejects E8M0 scales at dispatch, so the kernel must
+    # upcast them to fp32 when processing weights. Regression test for
+    # https://github.com/vllm-project/vllm/issues/47818.
+    is_supported, reason = CutlassFp8BlockScaledMMKernel.is_supported()
+    if not is_supported:
+        pytest.skip(reason)
+
+    M, N, K = 32, 512, 7168
+    torch.manual_seed(0)
+    fp8_info = torch.finfo(torch.float8_e4m3fn)
+
+    weight = (
+        ((torch.rand(N, K, dtype=torch.float32) - 0.5) * 2 * fp8_info.max)
+        .clamp(min=fp8_info.min, max=fp8_info.max)
+        .to(torch.float8_e4m3fn)
+    )
+    scale = torch.exp2(torch.randint(-8, 0, (N // 128, K // 128)).to(torch.float32))
+
+    config = _block_fp8_linear_config(N, K)
+    kernel = CutlassFp8BlockScaledMMKernel(config)
+
+    def make_layer(weight_scale: torch.Tensor) -> torch.nn.Module:
+        layer = torch.nn.Module()
+        layer.weight = torch.nn.Parameter(weight.clone(), requires_grad=False)
+        layer.weight_scale_inv = torch.nn.Parameter(weight_scale, requires_grad=False)
+        kernel.process_weights_after_loading(layer)
+        return layer
+
+    e8m0_layer = make_layer(scale.to(torch.float8_e8m0fnu))
+    assert e8m0_layer.weight_scale_inv.dtype == torch.float32
+    assert torch.equal(e8m0_layer.weight_scale_inv, scale)
+
+    fp32_layer = make_layer(scale.clone())
+    x = torch.randn(M, K, dtype=torch.bfloat16)
+    assert torch.equal(
+        kernel.apply_weights(e8m0_layer, x), kernel.apply_weights(fp32_layer, x)
+    )
 
 
 @pytest.mark.skipif(
