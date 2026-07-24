@@ -557,7 +557,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Distribute the remainder evenly so no dummy request exceeds
         # ceil(num_tokens / num_reqs) <= max_model_len tokens.
         num_tokens_per_request = [
-            num_tokens // num_reqs + (i < num_tokens % num_reqs)
+            num_tokens // num_reqs + (i >= num_reqs - num_tokens % num_reqs)
             for i in range(num_reqs)
         ]
 

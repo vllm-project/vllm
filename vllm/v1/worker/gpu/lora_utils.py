@@ -62,7 +62,9 @@ def create_lora_capture_hook(
         # Match InputBatch.make_dummy: distribute the remainder evenly so no
         # dummy request exceeds ceil(num_tokens / num_reqs) tokens.
         num_scheduled = np.full(num_reqs, num_tokens // num_reqs, dtype=np.int32)
-        num_scheduled[: num_tokens % num_reqs] += 1
+        num_extra = num_tokens % num_reqs
+        if num_extra > 0:
+            num_scheduled[-num_extra:] += 1
         with runner.maybe_select_dummy_loras(
             lora_config, num_scheduled, num_active_loras=num_active_loras
         ):

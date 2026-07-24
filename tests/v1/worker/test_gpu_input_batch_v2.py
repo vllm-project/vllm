@@ -37,6 +37,8 @@ def test_make_dummy_distributes_remainder(num_reqs: int, num_tokens: int):
     assert batch.num_scheduled_tokens.sum() == num_tokens
     assert batch.num_scheduled_tokens.max() == max_per_req
     assert batch.num_scheduled_tokens.min() >= num_tokens // num_reqs
+    # Requests with an extra token are placed at the end of the batch.
+    assert (batch.num_scheduled_tokens[:-1] <= batch.num_scheduled_tokens[1:]).all()
 
     # seq_len == query_len for the dummy prefill-shaped batch, on GPU and CPU.
     query_lens = batch.query_start_loc_np[1:] - batch.query_start_loc_np[:-1]

@@ -120,12 +120,13 @@ class InputBatch:
         base_tokens = num_tokens // num_reqs
         num_extra = num_tokens % num_reqs
         num_scheduled_tokens = np.full(num_reqs, base_tokens, dtype=np.int32)
-        num_scheduled_tokens[:num_extra] += 1
+        if num_extra > 0:
+            num_scheduled_tokens[-num_extra:] += 1
         assert int(num_scheduled_tokens.sum()) == num_tokens
 
         # seq_len equals to query_len
-        input_buffers.seq_lens[:num_extra] = base_tokens + 1
-        input_buffers.seq_lens[num_extra:num_reqs] = base_tokens
+        input_buffers.seq_lens[: num_reqs - num_extra] = base_tokens
+        input_buffers.seq_lens[num_reqs - num_extra : num_reqs] = base_tokens + 1
         # Pad for full CUDA graph mode.
         input_buffers.seq_lens[num_reqs:] = 0
         seq_lens = input_buffers.seq_lens[:num_reqs]
