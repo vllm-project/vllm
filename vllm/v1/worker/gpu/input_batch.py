@@ -115,13 +115,17 @@ class InputBatch:
         expanded_idx_mapping = idx_mapping
         expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=device)
 
-        num_scheduled_tokens = np.full(num_reqs, num_tokens // num_reqs, dtype=np.int32)
-        num_scheduled_tokens[-1] += num_tokens % num_reqs
+        # Distribute the remainder evenly so that no dummy request exceeds
+        # ceil(num_tokens / num_reqs) <= max_model_len tokens.
+        base_tokens = num_tokens // num_reqs
+        num_extra = num_tokens % num_reqs
+        num_scheduled_tokens = np.full(num_reqs, base_tokens, dtype=np.int32)
+        num_scheduled_tokens[:num_extra] += 1
         assert int(num_scheduled_tokens.sum()) == num_tokens
 
         # seq_len equals to query_len
-        input_buffers.seq_lens[:num_reqs] = num_tokens // num_reqs
-        input_buffers.seq_lens[num_reqs - 1] += num_tokens % num_reqs
+        input_buffers.seq_lens[:num_extra] = base_tokens + 1
+        input_buffers.seq_lens[num_extra:num_reqs] = base_tokens
         # Pad for full CUDA graph mode.
         input_buffers.seq_lens[num_reqs:] = 0
         seq_lens = input_buffers.seq_lens[:num_reqs]
