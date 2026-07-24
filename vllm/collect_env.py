@@ -711,6 +711,11 @@ def get_env_vars():
         "CUDA",
         "CUBLAS",
         "CUDNN",
+        "ROCM",
+        "HIP",
+        "HSA_",
+        "MIOPEN",
+        "RCCL",
         "OMP_",
         "MKL_",
         "NVIDIA",
@@ -1003,6 +1008,19 @@ MIOpen runtime version       : {miopen_runtime_version}
 Is XNNPACK available         : {is_xnnpack_available}
 """.strip()
 
+    ROCM_FMT = """
+==============================
+       ROCm / GPU Info
+==============================
+Is torch.cuda available      : {is_cuda_available}
+ROCm runtime version         : {rocm_version}
+HIP runtime version          : {hip_runtime_version}
+MIOpen runtime version       : {miopen_runtime_version}
+GPU models and configuration : {nvidia_gpu_models}
+GPU driver version           : {nvidia_driver_version}
+Is XNNPACK available         : {is_xnnpack_available}
+""".strip()
+
     XPU_FMT = """
 ==============================
       Intel XPU / GPU Info
@@ -1026,12 +1044,17 @@ vLLM XPU kernels version     : {vllm_xpu_kernels_version}
 
     invalid_vers = {"N/A", "Could not collect", "None"}
     sections = []
+    has_rocm = (
+        mutable_dict.get("hip_compiled_version") not in invalid_vers
+        or mutable_dict.get("hip_runtime_version") not in invalid_vers
+        or mutable_dict.get("rocm_version") not in invalid_vers
+    )
 
     if (
         mutable_dict.get("is_cuda_available") in ("True", "Yes")
         or mutable_dict.get("cuda_compiled_version") not in invalid_vers
     ):
-        sections.append(CUDA_FMT)
+        sections.append(ROCM_FMT if has_rocm else CUDA_FMT)
 
     if (
         mutable_dict.get("xpu_available") in ("True", "Yes")
