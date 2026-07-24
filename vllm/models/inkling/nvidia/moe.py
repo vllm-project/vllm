@@ -68,6 +68,7 @@ def _linear_with_fp32_out(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor
         and flat.is_contiguous()
         and weight.is_contiguous()
         and flat.shape[1] % 8 == 0
+        and current_platform.is_cuda()
         and current_platform.has_device_capability(90)
         and ll_bf16.is_available()
     ):

@@ -17,6 +17,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     canonicalize_singleton_dim_strides,
     kv_cache_dtype_str_to_dtype,
@@ -38,6 +39,8 @@ from .ops.fa4_rel_attention import (
     bucket_max_seqlen_q,
     inkling_fa4_num_splits,
     inkling_fa4_rel_attention,
+    inkling_torch_rel_attention,
+    inkling_triton_decode_rel_attention,
 )
 from .ops.fa4_warmup import InklingFA4WarmupConfig, register_fa4_warmup
 from .ops.qkvr_prep import fused_qkvr_prep
@@ -166,6 +169,20 @@ class InklingAttention(nn.Module, AttentionLayerBase):
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, vllm_config.model_config
         )
+        self._use_torch_rel_attention = current_platform.is_rocm()
+        if self._use_torch_rel_attention:
+            if vllm_config.model_config.dtype != torch.bfloat16:
+                raise ValueError(
+                    "Inkling on ROCm currently supports bfloat16 model dtype only"
+                )
+            if self.kv_cache_torch_dtype != torch.bfloat16:
+                raise ValueError(
+                    "Inkling on ROCm currently supports bfloat16 KV cache only"
+                )
+            if quant_config is not None:
+                raise ValueError(
+                    "Inkling on ROCm currently supports unquantized bfloat16 only"
+                )
         self.register_buffer("k_scale", torch.ones((), dtype=torch.float32))
         self.register_buffer("v_scale", torch.ones((), dtype=torch.float32))
 
@@ -175,24 +192,25 @@ class InklingAttention(nn.Module, AttentionLayerBase):
         compilation_config.static_forward_context[prefix] = self
         self.kv_cache = torch.tensor([])  # replaced by bind_kv_cache
 
-        register_fa4_warmup(
-            InklingFA4WarmupConfig(
-                num_heads=self.num_heads,
-                num_kv_heads=self.num_kv_heads,
-                head_dim=self.head_dim,
-                rel_extent=self.rel_extent,
-                window_size=self.window_size,
-                is_local=self.is_local,
-                max_kv_len=self._max_kv_len,
-                dtype=vllm_config.model_config.dtype,
-                kv_dtype=self.kv_cache_torch_dtype,
-                block_size=vllm_config.cache_config.block_size,
-                max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
-                max_num_batched_tokens=(
-                    vllm_config.scheduler_config.max_num_batched_tokens
-                ),
+        if not self._use_torch_rel_attention:
+            register_fa4_warmup(
+                InklingFA4WarmupConfig(
+                    num_heads=self.num_heads,
+                    num_kv_heads=self.num_kv_heads,
+                    head_dim=self.head_dim,
+                    rel_extent=self.rel_extent,
+                    window_size=self.window_size,
+                    is_local=self.is_local,
+                    max_kv_len=self._max_kv_len,
+                    dtype=vllm_config.model_config.dtype,
+                    kv_dtype=self.kv_cache_torch_dtype,
+                    block_size=vllm_config.cache_config.block_size,
+                    max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
+                    max_num_batched_tokens=(
+                        vllm_config.scheduler_config.max_num_batched_tokens
+                    ),
+                )
             )
-        )
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return FlashAttentionBackend
@@ -300,6 +318,28 @@ class InklingAttention(nn.Module, AttentionLayerBase):
 
         nt = md.num_actual_tokens
         key_cache, value_cache = self._split_kv_cache()
+        if self._use_torch_rel_attention:
+            attention_fn = (
+                inkling_triton_decode_rel_attention
+                if md.max_query_len == 1
+                else inkling_torch_rel_attention
+            )
+            attention_fn(
+                q[:nt],
+                key_cache,
+                value_cache,
+                block_table=md.block_table,
+                cache_seqlens=md.seq_lens,
+                cu_seqlens_q=md.query_start_loc,
+                max_seqlen_q=md.max_query_len,
+                softmax_scale=self.scaling,
+                causal=True,
+                window_size=self.window_size,
+                rel_extent=self.rel_extent,
+                rel_logits=rel_logits[:nt],
+                out=output[:nt],
+            )
+            return
         max_seqlen_q = bucket_max_seqlen_q(md.max_query_len)
         num_splits = inkling_fa4_num_splits(
             is_local=self.is_local,

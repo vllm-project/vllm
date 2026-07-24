@@ -26,6 +26,8 @@ from vllm.models.inkling.nvidia.ops.fa4_rel_attention import (
     _use_sheared_bias,
     inkling_fa4_num_splits,
     inkling_fa4_rel_attention,
+    inkling_torch_rel_attention,
+    inkling_triton_decode_rel_attention,
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
@@ -226,9 +228,18 @@ def _ref_rel_attn(
     return out
 
 
-def _run_case(seq_lens, num_heads, num_kv_heads, rel_extent, window_left, seed=0):
+def _run_case(
+    seq_lens,
+    num_heads,
+    num_kv_heads,
+    rel_extent,
+    window_left,
+    seed=0,
+    *,
+    device="cuda",
+    attention_fn=inkling_fa4_rel_attention,
+):
     torch.manual_seed(seed)
-    device = "cuda"
     q_lens = [s[0] for s in seq_lens]
     kv_lens = [s[1] for s in seq_lens]
     total_q = sum(q_lens)
@@ -279,7 +290,7 @@ def _run_case(seq_lens, num_heads, num_kv_heads, rel_extent, window_left, seed=0
         num_kv_heads=num_kv_heads,
         max_kv_len=max(kv_lens),
     )
-    out = inkling_fa4_rel_attention(
+    out = attention_fn(
         q,
         key_cache,
         value_cache,
@@ -312,6 +323,53 @@ def _run_case(seq_lens, num_heads, num_kv_heads, rel_extent, window_left, seed=0
     )
 
     torch.testing.assert_close(out.float(), ref.float(), atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize(
+    ("seq_lens", "window_left"),
+    [
+        ([(17, 17), (9, 33)], None),
+        ([(13, 29), (1, 80)], 15),
+    ],
+)
+@pytest.mark.parametrize("num_heads,num_kv_heads", NUM_HEADS)
+@torch.inference_mode()
+def test_torch_attention_matches_reference(
+    seq_lens, window_left, num_heads, num_kv_heads
+):
+    _run_case(
+        seq_lens,
+        num_heads,
+        num_kv_heads,
+        rel_extent=128,
+        window_left=window_left,
+        device="cpu",
+        attention_fn=inkling_torch_rel_attention,
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="requires ROCm")
+@pytest.mark.parametrize("num_heads,num_kv_heads", NUM_HEADS)
+@pytest.mark.parametrize(
+    ("seq_lens", "rel_extent", "window_left"),
+    [
+        ([(1, 50), (1, 7), (1, 200)], 128, None),
+        ([(1, 512), (1, 333)], 1024, None),
+        ([(1, 512), (1, 333)], 128, 127),
+    ],
+)
+@torch.inference_mode()
+def test_triton_decode_attention_matches_reference(
+    seq_lens, rel_extent, window_left, num_heads, num_kv_heads
+):
+    _run_case(
+        seq_lens,
+        num_heads,
+        num_kv_heads,
+        rel_extent=rel_extent,
+        window_left=window_left,
+        attention_fn=inkling_triton_decode_rel_attention,
+    )
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")

@@ -44,6 +44,7 @@ from vllm.models.inkling.common.mm_preprocess import (
 )
 from vllm.models.inkling.common.towers import InklingAudio, InklingVision
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from ..configs import InklingMMConfig, InklingModelConfig
@@ -418,11 +419,12 @@ class _TmlForCausalLMBase(nn.Module, SupportsPP, SupportsLoRA):
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "model"),
         )
-        initialize_lamport_rs_conv(
-            text_config.hidden_size,
-            text_config.sconv_kernel_size,
-            vllm_config.scheduler_config.max_num_batched_tokens,
-        )
+        if not current_platform.is_rocm():
+            initialize_lamport_rs_conv(
+                text_config.hidden_size,
+                text_config.sconv_kernel_size,
+                vllm_config.scheduler_config.max_num_batched_tokens,
+            )
         self.lm_head = ParallelLMHead(
             text_config.padded_vocab_size,
             text_config.hidden_size,
