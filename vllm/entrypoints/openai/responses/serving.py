@@ -107,6 +107,8 @@ from vllm.utils.collection_utils import as_list
 
 logger = init_logger(__name__)
 
+_ACTIVE_RESPONSE_STATUSES = frozenset(("queued", "in_progress"))
+
 
 def _extract_allowed_tools_from_mcp_requests(
     tools: list[Tool],
@@ -206,11 +208,16 @@ class OpenAIServingResponses(GenerateBaseServing):
         # behavior in OpenAI's Responses API is to store the response, but
         # vLLM's default behavior is not.
         self.enable_store = envs.VLLM_ENABLE_RESPONSES_API_STORE
+        self.max_store_entries = envs.VLLM_RESPONSES_API_STORE_MAX_ENTRIES
+        if self.enable_store and self.max_store_entries <= 0:
+            raise ValueError(
+                "VLLM_RESPONSES_API_STORE_MAX_ENTRIES must be greater than 0"
+            )
         if self.enable_store:
             logger.warning_once(
-                "`VLLM_ENABLE_RESPONSES_API_STORE` is enabled. This may "
-                "cause a memory leak since we never remove responses from "
-                "the store."
+                "`VLLM_ENABLE_RESPONSES_API_STORE` is enabled. The server "
+                "will retain up to %d completed responses in memory.",
+                self.max_store_entries,
             )
 
         self.use_harmony = self.model_config.hf_config.model_type == "gpt_oss"
@@ -220,20 +227,11 @@ class OpenAIServingResponses(GenerateBaseServing):
                 "and always enable tool use."
             )
         self.enable_auto_tools = enable_auto_tools
-        # HACK(woosuk): This is a hack. We should use a better store.
-        # FIXME: If enable_store=True, this may cause a memory leak since we
-        # never remove responses from the store.
         self.response_store: dict[str, ResponsesResponse] = {}
         self.response_store_lock = asyncio.Lock()
 
-        # HACK(woosuk): This is a hack. We should use a better store.
-        # FIXME: If enable_store=True, this may cause a memory leak since we
-        # never remove messages from the store.
         self.msg_store: dict[str, list[ChatCompletionMessageParam]] = {}
 
-        # HACK(wuhang): This is a hack. We should use a better store.
-        # FIXME: If enable_store=True, this may cause a memory leak since we
-        # never remove events from the store.
         self.event_store: dict[
             str, tuple[deque[StreamingResponsesResponse], asyncio.Event]
         ] = {}
@@ -241,6 +239,45 @@ class OpenAIServingResponses(GenerateBaseServing):
         self.background_tasks: dict[str, asyncio.Task] = {}
 
         self.tool_server = tool_server
+
+    def _remove_stored_response(self, response_id: str) -> None:
+        self.response_store.pop(response_id, None)
+        self.msg_store.pop(response_id, None)
+        self.event_store.pop(response_id, None)
+
+    def _evict_stored_responses(self) -> None:
+        completed_response_ids = [
+            response_id
+            for response_id, response in self.response_store.items()
+            if response.status not in _ACTIVE_RESPONSE_STATUSES
+        ]
+        for response_id in completed_response_ids[: -self.max_store_entries]:
+            self._remove_stored_response(response_id)
+
+    async def _store_response(
+        self,
+        response: ResponsesResponse,
+        *,
+        preserve_cancelled: bool = False,
+    ) -> None:
+        async with self.response_store_lock:
+            stored_response = self.response_store.get(response.id)
+            if (
+                preserve_cancelled
+                and stored_response is not None
+                and stored_response.status == "cancelled"
+            ):
+                return
+            self.response_store.pop(response.id, None)
+            self.response_store[response.id] = response
+            self._evict_stored_responses()
+
+    async def _get_stored_response(self, response_id: str) -> ResponsesResponse | None:
+        async with self.response_store_lock:
+            response = self.response_store.pop(response_id, None)
+            if response is not None:
+                self.response_store[response_id] = response
+            return response
 
     def _effective_chat_template_kwargs(
         self, request: ResponsesRequest
@@ -371,8 +408,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         # Handle the previous response ID.
         prev_response_id = request.previous_response_id
         if prev_response_id is not None:
-            async with self.response_store_lock:
-                prev_response = self.response_store.get(prev_response_id)
+            prev_response = await self._get_stored_response(prev_response_id)
             if prev_response is None:
                 return self._make_not_found_error(prev_response_id)
         else:
@@ -540,8 +576,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 status="queued",
                 usage=None,
             )
-            async with self.response_store_lock:
-                self.response_store[response.id] = response
+            await self._store_response(response)
 
             # Run the request in the background.
             if request.stream:
@@ -936,11 +971,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         )
 
         if request.store:
-            async with self.response_store_lock:
-                stored_response = self.response_store.get(response.id)
-                # If the response is already cancelled, don't update it.
-                if stored_response is None or stored_response.status != "cancelled":
-                    self.response_store[response.id] = response
+            await self._store_response(response, preserve_cancelled=True)
         return response
 
     def _topk_logprobs(
@@ -1240,6 +1271,9 @@ class OpenAIServingResponses(GenerateBaseServing):
                 assert stored_response is not None
                 if stored_response.status not in ("completed", "cancelled"):
                     stored_response.status = "failed"
+                    self.response_store.pop(response_id)
+                    self.response_store[response_id] = stored_response
+                    self._evict_stored_responses()
 
     async def responses_background_stream_generator(
         self,
@@ -1280,8 +1314,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         | ResponsesResponse
         | AsyncGenerator[StreamingResponsesResponse, None]
     ):
-        async with self.response_store_lock:
-            response = self.response_store.get(response_id)
+        response = await self._get_stored_response(response_id)
 
         if response is None:
             return self._make_not_found_error(response_id)
@@ -1312,6 +1345,9 @@ class OpenAIServingResponses(GenerateBaseServing):
 
             # Update the status to "cancelled".
             response.status = "cancelled"
+            self.response_store.pop(response_id)
+            self.response_store[response_id] = response
+            self._evict_stored_responses()
 
         # Abort the request.
         if task := self.background_tasks.get(response_id):
