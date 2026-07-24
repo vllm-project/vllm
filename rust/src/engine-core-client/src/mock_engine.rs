@@ -57,6 +57,13 @@ pub fn default_ready_response() -> EngineCoreReadyResponse {
         vllm_version: "test-vllm-version".to_string(),
         world_size: 1,
         data_parallel_size: 1,
+        tensor_parallel_size: 1,
+        pipeline_parallel_size: 1,
+        decode_context_parallel_size: 1,
+        data_parallel_rank: 0,
+        max_num_seqs: 256,
+        max_num_batched_tokens: 8192,
+        instance_id: "test-instance".to_string(),
         kv_cache_size_tokens: None,
         kv_cache_max_concurrency: None,
     }

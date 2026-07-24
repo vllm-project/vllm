@@ -7,15 +7,11 @@ package vllm;
 import "google/protobuf/struct.proto";
 
 
-service Generate {
+service Inference {
   // Generates text given a prompt
   rpc Generate (GenerateRequest) returns (GenerateResponse) {}
   // Generates text given a prompt, streaming the outputs
   rpc GenerateStream (GenerateRequest) returns (stream GenerateResponse) {}
-}
-
-service Control {
-  rpc Abort (AbortRequest) returns (AbortResponse) {}
 }
 
 // ======================================================================================
@@ -204,13 +200,3 @@ message CandidateTokenInfo {
 message TokenIds {
   repeated uint32 ids = 1;
 }
-
-// ======================================================================================
-// Control
-// ======================================================================================
-
-message AbortRequest {
-  repeated string request_ids = 1;
-}
-
-message AbortResponse {}
