@@ -127,17 +127,24 @@ def causal_conv1d_update_cpu(
     if isinstance(activation, bool):
         activation = "silu" if activation else None
 
-    native_x = _prepare_native_update_input(
-        x=x,
-        weight=weight,
-        conv_state=conv_state,
-        conv_state_indices=conv_state_indices,
-        query_start_loc=query_start_loc,
-        num_accepted_tokens=num_accepted_tokens,
-        native_weight=native_weight,
-    )
+    if (
+        native_weight is not None
+        and num_accepted_tokens is None
+        and _can_use_native_conv(conv_state)
+    ):
+        native_x = x
+    else:
+        native_x = _prepare_native_update_input(
+            x=x,
+            weight=weight,
+            conv_state=conv_state,
+            conv_state_indices=conv_state_indices,
+            query_start_loc=query_start_loc,
+            num_accepted_tokens=num_accepted_tokens,
+            native_weight=native_weight,
+        )
     if native_x is not None:
-        return ops.causal_conv1d_update_cpu(
+        out = ops.causal_conv1d_update_cpu(
             x=native_x,
             conv_states=conv_state,
             weight=native_weight,
@@ -147,6 +154,7 @@ def causal_conv1d_update_cpu(
             is_vnni=True,
             num_accepted_tokens=num_accepted_tokens,
         )
+        return out.view_as(x) if out.shape != x.shape else out
 
     if num_accepted_tokens is not None:
         if query_start_loc is None:
@@ -234,17 +242,16 @@ def _prepare_native_update_input(
         num_sequences <= 0
         or conv_state_indices.numel() != num_sequences
         or num_accepted_tokens.numel() != num_sequences
-        or int(query_start_loc[0].item()) != 0
-        or int(query_start_loc[-1].item()) != x.size(0)
+        or x.size(0) % num_sequences != 0
     ):
         return None
 
-    query_lens = query_start_loc[1:] - query_start_loc[:-1]
-    if int(query_lens[0].item()) <= 0 or not bool(
-        torch.all(query_lens == query_lens[0]).item()
+    query_len = x.size(0) // num_sequences
+    if query_len <= 0 or not bool(
+        torch.all(query_start_loc[1:] - query_start_loc[:-1] == query_len).item()
     ):
         return None
-    return x.view(num_sequences, int(query_lens[0].item()), x.size(1))
+    return x.view(num_sequences, query_len, x.size(1))
 
 
 def _can_use_arm_torch_update(
@@ -351,11 +358,17 @@ def _causal_conv1d_update_ragged_torch(
         if not 1 <= num_accepted <= seq_len or seq_len > state_len:
             raise ValueError("invalid accepted-token count or query length")
 
+        accepted_offset = num_accepted - 1
+        if accepted_offset + history_len > state_len:
+            raise ValueError("accepted-token history exceeds convolution state")
+
         state = conv_state[slot]
         x_seq = x[begin:end].transpose(0, 1).to(state.dtype)
-        offset = num_accepted - 1
-        prior = state[:, offset : offset + history_len]
-        keep = state[:, offset + 1 : offset + 1 + (state_len - seq_len)]
+        prior = state[:, accepted_offset : accepted_offset + history_len]
+        keep = state[
+            :,
+            accepted_offset + 1 : accepted_offset + 1 + (state_len - seq_len),
+        ]
         conv_in = torch.cat([prior, x_seq], dim=-1).unsqueeze(0).to(weight.dtype)
         seq_out = F.conv1d(
             conv_in, weight.unsqueeze(1), bias, padding=0, groups=x.size(1)

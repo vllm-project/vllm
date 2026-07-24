@@ -648,12 +648,13 @@ def test_causal_conv1d_update_cpu_dispatches_native(
     import vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d as causal_conv
 
     dim = 32
-    x = torch.zeros(2, 4, dim, dtype=torch.bfloat16)
+    x = torch.zeros(8, dim, dtype=torch.bfloat16)
     conv_state = torch.zeros(2, 6, dim, dtype=torch.bfloat16).transpose(1, 2)
     weight = torch.zeros(dim, CONV_KERNEL, dtype=torch.bfloat16)
     indices = torch.tensor([0, 1], dtype=torch.int32)
+    query_start_loc = torch.tensor([0, 4, 8], dtype=torch.int32)
     accepted = torch.tensor([1, 4], dtype=torch.int32)
-    expected = torch.ones_like(x)
+    expected = torch.ones(2, 4, dim, dtype=x.dtype)
     forwarded = {}
 
     def native_update(**kwargs):
@@ -668,18 +669,100 @@ def test_causal_conv1d_update_cpu_dispatches_native(
         weight=weight,
         activation="silu",
         conv_state_indices=indices,
+        query_start_loc=query_start_loc,
         num_accepted_tokens=accepted,
         native_weight=weight,
     )
 
-    assert actual is expected
-    assert forwarded["x"] is x
+    assert actual.shape == x.shape
+    torch.testing.assert_close(actual, expected.view_as(x))
+    assert forwarded["x"].shape == (2, 4, dim)
+    torch.testing.assert_close(forwarded["x"].view_as(x), x)
     assert forwarded["conv_states"] is conv_state
     assert forwarded["weight"] is weight
     assert forwarded["conv_state_indices"] is indices
     assert forwarded["num_accepted_tokens"] is accepted
     assert forwarded["is_vnni"] is True
     assert forwarded["silu_activation"] is True
+
+
+@torch.inference_mode()
+def test_causal_conv1d_update_cpu_ragged_fallback_matches_python(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d as causal_conv
+
+    dim = 32
+    state_len = 6
+    query_start_loc = torch.tensor([0, 3, 7], dtype=torch.int32)
+    x = torch.rand(7, dim, dtype=torch.bfloat16)
+    weight = torch.rand(dim, CONV_KERNEL, dtype=torch.bfloat16)
+    bias = torch.rand(dim, dtype=torch.bfloat16)
+    indices = torch.tensor([1, 0], dtype=torch.int32)
+    accepted = torch.tensor([1, 3], dtype=torch.int32)
+    conv_state_ref = _sd_conv_states(2, state_len, dim)
+    conv_state_ref.copy_(torch.rand_like(conv_state_ref))
+    conv_state = conv_state_ref.clone()
+    expected = torch.empty_like(x)
+
+    for seq_idx in range(2):
+        begin = int(query_start_loc[seq_idx].item())
+        end = int(query_start_loc[seq_idx + 1].item())
+        expected[begin:end] = _ref_causal_conv1d_update_cpu_multi(
+            x=x[begin:end].unsqueeze(0),
+            conv_states=conv_state_ref,
+            weight=weight,
+            bias=bias,
+            silu_activation=True,
+            conv_state_indices=indices[seq_idx : seq_idx + 1],
+            num_accepted_tokens=accepted[seq_idx : seq_idx + 1],
+        ).squeeze(0)
+
+    def fail_native_update(**kwargs):
+        raise AssertionError("heterogeneous queries must use the ragged fallback")
+
+    monkeypatch.setattr(causal_conv.ops, "causal_conv1d_update_cpu", fail_native_update)
+    monkeypatch.setattr(torch.cpu, "_is_amx_tile_supported", lambda: True)
+    actual = causal_conv.causal_conv1d_update_cpu(
+        x=x,
+        conv_state=conv_state,
+        weight=weight,
+        bias=bias,
+        activation="silu",
+        conv_state_indices=indices,
+        query_start_loc=query_start_loc,
+        pad_slot_id=-1,
+        num_accepted_tokens=accepted,
+        native_weight=weight,
+    )
+
+    torch.testing.assert_close(actual, expected, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(conv_state, conv_state_ref, atol=0, rtol=0)
+
+
+@torch.inference_mode()
+def test_causal_conv1d_update_cpu_rejects_history_beyond_state() -> None:
+    from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
+        causal_conv1d_update_cpu,
+    )
+
+    dim = 32
+    conv_state = _sd_conv_states(1, 5, dim)
+    conv_state.copy_(torch.rand_like(conv_state))
+    original_state = conv_state.clone()
+
+    with pytest.raises(ValueError, match="history exceeds convolution state"):
+        causal_conv1d_update_cpu(
+            x=torch.rand(4, dim, dtype=torch.bfloat16),
+            conv_state=conv_state,
+            weight=torch.rand(dim, CONV_KERNEL, dtype=torch.bfloat16),
+            conv_state_indices=torch.tensor([0], dtype=torch.int32),
+            query_start_loc=torch.tensor([0, 4], dtype=torch.int32),
+            pad_slot_id=-1,
+            num_accepted_tokens=torch.tensor([4], dtype=torch.int32),
+        )
+
+    torch.testing.assert_close(conv_state, original_state, atol=0, rtol=0)
 
 
 @torch.inference_mode()
