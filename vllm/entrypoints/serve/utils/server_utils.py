@@ -562,6 +562,7 @@ async def lifespan(app: FastAPI):
             for attr_name in (
                 "openai_serving_transcription",
                 "openai_serving_translation",
+                "serving_scores",
             ):
                 serving = getattr(app.state, attr_name, None)
                 if serving is not None and hasattr(serving, "shutdown"):
