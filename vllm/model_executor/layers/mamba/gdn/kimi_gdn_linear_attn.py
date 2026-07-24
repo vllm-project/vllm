@@ -15,6 +15,7 @@ from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import (
     FusedRMSNormGated,
     chunk_kda_with_fused_gate,
@@ -254,15 +255,26 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        torch.ops.vllm.kda_attention(
-            q,
-            k,
-            v,
-            g1,
-            beta,
-            core_attn_out,
-            self.prefix,
-        )
+        if current_platform.is_xpu() and hasattr(torch.ops._xpu_C, "kda_attention"):
+            torch.ops.vllm.kda_attention_core_xpu(
+                core_attn_out,
+                q,
+                k,
+                v,
+                g1,
+                beta,
+                self.prefix,
+            )
+        else:
+            torch.ops.vllm.kda_attention(
+                q,
+                k,
+                v,
+                g1,
+                beta,
+                core_attn_out,
+                self.prefix,
+            )
         core_attn_out = self.o_norm(core_attn_out, g2)
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
         output[:] = self.o_proj(core_attn_out)[0]
