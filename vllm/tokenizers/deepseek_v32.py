@@ -74,7 +74,12 @@ def get_deepseek_v32_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
             return added_vocab.copy()
 
         def __reduce__(self):
-            return get_deepseek_v32_tokenizer, (tokenizer,)
+            # Capture the original tokenizer for unpickling
+            return (self.__class__._rebuild, (tokenizer,))
+
+        @staticmethod
+        def _rebuild(base_tokenizer):
+            return get_deepseek_v32_tokenizer(base_tokenizer)
 
     _DeepseekV32Tokenizer.__name__ = f"DSV32{tokenizer.__class__.__name__}"
 
