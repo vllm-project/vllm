@@ -752,8 +752,9 @@ void reshape_and_cache_flash(
         value_cache,  // [num_blocks, block_size, num_heads, head_size]
     torch::stable::Tensor& slot_mapping,  // [num_tokens] or [num_actual_tokens]
     const std::string& kv_cache_dtype,
-    torch::stable::Tensor& k_scale,    // [1] or [num_heads]
-    torch::stable::Tensor& v_scale) {  // [1] or [num_heads]
+    torch::stable::Tensor& k_scale,  // [1] or [num_heads]
+    torch::stable::Tensor& v_scale,  // [1] or [num_heads]
+    const std::string& kv_cache_quant_algo) {
   // NOTE(woosuk): In vLLM V1, key.size(0) can be different from
   // slot_mapping.size(0) because of padding for CUDA graphs.
   // In vLLM V0, key.size(0) is always equal to slot_mapping.size(0) because
@@ -779,9 +780,11 @@ void reshape_and_cache_flash(
         torch::stable::Tensor & key, torch::stable::Tensor & value,
         torch::stable::Tensor & key_cache, torch::stable::Tensor & value_cache,
         torch::stable::Tensor & slot_mapping, torch::stable::Tensor & k_scale,
-        torch::stable::Tensor & v_scale);
+        torch::stable::Tensor & v_scale,
+        const std::string& kv_cache_quant_algo);
     reshape_and_cache_nvfp4_dispatch(key, value, key_cache, value_cache,
-                                     slot_mapping, k_scale, v_scale);
+                                     slot_mapping, k_scale, v_scale,
+                                     kv_cache_quant_algo);
     return;
 #else
     STD_TORCH_CHECK(

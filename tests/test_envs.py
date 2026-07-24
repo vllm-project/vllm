@@ -48,6 +48,23 @@ def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch)
     assert envs.VLLM_P2P_SIDE_CHANNEL_PORT == 5799
 
 
+@pytest.mark.parametrize("algo", ["default", "four_over_six", "four_over_six_k_only"])
+def test_nvfp4_kv_quant_algo_choices(
+    monkeypatch: pytest.MonkeyPatch, algo: str
+) -> None:
+    monkeypatch.setenv("VLLM_NVFP4_KV_QUANT_ALGO", algo)
+    assert algo == envs.VLLM_NVFP4_KV_QUANT_ALGO
+
+
+def test_invalid_nvfp4_kv_quant_algo(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VLLM_NVFP4_KV_QUANT_ALGO", "invalid")
+    with pytest.raises(
+        ValueError,
+        match="Invalid value 'invalid' for VLLM_NVFP4_KV_QUANT_ALGO",
+    ):
+        _ = envs.VLLM_NVFP4_KV_QUANT_ALGO
+
+
 def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_HOST_IP", "1.1.1.1")
     monkeypatch.setenv("VLLM_PORT", "1234")

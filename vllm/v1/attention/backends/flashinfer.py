@@ -5,7 +5,7 @@
 from dataclasses import dataclass
 from enum import Enum
 from functools import partial
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 import numpy as np
 import torch
@@ -90,6 +90,20 @@ FP4_DTYPE = torch.uint8
 logger = init_logger(__name__)
 
 trtllm_workspace_buffer = None
+
+NVFP4KVQuantAlgo = Literal["default", "four_over_six", "four_over_six_k_only"]
+
+
+def _nvfp4_kv_quant_algo() -> NVFP4KVQuantAlgo:
+    """Return the NVFP4 KV cache scale-search algorithm.
+
+    ``default`` uses the existing max-absolute-value divided by 6 scale.
+    ``four_over_six`` evaluates max/6 and max/4 for every 16-value group
+    and stores the candidate with lower squared reconstruction error.
+    ``four_over_six_k_only`` applies that search to K while V uses
+    ``default``.
+    """
+    return envs.VLLM_NVFP4_KV_QUANT_ALGO
 
 
 def _get_trtllm_workspace_buffer():
@@ -2285,6 +2299,7 @@ class FlashInferImpl(AttentionImpl):
                 self.kv_cache_dtype,
                 layer._k_scale,
                 layer._v_scale,
+                _nvfp4_kv_quant_algo() if self.is_kvcache_nvfp4 else "default",
             )
 
 
