@@ -1163,6 +1163,24 @@ def _print_dry_run(key: str, directory: Path) -> None:
     print(f"dump argv:    {shlex.join(template)}")
 
 
+def _park_pid_counter() -> None:
+    # criu restore recreates the helper at its dump-time pid, and a fresh
+    # container's early-boot churn (entrypoint wrapper, create's own
+    # subprocesses) can transiently occupy a low pid at restore time: criu
+    # fails "Can't fork for N: File exists" and the boot cold-falls back
+    # (observed at ~1/100 in the restore soak). Park the counter high before
+    # spawning the helper so its pid sits far above anything a container boot
+    # ever allocates; best-effort, the privilege is already required for dump.
+    try:
+        Path("/proc/sys/kernel/ns_last_pid").write_text("20000")
+    except OSError as error:
+        logger.info(
+            "snapshot create: pid counter not parked (%s); restores may race "
+            "boot-time pids",
+            error,
+        )
+
+
 def _run_create(
     key: str, directory: Path, create_env: dict[str, Any], key_obj: dict[str, Any]
 ) -> None:
@@ -1170,6 +1188,7 @@ def _run_create(
     subject, peer = socket.socketpair()
     process: subprocess.Popen[bytes] | None = None
     try:
+        _park_pid_counter()
         process = _spawn_helper(directory, create_env, subject.fileno())
         subject.close()
         subject = None  # type: ignore[assignment]
