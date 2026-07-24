@@ -4,9 +4,11 @@
 import asyncio
 import signal
 import socket
+import time
 from functools import partial
 from typing import Any
 
+import psutil
 import uvicorn
 from fastapi import FastAPI
 
@@ -80,6 +82,7 @@ async def serve_http(
 
     watchdog_task = loop.create_task(watchdog_loop(server, app.state.engine_client))
     server_task = loop.create_task(server.serve(sockets=[sock] if sock else None))
+    startup_task = loop.create_task(log_startup_complete(server))
 
     ssl_cert_refresher = (
         None
@@ -151,6 +154,18 @@ async def serve_http(
     finally:
         shutdown_task.cancel()
         watchdog_task.cancel()
+        startup_task.cancel()
+
+
+async def log_startup_complete(server: uvicorn.Server) -> None:
+    """Log the elapsed startup time once the server is ready for requests."""
+    while not server.started:
+        await asyncio.sleep(0.1)
+    try:
+        elapsed = time.time() - psutil.Process().create_time()
+        logger.info("vLLM API server is ready. Startup took %.3f seconds", elapsed)
+    except psutil.Error:
+        logger.info("vLLM API server is ready.")
 
 
 async def watchdog_loop(server: uvicorn.Server, engine: EngineClient):
