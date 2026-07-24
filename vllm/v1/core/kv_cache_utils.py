@@ -6,6 +6,7 @@ import copy
 import hashlib
 import math
 import os
+import threading
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
@@ -15,7 +16,7 @@ from typing import Any, NamedTuple, NewType, TypeAlias, cast, overload
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils.hashing import sha256_cbor, xxhash_cbor
+from vllm.utils.hashing import get_hash_fn_by_name, sha256_cbor, xxhash_cbor
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
@@ -112,6 +113,25 @@ def init_none_hash(hash_fn: Callable[[Any], bytes]):
         NONE_HASH = BlockHash(os.urandom(32))
     else:
         NONE_HASH = BlockHash(hash_fn(hash_seed))
+
+
+_none_hash_lock = threading.Lock()
+
+
+def _ensure_none_hash(hash_fn: Callable[[Any], bytes]) -> None:
+    """Initialize NONE_HASH if it isn't set yet; never overwrite an existing
+    value.
+
+    NONE_HASH is process-global and first-writer-wins. If another caller in
+    this process -- e.g. a running engine -- already initialized it, possibly
+    with a different hash function, adopt that value instead of re-seeding.
+    Overwriting it would silently invalidate that caller's existing
+    block-hash chains rather than fail loudly, since every full block's hash
+    is chained back through NONE_HASH.
+    """
+    with _none_hash_lock:
+        if "NONE_HASH" not in globals():
+            init_none_hash(hash_fn)
 
 
 @dataclass(slots=True)
@@ -621,6 +641,83 @@ def hash_block_tokens(
     return BlockHash(
         hash_function((parent_block_hash, curr_block_token_ids_tuple, extra_keys))
     )
+
+
+def build_full_block_hash_chain(
+    token_ids: Sequence[int],
+    block_size: int,
+    hash_algo: str,
+    extra_keys: tuple[Any, ...] | None = None,
+) -> list[BlockHash]:
+    """Compute the full-block hash chain for a token sequence, matching
+    exactly what ``get_request_block_hasher`` computes for a live request.
+
+    Partial trailing blocks (fewer than ``block_size`` tokens) are dropped,
+    mirroring the engine's full-block-only hashing: a partial block is never
+    hashed or cached.
+
+    Intended for callers outside the scheduler/request hot path -- e.g.
+    offline analysis tooling -- that need the engine's exact block-hash
+    semantics without reimplementing them. See ``_ensure_none_hash`` for the
+    NONE_HASH seeding behavior this relies on.
+
+    Seeding and stability: NONE_HASH is process-wide and first-writer-wins.
+    Without ``PYTHONHASHSEED`` set, it is random per process, so two separate
+    processes diverge even given identical inputs and the same
+    ``hash_algo``. With ``PYTHONHASHSEED`` set, NONE_HASH is derived from the
+    seed *and* whichever hash function first initialized it in this process
+    -- so for reproducible cross-process analysis (e.g. diffing JSON reports
+    across CI runs), set ``PYTHONHASHSEED`` and run in a fresh process with a
+    single, consistent ``hash_algo``. Hash *values* are never guaranteed
+    stable across vLLM versions or hash-algorithm changes. The one
+    unconditional contract is narrower: within a single process, the
+    returned chain matches what the engine's own request-hashing path
+    computes for the same tokens, block size, and hash algorithm.
+
+    Args:
+        token_ids: The full token sequence for one request.
+        block_size: The block size to hash against.
+        hash_algo: Name of a hash function registered in
+            ``vllm.utils.hashing.get_hash_fn_by_name`` (e.g. ``"sha256"``).
+        extra_keys: Optional extra keys applied uniformly to every block in
+            the chain. This matches production semantics for per-request
+            keys that don't vary by position, like LoRA adapter names. It
+            does NOT match production for the position-dependent keys
+            ``generate_block_hash_extra_keys`` varies per block -- cache-salt
+            (applied to the first block only) and multimodal keys (applied
+            only to blocks overlapping the media's token range). Passing
+            those as a single uniform tuple here produces a chain the engine
+            would never produce. No in-tree caller populates this yet; the
+            slot exists for per-request-uniform keys without a future
+            signature change. Position-dependent keys would need a
+            different parameter shape (e.g. a per-block callable).
+
+    Returns:
+        The ordered list of block hashes, one per full block, chained on
+        their parent exactly as ``hash_block_tokens`` chains them for a
+        live request.
+
+    Raises:
+        ValueError: If ``block_size`` is not positive.
+    """
+    if block_size <= 0:
+        raise ValueError(f"block_size must be positive, got {block_size}")
+
+    hash_fn = get_hash_fn_by_name(hash_algo)
+    _ensure_none_hash(hash_fn)
+
+    chain: list[BlockHash] = []
+    parent: BlockHash | None = None
+    num_full_blocks = len(token_ids) // block_size
+    for i in range(num_full_blocks):
+        start = i * block_size
+        end = start + block_size
+        block_hash = hash_block_tokens(
+            hash_fn, parent, token_ids[start:end], extra_keys
+        )
+        chain.append(block_hash)
+        parent = block_hash
+    return chain
 
 
 def resolve_kv_cache_block_sizes(

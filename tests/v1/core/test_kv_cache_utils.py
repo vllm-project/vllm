@@ -676,6 +676,112 @@ def test_hash_block_tokens(hash_fn):
     assert block_hash == expected
 
 
+@pytest.mark.parametrize(
+    "hash_algo,hash_fn", [("sha256", sha256), ("sha256_cbor", sha256_cbor)]
+)
+def test_build_full_block_hash_chain_matches_request_block_hasher(
+    monkeypatch, hash_algo, hash_fn
+):
+    with monkeypatch.context() as m:
+        m.delenv("PYTHONHASHSEED", raising=False)
+        m.delattr(kv_cache_utils, "NONE_HASH", raising=False)
+
+        block_size = 3
+        token_ids = list(range(9))
+
+        # Seed NONE_HASH via the function under test first, so the
+        # production request path below reads the same seed.
+        chain = kv_cache_utils.build_full_block_hash_chain(
+            token_ids, block_size, hash_algo
+        )
+
+        request = make_request(
+            request_id="0",
+            prompt_token_ids=token_ids,
+            block_size=block_size,
+            hash_fn=hash_fn,
+        )
+        assert chain == request.block_hashes
+
+
+def test_build_full_block_hash_chain_drops_partial_trailing_block(monkeypatch):
+    with monkeypatch.context() as m:
+        m.delenv("PYTHONHASHSEED", raising=False)
+        m.delattr(kv_cache_utils, "NONE_HASH", raising=False)
+
+        # 2 full blocks of 3, plus one leftover token that must not appear.
+        chain = kv_cache_utils.build_full_block_hash_chain(
+            list(range(7)), block_size=3, hash_algo="sha256"
+        )
+        assert len(chain) == 2
+
+
+def test_build_full_block_hash_chain_same_inputs_twice_are_identical(monkeypatch):
+    """Regression test for the bug this helper exists to prevent: calling
+    ``init_none_hash`` unguarded on every invocation would re-randomize
+    NONE_HASH per call (absent PYTHONHASHSEED), silently diverging the same
+    request's chain across two calls in the same process. The guard must
+    make repeated calls, e.g. across a batch of requests, deterministic.
+    """
+    with monkeypatch.context() as m:
+        m.delenv("PYTHONHASHSEED", raising=False)
+        m.delattr(kv_cache_utils, "NONE_HASH", raising=False)
+
+        token_ids = list(range(9))
+        first = kv_cache_utils.build_full_block_hash_chain(
+            token_ids, block_size=3, hash_algo="sha256"
+        )
+        second = kv_cache_utils.build_full_block_hash_chain(
+            token_ids, block_size=3, hash_algo="sha256"
+        )
+        assert first == second
+
+
+def test_build_full_block_hash_chain_adopts_existing_none_hash(monkeypatch):
+    with monkeypatch.context() as m:
+        m.setenv("PYTHONHASHSEED", "existing-seed")
+        m.delattr(kv_cache_utils, "NONE_HASH", raising=False)
+
+        # Simulate a caller already sharing this process -- e.g. a running
+        # engine -- that seeded NONE_HASH with a different hash function
+        # than the one this call will request.
+        kv_cache_utils.init_none_hash(sha256_cbor)
+        seeded_value = kv_cache_utils.NONE_HASH
+
+        kv_cache_utils.build_full_block_hash_chain(
+            [1, 2, 3], block_size=3, hash_algo="sha256"
+        )
+
+        # The existing seed must be adopted, not clobbered.
+        assert seeded_value == kv_cache_utils.NONE_HASH
+
+
+def test_build_full_block_hash_chain_extra_keys(monkeypatch):
+    with monkeypatch.context() as m:
+        m.delenv("PYTHONHASHSEED", raising=False)
+        m.delattr(kv_cache_utils, "NONE_HASH", raising=False)
+
+        hash_fn = kv_cache_utils.get_hash_fn_by_name("sha256")
+        token_ids = [1, 2, 3]
+        extra_keys = ("lora-A",)
+
+        chain = kv_cache_utils.build_full_block_hash_chain(
+            token_ids, block_size=3, hash_algo="sha256", extra_keys=extra_keys
+        )
+        expected = kv_cache_utils.hash_block_tokens(
+            hash_fn, None, token_ids, extra_keys
+        )
+        assert chain == [expected]
+
+
+@pytest.mark.parametrize("block_size", [0, -1])
+def test_build_full_block_hash_chain_rejects_non_positive_block_size(block_size):
+    with pytest.raises(ValueError, match="block_size"):
+        kv_cache_utils.build_full_block_hash_chain(
+            [1, 2, 3], block_size=block_size, hash_algo="sha256"
+        )
+
+
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_request_block_hasher(hash_fn):
     request = make_request(
