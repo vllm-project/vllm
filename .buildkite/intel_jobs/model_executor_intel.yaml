@@ -1,0 +1,32 @@
+group: Model Executor Intel
+depends_on:
+  - image-build-xpu
+steps:
+- label: Model Executor (Intel)
+  key: model-executor-intel
+  timeout_in_minutes: 45
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+  - vllm/engine/arg_utils.py
+  - vllm/config/model.py
+  - vllm/model_executor
+  - tests/model_executor
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'apt-get update && apt-get install -y curl libsodium23 &&
+      pip3 install runai-model-streamer[s3,gcs,azure]\>=0.15.7 &&
+      export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
+      export PYTHONFAULTHANDLER=1 &&
+      cd tests &&
+      pytest -v -s model_executor -m "not slow_test"'
