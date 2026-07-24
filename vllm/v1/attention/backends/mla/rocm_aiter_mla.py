@@ -713,6 +713,15 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         )
         AiterMLAHelper.check_num_heads_validity(num_heads)
 
+        # AITER's ASM MLA decode kernel supports nhead=4 natively for a BF16 KV
+        # cache (the same path rocm_aiter_mla_sparse.py exercises), so we can
+        # skip the expensive head repeat_interleave padding in that case. For an
+        # FP8 KV cache the kernel's block-size table lacks the nhead=4 entry, and
+        # other small head counts (e.g. nhead=8) are unverified, so we still pad
+        # to 16 heads there.
+        is_fp8_kv_cache = kv_cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2")
+        self._skip_head_repeat = num_heads == 4 and not is_fp8_kv_cache
+
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
             raise NotImplementedError(
@@ -925,8 +934,12 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         assert isinstance(q, torch.Tensor)
         B = q.shape[0]
 
-        mla_padded_q = AiterMLAHelper.get_mla_padded_q(self.num_heads, q)
-        mla_num_heads = AiterMLAHelper.get_actual_mla_num_heads(self.num_heads)
+        if self._skip_head_repeat:
+            mla_padded_q = q
+            mla_num_heads = self.num_heads
+        else:
+            mla_padded_q = AiterMLAHelper.get_mla_padded_q(self.num_heads, q)
+            mla_num_heads = AiterMLAHelper.get_actual_mla_num_heads(self.num_heads)
         o = torch.empty(
             B,
             mla_num_heads,
@@ -968,4 +981,6 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             **mla_kwargs,
         )
 
+        if self._skip_head_repeat:
+            return o, None
         return AiterMLAHelper.get_mla_unpadded_o(self.num_heads, o), None
