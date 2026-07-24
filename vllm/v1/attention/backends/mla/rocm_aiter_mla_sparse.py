@@ -13,7 +13,11 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
-    get_mla_dims,
+    MLACommonPrefillMetadata,
+)
+from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    SparseMLACommonImpl,
+    SparseMLACommonMetadataBuilder,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -22,9 +26,7 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
     AttentionMetadata,
-    AttentionMetadataBuilder,
     CommonAttentionMetadata,
-    MLAAttentionImpl,
     MultipleOf,
 )
 from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
@@ -123,6 +125,10 @@ def triton_convert_req_index_to_global_index(
     assert req_id.dtype == torch.int32
     assert block_table.dtype == torch.int32
     assert token_indices.dtype == torch.int32
+    assert req_id.shape[0] == token_indices.shape[0], (
+        f"req_id ({req_id.shape[0]}) and token_indices ({token_indices.shape[0]}) "
+        "must cover the same tokens"
+    )
     assert token_indices.shape[1] == NUM_TOPK_TOKENS
     assert NUM_TOPK_TOKENS % BLOCK_N == 0, (
         f"NUM_TOPK_TOKENS ({NUM_TOPK_TOKENS}) must be divisible byBLOCK_N ({BLOCK_N})"
@@ -324,14 +330,22 @@ class ROCMAiterMLASparseMetadata(AttentionMetadata):
     block_table: torch.Tensor
     req_id_per_token: torch.Tensor
 
-    qo_indptr: torch.Tensor
-    paged_kv_last_page_len: torch.Tensor
-    paged_kv_indices: torch.Tensor
-    paged_kv_indptr: torch.Tensor
-    attn_out_dtype: torch.dtype
-
     block_size: int = 1
     topk_tokens: int = 2048
+
+    num_decodes: int = 0
+    num_prefills: int = 0
+    num_decode_tokens: int = 0
+    seq_lens: torch.Tensor | None = None
+    prefill_max_seq_len: int = 0
+    prefill: MLACommonPrefillMetadata | None = None
+    cp_kv_cache_interleave_size: int = 1
+
+    qo_indptr: torch.Tensor | None = None
+    paged_kv_last_page_len: torch.Tensor | None = None
+    paged_kv_indices: torch.Tensor | None = None
+    paged_kv_indptr: torch.Tensor | None = None
+    attn_out_dtype: torch.dtype | None = None
 
     # Persistent MLA metadata (only populated when persistent mode is enabled,
     # i.e. when the aiter sparse decode kernel supports work-stealing splits).
@@ -345,9 +359,10 @@ class ROCMAiterMLASparseMetadata(AttentionMetadata):
 
 @dataclass
 class ROCMAiterMLASparseMetadataBuilder(
-    AttentionMetadataBuilder[ROCMAiterMLASparseMetadata]
+    SparseMLACommonMetadataBuilder[ROCMAiterMLASparseMetadata]
 ):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    metadata_cls = ROCMAiterMLASparseMetadata
 
     def __init__(
         self,
@@ -356,19 +371,14 @@ class ROCMAiterMLASparseMetadataBuilder(
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        self.kv_cache_spec = kv_cache_spec
-        self.model_config = vllm_config.model_config
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.model_dtype = vllm_config.model_config.dtype
         parallel_config = vllm_config.parallel_config
-        self.device = device
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
-        self.vllm_config = vllm_config
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
-        self.mla_dims = get_mla_dims(self.model_config)
-        self.topk_tokens = vllm_config.model_config.hf_config.index_topk
         # Bounds the KV-split heuristic (see `_sparse_decode_max_split`).
         self._num_compute_units = current_platform.num_compute_units()
         self.max_model_len_tensor = torch.tensor(
@@ -421,9 +431,14 @@ class ROCMAiterMLASparseMetadataBuilder(
         kv_cache_dtype_str = getattr(vllm_config.cache_config, "cache_dtype", "auto")
         if kv_cache_dtype_str in ("fp8", "fp8_e4m3", "fp8_e5m2"):
             kv_cache_dtype_str = "fp8"
+            q_dtype = dtypes.fp8
         else:
             kv_cache_dtype_str = "bf16"
         kv_dtype = dtypes.d_dtypes.get(kv_cache_dtype_str, dtypes.bf16)
+        # get_mla_metadata_info_v1 and get_mla_metadata_v1 must use the same
+        # query/KV dtypes.
+        self._mla_q_dtype = q_dtype
+        self._mla_kv_dtype = kv_dtype
 
         (
             (work_meta_data_size, work_meta_data_type),
@@ -487,9 +502,18 @@ class ROCMAiterMLASparseMetadataBuilder(
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> ROCMAiterMLASparseMetadata:
-        num_tokens = common_attn_metadata.num_actual_tokens
+        metadata = super().build(
+            common_prefix_len, common_attn_metadata, fast_build=fast_build
+        )
+        use_dense_prefill = (
+            metadata.num_prefills > 0
+            and metadata.prefill_max_seq_len <= metadata.topk_tokens
+            and not self.vllm_config.attention_config.sparse_mla_force_mqa
+        )
+        num_reqs = metadata.num_decodes if use_dense_prefill else metadata.num_reqs
+        num_tokens = int(common_attn_metadata.query_start_loc_cpu[num_reqs].item())
         starts = np.asarray(common_attn_metadata.query_start_loc_cpu, dtype=np.int32)
-        seg_lengths = np.diff(starts)
+        seg_lengths = np.diff(starts[: num_reqs + 1])
         req_id_per_token = np.repeat(
             np.arange(seg_lengths.shape[0], dtype=np.int32), seg_lengths
         )
@@ -512,15 +536,13 @@ class ROCMAiterMLASparseMetadataBuilder(
         self.req_id_per_token_buffer[:new_req_extent].copy_(
             torch.from_numpy(req_id_per_token), non_blocking=True
         )
-        query_lens = (
-            common_attn_metadata.query_start_loc[1:]
-            - common_attn_metadata.query_start_loc[:-1]
-        )
-        seq_lens = common_attn_metadata.seq_lens
+        query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
+        query_lens = query_start_loc[1:] - query_start_loc[:-1]
+        seq_lens = common_attn_metadata.seq_lens[:num_reqs]
         sparse_seqlen = generate_sparse_seqlen_triton(
             query_lens,
             seq_lens,
-            common_attn_metadata.query_start_loc,
+            query_start_loc,
             self.topk_tokens,
             num_tokens,
             common_attn_metadata.max_query_len,
@@ -544,7 +566,6 @@ class ROCMAiterMLASparseMetadataBuilder(
         # context lengths (both clamped to topk_tokens, past which per-token KV
         # length saturates) and num_heads; fingerprint those CPU-side and skip
         # the launch when nothing changed.
-        num_reqs = common_attn_metadata.num_reqs
         clamped_seq_lens = np.minimum(
             common_attn_metadata.seq_lens_cpu[:num_reqs].numpy(),
             self.topk_tokens,
@@ -561,7 +582,18 @@ class ROCMAiterMLASparseMetadataBuilder(
             clamped_context_lens.tobytes(),
             seg_lengths.tobytes(),
         )
-        if metadata_key != self._prev_metadata_key:
+        is_long_pure_bf16_prefill = (
+            self._mla_kv_dtype == torch.bfloat16
+            and metadata.num_decodes == 0
+            and metadata.num_prefills > 0
+            and metadata.prefill_max_seq_len > metadata.topk_tokens
+        )
+        use_persistent_metadata = not is_long_pure_bf16_prefill
+        if (
+            use_persistent_metadata
+            and num_tokens > 0
+            and metadata_key != self._prev_metadata_key
+        ):
             from aiter import get_mla_metadata_v1
 
             max_split_per_batch = self._sparse_decode_max_split(
@@ -586,34 +618,42 @@ class ROCMAiterMLASparseMetadataBuilder(
                 uni_seqlen_qo=1,
                 fast_mode=True,
                 max_split_per_batch=max_split_per_batch,
+                dtype_q=self._mla_q_dtype,
+                dtype_kv=self._mla_kv_dtype,
             )
             # The persistent metadata buffers are read by graph replay. Order
             # the async metadata write before the graph-captured decode kernel.
             torch.cuda.current_stream(self.device).synchronize()
             self._prev_metadata_key = metadata_key
 
-        metadata = ROCMAiterMLASparseMetadata(
-            num_reqs=common_attn_metadata.num_reqs,
-            max_query_len=common_attn_metadata.max_query_len,
-            max_seq_len=common_attn_metadata.max_seq_len,
-            num_actual_tokens=common_attn_metadata.num_actual_tokens,
-            query_start_loc=common_attn_metadata.query_start_loc,
-            slot_mapping=common_attn_metadata.slot_mapping,
-            block_table=common_attn_metadata.block_table_tensor,
-            req_id_per_token=req_id_per_token,
-            block_size=self.kv_cache_spec.block_size,
-            attn_out_dtype=self.model_dtype,
-            topk_tokens=self.topk_tokens,
-            qo_indptr=qo_indptr,
-            paged_kv_last_page_len=paged_kv_last_page_len,
-            paged_kv_indices=paged_kv_indices,
-            paged_kv_indptr=paged_kv_indptr,
-            work_meta_data=self._mla_work_meta_data,
-            work_indptr=self._mla_work_indptr,
-            work_info_set=self._mla_work_info_set,
-            reduce_indptr=self._mla_reduce_indptr,
-            reduce_final_map=self._mla_reduce_final_map,
-            reduce_partial_map=self._mla_reduce_partial_map,
+        metadata.req_id_per_token = req_id_per_token
+        metadata.attn_out_dtype = self.model_dtype
+        metadata.qo_indptr = qo_indptr
+        metadata.paged_kv_last_page_len = paged_kv_last_page_len
+        metadata.paged_kv_indices = paged_kv_indices
+        metadata.paged_kv_indptr = paged_kv_indptr
+        # A long pure prefill is modeled as many separate qseqlen=1 entries.
+        # AITER's BF16 persistent split reduction is numerically unstable for
+        # that shape, so let AITER build its non-persistent work metadata. Keep
+        # the persistent path for decode/mixed batches and FP8, whose fallback
+        # kernel has different support constraints.
+        metadata.work_meta_data = (
+            self._mla_work_meta_data if use_persistent_metadata else None
+        )
+        metadata.work_indptr = (
+            self._mla_work_indptr if use_persistent_metadata else None
+        )
+        metadata.work_info_set = (
+            self._mla_work_info_set if use_persistent_metadata else None
+        )
+        metadata.reduce_indptr = (
+            self._mla_reduce_indptr if use_persistent_metadata else None
+        )
+        metadata.reduce_final_map = (
+            self._mla_reduce_final_map if use_persistent_metadata else None
+        )
+        metadata.reduce_partial_map = (
+            self._mla_reduce_partial_map if use_persistent_metadata else None
         )
         return metadata
 
@@ -647,9 +687,7 @@ def reference_mla_sparse_prefill(
     return (result, lse)
 
 
-class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
-    is_sparse = True
-
+class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
     def __init__(
         self,
         num_heads: int,
@@ -668,20 +706,22 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
         **mla_args,
     ) -> None:
         AiterMLAHelper.check_num_heads_validity(num_heads)
-
-        self.num_heads = num_heads
-        self.head_size = head_size
-        self.scale = float(scale)
-        self.num_kv_heads = num_kv_heads
-        self.kv_cache_dtype = kv_cache_dtype
-        self.kv_lora_rank: int = mla_args["kv_lora_rank"]
-        self.softmax_scale = scale
-        # The indexer carries the shared buffer for normal layers and tests;
-        # the explicitly-passed buffer covers backbone skip layers, whose
-        # indexer is not constructed (see deepseek_v2.py).
-        self.topk_indices_buffer: torch.Tensor | None = (
-            indexer.topk_indices_buffer if indexer is not None else topk_indices_buffer
+        super().__init__(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            alibi_slopes,
+            sliding_window,
+            kv_cache_dtype,
+            logits_soft_cap,
+            attn_type,
+            kv_sharing_target_layer_name,
+            indexer=indexer,
+            topk_indices_buffer=topk_indices_buffer,
+            **mla_args,
         )
+        self.softmax_scale = scale
 
         vllm_config = get_current_vllm_config()
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -758,14 +798,14 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
                 q = self.q_concat_buffer[: ql_nope.shape[0]]
                 ops.concat_mla_q(ql_nope, q_pe, q)
 
-        num_actual_toks = attn_metadata.num_actual_tokens
+        num_actual_toks = q[0].shape[0] if isinstance(q, tuple) else q.shape[0]
 
         # Get topk indices
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
         triton_convert_req_index_to_global_index(
-            attn_metadata.req_id_per_token,
+            attn_metadata.req_id_per_token[:num_actual_toks],
             attn_metadata.block_table,
             topk_indices,
             attn_metadata.paged_kv_indptr,
