@@ -15,6 +15,7 @@ __all__ = [
     "to_meta_tensor",
     "materialize_meta_tensor",
     "capture_layer_to_meta",
+    "get_reloadable_layer_tensors",
     "restore_layer_on_meta",
     "materialize_layer",
     "get_numel_loaded",
@@ -96,16 +97,27 @@ def capture_layer_to_meta(layer: torch.nn.Module) -> LayerTensors:
     if layer.__class__.__name__ in SKIP_MODULES:
         return ({}, {})
 
-    params, buffers = get_layer_params_buffers(layer)
-    parameter_storage_ptrs = _parameter_storage_ptrs(layer)
+    params, buffers = get_reloadable_layer_tensors(layer)
     return (
         {
             name: sanitize_layer_refs(to_meta_tensor(param), layer)
             for name, param in params.items()
-            if name not in SKIP_TENSORS
         },
         {
             name: sanitize_layer_refs(to_meta_tensor(buffer), layer)
+            for name, buffer in buffers.items()
+        },
+    )
+
+
+def get_reloadable_layer_tensors(layer: torch.nn.Module) -> LayerTensors:
+    """Return tensors represented by checkpoint-format reload metadata."""
+    params, buffers = get_layer_params_buffers(layer)
+    parameter_storage_ptrs = _parameter_storage_ptrs(layer)
+    return (
+        {name: param for name, param in params.items() if name not in SKIP_TENSORS},
+        {
+            name: buffer
             for name, buffer in buffers.items()
             if name not in SKIP_TENSORS
             and not _is_non_persistent_parameter_alias_buffer(
