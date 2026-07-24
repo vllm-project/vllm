@@ -424,6 +424,9 @@ def test_fused_norm_rope_ds_mla(num_tokens: int):
     kpe_ref = rope(k_pe.float(), pos, mla_cos_sin, interleave=True)  # [N, 64]
     tiles = kv_ref.view(num_tokens, 4, 128)
     ref_scale = torch.clamp(tiles.abs().amax(dim=-1) / FP8_MAX, min=1.1754944e-38)
+    uses_e8m0_scale = torch.cuda.get_device_capability()[0] >= 10
+    if uses_e8m0_scale:
+        ref_scale = torch.exp2(torch.ceil(torch.log2(ref_scale)))
     ref_nope = (tiles / ref_scale[..., None]).reshape(num_tokens, KV_LORA).to(FP8)
 
     cache = mla_cache[0, :num_tokens]  # [N, 656] uint8
@@ -433,6 +436,8 @@ def test_fused_norm_rope_ds_mla(num_tokens: int):
     rope_vals = cache.view(torch.bfloat16)[:, rope_off : rope_off + ROPE_DIM]
 
     torch.testing.assert_close(scales, ref_scale, rtol=1e-2, atol=1e-6)
+    if uses_e8m0_scale:
+        torch.testing.assert_close(torch.log2(scales), torch.log2(scales).round())
     assert_fp8(nope, ref_nope, "ds_mla NoPE fp8")
     assert_bf16(rope_vals, kpe_ref, "ds_mla RoPE bf16")
     # No indexer on this call: top-k buffer must be untouched.

@@ -521,6 +521,11 @@ __global__ void concat_and_cache_ds_mla_kernel(
 
   // Compute the scale for the tile
   float tile_scale = fmaxf(max_abs / kFp8ScaleDivisor, FLT_MIN);
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
+  // FlashMLA's SM100 sparse FP8 reader consumes this scale as E8M0.
+  // Round up so the conversion preserves the scale without overflowing E4M3.
+  tile_scale = exp2f(ceilf(log2f(tile_scale)));
+#endif
 
   // The first lane of each half-warp writes the scale to kv_cache
   if ((lane_idx == 0) || (lane_idx == 16)) {

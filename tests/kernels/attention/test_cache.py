@@ -769,6 +769,7 @@ def test_concat_and_cache_ds_mla(
 
     ref_cache = torch.zeros_like(kv_cache, dtype=kv_cache.dtype)
     tile_data = torch.zeros(128, dtype=dtype, device=device)
+    uses_e8m0_scale = torch.cuda.get_device_capability(device)[0] >= 10
 
     for i in range(num_tokens):
         slot = slot_mapping[i].item()
@@ -794,6 +795,8 @@ def test_concat_and_cache_ds_mla(
             for j in range(1, 128):
                 manual_max = max(manual_max, abs(tile_data_float[j]))
             tile_scale = manual_max / 448.0
+            if uses_e8m0_scale:
+                tile_scale = torch.exp2(torch.ceil(torch.log2(tile_scale)))
 
             ref_cache_32bit[kv_lora_rank // 4 + tile_idx] = tile_scale
 
@@ -835,6 +838,10 @@ def test_concat_and_cache_ds_mla(
 
         torch.testing.assert_close(kv_nope, ref_nope, atol=0.001, rtol=0.1)
         torch.testing.assert_close(kv_scales, ref_scales, atol=0.001, rtol=0.1)
+        if uses_e8m0_scale:
+            torch.testing.assert_close(
+                torch.log2(kv_scales), torch.log2(kv_scales).round()
+            )
         torch.testing.assert_close(kv_rope, ref_rope, atol=0.001, rtol=0.1)
 
 
