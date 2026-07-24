@@ -105,8 +105,16 @@ TOP_KS = [1, 2, 6]
 SEEDS = [0]
 
 
-def torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, topk_weight, topk_ids, block_shape):
-    """Fused moe with block-wise quantization using native torch."""
+def torch_w8a8_block_fp8_moe(
+    a, w1, w2, w1_s, w2_s, topk_weight, topk_ids, block_shape, silu_fp32=False
+):
+    """Fused MoE with block-wise fp8 quantization using native torch.
+
+    silu_fp32=True computes the intermediate SiLU in fp32 and quantizes it
+    directly, matching the modular Helion silu_and_mul_per_block_quant kernel;
+    False rounds the SiLU output to bf16 first, matching fused_experts. Each
+    kernel is checked against the reference variant matching its precision.
+    """
     B, D = a.shape
     topk = topk_ids.size(1)
     a = a.view(B, -1, D).repeat(1, topk, 1).reshape(-1, D)
@@ -127,7 +135,9 @@ def torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, topk_weight, topk_ids, block
             inter_out = native_w8a8_block_matmul(
                 a_q[mask], w1[i], a_s[mask], w1_s[i], block_shape, output_dtype=a.dtype
             )
-            act_out = SiluAndMul().forward_native(inter_out)
+            act_out = SiluAndMul().forward_native(
+                inter_out.float() if silu_fp32 else inter_out
+            )
             act_out_q, act_out_s = per_token_group_quant_fp8(
                 act_out, block_k, dtype=torch.float8_e4m3fn
             )
@@ -211,14 +221,29 @@ def test_w8a8_block_fp8_fused_moe(
 
     # 0.039 only needed for M >= 8192
     tol = 0.035 if M < 8192 else 0.039
-    # ROCm/gfx950: aligning the reference quantizer with the kernel (see
-    # torch_w8a8_block_fp8_moe) removes the fp8 boundary-flip divergence, but a
-    # bounded residual from the fp8 block-matmul accumulation still grows with K
-    # and N, so large-K/large-N shapes need a slightly wider tolerance on ROCm.
+
+    # The modular path fuses SiLU+quant in fp32 (silu_and_mul_per_block_quant),
+    # while fused_experts/the reference round SiLU to bf16 first. On large K/N this
+    # ~1-ULP gap pushes m_out past the base tol, so validate m_out against an
+    # fp32-SiLU reference — keeping the tight base tolerance, no widened override.
     if current_platform.is_rocm() and K >= 4096 and N >= 1024:
-        tol = max(tol, 0.07)
+        with set_current_vllm_config(vllm_config):
+            ref_out_m = torch_w8a8_block_fp8_moe(
+                a,
+                w1,
+                w2,
+                quant_config.w1_scale,
+                quant_config.w2_scale,
+                topk_weights,
+                topk_ids,
+                block_size,
+                silu_fp32=True,
+            )
+    else:
+        ref_out_m = ref_out
+
     torch.testing.assert_close(out, ref_out, atol=tol, rtol=tol)
-    torch.testing.assert_close(m_out, ref_out, atol=tol, rtol=tol)
+    torch.testing.assert_close(m_out, ref_out_m, atol=tol, rtol=tol)
 
 
 @pytest.mark.parametrize(("M", "N", "K"), MNK_FACTORS_DG)
