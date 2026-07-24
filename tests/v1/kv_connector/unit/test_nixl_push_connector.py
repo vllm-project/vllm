@@ -754,6 +754,50 @@ class TestPushWriterNegative:
         # Wake set so the writer drains NIXL notifs even when idle.
         assert w._push_writer_wake.is_set()
 
+    def test_failed_push_transfer_finishes_sending(self):
+        w = _StubWriterWorker.fresh()
+        w.nixl_wrapper = MagicMock()
+        w.nixl_wrapper.check_xfer_state.return_value = "ERR"
+        w.xfer_stats = MagicMock()
+        w._log_failure = MagicMock()
+        w._sending_transfers["req-failed"] = [17]
+        w._reqs_to_send["req-failed"] = time.perf_counter() + 30
+        w._reqs_to_process.add("req-failed")
+
+        with patch.object(
+            NixlPushConnectorWorker.__mro__[1],
+            "get_finished",
+            return_value=(set(), set()),
+        ):
+            done_sending, done_recving = w.get_finished()
+
+        assert done_sending == {"req-failed"}
+        assert done_recving == set()
+        assert "req-failed" not in w._sending_transfers
+        assert "req-failed" not in w._reqs_to_send
+        assert "req-failed" not in w._reqs_to_process
+        w.nixl_wrapper.release_xfer_handle.assert_called_once_with(17)
+
+    def test_unpollable_push_handle_release_failure_is_suppressed(self):
+        w = _StubWriterWorker.fresh()
+        w.nixl_wrapper = MagicMock()
+        w.nixl_wrapper.check_xfer_state.side_effect = RuntimeError("unpollable")
+        w.nixl_wrapper.release_xfer_handle.side_effect = RuntimeError("unreleasable")
+        w.xfer_stats = MagicMock()
+        w._log_failure = MagicMock()
+        w._sending_transfers["req-unpollable"] = [23]
+
+        with patch.object(
+            NixlPushConnectorWorker.__mro__[1],
+            "get_finished",
+            return_value=(set(), set()),
+        ):
+            done_sending, done_recving = w.get_finished()
+
+        assert done_sending == {"req-unpollable"}
+        assert done_recving == set()
+        w.nixl_wrapper.release_xfer_handle.assert_called_once_with(23)
+
     def test_get_new_notifs_unknown_request_is_logged_and_skipped(self, caplog):
         """A completion notif for a request the worker doesn't know
         about should be logged but not crash."""

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Shared forward_mha implementation and metadata builder for sparse MLA backends."""
 
+from dataclasses import replace
 from shutil import which
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
 
@@ -552,12 +553,16 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             and prefill.chunked_context is not None
         ):
             assert attn_metadata.seq_lens is not None
-            kv_cache, prefill.block_table = (
+            kv_cache, staged_block_table = (
                 self.hisparse_coordinator.stage_prefill_cache(
                     kv_cache,
                     prefill.block_table,
                     attn_metadata.seq_lens[attn_metadata.num_decodes :],
                 )
+            )
+            attn_metadata = replace(
+                attn_metadata,
+                prefill=replace(prefill, block_table=staged_block_table),
             )
         super().forward_mha(
             q,

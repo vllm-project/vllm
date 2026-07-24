@@ -3,6 +3,7 @@
 """Unit tests for the sparse MLA backends and utilities."""
 
 import math
+from dataclasses import dataclass
 from types import MethodType, SimpleNamespace
 
 import pytest
@@ -21,6 +22,7 @@ from tests.v1.attention.utils import (
 )
 from vllm import _custom_ops as ops
 from vllm.config import HiSparseConfig, set_current_vllm_config
+from vllm.model_executor.layers.attention.mla_attention import MLACommonBaseImpl
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
 
@@ -863,6 +865,69 @@ def test_flashmla_forward_bf16_kv_slices_req_id_to_mqa_tokens():
 def test_split_prefill_chunks(seq_lens, max_buf, expected):
     out = split_prefill_chunks(seq_lens, max_buf)
     assert out == expected
+
+
+def test_hisparse_mha_staging_preserves_shared_metadata(monkeypatch):
+    @dataclass
+    class PrefillMetadata:
+        block_table: torch.Tensor
+        chunked_context: object
+
+    @dataclass
+    class Metadata:
+        prefill: PrefillMetadata
+        seq_lens: torch.Tensor
+        num_decodes: int
+
+    original_block_table = torch.tensor([[7, 11]], dtype=torch.int32)
+    staged_block_table = torch.tensor([[0, 1]], dtype=torch.int32)
+    staged_inputs = []
+
+    class Coordinator:
+        def stage_prefill_cache(self, kv_cache, block_table, seq_lens):
+            staged_inputs.append(block_table.clone())
+            return kv_cache, staged_block_table
+
+    observed_block_tables = []
+
+    def forward_mha(self, *args, **kwargs):
+        attn_metadata = args[4]
+        observed_block_tables.append(attn_metadata.prefill.block_table.clone())
+
+    monkeypatch.setattr(MLACommonBaseImpl, "forward_mha", forward_mha)
+
+    impls = [object.__new__(FlashMLASparseImpl) for _ in range(2)]
+    for impl in impls:
+        impl.hisparse_coordinator = Coordinator()
+
+    prefill = PrefillMetadata(
+        block_table=original_block_table,
+        chunked_context=object(),
+    )
+    metadata = Metadata(
+        prefill=prefill,
+        seq_lens=torch.tensor([128], dtype=torch.int32),
+        num_decodes=0,
+    )
+    tensor = torch.empty(0)
+
+    for impl in impls:
+        impl.forward_mha(
+            tensor,
+            tensor,
+            tensor,
+            torch.empty(1, 64, 1),
+            metadata,
+            tensor,
+            tensor,
+        )
+
+    assert prefill.block_table is original_block_table
+    assert len(staged_inputs) == len(observed_block_tables) == 2
+    for block_table in staged_inputs:
+        torch.testing.assert_close(block_table, original_block_table)
+    for block_table in observed_block_tables:
+        torch.testing.assert_close(block_table, staged_block_table)
 
 
 PREFILL_BATCH_SPECS = {

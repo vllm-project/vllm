@@ -101,6 +101,7 @@ __device__ __forceinline__ int warp_inclusive_scan(int32_t* s_data, int lane_id,
 //   s_counters[2]            [0] buffer hits, [1] resolved-in-phase-1 count
 //   s_lru_out[hot_size]      int16, compacted slots: [hits fwd | evict bwd]
 //   s_hash_vals[hash_size]   int16 hash values (top-k index)
+// Valid global ids must be unique within each row.
 __global__ void hisparse_swap_in_kernel(
     const char* __restrict__ host_cache,         // [host_rows, row_bytes]
     char* __restrict__ hot_cache,                // [n_rows*stride, row_bytes]

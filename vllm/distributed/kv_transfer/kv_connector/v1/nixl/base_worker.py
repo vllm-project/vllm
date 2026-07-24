@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Base worker-side logic for the NIXL connector."""
 
+import contextlib
 import itertools
 import logging
 import os
@@ -2013,7 +2014,7 @@ class NixlBaseConnectorWorker:
         """
         assert self.transfer_topo is not None
         done_sending = self._get_new_notifs()
-        done_recving = self._pop_done_transfers(self._recving_transfers)
+        done_recving = self._pop_done_transfers(self._recving_transfers, is_recv=True)
 
         # Drain queue of requests where handshake or transfer setup failed.
         failed_recv_reqs = set[ReqId]()
@@ -2159,11 +2160,14 @@ class NixlBaseConnectorWorker:
                     new_expiry,
                 )
 
-    def _pop_done_transfers(self, transfers: dict[str, list[int]]) -> set[str]:
+    def _pop_done_transfers(
+        self, transfers: dict[str, list[int]], *, is_recv: bool
+    ) -> set[str]:
         """
         Pop completed xfers by checking for DONE state.
         Args:
             transfers: dict of req_id -> list[running_xfer]
+            is_recv: Whether failures require receive-side invalidation and reporting.
         Returns:
             set of req_ids that have all done xfers
         """
@@ -2183,16 +2187,18 @@ class NixlBaseConnectorWorker:
                     else:
                         self._log_failure(
                             failure_type="transfer_failed",
-                            msg="Deferring the failure report until the "
-                            "request's last xfer is terminal",
+                            msg="Deferring request completion until its last "
+                            "xfer is terminal",
                             req_id=req_id,
                             xfer_state=xfer_state,
                         )
                         # ERR is terminal; PROC handles remain in_progress.
-                        self.nixl_wrapper.release_xfer_handle(handle)
+                        with contextlib.suppress(Exception):
+                            self.nixl_wrapper.release_xfer_handle(handle)
                         self.xfer_stats.record_failed_transfer()
-                        with self._failed_recv_lock:
-                            self._failed_recv_pending.add(req_id)
+                        if is_recv:
+                            with self._failed_recv_lock:
+                                self._failed_recv_pending.add(req_id)
                 except Exception as e:
                     self._log_failure(
                         failure_type="transfer_exception",
@@ -2201,21 +2207,26 @@ class NixlBaseConnectorWorker:
                         error=e,
                     )
                     self.xfer_stats.record_failed_transfer()
-                    with self._failed_recv_lock:
-                        self._failed_recv_pending.add(req_id)
+                    with contextlib.suppress(Exception):
+                        self.nixl_wrapper.release_xfer_handle(handle)
+                    if is_recv:
+                        with self._failed_recv_lock:
+                            self._failed_recv_pending.add(req_id)
 
-            with self._failed_recv_lock:
-                if in_progress:
-                    transfers[req_id] = in_progress
-                    continue
-                del transfers[req_id]
-                failed = req_id in self._failed_recv_pending
-                self._failed_recv_pending.discard(req_id)
-            if failed:
-                self._report_failed_recv(req_id)
+            if in_progress:
+                transfers[req_id] = in_progress
                 continue
+            del transfers[req_id]
+            if is_recv:
+                with self._failed_recv_lock:
+                    failed = req_id in self._failed_recv_pending
+                    self._failed_recv_pending.discard(req_id)
+                if failed:
+                    self._report_failed_recv(req_id)
+                    continue
             done_req_ids.add(req_id)
-            self._send_pending_recv_notifs(req_id)
+            if is_recv:
+                self._send_pending_recv_notifs(req_id)
         return done_req_ids
 
     def _send_pending_recv_notifs(self, req_id: str) -> None:
