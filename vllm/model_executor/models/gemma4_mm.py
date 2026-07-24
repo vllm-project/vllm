@@ -1716,3 +1716,6 @@ class Gemma4ForConditionalGeneration(
         if modality == "video":
             return "<|video|>"
         raise ValueError(f"Unsupported modality: {modality}")
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        return self.language_model.get_expert_mapping()
