@@ -209,6 +209,7 @@ def _make_vllm_config(
         parallel_config=SimpleNamespace(
             pipeline_parallel_size=1,
             rank=rank,
+            data_parallel_index=0,
             decode_context_parallel_size=decode_context_parallel_size,
             prefill_context_parallel_size=1,
         ),
@@ -270,7 +271,6 @@ def _patch_worker_runtime(
     # DCP groups are contiguous splits of the TP group (see
     # parallel_state.py), so dcp_rank == tp_rank % dcp_size.
     dcp_group = SimpleNamespace(world_size=dcp_size, rank_in_group=tp_rank % dcp_size)
-    monkeypatch.setattr(worker, "get_mooncake_dp_engine_index", lambda _: 0)
     monkeypatch.setattr(worker, "get_tensor_model_parallel_rank", lambda: tp_rank)
     monkeypatch.setattr(worker, "get_tensor_model_parallel_world_size", lambda: tp_size)
     monkeypatch.setattr(worker, "get_pcp_group", lambda: single_rank_group)
