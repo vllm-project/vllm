@@ -22,8 +22,8 @@ pub(crate) struct DelimitedReasoningParser {
     buffer: String,
     start_token: String,
     end_token: String,
-    start_token_id: u32,
-    end_token_id: u32,
+    start_token_id: Option<u32>,
+    end_token_id: Option<u32>,
     default_in_reasoning: bool,
 }
 
@@ -54,21 +54,47 @@ impl DelimitedReasoningParser {
             buffer: String::new(),
             start_token: start_token.to_string(),
             end_token: end_token.to_string(),
-            start_token_id,
-            end_token_id,
+            start_token_id: Some(start_token_id),
+            end_token_id: Some(end_token_id),
             default_in_reasoning,
         })
     }
 
+    /// Create one delimited parser state machine without requiring tokens to exist in the tokenizer.
+    pub(crate) fn new_optional(
+        tokenizer: DynTokenizer,
+        start_token: &'static str,
+        end_token: &'static str,
+        default_in_reasoning: bool,
+    ) -> Self {
+        let start_token_id = tokenizer.token_to_id(start_token);
+        let end_token_id = tokenizer.token_to_id(end_token);
+
+        Self {
+            tokenizer,
+            current_in_reasoning: default_in_reasoning,
+            buffer: String::new(),
+            start_token: start_token.to_string(),
+            end_token: end_token.to_string(),
+            start_token_id,
+            end_token_id,
+            default_in_reasoning,
+        }
+    }
+
     /// Initialize the starting state from prompt token IDs.
     pub(crate) fn initialize(&mut self, prompt_token_ids: &[u32]) {
-        self.current_in_reasoning = last_reasoning_boundary(
-            prompt_token_ids,
-            self.start_token_id,
-            self.end_token_id,
-            self.tokenizer.as_ref(),
-        )
-        .unwrap_or(self.default_in_reasoning);
+        if let (Some(start_id), Some(end_id)) = (self.start_token_id, self.end_token_id) {
+            self.current_in_reasoning = last_reasoning_boundary(
+                prompt_token_ids,
+                start_id,
+                end_id,
+                self.tokenizer.as_ref(),
+            )
+            .unwrap_or(self.default_in_reasoning);
+        } else {
+            self.current_in_reasoning = self.default_in_reasoning;
+        }
     }
 
     /// Return whether the parser is currently inside a reasoning section.
