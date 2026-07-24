@@ -76,6 +76,9 @@ class InputBatch:
     num_computed_prefill_tokens_np: np.ndarray
     # [num_reqs] CPU bool array == (num_computed_prefill_tokens_np < prefill_len_np).
     is_prefilling_np: np.ndarray
+    # [num_reqs] True if this step is the request's first scheduled step
+    # (including resumption after preemption, which re-adds the request).
+    is_new_req_np: np.ndarray
 
     # [num_reqs] only populated when pipeline parallelism is enabled.
     max_seq_len_np: np.ndarray | None
@@ -170,6 +173,7 @@ class InputBatch:
             prefill_len_np=np.zeros(num_reqs, dtype=np.int32),
             num_computed_prefill_tokens_np=np.zeros(num_reqs, dtype=np.int32),
             is_prefilling_np=np.zeros(num_reqs, dtype=np.bool_),
+            is_new_req_np=np.zeros(num_reqs, dtype=np.bool_),
             max_seq_len_np=None,
             input_ids=input_ids,
             positions=positions,

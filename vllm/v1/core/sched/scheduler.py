@@ -240,6 +240,7 @@ class Scheduler(SchedulerInterface):
         self.use_eagle = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.num_lookahead_tokens = 0
+        self.num_reprefillable_tokens = 0
         self.dynamic_sd_lookup: list[int] | None = None
         if speculative_config is not None:
             if speculative_config.num_speculative_tokens_per_batch_size:
@@ -248,6 +249,10 @@ class Scheduler(SchedulerInterface):
                     vllm_max_batch_size=self.scheduler_config.max_num_seqs,
                     vllm_num_speculative_tokens=self.num_spec_tokens,
                 )
+            if speculative_config.use_multi_module_mtp():
+                # During multi-module MTP, the last num_spec_tokens - 1 tokens can
+                # be re-prefilled by MTP modules in subsequent decode steps.
+                self.num_reprefillable_tokens = self.num_spec_tokens - 1
             if speculative_config.use_eagle():
                 self.use_eagle = True
                 self.num_lookahead_tokens = self.num_spec_tokens
@@ -274,6 +279,7 @@ class Scheduler(SchedulerInterface):
             max_in_flight_tokens=vllm_config.max_in_flight_tokens,
             enable_caching=self.cache_config.enable_prefix_caching,
             use_eagle=self.use_eagle,
+            num_reprefillable_tokens=self.num_reprefillable_tokens,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=self.dcp_world_size,
@@ -508,7 +514,16 @@ class Scheduler(SchedulerInterface):
             )
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
-            num_new_tokens = min(num_new_tokens, token_budget)
+
+            # During multi-module MTP, the draft model layers re-prefill tokens from
+            # the last chunked prefill. These must be accounted for in the token budget
+            # while scheduling requests.
+            num_reprefill_tokens = (
+                self.num_reprefillable_tokens if request.is_prefill_chunk else 0
+            )
+            num_new_tokens = min(
+                num_new_tokens, max(0, token_budget - num_reprefill_tokens)
+            )
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
@@ -585,6 +600,10 @@ class Scheduler(SchedulerInterface):
                             preempted_req_id = preempted_req.request_id
                             scheduled_running_reqs.remove(preempted_req)
                             token_budget += num_scheduled_tokens.pop(preempted_req_id)
+                            if preempted_req.is_prefill_chunk:
+                                # Refund the re-prefill tokens debited from the token
+                                # budget during scheduling.
+                                token_budget += self.num_reprefillable_tokens
                             req_to_new_blocks.pop(preempted_req_id)
                             scheduled_spec_decode_tokens.pop(preempted_req_id, None)
                             preempted_encoder_inputs = scheduled_encoder_inputs.pop(
@@ -618,7 +637,7 @@ class Scheduler(SchedulerInterface):
             request_id = request.request_id
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
-            token_budget -= num_new_tokens
+            token_budget -= num_new_tokens + num_reprefill_tokens
             req_index += 1
 
             # Speculative decode related.

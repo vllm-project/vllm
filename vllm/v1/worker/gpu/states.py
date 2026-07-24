@@ -54,6 +54,9 @@ class RequestState:
 
         # Number of computed tokens.
         self.num_computed_prefill_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
+        # True if the current step is the request's first scheduled step. Requests
+        # resumed after preemption are re-added and count as new again.
+        self.is_new_req = np.zeros(self.max_num_reqs, dtype=bool)
         self.num_computed_tokens = StagedWriteTensor(
             self.max_num_reqs, dtype=torch.int32, device=device
         )
@@ -109,6 +112,7 @@ class RequestState:
         self.num_computed_prefill_tokens[req_idx] = num_computed_tokens
         self.num_computed_tokens_np[req_idx] = num_computed_tokens
         self.num_computed_tokens.stage_write_elem(req_idx, num_computed_tokens)
+        self.is_new_req[req_idx] = True
 
         self.draft_tokens[req_idx].zero_()
 

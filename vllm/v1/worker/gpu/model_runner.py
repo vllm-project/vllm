@@ -614,7 +614,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     torch.zeros(
                         input_batch.num_tokens,
                         dtype=torch.bool,
-                        device=self.device,
+                        device="cpu",
                     ),
                 )
 
@@ -863,6 +863,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ):
             req_index = self.req_states.req_id_to_index[req_id]
             num_computed_tokens_np[req_index] = num_computed_tokens
+            self.req_states.is_new_req[req_index] = False
             if req_new_block_ids is not None:
                 self.block_tables.append_block_ids(
                     req_index, req_new_block_ids, overwrite=False
@@ -966,6 +967,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         computed_prefill_tokens_np = self.req_states.num_computed_prefill_tokens
         num_computed_prefill_tokens_np = computed_prefill_tokens_np[idx_mapping_np]
         is_prefilling_np = num_computed_prefill_tokens_np < prefill_len_np
+        is_new_req_np = self.req_states.is_new_req[idx_mapping_np]
 
         # Get prefill tokens if any.
         if np.any(is_prefilling_np):
@@ -1059,6 +1061,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prefill_len_np=prefill_len_np,
             num_computed_prefill_tokens_np=num_computed_prefill_tokens_np,
             is_prefilling_np=is_prefilling_np,
+            is_new_req_np=is_new_req_np,
             max_seq_len_np=max_seq_len_np,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
