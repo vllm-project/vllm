@@ -473,27 +473,25 @@ def test_from_request_tracker_no_load_saves_normally():
 class _StubLookupClient:
     def __init__(self, hit_tokens: int) -> None:
         self._hit_tokens = hit_tokens
+        self.num_tokens: list[int] = []
 
     def lookup(
         self,
         req_id: str,
-        token_len: int,
+        num_tokens: int,
         block_hashes: list[bytes],
         non_block: bool = False,
     ) -> int:
+        self.num_tokens.append(num_tokens)
         return self._hit_tokens
 
 
 def test_full_external_hit_keeps_kvpool_cached_tokens_block_aligned():
-    # When the external store hits the entire prompt, scheduler must leave at
-    # least one token uncomputed for sampling but stay on a block boundary.
-    # Otherwise the recv-side load mask floors token_len to
-    # (num_tokens-1)//block_size, the tail partial chunk is dropped, and -- if
-    # the local cache covers the aligned prefix -- key_list ends up empty
-    # (ZeroDivisionError in the recv thread's `tp_rank % len(key_list)`).
+    # The worker re-derives a full external hit below the request end on an
+    # existing boundary, so the scheduler receives the usable aligned hit.
     scheduler = _make_bare_scheduler()
     scheduler.load_async = True
-    scheduler.client = _StubLookupClient(hit_tokens=48)  # full hit on 48-token prompt
+    scheduler.client = _StubLookupClient(hit_tokens=32)
 
     request = SimpleNamespace(
         request_id="req-0",
@@ -510,6 +508,7 @@ def test_full_external_hit_keeps_kvpool_cached_tokens_block_aligned():
     assert need_to_allocate == 16
     assert load_async is True
     load_spec = scheduler.load_specs["req-0"]
+    assert scheduler.client.num_tokens == [48]
     assert load_spec.vllm_cached_tokens == 16
     assert load_spec.kvpool_cached_tokens == 32
     assert load_spec.kvpool_cached_tokens % 16 == 0
@@ -522,7 +521,7 @@ def test_full_external_hit_with_full_local_hit_skips_load():
     # into any block-aligned key.
     scheduler = _make_bare_scheduler()
     scheduler.load_async = True
-    scheduler.client = _StubLookupClient(hit_tokens=48)
+    scheduler.client = _StubLookupClient(hit_tokens=32)
 
     request = SimpleNamespace(
         request_id="req-0",
