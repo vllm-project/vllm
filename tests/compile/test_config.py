@@ -788,3 +788,44 @@ def test_inductor_asserts_user_override(monkeypatch):
     assert config.inductor_compile_config.get("size_asserts") is True
     if not _is_torch_equal_or_newer(torch.__version__, "2.12.0.dev"):
         assert config.inductor_compile_config.get("alignment_asserts") is False
+
+
+@pytest.mark.skipif(
+    not _is_torch_equal_or_newer(torch.__version__, "2.9.0.dev")
+    or current_platform.is_cpu(),
+    reason="combo_kernels auto-enable requires torch >= 2.9 and non-CPU",
+)
+def test_benchmark_combo_kernel_disabled_on_network_fs(monkeypatch):
+    monkeypatch.setattr(
+        "vllm.config.compilation.is_network_filesystem",
+        lambda _path: True,
+    )
+    config = CompilationConfig()
+    assert config.inductor_compile_config.get("combo_kernels") is True
+    assert config.inductor_compile_config.get("benchmark_combo_kernel") is False
+
+
+@pytest.mark.skipif(
+    not _is_torch_equal_or_newer(torch.__version__, "2.9.0.dev")
+    or current_platform.is_cpu(),
+    reason="combo_kernels auto-enable requires torch >= 2.9 and non-CPU",
+)
+def test_benchmark_combo_kernel_enabled_on_local_fs(monkeypatch):
+    monkeypatch.setattr(
+        "vllm.config.compilation.is_network_filesystem",
+        lambda _path: False,
+    )
+    config = CompilationConfig()
+    assert config.inductor_compile_config.get("combo_kernels") is True
+    assert config.inductor_compile_config.get("benchmark_combo_kernel") is True
+
+
+def test_benchmark_combo_kernel_user_override_respected(monkeypatch):
+    monkeypatch.setattr(
+        "vllm.config.compilation.is_network_filesystem",
+        lambda _path: True,
+    )
+    config = CompilationConfig(
+        inductor_compile_config={"benchmark_combo_kernel": True},
+    )
+    assert config.inductor_compile_config.get("benchmark_combo_kernel") is True

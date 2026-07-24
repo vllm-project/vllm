@@ -93,6 +93,44 @@ def suppress_stdout():
 
 # File path utilities
 
+NETWORK_FILESYSTEM_TYPES = frozenset({"nfs", "nfs4", "lustre"})
+
+
+def get_fs_type(path: str | os.PathLike[str] | None) -> str:
+    """Get the filesystem type for *path* (Linux only)."""
+    if path is None:
+        return ""
+    try:
+        resolved = os.path.realpath(path)
+        best_mount = ""
+        best_fstype = ""
+        # /proc/mounts may contain nested mount points (e.g. "/" -> ext4,
+        # "/data" -> nfs4, "/data/local" -> ext4).  We pick the entry with
+        # the longest matching mount_point — the same "longest prefix match"
+        # rule the kernel uses to decide which filesystem serves a path.
+        with open("/proc/mounts") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                mount_point, fstype = parts[1], parts[2]
+                if (
+                    resolved == mount_point
+                    or resolved.startswith(os.path.join(mount_point, ""))
+                ) and len(mount_point) > len(best_mount):
+                    best_mount = mount_point
+                    best_fstype = fstype
+        return best_fstype
+    except Exception:
+        # /proc/mounts is Linux-specific; on other OSes (or if the read
+        # fails for any reason) we fall back to an empty string.
+        return ""
+
+
+def is_network_filesystem(path: str | os.PathLike[str] | None) -> bool:
+    """Return True if *path* resides on a known network filesystem."""
+    return get_fs_type(path) in NETWORK_FILESYSTEM_TYPES
+
 
 def unique_filepath(fn: Callable[[int], Path]) -> Path:
     """Generate a unique file path by trying incrementing integers.

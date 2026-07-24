@@ -22,6 +22,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.math_utils import round_up
+from vllm.utils.system_utils import is_network_filesystem
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 if TYPE_CHECKING:
@@ -989,7 +990,19 @@ class CompilationConfig:
             # use horizontal fusion, which is useful for fusing qk-norm and
             # qk-rope when query and key have different shapes.
             self.inductor_compile_config["combo_kernels"] = True
-            self.inductor_compile_config["benchmark_combo_kernel"] = True
+            cache_path = self.cache_dir or envs.VLLM_CACHE_ROOT
+            if is_network_filesystem(cache_path):
+                # Inductor's combo-kernel benchmarking writes and imports temp
+                # .py files under the compile cache. On NFS/Lustre this can hit
+                # stale file handle errors during engine init.
+                self.inductor_compile_config["benchmark_combo_kernel"] = False
+                logger.info_once(
+                    "Disabling inductor benchmark_combo_kernel because the "
+                    "torch.compile cache path is on a network filesystem: %s",
+                    cache_path,
+                )
+            else:
+                self.inductor_compile_config["benchmark_combo_kernel"] = True
 
         if self.use_inductor_graph_partition and not is_torch_equal_or_newer(
             "2.9.0.dev"
