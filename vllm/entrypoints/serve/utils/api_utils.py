@@ -6,12 +6,13 @@ import dataclasses
 import functools
 import os
 from argparse import Namespace
+from http import HTTPStatus
 from logging import Logger
 from string import Template
 from typing import Any
 
 import regex as re
-from fastapi import Request
+from fastapi import Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask, BackgroundTasks
@@ -141,6 +142,58 @@ def load_aware_call(func):
         else:
             raw_request.app.state.server_load_metrics -= 1
 
+        return response
+
+    return wrapper
+
+
+def log_request_exit(
+    request: Request,
+    response: Response | Exception,
+):
+    request_id = request.state.request_metadata.request_id
+    if isinstance(response, Exception):
+        logger.error("Failed request %s (exception: %s)", request_id, str(response))
+    else:
+        status_code = response.status_code
+        if status_code == HTTPStatus.OK.value:
+            logger.info("Completed request %s", request_id)
+        else:
+            logger.error(
+                "Failed request %s (status_code: %s, response body: %s)",
+                request_id,
+                status_code,
+                response.body,
+            )
+
+
+def track_request_exit(func):
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        raw_request = kwargs.get("raw_request", args[1] if len(args) > 1 else None)
+        if raw_request is None:
+            raise ValueError("raw_request required when request exited")
+        try:
+            response = await func(*args, **kwargs)
+        except Exception as e:
+            log_request_exit(raw_request, e)
+            raise
+        if isinstance(response, (JSONResponse, StreamingResponse)):
+            if response.background is None:
+                response.background = BackgroundTask(
+                    log_request_exit, raw_request, response
+                )
+            elif isinstance(response.background, BackgroundTasks):
+                response.background.add_task(log_request_exit, raw_request, response)
+            elif isinstance(response.background, BackgroundTask):
+                tasks = BackgroundTasks()
+                tasks.add_task(
+                    response.background.func,
+                    *response.background.args,
+                    **response.background.kwargs,
+                )
+                tasks.add_task(log_request_exit, raw_request, response)
+                response.background = tasks
         return response
 
     return wrapper
