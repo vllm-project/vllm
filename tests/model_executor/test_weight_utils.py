@@ -5,11 +5,14 @@ import tempfile
 
 import huggingface_hub.constants
 import pytest
+import torch
 from huggingface_hub.utils import LocalEntryNotFoundError
 
 from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf,
+    maybe_remap_moe_expert_param_name,
     maybe_remap_kv_scale_name,
+    remap_moe_expert_weights,
 )
 
 
@@ -158,6 +161,80 @@ class TestMaybeRemapKvScaleName:
             "model.layers.0.self_attn.qkv_proj.k_scale", empty_params
         )
         assert result is None
+
+
+class TestMaybeRemapMoeExpertParamName:
+    """Tests for remapping old checkpoint expert names to routed_experts."""
+
+    PARAMS_DICT = {
+        name: torch.nn.Parameter(torch.empty(0), requires_grad=False)
+        for name in [
+            "model.layers.0.mlp.experts.routed_experts.w13_weight",
+            "model.layers.0.mlp.experts.routed_experts.w2_weight",
+            "model.layers.0.mlp.experts.routed_experts.w13_bias",
+            "model.layers.0.mlp.experts.routed_experts.w2_bias",
+        ]
+    }
+
+    @pytest.mark.parametrize(
+        ("checkpoint_name", "expected_name"),
+        [
+            (
+                "model.layers.0.mlp.experts.w13_weight",
+                "model.layers.0.mlp.experts.routed_experts.w13_weight",
+            ),
+            (
+                "model.layers.0.mlp.experts.w2_weight",
+                "model.layers.0.mlp.experts.routed_experts.w2_weight",
+            ),
+            (
+                "model.layers.0.mlp.experts.w13_bias",
+                "model.layers.0.mlp.experts.routed_experts.w13_bias",
+            ),
+            (
+                "model.layers.0.mlp.experts.w2_bias",
+                "model.layers.0.mlp.experts.routed_experts.w2_bias",
+            ),
+        ],
+    )
+    def test_remaps_legacy_expert_names(self, checkpoint_name, expected_name):
+        assert (
+            maybe_remap_moe_expert_param_name(checkpoint_name, self.PARAMS_DICT)
+            == expected_name
+        )
+
+    def test_remaps_gpt_oss_bf16_down_projection_weight(self):
+        """Regression test for https://github.com/vllm-project/vllm/issues/45830."""
+        name = "model.layers.0.mlp.experts.w2_weight"
+
+        assert (
+            maybe_remap_moe_expert_param_name(name, self.PARAMS_DICT)
+            == "model.layers.0.mlp.experts.routed_experts.w2_weight"
+        )
+
+    def test_already_remapped_name_is_unchanged(self):
+        name = "model.layers.0.mlp.experts.routed_experts.w2_weight"
+
+        assert maybe_remap_moe_expert_param_name(name, self.PARAMS_DICT) == name
+
+    def test_missing_routed_target_is_unchanged(self):
+        name = "model.layers.0.mlp.experts.w2_weight"
+
+        assert maybe_remap_moe_expert_param_name(name, {}) == name
+
+    def test_remap_moe_expert_weights_preserves_tensor(self):
+        weight = torch.ones(1)
+        mapped_weights = list(
+            remap_moe_expert_weights(
+                [("model.layers.0.mlp.experts.w2_weight", weight)],
+                self.PARAMS_DICT,
+            )
+        )
+
+        assert mapped_weights[0][0] == (
+            "model.layers.0.mlp.experts.routed_experts.w2_weight"
+        )
+        assert mapped_weights[0][1] is weight
 
 
 class TestKvCacheScaleMapper:
