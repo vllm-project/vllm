@@ -280,6 +280,31 @@ def _find_exact_cc_in_function(tree: ast.AST, func_name: str) -> str | None:
     return None
 
 
+def _find_family_ccs_in_function(tree: ast.AST, func_name: str) -> list[str]:
+    """Find all is_device_capability_family() capabilities in a function.
+
+    Returns CC strings (e.g. ``["10.x", "12.x"]``) in first-seen order without
+    duplicates.
+    """
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or node.name != func_name:
+            continue
+        for n in ast.walk(node):
+            if (
+                isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "is_device_capability_family"
+                and n.args
+                and isinstance(n.args[0], ast.Constant)
+                and isinstance(n.args[0].value, int)
+            ):
+                cc = f"{n.args[0].value // 10}.x"
+                if cc not in found:
+                    found.append(cc)
+    return found
+
+
 # ---------------------------------------------------------------------------
 # Registry and file resolution
 # ---------------------------------------------------------------------------
@@ -1247,7 +1272,7 @@ def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
 def parse_flashinfer_trtllm_features() -> dict[str, dict[str, Any]]:
     """Parse flashinfer.py to detect FlashInfer TRTLLM API variants.
 
-    FLASHINFER uses XQA on SM90 and trtllm-gen on SM100 through FlashInfer's
+    FLASHINFER uses XQA on SM90 and SM12x and trtllm-gen on SM100 through FlashInfer's
     TRTLLM decode API. These variants have different capabilities than native
     FlashInfer.
     """
@@ -1261,6 +1286,18 @@ def parse_flashinfer_trtllm_features() -> dict[str, dict[str, Any]]:
 
     xqa_compute_cap = _find_exact_cc_in_function(tree, "supports_trtllm_attention")
     trtllm_gen_compute_cap = _find_cc_in_function(tree, "supports_trtllm_attention")
+
+    # Families other than the SM100 trtllm-gen family (e.g. SM12x) also decode
+    # through XQA; fold them into the XQA compute-capability list.
+    xqa_extra_caps = [
+        cc
+        for cc in _find_family_ccs_in_function(tree, "supports_trtllm_attention")
+        if cc != trtllm_gen_compute_cap
+    ]
+    if xqa_extra_caps:
+        xqa_compute_cap = ", ".join(
+            ([xqa_compute_cap] if xqa_compute_cap else []) + xqa_extra_caps
+        )
 
     if not xqa_compute_cap and not trtllm_gen_compute_cap:
         return {}
@@ -2034,7 +2071,7 @@ def generate_docs() -> str:
     if fi_features:
         footnotes.append(
             "> **†** FlashInfer Native is the regular FlashInfer path. XQA is the "
-            "SM90 decode path exposed through FlashInfer's TRTLLM decode API. "
+            "SM90/SM12x decode path exposed through FlashInfer's TRTLLM decode API. "
             "trtllm-gen is used on SM100 and supports sinks. Disable XQA/trtllm-gen "
             "via `--attention-config.use_trtllm_attention=0`."
         )
