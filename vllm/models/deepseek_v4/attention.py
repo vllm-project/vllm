@@ -119,6 +119,25 @@ def _resolve_dsv4_kv_cache_dtype(
     return kv_cache_dtype, torch.bfloat16
 
 
+def resolve_layer_compress_ratio(config, layer_id: int) -> tuple[int, bool]:
+    """Resolve (operational_compress_ratio, use_unscaled_rope) for a layer.
+
+    NOTE(zyongye) Compress ratio can't be 0; historically every layer_id >=
+    num_hidden_layers (the MTP draft layer) was mapped to 1 because "MTP layer
+    is not included in the compress ratio list". Some checkpoints DO include
+    their MTP draft layer in compress_ratios, with an entry of 0 meaning
+    uncompressed KV and plain (unscaled) rope. The operational ratio stays
+    clamped to >= 1 (KV-cache specs treat 1 as "no compression" and divide by
+    it); a raw 0 only selects unscaled rope for that layer.
+    """
+    if layer_id < config.num_hidden_layers:
+        return max(1, config.compress_ratios[layer_id]), False
+    if layer_id < len(config.compress_ratios):
+        raw_compress_ratio = config.compress_ratios[layer_id]
+        return max(1, raw_compress_ratio), raw_compress_ratio == 0
+    return 1, False
+
+
 class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     """DeepseekV4 MLA attention layer.
 
@@ -202,13 +221,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self.n_groups = config.o_groups
         self.n_local_groups = self.n_groups // tp_size
         self.window_size = config.sliding_window
-        # NOTE(zyongye) Compress ratio can't be 0
-        # we do this for because MTP layer is not included
-        # in the compress ratio list
-        if layer_id < config.num_hidden_layers:
-            self.compress_ratio = max(1, config.compress_ratios[layer_id])
-        else:
-            self.compress_ratio = 1
+        self.compress_ratio, use_unscaled_rope = resolve_layer_compress_ratio(
+            config, layer_id
+        )
         self.eps = config.rms_norm_eps
         self.scale = self.head_dim**-0.5
 
@@ -266,6 +281,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             rope_head_dim=self.rope_head_dim,
             max_position_embeddings=config.max_position_embeddings,
             compress_ratio=self.compress_ratio,
+            use_unscaled_rope=use_unscaled_rope,
         )
         self.indexer_rotary_emb = self.rotary_emb
         self.topk_indices_buffer = topk_indices_buffer
