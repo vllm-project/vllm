@@ -246,6 +246,40 @@ class TestModel(torch.nn.Module):
         ]
 
 
+class _MixedDtypeFusedAddRMSNormModel(torch.nn.Module):
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float,
+        force_kernel: type[_KernelT],
+        group_shape: GroupShape,
+        dtype: torch.dtype,
+    ):
+        super().__init__()
+        self.eps = eps
+        self.weight = torch.nn.Parameter(torch.empty(hidden_size, dtype=torch.float32))
+
+        block_size = group_shape.col
+        self.activation_quant_key = create_fp8_quant_key(
+            static=False, group_shape=group_shape
+        )
+        self.weight_quant_key = create_fp8_quant_key(
+            static=True, group_shape=GroupShape(block_size, block_size)
+        )
+        self.fp8_linear = TestFP8Layer(
+            weight_shape=(hidden_size, hidden_size),
+            activation_quant_key=self.activation_quant_key,
+            weight_quant_key=self.weight_quant_key,
+            force_kernel=force_kernel,
+            input_dtype=dtype,
+        )
+
+    def forward(self, x):
+        x = residual = torch.relu(x)
+        y, _ = vllm.ir.ops.fused_add_rms_norm(x, residual, self.weight, self.eps)
+        return self.fp8_linear(y)
+
+
 def _run_fusion_test(
     model,
     fusion_pass,
@@ -285,6 +319,67 @@ def _run_fusion_test(
     backend.check_after_ops(model.ops_in_model_after())
 
     return backend, backend2
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Only test on CUDA and ROCm"
+)
+def test_rms_quant_fusion_skips_mixed_dtype_fused_add_rms_norm():
+    dtype = torch.bfloat16
+    hidden_size = 256
+    num_tokens = 257
+    eps = 1e-5
+    group_shape = GroupShape(1, 128)
+    force_kernel = TritonFp8BlockScaledMMKernel
+
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(dtype=dtype),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=["+rms_norm", "+quant_fp8"],
+            pass_config=PassConfig(
+                fuse_norm_quant=True,
+                fuse_act_quant=True,
+                eliminate_noops=True,
+            ),
+        ),
+    )
+
+    with (
+        vllm.config.set_current_vllm_config(vllm_config),
+        vllm_config.kernel_config.ir_op_priority.set_priority(),
+    ):
+        torch.set_default_device("cuda")
+        torch.set_default_dtype(dtype)
+        torch.manual_seed(1)
+
+        fusion_pass = RMSNormQuantFusionPass(vllm_config)
+        model = _MixedDtypeFusedAddRMSNormModel(
+            hidden_size=hidden_size,
+            eps=eps,
+            force_kernel=force_kernel,
+            group_shape=group_shape,
+            dtype=dtype,
+        )
+
+        noop_pass = NoOpEliminationPass(vllm_config)
+        cleanup_pass = PostCleanupPass(vllm_config)
+        backend = TestBackend(noop_pass, fusion_pass, cleanup_pass)
+
+        x = torch.rand(num_tokens, hidden_size)
+        torch._dynamo.mark_dynamic(x, 0)
+
+        model_fused = torch.compile(model, backend=backend)
+        model_fused(x)
+
+        assert fusion_pass.matched_count == 0
+        assert backend.op_count(torch.ops.vllm_ir.fused_add_rms_norm.default) > 0
+        assert (
+            backend.op_count(
+                FUSED_OPS[FusedRMSQuantKey(model.activation_quant_key, True)]
+            )
+            == 0
+        )
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
