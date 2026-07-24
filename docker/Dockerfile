@@ -1067,12 +1067,19 @@ FROM vllm-openai-base AS vllm-openai
 
 # CRIU for the default-on imports-snapshot entrypoint (see
 # docker/entrypoints/vllm-snapshot-entrypoint.sh). Jammy's archive criu is
-# 3.16.x, below the >=3.17 floor `vllm snapshot` enforces at runtime, so
-# install from the CRIU team's PPA and fail the build if the floor is not met.
-RUN for i in 1 2 3; do \
-        add-apt-repository -y ppa:criu/ppa && break || \
-        { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
-    done \
+# 3.16.x, below the >=3.17 floor `vllm snapshot` enforces at runtime (and
+# noble's archive has no criu at all), so install from the CRIU team's PPA and
+# fail the build if the floor is not met. The keyring is written manually
+# (same pattern as the deadsnakes mirror branch above): add-apt-repository is
+# unusable at this stage because /usr/bin/python3 now points at the deadsnakes
+# python, which has no apt_pkg module.
+RUN mkdir -p -m 0755 /etc/apt/keyrings \
+    && curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x4E2A48715C45AEEC077B48169B29EEC9246B6CE2" \
+        | gpg --dearmor > /etc/apt/keyrings/criu-ppa.gpg \
+    && chmod 644 /etc/apt/keyrings/criu-ppa.gpg \
+    && . /etc/os-release \
+    && echo "deb [signed-by=/etc/apt/keyrings/criu-ppa.gpg] https://ppa.launchpadcontent.net/criu/ppa/ubuntu ${VERSION_CODENAME} main" \
+        > /etc/apt/sources.list.d/criu-ppa.list \
     && apt-get update -y \
     && apt-get install -y --no-install-recommends criu \
     && rm -rf /var/lib/apt/lists/* \
