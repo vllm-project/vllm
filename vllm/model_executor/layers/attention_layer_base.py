@@ -3,6 +3,7 @@
 """Base class for attention-like layers."""
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 
 import torch
 
@@ -30,6 +31,20 @@ class AttentionLayerBase(ABC):
         override this to unpack the raw buffer into per-state views.
         """
         self.kv_cache = kv_cache
+
+    def bind_pcp_peer_kv_cache(
+        self,
+        peer_kv_cache: torch.Tensor,
+        fence: Callable[[], None],
+    ) -> None:
+        """Bind the rank-major peer view for direct PCP cache writes.
+
+        The ordinary ``kv_cache`` remains the rank-local consumer view. The
+        peer view adds a leading PCP-rank dimension and is only present when
+        the experimental direct-store path is enabled.
+        """
+        self.pcp_peer_kv_cache = peer_kv_cache
+        self.pcp_peer_cache_fence = fence
 
     @abstractmethod
     def get_attn_backend(self) -> type[AttentionBackend]:

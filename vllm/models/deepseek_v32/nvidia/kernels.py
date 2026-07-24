@@ -131,23 +131,37 @@ def _fp8_quant_and_cache_write(
     kv_cache_ptr,
     kv_cache_scale_ptr,
     cache_block_size,
+    cache_block_stride,
     cache_stride,
+    cache_peer_stride,
+    scale_peer_stride,
     offsets,
     HEAD_DIM: tl.constexpr,
+    PEER_COUNT: tl.constexpr,
 ):
     k_fp8, scale = _fp8_ue8m0_quantize(vals)
 
     block_idx = slot_idx // cache_block_size
     block_offset = slot_idx % cache_block_size
-    block_start = block_idx * cache_block_size * cache_stride
+    # Use the physical block stride explicitly. Packed KV-cache layouts can
+    # place other layers' pages between consecutive blocks of this layer.
+    block_start = block_idx * cache_block_stride
 
-    tl.store(
-        kv_cache_ptr + block_start + block_offset * HEAD_DIM + offsets,
-        k_fp8,
-        mask=mask,
-    )
     scale_byte_off = block_start + cache_block_size * HEAD_DIM + block_offset * 4
-    tl.store(kv_cache_scale_ptr + scale_byte_off // 4, scale)
+    for peer_rank in range(PEER_COUNT):
+        tl.store(
+            kv_cache_ptr
+            + peer_rank * cache_peer_stride
+            + block_start
+            + block_offset * HEAD_DIM
+            + offsets,
+            k_fp8,
+            mask=mask,
+        )
+        tl.store(
+            kv_cache_scale_ptr + peer_rank * scale_peer_stride + scale_byte_off // 4,
+            scale,
+        )
 
 
 @triton.jit
@@ -192,11 +206,16 @@ def _fused_norm_rope_kernel(
     indexer_cache_ptr,
     indexer_cache_scale_ptr,
     indexer_cache_block_size,
+    indexer_cache_block_stride,
     indexer_cache_stride,
+    indexer_cache_peer_stride,
+    indexer_cache_scale_peer_stride,
     # MLA KV cache (concat kv_c_normed + k_pe_roped, uses slot_mapping_ptr)
     mla_cache_ptr,
+    mla_cache_block_size,
     mla_cache_block_stride,
     mla_cache_entry_stride,
+    mla_cache_peer_stride,
     MLA_CACHE_FP8: tl.constexpr,
     mla_cache_scale_ptr,
     # fp8_ds_mla cache views (block-scaled fp8 NoPE + unquantized bf16 RoPE).
@@ -204,6 +223,8 @@ def _fused_norm_rope_kernel(
     # are byte offsets; these two share the same buffer as fp32 / bf16 views.
     mla_cache_ds_scale_ptr,
     mla_cache_ds_rope_ptr,
+    mla_cache_ds_scale_peer_stride,
+    mla_cache_ds_rope_peer_stride,
     MLA_CACHE_DS_MLA: tl.constexpr,
     MLA_NUM_TILES: tl.constexpr,
     MLA_TILE_DIM: tl.constexpr,
@@ -215,6 +236,8 @@ def _fused_norm_rope_kernel(
     HAS_INDEXER: tl.constexpr,
     INDEX_ROPE_INTERLEAVE: tl.constexpr,
     USE_PDL: tl.constexpr,
+    PCP_PEER_COUNT: tl.constexpr,
+    MATERIALIZE_CACHE_INPUTS: tl.constexpr,
 ):
     pid = tl.program_id(0)
     tok_idx = tl.program_id(1)
@@ -239,8 +262,9 @@ def _fused_norm_rope_kernel(
         return
 
     if pid == 2:
-        # Q RMS norm does not depend on cache availability. In particular,
-        # profiling uses a negative dummy slot mapping but still consumes Q.
+        # Query normalization is compute, not a cache write. PCP intentionally
+        # masks replicated decode slots on ranks other than rank 0, but every
+        # rank still needs a valid query for its local attention work.
         q_block = tl.arange(0, Q_BLOCK_SIZE)
         q_mask = q_block < Q_DIM
         q_c = tl.load(q_c_ptr + tok_idx * q_c_stride + q_block, mask=q_mask, other=0.0)
@@ -249,13 +273,19 @@ def _fused_norm_rope_kernel(
         tl.store(q_c_out_ptr + tok_idx * q_c_out_stride + q_block, q_c, mask=q_mask)
         return
 
-    if slot_mapping_ptr is None:
-        # Memory profiling run.
-        return
-    slot_idx = tl.load(slot_mapping_ptr + tok_idx)
-    if slot_idx < 0:
-        # Padding
-        return
+    # The direct/single-rank path skips all cache preparation for padding just
+    # as before.  The collective PCP fallback, however, must prepare every
+    # local row first: replicated decode rows are deliberately PAD on nonzero
+    # ranks, while their local Q/KV values are still needed by attention.
+    slot_idx = 0
+    if not MATERIALIZE_CACHE_INPUTS:
+        if slot_mapping_ptr is None:
+            # Memory profiling run.
+            return
+        slot_idx = tl.load(slot_mapping_ptr + tok_idx)
+        if slot_idx < 0:
+            # Padding
+            return
 
     if pid == 1:
         # KV RMS Norm + KV RoPE + MLA concat_and_cache.
@@ -285,10 +315,20 @@ def _fused_norm_rope_kernel(
         r1 = x1 * cos - x2 * sin
         r2 = x2 * cos + x1 * sin
 
+        if MATERIALIZE_CACHE_INPUTS:
+            # The collective PCP fallback gathers these locally prepared BF16
+            # values before using the ordinary backend cache-update kernel.
+            tl.store(kv_ptr + tok_idx * kv_stride + kv_block, kv_c)
+            tl.store(kpe_base + dim_off * 2, r1)
+            tl.store(kpe_base + dim_off * 2 + 1, r2)
+            return
+
         # MLA concat_and_cache: write [kv_c_normed, k_pe_roped] to cache.
-        mla_block_size = mla_cache_block_stride // mla_cache_entry_stride
-        mla_block_idx = slot_idx // mla_block_size
-        mla_block_off = slot_idx % mla_block_size
+        if mla_cache_entry_stride == 0:
+            return
+
+        mla_block_idx = slot_idx // mla_cache_block_size
+        mla_block_off = slot_idx % mla_cache_block_size
 
         if MLA_CACHE_DS_MLA:
             # fp8_ds_mla layout (DeepSeek-V3.2, KV_DIM == 512): per-128-element
@@ -309,15 +349,31 @@ def _fused_norm_rope_kernel(
             # concat_and_cache_ds_mla kernel; floored to FLT_MIN.
             tile_scale = tl.maximum(tile_amax * (1.0 / 448.0), 1.1754944e-38)
             kv_c_fp8 = tl.reshape((kv_2d / tile_scale).to(tl.float8e4nv), (KV_DIM,))
-            tl.store(mla_cache_ptr + byte_base + kv_block, kv_c_fp8)
             tile_off = tl.arange(0, MLA_NUM_TILES)
-            tl.store(
-                mla_cache_ds_scale_ptr + byte_base // 4 + KV_DIM // 4 + tile_off,
-                tl.reshape(tile_scale, (MLA_NUM_TILES,)),
-            )
-            rope_dst = mla_cache_ds_rope_ptr + byte_base // 2 + (KV_DIM // 2 + 8)
-            tl.store(rope_dst + dim_off * 2, r1.to(tl.bfloat16))
-            tl.store(rope_dst + dim_off * 2 + 1, r2.to(tl.bfloat16))
+            for peer_rank in range(PCP_PEER_COUNT):
+                tl.store(
+                    mla_cache_ptr
+                    + peer_rank * mla_cache_peer_stride
+                    + byte_base
+                    + kv_block,
+                    kv_c_fp8,
+                )
+                tl.store(
+                    mla_cache_ds_scale_ptr
+                    + peer_rank * mla_cache_ds_scale_peer_stride
+                    + byte_base // 4
+                    + KV_DIM // 4
+                    + tile_off,
+                    tl.reshape(tile_scale, (MLA_NUM_TILES,)),
+                )
+                rope_dst = (
+                    mla_cache_ds_rope_ptr
+                    + peer_rank * mla_cache_ds_rope_peer_stride
+                    + byte_base // 2
+                    + (KV_DIM // 2 + 8)
+                )
+                tl.store(rope_dst + dim_off * 2, r1.to(tl.bfloat16))
+                tl.store(rope_dst + dim_off * 2 + 1, r2.to(tl.bfloat16))
             return
 
         dst = (
@@ -329,16 +385,25 @@ def _fused_norm_rope_kernel(
         if MLA_CACHE_FP8:
             scale = tl.load(mla_cache_scale_ptr)
             kv_c_fp8 = (kv_c.to(tl.float32) / scale).to(tl.float8e4nv)
-            tl.store(dst + kv_block, kv_c_fp8)
-        else:
-            tl.store(dst + kv_block, kv_c)
-        # k_pe_roped (from registers, interleaved layout)
-        if MLA_CACHE_FP8:
-            tl.store(dst + KV_DIM + dim_off * 2, (r1 / scale).to(tl.float8e4nv))
-            tl.store(dst + KV_DIM + dim_off * 2 + 1, (r2 / scale).to(tl.float8e4nv))
-        else:
-            tl.store(dst + KV_DIM + dim_off * 2, r1)
-            tl.store(dst + KV_DIM + dim_off * 2 + 1, r2)
+        for peer_rank in range(PCP_PEER_COUNT):
+            peer_dst = dst + peer_rank * mla_cache_peer_stride
+            if MLA_CACHE_FP8:
+                tl.store(peer_dst + kv_block, kv_c_fp8)
+            else:
+                tl.store(peer_dst + kv_block, kv_c)
+            # k_pe_roped (from registers, interleaved layout)
+            if MLA_CACHE_FP8:
+                tl.store(
+                    peer_dst + KV_DIM + dim_off * 2,
+                    (r1 / scale).to(tl.float8e4nv),
+                )
+                tl.store(
+                    peer_dst + KV_DIM + dim_off * 2 + 1,
+                    (r2 / scale).to(tl.float8e4nv),
+                )
+            else:
+                tl.store(peer_dst + KV_DIM + dim_off * 2, r1)
+                tl.store(peer_dst + KV_DIM + dim_off * 2 + 1, r2)
     elif pid == 0:
         if not HAS_INDEXER:
             # Shared layer: no indexer K to process.
@@ -419,6 +484,14 @@ def _fused_norm_rope_kernel(
         roped = normed * cos_full + sign * normed_partner * sin_full
         result = tl.where(in_rope, roped, normed)
 
+        if MATERIALIZE_CACHE_INPUTS:
+            tl.store(
+                index_k_ptr + tok_idx * index_k_stride + index_k_block,
+                result,
+                mask=index_k_mask,
+            )
+            return
+
         # 3. FP8 quantize + cache write from registers.
         #    No need to write back to index_k_ptr — the only consumer
         #    (sparse_attn_indexer) reads from the cache, not index_k.
@@ -429,9 +502,13 @@ def _fused_norm_rope_kernel(
             indexer_cache_ptr,
             indexer_cache_scale_ptr,
             indexer_cache_block_size,
+            indexer_cache_block_stride,
             indexer_cache_stride,
+            indexer_cache_peer_stride,
+            indexer_cache_scale_peer_stride,
             index_k_block,
             INDEX_K_DIM,
+            PCP_PEER_COUNT,
         )
 
 
@@ -455,11 +532,16 @@ def _fused_norm_rope_impl(
     slot_mapping: torch.Tensor | None = None,
     indexer_k_cache: torch.Tensor | None = None,
     mla_kv_cache: torch.Tensor | None = None,
+    pcp_peer_indexer_k_cache: torch.Tensor | None = None,
+    pcp_peer_mla_kv_cache: torch.Tensor | None = None,
+    pcp_rank: int = 0,
+    pcp_size: int = 1,
     mla_kv_cache_dtype: str = "auto",
     mla_k_scale: torch.Tensor | None = None,
     has_indexer: bool = True,
     index_rope_interleave: bool = False,
     q_c_out: torch.Tensor | None = None,
+    materialize_cache_inputs: bool = False,
 ) -> torch.Tensor:
     assert positions.ndim == 1
     assert q_c.ndim == 2
@@ -471,6 +553,14 @@ def _fused_norm_rope_impl(
     q_dim = q_c.shape[-1]
     kv_dim = kv_c.shape[-1]
     device = positions.device
+    use_pcp_peer_cache = pcp_peer_mla_kv_cache is not None
+    assert not (use_pcp_peer_cache and materialize_cache_inputs)
+    if use_pcp_peer_cache:
+        assert pcp_size > 1 and 0 <= pcp_rank < pcp_size
+        assert pcp_peer_mla_kv_cache.shape[0] == pcp_size
+        assert slot_mapping is not None
+        assert slot_mapping.numel() >= pcp_size * num_tokens
+        slot_mapping = slot_mapping.view(pcp_size, -1)[pcp_rank, :num_tokens]
 
     # Shared (no-indexer) layers: substitute cached 1-element dummies so the
     # kernel launches cleanly; pid 0/3 (indexer + topk fill) skipped by
@@ -487,11 +577,26 @@ def _fused_norm_rope_impl(
     topk = topk_indices_buffer.shape[-1]
 
     # --- Indexer K cache setup ---
-    if indexer_k_cache is not None:
+    if use_pcp_peer_cache and has_indexer:
+        assert pcp_peer_indexer_k_cache is not None
+        assert pcp_peer_indexer_k_cache.shape[0] == pcp_size
+        indexer_k_cache = pcp_peer_indexer_k_cache
+        idx_cache_scale_view = indexer_k_cache.view(torch.uint8).view(torch.float32)
+        idx_cache_block_size = indexer_k_cache.shape[2]
+        idx_cache_block_stride = indexer_k_cache.stride(1)
+        idx_cache_stride = indexer_k_cache.shape[3]
+        idx_cache_peer_stride = indexer_k_cache.stride(0)
+        idx_cache_scale_peer_stride = idx_cache_scale_view.stride(0)
+        if indexer_k_cache.dtype == torch.uint8:
+            indexer_k_cache = indexer_k_cache.view(torch.float8_e4m3fn)
+    elif indexer_k_cache is not None:
         assert slot_mapping is not None
         idx_cache_scale_view = indexer_k_cache.view(torch.uint8).view(torch.float32)
         idx_cache_block_size = indexer_k_cache.shape[1]
+        idx_cache_block_stride = indexer_k_cache.stride(0)
         idx_cache_stride = indexer_k_cache.shape[2]
+        idx_cache_peer_stride = 0
+        idx_cache_scale_peer_stride = 0
         if indexer_k_cache.dtype == torch.uint8:
             indexer_k_cache = indexer_k_cache.view(torch.float8_e4m3fn)
     else:
@@ -500,8 +605,11 @@ def _fused_norm_rope_impl(
         idx_cache_scale_view = torch.empty(0, dtype=torch.float32, device=device)
         indexer_k_cache = torch.empty(0, dtype=torch.float8_e4m3fn, device=device)
         idx_cache_block_size = 1
+        idx_cache_block_stride = 1
         idx_cache_stride = 1
-        if mla_kv_cache is None:
+        idx_cache_peer_stride = 0
+        idx_cache_scale_peer_stride = 0
+        if mla_kv_cache is None and not materialize_cache_inputs:
             # Pure profiling run (no caches at all): skip all per-token writes.
             slot_mapping = torch.full(
                 (num_tokens,), -1, dtype=torch.int64, device=device
@@ -513,7 +621,15 @@ def _fused_norm_rope_impl(
     mla_num_tiles = 1
     mla_ds_scale_view = torch.empty(0, dtype=torch.float32, device=device)
     mla_ds_rope_view = torch.empty(0, dtype=torch.bfloat16, device=device)
+    if use_pcp_peer_cache:
+        mla_kv_cache = pcp_peer_mla_kv_cache
     if mla_kv_cache is not None:
+        cache_dim = 1 if use_pcp_peer_cache else 0
+        # The block-size dimension follows the physical block dimension in
+        # both layouts: [blocks, block_size, ...] and
+        # [peer, blocks, block_size, ...].
+        mla_cache_block_size = mla_kv_cache.shape[cache_dim + 1]
+        mla_cache_peer_stride = mla_kv_cache.stride(0) if use_pcp_peer_cache else 0
         if mla_cache_ds_mla:
             # 656-byte custom layout addressed in bytes; mla_cache_ptr is the
             # 1-byte fp8 view, so block/entry strides are byte offsets and the
@@ -521,14 +637,22 @@ def _fused_norm_rope_impl(
             assert kv_dim == 512, "fp8_ds_mla requires kv_lora_rank == 512"
             mla_num_tiles = kv_dim // 128
             u8_cache = mla_kv_cache.view(torch.uint8)
-            mla_block_stride = u8_cache.stride(0)
-            mla_entry_stride = u8_cache.stride(1)
+            mla_block_stride = u8_cache.stride(cache_dim)
+            mla_entry_stride = u8_cache.stride(cache_dim + 1)
             mla_ds_scale_view = u8_cache.view(torch.float32)
             mla_ds_rope_view = u8_cache.view(torch.bfloat16)
+            mla_ds_scale_peer_stride = (
+                mla_ds_scale_view.stride(0) if use_pcp_peer_cache else 0
+            )
+            mla_ds_rope_peer_stride = (
+                mla_ds_rope_view.stride(0) if use_pcp_peer_cache else 0
+            )
             mla_kv_cache = u8_cache.view(torch.float8_e4m3fn)
         else:
-            mla_block_stride = mla_kv_cache.stride(0)
-            mla_entry_stride = mla_kv_cache.stride(1)
+            mla_block_stride = mla_kv_cache.stride(cache_dim)
+            mla_entry_stride = mla_kv_cache.stride(cache_dim + 1)
+            mla_ds_scale_peer_stride = 0
+            mla_ds_rope_peer_stride = 0
             if mla_cache_fp8 and mla_kv_cache.dtype == torch.uint8:
                 mla_kv_cache = mla_kv_cache.view(torch.float8_e4m3fn)
         if mla_k_scale is None:
@@ -537,12 +661,16 @@ def _fused_norm_rope_impl(
         # Dummy values — pid 2 will skip the MLA cache write because
         # slot_mapping is all -1.
         mla_kv_cache = torch.empty(0, dtype=torch.bfloat16, device=device)
+        mla_cache_block_size = 1
         # Torch's Triton HOP mutation analysis compiles every program-id
         # branch even though the dummy slot mapping returns before cache
         # access. Keep the unused strides nonzero so that analysis can lower
         # the block-size calculation safely.
         mla_block_stride = 1
         mla_entry_stride = 1
+        mla_cache_peer_stride = 0
+        mla_ds_scale_peer_stride = 0
+        mla_ds_rope_peer_stride = 0
         mla_k_scale = torch.ones(1, dtype=torch.float32, device=device)
 
     if q_c_out is None:
@@ -587,15 +715,22 @@ def _fused_norm_rope_impl(
         indexer_k_cache,
         idx_cache_scale_view,
         idx_cache_block_size,
+        idx_cache_block_stride,
         idx_cache_stride,
+        idx_cache_peer_stride,
+        idx_cache_scale_peer_stride,
         # MLA KV cache (uses same slot_mapping)
         mla_kv_cache,
+        mla_cache_block_size,
         mla_block_stride,
         mla_entry_stride,
+        mla_cache_peer_stride,
         mla_cache_fp8,
         mla_k_scale,
         mla_ds_scale_view,
         mla_ds_rope_view,
+        mla_ds_scale_peer_stride,
+        mla_ds_rope_peer_stride,
         mla_cache_ds_mla,
         mla_num_tiles,
         kv_dim // mla_num_tiles if mla_cache_ds_mla else 1,
@@ -607,6 +742,8 @@ def _fused_norm_rope_impl(
         HAS_INDEXER=has_indexer,
         INDEX_ROPE_INTERLEAVE=index_rope_interleave,
         USE_PDL=use_pdl,
+        PCP_PEER_COUNT=pcp_size if use_pcp_peer_cache else 1,
+        MATERIALIZE_CACHE_INPUTS=materialize_cache_inputs,
         launch_pdl=use_pdl,
     )
     return q_c_out
@@ -631,11 +768,16 @@ def _fused_norm_rope_op(
     slot_mapping: torch.Tensor | None,
     indexer_k_cache: torch.Tensor | None,
     mla_kv_cache: torch.Tensor | None,
+    pcp_peer_indexer_k_cache: torch.Tensor | None,
+    pcp_peer_mla_kv_cache: torch.Tensor | None,
+    pcp_rank: int,
+    pcp_size: int,
     mla_kv_cache_dtype: str,
     mla_k_scale: torch.Tensor | None,
     has_indexer: bool,
     index_rope_interleave: bool,
     q_c_out: torch.Tensor,
+    materialize_cache_inputs: bool,
 ) -> None:
     _fused_norm_rope_impl(
         positions,
@@ -656,11 +798,16 @@ def _fused_norm_rope_op(
         slot_mapping=slot_mapping,
         indexer_k_cache=indexer_k_cache,
         mla_kv_cache=mla_kv_cache,
+        pcp_peer_indexer_k_cache=pcp_peer_indexer_k_cache,
+        pcp_peer_mla_kv_cache=pcp_peer_mla_kv_cache,
+        pcp_rank=pcp_rank,
+        pcp_size=pcp_size,
         mla_kv_cache_dtype=mla_kv_cache_dtype,
         mla_k_scale=mla_k_scale,
         has_indexer=has_indexer,
         index_rope_interleave=index_rope_interleave,
         q_c_out=q_c_out,
+        materialize_cache_inputs=materialize_cache_inputs,
     )
 
 
@@ -683,11 +830,16 @@ def _fused_norm_rope_fake(
     slot_mapping: torch.Tensor | None,
     indexer_k_cache: torch.Tensor | None,
     mla_kv_cache: torch.Tensor | None,
+    pcp_peer_indexer_k_cache: torch.Tensor | None,
+    pcp_peer_mla_kv_cache: torch.Tensor | None,
+    pcp_rank: int,
+    pcp_size: int,
     mla_kv_cache_dtype: str,
     mla_k_scale: torch.Tensor | None,
     has_indexer: bool,
     index_rope_interleave: bool,
     q_c_out: torch.Tensor,
+    materialize_cache_inputs: bool,
 ) -> None:
     return
 
@@ -696,9 +848,14 @@ direct_register_custom_op(
     op_name="fused_norm_rope_deepseek_v32",
     op_func=_fused_norm_rope_op,
     mutates_args=[
+        "kv_c",
+        "k_pe",
+        "index_k",
         "topk_indices_buffer",
         "indexer_k_cache",
         "mla_kv_cache",
+        "pcp_peer_indexer_k_cache",
+        "pcp_peer_mla_kv_cache",
         "q_c_out",
     ],
     fake_impl=_fused_norm_rope_fake,
@@ -725,14 +882,26 @@ def fused_norm_rope(
     slot_mapping: torch.Tensor | None = None,
     indexer_k_cache: torch.Tensor | None = None,
     mla_kv_cache: torch.Tensor | None = None,
+    pcp_peer_indexer_k_cache: torch.Tensor | None = None,
+    pcp_peer_mla_kv_cache: torch.Tensor | None = None,
+    pcp_rank: int = 0,
+    pcp_size: int = 1,
     mla_kv_cache_dtype: str = "auto",
     mla_k_scale: torch.Tensor | None = None,
     has_indexer: bool = True,
     index_rope_interleave: bool = False,
     q_c_out: torch.Tensor | None = None,
+    materialize_cache_inputs: bool = False,
 ) -> torch.Tensor:
     if q_c_out is None:
         q_c_out = torch.empty_like(q_c)
+    # The rank-local caches are slices of the rank-major peer mappings. Avoid
+    # passing overlapping mutable aliases through the registered-op boundary;
+    # the implementation selects the peer tensors for direct PCP stores.
+    if pcp_peer_indexer_k_cache is not None:
+        indexer_k_cache = None
+    if pcp_peer_mla_kv_cache is not None:
+        mla_kv_cache = None
     torch.ops.vllm.fused_norm_rope_deepseek_v32(
         positions,
         q_c,
@@ -752,11 +921,16 @@ def fused_norm_rope(
         slot_mapping,
         indexer_k_cache,
         mla_kv_cache,
+        pcp_peer_indexer_k_cache,
+        pcp_peer_mla_kv_cache,
+        pcp_rank,
+        pcp_size,
         mla_kv_cache_dtype,
         mla_k_scale,
         has_indexer,
         index_rope_interleave,
         q_c_out,
+        materialize_cache_inputs,
     )
     return q_c_out
 

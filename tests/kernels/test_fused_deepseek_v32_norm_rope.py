@@ -24,11 +24,23 @@ outputs are checked within 1 representable-step (ULP); bf16 norm/RoPE outputs us
 rtol/atol=1e-2 (the tolerance the sibling deepseek_v4 fused-kernel test uses).
 """
 
+import os
+
 import pytest
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 
+from vllm.distributed.device_communicators.cuda_vmm import (
+    create_rank_major_peer_view,
+)
+from vllm.model_executor.layers.attention.pcp_peer_cache import (
+    PCPPeerCacheFence,
+    make_rank_major_tensor_view,
+)
 from vllm.models.deepseek_v32.nvidia import kernels as K
 from vllm.platforms import current_platform
+from vllm.utils.network_utils import get_open_port
 
 FP8 = torch.float8_e4m3fn
 FP8_MAX = 448.0
@@ -316,6 +328,476 @@ def test_fused_norm_rope_no_indexer(num_tokens: int):
     )
     # Shared layers reuse the previous indexer's top-k: buffer must be untouched.
     assert (topk == 7).all(), "topk buffer should be untouched on shared layer"
+
+
+@pytest.mark.parametrize("index_interleave", [True, False])
+def test_fused_norm_rope_materializes_collective_cache_inputs(
+    index_interleave: bool,
+):
+    """The PCP fallback prepares BF16 inputs without doing local cache writes."""
+    torch.manual_seed(11)
+    dev = "cuda"
+    num_tokens = 5
+    max_pos = 32
+    pos = torch.arange(num_tokens, device=dev, dtype=torch.int64)
+
+    q_c = torch.randn(num_tokens, Q_LORA, device=dev, dtype=torch.bfloat16)
+    kv_c = torch.randn(num_tokens, KV_LORA, device=dev, dtype=torch.bfloat16)
+    k_pe = torch.randn(num_tokens, ROPE_DIM, device=dev, dtype=torch.bfloat16)
+    index_k = torch.randn(num_tokens, INDEX_HEAD_DIM, device=dev, dtype=torch.bfloat16)
+    q_input = q_c.clone()
+    kv_input = kv_c.clone()
+    kpe_input = k_pe.clone()
+    index_input = index_k.clone()
+    qw = torch.randn(Q_LORA, device=dev, dtype=torch.bfloat16)
+    kvw = torch.randn(KV_LORA, device=dev, dtype=torch.bfloat16)
+    index_w = torch.randn(INDEX_HEAD_DIM, device=dev, dtype=torch.float32)
+    index_b = torch.randn(INDEX_HEAD_DIM, device=dev, dtype=torch.float32)
+    cos_sin = make_cos_sin(max_pos, ROPE_DIM, dev)
+    topk = torch.full((num_tokens, 16), 7, device=dev, dtype=torch.int32)
+
+    q_out = K.fused_norm_rope(
+        pos,
+        q_c,
+        qw,
+        EPS,
+        kv_c,
+        kvw,
+        EPS,
+        k_pe,
+        cos_sin,
+        index_k,
+        index_w,
+        index_b,
+        EPS,
+        cos_sin,
+        topk,
+        slot_mapping=None,
+        indexer_k_cache=None,
+        mla_kv_cache=None,
+        has_indexer=True,
+        index_rope_interleave=index_interleave,
+        materialize_cache_inputs=True,
+    )
+
+    assert_bf16(q_out, rms_norm(q_input, qw), "materialized q_c rmsnorm")
+    assert_bf16(kv_c, rms_norm(kv_input, kvw), "materialized kv_c rmsnorm")
+    assert_bf16(
+        k_pe,
+        rope(kpe_input.float(), pos, cos_sin, interleave=True),
+        "materialized MLA k_pe",
+    )
+    index_ref = layer_norm(index_input, index_w, index_b)
+    index_ref = rope(index_ref, pos, cos_sin, interleave=index_interleave)
+    assert_bf16(index_k, index_ref, "materialized indexer k")
+    assert (topk == -1).all(), "topk buffer not cleared on indexer layer"
+
+
+@pytest.mark.parametrize("mla_dtype", ["fp8", "fp8_ds_mla"])
+def test_fused_norm_rope_direct_pcp_fanout_uses_local_rank_slots(mla_dtype: str):
+    """Direct PCP stores update every peer cache without gathering inputs."""
+    torch.manual_seed(7)
+    dev = "cuda"
+    num_tokens = 4
+    pcp_size = 2
+    pcp_rank = 1
+    max_pos = 32
+    pos = torch.arange(num_tokens, device=dev, dtype=torch.int64)
+    q_c = torch.randn(num_tokens, Q_LORA, device=dev, dtype=torch.bfloat16)
+    kv_c = torch.randn(num_tokens, KV_LORA, device=dev, dtype=torch.bfloat16)
+    k_pe = torch.randn(num_tokens, ROPE_DIM, device=dev, dtype=torch.bfloat16)
+    qw = torch.randn(Q_LORA, device=dev, dtype=torch.bfloat16)
+    kvw = torch.randn(KV_LORA, device=dev, dtype=torch.bfloat16)
+    index_k = torch.randn(num_tokens, INDEX_HEAD_DIM, device=dev, dtype=torch.bfloat16)
+    index_w = torch.randn(INDEX_HEAD_DIM, device=dev, dtype=torch.float32)
+    index_b = torch.randn(INDEX_HEAD_DIM, device=dev, dtype=torch.float32)
+    cos_sin = make_cos_sin(max_pos, ROPE_DIM, dev)
+
+    mla_dim = 656 if mla_dtype == "fp8_ds_mla" else KV_LORA + ROPE_DIM
+    peer_mla = torch.zeros(pcp_size, 1, max_pos, mla_dim, device=dev, dtype=torch.uint8)
+    index_row = INDEX_HEAD_DIM + 4
+    peer_index = torch.zeros(
+        pcp_size, 1, max_pos, index_row, device=dev, dtype=torch.uint8
+    )
+    # Rank 0 owns slots 0..3. This producer rank has two padding/masked rows
+    # around slots 8..9, as happens for uneven and replicated-decode PCP rows.
+    slot_mapping = torch.cat(
+        (
+            torch.arange(num_tokens, device=dev, dtype=torch.int64),
+            torch.tensor([-1, 8, 9, -1], device=dev, dtype=torch.int64),
+        )
+    )
+    topk = torch.full((num_tokens, 16), 7, device=dev, dtype=torch.int32)
+
+    q_out = K.fused_norm_rope(
+        pos,
+        q_c,
+        qw,
+        EPS,
+        kv_c,
+        kvw,
+        EPS,
+        k_pe,
+        cos_sin,
+        index_k,
+        index_w,
+        index_b,
+        EPS,
+        cos_sin,
+        topk,
+        slot_mapping=slot_mapping,
+        indexer_k_cache=peer_index[pcp_rank],
+        mla_kv_cache=peer_mla[pcp_rank],
+        pcp_peer_indexer_k_cache=peer_index,
+        pcp_peer_mla_kv_cache=peer_mla,
+        pcp_rank=pcp_rank,
+        pcp_size=pcp_size,
+        mla_kv_cache_dtype=mla_dtype,
+        mla_k_scale=(
+            None if mla_dtype == "fp8_ds_mla" else torch.tensor([0.5], device=dev)
+        ),
+        has_indexer=True,
+        index_rope_interleave=True,
+    )
+
+    torch.testing.assert_close(peer_mla[0], peer_mla[1])
+    torch.testing.assert_close(peer_index[0], peer_index[1])
+    assert_bf16(q_out, rms_norm(q_c, qw), "direct PCP q_c rmsnorm")
+    assert not peer_mla[:, :, :num_tokens].any()
+    assert peer_mla[:, :, 8:10].any()
+    assert not peer_mla[:, :, 10:12].any()
+    index_values = peer_index.view(pcp_size, -1)
+    assert not index_values[:, : num_tokens * INDEX_HEAD_DIM].any()
+    assert index_values[:, 8 * INDEX_HEAD_DIM : 10 * INDEX_HEAD_DIM].any()
+    assert not index_values[:, 10 * INDEX_HEAD_DIM : 12 * INDEX_HEAD_DIM].any()
+
+
+def _fused_norm_rope_replicated_vmm_worker(
+    rank: int, world_size: int, port: int
+) -> None:
+    os.environ.update(
+        MASTER_ADDR="127.0.0.1",
+        MASTER_PORT=str(port),
+        RANK=str(rank),
+        WORLD_SIZE=str(world_size),
+    )
+    torch.cuda.set_device(rank)
+    dist.init_process_group("gloo", rank=rank, world_size=world_size)
+
+    mla_allocation = None
+    index_allocation = None
+    fence = None
+    actual_mla = None
+    actual_index = None
+    expected_mla = None
+    expected_index = None
+    actual_guards = None
+    actual_block_gaps = None
+    direct_q_valid = None
+    reference_q_valid = None
+    expected_q_valid = None
+    try:
+        dev = torch.device(f"cuda:{rank}")
+        # Each producer sees one replicated decode row followed by its four
+        # DualChunkSwap prefill rows.  Only rank 0 owns the decode cache write;
+        # the other ranks must still compute a valid Q for that PAD slot.
+        num_tokens = 5
+        num_blocks = 6
+        block_size = 8
+        mla_dim = KV_LORA + ROPE_DIM
+        index_dim = INDEX_HEAD_DIM + 4
+
+        # Production gives each rank a complete local cache and maps those
+        # allocations rank-major. Construct real strided cache views over a
+        # larger backing allocation: consecutive physical blocks are separated
+        # by gaps which must not be mistaken for cache storage. Nonzero outer
+        # offsets additionally validate mirroring a subview of the allocation.
+        guard_bytes = 128
+        mla_block_bytes = block_size * mla_dim
+        index_block_bytes = block_size * index_dim
+        mla_gap_bytes = 64
+        index_gap_bytes = 32
+        mla_block_stride = mla_block_bytes + mla_gap_bytes
+        index_block_stride = index_block_bytes + index_gap_bytes
+        mla_backing_bytes = (num_blocks - 1) * mla_block_stride + mla_block_bytes
+        index_backing_bytes = (num_blocks - 1) * index_block_stride + index_block_bytes
+        mla_allocation = create_rank_major_peer_view(
+            (guard_bytes + mla_backing_bytes + guard_bytes,),
+            dtype=torch.uint8,
+            group=dist.group.WORLD,
+            require_native_atomics=True,
+            device=dev,
+        )
+        index_allocation = create_rank_major_peer_view(
+            (guard_bytes + index_backing_bytes + guard_bytes,),
+            dtype=torch.uint8,
+            group=dist.group.WORLD,
+            require_native_atomics=True,
+            device=dev,
+        )
+        mla_allocation.local_view.zero_()
+        index_allocation.local_view.zero_()
+        local_mla_backing = mla_allocation.local_view.narrow(
+            0, guard_bytes, mla_backing_bytes
+        )
+        local_index_backing = index_allocation.local_view.narrow(
+            0, guard_bytes, index_backing_bytes
+        )
+        local_mla = torch.as_strided(
+            local_mla_backing,
+            size=(num_blocks, block_size, mla_dim),
+            stride=(mla_block_stride, mla_dim, 1),
+        )
+        local_index = torch.as_strided(
+            local_index_backing,
+            size=(num_blocks, block_size, index_dim),
+            stride=(index_block_stride, index_dim, 1),
+        )
+        assert local_mla.stride(0) == mla_block_stride > mla_block_bytes
+        assert local_index.stride(0) == index_block_stride > index_block_bytes
+        peer_mla = make_rank_major_tensor_view(mla_allocation, local_mla)
+        peer_index = make_rank_major_tensor_view(index_allocation, local_index)
+        assert peer_mla.shape == (world_size, *local_mla.shape)
+        assert peer_index.shape == (world_size, *local_index.shape)
+        fence = PCPPeerCacheFence(dist.group.WORLD, dev)
+
+        # This is the exact DualChunkSwap partition for an uneven 13-token
+        # prefill at PCP=4 (eight chunks of size two), prefixed by one decode
+        # token replicated onto every rank. Padding gathers token 0 but carries
+        # slot -1. Rank 0 exclusively owns the replicated decode cache write.
+        #
+        # Valid slots deliberately span six physical blocks and use varied
+        # in-block offsets. This catches kernels that accidentally treat the
+        # packed caches as dense rows or ignore their physical block stride.
+        gather_rows = torch.tensor(
+            [
+                [13, 0, 1, 0, 0],
+                [13, 2, 3, 12, 0],
+                [13, 4, 5, 10, 11],
+                [13, 6, 7, 8, 9],
+            ],
+            dtype=torch.int64,
+            device=dev,
+        )
+        slot_rows = torch.tensor(
+            [
+                [37, 19, 26, -1, -1],
+                [-1, 35, 4, 44, -1],
+                [-1, 11, 21, 30, 47],
+                [-1, 1, 15, 24, 40],
+            ],
+            dtype=torch.int64,
+            device=dev,
+        )
+        valid_slots = slot_rows[slot_rows >= 0]
+        assert valid_slots.unique().numel() == valid_slots.numel()
+        assert slot_rows[0, 0] >= 0
+        assert (slot_rows[1:, 0] == -1).all()
+        assert (valid_slots // block_size).unique().numel() == num_blocks
+        assert (valid_slots % block_size).unique().numel() > 4
+
+        torch.manual_seed(2026)
+        global_tokens = 14
+        positions_global = torch.arange(global_tokens, device=dev, dtype=torch.int64)
+        positions_global[-1] = 31
+        q_global = torch.randn(global_tokens, Q_LORA, device=dev, dtype=torch.bfloat16)
+        kv_global = torch.randn(
+            global_tokens, KV_LORA, device=dev, dtype=torch.bfloat16
+        )
+        kpe_global = torch.randn(
+            global_tokens, ROPE_DIM, device=dev, dtype=torch.bfloat16
+        )
+        index_global = torch.randn(
+            global_tokens, INDEX_HEAD_DIM, device=dev, dtype=torch.bfloat16
+        )
+        q_weight = torch.randn(Q_LORA, device=dev, dtype=torch.bfloat16)
+        kv_weight = torch.randn(KV_LORA, device=dev, dtype=torch.bfloat16)
+        index_weight = torch.randn(INDEX_HEAD_DIM, device=dev, dtype=torch.float32)
+        index_bias = torch.randn(INDEX_HEAD_DIM, device=dev, dtype=torch.float32)
+        cos_sin = make_cos_sin(32, ROPE_DIM, dev)
+        local_gather = gather_rows[rank]
+        positions = positions_global[local_gather]
+        q_c = q_global[local_gather]
+        kv_c = kv_global[local_gather]
+        k_pe = kpe_global[local_gather]
+        index_k = index_global[local_gather]
+        mla_k_scale = torch.tensor([0.5], device=dev, dtype=torch.float32)
+
+        direct_topk = torch.full((num_tokens, 16), 7, device=dev, dtype=torch.int32)
+        direct_q = K.fused_norm_rope(
+            positions,
+            q_c,
+            q_weight,
+            EPS,
+            kv_c,
+            kv_weight,
+            EPS,
+            k_pe,
+            cos_sin,
+            index_k,
+            index_weight,
+            index_bias,
+            EPS,
+            cos_sin,
+            direct_topk,
+            slot_mapping=slot_rows.flatten(),
+            indexer_k_cache=local_index,
+            mla_kv_cache=local_mla,
+            pcp_peer_indexer_k_cache=peer_index,
+            pcp_peer_mla_kv_cache=peer_mla,
+            pcp_rank=rank,
+            pcp_size=world_size,
+            mla_kv_cache_dtype="fp8",
+            mla_k_scale=mla_k_scale,
+            has_indexer=True,
+            index_rope_interleave=True,
+        )
+        fence()
+
+        # The ordinary single-rank path is the byte-level oracle for this
+        # producer. Combining the disjoint local writes across ranks yields the
+        # exact full replica that every direct-store cache must observe.
+        reference_mla_backing = torch.zeros(
+            mla_backing_bytes, device=dev, dtype=torch.uint8
+        )
+        reference_index_backing = torch.zeros(
+            index_backing_bytes, device=dev, dtype=torch.uint8
+        )
+        reference_mla = torch.as_strided(
+            reference_mla_backing,
+            size=local_mla.shape,
+            stride=local_mla.stride(),
+        )
+        reference_index = torch.as_strided(
+            reference_index_backing,
+            size=local_index.shape,
+            stride=local_index.stride(),
+        )
+        reference_topk = torch.full_like(direct_topk, 7)
+        reference_q = K.fused_norm_rope(
+            positions,
+            q_c,
+            q_weight,
+            EPS,
+            kv_c,
+            kv_weight,
+            EPS,
+            k_pe,
+            cos_sin,
+            index_k,
+            index_weight,
+            index_bias,
+            EPS,
+            cos_sin,
+            reference_topk,
+            slot_mapping=slot_rows[rank],
+            indexer_k_cache=reference_index,
+            mla_kv_cache=reference_mla,
+            mla_kv_cache_dtype="fp8",
+            mla_k_scale=mla_k_scale,
+            has_indexer=True,
+            index_rope_interleave=True,
+        )
+
+        local_reference = (reference_mla.cpu(), reference_index.cpu())
+        gathered_references = [None] * world_size
+        dist.all_gather_object(
+            gathered_references, local_reference, group=dist.group.WORLD
+        )
+        expected_mla = torch.zeros_like(local_reference[0])
+        expected_index = torch.zeros_like(local_reference[1])
+        for reference in gathered_references:
+            assert reference is not None
+            reference_mla, reference_index = reference
+            expected_mla.bitwise_or_(reference_mla)
+            expected_index.bitwise_or_(reference_index)
+
+        actual_mla = local_mla.cpu()
+        actual_index = local_index.cpu()
+        actual_guards = torch.cat(
+            (
+                mla_allocation.local_view[:guard_bytes],
+                mla_allocation.local_view[guard_bytes + mla_backing_bytes :],
+                index_allocation.local_view[:guard_bytes],
+                index_allocation.local_view[guard_bytes + index_backing_bytes :],
+            )
+        ).cpu()
+        actual_block_gaps = torch.cat(
+            [
+                local_mla_backing.narrow(
+                    0, block * mla_block_stride + mla_block_bytes, mla_gap_bytes
+                )
+                for block in range(num_blocks - 1)
+            ]
+            + [
+                local_index_backing.narrow(
+                    0,
+                    block * index_block_stride + index_block_bytes,
+                    index_gap_bytes,
+                )
+                for block in range(num_blocks - 1)
+            ]
+        ).cpu()
+        direct_q_valid = direct_q.cpu()
+        reference_q_valid = reference_q.cpu()
+        # Q production is independent of cache insertion. In particular, all
+        # replicated-decode copies and uneven-prefill PAD rows must retain Q.
+        # Save the evidence now and assert only after peer mappings are closed.
+        expected_q_valid = rms_norm(q_c, q_weight).cpu()
+
+        # Do not assert while peer mappings are live: all ranks first copy the
+        # evidence, quiesce, and close in reverse allocation order.
+        dist.barrier()
+        fence.close()
+        fence = None
+        index_allocation.close()
+        index_allocation = None
+        mla_allocation.close()
+        mla_allocation = None
+        dist.barrier()
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+    assert actual_mla is not None and expected_mla is not None
+    assert actual_index is not None and expected_index is not None
+    assert actual_guards is not None
+    assert actual_block_gaps is not None
+    assert direct_q_valid is not None and reference_q_valid is not None
+    assert expected_q_valid is not None
+    assert torch.equal(actual_mla, expected_mla), (
+        int((actual_mla != expected_mla).sum()),
+        int(actual_mla.count_nonzero()),
+        int(expected_mla.count_nonzero()),
+        actual_mla.count_nonzero(dim=(1, 2)).nonzero().flatten().tolist(),
+        expected_mla.count_nonzero(dim=(1, 2)).nonzero().flatten().tolist(),
+        actual_mla.flatten()[(actual_mla != expected_mla).flatten()][:16].tolist(),
+        expected_mla.flatten()[(actual_mla != expected_mla).flatten()][:16].tolist(),
+    )
+    assert torch.equal(actual_index, expected_index), (
+        int((actual_index != expected_index).sum()),
+        int(actual_index.count_nonzero()),
+        int(expected_index.count_nonzero()),
+    )
+    assert not actual_guards.any()
+    assert not actual_block_gaps.any()
+    assert torch.equal(direct_q_valid, reference_q_valid)
+    assert_bf16(direct_q_valid, expected_q_valid, "direct PCP packed/mixed Q")
+
+
+def test_fused_norm_rope_replicated_vmm_pcp4() -> None:
+    world_size = 4
+    if torch.cuda.device_count() < world_size or not all(
+        source == destination or torch.cuda.can_device_access_peer(source, destination)
+        for source in range(world_size)
+        for destination in range(world_size)
+    ):
+        pytest.skip("replicated PCP fanout requires four peer-accessible CUDA GPUs")
+    mp.spawn(
+        _fused_norm_rope_replicated_vmm_worker,
+        args=(world_size, get_open_port()),
+        nprocs=world_size,
+    )
 
 
 def test_fused_norm_rope_profile_without_cache_compiles():

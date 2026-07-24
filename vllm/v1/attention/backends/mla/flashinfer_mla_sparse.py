@@ -390,6 +390,13 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
 
         num_actual_toks = q.shape[0]
 
+        # PCP can legitimately assign no local tokens to a rank for a short
+        # prefill. TRT-LLM's TMA descriptor builder rejects a zero query
+        # dimension, so preserve collective participation in the caller and
+        # skip only the local sparse-attention kernel.
+        if num_actual_toks == 0:
+            return q.new_empty((0, self.num_heads, self.kv_lora_rank)), None
+
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 

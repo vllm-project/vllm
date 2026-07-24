@@ -5,9 +5,15 @@ from dataclasses import dataclass, replace
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
+from vllm.distributed.parallel_state import (
+    get_dcp_group,
+    get_pcp_group,
+    in_the_same_node_as,
+)
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
@@ -55,6 +61,7 @@ class PCPManager:
         dcp_world_size: int = 1,
         dcp_rank: int = 0,
         cp_interleave: int = 1,
+        direct_kv_enabled: bool = False,
     ) -> None:
         self.pcp_world_size = pcp_world_size
         self.pcp_rank = pcp_rank
@@ -62,6 +69,9 @@ class PCPManager:
         self.dcp_world_size = dcp_world_size
         self.dcp_rank = dcp_rank
         self.cp_interleave = cp_interleave
+        self.direct_kv_enabled = direct_kv_enabled
+        self._peer_cache_allocations = []
+        self._peer_cache_fence = None
 
         self._global_batch: InputBatch | None = None
         self._req_states = req_states
@@ -159,6 +169,107 @@ class PCPManager:
             )
         if vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs():
             raise NotImplementedError("MRV2 PCP supports PIECEWISE CUDA graphs only.")
+
+        if not envs.VLLM_USE_PCP_DIRECT_KV:
+            return
+
+        if not current_platform.is_cuda():
+            raise NotImplementedError("Direct PCP KV requires CUDA.")
+        if model_config.hf_text_config.model_type != "glm_moe_dsa":
+            raise NotImplementedError(
+                "Direct PCP KV currently supports GLM-5.2 (glm_moe_dsa) only."
+            )
+        forward_layers = vllm_config.compilation_config.static_forward_context
+        if not any(
+            type(layer).__module__ == "vllm.models.deepseek_v32.nvidia.attention"
+            and type(layer).__name__ == "DeepseekV32Attention"
+            for layer in forward_layers.values()
+        ):
+            raise NotImplementedError(
+                "Direct PCP KV requires the specialized NVIDIA deepseek_v32 "
+                "model implementation. Select it with --model-class-overrides."
+            )
+        if parallel_config.tensor_parallel_size != 1:
+            raise NotImplementedError("Direct PCP KV currently requires TP=1.")
+        if parallel_config.decode_context_parallel_size != 1:
+            raise NotImplementedError("Direct PCP KV currently requires DCP=1.")
+        if parallel_config.data_parallel_size != 1:
+            raise NotImplementedError("Direct PCP KV currently requires DP=1.")
+        if parallel_config.use_ubatching:
+            raise NotImplementedError(
+                "Direct PCP KV does not support dual batch overlap or ubatching."
+            )
+        if vllm_config.scheduler_config.async_scheduling:
+            raise NotImplementedError(
+                "Direct PCP KV does not support async scheduling."
+            )
+        if vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            raise NotImplementedError(
+                "Direct PCP KV currently requires eager execution. Set --enforce-eager."
+            )
+        cache_config = vllm_config.cache_config
+        if cache_config is None or cache_config.cache_dtype not in (
+            "fp8",
+            "fp8_ds_mla",
+        ):
+            raise NotImplementedError(
+                "Direct PCP KV requires --kv-cache-dtype fp8 or fp8_ds_mla."
+            )
+        if cache_config.enable_prefix_caching:
+            raise NotImplementedError(
+                "Direct PCP KV does not support prefix caching or copy-on-write. "
+                "Set --no-enable-prefix-caching."
+            )
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if (
+            kv_transfer_config is not None
+            and kv_transfer_config.kv_connector is not None
+        ):
+            raise NotImplementedError(
+                "Direct PCP KV does not support KV connectors or offloading."
+            )
+        if getattr(model_config, "enable_sleep_mode", False):
+            raise NotImplementedError("Direct PCP KV does not support sleep mode.")
+
+    def allocate_peer_cache(self, size: int):
+        """Collectively allocate one rank-local cache and its peer view."""
+        if not self.direct_kv_enabled:
+            raise RuntimeError("Direct PCP KV cache allocation is not enabled.")
+        from vllm.distributed.device_communicators.cuda_vmm import (
+            create_rank_major_peer_view,
+        )
+
+        allocation = create_rank_major_peer_view(
+            (size,),
+            dtype=torch.int8,
+            group=get_pcp_group().cpu_group,
+            require_native_atomics=True,
+            device=self.device,
+        )
+        allocation.local_view.zero_()
+        self._peer_cache_allocations.append(allocation)
+        return allocation
+
+    def get_peer_cache_fence(self):
+        if not self.direct_kv_enabled:
+            raise RuntimeError("Direct PCP KV cache fencing is not enabled.")
+        if self._peer_cache_fence is None:
+            from vllm.model_executor.layers.attention.pcp_peer_cache import (
+                PCPPeerCacheFence,
+            )
+
+            self._peer_cache_fence = PCPPeerCacheFence(
+                get_pcp_group().cpu_group, self.device
+            )
+        return self._peer_cache_fence
+
+    def close(self) -> None:
+        if self._peer_cache_fence is not None:
+            self._peer_cache_fence.close()
+            self._peer_cache_fence = None
+        for allocation in reversed(self._peer_cache_allocations):
+            allocation.close()
+        self._peer_cache_allocations.clear()
 
     @staticmethod
     def _reorder_segments(
@@ -658,9 +769,22 @@ def maybe_build_pcp_manager(
     parallel_config = vllm_config.parallel_config
     pcp_size = parallel_config.prefill_context_parallel_size
     if pcp_size <= 1:
+        if envs.VLLM_USE_PCP_DIRECT_KV:
+            raise ValueError(
+                "VLLM_USE_PCP_DIRECT_KV=1 requires "
+                "--prefill-context-parallel-size greater than 1."
+            )
         return None
 
     PCPManager.validate_config(vllm_config, supports_mm_inputs)
+
+    direct_kv_enabled = envs.VLLM_USE_PCP_DIRECT_KV
+    if direct_kv_enabled and not all(
+        in_the_same_node_as(get_pcp_group().cpu_group, source_rank=0)
+    ):
+        raise NotImplementedError(
+            "Direct PCP KV currently requires every PCP rank on one host."
+        )
 
     pcp_rank = get_pcp_group().rank_in_group
     dcp_size = parallel_config.decode_context_parallel_size
@@ -677,4 +801,5 @@ def maybe_build_pcp_manager(
         dcp_world_size=dcp_size,
         dcp_rank=dcp_rank,
         cp_interleave=parallel_config.cp_kv_cache_interleave_size,
+        direct_kv_enabled=direct_kv_enabled,
     )

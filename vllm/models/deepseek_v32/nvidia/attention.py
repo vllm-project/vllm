@@ -5,11 +5,16 @@ import torch.nn as nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
 import vllm._custom_ops as ops
+import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed.parallel_state import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention import MLAAttention
+from vllm.model_executor.layers.attention.pcp import (
+    maybe_gather_mla_latent_cache_inputs,
+)
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -270,6 +275,7 @@ class DeepseekV32Attention(MLAAttention):
         self.qk_head_dim = qk_head_dim
         self.indexer = indexer
         self.topk_indices_buffer = topk_indices_buffer
+        self.use_pcp_direct_kv = self.use_pcp and envs.VLLM_USE_PCP_DIRECT_KV
         # Runtime toggle for index_share_for_mtp_iteration: MTP draft step 0
         # computes the top-k, steps 1+ set this True to reuse it.
         self.skip_topk = False
@@ -482,6 +488,42 @@ class DeepseekV32Attention(MLAAttention):
             mla_kv_cache = self.kv_cache
             mla_k_scale = self._k_scale
 
+        pcp_peer_mla_kv_cache = None
+        pcp_peer_indexer_k_cache = None
+        pcp_rank = 0
+        pcp_size = 1
+        if attn_metadata is not None:
+            pcp_peer_mla_kv_cache = getattr(self, "pcp_peer_kv_cache", None)
+            if self.use_pcp and self.use_pcp_direct_kv != (
+                pcp_peer_mla_kv_cache is not None
+            ):
+                expected = "present" if self.use_pcp_direct_kv else "absent"
+                raise RuntimeError(
+                    "Direct PCP KV peer-cache binding mismatch: expected "
+                    f"the peer cache to be {expected}."
+                )
+            if pcp_peer_mla_kv_cache is not None:
+                pcp_group = get_pcp_group()
+                pcp_rank = pcp_group.rank_in_group
+                pcp_size = pcp_group.world_size
+                if self.indexer is not None:
+                    pcp_peer_indexer_k_cache = getattr(
+                        self.indexer.k_cache, "pcp_peer_kv_cache", None
+                    )
+                    if pcp_peer_indexer_k_cache is None:
+                        raise RuntimeError(
+                            "Direct PCP KV requires an indexer peer-cache binding."
+                        )
+
+        # Keep the specialized model implementation usable as the correctness
+        # baseline when direct peer caches are disabled. Its local inputs are
+        # PCP-partitioned, so fused local cache writes would otherwise use the
+        # rank-0 slot row on every rank. Materialize the prepared BF16 values
+        # instead and feed them through the ordinary collective update path.
+        use_pcp_collective_cache_update = (
+            attn_metadata is not None and self.use_pcp and pcp_peer_mla_kv_cache is None
+        )
+
         q_c = fused_norm_rope(
             positions,
             q_c,
@@ -498,14 +540,43 @@ class DeepseekV32Attention(MLAAttention):
             indexer_k_norm_eps,
             indexer_k_rope_cos_sin_cache,
             self.topk_indices_buffer,
-            slot_mapping=mla_slot,
-            indexer_k_cache=indexer_k_cache,
-            mla_kv_cache=mla_kv_cache,
+            slot_mapping=None if use_pcp_collective_cache_update else mla_slot,
+            indexer_k_cache=(
+                None if use_pcp_collective_cache_update else indexer_k_cache
+            ),
+            mla_kv_cache=None if use_pcp_collective_cache_update else mla_kv_cache,
+            pcp_peer_indexer_k_cache=pcp_peer_indexer_k_cache,
+            pcp_peer_mla_kv_cache=pcp_peer_mla_kv_cache,
+            pcp_rank=pcp_rank,
+            pcp_size=pcp_size,
             mla_kv_cache_dtype=self.kv_cache_dtype,
             mla_k_scale=mla_k_scale,
             has_indexer=has_indexer,
             index_rope_interleave=self._index_rope_interleave,
+            materialize_cache_inputs=use_pcp_collective_cache_update,
         )
+        if pcp_peer_mla_kv_cache is not None:
+            self.pcp_peer_cache_fence()
+        elif use_pcp_collective_cache_update:
+            assert attn_metadata is not None and mla_slot is not None
+            kv_for_cache, kpe_for_cache, cache_slot_mapping = (
+                maybe_gather_mla_latent_cache_inputs(
+                    kv_c,
+                    k_pe,
+                    mla_slot,
+                    attn_metadata.num_decode_tokens,  # type: ignore[attr-defined]
+                    True,
+                )
+            )
+            assert cache_slot_mapping is not None
+            self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
+                kv_for_cache,
+                kpe_for_cache,
+                self.kv_cache,
+                cache_slot_mapping,
+                self.kv_cache_dtype,
+                self._k_scale,
+            )
 
         if self._q_b_skinny_max is not None and q_c.shape[0] <= 16:
             q = self._decode_m_gemm(q_c, self.q_b_proj.weight, self._q_b_skinny_max)
@@ -545,7 +616,7 @@ class DeepseekV32Attention(MLAAttention):
                 self.indexer.k_cache.kv_cache,
                 index_q_fp8,
                 None,  # q_scale folded into weights on the fp8 path
-                None,  # k unused when skip_k_cache_insert=True
+                index_k if use_pcp_collective_cache_update else None,
                 index_weights_out,
                 self.indexer.quant_block_size,
                 self.indexer.scale_fmt,
@@ -554,8 +625,9 @@ class DeepseekV32Attention(MLAAttention):
                 self.indexer.max_model_len,
                 self.indexer.max_total_seq_len,
                 self.topk_indices_buffer,
-                True,  # skip_k_cache_insert
-                False,  # use_fp4_cache
+                skip_k_cache_insert=not use_pcp_collective_cache_update,
+                use_pcp=use_pcp_collective_cache_update,
+                use_fp4_cache=False,
                 # fused_norm_rope already cleared the topk buffer this forward.
                 skip_topk_buffer_clear=True,
             )
