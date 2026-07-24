@@ -139,7 +139,10 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             meta.local_num_computed_tokens // self._local_logical_block_size()
         ) * self.dcp_size
 
-        remote_tp_rank_count = len({key[1] for key in remote_worker_keys})
+        plan = self.tp_mappings[engine_id]
+        needs_split_local_handles = self._needs_split_local_xfer_handles(
+            tp_ratio, plan
+        )
         launched_read = False
         for remote_worker_key in remote_worker_keys:
             remote_pcp_rank, remote_tp_rank = remote_worker_key
@@ -191,7 +194,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 req_id,
             )
             # Get side handles.
-            if tp_ratio < 0 and (not self.use_mla or remote_tp_rank_count > 1):
+            if needs_split_local_handles:
                 assert remote_block_size == self.block_size
                 # Remote tp_size > local tp_size: we must perform multiple
                 # reads. Get the memory chunk onto which we will write to.

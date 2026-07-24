@@ -211,6 +211,21 @@ class NixlBaseConnectorWorker:
                     handle.append((addr + p_idx * chunk, chunk, dev))
             yield handle
 
+    def _needs_split_local_xfer_handles(
+        self, tp_ratio: int, plan: TPMapping
+    ) -> bool:
+        """Whether reads need per-source slices of the local KV region.
+
+        Pure MLA attention is replicated across TP ranks and writes the whole
+        local region. Multiple physical remote workers may still participate
+        because DCP assigns them disjoint blocks, but that does not require
+        splitting the local region. Hybrid MLA+SSM is different: its mapping
+        contains multiple source ranks for the sharded SSM state.
+        """
+        return tp_ratio < 0 and (
+            not self.use_mla or len(plan.all_source_ranks) > 1
+        )
+
     def _fa_desc_replicated(self, num_fa_descs: int) -> list[bool]:
         """Per-FA-descriptor replicate flag, in _build_fa_local emission order
         (region-major; K then optional V per region). Length ``num_fa_descs``.
@@ -1766,10 +1781,8 @@ class NixlBaseConnectorWorker:
         plan = self.tp_mappings[engine_id]
 
         ### (Optional) Register local agent memory regions. MLA is not split.
-        if (
-            tp_ratio < 0
-            and (not self.use_mla or len(plan.all_source_ranks) > 1)
-            and tp_ratio not in self.src_xfer_handles_by_tp_ratio
+        if self._needs_split_local_xfer_handles(tp_ratio, plan) and (
+            tp_ratio not in self.src_xfer_handles_by_tp_ratio
         ):
             # Remote tp_size > local tp_size: read from multiple remote ranks.
             # Logically "split" own regions into per-source chunks. Hybrid
