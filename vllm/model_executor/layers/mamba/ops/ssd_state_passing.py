@@ -8,19 +8,42 @@
 
 import torch
 
-from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
+from vllm.model_executor.layers.mamba.ops.triton_helpers import (
+    cpu_thread_choices,
+    fast_exp,
+)
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
+CPU_THREADS = cpu_thread_choices()
+IS_CPU = current_platform.is_cpu()
 
-@triton.autotune(
-    configs=[
+if IS_CPU:
+    # Fix BLOCK_SIZE heuristically on CPU (~dim) and autotune only the OpenMP
+    # thread count, instead of sweeping block sizes.
+    _state_passing_configs = [triton.Config({}, num_cpu_threads=t) for t in CPU_THREADS]
+else:
+    _state_passing_configs = [
         triton.Config({"BLOCK_SIZE": 64}),
         triton.Config({"BLOCK_SIZE": 128}),
         triton.Config({"BLOCK_SIZE": 256}),
         triton.Config({"BLOCK_SIZE": 512}),
         triton.Config({"BLOCK_SIZE": 1024}),
         triton.Config({"BLOCK_SIZE": 2048}),
-    ],
+    ]
+
+
+@triton.heuristics(
+    {
+        **(
+            {"BLOCK_SIZE": lambda args: min(triton.next_power_of_2(args["dim"]), 2048)}
+            if IS_CPU
+            else {}
+        )
+    }
+)
+@triton.autotune(
+    configs=_state_passing_configs,
     key=["dim"],
 )
 @triton.jit

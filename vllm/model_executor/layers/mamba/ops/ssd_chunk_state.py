@@ -8,21 +8,50 @@
 
 import torch
 
-from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
+from vllm.model_executor.layers.mamba.ops.triton_helpers import (
+    cpu_thread_choices,
+    fast_exp,
+)
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .mamba_ssm import softplus
 
+CPU_THREADS = cpu_thread_choices()
+IS_CPU = current_platform.is_cpu()
 
-@triton.autotune(
-    configs=[
+if IS_CPU:
+    # On CPU, fix the block size via a heuristic (small, so the tl.cumsum over
+    # the chunk axis stays cheap to compile) and autotune only the OpenMP thread
+    # count. Sweeping BLOCK_SIZE_H here compiles a large [BLOCK_SIZE_H, chunk]
+    # scan per value, which is extremely slow to lower on the CPU backend.
+    _cumsum_configs = [triton.Config({}, num_cpu_threads=t) for t in CPU_THREADS]
+else:
+    _cumsum_configs = [
         triton.Config({"BLOCK_SIZE_H": 2}),
         triton.Config({"BLOCK_SIZE_H": 4}),
         triton.Config({"BLOCK_SIZE_H": 8}),
         triton.Config({"BLOCK_SIZE_H": 16}),
         triton.Config({"BLOCK_SIZE_H": 32}),
         triton.Config({"BLOCK_SIZE_H": 64}),
-    ],
+    ]
+
+
+@triton.heuristics(
+    {
+        **(
+            {
+                "BLOCK_SIZE_H": lambda args: min(
+                    triton.next_power_of_2(args["nheads"]), 8
+                )
+            }
+            if IS_CPU
+            else {}
+        )
+    }
+)
+@triton.autotune(
+    configs=_cumsum_configs,
     key=["chunk_size", "nheads"],
 )
 @triton.jit
@@ -114,9 +143,12 @@ def _chunk_cumsum_fwd_kernel(
     )
 
 
-@triton.autotune(
-    configs=[
-        # Small headdim/dstate configs (hdim<=64, dstate<=128) - increased parallelism
+if current_platform.is_cpu():
+    # Fix tile sizes heuristically on CPU (M~hdim, N~dstate, K~chunk_size) and
+    # autotune only the OpenMP thread count, instead of sweeping the block grid.
+    _chunk_state_configs = [triton.Config({}, num_cpu_threads=t) for t in CPU_THREADS]
+else:
+    _chunk_state_configs = [
         triton.Config(
             {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
             num_stages=3,
@@ -132,7 +164,6 @@ def _chunk_cumsum_fwd_kernel(
             num_stages=3,
             num_warps=4,
         ),
-        # Low register pressure configs for large dstate (dstate=128)
         triton.Config(
             {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 64},
             num_stages=2,
@@ -143,7 +174,6 @@ def _chunk_cumsum_fwd_kernel(
             num_stages=2,
             num_warps=4,
         ),
-        # original configs for larger headdim/dstate values
         triton.Config(
             {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 64},
             num_stages=3,
@@ -189,7 +219,30 @@ def _chunk_cumsum_fwd_kernel(
             num_stages=4,
             num_warps=2,
         ),
-    ],
+    ]
+
+
+@triton.heuristics(
+    {
+        **(
+            {
+                "BLOCK_SIZE_M": lambda args: min(
+                    triton.next_power_of_2(args["hdim"]), 64
+                ),
+                "BLOCK_SIZE_N": lambda args: min(
+                    triton.next_power_of_2(args["dstate"]), 128
+                ),
+                "BLOCK_SIZE_K": lambda args: min(
+                    triton.next_power_of_2(args["chunk_size"]), 32
+                ),
+            }
+            if IS_CPU
+            else {}
+        )
+    }
+)
+@triton.autotune(
+    configs=_chunk_state_configs,
     key=["hdim", "dstate", "chunk_size"],
 )
 @triton.jit

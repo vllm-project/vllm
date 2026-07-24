@@ -8,18 +8,24 @@
 
 from packaging import version
 
-from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
+from vllm.model_executor.layers.mamba.ops.triton_helpers import (
+    cpu_thread_choices,
+    fast_exp,
+)
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse("2.2.0")
 
+CPU_THREADS = cpu_thread_choices()
+IS_CPU = current_platform.is_cpu()
 
-@triton.autotune(
-    configs=[
-        # =================================================================
-        # Higher warp count configs for better latency hiding
-        # More warps = more instructions in flight = better memory latency hiding
-        # =================================================================
+if IS_CPU:
+    # Fix tile sizes heuristically on CPU (M/K~chunk_size, N~hdim) and autotune
+    # only the OpenMP thread count, instead of sweeping the block grid.
+    _chunk_scan_configs = [triton.Config({}, num_cpu_threads=t) for t in CPU_THREADS]
+else:
+    _chunk_scan_configs = [
         triton.Config(
             {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
             num_stages=2,
@@ -35,7 +41,6 @@ TRITON_22 = version.parse(triton.__version__) >= version.parse("2.2.0")
             num_stages=2,
             num_warps=8,
         ),
-        # Smaller tiles with more stages for software pipelining
         triton.Config(
             {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
             num_stages=3,
@@ -46,9 +51,6 @@ TRITON_22 = version.parse(triton.__version__) >= version.parse("2.2.0")
             num_stages=2,
             num_warps=4,
         ),
-        # =================================================================
-        # Low register pressure configs (num_stages=1) for large dstate
-        # =================================================================
         triton.Config(
             {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 64},
             num_stages=1,
@@ -69,7 +71,6 @@ TRITON_22 = version.parse(triton.__version__) >= version.parse("2.2.0")
             num_stages=1,
             num_warps=4,
         ),
-        # num_stages=2 configs - moderate register pressure
         triton.Config(
             {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 64},
             num_stages=2,
@@ -85,7 +86,6 @@ TRITON_22 = version.parse(triton.__version__) >= version.parse("2.2.0")
             num_stages=2,
             num_warps=4,
         ),
-        # Original configs for larger dstate values
         triton.Config(
             {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 64},
             num_stages=3,
@@ -141,7 +141,30 @@ TRITON_22 = version.parse(triton.__version__) >= version.parse("2.2.0")
             num_stages=4,
             num_warps=2,
         ),
-    ],
+    ]
+
+
+@triton.heuristics(
+    {
+        **(
+            {
+                "BLOCK_SIZE_M": lambda args: min(
+                    triton.next_power_of_2(args["chunk_size"]), 64
+                ),
+                "BLOCK_SIZE_N": lambda args: min(
+                    triton.next_power_of_2(args["hdim"]), 64
+                ),
+                "BLOCK_SIZE_K": lambda args: min(
+                    triton.next_power_of_2(args["chunk_size"]), 64
+                ),
+            }
+            if IS_CPU
+            else {}
+        )
+    }
+)
+@triton.autotune(
+    configs=_chunk_scan_configs,
     key=["chunk_size", "hdim", "dstate", "IS_CAUSAL"],
 )
 @triton.jit

@@ -283,11 +283,14 @@ def initialize_mamba_ssu_backend(
     # backend unless the user explicitly chose something other than "triton".
     if backend == MambaBackendEnum.TRITON:
         from vllm.platforms import current_platform
+        from vllm.triton_utils import HAS_TRITON
 
-        if current_platform.is_cpu():
+        # Prefer triton-cpu SSU when the backend is installed (HAS_TRITON),
+        # mirroring the GDN gating; otherwise use the native C++ CPU kernel.
+        if current_platform.is_cpu() and not HAS_TRITON:
             logger.info(
-                "CPU platform detected: overriding Mamba SSU backend "
-                "from 'triton' to 'cpu'."
+                "CPU platform detected without triton-cpu: overriding Mamba "
+                "SSU backend from 'triton' to 'cpu'."
             )
             backend = MambaBackendEnum.CPU
 

@@ -1241,6 +1241,8 @@ def causal_conv1d_update(
 
 from vllm.platforms import current_platform  # noqa: E402
 
+# conv1d stays native on CPU; its triton kernel's tl.debug_barrier isn't
+# lowerable on triton-cpu yet (triton-cpu#274). SSD/SSU gate on HAS_TRITON.
 if current_platform.is_cpu():
     from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
         causal_conv1d_fn_cpu,
