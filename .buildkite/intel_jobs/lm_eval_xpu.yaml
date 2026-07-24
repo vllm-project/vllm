@@ -6,8 +6,8 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 45
   autorun_on_main: true
-  no_plugin: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -27,8 +27,8 @@ steps:
     pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt || true'
 - label: LM Eval Large Models (4xH100)
   device: intel_gpu
-  optional: true
   num_devices: 4
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -51,11 +51,11 @@ steps:
     cd .buildkite/lm-eval-harness &&
     pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt --tp-size=4 || true'
 - label: LM Eval Small Models (1xB200)
-  timeout_in_minutes: 50
   device: intel_gpu
+  timeout_in_minutes: 50
   optional: true
-  no_plugin: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -74,13 +74,13 @@ steps:
     'cd tests &&
     pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell.txt || true'
 - label: LM Eval Small Models Distributed (2xB200)
-  timeout_in_minutes: 120
   device: intel_gpu
+  timeout_in_minutes: 120
   num_devices: 2
   optional: true
   autorun_on_main: true
-  no_plugin: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -98,13 +98,47 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small-tp.txt || true'
-- label: LM Eval Large Models EP (2xB200)
-  timeout_in_minutes: 60
+- label: LM Eval PCP (4xB200)
   device: intel_gpu
+  timeout_in_minutes: 360
+  num_devices: 4
   optional: true
-  num_devices: 2
-  no_plugin: true
+  autorun_on_main: true
   working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 4+
+  _raw_old_commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-pcp.txt
+  source_file_dependencies:
+  - csrc/
+  - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP2-PCP2-EP.yaml
+  - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP1-PCP4-EP.yaml
+  - tests/evals/gsm8k/configs/models-pcp.txt
+  - vllm/model_executor/layers/quantization
+  - vllm/config/parallel.py
+  - vllm/distributed/parallel_state.py
+  - vllm/model_executor/layers/attention/mla_attention.py
+  - vllm/model_executor/layers/attention/pcp.py
+  - vllm/v1/worker/gpu/model_runner.py
+  - vllm/v1/worker/gpu/pcp_manager.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-pcp.txt || true'
+- label: LM Eval Large Models EP (2xB200)
+  device: intel_gpu
+  timeout_in_minutes: 60
+  num_devices: 2
+  optional: true
+  working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -123,12 +157,12 @@ steps:
     'cd tests &&
     pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell-ep.txt || true'
 - label: LM Eval Qwen3.5 Models (2xB200)
-  timeout_in_minutes: 45
   device: intel_gpu
-  optional: true
+  timeout_in_minutes: 45
   num_devices: 2
-  no_plugin: true
+  optional: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -145,19 +179,19 @@ steps:
   - vllm/transformers_utils/configs/qwen3_5_moe.py
   - vllm/model_executor/models/qwen3_next.py
   - vllm/model_executor/models/qwen3_next_mtp.py
-  - vllm/model_executor/layers/fla/ops/
+  - vllm/third_party/flash_linear_attention/ops/
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-qwen35-blackwell.txt || true'
 - label: LM Eval Large Models (8xH200)
-  timeout_in_minutes: 50
   device: intel_gpu
-  optional: true
+  timeout_in_minutes: 50
   num_devices: 8
-  no_plugin: true
+  optional: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -174,10 +208,10 @@ steps:
     pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200.txt || true'
 - label: MoE Refactor Integration Test (H100 - TEMPORARY)
   device: intel_gpu
-  optional: true
   num_devices: 2
-  no_plugin: true
+  optional: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -194,10 +228,10 @@ steps:
     pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-h100.txt || true'
 - label: MoE Refactor Integration Test (B200 - TEMPORARY)
   device: intel_gpu
-  optional: true
   num_devices: 2
-  no_plugin: true
+  optional: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -214,10 +248,10 @@ steps:
     pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-b200.txt || true'
 - label: MoE Refactor Integration Test (B200 DP - TEMPORARY)
   device: intel_gpu
-  optional: true
   num_devices: 2
-  no_plugin: true
+  optional: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -233,12 +267,12 @@ steps:
     'cd tests &&
     pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor-dp-ep/config-b200.txt || true'
 - label: LM Eval Humming f16 (A100 - TEMPORARY)
-  timeout_in_minutes: 75
   device: intel_gpu
-  optional: true
+  timeout_in_minutes: 75
   num_devices: 1
-  no_plugin: true
+  optional: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -260,12 +294,12 @@ steps:
     'cd tests &&
     pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config.txt || true'
 - label: LM Eval Humming Act int8 (A100 - TEMPORARY)
-  timeout_in_minutes: 45
   device: intel_gpu
-  optional: true
+  timeout_in_minutes: 45
   num_devices: 1
-  no_plugin: true
+  optional: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -287,12 +321,12 @@ steps:
     'cd tests &&
     pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-int8.txt || true'
 - label: LM Eval Humming Act fp8/int8 (H100 - TEMPORARY)
-  timeout_in_minutes: 70
   device: intel_gpu
-  optional: true
+  timeout_in_minutes: 70
   num_devices: 1
-  no_plugin: true
+  optional: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -316,10 +350,10 @@ steps:
     pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-fp8.txt || true &&
     pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-int8.txt || true'
 - label: LM Eval TurboQuant KV Cache
-  timeout_in_minutes: 55
   device: intel_gpu
-  no_plugin: true
+  timeout_in_minutes: 55
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -340,12 +374,12 @@ steps:
     'cd tests &&
     pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant.txt || true'
 - label: GPQA Eval (GPT-OSS) (2xH100)
-  timeout_in_minutes: 35
   device: intel_gpu
-  optional: true
+  timeout_in_minutes: 35
   num_devices: 2
-  no_plugin: true
+  optional: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -367,12 +401,12 @@ steps:
     cd tests &&
     pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-h100.txt || true'
 - label: GPQA Eval (GPT-OSS) (2xB200)
-  timeout_in_minutes: 30
   device: intel_gpu
-  optional: true
+  timeout_in_minutes: 30
   num_devices: 2
-  no_plugin: true
+  optional: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -394,12 +428,12 @@ steps:
     cd tests &&
     pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-b200.txt || true'
 - label: GPQA Eval (GPT-OSS) (DGX Spark)
-  timeout_in_minutes: 35
   device: intel_gpu
-  optional: true
+  timeout_in_minutes: 35
   num_devices: 1
-  no_plugin: true
+  optional: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -421,10 +455,10 @@ steps:
     cd tests &&
     pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-spark.txt || true'
 - label: LM Eval KV-Offload (1xH200)
-  timeout_in_minutes: 30
   device: intel_gpu
-  no_plugin: true
+  timeout_in_minutes: 30
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -446,11 +480,11 @@ steps:
     'cd tests &&
     pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k nemotron-h-8b or gemma-4-e4b-it || true'
 - label: LM Eval KV-Offload (2xH100)
-  timeout_in_minutes: 30
   device: intel_gpu
+  timeout_in_minutes: 30
   num_devices: 2
-  no_plugin: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -472,11 +506,11 @@ steps:
     'cd tests &&
     pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k qwen3.5-35b || true'
 - label: LM Eval KV-Offload (4xH100)
-  timeout_in_minutes: 40
   device: intel_gpu
+  timeout_in_minutes: 40
   num_devices: 4
-  no_plugin: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -500,8 +534,8 @@ steps:
 - label: MRCR Eval Small Models
   device: intel_gpu
   timeout_in_minutes: 25
-  no_plugin: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
