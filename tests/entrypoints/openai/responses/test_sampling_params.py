@@ -28,6 +28,7 @@ class TestResponsesRequestSamplingParams:
             temperature=0.8,
             top_p=0.95,
             top_k=50,
+            min_p=0.1,
             max_output_tokens=100,
         )
 
@@ -36,7 +37,19 @@ class TestResponsesRequestSamplingParams:
         assert sampling_params.temperature == 0.8
         assert sampling_params.top_p == 0.95
         assert sampling_params.top_k == 50
+        assert sampling_params.min_p == 0.1
         assert sampling_params.max_tokens == 100
+
+    def test_min_p_default(self):
+        """Test that min_p defaults to 0.0 when unset (parity with top_k)."""
+        request = ResponsesRequest(
+            model="test-model",
+            input="test input",
+        )
+
+        sampling_params = request.to_sampling_params(default_max_tokens=1000)
+
+        assert sampling_params.min_p == 0.0
 
     def test_extra_sampling_params(self):
         """Test extra sampling parameters are correctly mapped."""
