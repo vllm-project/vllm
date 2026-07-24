@@ -847,27 +847,24 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if not isinstance(data, dict):
             return data
 
-        # Reject empty tools array, matching OpenAI API behavior
-        if data.get("tools") == []:
-            raise VLLMValidationError(
-                "`tools` must not be an empty array. "
-                "Either provide at least one tool or omit the field entirely.",
-                parameter="tools",
-            )
-
         # if "tool_choice" is not specified but tools are provided,
         # default to "auto" tool_choice
         if "tool_choice" not in data and data.get("tools"):
             data["tool_choice"] = "auto"
 
-        # if "tool_choice" is "none" -- no validation is needed for tools
-        if "tool_choice" in data and data["tool_choice"] == "none":
+        # match OpenAI behavior and return early in case of empty tools list to
+        # ignore absence of tools
+        if data.get("tools") == [] and data.get("tool_choice") == "auto":
+            return data
+
+        # match OpenAI behavior and skip validation only if tools are defined
+        if data.get("tool_choice") == "none" and data.get("tools") is not None:
             return data
 
         # if "tool_choice" is specified -- validation
         if "tool_choice" in data and data["tool_choice"] is not None:
-            # ensure that if "tool choice" is specified, tools are present
-            if "tools" not in data or data["tools"] is None:
+            # ensure that if "tool choice" is specified, tools are present and not empty
+            if "tools" not in data or data["tools"] is None or data["tools"] == []:
                 raise VLLMValidationError(
                     "When using `tool_choice`, `tools` must be set.",
                     parameter="tool_choice",

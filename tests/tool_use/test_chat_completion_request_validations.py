@@ -26,15 +26,57 @@ def test_chat_completion_request_with_no_tools():
     )
     assert request.tool_choice == "none"
 
-    # tools key present but empty -- should be rejected
-    with pytest.raises(ValueError, match="must not be an empty array"):
-        ChatCompletionRequest.model_validate(
-            {
-                "messages": [{"role": "user", "content": "Hello"}],
-                "model": "facebook/opt-125m",
-                "tools": [],
-            }
-        )
+    # tools key present but empty -- accepted
+    request = ChatCompletionRequest.model_validate(
+        {
+            "messages": [{"role": "user", "content": "Hello"}],
+            "model": "facebook/opt-125m",
+            "tools": [],
+        }
+    )
+    assert request.tool_choice == "none"
+
+
+@pytest.mark.parametrize(
+    "tool_choice,tools,expect_ok",
+    [
+        # tool_choice / tools matrix
+        ("auto", None, False),
+        ("auto", [], True),
+        ("required", None, False),
+        ("required", [], False),
+        ("none", None, False),
+        ("none", [], True),
+        # tool_choice omitted
+        (None, None, True),
+        (None, [], True),
+        # tools-only rows (no tool_choice key)
+        ("only_tools", [], True),
+        ("only_tools", None, True),
+    ],
+)
+def test_tool_choice_tools_matrix(tool_choice, tools, expect_ok):
+    payload = {
+        "messages": [{"role": "user", "content": "Hello"}],
+        "model": "facebook/opt-125m",
+    }
+    only_tools = tool_choice == "only_tools"
+    if not only_tools and tool_choice is not None:
+        payload["tool_choice"] = tool_choice
+    payload["tools"] = tools
+
+    if expect_ok:
+        request = ChatCompletionRequest.model_validate(payload)
+        if only_tools or tool_choice is None:
+            assert request.tool_choice == "none"
+        else:
+            assert request.tool_choice == tool_choice
+    else:
+        with pytest.raises(
+            ValueError,
+            match=r"When using `tool_choice`, `tools` must be set\.",
+        ):
+            ChatCompletionRequest.model_validate(payload)
 
 
 @pytest.mark.parametrize("tool_choice", ["auto", "required"])
