@@ -617,6 +617,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             request_input=request.input,
             prev_msg=self.msg_store.get(prev_response.id) if prev_response else None,
             prev_response_output=prev_response.output if prev_response else None,
+            reasoning_context=request.reasoning_context,
         )
         chat_template_kwargs = self._effective_chat_template_kwargs(request)
         _, engine_inputs = await self.online_renderer.preprocess_chat(

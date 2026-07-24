@@ -300,6 +300,23 @@ class ResponsesRequest(OpenAIBaseModel):
     )
     # --8<-- [end:responses-extra-params]
 
+    @property
+    def reasoning_context(self) -> str | None:
+        """The ``reasoning.context`` value (``auto``/``current_turn``/
+        ``all_turns``), if the client set it.
+
+        The OpenAI ``Reasoning`` type does not yet declare ``context`` as a
+        formal field, so it arrives as an extra field; read it defensively so
+        this works whether or not the SDK adds it later.
+        """
+        reasoning = self.reasoning
+        if reasoning is None:
+            return None
+        context = getattr(reasoning, "context", None)
+        if context is None and reasoning.model_extra is not None:
+            context = reasoning.model_extra.get("context")
+        return context
+
     def build_chat_params(
         self,
         default_template: str | None,
