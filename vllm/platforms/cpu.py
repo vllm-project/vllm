@@ -78,12 +78,19 @@ class CpuPlatform(Platform):
         attn_selector_config: "AttentionSelectorConfig",
         num_heads: int | None = None,
     ) -> str:
-        if selected_backend and selected_backend != AttentionBackendEnum.CPU_ATTN:
-            logger.info("Cannot use %s backend on CPU.", selected_backend)
-        if attn_selector_config.use_mla:
-            raise NotImplementedError("MLA is not supported on CPU.")
         if attn_selector_config.use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on CPU.")
+        if attn_selector_config.use_mla:
+            # Reference MLA implementation on CPU. Performance is not the
+            # goal here; the backend simply wires the CPU decode kernel
+            # (`mla_decode_kvcache`) and an SDPA-based prefill together with
+            # the shared MLA scaffolding so that DeepSeek-style models can
+            # execute on CPU.
+            if selected_backend and selected_backend != AttentionBackendEnum.CPU_MLA:
+                logger.info("Cannot use %s backend on CPU.", selected_backend)
+            return AttentionBackendEnum.CPU_MLA.get_path()
+        if selected_backend and selected_backend != AttentionBackendEnum.CPU_ATTN:
+            logger.info("Cannot use %s backend on CPU.", selected_backend)
         return AttentionBackendEnum.CPU_ATTN.get_path()
 
     @classmethod
@@ -116,10 +123,25 @@ class CpuPlatform(Platform):
 
         cache_config = vllm_config.cache_config
 
-        if not cache_config.user_specified_block_size:
+        # The CPU MLA decode kernel only compiles with block_size=16 today
+        # (see csrc/cpu/mla_decode.cpp). If the model uses MLA we override
+        # the default block size regardless of user preference to avoid a
+        # runtime kernel dispatch failure.
+        cpu_mla_enabled = model_config is not None and getattr(
+            model_config, "use_mla", False
+        )
+        if cpu_mla_enabled:
+            if cache_config.user_specified_block_size and cache_config.block_size != 16:
+                logger.warning(
+                    "CPU MLA backend requires block_size=16, overriding "
+                    "user-specified block_size=%s.",
+                    cache_config.block_size,
+                )
+            cache_config.block_size = 16
+        elif not cache_config.user_specified_block_size:
             cache_config.block_size = 128
 
-        if cache_config.block_size % 32 != 0:
+        if not cpu_mla_enabled and cache_config.block_size % 32 != 0:
             logger.warning(
                 "CPU backend prefers block_size is multiples of 32, "
                 "otherwise the performance is not optimized."
@@ -320,6 +342,7 @@ class CpuPlatform(Platform):
                 "prefill and prefix caching to be disabled."
             )
             vllm_config.scheduler_config.enable_chunked_prefill = False
+            vllm_config.cache_config.enable_prefix_caching = False
             vllm_config.scheduler_config.max_num_batched_tokens = max(
                 vllm_config.model_config.max_model_len,
                 vllm_config.scheduler_config.DEFAULT_MAX_NUM_BATCHED_TOKENS,
@@ -471,6 +494,13 @@ class CpuPlatform(Platform):
         # initialized vllm.platforms (avoid circular import while CpuPlatform loads).
         from vllm._custom_ops import cpu_attn_reshape_and_cache
         from vllm.v1.attention.backends.cpu_attn import _get_attn_isa
+
+        # MLA uses a single latent cache of shape [N, block_size, head_size],
+        # so the classic key/value split does not apply. The MLA backend
+        # writes the cache itself via `concat_and_cache_mla` inside
+        # `do_kv_cache_update`, so there is nothing to pack here.
+        if kv_cache.dim() == 3:
+            return
 
         num_blocks, num_kv_heads, block_size, fused_head_size = kv_cache.shape
         head_size = fused_head_size // 2
