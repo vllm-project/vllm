@@ -128,3 +128,20 @@ def test_mm_prefix_lm_raises_batched_tokens_floor():
         vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
 
     assert vllm_config.scheduler_config.max_num_batched_tokens >= 2496
+
+
+def test_data_parallel_start_rank_zero_infers_hybrid_lb():
+    """An explicit --data-parallel-start-rank 0 must be treated the same as
+    any other explicit start rank when inferring hybrid LB mode, not as
+    "unset" (regression test for a truthiness-vs-`is not None` bug).
+    """
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        data_parallel_size=4,
+        data_parallel_size_local=2,
+        data_parallel_start_rank=0,
+    )
+    vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+
+    assert vllm_config.parallel_config.data_parallel_hybrid_lb is True
+    assert vllm_config.parallel_config.data_parallel_rank == 0
