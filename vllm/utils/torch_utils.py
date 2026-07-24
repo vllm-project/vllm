@@ -762,6 +762,15 @@ def weak_ref_tensors(
         return ret
     raise ValueError("Invalid type for tensors")
 
+def get_accelerator_view_from_cpu_tensor_torch(cpu_tensor: torch.Tensor) -> torch.Tensor:
+    ##xxdebug
+    if cpu_tensor.numel() == 0:
+        return torch.empty_like(cpu_tensor, device='cuda')
+
+    if cpu_tensor.is_pinned():
+        return cpu_tensor.cuda(non_blocking=True)
+    else:
+        return cpu_tensor.cuda()
 
 def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
     """
@@ -772,8 +781,10 @@ def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tens
     if current_platform.is_xpu():
         assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
         return torch.ops._C.get_xpu_view_from_cpu_tensor(cpu_tensor)
-    elif current_platform.is_cuda_alike():
-        return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
+    # elif current_platform.is_cuda_alike():
+    elif True:
+        # return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
+        return get_accelerator_view_from_cpu_tensor_torch(cpu_tensor)
     else:
         raise ValueError(
             f"`get_accelerator_view_from_cpu_tensor` is currently "

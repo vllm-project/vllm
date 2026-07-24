@@ -44,6 +44,25 @@ def _min_p_kernel(
         logits = tl.where(logits < threshold, float("-inf"), logits)
         tl.store(logits_ptr + token_idx * logits_stride + block, logits, mask=mask)
 
+def _min_p_torch(
+    logits: torch.Tensor, expanded_idx_mapping: torch.Tensor, min_p: torch.Tensor
+) -> None:
+    """纯 torch 版本，替换 `_min_p_kernel`（平台不支持 triton）。
+
+    对每个 token 取其请求的 min_p（min_p==0 的行跳过），在 log 空间计算阈值
+    threshold = max(logits) + log(min_p)，把低于阈值的 logits 置为 -inf。
+    """
+    mp = min_p[expanded_idx_mapping.long()].to(torch.float32)  # [num_tokens]
+    apply = mp != 0.0
+    if not bool(apply.any()):
+        return
+
+    logits_f = logits.to(torch.float32)
+    max_val = logits_f.max(dim=1, keepdim=True).values  # [num_tokens, 1]
+    threshold = max_val + torch.log(mp).unsqueeze(1)  # [num_tokens, 1]
+
+    drop = (logits_f < threshold) & apply.unsqueeze(1)
+    logits[drop] = -float("inf")
 
 def apply_min_p(
     logits: torch.Tensor, expanded_idx_mapping: torch.Tensor, min_p: torch.Tensor
@@ -58,3 +77,4 @@ def apply_min_p(
         vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
     )
+    _min_p_torch(logits, expanded_idx_mapping, min_p)

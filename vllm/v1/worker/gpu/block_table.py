@@ -192,6 +192,20 @@ class BlockTables:
             PAD_ID=PAD_SLOT_ID,
             TRITON_BLOCK_SIZE=1024,  # type: ignore
         )
+        _compute_slot_mappings_torch(
+            self.slot_mappings,
+            idx_mapping,
+            query_start_loc,
+            positions,
+            [b.gpu for b in self.block_tables],
+            self.kernel_block_sizes,
+            self.cp_rank,
+            self.cp_size,
+            self.cp_interleave,
+            PAD_SLOT_ID,
+            self.max_num_batched_tokens,
+            num_reqs,
+        )
         return slot_mappings[:, :num_tokens_padded]
 
     def get_dummy_slot_mappings(self, num_tokens: int) -> torch.Tensor:
@@ -245,6 +259,66 @@ def _gather_block_tables_kernel(
         block_ids = tl.load(src_row_ptr + offset, mask=offset < num_blocks)
         tl.store(dst_row_ptr + offset, block_ids, mask=offset < num_blocks)
 
+def _compute_slot_mappings_torch(
+    slot_mappings: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    positions: torch.Tensor,
+    block_tables: list[torch.Tensor],
+    block_sizes: list[int],
+    cp_rank: int,
+    cp_size: int,
+    cp_interleave: int,
+    pad_id: int,
+    max_num_tokens: int,
+    num_reqs: int,
+) -> None:
+    """纯 torch 版本，替换 `_compute_slot_mappings_kernel`（平台不支持 triton）。
+
+    对每个 kv cache group：
+    - 先把 [actual_num_tokens, max_num_tokens) 的尾部填 PAD_ID（对应原 kernel 的
+      padding 线程块）；
+    - 再对每个请求 batch_idx，根据 positions 计算 block_indices/offsets，从 block_table
+      查出物理 block 号，换算成 slot id 写入 slot_mappings。
+    支持 context parallel (CP_SIZE > 1) 分支。
+    """
+    num_groups = len(block_tables)
+    total_tokens = int(query_start_loc[num_reqs])
+    for group_id in range(num_groups):
+        bt = block_tables[group_id]  # [max_num_reqs, max_num_blocks]
+        block_size = block_sizes[group_id]
+        row = slot_mappings[group_id]
+
+        # Pad remaining slots to PAD_ID (needed for CUDA graphs).
+        row[total_tokens:max_num_tokens] = pad_id
+
+        for batch_idx in range(num_reqs):
+            req_state_idx = int(idx_mapping[batch_idx])
+            start_idx = int(query_start_loc[batch_idx])
+            end_idx = int(query_start_loc[batch_idx + 1])
+            if end_idx <= start_idx:
+                continue
+
+            pos_slice = positions[start_idx:end_idx].to(torch.int64)
+            block_indices = pos_slice // (block_size * cp_size)
+            block_offsets = pos_slice % (block_size * cp_size)
+            block_numbers = bt[req_state_idx][block_indices].to(torch.int64)
+
+            if cp_size == 1:
+                # Common case: Context parallelism is not used.
+                slot_ids = block_numbers * block_size + block_offsets
+            else:
+                # Context parallelism is used.
+                is_local = block_offsets // cp_interleave % cp_size == cp_rank
+                rounds = block_offsets // (cp_interleave * cp_size)
+                remainder = block_offsets % cp_interleave
+                local_offsets = rounds * cp_interleave + remainder
+                slot_ids = block_numbers * block_size + local_offsets
+                slot_ids = torch.where(
+                    is_local, slot_ids, torch.full_like(slot_ids, pad_id)
+                )
+
+            row[start_idx:end_idx] = slot_ids
 
 @triton.jit
 def _compute_slot_mappings_kernel(

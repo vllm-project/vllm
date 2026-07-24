@@ -181,6 +181,42 @@ class InputBatch:
             prompt_lens=None,
         )
 
+def _prepare_prefill_inputs_torch(
+    input_ids: torch.Tensor,
+    next_prefill_tokens: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    all_token_ids: torch.Tensor,
+    prefill_len: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+) -> None:
+    """纯 torch 版本，替换 `_prepare_prefill_inputs_kernel`（平台不支持 triton）。
+
+    对每个 batch_idx 对应的请求 req_state_idx：
+    - 若已完成 prefill（num_computed >= prefill_len）则跳过；
+    - 否则把 all_token_ids 中 [num_computed, num_computed+query_len) 的 token 拷到
+      input_ids[query_start:query_end]；
+    - 若还有下一个 prefill token，写入 next_prefill_tokens[req_state_idx]。
+    """
+    num_reqs = idx_mapping.shape[0]
+    for batch_idx in range(num_reqs):
+        req_state_idx = int(idx_mapping[batch_idx])
+        p_len = int(prefill_len[req_state_idx])
+        num_computed = int(num_computed_tokens[req_state_idx])
+        if num_computed >= p_len:
+            # Not prefill.
+            continue
+
+        q_start = int(query_start_loc[batch_idx])
+        q_end = int(query_start_loc[batch_idx + 1])
+        q_len = q_end - q_start
+
+        row = all_token_ids[req_state_idx]
+        input_ids[q_start : q_start + q_len] = row[num_computed : num_computed + q_len]
+
+        next_pos = num_computed + q_len
+        if next_pos < p_len:
+            next_prefill_tokens[req_state_idx] = row[next_pos]
 
 @triton.jit
 def _prepare_prefill_inputs_kernel(
@@ -240,6 +276,15 @@ def prepare_prefill_inputs(
         num_computed_tokens,
         BLOCK_SIZE=1024,
     )
+    _prepare_prefill_inputs_torch(
+        input_ids,
+        next_prefill_tokens,
+        idx_mapping,
+        query_start_loc,
+        all_token_ids,
+        prefill_len,
+        num_computed_tokens,
+    )
 
 
 @triton.jit
@@ -278,6 +323,38 @@ def _prepare_pos_seq_lens_kernel(
         pos = num_computed_tokens + block
         tl.store(pos_ptr + start + block, pos, mask=mask)
 
+def _prepare_pos_seq_lens_torch(
+    idx_mapping: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+    pos: torch.Tensor,
+    seq_lens: torch.Tensor,
+) -> None:
+    """纯 torch 版本，替换 `_prepare_pos_seq_lens_kernel`（平台不支持 triton）。
+
+    对每个 req_id 对应的请求 req_state_idx：
+    - seq_lens[req_id] = num_computed_tokens + query_len；
+    - pos[start:end] = num_computed_tokens + [0, query_len)。
+    并把未使用的 seq_lens 尾部填 0（对应原 kernel 的 padding 线程块）。
+    """
+    num_reqs = idx_mapping.shape[0]
+    max_num_reqs = seq_lens.shape[0]
+
+    # Pad unused seq_lens as 0 for full CUDA graphs.
+    seq_lens[num_reqs:max_num_reqs] = 0
+
+    for req_id in range(num_reqs):
+        req_state_idx = int(idx_mapping[req_id])
+        num_computed = int(num_computed_tokens[req_state_idx])
+
+        start = int(query_start_loc[req_id])
+        end = int(query_start_loc[req_id + 1])
+        query_len = end - start
+
+        seq_lens[req_id] = num_computed + query_len
+        pos[start : start + query_len] = num_computed + torch.arange(
+            query_len, device=pos.device, dtype=pos.dtype
+        )
 
 def prepare_pos_seq_lens(
     idx_mapping: torch.Tensor,
@@ -297,6 +374,13 @@ def prepare_pos_seq_lens(
         num_computed_tokens,
         seq_lens.shape[0],
         BLOCK_SIZE=1024,
+    )
+    _prepare_pos_seq_lens_torch(
+        idx_mapping,
+        query_start_loc,
+        num_computed_tokens,
+        pos,
+        seq_lens,
     )
 
 
@@ -360,6 +444,58 @@ def _combine_sampled_and_draft_tokens_kernel(
             mask=mask,
         )
 
+def _combine_sampled_and_draft_tokens_torch(
+    input_ids: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    last_sampled_tokens: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    prefill_len: torch.Tensor,
+    draft_tokens: torch.Tensor,
+    cu_num_logits: torch.Tensor,
+    logits_indices: torch.Tensor,
+    num_new_sampled_tokens: int,
+) -> None:
+    """纯 torch 版本，替换 `_combine_sampled_and_draft_tokens_kernel`（无 triton）。
+
+    对每个 batch_idx 对应的请求 req_state_idx：
+    - 写 logits_indices[cu_start:cu_end] = logits_start + [0, num_logits)；
+    - 仍在 prefill（seq_len <= prefill_len）则跳过；
+    - 否则视情况把上一次采样 token 写入生成槽位，并把 draft tokens 写回 input_ids。
+    """
+    num_reqs = idx_mapping.shape[0]
+    last_sampled_flat = last_sampled_tokens.view(-1)
+    for batch_idx in range(num_reqs):
+        req_state_idx = int(idx_mapping[batch_idx])
+
+        cu_start = int(cu_num_logits[batch_idx])
+        cu_end = int(cu_num_logits[batch_idx + 1])
+        num_logits = cu_end - cu_start
+        num_draft_tokens = num_logits - num_new_sampled_tokens
+
+        query_end = int(query_start_loc[batch_idx + 1])
+        logits_start = query_end - num_logits
+        logits_indices[cu_start : cu_start + num_logits] = logits_start + torch.arange(
+            num_logits, device=logits_indices.device, dtype=logits_indices.dtype
+        )
+
+        seq_len = int(seq_lens[batch_idx])
+        p_len = int(prefill_len[req_state_idx])
+        if seq_len <= p_len:
+            # Handling prefill tokens. No sampled or draft tokens.
+            continue
+
+        # Keep prompt-tail slots intact; only rewrite generated-token slots.
+        first_logit_seq_pos = seq_len - num_logits
+        if num_new_sampled_tokens > 0 and first_logit_seq_pos >= p_len:
+            # Write the last sampled token ID to input_ids.
+            input_ids[logits_start] = last_sampled_flat[req_state_idx]
+
+        # Write the draft tokens (if any) to input_ids.
+        if num_draft_tokens > 0:
+            input_ids[query_end - num_draft_tokens : query_end] = draft_tokens[
+                req_state_idx
+            ][:num_draft_tokens]
 
 def combine_sampled_and_draft_tokens(
     input_ids: torch.Tensor,
@@ -403,6 +539,18 @@ def combine_sampled_and_draft_tokens(
             num_speculative_steps + num_new_sampled_tokens
         ),
     )
+    _combine_sampled_and_draft_tokens_torch(
+        input_ids,
+        idx_mapping,
+        last_sampled_tokens,
+        query_start_loc,
+        seq_lens,
+        prefill_len,
+        draft_tokens,
+        cu_num_logits,
+        logits_indices,
+        num_new_sampled_tokens,
+    )
     return logits_indices
 
 
@@ -434,6 +582,32 @@ def _get_num_sampled_and_rejected_kernel(
     num_rejected = tl.where(is_chunked_prefilling, 0, num_rejected)
     tl.store(num_rejected_ptr + batch_idx, num_rejected)
 
+def get_num_sampled_and_rejected(
+    num_sampled: torch.Tensor,
+    seq_lens: torch.Tensor,
+    cu_num_logits: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    prefill_len: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    纯 PyTorch 实现，等效于 Triton kernel。
+    """
+    req_state_idx = idx_mapping
+
+    seq_len = seq_lens
+    prefill_len_for_batch = prefill_len[req_state_idx]
+    is_chunked = seq_len < prefill_len_for_batch
+
+    num_sampled[is_chunked] = 0
+
+    logits_start = cu_num_logits[:-1]
+    logits_end = cu_num_logits[1:]
+    num_logits = logits_end - logits_start
+
+    num_rejected = num_logits - num_sampled
+    num_rejected[is_chunked] = 0
+
+    return num_sampled, num_rejected
 
 def get_num_sampled_and_rejected(
     num_sampled: torch.Tensor,
@@ -515,6 +689,56 @@ def _post_update_kernel(
         num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
         tl.store(num_computed_tokens_ptr + req_state_idx, num_computed + computed_delta)
 
+def _post_update_torch(
+    idx_mapping: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+    last_sampled_tokens: torch.Tensor,
+    output_bin_counts: torch.Tensor | None,
+    sampled_tokens: torch.Tensor,
+    num_sampled: torch.Tensor,
+    num_rejected: torch.Tensor,
+    query_start_loc: torch.Tensor | None,
+    all_token_ids: torch.Tensor,
+    total_len: torch.Tensor,
+) -> None:
+    """纯 torch 版本，替换 `_post_update_kernel`（平台不支持 triton）。
+
+    对每个 req_id 对应的请求 req_state_idx（负索引跳过）：
+    - 若有采样 token：记录最后一个采样 token、更新 total_len，并把采样 token 追加到
+      all_token_ids，同时（若提供）累加 output_bin_counts 词频；
+    - 根据 query_len - num_rejected 更新 num_computed_tokens。
+    注意：追加 token 时使用更新前的 total_len（与原 kernel 的局部变量语义一致）。
+    """
+    num_reqs = idx_mapping.shape[0]
+    last_flat = last_sampled_tokens.view(-1)
+    for req_id in range(num_reqs):
+        req = int(idx_mapping[req_id])
+        if req < 0:
+            # Filter rows with negative index entries.
+            continue
+
+        tlen = int(total_len[req])  # 更新前的值
+        n_samp = int(num_sampled[req_id])
+        if n_samp > 0:
+            toks = sampled_tokens[req_id][:n_samp]
+            last_flat[req] = toks[-1]
+            total_len[req] = tlen + n_samp
+            all_token_ids[req][tlen : tlen + n_samp] = toks
+            if output_bin_counts is not None:
+                obc_row = output_bin_counts[req]
+                obc_row.scatter_add_(
+                    0, toks.long(), torch.ones_like(toks, dtype=obc_row.dtype)
+                )
+
+        if query_start_loc is None:
+            query_len = 0
+        else:
+            query_len = int(query_start_loc[req_id + 1]) - int(
+                query_start_loc[req_id]
+            )
+        computed_delta = query_len - int(num_rejected[req_id])
+        if computed_delta != 0:
+            num_computed_tokens[req] += computed_delta
 
 def post_update(
     # [num_reqs] batch_idx -> req_state_idx; negative index means skip.
@@ -554,6 +778,18 @@ def post_update(
         all_token_ids.stride(0),
         total_len,
         num_warps=1,
+    )
+    _post_update_torch(
+        idx_mapping,
+        num_computed_tokens,
+        last_sampled_tokens,
+        output_bin_counts,
+        sampled_tokens,
+        num_sampled,
+        num_rejected,
+        query_start_loc,
+        all_token_ids,
+        total_len,
     )
 
 

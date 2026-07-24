@@ -74,11 +74,41 @@ class StructuredOutputsWorker:
             vocab_size,
             BLOCK_SIZE=BLOCK_SIZE,
         )
+        _apply_grammar_bitmask_torch(
+            logits,
+            logits_indices,
+            bitmask,
+            vocab_size,
+        )
 
         # Ensure the copy stream waits for the device tensors to finish being used
         # before it re-uses or deallocates them
         self.copy_stream.wait_stream(current_stream)
 
+def _apply_grammar_bitmask_torch(
+    logits: torch.Tensor,
+    logits_indices: torch.Tensor,
+    bitmask: torch.Tensor,
+    vocab_size: int,
+) -> None:
+    """纯 torch 版本，替换 `_apply_grammar_bitmask_kernel`（平台不支持 triton）。
+
+    bitmask 为按 32bit 打包的允许位图：bit=1 表示该 token 允许，bit=0 表示禁止。
+    对每个 mask 行 bitmask_idx，取出对应 logits 行 logits_indices[bitmask_idx]，
+    把被禁止（bit=0）的 token 对应 logits 置为 -inf。
+    """
+    num_masks = bitmask.shape[0]
+    device = logits.device
+    shifts = torch.arange(32, device=device, dtype=torch.int32)
+
+    bits = (bitmask.unsqueeze(-1) >> shifts) & 1  # [num_masks, num_words, 32]
+    allowed = bits.reshape(num_masks, -1)[:, :vocab_size].to(torch.bool)
+    disallowed = ~allowed
+
+    rows = logits_indices.long()
+    sub = logits.index_select(0, rows)
+    sub[disallowed] = -float("inf")
+    logits.index_copy_(0, rows, sub)
 
 # Adapted from
 # https://github.com/mlc-ai/xgrammar/blob/main/python/xgrammar/kernels/apply_token_bitmask_inplace_triton.py

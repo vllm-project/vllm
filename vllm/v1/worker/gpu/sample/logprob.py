@@ -12,6 +12,20 @@ from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 # Upper bound on the topk kernel's per-iteration gather width.
 _MAX_TOPK_BLOCK = 1024
 
+def _topk_log_softmax_torch(
+    logprobs: torch.Tensor,
+    logits: torch.Tensor,
+    token_ids: torch.Tensor,
+) -> None:
+    """纯 torch 版本，替换 `_topk_log_softmax_kernel`（平台不支持 triton）。
+
+    对每行计算 log_softmax，并只取出 token_ids 指定位置的 logprob 写入 logprobs。
+    等价于原 kernel 的 logits - max - log(sum exp(logits - max))。
+    """
+    logits_f = logits.to(torch.float32)
+    lse = torch.logsumexp(logits_f, dim=1, keepdim=True)  # [batch, 1]
+    gathered = torch.gather(logits_f, 1, token_ids.to(torch.int64))
+    logprobs.copy_((gathered - lse).to(logprobs.dtype))
 
 @triton.jit
 def _topk_log_softmax_kernel(
@@ -56,6 +70,19 @@ def _topk_log_softmax_kernel(
         o = logits - max_val - lse
         tl.store(output_ptr + req_idx * topk + k_offset, o, mask=k_mask)
 
+def _ranks_torch(
+    token_ranks: torch.Tensor,
+    logits: torch.Tensor,
+    token_ids: torch.Tensor,
+) -> None:
+    """纯 torch 版本，替换 `_ranks_kernel`（平台不支持 triton）。
+
+    对每行取出 token_ids 指定 token 的 logit x，统计该行中 logit >= x 的 token 数量，
+    即该 token 的排名（含自身，1-based），写入 token_ranks。
+    """
+    x = torch.gather(logits, 1, token_ids.view(-1, 1).to(torch.int64))  # [batch, 1]
+    ranks = (logits >= x).sum(dim=1)  # [batch]
+    token_ranks.copy_(ranks.to(token_ranks.dtype))
 
 @triton.jit
 def _ranks_kernel(
@@ -103,6 +130,7 @@ def compute_token_logprobs(
         BLOCK_SIZE=1024,  # type: ignore
         TOPK_BLOCK_SIZE=topk_block_size,
     )
+    _topk_log_softmax_torch(logprobs, logits, token_ids)
     return logprobs
 
 
@@ -177,6 +205,7 @@ def compute_topk_scores(
         vocab_size,
         BLOCK_SIZE=8192,  # type: ignore
     )
+    _ranks_torch(token_ranks, logits, sampled_token_ids)
     return LogprobsTensors(
         logprob_token_ids=logprob_token_ids,
         logprobs=scores,

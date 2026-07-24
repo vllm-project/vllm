@@ -96,6 +96,67 @@ class BadWordsState:
             max_num_bad_words,
         )
 
+def _bad_words_torch(
+    logits: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    bad_word_token_ids: torch.Tensor,
+    bad_word_offsets: torch.Tensor,
+    num_bad_words: torch.Tensor,
+    all_token_ids: torch.Tensor,
+    prompt_len: torch.Tensor,
+    total_len: torch.Tensor,
+    input_ids: torch.Tensor,
+    expanded_local_pos: torch.Tensor,
+) -> None:
+    """纯 torch 版本，替换 `_bad_words_kernel`（平台不支持 triton）。
+
+    对每个 token_idx 对应的请求 req_state_idx，逐个 bad word 检查：
+    - 若该 bad word 的前缀（除最后一个 token 外）与当前生成序列的结尾完全匹配，
+      则把最后一个 token 的 logits 置为 -inf。
+    序列结尾的 token 从已生成的 output（all_token_ids 中 prompt_len 之后）或
+    speculative 输入（input_ids）中取，与原 kernel 的取值逻辑一致。
+    """
+    num_tokens = logits.shape[0]
+    for token_idx in range(num_tokens):
+        req = int(expanded_idx_mapping[token_idx])
+        n_bw = int(num_bad_words[req])
+        if n_bw == 0:
+            continue
+
+        pos = int(expanded_local_pos[token_idx])
+        cur_req_first_pos = token_idx - pos
+        p_len = int(prompt_len[req])
+        t_len = int(total_len[req])
+        output_len = t_len - p_len
+        effective_len = output_len + pos
+
+        offsets_row = bad_word_offsets[req]
+        tokens_row = bad_word_token_ids[req]
+        out_row = all_token_ids[req]  # output token 位于 prompt_len 之后
+
+        for bw_idx in range(n_bw):
+            start = int(offsets_row[bw_idx])
+            end = int(offsets_row[bw_idx + 1])
+            prefix_len = (end - start) - 1
+            if prefix_len > effective_len:
+                continue
+
+            last_token = int(tokens_row[end - 1])
+            match = True
+            for i in range(prefix_len):
+                expected = int(tokens_row[start + i])
+                actual_pos = effective_len - prefix_len + i
+                if actual_pos >= output_len:
+                    spec_offset = actual_pos - output_len
+                    actual = int(input_ids[cur_req_first_pos + spec_offset])
+                else:
+                    actual = int(out_row[p_len + actual_pos])
+                if expected != actual:
+                    match = False
+                    break
+
+            if match:
+                logits[token_idx][last_token] = -float("inf")
 
 @triton.jit
 def _bad_words_kernel(
@@ -187,6 +248,18 @@ def apply_bad_words(
         num_bad_words,
         all_token_ids,
         all_token_ids.stride(0),
+        prompt_len,
+        total_len,
+        input_ids,
+        expanded_local_pos,
+    )
+    _bad_words_torch(
+        logits,
+        expanded_idx_mapping,
+        bad_word_token_ids,
+        bad_word_offsets,
+        num_bad_words,
+        all_token_ids,
         prompt_len,
         total_len,
         input_ids,
