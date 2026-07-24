@@ -279,6 +279,20 @@ class TestEngineRegistry:
         )
         assert isinstance(engine, SparseNCCLWeightTransferEngine)
 
+    def test_create_engine_wpi(self):
+        from vllm.distributed.weight_transfer.wpi_engine import (
+            WPIWeightTransferEngine,
+        )
+
+        config = WeightTransferConfig(backend="wpi")
+        engine = WeightTransferEngineFactory.create_engine(
+            config,
+            create_mock_vllm_config(),
+            torch.device("cuda"),
+            MagicMock(spec=torch.nn.Module),
+        )
+        assert isinstance(engine, WPIWeightTransferEngine)
+
     def test_create_engine_invalid_backend(self):
         config = WeightTransferConfig(backend="invalid")
         with pytest.raises(ValueError, match="Invalid weight transfer backend"):

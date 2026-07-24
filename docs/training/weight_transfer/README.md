@@ -18,6 +18,7 @@ The weight transfer system follows a **four-phase protocol** with a pluggable ba
 | [NCCL](nccl.md) | NCCL broadcast | Separate GPUs for training and inference |
 | [IPC](ipc.md) | CUDA IPC handles | Colocated training and inference on same GPU |
 | [sparse_nccl](nccl.md#sparse-nccl) | NCCL broadcast | Sparse flat-index weight patches (TP=1/PP=1) |
+| [WPI](wpi.md) | WPI / NCCL | Zero-copy multi-node weight propagation |
 
 ## Configuration
 
@@ -31,7 +32,7 @@ from vllm.config import WeightTransferConfig
 
 llm = LLM(
     model="my-model",
-    weight_transfer_config=WeightTransferConfig(backend="nccl"),  # or "ipc"
+    weight_transfer_config=WeightTransferConfig(backend="nccl"),  # or "ipc" or "wpi"
 )
 ```
 
@@ -42,7 +43,7 @@ vllm serve my-model \
     --weight-transfer-config '{"backend": "nccl"}'
 ```
 
-The `backend` field accepts `"nccl"` (default), `"ipc"`, or `"sparse_nccl"`.
+The `backend` field accepts `"nccl"` (default), `"ipc"`, `"sparse_nccl"`, or `"wpi"`.
 
 ## API Endpoints
 
@@ -63,7 +64,7 @@ When running vLLM as an HTTP server, the following endpoints are available for w
 
 ## Trainer-Side API
 
-Both backends provide static methods that the trainer calls to send weights. The general pattern is:
+All backends provide static methods that the trainer calls to send weights. The general pattern is:
 
 ```python
 # 1. Initialize the transfer engine (backend-specific)
@@ -82,7 +83,7 @@ EngineClass.trainer_send_weights(
 llm.finish_weight_update()
 ```
 
-See the [NCCL](nccl.md) and [IPC](ipc.md) pages for backend-specific trainer APIs and full examples.
+See the [NCCL](nccl.md), [IPC](ipc.md), and [WPI](wpi.md) pages for backend-specific trainer APIs and full examples.
 
 ## Extending the System
 

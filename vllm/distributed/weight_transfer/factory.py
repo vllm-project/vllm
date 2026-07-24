@@ -228,3 +228,9 @@ WeightTransferEngineFactory.register_engine(
     "vllm.distributed.weight_transfer.sparse_nccl_engine",
     "SparseNCCLWeightTransferEngine",
 )
+
+WeightTransferEngineFactory.register_engine(
+    "wpi",
+    "vllm.distributed.weight_transfer.wpi_engine",
+    "WPIWeightTransferEngine",
+)
