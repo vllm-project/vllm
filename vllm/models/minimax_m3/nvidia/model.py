@@ -70,7 +70,10 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
-from vllm.models.minimax_m3.common.indexer import MiniMaxM3Indexer
+from vllm.models.minimax_m3.common.indexer import (
+    MiniMaxM3Indexer,
+    select_indexer_impl_cls,
+)
 from vllm.models.minimax_m3.common.mm_preprocess import (
     MiniMaxM3VLDummyInputsBuilder,
     MiniMaxM3VLMultiModalProcessor,
@@ -787,24 +790,23 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         else:
             self.embed_tokens = PPMissingLayer()
 
-        # Reserved top-k indices buffer shared by all sparse-attention indexer
-        # layers (mirrors DeepseekV4); kept at a stable address so the indexer's
-        # top-k output survives cudagraph capture/replay. Token-major
-        # [total_q, num_index_heads, topk] so the indexer writes its native
-        # [token, head, topk] top-k; the attend transposes to [H, tokens, topk].
+        # Reserved top-k indices buffer shared by all sparse-attention layers.
         sparse_cfg = getattr(config, "sparse_attention_config", None)
         if sparse_cfg is not None:
             tp_size = get_tensor_model_parallel_world_size()
             num_index_heads = max(1, sparse_cfg["sparse_num_index_heads"] // tp_size)
-            # Pad tokens to a multiple of 4 so the buffer head stride stays
-            # int4-aligned for build_k2q_csr's vectorised int4 loads.
             max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
             padded_num_tokens = (max_num_batched_tokens + 3) // 4 * 4
+            indexer_impl_cls = select_indexer_impl_cls(
+                topk_blocks=sparse_cfg["sparse_topk_blocks"],
+                indexer_kv_dtype=vllm_config.attention_config.indexer_kv_dtype,
+            )
+            if indexer_impl_cls.topk_indices_buffer_layout == "token_major":
+                buffer_shape = (padded_num_tokens, num_index_heads)
+            else:
+                buffer_shape = (num_index_heads, padded_num_tokens)
             self.topk_indices_buffer = torch.empty(
-                padded_num_tokens,
-                num_index_heads,
-                sparse_cfg["sparse_topk_blocks"],
-                dtype=torch.int32,
+                *buffer_shape, sparse_cfg["sparse_topk_blocks"], dtype=torch.int32
             )
         else:
             self.topk_indices_buffer = None
