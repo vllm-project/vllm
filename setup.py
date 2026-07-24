@@ -503,13 +503,14 @@ class precompiled_wheel_utils:
 
     @staticmethod
     def fetch_metadata_for_variant(
-        commit: str, variant: str | None
+        commit: str, variant: str | None, *, rocm: bool = False
     ) -> tuple[list[dict], str]:
         """
         Fetches metadata for a specific variant of the precompiled wheel.
         """
         variant_dir = f"{variant}/" if variant is not None else ""
-        repo_url = f"https://wheels.vllm.ai/{commit}/{variant_dir}vllm/"
+        commit_prefix = f"rocm/{commit}" if rocm else commit
+        repo_url = f"https://wheels.vllm.ai/{commit_prefix}/{variant_dir}vllm/"
         meta_url = repo_url + "metadata.json"
         print(f"Trying to fetch nightly build metadata from {meta_url}")
         from urllib.request import urlopen
@@ -579,6 +580,96 @@ class precompiled_wheel_utils:
         return variant
 
     @staticmethod
+    def rocm_version_to_variant(rocm_version: str) -> str:
+        """Convert a ROCm version string to a wheel variant, e.g. 7.2.3 -> rocm723."""
+        return "rocm" + rocm_version.replace(".", "")
+
+    @staticmethod
+    def detect_system_rocm_variant() -> str | None:
+        """Auto-detect the ROCm wheel variant from the installed ROCm stack."""
+        rocm_version = get_rocm_version()
+        if not rocm_version:
+            try:
+                import torch
+
+                rocm_version = torch.version.hip
+            except Exception:
+                pass
+        if not rocm_version:
+            return None
+        variant = precompiled_wheel_utils.rocm_version_to_variant(rocm_version)
+        print(f"Detected ROCm {rocm_version}, using variant {variant}")
+        return variant
+
+    @staticmethod
+    def fetch_available_rocm_variants(commit: str) -> list[str]:
+        """List ROCm wheel variants published for a commit on wheels.vllm.ai."""
+        from urllib.request import urlopen
+
+        index_url = f"https://wheels.vllm.ai/rocm/{commit}/"
+        print(f"Fetching available ROCm variants from {index_url}")
+        try:
+            with urlopen(index_url) as resp:
+                html = resp.read().decode("utf-8")
+        except Exception as e:
+            logger.warning(
+                "Failed to fetch ROCm variant index for commit %s: %s", commit, e
+            )
+            return []
+        variants = sorted(set(re.findall(r"rocm\d+", html)))
+        print(f"Available ROCm variants for commit {commit}: {variants}")
+        return variants
+
+    @staticmethod
+    def resolve_rocm_wheel_variant(
+        commit: str, variant_override: str | None
+    ) -> str | None:
+        """Resolve a ROCm wheel variant for a commit from wheels.vllm.ai."""
+        env_variant = precompiled_wheel_utils.detect_system_rocm_variant()
+        available = precompiled_wheel_utils.fetch_available_rocm_variants(commit)
+
+        if variant_override is not None:
+            if env_variant and variant_override != env_variant:
+                logger.warning(
+                    "VLLM_PRECOMPILED_WHEEL_VARIANT=%s does not match the "
+                    "detected environment ROCm variant %s; refusing to use a "
+                    "different ROCm patch wheel",
+                    variant_override,
+                    env_variant,
+                )
+                return None
+            if available and variant_override not in available:
+                logger.warning(
+                    "Requested ROCm variant %s is not available for commit %s "
+                    "(available: %s)",
+                    variant_override,
+                    commit,
+                    available,
+                )
+                return None
+            return variant_override
+
+        if env_variant is None:
+            if available:
+                print(
+                    "Could not detect ROCm version from the environment; "
+                    f"available variants for commit {commit}: {available}"
+                )
+            return None
+
+        if env_variant in available:
+            return env_variant
+
+        logger.warning(
+            "Environment ROCm variant %s is not available for commit %s "
+            "(available: %s). Precompiled wheels may not be compatible.",
+            env_variant,
+            commit,
+            available,
+        )
+        return None
+
+    @staticmethod
     def find_local_rocm_wheel() -> str | None:
         """Search for a local vllm wheel in common locations."""
         import glob
@@ -635,6 +726,54 @@ class precompiled_wheel_utils:
             print(f"Found local ROCm wheel: {local_wheel}")
             return local_wheel, None
 
+        import platform
+
+        arch = platform.machine()
+        commit = os.getenv("VLLM_PRECOMPILED_WHEEL_COMMIT", "").lower()
+        if not commit or len(commit) != 40:
+            print(
+                f"VLLM_PRECOMPILED_WHEEL_COMMIT not valid: {commit}"
+                ", trying to fetch base commit in main branch"
+            )
+            commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
+        variant = precompiled_wheel_utils.resolve_rocm_wheel_variant(
+            commit, os.getenv("VLLM_PRECOMPILED_WHEEL_VARIANT", None)
+        )
+        print(f"Using precompiled ROCm wheel commit {commit} with variant {variant}")
+        wheels, repo_url = None, None
+        if variant is not None:
+            try:
+                wheels, repo_url = precompiled_wheel_utils.fetch_metadata_for_variant(
+                    commit, variant, rocm=True
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to fetch ROCm wheel metadata for variant %s: %s",
+                    variant,
+                    e,
+                )
+        if wheels is not None and repo_url is not None:
+            from urllib.parse import urljoin
+
+            for wheel in wheels:
+                if wheel.get("package_name") == "vllm" and arch in wheel.get(
+                    "platform_tag", ""
+                ):
+                    print(f"Found precompiled wheel metadata: {wheel}")
+                    if "path" not in wheel:
+                        raise ValueError(f"Wheel metadata missing path: {wheel}")
+                    wheel_url = urljoin(repo_url, wheel["path"])
+                    download_filename = wheel.get("filename")
+                    print(f"Using precompiled wheel URL: {wheel_url}")
+                    return wheel_url, download_filename
+            logger.warning(
+                "No precompiled vllm wheel found for architecture %s "
+                "from repo %s. All available wheels: %s",
+                arch,
+                repo_url,
+                wheels,
+            )
+
         # Fall back to AMD's PyPI index
         index_url = os.getenv(
             "VLLM_ROCM_WHEEL_INDEX", "https://pypi.amd.com/vllm-rocm/simple"
@@ -665,8 +804,7 @@ class precompiled_wheel_utils:
             print(f"Using user-specified precompiled wheel location: {wheel_location}")
             return wheel_location, None
         else:
-            # ROCm: use local wheel or AMD's PyPI index
-            # TODO: When we have ROCm nightly wheels, we can update this logic.
+            # ROCm: resolve wheels from wheels.vllm.ai with environment-matched variant
             if precompiled_wheel_utils.is_rocm_system():
                 return precompiled_wheel_utils.determine_wheel_url_rocm()
 
