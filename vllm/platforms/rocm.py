@@ -877,6 +877,10 @@ class RocmPlatform(Platform):
         )
 
     @classmethod
+    def get_eplb_backend_cls(cls) -> str:
+        return "vllm.distributed.eplb.cuda_platform_backend.CudaEplbPlatformBackend"
+
+    @classmethod
     def supports_mx(cls) -> bool:
         return any(gfx in _GCN_ARCH for gfx in ["gfx95"])
 

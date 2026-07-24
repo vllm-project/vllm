@@ -558,6 +558,10 @@ class CudaPlatformBase(Platform):
         )
 
     @classmethod
+    def get_eplb_backend_cls(cls) -> str:
+        return "vllm.distributed.eplb.cuda_platform_backend.CudaEplbPlatformBackend"
+
+    @classmethod
     def supports_fp8(cls) -> bool:
         return cls.has_device_capability(89)
 
