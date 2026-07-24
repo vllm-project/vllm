@@ -27,6 +27,7 @@ from vllm.model_executor.layers.fused_moe import (
     UnquantizedFusedMoEMethod,
 )
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
@@ -531,6 +532,34 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             allow_vllm_cutlass=False,
         )
 
+    def maybe_roundup_sizes(
+        self,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        act_dtype: torch.dtype,
+        moe_parallel_config: FusedMoEParallelConfig,
+    ) -> tuple[int, int]:
+        """Round up ``intermediate_size_per_partition`` to a multiple of
+        ``block_n`` for block-quantized MoE so the block-wise weight scales
+        shard cleanly under TP. Padded rows are zero-filled and the loader
+        slices the checkpoint block-aligned (see
+        ``RoutedExperts._load_w13``/``_load_w2``), so the padding does not
+        affect the result. No-op for non-block-quant methods.
+        """
+        hidden_size, intermediate_size_per_partition = super().maybe_roundup_sizes(
+            hidden_size=hidden_size,
+            intermediate_size_per_partition=intermediate_size_per_partition,
+            act_dtype=act_dtype,
+            moe_parallel_config=moe_parallel_config,
+        )
+        if self.block_quant:
+            assert self.weight_block_size is not None
+            block_n = self.weight_block_size[0]
+            intermediate_size_per_partition = (
+                (intermediate_size_per_partition + block_n - 1) // block_n
+            ) * block_n
+        return hidden_size, intermediate_size_per_partition
+
     def create_weights(
         self,
         layer: RoutedExperts,
@@ -543,6 +572,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         layer.num_experts = num_experts
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
+        # When block-quant padding rounded the per-partition intermediate size
+        # up, the loader must slice the checkpoint with the padded,
+        # block-aligned per-rank size so weights and block scales stay aligned.
+        # No-op when no padding happened (padded == intermediate // tp_size).
+        layer.block_aligned_tp_shard = self.block_quant
 
         assert self.quant_config.is_checkpoint_fp8_serialized
         params_dtype = torch.float8_e4m3fn
@@ -575,7 +609,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
-            torch.empty(
+            torch.zeros(
                 num_experts,
                 2 * intermediate_size_per_partition,
                 hidden_size,
@@ -587,7 +621,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
         w2_weight = torch.nn.Parameter(
-            torch.empty(
+            torch.zeros(
                 num_experts,
                 hidden_size,
                 intermediate_size_per_partition,
