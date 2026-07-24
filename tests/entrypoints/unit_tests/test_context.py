@@ -74,7 +74,7 @@ class FakeHarmonyParser(HarmonyParser):
         self.reasoning_parser = None
         self.tool_parser = None
         self._chunk_results: list[ChunkResult] = []
-        self._flush_results: list[list[Segment]] = []
+        self._flush_results: list[Segment | None] = []
         self.processed_chunks: list[list[int]] = []
 
     def enqueue_chunk_result(
@@ -89,7 +89,7 @@ class FakeHarmonyParser(HarmonyParser):
             )
         )
 
-    def enqueue_flush_result(self, segment: list[Segment]) -> None:
+    def enqueue_flush_result(self, segment: Segment | None) -> None:
         self._flush_results.append(segment)
 
     def process_chunk(self, token_ids) -> ChunkResult:
@@ -98,10 +98,10 @@ class FakeHarmonyParser(HarmonyParser):
             return self._chunk_results.pop(0)
         return ChunkResult(segments=[], reasoning_token_count=0)
 
-    def flush(self) -> list[Segment]:
+    def flush(self) -> Segment | None:
         if self._flush_results:
             return self._flush_results.pop(0)
-        return []
+        return None
 
 
 def make_harmony_context(
@@ -598,21 +598,13 @@ async def test_streaming_message_synchronization():
         content=[TextContent(text=response_text)],
         recipient=Role.USER,
     )
-    flush_segments = [
-        Segment(
-            channel="final",
-            recipient=None,
-            delta=response_text,
-            completed_message=None,
-        ),
-        Segment(
-            channel="final",
-            recipient=None,
-            delta="",
-            completed_message=message,
-        ),
-    ]
-    parser.enqueue_flush_result(flush_segments)
+    flush_segment = Segment(
+        channel="commentary",
+        recipient=None,
+        delta="",
+        completed_message=message,
+    )
+    parser.enqueue_flush_result(flush_segment)
 
     # Create another output to trigger synchronization via flush()
     context.append_output(
@@ -626,9 +618,8 @@ async def test_streaming_message_synchronization():
     assert context.num_init_messages == 1
     assert context._messages[2].content[0].text == response_text
     assert context.last_append_flush_status is True
-    assert len(context.last_append_segments) == 2
-    assert context.last_append_segments[-2].delta == response_text
-    assert context.last_append_segments[-1].completed_message is message
+    assert len(context.last_append_segments) == 1
+    assert context.last_append_segments[0].completed_message is message
 
 
 def test_turn_metrics_copy_and_reset():
