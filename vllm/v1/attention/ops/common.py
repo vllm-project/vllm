@@ -235,6 +235,48 @@ def cp_lse_ag_out_rs(
     return out
 
 
+def cp_lse_ag_out_rs_batch(
+    cp_attn_out: torch.Tensor,
+    cp_attn_lse: torch.Tensor,
+    cp_group: GroupCoordinator,
+    ctx: CPTritonContext | None = None,
+    return_lse: bool = False,
+    is_lse_base_on_e=True,
+):
+    """LSE-correct partial outputs and reduce-scatter their batch dimension.
+
+    Every rank must provide partial attention outputs for the same rank-major
+    rows. The leading dimension is split evenly so rank ``r`` receives the
+    original rows for source rank ``r``.
+    """
+    if cp_group.world_size == 1:
+        if return_lse:
+            return cp_attn_out, cp_attn_lse
+        return cp_attn_out
+    if cp_attn_out.shape[0] % cp_group.world_size != 0:
+        raise ValueError(
+            "Batch LSE reduce-scatter requires a leading dimension divisible "
+            f"by the CP world size, got {cp_attn_out.shape[0]} rows and "
+            f"world size {cp_group.world_size}."
+        )
+
+    out, lse = _cp_lse_common(
+        cp_attn_out,
+        cp_attn_lse,
+        cp_group,
+        ctx=ctx,
+        is_lse_base_on_e=is_lse_base_on_e,
+    )
+    out = cp_group.reduce_scatter(out, dim=0)
+
+    if return_lse:
+        rows_per_rank = lse.shape[0] // cp_group.world_size
+        rank = cp_group.rank_in_group
+        lse = lse[rows_per_rank * rank : rows_per_rank * (rank + 1)]
+        return out, lse
+    return out
+
+
 def cp_lse_ag_out_ar(
     cp_attn_out: torch.Tensor,
     cp_attn_lse: torch.Tensor,

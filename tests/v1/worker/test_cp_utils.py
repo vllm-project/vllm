@@ -1,10 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
+
 import pytest
 import torch
 
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
-from vllm.v1.worker.cp_utils import should_skip_dcp_context_attention
+from vllm.v1.worker.cp_utils import (
+    check_attention_cp_compatibility,
+    should_skip_dcp_context_attention,
+)
 
 
 def test_skip_gate_only_for_zero_context():
@@ -12,6 +17,30 @@ def test_skip_gate_only_for_zero_context():
     assert not should_skip_dcp_context_attention(
         torch.tensor([0, 5, 0], dtype=torch.int32)
     )
+
+
+def test_dcp_compatibility_accepts_layer_internal_decode(monkeypatch):
+    layer = SimpleNamespace(
+        impl=SimpleNamespace(
+            need_to_return_lse_for_decode=False,
+            supports_mtp_with_cp_non_trivial_interleave_size=False,
+        ),
+        handles_dcp_decode_internally=True,
+    )
+    monkeypatch.setattr(
+        "vllm.v1.worker.cp_utils.get_layers_from_vllm_config",
+        lambda *_args, **_kwargs: {"layer": layer},
+    )
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=2,
+            cp_kv_cache_interleave_size=1,
+        ),
+        speculative_config=None,
+    )
+
+    check_attention_cp_compatibility(config)
 
 
 @pytest.mark.parametrize(

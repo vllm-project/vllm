@@ -18,12 +18,14 @@ def test_block_ids_are_not_overwritten_while_copy_is_in_flight():
     # in-flight copy behavior without constructing model attention groups.
     zeroer = KVBlockZeroer.__new__(KVBlockZeroer)
     zeroer.device = device
-    zeroer._meta = (
-        torch.tensor([storage.data_ptr()], dtype=torch.uint64, device=device),
-        page_size_el,
-        page_size_el,
-        1,
-    )
+    zeroer._meta = [
+        (
+            torch.tensor([storage.data_ptr()], dtype=torch.uint64, device=device),
+            page_size_el,
+            page_size_el,
+            1,
+        )
+    ]
 
     stream = torch.cuda.Stream()
     with torch.cuda.stream(stream):
@@ -39,3 +41,36 @@ def test_block_ids_are_not_overwritten_while_copy_is_in_flight():
     assert torch.all(storage[1] == 0)
     assert torch.all(storage[2] == 0)
     assert torch.all(storage[3] == 1)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_heterogeneous_page_sizes_are_zeroed():
+    device = torch.device("cuda")
+    num_blocks = 4
+    narrow = torch.ones((num_blocks, 4), dtype=torch.int32, device=device)
+    wide = torch.ones((num_blocks, 8), dtype=torch.int32, device=device)
+
+    zeroer = KVBlockZeroer.__new__(KVBlockZeroer)
+    zeroer.device = device
+    zeroer._meta = [
+        (
+            torch.tensor([narrow.data_ptr()], dtype=torch.uint64, device=device),
+            4,
+            4,
+            1,
+        ),
+        (
+            torch.tensor([wide.data_ptr()], dtype=torch.uint64, device=device),
+            8,
+            8,
+            1,
+        ),
+    ]
+
+    zeroer.zero_block_ids([1, 3])
+    torch.cuda.synchronize(device)
+
+    assert torch.all(narrow[[0, 2]] == 1)
+    assert torch.all(narrow[[1, 3]] == 0)
+    assert torch.all(wide[[0, 2]] == 1)
+    assert torch.all(wide[[1, 3]] == 0)

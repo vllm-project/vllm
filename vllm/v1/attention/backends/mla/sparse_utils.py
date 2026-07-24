@@ -7,6 +7,494 @@ import torch
 from vllm.triton_utils import tl, triton
 
 
+@triton.jit
+def _build_rotated_dcp_peer_block_table_kernel(
+    gathered_block_tables_ptr,
+    out_ptr,
+    num_requests: tl.constexpr,
+    max_owner_pages: tl.constexpr,
+    dcp_size: tl.constexpr,
+    local_rank: tl.constexpr,
+    peer_block_stride: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    gathered_stride0,
+    gathered_stride1,
+    gathered_stride2,
+    out_stride0,
+    out_stride1,
+):
+    request = tl.program_id(0)
+    logical_page = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
+    max_logical_pages = dcp_size * max_owner_pages
+    page_mask = logical_page < max_logical_pages
+
+    owner = logical_page % dcp_size
+    owner_local_page = logical_page // dcp_size
+    owner_i64 = owner.to(tl.int64)
+    request_i64 = request.to(tl.int64)
+    owner_local_page_i64 = owner_local_page.to(tl.int64)
+    physical_block = tl.load(
+        gathered_block_tables_ptr
+        + owner_i64 * gathered_stride0
+        + request_i64 * gathered_stride1
+        + owner_local_page_i64 * gathered_stride2,
+        mask=page_mask,
+        other=-1,
+    )
+
+    # The rank-local VMM alias rotates segments so this rank is segment zero.
+    # Use int64 before multiplying by the padded peer stride: VMM allocations
+    # can make the intermediate address larger than signed int32 even though
+    # such an entry must fail closed in the int32 block table.
+    rotated_owner = (owner + dcp_size - local_rank) % dcp_size
+    peer_block = rotated_owner.to(tl.int64) * peer_block_stride + physical_block.to(
+        tl.int64
+    )
+    valid = (
+        page_mask
+        & (physical_block >= 0)
+        & (physical_block < peer_block_stride)
+        & (peer_block >= 0)
+        & (peer_block <= 2147483647)
+    )
+    tl.store(
+        out_ptr + request * out_stride0 + logical_page * out_stride1,
+        tl.where(valid, peer_block, -1).to(tl.int32),
+        mask=page_mask,
+    )
+
+
+def build_rotated_dcp_peer_block_table(
+    gathered_block_tables: torch.Tensor,
+    *,
+    local_rank: int,
+    peer_block_stride: int,
+    cp_kv_cache_interleave_size: int,
+    block_size: int,
+    BLOCK_N: int = 128,
+) -> torch.Tensor:
+    """Build a logical page table over a rank-local rotated DCP peer view.
+
+    ``gathered_block_tables`` has shape
+    ``[dcp_size, num_requests, max_owner_pages]``. Entry ``[owner, req, p]``
+    is the physical block assigned to owner-local logical page ``p`` for that
+    request. This helper supports the page-sharded layout where one interleave
+    is exactly one KV block:
+
+    .. code-block:: text
+
+        owner(logical_page) = logical_page % dcp_size
+        owner_page          = logical_page // dcp_size
+        output_block        = (
+            (owner - local_rank) % dcp_size
+        ) * peer_block_stride + physical_block
+
+    The result has shape ``[num_requests, dcp_size * max_owner_pages]`` and can
+    be passed to an attention kernel reading a rank-local rotated VMM alias.
+    Negative/padded entries, physical blocks outside their owner's padded
+    segment, and peer block IDs outside signed int32 map to ``-1``.
+
+    Inputs may be strided, but must be CUDA int32. Address arithmetic in the
+    Triton kernel is int64 even though the output block table remains int32.
+    """
+    if gathered_block_tables.dtype != torch.int32:
+        raise TypeError(
+            "gathered_block_tables must have dtype int32, got "
+            f"{gathered_block_tables.dtype}."
+        )
+    if gathered_block_tables.ndim != 3:
+        raise ValueError(
+            "gathered_block_tables must have shape "
+            "[dcp_size, num_requests, max_owner_pages], got "
+            f"{tuple(gathered_block_tables.shape)}."
+        )
+    dcp_size, num_requests, max_owner_pages = gathered_block_tables.shape
+    if dcp_size < 1:
+        raise ValueError("gathered_block_tables must contain at least one DCP owner.")
+    if not 0 <= local_rank < dcp_size:
+        raise ValueError(f"local_rank must be in [0, {dcp_size}), got {local_rank}.")
+    if peer_block_stride < 1:
+        raise ValueError(
+            f"peer_block_stride must be positive, got {peer_block_stride}."
+        )
+    if peer_block_stride > torch.iinfo(torch.int64).max // dcp_size:
+        raise ValueError("The rotated peer block-table address space exceeds int64.")
+    if block_size < 1:
+        raise ValueError(f"block_size must be positive, got {block_size}.")
+    if cp_kv_cache_interleave_size != block_size:
+        raise ValueError(
+            "Page-sharded DCP peer tables require "
+            "cp_kv_cache_interleave_size == block_size, got "
+            f"{cp_kv_cache_interleave_size} and {block_size}."
+        )
+    if BLOCK_N < 1 or BLOCK_N & (BLOCK_N - 1):
+        raise ValueError(f"BLOCK_N must be a positive power of two, got {BLOCK_N}.")
+    if gathered_block_tables.device.type != "cuda":
+        raise ValueError("Rotated DCP peer block-table conversion requires CUDA.")
+
+    max_logical_pages = dcp_size * max_owner_pages
+    out = torch.empty(
+        (num_requests, max_logical_pages),
+        dtype=torch.int32,
+        device=gathered_block_tables.device,
+    )
+    if num_requests > 0 and max_logical_pages > 0:
+        _build_rotated_dcp_peer_block_table_kernel[
+            (num_requests, triton.cdiv(max_logical_pages, BLOCK_N))
+        ](
+            gathered_block_tables,
+            out,
+            num_requests,
+            max_owner_pages,
+            dcp_size,
+            local_rank,
+            peer_block_stride,
+            BLOCK_N,
+            gathered_block_tables.stride(0),
+            gathered_block_tables.stride(1),
+            gathered_block_tables.stride(2),
+            out.stride(0),
+            out.stride(1),
+        )
+    return out
+
+
+@triton.jit
+def _convert_global_indices_to_dcp_peer_slots_kernel(
+    req_id_ptr,
+    block_table_ptr,
+    token_indices_ptr,
+    out_ptr,
+    valid_count_ptr,
+    num_requests: tl.constexpr,
+    max_num_blocks_per_req: tl.constexpr,
+    NUM_TOPK_TOKENS: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    COUNT_VALID: tl.constexpr,
+    DCP_SIZE: tl.constexpr,
+    DCP_INTERLEAVE: tl.constexpr,
+    PEER_BLOCK_STRIDE: tl.constexpr,
+    req_stride,
+    bt_stride0,
+    bt_stride1,
+    ti_stride0,
+    ti_stride1,
+    out_stride0,
+    out_stride1,
+):
+    token_id = tl.program_id(0)
+    column = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
+    column_mask = column < NUM_TOPK_TOKENS
+
+    req = tl.load(req_id_ptr + token_id * req_stride)
+    token = tl.load(
+        token_indices_ptr + token_id * ti_stride0 + column * ti_stride1,
+        mask=column_mask,
+        other=-1,
+    )
+    owner = (token // DCP_INTERLEAVE) % DCP_SIZE
+    local = (
+        token // (DCP_SIZE * DCP_INTERLEAVE)
+    ) * DCP_INTERLEAVE + token % DCP_INTERLEAVE
+    logical_block = local // BLOCK_SIZE
+    block_offset = local % BLOCK_SIZE
+
+    valid = (
+        column_mask
+        & (token >= 0)
+        & (req >= 0)
+        & (req < num_requests)
+        & (logical_block >= 0)
+        & (logical_block < max_num_blocks_per_req)
+    )
+    physical_block = tl.load(
+        block_table_ptr + req * bt_stride0 + logical_block * bt_stride1,
+        mask=valid,
+        other=-1,
+    )
+    valid &= (physical_block >= 0) & (physical_block < PEER_BLOCK_STRIDE)
+    peer_slot = (owner * PEER_BLOCK_STRIDE + physical_block) * BLOCK_SIZE + block_offset
+    output = tl.where(valid, peer_slot, -1)
+    tl.store(
+        out_ptr + token_id * out_stride0 + column * out_stride1,
+        output,
+        mask=column_mask,
+    )
+
+    if COUNT_VALID:
+        tl.atomic_add(
+            valid_count_ptr + token_id,
+            tl.sum(valid.to(tl.int32)),
+        )
+
+
+def convert_global_indices_to_dcp_peer_slots(
+    req_id: torch.Tensor,
+    block_table: torch.Tensor,
+    token_indices: torch.Tensor,
+    dcp_size: int,
+    blocks_per_peer: int,
+    cp_kv_cache_interleave_size: int = 1,
+    block_size: int = 64,
+    BLOCK_N: int = 128,
+    return_valid_counts: bool = False,
+    out: torch.Tensor | None = None,
+    valid_counts_out: torch.Tensor | None = None,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    """Map global sparse token indices into a rank-major DCP peer view.
+
+    DCP assigns groups of ``cp_kv_cache_interleave_size`` consecutive tokens
+    round-robin across ranks. Each owner stores its tokens de-interleaved in a
+    local logical sequence. ``block_table`` maps that local logical sequence to
+    physical blocks in one peer's allocation.
+
+    The peer view is laid out as ``[dcp_rank, physical_block, block_offset]``.
+    ``blocks_per_peer`` is its rank stride in physical blocks (including any
+    VMM padding), so a valid global token index ``t`` maps as follows::
+
+        owner = (t // interleave) % dcp_size
+        local = (t // (dcp_size * interleave)) * interleave + t % interleave
+        physical_block = block_table[request, local // block_size]
+        peer_slot = (
+            owner * blocks_per_peer + physical_block
+        ) * block_size + local % block_size
+
+    Invalid token indices, out-of-range requests or logical blocks, and invalid
+    physical block-table entries map to ``-1``. The returned tensor has the same
+    shape and ``int32`` dtype as ``token_indices``. When
+    ``return_valid_counts`` is true, the kernel also returns the number of valid
+    peer slots in each row.
+
+    The conversion is one Triton pass. It accepts strided inputs directly.
+    Callers may supply persistent ``out`` and ``valid_counts_out`` buffers to
+    reuse the translated slots across layers. ``valid_counts_out`` is cleared
+    before the kernel because each column tile atomically contributes its count.
+    """
+    if dcp_size < 1:
+        raise ValueError(f"dcp_size must be positive, got {dcp_size}.")
+    if blocks_per_peer < 1:
+        raise ValueError(f"blocks_per_peer must be positive, got {blocks_per_peer}.")
+    if cp_kv_cache_interleave_size < 1:
+        raise ValueError(
+            "cp_kv_cache_interleave_size must be positive, got "
+            f"{cp_kv_cache_interleave_size}."
+        )
+    if block_size < cp_kv_cache_interleave_size or (
+        block_size % cp_kv_cache_interleave_size != 0
+    ):
+        raise ValueError(
+            f"block_size ({block_size}) must be greater than or equal to and "
+            "divisible by cp_kv_cache_interleave_size "
+            f"({cp_kv_cache_interleave_size})."
+        )
+    if dcp_size * blocks_per_peer * block_size > torch.iinfo(torch.int32).max:
+        raise ValueError("Rank-major peer slots do not fit in int32.")
+    if BLOCK_N < 1 or BLOCK_N & (BLOCK_N - 1):
+        raise ValueError(f"BLOCK_N must be a positive power of two, got {BLOCK_N}.")
+    if req_id.dtype != torch.int32:
+        raise TypeError(f"req_id must have dtype int32, got {req_id.dtype}.")
+    if block_table.dtype != torch.int32:
+        raise TypeError(f"block_table must have dtype int32, got {block_table.dtype}.")
+    if token_indices.dtype != torch.int32:
+        raise TypeError(
+            f"token_indices must have dtype int32, got {token_indices.dtype}."
+        )
+    if req_id.ndim != 1:
+        raise ValueError(f"req_id must be 1D, got shape {tuple(req_id.shape)}.")
+    if block_table.ndim != 2:
+        raise ValueError(
+            f"block_table must be 2D, got shape {tuple(block_table.shape)}."
+        )
+    if token_indices.ndim != 2:
+        raise ValueError(
+            f"token_indices must be 2D, got shape {tuple(token_indices.shape)}."
+        )
+    if req_id.shape[0] != token_indices.shape[0]:
+        raise ValueError(
+            f"req_id ({req_id.shape[0]}) and token_indices "
+            f"({token_indices.shape[0]}) must have the same row count."
+        )
+    if block_table.shape[0] == 0 or block_table.shape[1] == 0:
+        raise ValueError("block_table must have at least one row and one column.")
+    if token_indices.shape[1] == 0:
+        raise ValueError("token_indices must contain at least one column.")
+    if not (req_id.device == block_table.device == token_indices.device):
+        raise ValueError("req_id, block_table, and token_indices must share a device.")
+    if token_indices.device.type != "cuda":
+        raise ValueError("DCP peer-slot conversion requires CUDA tensors.")
+
+    num_tokens, num_topk_tokens = token_indices.shape
+    if out is None:
+        out = torch.empty(
+            token_indices.shape,
+            dtype=torch.int32,
+            device=token_indices.device,
+        )
+    elif (
+        out.shape != token_indices.shape
+        or out.dtype != torch.int32
+        or out.device != token_indices.device
+    ):
+        raise ValueError(
+            "out must match token_indices shape, dtype, and device; got "
+            f"shape={tuple(out.shape)}, dtype={out.dtype}, device={out.device}."
+        )
+    elif out.numel() > 0 and out.data_ptr() == token_indices.data_ptr():
+        raise ValueError("out must not alias token_indices.")
+
+    valid_counts: torch.Tensor | None = None
+    if return_valid_counts:
+        if valid_counts_out is None:
+            valid_counts = torch.zeros(
+                num_tokens,
+                dtype=torch.int32,
+                device=token_indices.device,
+            )
+        elif (
+            valid_counts_out.shape != (num_tokens,)
+            or valid_counts_out.dtype != torch.int32
+            or valid_counts_out.device != token_indices.device
+        ):
+            raise ValueError(
+                "valid_counts_out must be a one-dimensional int32 tensor with "
+                f"{num_tokens} entries on {token_indices.device}; got "
+                f"shape={tuple(valid_counts_out.shape)}, "
+                f"dtype={valid_counts_out.dtype}, device={valid_counts_out.device}."
+            )
+        else:
+            valid_counts = valid_counts_out
+            valid_counts.zero_()
+    elif valid_counts_out is not None:
+        raise ValueError("valid_counts_out requires return_valid_counts=True.")
+
+    if num_tokens > 0:
+        _convert_global_indices_to_dcp_peer_slots_kernel[
+            (num_tokens, triton.cdiv(num_topk_tokens, BLOCK_N))
+        ](
+            req_id,
+            block_table,
+            token_indices,
+            out,
+            valid_counts,
+            block_table.shape[0],
+            block_table.shape[1],
+            num_topk_tokens,
+            block_size,
+            BLOCK_N,
+            return_valid_counts,
+            dcp_size,
+            cp_kv_cache_interleave_size,
+            blocks_per_peer,
+            req_id.stride(0),
+            block_table.stride(0),
+            block_table.stride(1),
+            token_indices.stride(0),
+            token_indices.stride(1),
+            out.stride(0),
+            out.stride(1),
+        )
+
+    if return_valid_counts:
+        assert valid_counts is not None
+        return out, valid_counts
+    return out
+
+
+@triton.jit
+def _filter_peer_slots_to_owner_local_kernel(
+    peer_slots_ptr,
+    local_slots_ptr,
+    valid_counts_ptr,
+    peer_slots_stride0,
+    peer_slots_stride1,
+    local_slots_stride0,
+    local_slots_stride1,
+    NUM_TOPK_TOKENS: tl.constexpr,
+    OWNER_SLOT_START: tl.constexpr,
+    OWNER_SLOT_STOP: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    row = tl.program_id(0)
+    columns = tl.arange(0, BLOCK_N)
+    column_mask = columns < NUM_TOPK_TOKENS
+    slots = tl.load(
+        peer_slots_ptr + row * peer_slots_stride0 + columns * peer_slots_stride1,
+        mask=column_mask,
+        other=-1,
+    )
+    valid = column_mask & (slots >= OWNER_SLOT_START) & (slots < OWNER_SLOT_STOP)
+    valid_int = valid.to(tl.int32)
+    compacted_columns = tl.cumsum(valid_int) - valid_int
+    tl.store(
+        local_slots_ptr
+        + row * local_slots_stride0
+        + compacted_columns * local_slots_stride1,
+        slots - OWNER_SLOT_START,
+        mask=valid,
+    )
+    tl.store(valid_counts_ptr + row, tl.sum(valid_int, axis=0))
+
+
+def filter_peer_slots_to_owner_local(
+    peer_slots: torch.Tensor,
+    *,
+    owner_rank: int,
+    dcp_world_size: int,
+    blocks_per_peer: int,
+    block_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Filter rank-major peer slots to one owner's local cache.
+
+    One Triton program handles a complete selected-token row, so prefix
+    compaction is stable and requires no atomics. The result is suitable for
+    FlashInfer's sparse MLA block-table input: valid local slots occupy
+    ``[0, valid_count)`` and the tail remains ``-1``.
+    """
+    if peer_slots.dtype != torch.int32 or peer_slots.ndim != 2:
+        raise ValueError("Owner-compute peer slots must be a 2D int32 tensor.")
+    if peer_slots.device.type != "cuda":
+        raise ValueError("Owner-compute peer-slot filtering requires CUDA.")
+    if dcp_world_size <= 1 or not 0 <= owner_rank < dcp_world_size:
+        raise ValueError("Owner-compute filtering requires a valid DCP owner.")
+    if blocks_per_peer <= 0 or block_size <= 0:
+        raise ValueError("Owner-compute peer stride and block size must be positive.")
+    if peer_slots.shape[1] == 0:
+        raise ValueError("Owner-compute selected-slot rows cannot be empty.")
+
+    rows, topk = peer_slots.shape
+    block_n = triton.next_power_of_2(topk)
+    if block_n > 65536:
+        raise ValueError(
+            f"Owner-compute top-k is too large for one Triton row: {topk}."
+        )
+    slots_per_peer = blocks_per_peer * block_size
+    owner_start = owner_rank * slots_per_peer
+    owner_stop = owner_start + slots_per_peer
+    local_slots = torch.full_like(peer_slots, -1)
+    valid_counts = torch.empty(
+        rows,
+        dtype=torch.int32,
+        device=peer_slots.device,
+    )
+    if rows > 0:
+        _filter_peer_slots_to_owner_local_kernel[(rows,)](
+            peer_slots,
+            local_slots,
+            valid_counts,
+            peer_slots.stride(0),
+            peer_slots.stride(1),
+            local_slots.stride(0),
+            local_slots.stride(1),
+            topk,
+            owner_start,
+            owner_stop,
+            block_n,
+            num_warps=8,
+        )
+    return local_slots, valid_counts
+
+
 # Kernel with prefill workspace support and valid count tracking
 @triton.jit
 def _convert_req_index_to_global_index_kernel(
@@ -81,7 +569,11 @@ def _convert_req_index_to_global_index_kernel(
     # Guard block_table access
     valid_block = (block_id < max_num_blocks_per_req) & (block_id >= 0)
     bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
-    is_invalid_tok |= ~valid_block | is_remote
+    # Dense prefill workspaces are addressed by the original global token ID,
+    # so owner-local paged-cache bounds and ownership do not apply to them.
+    # Applying these checks before the workspace override silently discarded
+    # valid long-context selections beyond one DCP owner's BlockTable width.
+    is_invalid_tok |= (~is_prefill) & (~valid_block | is_remote)
     base = tl.load(bt_ptr, mask=valid_block & ~is_prefill & ~is_remote, other=0)
     out_val = base * BLOCK_SIZE + inblock_off
 

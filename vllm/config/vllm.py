@@ -1456,6 +1456,10 @@ class VllmConfig:
                 "Modify KVEventsConfig.enable_kv_cache_events "
                 "to True to enable."
             )
+        if envs.VLLM_USE_PCP_OWNER_HISTORY and not self.use_v2_model_runner:
+            raise ValueError(
+                "Owner-sharded PCP history requires VLLM_USE_V2_MODEL_RUNNER=1."
+            )
         current_platform.check_and_update_config(self)
 
         if self.use_v2_model_runner:

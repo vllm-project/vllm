@@ -3,8 +3,17 @@
 
 import torch
 
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVQuantMode
-from vllm.v1.worker.gpu.attn_utils import _reshape_kv_cache
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheTensor,
+    KVQuantMode,
+)
+from vllm.v1.worker.gpu.attn_utils import (
+    _peer_cache_block_stride,
+    _reshape_kv_cache,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -25,6 +34,39 @@ class FakeFlashAttentionBackend:
     ) -> tuple[int, ...]:
         assert not include_num_layers_dimension
         return (0, 1, 2, 3, 4)
+
+
+def test_peer_cache_block_stride_uses_physical_page_size():
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=2,
+        dtype=torch.float32,
+        page_size_padded=384,
+    )
+    tensor = KVCacheTensor(size=3840, shared_by=["layer"])
+    config = KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[tensor],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer"], kv_cache_spec=spec)],
+    )
+
+    assert _peer_cache_block_stride(tensor, config) == 384
+
+
+def test_peer_cache_block_stride_uses_packed_stride():
+    tensor = KVCacheTensor(
+        size=8192,
+        shared_by=["layer"],
+        block_stride=2048,
+    )
+    config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[tensor],
+        kv_cache_groups=[],
+    )
+
+    assert _peer_cache_block_stride(tensor, config) == 2048
 
 
 class FakeHNDFlashAttentionBackend(FakeFlashAttentionBackend):

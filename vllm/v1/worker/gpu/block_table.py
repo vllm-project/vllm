@@ -172,10 +172,44 @@ class BlockTables:
         positions: torch.Tensor,
         num_tokens_padded: int,
         out: torch.Tensor | None = None,
+        owner_slot_mappings_out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         num_reqs = idx_mapping.shape[0]
         num_groups = self.num_kv_cache_groups
         slot_mappings = self.slot_mappings if out is None else out
+        emit_owner_slots = owner_slot_mappings_out is not None
+        if owner_slot_mappings_out is None:
+            # Triton still requires a valid pointer and strides when the
+            # compile-time branch is disabled.
+            owner_slot_mappings_out = slot_mappings
+            owner_group_stride = slot_mappings.stride(0)
+            owner_token_stride = slot_mappings.stride(1)
+        else:
+            expected_prefix = (num_groups, slot_mappings.shape[1])
+            if (
+                owner_slot_mappings_out.ndim != 3
+                or owner_slot_mappings_out.shape[:2] != expected_prefix
+                or owner_slot_mappings_out.shape[2] != 2
+            ):
+                raise ValueError(
+                    "Owner slot mappings must have shape "
+                    f"{expected_prefix + (2,)}, got "
+                    f"{tuple(owner_slot_mappings_out.shape)}."
+                )
+            if (
+                owner_slot_mappings_out.dtype != torch.int64
+                or owner_slot_mappings_out.device != slot_mappings.device
+            ):
+                raise ValueError(
+                    "Owner slot mappings must be int64 on the slot-mapping device."
+                )
+            if owner_slot_mappings_out.stride(2) != 1:
+                raise ValueError(
+                    "Owner slot mapping pairs must be contiguous in their last "
+                    "dimension."
+                )
+            owner_group_stride = owner_slot_mappings_out.stride(0)
+            owner_token_stride = owner_slot_mappings_out.stride(1)
         _compute_slot_mappings_kernel[(num_groups, num_reqs + 1)](
             slot_mappings.shape[1],
             idx_mapping,
@@ -186,9 +220,13 @@ class BlockTables:
             self.block_sizes_tensor,
             slot_mappings,
             slot_mappings.stride(0),
+            owner_slot_mappings_out,
+            owner_group_stride,
+            owner_token_stride,
             self.cp_rank,
             CP_SIZE=self.cp_size,
             CP_INTERLEAVE=self.cp_interleave,
+            EMIT_OWNER_SLOTS=emit_owner_slots,
             PAD_ID=PAD_SLOT_ID,
             TRITON_BLOCK_SIZE=1024,  # type: ignore
         )
@@ -257,9 +295,13 @@ def _compute_slot_mappings_kernel(
     block_sizes,  # [num_kv_cache_groups]
     slot_mappings_ptr,  # [num_kv_cache_groups, max_num_tokens]
     slot_mappings_stride,
+    owner_slot_mappings_ptr,  # [num_kv_cache_groups, max_num_tokens, 2]
+    owner_group_stride,
+    owner_token_stride,
     cp_rank,
     CP_SIZE: tl.constexpr,
     CP_INTERLEAVE: tl.constexpr,
+    EMIT_OWNER_SLOTS: tl.constexpr,
     PAD_ID: tl.constexpr,
     TRITON_BLOCK_SIZE: tl.constexpr,
 ):
@@ -276,7 +318,16 @@ def _compute_slot_mappings_kernel(
         actual_num_tokens = tl.load(query_start_loc + batch_idx)
         for i in range(actual_num_tokens, max_num_tokens, TRITON_BLOCK_SIZE):
             offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
-            tl.store(slot_mapping_ptr + offset, PAD_ID, mask=offset < max_num_tokens)
+            mask = offset < max_num_tokens
+            tl.store(slot_mapping_ptr + offset, PAD_ID, mask=mask)
+            if EMIT_OWNER_SLOTS:
+                owner_ptr = (
+                    owner_slot_mappings_ptr
+                    + group_id * owner_group_stride
+                    + offset * owner_token_stride
+                )
+                tl.store(owner_ptr, PAD_ID, mask=mask)
+                tl.store(owner_ptr + 1, PAD_ID, mask=mask)
         return
 
     block_table_ptr = _load_ptr(block_table_ptrs + group_id, tl.int32)
@@ -299,13 +350,28 @@ def _compute_slot_mappings_kernel(
         if CP_SIZE == 1:
             # Common case: Context parallelism is not used.
             slot_ids = block_numbers * block_size + block_offsets
+            owner_rank = tl.zeros_like(block_offsets)
+            owner_local_slot = slot_ids
         else:
             # Context parallelism is used.
-            is_local = block_offsets // CP_INTERLEAVE % CP_SIZE == cp_rank
+            owner_rank = block_offsets // CP_INTERLEAVE % CP_SIZE
+            is_local = owner_rank == cp_rank
             rounds = block_offsets // (CP_INTERLEAVE * CP_SIZE)
             remainder = block_offsets % CP_INTERLEAVE
             local_offsets = rounds * CP_INTERLEAVE + remainder
-            slot_ids = block_numbers * block_size + local_offsets
-            slot_ids = tl.where(is_local, slot_ids, PAD_ID)
+            owner_local_slot = block_numbers * block_size + local_offsets
+            slot_ids = tl.where(is_local, owner_local_slot, PAD_ID)
 
-        tl.store(slot_mapping_ptr + offset, slot_ids, mask=offset < end_idx)
+        mask = offset < end_idx
+        tl.store(slot_mapping_ptr + offset, slot_ids, mask=mask)
+        if EMIT_OWNER_SLOTS:
+            # DCP ranks receive replicated scheduler block IDs, so ownership
+            # and the owner-local slot can be emitted without gathering the
+            # rank-masked slot rows first.
+            owner_ptr = (
+                owner_slot_mappings_ptr
+                + group_id * owner_group_stride
+                + offset * owner_token_stride
+            )
+            tl.store(owner_ptr, owner_rank, mask=mask)
+            tl.store(owner_ptr + 1, owner_local_slot, mask=mask)

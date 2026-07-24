@@ -3,6 +3,7 @@
 """Custom Sparse Attention Indexer layers."""
 
 import torch
+import torch.distributed as dist
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -33,6 +34,10 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
+    DeepseekV32IndexerPrefillMetadata,
+)
+from vllm.v1.attention.backends.mla.sparse_utils import (
+    build_rotated_dcp_peer_block_table,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -122,6 +127,324 @@ def _merge_dcp_topk_global(
     stable_topk_from_gathered_candidates_cutedsl(
         gathered, topk_tokens, out=topk_indices
     )
+
+
+def _build_pcp_candidate_a2a_send_buffer(
+    packed: torch.Tensor,
+    source_ranks: torch.Tensor,
+    source_token_indices: torch.Tensor,
+    source_stride: int,
+    dcp_world_size: int,
+) -> torch.Tensor:
+    """Scatter route-order candidates into fixed destination-major slots."""
+    if packed.ndim != 3 or packed.shape[-1] != 2:
+        raise ValueError(
+            "Packed PCP candidates must have shape [rows, topk, 2], got "
+            f"{tuple(packed.shape)}."
+        )
+    if (
+        source_ranks.ndim != 1
+        or source_token_indices.ndim != 1
+        or source_ranks.shape[0] != packed.shape[0]
+        or source_token_indices.shape[0] != packed.shape[0]
+    ):
+        raise ValueError("PCP candidate source rows must align with packed rows.")
+    if source_stride <= 0 or dcp_world_size <= 1:
+        raise ValueError(
+            "PCP candidate all-to-all requires positive source stride and "
+            f"DCP world size > 1, got {source_stride=} and {dcp_world_size=}."
+        )
+
+    flat_destination_rows = (
+        source_ranks.to(torch.int64) * source_stride + source_token_indices
+    )
+    # Route construction validates device-resident production metadata before
+    # model execution. Retain full data-dependent fail-closed checks for the
+    # pure CPU layout helper and its reference tests.
+    if (
+        flat_destination_rows.device.type == "cpu"
+        and flat_destination_rows.numel() > 0
+        and (
+            int(source_ranks.min()) < 0
+            or int(source_ranks.max()) >= dcp_world_size
+            or int(source_token_indices.min()) < 0
+            or int(source_token_indices.max()) >= source_stride
+        )
+    ):
+        raise ValueError("PCP candidate route contains an out-of-range source row.")
+    if (
+        flat_destination_rows.device.type == "cpu"
+        and flat_destination_rows.unique().numel() != flat_destination_rows.numel()
+    ):
+        raise ValueError("PCP candidate route contains duplicate source rows.")
+
+    send_buffer = torch.empty(
+        (dcp_world_size, source_stride, packed.shape[1], 2),
+        dtype=packed.dtype,
+        device=packed.device,
+    )
+    send_buffer[..., 0].fill_(float("-inf"))
+    send_buffer[..., 1].fill_(-1)
+    send_buffer.view(-1, packed.shape[1], 2).index_copy_(
+        0, flat_destination_rows, packed
+    )
+    return send_buffer
+
+
+def _pcp_candidate_a2a_selector_input(
+    received: torch.Tensor,
+) -> torch.Tensor:
+    """Convert source-owner-major A2A receive data to selector row layout."""
+    if received.ndim != 4 or received.shape[-1] != 2:
+        raise ValueError(
+            "Received PCP candidates must have shape [owners, rows, topk, 2], "
+            f"got {tuple(received.shape)}."
+        )
+    owners, source_stride, topk_tokens, _ = received.shape
+    return (
+        received.permute(1, 0, 2, 3)
+        .contiguous()
+        .view(source_stride, owners * topk_tokens, 2)
+    )
+
+
+def _exchange_pcp_candidates_to_origins(
+    send_buffer: torch.Tensor,
+) -> torch.Tensor:
+    """Run the production async candidate A2A and return selector row layout."""
+    recv_buffer = torch.empty_like(send_buffer)
+    work = dist.all_to_all_single(
+        recv_buffer.view(-1),
+        send_buffer.view(-1),
+        group=get_dcp_group().device_group,
+        async_op=True,
+    )
+    work.wait()
+    return _pcp_candidate_a2a_selector_input(recv_buffer)
+
+
+def _merge_packed_dcp_topk_to_origin(
+    packed: torch.Tensor,
+    source_ranks: torch.Tensor,
+    source_token_indices: torch.Tensor,
+    source_stride: int,
+    topk_tokens: int,
+    dcp_world_size: int,
+) -> torch.Tensor:
+    """Return exact global candidates only to each query's origin rank."""
+    from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
+        stable_topk_from_gathered_candidates_cutedsl,
+    )
+
+    send_buffer = _build_pcp_candidate_a2a_send_buffer(
+        packed,
+        source_ranks,
+        source_token_indices,
+        source_stride,
+        dcp_world_size,
+    )
+    selector_input = _exchange_pcp_candidates_to_origins(send_buffer)
+    merged = torch.empty(
+        (source_stride, topk_tokens),
+        dtype=torch.int32,
+        device=packed.device,
+    )
+    stable_topk_from_gathered_candidates_cutedsl(
+        selector_input, topk_tokens, out=merged
+    )
+    return merged
+
+
+def _run_pcp_dcp_routed_prefill(
+    *,
+    prefill_metadata: DeepseekV32IndexerPrefillMetadata,
+    kv_cache: torch.Tensor,
+    q_quant: torch.Tensor,
+    q_scale: torch.Tensor | None,
+    weights: torch.Tensor,
+    topk_indices_buffer: torch.Tensor,
+    topk_tokens: int,
+    head_dim: int,
+    total_seq_lens: int,
+    use_fp4_cache: bool,
+    dcp_rank: int,
+    dcp_world_size: int,
+    cp_kv_cache_interleave_size: int,
+) -> None:
+    """Evaluate every PCP source row on every DCP owner.
+
+    Query/weight payloads are gathered once at fixed per-rank shape. KV gather
+    and logits work may be split into deterministic chunks, but candidate
+    exchange is packed into one fixed owner-to-origin all-to-all after all
+    chunks.
+    """
+    chunks = prefill_metadata.pcp_routed_chunks
+    assert chunks is not None
+    if not chunks:
+        return
+    if dcp_world_size <= 1 or get_dcp_group().world_size != dcp_world_size:
+        raise RuntimeError(
+            "PCP-routed sparse prefill requires an initialized DCP group."
+        )
+    pcp_group = get_pcp_group()
+    if pcp_group.world_size != dcp_world_size or pcp_group.rank_in_group != dcp_rank:
+        raise RuntimeError(
+            "PCP-routed sparse prefill requires identical PCP/DCP rank axes."
+        )
+    if cp_kv_cache_interleave_size != 1:
+        raise RuntimeError(
+            "PCP-routed sparse prefill supports only cp_kv_cache_interleave_size=1."
+        )
+    if q_quant.shape[0] != weights.shape[0]:
+        raise RuntimeError(
+            "PCP-routed sparse prefill requires aligned Q and weight rows, got "
+            f"{q_quant.shape[0]} and {weights.shape[0]}."
+        )
+    if q_scale is not None and q_scale.shape[0] != q_quant.shape[0]:
+        raise RuntimeError("PCP-routed sparse prefill requires aligned Q-scale rows.")
+    # Validate the common candidate-merge contract before the first
+    # collective. In particular, an owner with zero local history must fail in
+    # lockstep with owners that would otherwise discover an unsupported top-k
+    # only after computing logits.
+    _assert_cutedsl_dcp_merge_supported(
+        q_quant.new_empty((1, 1), dtype=torch.float32),
+        topk_indices_buffer,
+        topk_tokens,
+    )
+
+    # PCPManager pads every source to the same first-dimension shape. The
+    # fixed-shape all-gathers therefore remain safe for uneven DualChunkSwap
+    # partitions and zero-token source ranks.
+    source_stride = prefill_metadata.pcp_source_stride
+    if source_stride <= 0 or q_quant.shape[0] != source_stride:
+        raise RuntimeError(
+            "PCP-routed sparse prefill Q rows do not match the validated fixed "
+            f"source stride: q_rows={q_quant.shape[0]}, stride={source_stride}."
+        )
+    routed_q = get_dcp_group().all_gather(q_quant, dim=0)
+    routed_weights = get_dcp_group().all_gather(weights, dim=0)
+    routed_q_scale = (
+        get_dcp_group().all_gather(q_scale, dim=0) if q_scale is not None else None
+    )
+
+    fp8_dtype = current_platform.fp8_dtype()
+    values_spec, scales_spec = _gather_workspace_shapes(
+        total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
+    )
+    k_quant_full, k_scale_full = current_workspace_manager().get_simultaneous(
+        values_spec,
+        scales_spec,
+    )
+
+    from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
+        pack_dcp_topk_candidates_cutedsl,
+    )
+
+    packed_chunks: list[torch.Tensor] = []
+    source_rank_chunks: list[torch.Tensor] = []
+    source_token_chunks: list[torch.Tensor] = []
+    for chunk in chunks:
+        routed_indices = (
+            chunk.source_ranks.to(torch.int64) * source_stride
+            + chunk.source_token_indices
+        )
+        if routed_indices.numel() == 0:
+            continue
+
+        q_slice = routed_q.index_select(0, routed_indices)
+        weights_slice = routed_weights.index_select(0, routed_indices)
+        q_scale_slice = (
+            routed_q_scale.index_select(0, routed_indices)
+            if routed_q_scale is not None
+            else None
+        )
+        topk_indices = torch.full(
+            (q_slice.shape[0], topk_tokens),
+            -1,
+            dtype=torch.int32,
+            device=q_slice.device,
+        )
+        packed = torch.empty(
+            (*topk_indices.shape, 2),
+            dtype=torch.float32,
+            device=q_slice.device,
+        )
+
+        if chunk.local_total_seq_lens == 0:
+            logits = q_slice.new_empty((q_slice.shape[0], 0), dtype=torch.float32)
+            packed[..., 0].fill_(float("-inf"))
+            packed[..., 1].fill_(-1)
+        else:
+            k_quant = k_quant_full[: chunk.max_local_total_seq_lens]
+            k_scale = k_scale_full[: chunk.max_local_total_seq_lens]
+            ops.cp_gather_indexer_k_quant_cache(
+                kv_cache,
+                k_quant,
+                k_scale,
+                chunk.block_table,
+                chunk.local_cu_seq_lens,
+            )
+            if use_fp4_cache:
+                q_slice_cast = q_slice.view(torch.int8)
+                k_quant_cast = k_quant.view(torch.int8)
+                k_scale_cast = k_scale.view(torch.int32).squeeze(-1)
+            else:
+                q_slice_cast = q_slice
+                k_quant_cast = k_quant
+                k_scale_cast = k_scale.view(torch.float32).squeeze(-1)
+            logits = fp8_fp4_mqa_logits(
+                (q_slice_cast, q_scale_slice),
+                (k_quant_cast, k_scale_cast),
+                weights_slice,
+                chunk.cu_seqlen_ks,
+                chunk.cu_seqlen_ke,
+                clean_logits=False,
+            )
+            ops.top_k_per_row_prefill(
+                logits,
+                chunk.cu_seqlen_ks,
+                chunk.cu_seqlen_ke,
+                topk_indices,
+                logits.shape[0],
+                logits.stride(0),
+                logits.stride(1),
+                topk_tokens,
+            )
+            pack_dcp_topk_candidates_cutedsl(
+                logits,
+                topk_indices,
+                packed,
+                dcp_rank,
+                dcp_world_size,
+                cp_kv_cache_interleave_size,
+                chunk.cu_seqlen_ks,
+            )
+
+        packed_chunks.append(packed)
+        source_rank_chunks.append(chunk.source_ranks)
+        source_token_chunks.append(chunk.source_token_indices)
+
+    if not packed_chunks:
+        return
+    packed = torch.cat(packed_chunks, dim=0)
+    source_ranks = torch.cat(source_rank_chunks, dim=0)
+    source_token_indices = torch.cat(source_token_chunks, dim=0)
+    merged_local = _merge_packed_dcp_topk_to_origin(
+        packed,
+        source_ranks,
+        source_token_indices,
+        source_stride,
+        topk_tokens,
+        dcp_world_size,
+    )
+    local_rows = source_ranks == dcp_rank
+    local_token_indices = source_token_indices[local_rows]
+    if local_token_indices.numel() > 0:
+        topk_indices_buffer.index_copy_(
+            0,
+            local_token_indices,
+            merged_local.index_select(0, local_token_indices),
+        )
 
 
 @triton.jit
@@ -315,6 +638,8 @@ def sparse_attn_indexer(
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
     skip_topk_buffer_clear: bool = False,
+    pcp_peer_kv_cache: torch.Tensor | None = None,
+    pcp_peer_block_stride: int | None = None,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
@@ -409,7 +734,24 @@ def sparse_attn_indexer(
     # fill.
     if not skip_topk_buffer_clear:
         topk_indices_buffer[: hidden_states.shape[0]] = -1
-    if has_prefill:
+    prefill_metadata = attn_metadata_narrowed.prefill
+    if prefill_metadata is not None and prefill_metadata.pcp_routed_chunks is not None:
+        _run_pcp_dcp_routed_prefill(
+            prefill_metadata=prefill_metadata,
+            kv_cache=kv_cache,
+            q_quant=q_quant,
+            q_scale=q_scale,
+            weights=weights,
+            topk_indices_buffer=topk_indices_buffer,
+            topk_tokens=topk_tokens,
+            head_dim=head_dim,
+            total_seq_lens=total_seq_lens,
+            use_fp4_cache=use_fp4_cache,
+            dcp_rank=dcp_rank,
+            dcp_world_size=dcp_world_size,
+            cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
+        )
+    elif has_prefill:
         prefill_metadata = attn_metadata_narrowed.prefill
         assert prefill_metadata is not None
 
@@ -431,12 +773,48 @@ def sparse_attn_indexer(
             assert chunk.local_cu_seq_lens is not None
             k_quant = k_quant_full[: chunk.max_local_total_seq_lens]
             k_scale = k_scale_full[: chunk.max_local_total_seq_lens]
+            read_kv_cache = kv_cache
+            read_block_table = chunk.block_table
+            direct_peer_prefill = chunk.pcp_owner_block_tables is not None
+            if direct_peer_prefill:
+                if pcp_peer_kv_cache is None:
+                    raise RuntimeError(
+                        "Owner-history indexer prefill requires a global rank-major "
+                        "peer cache view."
+                    )
+                if pcp_peer_block_stride is None or pcp_peer_block_stride <= 0:
+                    raise RuntimeError(
+                        "Owner-history indexer prefill requires a positive peer "
+                        "block stride."
+                    )
+                read_kv_cache = pcp_peer_kv_cache
+                peer_block_table_key = (
+                    pcp_peer_block_stride,
+                    cp_kv_cache_interleave_size,
+                    kv_cache.shape[1],
+                )
+                read_block_table = chunk.pcp_peer_block_table
+                if (
+                    read_block_table is None
+                    or chunk.pcp_peer_block_table_key != peer_block_table_key
+                ):
+                    read_block_table = build_rotated_dcp_peer_block_table(
+                        chunk.pcp_owner_block_tables,
+                        # The canonical global VMM alias is rank-major beginning
+                        # with owner zero on every reader.
+                        local_rank=0,
+                        peer_block_stride=pcp_peer_block_stride,
+                        cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
+                        block_size=kv_cache.shape[1],
+                    )
+                    chunk.pcp_peer_block_table = read_block_table
+                    chunk.pcp_peer_block_table_key = peer_block_table_key
             if not chunk.skip_kv_gather and chunk.local_total_seq_lens > 0:
                 ops.cp_gather_indexer_k_quant_cache(
-                    kv_cache,
+                    read_kv_cache,
                     k_quant,
                     k_scale,
-                    chunk.block_table,
+                    read_block_table,
                     chunk.local_cu_seq_lens,
                 )
 
@@ -496,15 +874,16 @@ def sparse_attn_indexer(
                     topk_tokens,
                 )
 
-            _merge_dcp_topk_global(
-                logits,
-                topk_indices,
-                topk_tokens,
-                dcp_rank,
-                dcp_world_size,
-                cp_kv_cache_interleave_size,
-                row_starts=chunk.cu_seqlen_ks,
-            )
+            if not direct_peer_prefill:
+                _merge_dcp_topk_global(
+                    logits,
+                    topk_indices,
+                    topk_tokens,
+                    dcp_rank,
+                    dcp_world_size,
+                    cp_kv_cache_interleave_size,
+                    row_starts=chunk.cu_seqlen_ks,
+                )
 
     if has_decode:
         decode_metadata = attn_metadata_narrowed.decode
@@ -689,6 +1068,8 @@ def sparse_attn_indexer_fake(
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
     skip_topk_buffer_clear: bool = False,
+    pcp_peer_kv_cache: torch.Tensor | None = None,
+    pcp_peer_block_stride: int | None = None,
 ) -> torch.Tensor:
     return topk_indices_buffer
 

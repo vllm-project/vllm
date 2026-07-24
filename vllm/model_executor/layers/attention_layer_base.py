@@ -3,6 +3,7 @@
 """Base class for attention-like layers."""
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 
 import torch
 
@@ -22,6 +23,10 @@ class AttentionLayerBase(ABC):
 
     impl: "AttentionImpl"
     supports_dcp: bool = True
+    # Specialized layers may consume complete history on every query rank or
+    # perform their own partial-output reduction. Such layers do not require
+    # their backend to expose LSE to the generic DCP reducer.
+    handles_dcp_decode_internally: bool = False
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         """Bind the allocated KV cache tensor to this layer.
@@ -30,6 +35,28 @@ class AttentionLayerBase(ABC):
         override this to unpack the raw buffer into per-state views.
         """
         self.kv_cache = kv_cache
+
+    def bind_pcp_peer_kv_cache(
+        self,
+        peer_kv_cache: torch.Tensor,
+        fence: Callable[[], None],
+    ) -> None:
+        """Bind the rank-major peer view for owner-history cache writes.
+
+        The ordinary ``kv_cache`` remains the rank-local consumer view. The
+        peer view adds a leading PCP-rank dimension and is only present when
+        owner-sharded history is enabled.
+        """
+        from vllm.model_executor.layers.attention.pcp_peer_cache import (
+            make_rank_major_block_tensor_view,
+        )
+
+        self.pcp_peer_kv_cache = peer_kv_cache
+        (
+            self.pcp_peer_block_kv_cache,
+            self.pcp_peer_block_stride,
+        ) = make_rank_major_block_tensor_view(peer_kv_cache)
+        self.pcp_peer_cache_fence = fence
 
     @abstractmethod
     def get_attn_backend(self) -> type[AttentionBackend]:
