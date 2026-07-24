@@ -17,6 +17,7 @@ via Gemma4MultimodalEmbedder.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
@@ -52,7 +53,10 @@ from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor, async_copy_to_gpu
 from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.model_states.interface import (
+    ModelSpecificAttnMetadata,
+    ModelState,
+)
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.penalties import use_penalty
@@ -65,6 +69,18 @@ from .interfaces import (
 )
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class DiffusionGemmaAttnMetadata(ModelSpecificAttnMetadata):
+    diffusion_rect_swa: torch.Tensor
+
+    def get_extra_common_attn_kwargs(
+        self,
+        kv_cache_group_id: int,
+        num_reqs: int,
+    ) -> dict[str, Any]:
+        return {"diffusion_rect_swa": self.diffusion_rect_swa[:num_reqs]}
 
 
 class DiffusionGemmaSelfConditioning(nn.Module):
@@ -786,6 +802,7 @@ class DiffusionGemmaModelState(ModelState):
 
         text_config = self.model_config.hf_text_config
         self.gen_config = self.model_config.try_get_generation_config()
+        self.gen_config.update(self.model_config.override_generation_config)
         max_denoising_steps = (
             diffusion_config.max_denoising_steps if diffusion_config else None
         ) or self.gen_config.get("max_denoising_steps", 48)
@@ -806,6 +823,9 @@ class DiffusionGemmaModelState(ModelState):
         # Persistent buffer for per-request causal flags, updated in-place
         # so FULL CUDA graph replay sees the latest values.
         self._causal_buf = torch.zeros(
+            self.max_num_reqs, dtype=torch.bool, device=device
+        )
+        self._diffusion_rect_swa_buf = torch.zeros(
             self.max_num_reqs, dtype=torch.bool, device=device
         )
 
@@ -1012,6 +1032,17 @@ class DiffusionGemmaModelState(ModelState):
             self._causal_buf[actual_num_reqs:num_reqs] = False
         causal: bool | torch.Tensor = self._causal_buf[:num_reqs]
 
+        # HF uses a fixed sliding-window prefix for every denoising canvas row,
+        # followed by the complete bidirectional canvas.
+        self._diffusion_rect_swa_buf[:actual_num_reqs] = ~self._causal_buf[
+            :actual_num_reqs
+        ]
+        if actual_num_reqs < num_reqs:
+            self._diffusion_rect_swa_buf[actual_num_reqs:num_reqs] = False
+        model_specific_attn_metadata = DiffusionGemmaAttnMetadata(
+            diffusion_rect_swa=self._diffusion_rect_swa_buf[:num_reqs]
+        )
+
         return build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -1025,6 +1056,7 @@ class DiffusionGemmaModelState(ModelState):
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
             causal=causal,
+            model_specific_attn_metadata=model_specific_attn_metadata,
         )
 
     num_new_sampled_tokens_per_step: int = 0
