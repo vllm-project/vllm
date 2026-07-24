@@ -843,21 +843,60 @@ class LoRAModelManager:
     def _stack_moe_lora_weights(
         self, lora_model: LoRAModel, module: FusedMoE3DWithLoRA, module_name: str
     ):
-        module_lora = self._get_lora_layer_weights(lora_model, module_name)
+        gate_up_proj_lora = self._get_lora_layer_weights(
+            lora_model, module_name + ".base_layer"
+        )
+        down_proj_lora = self._get_lora_layer_weights(lora_model, module_name)
 
         # Note (gnovack) - If MOE lora weights are not split into
         # num_experts chunks, we split them here
-        if module_lora and torch.is_tensor(module_lora.lora_a):
+        if any(
+            lora is not None and torch.is_tensor(lora.lora_a)
+            for lora in (gate_up_proj_lora, down_proj_lora)
+        ):
             # Handle PEFT file format where experts.base_layer is the
             # gate_up_proj and experts is the down_proj
-            gate_up_proj_lora = self._get_lora_layer_weights(
-                lora_model, module_name + ".base_layer"
-            )
-            down_proj_lora = module_lora
-            # FIXME Edge case where LoRA is not added to gate_up_proj
-            # or down_proj
-            assert gate_up_proj_lora is not None
-            assert down_proj_lora is not None
+            reference_lora = gate_up_proj_lora or down_proj_lora
+            assert reference_lora is not None
+            assert torch.is_tensor(reference_lora.lora_a)
+            assert torch.is_tensor(reference_lora.lora_b)
+
+            # PEFT allows either fused projection to be targeted independently.
+            # Keep the wrapper's fixed two-projection layout by making an omitted
+            # projection an explicit no-op.
+            def create_zero_lora(
+                name: str, input_size: int, output_size: int
+            ) -> LoRALayerWeights:
+                num_experts = module.global_num_experts
+                rank = reference_lora.rank
+                return LoRALayerWeights(
+                    name,
+                    rank,
+                    reference_lora.lora_alpha,
+                    reference_lora.lora_a.new_zeros(num_experts * rank, input_size),
+                    reference_lora.lora_b.new_zeros(output_size, num_experts * rank),
+                    scaling=1,
+                )
+
+            if gate_up_proj_lora is None:
+                gate_up_proj_lora = create_zero_lora(
+                    module_name + ".base_layer",
+                    module.w13_input_size,
+                    module.w13_output_size,
+                )
+            if down_proj_lora is None:
+                down_proj_lora = create_zero_lora(
+                    module_name,
+                    module.w2_input_size,
+                    module.w2_output_size,
+                )
+                lora_model.loras[module_name] = down_proj_lora
+
+            assert torch.is_tensor(gate_up_proj_lora.lora_a)
+            assert torch.is_tensor(gate_up_proj_lora.lora_b)
+            assert torch.is_tensor(down_proj_lora.lora_a)
+            assert torch.is_tensor(down_proj_lora.lora_b)
+            module_lora = down_proj_lora
             if self._is_3d_moe_model:
                 local_num_experts = module.w13_lora_a_stacked[0].shape[1]
                 # The checkpoint holds weights for all global experts, but
@@ -934,6 +973,8 @@ class LoRAModelManager:
 
                 module_lora.lora_a = lora_a
                 module_lora.lora_b = lora_b
+
+            lora_model.loras.pop(module_name + ".base_layer", None)
 
     def _convert_3d_to_2d_moe_lora(
         self,
