@@ -146,6 +146,30 @@ steps:
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
         'cd tests &&
         pytest -v -s quantization/test_auto_round.py'
+  - label: "XPU GPQA Eval (GPT-OSS)"
+    depends_on:
+      - image-build-xpu
+    timeout_in_minutes: 60
+    device: intel_gpu
+    agent_tags:
+      label: production
+      gpu: 1+
+      mem: 24+
+    no_plugin: true
+    env:
+      REGISTRY: "public.ecr.aws/q9t5s3a7"
+      REPO: "vllm-ci-test-repo"
+      VLLM_TEST_DEVICE: "xpu"
+    source_file_dependencies:
+      - vllm/
+      - tests/evals/gpt_oss/
+      - .buildkite/intel_jobs/test-intel.yaml
+    commands:
+      - >-
+        bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+        'pip install "gpt-oss[eval]==0.0.5" &&
+        cd tests &&
+        pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-xpu.txt'
   - label: "XPU compressed tensors FP8 test"
     depends_on:
       - image-build-xpu
