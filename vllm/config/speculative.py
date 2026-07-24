@@ -916,6 +916,15 @@ class SpeculativeConfig:
                         f"Unsupported speculative method: '{self.method}'"
                     )
 
+                if self.method in ("eagle", "eagle3"):
+                    # EAGLE drafts share the target's positional space; a
+                    # draft checkpoint with a smaller max_position_embeddings
+                    # than the target under-sizes its rotary cache (#48894).
+                    SpeculativeConfig._maybe_override_draft_max_position_embeddings(
+                        self.draft_model_config.hf_config,
+                        self.target_model_config.max_model_len,
+                    )
+
                 # Replace hf_config for EAGLE draft_model
                 if self.method in ("eagle", "eagle3", "dflash"):
                     from vllm.transformers_utils.configs.eagle import EAGLEConfig
@@ -1135,6 +1144,40 @@ class SpeculativeConfig:
                 result,
             )
         return result
+
+    @staticmethod
+    def _maybe_override_draft_max_position_embeddings(
+        draft_hf_config: PretrainedConfig,
+        target_max_model_len: int,
+    ) -> None:
+        """Raise an EAGLE draft's max_position_embeddings up to the target's.
+
+        The proposer feeds the draft positions up to the target's
+        max_model_len, while max_position_embeddings sizes the draft's
+        rotary cos_sin_cache. A smaller checkpoint value (e.g. 2048 for
+        yuhuili/EAGLE3-LLaMA3.1-Instruct-8B) makes that cache gather go
+        out of bounds (#48894).
+
+        Args:
+            draft_hf_config: The draft model's HF config, mutated in place.
+            target_max_model_len: The target model's max_model_len.
+        """
+        draft_max_position_embeddings = getattr(
+            draft_hf_config, "max_position_embeddings", None
+        )
+        if (
+            draft_max_position_embeddings is None
+            or draft_max_position_embeddings >= target_max_model_len
+        ):
+            return
+        logger.info(
+            "Overriding draft model max_position_embeddings from %d to the "
+            "target model's max_model_len (%d); EAGLE drafts share the "
+            "target's positional space.",
+            draft_max_position_embeddings,
+            target_max_model_len,
+        )
+        draft_hf_config.max_position_embeddings = target_max_model_len
 
     @staticmethod
     def _verify_and_get_draft_tp(
