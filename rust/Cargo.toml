@@ -2,6 +2,7 @@
 members = [
     "src/bench",
     "src/chat",
+    "src/chat-renderer",
     "src/chat-types",
     "src/cmd",
     "src/engine-core-client",
@@ -136,6 +137,7 @@ uuid = { version = "1.22.0", features = ["v4"] }
 validator = { version = "0.20.0", features = ["derive"] }
 vllm-bench = { path = "src/bench" }
 vllm-chat = { path = "src/chat" }
+vllm-chat-renderer = { path = "src/chat-renderer" }
 vllm-chat-types = { path = "src/chat-types" }
 vllm-engine-core-client = { path = "src/engine-core-client" }
 vllm-llm = { path = "src/llm" }

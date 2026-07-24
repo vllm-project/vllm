@@ -29,13 +29,21 @@ pub enum RendererSelection {
 }
 
 impl RendererSelection {
+    /// CLI/config literal for automatic renderer selection.
     pub const AUTO_LITERAL: &str = "auto";
+    /// CLI/config literal and model type for DeepSeek V3.2.
     pub const DEEPSEEK_V32_LITERAL: &str = "deepseek_v32";
+    /// CLI/config literal and model type for DeepSeek V4.
     pub const DEEPSEEK_V4_LITERAL: &str = "deepseek_v4";
+    /// Hugging Face model type routed to the Harmony renderer.
     pub const GPT_OSS_MODEL_TYPE: &str = "gpt_oss";
+    /// CLI/config literal for the Harmony renderer.
     pub const HARMONY_LITERAL: &str = "harmony";
+    /// CLI/config literal for the Hugging Face renderer.
     pub const HF_LITERAL: &str = "hf";
+    /// CLI/config literal for the Inkling renderer.
     pub const INKLING_LITERAL: &str = "inkling";
+    /// Hugging Face model type routed to the Inkling renderer.
     pub const INKLING_MODEL_TYPE: &str = "inkling_mm_model";
 
     /// Resolve the renderer selection using the given model type string, if

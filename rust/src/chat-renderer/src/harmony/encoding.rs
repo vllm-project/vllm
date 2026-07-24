@@ -12,13 +12,13 @@ use thiserror_ext::AsReport as _;
 use crate::error::{Error, Result};
 
 /// Lazily load the shared GPT-OSS Harmony encoding once per process.
-pub(crate) fn harmony_encoding() -> Result<&'static HarmonyEncoding> {
+pub fn harmony_encoding() -> Result<&'static HarmonyEncoding> {
     static ENCODING: LazyLock<anyhow::Result<HarmonyEncoding>> = LazyLock::new(|| {
         load_harmony_encoding(HarmonyEncodingName::HarmonyGptOss)
             .context("failed to load harmony encoding for gpt-oss")
     });
 
-    ENCODING.as_ref().map_err(|error| Error::HarmonyOutputParsing {
+    ENCODING.as_ref().map_err(|error| Error::HarmonyEncoding {
         error: error.to_report_string().into(),
     })
 }

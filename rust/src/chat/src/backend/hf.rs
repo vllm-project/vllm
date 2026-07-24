@@ -4,6 +4,13 @@
 use std::sync::Arc;
 
 use tracing::info;
+use vllm_chat_renderer::hf::{
+    HfChatRenderer, HfRendererConfig, HfRendererFiles, MultimodalRenderInfo,
+};
+use vllm_chat_renderer::{
+    DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer, HarmonyChatRenderer,
+    InklingChatRenderer,
+};
 use vllm_text::backend::hf::{HfTextBackend, ResolvedModelFiles, load_model_config};
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{DynTextBackend, TextBackend as _};
@@ -16,11 +23,6 @@ use crate::error::Result;
 use crate::multimodal::{MultimodalConfigFiles, MultimodalModelInfo};
 use crate::output::{
     DefaultChatOutputProcessor, HarmonyChatOutputProcessor, validate_harmony_parser_overrides,
-};
-use crate::renderer::hf::{HfChatRenderer, MultimodalRenderInfo};
-use crate::renderer::{
-    DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer, HarmonyChatRenderer,
-    InklingChatRenderer,
 };
 use crate::request::ChatRequest;
 use crate::{DynChatOutputProcessor, RendererSelection};
@@ -65,9 +67,16 @@ impl HfChatBackend {
         let chat_renderer: DynChatRenderer = match renderer {
             RendererSelection::Auto => unreachable!("renderer auto should be resolved above"),
             RendererSelection::Hf => Arc::new(HfChatRenderer::load(
-                &files,
-                options,
-                multimodal_render_info,
+                HfRendererFiles {
+                    tokenizer_config: files.tokenizer_config_path.as_deref(),
+                    chat_template: files.chat_template_path.as_deref(),
+                },
+                HfRendererConfig {
+                    chat_template: options.chat_template,
+                    default_template_kwargs: options.default_chat_template_kwargs,
+                    content_format: options.chat_template_content_format,
+                    multimodal: multimodal_render_info,
+                },
             )?),
             RendererSelection::DeepSeekV32 => Arc::new(DeepSeekV32ChatRenderer::new()),
             RendererSelection::DeepSeekV4 => Arc::new(DeepSeekV4ChatRenderer::new()),
@@ -165,7 +174,6 @@ mod tests {
 
     use tempfile::tempdir;
     use thiserror_ext::AsReport as _;
-    use vllm_text::Prompt;
     use vllm_text::backend::hf::TokenizerSource;
     use vllm_text::tokenizer::DynTokenizer;
     use vllm_tokenizer::test_utils::TestTokenizer;
@@ -173,7 +181,7 @@ mod tests {
     use super::HfChatBackend;
     use crate::backend::{ChatBackend, LoadModelBackendsOptions, NewChatOutputProcessorOptions};
     use crate::request::{ChatContent, ChatMessage, ChatRequest};
-    use crate::{ParserSelection, RendererSelection};
+    use crate::{ParserSelection, RenderedPromptContent, RendererSelection};
 
     fn request_with_user_text(text: &str) -> ChatRequest {
         ChatRequest {
@@ -241,11 +249,13 @@ mod tests {
         config_json: &str,
         tokenizer_config_json: &str,
     ) -> String {
-        backend_for_selection(renderer, config_json, tokenizer_config_json)
+        let backend = backend_for_selection(renderer, config_json, tokenizer_config_json);
+        let request = request_with_user_text("hello");
+        backend
             .chat_renderer()
-            .render(&request_with_user_text("hello"))
+            .render(request.as_render_request())
             .unwrap()
-            .prompt
+            .content
             .into_text()
             .expect("renderer should return text prompt")
     }
@@ -283,9 +293,13 @@ mod tests {
             r#"{"chat_template":"{{ messages[0].content }}"}"#,
         );
 
-        let prompt =
-            backend.chat_renderer().render(&request_with_user_text("hello")).unwrap().prompt;
-        assert!(matches!(prompt, Prompt::TokenIds(_)));
+        let render_request = request_with_user_text("hello");
+        let prompt = backend
+            .chat_renderer()
+            .render(render_request.as_render_request())
+            .unwrap()
+            .content;
+        assert!(matches!(prompt, RenderedPromptContent::TokenIds(_)));
 
         let mut request = request_with_user_text("hello");
         let error = match backend.new_chat_output_processor(

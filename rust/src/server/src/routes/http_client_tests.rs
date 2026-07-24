@@ -19,7 +19,8 @@ use futures::StreamExt as _;
 use serial_test::serial;
 use vllm_chat::{
     ChatBackend, ChatLlm, ChatRenderer, ChatRequest, ChatTextBackend, DefaultChatOutputProcessor,
-    DynChatOutputProcessor, DynChatRenderer, Error, NewChatOutputProcessorOptions, RenderedPrompt,
+    DynChatOutputProcessor, DynChatRenderer, NewChatOutputProcessorOptions, RenderRequest,
+    RenderedPrompt, RenderedPromptContent, RendererError, RendererResult,
 };
 use vllm_engine_core_client::protocol::output::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs,
@@ -28,8 +29,8 @@ use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId};
 use vllm_llm::Llm;
+use vllm_text::TextBackend;
 use vllm_text::tokenizer::DynTokenizer;
-use vllm_text::{Prompt, TextBackend};
 use vllm_tokenizer::test_utils::TestTokenizer;
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
@@ -183,19 +184,21 @@ impl ChatBackend for FakeChatBackend {
 }
 
 impl ChatRenderer for FakeChatBackend {
-    fn render(&self, request: &ChatRequest) -> vllm_chat::Result<RenderedPrompt> {
+    fn render(&self, request: RenderRequest<'_>) -> RendererResult<RenderedPrompt> {
         let mut prompt = String::new();
-        for message in &request.messages {
+        for message in request.messages {
             prompt.push_str(message.role().as_str());
             prompt.push_str(": ");
-            prompt.push_str(&message.text_content().map_err(Error::UnsupportedMultimodalContent)?);
+            prompt.push_str(
+                &message.text_content().map_err(RendererError::UnsupportedMultimodalContent)?,
+            );
             prompt.push('\n');
         }
         if request.chat_options.add_generation_prompt() {
             prompt.push_str("assistant:");
         }
         Ok(RenderedPrompt {
-            prompt: Prompt::Text(prompt),
+            content: RenderedPromptContent::Text(prompt),
             effective_template_kwargs: Default::default(),
         })
     }
