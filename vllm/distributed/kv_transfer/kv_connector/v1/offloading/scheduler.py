@@ -865,6 +865,7 @@ class OffloadingConnectorScheduler:
                     num_pending_gpu_blocks
                     <= group_config.sliding_window_size_in_chunks
                     * self.config.blocks_per_chunk
+                    + 1
                 )
 
             num_chunks = cdiv(num_cached_tokens, tokens_per_chunk)
