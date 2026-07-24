@@ -10,22 +10,25 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 
 @dataclass
-class MxFp4LinearLayerConfig:
-    """Configuration for an MXFP4 linear layer.
+class MxFp6LinearLayerConfig:
+    """Configuration for an MXFP6 linear layer.
 
-    All MXFP4 layers share the same structure: packed uint8 weights (2 FP4 values per
+    All MXFP6 layers share the same structure: packed uint8 weights (2 FP4 values per
     byte) and per-block weight scales (group size 32).
 
     Attributes:
+        weight_quant_key: Identifies the weight quantization format. Can be
+        kMxfp6E2M3Static or kMxfp6E3M2Static.
         activation_quant_key: Identifies the activation quantization format,
             or `None` when activations must not be quantized.
     """
 
+    weight_quant_key: QuantKey
     activation_quant_key: QuantKey | None = None
 
 
-class MxFp4LinearKernel(ABC):
-    """Base class for MXFP4 quantized linear kernels.
+class MxFp6LinearKernel(ABC):
+    """Base class for MXFP6 quantized linear kernels.
 
     Each subclass implements a specific GEMM backend (CUTLASS, Marlin, etc).
     The kernel selection mechanism iterates over registered subclasses in
@@ -33,7 +36,7 @@ class MxFp4LinearKernel(ABC):
     match for the current hardware.
     """
 
-    def __init__(self, config: MxFp4LinearLayerConfig) -> None:
+    def __init__(self, config: MxFp6LinearLayerConfig) -> None:
         assert self.can_implement(config)[0]
         assert self.is_supported()[0]
         self.config = config
@@ -48,7 +51,7 @@ class MxFp4LinearKernel(ABC):
 
     @classmethod
     @abstractmethod
-    def can_implement(cls, config: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, config: MxFp6LinearLayerConfig) -> tuple[bool, str | None]:
         """Return whether this kernel can handle *config*."""
         raise NotImplementedError
 

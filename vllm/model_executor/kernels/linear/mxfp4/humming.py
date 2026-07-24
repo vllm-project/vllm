@@ -3,13 +3,20 @@
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.humming_utils import (
     convert_linear_layer_to_humming_standard,
     prepare_humming_layer,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kMxfp4Dynamic,
+    kMxfp4Static,
+)
 from vllm.platforms import current_platform
 
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
+
+logger = init_logger(__name__)
 
 
 class HummingMxFp4LinearKernel(MxFp4LinearKernel):
@@ -28,7 +35,15 @@ class HummingMxFp4LinearKernel(MxFp4LinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, c: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, config: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
+        if config.activation_quant_key not in (None, kMxfp4Dynamic, kMxfp4Static):
+            return False, "only supports MXFP4 or unquantized activations"
+        if config.activation_quant_key is not None:
+            logger.warning_once(
+                "HummingMxFp4LinearKernel is a weight-only (A16) kernel; "
+                "the requested activation quantization (%s) is ignored.",
+                config.activation_quant_key,
+            )
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
