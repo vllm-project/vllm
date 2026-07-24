@@ -83,6 +83,21 @@ NUM_RANDOM_SEEDS = 2
 VOCAB_PARALLEL_EMBEDDING_TEST_NUM_RANDOM_SEEDS = 2
 
 
+def test_base_layer_with_lora_delegates_load_weights():
+    class BaseLayer(torch.nn.Module):
+        def load_weights(self, weights):
+            self.loaded_weights = list(weights)
+            return {"weight"}
+
+    base_layer = BaseLayer()
+    layer = BaseLayerWithLoRA()
+    layer.base_layer = base_layer
+    weights = [("weight", torch.ones(1))]
+
+    assert layer.load_weights(weights) == {"weight"}
+    assert base_layer.loaded_weights == weights
+
+
 @pytest.fixture(autouse=True)
 def clean_cache_reset_device(reset_default_device):
     # Release any memory we might be holding on to. CI runs OOMs otherwise.
@@ -514,10 +529,6 @@ def test_lm_head_logits_processor_invalid_vocab_size(
 def test_lm_head_reset_sharded_to_full_mapping(
     default_vllm_config, dist_init, device
 ) -> None:
-    """reset_sharded_to_full_mapping() must rebuild the TP>1 logits index
-    mapping from the CPU-side list. Regression test for the level-2
-    sleep/wake/reload path, where the GPU tensor's contents are undefined
-    after wake and adapter activation does not rewrite it."""
     if current_platform.is_cuda_alike() or current_platform.is_xpu():
         torch.accelerator.set_device_index(device)
 
@@ -535,9 +546,6 @@ def test_lm_head_reset_sharded_to_full_mapping(
     )
     lora_logits_processor.create_lora_weights(max_loras, lora_config)
 
-    # Simulate the state after a level-2 sleep/wake cycle: the mapping
-    # tensor lives in the sleep-mode memory pool, so its contents are
-    # undefined after wake.
     lora_logits_processor.sharded_to_full_mapping_gpu.fill_(-1)
 
     lora_logits_processor.reset_sharded_to_full_mapping()

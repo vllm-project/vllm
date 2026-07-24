@@ -4,6 +4,7 @@
 Define LoRA functionality mixin for model runners.
 """
 
+from collections.abc import Callable
 from contextlib import contextmanager
 from typing import TypeAlias
 
@@ -28,23 +29,11 @@ logger = init_logger(__name__)
 
 # Defined as a mixin for GPUModelRunner
 class LoRAModelRunnerMixin:
+    lora_config: LoRAConfig | None
+    get_model: Callable[[], nn.Module]
+
     def reset_lora_state(self) -> None:
-        """Invalidate LoRA GPU state after the base weights change.
-
-        LoRA GPU state lives in plain tensor attributes, not parameters
-        or buffers, so weight reloads/updates do not restore it, and
-        level-2 sleep leaves it undefined. Drop all adapters — they are
-        re-loaded lazily on next use, and activation rewrites their
-        slots — and rebuild the TP>1 logits index mapping, which is the
-        one piece of LoRA state adapter activation does not rewrite.
-        Dropping adapters is also correct whenever the base weights
-        changed (weight hot-swap, RL weight sync): adapters trained on
-        the old base weights are invalid.
-
-        Must be called after every weight reload/update path: both
-        reload_weights() and the weight transfer engine flow
-        (start_weight_update / update_weights / finish_weight_update).
-        """
+        """Invalidate LoRA state after base weights are replaced."""
         if not self.lora_config:
             return
 

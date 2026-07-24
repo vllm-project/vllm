@@ -1298,15 +1298,8 @@ class Worker(WorkerBase):
             self.weight_transfer_engine.reset_weight_update_target()
             self._weight_update_active = False
 
-        # The transfer engines write the base weights directly and never go
-        # through reload_weights(), so LoRA state must be invalidated here as
-        # well (stale adapters would keep serving slots that the update — or a
-        # preceding level-2 sleep — clobbered). Draft-model sessions don't
-        # touch the target model's weights, so LoRA state stays valid.
-        if (
-            self.vllm_config.lora_config is not None
-            and not self._weight_update_is_draft
-        ):
+        # Weight transfer bypasses GPUModelRunner.reload_weights().
+        if not self._weight_update_is_draft:
             self.model_runner.reset_lora_state()
 
     def shutdown(self) -> None:

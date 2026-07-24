@@ -55,7 +55,7 @@ from vllm.forward_context import (
     set_forward_context,
 )
 from vllm.logger import init_logger
-from vllm.lora.layers import LoRAMapping, LoRAMappingType
+from vllm.lora.layers import BaseLayerWithLoRA, LoRAMapping, LoRAMappingType
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
@@ -247,6 +247,16 @@ if TYPE_CHECKING:
     from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
 logger = init_logger(__name__)
+
+
+def _get_parameter_for_reload(model: nn.Module, name: str) -> nn.Parameter:
+    """Resolve checkpoint names without changing the model's module tree."""
+    module_name, _, parameter_name = name.rpartition(".")
+    module = model.get_submodule(module_name)
+    if isinstance(module, BaseLayerWithLoRA):
+        module = module.base_layer
+    return module.get_parameter(parameter_name)
+
 
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
@@ -5502,7 +5512,10 @@ class GPUModelRunner(
             )
 
         model = self.get_model()
-        weights_to_load = {name for name, _ in model.named_parameters()}
+        weights_to_load = {
+            name.replace(".base_layer.", ".") if self.lora_config else name
+            for name, _ in model.named_parameters()
+        }
         counter_before_reloading = time.perf_counter()
 
         # load weights from disk if none are provided
@@ -5534,15 +5547,9 @@ class GPUModelRunner(
                 "Reloading with `is_checkpoint_format=True` requires that "
                 "weights be in kernel format and already sharded",
             )
-            # Look up via named_parameters() rather than get_parameter():
-            # with LoRA enabled, named_parameters() returns flattened names
-            # (see BaseLayerWithLoRA.named_modules). remove_duplicate=False
-            # keeps tied-weight aliases (e.g. lm_head.weight for tied
-            # embeddings) resolvable, matching get_parameter() behavior.
-            params_dict = dict(model.named_parameters(remove_duplicate=False))
             loaded_weights = set()
             for name, loaded_weight in weights_iterator:
-                param = params_dict[name]  # TODO: buffers?
+                param = _get_parameter_for_reload(model, name)  # TODO: buffers?
                 param.copy_(loaded_weight)
                 loaded_weights.add(name)
 
