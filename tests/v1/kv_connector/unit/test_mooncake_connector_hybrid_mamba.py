@@ -212,6 +212,76 @@ def test_register_kv_caches_deduplicates_shared_backing_memory(monkeypatch):
         connector.connector_worker = None
 
 
+def test_register_kv_caches_accepts_multi_view_list_input(monkeypatch):
+    """Layers whose backend exposes multiple views (e.g. Ascend's compressed
+    MLA with separate K and scale tensors of different dtypes) pass a list
+    as the kv_caches value. Each view must be registered, and views sharing
+    the same backing storage are deduplicated for the underlying engine.
+    """
+    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_consumer",
+    )
+    kv_cache_config = make_hybrid_gdn_kv_cache_config(
+        vllm_config.cache_config.block_size
+    )
+
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        connector = MooncakeConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            kv_cache_config,
+        )
+        worker = connector.connector_worker
+
+        # Two views of the same backing storage with DIFFERENT dtypes, like
+        # Ascend's compressed MLA [k_cache (int8), scale_cache (fp16)].
+        backing = torch.empty((4, 64), dtype=torch.float16)
+        k_cache = torch.empty((2, 2, 11), dtype=torch.int8)
+        scale_cache = torch.empty((2, 2, 11), dtype=torch.float16)
+
+        with patch.object(
+            worker.engine, "batch_register_memory", return_value=0
+        ) as batch_register_memory:
+            worker.register_kv_caches(
+                {
+                    "model.layers.0.self_attn": [k_cache, scale_cache],
+                    "model.layers.1.linear_attn": backing,
+                }
+            )
+
+        # Both views of the list-valued layer are registered.
+        assert worker.kv_caches_base_addr == [
+            k_cache.data_ptr(),
+            scale_cache.data_ptr(),
+            backing.data_ptr(),
+        ]
+        assert worker.registered_layer_names == [
+            "model.layers.0.self_attn",
+            "model.layers.0.self_attn",
+            "model.layers.1.linear_attn",
+        ]
+        batch_register_memory.assert_called_once()
+        registered_ptrs, registered_lens = batch_register_memory.call_args[0]
+        # Each unique tensor is registered once (k and scale have distinct
+        # storage here).
+        assert set(registered_ptrs) == {
+            k_cache.data_ptr(),
+            scale_cache.data_ptr(),
+            backing.data_ptr(),
+        }
+        assert registered_lens == [
+            k_cache.untyped_storage().nbytes(),
+            scale_cache.untyped_storage().nbytes(),
+            backing.untyped_storage().nbytes(),
+        ]
+
+        worker.shutdown()
+        worker.shutdown = noop_shutdown
+        connector.connector_worker = None
+
+
 def test_hybrid_gdn_transfer_params_preserve_group_identity(monkeypatch):
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
     vllm_config = create_vllm_config(
