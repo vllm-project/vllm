@@ -1240,8 +1240,9 @@ def causal_conv1d_update(
 
 
 from vllm.platforms import current_platform  # noqa: E402
+from vllm.triton_utils import HAS_TRITON  # noqa: E402
 
-if current_platform.is_cpu():
+if current_platform.is_cpu() and not HAS_TRITON:
     from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
         causal_conv1d_fn_cpu,
         causal_conv1d_update_cpu,

@@ -228,8 +228,11 @@ def mamba_chunk_scan_combined_varlen(
 
 
 from vllm.platforms import current_platform  # noqa: E402
+from vllm.triton_utils import HAS_TRITON  # noqa: E402
 
-if current_platform.is_cpu():
+# On CPU prefer the triton-cpu SSD kernels when the backend is installed
+# (HAS_TRITON), mirroring the GDN gating; otherwise use the native C++ path.
+if current_platform.is_cpu() and not HAS_TRITON:
     import vllm.model_executor.layers.mamba.ops.cpu.mamba_ssm as cpu_mamba_ssm
 
     _mamba_chunk_scan_combined_fwd = cpu_mamba_ssm._mamba_chunk_scan_combined_fwd_cpu  # type: ignore
