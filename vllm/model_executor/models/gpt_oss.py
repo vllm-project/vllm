@@ -33,6 +33,9 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.compressed_tensors.moe_loading_utils import (  # noqa: E501
+    load_per_expert_moe_weight,
+)
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_BLOCK_SIZE
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.utils import rocm_unquantized_gemm
@@ -1018,6 +1021,23 @@ class GptOssModel(nn.Module, EagleModelMixin):
             if is_pp_missing_parameter(name, self):
                 continue
 
+            # compressed-tensors / HF gpt-oss per-expert layout: route into the
+            # stacked w13_*/w2_* params.
+            if load_per_expert_moe_weight(
+                name,
+                weight,
+                params_dict=params_dict,
+                loaded_params=loaded_params,
+                use_ep=use_ep,
+                ep_rank_start=ep_rank_start,
+                ep_rank_end=ep_rank_end,
+                tp_rank=tp_rank,
+                tp_rank_start=tp_rank_start,
+                tp_rank_end=tp_rank_end,
+                per_rank_intermediate_size=per_rank_intermediate_size,
+            ):
+                continue
+
             if ".w13_weight" in name:
                 # Handle MLP gate and up projection weights
                 # Extract gate and up projection parts
@@ -1199,6 +1219,15 @@ class GptOssForCausalLM(
             ".down_proj.weight_scale": ".w2_weight_scale",
             ".down_proj.bias": ".w2_bias",
             ".down_proj.input_scale": ".w2_input_scale",
+            # compressed-tensors / HF "experts.experts.N.{gate,up}_proj.*" form:
+            # rename to .w1_* / .w3_* so _load_weights_other routes them into
+            # the right half of w13_* (already-fused .w13_* names untouched).
+            ".gate_proj.weight": ".w1_weight",
+            ".gate_proj.weight_scale": ".w1_weight_scale",
+            ".gate_proj.bias": ".w1_bias",
+            ".up_proj.weight": ".w3_weight",
+            ".up_proj.weight_scale": ".w3_weight_scale",
+            ".up_proj.bias": ".w3_bias",
         },
     )
 
