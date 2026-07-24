@@ -452,13 +452,6 @@ def test_processing_correctness(
             "audio placeholders from processed audio lengths. Its vLLM "
             "processor paths are covered by test_moss_audio.py."
         )
-    # TODO: Remove once https://github.com/huggingface/transformers/pull/47483 lands.
-    if model_id == "microsoft/VibeVoice-ASR-HF":
-        pytest.skip(
-            "VibeVoice ASR requires audio as a positional argument and hence "
-            "cannot pass the processing correctness test as is. Its generation "
-            "is covered by test_transformers_audio.py."
-        )
     if model_id == "lmms-lab-encoder/LLaVA-OneVision-2-8B-Instruct":
         pytest.skip(
             "LLaVA-OneVision-2 video processing routes frames through custom "
