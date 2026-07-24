@@ -181,6 +181,10 @@ class KVConnectorBase_V1(ABC):
         """
         return False
 
+    @property
+    def transfer_intermediate_tensors(self) -> bool:
+        return False
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
