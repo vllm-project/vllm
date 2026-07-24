@@ -114,6 +114,23 @@ def make_request(
     )
 
 
+def replace_request_suffix_and_hashes(
+    request: Request,
+    num_kept_tokens: int,
+    replacement_token_ids: list[int],
+    block_size: int,
+) -> None:
+    del request.block_hashes[num_kept_tokens // block_size :]
+    del request._all_token_ids[num_kept_tokens:]
+    request._output_token_ids.clear()
+    assert request.prompt_token_ids is not None
+    del request.prompt_token_ids[num_kept_tokens:]
+    request.prompt_token_ids.extend(replacement_token_ids)
+    request._all_token_ids.extend(replacement_token_ids)
+    request.update_block_hashes()
+    request.num_prompt_tokens = len(request.prompt_token_ids)
+
+
 def new_kv_cache_spec(
     block_size=16,
     num_kv_heads=2,
@@ -696,6 +713,140 @@ def test_request_block_hasher(hash_fn):
         (kv_cache_utils.NONE_HASH, (0, 1, 2), (("hash1", 0),))
     )
     assert block_hashes[1] == hash_fn((block_hashes[0], (3, 4, 5), (("hash2", 0),)))
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+@pytest.mark.parametrize(
+    ("mm_positions", "expected_extra_keys"),
+    [
+        pytest.param([], [None, None, None, None], id="no-mm"),
+        pytest.param(
+            [PlaceholderRange(offset=0, length=4)],
+            [(("A", 0),), None, None, None],
+            id="wholly-before",
+        ),
+        pytest.param(
+            [PlaceholderRange(offset=2, length=4)],
+            [(("A", 2),), (("A", -2),), None, None],
+            id="overlaps-first-recomputed-block",
+        ),
+        pytest.param(
+            [PlaceholderRange(offset=12, length=2)],
+            [None, None, None, (("A", 0),)],
+            id="wholly-after-first-recomputed-block",
+        ),
+        pytest.param(
+            [
+                PlaceholderRange(offset=4, length=1),
+                PlaceholderRange(offset=6, length=2),
+            ],
+            [None, (("A", 0), ("B", 2)), None, None],
+            id="multiple-features-in-one-block",
+        ),
+        pytest.param(
+            [
+                PlaceholderRange(offset=2, length=4),
+                PlaceholderRange(offset=9, length=2),
+            ],
+            [(("A", 2),), (("A", -2),), (("B", 1),), None],
+            id="overlapping-a-and-later-b",
+        ),
+        pytest.param(
+            [
+                PlaceholderRange(offset=4, length=2),
+                PlaceholderRange(offset=12, length=1),
+            ],
+            [None, (("A", 0),), None, (("B", 0),)],
+            id="starts-at-block-boundary",
+        ),
+        pytest.param(
+            [
+                PlaceholderRange(offset=2, length=2),
+                PlaceholderRange(offset=9, length=2),
+            ],
+            [(("A", 2),), None, (("B", 1),), None],
+            id="ends-at-block-boundary",
+        ),
+        pytest.param(
+            [
+                PlaceholderRange(offset=2, length=10),
+                PlaceholderRange(offset=14, length=1),
+            ],
+            [
+                (("A", 2),),
+                (("A", -2),),
+                (("A", -6),),
+                (("B", 2),),
+            ],
+            id="spans-multiple-blocks",
+        ),
+    ],
+)
+def test_request_block_hasher_rehashes_multimodal_suffix(
+    hash_fn,
+    mm_positions: list[PlaceholderRange],
+    expected_extra_keys: list[tuple[Any, ...] | None],
+):
+    block_size = 4
+    identifiers = [chr(ord("A") + i) for i in range(len(mm_positions))]
+    incremental = make_request(
+        request_id="incremental",
+        prompt_token_ids=list(range(4)) + list(range(100, 112)),
+        block_size=block_size,
+        hash_fn=hash_fn,
+        mm_positions=mm_positions,
+        mm_hashes=identifiers,
+    )
+    retained_hash = incremental.block_hashes[0]
+    replace_request_suffix_and_hashes(incremental, 4, list(range(4, 16)), 4)
+    fresh = make_request(
+        request_id="fresh",
+        prompt_token_ids=list(range(16)),
+        block_size=block_size,
+        hash_fn=hash_fn,
+        mm_positions=mm_positions,
+        mm_hashes=identifiers,
+    )
+
+    actual_extra_keys = []
+    curr_mm_idx = 0
+    for start in range(0, 16, block_size):
+        extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
+            fresh, start, start + block_size, curr_mm_idx
+        )
+        actual_extra_keys.append(extra_keys)
+
+    assert actual_extra_keys == expected_extra_keys
+    assert incremental.block_hashes[0] == retained_hash
+    assert incremental.block_hashes == fresh.block_hashes
+
+
+def test_request_block_hasher_incremental_append_scans_all_mm_features():
+    incremental = make_request(
+        request_id="incremental",
+        prompt_token_ids=list(range(7)),
+        block_size=4,
+        hash_fn=sha256,
+        mm_positions=[
+            PlaceholderRange(offset=4, length=2),
+            PlaceholderRange(offset=6, length=1),
+        ],
+        mm_hashes=["A", "B"],
+    )
+    incremental.append_output_token_ids(7)
+    fresh = make_request(
+        request_id="fresh",
+        prompt_token_ids=list(range(8)),
+        block_size=4,
+        hash_fn=sha256,
+        mm_positions=[
+            PlaceholderRange(offset=4, length=2),
+            PlaceholderRange(offset=6, length=1),
+        ],
+        mm_hashes=["A", "B"],
+    )
+
+    assert incremental.block_hashes == fresh.block_hashes
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
