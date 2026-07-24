@@ -6,6 +6,7 @@ import atexit
 import os
 import random
 import threading
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -39,6 +40,7 @@ _fi_ar_workspace = None
 # allreduce backend or a fallback backend when the primary workspace is not
 # available on the current topology.
 _fi_ar_quant_workspace = None
+_fi_ar_workspace_groups: dict[int, ProcessGroup] = {}
 
 
 def _create_workspace(
@@ -81,6 +83,14 @@ def _create_workspace(
         return None
     finally:
         random.setstate(rng_state)
+    workspace_id = id(workspace)
+    workspace_group = _fi_ar_workspace_groups.get(workspace_id)
+    if workspace_group is not None and workspace_group is not group:
+        raise RuntimeError(
+            "FlashInfer returned an all-reduce workspace already associated "
+            "with a different process group"
+        )
+    _fi_ar_workspace_groups[workspace_id] = group
     logger.debug(
         "Initialized FlashInfer All Reduce workspace: backend=%s, "
         "world_size=%d, rank=%d, max_token_num=%d, hidden_dim=%d, dtype=%s",
@@ -111,7 +121,7 @@ def _resolve_fi_ar_backend() -> tuple[str, bool]:
     # Default to mnnvl for both single- and multi-node setups. The mnnvl
     # cudagraph hang that previously forced single-node to trtllm
     # (https://github.com/vllm-project/vllm/issues/35772) was fixed upstream in
-    # FlashInfer (>= 0.6.12, vLLM pins 0.6.13), so mnnvl is safe here. trtllm
+    # FlashInfer (>= 0.6.12, vLLM pins 0.6.15), so mnnvl is safe here. trtllm
     # does not support multi-node allreduce, so mnnvl is required there anyway.
     # mnnvl needs NVSwitch multicast; on single-node topologies without it,
     # fall back to trtllm so fused allreduce stays enabled.
@@ -268,6 +278,36 @@ def destroy_fi_ar_workspace():
             _fi_ar_quant_workspace.destroy()
 
         _fi_ar_workspace = _fi_ar_quant_workspace = None
+        _fi_ar_workspace_groups.clear()
+
+
+def _fi_ar_workspaces_for_group(group: ProcessGroup) -> list[Any]:
+    workspaces = [_fi_ar_workspace]
+    if _fi_ar_quant_workspace is not _fi_ar_workspace:
+        workspaces.append(_fi_ar_quant_workspace)
+
+    group_workspaces = []
+    for workspace in workspaces:
+        if workspace is None:
+            continue
+        workspace_group = _fi_ar_workspace_groups.get(id(workspace))
+        if workspace_group is None:
+            raise RuntimeError(
+                "FlashInfer all-reduce workspace process group was not retained"
+            )
+        if workspace_group is group:
+            group_workspaces.append(workspace)
+    return group_workspaces
+
+
+def checkpoint_prepare_fi_ar_workspaces(group: ProcessGroup) -> None:
+    for workspace in _fi_ar_workspaces_for_group(group):
+        workspace.checkpoint_prepare()
+
+
+def checkpoint_restore_fi_ar_workspaces(group: ProcessGroup) -> None:
+    for workspace in _fi_ar_workspaces_for_group(group):
+        workspace.checkpoint_restore(TorchDistBackend(group=group))
 
 
 atexit.register(destroy_fi_ar_workspace)

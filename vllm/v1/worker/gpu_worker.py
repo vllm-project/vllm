@@ -41,6 +41,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.parallel_state import (
     Handle,
+    checkpoint_prepare_distributed_state,
+    checkpoint_restore_distributed_state,
     get_pp_group,
     get_tp_group,
 )
@@ -240,6 +242,12 @@ class Worker(WorkerBase):
 
         if tags is None or "kv_cache" in tags:
             self.model_runner.post_kv_cache_wake_up()
+
+    def checkpoint_prepare(self) -> None:
+        checkpoint_prepare_distributed_state()
+
+    def checkpoint_restore(self) -> None:
+        checkpoint_restore_distributed_state()
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if (
