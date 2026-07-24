@@ -51,6 +51,19 @@ def flashinfer_sampler_supported() -> bool:
             f"unsupported compute capability {capability.as_version_str()}"
         )
 
+    # FlashInfer top-k/top-p sampler can cause CUDA stream hangs on
+    # Blackwell consumer GPUs (SM120/SM121: GB10, RTX 5090, RTX 6000 Pro).
+    # Default-disable on these archs; users can still explicitly opt in
+    # with VLLM_USE_FLASHINFER_SAMPLER=1.
+    # See https://github.com/vllm-project/vllm/issues/43885
+    # TODO: remove this workaround after FlashInfer fix
+    # https://github.com/flashinfer-ai/flashinfer/issues/361
+    if unsupported_reason is None and capability[0] == 12:
+        unsupported_reason = (
+            "FlashInfer sampler default-disabled on Blackwell consumer GPUs "
+            "(SM120/SM121) due to potential CUDA stream hangs"
+        )
+
     if unsupported_reason is None:
         logger.info_once("Using FlashInfer for top-p & top-k sampling.", scope="global")
         return True
