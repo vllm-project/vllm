@@ -4,8 +4,10 @@
 # It serves a sanity check for compilation and basic model usage.
 set -ex
 
-# Skip the new torch installation during build since we are using the specified version for arm64 in the Dockerfile
-python3 use_existing_torch.py
+# Strip only the core torch version pin so the pre-installed arm64 torch is reused.
+# --torch-only preserves torchvision and torchaudio version pins so they are still
+# installed from requirements/cuda.txt during the Docker build.
+python3 use_existing_torch.py --torch-only
 
 # Try building the docker image
 DOCKER_BUILDKIT=1 docker build . \
