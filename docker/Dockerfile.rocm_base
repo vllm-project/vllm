@@ -1,11 +1,11 @@
 ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2.3-complete
-ARG TRITON_BRANCH="0f380657"
+ARG TRITON_BRANCH="0263a6a"
 ARG TRITON_REPO="https://github.com/ROCm/triton.git"
-ARG PYTORCH_BRANCH="d0c8b1f3" # release/2.11 as of 6/09
+ARG PYTORCH_BRANCH="e4d43db" # release/2.12 as of 7/9
 ARG PYTORCH_REPO="https://github.com/ROCm/pytorch.git"
-ARG PYTORCH_VISION_BRANCH="v0.24.1"
+ARG PYTORCH_VISION_BRANCH="v0.27.1"
 ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
-ARG PYTORCH_AUDIO_BRANCH="v2.9.0"
+ARG PYTORCH_AUDIO_BRANCH="v2.11.0"
 ARG PYTORCH_AUDIO_REPO="https://github.com/pytorch/audio.git"
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
@@ -42,16 +42,16 @@ RUN mkdir -p /app
 WORKDIR /app
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install Python and other dependencies
+# Install Python and other dependencies (plus gcc-13, selected later in build_pytorch).
 RUN apt-get update -y \
     && apt-get install -y software-properties-common git curl sudo vim less libgfortran5 libopenmpi-dev libpci-dev liblzma-dev pkg-config \
     && for i in 1 2 3; do \
-        add-apt-repository -y ppa:deadsnakes/ppa && break || \
+        add-apt-repository -y ppa:deadsnakes/ppa && add-apt-repository -y ppa:ubuntu-toolchain-r/test && break || \
         { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
     done \
     && apt-get update -y \
     && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
-       python${PYTHON_VERSION}-lib2to3 python-is-python3  \
+       python${PYTHON_VERSION}-lib2to3 python-is-python3 gcc-13 g++-13 \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
@@ -112,12 +112,9 @@ FROM base AS build_triton
 ARG TRITON_BRANCH
 ARG TRITON_REPO
 RUN git clone ${TRITON_REPO}
-# Cherry picking the following
-# https://github.com/triton-lang/triton/pull/8991
 RUN cd triton \
     && git checkout ${TRITON_BRANCH} \
     && git config --global user.email "you@example.com" && git config --global user.name "Your Name" \
-    && git cherry-pick 555d04f \
     && if [ ! -f setup.py ]; then cd python; fi \
     && python3 setup.py bdist_wheel --dist-dir=dist \
     && mkdir -p /app/install && cp dist/*.whl /app/install
@@ -147,6 +144,8 @@ ARG PYTORCH_AUDIO_REPO
 ARG USE_SCCACHE
 
 RUN apt-get update && apt-get install -y pkg-config liblzma-dev
+# torch 2.12 emits float->__bf16 libcalls (__truncsfbf2) absent from gcc-11 libgcc; build with gcc-13.
+RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 130 --slave /usr/bin/g++ g++ /usr/bin/g++-13
 RUN git clone ${PYTORCH_REPO} pytorch
 RUN cd pytorch && git checkout ${PYTORCH_BRANCH}
 RUN cd pytorch \
