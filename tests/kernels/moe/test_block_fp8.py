@@ -11,10 +11,7 @@ from tests.kernels.moe.utils import (
     make_test_weights,
     modular_triton_fused_moe,
 )
-from tests.kernels.quant_utils import (
-    native_per_token_group_quant_fp8,
-    native_w8a8_block_matmul,
-)
+from tests.kernels.quant_utils import native_w8a8_block_matmul
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import (
@@ -33,6 +30,9 @@ from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
+)
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
@@ -116,7 +116,10 @@ def torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, topk_weight, topk_ids, block
     topk_ids = topk_ids.view(-1)
 
     _, block_k = block_shape[0], block_shape[1]
-    a_q, a_s = native_per_token_group_quant_fp8(a, block_k)
+    # Quantize with the production per-token-group fp8 kernel (same HIP/CUDA op the
+    # kernels use) so the reference is bit-identical here; removes ~0.06-0.10% fp8
+    # boundary-flip divergence that otherwise accumulates over K. Matmul stays fp32.
+    a_q, a_s = per_token_group_quant_fp8(a, block_k, dtype=torch.float8_e4m3fn)
     a_q = a_q.to(torch.float32)
     for i in range(w1.shape[0]):
         mask = topk_ids == i
@@ -125,7 +128,9 @@ def torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, topk_weight, topk_ids, block
                 a_q[mask], w1[i], a_s[mask], w1_s[i], block_shape, output_dtype=a.dtype
             )
             act_out = SiluAndMul().forward_native(inter_out)
-            act_out_q, act_out_s = native_per_token_group_quant_fp8(act_out, block_k)
+            act_out_q, act_out_s = per_token_group_quant_fp8(
+                act_out, block_k, dtype=torch.float8_e4m3fn
+            )
             out[mask] = native_w8a8_block_matmul(
                 act_out_q, w2[i], act_out_s, w2_s[i], block_shape, output_dtype=a.dtype
             )
@@ -206,12 +211,12 @@ def test_w8a8_block_fp8_fused_moe(
 
     # 0.039 only needed for M >= 8192
     tol = 0.035 if M < 8192 else 0.039
-    # ROCm/gfx950: fp8 block-quant accumulation error grows with K and N, so the
-    # large-K/large-N shapes slightly exceed the base tolerance. The error is
-    # broadly distributed but hard-capped (no element exceeds 0.08), so widen the
-    # absolute tolerance for these shapes on ROCm only.
+    # ROCm/gfx950: aligning the reference quantizer with the kernel (see
+    # torch_w8a8_block_fp8_moe) removes the fp8 boundary-flip divergence, but a
+    # bounded residual from the fp8 block-matmul accumulation still grows with K
+    # and N, so large-K/large-N shapes need a slightly wider tolerance on ROCm.
     if current_platform.is_rocm() and K >= 4096 and N >= 1024:
-        tol = max(tol, 0.08)
+        tol = max(tol, 0.07)
     torch.testing.assert_close(out, ref_out, atol=tol, rtol=tol)
     torch.testing.assert_close(m_out, ref_out, atol=tol, rtol=tol)
 
