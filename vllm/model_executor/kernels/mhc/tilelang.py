@@ -42,13 +42,14 @@ def _select_hc_prenorm_gemm_backend(
     fn: torch.Tensor,
     preferred_n_splits: int,
 ) -> tuple[bool, bool, int]:
-    if _can_use_cutedsl_hc_prenorm_gemm(x, fn, preferred_n_splits):
-        return True, False, preferred_n_splits
-
     from vllm.utils.deep_gemm import is_deep_gemm_supported
 
     if is_deep_gemm_supported():
         return False, True, preferred_n_splits
+
+    if _can_use_cutedsl_hc_prenorm_gemm(x, fn, preferred_n_splits):
+        return True, False, preferred_n_splits
+
     return False, False, 1
 
 
