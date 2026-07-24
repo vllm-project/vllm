@@ -107,7 +107,7 @@ def smart_resize(
     if max(height, width) / min(height, width) > 200:
         raise ValueError(
             "absolute aspect ratio must be smaller than 200, got "
-            "{max(height, width) / min(height, width)}"
+            f"{max(height, width) / min(height, width)}"
         )
     h_bar = round(height / factor) * factor
     w_bar = round(width / factor) * factor
