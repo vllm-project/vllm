@@ -1415,11 +1415,21 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )
 
         if not all_uses_trtllm:
-            if self.has_sinks:
+            # Sinks are carried by the trtllm paths, the native FlashInfer
+            # prefill/decode run() calls, and the XQA decode kernel, but NOT by
+            # the DCP prefill wrapper or the cascade path. On SM90/SM12x prefill
+            # is always native (no trtllm prefill), so all_uses_trtllm is False
+            # for sink models even though sinks are fully supported there.
+            # Only reject when sinks would actually be dropped.
+            sinks_would_be_dropped = self.use_dcp or use_cascade
+            if self.has_sinks and (
+                not FlashInferBackend.supports_sink() or sinks_would_be_dropped
+            ):
                 raise NotImplementedError(
-                    "FlashInfer backend currently does not support attention "
-                    "sinks, please use trtllm on blackwell or flash attention "
-                    "on earlier GPUs."
+                    "FlashInfer backend does not support attention sinks on "
+                    "this path (DCP prefill / cascade, or a FlashInfer build "
+                    "without the XQA decode API). Use trtllm on Blackwell or "
+                    "flash attention on earlier GPUs."
                 )
 
             if not self.global_hyperparameters.has_same_window_lefts:
