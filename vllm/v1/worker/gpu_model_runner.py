@@ -476,6 +476,9 @@ class GPUModelRunner(
         parallel_config = self.parallel_config
         self.device = device
         self.dtype = self.model_config.dtype
+        self.use_moe_padding_mask = (
+            envs.VLLM_MOE_SKIP_PADDING and self.model_config.is_moe
+        )
 
         self.check_ep_fault = False
         if parallel_config.data_parallel_size > 1 and self.model_config.is_moe:
@@ -761,6 +764,12 @@ class GPUModelRunner(
 
         # Persistent buffers for CUDA graphs.
         self.input_ids = self._make_buffer(self.max_num_tokens, dtype=torch.int32)
+        # Persistent so CUDA graphs and DBO microbatches see a stable padding
+        # mask. The fused-MoE routers use this to avoid dispatching padding
+        # tokens as real work.
+        self.is_padding = self._make_buffer(
+            self.max_num_tokens, dtype=torch.bool, numpy=False
+        )
         self.positions = torch.zeros(
             self.max_num_tokens, dtype=torch.int64, device=self.device
         )
@@ -1044,6 +1053,26 @@ class GPUModelRunner(
             device=self.device,
             with_numpy=numpy,
         )
+
+    def _prepare_moe_padding_mask(
+        self,
+        num_tokens_unpadded: int,
+        num_tokens_padded: int,
+        cudagraph_mode: CUDAGraphMode,
+    ) -> torch.Tensor | None:
+        # A graph captured for a padded shape must retain the stable mask
+        # address even when its capture input happens to fill the whole shape.
+        # Eager, unpadded batches and dense models do not need the two fills or
+        # the downstream router masking operation.
+        if not self.use_moe_padding_mask or (
+            num_tokens_unpadded == num_tokens_padded
+            and cudagraph_mode is CUDAGraphMode.NONE
+        ):
+            return None
+
+        self.is_padding.gpu[:num_tokens_unpadded].fill_(False)
+        self.is_padding.gpu[num_tokens_unpadded:num_tokens_padded].fill_(True)
+        return self.is_padding.gpu[:num_tokens_padded]
 
     def _get_mamba_bufs(self) -> mamba_utils.MambaBuffers:
         # Only reachable on the ``mamba_cache_mode == "align"`` path.
@@ -4272,6 +4301,9 @@ class GPUModelRunner(
             )
 
             num_tokens_padded = batch_desc.num_tokens
+            is_padding = self._prepare_moe_padding_mask(
+                num_tokens_unpadded, num_tokens_padded, cudagraph_mode
+            )
             num_reqs_padded = (
                 batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
             )
@@ -4424,6 +4456,7 @@ class GPUModelRunner(
                 ubatch_slices=ubatch_slices_padded,
                 slot_mapping=slot_mappings,
                 skip_compiled=has_encoder_input,
+                is_padding=is_padding,
             ),
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(
@@ -5942,6 +5975,9 @@ class GPUModelRunner(
             )
 
         num_tokens_padded = batch_desc.num_tokens
+        is_padding = self._prepare_moe_padding_mask(
+            num_tokens_unpadded, num_tokens_padded, cudagraph_runtime_mode
+        )
         num_reqs_padded = (
             batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
         )
@@ -6119,6 +6155,7 @@ class GPUModelRunner(
                     batch_descriptor=batch_desc,
                     ubatch_slices=ubatch_slices_padded,
                     slot_mapping=slot_mappings,
+                    is_padding=is_padding,
                 ),
             ):
                 outputs = self.model(
