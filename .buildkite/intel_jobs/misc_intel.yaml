@@ -22,6 +22,7 @@ steps:
     - tests/v1/kv_offload
     - tests/v1/worker
     - tests/v1/kv_connector/unit
+    - tests/v1/ec_connector/unit
     - tests/v1/metrics
     - tests/entrypoints/openai/correctness/test_lmeval.py
   commands:
@@ -30,7 +31,8 @@ steps:
       'pip install -r requirements/kv_connectors.txt &&
       export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       cd tests &&
-      pytest -v -s v1/executor'
+      pytest -v -s v1/executor &&
+      pytest -v -s -m 'not cpu_test' v1/ec_connector/unit'
 
 - label: V1 Sample + Logits
   timeout_in_minutes: 90
