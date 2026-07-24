@@ -5566,10 +5566,16 @@ class GPUModelRunner(
         # begin loading weights
         logger.info_once("Reloading weights inplace...")
         if is_checkpoint_format:
-            # load weights from checkpoint/ original model format
-            initialize_layerwise_reload(model)
-            loaded_weights = model.load_weights(weights_iterator)
-            finalize_layerwise_reload(model, self.model_config)
+            # Layerwise reload only exists to defer quantization repacking;
+            # for non-quantized models it is unnecessary, and its per-layer
+            # reprocessing corrupts hybrid (Mamba) weights on reload. Use the
+            # plain startup load path instead.
+            if getattr(self.model_config, "quantization", None) is None:
+                loaded_weights = model.load_weights(weights_iterator)
+            else:
+                initialize_layerwise_reload(model)
+                loaded_weights = model.load_weights(weights_iterator)
+                finalize_layerwise_reload(model, self.model_config)
 
         else:
             # load weights from kernel format
