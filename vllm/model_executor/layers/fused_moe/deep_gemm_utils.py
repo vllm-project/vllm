@@ -180,6 +180,7 @@ def _fwd_kernel_ep_scatter_2(
     topk_num: tl.constexpr,
     expert_map,
     HAS_EXPERT_MAP: tl.constexpr,
+    HAS_SCALE: tl.constexpr,
     HIDDEN_SIZE: tl.constexpr,
     HIDDEN_SIZE_PAD: tl.constexpr,
     SCALE_HIDDEN_SIZE: tl.constexpr,
@@ -207,7 +208,7 @@ def _fwd_kernel_ep_scatter_2(
     for token_id in range(start_token_id, total_token_num, grid_num):
         to_copy = tl.load(recv_x + token_id * recv_x_stride0 + offset_in, mask=mask)
 
-        if PACK_UE8M0:
+        if HAS_SCALE and PACK_UE8M0:
             # Pack 4 UE8M0 bytes into one int32 (byte j = group 4*pk+j).
             base_s = recv_x_scale + token_id * recv_x_scale_stride0
             g0, g1 = offs_pk * 4, offs_pk * 4 + 1
@@ -230,7 +231,7 @@ def _fwd_kernel_ep_scatter_2(
                 | (b2.to(tl.int32) << 16)
                 | (b3.to(tl.int32) << 24)
             )
-        else:
+        elif HAS_SCALE:
             to_copy_s = tl.load(
                 recv_x_scale + token_id * recv_x_scale_stride0 + offset_in_s,
                 mask=mask_s,
@@ -257,13 +258,13 @@ def _fwd_kernel_ep_scatter_2(
                 output_tensor_scale_ptr = (
                     output_tensor_scale + dest_token_index * output_tensor_scale_stride0
                 )
-                if PACK_UE8M0:
+                if HAS_SCALE and PACK_UE8M0:
                     tl.store(
                         output_tensor_scale_ptr + offs_pk * output_tensor_scale_stride1,
                         packed_s,
                         mask=mask_pk,
                     )
-                else:
+                elif HAS_SCALE:
                     tl.store(
                         output_tensor_scale_ptr + offset_in_s, to_copy_s, mask=mask_s
                     )
@@ -272,13 +273,13 @@ def _fwd_kernel_ep_scatter_2(
 @torch.no_grad()
 def ep_scatter(
     recv_x: torch.Tensor,
-    recv_x_scale: torch.Tensor,
+    recv_x_scale: torch.Tensor | None,
     recv_topk: torch.Tensor,
     num_recv_tokens_per_expert: torch.Tensor,
     expert_map: torch.Tensor | None,
     expert_start_loc: torch.Tensor,
     output_tensor: torch.Tensor,
-    output_tensor_scale: torch.Tensor,
+    output_tensor_scale: torch.Tensor | None,
     m_indices: torch.Tensor,
     output_index: torch.Tensor,
     align_m: int = 128,
@@ -291,6 +292,13 @@ def ep_scatter(
     num_warps = 8
     num_experts = num_recv_tokens_per_expert.shape[0]
     hidden_size = recv_x.shape[1]
+    # BF16 (unquantized) permute has no activation scales; pass dummy tensors
+    # so the kernel's HAS_SCALE-guarded loads/stores stay valid but inert.
+    has_scale = recv_x_scale is not None
+    if not has_scale:
+        _dummy_scale = torch.empty((1, 1), device=recv_x.device, dtype=torch.float32)
+        recv_x_scale = _dummy_scale
+        output_tensor_scale = _dummy_scale
     # grid = (triton.cdiv(hidden_size, BLOCK_D), num_experts)
     grid = num_experts
 
@@ -298,7 +306,7 @@ def ep_scatter(
     assert expert_start_loc.shape[0] == num_experts
 
     # pack_ue8m0: scatter packs 4 UE8M0 bytes per int32; else copies scales as-is.
-    scale_hidden_size = hidden_size // BLOCK_D
+    scale_hidden_size = hidden_size // BLOCK_D if has_scale else 1
     scale_packed_size = (scale_hidden_size + 3) // 4 if pack_ue8m0 else 1
 
     _fwd_kernel_ep_scatter_1[(grid,)](
@@ -338,6 +346,7 @@ def ep_scatter(
         topk_num=recv_topk.shape[1],
         expert_map=expert_map,
         HAS_EXPERT_MAP=expert_map is not None,
+        HAS_SCALE=has_scale,
         num_warps=num_warps,
         HIDDEN_SIZE=hidden_size,
         HIDDEN_SIZE_PAD=triton.next_power_of_2(hidden_size),
@@ -456,7 +465,7 @@ def ep_gather(
 
 def deepgemm_moe_permute(
     aq: torch.Tensor,
-    aq_scale: torch.Tensor,
+    aq_scale: torch.Tensor | None,
     topk_ids: torch.Tensor,
     local_num_experts: int,
     expert_map: torch.Tensor | None,
@@ -493,9 +502,13 @@ def deepgemm_moe_permute(
 
     # uint8 UE8M0 (MXFP8) -> scatter packs into DeepGEMM's int32 MN-major
     # TMA-aligned layout; float32 (FP8/FP4) scattered row-major as-is.
-    pack_ue8m0 = aq_scale.dtype == torch.uint8
+    # BF16 (unquantized) has no scales: aq_scale is None -> no scale output.
+    has_scale = aq_scale is not None
+    pack_ue8m0 = has_scale and aq_scale.dtype == torch.uint8
     sf_k = H // block_k
-    if pack_ue8m0:
+    if not has_scale:
+        aq_scale_out = None
+    elif pack_ue8m0:
         packed_sf_k = (sf_k + 3) // 4
         tma_aligned_mn = round_up(M_sum, 4)
         aq_scale_out = torch.empty_strided(
