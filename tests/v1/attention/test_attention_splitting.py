@@ -131,6 +131,35 @@ def test_make_metadata_with_slice_mixed_batch(mixed_small_metadata):
     assert torch.equal(result.seq_lens, torch.tensor([40, 48]))
 
 
+def test_make_metadata_with_slice_carries_positions(mixed_small_metadata):
+    """positions must be sliced alongside slot_mapping (DBO regression)"""
+    mixed_small_metadata.positions = torch.arange(
+        mixed_small_metadata.num_actual_tokens, dtype=torch.int64
+    )
+
+    request_slice = slice(1, 3)
+    token_slice = slice(1, 7)
+    ubatch_slice = UBatchSlice(request_slice, token_slice)
+
+    result = _make_metadata_with_slice(ubatch_slice, mixed_small_metadata)
+
+    assert result.num_reqs == 2
+    assert result.num_actual_tokens == 6
+    assert result.max_query_len == 5
+    assert torch.equal(result.query_start_loc, torch.tensor([0, 1, 6]))
+    assert torch.equal(result.seq_lens, torch.tensor([40, 48]))
+
+    assert result.positions is not None
+    assert torch.equal(result.positions, mixed_small_metadata.positions[token_slice])
+    assert torch.equal(
+        result.slot_mapping, mixed_small_metadata.slot_mapping[token_slice]
+    )
+    assert torch.equal(
+        result.block_table_tensor,
+        mixed_small_metadata.block_table_tensor[request_slice],
+    )
+
+
 def test_split_attn_metadata_decode_batch(large_decode_metadata):
     """Test splitting decode batch into two equal parts"""
     num_tokens = large_decode_metadata.num_reqs
