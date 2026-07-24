@@ -16,7 +16,7 @@ import numpy as np
 import torch
 import zmq
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -187,6 +187,12 @@ def resolve_moriio_transfer_ack(
 
 
 class MoRIIOConnector(KVConnectorBase_V1):
+    @classmethod
+    def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
+        # READ needs PIECEWISE for its per-layer barrier; WRITE is unchanged.
+        kv_transfer_config = KVTransferConfig(kv_connector_extra_config=extra_config)
+        return get_moriio_mode(kv_transfer_config) == MoRIIOMode.READ
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -296,7 +302,8 @@ class MoRIIOConnector(KVConnectorBase_V1):
         self.connector_worker.start_load_kv(self._connector_metadata)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        pass
+        assert self.connector_worker is not None
+        self.connector_worker.wait_for_layer_load(layer_name)
 
     def save_kv_layer(
         self,
@@ -994,8 +1001,8 @@ class MoRIIOConnectorWorker:
         # Map of engine_id -> num_blocks. All ranks in the same deployment will
         # have the same number of blocks.
         self.dst_num_blocks: dict[EngineId, int] = {}
-        # In progress transfers.
-        self._recving_transfers: defaultdict[ReqId, list] = defaultdict(list)
+        # In-progress READ transfers: req_id -> {layer_name: status}.
+        self._recving_transfers: defaultdict[ReqId, dict] = defaultdict(dict)
         # Values are (remote_host, remote_notify_port, transfer_id).
         self._recving_transfers_callback_addr: dict[ReqId, tuple[str, str, str]] = {}
 
@@ -1616,13 +1623,53 @@ class MoRIIOConnectorWorker:
 
         return done_sending, done_recving
 
+    def wait_for_layer_load(self, layer_name: str) -> None:
+        """Block until all in-flight READs of this layer have landed."""
+        if self.is_producer or self.mode != MoRIIOMode.READ:
+            return
+
+        deadline = time.monotonic() + self.moriio_config.transfer_timeout
+        while True:
+            with self.moriio_wrapper.lock:
+                pending = [
+                    status_by_layer[layer_name]
+                    for status_by_layer in self._recving_transfers.values()
+                    if layer_name in status_by_layer
+                ]
+
+            if not pending:
+                return
+
+            still_running = False
+            for status in pending:
+                # A failed read is dropped in _pop_done_transfers.
+                if status.Succeeded() or status.Failed():
+                    continue
+                still_running = True
+
+            if not still_running:
+                return
+
+            if time.monotonic() > deadline:
+                logger.warning(
+                    "MoRIIO READ barrier timed out for layer %s; proceeding "
+                    "(request dropped via get_finished).",
+                    layer_name,
+                )
+                return
+
+            time.sleep(0.001)
+
     def _pop_done_transfers(self) -> set[str]:
         done_req_ids: set[str] = set()
         with self.moriio_wrapper.lock:
             to_remove = []
-            for req_id, status_list in self._recving_transfers.items():
-                last = status_list[-1]
-                if last.Succeeded():
+            for req_id, status_by_layer in self._recving_transfers.items():
+                statuses = list(status_by_layer.values())
+                failed_status = next(
+                    (status for status in statuses if status.Failed()), None
+                )
+                if statuses and all(status.Succeeded() for status in statuses):
                     host, port, xfer_id = self._recving_transfers_callback_addr[req_id]
                     done_req_ids.add(xfer_id)
                     self.moriio_wrapper.send_notify(
@@ -1633,14 +1680,14 @@ class MoRIIOConnectorWorker:
                         message_fields={"consumer_tp_size": self.world_size},
                     )
                     to_remove.append(req_id)
-                elif last.Failed():
+                elif failed_status is not None:
                     logger.error(
                         "RDMA transfer failed for request %s: %s (code=%s). "
                         "Notifying prefill to free blocks; request will be "
                         "aborted by timeout.",
                         req_id,
-                        last.Message(),
-                        last.Code(),
+                        failed_status.Message(),
+                        failed_status.Code(),
                     )
                     host, port, xfer_id = self._recving_transfers_callback_addr[req_id]
                     try:
@@ -2027,7 +2074,7 @@ class MoRIIOConnectorWorker:
                 time.sleep(_backoff)
                 _backoff = min(_backoff * 2, 0.05)
             with self.moriio_wrapper.lock:
-                self._recving_transfers[request_id].append(transfer_status)
+                self._recving_transfers[request_id][layer_name] = transfer_status
                 self._recving_transfers_callback_addr[request_id] = (
                     remote_host,
                     str(remote_notify_port + self._remote_tp_rank(remote_tp_size)),
