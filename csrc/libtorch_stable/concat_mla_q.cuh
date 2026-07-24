@@ -17,8 +17,11 @@ __global__ void ConcatMLAQKernel(
     const int64_t out_stride_0, const int64_t out_stride_1,
     const int64_t nope_stride_0, const int64_t nope_stride_1,
     const int64_t pe_stride_0, const int64_t pe_stride_1) {
-  const int flat_warp_id = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
-  if (flat_warp_id >= num_tokens * num_heads) return;
+  // 64-bit: blockIdx.x * blockDim.x wraps past 2^32 threads (i.e. more than
+  // 2^27 token-heads), aliasing later warps onto earlier tokens/heads.
+  const int64_t flat_warp_id =
+      (static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x) >> 5;
+  if (flat_warp_id >= static_cast<int64_t>(num_tokens) * num_heads) return;
 
   const int token_id = flat_warp_id / num_heads;
   const int head_id = flat_warp_id % num_heads;
