@@ -13,9 +13,18 @@ completes its own load.
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 
+import numpy as np
 import pytest
 
+from vllm.v1.kv_offload.base import (
+    LookupResult,
+    OffloadKey,
+    ReqContext,
+    RequestOffloadingContext,
+)
+from vllm.v1.kv_offload.tiering.base import JobMetadata
 from vllm.v1.kv_offload.tiering.p2p.session import (
     LoadResult,
     P2PSession,
@@ -33,6 +42,8 @@ from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
     ConnectMsg,
     DisconnectMsg,
     FetchMsg,
+    LookupMsg,
+    LookupRespMsg,
     TransferDoneMsg,
 )
 from vllm.v1.kv_offload.tiering.p2p.session.server import (
@@ -46,6 +57,11 @@ from vllm.v1.kv_offload.tiering.p2p.session.session import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+# Shared PYTHONHASHSEED used by the session under test and the fake peer's
+# ConnectMsg so the handshake succeeds unless a test overrides one side.
+_DEFAULT_HASH_SEED = "0"
 
 
 class FakeDataTransport:
@@ -146,12 +162,16 @@ class FakeConnection:
         self._inbox: list[dict] = []
         self._sent: list[dict] = []
         self._closed = False
+        # When True, send() raises to simulate a broken/dead connection.
+        self.fail_send = False
 
     @property
     def alive(self) -> bool:
         return not self._closed
 
     def send(self, msg: dict) -> None:
+        if self.fail_send:
+            raise ConnectionError("simulated dead connection")
         self._sent.append(msg)
 
     def recv(self) -> list[dict]:
@@ -173,6 +193,7 @@ def _peer_connect_msg(
     peer_id: str = "peer:8000",
     block_len: int = 4096,
     fingerprint: str | None = None,
+    hash_seed: str = _DEFAULT_HASH_SEED,
 ) -> dict:
     """Build a ConnectMsg as if the peer sent it."""
     msg = {
@@ -182,10 +203,74 @@ def _peer_connect_msg(
         ConnectMsg.BASE_ADDR: 0x2000,
         ConnectMsg.NUM_BLOCKS: 16,
         ConnectMsg.BLOCK_LEN: block_len,
+        ConnectMsg.HASH_SEED: hash_seed,
     }
     if fingerprint is not None:
         msg[ConnectMsg.CONFIG_FINGERPRINT] = fingerprint
     return msg
+
+
+class FakeParent:
+    """Configurable :class:`ParentManager` for server-role tests.
+
+    ``stored`` is the dict of ready blocks (key → primary block_id).
+    ``pending`` and ``retry`` script the first lookup() result for those
+    keys; subsequent lookups behave normally (a key that promised
+    HIT_PENDING / RETRY can later be promoted to HIT by adding it to
+    ``stored`` and removing it from ``pending``/``retry``). ``calls``
+    captures every parent invocation in order for assertions.
+
+    Injected per-step via ``session.serve_external_requests(parent)`` —
+    not held by the session, matching how ``TieringOffloadingManager``
+    hands the tier a handle valid only for that call.
+    """
+
+    def __init__(
+        self,
+        stored: dict[OffloadKey, int] | None = None,
+        pending: set[OffloadKey] | None = None,
+        retry: set[OffloadKey] | None = None,
+    ) -> None:
+        self.stored: dict[OffloadKey, int] = dict(stored or {})
+        self.pending: set[OffloadKey] = set(pending or ())
+        self.retry: set[OffloadKey] = set(retry or ())
+        self._next_job_id: int = 1000
+        self.calls: list[tuple] = []
+
+    def on_new_request(self, ctx: ReqContext) -> RequestOffloadingContext:
+        self.calls.append(("on_new_request", ctx.req_id))
+        return RequestOffloadingContext()
+
+    def lookup(self, key: OffloadKey, ctx: ReqContext) -> LookupResult:
+        self.calls.append(("lookup", key, ctx.req_id))
+        if key in self.pending:
+            return LookupResult.HIT_PENDING
+        if key in self.retry:
+            return LookupResult.RETRY
+        if key in self.stored:
+            return LookupResult.HIT
+        return LookupResult.MISS
+
+    def create_store_job(
+        self,
+        keys: Sequence[OffloadKey],
+        ctx: ReqContext,
+    ) -> JobMetadata:
+        keys_list = list(keys)
+        self.calls.append(("create_store_job", tuple(keys_list), ctx.req_id))
+        block_ids = np.array([self.stored[k] for k in keys_list], dtype=np.int32)
+        job_id = self._next_job_id
+        self._next_job_id += 1
+        return JobMetadata(
+            job_id=job_id,
+            keys=keys_list,
+            block_ids=block_ids,
+            is_promotion=False,
+            req_context=ctx,
+        )
+
+    def on_request_finished(self, ctx: ReqContext) -> None:
+        self.calls.append(("on_request_finished", ctx.req_id))
 
 
 def _make_session(
@@ -193,6 +278,7 @@ def _make_session(
     transport: FakeDataTransport | None = None,
     peer_id: str = "peer:8000",
     local_id: str = "local:9000",
+    local_hash_seed: str = _DEFAULT_HASH_SEED,
 ) -> tuple[P2PSession, FakeConnection, FakeDataTransport]:
     if conn is None:
         conn = FakeConnection(peer_id=peer_id)
@@ -203,9 +289,15 @@ def _make_session(
         local_id=local_id,
         transport=transport,  # type: ignore[arg-type]
         local_block_len=transport.block_len,
+        local_hash_seed=local_hash_seed,
         conn=conn,  # type: ignore[arg-type]
     )
     return session, conn, transport
+
+
+def _serve(session: P2PSession, parent: FakeParent) -> None:
+    """Resolve enqueued inbound lookups, as the manager does each step."""
+    session.serve_external_requests(parent)  # type: ignore[arg-type]
 
 
 def _activate(
@@ -215,6 +307,42 @@ def _activate(
     conn.enqueue(_peer_connect_msg(peer_id=peer_id))
     conn.enqueue({TYPE_KEY: ConnectAckMsg.TYPE, ConnectAckMsg.PEER_ID: peer_id})
     session.poll()
+
+
+# --- Accessors for the server role's consolidated per-request state.
+# ServerRole keeps one _ServerRequestState per kv_request_id; entries are
+# garbage-collected once fully idle, so "no outbound"/"no abort" reads as
+# either a missing entry or a None field. These helpers paper over that.
+
+
+def _srv_outbound(session: P2PSession, kv_request_id: str):
+    """Outbound serve state for a kv_request_id, or None (idle / GC'd)."""
+    st = session._server._requests.get(kv_request_id)
+    return st.outbound if st is not None else None
+
+
+def _srv_lookups(session: P2PSession) -> list:
+    """Every parked inbound _ActiveLookup across all requests."""
+    return [
+        lu for st in session._server._requests.values() for lu in st.lookups.values()
+    ]
+
+
+def _srv_abort_started(session: P2PSession, kv_request_id: str) -> float | None:
+    """Pending-abort start time for a kv_request_id, or None."""
+    st = session._server._requests.get(kv_request_id)
+    return st.abort_started_at if st is not None else None
+
+
+def _srv_inflight_count(session: P2PSession, kv_request_id: str) -> int:
+    """Inflight-transfer count tracked for a kv_request_id (0 if idle)."""
+    st = session._server._requests.get(kv_request_id)
+    return len(st.inflight_tids) if st is not None else 0
+
+
+def _srv_total_inflight(session: P2PSession) -> int:
+    """Sum of per-request inflight counts across all requests."""
+    return sum(len(st.inflight_tids) for st in session._server._requests.values())
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +428,29 @@ class TestConnectHandshake:
         session.poll()
         assert "peer:8000" in transport._remote_peers
 
+    def test_hash_seed_mismatch_marks_dead(self):
+        """Mismatched PYTHONHASHSEED rejects peer and marks connection dead."""
+        session, conn, transport = _make_session(local_hash_seed="0")
+        conn.enqueue(_peer_connect_msg(hash_seed="12345"))  # mismatch
+        session.poll()
+        assert "peer:8000" not in transport._remote_peers
+        assert not session.alive
+        assert not any(m[TYPE_KEY] == ConnectAckMsg.TYPE for m in conn._sent)
+
+    def test_hash_seed_match_succeeds(self):
+        """Matching PYTHONHASHSEED registers the peer and acks."""
+        session, conn, transport = _make_session(local_hash_seed="12345")
+        conn.enqueue(_peer_connect_msg(hash_seed="12345"))
+        session.poll()
+        assert "peer:8000" in transport._remote_peers
+        assert session.alive
+        assert any(m[TYPE_KEY] == ConnectAckMsg.TYPE for m in conn._sent)
+
+    def test_hash_seed_advertised_in_connect_msg(self):
+        """Session advertises its own PYTHONHASHSEED in the ConnectMsg."""
+        _, conn, _ = _make_session(local_hash_seed="777")
+        assert conn._sent[0][ConnectMsg.HASH_SEED] == "777"
+
 
 # ---------------------------------------------------------------------------
 # Client-role flows
@@ -316,7 +467,7 @@ class TestClientFlows:
         lookup = conn._sent[-1]
         assert lookup[TYPE_KEY] == FetchMsg.TYPE
         assert lookup[FetchMsg.KV_REQUEST_ID] == "req-1"
-        assert lookup[FetchMsg.BLOCK_HASHES] == [b"k1", b"k2"]
+        assert lookup[FetchMsg.KEYS] == [b"k1", b"k2"]
         assert lookup[FetchMsg.BLOCK_INDEXES] == [0, 1]
 
     def test_transfer_done_success(self):
@@ -362,13 +513,46 @@ class TestClientFlows:
         assert abort[TYPE_KEY] == AbortFetchMsg.TYPE
         assert abort[AbortFetchMsg.KV_REQUEST_ID] == "req-1"
 
+    def test_active_loads_work_list_tracks_in_flight(self):
+        """collect_results / has_active_loads use the _active_loads work-list,
+        armed when a fetch is issued and discarded exactly when its load
+        clears — a probe-only request never enters it, and completion empties
+        it while the entry may briefly linger for GC."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        client = session._client
+
+        # A probe-only request has no in-flight load: not in _active_loads.
+        session.register_lookup("req-probe", b"hp")
+        assert client._active_loads == set()
+        assert client.has_active_loads is False
+
+        # Issuing a fetch arms the work-list.
+        session.request_blocks(
+            job_id=1, kv_request_id="req-1", keys=[b"k"], block_ids=[0]
+        )
+        assert client._active_loads == {"req-1"}
+        assert client.has_active_loads is True
+
+        # Completion clears the load and discards it from the work-list.
+        conn.enqueue(
+            {
+                TYPE_KEY: TransferDoneMsg.TYPE,
+                TransferDoneMsg.KV_REQUEST_ID: "req-1",
+                TransferDoneMsg.SUCCESS: True,
+            }
+        )
+        session.poll()
+        assert client._active_loads == set()
+        assert client.has_active_loads is False
+
     def test_load_timeout_sends_abort(self):
         session, conn, _ = _make_session()
         _activate(session, conn)
         session.request_blocks(
             job_id=1, kv_request_id="req-1", keys=[b"k"], block_ids=[0]
         )
-        session._client._inbound["req-1"].submitted_at = time.monotonic() - 60.0
+        session._client._requests["req-1"].load.submitted_at = time.monotonic() - 60.0
         session.poll()
         abort = conn._sent[-1]
         assert abort[TYPE_KEY] == AbortFetchMsg.TYPE
@@ -376,7 +560,7 @@ class TestClientFlows:
     def test_load_abort_ack_timeout_surfaces_failure(self):
         """After load timeout sends AbortFetch, if no AbortAck arrives within
         _ABORT_ACK_TIMEOUT_S the request is surfaced as failed and removed
-        from _inbound — the engine cannot wait forever on a peer that won't
+        from _requests — the engine cannot wait forever on a peer that won't
         ack.
         """
         session, conn, _ = _make_session()
@@ -385,7 +569,7 @@ class TestClientFlows:
             job_id=7, kv_request_id="req-7", keys=[b"k"], block_ids=[0]
         )
         # 1) Trip the load timeout to send AbortFetch and stamp aborted_at.
-        session._client._inbound["req-7"].submitted_at = (
+        session._client._requests["req-7"].load.submitted_at = (
             time.monotonic() - _LOAD_TIMEOUT_S - 1.0
         )
         loads = session.poll().loads
@@ -395,32 +579,32 @@ class TestClientFlows:
             and m[AbortFetchMsg.KV_REQUEST_ID] == "req-7"
             for m in conn._sent
         )
-        assert session._client._inbound["req-7"].aborted_at is not None
+        assert session._client._requests["req-7"].load.aborted_at is not None
 
         # 2) Now backdate aborted_at past the abort-ack timeout. No ack ever
         # arrived from the peer.
-        session._client._inbound["req-7"].aborted_at = (
+        session._client._requests["req-7"].load.aborted_at = (
             time.monotonic() - _ABORT_ACK_TIMEOUT_S - 1.0
         )
         loads = session.poll().loads
         assert loads == [LoadResult(job_id=7, kv_request_id="req-7", success=False)]
-        assert "req-7" not in session._client._inbound
+        assert "req-7" not in session._client._requests
 
     def test_load_abort_ack_clears_request(self):
         """After load timeout sends AbortFetch, an arriving AbortAckMsg from
         the peer surfaces the failure cleanly and removes the request from
-        _inbound — covers the on_abort_ack arrival path."""
+        _requests — covers the on_abort_ack arrival path."""
         session, conn, _ = _make_session()
         _activate(session, conn)
         session.request_blocks(
             job_id=8, kv_request_id="req-8", keys=[b"k"], block_ids=[0]
         )
-        session._client._inbound["req-8"].submitted_at = (
+        session._client._requests["req-8"].load.submitted_at = (
             time.monotonic() - _LOAD_TIMEOUT_S - 1.0
         )
         # First poll: AbortFetch goes out.
         session.poll()
-        assert session._client._inbound["req-8"].aborted_at is not None
+        assert session._client._requests["req-8"].load.aborted_at is not None
 
         # Peer acks the abort.
         conn.enqueue(
@@ -431,7 +615,652 @@ class TestClientFlows:
         )
         loads = session.poll().loads
         assert loads == [LoadResult(job_id=8, kv_request_id="req-8", success=False)]
-        assert "req-8" not in session._client._inbound
+        assert "req-8" not in session._client._requests
+
+
+# ---------------------------------------------------------------------------
+# Symmetric-P2P lookup flow (do_p2p_fetch)
+# ---------------------------------------------------------------------------
+
+
+class TestLookupFlow:
+    """Consumer-side state machine for do_p2p_fetch lookups."""
+
+    def test_aggregate_flush_resolve_round_trip(self):
+        """register_lookup → flush sends one LookupMsg → response
+        resolves entries → register_lookup returns the cached bool on
+        every call, and repeat probes never re-issue a LookupMsg."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        # Aggregate two keys for the same kv_request_id; both return None.
+        assert session.register_lookup("req-1", b"hA") is None
+        assert session.register_lookup("req-1", b"hB") is None
+
+        # Flush sends one LookupMsg with both keys.
+        sent_before = len(conn._sent)
+        session.flush_pending_lookups()
+        new = conn._sent[sent_before:]
+        assert len(new) == 1
+        msg = new[0]
+        assert msg[TYPE_KEY] == LookupMsg.TYPE
+        assert msg[LookupMsg.KV_REQUEST_ID] == "req-1"
+        assert sorted(msg[LookupMsg.KEYS]) == [b"hA", b"hB"]
+
+        # Idempotent re-flush sends nothing — the entries are now in-flight.
+        sent_before = len(conn._sent)
+        session.flush_pending_lookups()
+        assert conn._sent[sent_before:] == []
+
+        # While in-flight, register_lookup keeps returning None.
+        assert session.register_lookup("req-1", b"hA") is None
+
+        # Peer answers: hA hit, hB miss.
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupRespMsg.TYPE,
+                LookupRespMsg.KV_REQUEST_ID: "req-1",
+                LookupRespMsg.KEYS: [b"hA", b"hB"],
+                LookupRespMsg.HITS: [True, False],
+            }
+        )
+        session.poll()
+
+        # register_lookup returns the resolved bool.
+        assert session.register_lookup("req-1", b"hA") is True
+        assert session.register_lookup("req-1", b"hB") is False
+        # The entry is cached, not popped: repeat probes keep returning the
+        # same result and never re-queue the key, so a flush sends nothing.
+        assert session.register_lookup("req-1", b"hA") is True
+        assert session.register_lookup("req-1", b"hB") is False
+        sent_before = len(conn._sent)
+        session.flush_pending_lookups()
+        assert [
+            m for m in conn._sent[sent_before:] if m[TYPE_KEY] == LookupMsg.TYPE
+        ] == []
+
+    def test_request_blocks_clears_probe_cache(self):
+        """A resolved HIT probe is popped when its fetch is issued, so a
+        re-scheduled request re-probes instead of trusting the stale True
+        (the served block is unpinned and may have been evicted)."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        # Probe hA, flush, and let the peer resolve it to a HIT.
+        assert session.register_lookup("req-1", b"hA") is None
+        session.flush_pending_lookups()
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupRespMsg.TYPE,
+                LookupRespMsg.KV_REQUEST_ID: "req-1",
+                LookupRespMsg.KEYS: [b"hA"],
+                LookupRespMsg.HITS: [True],
+            }
+        )
+        session.poll()
+        assert session.register_lookup("req-1", b"hA") is True
+
+        # Fetch consumes the probe.
+        session.request_blocks(
+            job_id=1, kv_request_id="req-1", keys=[b"hA"], block_ids=[0]
+        )
+        assert b"hA" not in session._client._requests["req-1"].probes
+
+        # Re-scheduled probe of the same key is treated as brand-new: it
+        # returns None and re-queues, so a flush emits a fresh LookupMsg.
+        assert session.register_lookup("req-1", b"hA") is None
+        sent_before = len(conn._sent)
+        session.flush_pending_lookups()
+        fresh = [m for m in conn._sent[sent_before:] if m[TYPE_KEY] == LookupMsg.TYPE]
+        assert len(fresh) == 1
+        assert fresh[0][LookupMsg.KEYS] == [b"hA"]
+
+    def test_flush_uses_work_list_not_full_scan(self):
+        """flush drains a work-list rather than scanning every live request.
+
+        A request with no newly-registered keys is not revisited: after a
+        flush the work-list is empty, an idle re-flush sends nothing, and a
+        subsequent register re-arms exactly the one affected id — even while
+        an unrelated request stays live in ``_requests``.
+        """
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        client = session._client
+
+        # Two requests register keys; both are queued for flush.
+        session.register_lookup("req-A", b"hA")
+        session.register_lookup("req-B", b"hB")
+        assert client._flush_pending == {"req-A", "req-B"}
+
+        # Flush drains the work-list even though both requests stay live.
+        session.flush_pending_lookups()
+        assert client._flush_pending == set()
+        assert set(client._requests) == {"req-A", "req-B"}
+
+        # An idle re-flush visits nothing and sends no LookupMsg.
+        sent_before = len(conn._sent)
+        session.flush_pending_lookups()
+        assert [
+            m for m in conn._sent[sent_before:] if m[TYPE_KEY] == LookupMsg.TYPE
+        ] == []
+
+        # A new register re-arms only that id.
+        session.register_lookup("req-A", b"hA2")
+        assert client._flush_pending == {"req-A"}
+
+    def test_separate_lookup_msg_per_kv_request_id(self):
+        """Hashes for different kv_request_ids flush as separate LookupMsgs."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        session.register_lookup("req-A", b"h1")
+        session.register_lookup("req-B", b"h2")
+        session.register_lookup("req-A", b"h3")
+
+        sent_before = len(conn._sent)
+        session.flush_pending_lookups()
+        sent = [m for m in conn._sent[sent_before:] if m[TYPE_KEY] == LookupMsg.TYPE]
+        assert len(sent) == 2
+        by_req = {m[LookupMsg.KV_REQUEST_ID]: m[LookupMsg.KEYS] for m in sent}
+        assert sorted(by_req["req-A"]) == [b"h1", b"h3"]
+        assert by_req["req-B"] == [b"h2"]
+
+    def test_multiple_lookup_msgs_across_steps(self):
+        """A request's block set may be discovered across scheduler steps:
+        each step that registers new keys flushes its own LookupMsg for
+        the same kv_request_id, carrying only the newly-probed keys."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        # Step 1: probe hA, hB.
+        session.register_lookup("req-1", b"hA")
+        session.register_lookup("req-1", b"hB")
+        sent_before = len(conn._sent)
+        session.flush_pending_lookups()
+        first = [m for m in conn._sent[sent_before:] if m[TYPE_KEY] == LookupMsg.TYPE]
+        assert len(first) == 1
+        assert first[0][LookupMsg.KV_REQUEST_ID] == "req-1"
+        assert sorted(first[0][LookupMsg.KEYS]) == [b"hA", b"hB"]
+
+        # Step 2: a new key is discovered for the same request. The
+        # in-flight keys from step 1 are not re-sent; a second LookupMsg
+        # goes out carrying only the newly-probed key.
+        assert session.register_lookup("req-1", b"hA") is None  # in-flight no-op
+        session.register_lookup("req-1", b"hC")
+        sent_before = len(conn._sent)
+        session.flush_pending_lookups()
+        second = [m for m in conn._sent[sent_before:] if m[TYPE_KEY] == LookupMsg.TYPE]
+        assert len(second) == 1
+        assert second[0][LookupMsg.KV_REQUEST_ID] == "req-1"
+        assert second[0][LookupMsg.KEYS] == [b"hC"]
+
+    def test_split_response_resolves_across_messages(self):
+        """Producer may answer one LookupMsg's keys across multiple
+        LookupRespMsgs — pairs are self-describing so each lands."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        session.register_lookup("req-1", b"hA")
+        session.register_lookup("req-1", b"hB")
+        session.flush_pending_lookups()
+
+        # Two responses, each carrying one of the two keys.
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupRespMsg.TYPE,
+                LookupRespMsg.KV_REQUEST_ID: "req-1",
+                LookupRespMsg.KEYS: [b"hA"],
+                LookupRespMsg.HITS: [True],
+            }
+        )
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupRespMsg.TYPE,
+                LookupRespMsg.KV_REQUEST_ID: "req-1",
+                LookupRespMsg.KEYS: [b"hB"],
+                LookupRespMsg.HITS: [False],
+            }
+        )
+        session.poll()
+
+        assert session.register_lookup("req-1", b"hA") is True
+        assert session.register_lookup("req-1", b"hB") is False
+
+    def test_finish_request_cancels_pending_lookups(self):
+        """finish_request drops every pending lookup for the kv_request_id."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        session.register_lookup("req-1", b"hA")
+        session.register_lookup("req-1", b"hB")
+        session.register_lookup("req-2", b"hC")
+        session.finish_request("req-1")
+
+        # req-1 entries gone, req-2 untouched.
+        assert "req-1" not in session._client._requests
+        assert b"hC" in session._client._requests["req-2"].probes
+
+    def test_finish_after_flushed_lookup_sends_empty_fetch(self):
+        """LookupMsg flushed but no FetchMsg sent (all-miss case) →
+        finish_request emits an empty FetchMsg so the peer can drop its
+        lookup state and call parent.on_request_finished."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        session.register_lookup("req-1", b"hA")
+        session.flush_pending_lookups()
+        sent_before = len(conn._sent)
+
+        session.finish_request("req-1")
+
+        fetches = [m for m in conn._sent[sent_before:] if m[TYPE_KEY] == FetchMsg.TYPE]
+        assert len(fetches) == 1
+        assert fetches[0][FetchMsg.KV_REQUEST_ID] == "req-1"
+        assert fetches[0][FetchMsg.KEYS] == []
+        assert fetches[0][FetchMsg.BLOCK_INDEXES] == []
+
+    def test_finish_without_flushed_lookup_sends_no_fetch(self):
+        """No LookupMsg was ever sent → finish_request must not emit an
+        empty FetchMsg (the peer has no state to release)."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        # Register but never flush.
+        session.register_lookup("req-1", b"hA")
+        sent_before = len(conn._sent)
+
+        session.finish_request("req-1")
+
+        fetches = [m for m in conn._sent[sent_before:] if m[TYPE_KEY] == FetchMsg.TYPE]
+        assert fetches == []
+
+    def test_finish_after_real_fetch_sends_no_second_fetch(self):
+        """A real FetchMsg was already sent for the id → finish_request
+        must not emit a second (empty) FetchMsg."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        session.register_lookup("req-1", b"hA")
+        session.flush_pending_lookups()
+        # Resolve the probe to a HIT before fetching, as the manager only
+        # loads confirmed hits (an unresolved probe yields RETRY).
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupRespMsg.TYPE,
+                LookupRespMsg.KV_REQUEST_ID: "req-1",
+                LookupRespMsg.KEYS: [b"hA"],
+                LookupRespMsg.HITS: [True],
+            }
+        )
+        session.poll()
+        session.request_blocks(
+            job_id=1, kv_request_id="req-1", keys=[b"hA"], block_ids=[7]
+        )
+        sent_before = len(conn._sent)
+
+        session.finish_request("req-1")
+
+        fetches = [m for m in conn._sent[sent_before:] if m[TYPE_KEY] == FetchMsg.TYPE]
+        assert fetches == []
+
+    def test_server_lookup_deferred_until_serve_then_all_misses(self):
+        """``poll()`` only enqueues an inbound LookupMsg — no response is
+        sent until ``serve_external_requests``. With an all-miss parent
+        the aggregated LookupRespMsg carries the same keys and
+        ``hits=[False, ...]``."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        sent_before = len(conn._sent)
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupMsg.TYPE,
+                LookupMsg.KV_REQUEST_ID: "req-1",
+                LookupMsg.KEYS: [b"hX", b"hY", b"hZ"],
+            }
+        )
+        session.poll()
+
+        # Dispatch alone must not answer — the parent handle is only valid
+        # during serve_external_requests.
+        assert [
+            m for m in conn._sent[sent_before:] if m[TYPE_KEY] == LookupRespMsg.TYPE
+        ] == []
+
+        _serve(session, FakeParent())
+
+        resps = [
+            m for m in conn._sent[sent_before:] if m[TYPE_KEY] == LookupRespMsg.TYPE
+        ]
+        assert len(resps) == 1
+        resp = resps[0]
+        assert resp[LookupRespMsg.KV_REQUEST_ID] == "req-1"
+        assert resp[LookupRespMsg.KEYS] == [b"hX", b"hY", b"hZ"]
+        assert resp[LookupRespMsg.HITS] == [False, False, False]
+
+
+# ---------------------------------------------------------------------------
+# Server-side handling of inbound LookupMsg (ParentManager-driven)
+#
+# poll() only enqueues the LookupMsg; serve_external_requests(parent)
+# resolves it. Tests follow the poll() → _serve() pattern.
+# ---------------------------------------------------------------------------
+
+
+def _send_lookup(conn: FakeConnection, kv_request_id: str, keys: list[bytes]):
+    conn.enqueue(
+        {
+            TYPE_KEY: LookupMsg.TYPE,
+            LookupMsg.KV_REQUEST_ID: kv_request_id,
+            LookupMsg.KEYS: list(keys),
+        }
+    )
+
+
+def _lookup_resps(conn: FakeConnection, since: int = 0) -> list[dict]:
+    return [m for m in conn._sent[since:] if m[TYPE_KEY] == LookupRespMsg.TYPE]
+
+
+class TestServerLookupHandling:
+    def test_immediate_hits_create_one_store_job(self):
+        """All-HIT batch: one create_store_job call with all keys, one
+        LookupRespMsg with hits=[True]*N, on_request_finished fires at the
+        end of serve, and `available` is populated for the eventual fetch."""
+        cb = FakeParent(stored={b"hA": 1, b"hB": 2, b"hC": 3})
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        sent_before = len(conn._sent)
+        _send_lookup(conn, "req-1", [b"hA", b"hB", b"hC"])
+        session.poll()
+        _serve(session, cb)
+
+        resps = _lookup_resps(conn, sent_before)
+        assert len(resps) == 1
+        assert resps[0][LookupRespMsg.KEYS] == [b"hA", b"hB", b"hC"]
+        assert resps[0][LookupRespMsg.HITS] == [True, True, True]
+
+        kinds = [c[0] for c in cb.calls]
+        assert kinds.count("create_store_job") == 1
+        cs = next(c for c in cb.calls if c[0] == "create_store_job")
+        assert cs[1] == (b"hA", b"hB", b"hC")
+        assert cb.calls[-1][0] == "on_request_finished"
+
+        # Hits are pinned in outbound state for the upcoming FetchMsg match.
+        assert set(_srv_outbound(session, "req-1").available) == {
+            b"hA",
+            b"hB",
+            b"hC",
+        }
+
+    def test_all_misses_no_store_job_finish_fires(self):
+        """All-MISS batch: no create_store_job call; one LookupRespMsg
+        with hits=[False]*N; on_request_finished fires at end of serve."""
+        cb = FakeParent()
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        sent_before = len(conn._sent)
+        _send_lookup(conn, "req-1", [b"hA", b"hB"])
+        session.poll()
+        _serve(session, cb)
+
+        resps = _lookup_resps(conn, sent_before)
+        assert len(resps) == 1
+        assert resps[0][LookupRespMsg.HITS] == [False, False]
+        assert all(c[0] != "create_store_job" for c in cb.calls)
+        assert cb.calls[-1][0] == "on_request_finished"
+
+    def test_mixed_hit_miss_pending_defers_response_until_aggregate(self):
+        """HIT/MISS resolutions do not go out on first sight when any
+        key is still HIT_PENDING / RETRY. The lookup parks until every
+        key has settled (or the deadline fires), then one
+        LookupRespMsg carries all keys in wire order."""
+        cb = FakeParent(
+            stored={b"hA": 1},
+            pending={b"hB"},
+            retry={b"hD"},
+        )
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        sent_before = len(conn._sent)
+        _send_lookup(conn, "req-1", [b"hA", b"hB", b"hC", b"hD"])
+        session.poll()
+        _serve(session, cb)
+
+        # No LookupRespMsg yet — hB and hD are still pending.
+        assert _lookup_resps(conn, sent_before) == []
+        # HIT is still pinned immediately so the eventual FetchMsg matches.
+        cs_calls = [c for c in cb.calls if c[0] == "create_store_job"]
+        assert len(cs_calls) == 1
+        assert cs_calls[0][1] == (b"hA",)
+        # Lookup is parked; on_request_finished not yet called.
+        assert all(c[0] != "on_request_finished" for c in cb.calls)
+        assert len(_srv_lookups(session)) == 1
+
+    def test_pending_resolves_then_aggregate_response_fires(self):
+        """A HIT_PENDING key that becomes HIT on a later poll releases
+        the deferred aggregate response: one LookupRespMsg carrying
+        both keys in wire order, and one create_store_job call per
+        HIT (the second HIT is pinned when it resolves, not when the
+        response goes out)."""
+        cb = FakeParent(stored={b"hA": 1}, pending={b"hB"})
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        sent_before = len(conn._sent)
+        _send_lookup(conn, "req-1", [b"hA", b"hB"])
+        session.poll()
+        _serve(session, cb)
+        # No response yet — hB still pending.
+        assert _lookup_resps(conn, sent_before) == []
+
+        # Promote hB.
+        cb.pending.discard(b"hB")
+        cb.stored[b"hB"] = 2
+
+        # Drive resolver via a second serve_external_requests.
+        _serve(session, cb)
+
+        resps = _lookup_resps(conn, sent_before)
+        assert len(resps) == 1
+        assert resps[0][LookupRespMsg.KEYS] == [b"hA", b"hB"]
+        assert resps[0][LookupRespMsg.HITS] == [True, True]
+
+        cs_calls = [c for c in cb.calls if c[0] == "create_store_job"]
+        assert len(cs_calls) == 2
+        assert cs_calls[0][1] == (b"hA",)
+        assert cs_calls[1][1] == (b"hB",)
+        # on_request_finished fires once after the aggregate resolve.
+        assert sum(1 for c in cb.calls if c[0] == "on_request_finished") == 1
+        assert b"hA" in _srv_outbound(session, "req-1").available
+        assert b"hB" in _srv_outbound(session, "req-1").available
+
+    def test_pending_timeout_replies_miss_no_store_job(self):
+        """A HIT_PENDING key that stays pending past the batch
+        ``deadline`` is force-MISS and never pinned; the deferred
+        aggregate response fires with hits=[False]."""
+        cb = FakeParent(pending={b"hA"})
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        sent_before = len(conn._sent)
+        _send_lookup(conn, "req-1", [b"hA"])
+        session.poll()
+        _serve(session, cb)
+        # Initial serve: nothing immediate, lookup parked, no LookupRespMsg.
+        assert _lookup_resps(conn, sent_before) == []
+
+        # Forge the deadline into the past to trigger the timeout branch.
+        lookup = _srv_lookups(session)[0]
+        lookup.deadline = time.monotonic() - 0.1
+
+        _serve(session, cb)
+
+        resps = _lookup_resps(conn, sent_before)
+        assert len(resps) == 1
+        assert resps[0][LookupRespMsg.KEYS] == [b"hA"]
+        assert resps[0][LookupRespMsg.HITS] == [False]
+        assert all(c[0] != "create_store_job" for c in cb.calls)
+        assert sum(1 for c in cb.calls if c[0] == "on_request_finished") == 1
+
+    def test_finish_request_called_per_lookup_msg_not_per_kv_request_id(self):
+        """Two LookupMsgs for the same kv_request_id get distinct ctxs
+        and two on_request_finished calls (one per batch)."""
+        cb = FakeParent(stored={b"hA": 1, b"hB": 2})
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        _send_lookup(conn, "req-1", [b"hA"])
+        session.poll()
+        _serve(session, cb)
+        _send_lookup(conn, "req-1", [b"hB"])
+        session.poll()
+        _serve(session, cb)
+
+        finish_calls = [c for c in cb.calls if c[0] == "on_request_finished"]
+        assert len(finish_calls) == 2
+        # Distinct synthetic req_ids
+        assert finish_calls[0][1] != finish_calls[1][1]
+        # Both namespaced under the same kv_request_id
+        assert ":req-1:" in finish_calls[0][1]
+        assert ":req-1:" in finish_calls[1][1]
+
+    def test_close_returns_open_batch_ctxs_as_failed_serves(self):
+        """Tearing the session down with a parked batch returns the
+        synthetic ctx as a failed serve (no parent handle at teardown) so
+        the manager can release the TieringManager's state on its next
+        serve."""
+        cb = FakeParent(pending={b"hA"})
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        _send_lookup(conn, "req-1", [b"hA"])
+        session.poll()
+        _serve(session, cb)
+        assert len(_srv_lookups(session)) == 1
+        assert all(c[0] != "on_request_finished" for c in cb.calls)
+
+        result = session.close()
+
+        assert len(result.failed_serves) == 1
+        assert ":req-1:" in result.failed_serves[0].req_id
+        # close() itself must not call the parent.
+        assert all(c[0] != "on_request_finished" for c in cb.calls)
+
+    def test_wire_finish_drops_pending_batches_for_kv_request_id(self):
+        """``ServerRole.finish(kv_request_id)`` drops every parked batch
+        whose kv_request_id matches and queues its ctx for the next
+        serve's on_request_finished."""
+        cb = FakeParent(pending={b"hA", b"hB"})
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        _send_lookup(conn, "req-1", [b"hA"])
+        session.poll()
+        _serve(session, cb)
+        _send_lookup(conn, "req-2", [b"hB"])
+        session.poll()
+        _serve(session, cb)
+        assert len(_srv_lookups(session)) == 2
+
+        session._server.finish("req-1")
+
+        # req-1 batch dropped from parked lookups; its ctx queued for release.
+        remaining_kv_request_ids = {b.kv_request_id for b in _srv_lookups(session)}
+        assert remaining_kv_request_ids == {"req-2"}
+        queued = session._server._finished_lookup_ctxs
+        assert len(queued) == 1
+        assert ":req-1:" in queued[0].req_id
+
+        # The next serve fires on_request_finished exactly once for req-1.
+        _serve(session, cb)
+        finish_calls = [c for c in cb.calls if c[0] == "on_request_finished"]
+        assert len(finish_calls) == 1
+        assert ":req-1:" in finish_calls[0][1]
+
+    def test_incoming_fetch_drops_pending_lookups_for_kv_request_id(self):
+        """A peer FetchMsg terminates the lookup phase for its id: parked
+        lookups with matching kv_request_id are dropped and their
+        ctx queued for on_request_finished; other kv_request_ids untouched."""
+        cb = FakeParent(pending={b"hA", b"hB"})
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        _send_lookup(conn, "req-1", [b"hA"])
+        session.poll()
+        _serve(session, cb)
+        _send_lookup(conn, "req-2", [b"hB"])
+        session.poll()
+        _serve(session, cb)
+        assert len(_srv_lookups(session)) == 2
+
+        # Empty FetchMsg: peer signals "lookup phase done" without asking
+        # for any blocks (the all-miss case).
+        conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.KEYS: [],
+                FetchMsg.BLOCK_INDEXES: [],
+            }
+        )
+        session.poll()
+
+        remaining_kv_request_ids = {lu.kv_request_id for lu in _srv_lookups(session)}
+        assert remaining_kv_request_ids == {"req-2"}
+        # Dispatch queues the ctx but does not call the parent yet.
+        queued = session._server._finished_lookup_ctxs
+        assert len(queued) == 1
+        assert ":req-1:" in queued[0].req_id
+
+        # The next serve fires on_request_finished exactly once for req-1.
+        _serve(session, cb)
+        finish_calls = [c for c in cb.calls if c[0] == "on_request_finished"]
+        assert len(finish_calls) == 1
+        assert ":req-1:" in finish_calls[0][1]
+
+    def test_lookup_then_fetch_round_trip_emits_store_result(self):
+        """End-to-end: lookup pins primary slots → fetch matches them →
+        NIXL transfer completes → StoreResult surfaces with the
+        create_store_job's job_id (the engine releases the pin)."""
+        cb = FakeParent(stored={b"hA": 7, b"hB": 8})
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+
+        _send_lookup(conn, "req-1", [b"hA", b"hB"])
+        session.poll()
+        _serve(session, cb)
+        cs = next(c for c in cb.calls if c[0] == "create_store_job")
+        # FakeParent issues monotonic job_ids starting at 1000.
+        expected_job_id = 1000
+
+        # Consumer issues FetchMsg on the resolved hits.
+        conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.KEYS: [b"hA", b"hB"],
+                FetchMsg.BLOCK_INDEXES: [20, 21],
+            }
+        )
+        session.poll()
+
+        # NIXL write_blocks called with our pinned local block_ids.
+        assert len(transport._transfers) == 1
+        _, (_peer, local, remote) = next(iter(transport._transfers.items()))
+        assert local == [7, 8]
+        assert remote == [20, 21]
+
+        # Drive the transport completion.
+        transport._poll_done.append(0)
+        result = session.poll()
+
+        store_results = [s for s in result.stores if s.success]
+        assert any(s.job_id == expected_job_id for s in store_results)
+        # Sanity: kv mention in synthetic ctx.
+        assert cs[2].startswith("p2p:")
 
 
 # ---------------------------------------------------------------------------
@@ -449,7 +1278,7 @@ class TestServerFlows:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"k1", b"k2"],
+                FetchMsg.KEYS: [b"k1", b"k2"],
                 FetchMsg.BLOCK_INDEXES: [10, 11],
             }
         )
@@ -467,7 +1296,7 @@ class TestServerFlows:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.KEYS: [b"k1"],
                 FetchMsg.BLOCK_INDEXES: [5],
             }
         )
@@ -485,7 +1314,7 @@ class TestServerFlows:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.KEYS: [b"k1"],
                 FetchMsg.BLOCK_INDEXES: [5],
             }
         )
@@ -508,11 +1337,11 @@ class TestServerFlows:
         session.poll()
         ack = next(m for m in conn._sent if m[TYPE_KEY] == AbortAckMsg.TYPE)
         assert ack[AbortAckMsg.KV_REQUEST_ID] == "req-1"
-        assert "req-1" not in session._server._pending_aborts
+        assert _srv_abort_started(session, "req-1") is None
 
     def test_abort_fetch_defers_ack_when_cancel_pending(self):
         """If cancel(mode='wait') reports still-inflight tids, the ack is
-        deferred and the abort is parked in _pending_aborts."""
+        deferred and the abort is parked (abort_started_at set)."""
         session, conn, transport = _make_session()
         _activate(session, conn)
         # Seed an inflight transfer for req-1 that the transport pretends
@@ -533,7 +1362,7 @@ class TestServerFlows:
         session.poll()
 
         assert not any(m[TYPE_KEY] == AbortAckMsg.TYPE for m in conn._sent)
-        assert "req-1" in session._server._pending_aborts
+        assert _srv_abort_started(session, "req-1") is not None
         # First attempt happens inside _on_abort_fetch; the per-tick
         # drain runs again at the end of poll() — both are wait-mode.
         assert all(mode == "wait" for _, mode in transport._cancel_calls)
@@ -558,7 +1387,7 @@ class TestServerFlows:
             }
         )
         session.poll()
-        assert "req-1" in session._server._pending_aborts
+        assert _srv_abort_started(session, "req-1") is not None
 
         # Backend finishes draining: transport.poll() will return tid as
         # DONE, and the next cancel(mode='wait') call sees it's gone.
@@ -569,7 +1398,7 @@ class TestServerFlows:
 
         ack = next(m for m in conn._sent if m[TYPE_KEY] == AbortAckMsg.TYPE)
         assert ack[AbortAckMsg.KV_REQUEST_ID] == "req-1"
-        assert "req-1" not in session._server._pending_aborts
+        assert _srv_abort_started(session, "req-1") is None
         assert tid not in session._server._inflight
 
     def test_abort_fetch_force_cancels_after_timeout(self):
@@ -591,9 +1420,9 @@ class TestServerFlows:
             }
         )
         session.poll()
-        assert "req-1" in session._server._pending_aborts
+        assert _srv_abort_started(session, "req-1") is not None
         # Backdate past the drain deadline.
-        session._server._pending_aborts["req-1"] = (
+        session._server._requests["req-1"].abort_started_at = (
             time.monotonic() - _CANCEL_DRAIN_TIMEOUT_S - 1.0
         )
         # Even if the transport still claims it can't cancel, the
@@ -604,7 +1433,7 @@ class TestServerFlows:
 
         ack = next(m for m in conn._sent if m[TYPE_KEY] == AbortAckMsg.TYPE)
         assert ack[AbortAckMsg.KV_REQUEST_ID] == "req-1"
-        assert "req-1" not in session._server._pending_aborts
+        assert _srv_abort_started(session, "req-1") is None
         assert tid not in session._server._inflight
         assert ([tid], "immediate") in transport._cancel_calls
 
@@ -627,7 +1456,7 @@ class TestServerFlows:
             }
         )
         session.poll()
-        first_started_at = session._server._pending_aborts["req-1"]
+        first_started_at = _srv_abort_started(session, "req-1")
 
         # Second AbortFetchMsg for the same kv_request_id while still
         # draining must not reset the deadline.
@@ -638,7 +1467,7 @@ class TestServerFlows:
             }
         )
         session.poll()
-        assert session._server._pending_aborts["req-1"] == first_started_at
+        assert _srv_abort_started(session, "req-1") == first_started_at
 
         # Now let the drain succeed and confirm exactly one ack ever.
         transport._cancel_still_inflight.discard(tid)
@@ -669,7 +1498,7 @@ class TestServerFlows:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.KEYS: [b"k1"],
                 FetchMsg.BLOCK_INDEXES: [5],
             }
         )
@@ -701,7 +1530,7 @@ class TestServerFlows:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.KEYS: [b"k1"],
                 FetchMsg.BLOCK_INDEXES: [5],
             }
         )
@@ -743,12 +1572,12 @@ class TestFinishRequestServerSide:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.KEYS: [b"k1"],
                 FetchMsg.BLOCK_INDEXES: [5],
             }
         )
         session.poll()
-        assert "req-1" in session._server._outbound
+        assert _srv_outbound(session, "req-1") is not None
 
         session.finish_request("req-1")
 
@@ -756,7 +1585,7 @@ class TestFinishRequestServerSide:
         assert msg is not None
         assert msg[TransferDoneMsg.KV_REQUEST_ID] == "req-1"
         assert msg[TransferDoneMsg.SUCCESS] is False
-        assert "req-1" not in session._server._outbound
+        assert _srv_outbound(session, "req-1") is None
 
     def test_with_inflight_defers_then_fires_on_last_transfer(self):
         """finish_request with inflight defers; last transfer fires the
@@ -768,7 +1597,7 @@ class TestFinishRequestServerSide:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"k1", b"k2"],
+                FetchMsg.KEYS: [b"k1", b"k2"],
                 FetchMsg.BLOCK_INDEXES: [10, 11],
             }
         )
@@ -780,8 +1609,8 @@ class TestFinishRequestServerSide:
         before = len(conn._sent)
         session.finish_request("req-1")
         assert len(conn._sent) == before
-        assert "req-1" in session._server._outbound
-        assert session._server._outbound["req-1"].finishing
+        assert _srv_outbound(session, "req-1") is not None
+        assert _srv_outbound(session, "req-1").finishing
 
         # Last inflight settles -> early-fail fires.
         tid = next(iter(transport._transfers))
@@ -792,7 +1621,7 @@ class TestFinishRequestServerSide:
         assert msg is not None
         assert msg[TransferDoneMsg.KV_REQUEST_ID] == "req-1"
         assert msg[TransferDoneMsg.SUCCESS] is False
-        assert "req-1" not in session._server._outbound
+        assert _srv_outbound(session, "req-1") is None
 
     def test_full_demand_satisfied_still_sends_success(self):
         """finish_request must not override a fully-satisfied transfer:
@@ -803,7 +1632,7 @@ class TestFinishRequestServerSide:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.KEYS: [b"k1"],
                 FetchMsg.BLOCK_INDEXES: [10],
             }
         )
@@ -831,13 +1660,13 @@ class TestFinishRequestServerSide:
         session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
         # finish_request first — no demand received yet -> defer.
         session.finish_request("req-1")
-        assert "req-1" in session._server._outbound
+        assert _srv_outbound(session, "req-1") is not None
         # Fetch arrives now: demand fully satisfied by available.
         conn.enqueue(
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.KEYS: [b"k1"],
                 FetchMsg.BLOCK_INDEXES: [10],
             }
         )
@@ -858,7 +1687,7 @@ class TestFinishRequestServerSide:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-2",
-                FetchMsg.BLOCK_HASHES: [b"k1", b"k2"],
+                FetchMsg.KEYS: [b"k1", b"k2"],
                 FetchMsg.BLOCK_INDEXES: [10, 11],
             }
         )
@@ -870,7 +1699,7 @@ class TestFinishRequestServerSide:
         session.poll()
         msg = next(m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE)
         assert msg[TransferDoneMsg.SUCCESS] is False
-        assert "req-2" not in session._server._outbound
+        assert _srv_outbound(session, "req-2") is None
 
     def test_unknown_request_is_noop(self):
         session, conn, _ = _make_session()
@@ -891,7 +1720,7 @@ class TestFinishRequestServerSide:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"demand"],
+                FetchMsg.KEYS: [b"demand"],
                 FetchMsg.BLOCK_INDEXES: [5],
             }
         )
@@ -900,7 +1729,7 @@ class TestFinishRequestServerSide:
         # matches demand. Without the shortcut, job 42 sits in _store_jobs
         # for _STORE_TIMEOUT_S.
         session.add_stored_blocks("req-1", [b"unrelated"], [0], job_id=42)
-        assert session._server._outbound["req-1"].pending_job_ids == {42}
+        assert _srv_outbound(session, "req-1").pending_job_ids == {42}
 
         session.finish_request("req-1")
 
@@ -908,7 +1737,7 @@ class TestFinishRequestServerSide:
         msg = self._last_transfer_done(conn)
         assert msg is not None
         assert msg[TransferDoneMsg.SUCCESS] is False
-        assert "req-1" not in session._server._outbound
+        assert _srv_outbound(session, "req-1") is None
 
         # Local store job surfaces on the next poll, success=False.
         stores = session.poll().stores
@@ -925,7 +1754,7 @@ class TestFinishRequestServerSide:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.KEYS: [b"k1"],
                 FetchMsg.BLOCK_INDEXES: [10],
             }
         )
@@ -933,7 +1762,7 @@ class TestFinishRequestServerSide:
         session.add_stored_blocks("req-1", [b"k1"], [0], job_id=7)
         # finish_request races with the inflight transfer.
         session.finish_request("req-1")
-        assert "req-1" in session._server._outbound  # deferred
+        assert _srv_outbound(session, "req-1") is not None  # deferred
 
         # Last inflight completes -> _finalize_outbound(success=True) fires.
         tid = next(iter(transport._transfers))
@@ -944,7 +1773,7 @@ class TestFinishRequestServerSide:
         assert msg is not None
         assert msg[TransferDoneMsg.SUCCESS] is True
         assert StoreResult(job_id=7, success=True) in stores
-        assert "req-1" not in session._server._outbound
+        assert _srv_outbound(session, "req-1") is None
 
     def test_write_blocks_failure_finalizes_with_failure(self):
         """write_blocks returning None must not leave the request hanging.
@@ -962,7 +1791,7 @@ class TestFinishRequestServerSide:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.KEYS: [b"k1"],
                 FetchMsg.BLOCK_INDEXES: [10],
             }
         )
@@ -973,7 +1802,7 @@ class TestFinishRequestServerSide:
         session.add_stored_blocks("req-1", [b"k1"], [0], job_id=42)
 
         # Outbound was finalized immediately (no other inflight).
-        assert "req-1" not in session._server._outbound
+        assert _srv_outbound(session, "req-1") is None
         # Peer notified with success=False.
         msg = next(m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE)
         assert msg[TransferDoneMsg.KV_REQUEST_ID] == "req-1"
@@ -996,14 +1825,14 @@ class TestFinishRequestServerSide:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"k1", b"k2", b"k3"],
+                FetchMsg.KEYS: [b"k1", b"k2", b"k3"],
                 FetchMsg.BLOCK_INDEXES: [10, 11, 12],
             }
         )
         session.poll()
         # Demand registered, no matches yet.
         assert session._server._inflight == {}
-        outbound = session._server._outbound["req-1"]
+        outbound = _srv_outbound(session, "req-1")
         assert outbound.remaining == 3
         assert set(outbound.demanded.keys()) == {b"k1", b"k2", b"k3"}
 
@@ -1024,7 +1853,7 @@ class TestFinishRequestServerSide:
         assert session._server._inflight == {}
         assert outbound.remaining == 2
         # Not yet finalized — still 2 blocks demanded.
-        assert "req-1" in session._server._outbound
+        assert _srv_outbound(session, "req-1") is not None
 
         # Round 2: k2 and k3 arrive together.
         session.add_stored_blocks("req-1", [b"k2", b"k3"], [1, 2], job_id=200)
@@ -1038,7 +1867,7 @@ class TestFinishRequestServerSide:
         stores = session.poll().stores
         assert StoreResult(job_id=200, success=True) in stores
         # _finalize_outbound fired — request gone, peer notified with success.
-        assert "req-1" not in session._server._outbound
+        assert _srv_outbound(session, "req-1") is None
         done = next(m for m in conn._sent if m.get(TYPE_KEY) == TransferDoneMsg.TYPE)
         assert done[TransferDoneMsg.KV_REQUEST_ID] == "req-1"
         assert done[TransferDoneMsg.SUCCESS] is True
@@ -1057,7 +1886,7 @@ class TestFinishRequestServerSide:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"k1", b"k2"],
+                FetchMsg.KEYS: [b"k1", b"k2"],
                 FetchMsg.BLOCK_INDEXES: [10, 11],
             }
         )
@@ -1067,7 +1896,7 @@ class TestFinishRequestServerSide:
         session.add_stored_blocks("req-1", [b"k1"], [0], job_id=100)
         assert len(session._server._inflight) == 1
         tid_1 = next(iter(session._server._inflight))
-        outbound = session._server._outbound["req-1"]
+        outbound = _srv_outbound(session, "req-1")
         assert outbound.remaining == 2  # decrement happens on completion
         assert outbound.finishing is False
 
@@ -1078,7 +1907,7 @@ class TestFinishRequestServerSide:
         assert list(session._server._inflight.keys()) == [tid_1]
         # Marked finishing, but NOT finalized yet (transfer_1 still inflight).
         assert outbound.finishing is True
-        assert "req-1" in session._server._outbound
+        assert _srv_outbound(session, "req-1") is not None
         done_msgs = [m for m in conn._sent if m.get(TYPE_KEY) == TransferDoneMsg.TYPE]
         assert done_msgs == []
 
@@ -1090,7 +1919,7 @@ class TestFinishRequestServerSide:
         stores_first = session.poll().stores
         assert StoreResult(job_id=100, success=True) in stores_first
         # Outbound state cleaned up; peer notified with success=False.
-        assert "req-1" not in session._server._outbound
+        assert _srv_outbound(session, "req-1") is None
         done = next(m for m in conn._sent if m.get(TYPE_KEY) == TransferDoneMsg.TYPE)
         assert done[TransferDoneMsg.KV_REQUEST_ID] == "req-1"
         assert done[TransferDoneMsg.SUCCESS] is False
@@ -1123,7 +1952,7 @@ class TestBidirectional:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-srv",
-                FetchMsg.BLOCK_HASHES: [b"served"],
+                FetchMsg.KEYS: [b"served"],
                 FetchMsg.BLOCK_INDEXES: [7],
             }
         )
@@ -1178,6 +2007,7 @@ class TestPendingSession:
             local_id="local:9000",
             transport=transport,  # type: ignore[arg-type]
             local_block_len=4096,
+            local_hash_seed=_DEFAULT_HASH_SEED,
             conn=None,
         )
         session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
@@ -1197,6 +2027,7 @@ class TestPendingSession:
             local_id="local:9000",
             transport=transport,  # type: ignore[arg-type]
             local_block_len=4096,
+            local_hash_seed=_DEFAULT_HASH_SEED,
             conn=None,
         )
         conn = FakeConnection(peer_id="peer:8000")
@@ -1218,13 +2049,16 @@ class TestPendingSession:
             local_id="local:9000",
             transport=transport,  # type: ignore[arg-type]
             local_block_len=4096,
+            local_hash_seed=_DEFAULT_HASH_SEED,
             conn=None,
         )
         session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
         session.add_stored_blocks("req-2", [b"k2"], [1], job_id=2)
-        failed_loads, failed_stores = session.close()
-        assert failed_loads == []
-        assert set(failed_stores) == {1, 2}
+        result = session.close()
+        assert result.failed_jobs == []
+        assert result.failed_req_ids == []
+        assert set(result.failed_stores) == {1, 2}
+        assert result.failed_serves == []
 
 
 # ---------------------------------------------------------------------------
@@ -1246,9 +2080,50 @@ class TestDisconnect:
         session.request_blocks(1, "req-1", [b"k"], [0])
         session.request_blocks(2, "req-2", [b"k"], [0])
         session.add_stored_blocks("req-srv", [b"k"], [0], job_id=10)
-        failed_loads, failed_stores = session.close()
-        assert set(failed_loads) == {(1, "req-1"), (2, "req-2")}
-        assert set(failed_stores) == {10}
+        result = session.close()
+        assert set(result.failed_jobs) == {1, 2}
+        assert set(result.failed_req_ids) == {"req-1", "req-2"}
+        assert set(result.failed_stores) == {10}
+        assert result.failed_serves == []
+
+    def test_send_failure_marks_connection_dead(self):
+        """A raising send must mark the connection dead, not silently drop
+        the message — otherwise the session lingers alive, is never reaped,
+        and in-flight lookups/loads toward the dead peer hang forever."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        assert session.alive
+
+        conn.fail_send = True
+        # request_blocks flushes a FetchMsg synchronously via _do_send.
+        session.request_blocks(1, "req-1", [b"k"], [0])
+
+        assert not session.alive
+
+    def test_close_surfaces_inflight_lookups(self):
+        """close() reports kv_request_ids whose symmetric-P2P probe is still
+        unresolved; resolved probes are not reported (their answer is in)."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        session.register_lookup("req-hit", b"hA")
+        session.register_lookup("req-inflight", b"hB")
+        session.flush_pending_lookups()
+
+        # Only req-hit is answered; req-inflight stays in flight.
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupRespMsg.TYPE,
+                LookupRespMsg.KV_REQUEST_ID: "req-hit",
+                LookupRespMsg.KEYS: [b"hA"],
+                LookupRespMsg.HITS: [True],
+            }
+        )
+        session.poll()
+
+        result = session.close()
+        assert result.failed_jobs == []
+        assert result.failed_req_ids == ["req-inflight"]
 
 
 # ---------------------------------------------------------------------------
@@ -1294,7 +2169,7 @@ class TestAdversarial:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-bad",
-                FetchMsg.BLOCK_HASHES: [b"k1", b"k2"],
+                FetchMsg.KEYS: [b"k1", b"k2"],
                 FetchMsg.BLOCK_INDEXES: [1],
             }
         )
@@ -1342,7 +2217,7 @@ class TestDispatchErrorHandling:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-bad",
-                FetchMsg.BLOCK_HASHES: [b"k1", b"k2"],
+                FetchMsg.KEYS: [b"k1", b"k2"],
                 FetchMsg.BLOCK_INDEXES: [1],
             }
         )
@@ -1372,7 +2247,7 @@ class TestDispatchErrorHandling:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: "req-1",
-                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.KEYS: [b"k1"],
                 FetchMsg.BLOCK_INDEXES: [0],
             }
         )
@@ -1395,7 +2270,7 @@ class TestDispatchErrorHandling:
                 {
                     TYPE_KEY: FetchMsg.TYPE,
                     FetchMsg.KV_REQUEST_ID: "req-1",
-                    FetchMsg.BLOCK_HASHES: [b"k1"],
+                    FetchMsg.KEYS: [b"k1"],
                     FetchMsg.BLOCK_INDEXES: [0],
                 }
             )
@@ -1422,7 +2297,7 @@ class TestDispatchErrorHandling:
                 {
                     TYPE_KEY: FetchMsg.TYPE,
                     FetchMsg.KV_REQUEST_ID: "req-1",
-                    FetchMsg.BLOCK_HASHES: [b"k1"],
+                    FetchMsg.KEYS: [b"k1"],
                     FetchMsg.BLOCK_INDEXES: [0],
                 }
             )
@@ -1438,10 +2313,10 @@ class TestDispatchErrorHandling:
 
 
 class TestInflightPerReqInvariant:
-    """`_inflight_per_req` is the O(1) replacement for the previous
-    O(N) scan in `_has_inflight_for`. These tests check that every
-    mutation site keeps the counter in sync with `_inflight` and that
-    the lookup is correct under high fan-out.
+    """Per-request `inflight_tids` is the O(1) replacement for the
+    previous O(N) scan in `_has_inflight_for`. These tests check that
+    every mutation site keeps the set in sync with `_inflight` and
+    that the lookup is correct under high fan-out.
     """
 
     def test_invariant_holds_through_lifecycle(self):
@@ -1452,17 +2327,14 @@ class TestInflightPerReqInvariant:
         _activate(session, conn)
 
         def _invariant_holds() -> bool:
-            counted = sum(session._server._inflight_per_req.values())
-            return counted == len(session._server._inflight) and all(
-                v > 0 for v in session._server._inflight_per_req.values()
-            )
+            return _srv_total_inflight(session) == len(session._server._inflight)
 
         assert _invariant_holds()
 
         # Two requests, two blocks each, all dispatched in one batch.
         session.add_stored_blocks("req-A", [b"a1", b"a2"], [0, 1], job_id=10)
         session.add_stored_blocks("req-B", [b"b1", b"b2"], [2, 3], job_id=11)
-        for kv_id, hashes, indexes in (
+        for kv_id, keys, indexes in (
             ("req-A", [b"a1", b"a2"], [100, 101]),
             ("req-B", [b"b1", b"b2"], [102, 103]),
         ):
@@ -1470,7 +2342,7 @@ class TestInflightPerReqInvariant:
                 {
                     TYPE_KEY: FetchMsg.TYPE,
                     FetchMsg.KV_REQUEST_ID: kv_id,
-                    FetchMsg.BLOCK_HASHES: hashes,
+                    FetchMsg.KEYS: keys,
                     FetchMsg.BLOCK_INDEXES: indexes,
                 }
             )
@@ -1493,7 +2365,7 @@ class TestInflightPerReqInvariant:
 
         assert _invariant_holds()
         assert not session._server._has_inflight_for("req-A")
-        assert "req-A" not in session._server._inflight_per_req  # entry was removed
+        assert _srv_inflight_count(session, "req-A") == 0  # entry drained
         assert session._server._has_inflight_for("req-B")
 
         # Complete req-B; counter must drain to empty.
@@ -1508,7 +2380,7 @@ class TestInflightPerReqInvariant:
 
         assert _invariant_holds()
         assert session._server._inflight == {}
-        assert session._server._inflight_per_req == {}
+        assert _srv_total_inflight(session) == 0
 
     def test_has_inflight_for_correct_with_many_requests(self):
         """Populate many inflight xfers across many ids; lookup must
@@ -1524,9 +2396,7 @@ class TestInflightPerReqInvariant:
                     tid,
                     _InflightXfer(kv_request_id=kv_id, block_count=1, job_ids={tid}),
                 )
-        assert sum(session._server._inflight_per_req.values()) == len(
-            session._server._inflight
-        )
+        assert _srv_total_inflight(session) == len(session._server._inflight)
         assert session._server._has_inflight_for("req-0")
         assert session._server._has_inflight_for("req-99")
         assert not session._server._has_inflight_for("req-missing")
@@ -1539,7 +2409,7 @@ class TestInflightPerReqInvariant:
         ]
         for tid in tids_50:
             session._server._inflight_pop(tid)
-        assert "req-50" not in session._server._inflight_per_req
+        assert _srv_inflight_count(session, "req-50") == 0
         assert not session._server._has_inflight_for("req-50")
         # Other ids unaffected.
         assert session._server._has_inflight_for("req-49")
@@ -1559,6 +2429,7 @@ class TestConnectMsgValidation:
             ConnectMsg.BASE_ADDR: 0x1000,
             ConnectMsg.NUM_BLOCKS: 8,
             ConnectMsg.BLOCK_LEN: 4096,
+            ConnectMsg.HASH_SEED: "0",
         }
 
     def test_valid_message_passes(self):
@@ -1600,13 +2471,25 @@ class TestConnectMsgValidation:
         with pytest.raises(ValueError, match="block_len"):
             ConnectMsg.validate(msg)
 
+    def test_missing_hash_seed(self):
+        msg = self._valid_msg()
+        del msg[ConnectMsg.HASH_SEED]
+        with pytest.raises(ValueError, match="hash_seed"):
+            ConnectMsg.validate(msg)
+
+    def test_hash_seed_wrong_type(self):
+        msg = self._valid_msg()
+        msg[ConnectMsg.HASH_SEED] = 12345  # int, not str
+        with pytest.raises(ValueError, match="hash_seed"):
+            ConnectMsg.validate(msg)
+
 
 class TestFetchMsgValidation:
     def _valid_msg(self) -> dict:
         return {
             TYPE_KEY: FetchMsg.TYPE,
             FetchMsg.KV_REQUEST_ID: "req-1",
-            FetchMsg.BLOCK_HASHES: [b"k1", b"k2"],
+            FetchMsg.KEYS: [b"k1", b"k2"],
             FetchMsg.BLOCK_INDEXES: [0, 1],
         }
 

@@ -21,9 +21,11 @@ from vllm.v1.kv_offload.tiering.p2p import manager as manager_module
 from vllm.v1.kv_offload.tiering.p2p.manager import (
     _UNBOUND_STORE_TIMEOUT_S,
     P2PSecondaryTierManager,
+    _annotate_req_context,
 )
 from vllm.v1.kv_offload.tiering.p2p.session import (
     LoadResult,
+    SessionCloseResult,
     SessionPollResult,
     StoreResult,
 )
@@ -33,15 +35,15 @@ from vllm.v1.kv_offload.tiering.p2p.session import (
 # ---------------------------------------------------------------------------
 
 
-def _prefill_kv_params(
+def _remote_prefiller_kv_params(
     remote_host: str = "10.0.0.1",
     remote_port: int = 8000,
     kv_request_id: str = "req-1",
 ) -> dict:
-    """Decoder-side kv_transfer_params: ``prefill`` sub-dict carries
+    """Decoder-side kv_transfer_params: ``remote_prefiller`` sub-dict carries
     kv_request_id + remote_host + remote_port."""
     return {
-        "prefill": {
+        "remote_prefiller": {
             "kv_request_id": kv_request_id,
             "remote_host": remote_host,
             "remote_port": remote_port,
@@ -49,14 +51,34 @@ def _prefill_kv_params(
     }
 
 
-def _decode_kv_params(kv_request_id: str = "req-1") -> dict:
-    """Prefiller-side kv_transfer_params: ``decode`` sub-dict carries
+def _remote_kv_source_kv_params(
+    remote_host: str = "10.0.0.1",
+    remote_port: int = 8000,
+    kv_request_id: str = "req-1",
+) -> dict:
+    """Symmetric-P2P consumer kv_transfer_params: ``remote_kv_source`` sub-dict has
+    the same shape as ``remote_prefiller`` (kv_request_id + remote_host + port)."""
+    return {
+        "remote_kv_source": {
+            "kv_request_id": kv_request_id,
+            "remote_host": remote_host,
+            "remote_port": remote_port,
+        },
+    }
+
+
+def _remote_decoder_kv_params(kv_request_id: str = "req-1") -> dict:
+    """Prefiller-side kv_transfer_params: ``remote_decoder`` sub-dict carries
     kv_request_id only."""
-    return {"decode": {"kv_request_id": kv_request_id}}
+    return {"remote_decoder": {"kv_request_id": kv_request_id}}
 
 
 def _req_context(kv_params: dict | None = None) -> ReqContext:
-    return ReqContext(req_id="test", kv_transfer_params=kv_params)
+    ctx = ReqContext(req_id="test", kv_transfer_params=kv_params)
+    # Mirror on_new_request: parse the P2P routing state once and cache it,
+    # so lookup/submit_*/on_request_finished can read it back via get_state.
+    _annotate_req_context(ctx)
+    return ctx
 
 
 def _job_metadata(
@@ -82,38 +104,78 @@ def _make_manager() -> P2PSecondaryTierManager:
     """Create a manager with stubbed __init__."""
     mgr = P2PSecondaryTierManager.__new__(P2PSecondaryTierManager)
     mgr._local_id = "127.0.0.1:7777"
+    mgr._hash_seed = "0"
     mgr._finished_jobs = []
     mgr._failed_req_ids = set()
     mgr._sessions = {}
     mgr._kv_to_session = {}
     mgr._unbound_stores = {}
+    mgr._failed_serve_ctxs = []
     return mgr
 
 
+def _init_offloading_spec() -> SimpleNamespace:
+    """Minimal offloading_spec for driving the real __init__."""
+    return SimpleNamespace(
+        config=SimpleNamespace(parallel=SimpleNamespace(data_parallel_index=0)),
+        blocks_per_chunk=1,
+    )
+
+
 # ---------------------------------------------------------------------------
-# Tests for _remote_id_from_params
+# Tests for __init__ PYTHONHASHSEED assertion
 # ---------------------------------------------------------------------------
 
 
-class TestRemoteIdFromParams:
+class TestInitHashSeedAssertion:
+    def test_missing_pythonhashseed_raises(self, monkeypatch):
+        """P2P instance refuses to start when PYTHONHASHSEED is unset."""
+        monkeypatch.delenv("PYTHONHASHSEED", raising=False)
+        with pytest.raises(ValueError, match="PYTHONHASHSEED"):
+            P2PSecondaryTierManager(
+                offloading_spec=_init_offloading_spec(),
+                primary_kv_view=memoryview(bytearray(16)),
+            )
+
+    def test_pythonhashseed_set_succeeds(self, monkeypatch):
+        """With PYTHONHASHSEED set, __init__ records it for the handshake."""
+        monkeypatch.setenv("PYTHONHASHSEED", "12345")
+        monkeypatch.setattr(manager_module, "NixlTransport", lambda *a, **k: object())
+        monkeypatch.setattr(manager_module, "ZmqTransport", lambda *a, **k: object())
+        monkeypatch.setattr(
+            manager_module.FileMapper,
+            "from_offloading_spec",
+            lambda **k: SimpleNamespace(get_run_config=lambda: {}),
+        )
+        mgr = P2PSecondaryTierManager(
+            offloading_spec=_init_offloading_spec(),
+            primary_kv_view=memoryview(bytearray(16)),
+        )
+        assert mgr._hash_seed == "12345"
+
+
+# ---------------------------------------------------------------------------
+# Tests for _peer_id_from_params
+# ---------------------------------------------------------------------------
+
+
+class TestPeerIdFromParams:
     def test_valid_params(self):
-        result = P2PSecondaryTierManager._remote_id_from_params(
+        result = manager_module._peer_id_from_params(
             {"remote_host": "10.0.0.1", "remote_port": 8000}
         )
         assert result == "10.0.0.1:8000"
 
     def test_missing_host(self):
-        result = P2PSecondaryTierManager._remote_id_from_params({"remote_port": 8000})
+        result = manager_module._peer_id_from_params({"remote_port": 8000})
         assert result is None
 
     def test_missing_port(self):
-        result = P2PSecondaryTierManager._remote_id_from_params(
-            {"remote_host": "10.0.0.1"}
-        )
+        result = manager_module._peer_id_from_params({"remote_host": "10.0.0.1"})
         assert result is None
 
     def test_empty_dict(self):
-        result = P2PSecondaryTierManager._remote_id_from_params({})
+        result = manager_module._peer_id_from_params({})
         assert result is None
 
 
@@ -130,33 +192,103 @@ class TestLookup:
 
     def test_lookup_returns_miss_without_required_fields(self):
         mgr = _make_manager()
-        ctx = _req_context(kv_params={"prefill": {"remote_host": "x"}})
+        ctx = _req_context(kv_params={"remote_prefiller": {"remote_host": "x"}})
         assert mgr.lookup(b"key", ctx) is LookupResult.MISS
 
     def test_lookup_returns_hit_for_valid_request(self):
         mgr = _make_manager()
-        ctx = _req_context(kv_params=_prefill_kv_params())
+        ctx = _req_context(kv_params=_remote_prefiller_kv_params())
         assert mgr.lookup(b"key", ctx) is LookupResult.HIT
 
     def test_lookup_returns_miss_for_failed_request(self):
         mgr = _make_manager()
         mgr._failed_req_ids.add("req-1")
-        ctx = _req_context(kv_params=_prefill_kv_params(kv_request_id="req-1"))
+        ctx = _req_context(kv_params=_remote_prefiller_kv_params(kv_request_id="req-1"))
         assert mgr.lookup(b"key", ctx) is LookupResult.MISS
 
     def test_lookup_returns_hit_for_different_request_id(self):
         mgr = _make_manager()
         mgr._failed_req_ids.add("req-1")
-        ctx = _req_context(kv_params=_prefill_kv_params(kv_request_id="req-2"))
+        ctx = _req_context(kv_params=_remote_prefiller_kv_params(kv_request_id="req-2"))
         assert mgr.lookup(b"key", ctx) is LookupResult.HIT
 
     def test_lookup_returns_miss_without_prefill_key(self):
-        """No ``prefill`` sub-dict means the request was not routed for
+        """No ``remote_prefiller`` sub-dict means the request was not routed for
         remote prefill — local prefill should run instead, so lookup()
-        returns MISS even when a stale ``decode`` block is present."""
+        returns MISS even when a stale ``remote_decoder`` block is present."""
         mgr = _make_manager()
-        ctx = _req_context(kv_params=_decode_kv_params())
+        ctx = _req_context(kv_params=_remote_decoder_kv_params())
         assert mgr.lookup(b"key", ctx) is LookupResult.MISS
+
+
+# ---------------------------------------------------------------------------
+# Tests for serve_external_requests
+# ---------------------------------------------------------------------------
+
+
+class _RecordingParent:
+    """Minimal ParentManager stub recording on_request_finished calls."""
+
+    def __init__(self) -> None:
+        self.finished: list[str] = []
+
+    def on_new_request(self, ctx):
+        from vllm.v1.kv_offload.base import RequestOffloadingContext
+
+        return RequestOffloadingContext()
+
+    def lookup(self, key, ctx):
+        return LookupResult.MISS
+
+    def create_store_job(self, keys, ctx):
+        raise AssertionError("unreachable")
+
+    def on_request_finished(self, ctx) -> None:
+        self.finished.append(ctx.req_id)
+
+
+class _RecordingSession:
+    """Fake P2PSession that records the parent it was served with."""
+
+    def __init__(self) -> None:
+        self.served_with: list[object] = []
+
+    def serve_external_requests(self, parent) -> None:
+        self.served_with.append(parent)
+
+
+class TestServeExternalRequests:
+    def test_flushes_failed_serve_ctxs_then_serves_each_session(self):
+        """serve_external_requests releases the failed serves left by
+        reaped sessions via parent.on_request_finished (clearing the
+        queue), then delegates to every live session with the same parent."""
+        mgr = _make_manager()
+        ctx = ReqContext(req_id="p2p:peer:req-1:lu1")
+        mgr._failed_serve_ctxs = [ctx]
+        sess_a = _RecordingSession()
+        sess_b = _RecordingSession()
+        mgr._sessions = {"a": sess_a, "b": sess_b}  # type: ignore[assignment]
+
+        parent = _RecordingParent()
+        mgr.serve_external_requests(parent)  # type: ignore[arg-type]
+
+        # Failed serve released and queue cleared.
+        assert parent.finished == ["p2p:peer:req-1:lu1"]
+        assert mgr._failed_serve_ctxs == []
+        # Every live session served with the same parent handle.
+        assert sess_a.served_with == [parent]
+        assert sess_b.served_with == [parent]
+
+    def test_no_failed_serves_still_serves_sessions(self):
+        mgr = _make_manager()
+        sess = _RecordingSession()
+        mgr._sessions = {"a": sess}  # type: ignore[assignment]
+
+        parent = _RecordingParent()
+        mgr.serve_external_requests(parent)  # type: ignore[arg-type]
+
+        assert parent.finished == []
+        assert sess.served_with == [parent]
 
 
 # ---------------------------------------------------------------------------
@@ -166,16 +298,16 @@ class TestLookup:
 
 class TestSubmitStore:
     def test_no_decode_succeeds_immediately(self):
-        """Without a ``decode`` block, job succeeds immediately."""
+        """Without a ``remote_decoder`` block, job succeeds immediately."""
         mgr = _make_manager()
         job = _job_metadata(job_id=1, kv_params={})
         mgr.submit_store(job)
         assert mgr._finished_jobs == [JobResult(job_id=1, success=True)]
 
     def test_missing_kv_request_id_fails(self):
-        """Missing kv_request_id inside ``decode`` fails the job."""
+        """Missing kv_request_id inside ``remote_decoder`` fails the job."""
         mgr = _make_manager()
-        params: dict = {"decode": {}}
+        params: dict = {"remote_decoder": {}}
         job = _job_metadata(job_id=1, kv_params=params)
         mgr.submit_store(job)
         assert mgr._finished_jobs == [JobResult(job_id=1, success=False)]
@@ -189,7 +321,7 @@ class TestSubmitStore:
             job_id=1,
             keys=[b"k1", b"k2"],
             block_ids=[3, 4],
-            kv_params=_decode_kv_params(kv_request_id="req-1"),
+            kv_params=_remote_decoder_kv_params(kv_request_id="req-1"),
         )
         mgr.submit_store(job)
 
@@ -220,7 +352,7 @@ class TestSubmitStore:
             job_id=7,
             keys=[b"k1", b"k2"],
             block_ids=[3, 4],
-            kv_params=_decode_kv_params(kv_request_id="req-1"),
+            kv_params=_remote_decoder_kv_params(kv_request_id="req-1"),
         )
         mgr.submit_store(job)
 
@@ -233,9 +365,9 @@ class TestSubmitStore:
     def test_extra_top_level_keys_are_ignored(self):
         """Producer-side kv_transfer_params should not pre-create a
         session even when a stale caller still passes a top-level
-        ``remote_host``/``remote_port`` next to ``decode``."""
+        ``remote_host``/``remote_port`` next to ``remote_decoder``."""
         mgr = _make_manager()
-        params = _decode_kv_params()
+        params = _remote_decoder_kv_params()
         params["remote_host"] = "stale"
         params["remote_port"] = 12345
         job = _job_metadata(job_id=1, kv_params=params)
@@ -262,7 +394,7 @@ class TestSubmitLoad:
         """Empty key list succeeds immediately."""
         mgr = _make_manager()
         job = _job_metadata(
-            job_id=1, keys=[], block_ids=[], kv_params=_prefill_kv_params()
+            job_id=1, keys=[], block_ids=[], kv_params=_remote_prefiller_kv_params()
         )
         mgr.submit_load(job)
         assert mgr._finished_jobs == [JobResult(job_id=1, success=True)]
@@ -270,7 +402,7 @@ class TestSubmitLoad:
     def test_no_session_fails(self):
         """No session for peer fails and marks request failed."""
         mgr = _make_manager()
-        job = _job_metadata(job_id=1, kv_params=_prefill_kv_params())
+        job = _job_metadata(job_id=1, kv_params=_remote_prefiller_kv_params())
         mgr.submit_load(job)
         assert mgr._finished_jobs == [JobResult(job_id=1, success=False)]
         assert "req-1" in mgr._failed_req_ids
@@ -286,13 +418,27 @@ class TestSubmitLoad:
             job_id=42,
             keys=[b"k1", b"k2"],
             block_ids=[5, 6],
-            kv_params=_prefill_kv_params(kv_request_id="req-42"),
+            kv_params=_remote_prefiller_kv_params(kv_request_id="req-42"),
         )
         mgr.submit_load(job)
 
         assert existing.requests == [(42, "req-42")]
         assert mgr._finished_jobs == []
         assert "req-42" not in mgr._failed_req_ids
+
+    def test_missing_consumer_flag_fails(self):
+        """Peer fields present but neither do_remote_prefill nor
+        do_p2p_fetch is set — submit_load fails the job rather than
+        emit a stray FetchMsg."""
+        mgr = _make_manager()
+        params = {
+            "remote_host": "10.0.0.1",
+            "remote_port": 8000,
+            "kv_request_id": "req-1",
+        }
+        job = _job_metadata(job_id=1, kv_params=params)
+        mgr.submit_load(job)
+        assert mgr._finished_jobs == [JobResult(job_id=1, success=False)]
 
 
 # ---------------------------------------------------------------------------
@@ -308,7 +454,7 @@ class TestOnRequestFinished:
 
     def test_prunes_failed_req_ids(self):
         mgr = self._make_with_failed()
-        ctx = _req_context(kv_params=_prefill_kv_params(kv_request_id="req-1"))
+        ctx = _req_context(kv_params=_remote_prefiller_kv_params(kv_request_id="req-1"))
         mgr.on_request_finished(ctx)
         assert "req-1" not in mgr._failed_req_ids
 
@@ -325,14 +471,26 @@ class TestOnRequestFinished:
         assert "req-1" in mgr._failed_req_ids
 
     def test_decoder_side_calls_session_finish_request(self):
-        """Decoder-side finish (``prefill`` set) still routes via peer_id
+        """Decoder-side finish (``remote_prefiller`` set) still routes via peer_id
         because the consumer addresses the producer it loaded from. The
         session's finish_request cancels the client-role load."""
         mgr = _make_manager()
         peer_id = "10.0.0.1:8000"
         session = _FakeSession(peer_id=peer_id)
         mgr._sessions[peer_id] = session
-        ctx = _req_context(kv_params=_prefill_kv_params(kv_request_id="req-1"))
+        ctx = _req_context(kv_params=_remote_prefiller_kv_params(kv_request_id="req-1"))
+        mgr.on_request_finished(ctx)
+        assert session.finishes == ["req-1"]
+
+    def test_p2p_consumer_side_calls_session_finish_request(self):
+        """Symmetric-P2P consumer finish (``remote_kv_source`` set) routes via peer_id
+        so the session drops any pending lookups (cancel_lookups) and
+        cancels any inbound load."""
+        mgr = _make_manager()
+        peer_id = "10.0.0.1:8000"
+        session = _FakeSession(peer_id=peer_id)
+        mgr._sessions[peer_id] = session
+        ctx = _req_context(kv_params=_remote_kv_source_kv_params(kv_request_id="req-1"))
         mgr.on_request_finished(ctx)
         assert session.finishes == ["req-1"]
 
@@ -342,7 +500,7 @@ class TestOnRequestFinished:
         mgr = _make_manager()
         bound = _FakeSession(peer_id="some-peer:1", connected=True)
         mgr._kv_to_session["req-1"] = bound  # type: ignore[assignment]
-        ctx = _req_context(kv_params=_decode_kv_params(kv_request_id="req-1"))
+        ctx = _req_context(kv_params=_remote_decoder_kv_params(kv_request_id="req-1"))
         mgr.on_request_finished(ctx)
         assert bound.finishes == ["req-1"]
         assert "req-1" not in mgr._kv_to_session
@@ -360,7 +518,7 @@ class TestOnRequestFinished:
             _UnboundStoreBatch(job_id=10, keys=[b"k"], block_ids=[0]),
             _UnboundStoreBatch(job_id=11, keys=[b"k2"], block_ids=[1]),
         ]
-        ctx = _req_context(kv_params=_decode_kv_params(kv_request_id="req-1"))
+        ctx = _req_context(kv_params=_remote_decoder_kv_params(kv_request_id="req-1"))
         mgr.on_request_finished(ctx)
         assert "req-1" in mgr._unbound_stores
         assert [b.job_id for b in mgr._unbound_stores["req-1"]] == [10, 11]
@@ -378,10 +536,18 @@ class _FakeServerHalf:
     def __init__(self) -> None:
         self._inflight: dict[int, object] = {}
 
+    @property
+    def has_inflight_transfers(self) -> bool:
+        return bool(self._inflight)
+
 
 class _FakeClientHalf:
     def __init__(self) -> None:
         self._inbound: dict[int, object] = {}
+
+    @property
+    def has_active_loads(self) -> bool:
+        return bool(self._inbound)
 
 
 class _FakeSession:
@@ -395,8 +561,10 @@ class _FakeSession:
         loads: list[LoadResult] | None = None,
         stores: list[StoreResult] | None = None,
         new_fetch_ids: list[str] | None = None,
-        close_loads: list[tuple[int, str]] | None = None,
+        close_jobs: list[int] | None = None,
+        close_req_ids: list[str] | None = None,
         close_stores: list[int] | None = None,
+        close_failed_serves: list[ReqContext] | None = None,
     ) -> None:
         self.peer_id = peer_id
         self.alive = alive
@@ -405,17 +573,23 @@ class _FakeSession:
         self._loads = loads or []
         self._stores = stores or []
         self._new_fetch_ids = new_fetch_ids or []
-        self._close_loads = close_loads or []
+        self._close_jobs = close_jobs or []
+        self._close_req_ids = close_req_ids or []
         self._close_stores = close_stores or []
+        self._close_failed_serves = close_failed_serves or []
         self.requests: list[tuple[int, str]] = []
         self.stores_added: list[tuple[str, list, object, int]] = []
         self.attached: list[object] = []
         self.finishes: list[str] = []
         # Mirror P2PSession._server._inflight (transfer_id → handle) and
-        # P2PSession._client._inbound for the shutdown-drain and drain_jobs
-        # paths. Tests populate _server._inflight when needed.
+        # P2PSession._client.has_active_loads for the shutdown-drain and
+        # drain_jobs paths. Tests populate _server._inflight when needed.
         self._server = _FakeServerHalf()
         self._client = _FakeClientHalf()
+
+    @property
+    def has_pending_work(self) -> bool:
+        return self._client.has_active_loads or self._server.has_inflight_transfers
 
     def poll(self):
         result = SessionPollResult(
@@ -442,7 +616,12 @@ class _FakeSession:
         self.finishes.append(kv_request_id)
 
     def close(self):
-        return self._close_loads, self._close_stores
+        return SessionCloseResult(
+            failed_jobs=self._close_jobs,
+            failed_req_ids=self._close_req_ids,
+            failed_stores=self._close_stores,
+            failed_serves=self._close_failed_serves,
+        )
 
 
 class TestGetFinished:
@@ -484,7 +663,8 @@ class TestGetFinished:
             peer_id="dead:1234",
             alive=False,
             connected=True,
-            close_loads=[(20, "req-load")],
+            close_jobs=[20],
+            close_req_ids=["req-load"],
             close_stores=[10, 11],
         )
         mgr._sessions["dead:1234"] = dead  # type: ignore[assignment]
@@ -497,6 +677,29 @@ class TestGetFinished:
         assert JobResult(job_id=20, success=False) in results
         assert "dead:1234" not in mgr._sessions
         assert "req-load" in mgr._failed_req_ids
+
+    def test_reap_fails_probes(self):
+        """A reaped session's in-flight lookups land in _failed_req_ids so
+        the consumer's lookup() returns MISS instead of RETRY forever."""
+
+        class FakeData:
+            def remove_remote_peer(self, pid):
+                pass
+
+        mgr = self._make()
+        mgr._data = FakeData()  # type: ignore[assignment]
+        dead = _FakeSession(
+            peer_id="dead:1234",
+            alive=False,
+            connected=True,
+            close_req_ids=["req-probe-1", "req-probe-2"],
+        )
+        mgr._sessions["dead:1234"] = dead  # type: ignore[assignment]
+
+        list(mgr.get_finished_jobs())
+        assert "dead:1234" not in mgr._sessions
+        assert "req-probe-1" in mgr._failed_req_ids
+        assert "req-probe-2" in mgr._failed_req_ids
 
     def test_unbound_store_kept_within_timeout(self):
         """Recently-parked unbound stores stay across a poll."""
@@ -537,7 +740,7 @@ class TestGetFinished:
         submitted_at stamp so the unbound-store sweep can age it out."""
         mgr = _make_manager()
         job = _job_metadata(
-            job_id=1, kv_params=_decode_kv_params(kv_request_id="req-1")
+            job_id=1, kv_params=_remote_decoder_kv_params(kv_request_id="req-1")
         )
         before = time.monotonic()
         mgr.submit_store(job)
@@ -881,21 +1084,21 @@ class TestBidirectionalManager:
         b_loads_kv = "req-BtoA-load"  # B loads, A serves
 
         a_decoder_params = {
-            "prefill": {
+            "remote_prefiller": {
                 "kv_request_id": a_loads_kv,
                 "remote_host": "B",
                 "remote_port": 2,
             },
         }
         b_decoder_params = {
-            "prefill": {
+            "remote_prefiller": {
                 "kv_request_id": b_loads_kv,
                 "remote_host": "A",
                 "remote_port": 1,
             },
         }
-        a_prefiller_params = {"decode": {"kv_request_id": b_loads_kv}}
-        b_prefiller_params = {"decode": {"kv_request_id": a_loads_kv}}
+        a_prefiller_params = {"remote_decoder": {"kv_request_id": b_loads_kv}}
+        b_prefiller_params = {"remote_decoder": {"kv_request_id": a_loads_kv}}
 
         # 1. Both sides open client-role sessions toward the peer.
         mgr_a.on_new_request(_req_context(a_decoder_params))
@@ -1065,7 +1268,8 @@ class TestPollOnce:
             peer_id=peer_dead,
             alive=False,
             connected=True,
-            close_loads=[(33, "req-33")],
+            close_jobs=[33],
+            close_req_ids=["req-33"],
             close_stores=[44],
         )
         mgr._sessions[peer_dead] = dead  # type: ignore[assignment]
@@ -1309,13 +1513,13 @@ class TestConnectionDeathMidTransfer:
         mgr_a, mgr_b = _build_paired_managers()
 
         a_decoder_params = {
-            "prefill": {
+            "remote_prefiller": {
                 "kv_request_id": "req-load",
                 "remote_host": "B",
                 "remote_port": 2,
             },
         }
-        a_prefiller_params = {"decode": {"kv_request_id": "req-store"}}
+        a_prefiller_params = {"remote_decoder": {"kv_request_id": "req-store"}}
 
         # Open the outbound session A->B and submit one load + one store.
         mgr_a.on_new_request(_req_context(a_decoder_params))
@@ -1394,6 +1598,7 @@ class TestBindHostPortDefaults:
         identity (``host:port``) stays decoupled from the NIXL agent name
         (a uuid).
         """
+        monkeypatch.setenv("PYTHONHASHSEED", "0")
         monkeypatch.setattr(
             manager_module,
             "FileMapper",

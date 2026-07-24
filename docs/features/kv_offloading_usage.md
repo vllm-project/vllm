@@ -157,7 +157,7 @@ Object keys follow the same run-configuration digest scheme as the filesystem ti
 
 The P2P tier (`type: "p2p"`) shares completed KV blocks between vLLM instances over RDMA via NIXL. Each instance binds a control socket on `host:port` and exchanges blocks directly with peers — no shared filesystem required.
 
-PYTHONHASHSEED environment variable must be set to the same fixed value on all nodes.
+The `PYTHONHASHSEED` environment variable must be set to the same fixed value (e.g. `"0"`) on all nodes so that block content hashes match across instances (see [Cross-Process Sharing](#cross-process-sharing)). This is enforced: a P2P instance started without `PYTHONHASHSEED` set fails at startup, and each peer's value is verified during the connect handshake — a peer advertising a different `PYTHONHASHSEED` is rejected.
 
 | Key | Required | Default | Notes |
 | --- | --- | --- | --- |
@@ -175,6 +175,71 @@ Rather than embedding `host`/`port` in each `secondary_tiers` entry, set them on
 
 - `VLLM_P2P_SIDE_CHANNEL_HOST` (default `localhost`): address the P2P control socket binds to. It is used **verbatim** as both the bind address and the identity peers dial back — there is no auto-detection (this mirrors `VLLM_NIXL_SIDE_CHANNEL_HOST`). The default binds the loopback interface only, so peers on another host cannot reach it. **For any cross-host P2P deployment you must set this explicitly to the node's routable IP** (e.g. the pod IP) before launching `vllm serve` — otherwise remote peers will fail to connect. The NIXL agent name is a separate per-process identifier, so peers sharing a `host:port` never collide.
 - `VLLM_P2P_SIDE_CHANNEL_PORT` (default `5710`): base port for the P2P control socket. The port actually bound is `VLLM_P2P_SIDE_CHANNEL_PORT + data_parallel_index` — one socket per DP replica, matching NIXL (for DP=1 the offset is 0). The peer's port is passed as `remote_port` in `kv_transfer_params`; the router/EPP that selects the DP rank (e.g. via the `X-data-parallel-rank` header) computes `remote_port = base + rank`. The DP-index offset separates replicas *within* one deployment; two co-located *deployments* (a prefiller and a decoder on the same host) still need distinct base ports (e.g. decoder base `5711`) to avoid a bind collision.
+
+#### Orchestration-Layer Protocol
+
+The P2P tier does not decide *which* peer to pull from — that is the orchestration layer's job (the router/EPP and its scheduler). The orchestrator drives every transfer through a request's `kv_transfer_params` dict: it picks the request's role, allocates a unique transaction ID, and supplies the remote peer's address. All block lookup, hash matching, and NIXL transfer happen at the tier level below; the orchestrator only sets the correct role keys and enforces the allowed combinations.
+
+Every vLLM instance is a symmetric **peer**. Per request it acts as a **consumer** (pulls KV blocks from a remote peer's CPU cache instead of computing locally) or a **producer** (serves blocks from its own CPU cache to remote consumers) — or both, on the same session, for different requests. Roles are chosen per request by the keys below; there are no fixed prefiller/decoder processes.
+
+Three role keys are defined, each mapping to a sub-dict. All are optional; a request with none of them uses the tier only as a local CPU cache.
+
+Each key names the **remote counterpart** this peer transfers with (not this
+peer's own role), so the name reads as "the remote ___ I transfer with".
+
+| Key | Set on | Value fields | Meaning |
+| --- | --- | --- | --- |
+| `remote_decoder` | prefill producer request | `kv_request_id` | Peer computes KV and keeps it available in CPU cache for the remote decoder to pull. |
+| `remote_prefiller` | decode consumer request | `kv_request_id`, `remote_host`, `remote_port` | Peer pulls KV from the remote prefiller at the given address (classic P/D disaggregation). |
+| `remote_kv_source` | P2P consumer request | `kv_request_id`, `remote_host`, `remote_port` | Peer looks up and pulls whatever blocks the remote source currently holds in CPU cache. |
+
+Field semantics:
+
+- `kv_request_id` (str): unique transaction ID allocated by the orchestrator and pushed to every peer involved in the transfer; used to correlate the lookup, fetch, and transfer-done messages. The producer is implicit — it serves whatever block hashes it currently holds in its CPU cache for that ID.
+- `remote_host` (str): IP/hostname of the remote peer's control socket to query. Must be the peer's routable node IP (see [Environment Variables](#environment-variables)).
+- `remote_port` (int): the peer's bound control-socket port, i.e. `base + data_parallel_index` for the selected DP rank.
+
+Allowed and forbidden combinations:
+
+- **`remote_decoder` + `remote_kv_source`** is the only legal multi-key combination: a prefill producer may *also* act as a P2P consumer for the same request — skipping prefix prefill by pulling cached blocks from a source while still keeping its own computed blocks available for a downstream decoder.
+- Forbidden: `remote_prefiller` + `remote_decoder` (contradictory roles), `remote_prefiller` + `remote_kv_source` (two competing fetch sources), and all three together.
+
+Minimal examples (values that would appear in the request's `kv_transfer_params`):
+
+```python
+# Prefill producer — compute and keep KV for a remote decoder to pull
+kv_transfer_params = {"remote_decoder": {"kv_request_id": "<unique-transfer-id>"}}
+
+# Decode consumer — pull KV from a specific prefiller (classic P/D)
+kv_transfer_params = {
+    "remote_prefiller": {
+        "kv_request_id": "<unique-transfer-id>",
+        "remote_host": "<prefiller-node-ip>",
+        "remote_port": 5710,
+    }
+}
+
+# P2P consumer — pull whatever the source already has cached
+kv_transfer_params = {
+    "remote_kv_source": {
+        "kv_request_id": "<unique-transfer-id>",
+        "remote_host": "<source-node-ip>",
+        "remote_port": 5710,
+    }
+}
+```
+
+Runtime handshake for a P2P (or P/D) pull, once the orchestrator has set the keys above:
+
+1. Both peers already have listener threads on their control sockets (see [Environment Variables](#environment-variables)).
+2. **Lookup.** The consumer's tiering manager does per-block lookups; in P2P mode the tier returns `None` and registers the key. At `on_schedule_end` the consumer sends one **`LookupMsg`** (`kv_request_id` + block hashes) to the peer, per request, per step.
+3. The producer matches those hashes against its local CPU cache and replies with a **`LookupRespMsg`** carrying the hit block hashes.
+4. **Resolve.** Retried lookups now return hit / miss / in-flight. The consumer calls `submit_load` for hits only, allocating CPU slots only for hits.
+5. The consumer sends a **`FetchMsg`** (`kv_request_id`, block hashes, destination block indexes).
+6. The producer performs the **NIXL WRITE** transfer and sends **`TransferDone`** with a success status.
+7. On `get_finished`, hits are loaded into GPU as ordinary cache hits; misses are recomputed by the engine.
+
+In classic **P/D mode** (`remote_prefiller` set, no `remote_kv_source`), the lookup phase (steps 2–4) is skipped: the decode consumer assumes the prefiller holds all of the request's blocks, so every block `lookup()` returns an immediate hit and the consumer jumps straight to the **`FetchMsg`** in step 5. The `LookupMsg`/`LookupRespMsg` round-trip only happens in P2P mode, where the consumer does not know in advance which blocks the peer has cached.
 
 ## Tuning Tips
 
