@@ -5475,6 +5475,80 @@ class GPUModelRunner(
 
         return None
 
+    @staticmethod
+    def _collect_graph_address_set(model: torch.nn.Module) -> set[int]:
+        """Collect storage addresses of all reachable CUDA tensors.
+
+        Recursively walks module attributes including nested non-Module
+        objects (quant_method, moe_kernel, fused_experts, etc.) to find
+        the same unmanaged tensors that collect_extra_tensors() discovers.
+        """
+        ptrs: set[int] = set()
+        visited: set[int] = set()
+
+        def _walk_obj(obj: object, depth: int = 0) -> None:
+            if depth > 8:
+                return
+            if isinstance(obj, torch.Tensor):
+                if obj.is_cuda and obj.numel() > 0:
+                    ptrs.add(obj.untyped_storage().data_ptr())
+                return
+            if isinstance(obj, torch.nn.Module):
+                return  # modules are visited by the outer loop
+            obj_id = id(obj)
+            if obj_id in visited:
+                return
+            visited.add(obj_id)
+            # Containers
+            if isinstance(obj, dict):
+                for v in obj.values():
+                    if v is not None:
+                        _walk_obj(v, depth + 1)
+                return
+            if isinstance(obj, (list, tuple)):
+                for v in obj:
+                    if v is not None:
+                        _walk_obj(v, depth + 1)
+                return
+            # functools.partial
+            import functools
+            if isinstance(obj, functools.partial):
+                for arg in obj.args:
+                    _walk_obj(arg, depth + 1)
+                for v in obj.keywords.values():
+                    _walk_obj(v, depth + 1)
+                return
+            # Closures
+            import types as _types
+            if isinstance(obj, _types.FunctionType) and obj.__closure__:
+                for cell in obj.__closure__:
+                    try:
+                        _walk_obj(cell.cell_contents, depth + 1)
+                    except ValueError:
+                        pass
+                return
+            # Generic object with __dict__
+            obj_dict = getattr(obj, "__dict__", None)
+            if obj_dict is None or isinstance(obj, type):
+                return
+            for val in obj_dict.values():
+                if val is not None:
+                    _walk_obj(val, depth + 1)
+
+        for module in model.modules():
+            for p in module.parameters(recurse=False):
+                if p.is_cuda:
+                    ptrs.add(p.untyped_storage().data_ptr())
+            for _, b in module.named_buffers(recurse=False):
+                if b.is_cuda:
+                    ptrs.add(b.untyped_storage().data_ptr())
+            # Walk non-Module attributes to find unmanaged tensors
+            for val in vars(module).values():
+                if val is not None and not isinstance(val, torch.nn.Module):
+                    _walk_obj(val)
+
+        return ptrs
+
     def reload_weights(
         self,
         weights_iterator: Iterable[tuple[str, torch.Tensor]] | None = None,
@@ -5519,25 +5593,43 @@ class GPUModelRunner(
                 Iterable[tuple[str, torch.Tensor]], weights_iterator
             )
 
+        # When CUDA graphs are active, collect the set of storage addresses
+        # baked into captures and the set of layers participating in them.
+        # This enables strict-mode escalation for unregistered tensors whose
+        # storage is referenced by graph replay.
+        graph_address_set: set[int] | None = None
+        graph_captured_layers: set[torch.nn.Module] | None = None
+        if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            graph_captured_layers = set(model.modules())
+            graph_address_set = self._collect_graph_address_set(model)
+
         # begin loading weights
         logger.info_once("Reloading weights inplace...")
-        if is_checkpoint_format:
-            # load weights from checkpoint/ original model format
-            initialize_layerwise_reload(model)
-            loaded_weights = model.load_weights(weights_iterator)
-            finalize_layerwise_reload(model, self.model_config)
+        # Wrap in set_current_vllm_config so that CustomOps (e.g. QuantFP8
+        # in W4A8 quantization) can access the config during
+        # process_weights_after_loading.
+        with set_current_vllm_config(self.vllm_config):
+            if is_checkpoint_format:
+                # load weights from checkpoint/ original model format
+                initialize_layerwise_reload(
+                    model,
+                    graph_address_set=graph_address_set,
+                    graph_captured_layers=graph_captured_layers,
+                )
+                loaded_weights = model.load_weights(weights_iterator)
+                finalize_layerwise_reload(model, self.model_config)
 
-        else:
-            # load weights from kernel format
-            logger.warning_once(
-                "Reloading with `is_checkpoint_format=True` requires that "
-                "weights be in kernel format and already sharded",
-            )
-            loaded_weights = set()
-            for name, loaded_weight in weights_iterator:
-                param = model.get_parameter(name)  # TODO: buffers?
-                param.copy_(loaded_weight)
-                loaded_weights.add(name)
+            else:
+                # load weights from kernel format
+                logger.warning_once(
+                    "Reloading with `is_checkpoint_format=True` requires that "
+                    "weights be in kernel format and already sharded",
+                )
+                loaded_weights = set()
+                for name, loaded_weight in weights_iterator:
+                    param = model.get_parameter(name)  # TODO: buffers?
+                    param.copy_(loaded_weight)
+                    loaded_weights.add(name)
 
         # logging and validation
         counter_after_reloading = time.perf_counter()

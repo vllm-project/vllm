@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
 from inspect import BoundArguments
+from typing import Any
 
 import torch
 
@@ -32,6 +33,22 @@ class LayerReloadingInfo:
     # non-persistent buffer names captured with `kernel_tensors`, so buffer
     # persistence survives `_non_persistent_buffers_set` being mutated during reload
     kernel_non_persistent_buffers: set[str] = field(default_factory=set)
+
+    # CUDA tensors reachable from the layer but NOT registered as parameters
+    # or buffers (e.g. workspace, sort-indices, derived MLA weights, CUTLASS
+    # stride descriptors).  Populated by `initialize_layerwise_reload` so that
+    # `copy_back_extra_tensors` can preserve their device addresses across
+    # reload, keeping captured CUDA-graph pointers valid.
+    # Each entry is (dotted_path, old_tensor).
+    extra_tensor_slots: list[tuple[str, torch.Tensor]] = field(
+        default_factory=list)
+
+    # Snapshot of registry-managed tensors captured before reload.
+    # Used by `copy_back_registered()` to restore tensor identity.
+    # Keys are dotted paths, values are SnapshotEntry(tensor, metadata).
+    # Type is Any to avoid circular import from graph_storage_registry.
+    registry_snapshot: dict[str, Any] = field(
+        default_factory=dict)
 
     def reset(self):
         self.__init__(  # type: ignore[misc]

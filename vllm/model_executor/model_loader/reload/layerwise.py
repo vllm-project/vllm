@@ -20,6 +20,9 @@ from .meta import (
     materialize_layer,
     restore_layer_on_meta,
 )
+from .graph_storage_escalation import escalate_walk_discoveries
+from .graph_storage_registry import get_global_registry
+from .tensor_collector import collect_extra_tensors, copy_back_extra_tensors
 from .types import LayerReloadingInfo
 from .utils import (
     get_info_size,
@@ -81,7 +84,11 @@ def record_metadata_for_reloading(model: torch.nn.Module):
 
 
 @torch.no_grad()
-def initialize_layerwise_reload(model: torch.nn.Module):
+def initialize_layerwise_reload(
+    model: torch.nn.Module,
+    graph_address_set: set[int] | None = None,
+    graph_captured_layers: set[torch.nn.Module] | None = None,
+):
     """
     Set up layerwise weight loading with deferred processing.
 
@@ -95,6 +102,15 @@ def initialize_layerwise_reload(model: torch.nn.Module):
     2. Load all cached weights
     3. Run quantization processing if applicable
     4. Copy processed values back to original tensor storage
+
+    Args:
+        model: The model to set up for layerwise reload.
+        graph_address_set: Optional set of storage data_ptrs from CUDA graph
+            captures. Used for graph-relevance determination during
+            walk-discovered tensor escalation.
+        graph_captured_layers: Optional set of layers that participate in
+            CUDA graph captures. Address-set escalation only fires for
+            layers in this set.
     """
     # disable torchao reloading to avoid infinite recursion
     model._original_do_torchao_reload = getattr(model, "_do_torchao_reload", False)
@@ -111,6 +127,30 @@ def initialize_layerwise_reload(model: torch.nn.Module):
         info.kernel_tensors = get_layer_params_buffers(layer)
         # snapshot now: restore_layer_on_meta drops alias buffers from the live set
         info.kernel_non_persistent_buffers = set(layer._non_persistent_buffers_set)
+
+        # Snapshot registry-managed tensors (O(1) path) before PWAL.
+        # Must happen before restore_layer_on_meta so paths still resolve.
+        registry = get_global_registry()
+        registered_paths = registry.get_registered_paths(layer)
+        if registered_paths:
+            info.registry_snapshot = registry.snapshot(layer)
+
+        # Snapshot unmanaged CUDA tensors (workspace, sort-indices,
+        # derived MLA weights, CUTLASS stride descriptors, …) so their
+        # device addresses can be preserved across reload.
+        # Exclude registered paths to avoid double copy-back.
+        info.extra_tensor_slots = collect_extra_tensors(
+            layer, exclude_paths=registered_paths or None
+        )
+
+        # Escalate walk-discovered unregistered tensors:
+        # Production mode → WARNING with migration suggestion (rate-limited)
+        # Strict mode (VLLM_GRAPH_STORAGE_STRICT=1) → raises for
+        # graph-relevant tensors in targeted backends
+        escalate_walk_discoveries(
+            layer, info.extra_tensor_slots,
+            graph_address_set=graph_address_set,
+            graph_captured_layers=graph_captured_layers)
 
         # Restore layer parameters/buffers onto meta device
         restore_layer_on_meta(layer, info)
@@ -265,7 +305,21 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
             # when nothing is loadable (load_numel_total == 0), so parameter-alias
             # buffers on such layers are restored rather than left deleted.
             if info.load_numel_total > 0:  # type: ignore[operator]
-                logger.warning("%s: Failed to load weights", layer.__class__.__name__)
+                # Only warn if the layer has actual parameters (not just
+                # non-persistent buffers like cos_sin_cache in RotaryEmbedding).
+                has_params = any(
+                    p is not None for p in layer._parameters.values()
+                )
+                if has_params:
+                    logger.warning(
+                        "%s: Failed to load weights",
+                        layer.__class__.__name__,
+                    )
+                else:
+                    logger.debug(
+                        "%s: No checkpoint weights (non-persistent buffers only)",
+                        layer.__class__.__name__,
+                    )
             _place_kernel_tensors(layer, info)
 
         # Process non-attention layers which did not load all elements. This can happen
@@ -305,6 +359,17 @@ def _finalize_attention_layer(
     else:
         _place_kernel_tensors(layer, info)
     layer.process_weights_after_loading(model_config.dtype)
+
+    # Attention PWAL creates derived tensors (W_UV, W_UK_T, W_K, W_V, …)
+    # with new device addresses.  Copy their values back into the old
+    # storage captured before reload so that CUDA-graph pointers stay valid.
+    if info.kernel_tensors is not None:
+        # Registry copy-back first (O(1), fail-closed)
+        if info.registry_snapshot:
+            registry = get_global_registry()
+            registry.copy_back_registered(layer, info.registry_snapshot)
+        # Walk copy-back second (O(N), best-effort)
+        copy_back_extra_tensors(layer, info.extra_tensor_slots)
 
 
 def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
@@ -374,6 +439,12 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     # this code is a no-op if not reloading (because kernel tensors is empty)
     if info.kernel_tensors is not None:
         _copy_and_restore_kernel_tensors(layer, info)
+        # Registry copy-back first (O(1), fail-closed)
+        if info.registry_snapshot:
+            registry = get_global_registry()
+            registry.copy_back_registered(layer, info.registry_snapshot)
+        # Walk copy-back second (O(N), best-effort)
+        copy_back_extra_tensors(layer, info.extra_tensor_slots)
 
     info.reset()
     logger.debug("%s: Processed", layer.__class__.__name__)

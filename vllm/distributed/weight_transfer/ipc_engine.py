@@ -212,6 +212,8 @@ class IPCWeightTransferEngine(
             initialize_layerwise_reload,
         )
 
+        # No graph_address_set/graph_captured_layers: weight transfer engines
+        # operate before CUDA graph capture or after graphs are cleared.
         initialize_layerwise_reload(self.model)
 
     def finish_weight_update(self) -> None:
