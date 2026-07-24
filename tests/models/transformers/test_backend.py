@@ -270,8 +270,14 @@ def test_pooling(hf_runner, vllm_runner, example_prompts, arch):
     )
 
 
-def _run_create_attention_instances(per_layer_attributes, per_layer_config):
-    """Build attention instances from a mocked heterogeneous text config."""
+def _run_create_attention_instances(
+    is_heterogeneous, get_head_size=None, get_num_kv_heads=None
+):
+    """Build attention instances from a mocked ModelConfig.
+
+    `get_head_size`/`get_num_kv_heads`, when given, replace the default flat
+    mocks so tests can assert per-layer (`layer_idx=...`) resolution.
+    """
     from unittest.mock import MagicMock
 
     import torch
@@ -282,8 +288,12 @@ def _run_create_attention_instances(per_layer_attributes, per_layer_config):
 
     model_config = MagicMock()
     model_config.get_num_attention_heads = MagicMock(return_value=8)
-    model_config.get_head_size = MagicMock(return_value=256)
-    model_config.get_num_kv_heads = MagicMock(return_value=4)
+    model_config.get_head_size = MagicMock(
+        side_effect=get_head_size or (lambda layer_idx=None: 256)
+    )
+    model_config.get_num_kv_heads = MagicMock(
+        side_effect=get_num_kv_heads or (lambda parallel_config, layer_idx=None: 4)
+    )
     model_config.get_total_num_hidden_layers = MagicMock(return_value=2)
     model_config.dtype = torch.float16
     model_config.is_mm_prefix_lm = False
@@ -322,8 +332,14 @@ def _run_create_attention_instances(per_layer_attributes, per_layer_config):
             self.config.sliding_window = 4096
             self.config.num_hidden_layers = 2
             self.config.attn_logit_softcapping = None
-            self.config.per_layer_attributes = per_layer_attributes
-            self.config.per_layer_config = per_layer_config
+            # `per_layer_attributes` gates heterogeneous resolution in
+            # create_attention_instances; its content is otherwise
+            # irrelevant since per-layer values now come from
+            # model_config.get_head_size/get_num_kv_heads, not from reading
+            # per_layer_config directly.
+            self.config.per_layer_attributes = (
+                {"head_dim", "num_key_value_heads"} if is_heterogeneous else None
+            )
             self.text_config = self.config
             self.pp_group = MagicMock()
             self.pp_group.rank_in_group = 0
@@ -332,22 +348,31 @@ def _run_create_attention_instances(per_layer_attributes, per_layer_config):
             self.quant_config = None
 
     with set_current_vllm_config(vllm_config):
-        return TestBase().create_attention_instances()
+        instances = TestBase().create_attention_instances()
+    return instances, model_config
 
 
 def test_heterogeneous_attention():
-    """Heterogeneous configs (e.g. Gemma 4) declare per-layer `head_dim` and
-    `num_key_value_heads` through `per_layer_config`. Attention instances must
-    reflect the per-layer geometry or KV cache allocation and projection
-    shapes break at runtime."""
-    from types import SimpleNamespace
+    """Heterogeneous configs (e.g. Gemma 4) vary attention geometry across
+    layers. create_attention_instances must resolve head_size/num_kv_heads
+    per layer via ModelConfig.get_head_size(layer_idx=...)/get_num_kv_heads(
+    layer_idx=...) instead of assuming which config attributes vary, or KV
+    cache allocation and projection shapes break at runtime."""
+    # `None` covers the unconditional global precompute call that
+    # create_attention_instances always makes before the per-layer loop.
+    per_layer_head_size = {None: 256, 0: 256, 1: 512}
+    per_layer_total_kv_heads = {None: 8, 0: 8, 1: 1}
 
-    sliding_layer = SimpleNamespace(head_dim=256, num_key_value_heads=8)
-    full_layer = SimpleNamespace(head_dim=512, num_key_value_heads=1)
-
-    attention_instances = _run_create_attention_instances(
-        per_layer_attributes={"head_dim", "num_key_value_heads"},
-        per_layer_config=[sliding_layer, full_layer],
+    attention_instances, model_config = _run_create_attention_instances(
+        is_heterogeneous=True,
+        get_head_size=lambda layer_idx=None: per_layer_head_size[layer_idx],
+        get_num_kv_heads=(
+            lambda parallel_config, layer_idx=None: max(
+                1,
+                per_layer_total_kv_heads[layer_idx]
+                // parallel_config.tensor_parallel_size,
+            )
+        ),
     )
 
     sliding_attn = attention_instances[0]
@@ -361,30 +386,34 @@ def test_heterogeneous_attention():
     assert full_attn.head_size == 512
     # 1 KV head is replicated across TP ranks
     assert full_attn.num_kv_heads == 1
+    # Every layer must be resolved with its own layer_idx, in addition to
+    # the unconditional global (no-argument) precompute call.
+    head_size_layer_idxs = {
+        c.kwargs.get("layer_idx") for c in model_config.get_head_size.mock_calls
+    }
+    assert head_size_layer_idxs == {None, 0, 1}
 
 
-@pytest.mark.parametrize(
-    "per_layer_attributes",
-    [None, {"intermediate_size"}],
-    ids=["homogeneous", "non_geometry_attrs"],
-)
-def test_heterogeneous_attention_global_fallback(per_layer_attributes):
-    """Configs without per-layer geometry keep the global values: when
-    `per_layer_attributes` is `None` (homogeneous config) or declares no
-    geometry attributes, `per_layer_config` must not even be consulted."""
-    from unittest.mock import MagicMock
-
-    per_layer_config = MagicMock()
-    per_layer_config.__getitem__ = MagicMock(
-        side_effect=AssertionError("per_layer_config should not be consulted")
-    )
-
-    attention_instances = _run_create_attention_instances(
-        per_layer_attributes=per_layer_attributes,
-        per_layer_config=per_layer_config,
+def test_heterogeneous_attention_global_fallback():
+    """Homogeneous configs (`per_layer_config` is `None`) must not resolve
+    per layer: get_head_size/get_num_kv_heads must only ever be called with
+    the global (no layer_idx) signature."""
+    attention_instances, model_config = _run_create_attention_instances(
+        is_heterogeneous=False
     )
 
     for attn in attention_instances.values():
         assert attn.num_heads == 8
         assert attn.head_size == 256
         assert attn.num_kv_heads == 4
+
+    # Only the unconditional global (no layer_idx) precompute call happens —
+    # per-layer resolution must never be consulted for a homogeneous config.
+    head_size_layer_idxs = {
+        c.kwargs.get("layer_idx") for c in model_config.get_head_size.mock_calls
+    }
+    num_kv_heads_layer_idxs = {
+        c.kwargs.get("layer_idx") for c in model_config.get_num_kv_heads.mock_calls
+    }
+    assert head_size_layer_idxs == {None}
+    assert num_kv_heads_layer_idxs == {None}

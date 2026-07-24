@@ -547,13 +547,11 @@ class Base(
         start, end = get_pp_indices(text_config.num_hidden_layers, pp_rank, pp_size)
 
         # Heterogeneous configs (e.g. Gemma 4) vary attention geometry across
-        # layers, so the global config cannot describe every layer. Mirror the
-        # Transformers modeling code and read the varying attributes from
-        # `per_layer_config` instead.
-        per_layer_attrs = getattr(text_config, "per_layer_attributes", None) or set()
-        geometry_attrs = {"head_dim", "num_key_value_heads"} & per_layer_attrs
-        layer_configs = text_config.per_layer_config if geometry_attrs else None
-        tp_size = self.parallel_config.tensor_parallel_size
+        # layers, so the global config cannot describe every layer. Resolve
+        # per layer via get_head_size/get_num_kv_heads rather than assuming
+        # which attributes vary — that is model-specific and already known
+        # to ModelArchConfigConvertor.
+        is_heterogeneous = bool(getattr(text_config, "per_layer_attributes", None))
 
         attention_instances = {}
         for i in range(start, end):
@@ -565,16 +563,14 @@ class Base(
             ):
                 per_layer_sliding_window = self.config.sliding_window
 
-            layer_head_size = head_size
-            layer_num_kv_heads = num_kv_heads
-            if layer_configs is not None:
-                layer_config = layer_configs[i]
-                if "head_dim" in geometry_attrs:
-                    layer_head_size = layer_config.head_dim
-                if "num_key_value_heads" in geometry_attrs:
-                    layer_num_kv_heads = max(
-                        1, layer_config.num_key_value_heads // tp_size
-                    )
+            if is_heterogeneous:
+                layer_head_size = self.model_config.get_head_size(layer_idx=i)
+                layer_num_kv_heads = self.model_config.get_num_kv_heads(
+                    self.parallel_config, layer_idx=i
+                )
+            else:
+                layer_head_size = head_size
+                layer_num_kv_heads = num_kv_heads
 
             attn_cls = (
                 EncoderOnlyAttention

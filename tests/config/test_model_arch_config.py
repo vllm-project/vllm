@@ -215,3 +215,64 @@ def test_gemma4_head_size_heterogeneous_config():
     heterogeneous.per_layer_config = {1: {"head_dim": 512}}
     convertor = Gemma4ModelArchConfigConvertor(heterogeneous, heterogeneous)
     assert convertor.get_head_size() == 512
+
+
+def test_get_model_arch_config_layer_idx():
+    """`get_model_arch_config(layer_idx=...)` must resolve per-layer values
+    for heterogeneous configs, and must NOT crash for homogeneous ones.
+
+    `per_layer_config` exists (as `None`) on every config via the
+    heterogeneity mixin, even when no heterogeneity is declared, so gating
+    on `hasattr` instead of the value would subscript `None` for any
+    ordinary model as soon as a caller passes `layer_idx`.
+    """
+    from transformers import PretrainedConfig
+
+    homogeneous = ModelConfig.__new__(ModelConfig)
+    homogeneous_hf_config = PretrainedConfig(
+        model_type="qwen3", num_attention_heads=8, head_dim=128
+    )
+    homogeneous.hf_config = homogeneous_hf_config
+    homogeneous.hf_text_config = homogeneous_hf_config
+    homogeneous.model_arch_config = homogeneous.get_model_arch_config()
+
+    assert homogeneous.get_model_arch_config().head_size == 128
+    assert homogeneous.get_model_arch_config(layer_idx=0).head_size == 128
+
+    pytest.importorskip(
+        "transformers.integrations.heterogeneity.configuration_utils",
+        reason="requires transformers with heterogeneous config support",
+    )
+    from transformers import PreTrainedConfig
+
+    heterogeneous = ModelConfig.__new__(ModelConfig)
+    heterogeneous_hf_config = PreTrainedConfig(
+        model_type="gemma4_unified",
+        num_hidden_layers=2,
+        num_attention_heads=8,
+        num_key_value_heads=8,
+        head_dim=256,
+    )
+    heterogeneous_hf_config.per_layer_config = {
+        1: {"head_dim": 512, "num_key_value_heads": 1}
+    }
+    heterogeneous.hf_config = heterogeneous_hf_config
+    heterogeneous.hf_text_config = heterogeneous_hf_config
+    heterogeneous.model_arch_config = heterogeneous.get_model_arch_config()
+
+    sliding = heterogeneous.get_model_arch_config(layer_idx=0)
+    full = heterogeneous.get_model_arch_config(layer_idx=1)
+    assert sliding.head_size == 256
+    assert sliding.total_num_kv_heads == 8
+    assert full.head_size == 512
+    assert full.total_num_kv_heads == 1
+
+    # TP-division arithmetic for get_num_kv_heads is covered by
+    # test_heterogeneous_attention in test_backend.py; this only needs to
+    # confirm layer_idx routing, so use TP=1 to avoid the multi-GPU
+    # validation ParallelConfig(tensor_parallel_size>1) requires.
+    parallel_config = ParallelConfig(tensor_parallel_size=1)
+    assert heterogeneous.get_head_size(layer_idx=0) == 256
+    assert heterogeneous.get_head_size(layer_idx=1) == 512
+    assert heterogeneous.get_num_kv_heads(parallel_config, layer_idx=0) == 8
+    assert heterogeneous.get_num_kv_heads(parallel_config, layer_idx=1) == 1
