@@ -597,6 +597,8 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
         model="facebook/opt-125m",
         max_num_batched_tokens=1024,
         long_prefill_token_threshold=400,
+        max_num_partial_prefills=3,
+        max_long_partial_prefills=3,
         enable_prefix_caching=enable_prefix_caching,
     )
     requests = create_requests(

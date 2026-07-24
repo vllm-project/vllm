@@ -469,6 +469,9 @@ class Scheduler(SchedulerInterface):
         ) and any(not r.is_prefill_chunk for r in self.running)
 
         # First, schedule the RUNNING requests.
+        # Counters for concurrent partial-prefill limits.
+        num_partial_prefills = 0
+        num_long_partial_prefills = 0
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
@@ -508,6 +511,22 @@ class Scheduler(SchedulerInterface):
             )
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
+                # This request will be partially prefilled as a long prefill.
+                if (num_long_partial_prefills
+                        >= self.scheduler_config.max_long_partial_prefills):
+                    req_index += 1
+                    continue
+            # Enforce max_num_partial_prefills: a partial prefill is any running
+            # request whose prompt is not yet fully computed.
+            is_partial_prefill = (
+                request.num_computed_tokens < request.num_prompt_tokens
+            )
+            if is_partial_prefill and (
+                num_partial_prefills
+                >= self.scheduler_config.max_num_partial_prefills
+            ):
+                req_index += 1
+                continue
             num_new_tokens = min(num_new_tokens, token_budget)
 
             # Make sure the input position does not exceed the max model len.
@@ -615,6 +634,16 @@ class Scheduler(SchedulerInterface):
             # Schedule the request.
             scheduled_running_reqs.append(request)
             prefill_scheduled |= request.is_prefill_chunk
+            # Track partial-prefill concurrency for the next iterations.
+            if request.num_computed_tokens < request.num_prompt_tokens:
+                num_partial_prefills += 1
+                threshold = self.scheduler_config.long_prefill_token_threshold
+                if 0 < threshold < (
+                    request.num_tokens_with_spec
+                    + request.num_output_placeholders
+                    - request.num_computed_tokens
+                ):
+                    num_long_partial_prefills += 1
             request_id = request.request_id
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
@@ -845,6 +874,24 @@ class Scheduler(SchedulerInterface):
                     threshold = self.scheduler_config.long_prefill_token_threshold
                     if 0 < threshold < num_new_tokens:
                         num_new_tokens = threshold
+                        # This is a long partial prefill from waiting.
+                        if (num_long_partial_prefills
+                                >= self.scheduler_config.max_long_partial_prefills):
+                            request_queue.pop_request()
+                            step_skipped_waiting.prepend_request(request)
+                            continue
+                    # A request is a partial prefill when long_prefill_token_threshold
+                    # forces its prompt to span multiple steps (not just token_budget).
+                    threshold = self.scheduler_config.long_prefill_token_threshold
+                    full_remaining = request.num_tokens - num_computed_tokens
+                    is_waiting_partial = 0 < threshold < full_remaining
+                    if is_waiting_partial and (
+                        num_partial_prefills
+                        >= self.scheduler_config.max_num_partial_prefills
+                    ):
+                        request_queue.pop_request()
+                        step_skipped_waiting.prepend_request(request)
+                        continue
 
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
@@ -1009,6 +1056,12 @@ class Scheduler(SchedulerInterface):
                     scheduled_resumed_reqs.append(request)
                 else:
                     raise RuntimeError(f"Invalid request status: {request.status}")
+                # Track partial-prefill concurrency for subsequent iterations.
+                _threshold = self.scheduler_config.long_prefill_token_threshold
+                _full_rem = request.num_tokens - num_computed_tokens
+                if 0 < _threshold < _full_rem:
+                    num_partial_prefills += 1
+                    num_long_partial_prefills += 1
 
                 if self.lora_config and request.lora_request:
                     scheduled_loras.add(request.lora_request.lora_int_id)
