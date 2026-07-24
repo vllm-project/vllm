@@ -20,9 +20,10 @@ def test_block_ids_are_not_overwritten_while_copy_is_in_flight():
     zeroer.device = device
     zeroer._meta = (
         torch.tensor([storage.data_ptr()], dtype=torch.uint64, device=device),
-        page_size_el,
-        page_size_el,
-        1,
+        torch.tensor([page_size_el], dtype=torch.int64, device=device),
+        page_size_el // page_size_el,  # max_chunks = 1
+        page_size_el,  # blk_size
+        1,  # n_segs
     )
 
     stream = torch.cuda.Stream()
