@@ -311,3 +311,48 @@ def test_snapshot_create_flags_skip_early_exit(monkeypatch, tmp_path):
     monkeypatch.setattr(snapshot_module, "lookup_key", lambda env: {"stub": 1})
     _prime_snapshot_dir(tmp_path, key_from({"stub": 1}))
     assert maybe_restore_serve() is None
+
+
+def test_lookup_key_keys_dpkg_dists_by_deb_revision(monkeypatch):
+    # A RECORD-less dpkg-managed dist (Debian ships apt python packages
+    # without RECORD) must not refuse the snapshot key, and must be keyed by
+    # the dpkg package version: a security update bumps only the Debian
+    # revision, so the digest has to change with it.
+    import pathlib
+
+    import vllm.entrypoints.snapshot as snapshot_module
+
+    class FakeDpkgDist:
+        name = "protobuf"
+        version = "3.12.4"
+        metadata = {"Name": "protobuf"}
+        _path = pathlib.Path("/usr/lib/python3/dist-packages/protobuf-3.12.4.egg-info")
+
+        def read_text(self, _name):
+            return None
+
+    deb = {"version": "3.12.4-1ubuntu7"}
+
+    def fake_run(argv, **_kwargs):
+        class Result:
+            returncode = 0
+            stderr = ""
+
+        result = Result()
+        if argv[0] == "criu":
+            result.stdout = "Version: 4.2"
+        elif argv[0] == "dpkg":
+            result.stdout = f"python3-protobuf: {argv[-1]}\n"
+        else:  # dpkg-query
+            result.stdout = f"python3-protobuf {deb['version']}\n"
+        return result
+
+    monkeypatch.setattr(snapshot_module, "_entry_state", {})
+    monkeypatch.setattr(
+        snapshot_module.importlib.metadata, "distributions", lambda: [FakeDpkgDist()]
+    )
+    monkeypatch.setattr(snapshot_module.subprocess, "run", fake_run)
+    first = snapshot_module.lookup_key(creation_env())["dists_digest"]
+    deb["version"] = "3.12.4-1ubuntu7.22.04.2"
+    second = snapshot_module.lookup_key(creation_env())["dists_digest"]
+    assert first != second

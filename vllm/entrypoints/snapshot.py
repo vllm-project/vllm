@@ -24,6 +24,7 @@ import importlib.metadata
 import json
 import os
 import platform
+import re
 import shlex
 import shutil
 import signal
@@ -378,9 +379,76 @@ def _is_editable(dist: importlib.metadata.Distribution) -> bool:
     return bool(isinstance(info, dict) and info.get("dir_info", {}).get("editable"))
 
 
+# Debian policy installs apt python packages under /usr/lib/python3*/
+# dist-packages without RECORD; the official docker image always contains
+# some (python3-apt through launchpadlib, and python3-protobuf is a
+# dependency of criu itself), so refusing them would make `snapshot create`
+# unusable there. They are keyed by their dpkg package version instead:
+# python metadata versions miss Debian revisions, and a security update bumps
+# only the revision, so dpkg's database is the change signal. Ownership is
+# proven by dpkg -S, not by path; anything dpkg cannot vouch for refuses.
+_DPKG_DIST_PACKAGES = re.compile(r"/usr/lib/python3(\.\d+)?/dist-packages(/|$)")
+
+
+def _dpkg_metadata_path(dist: importlib.metadata.Distribution) -> str | None:
+    path = getattr(dist, "_path", None)
+    if path is None:
+        return None
+    try:
+        real = os.path.realpath(str(path))
+    except (OSError, ValueError):
+        return None
+    return real if _DPKG_DIST_PACKAGES.match(os.path.dirname(real) + "/") else None
+
+
+def _dpkg_versions(paths: list[str]) -> dict[str, str]:
+    """Map each dpkg-owned metadata path to its 'package=deb-version' string.
+
+    Empty on any failure, which the caller treats as refusal (fail closed).
+    """
+    try:
+        search = subprocess.run(
+            ["dpkg", "-S", *paths],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        ).stdout
+        owner_by_path: dict[str, str] = {}
+        for line in search.splitlines():
+            pkg, sep, fpath = line.partition(": ")
+            if not sep:
+                continue
+            owner = pkg.split(",")[0].strip().split(":")[0]
+            owner_by_path[fpath.strip()] = owner
+        owners = sorted(set(owner_by_path.values()))
+        if not owners:
+            return {}
+        query = subprocess.run(
+            ["dpkg-query", "-W", "-f", "${Package} ${Version}\n", *owners],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        ).stdout
+        version_by_owner = dict(
+            line.split(None, 1) for line in query.splitlines() if " " in line
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return {}
+    resolved: dict[str, str] = {}
+    for path in paths:
+        pkg_owner = owner_by_path.get(path)
+        version = version_by_owner.get(pkg_owner or "")
+        if pkg_owner and version:
+            resolved[path] = f"{pkg_owner}={version.strip()}"
+    return resolved
+
+
 def _distributions_digest() -> str:
     triples: list[list[str]] = []
     offenders: list[str] = []
+    dpkg_pending: list[tuple[str, str, str]] = []
     for dist in importlib.metadata.distributions():
         name = dist.metadata["Name"] or dist.name or "?"
         if _is_editable(dist):
@@ -388,10 +456,22 @@ def _distributions_digest() -> str:
             continue
         record = dist.read_text("RECORD")
         if not record:
-            offenders.append(f"{name} (no RECORD)")
+            dpkg_path = _dpkg_metadata_path(dist)
+            if dpkg_path is not None:
+                dpkg_pending.append((name, dist.version, dpkg_path))
+            else:
+                offenders.append(f"{name} (no RECORD)")
             continue
         digest = hashlib.sha256(record.encode()).hexdigest()
         triples.append([name, dist.version, digest])
+    if dpkg_pending:
+        versions = _dpkg_versions([path for _, _, path in dpkg_pending])
+        for name, version, path in dpkg_pending:
+            deb = versions.get(path)
+            if deb is None:
+                offenders.append(f"{name} (no RECORD)")
+            else:
+                triples.append([name, version, f"dpkg:{deb}"])
     if offenders:
         raise SnapshotKeyError(
             "editable or RECORD-less distributions refuse snapshot: "

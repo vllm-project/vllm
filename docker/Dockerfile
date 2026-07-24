@@ -1074,7 +1074,8 @@ FROM vllm-openai-base AS vllm-openai
 # unusable at this stage because /usr/bin/python3 now points at the deadsnakes
 # python, which has no apt_pkg module.
 RUN mkdir -p -m 0755 /etc/apt/keyrings \
-    && curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x4E2A48715C45AEEC077B48169B29EEC9246B6CE2" \
+    && curl -fsSL --retry 3 --retry-all-errors \
+        "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x4E2A48715C45AEEC077B48169B29EEC9246B6CE2" \
         | gpg --dearmor > /etc/apt/keyrings/criu-ppa.gpg \
     && chmod 644 /etc/apt/keyrings/criu-ppa.gpg \
     && . /etc/os-release \
