@@ -224,6 +224,8 @@ class RequestState:
             if not sampling_params.detokenize:
                 tokenizer = None
             output_kind = sampling_params.output_kind
+            if sampling_params.stream_interval is not None:
+                stream_interval = sampling_params.stream_interval
             logprobs_processor = LogprobsProcessor.from_new_request(
                 tokenizer=tokenizer,
                 request=request,
