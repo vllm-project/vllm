@@ -1031,13 +1031,20 @@ def _process_weights_xpu(
     expects this convention; on a big-endian host the byte order reverses
     and the kernel would silently miscompute, so we hard-fail.
     """
-    del layer, quant_config  # unused — kept for parity with the marlin helper
+    del layer  # unused — kept for parity with the marlin helper
 
     if sys.byteorder != "little":
         raise NotImplementedError(
             "_process_weights_xpu requires a little-endian host: the GPTQ "
             "int32 → uint8 nibble repack relies on LE byte ordering."
         )
+    from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
+
+    if isinstance(quant_config, AutoAWQConfig):
+        from vllm_xpu_kernels.quantization._quantize_convert import AWQUtils
+
+        w13_qweight = AWQUtils.moe_repack(w13_qweight)
+        w2_qweight = AWQUtils.moe_repack(w2_qweight)
 
     w13_xpu = w13_qweight.transpose(1, 2).contiguous().view(torch.uint8)
     w2_xpu = w2_qweight.transpose(1, 2).contiguous().view(torch.uint8)
