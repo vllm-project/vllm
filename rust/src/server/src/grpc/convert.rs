@@ -96,6 +96,8 @@ pub fn to_text_request(
         sampling_params,
         decode_options,
         intermediate: stream,
+        truncate_prompt_tokens: None,
+        truncation_side: None,
         priority: req.priority,
         cache_salt: kv.map(|k| &k.cache_salt).filter(|s| !s.is_empty()).cloned(),
         add_special_tokens: true,

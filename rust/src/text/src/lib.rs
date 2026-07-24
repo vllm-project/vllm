@@ -87,12 +87,70 @@ impl TextRequestProcessor {
         }
 
         let tokenizer = self.backend.tokenizer();
-        let prompt_token_ids = match take(&mut request.prompt) {
+        let mut prompt_token_ids = match take(&mut request.prompt) {
             Prompt::Text(text) => tokenizer.encode(&text, request.add_special_tokens)?,
             // Pre-tokenized prompts are the main completions-side escape hatch that lets benchmark
             // and infra workloads bypass chat rendering and tokenizer overhead entirely.
             Prompt::TokenIds(token_ids) => token_ids,
         };
+
+        if let Some(truncate_prompt_tokens) = request.truncate_prompt_tokens {
+            let max_input_tokens = if truncate_prompt_tokens < 0 {
+                // `-1` maps to the model's input budget. The reservation uses the
+                // engine-facing `max_tokens`: for `/v1/completions` prompt-only
+                // echo the frontend drives the engine with one internal output
+                // token, and that token must stay reserved so the truncated
+                // prompt still fits alongside it (see `resolve_max_tokens`).
+                let max_output_tokens = request.sampling_params.max_tokens.unwrap_or(0);
+                self.max_model_len.saturating_sub(max_output_tokens) as usize
+            } else {
+                truncate_prompt_tokens as usize
+            };
+
+            if prompt_token_ids.len() > max_input_tokens {
+                let side = request.truncation_side.as_deref().unwrap_or("left");
+                let boundary = if side == "left" {
+                    prompt_token_ids.len() - max_input_tokens
+                } else {
+                    max_input_tokens
+                };
+                if request.mm_features.as_ref().is_some_and(|features| {
+                    features.iter().any(|f| {
+                        let end = f.mm_position.offset + f.mm_position.length;
+                        f.mm_position.offset < boundary && boundary < end
+                    })
+                }) {
+                    return Err(crate::error::Error::PartialMultimodalTruncation {
+                        request_id: request.request_id.clone(),
+                    });
+                }
+
+                if side == "left" {
+                    let start = boundary;
+                    prompt_token_ids.drain(0..start);
+                    if let Some(features) = request.mm_features.as_mut() {
+                        features.retain_mut(|f| {
+                            let end = f.mm_position.offset + f.mm_position.length;
+                            if end <= start {
+                                false
+                            } else if f.mm_position.offset < start {
+                                false
+                            } else {
+                                f.mm_position.offset -= start;
+                                true
+                            }
+                        });
+                    }
+                } else {
+                    prompt_token_ids.truncate(max_input_tokens);
+                    if let Some(features) = request.mm_features.as_mut() {
+                        features.retain(|f| {
+                            f.mm_position.offset + f.mm_position.length <= max_input_tokens
+                        });
+                    }
+                }
+            }
+        }
         let sampling_hints = self.backend.sampling_hints()?;
         let sampling_limits = SamplingLimits {
             max_model_len: self.max_model_len,
