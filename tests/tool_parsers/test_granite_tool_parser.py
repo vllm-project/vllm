@@ -88,11 +88,6 @@ I'll get that information.""",
                     "Streaming mode doesn't strip <|tool_call|> marker from content"
                 ),
             },
-            xfail_nonstreaming={
-                "test_surrounding_text": (
-                    "Parser doesn't handle surrounding text correctly in non-streaming"
-                ),
-            },
         )
 
     # Granite-Specific Tests
@@ -124,6 +119,22 @@ I'll get that information.""",
             f"Expected 1 tool call from string format, got {len(tool_calls)}"
         )
         assert tool_calls[0].function.name == "get_weather"
+
+    def test_granite_surrounding_text_non_streaming(self, tool_parser):
+        """Non-streaming: a call wrapped in prose is still extracted, the
+        leading text is returned as content, and trailing text after the
+        closing ``]`` is tolerated (matching granite-20b-fc)."""
+        output = (
+            "Let me check the weather for you.\n"
+            '<|tool_call|> [{"name": "get_weather", '
+            '"arguments": {"city": "Tokyo"}}]\n'
+            "I'll get that information."
+        )
+        content, tool_calls = run_tool_extraction(tool_parser, output, streaming=False)
+        assert len(tool_calls) == 1
+        assert tool_calls[0].function.name == "get_weather"
+        assert json.loads(tool_calls[0].function.arguments) == {"city": "Tokyo"}
+        assert content == "Let me check the weather for you.\n"
 
 
 # granite emits arguments before name and its own tokenizer (not gpt2) is used
