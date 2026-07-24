@@ -706,6 +706,27 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
 
         return E, M, N, K, topk
 
+    @staticmethod
+    def supports_swiglu_clamp_limit(activation: MoEActivation) -> bool:
+        """`_fused_marlin_moe` forwards `clamp_limit`/`alpha`/`beta`
+        (read from the quant config in `__init__`) into `activation_func`
+        (`apply_moe_activation`) for every activation. That dispatcher
+        consumes the clamp for SILU (`silu_and_mul_with_clamp`) and for
+        SWIGLUOAI_UNINTERLEAVE (same kernel; the clamp is mandatory
+        there). SWIGLUOAI ignores the config clamp (`swigluoai_and_mul`
+        is invoked with kernel-default alpha/limit) and SWIGLUSTEP has
+        no clamp path, so both stay False.
+
+        No `supports_swiglu_clamp_limit_with_lora` override is needed:
+        `MarlinExperts.apply`'s `activation_with_lora` wrapper receives
+        `clamp_limit` and forwards it to `self.activation()` after
+        injecting `apply_w13_lora`, so clamp and LoRA compose.
+        """
+        return activation in (
+            MoEActivation.SILU,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        )
+
 
 class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
     """Marlin-based fused MoE expert implementation."""

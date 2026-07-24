@@ -269,6 +269,22 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
     """
 
     @staticmethod
+    def supports_swiglu_clamp_limit(activation: MoEActivation) -> bool:
+        """The kernel invocation forwards `self.gemm1_clamp_limit` (a
+        per-expert tensor pre-folded by `process_weights_after_loading`
+        so the TRTLLM kernel receives the raw-GEMM-space clamp) to
+        `flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe` via the
+        `gemm1_clamp_limit` arg, for every activation. Of the activations
+        accepted by `_supports_activation`, SILU and
+        SWIGLUOAI_UNINTERLEAVE are the SwiGLU clamp paths; the rest
+        (RELU2_NO_MUL/GELU/GELU_TANH) have no clamp semantics.
+        """
+        return activation in (
+            MoEActivation.SILU,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        )
+
+    @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         """The modular implementation supports all parallel configs."""
         return True
@@ -437,6 +453,22 @@ class TrtLlmNvFp4ExpertsMonolithic(
 
     def supports_routing_replay_capture(self) -> bool:
         return True
+
+    @staticmethod
+    def supports_swiglu_clamp_limit(activation: MoEActivation) -> bool:
+        """`apply` forwards `self.gemm1_clamp_limit` (a per-expert tensor
+        pre-folded by `process_weights_after_loading` so the TRTLLM
+        kernel receives the raw-GEMM-space clamp) to
+        `flashinfer.fused_moe.trtllm_fp4_block_scale_moe` via the
+        `gemm1_clamp_limit` arg, for every activation. Of the activations
+        accepted by `_supports_activation`, SILU and
+        SWIGLUOAI_UNINTERLEAVE are the SwiGLU clamp paths; the rest
+        (RELU2_NO_MUL/GELU/GELU_TANH) have no clamp semantics.
+        """
+        return activation in (
+            MoEActivation.SILU,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        )
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
