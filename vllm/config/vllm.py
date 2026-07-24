@@ -2260,6 +2260,19 @@ class VllmConfig:
                 "than or equal to and divisible by cp_kv_cache_interleave_size "
                 f"({self.parallel_config.cp_kv_cache_interleave_size})."
             )
+            # The DFlash/DSpark draft path computes context slot mappings
+            # without DCP sharding (dcp-blind), so the draft reads wrong KV
+            # blocks and acceptance collapses to ~0%. Fail fast instead.
+            if (
+                self.speculative_config is not None
+                and self.speculative_config.method in ("dflash", "dspark")
+            ):
+                raise NotImplementedError(
+                    "DFlash/DSpark speculative decoding does not support "
+                    "decode context parallelism (dcp-blind draft slot "
+                    "mapping); use decode_context_parallel_size=1 or a "
+                    "different speculative method (e.g. mtp)."
+                )
 
         # Mamba cache align-mode constraints
         if self.cache_config.mamba_cache_mode == "align":
