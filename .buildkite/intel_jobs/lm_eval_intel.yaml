@@ -1,0 +1,27 @@
+group: LM Eval Intel
+depends_on:
+  - image-build-xpu
+steps:
+- label: LM Eval Large Models(4 GPUs)
+  timeout_in_minutes: 45
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 4+
+    mem: 24+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/
+    - .buildkite/lm-eval-harness/
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd .buildkite/lm-eval-harness &&
+       export VLLM_USE_DEEP_GEMM=0 &&
+      pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-xpu-fp8.txt --tp-size=4'
+
