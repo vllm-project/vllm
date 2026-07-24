@@ -52,10 +52,12 @@ from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.mistral import is_mistral_tokenizer
 
 try:
-    from datasets import load_dataset
+    from datasets import DatasetDict, IterableDatasetDict, load_dataset
 except ImportError:
     datasets = PlaceholderModule("datasets")
     load_dataset = datasets.placeholder_attr("load_dataset")
+    DatasetDict = datasets.placeholder_attr("DatasetDict")
+    IterableDatasetDict = datasets.placeholder_attr("IterableDatasetDict")
 
 try:
     import pandas as pd
@@ -3274,7 +3276,7 @@ class HuggingFaceDataset(BenchmarkDataset):
     def __init__(
         self,
         dataset_path: str,
-        dataset_split: str,
+        dataset_split: str | None,
         no_stream: bool = False,
         dataset_subset: str | None = None,
         hf_name: str | None = None,
@@ -3299,6 +3301,24 @@ class HuggingFaceDataset(BenchmarkDataset):
             streaming=self.load_stream,
             trust_remote_code=self.trust_remote_code,
         )
+        # When no split is requested, ``load_dataset`` returns a mapping of
+        # split name -> dataset (DatasetDict / IterableDatasetDict). Iterating
+        # that yields split *names* (str) instead of examples, so downstream
+        # sampling fails with "string indices must be integers". Collapse it to
+        # a single concrete split, preferring "train" when present.
+        if isinstance(self.data, (DatasetDict, IterableDatasetDict)):
+            available_splits = list(self.data.keys())
+            chosen_split = (
+                "train" if "train" in available_splits else available_splits[0]
+            )
+            logger.warning(
+                "No split specified for dataset '%s' (available splits: %s); "
+                "defaulting to '%s'. Pass --hf-split to select one explicitly.",
+                self.dataset_path,
+                available_splits,
+                chosen_split,
+            )
+            self.data = self.data[chosen_split]
         if not getattr(self, "disable_shuffle", False):
             self.data = self.data.shuffle(seed=self.random_seed)
 
