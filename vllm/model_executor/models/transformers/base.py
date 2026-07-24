@@ -546,13 +546,6 @@ class Base(
         pp_size = self.pp_group.world_size
         start, end = get_pp_indices(text_config.num_hidden_layers, pp_rank, pp_size)
 
-        # Heterogeneous configs (e.g. Gemma 4) vary attention geometry across
-        # layers, so the global config cannot describe every layer. Resolve
-        # per layer via get_head_size/get_num_kv_heads rather than assuming
-        # which attributes vary — that is model-specific and already known
-        # to ModelArchConfigConvertor.
-        is_heterogeneous = bool(getattr(text_config, "per_layer_attributes", None))
-
         attention_instances = {}
         for i in range(start, end):
             # Handle interleaved sliding window attention
@@ -563,7 +556,7 @@ class Base(
             ):
                 per_layer_sliding_window = self.config.sliding_window
 
-            if is_heterogeneous:
+            if getattr(text_config, "is_heterogeneous", False):
                 layer_head_size = self.model_config.get_head_size(layer_idx=i)
                 layer_num_kv_heads = self.model_config.get_num_kv_heads(
                     self.parallel_config, layer_idx=i
