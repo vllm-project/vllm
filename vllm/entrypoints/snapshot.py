@@ -70,6 +70,11 @@ UNION_IMPORTS = (
 CONTROL_ENV = frozenset(
     {"VLLM_SNAPSHOT", "VLLM_SNAPSHOT_ROOT", "VLLM_SNAPSHOT_RESTORED"}
 )
+# Shell bookkeeping, scrubbed like CONTROL_ENV: bash increments SHLVL at
+# startup but decrements it again on `exec`, so a create run as a wrapper
+# child records SHLVL=1 while the exec'd serve sees SHLVL=0 and every restore
+# misses on a variable no import reads. `_` and OLDPWD move the same way.
+SHELL_LIFECYCLE_ENV = frozenset({"SHLVL", "_", "OLDPWD"})
 # Explicit credential names only, NO suffix/pattern matching: policy vars
 # like HF_HUB_DISABLE_IMPLICIT_TOKEN end in _TOKEN but are import-affecting
 # (huggingface_hub freezes the value at import), so a pattern would silently
@@ -152,7 +157,7 @@ def sha256_json(value: Any) -> str:
 
 def canonical_env(env: dict[str, str] | None = None) -> dict[str, str]:
     source = dict(os.environ if env is None else env)
-    for name in CONTROL_ENV:
+    for name in CONTROL_ENV | SHELL_LIFECYCLE_ENV:
         source.pop(name, None)
     return dict(sorted(source.items()))
 

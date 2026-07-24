@@ -208,15 +208,21 @@ def test_restore_hook_refuses_pythonhashseed(monkeypatch, caplog):
 
 def test_creation_env_drops_secrets_keeps_policy_vars():
     # Credentials never reach the dumped helper; policy vars that merely end
-    # in _TOKEN (import-affecting) stay in the keyed env.
+    # in _TOKEN (import-affecting) stay in the keyed env. Shell bookkeeping
+    # (SHLVL moves between a wrapper's create child and its exec'd serve)
+    # is scrubbed so it can never key or miss a snapshot.
     env = {
         "HF_TOKEN": "hf_secret",
         "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1",
         "PATH": "/usr/bin",
+        "SHLVL": "1",
+        "_": "/usr/local/bin/vllm",
     }
     values = creation_env(env)
     assert "HF_TOKEN" not in values
     assert values["HF_HUB_DISABLE_IMPLICIT_TOKEN"] == "1"
+    assert "SHLVL" not in values
+    assert "_" not in values
 
 
 def test_environment_miss_ignores_secrets_not_policy_vars():
