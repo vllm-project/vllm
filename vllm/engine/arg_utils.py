@@ -1802,7 +1802,7 @@ class EngineArgs:
                 for x in cvd.split(",")
             ]
             for i in int_ids:
-                if i >= len(cvd_ids):
+                if not 0 <= i < len(cvd_ids):
                     raise ValueError(
                         f"--device-ids index {i} is out of range for "
                         f"{current_platform.device_control_env_var}"
