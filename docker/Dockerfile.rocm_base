@@ -6,8 +6,8 @@ ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
 ARG AITER_BRANCH="v0.1.16.post5"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 
-# Sccache configuration (only used in release pipeline)
-ARG USE_SCCACHE
+# Sccache configuration
+ARG USE_SCCACHE="1"
 ARG SCCACHE_DOWNLOAD_URL
 ARG SCCACHE_ENDPOINT
 ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
