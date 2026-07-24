@@ -258,8 +258,12 @@ def kv_postprocess_layout_on_receive(cache, indices):
     This method corrects layout mismatches from direct memory copies by
     permuting the tensor dimensions.
 
+    4D cache:
     - **Source Layout:** `[num_blocks, n_kv_head, block_size, head_dim]`
     - **Target Layout:** `[num_blocks, block_size, n_kv_head, head_dim]`
+    5D cache:
+    - **Source Layout:** `[num_blocks, kv_dim, n_kv_head, block_size, head_dim]`
+    - **Target Layout:** `[num_blocks, kv_dim, block_size, n_kv_head, head_dim]`
 
     Implementation:
     - x = blocks_to_update.reshape(src_shape) # view local kv with sender layout
@@ -270,7 +274,7 @@ def kv_postprocess_layout_on_receive(cache, indices):
     blocks_to_update = cache.index_select(0, indices)
     target_shape = list(blocks_to_update.shape)
     target_shape[0] = -1
-    inv_order = [0, 2, 1, 3]
+    inv_order = [0, 1, 3, 2, 4] if blocks_to_update.ndim == 5 else [0, 2, 1, 3]
     src_shape = tuple(target_shape[i] for i in inv_order)
     blocks_to_update = cache.index_select(0, indices)
     permuted_blocks = blocks_to_update.reshape(src_shape).permute(*inv_order)
