@@ -77,6 +77,8 @@ class Request:
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
         abort_immediately: bool = False,
+        cache_checkpoint_boundaries: tuple[int, ...] = (),
+        cache_checkpoint_decode_end: bool = False,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -140,6 +142,16 @@ class Request:
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
             prompt_token_ids, prompt_embeds
         )
+        self.cache_checkpoint_boundaries = tuple(
+            sorted(
+                {
+                    boundary
+                    for boundary in cache_checkpoint_boundaries
+                    if 0 < boundary < self.num_prompt_tokens
+                }
+            )
+        )
+        self.cache_checkpoint_decode_end = cache_checkpoint_decode_end
         self._output_token_ids: list[int] = []
         self._all_token_ids: list[int] = (
             self.prompt_token_ids.copy()
@@ -239,6 +251,8 @@ class Request:
             reasoning_ended=request.reasoning_ended,
             reasoning_parser_kwargs=request.reasoning_parser_kwargs,
             abort_immediately=request.abort_immediately,
+            cache_checkpoint_boundaries=request.cache_checkpoint_boundaries,
+            cache_checkpoint_decode_end=request.cache_checkpoint_decode_end,
         )
 
     def append_output_token_ids(

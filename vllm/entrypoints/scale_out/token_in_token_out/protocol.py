@@ -97,6 +97,12 @@ class GenerateRequest(BaseModel):
     them (Fast tokenizer, text input, no multimodal data). List length
     equals `token_ids` length when present. None otherwise."""
 
+    cache_checkpoint_boundaries: list[int] | None = None
+    """Trusted frontend-provided token prefix lengths to retain."""
+
+    cache_checkpoint_decode_end: bool = False
+    """Retain the latest materializable committed decode prefix."""
+
     features: MultiModalFeatures | None = None
     """Multimodal hashes and placeholder positions (populated for MM inputs)."""
 

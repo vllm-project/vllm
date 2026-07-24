@@ -147,6 +147,10 @@ class ServingRender(BaseServing):
             cache_salt=request.cache_salt,
             priority=request.priority,
             token_offsets=engine_input.get("prompt_token_offsets"),
+            cache_checkpoint_boundaries=engine_input.get("cache_checkpoint_boundaries"),
+            cache_checkpoint_decode_end=engine_input.get(
+                "cache_checkpoint_decode_end", False
+            ),
         )
 
     async def render_completion_request(

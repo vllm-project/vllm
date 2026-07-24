@@ -308,6 +308,17 @@ class InputProcessor:
             prompt_embeds = None
             prompt_is_token_ids = None
 
+        cache_checkpoint_boundaries = (
+            tuple(decoder_inputs.get("cache_checkpoint_boundaries", ()))
+            if decoder_inputs["type"] == "token"
+            else ()
+        )
+        cache_checkpoint_decode_end = (
+            bool(decoder_inputs.get("cache_checkpoint_decode_end", False))
+            if decoder_inputs["type"] == "token"
+            else False
+        )
+
         sampling_params = None
         pooling_params = None
         if isinstance(params, SamplingParams):
@@ -372,6 +383,8 @@ class InputProcessor:
             prompt_token_ids=prompt_token_ids,
             prompt_embeds=prompt_embeds,
             prompt_is_token_ids=prompt_is_token_ids,
+            cache_checkpoint_boundaries=cache_checkpoint_boundaries,
+            cache_checkpoint_decode_end=cache_checkpoint_decode_end,
             mm_features=mm_features,
             sampling_params=sampling_params,
             pooling_params=pooling_params,
