@@ -65,6 +65,8 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         # a synthesized uniform-1.0 tensor for W4A16 checkpoints that lack
         # one. Holding it on the instance keeps apply() alloc-free.
         self._fc2_input_scale: torch.Tensor | None = None
+        # FC1 input-quant global scale, bound in process_weights_after_loading.
+        self._fc1_input_gs: torch.Tensor | None = None
 
         # Shape params for B12xMoEWrapper construction.
         self.global_num_experts = moe_config.num_experts
@@ -91,26 +93,15 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         self.w2_sf_mma: torch.Tensor | None = None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Normalise block scales to absorb the per-expert weight global scale
-        # (w_gs).  vLLM's NVFP4 convention stores:
-        #   block_scale = max_abs * w_gs / fp4_max,  g1_alphas = 1/w_gs
-        # The SM12x kernel treats w1_alpha (= g1_alphas) as a per-expert weight
-        # dequant multiplier separate from input_gs (activation scale).  We bake
-        # w_gs into the block scales so that w1_alpha = 1.0 and the kernel sees
-        # the simpler form:
-        #   block_scale = max_abs / fp4_max,  w1_alpha = 1.0
-        # The FP4-packed values and dequantised results are identical in both
-        # representations.  We set scale_2 = 1.0 to signal that the bake-in is
-        # already done.
-        layer.w13_weight_scale.data = (
-            layer.w13_weight_scale.float() * layer.w13_weight_scale_2.view(-1, 1, 1)
-        ).to(layer.w13_weight_scale.dtype)
-        layer.w13_weight_scale_2.data.fill_(1.0)
-
-        layer.w2_weight_scale.data = (
-            layer.w2_weight_scale.float() * layer.w2_weight_scale_2.view(-1, 1, 1)
-        ).to(layer.w2_weight_scale.dtype)
-        layer.w2_weight_scale_2.data.fill_(1.0)
+        # Pass scale_2 (via g1/g2_alphas) to the kernel in full precision
+        # instead of baking it into the e4m3 block scales, which distorts the
+        # dequantized weights. input_global_scale=1.0 keeps FC1 activation
+        # quantization unchanged.
+        self._fc1_input_gs = torch.ones(
+            self.num_local_experts,
+            device=layer.w13_weight.device,
+            dtype=torch.float32,
+        )
 
         # The SM12x kernel uses dynamic per-block quantization for FC2 input
         # activations (the SwiGLU output before the down projection).  The
@@ -285,6 +276,7 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             w1_weight=w1,
             w1_weight_sf=self.w1_sf_mma,
             w1_alpha=self.g1_alphas,
+            input_global_scale=self._fc1_input_gs,
             fc2_input_scale=self._fc2_input_scale,
             w2_weight=w2,
             w2_weight_sf=self.w2_sf_mma,
