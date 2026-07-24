@@ -764,7 +764,7 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
 
     total_bytes = input_.numel() * input_.element_size()
     hidden_dim = input_.shape[-1]
-    token_num = input_.shape[0]
+    token_num = input_.numel() // hidden_dim
     if input_.dtype in (torch.bfloat16, torch.float16):
         pack_size = 16 // input_.element_size()
         hidden_ok = hidden_dim % pack_size == 0 and hidden_dim // pack_size <= 1024
@@ -824,7 +824,7 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_impl(
 
     total_bytes = input_.numel() * input_.element_size()
     hidden_dim = input_.shape[-1]
-    token_num = input_.shape[0]
+    token_num = input_.numel() // hidden_dim
     if input_.dtype in (torch.bfloat16, torch.float16):
         pack_size = 16 // input_.element_size()
         hidden_ok = hidden_dim % pack_size == 0 and hidden_dim // pack_size <= 1024
