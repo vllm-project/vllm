@@ -16,6 +16,7 @@ mod server_info;
 mod sleep;
 mod tokenize;
 mod version;
+mod weight_transfer;
 mod world_size;
 
 use std::sync::Arc;
@@ -108,6 +109,19 @@ fn build_router_with_options(
             .route("/pause", post(pause::pause))
             .route("/resume", post(pause::resume))
             .route("/is_paused", get(pause::is_paused))
+            .route(
+                "/init_weight_transfer_engine",
+                post(weight_transfer::init_weight_transfer_engine),
+            )
+            .route(
+                "/start_weight_update",
+                post(weight_transfer::start_weight_update),
+            )
+            .route("/update_weights", post(weight_transfer::update_weights))
+            .route(
+                "/finish_weight_update",
+                post(weight_transfer::finish_weight_update),
+            )
             .route("/server_info", get(server_info::server_info))
             .route("/get_world_size", get(world_size::get_world_size))
     }
