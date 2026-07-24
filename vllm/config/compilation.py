@@ -1220,9 +1220,11 @@ class CompilationConfig:
                 )
                 self.cudagraph_mode = CUDAGraphMode.FULL
 
-        # Disable CUDA graphs for DeepEP high-throughput since its not CG compatible
+        # Disable CUDA graphs for high-throughput all2all backends (DeepEP-HT,
+        # MoRI-HT): they are prefill-optimized with dynamic per-rank token
+        # counts and are not CUDA-graph compatible.
         if (
-            all2all_backend == "deepep_high_throughput"
+            all2all_backend in ("deepep_high_throughput", "mori_high_throughput")
             and data_parallel_size > 1
             and self.cudagraph_mode != CUDAGraphMode.NONE
         ):
@@ -1230,11 +1232,12 @@ class CompilationConfig:
             # if torch compile cache key issue fixed
             # See https://github.com/vllm-project/vllm/pull/25093
             logger.info(
-                "DeepEP: Disabling CUDA Graphs since DeepEP high-throughput kernels "
-                "are optimized for prefill and are incompatible with CUDA Graphs. "
-                "In order to use CUDA Graphs for decode-optimized workloads, "
-                "use --all2all-backend with another option, such as "
-                "deepep_low_latency, nixl_ep, or allgather_reducescatter."
+                "Disabling CUDA Graphs: the '%s' high-throughput all2all backend "
+                "is optimized for prefill and is not CUDA-graph compatible. For "
+                "CUDA Graphs on decode-optimized workloads, use --all2all-backend "
+                "with another option, such as deepep_low_latency, mori_low_latency, "
+                "nixl_ep, or allgather_reducescatter.",
+                all2all_backend,
             )
             self.cudagraph_mode = CUDAGraphMode.NONE
 
