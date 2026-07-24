@@ -62,15 +62,15 @@ ARG SCCACHE_REGION_NAME
 ARG SCCACHE_S3_NO_CREDENTIALS
 RUN if [ "$USE_SCCACHE" = "1" ]; then \
         echo "Installing sccache..." \
-    && SCCACHE_ARCH="x86_64" \
-    && SCCACHE_VERSION="v0.8.1" \
-    && SCCACHE_DL_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
-    && curl -L -o /tmp/sccache.tar.gz ${SCCACHE_DL_URL} \
-    && tar -xzf /tmp/sccache.tar.gz -C /tmp \
-    && mv /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
-    && chmod +x /usr/bin/sccache \
-    && rm -rf /tmp/sccache.tar.gz /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl \
-    && sccache --version; \
+        && SCCACHE_ARCH="x86_64" \
+        && SCCACHE_VERSION="v0.8.1" \
+        && SCCACHE_DL_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
+        && curl -L -o /tmp/sccache.tar.gz ${SCCACHE_DL_URL} \
+        && tar -xzf /tmp/sccache.tar.gz -C /tmp \
+        && mv /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
+        && chmod +x /usr/bin/sccache \
+        && rm -rf /tmp/sccache.tar.gz /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl \
+        && sccache --version; \
     fi
 
 # NOTE: sccache wrappers are created AFTER TheRock ROCm install (below)
