@@ -7,10 +7,12 @@ import torch
 from vllm.models.deepseek_v32.nvidia.attention import (
     DeepseekV32Attention,
     _owner_history_uses_peer_slots,
+    _use_pcp_collective_cache_update,
 )
 from vllm.v1.attention.backends.mla.owner_history import (
     select_owner_slot_mapping,
     validate_owner_fused_cache_contract,
+    validate_owner_history_peer_cache_binding,
 )
 
 
@@ -51,6 +53,31 @@ def test_owner_history_peer_slot_refresh_matches_selected_path(
         },
     )()
     assert _owner_history_uses_peer_slots(impl, metadata) is expect_peer_slots
+
+
+@pytest.mark.parametrize(
+    "has_metadata,use_pcp,has_peer_cache,expected",
+    [
+        (True, True, False, True),
+        (True, True, True, False),
+        (True, False, False, False),
+        (False, True, False, False),
+    ],
+)
+def test_standard_pcp_cache_update_selection(
+    has_metadata: bool,
+    use_pcp: bool,
+    has_peer_cache: bool,
+    expected: bool,
+) -> None:
+    assert (
+        _use_pcp_collective_cache_update(
+            attn_metadata=object() if has_metadata else None,
+            use_pcp=use_pcp,
+            peer_cache=_peer_cache() if has_peer_cache else None,
+        )
+        is expected
+    )
 
 
 def _attention_for_output_test(*, projected: bool) -> DeepseekV32Attention:
@@ -187,6 +214,32 @@ def test_owner_slot_selection_returns_rank_view_without_copy(
 
 def _peer_cache(block_size: int = 8) -> torch.Tensor:
     return torch.empty((4, 3, block_size, 16), dtype=torch.uint8)
+
+
+def test_owner_history_requires_bound_peer_cache() -> None:
+    with pytest.raises(RuntimeError, match="requires a bound Main-KV peer cache"):
+        validate_owner_history_peer_cache_binding(
+            owner_history_expected=True,
+            peer_cache=None,
+        )
+
+
+def test_peer_cache_requires_owner_history() -> None:
+    with pytest.raises(RuntimeError, match="require VLLM_USE_PCP_OWNER_HISTORY=1"):
+        validate_owner_history_peer_cache_binding(
+            owner_history_expected=False,
+            peer_cache=_peer_cache(),
+        )
+
+
+@pytest.mark.parametrize("owner_history_expected", [False, True])
+def test_owner_history_peer_cache_binding_accepts_matching_state(
+    owner_history_expected: bool,
+) -> None:
+    validate_owner_history_peer_cache_binding(
+        owner_history_expected=owner_history_expected,
+        peer_cache=_peer_cache() if owner_history_expected else None,
+    )
 
 
 def test_fused_cache_contract_accepts_shared_slot_and_block_size() -> None:

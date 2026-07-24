@@ -43,7 +43,6 @@ from vllm.v1.attention.backends.mla.owner_peer_slot_cache import (
     OwnerPeerSlotCache,
     maybe_allocate_owner_peer_slot_cache,
 )
-from vllm.v1.attention.backends.mla.sparse_utils import register_phys_shadow
 
 from .attention import DeepseekV32Attention
 from .fused_ops import fused_allreduce_rms_norm
@@ -207,7 +206,6 @@ class DeepseekV32Model(torch.nn.Module):
             dtype=torch.int32,
             device=self.device,
         )
-        register_phys_shadow(topk_indices_buffer)
         self.owner_peer_slot_cache = maybe_allocate_owner_peer_slot_cache(
             vllm_config,
             topk_indices_buffer,

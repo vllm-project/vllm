@@ -300,7 +300,7 @@ def maybe_allocate_owner_peer_slot_cache(
     vllm_config: VllmConfig,
     topk_indices_buffer: torch.Tensor,
 ) -> OwnerPeerSlotCache | None:
-    """Allocate only for the experimental owner-sharded direct history path."""
+    """Allocate only for the owner-sharded history path."""
     parallel_config = vllm_config.parallel_config
     if (
         not envs.VLLM_USE_PCP_OWNER_HISTORY

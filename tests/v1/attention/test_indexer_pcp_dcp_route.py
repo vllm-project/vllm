@@ -419,13 +419,12 @@ def test_pcp_candidate_a2a_layout_is_padded_and_owner_ordered() -> None:
                 .nonzero()
                 .item()
             )
-            # The A2A selector row is byte-for-byte the candidate ordering the
-            # old rank-ordered all-gather supplied for this query, preserving
-            # stable score/global-id tie semantics.
-            old_all_gather_row = torch.cat(
+            # The A2A selector row preserves stable owner-major candidate
+            # ordering and score/global-id tie semantics.
+            expected_owner_ordered_row = torch.cat(
                 [packed_by_owner[owner][route_row] for owner in range(world)]
             )
-            assert torch.equal(selector_input[source_row], old_all_gather_row)
+            assert torch.equal(selector_input[source_row], expected_owner_ordered_row)
             for owner in range(world):
                 expected_scores = torch.tensor(
                     [

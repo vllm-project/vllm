@@ -32,7 +32,6 @@ from vllm.v1.attention.backends.mla.owner_compute import (
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
     filter_peer_slots_to_owner_local,
-    phys_shadow,
     triton_convert_req_index_to_global_index,
     triton_filter_and_convert_dcp_index,
 )
