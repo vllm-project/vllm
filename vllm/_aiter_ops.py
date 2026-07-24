@@ -409,37 +409,6 @@ def _rocm_aiter_fused_topk_fake(
 
 # Cache whether aiter supports FP8 MLA parameters
 _AITER_MLA_SUPPORTS_FP8: bool | None = None
-_AITER_HAS_FUSED_QK_RMSNORM: bool | None = None
-
-
-def check_aiter_fused_qk_rmsnorm() -> bool:
-    """Check if aiter provides fused_qk_rmsnorm.
-
-    Supports both the new private name ``_fused_qk_rmsnorm``
-    (AITER >= PR #2958) and the old public name ``fused_qk_rmsnorm``
-    (AITER >= PR #2442).
-
-    TODO(rbrugaro-amd): remove the legacy fused_qk_rmsnorm path once
-    AITER stabilizes the API (https://github.com/ROCm/aiter/issues/3207).
-    """
-    global _AITER_HAS_FUSED_QK_RMSNORM
-    if _AITER_HAS_FUSED_QK_RMSNORM is None:
-        try:
-            from aiter.ops.fused_qk_norm_rope_cache_quant import (  # noqa: F401
-                _fused_qk_rmsnorm,
-            )
-
-            _AITER_HAS_FUSED_QK_RMSNORM = True
-        except (ImportError, ModuleNotFoundError, AttributeError):
-            try:
-                from aiter.ops.fused_qk_norm_rope_cache_quant import (  # noqa: F401
-                    fused_qk_rmsnorm,
-                )
-
-                _AITER_HAS_FUSED_QK_RMSNORM = True
-            except (ImportError, ModuleNotFoundError, AttributeError):
-                _AITER_HAS_FUSED_QK_RMSNORM = False
-    return _AITER_HAS_FUSED_QK_RMSNORM
 
 
 def _check_aiter_mla_fp8_support() -> bool:
@@ -795,7 +764,7 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
 
     total_bytes = input_.numel() * input_.element_size()
     hidden_dim = input_.shape[-1]
-    token_num = input_.shape[0]
+    token_num = input_.numel() // hidden_dim
     if input_.dtype in (torch.bfloat16, torch.float16):
         pack_size = 16 // input_.element_size()
         hidden_ok = hidden_dim % pack_size == 0 and hidden_dim // pack_size <= 1024
@@ -855,7 +824,7 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_impl(
 
     total_bytes = input_.numel() * input_.element_size()
     hidden_dim = input_.shape[-1]
-    token_num = input_.shape[0]
+    token_num = input_.numel() // hidden_dim
     if input_.dtype in (torch.bfloat16, torch.float16):
         pack_size = 16 // input_.element_size()
         hidden_ok = hidden_dim % pack_size == 0 and hidden_dim // pack_size <= 1024
@@ -1267,43 +1236,17 @@ def _fused_mla_dual_rms_norm_impl(
     x1_epsilon: float,
     x2_epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    try:
-        import aiter.ops.fused_qk_norm_rope_cache_quant as aiter_ops
-    except (ImportError, ModuleNotFoundError, AttributeError) as exc:
-        raise ImportError(
-            "fused_qk_rmsnorm requires AITer >= PR #2442. "
-            "Please upgrade aiter or disable the "
-            "fuse_mla_dual_rms_norm pass."
-        ) from exc
+    from aiter.ops.fused_qk_norm_rope_cache_quant import _fused_qk_rmsnorm
 
-    if hasattr(aiter_ops, "_fused_qk_rmsnorm"):
-        return aiter_ops._fused_qk_rmsnorm(
-            q_out=None,
-            q=x1,
-            q_weight=x1_weight,
-            q_eps=x1_epsilon,
-            k_out=None,
-            k=x2,
-            k_weight=x2_weight,
-            k_eps=x2_epsilon,
-        )
-
-    # TODO(rbrugaro-amd): remove the legacy fused_qk_rmsnorm path once
-    # AITER stabilizes the API (https://github.com/ROCm/aiter/issues/3207).
-    if hasattr(aiter_ops, "fused_qk_rmsnorm"):
-        return aiter_ops.fused_qk_rmsnorm(
-            q=x1,
-            q_weight=x1_weight,
-            q_eps=x1_epsilon,
-            k=x2,
-            k_weight=x2_weight,
-            k_eps=x2_epsilon,
-        )
-
-    raise ImportError(
-        "fused_qk_rmsnorm requires AITer >= PR #2442. "
-        "Please upgrade aiter or disable the "
-        "fuse_mla_dual_rms_norm pass."
+    return _fused_qk_rmsnorm(
+        q_out=None,
+        q=x1,
+        q_weight=x1_weight,
+        q_eps=x1_epsilon,
+        k_out=None,
+        k=x2,
+        k_weight=x2_weight,
+        k_eps=x2_epsilon,
     )
 
 

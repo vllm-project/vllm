@@ -527,8 +527,6 @@ class EngineArgs:
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
     max_num_batched_tokens: int | None = None
     max_num_scheduled_tokens: int | None = None
-    max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
-    max_long_partial_prefills: int = SchedulerConfig.max_long_partial_prefills
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
     max_num_seqs: int | None = None
     max_logprobs: int = ModelConfig.max_logprobs
@@ -1441,13 +1439,6 @@ class EngineArgs:
             },
         )
         scheduler_group.add_argument(
-            "--max-num-partial-prefills", **scheduler_kwargs["max_num_partial_prefills"]
-        )
-        scheduler_group.add_argument(
-            "--max-long-partial-prefills",
-            **scheduler_kwargs["max_long_partial_prefills"],
-        )
-        scheduler_group.add_argument(
             "--long-prefill-token-threshold",
             **scheduler_kwargs["long_prefill_token_threshold"],
         )
@@ -1964,12 +1955,21 @@ class EngineArgs:
         assert not headless or not self.data_parallel_hybrid_lb, (
             "data_parallel_hybrid_lb is not applicable in headless mode"
         )
-        assert not (self.data_parallel_hybrid_lb and self.data_parallel_external_lb), (
-            "data_parallel_hybrid_lb and data_parallel_external_lb cannot both be True."
-        )
-        assert self.data_parallel_backend == "mp" or self.nnodes == 1, (
-            "nnodes > 1 is only supported with data_parallel_backend=mp"
-        )
+        if self.data_parallel_hybrid_lb and self.data_parallel_external_lb:
+            raise ValueError(
+                "Invalid data-parallel launch options: "
+                "`--data-parallel-hybrid-lb` and "
+                "`--data-parallel-external-lb` cannot be enabled together. "
+                "Enable only one load-balancing mode."
+            )
+        if self.nnodes > 1 and self.data_parallel_backend != "mp":
+            raise ValueError(
+                "Invalid data-parallel launch options: "
+                f"`--nnodes {self.nnodes}` requires "
+                "`--data-parallel-backend mp`; got "
+                f"`--data-parallel-backend {self.data_parallel_backend}`. "
+                "Use the MP backend or set `--nnodes 1`."
+            )
         inferred_data_parallel_rank = 0
         if self.nnodes > 1:
             world_size = (
@@ -1980,13 +1980,22 @@ class EngineArgs:
             world_size_within_dp = (
                 self.pipeline_parallel_size * self.tensor_parallel_size
             )
+            if world_size % self.nnodes != 0:
+                raise ValueError(
+                    "Invalid data-parallel launch options: "
+                    f"`--nnodes {self.nnodes}` must evenly divide the total "
+                    f"world size ({world_size}). Adjust `--nnodes`, "
+                    "`--data-parallel-size`, `--pipeline-parallel-size`, or "
+                    "`--tensor-parallel-size`."
+                )
+            if not 0 <= self.node_rank < self.nnodes:
+                raise ValueError(
+                    "Invalid data-parallel launch options: `--node-rank` must "
+                    f"be between 0 and {self.nnodes - 1}; got "
+                    f"`--node-rank {self.node_rank}`. Set it to this node's "
+                    "zero-based index."
+                )
             local_world_size = world_size // self.nnodes
-            assert world_size % self.nnodes == 0, (
-                f"world_size={world_size} must be divisible by nnodes={self.nnodes}."
-            )
-            assert self.node_rank < self.nnodes, (
-                f"node_rank={self.node_rank} must be less than nnodes={self.nnodes}."
-            )
             inferred_data_parallel_rank = (
                 self.node_rank * local_world_size
             ) // world_size_within_dp
@@ -2017,14 +2026,21 @@ class EngineArgs:
             )
         # Local DP rank = 1, use pure-external LB.
         if data_parallel_external_lb:
-            assert self.data_parallel_rank is not None, (
-                "data_parallel_rank or node_rank must be specified if "
-                "data_parallel_external_lb is enable."
-            )
-            assert self.data_parallel_size_local in (1, None), (
-                "data_parallel_size_local must be 1 or None when data_parallel_rank "
-                "is set"
-            )
+            if self.data_parallel_rank is None:
+                raise ValueError(
+                    "Invalid data-parallel launch options: "
+                    "`--data-parallel-external-lb` requires a data-parallel "
+                    "rank. Set `--data-parallel-rank`, or set "
+                    "`--data-parallel-size` greater than 1 and use `--nnodes` "
+                    "with `--node-rank` so the rank can be inferred."
+                )
+            if self.data_parallel_size_local not in (1, None):
+                raise ValueError(
+                    "Invalid data-parallel launch options: an external "
+                    "data-parallel rank requires `--data-parallel-size-local "
+                    f"1`; got {self.data_parallel_size_local}. Set it to 1 or "
+                    "omit it."
+                )
             data_parallel_size_local = 1
             # Use full external lb if we have local_size of 1.
             self.data_parallel_hybrid_lb = False
@@ -2059,9 +2075,13 @@ class EngineArgs:
                     self.node_rank,
                 )
         else:
-            assert not self.data_parallel_hybrid_lb, (
-                "data_parallel_size_local must be set to use data_parallel_hybrid_lb."
-            )
+            if self.data_parallel_hybrid_lb:
+                raise ValueError(
+                    "Invalid data-parallel launch options: "
+                    "`--data-parallel-hybrid-lb` requires "
+                    "`--data-parallel-size-local`. Set it to the number of "
+                    "data-parallel ranks on this node."
+                )
 
             if self.data_parallel_backend == "ray" and (
                 envs.VLLM_RAY_DP_PACK_STRATEGY == "span"
@@ -2190,8 +2210,6 @@ class EngineArgs:
             is_encoder_decoder=model_config.is_encoder_decoder,
             policy=self.scheduling_policy,
             scheduler_cls=self.scheduler_cls,
-            max_num_partial_prefills=self.max_num_partial_prefills,
-            max_long_partial_prefills=self.max_long_partial_prefills,
             long_prefill_token_threshold=self.long_prefill_token_threshold,
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,
@@ -2402,14 +2420,6 @@ class EngineArgs:
 
     def _check_feature_supported(self):
         """Raise an error if the feature is not supported."""
-        # No Concurrent Partial Prefills so far.
-        if (
-            self.max_num_partial_prefills != SchedulerConfig.max_num_partial_prefills
-            or self.max_long_partial_prefills
-            != SchedulerConfig.max_long_partial_prefills
-        ):
-            _raise_unsupported_error(feature_name="Concurrent Partial Prefill")
-
         if self.pipeline_parallel_size > 1:
             supports_pp = getattr(
                 self.distributed_executor_backend, "supports_pp", False
