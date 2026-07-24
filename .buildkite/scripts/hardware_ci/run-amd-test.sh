@@ -400,10 +400,14 @@ initialize_native_environment() {
   native_root="/tmp/vllm-native-${job_id}"
   TMPDIR="/tmp/vllm-${job_id_suffix}/tmp"
   VLLM_RPC_BASE_PATH="/tmp"
-  : "${TORCHINDUCTOR_CACHE_DIR:=${native_root}/cache/torchinductor}"
-  : "${TRITON_CACHE_DIR:=${native_root}/cache/triton}"
-  : "${VLLM_CACHE_ROOT:=${native_root}/cache/vllm}"
-  : "${XDG_CACHE_HOME:=${native_root}/cache/xdg}"
+  # Buildkite agent hooks pre-set VLLM_CACHE_ROOT (and friends) to the shared
+  # Hugging Face NFS mount. Use := only for model/checkpoint caches; compile
+  # artifacts must live on local disk or Inductor combo-kernel benchmarking can
+  # hit stale file handles during torch.compile (see MI300 spec decode failures).
+  TORCHINDUCTOR_CACHE_DIR="${native_root}/cache/torchinductor"
+  TRITON_CACHE_DIR="${native_root}/cache/triton"
+  VLLM_CACHE_ROOT="${native_root}/cache/vllm"
+  XDG_CACHE_HOME="${native_root}/cache/xdg"
   : "${HF_HOME:=/home/buildkite-agent/huggingface}"
   : "${HF_HUB_DOWNLOAD_TIMEOUT:=300}"
   : "${HF_HUB_ETAG_TIMEOUT:=60}"
@@ -418,6 +422,8 @@ initialize_native_environment() {
     "${VLLM_CACHE_ROOT}" \
     "${XDG_CACHE_HOME}" \
     "${HF_HOME}" || return 1
+
+  echo "Native compile caches: VLLM_CACHE_ROOT=${VLLM_CACHE_ROOT} TORCHINDUCTOR_CACHE_DIR=${TORCHINDUCTOR_CACHE_DIR}"
 
   if [[ "${VLLM_CI_REQUIRE_PERSISTENT_HF_CACHE:-0}" == "1" ]]; then
     if ! command -v findmnt >/dev/null 2>&1; then
