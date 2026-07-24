@@ -2224,6 +2224,22 @@ def wvSplitKQ(
     return out
 
 
+def swmmac_gemm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    logical_m: int,
+    cu_count: int,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return torch.ops._rocm_C.swmmacGEMM(
+        a,
+        b,
+        bias,
+        logical_m,
+        cu_count,
+    )
+
+
 # moe
 def moe_sum(
     input: torch.Tensor,

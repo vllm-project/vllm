@@ -169,6 +169,13 @@ __device__ __forceinline__ float4 load_ntmprl(const float4* addr) {
   return make_float4(dat0, dat1, dat2, dat3);
 }
 
+using swmmac_i16x8 = short __attribute__((ext_vector_type(8)));
+using swmmac_i16x16 = short __attribute__((ext_vector_type(16)));
+using swmmac_f16x8 = __fp16 __attribute__((ext_vector_type(8)));
+using swmmac_f16x16 = __fp16 __attribute__((ext_vector_type(16)));
+using swmmac_f32x8 = float __attribute__((ext_vector_type(8)));
+using swmmac_i32x4 = int32_t __attribute__((__vector_size__(16)));
+
 // TBlock fetches entire rows of A, and entire col of B (K dimension); assume
 // N=1 for time being grid is M/A_NUM_ROWS blocks
 template <typename scalar_t, int NUM_A_ROWS_PER_BLOCK>
@@ -344,6 +351,853 @@ __device__ inline unsigned int min__(uint32_t a, uint32_t b) {
   return min(a, b);
 }
 
+#if defined(__GFX12__)
+
+// Selectors used by the SWMMAC sparse A operand. Even/odd lanes choose
+// different 16-bit pairs from the A fragment.
+static constexpr int32_t kSwmmacSelect01 = static_cast<int32_t>(0x44444444u);
+static constexpr int32_t kSwmmacSelect23 = static_cast<int32_t>(0xEEEEEEEEu);
+
+template <typename scalar_t>
+struct swmmac_traits;
+
+template <>
+struct swmmac_traits<__hip_bfloat16> {
+  using a_frag_t = swmmac_i16x8;
+  using b_frag_t = swmmac_i16x16;
+
+  __device__ __forceinline__ static swmmac_f32x8 mma(const a_frag_t a,
+                                                     const b_frag_t b,
+                                                     const swmmac_f32x8 acc,
+                                                     const int sparse_idx) {
+    return __builtin_amdgcn_swmmac_f32_16x16x32_bf16_w32(a, b, acc, sparse_idx);
+  }
+
+  __device__ __forceinline__ static float to_float(const __hip_bfloat16 value) {
+    return __bfloat162float(value);
+  }
+
+  __device__ __forceinline__ static __hip_bfloat16 from_float(
+      const float value) {
+    return __float2bfloat16(value);
+  }
+};
+
+template <>
+struct swmmac_traits<half> {
+  using a_frag_t = swmmac_f16x8;
+  using b_frag_t = swmmac_f16x16;
+
+  __device__ __forceinline__ static swmmac_f32x8 mma(const a_frag_t a,
+                                                     const b_frag_t b,
+                                                     const swmmac_f32x8 acc,
+                                                     const int sparse_idx) {
+    return __builtin_amdgcn_swmmac_f32_16x16x32_f16_w32(a, b, acc, sparse_idx);
+  }
+
+  __device__ __forceinline__ static float to_float(const half value) {
+    return __half2float(value);
+  }
+
+  __device__ __forceinline__ static half from_float(const float value) {
+    return __float2half(value);
+  }
+};
+
+// Build the A fragment for SWMMAC.
+//
+// B stays row-major. Each lane reads one contiguous 16-value half row from LDS:
+//   lane_half 0 -> B[k +  0 : k + 16]
+//   lane_half 1 -> B[k + 16 : k + 32]
+template <typename scalar_t, int N, int K_PER_INSTRUCTION>
+__device__ __forceinline__ typename swmmac_traits<scalar_t>::a_frag_t
+load_swmmac_a_direct(const scalar_t* __restrict__ A, const int A_stride,
+                     const int global_kblock, const int lane) {
+  using a_frag_t = typename swmmac_traits<scalar_t>::a_frag_t;
+  a_frag_t frag{};
+
+  const int sparse_row = lane & 15;
+  const int original_n = sparse_row >> 1;
+  if (original_n >= N) {
+    return frag;
+  }
+
+  const int lane_half = lane >> 4;
+  const bool select_high_pair = (sparse_row & 1) != 0;
+
+  const auto* src_aligned =
+      reinterpret_cast<const int32_t*>(A) +
+      (original_n * A_stride + global_kblock * K_PER_INSTRUCTION +
+       lane_half * 16) /
+          2;
+
+  const auto* src_vec = reinterpret_cast<const swmmac_i32x4*>(src_aligned);
+
+  const auto load0 = src_vec[0];
+  const auto load1 = src_vec[1];
+
+  auto* frag_i32 = reinterpret_cast<int32_t*>(&frag);
+
+  if (select_high_pair) {
+    frag_i32[0] = load0[1];
+    frag_i32[1] = load0[3];
+    frag_i32[2] = load1[1];
+    frag_i32[3] = load1[3];
+  } else {
+    frag_i32[0] = load0[0];
+    frag_i32[1] = load0[2];
+    frag_i32[2] = load1[0];
+    frag_i32[3] = load1[2];
+  }
+
+  return frag;
+}
+
+// B panels are streamed through the kernel, so use nontemporal vector loads.
+template <typename frag_t>
+__device__ __forceinline__ frag_t
+load_swmmac_b(const frag_t* __restrict__ ptr) {
+  return __builtin_nontemporal_load(ptr);
+}
+
+__device__ __forceinline__ int swmmac_bias_index(const int row, const int col,
+                                                 const int N, const int M,
+                                                 const int Bx, const int By) {
+  if (Bx == 1 && By == 1) return 0;
+  if (Bx == M && By == 1) return col;
+  if (Bx == 1 && By == N) return row;
+  if (Bx == M && By == N) return row * M + col;
+  return (row % By) * Bx + (col % Bx);
+}
+
+__device__ __forceinline__ void swmmac_lds_wave_fence() {
+  // Wait for wave-local LDS operations before reading from, or reusing, the
+  // LDS panel.
+  asm volatile("s_waitcnt lgkmcnt(0)" ::: "memory");
+  __syncwarp();
+}
+
+// Prefetch one row-major B panel from global memory into VGPRs.
+//
+// For one wave, the panel is:
+//
+//   B[m + 0 ][k_start : k_start + K_LOAD]
+//   B[m + 1 ][k_start : k_start + K_LOAD]
+//   ...
+//   B[m + COLUMNS_PER_WAVE - 1][k_start : k_start + K_LOAD]
+template <typename scalar_t, int K_LOAD, int COLUMNS_PER_WAVE,
+          int THREADS_PER_WAVE>
+__device__ __forceinline__ void prefetch_swmmac_b_panel(
+    swmmac_i32x4* __restrict__ prefetched, const scalar_t* __restrict__ B,
+    const int K, const int M, const int m, const int k_start,
+    const int valid_kblocks) {
+  constexpr int scalars_per_vec = 8;
+  constexpr int vecs_per_row = K_LOAD / scalars_per_vec;
+  constexpr int panel_vecs = COLUMNS_PER_WAVE * vecs_per_row;
+  static_assert(panel_vecs % THREADS_PER_WAVE == 0);
+  constexpr int vecs_per_lane = panel_vecs / THREADS_PER_WAVE;
+
+  const int lane = static_cast<int>(threadIdx.x);
+  const int valid_k = valid_kblocks * 32;
+
+  #pragma unroll
+  for (int v = 0; v < vecs_per_lane; ++v) {
+    const int flat_vec = v * THREADS_PER_WAVE + lane;
+    const int row = flat_vec / vecs_per_row;
+    const int scalar_col = (flat_vec % vecs_per_row) * scalars_per_vec;
+
+    swmmac_i32x4 value{};
+
+    if (m + row < M && scalar_col + scalars_per_vec <= valid_k) {
+      const auto* src = reinterpret_cast<const swmmac_i32x4*>(
+          B + static_cast<size_t>(m + row) * K + k_start + scalar_col);
+      value = load_swmmac_b(src);
+    }
+
+    prefetched[v] = value;
+  }
+}
+
+// Commit the prefetched VGPR panel into LDS.
+template <typename scalar_t, int K_LOAD, int K_LOAD_PAD, int COLUMNS_PER_WAVE,
+          int THREADS_PER_WAVE>
+__device__ __forceinline__ void commit_swmmac_b_panel(
+    scalar_t* __restrict__ lds_panel,
+    const swmmac_i32x4* __restrict__ prefetched) {
+  constexpr int scalars_per_vec = 8;
+  constexpr int vecs_per_row = K_LOAD / scalars_per_vec;
+  constexpr int panel_vecs = COLUMNS_PER_WAVE * vecs_per_row;
+  static_assert(panel_vecs % THREADS_PER_WAVE == 0);
+  constexpr int vecs_per_lane = panel_vecs / THREADS_PER_WAVE;
+
+  const int lane = static_cast<int>(threadIdx.x);
+
+  #pragma unroll
+  for (int v = 0; v < vecs_per_lane; ++v) {
+    const int flat_vec = v * THREADS_PER_WAVE + lane;
+    const int row = flat_vec / vecs_per_row;
+    const int scalar_col = (flat_vec % vecs_per_row) * scalars_per_vec;
+
+    auto* dst = reinterpret_cast<swmmac_i32x4*>(
+        lds_panel + static_cast<size_t>(row) * K_LOAD_PAD + scalar_col);
+    *dst = prefetched[v];
+  }
+}
+
+// Read one SWMMAC B fragment from the row-major LDS panel. Each lane owns
+// one output column and one 16-value half of the current K block.
+template <typename scalar_t, int K_LOAD_PAD, int TILE_COLUMNS,
+          int K_PER_INSTRUCTION>
+__device__ __forceinline__ typename swmmac_traits<scalar_t>::b_frag_t
+load_swmmac_b_lds_row_major(const scalar_t* __restrict__ lds_panel,
+                            const int tile, const int u, const int lane) {
+  using b_frag_t = typename swmmac_traits<scalar_t>::b_frag_t;
+
+  const int row = tile * TILE_COLUMNS + (lane & 15);
+  const int lane_half = lane >> 4;
+  const int scalar_col = u * K_PER_INSTRUCTION + lane_half * 16;
+
+  const auto* src = reinterpret_cast<const b_frag_t*>(
+      lds_panel + static_cast<size_t>(row) * K_LOAD_PAD + scalar_col);
+  return *src;
+}
+
+// Regular SWMMAC path. Each active wave computes one 16-column output tile.
+//
+// Two LDS panels are used as ping-pong buffers for B:
+//   prefetch next B panel into VGPRs
+//   compute current B panel from LDS
+//   commit next B panel into the alternate LDS panel
+template <typename scalar_t, int N, bool HAS_BIAS, int LOAD_GROUP,
+          bool ALIGNED_K, int TILE_COLUMNS, int M_TILES_PER_WAVE,
+          int K_PER_INSTRUCTION, int WV_PER_GROUP, int THREADS_PER_WAVE>
+__global__ void __launch_bounds__(WV_PER_GROUP* THREADS_PER_WAVE)
+    swmmacGemmRegular(const int K, const int A_stride, const int M,
+                      const int Bx, const int By,
+                      const scalar_t* __restrict__ A,
+                      const scalar_t* __restrict__ B,
+                      const scalar_t* __restrict__ BIAS,
+                      scalar_t* __restrict__ C) {
+  static_assert(N >= 5 && N <= 8);
+
+  using traits_t = swmmac_traits<scalar_t>;
+  using a_frag_t = typename traits_t::a_frag_t;
+  using b_frag_t = typename traits_t::b_frag_t;
+
+  constexpr int columns_per_wave = TILE_COLUMNS * M_TILES_PER_WAVE;
+  constexpr int k_load = LOAD_GROUP * K_PER_INSTRUCTION;
+  constexpr int k_load_pad = k_load + 8;
+  constexpr int vecs_per_lane =
+      (columns_per_wave * k_load) / (8 * THREADS_PER_WAVE);
+
+  // Two B panels per wave. They are used as ping-pong buffers.
+  __shared__ __align__(16)
+      scalar_t b_lds[WV_PER_GROUP][2][columns_per_wave][k_load_pad];
+
+  const int total_num_kblocks = K / K_PER_INSTRUCTION;
+  const int lane = static_cast<int>(threadIdx.x);
+  const int wave_id = static_cast<int>(threadIdx.y);
+  const int j = lane & 15;
+  const int row_base = (lane >> 4) * 4;
+  const int32_t sparse_idx = (lane & 1) ? kSwmmacSelect23 : kSwmmacSelect01;
+
+  // Some blocks need fewer than four waves when M is small.
+  const int columns_per_grid_round =
+      static_cast<int>(gridDim.x) * columns_per_wave;
+  const int required_waves =
+      (M + columns_per_grid_round - 1) / columns_per_grid_round;
+  const int active_waves =
+      required_waves < WV_PER_GROUP ? required_waves : WV_PER_GROUP;
+
+  if (wave_id >= active_waves) return;
+
+  uint32_t m =
+      (static_cast<uint32_t>(blockIdx.x) * static_cast<uint32_t>(active_waves) +
+       static_cast<uint32_t>(wave_id)) *
+      columns_per_wave;
+
+  while (m < static_cast<uint32_t>(M)) {
+    // Accumulate even and odd K blocks separately, then merge before store.
+    swmmac_f32x8 acc0[M_TILES_PER_WAVE]{};
+    swmmac_f32x8 acc1[M_TILES_PER_WAVE]{};
+
+    // Load the first B panel and place it in LDS buffer 0.
+    swmmac_i32x4 initial_panel[vecs_per_lane];
+    const int first_valid_kblocks =
+        total_num_kblocks < LOAD_GROUP ? total_num_kblocks : LOAD_GROUP;
+
+    prefetch_swmmac_b_panel<scalar_t, k_load, columns_per_wave,
+                            THREADS_PER_WAVE>(
+        initial_panel, B, K, M, static_cast<int>(m), 0, first_valid_kblocks);
+
+    commit_swmmac_b_panel<scalar_t, k_load, k_load_pad, columns_per_wave,
+                          THREADS_PER_WAVE>(&b_lds[wave_id][0][0][0],
+                                            initial_panel);
+
+    swmmac_lds_wave_fence();
+
+    for (int group_base = 0; group_base < total_num_kblocks;
+         group_base += LOAD_GROUP) {
+      // Current buffer is consumed by SWMMAC; next buffer receives the next
+      // prefetched panel.
+      const int current_buffer = (group_base / LOAD_GROUP) & 1;
+      const int next_buffer = current_buffer ^ 1;
+      const int next_group_base = group_base + LOAD_GROUP;
+      const bool has_next = next_group_base < total_num_kblocks;
+
+      const int current_valid_kblocks =
+          ALIGNED_K ? LOAD_GROUP
+                    : ((total_num_kblocks - group_base) < LOAD_GROUP
+                           ? (total_num_kblocks - group_base)
+                           : LOAD_GROUP);
+
+      // A is small, so keep the current group of A fragments in registers.
+      a_frag_t frag_a[LOAD_GROUP]{};
+
+      // Compute this group from the current LDS panel.
+  #pragma unroll
+      for (int u = 0; u < LOAD_GROUP; ++u) {
+        if constexpr (!ALIGNED_K) {
+          if (u >= current_valid_kblocks) continue;
+        }
+
+        frag_a[u] = load_swmmac_a_direct<scalar_t, N, K_PER_INSTRUCTION>(
+            A, A_stride, group_base + u, lane);
+      }
+
+      // Prefetch the next B panel into VGPRs before computing this group.
+      swmmac_i32x4 next_panel[vecs_per_lane];
+
+      if (has_next) {
+        const int next_valid_kblocks =
+            ALIGNED_K ? LOAD_GROUP
+                      : ((total_num_kblocks - next_group_base) < LOAD_GROUP
+                             ? (total_num_kblocks - next_group_base)
+                             : LOAD_GROUP);
+
+        prefetch_swmmac_b_panel<scalar_t, k_load, columns_per_wave,
+                                THREADS_PER_WAVE>(
+            next_panel, B, K, M, static_cast<int>(m),
+            next_group_base * K_PER_INSTRUCTION, next_valid_kblocks);
+      }
+
+  #pragma unroll
+      for (int u = 0; u < LOAD_GROUP; ++u) {
+        if constexpr (!ALIGNED_K) {
+          if (u >= current_valid_kblocks) continue;
+        }
+
+        const int global_kblock = group_base + u;
+
+  #pragma unroll
+        for (int tile = 0; tile < M_TILES_PER_WAVE; ++tile) {
+          const uint32_t tile_m =
+              m + static_cast<uint32_t>(tile * TILE_COLUMNS);
+          if (tile_m >= static_cast<uint32_t>(M)) continue;
+
+          const b_frag_t frag_b =
+              load_swmmac_b_lds_row_major<scalar_t, k_load_pad, TILE_COLUMNS,
+                                          K_PER_INSTRUCTION>(
+                  &b_lds[wave_id][current_buffer][0][0], tile, u, lane);
+
+          if (global_kblock & 1) {
+            acc1[tile] =
+                traits_t::mma(frag_a[u], frag_b, acc1[tile], sparse_idx);
+          } else {
+            acc0[tile] =
+                traits_t::mma(frag_a[u], frag_b, acc0[tile], sparse_idx);
+          }
+        }
+      }
+
+      // Commit the prefetched next panel into the alternate LDS buffer.
+      if (has_next) {
+        commit_swmmac_b_panel<scalar_t, k_load, k_load_pad, columns_per_wave,
+                              THREADS_PER_WAVE>(
+            &b_lds[wave_id][next_buffer][0][0], next_panel);
+
+        swmmac_lds_wave_fence();
+      }
+    }
+
+    // Merge even/odd K-block accumulators.
+  #pragma unroll
+    for (int tile = 0; tile < M_TILES_PER_WAVE; ++tile) {
+  #pragma unroll
+      for (int r = 0; r < 8; ++r) {
+        acc0[tile][r] += acc1[tile][r];
+      }
+    }
+
+    // Store the final C tile. Each lane owns one output column.
+  #pragma unroll
+    for (int tile = 0; tile < M_TILES_PER_WAVE; ++tile) {
+      const int col = static_cast<int>(m) + tile * TILE_COLUMNS + j;
+      if (col >= M) continue;
+
+  #pragma unroll
+      for (int r = 0; r < 4; ++r) {
+        const int row = row_base + r;
+        if (row >= N) continue;
+
+        float value = acc0[tile][2 * r] + acc0[tile][2 * r + 1];
+
+        if constexpr (HAS_BIAS) {
+          value += traits_t::to_float(
+              BIAS[swmmac_bias_index(row, col, N, M, Bx, By)]);
+        }
+
+        C[row * M + col] = traits_t::from_float(value);
+      }
+    }
+
+    m += static_cast<uint32_t>(gridDim.x) *
+         static_cast<uint32_t>(active_waves) * columns_per_wave;
+  }
+}
+
+// Split-K SWMMAC path. Compute different K shards for the same output
+// tile, then reduce the partial sums through LDS.
+template <typename scalar_t, int N, bool HAS_BIAS, int SPLIT_K, int LOAD_GROUP,
+          bool ALIGNED_SHARDS, int TILE_COLUMNS, int M_TILES_PER_WAVE,
+          int K_PER_INSTRUCTION, int WV_PER_GROUP, int THREADS_PER_WAVE>
+__global__ void __launch_bounds__(WV_PER_GROUP* THREADS_PER_WAVE)
+    swmmacGemmSplitK(const int K, const int A_stride, const int M, const int Bx,
+                     const int By, const scalar_t* __restrict__ A,
+                     const scalar_t* __restrict__ B,
+                     const scalar_t* __restrict__ BIAS,
+                     scalar_t* __restrict__ C) {
+  static_assert(N >= 5 && N <= 8);
+
+  using traits_t = swmmac_traits<scalar_t>;
+  using a_frag_t = typename traits_t::a_frag_t;
+  using b_frag_t = typename traits_t::b_frag_t;
+
+  constexpr int columns_per_wave = TILE_COLUMNS * M_TILES_PER_WAVE;
+  constexpr int k_load = LOAD_GROUP * K_PER_INSTRUCTION;
+  constexpr int k_load_pad = k_load + 8;
+  constexpr int vecs_per_lane =
+      (columns_per_wave * k_load) / (8 * THREADS_PER_WAVE);
+
+  // One partial C tile per K shard. The +1 column padding helps avoid LDS
+  // bank conflicts during the reduction.
+  __shared__ float partials_lds[SPLIT_K][N][columns_per_wave + 1];
+
+  // Each K shard owns its own pair of B ping-pong panels.
+  __shared__ __align__(16)
+      scalar_t b_lds[SPLIT_K][2][columns_per_wave][k_load_pad];
+
+  const int total_num_kblocks = K / K_PER_INSTRUCTION;
+
+  // threadIdx.y selects which K shard this wave computes.
+  const int shard_id = static_cast<int>(threadIdx.y);
+  const int shard_begin_kblock = (total_num_kblocks * shard_id) / SPLIT_K;
+  const int shard_end_kblock = (total_num_kblocks * (shard_id + 1)) / SPLIT_K;
+  const int shard_num_kblocks = shard_end_kblock - shard_begin_kblock;
+
+  const int lane = static_cast<int>(threadIdx.x);
+  const int j = lane & 15;
+  const int row_base = (lane >> 4) * 4;
+  const int32_t sparse_idx = (lane & 1) ? kSwmmacSelect23 : kSwmmacSelect01;
+
+  uint32_t m = static_cast<uint32_t>(blockIdx.x) * columns_per_wave;
+
+  while (m < static_cast<uint32_t>(M)) {
+    swmmac_f32x8 acc0[M_TILES_PER_WAVE]{};
+    swmmac_f32x8 acc1[M_TILES_PER_WAVE]{};
+
+    // Load this shard's first B panel into LDS buffer 0.
+    swmmac_i32x4 initial_panel[vecs_per_lane];
+    const int first_valid_kblocks =
+        shard_num_kblocks < LOAD_GROUP ? shard_num_kblocks : LOAD_GROUP;
+
+    prefetch_swmmac_b_panel<scalar_t, k_load, columns_per_wave,
+                            THREADS_PER_WAVE>(
+        initial_panel, B, K, M, static_cast<int>(m),
+        shard_begin_kblock * K_PER_INSTRUCTION, first_valid_kblocks);
+
+    commit_swmmac_b_panel<scalar_t, k_load, k_load_pad, columns_per_wave,
+                          THREADS_PER_WAVE>(&b_lds[shard_id][0][0][0],
+                                            initial_panel);
+
+    swmmac_lds_wave_fence();
+
+    for (int local_group_base = 0; local_group_base < shard_num_kblocks;
+         local_group_base += LOAD_GROUP) {
+      // Ping-pong between this shard's two B LDS buffers.
+      const int current_buffer = (local_group_base / LOAD_GROUP) & 1;
+      const int next_buffer = current_buffer ^ 1;
+      const int next_local_group_base = local_group_base + LOAD_GROUP;
+      const bool has_next = next_local_group_base < shard_num_kblocks;
+
+      const int current_valid_kblocks =
+          ALIGNED_SHARDS ? LOAD_GROUP
+                         : ((shard_num_kblocks - local_group_base) < LOAD_GROUP
+                                ? (shard_num_kblocks - local_group_base)
+                                : LOAD_GROUP);
+
+      // Keep this shard-local group of A fragments in registers.
+      a_frag_t frag_a[LOAD_GROUP]{};
+
+      // Compute this shard's partial sums from the current LDS panel.
+  #pragma unroll
+      for (int u = 0; u < LOAD_GROUP; ++u) {
+        if constexpr (!ALIGNED_SHARDS) {
+          if (u >= current_valid_kblocks) continue;
+        }
+
+        frag_a[u] = load_swmmac_a_direct<scalar_t, N, K_PER_INSTRUCTION>(
+            A, A_stride, shard_begin_kblock + local_group_base + u, lane);
+      }
+
+      // Prefetch this shard's next B panel into VGPRs.
+      swmmac_i32x4 next_panel[vecs_per_lane];
+
+      if (has_next) {
+        const int next_valid_kblocks =
+            ALIGNED_SHARDS
+                ? LOAD_GROUP
+                : ((shard_num_kblocks - next_local_group_base) < LOAD_GROUP
+                       ? (shard_num_kblocks - next_local_group_base)
+                       : LOAD_GROUP);
+
+        prefetch_swmmac_b_panel<scalar_t, k_load, columns_per_wave,
+                                THREADS_PER_WAVE>(
+            next_panel, B, K, M, static_cast<int>(m),
+            (shard_begin_kblock + next_local_group_base) * K_PER_INSTRUCTION,
+            next_valid_kblocks);
+      }
+
+  #pragma unroll
+      for (int u = 0; u < LOAD_GROUP; ++u) {
+        if constexpr (!ALIGNED_SHARDS) {
+          if (u >= current_valid_kblocks) continue;
+        }
+
+        const int global_kblock = shard_begin_kblock + local_group_base + u;
+
+  #pragma unroll
+        for (int tile = 0; tile < M_TILES_PER_WAVE; ++tile) {
+          const uint32_t tile_m =
+              m + static_cast<uint32_t>(tile * TILE_COLUMNS);
+          if (tile_m >= static_cast<uint32_t>(M)) continue;
+
+          const b_frag_t frag_b =
+              load_swmmac_b_lds_row_major<scalar_t, k_load_pad, TILE_COLUMNS,
+                                          K_PER_INSTRUCTION>(
+                  &b_lds[shard_id][current_buffer][0][0], tile, u, lane);
+
+          if (global_kblock & 1) {
+            acc1[tile] =
+                traits_t::mma(frag_a[u], frag_b, acc1[tile], sparse_idx);
+          } else {
+            acc0[tile] =
+                traits_t::mma(frag_a[u], frag_b, acc0[tile], sparse_idx);
+          }
+        }
+      }
+
+      // Commit the prefetched next panel into the alternate LDS buffer.
+      if (has_next) {
+        commit_swmmac_b_panel<scalar_t, k_load, k_load_pad, columns_per_wave,
+                              THREADS_PER_WAVE>(
+            &b_lds[shard_id][next_buffer][0][0], next_panel);
+
+        swmmac_lds_wave_fence();
+      }
+    }
+
+    // Merge even/odd K-block accumulators for this shard.
+  #pragma unroll
+    for (int tile = 0; tile < M_TILES_PER_WAVE; ++tile) {
+  #pragma unroll
+      for (int r = 0; r < 8; ++r) {
+        acc0[tile][r] += acc1[tile][r];
+      }
+    }
+
+    // Store this shard's partial C tile into LDS.
+  #pragma unroll
+    for (int tile = 0; tile < M_TILES_PER_WAVE; ++tile) {
+      const int local_col = tile * TILE_COLUMNS + j;
+      const int col = static_cast<int>(m) + local_col;
+      if (col >= M) continue;
+
+  #pragma unroll
+      for (int r = 0; r < 4; ++r) {
+        const int row = row_base + r;
+        if (row < N) {
+          partials_lds[shard_id][row][local_col] =
+              acc0[tile][2 * r] + acc0[tile][2 * r + 1];
+        }
+      }
+    }
+
+    // Wait for all K shards, then reduce partials and write final C.
+    __syncthreads();
+
+    const int epilogue_local_col = lane;
+    const int epilogue_col = static_cast<int>(m) + epilogue_local_col;
+
+    if (lane < columns_per_wave && epilogue_col < M) {
+  #pragma unroll
+      for (int r_step = 0; r_step < 2; ++r_step) {
+        const int row = shard_id + r_step * SPLIT_K;
+        if (row >= N) continue;
+
+        float value = 0.0f;
+
+  #pragma unroll
+        for (int shard = 0; shard < SPLIT_K; ++shard) {
+          value += partials_lds[shard][row][epilogue_local_col];
+        }
+
+        if constexpr (HAS_BIAS) {
+          value += traits_t::to_float(
+              BIAS[swmmac_bias_index(row, epilogue_col, N, M, Bx, By)]);
+        }
+
+        C[row * M + epilogue_col] = traits_t::from_float(value);
+      }
+    }
+
+    __syncthreads();
+
+    m += static_cast<uint32_t>(gridDim.x) * columns_per_wave;
+  }
+}
+
+#else
+
+// Matching host-compilation stubs. HIP-Clang parses kernel launches in the
+// host pass as well, so the signatures must exactly match the device branch.
+
+template <typename scalar_t, int N, bool HAS_BIAS, int LOAD_GROUP,
+          bool ALIGNED_K, int TILE_COLUMNS, int M_TILES_PER_WAVE,
+          int K_PER_INSTRUCTION, int WV_PER_GROUP, int THREADS_PER_WAVE>
+__global__ void __launch_bounds__(WV_PER_GROUP* THREADS_PER_WAVE)
+    swmmacGemmRegular(const int, const int, const int, const int, const int,
+                      const scalar_t*, const scalar_t*, const scalar_t*,
+                      scalar_t*) {
+  UNREACHABLE_CODE
+}
+
+template <typename scalar_t, int N, bool HAS_BIAS, int SPLIT_K, int LOAD_GROUP,
+          bool ALIGNED_SHARDS, int TILE_COLUMNS, int M_TILES_PER_WAVE,
+          int K_PER_INSTRUCTION, int WV_PER_GROUP, int THREADS_PER_WAVE>
+__global__ void __launch_bounds__(WV_PER_GROUP* THREADS_PER_WAVE)
+    swmmacGemmSplitK(const int, const int, const int, const int, const int,
+                     const scalar_t*, const scalar_t*, const scalar_t*,
+                     scalar_t*){UNREACHABLE_CODE}
+
+#endif
+
+torch::Tensor swmmacGEMM(const at::Tensor& in_a, const at::Tensor& in_b,
+                         const std::optional<at::Tensor>& in_bias,
+                         const int64_t logical_M, const int64_t CuCount) {
+  TORCH_CHECK(on_gfx12(), "swmmacGEMM is only supported on GFX12");
+  TORCH_CHECK(in_b.scalar_type() == torch::kFloat16 ||
+                  in_b.scalar_type() == torch::kBFloat16,
+              "B must be FP16 or BF16");
+  TORCH_CHECK(in_a.scalar_type() == in_b.scalar_type(),
+              "A and B must use the same dtype");
+  TORCH_CHECK(in_b.dim() == 2, "B must be a 2D tensor");
+  TORCH_CHECK(in_a.dim() == 2, "A must be a 2D tensor");
+
+  constexpr int tile_columns = 16;
+  constexpr int m_tiles_per_wave = 1;
+  constexpr int load_group = 4;
+  constexpr int columns_per_wave = tile_columns * m_tiles_per_wave;
+  constexpr int k_per_instruction = 32;
+  constexpr int split_k = 4;
+  constexpr int regular_waves_per_block = 4;
+  constexpr int threads_per_wave = 32;
+
+  const int M = static_cast<int>(in_b.size(0));
+  const int K = static_cast<int>(in_b.size(1));
+  const int N = static_cast<int>(in_a.size(0));
+  const int A_stride = static_cast<int>(in_a.stride(0));
+
+  TORCH_CHECK(logical_M == M, "logical_M must match the row count of raw B");
+  TORCH_CHECK(N >= 5 && N <= 8, "swmmacGEMM supports N in [5, 8]");
+  TORCH_CHECK(in_a.size(1) == K, "A and B inner dimensions (K) must match");
+  TORCH_CHECK(K % k_per_instruction == 0, "K must be divisible by ",
+              k_per_instruction);
+
+  const bool has_bias = in_bias.has_value() && in_bias->numel() > 0;
+
+  if (has_bias) {
+    TORCH_CHECK(in_bias->scalar_type() == in_a.scalar_type(),
+                "bias and A must use the same dtype");
+    TORCH_CHECK(in_bias->dim() == 1 || in_bias->dim() == 2,
+                "bias must be a 1D or 2D tensor");
+  }
+
+  // Bias may be scalar, per-column, per-row, or full [N, M]. Bx is the
+  // logical bias width used by swmmac_bias_index().
+  const int Bx = !has_bias
+                     ? 1
+                     : static_cast<int>(in_bias->dim() == 2 ? in_bias->size(1)
+                                                            : in_bias->size(0));
+
+  // By is the logical bias height. A 1D bias is treated as [1, M].
+  const int By =
+      !has_bias || in_bias->dim() == 1 ? 1 : static_cast<int>(in_bias->size(0));
+
+  auto out_c = torch::empty(
+      {N, M}, torch::TensorOptions().dtype(in_a.dtype()).device(in_a.device()));
+
+  const auto ceil_div = [](const int value, const int divisor) {
+    return (value + divisor - 1) / divisor;
+  };
+
+  const int cu_count = static_cast<int>(CuCount);
+  const int total_num_kblocks = K / k_per_instruction;
+
+  const int regular_columns_per_block =
+      regular_waves_per_block * columns_per_wave;
+
+  const int regular_workgroups = ceil_div(M, regular_columns_per_block);
+  const int regular_useful_waves = ceil_div(M, columns_per_wave);
+
+  // Use split-K when regular M tiling does not create enough waves to fill
+  // the GPU and K is long enough to make splitting worthwhile.
+  const bool regular_is_underfilled = regular_useful_waves < cu_count * 4;
+  const bool splitk_is_profitable = total_num_kblocks >= 64;
+  const bool use_splitk = regular_is_underfilled && splitk_is_profitable;
+
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(in_a));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+#define VLLM_LAUNCH_SWMMAC_REGULAR(_N, _HAS_BIAS, _ALIGNED)                    \
+  swmmacGemmRegular<fptype, _N, _HAS_BIAS, load_group, _ALIGNED, tile_columns, \
+                    m_tiles_per_wave, k_per_instruction,                       \
+                    regular_waves_per_block, threads_per_wave>                 \
+      <<<grid, block, 0, stream>>>(K, A_stride, M, Bx, By, A, B, BIAS, C)
+
+#define VLLM_DISPATCH_SWMMAC_REGULAR(_N, _HAS_BIAS)     \
+  do {                                                  \
+    if (aligned_regular) {                              \
+      VLLM_LAUNCH_SWMMAC_REGULAR(_N, _HAS_BIAS, true);  \
+    } else {                                            \
+      VLLM_LAUNCH_SWMMAC_REGULAR(_N, _HAS_BIAS, false); \
+    }                                                   \
+  } while (0)
+
+#define VLLM_DISPATCH_SWMMAC_REGULAR_BY_N(_HAS_BIAS) \
+  do {                                               \
+    switch (N) {                                     \
+      case 5:                                        \
+        VLLM_DISPATCH_SWMMAC_REGULAR(5, _HAS_BIAS);  \
+        break;                                       \
+      case 6:                                        \
+        VLLM_DISPATCH_SWMMAC_REGULAR(6, _HAS_BIAS);  \
+        break;                                       \
+      case 7:                                        \
+        VLLM_DISPATCH_SWMMAC_REGULAR(7, _HAS_BIAS);  \
+        break;                                       \
+      case 8:                                        \
+        VLLM_DISPATCH_SWMMAC_REGULAR(8, _HAS_BIAS);  \
+        break;                                       \
+      default:                                       \
+        TORCH_CHECK(false, "unsupported N: ", N);    \
+    }                                                \
+  } while (0)
+
+#define VLLM_LAUNCH_SWMMAC_SPLITK(_N, _HAS_BIAS, _ALIGNED)                     \
+  swmmacGemmSplitK<fptype, _N, _HAS_BIAS, split_k, load_group, _ALIGNED,       \
+                   tile_columns, m_tiles_per_wave, k_per_instruction, split_k, \
+                   threads_per_wave>                                           \
+      <<<fused_splitk_grid, fused_splitk_block, 0, stream>>>(                  \
+          K, A_stride, M, Bx, By, A, B, BIAS, C)
+
+#define VLLM_DISPATCH_SWMMAC_SPLITK(_N, _HAS_BIAS)     \
+  do {                                                 \
+    if (aligned_splitk) {                              \
+      VLLM_LAUNCH_SWMMAC_SPLITK(_N, _HAS_BIAS, true);  \
+    } else {                                           \
+      VLLM_LAUNCH_SWMMAC_SPLITK(_N, _HAS_BIAS, false); \
+    }                                                  \
+  } while (0)
+
+#define VLLM_DISPATCH_SWMMAC_SPLITK_BY_N(_HAS_BIAS) \
+  do {                                              \
+    switch (N) {                                    \
+      case 5:                                       \
+        VLLM_DISPATCH_SWMMAC_SPLITK(5, _HAS_BIAS);  \
+        break;                                      \
+      case 6:                                       \
+        VLLM_DISPATCH_SWMMAC_SPLITK(6, _HAS_BIAS);  \
+        break;                                      \
+      case 7:                                       \
+        VLLM_DISPATCH_SWMMAC_SPLITK(7, _HAS_BIAS);  \
+        break;                                      \
+      case 8:                                       \
+        VLLM_DISPATCH_SWMMAC_SPLITK(8, _HAS_BIAS);  \
+        break;                                      \
+      default:                                      \
+        TORCH_CHECK(false, "unsupported N: ", N);   \
+    }                                               \
+  } while (0)
+
+  AT_DISPATCH_REDUCED_FLOATING_TYPES(in_a.scalar_type(), "swmmacGEMM", [&] {
+    using fptype = typename scalar<scalar_t>::type;
+
+    const auto* B = reinterpret_cast<const fptype*>(in_b.data_ptr());
+    const auto* A = reinterpret_cast<const fptype*>(in_a.data_ptr());
+
+    const auto* BIAS =
+        has_bias ? reinterpret_cast<const fptype*>(in_bias->data_ptr())
+                 : nullptr;
+
+    auto* C = reinterpret_cast<fptype*>(out_c.data_ptr());
+
+    if (!use_splitk) {
+      const int grid_x =
+          std::max(1, std::min(regular_workgroups, cu_count * 2));
+
+      const dim3 grid(grid_x);
+      const dim3 block(threads_per_wave, regular_waves_per_block);
+
+      const bool aligned_regular = total_num_kblocks % load_group == 0;
+
+      if (has_bias) {
+        VLLM_DISPATCH_SWMMAC_REGULAR_BY_N(true);
+      } else {
+        VLLM_DISPATCH_SWMMAC_REGULAR_BY_N(false);
+      }
+
+      return;
+    }
+
+    const int fused_splitk_workgroups = ceil_div(M, columns_per_wave);
+
+    const int fused_splitk_grid_x =
+        std::max(1, std::min(fused_splitk_workgroups, cu_count * split_k * 2));
+
+    const dim3 fused_splitk_grid(fused_splitk_grid_x);
+    const dim3 fused_splitk_block(threads_per_wave, split_k);
+
+    const bool aligned_splitk = total_num_kblocks % split_k == 0 &&
+                                (total_num_kblocks / split_k) % load_group == 0;
+
+    if (has_bias) {
+      VLLM_DISPATCH_SWMMAC_SPLITK_BY_N(true);
+    } else {
+      VLLM_DISPATCH_SWMMAC_SPLITK_BY_N(false);
+    }
+  });
+
+#undef VLLM_LAUNCH_SWMMAC_REGULAR
+#undef VLLM_DISPATCH_SWMMAC_REGULAR
+#undef VLLM_DISPATCH_SWMMAC_REGULAR_BY_N
+#undef VLLM_LAUNCH_SWMMAC_SPLITK
+#undef VLLM_DISPATCH_SWMMAC_SPLITK
+#undef VLLM_DISPATCH_SWMMAC_SPLITK_BY_N
+
+  return out_c;
+}
+
 #if defined(__HIP__GFX9__) || defined(__HIP__GFX1X__)
 // This version targets cases where A[] fits LDS capacity
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
@@ -378,7 +1232,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   // Goal is to bring the activation matrix A to the LDS
   // and use it across the lifetime of the work group
   // TODO: When activation matrix is larger than 64 KB
-  //	     then this is not going to work!
+  //     then this is not going to work!
   //----------------------------------------------------
   __shared__ scalar_t s[max_lds_len];
 
@@ -849,7 +1703,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   // Goal is to bring the activation matrix A to the LDS
   // and use it across the lifetime of the work group
   // TODO: When activation matrix is larger than 64 KB
-  //	     then this is not going to work!
+  //     then this is not going to work!
   //----------------------------------------------------
   __shared__ scalar_t s[max_lds_len];
 
