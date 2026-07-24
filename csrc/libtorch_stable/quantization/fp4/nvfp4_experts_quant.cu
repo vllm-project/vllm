@@ -63,6 +63,8 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
     int rowIdx = globalIdx / colsPerRow;
     int colIdx = globalIdx % colsPerRow;
 
+    bool is_valid_row = (rowIdx < __ldca(&input_offset_by_experts[n_experts]));
+
     // Find index within the experts using different strategies based on expert
     // count
     int rowIdx_in_expert = 0;
@@ -121,11 +123,6 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
       quant_input = in_vec;
     }
 
-    // Get the output tensor offset.
-    // Same as inOffset because 8 elements are packed into one uint32_t.
-    int64_t outOffset = rowIdx * colsPerRow + colIdx;
-    auto& out_pos = out[outOffset];
-
     // Get the global scaling factor, which will be applied to the SF.
     // Note SFScale is the same as next GEMM's alpha, which is
     // (448.f / (Alpha_A / 6.f)).
@@ -134,13 +131,23 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
     uint32_t* SFout_in_expert =
         SFout + output_scale_offset_by_experts[expert_idx] * numKTiles;
 
+    // Padding rows pass nullptr to suppress the scale write while
+    // still participating in warp shuffles inside cvt_warp_fp16_to_fp4.
     auto sf_out =
-        cvt_quant_to_fp4_get_sf_out_offset<uint32_t,
-                                           CVT_FP4_NUM_THREADS_PER_SF>(
-            rowIdx_in_expert, colIdx, numKTiles, SFout_in_expert);
+        is_valid_row
+            ? cvt_quant_to_fp4_get_sf_out_offset<uint32_t,
+                                                 CVT_FP4_NUM_THREADS_PER_SF>(
+                  rowIdx_in_expert, colIdx, numKTiles, SFout_in_expert)
+            : nullptr;
 
-    out_pos = cvt_warp_fp16_to_fp4<Type, CVT_FP4_NUM_THREADS_PER_SF, UE8M0_SF>(
-        quant_input, SFScaleVal, sf_out);
+    auto out_val =
+        cvt_warp_fp16_to_fp4<Type, CVT_FP4_NUM_THREADS_PER_SF, UE8M0_SF>(
+            quant_input, SFScaleVal, sf_out);
+
+    if (is_valid_row) {
+      int64_t outOffset = rowIdx * colsPerRow + colIdx;
+      out[outOffset] = out_val;
+    }
   }
 }
 
@@ -196,6 +203,8 @@ __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
     int rowIdx = globalIdx / colsPerRow;
     int colIdx = globalIdx % colsPerRow;
 
+    bool is_valid_row = (rowIdx < shared_input_offsets[n_experts]);
+
     // Find expert using binary search for better performance with large m_topk
     int rowIdx_in_expert = 0;
     int expert_idx = 0;
@@ -232,21 +241,28 @@ __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
       quant_input = in_vec;
     }
 
-    int64_t outOffset = rowIdx * colsPerRow + colIdx;
-    auto& out_pos = out[outOffset];
-
     float const SFScaleVal = SFScale == nullptr ? 1.0f : SFScale[expert_idx];
 
     uint32_t* SFout_in_expert =
         SFout + output_scale_offset_by_experts[expert_idx] * numKTiles;
 
+    // Padding rows pass nullptr to suppress the scale write while
+    // still participating in warp shuffles inside cvt_warp_fp16_to_fp4.
     auto sf_out =
-        cvt_quant_to_fp4_get_sf_out_offset<uint32_t,
-                                           CVT_FP4_NUM_THREADS_PER_SF>(
-            rowIdx_in_expert, colIdx, numKTiles, SFout_in_expert);
+        is_valid_row
+            ? cvt_quant_to_fp4_get_sf_out_offset<uint32_t,
+                                                 CVT_FP4_NUM_THREADS_PER_SF>(
+                  rowIdx_in_expert, colIdx, numKTiles, SFout_in_expert)
+            : nullptr;
 
-    out_pos = cvt_warp_fp16_to_fp4<Type, CVT_FP4_NUM_THREADS_PER_SF, UE8M0_SF>(
-        quant_input, SFScaleVal, sf_out);
+    auto out_val =
+        cvt_warp_fp16_to_fp4<Type, CVT_FP4_NUM_THREADS_PER_SF, UE8M0_SF>(
+            quant_input, SFScaleVal, sf_out);
+
+    if (is_valid_row) {
+      int64_t outOffset = rowIdx * colsPerRow + colIdx;
+      out[outOffset] = out_val;
+    }
   }
 }
 
