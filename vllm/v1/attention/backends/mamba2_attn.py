@@ -7,6 +7,7 @@ from typing import Any
 import torch
 
 from vllm.config import VllmConfig
+from vllm.config.mamba import MambaPrefillBackendEnum
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -88,6 +89,14 @@ def compute_varlen_chunk_metadata(
     return cu_chunk_seqlens, last_chunk_indices_t, seq_idx_chunks_t
 
 
+@dataclass(frozen=True)
+class FlashInferSSDMetadata:
+    seq_idx: torch.Tensor
+    chunk_indices: torch.Tensor
+    chunk_offsets: torch.Tensor
+    seq_chunk_cumsum: torch.Tensor
+
+
 class Mamba2AttentionBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
@@ -110,6 +119,8 @@ class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
     # Chunk-related metadata (only for prefill)
     seq_idx_p: torch.Tensor | None = None
 
+    flashinfer_ssd_metadata_p: FlashInferSSDMetadata | None = None
+
 
 class Mamba2AttentionMetadataBuilder(
     BaseMambaAttentionMetadataBuilder[Mamba2AttentionMetadata]
@@ -129,6 +140,57 @@ class Mamba2AttentionMetadataBuilder(
             "chunk_size needs to be set in the model config for Mamba2 models"
         )
         self.chunk_size: int = chunk_size
+        self.use_flashinfer_prefill = (
+            vllm_config.mamba_config.prefill_backend
+            == MambaPrefillBackendEnum.FLASHINFER
+        )
+
+    def _build_flashinfer_ssd_metadata(
+        self,
+        common: Mamba2AttentionMetadata,
+        common_attn_metadata: CommonAttentionMetadata,
+    ) -> FlashInferSSDMetadata:
+        query_start_loc = (
+            common_attn_metadata.query_start_loc_cpu[-common.num_prefills - 1 :]
+            - common.num_decode_tokens
+        )
+        query_lens = query_start_loc[1:] - query_start_loc[:-1]
+        cu_chunk_seqlens, _, chunk_seq_idx = compute_varlen_chunk_metadata(
+            query_start_loc, self.chunk_size
+        )
+
+        seq_idx = torch.repeat_interleave(
+            torch.arange(common.num_prefills, dtype=torch.int32), query_lens
+        )
+        padding = -seq_idx.numel() % self.chunk_size
+        seq_idx = torch.cat(
+            (seq_idx, seq_idx.new_full((padding,), common.num_prefills - 1))
+        )
+
+        chunk_starts = cu_chunk_seqlens[:-1]
+        chunk_counts = torch.bincount(chunk_seq_idx, minlength=common.num_prefills)
+        seq_chunk_cumsum = torch.cat(
+            (chunk_counts.new_zeros(1), chunk_counts.cumsum(0))
+        )
+        device = common_attn_metadata.query_start_loc.device
+        return FlashInferSSDMetadata(
+            seq_idx=async_tensor_h2d(
+                seq_idx, dtype=torch.int32, device=device
+            ).unsqueeze(0),
+            chunk_indices=async_tensor_h2d(
+                chunk_starts // self.chunk_size,
+                dtype=torch.int32,
+                device=device,
+            ),
+            chunk_offsets=async_tensor_h2d(
+                chunk_starts % self.chunk_size,
+                dtype=torch.int32,
+                device=device,
+            ),
+            seq_chunk_cumsum=async_tensor_h2d(
+                seq_chunk_cumsum, dtype=torch.int32, device=device
+            ),
+        )
 
     def build(
         self,
@@ -147,8 +209,8 @@ class Mamba2AttentionMetadataBuilder(
         cu_chunk_seqlen_p = None
         last_chunk_indices_p = None
         prep_initial_states = False
+        flashinfer_ssd_metadata_p = None
 
-        # Compute seq_idx for prefill only
         if common.num_prefills > 0:
             prep_initial_states = (
                 torch.any(common.has_initial_states_p).item()
@@ -156,13 +218,18 @@ class Mamba2AttentionMetadataBuilder(
                 else False
             )
 
-            cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p = (
-                self._build_chunk_metadata_tensors(
-                    self.chunk_size,
-                    common,
-                    common_attn_metadata,
+            if self.use_flashinfer_prefill:
+                flashinfer_ssd_metadata_p = self._build_flashinfer_ssd_metadata(
+                    common, common_attn_metadata
                 )
-            )
+            else:
+                cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p = (
+                    self._build_chunk_metadata_tensors(
+                        self.chunk_size,
+                        common,
+                        common_attn_metadata,
+                    )
+                )
 
         return replace(
             common,
@@ -171,4 +238,5 @@ class Mamba2AttentionMetadataBuilder(
             seq_idx_p=seq_idx_p,
             cu_chunk_seqlen_p=cu_chunk_seqlen_p,
             last_chunk_indices_p=last_chunk_indices_p,
+            flashinfer_ssd_metadata_p=flashinfer_ssd_metadata_p,
         )

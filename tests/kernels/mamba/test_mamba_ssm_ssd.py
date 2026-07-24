@@ -1,25 +1,37 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
+from vllm.model_executor.layers.mamba.mamba_mixer2 import (
+    _flashinfer_mamba2_prefill,
+)
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
-from vllm.v1.attention.backends.mamba2_attn import compute_varlen_chunk_metadata
+from vllm.v1.attention.backends.mamba2_attn import (
+    Mamba2AttentionMetadataBuilder,
+    compute_varlen_chunk_metadata,
+)
+from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadataBuilder
 
-# All kernels exercised here are pure Triton, so they run on any backend
-# that the vLLM platform layer treats as a CUDA-alike device or as XPU.
 DEVICE = current_platform.device_type
 
 pytestmark = pytest.mark.skipif(
     not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
     reason="Mamba2 SSD Triton kernels require a CUDA-alike or XPU device.",
+)
+
+FLASHINFER_SSD_SUPPORTED = current_platform.is_cuda() and any(
+    current_platform.is_device_capability_family(capability)
+    for capability in (100, 110)
 )
 
 # Added by the IBM Team, 2024
@@ -577,3 +589,122 @@ def test_mamba_chunk_scan_cont_batch_prefill_chunking(chunk_size, seqlens):
             rtol=rtol,
             msg=lambda x, i=i: f"seq{i} state " + x,
         )
+
+
+@pytest.mark.skipif(
+    not FLASHINFER_SSD_SUPPORTED,
+    reason="FlashInfer SSDCombined requires NVIDIA SM100/SM103/SM110.",
+)
+@pytest.mark.parametrize("use_initial_states", [False, True])
+@pytest.mark.parametrize("state_dtype", [torch.float16, torch.bfloat16])
+def test_flashinfer_mamba2_prefill_matches_triton(
+    use_initial_states: bool,
+    state_dtype: torch.dtype,
+):
+    pytest.importorskip("flashinfer.mamba")
+    device = torch.device("cuda")
+    generator = torch.Generator(device=device).manual_seed(0)
+    chunk_size = 128
+    nheads, headdim, dstate, ngroups = 64, 64, 128, 8
+    contexts = torch.tensor([0, 1, 87], dtype=torch.int32)
+    query_start_loc_cpu = torch.tensor([0, 129, 200, 264], dtype=torch.int32)
+    query_start_loc = query_start_loc_cpu.to(device)
+    num_seqs = query_start_loc_cpu.numel() - 1
+    num_tokens = int(query_start_loc_cpu[-1])
+
+    def randn(*shape: int, dtype: torch.dtype, scale: float = 1.0):
+        return (
+            torch.randn(*shape, device=device, generator=generator)
+            .mul_(scale)
+            .to(dtype)
+        )
+
+    x = randn(num_tokens, nheads, headdim, dtype=torch.bfloat16, scale=0.1)
+    dt = randn(num_tokens, nheads, dtype=torch.bfloat16, scale=0.1)
+    A = -torch.rand(nheads, device=device, generator=generator)
+    B = randn(num_tokens, ngroups, dstate, dtype=torch.bfloat16, scale=0.1)
+    C = randn(num_tokens, ngroups, dstate, dtype=torch.bfloat16, scale=0.1)
+    D = randn(nheads, dtype=torch.bfloat16, scale=0.1)
+    dt_bias = randn(nheads, dtype=torch.float32, scale=0.1)
+    initial_states = (
+        randn(
+            num_seqs,
+            nheads,
+            headdim,
+            dstate,
+            dtype=state_dtype,
+            scale=0.01,
+        )
+        if use_initial_states
+        else None
+    )
+    if initial_states is not None:
+        initial_states[0].zero_()
+
+    metadata_builder = object.__new__(Mamba2AttentionMetadataBuilder)
+    metadata_builder.chunk_size = chunk_size
+    metadata = metadata_builder._build_flashinfer_ssd_metadata(
+        SimpleNamespace(num_prefills=num_seqs, num_decode_tokens=0),
+        SimpleNamespace(
+            query_start_loc_cpu=query_start_loc_cpu,
+            query_start_loc=query_start_loc,
+        ),
+    )
+    flashinfer_out = torch.empty_like(x)
+    flashinfer_states = _flashinfer_mamba2_prefill(
+        x,
+        dt,
+        A,
+        B,
+        C,
+        D,
+        dt_bias,
+        initial_states,
+        metadata,
+        chunk_size,
+        state_dtype,
+        flashinfer_out,
+    )
+
+    cu_chunk_seqlens, chunk_seq_idx, last_chunk_indices = [
+        torch.tensor(values, dtype=torch.int32, device=device)
+        for values in BaseMambaAttentionMetadataBuilder._compute_chunk_metadata(
+            None,
+            chunk_size,
+            num_seqs,
+            contexts,
+            query_start_loc_cpu,
+        )
+    ]
+    triton_out = torch.empty_like(x)
+    triton_states = mamba_chunk_scan_combined_varlen(
+        x,
+        dt,
+        A,
+        B,
+        C,
+        chunk_size,
+        cu_seqlens=query_start_loc,
+        cu_chunk_seqlens=cu_chunk_seqlens,
+        last_chunk_indices=last_chunk_indices,
+        seq_idx=chunk_seq_idx,
+        out=triton_out,
+        D=D,
+        dt_bias=dt_bias,
+        initial_states=initial_states,
+        dt_softplus=True,
+        dt_limit=(0.0, float("inf")),
+        state_dtype=state_dtype,
+    )
+    torch.testing.assert_close(flashinfer_out, triton_out, atol=8e-2, rtol=7e-2)
+    relative_l2_error = torch.linalg.vector_norm(
+        (flashinfer_out - triton_out).float()
+    ) / torch.linalg.vector_norm(triton_out.float())
+    assert relative_l2_error < 0.05
+    state_tolerance = 2e-3 if state_dtype == torch.float16 else 2e-2
+    torch.testing.assert_close(
+        flashinfer_states,
+        triton_states,
+        atol=state_tolerance,
+        rtol=state_tolerance,
+    )

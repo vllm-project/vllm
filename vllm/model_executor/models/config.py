@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import TYPE_CHECKING
 
+from vllm.config.mamba import MambaPrefillBackendEnum
 from vllm.logger import init_logger
 from vllm.utils.math_utils import round_up
 
@@ -554,11 +555,18 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         """
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
+        use_flashinfer_prefill = (
+            vllm_config.mamba_config.prefill_backend
+            == MambaPrefillBackendEnum.FLASHINFER
+        )
 
         if cache_config.enable_prefix_caching:
             if cache_config.mamba_cache_mode == "none":
                 cache_config.mamba_cache_mode = (
-                    "all" if model_config.supports_mamba_prefix_caching else "align"
+                    "all"
+                    if model_config.supports_mamba_prefix_caching
+                    and not use_flashinfer_prefill
+                    else "align"
                 )
                 logger.warning(
                     "Mamba cache mode is set to '%s' for %s by default "
@@ -575,6 +583,11 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                     "Hybrid or mamba-based model detected without support "
                     "for prefix caching with Mamba cache 'all' mode: "
                     "falling back to 'align' mode."
+                )
+            if use_flashinfer_prefill and cache_config.mamba_cache_mode == "all":
+                raise ValueError(
+                    "FlashInfer Mamba2 prefill does not support Mamba cache mode "
+                    "'all'; use --mamba-cache-mode align."
                 )
             if cache_config.mamba_cache_mode == "align":
                 assert vllm_config.scheduler_config.enable_chunked_prefill, (
