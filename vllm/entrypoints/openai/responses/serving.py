@@ -234,8 +234,10 @@ class OpenAIServingResponses(GenerateBaseServing):
         # HACK(wuhang): This is a hack. We should use a better store.
         # FIXME: If enable_store=True, this may cause a memory leak since we
         # never remove events from the store.
+        # Each entry is (events, new_event_signal, producer_done_signal).
         self.event_store: dict[
-            str, tuple[deque[StreamingResponsesResponse], asyncio.Event]
+            str,
+            tuple[deque[StreamingResponsesResponse], asyncio.Event, asyncio.Event],
         ] = {}
 
         self.background_tasks: dict[str, asyncio.Task] = {}
@@ -1215,13 +1217,22 @@ class OpenAIServingResponses(GenerateBaseServing):
     ):
         event_deque: deque[StreamingResponsesResponse] = deque()
         new_event_signal = asyncio.Event()
-        self.event_store[request.request_id] = (event_deque, new_event_signal)
+        done_signal = asyncio.Event()
+        self.event_store[request.request_id] = (
+            event_deque,
+            new_event_signal,
+            done_signal,
+        )
         generator = self.responses_stream_generator(request, *args, **kwargs)
         try:
             async for event in generator:
                 event_deque.append(event)
                 new_event_signal.set()  # Signal new event available
         finally:
+            # Mark the producer as finished before waking consumers so they
+            # can terminate even when no terminal event was emitted
+            # (cancellation, generation error, or an unexpected exception).
+            done_signal.set()
             new_event_signal.set()
 
     async def _run_background_request(
@@ -1253,7 +1264,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 value=response_id,
             )
 
-        event_deque, new_event_signal = self.event_store[response_id]
+        event_deque, new_event_signal, done_signal = self.event_store[response_id]
         start_index = 0 if starting_after is None else starting_after + 1
         current_index = start_index
 
@@ -1267,6 +1278,16 @@ class OpenAIServingResponses(GenerateBaseServing):
                 if getattr(event, "type", "unknown") == "response.completed":
                     return
                 current_index += 1
+
+            if done_signal.is_set():
+                # The producer exited without a terminal event (cancellation,
+                # generation error, or an unexpected exception). Flush any
+                # events appended just before the done signal, then stop
+                # instead of waiting on a signal that will never fire again.
+                while current_index < len(event_deque):
+                    yield event_deque[current_index]
+                    current_index += 1
+                return
 
             await new_event_signal.wait()
 
