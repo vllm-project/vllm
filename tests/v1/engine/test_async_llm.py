@@ -864,6 +864,61 @@ async def test_pause_then_abort_queued_request():
 
 
 @pytest.mark.asyncio
+async def test_sleep_aborts_new_requests():
+    """Test that requests arriving while asleep (level 1) are aborted.
+
+    Regression test for https://github.com/vllm-project/vllm/issues/45268:
+    a request that reaches the engine after sleep(level=1) has paused the
+    scheduler must receive an abort response immediately, instead of being
+    parked in the waiting queue with no response until wake_up (which
+    presents as an indefinite client-side hang when a request races with
+    a sleep call).
+    """
+    engine_args = AsyncEngineArgs(
+        model="meta-llama/Llama-3.2-1B-Instruct",
+        enforce_eager=True,
+        enable_sleep_mode=True,
+    )
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(engine_args)
+        after.callback(engine.shutdown)
+
+        async def gen(request_id: str) -> RequestOutput | None:
+            final_output: RequestOutput | None = None
+            async for out in engine.generate(
+                request_id=request_id,
+                prompt=TEXT_PROMPT,
+                sampling_params=SamplingParams(max_tokens=5),
+            ):
+                final_output = out
+            return final_output
+
+        # Put the engine to sleep (mode="abort" by default).
+        await engine.sleep(level=1)
+        assert await engine.is_sleeping()
+
+        # A request arriving while asleep must be aborted promptly,
+        # not parked until wake_up.
+        final_output = await asyncio.wait_for(gen("asleep-req"), timeout=10.0)
+        assert final_output is not None
+        assert final_output.finished
+        assert final_output.outputs[0].finish_reason == "abort"
+        # Request was never run, so no tokens.
+        assert len(final_output.outputs[0].token_ids) == 0
+
+        # After wake_up, new requests must be served normally.
+        await engine.wake_up()
+        assert not await engine.is_sleeping()
+
+        final_output = await asyncio.wait_for(gen("awake-req"), timeout=30.0)
+        assert final_output is not None
+        assert final_output.finished
+        assert final_output.outputs[0].finish_reason != "abort"
+        assert len(final_output.outputs[0].token_ids) > 0
+
+
+@pytest.mark.asyncio
 async def test_pause_wait():
     """Test that mode='wait' waits for in-flight requests to complete."""
     with ExitStack() as after:
