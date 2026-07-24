@@ -207,6 +207,10 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         # oneDNN expected layout [K/128, N/128] at load time (one-time cost).
         scale_t = scale.data.t().contiguous()
         replace_parameter(layer, scale_attr, scale_t)
+        # Mark the repacked layout so weight-dequant helpers
+        # (get_and_maybe_dequant_weights) can undo it: the block scale is now
+        # [K/block_k, N/block_n] instead of the checkpoint [N/block_n, K/block_k].
+        layer.weight_scale_transposed = True
 
         # For BMM layers (e.g. wo_a), precompute 3D scale and weight:
         # [K/bs, N/bs] -> [batch, K/bs, N_per_batch/bs]
@@ -228,6 +232,18 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 0, 2, 1
             )  # [G, K, N]
 
+        # oneDNN block matmul requires N to be a multiple of block_n
+        # We pad the weight boundary here
+        if not getattr(layer, "is_bmm", False):
+            weight = layer.weight.data
+            n = weight.shape[0]
+            self._output_size = n
+            block_n = self.weight_group_shape.row
+            n_pad = (n + block_n - 1) // block_n * block_n
+            if n_pad != n:
+                padded = torch.nn.functional.pad(weight, (0, 0, 0, n_pad - n))
+                replace_parameter(layer, "weight", padded.contiguous())
+
     def apply_block_scaled_mm(
         self,
         A: torch.Tensor,
@@ -237,7 +253,7 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     ) -> torch.Tensor:
         # Weight is [N, K]. Use .t() to create a [K, N] view without copying.
         # Bs is already [K/128, N/128] from process_weights_after_loading.
-        return torch.ops._xpu_C.fp8_gemm(
+        output = torch.ops._xpu_C.fp8_gemm(
             A,
             B.t(),
             self.config.out_dtype,
@@ -245,3 +261,4 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             Bs,
             torch.Tensor(),
         )
+        return output[..., : self._output_size]
