@@ -191,7 +191,6 @@ _TEXT_GENERATION_MODELS = {
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
     "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
-    "Plamo2ForCausalLM": ("plamo2", "Plamo2ForCausalLM"),
     "Plamo3ForCausalLM": ("plamo3", "Plamo3ForCausalLM"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
@@ -761,6 +760,7 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "TeleChatForCausalLM": "0.25.0",
     "PersimmonForCausalLM": "0.25.0",
     "FuyuForCausalLM": "0.25.0",
+    "Plamo2ForCausalLM": "0.26.0",
 }
 
 _OOT_SUPPORTED_MODELS = {
