@@ -120,7 +120,6 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
     if layer.__class__.__name__ in SKIP_MODULES:
         return
 
-    non_persistent = set(layer._non_persistent_buffers_set)
     for name in get_layer_tensors(layer):
         if name not in SKIP_TENSORS:
             delattr(layer, name)
@@ -129,12 +128,19 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
     for name, param in restore_params.items():
         if name not in SKIP_TENSORS:
             param = restore_layer_refs(param, layer)
+            # Some quant methods (e.g. mxfp4/nvfp4) replace nn.Parameter
+            # with non-Parameter objects (e.g. triton_kernels.tensor.Tensor)
+            # during process_weights_after_loading.  These live in __dict__
+            # but not _parameters, so the delattr loop above misses them.
+            # Clean up before re-registering.
+            if name in layer.__dict__ and name not in layer._parameters:
+                delattr(layer, name)
             layer.register_parameter(name, param)
 
     for name, buffer in restore_buffers.items():
         if name not in SKIP_TENSORS:
             buffer = restore_layer_refs(buffer, layer)
-            layer.register_buffer(name, buffer, persistent=name not in non_persistent)
+            layer.register_buffer(name, buffer)
 
 
 def materialize_layer(layer: torch.nn.Module, info: LayerReloadingInfo):

@@ -249,12 +249,13 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
         quant_config = self.get_fused_moe_quant_config(layer)
         assert quant_config is not None
         assert self.experts_cls is not None
-        self.moe_kernel = make_w4a8_int8_moe_kernel(
-            moe_quant_config=quant_config,
-            moe_config=self.moe,
-            experts_cls=self.experts_cls,
-            routing_tables=layer._expert_routing_tables(),
-        )
+        if self.moe_kernel is None:
+            self.moe_kernel = make_w4a8_int8_moe_kernel(
+                moe_quant_config=quant_config,
+                moe_config=self.moe,
+                experts_cls=self.experts_cls,
+                routing_tables=layer._expert_routing_tables(),
+            )
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module

@@ -20,6 +20,7 @@ from .meta import (
     materialize_layer,
     restore_layer_on_meta,
 )
+from .tensor_collector import collect_extra_tensors, copy_back_extra_tensors
 from .types import LayerReloadingInfo
 from .utils import (
     get_info_size,
@@ -111,6 +112,11 @@ def initialize_layerwise_reload(model: torch.nn.Module):
         info.kernel_tensors = get_layer_params_buffers(layer)
         # snapshot now: restore_layer_on_meta drops alias buffers from the live set
         info.kernel_non_persistent_buffers = set(layer._non_persistent_buffers_set)
+
+        # Snapshot unmanaged CUDA tensors (workspace, sort-indices,
+        # derived MLA weights, CUTLASS stride descriptors, …) so their
+        # device addresses can be preserved across reload.
+        info.extra_tensor_slots = collect_extra_tensors(layer)
 
         # Restore layer parameters/buffers onto meta device
         restore_layer_on_meta(layer, info)
@@ -265,7 +271,21 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
             # when nothing is loadable (load_numel_total == 0), so parameter-alias
             # buffers on such layers are restored rather than left deleted.
             if info.load_numel_total > 0:  # type: ignore[operator]
-                logger.warning("%s: Failed to load weights", layer.__class__.__name__)
+                # Only warn if the layer has actual parameters (not just
+                # non-persistent buffers like cos_sin_cache in RotaryEmbedding).
+                has_params = any(
+                    p is not None for p in layer._parameters.values()
+                )
+                if has_params:
+                    logger.warning(
+                        "%s: Failed to load weights",
+                        layer.__class__.__name__,
+                    )
+                else:
+                    logger.debug(
+                        "%s: No checkpoint weights (non-persistent buffers only)",
+                        layer.__class__.__name__,
+                    )
             _place_kernel_tensors(layer, info)
 
         # Process non-attention layers which did not load all elements. This can happen
@@ -305,6 +325,12 @@ def _finalize_attention_layer(
     else:
         _place_kernel_tensors(layer, info)
     layer.process_weights_after_loading(model_config.dtype)
+
+    # Attention PWAL creates derived tensors (W_UV, W_UK_T, W_K, W_V, …)
+    # with new device addresses.  Copy their values back into the old
+    # storage captured before reload so that CUDA-graph pointers stay valid.
+    if info.kernel_tensors is not None:
+        copy_back_extra_tensors(layer, info.extra_tensor_slots)
 
 
 def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
@@ -374,6 +400,7 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     # this code is a no-op if not reloading (because kernel tensors is empty)
     if info.kernel_tensors is not None:
         _copy_and_restore_kernel_tensors(layer, info)
+        copy_back_extra_tensors(layer, info.extra_tensor_slots)
 
     info.reset()
     logger.debug("%s: Processed", layer.__class__.__name__)
