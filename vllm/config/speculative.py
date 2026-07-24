@@ -1339,6 +1339,20 @@ class SpeculativeConfig:
     def use_dspark(self) -> bool:
         return self.method == "dspark"
 
+    @property
+    def num_drafter_query_tokens(self) -> int:
+        """Return the per-request query width used by the draft model."""
+        num_query_tokens = self.num_speculative_tokens
+        if self.use_dflash():
+            return num_query_tokens + 1
+        if not self.use_dspark():
+            return num_query_tokens
+
+        assert self.draft_model_config is not None
+        hf_config = self.draft_model_config.hf_config
+        sample_from_anchor = getattr(hf_config, "sample_from_anchor", True)
+        return num_query_tokens + int(not sample_from_anchor)
+
     def uses_dynamic_speculative_decoding(self) -> bool:
         return self.num_speculative_tokens_per_batch_size is not None
 
