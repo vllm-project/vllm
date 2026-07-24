@@ -187,6 +187,8 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES: bool = True
     VLLM_DCP_Q_REPLICATE: bool = False
+    VLLM_USE_PCP_OWNER_HISTORY: bool = False
+    VLLM_PCP_OWNER_PREFILL_MODE: Literal["auto", "direct", "materialize"] = "auto"
     VLLM_DEEP_GEMM_WARMUP: Literal[
         "skip",
         "full",
@@ -1493,6 +1495,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Opt-in MLA DCP query replication: skip the decode query all-gather.
     "VLLM_DCP_Q_REPLICATE": lambda: bool(int(os.getenv("VLLM_DCP_Q_REPLICATE", "0"))),
+    # Experimental owner-sharded PCP history. Each logical page has one DCP
+    # owner and is accessed through initialization-time CUDA VMM peer mappings.
+    "VLLM_USE_PCP_OWNER_HISTORY": lambda: bool(
+        int(os.getenv("VLLM_USE_PCP_OWNER_HISTORY", "0"))
+    ),
+    # Select the owner-sharded Main-KV prefill strategy. "auto" uses
+    # owner-local compute for long pure prefills, "direct" keeps FP8 peer
+    # reads, and "materialize" builds a transient BF16 working set for
+    # pure-prefill batches. Mixed and decode-only batches keep direct peer reads.
+    "VLLM_PCP_OWNER_PREFILL_MODE": lambda: os.getenv(
+        "VLLM_PCP_OWNER_PREFILL_MODE", "auto"
+    ),
     # DeepGemm JITs the kernels on-demand. The warmup attempts to make DeepGemm
     # JIT all the required kernels before model execution so there is no
     # JIT'ing in the hot-path. However, this warmup increases the engine

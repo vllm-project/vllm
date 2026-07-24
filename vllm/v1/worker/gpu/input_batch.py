@@ -99,6 +99,9 @@ class InputBatch:
     # [num_reqs] per-request prompt length, only populated for R-SWA.
     prompt_lens: torch.Tensor | None
 
+    # Replicated scheduler-global prefill maximum before PCP localizes rows.
+    global_prefill_max_seq_len: int | None = None
+
     @classmethod
     def make_dummy(
         cls,

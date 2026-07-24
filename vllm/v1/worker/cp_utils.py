@@ -43,10 +43,17 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                     f"supported in {layer_impl.__class__.__name__}."
                 )
             if dcp_size > 1:
-                assert layer_impl.need_to_return_lse_for_decode, (
+                handles_dcp_decode_internally = getattr(
+                    layer, "handles_dcp_decode_internally", False
+                )
+                assert (
+                    layer_impl.need_to_return_lse_for_decode
+                    or handles_dcp_decode_internally
+                ), (
                     "Decode Context Parallelism (DCP) requires attention "
-                    "implementations to return the softmax LSE during decode, "
-                    f"but {layer_impl.__class__.__name__} does not. "
+                    "implementations to return the softmax LSE during decode "
+                    "or the attention layer to handle DCP decode internally, "
+                    f"but {layer_impl.__class__.__name__} does neither. "
                     "Try a different backend by setting "
                     "--attention-backend or disable DCP."
                 )
