@@ -842,12 +842,7 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
             return allreduce[4], allreduce[2]
 
         pm.register_replacement(
-            pattern,
-            replacement,
-            self.get_inputs(),
-            pm.fwd_only,
-            pm_pass,
-            extra_check=_norm_input_weight_dtype_match,
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
         )
 
 
@@ -1046,12 +1041,7 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
             )
 
         pm.register_replacement(
-            pattern,
-            replacement,
-            self.get_inputs(),
-            pm.fwd_only,
-            pm_pass,
-            extra_check=_norm_input_weight_dtype_match,
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
         )
 
 
