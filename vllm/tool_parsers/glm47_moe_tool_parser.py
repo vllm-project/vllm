@@ -7,5 +7,5 @@ from vllm.parser.engine.registered_adapters import Glm47MoeParserToolAdapter
 
 
 class Glm47MoeModelToolParser(Glm47MoeParserToolAdapter):  # type: ignore[valid-type, misc]
-    supports_required_and_named = False
+    # Honor VLLM_ENFORCE_STRICT_TOOL_CALLING via __init_subclass__ (strict=0 -> True).
     structural_tag_model = "glm_4_7"
