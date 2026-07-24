@@ -285,7 +285,7 @@ class DerenderChatRequest(BaseModel):
 
     Required by the parsing so that tool/reasoning parsers can receive the full
     request context they expect (request.tools, request.tool_choice,
-    request._grammar_from_tool_parser, etc.).
+    request._grammar_from_parser, etc.).
     """
     # --8<-- [end:derender-chat-request]
 
