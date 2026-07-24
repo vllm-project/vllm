@@ -199,7 +199,14 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
         return_softmax_lse: bool,
         out: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
+        window_size: tuple[int, int] | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if window_size is not None:
+            raise NotImplementedError(
+                "FlashInferPrefillBackend does not support a per-call "
+                "sliding window (window_size) for new-token prefill; the "
+                "window is fixed at plan() time via window_left."
+            )
         assert self._prefill_main is not None
 
         ret = self._prefill_main.run(
