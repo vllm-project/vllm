@@ -14,6 +14,7 @@ from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
+    OffloadingWorkerMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
@@ -25,6 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     is_store_reachable_swa_chunk,
 )
 from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -40,6 +42,7 @@ from vllm.v1.kv_offload.base import (
     get_offload_block_hash,
     make_offload_key,
 )
+from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
 
@@ -2060,7 +2063,7 @@ def test_stale_sliding_window_block_after_prepare_store_failure(
     # Now prepare_store succeeds.
     # Without the fix, the request would try to offload the stale block_id
     # at position 0 (now reused at position 3), causing a duplicate in
-    # sliding_window_block_ids and eventually a KeyError.
+    # block_ids and eventually a KeyError.
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
@@ -2884,10 +2887,66 @@ class TestEagle:
 # ---------------------------------------------------------------------------
 
 
+def _make_finished_req_status(
+    scheduler: OffloadingConnectorScheduler,
+    *,
+    req_id: str = "finished-req",
+    block_ids: tuple[int, ...] = (1,),
+) -> RequestOffloadState:
+    """Build a minimal finished RequestOffloadState with synthetic blocks.
+
+    Sets only the fields the _build_store_jobs unit path reads. Finished
+    requests take num_tokens_after_batch = req.num_tokens, so
+    num_computed_tokens is intentionally not set.
+    """
+    tokens_per_block = scheduler.config.kv_group_configs[0].tokens_per_block
+    req = MagicMock()
+    req.request_id = req_id
+    req.num_tokens = tokens_per_block * len(block_ids)
+    req.num_prompt_tokens = req.num_tokens
+    req.is_finished.return_value = True
+    req.kv_transfer_params = None
+    req.block_hashes = [b"hash"] * len(block_ids)
+    req.all_token_ids = [0] * req.num_tokens
+    req.lora_request = None
+
+    state = RequestOffloadState(
+        config=scheduler.config,
+        req=req,
+        req_context=ReqContext(req_id=req_id),
+        offloading_context=RequestOffloadingContext(policy=OffloadPolicy.BLOCK_LEVEL),
+    )
+    state.group_states[0].block_ids = list(block_ids)
+    state.group_states[0].offload_keys = [
+        make_offload_key(f"k{i}".encode(), 0) for i in range(len(block_ids))
+    ]
+    return state
+
+
+def _drive_finished_store_job(
+    scheduler: OffloadingConnectorScheduler,
+    req_status: RequestOffloadState,
+    *,
+    allocated_block_ids: set[int],
+) -> tuple[int, OffloadingConnectorMetadata]:
+    """Drive build_connector_meta for a finished request and return the new
+    store job's ID plus the resulting metadata (which contains store_jobs and
+    jobs_to_flush populated by the unified fence check)."""
+    scheduler._req_status[req_status.req.request_id] = req_status
+    scheduler._current_batch_allocated_block_ids = set(allocated_block_ids)
+
+    scheduler_output = SchedulerOutput.make_empty()
+    scheduler_output.finished_req_ids = {req_status.req.request_id}
+    meta = scheduler.build_connector_meta(scheduler_output)
+    assert isinstance(meta, OffloadingConnectorMetadata)
+    store_jobs = meta.store_jobs
+    return next(iter(store_jobs)), meta
+
+
 def test_request_finished_with_pending_stores_populates_fence(request_runner):
     """When a request finishes with in-flight store jobs, the fence index
     (_block_id_to_pending_jobs) is correctly populated with the store jobs'
-    non_sliding_window_block_ids.
+    block_ids.
 
     This prevents data corruption when a subsequent request reuses the same
     GPU blocks before the store completes.
@@ -2921,7 +2980,7 @@ def test_request_finished_with_pending_stores_populates_fence(request_runner):
         )
         for js in runner.connector_scheduler._jobs.values():
             if js.is_store:
-                job_block_ids.update(js.non_sliding_window_block_ids or [])
+                job_block_ids.update(js.block_ids or [])
 
     # Run 1: create store job, finish request, populate fence.
     # With non-blocking drain (#45595), the job stays in-flight.
@@ -2936,7 +2995,7 @@ def test_request_finished_with_pending_stores_populates_fence(request_runner):
     populated_fence = next((f for f in fence_snapshots if len(f) > 0), None)
     assert populated_fence is not None, "Fence was never populated"
 
-    # Verify fence contained the job's non-SW block IDs.
+    # Verify fence contained the job's block IDs.
     for bid in job_block_ids:
         assert bid in populated_fence, f"Block {bid} not in fence: {populated_fence}"
 
@@ -3023,10 +3082,10 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
     request_runner,
 ):
     """With both FullAttention and SlidingWindow groups, a single store job
-    has both non_sliding_window_block_ids and sliding_window_block_ids.
-
-    request_finished only registers non-SW blocks in the fence.
-    SW blocks were already registered at store creation time.
+    carries blocks from both groups in the unified block_ids field. All are
+    registered in the fence at store creation time, so reusing any of them
+    triggers a flush. Guards that unified registration doesn't regress the
+    mixed-group case.
     """
     block_size = 4
     sliding_window = 8  # 2 blocks
@@ -3070,8 +3129,7 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
 
     # Capture fence state and job block IDs at each step.
     fence_snapshots: list[dict] = []
-    sw_block_ids: set[int] = set()
-    non_sw_block_ids: set[int] = set()
+    job_block_ids: set[int] = set()
 
     def capture_fence():
         fence_snapshots.append(
@@ -3079,8 +3137,7 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
         )
         for js in runner.connector_scheduler._jobs.values():
             if js.is_store:
-                sw_block_ids.update(js.sliding_window_block_ids or [])
-                non_sw_block_ids.update(js.non_sliding_window_block_ids or [])
+                job_block_ids.update(js.block_ids or [])
 
     # Run 1: create store job, finish request, populate fence.
     runner.run(
@@ -3089,23 +3146,18 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
         post_step_fn=capture_fence,
     )
 
-    # Verify job had both SW and non-SW blocks.
-    assert len(sw_block_ids) > 0, "No SW blocks in store job"
-    assert len(non_sw_block_ids) > 0, "No non-SW blocks in store job"
+    # Verify the store job had blocks from both FA and SW groups.
+    assert len(job_block_ids) > 0, "Store job had no blocks"
 
-    # Find the fence snapshot where both SW and non-SW blocks were present.
-    # SW blocks should appear at creation time, non-SW at request_finished.
-    populated_fence = None
-    for fence in fence_snapshots:
-        has_sw = all(bid in fence for bid in sw_block_ids)
-        has_non_sw = all(bid in fence for bid in non_sw_block_ids)
-        if has_sw and has_non_sw:
-            populated_fence = fence
-            break
+    # Find the fence snapshot where all of the job's blocks are present.
+    populated_fence = next(
+        (f for f in fence_snapshots if all(bid in f for bid in job_block_ids)),
+        None,
+    )
 
     assert populated_fence is not None, (
-        f"Fence never contained both SW {sw_block_ids} and "
-        f"non-SW {non_sw_block_ids} blocks. Snapshots: {fence_snapshots}"
+        f"Fence never contained all job blocks {job_block_ids}. "
+        f"Snapshots: {fence_snapshots}"
     )
 
     # Run 2: block reuse triggers fence-based flush of the old job.
@@ -3123,3 +3175,107 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
     # Verify fence is empty after full lifecycle (cleanup happened).
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
     assert len(runner.connector_scheduler._jobs) == 0
+
+
+def test_completed_store_removes_fence_entries(request_runner):
+    """Completing a store for an active request removes every associated
+    fence entry — no separate SW/NSW cleanup branches."""
+    block_size = 4
+    blocks_per_chunk = 1
+    tokens_per_chunk = block_size * blocks_per_chunk
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=4,
+        async_scheduling=False,
+        blocks_per_chunk=blocks_per_chunk,
+    )
+    runner.new_request(token_ids=[0] * tokens_per_chunk)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+
+    # Complete transfers so the store job finishes; request stays active.
+    runner.run(
+        decoded_tokens=[0] * tokens_per_chunk,
+        expected_stored=(0,),
+    )
+    assert runner.connector_scheduler._block_id_to_pending_jobs == {}
+    assert str(runner.req_id) in runner.connector_scheduler._req_status
+    assert not runner.connector_scheduler._jobs
+
+
+def test_finished_store_job_flushes_on_partial_reallocation(request_runner):
+    """A deferred finished-request store is flushed when some (but not all)
+    of its source blocks were reallocated in the same step.
+
+    After the unified-fence refactor, _build_store_jobs only registers source
+    blocks in _block_id_to_pending_jobs; the fence check in
+    build_connector_meta sees both pre-existing and newly created jobs and
+    flushes new jobs for finished requests whose blocks were reallocated.
+
+    Also exercises the cleanup path by simulating the worker
+    draining the self-flushed job.
+    """
+    block_size = 4
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=10,
+        async_scheduling=False,
+    )
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+
+    # R1 owns blocks (1, 2); R2 grabbed block 2 in the same step's schedule.
+    req_status = _make_finished_req_status(
+        runner.connector_scheduler, req_id="finished-req", block_ids=(1, 2)
+    )
+    new_job_id, meta = _drive_finished_store_job(
+        runner.connector_scheduler, req_status, allocated_block_ids={2}
+    )
+
+    assert new_job_id in meta.jobs_to_flush, (
+        f"Deferred store job {new_job_id} was NOT flushed even though "
+        f"block 2 was reallocated to another request in the same step."
+    )
+    assert runner.connector_scheduler._jobs[new_job_id].block_ids == [1, 2]
+
+    # Simulate the worker draining the self-flushed job; _remove_pending_job
+    # must drop the fence entries registered at store creation.
+    runner.connector_scheduler.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=OffloadingWorkerMetadata(
+                completed_jobs={
+                    new_job_id: runner.connector_scheduler.config.num_workers
+                }
+            )
+        )
+    )
+    assert runner.connector_scheduler._block_id_to_pending_jobs == {}
+    assert new_job_id not in runner.connector_scheduler._jobs
+
+
+def test_finished_store_job_no_overlap_does_not_flush(request_runner):
+    """Negative case for the unified fence check: when no source block of a
+    finished request's deferred store was reallocated, the job must NOT be
+    in jobs_to_flush."""
+    block_size = 4
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=10,
+        async_scheduling=False,
+    )
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+
+    req_status = _make_finished_req_status(
+        runner.connector_scheduler, req_id="finished-req", block_ids=(1, 2)
+    )
+    new_job_id, meta = _drive_finished_store_job(
+        runner.connector_scheduler, req_status, allocated_block_ids=set()
+    )
+
+    assert new_job_id not in meta.jobs_to_flush, (
+        f"Job {new_job_id} was flushed despite no overlap with reallocated blocks."
+    )
