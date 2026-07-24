@@ -163,7 +163,7 @@ def _get_group_hash(elem: MultiModalFieldElem):
     if not isinstance(elem.field, MultiModalSharedField):
         return None
 
-    return MultiModalHasher.hash_kwargs(data=elem.data)
+    return MultiModalHasher.hash_kwargs("sha256", data=elem.data)
 
 
 def _batch_mm_items(
