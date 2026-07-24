@@ -101,6 +101,7 @@ class BadWordsState:
 def _bad_words_kernel(
     logits_ptr,
     logits_stride,
+    output_width,
     expanded_idx_mapping_ptr,
     bad_word_token_ids_ptr,
     bad_word_token_ids_stride,
@@ -158,7 +159,7 @@ def _bad_words_kernel(
 
         match = match & (expected == actual)
 
-    if match:
+    if match and last_token >= 0 and last_token < output_width:
         tl.store(logits_ptr + token_idx * logits_stride + last_token, -float("inf"))
 
 
@@ -176,9 +177,11 @@ def apply_bad_words(
     max_num_bad_words: int,
 ) -> None:
     num_tokens = logits.shape[0]
+    output_width = logits.shape[1]
     _bad_words_kernel[(num_tokens, max_num_bad_words)](
         logits,
         logits.stride(0),
+        output_width,
         expanded_idx_mapping,
         bad_word_token_ids,
         bad_word_token_ids.stride(0),
