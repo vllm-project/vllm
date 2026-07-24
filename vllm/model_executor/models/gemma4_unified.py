@@ -163,7 +163,9 @@ class Gemma4UnifiedProcessingInfo(Gemma4ProcessingInfo):
         config = self.get_hf_config()
         # Unified field is `num_soft_tokens`.  Tower-based parent uses
         # `default_output_length`, hence the override.
-        tokens_per_image = config.vision_config.num_soft_tokens
+        
+        # Use getattr to prevent AttributeError on compressed/QAT model configurations
+        tokens_per_image = getattr(config.vision_config, "num_soft_tokens", 280)
         merged_kwargs = self.ctx.get_merged_mm_kwargs({})
         val, _ = _get_max_soft_tokens(merged_kwargs)
         if isinstance(val, int) and val in _SUPPORTED_SOFT_TOKENS:
