@@ -12,7 +12,11 @@ import importlib
 import importlib.metadata
 import inspect
 import json
-from collections.abc import Callable
+import os
+import sys
+import tempfile
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from pprint import pformat
@@ -20,6 +24,7 @@ from typing import Any
 
 import regex as re
 import torch
+from tqdm.auto import tqdm
 
 from vllm.kernels.helion.case_key import CaseKey
 from vllm.kernels.helion.config_manager import ConfigManager
@@ -453,6 +458,35 @@ def _load_op(spec: KernelSpec) -> Any:
     return getattr(module, spec.name)
 
 
+@contextmanager
+def _suppress_helion_output() -> Iterator[None]:
+    failed = False
+    with tempfile.TemporaryFile() as captured:
+        saved_stdout = os.dup(1)
+        saved_stderr = os.dup(2)
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os.dup2(captured.fileno(), 1)
+            os.dup2(captured.fileno(), 2)
+            yield
+        except BaseException:
+            failed = True
+            raise
+        finally:
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os.dup2(saved_stdout, 1)
+            os.dup2(saved_stderr, 2)
+            os.close(saved_stdout)
+            os.close(saved_stderr)
+            if failed:
+                captured.seek(0)
+                diagnostics = captured.read()
+                if diagnostics:
+                    sys.stderr.write(diagnostics.decode(errors="replace"))
+
+
 def generate(kernel_name: str, platform: str, check: bool) -> None:
     _require_matching_hardware(platform)
     spec = KERNEL_REGISTRY[kernel_name]
@@ -485,13 +519,25 @@ def generate(kernel_name: str, platform: str, check: bool) -> None:
     configured_op = op.get_configured_op()
     configured = configured_op._decorated_kernel
     expected_args = list(inspect.signature(configured_op.raw_kernel_func).parameters)
-    for case in cases:
+    action = "Check" if check else "Generate"
+    hardware = platform.removeprefix("nvidia_").upper()
+    progress = tqdm(
+        cases,
+        bar_format=(
+            "{desc}: {percentage:3.0f}%|{bar:20}| "
+            "{n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
+        ),
+        desc=f"{action} {hardware} {spec.name}",
+        unit="case",
+    )
+    for case in progress:
         filename = f"{_module_name(spec, case)}.py"
         expected.add(filename)
         args = inputs.get(case)
         if args is None:
             args = spec.input_factory(case)
-        code = configured.bind(args).to_code(concrete_configs[case])
+        with _suppress_helion_output():
+            code = configured.bind(args).to_code(concrete_configs[case])
         content = _postprocess(code, spec, case, expected_args)
         _write_or_check(output_dir / filename, content, check, errors)
 
@@ -515,6 +561,9 @@ def generate(kernel_name: str, platform: str, check: bool) -> None:
     if errors:
         paths = "\n".join(f"  {path}" for path in sorted(errors))
         raise SystemExit(f"Generated Helion kernels are stale:\n{paths}")
+    operation = "checked" if check else "generated"
+    print(f"Done: {operation} {len(cases)} {spec.name} cases for {platform}.")
+    print(f"Output: {output_dir}")
 
 
 def parse_args() -> argparse.Namespace:
