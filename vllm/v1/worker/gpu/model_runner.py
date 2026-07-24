@@ -29,7 +29,7 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import (
     get_dcp_group,
@@ -47,6 +47,7 @@ from vllm.multimodal.encoder_budget import (
     MultiModalBudget,
     get_dummy_encoder_profile_inputs,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.math_utils import cdiv
@@ -721,9 +722,90 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # SP is not supported yet.
         return num_scheduled_tokens
 
+    @torch.inference_mode()
     def profile_cudagraph_memory(self) -> int:
-        # NOTE(woosuk): It is TBD whether we keep this API or not.
-        return 0
+        """Estimate the GPU memory required to capture CUDA graphs.
+
+        Called during memory profiling, *before* the real KV cache is
+        allocated, so that ``Worker.determine_available_memory`` can reserve
+        headroom for graph capture. Without this, the KV cache claims the
+        entire ``gpu_memory_utilization`` budget and ``capture_model`` later
+        OOMs (https://github.com/vllm-project/vllm/issues/49224).
+
+        To measure, we bootstrap a minimal KV cache, capture the graphs into a
+        throwaway pool, read the free-memory delta, then release everything so
+        the real ``initialize_kv_cache``/``capture_model`` path starts clean.
+        """
+        if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+            return 0
+
+        with set_current_vllm_config(self.vllm_config):
+            self._init_minimal_kv_cache_for_profiling()
+
+        try:
+            assert self.cudagraph_manager is not None
+            if not self.cudagraph_manager.needs_capture():
+                return 0
+            # Capture into a throwaway graph pool so the profiling graphs'
+            # memory is reclaimed on teardown instead of being retained by the
+            # persistent global pool (which the real capture reuses).
+            self.cudagraph_manager.pool = current_platform.graph_pool_handle()
+            return int(self.capture_model())
+        finally:
+            self._teardown_profiling_state()
+
+    def _init_minimal_kv_cache_for_profiling(self) -> None:
+        """Allocate the smallest KV cache that still lets every CUDA graph be
+        captured, so graph-capture memory can be profiled up front."""
+        from vllm.v1.core.kv_cache_utils import (
+            get_kv_cache_config_from_groups,
+            get_kv_cache_groups,
+        )
+
+        kv_cache_spec = self.get_kv_cache_spec()
+        kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
+        # At least one block per sequence is required to capture the graphs.
+        min_blocks = (
+            min(self.max_num_reqs, self.compilation_config.max_cudagraph_capture_size)
+            or 1
+        )
+        saved_override = self.cache_config.num_gpu_blocks_override
+        self.cache_config.num_gpu_blocks_override = min_blocks
+        try:
+            minimal_config = get_kv_cache_config_from_groups(
+                self.vllm_config, kv_cache_groups, available_memory=0
+            )
+        finally:
+            self.cache_config.num_gpu_blocks_override = saved_override
+
+        self.initialize_kv_cache(minimal_config)
+        self.cache_config.num_gpu_blocks = minimal_config.num_blocks
+
+    def _teardown_profiling_state(self) -> None:
+        """Release the profiling KV cache, attention groups, and captured
+        graphs while keeping model weights, so the real
+        ``initialize_kv_cache`` can rebuild from a clean slate."""
+        torch.accelerator.synchronize()
+        if hasattr(self, "kv_caches"):
+            self.kv_caches.clear()
+        if hasattr(self, "attn_groups"):
+            self.attn_groups.clear()
+        if hasattr(self, "kv_cache_config"):
+            del self.kv_cache_config
+        # Dropping the manager releases the profiling graphs (and their
+        # throwaway pool) once the cache is emptied below.
+        self.cudagraph_manager = None
+        # Detach profiling KV tensors held by attention layers.
+        for layer in self.compilation_config.static_forward_context.values():
+            if hasattr(layer, "kv_cache"):
+                kv_cache = layer.kv_cache
+                layer.kv_cache = (
+                    torch.tensor([]) if isinstance(kv_cache, torch.Tensor) else []
+                )
+        self.cache_config.num_gpu_blocks = None
+        self.maybe_remove_all_loras(self.lora_config)
+        gc.collect()
+        torch.accelerator.empty_cache()
 
     @torch.inference_mode()
     def capture_model(self) -> int:
