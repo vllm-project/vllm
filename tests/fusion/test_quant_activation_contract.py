@@ -115,6 +115,38 @@ def test_bridge_marks_supporting_and_skips_others():
     assert not hasattr(layer, "input_quant_key")
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_dynamic_nvfp4_global_scale_skips_bridge_and_handles_empty_input(dtype):
+    kernel = FlashInferCutlassNvFp4LinearKernel.__new__(
+        FlashInferCutlassNvFp4LinearKernel
+    )
+    kernel.config = NvFp4LinearLayerConfig(dynamic_input_global_scale=True)
+    assert kernel.input_quant_key() is None
+
+    layer = torch.nn.Module()
+    layer.output_size_per_partition = 32
+    inputs = torch.empty(0, 16, dtype=dtype)
+    output = kernel.apply_weights(layer, inputs)
+    assert output.shape == (0, 32)
+    assert output.dtype == dtype
+    assert output.device == inputs.device
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float8_e4m3fn])
+def test_dynamic_nvfp4_global_scale_rejects_unsupported_dtype_before_empty_return(
+    dtype,
+):
+    kernel = FlashInferCutlassNvFp4LinearKernel.__new__(
+        FlashInferCutlassNvFp4LinearKernel
+    )
+    kernel.config = NvFp4LinearLayerConfig(dynamic_input_global_scale=True)
+    layer = torch.nn.Module()
+    layer.output_size_per_partition = 32
+
+    with pytest.raises(ValueError, match="requires FP16 or BF16"):
+        kernel.apply_weights(layer, torch.empty(0, 16, dtype=dtype))
+
+
 def test_as_quantized_activation_validates_key():
     qa = QuantizedActivation(
         data=torch.zeros(2, 4, dtype=current_platform.fp8_dtype()),

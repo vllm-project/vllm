@@ -467,6 +467,134 @@ def test_modelopt_nvfp4_config_dispatches_w4a4_method():
     assert config.quant_method == "NVFP4"
 
 
+def test_modelopt_nvfp4_parses_dynamic_activation_scheme():
+    config = ModelOptNvFp4Config.from_config(
+        {
+            "quant_method": "modelopt",
+            "quantization": {
+                "quant_algo": "NVFP4",
+                "activation_scheme": "dynamic",
+                "group_size": 16,
+                "kv_cache_quant_algo": None,
+                "exclude_modules": [],
+            },
+        }
+    )
+
+    assert config.activation_scheme == "dynamic"
+
+
+def test_modelopt_nvfp4_dynamic_activation_ignores_loaded_input_scale():
+    config = ModelOptNvFp4Config(
+        quant_method="NVFP4",
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+        activation_scheme="dynamic",
+    )
+    kernel = MagicMock()
+    with patch(
+        "vllm.model_executor.layers.quantization.modelopt.init_nvfp4_linear_kernel",
+        return_value=kernel,
+    ) as init_kernel:
+        method = ModelOptNvFp4LinearMethod(config)
+
+    layer = torch.nn.Module()
+    layer.register_parameter(
+        "input_scale",
+        torch.nn.Parameter(torch.tensor([float("nan")]), requires_grad=False),
+    )
+    layer.register_parameter(
+        "weight_scale_2",
+        torch.nn.Parameter(torch.tensor([0.125, 0.125]), requires_grad=False),
+    )
+
+    method.process_weights_after_loading(layer)
+
+    init_kernel.assert_called_once_with(dynamic_input_global_scale=True)
+    assert not hasattr(layer, "input_scale")
+    assert not hasattr(layer, "weight_scale_2")
+    assert layer.weight_global_scale.item() == pytest.approx(0.125)
+    kernel.process_weights_after_loading.assert_called_once_with(layer)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_dynamic_nvfp4_global_scales_use_current_activation_amax(dtype):
+    from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
+        _dynamic_nvfp4_global_scales,
+    )
+
+    quant_scale, dequant_scale = _dynamic_nvfp4_global_scales(
+        torch.tensor([-1344.0, 672.0], dtype=dtype)
+    )
+
+    assert quant_scale.dtype == torch.float32
+    assert dequant_scale.dtype == torch.float32
+    assert dequant_scale.item() == pytest.approx(0.5)
+    assert quant_scale.item() == pytest.approx(2.0)
+
+
+def test_modelopt_nvfp4_dynamic_activation_validates_before_mutating_layer():
+    config = ModelOptNvFp4Config(
+        quant_method="NVFP4",
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+        activation_scheme="dynamic",
+    )
+    kernel = MagicMock()
+    with patch(
+        "vllm.model_executor.layers.quantization.modelopt.init_nvfp4_linear_kernel",
+        return_value=kernel,
+    ):
+        method = ModelOptNvFp4LinearMethod(config)
+
+    layer = torch.nn.Module()
+    layer.register_parameter(
+        "input_scale",
+        torch.nn.Parameter(torch.tensor([0.25, 0.25]), requires_grad=False),
+    )
+    layer.register_parameter(
+        "weight_scale_2",
+        torch.nn.Parameter(torch.tensor([0.125, 0.25]), requires_grad=False),
+    )
+
+    with pytest.raises(ValueError, match="one shared weight_scale_2"):
+        method.process_weights_after_loading(layer)
+
+    assert hasattr(layer, "input_scale")
+    assert hasattr(layer, "weight_scale_2")
+    kernel.process_weights_after_loading.assert_not_called()
+
+
+def test_modelopt_nvfp4_rejects_invalid_activation_scheme():
+    with pytest.raises(ValueError, match="activation_scheme"):
+        ModelOptNvFp4Config(
+            quant_method="NVFP4",
+            is_checkpoint_nvfp4_serialized=True,
+            kv_cache_quant_algo=None,
+            exclude_modules=[],
+            activation_scheme="per_token",
+        )
+
+
+def test_modelopt_nvfp4_dynamic_activation_rejects_fused_moe():
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptNvFp4FusedMoE,
+    )
+
+    config = ModelOptNvFp4Config(
+        quant_method="NVFP4",
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+        activation_scheme="dynamic",
+    )
+
+    with pytest.raises(ValueError, match="only for dense linear layers"):
+        ModelOptNvFp4FusedMoE(config, MagicMock())
+
+
 def test_modelopt_nvfp4_config_dispatches_w4a16_method():
     """``quant_method="W4A16_NVFP4"`` routes to the new
     ``ModelOptNvFp4W4A16LinearMethod`` instead of the W4A4 sibling.
