@@ -175,6 +175,9 @@ class KernelConfig:
     enable_flashinfer_autotune: bool = None  # type: ignore[assignment]
     """If True, run FlashInfer autotuning during kernel warmup."""
 
+    enable_mamba_ssu_autotune: bool = None  # type: ignore[assignment]
+    """If True, run Mamba selective_state_update autotuning during warmup."""
+
     # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
     # to the shared JIT warmup infrastructure.
     # https://github.com/vllm-project/vllm/pull/47451
@@ -258,6 +261,7 @@ class KernelConfig:
             "enable_cutedsl_warmup",
             "enable_jit_warmup",
             "enable_flashinfer_autotune",
+            "enable_mamba_ssu_autotune",
             "ir_op_priority",  # handled separately below
         }
         factors = get_hash_factors(self, ignored_factors)
@@ -266,6 +270,7 @@ class KernelConfig:
 
     @field_validator(
         "enable_flashinfer_autotune",
+        "enable_mamba_ssu_autotune",
         "enable_cutedsl_warmup",
         "enable_jit_warmup",
         mode="wrap",

@@ -198,6 +198,8 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
     VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS: list[str] | None = None
+    VLLM_MAMBA_SSU_AUTOTUNE_CACHE_DIR: str | None = None
+    VLLM_MAMBA_SSU_AUTOTUNE_FORCE: bool = False
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_XGRAMMAR_CACHE_MB: int = 0
@@ -1632,6 +1634,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
             if v.strip()
         ]
     ),
+    # Override the directory for warmup-generated Mamba SSU Triton configs.
+    "VLLM_MAMBA_SSU_AUTOTUNE_CACHE_DIR": lambda: os.getenv(
+        "VLLM_MAMBA_SSU_AUTOTUNE_CACHE_DIR", None
+    ),
+    # If set, retune Mamba SSU even when a local cache file already exists.
+    "VLLM_MAMBA_SSU_AUTOTUNE_FORCE": lambda: bool(
+        int(os.getenv("VLLM_MAMBA_SSU_AUTOTUNE_FORCE", "0"))
+    ),
     # Flashinfer fused allreduce backend.
     "VLLM_FLASHINFER_ALLREDUCE_BACKEND": env_with_choices(
         "VLLM_FLASHINFER_ALLREDUCE_BACKEND",
@@ -2146,6 +2156,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_TUNED_CONFIG_FOLDER",
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
         "VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS",
+        "VLLM_MAMBA_SSU_AUTOTUNE_CACHE_DIR",
+        "VLLM_MAMBA_SSU_AUTOTUNE_FORCE",
         "VLLM_ENGINE_ITERATION_TIMEOUT_S",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",

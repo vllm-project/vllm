@@ -7,7 +7,8 @@
 import functools
 import json
 import os
-from contextlib import contextmanager
+import tempfile
+from contextlib import contextmanager, suppress
 from typing import Any
 
 import torch
@@ -57,10 +58,82 @@ def get_ssm_device_name() -> str:
     return get_device_name_as_file_name()
 
 
+def get_ssm_autotune_config_dir() -> str:
+    """Return the local warmup autotune cache directory for SSU configs."""
+    override_dir = envs.VLLM_MAMBA_SSU_AUTOTUNE_CACHE_DIR
+    if override_dir is not None:
+        return override_dir
+
+    # Keep different Triton codegen versions isolated. Device, shape, and dtype
+    # remain in the filename so the cache can use the existing JSON schema.
+    triton_version = getattr(triton, "__version__", "unknown").replace(os.sep, "_")
+    return os.path.join(
+        envs.VLLM_CACHE_ROOT,
+        "mamba_ssu_autotune_cache",
+        f"triton={triton_version}",
+    )
+
+
+def get_ssm_autotune_config_file_path(
+    headdim: int,
+    dstate: int,
+    cache_dtype: str,
+    device_name: str | None = None,
+    save_dir: str | None = None,
+) -> str:
+    cache_dtype = _canonical_cache_dtype(cache_dtype)
+    device_name = device_name if device_name is not None else get_ssm_device_name()
+    base_dir = save_dir if save_dir is not None else get_ssm_autotune_config_dir()
+    return os.path.join(
+        base_dir,
+        get_ssm_config_file_name(headdim, dstate, cache_dtype, device_name),
+    )
+
+
 def _canonical_cache_dtype(cache_dtype: str) -> str:
     """Canonical key for config lookup. bf16 and fp16 share the same tuned
     configs because the kernel only sees bit width when accessing state."""
     return "float16" if cache_dtype == "bfloat16" else cache_dtype
+
+
+def save_ssm_configs(
+    headdim: int,
+    dstate: int,
+    cache_dtype: str,
+    configs: dict[int, dict[str, int]],
+    save_dir: str | None = None,
+) -> str:
+    """Persist SSU launch configs using the runtime loader's JSON schema."""
+    file_path = get_ssm_autotune_config_file_path(
+        headdim=headdim,
+        dstate=dstate,
+        cache_dtype=cache_dtype,
+        save_dir=save_dir,
+    )
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    payload: dict[str, Any] = {
+        "triton_version": getattr(triton, "__version__", "unknown"),
+        **{str(k): v for k, v in sorted(configs.items())},
+    }
+
+    fd, tmp_path = tempfile.mkstemp(
+        dir=os.path.dirname(file_path),
+        suffix=".tmp",
+        prefix=f".{os.path.basename(file_path)}.",
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(payload, f, indent=4)
+            f.write("\n")
+        os.replace(tmp_path, file_path)
+    except BaseException:
+        with suppress(OSError):
+            os.unlink(tmp_path)
+        raise
+
+    get_ssm_configs.cache_clear()
+    _try_get_optimal_ssm_config_cached.cache_clear()
+    return file_path
 
 
 @functools.cache
@@ -87,6 +160,11 @@ def get_ssm_configs(
         config_file_paths.append(
             os.path.join(user_defined_config_folder, json_file_name)
         )
+
+    # Locally generated warmup autotune cache
+    config_file_paths.append(
+        get_ssm_autotune_config_file_path(headdim, dstate, cache_dtype, device_name)
+    )
 
     # Bundled default
     config_file_paths.append(os.path.join(_CONFIGS_DIR, json_file_name))
