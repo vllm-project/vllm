@@ -43,7 +43,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kInt4Static,
+    kInt4Static32,
     kInt8DynamicTokenSym,
+    kInt8Static,
     kInt8StaticChannelSym,
 )
 from vllm.platforms import current_platform
@@ -76,6 +79,16 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
+
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        # Defer activation quantization to apply() only when LoRA is active AND
+        # tokens are dispatched across ranks (DP+EP all2all).
+        return (
+            self._lora_context is not None
+            and self.quant_dtype is not None
+            and self.moe_config.moe_parallel_config.use_all2all_kernels
+        )
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -223,6 +236,25 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             torch.float8_e4m3fnuz,
         ]
 
+        # We declared expects_unquantized_inputs (LoRA + DP/EP all2all), so the
+        # prepare step deferred activation quantization to this kernel:
+        # `hidden_states` arrives unquantized. Keep the unquantized tensor for
+        # the LoRA shrink input and quantize a copy here for the base GEMM
+        # (mirrors what the prepare step would have done, but after the
+        # all-gather so the layout matches the gathered topk_ids / token map).
+        lora_unquantized_hidden_states: torch.Tensor | None = None
+        if self.expects_unquantized_inputs:
+            assert a1q_scale is None
+            lora_unquantized_hidden_states = hidden_states
+            hidden_states, a1q_scale = moe_kernel_quantize_input(
+                hidden_states,
+                self.a1_scale,
+                self.quant_dtype,
+                self.per_act_token_quant,
+                self.block_shape,
+                quantization_emulation=self.quantization_emulation,
+            )
+
         E, num_tokens, N, K, top_k_num = self.moe_problem_size(
             hidden_states, w1, w2, topk_ids
         )
@@ -280,19 +312,46 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         # GEMM on the default stream and the LoRA fast-path on aux_stream;
         # the LoRA writes its delta into a fresh zero buffer (add_inputs=
         # False) and we sum it into intermediate_cache1 after both finish.
-
+        #
+        # The LoRA shrink kernel needs unquantized, gathered-layout
+        # activations. When activation quant was deferred to this kernel
+        # (expects_unquantized_inputs), the input we quantized above is exactly
+        # that, so use it directly. Otherwise fall back to the context stash
+        # (e.g. weight-only quant), guarding on a row-count match so a
+        # DP-gathered layout never indexes a local stash out of bounds.
         sorted_token_ids_lora = None
         expert_ids_lora = None
         num_tokens_post_padded_lora = None
         token_lora_mapping = None
         lora_context = self._lora_context
+        if lora_unquantized_hidden_states is not None:
+            lora_x = lora_unquantized_hidden_states
+        elif (
+            lora_context is not None
+            and lora_context.original_hidden_states is not None
+            and lora_context.original_hidden_states.shape[0] == hidden_states.shape[0]
+        ):
+            lora_x = lora_context.original_hidden_states
+        else:
+            lora_x = hidden_states
+
+        # TODO: The fallback to self.a1_scale was added for deferred static
+        # activation quantization in https://github.com/vllm-project/vllm/pull/40857.
+        # Activation emulation relies solely on `a1q_scale` output of
+        # `moe_kernel_quantize_input` - this should be adapted to
+        # always solely rely on `a1q_scale`.
+        input_scale = (
+            a1q_scale
+            if self.quantization_emulation
+            else (a1q_scale if a1q_scale is not None else self.a1_scale)
+        )
 
         def _base_w13_fn():
             invoke_fused_moe_triton_kernel(
                 hidden_states,
                 w1,
                 intermediate_cache1,
-                a1q_scale if a1q_scale is not None else self.a1_scale,
+                input_scale,
                 self.w1_scale,
                 None,  # topk_weights
                 sorted_token_ids,
@@ -322,7 +381,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 return self.apply_w13_lora(
                     lora_context,
                     y=lora_delta_w13,
-                    x=hidden_states,
+                    x=lora_x,
                     topk_ids=topk_ids,
                     topk_weights=topk_weights,
                     expert_map=expert_map,
@@ -359,7 +418,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 ) = self.apply_w13_lora(
                     lora_context,
                     y=intermediate_cache1,
-                    x=hidden_states,
+                    x=lora_x,
                     topk_ids=topk_ids,
                     topk_weights=topk_weights,
                     expert_map=expert_map,
@@ -486,40 +545,45 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 class TritonWNA16Experts(TritonExperts):
     @staticmethod
     def _supports_current_device() -> bool:
-        raise NotImplementedError(
-            "TritonWNA16Experts is not yet used by an Oracle. "
-            "This method should not be called."
-        )
+        return current_platform.is_cuda_alike() or current_platform.is_xpu()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        raise NotImplementedError(
-            "TritonWNA16Experts is not yet used by an Oracle. "
-            "This method should not be called."
-        )
+        return True
 
     @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        raise NotImplementedError(
-            "TritonWNA16Experts is not yet used by an Oracle. "
-            "This method should not be called."
-        )
+        SUPPORTED_W = [
+            kInt4Static,
+            kInt8Static,
+            kInt4Static32,
+            # other group sizes?
+        ]
+        return weight_key in SUPPORTED_W
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        raise NotImplementedError(
-            "TritonWNA16Experts is not yet used by an Oracle. "
-            "This method should not be called."
-        )
+        return activation in [
+            MoEActivation.SILU,
+            MoEActivation.GELU,
+            MoEActivation.GELU_TANH,
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUSTEP,
+            MoEActivation.SILU_NO_MUL,
+            MoEActivation.GELU_NO_MUL,
+            MoEActivation.GELU_TANH_NO_MUL,
+            MoEActivation.RELU2_NO_MUL,
+        ]
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        raise NotImplementedError(
-            "TritonWNA16Experts is not yet used by an Oracle. "
-            "This method should not be called."
+        # Why?
+        return not (
+            moe_parallel_config.use_fi_nvl_two_sided_kernels
+            or moe_parallel_config.use_fi_nvl_one_sided_kernels
         )
 
     def apply(
@@ -542,7 +606,9 @@ class TritonWNA16Experts(TritonExperts):
     ):
         # Check constraints.
         if self.quant_config.use_int4_w4a16:
-            assert hidden_states.size(-1) // 2 == w1.size(2), "Hidden size mismatch"
+            assert hidden_states.size(-1) // 2 == w1.size(2), (
+                f"Hidden size mismatch {hidden_states.size(-1) // 2} == {w1.size(2)}"
+            )
         else:
             assert hidden_states.size(-1) == w1.size(2), (
                 f"Hidden size mismatch {hidden_states.size(-1)} != {w1.size(2)}"

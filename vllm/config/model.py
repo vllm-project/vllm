@@ -20,7 +20,7 @@ from vllm.config.multimodal import (
     MMTensorIPC,
     MultiModalConfig,
 )
-from vllm.config.pooler import PoolerConfig
+from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS, PoolerConfig
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
@@ -69,19 +69,31 @@ else:
     me_models = LazyLoader("model_executor", globals(), "vllm.model_executor.models")
     LoadConfig = Any
     ParallelConfig = Any
-    QuantizationMethods = Any
+    QuantizationMethods = str
     LogitsProcessor = Any
 
 logger = init_logger(__name__)
 
+# Process-local record of which (arch, target) model-class overrides have been
+# registered in *this* process. Must not live on ModelConfig: that instance is
+# pickled to each worker, so an instance flag would arrive already "registered"
+# while the worker's own global ModelRegistry is still untouched.
+_REGISTERED_MODEL_CLASS_OVERRIDES: set[tuple[str, str]] = set()
+
 RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify"]
 ConvertOption = Literal["auto", ConvertType]
-TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32", "deepseek_v4"]
+TokenizerMode = Literal[
+    "auto", "hf", "slow", "mistral", "deepseek_v32", "deepseek_v4", "inkling"
+]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal[
     "raw_logits", "raw_logprobs", "processed_logits", "processed_logprobs"
 ]
+PROCESSED_LOGPROBS_MODES: tuple[LogprobsMode, ...] = (
+    "processed_logits",
+    "processed_logprobs",
+)
 HfOverrides = dict[str, Any] | Callable[[PretrainedConfig], PretrainedConfig]
 ModelImpl = Literal["auto", "vllm", "transformers", "terratorch"]
 LayerBlockType = Literal["attention", "linear_attention", "mamba"]
@@ -213,7 +225,7 @@ class ModelConfig:
     flexibility."""
     enable_return_routed_experts: bool = False
     """Whether to return routed experts."""
-    max_logprobs: int = 20
+    max_logprobs: int = Field(default=20, ge=-1)
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
     OpenAI Chat Completions API. -1 means no cap, i.e. all (output_length *
@@ -225,6 +237,8 @@ class ModelConfig:
     Raw means the values before applying any logit processors, like bad words.
     Processed means the values after applying all processors, including
     temperature and top_k/top_p.
+    Note: for prompt_logprobs, processed_* and raw_* yield identical results
+    because prompt tokens do not go through sampling processors.
     """
     use_fp64_gumbel: bool = False
     """Whether to use FP64 (instead of FP32) random noise for Gumbel-max and
@@ -274,6 +288,13 @@ class ModelConfig:
     hf_overrides: HfOverrides = field(default_factory=dict)
     """If a dictionary, contains arguments to be forwarded to the Hugging Face
     config. If a callable, it is called to update the HuggingFace config."""
+    model_class_overrides: dict[str, str] = field(default_factory=dict)
+    """Override the model class used for one or more architectures, mapping the
+    architecture name to a `"module:class"` target (the same format accepted by
+    `ModelRegistry.register_model`). This registers the target class at runtime,
+    e.g. `{"GlmMoeDsaForCausalLM":
+    "vllm.models.deepseek_v32.nvidia.model:DeepseekV32ForCausalLM"}`. This
+    argument is for development and debugging purposes only."""
     generation_config: str = "auto"
     """The folder path to the generation config. Defaults to `"auto"`, the
     generation config will be loaded from model path. If set to `"vllm"`, no
@@ -289,6 +310,11 @@ class ModelConfig:
     enable_sleep_mode: bool = False
     """Enable sleep mode for the engine (only cuda and
     hip platforms are supported)."""
+    sleep_mode_backend: str = "cumem"
+    """Mechanism used to free and restore GPU state for sleep mode. ``"cumem"``
+    (default) uses the built-in ``CuMemAllocator`` and is behavior-compatible
+    with prior releases. Additional backends (CUDA checkpoint, CRIU, durable
+    snapshot) may be registered in-tree or by plugins (RFC #34303)."""
     enable_cumem_allocator: bool = False
     """Enable the custom cumem allocator to leverage advanced GPU memory
     allocation features such as multi-node NVLink support.
@@ -351,6 +377,7 @@ class ModelConfig:
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
     mm_tensor_ipc: InitVar[MMTensorIPC] = None
+    mm_ipc_gpu_memory_gb: InitVar[float | None] = None
 
     def compute_hash(self) -> str:
         """
@@ -397,6 +424,7 @@ class ModelConfig:
             "mm_encoder_tp_mode",
             "interleave_mm_strings",
             "skip_mm_profiling",
+            "mm_ipc_gpu_memory_gb",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
@@ -477,6 +505,7 @@ class ModelConfig:
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
         mm_tensor_ipc: MMTensorIPC,
+        mm_ipc_gpu_memory_gb: float | None,
     ) -> None:
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(
@@ -601,14 +630,14 @@ class ModelConfig:
         if self.tokenizer_mode == "auto":
             if self.model_impl == "terratorch":
                 self.tokenizer_mode = "terratorch"
-            elif arch == "Grok1ForCausalLM":
-                self.tokenizer_mode = "grok2"
             elif arch == "MoonshotKimiaForCausalLM":
                 self.tokenizer_mode = "kimi_audio"
             elif arch == "DeepseekV32ForCausalLM":
                 self.tokenizer_mode = "deepseek_v32"
             elif arch == "DeepseekV4ForCausalLM":
                 self.tokenizer_mode = "deepseek_v4"
+            elif arch in ("InklingForCausalLM", "InklingForConditionalGeneration"):
+                self.tokenizer_mode = "inkling"
 
             if self.tokenizer_mode != "auto":
                 logger.info(
@@ -621,6 +650,13 @@ class ModelConfig:
         if self.runner_type == "pooling":
             if self.pooler_config is None:
                 self.pooler_config = PoolerConfig()
+                pooler_config_sources: dict[str, str] = {}
+            else:
+                pooler_config_sources = {
+                    k: "user"
+                    for k in POOLER_CONFIG_LOG_FIELDS
+                    if getattr(self.pooler_config, k) is not None
+                }
 
             base_config = get_pooling_config(self.model, self.revision)
             if base_config is not None:
@@ -628,13 +664,18 @@ class ModelConfig:
                 for k, v in base_config.items():
                     if getattr(self.pooler_config, k) is None:
                         setattr(self.pooler_config, k, v)
+                        pooler_config_sources[k] = "sentence_transformers"
 
             default_seq_pooling_type = self._model_info.default_seq_pooling_type
             if self.pooler_config.seq_pooling_type is None:
                 self.pooler_config.seq_pooling_type = default_seq_pooling_type
+                pooler_config_sources["seq_pooling_type"] = "model_default"
             default_tok_pooling_type = self._model_info.default_tok_pooling_type
             if self.pooler_config.tok_pooling_type is None:
                 self.pooler_config.tok_pooling_type = default_tok_pooling_type
+                pooler_config_sources["tok_pooling_type"] = "model_default"
+            pooler_config_sources.setdefault("use_activation", "pooler_default")
+            self._pooler_config_sources = pooler_config_sources
 
         self.dtype: torch.dtype = _get_and_verify_dtype(
             self.model,
@@ -692,6 +733,7 @@ class ModelConfig:
                 skip_mm_profiling=skip_mm_profiling,
                 video_pruning_rate=video_pruning_rate,
                 mm_tensor_ipc=mm_tensor_ipc,
+                mm_ipc_gpu_memory_gb=mm_ipc_gpu_memory_gb,
             )
 
             mm_config_kwargs = {
@@ -805,7 +847,33 @@ class ModelConfig:
 
     @property
     def registry(self):
+        self._maybe_register_model_class_overrides()
         return me_models.ModelRegistry
+
+    def _maybe_register_model_class_overrides(self) -> None:
+        # Apply ``model_class_overrides`` here because this property is the
+        # single chokepoint through which every model-class inspect/resolve
+        # passes, in both the engine front-end and every worker process. The
+        # guard is process-local (see ``_REGISTERED_MODEL_CLASS_OVERRIDES``), so
+        # each worker re-registers into its own ModelRegistry exactly once
+        # rather than trusting a pickled-in instance flag.
+        if not self.model_class_overrides:
+            return
+        pending = [
+            (arch, target)
+            for arch, target in self.model_class_overrides.items()
+            if (arch, target) not in _REGISTERED_MODEL_CLASS_OVERRIDES
+        ]
+        if not pending:
+            return
+        logger.warning_once(
+            "Applying model_class_overrides %s. This is intended for "
+            "development/debugging.",
+            str(self.model_class_overrides),
+        )
+        for arch, target in pending:
+            me_models.ModelRegistry.register_model(arch, target)
+            _REGISTERED_MODEL_CLASS_OVERRIDES.add((arch, target))
 
     @property
     def architectures(self) -> list[str]:
@@ -984,12 +1052,15 @@ class ModelConfig:
                 "auto_gptq",
                 "gptq",
                 "gptq_marlin",
+                "auto_awq",
+                "awq",
                 "awq_marlin",
                 "inc",
                 "moe_wna16",
                 "modelopt",
                 "modelopt_fp4",
                 "modelopt_mxfp8",
+                "mxfp8",
                 "modelopt_mixed",
                 # Ensure heavy backends are probed last to avoid unnecessary
                 # imports during override detection (e.g., MXFP4 imports Triton)
@@ -1243,9 +1314,13 @@ class ModelConfig:
     def is_deepseek_mla(self) -> bool:
         return self.model_arch_config.is_deepseek_mla
 
-    @property
+    @cached_property
     def is_mm_prefix_lm(self) -> bool:
         return self.model_arch_config.is_mm_prefix_lm
+
+    @property
+    def rswa_window(self) -> int | None:
+        return self.model_arch_config.rswa_window
 
     def get_head_size(self) -> int:
         return self.model_arch_config.head_size
@@ -1656,23 +1731,17 @@ class ModelConfig:
         such as the lm_head in a generation model,
         or the score or classifier in a classification model.
 
-        `head_dtype` currently only supports pooling models.
-
-        - The pooling model defaults to using fp32 head, you can use
+        - Pooling models default to an fp32 head; use
           --hf-overrides '{"head_dtype": "model"}' to disable it.
+        - Generation models default to the model dtype; set
+          --hf-overrides '{"head_dtype": "float32"}' to run the lm_head in
+          fp32, which is required for RL training-inference consistency
+          (the trainer computes logits in fp32).
         """
 
         head_dtype = _get_head_dtype(
             config=self.hf_config, dtype=self.dtype, runner_type=self.runner_type
         )
-
-        if self.runner_type != "pooling" and head_dtype != self.dtype:
-            logger.warning_once(
-                "`head_dtype` currently only supports pooling models, "
-                "fallback to model dtype [%s].",
-                self.dtype,
-            )
-            return self.dtype
 
         if head_dtype not in current_platform.supported_dtypes:
             logger.warning_once(
@@ -1828,11 +1897,8 @@ class ModelConfig:
         else:
             # for generative models
             if attn_type == "hybrid":
-                logger.debug(
-                    "Hybrid models do not support prefix caching since the feature "
-                    "is still experimental."
-                )
-                return False
+                logger.debug("Generative hybrid models support prefix caching.")
+                return True
             elif attn_type == "attention_free":
                 logger.debug(
                     "Attention free models do not support prefix caching since the "

@@ -378,6 +378,11 @@ def split_audio(
             audio_data, search_start, search_end, min_energy_window_size
         )
 
+        # Guarantee forward progress: if split_point didn't advance,
+        # fall back to the hard chunk boundary.
+        if split_point <= i:
+            split_point = min(i + chunk_size, audio_data.shape[-1])
+
         # Extract chunk up to the split point
         chunks.append(audio_data[..., i:split_point])
         i = split_point
@@ -423,12 +428,12 @@ def find_split_point(
 
     # Calculate RMS energy in small windows
     min_energy = math.inf
-    quietest_idx = 0
+    quietest_idx = start_idx
 
     for i in range(0, len(segment) - min_energy_window, min_energy_window):
         window = segment[i : i + min_energy_window]
         energy = (window**2).mean() ** 0.5
-        if energy < min_energy:
+        if not math.isnan(energy) and energy < min_energy:
             quietest_idx = i + start_idx
             min_energy = energy
 

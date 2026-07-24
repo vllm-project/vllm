@@ -31,6 +31,7 @@ from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
 from vllm.utils.network_utils import get_open_zmq_ipc_path, get_tcp_uri
 from vllm.utils.system_utils import decorate_logs, kill_process_tree, set_process_title
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -114,7 +115,7 @@ class CpuGpuBuffer:
         *size: int | torch.SymInt,
         dtype: torch.dtype,
         device: torch.device,
-        pin_memory: bool,
+        pin_memory: bool = PIN_MEMORY,
         with_numpy: bool = True,
     ) -> None:
         # these buffers are mutable runtime state, so allocate them as normal
@@ -364,19 +365,25 @@ class RustFrontendProcessManager:
             cmd.extend(["--coordinator-address", stats_update_address])
         from vllm.entrypoints.serve.utils.api_utils import jsonify_non_default_args
 
-        args_json = json.dumps(
-            jsonify_non_default_args(
-                args,
-                exclude={
-                    "api_server_count",
-                    # Python passes the bootstrapped engine range explicitly.
-                    "data_parallel_rank",
-                    "data_parallel_external_lb",
-                    "data_parallel_hybrid_lb",
-                },
-            ),
-            sort_keys=True,
+        args_dict = jsonify_non_default_args(
+            args,
+            exclude={
+                "api_server_count",
+                # Python passes the bootstrapped engine range explicitly.
+                "data_parallel_rank",
+                "data_parallel_external_lb",
+                "data_parallel_hybrid_lb",
+            },
         )
+        # The Rust `frontend` subcommand parses --args-json via serde_json,
+        # which bypasses clap and therefore ignores any `#[arg(env = ...)]`
+        # declarations on SharedRuntimeArgs fields. Forward the env-driven
+        # values explicitly so VLLM_ENGINE_READY_TIMEOUT_S and
+        # VLLM_HTTP_TIMEOUT_KEEP_ALIVE behave the same on both Python and Rust
+        # frontends.
+        args_dict["engine_ready_timeout_secs"] = envs.VLLM_ENGINE_READY_TIMEOUT_S
+        args_dict["http_timeout_keep_alive"] = envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE
+        args_json = json.dumps(args_dict, sort_keys=True)
         cmd.extend(["--args-json", args_json])
 
         logger.info("Launching Rust frontend: %s", " ".join(cmd))
@@ -682,8 +689,15 @@ def report_usage_stats(
         else None
     )
 
+    if model_config.using_transformers_backend():
+        backend_cls = model_config._model_info.architecture
+        # Show what was wrapped e.g. TransformersForCausalLM(Starcoder2ForCausalLM)
+        architecture = f"{backend_cls}({model_config.architectures[0]})"
+    else:
+        architecture = get_architecture_class_name(model_config)
+
     usage_message.report_usage(
-        get_architecture_class_name(model_config),
+        architecture,
         usage_context,
         extra_kvs={
             # Common configuration
@@ -768,12 +782,16 @@ class IterationDetails:
     num_ctx_tokens: int
     num_generation_requests: int
     num_generation_tokens: int
+    num_encoder_inputs: int = 0
+    num_encoder_output_tokens: int = 0
 
     def __repr__(self) -> str:
         return f"IterationDetails(num_ctx_requests={self.num_ctx_requests},\
                  num_ctx_tokens={self.num_ctx_tokens}, \
                  num_generation_requests={self.num_generation_requests}, \
-                 num_generation_tokens={self.num_generation_tokens})"
+                 num_generation_tokens={self.num_generation_tokens}, \
+                 num_encoder_inputs={self.num_encoder_inputs}, \
+                 num_encoder_output_tokens={self.num_encoder_output_tokens})"
 
 
 def compute_iteration_details(scheduler_output: SchedulerOutput) -> IterationDetails:
@@ -804,9 +822,18 @@ def compute_iteration_details(scheduler_output: SchedulerOutput) -> IterationDet
         else:
             num_generation_requests += 1
             num_generation_tokens += num_tokens
+    scheduled_encoder_input_stats = scheduler_output.scheduled_encoder_input_stats
+    num_encoder_inputs = 0
+    num_encoder_output_tokens = 0
+    if scheduled_encoder_input_stats is not None:
+        num_encoder_inputs = scheduled_encoder_input_stats.num_inputs
+        num_encoder_output_tokens = scheduled_encoder_input_stats.output_tokens
+
     return IterationDetails(
         num_context_requests,
         num_context_tokens,
         num_generation_requests,
         num_generation_tokens,
+        num_encoder_inputs,
+        num_encoder_output_tokens,
     )

@@ -246,6 +246,17 @@ class MultiprocExecutor(Executor):
 
         self.output_rank = self._get_output_rank()
 
+    def get_response_mqs(self, unique_reply_rank: int = -1) -> list[MessageQueue]:
+        assert unique_reply_rank >= -1 and unique_reply_rank < self.world_size, (
+            f"unique_reply_rank must be -1 or < world_size,"
+            f"unique_reply_rank = {unique_reply_rank}, "
+            f"world_size={self.world_size}"
+        )
+        ranks = (
+            [unique_reply_rank] if unique_reply_rank != -1 else range(self.world_size)
+        )
+        return [self.workers[rank].worker_response_mq for rank in ranks]
+
     def _get_parallel_sizes(self) -> tuple[int, int, int]:
         self.world_size = self.parallel_config.world_size
         assert self.world_size % self.parallel_config.nnodes_within_dp == 0, (
@@ -280,9 +291,12 @@ class MultiprocExecutor(Executor):
                 logger.debug("MultiprocWorkerMonitor: shutdown already initiated")
                 return
             _self.is_failed = True
-            proc_name = next(h.proc.name for h in workers if h.proc.sentinel == died[0])
+            proc = next(h.proc for h in workers if h.proc.sentinel == died[0])
             logger.error(
-                "Worker proc %s died unexpectedly, shutting down executor.", proc_name
+                "Worker proc %s died unexpectedly (exit code: %s), "
+                "shutting down executor.",
+                proc.name,
+                proc.exitcode,
             )
             _self.shutdown()
             callback = _self.failure_callback
@@ -826,6 +840,16 @@ class WorkerProc:
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
+        # Publish the logical-to-physical mapping early so topology helpers
+        # work before init_device (needed by set_worker_net_device below).
+        assigned_physical_gpu_ids = kwargs[
+            "vllm_config"
+        ].parallel_config.assigned_physical_gpu_ids
+        if assigned_physical_gpu_ids is not None:
+            from vllm.platforms.interface import set_assigned_physical_gpu_ids
+
+            set_assigned_physical_gpu_ids(assigned_physical_gpu_ids)
+
         # Set net device env vars for the worker if VLLM_GPU_NIC_PCIE_MAPPING is set
         set_worker_net_device(kwargs.get("local_rank", 0), kwargs["vllm_config"])
 
@@ -929,7 +953,11 @@ class WorkerProc:
         converted to a FAILURE response.
         """
         if isinstance(output, AsyncModelRunnerOutput):
-            output = output.get_output()
+            try:
+                output = output.get_output()
+            except Exception as e:
+                logger.exception("Error getting async model runner output")
+                output = e
 
         if isinstance(output, Exception):
             result = (WorkerProc.ResponseStatus.FAILURE, str(output))

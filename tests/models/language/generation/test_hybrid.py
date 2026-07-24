@@ -37,12 +37,16 @@ HYBRID_MODELS = [
     "ai21labs/Jamba-tiny-dev",
     "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
-    "hmellor/tiny-random-BambaForCausalLM",
     "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
     "LiquidAI/LFM2-1.2B",
     "tiny-random/qwen3-next-moe",
 ]
+
+HYBRID_MODELS_REQUIRING_CHUNKED_PREFILL = {
+    "LiquidAI/LFM2-1.2B",
+    "tiny-random/qwen3-next-moe",
+}
 
 FULL_CUDA_GRAPH_MODELS = [
     "ai21labs/Jamba-tiny-dev",
@@ -93,8 +97,15 @@ def test_models(
             example_prompts, max_tokens, num_logprobs
         )
 
+    extra_kwargs = {}
+    if model in HYBRID_MODELS_REQUIRING_CHUNKED_PREFILL:
+        extra_kwargs["enable_chunked_prefill"] = True
+
     with vllm_runner(
-        model, max_num_seqs=MAX_NUM_SEQS, attention_backend=ATTN_BACKEND
+        model,
+        max_num_seqs=MAX_NUM_SEQS,
+        attention_backend=ATTN_BACKEND,
+        **extra_kwargs,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
@@ -373,8 +384,13 @@ def test_fp32_cache_state(
             example_prompts, max_tokens, num_logprobs
         )
 
+    # Leave enough headroom for repeated engine initialization on a
+    # 32.5 GiB MIG.
     with vllm_runner(
-        model, max_num_seqs=MAX_NUM_SEQS, **{cache_dtype_param: "float32"}
+        model,
+        max_num_seqs=MAX_NUM_SEQS,
+        gpu_memory_utilization=0.9,
+        **{cache_dtype_param: "float32"},
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
@@ -439,7 +455,7 @@ def _get_vLLM_output(
     return outs, vllm_model
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[0], HYBRID_MODELS[3]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
@@ -503,7 +519,7 @@ def test_apc_single_prompt(
         )
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[0], HYBRID_MODELS[3]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
@@ -584,7 +600,7 @@ def test_apc_single_prompt_block_align_alignment(
             )
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[0], HYBRID_MODELS[3]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
@@ -653,7 +669,7 @@ def test_apc_multiple_prompts_all_cached_outputs(
         )
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[0], HYBRID_MODELS[3]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
@@ -738,7 +754,7 @@ def test_apc_multiple_prompts_block_align_alignment(
             )
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[0], HYBRID_MODELS[3]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version

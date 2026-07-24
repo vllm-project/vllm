@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING
 
+from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
+
 if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
@@ -16,10 +18,12 @@ if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
+    from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
     from vllm.v1.request import Request
 else:
     ECConnectorMetadata = object
     KVConnectorMetadata = object
+    KVCacheBlockCopy = object
     LoRARequest = object
     MultiModalFeatureSpec = object
     PoolingParams = object
@@ -118,8 +122,8 @@ class CachedRequestData:
     # NOTE(woosuk): new_token_ids is only used for pipeline parallelism.
     # When PP is not used, new_token_ids will be empty.
     new_token_ids: list[list[int]]
-    # For requests not scheduled in the last step, propagate the token ids to the
-    # connector. Won't contain requests that were scheduled in the prior step.
+    # MRV1-only: For requests not scheduled in the last step, propagate the token ids
+    # to the connector. Won't contain requests scheduled in the prior step.
     all_token_ids: dict[str, list[int]]
     new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
@@ -178,6 +182,14 @@ class CachedRequestData:
 
 
 @dataclass
+class ScheduledEncoderInputStats:
+    """Stats for encoder inputs scheduled in one iteration."""
+
+    num_inputs: int = 0
+    output_tokens: int = 0
+
+
+@dataclass
 class SchedulerOutput:
     # list of the requests that are scheduled for the first time.
     # We cache the request's data in each worker process, so that we don't
@@ -214,6 +226,8 @@ class SchedulerOutput:
     # freed from the encoder cache.
     free_encoder_mm_hashes: list[str]
 
+    scheduled_encoder_input_stats: ScheduledEncoderInputStats | None = None
+
     # Request IDs that are preempted in this step.
     # Only used for v2 model runner.
     preempted_req_ids: set[str] | None = None
@@ -234,11 +248,15 @@ class SchedulerOutput:
 
     # EC Cache Connector metadata
     ec_connector_metadata: ECConnectorMetadata | None = None
-
+    # EC Cache Manager metadata
+    ec_manager_metadata: EncoderCacheManagerMetadata | None = None
     # Block IDs freshly allocated from the pool during this scheduling step.
     # The worker zeros the corresponding GPU memory before the blocks are used,
     # preventing stale NaN/data from corrupting attention or SSM computation.
     new_block_ids_to_zero: list[int] | None = None
+
+    # CoW copies to apply after zeroing new blocks and before forward.
+    kv_cache_block_copies: list[KVCacheBlockCopy] | None = None
 
     # Dynamic speculative decoding: optimal K chosen by scheduler.
     # Number of spec tokens to schedule for the next step.

@@ -10,7 +10,7 @@ from transformers import PretrainedConfig
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -20,6 +20,9 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
+)
+from vllm.model_executor.model_loader.mtp_validation import (
+    is_mtp_completeness_check_enabled,
 )
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
@@ -33,11 +36,31 @@ from .deepseek_v2 import (
     DeepseekV2MixtureOfExperts,
     DeepseekV2MoE,
     _try_load_fp8_indexer_wk,
-    get_spec_layer_idx_from_weight_name,
 )
-from .utils import get_pp_missing_layer_names, maybe_prefix
+from .utils import (
+    get_pp_missing_layer_names,
+    get_spec_layer_idx_from_weight_name,
+    maybe_prefix,
+)
 
-logger = init_logger(__name__)
+
+def _restore_full_token_layout_if_needed(
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor,
+    num_tokens: int,
+    is_sequence_parallel: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Restore full token rows for the MTP proposer after SP MoE layers."""
+    if not is_sequence_parallel and hidden_states.shape[0] == num_tokens:
+        return hidden_states, residual
+
+    combined_states = torch.cat([hidden_states, residual], dim=-1)
+    combined_states = tensor_model_parallel_all_gather(combined_states, 0)
+    combined_states = combined_states[:num_tokens]
+    hidden_states, residual = combined_states.split(
+        [hidden_states.shape[-1], residual.shape[-1]], dim=-1
+    )
+    return hidden_states, residual
 
 
 class SharedHead(nn.Module):
@@ -119,8 +142,18 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
             hidden_states=hidden_states,
             residual=None,
         )
-        hidden_states = residual + hidden_states
-        return hidden_states
+        hidden_states, residual = _restore_full_token_layout_if_needed(
+            hidden_states,
+            residual,
+            positions.shape[0],
+            is_sequence_parallel=self.mtp_block.use_sequence_parallel_moe,
+        )
+        hidden_states = residual + hidden_states  # pre-final-norm (logits hidden)
+        # Recycle the post-final-norm hidden into the next draft step.
+        # compute_logits applies shared_head (== final norm) to the pre-norm
+        # element, so logits and the recycle each get exactly one final-norm.
+        # Matches SGLang's deepseek_nextn.
+        return hidden_states, self.shared_head(hidden_states)
 
 
 class DeepSeekMultiTokenPredictor(nn.Module):
@@ -164,6 +197,21 @@ class DeepSeekMultiTokenPredictor(nn.Module):
                     mla_attn = getattr(self_attn, "mla_attn", None)
                     if mla_attn is not None and hasattr(mla_attn, "skip_topk"):
                         mla_attn.skip_topk = skip
+
+    def compact_topk_indices(self, slot_ids: torch.Tensor):
+        """Gather the top-k index rows at ``slot_ids`` to the front of the buffer."""
+        num_slots = slot_ids.numel()
+        for layer in self.layers.values():
+            mtp_block = getattr(layer, "mtp_block", None)
+            if mtp_block is not None:
+                self_attn = getattr(mtp_block, "self_attn", None)
+                if self_attn is not None:
+                    mla_attn = getattr(self_attn, "mla_attn", None)
+                    if mla_attn is not None and hasattr(
+                        mla_attn, "topk_indices_buffer"
+                    ):
+                        topk_indices_buffer = mla_attn.topk_indices_buffer
+                        topk_indices_buffer[:num_slots] = topk_indices_buffer[slot_ids]
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -213,7 +261,6 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
         self.set_moe_parameters()
 
     def set_moe_parameters(self):
-        self.expert_weights = []
         self.num_moe_layers = self.config.num_nextn_predict_layers
         self.num_expert_groups = self.config.n_group
 
@@ -472,7 +519,7 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
             self.model.mtp_start_layer_idx,
             self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
         ):
-            if layer_idx not in loaded_layers:
+            if layer_idx not in loaded_layers and is_mtp_completeness_check_enabled():
                 raise ValueError(
                     f"MTP speculative decoding layer {layer_idx} weights "
                     f"missing from checkpoint. The checkpoint may have "

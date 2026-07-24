@@ -139,10 +139,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def _maybe_pad_weight(self, weight: torch.Tensor) -> torch.Tensor:
         # Pad the weight tensor. This is an optimization on ROCm platform, which
-        # can benefit from tensors located far enough from one another in memory
+        # can benefit from tensors located far enough from one another in memory.
+        # Skip padding when EPLB is enabled because EPLB requires contiguous
+        # weights for the view/rearrangement operations.
         if (
             envs.VLLM_ROCM_MOE_PADDING
             and current_platform.is_rocm()
+            and not self.moe.moe_parallel_config.enable_eplb
             and weight.stride(-1) == 1
             and (weight.stride(-2) * weight.element_size()) % 512 == 0
         ):
@@ -161,7 +164,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         # Shuffle weights to runtime format.
         w13_new, w2_new = convert_to_unquantized_kernel_format(
             self.unquantized_backend,
-            layer=layer,
+            moe_config=layer.moe_config,
             w13_weight=w13,
             w2_weight=w2,
         )

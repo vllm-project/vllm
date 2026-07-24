@@ -8,7 +8,7 @@ import torch
 import torch.distributed as dist
 
 import vllm.envs as envs
-from vllm.distributed import get_dp_group, get_ep_group
+from vllm.distributed import get_dp_group, get_ep_group, get_pcp_group
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
@@ -16,6 +16,7 @@ from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
 )
+from vllm.utils.func_utils import supports_kw
 from vllm.utils.import_utils import has_deep_ep, has_deep_ep_v2, has_mori
 
 from .base_device_communicator import All2AllManagerBase, Cache
@@ -48,6 +49,23 @@ class AgRsAll2AllManager(All2AllManagerBase):
     def __init__(self, cpu_group, tcp_store_group=None):
         super().__init__(cpu_group, tcp_store_group)
 
+    def _get_comm_group(self, is_sequence_parallel: bool) -> Any:
+        if is_sequence_parallel:
+            return get_ep_group()
+        if self.dp_world_size > 1:
+            return get_dp_group()
+        return get_pcp_group()
+
+    def _get_sizes(self, num_local_tokens: int, comm_group: Any) -> list[int]:
+        if self.dp_world_size == 1:
+            return [num_local_tokens] * comm_group.world_size
+
+        dp_metadata = get_forward_context().dp_metadata
+        assert dp_metadata is not None
+        sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
+        assert sizes is not None
+        return sizes
+
     def dispatch_router_logits(
         self,
         hidden_states: torch.Tensor,
@@ -61,11 +79,8 @@ class AgRsAll2AllManager(All2AllManagerBase):
         """
         Gather hidden_states and router_logits from all dp ranks.
         """
-        dp_metadata = get_forward_context().dp_metadata
-        assert dp_metadata is not None
-        sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
-        assert sizes is not None
-        dist_group = get_ep_group() if is_sequence_parallel else get_dp_group()
+        dist_group = self._get_comm_group(is_sequence_parallel)
+        sizes = self._get_sizes(hidden_states.shape[0], dist_group)
         assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
 
         tensors_to_gather = [hidden_states, router_logits]
@@ -96,11 +111,8 @@ class AgRsAll2AllManager(All2AllManagerBase):
         """
         Gather hidden_states and router_logits from all dp ranks.
         """
-        dp_metadata = get_forward_context().dp_metadata
-        assert dp_metadata is not None
-        sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
-        assert sizes is not None
-        dist_group = get_ep_group() if is_sequence_parallel else get_dp_group()
+        dist_group = self._get_comm_group(is_sequence_parallel)
+        sizes = self._get_sizes(hidden_states.shape[0], dist_group)
         assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
 
         tensors_to_gather = [hidden_states, topk_weights, topk_ids]
@@ -128,12 +140,11 @@ class AgRsAll2AllManager(All2AllManagerBase):
         """
         Reduce-scatter hidden_states across all dp ranks.
         """
-        dp_metadata = get_forward_context().dp_metadata
-        assert dp_metadata is not None
-        sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
-        assert sizes is not None
-
-        dist_group = get_ep_group() if is_sequence_parallel else get_dp_group()
+        dist_group = self._get_comm_group(is_sequence_parallel)
+        sizes = self._get_sizes(
+            hidden_states.shape[0] // dist_group.world_size,
+            dist_group,
+        )
         hidden_states = dist_group.reduce_scatterv(hidden_states, dim=0, sizes=sizes)
         return hidden_states
 
@@ -261,8 +272,13 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
     All2All communication based on DeepEP Low-Latency kernels.
     """
 
+    _buffer: Any = None
+    _mask: torch.Tensor | None = None
+    _last_mask: torch.Tensor | None = None
+
     def __init__(self, cpu_group, tcp_store_group=None):
         super().__init__(cpu_group, tcp_store_group)
+        self.support_fault_tolerance = False  # TODO: set to True when FT is supported.
 
     def _make_all2all_kwargs(
         self,
@@ -304,6 +320,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
             allow_nvlink_for_low_latency_mode=True,
             allow_mnnvl=envs.VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL,
             explicitly_destroy=True,
+            enable_shrink=self.support_fault_tolerance,
         )
         return kwargs
 
@@ -319,11 +336,29 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         handle: deep_ep.Buffer = self.handle_cache.get_or_create(
             buffer_kwargs, deep_ep.Buffer
         )
+        DeepEPLLAll2AllManager._buffer = handle
         return handle
 
     # DeepEP LL uses RDMA so no SMs are used for communication
     def max_sms_used(self) -> int | None:
         return 0
+
+    def query_active_mask(self) -> torch.Tensor:
+        buf = DeepEPLLAll2AllManager._buffer
+        assert buf is not None
+        if DeepEPLLAll2AllManager._mask is None:
+            DeepEPLLAll2AllManager._mask = torch.zeros(
+                self.world_size, device="cuda", dtype=torch.int32
+            )
+        buf.low_latency_query_mask_buffer(DeepEPLLAll2AllManager._mask)
+        return DeepEPLLAll2AllManager._mask
+
+    def query_fault(self) -> torch.Tensor:
+        current = self.query_active_mask()
+        if DeepEPLLAll2AllManager._last_mask is None:
+            DeepEPLLAll2AllManager._last_mask = torch.zeros_like(current)
+        has_fault = (current != DeepEPLLAll2AllManager._last_mask).any()
+        return has_fault
 
 
 @dataclass
@@ -341,6 +376,8 @@ class NixlEPAll2AllManager(All2AllManagerBase):
 
     _buffer: _NixlEPBufferState | None = None
     _lock = threading.RLock()
+    _mask: torch.Tensor | None = None
+    _last_mask: torch.Tensor | None = None
 
     def __init__(self, cpu_group, tcp_store_group=None):
         if tcp_store_group is None:
@@ -350,6 +387,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
                 store=dist.PrefixStore("nixl_ep", cpu_group.get_group_store()),
             )
         super().__init__(cpu_group, tcp_store_group)
+        self.support_fault_tolerance = True
 
         self.max_num_ep_ranks = envs.VLLM_NIXL_EP_MAX_NUM_RANKS
 
@@ -508,6 +546,25 @@ class NixlEPAll2AllManager(All2AllManagerBase):
     def max_sms_used(self) -> int | None:
         return 0
 
+    def query_active_mask(self) -> torch.Tensor:
+        state = NixlEPAll2AllManager._buffer
+        assert state is not None
+        if NixlEPAll2AllManager._mask is None:
+            NixlEPAll2AllManager._mask = torch.zeros(
+                self.max_num_ep_ranks, device="cuda", dtype=torch.int32
+            )
+        state.buffer.query_mask_buffer(NixlEPAll2AllManager._mask)
+        return NixlEPAll2AllManager._mask[: state.active_ep_size]
+
+    def query_fault(self) -> torch.Tensor:
+        current = self.query_active_mask()
+        last = NixlEPAll2AllManager._last_mask
+        if last is None or last.shape != current.shape:
+            NixlEPAll2AllManager._last_mask = torch.zeros_like(current)
+            last = NixlEPAll2AllManager._last_mask
+        has_fault = (current != last).any()
+        return has_fault
+
 
 class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
     """
@@ -644,6 +701,7 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         self.max_num_tokens = 0
         self.top_k = 0
         self.num_experts = 0
+        self._combine_supports_output = False
 
     def initialize(
         self,
@@ -704,7 +762,14 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         self.num_experts = num_experts
 
         self.cleanup()
-        gpus_per_node = torch.accelerator.device_count()
+        from vllm.platforms.interface import get_assigned_physical_gpu_ids
+
+        assigned_physical_gpu_ids = get_assigned_physical_gpu_ids()
+        gpus_per_node = (
+            len(assigned_physical_gpu_ids)
+            if assigned_physical_gpu_ids is not None
+            else torch.accelerator.device_count()
+        )
         logger.debug(
             "Making One-sided NVLink mapping: rank=%d, world size=%d",
             self.rank,
@@ -737,6 +802,12 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
             workspace_size_per_rank=self.workspace_size,
             mnnvl_config=ep_config,
         )
+        try:
+            self._combine_supports_output = supports_kw(
+                self.moe_alltoall.combine, "output", allow_var_kwargs=False
+            )
+        except (TypeError, ValueError):
+            self._combine_supports_output = False
 
         self.gpus_per_node = gpus_per_node
         self.initialized = True
@@ -750,6 +821,27 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         # rebuild a different number of times if their MoE layers have
         # different shape sequences, so a world-level barrier would deadlock.
         dist.barrier(group=self.cpu_group)
+
+    def combine_into(
+        self,
+        payload: torch.Tensor,
+        runtime_max_tokens_per_rank: int,
+        output: torch.Tensor,
+    ) -> None:
+        """Combine into ``output``, with a fallback for older FlashInfer."""
+        assert self.moe_alltoall is not None
+        if self._combine_supports_output:
+            self.moe_alltoall.combine(
+                payload=payload,
+                runtime_max_tokens_per_rank=runtime_max_tokens_per_rank,
+                output=output,
+            )
+        else:
+            combined_output = self.moe_alltoall.combine(
+                payload=payload,
+                runtime_max_tokens_per_rank=runtime_max_tokens_per_rank,
+            )
+            output.copy_(combined_output)
 
     def get_handle(self, kwargs):
         return self
