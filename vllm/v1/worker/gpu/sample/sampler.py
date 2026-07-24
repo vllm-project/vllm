@@ -186,6 +186,9 @@ class Sampler:
         # Apply min_p in place.
         self.sampling_states.apply_min_p(logits, expanded_idx_mapping, idx_mapping_np)
 
+        # Apply Min-k in place.
+        self.sampling_states.apply_min_k(logits, expanded_idx_mapping, idx_mapping_np)
+
         if skip_top_k_top_p:
             return logits
 

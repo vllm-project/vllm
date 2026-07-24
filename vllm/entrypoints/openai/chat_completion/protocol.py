@@ -249,6 +249,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     use_beam_search: bool = False
     top_k: int | None = None
     min_p: float | None = None
+    min_k: bool = False
+    min_k_tau: float = 3.0
     repetition_penalty: float | None = None
     length_penalty: float = 1.0
     stop_token_ids: list[int] | None = []
@@ -671,6 +673,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
             top_p=top_p,
             top_k=top_k,
             min_p=min_p,
+            min_k=self.min_k,
+            min_k_tau=self.min_k_tau,
             seed=self.seed,
             stop=self.stop,
             stop_token_ids=stop_token_ids,
@@ -1049,6 +1053,8 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     use_beam_search: bool = False
     top_k: int | None = None
     min_p: float | None = None
+    min_k: bool = False
+    min_k_tau: float = 3.0
     repetition_penalty: float | None = None
     length_penalty: float | None = 1.0
     early_stopping: bool = False
