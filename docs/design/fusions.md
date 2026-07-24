@@ -273,12 +273,19 @@ q_rope, k_rope = rotary_embedding(q_norm, k_norm, ...)
 fused_qk_norm_rope(qkv, ...)
 ```
 
+**Multimodal RoPE (mRoPE).** The same pass (under the same `enable_qk_norm_rope_fusion`
+flag) also fuses the mRoPE variant used by Qwen3-VL-class models — per-head Q/K RMSNorm
+followed by 3-section `[t, h, w]` multimodal rotary embedding — into a single
+`fused_qk_norm_mrope` kernel. Both the contiguous `[T..T H..H W..W]` and interleaved
+`[T H W ... T T]` (the Qwen3-VL default) mRoPE section layouts are supported.
+
 Supported hardware: CUDA (sm80+) only, tested only on sm90 and sm100.
 
 **Code locations.**
 
 - Pass: [`vllm/compilation/passes/fusion/qk_norm_rope_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/qk_norm_rope_fusion.py)
 - CUDA kernel: [`csrc/ops.h`](https://github.com/vllm-project/vllm/blob/main/csrc/ops.h) (`fused_qk_norm_rope`)
+- mRoPE CUDA kernel: [`csrc/libtorch_stable/fused_qknorm_mrope_kernel.cu`](https://github.com/vllm-project/vllm/blob/main/csrc/libtorch_stable/fused_qknorm_mrope_kernel.cu) (`fused_qk_norm_mrope`)
 
 ### RMSNorm + Quantization (`fuse_norm_quant`)
 
