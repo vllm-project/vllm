@@ -620,6 +620,11 @@ _EMBEDDING_EXAMPLE_MODELS = {
         "nvidia/llama-nemotron-embed-vl-1b-v2", trust_remote_code=True
     ),
     "LlavaNextForConditionalGeneration": _HfExamplesInfo("royokong/e5-v"),
+    "MiniCPMRobotTrackModel": _HfExamplesInfo(
+        "openbmb/MiniCPM-RobotTrack",
+        is_available_online=False,
+        enforce_eager=True,
+    ),
     "Phi3VForCausalLM": _HfExamplesInfo(
         "TIGER-Lab/VLM2Vec-Full", trust_remote_code=True
     ),
