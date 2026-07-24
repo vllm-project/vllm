@@ -10,6 +10,7 @@ from torch.nn.parameter import Parameter
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config import get_current_vllm_config
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     MarlinNvFp4LinearKernel,
@@ -58,6 +59,12 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.online.base import (
+    OnlineQuantizationConfig,
+)
+from vllm.model_executor.layers.quantization.online.fp8 import (
+    Fp8PtpcOnlineLinearMethod,
+)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     swap_w13_to_w31,
 )
@@ -73,6 +80,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     MXFP8_SCALE_DTYPE,
     MXFP8_VALUE_DTYPE,
+    dequant_mxfp8_to_bf16,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -96,6 +104,7 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -1717,6 +1726,40 @@ class ModelOptMxFp8Config(ModelOptQuantConfigBase):
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
         return [torch.bfloat16]
 
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> "QuantizeMethodBase | None":
+        if current_platform.is_rocm() and isinstance(layer, LinearBase):
+            model_config = get_current_vllm_config().model_config
+            args = model_config.quantization_config
+            if isinstance(args, QuantizationConfigArgs) and not self.is_layer_excluded(
+                prefix
+            ):
+                target_method = OnlineQuantizationConfig(args).get_quant_method(
+                    layer, prefix
+                )
+                if isinstance(target_method, Fp8PtpcOnlineLinearMethod):
+                    linear_backend = (
+                        get_current_vllm_config().kernel_config.linear_backend
+                    )
+                    if linear_backend not in {"auto", "aiter"}:
+                        raise ValueError(
+                            "ModelOpt MXFP8 to FP8 PTPC requantization requires "
+                            "the AITER linear kernel; use --linear-backend=auto "
+                            "or --linear-backend=aiter, got "
+                            f"--linear-backend={linear_backend}."
+                        )
+                    source_method = ModelOptMxFp8LinearMethod(self, init_kernel=False)
+                    target_method.set_requantization_source(source_method)
+                    logger.info_once(
+                        "ModelOpt MXFP8 linear override: checkpoint MXFP8 + "
+                        "E8M0 -> BF16 -> FP8 PTPC; unspecified linears and "
+                        "MoE retain checkpoint quantization.",
+                        scope="global",
+                    )
+                    return target_method
+        return super().get_quant_method(layer, prefix)
+
     @classmethod
     def get_min_capability(cls) -> int:
         # Marlin kernel supports MXFP8 on SM80+
@@ -1782,7 +1825,9 @@ class ModelOptMxFp8Config(ModelOptQuantConfigBase):
 class ModelOptMxFp8LinearMethod(LinearMethodBase):
     """Linear method for ModelOpt MXFP8 quantization."""
 
-    def __init__(self, quant_config: ModelOptMxFp8Config) -> None:
+    def __init__(
+        self, quant_config: ModelOptMxFp8Config, *, init_kernel: bool = True
+    ) -> None:
         self.quant_config = quant_config
 
         if not self.quant_config.is_checkpoint_mxfp8_serialized:
@@ -1791,7 +1836,7 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
                 "Dynamic quantization is not supported."
             )
 
-        self.kernel = init_mxfp8_linear_kernel()
+        self.kernel = init_mxfp8_linear_kernel() if init_kernel else None
 
     def create_weights(
         self,
@@ -1856,6 +1901,12 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
         if layer.weight.element_size() >= 2:
             return
 
+        self._validate_serialized_weight(layer)
+        assert self.kernel is not None
+        self.kernel.process_weights_after_loading(layer)
+
+    @staticmethod
+    def _validate_serialized_weight(layer: torch.nn.Module) -> None:
         # Validate weight tensor
         if layer.weight.ndim != 2:
             raise ValueError(
@@ -1879,7 +1930,12 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
             f" got {layer.weight_scale.dtype}"
         )
 
-        self.kernel.process_weights_after_loading(layer)
+    def dequantize_weight(self, layer: torch.nn.Module) -> torch.Tensor:
+        """Reconstruct the serialized MXFP8 weight for online requantization."""
+        self._validate_serialized_weight(layer)
+        return dequant_mxfp8_to_bf16(
+            layer.weight.contiguous(), layer.weight_scale.contiguous()
+        )
 
     def apply(
         self,
@@ -1887,6 +1943,7 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        assert self.kernel is not None
         return self.kernel.apply_weights(layer, x, bias)
 
 
