@@ -253,6 +253,16 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
         ),
         (
             SimpleNamespace(
+                model="Qwen/Qwen3-1.7B-Base",
+                architectures=["Qwen3ForCausalLM"],
+                runner_type="draft",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            False,
+        ),
+        (
+            SimpleNamespace(
                 model="Qwen/Qwen3.5-4B",
                 architectures=["Qwen3_5ForConditionalGeneration"],
                 runner_type="generate",
@@ -281,7 +291,7 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
                 is_moe=False,
                 is_quantized=False,
             ),
-            False,
+            True,
         ),
     ],
 )
