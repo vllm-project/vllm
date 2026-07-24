@@ -377,9 +377,10 @@ class KVCacheManager:
                 requests when chunked prefill would otherwise only check the first chunk
             reserved_blocks: Number of free blocks that must be left available for
                 other in-flight sequences to complete. The actual allocation is only
-                made if it fits within (free blocks - reserved_blocks). Used to gate
-                async KV-connector loads so their initial allocation cannot consume
-                blocks an already in-flight (prefilling) sequence is relying on.
+                made if it fits within (free blocks - reserved_blocks). Applied to
+                every admission and running allocation so that no request can
+                consume blocks an in-flight prefill (e.g. a parked async KV load)
+                still needs to finish.
             has_scheduled_reqs: Whether any requests are already scheduled to run
                 this step, controls whether watermark is applied.
 
@@ -480,7 +481,9 @@ class KVCacheManager:
                 apply_admission_cap=True,
             )
             required_blocks = num_blocks_to_allocate + watermark_blocks
-            if required_blocks > self.block_pool.get_num_free_blocks():
+            if required_blocks > (
+                self.block_pool.get_num_free_blocks() - reserved_blocks
+            ):
                 return None
 
         num_tokens_main_model = total_computed_tokens + num_new_tokens
