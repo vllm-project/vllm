@@ -862,6 +862,8 @@ def test_split_prefill_chunks(seq_lens, max_buf, expected):
 PREFILL_BATCH_SPECS = {
     "short_dense_mha": BatchSpec(seq_lens=[64, 128], query_lens=[64, 128]),
     "short_context_dense_mha": BatchSpec(seq_lens=[128, 160], query_lens=[64, 32]),
+    "masked_mha": BatchSpec(seq_lens=[256], query_lens=[256]),
+    "masked_mha_chunked_context": BatchSpec(seq_lens=[448, 384], query_lens=[256, 256]),
 }
 
 
@@ -878,7 +880,7 @@ def test_sparse_backend_prefill_correctness(
     kv_cache_dtype,
     workspace_init,
 ):
-    """Test single-pass FA4 dense forward_mha for sparse MLA prefill."""
+    """Test single-pass dense and masked MHA for sparse MLA prefill."""
     backend_cls = FlashMLASparseBackend
     batch_spec = PREFILL_BATCH_SPECS[batch_name]
 
@@ -892,7 +894,8 @@ def test_sparse_backend_prefill_correctness(
     qk_rope_head_dim = 64
     v_head_dim = 128
     head_size = kv_lora_rank + qk_rope_head_dim
-    topk_tokens = 512
+    masked_mha = batch_name.startswith("masked_mha")
+    topk_tokens = 200 if masked_mha else 512
 
     max_seqlen = max(batch_spec.seq_lens)
     total_cache_tokens = sum(batch_spec.seq_lens)
@@ -942,13 +945,17 @@ def test_sparse_backend_prefill_correctness(
 
     # Compute dense reference outputs.
     total_query_tokens = sum(query_lens)
-    sparse_indices = torch.zeros(
-        total_query_tokens, topk_tokens, dtype=torch.int32, device=device
+    sparse_indices = torch.full(
+        (total_query_tokens, topk_tokens),
+        -1 if masked_mha else 0,
+        dtype=torch.int32,
+        device=device,
     )
 
     all_q, all_kv_c_new, all_k_pe_new = [], [], []
     kv_c_contexts, k_pe_contexts = [], []
     reference_outputs = []
+    global_token_idx = 0
 
     for i in range(batch_spec.batch_size):
         s_len = seq_lens[i]
@@ -981,8 +988,15 @@ def test_sparse_backend_prefill_correctness(
         for j in range(q_len):
             attend_end = ctx_len + j + 1
             q_tok = q_mha[j : j + 1]  # (1, H, D_qk)
-            k_attend = k_all[:attend_end]  # (N, H, D_qk)
-            v_attend = v_all[:attend_end]  # (N, H, D_v)
+            if masked_mha:
+                actual_topk = min(topk_tokens, attend_end)
+                attend_indices = torch.randperm(attend_end, device=device)[:actual_topk]
+                sparse_indices[global_token_idx, :actual_topk] = attend_indices
+                k_attend = k_all[attend_indices]
+                v_attend = v_all[attend_indices]
+            else:
+                k_attend = k_all[:attend_end]  # (N, H, D_qk)
+                v_attend = v_all[:attend_end]  # (N, H, D_v)
 
             q_sdpa = q_tok.unsqueeze(0).transpose(1, 2).float()
             k_sdpa = k_attend.unsqueeze(0).transpose(1, 2).float()
@@ -993,6 +1007,7 @@ def test_sparse_backend_prefill_correctness(
             )
             out = out.transpose(1, 2).squeeze(0)  # (1, H, D_v)
             reference_outputs.append(out.to(dtype).flatten(start_dim=-2))
+            global_token_idx += 1
 
         all_q.append(q_mha)
         all_kv_c_new.append(kv_c_full[ctx_len:])
@@ -1047,6 +1062,13 @@ def test_sparse_backend_prefill_correctness(
 
     builder_cls = backend_cls.get_builder_cls()
     builder = builder_cls(kv_cache_spec, ["placeholder"], vllm_config, device)
+    if batch_name == "masked_mha_chunked_context":
+        builder.chunked_prefill_workspace_size = block_size * batch_spec.batch_size
+        builder.chunked_prefill_workspace = torch.empty(
+            (builder.chunked_prefill_workspace_size, head_size),
+            dtype=dtype,
+            device=device,
+        )
     # Drive the queries through the dense-MHA prefill path directly (the routing
     # threshold would otherwise classify these short queries as MQA decodes).
     builder.reorder_batch_threshold = 1
