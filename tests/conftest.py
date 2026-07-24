@@ -1769,6 +1769,22 @@ def use_fresh_inductor_cache():
 
 
 @pytest.fixture
+def disable_vllm_compile_cache(monkeypatch, use_fresh_inductor_cache):
+    """
+    Use a fresh inductor cache AND disable vLLM's on-disk torch.compile cache.
+
+    This forces compilation (and any custom compile passes) to actually run
+    instead of being served from a warm cache left behind by previous runs
+    (e.g. on persistent CI agents). Use this for tests that inspect what
+    happens during compilation; use ``use_fresh_inductor_cache`` (or
+    ``fresh_vllm_cache``) instead when the vLLM compile cache must stay
+    enabled (e.g. cache save/load tests).
+    """
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+    yield
+
+
+@pytest.fixture
 def fresh_vllm_cache(monkeypatch, use_fresh_inductor_cache):
     """Temporary VLLM_CACHE_ROOT combined with a fresh inductor cache."""
     with tempfile.TemporaryDirectory() as tmp_dir:
