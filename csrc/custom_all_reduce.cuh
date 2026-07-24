@@ -30,14 +30,18 @@ namespace vllm {
   } while (0)
 
 // Maximal number of blocks in allreduce kernel.
+#ifndef USE_ROCM
 constexpr int kMaxBlocks = 36;
+#else
+constexpr int kMaxBlocks = 64;
+#endif
 
 // Default number of blocks in allreduce kernel.
 #ifndef USE_ROCM
 const int defaultBlockLimit = 36;
 CUpointer_attribute rangeStartAddrAttr = CU_POINTER_ATTRIBUTE_RANGE_START_ADDR;
 #else
-const int defaultBlockLimit = 16;
+const int defaultBlockLimit = 64;
 hipPointer_attribute rangeStartAddrAttr =
     HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR;
 #endif
@@ -89,11 +93,18 @@ struct packed_t {
 // scalar cast functions
 DINLINE float upcast_s(half val) { return __half2float(val); }
 
+DINLINE float upcast_s(float val) { return val; }
+
 template <typename T>
 DINLINE T downcast_s(float val);
 template <>
 DINLINE half downcast_s(float val) {
   return __float2half(val);
+}
+
+template <>
+DINLINE float downcast_s(float val) {
+  return val;
 }
 
 // scalar add functions
@@ -322,8 +333,6 @@ template <typename T, int ngpus>
 __global__ void __launch_bounds__(512, 1)
     cross_device_reduce_2stage(RankData* _dp, RankSignals sg, Signal* self_sg,
                                T* __restrict__ result, int rank, int size) {
-  int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  int stride = gridDim.x * blockDim.x;
   using P = typename packed_t<T>::P;
   using A = typename packed_t<T>::A;
   int part = size / ngpus;
@@ -341,25 +350,83 @@ __global__ void __launch_bounds__(512, 1)
   auto tmp_out = tmps[0];
   barrier_at_start<ngpus>(sg, self_sg, rank);
 
-  // stage 1: reduce scatter
-  for (int idx = start + tid; idx < end; idx += stride) {
-    tmp_out[idx - start] = packed_reduce<P, ngpus, A>(ptrs, idx);
-  }
-  barrier_at_end<ngpus>(sg, self_sg, rank);
+#if defined(USE_ROCM) && (defined(__gfx942__) || defined(__gfx950__))
+  if constexpr (512 % ngpus == 0) {
+    constexpr int pack_size = P::size;
+    constexpr int tnum_gpu = 512 / ngpus;
+    int warp_id = threadIdx.x / tnum_gpu;
+    int lane_id = threadIdx.x % tnum_gpu;
+    (void)lane_id;
+    int tid_rocm = blockIdx.x * tnum_gpu + lane_id;
+    int stride_rocm = gridDim.x * tnum_gpu;
+    __shared__ T tmp_smem[tnum_gpu * ngpus * pack_size];
+    for (int idx = start + tid_rocm; idx < end; idx += stride_rocm) {
+      *(reinterpret_cast<P*>(&tmp_smem[0]) + threadIdx.x) = ptrs[warp_id][idx];
+      // auto flat_src = ptrs[warp_id] + idx;
+      // using Gsrc = const __uint128_t __attribute__((address_space(1)))*;
+      // Gsrc gsrc = (Gsrc)flat_src;
+      // unsigned __int128 tmp;
+      // asm volatile("global_load_dwordx4 %0, %1 off\n\t"
+      //              "s_waitcnt vmcnt(0)\n\t"
+      //              : "=v"(tmp)
+      //              : "v"(gsrc)
+      //              : "memory");
+      // *(reinterpret_cast<P*>(&tmp_smem[0]) + threadIdx.x) =
+      //     *(reinterpret_cast<P*>(&tmp));
+      __syncthreads();
+      if (warp_id == 0) {
+        A add_reg;
+  #pragma unroll
+        for (int i = 0; i < pack_size; ++i)
+          add_reg.data[i] = upcast_s(tmp_smem[pack_size * threadIdx.x + i]);
+        constexpr int smem_gpu_loop_stride = tnum_gpu * pack_size;
+  #pragma unroll
+        for (int i = 1; i < ngpus; ++i)
+  #pragma unroll
+          for (int j = 0; j < pack_size; ++j)
+            add_reg.data[j] += upcast_s(tmp_smem[i * smem_gpu_loop_stride +
+                                                 pack_size * threadIdx.x + j]);
+        P write_reg;
+  #pragma unroll
+        for (int i = 0; i < pack_size; ++i)
+          write_reg.data[i] = downcast_s<T>(add_reg.data[i]);
+        tmp_out[idx - start] = write_reg;
+      }
 
-  // stage 2: allgather. Note: it's important to match the tid between
-  // the two stages, because visibility across devices is only guaranteed
-  // between threads that have the same tid. If thread i computes the sum of
-  // start + i in the first stage, then thread i also gathers start + i from
-  // all ranks.
-
-  for (int idx = tid; idx < largest_part; idx += stride) {
-#pragma unroll
-    for (int i = 0; i < ngpus; i++) {
-      int gather_from_rank = ((rank + i) % ngpus);
+      __syncthreads();
+    }
+    barrier_at_end<ngpus>(sg, self_sg, rank);
+    for (int idx = tid_rocm; idx < largest_part; idx += stride_rocm) {
+      int gather_from_rank = (warp_id + rank) % ngpus;
       if (gather_from_rank == ngpus - 1 || idx < part) {
         int dst_idx = gather_from_rank * part + idx;
-        ((P*)result)[dst_idx] = tmps[i][idx];
+        ((P*)result)[dst_idx] = tmps[warp_id][idx];
+      }
+    }
+  } else
+#endif
+  {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = gridDim.x * blockDim.x;
+    // stage 1: reduce scatter
+    for (int idx = start + tid; idx < end; idx += stride) {
+      tmp_out[idx - start] = packed_reduce<P, ngpus, A>(ptrs, idx);
+    }
+    barrier_at_end<ngpus>(sg, self_sg, rank);
+
+    // stage 2: allgather. Note: it's important to match the tid between
+    // the two stages, because visibility across devices is only guaranteed
+    // between threads that have the same tid. If thread i computes the sum of
+    // start + i in the first stage, then thread i also gathers start + i from
+    // all ranks.
+    for (int idx = tid; idx < largest_part; idx += stride) {
+#pragma unroll
+      for (int i = 0; i < ngpus; i++) {
+        int gather_from_rank = ((rank + i) % ngpus);
+        if (gather_from_rank == ngpus - 1 || idx < part) {
+          int dst_idx = gather_from_rank * part + idx;
+          ((P*)result)[dst_idx] = tmps[i][idx];
+        }
       }
     }
   }
@@ -558,6 +625,16 @@ class CustomAllreduce {
     auto bytes = size * sizeof(typename packed_t<T>::P);
     int blocks = std::min(block_limit, (size + threads - 1) / threads);
 
+#if defined(USE_ROCM)
+    const bool prefer_1stage_fully_connected =
+        (world_size_ <= 4 && bytes <= 64 * 1024) ||
+        (world_size_ <= 8 && bytes <= 64 * 1024);
+#else
+    const bool prefer_1stage_fully_connected =
+        (world_size_ <= 4 && bytes < 512 * 1024) ||
+        (world_size_ <= 8 && bytes < 256 * 1024);
+#endif
+
     // Check environment variable once
     const char* env_algo = std::getenv("VLLM_CUSTOM_ALLREDUCE_ALGO");
     bool force_1stage = false;
@@ -579,25 +656,24 @@ class CustomAllreduce {
 #define KL(ngpus, name)                                                       \
   name<T, ngpus><<<blocks, threads, 0, stream>>>(ptrs, sg_, self_sg_, output, \
                                                  rank_, size);
-#define REDUCE_CASE(ngpus)                              \
-  case ngpus: {                                         \
-    if (force_1stage) {                                 \
-      KL(ngpus, cross_device_reduce_1stage);            \
-    } else if (force_2stage) {                          \
-      KL(ngpus, cross_device_reduce_2stage);            \
-    } else {                                            \
-      if (world_size_ == 2) {                           \
-        KL(ngpus, cross_device_reduce_1stage);          \
-      } else if (fully_connected_) {                    \
-        if ((world_size_ <= 4 && bytes < 512 * 1024) || \
-            (world_size_ <= 8 && bytes < 256 * 1024)) { \
-          KL(ngpus, cross_device_reduce_1stage);        \
-        } else {                                        \
-          KL(ngpus, cross_device_reduce_2stage);        \
-        }                                               \
-      }                                                 \
-    }                                                   \
-    break;                                              \
+#define REDUCE_CASE(ngpus)                       \
+  case ngpus: {                                  \
+    if (force_1stage) {                          \
+      KL(ngpus, cross_device_reduce_1stage);     \
+    } else if (force_2stage) {                   \
+      KL(ngpus, cross_device_reduce_2stage);     \
+    } else {                                     \
+      if (world_size_ == 2) {                    \
+        KL(ngpus, cross_device_reduce_1stage);   \
+      } else if (fully_connected_) {             \
+        if (prefer_1stage_fully_connected) {     \
+          KL(ngpus, cross_device_reduce_1stage); \
+        } else {                                 \
+          KL(ngpus, cross_device_reduce_2stage); \
+        }                                        \
+      }                                          \
+    }                                            \
+    break;                                       \
   }
 
     switch (world_size_) {
