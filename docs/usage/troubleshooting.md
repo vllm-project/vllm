@@ -174,6 +174,33 @@ If the script runs successfully, you should see the message `sanity check is suc
 
 If the test script hangs or crashes, usually it means the hardware/drivers are broken in some sense. You should try to contact your system administrator or hardware vendor for further assistance. As a common workaround, you can try to tune some NCCL environment variables, such as `export NCCL_P2P_DISABLE=1` to see if it helps. Please check [their documentation](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/env.html) for more information. Please only use these environment variables as a temporary workaround, as they might affect the performance of the system. The best solution is still to fix the hardware/drivers so that the test script can run successfully.
 
+## CUDA architecture not covered by the wheel
+
+If vLLM logs a warning that the current wheel was built for a set of CUDA
+architectures but one of your visible CUDA devices is not covered, the installed
+wheel may not contain native CUDA kernels for that GPU. The same issue may also
+surface later as a CUDA runtime error such as `no kernel image is available for
+execution on the device`.
+
+The architecture list in a pre-built wheel is determined by the vLLM release and
+build pipelines, then filtered by CMake before individual kernels choose their
+own per-kernel architectures. It is not the same as the full set of
+architectures that vLLM can build from source.
+
+CUDA 12.9 wheels use architecture-specific targets for newer NVIDIA GPUs. To
+keep wheel size bounded, published CUDA 12.9 wheels may omit some newer
+Blackwell/Thor targets such as `sm_103` or `sm_121`, even though vLLM can build
+them from source. CUDA 13 wheels can use family-specific targets such as
+`sm_100f`, `sm_110f`, and `sm_120f`, which cover the corresponding
+major-version GPU family.
+
+If you see this warning or error, install a CUDA 13 wheel when possible.
+Otherwise, build vLLM from source and set `TORCH_CUDA_ARCH_LIST` to include
+your GPU's compute capability. See the CUDA installation guide's
+[pre-built wheels](../getting_started/installation/gpu.md#pre-built-wheels) and
+[build wheel from source](../getting_started/installation/gpu.md#build-wheel-from-source)
+sections for details.
+
 ## Python multiprocessing
 
 ### `RuntimeError` Exception

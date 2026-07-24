@@ -345,6 +345,28 @@ macro(set_gencode_flags_for_srcs)
 endmacro()
 
 #
+# For a list of source files append preprocessor definitions to file-specific
+# compile options. Use this for optional kernel feature macros so toggling one
+# kernel family does not perturb the compile command for every source in the
+# extension target.
+#
+macro(set_compile_definitions_for_srcs)
+  set(options)
+  set(oneValueArgs)
+  set(multiValueArgs SRCS DEFINITIONS)
+  cmake_parse_arguments(arg "${options}" "${oneValueArgs}"
+                        "${multiValueArgs}" ${ARGN})
+
+  foreach(_DEF ${arg_DEFINITIONS})
+    set_property(
+      SOURCE ${arg_SRCS}
+      APPEND PROPERTY
+      COMPILE_DEFINITIONS "${_DEF}"
+    )
+  endforeach()
+endmacro()
+
+#
 # For the given `SRC_CUDA_ARCHS` list of gencode versions in the form
 #  `<major>.<minor>[letter]` compute the "loose intersection" with the
 #  `TGT_CUDA_ARCHS` list of gencodes. We also support the `+PTX` suffix in

@@ -51,7 +51,8 @@ void cutlass_moe_mm_sm90(torch::stable::Tensor& out_tensors,
 
 #endif
 
-#if defined ENABLE_CUTLASS_MOE_SM100 && ENABLE_CUTLASS_MOE_SM100
+#if defined ENABLE_CUTLASS_MOE_SM10X_OR_SM11X && \
+    ENABLE_CUTLASS_MOE_SM10X_OR_SM11X
 void cutlass_moe_mm_sm100(torch::stable::Tensor& out_tensors,
                           torch::stable::Tensor const& a_tensors,
                           torch::stable::Tensor const& b_tensors,
@@ -83,8 +84,9 @@ void cutlass_scaled_mm_sm100(torch::stable::Tensor& c,
                              std::optional<torch::stable::Tensor> const& bias);
 #endif
 
-#if (defined(ENABLE_CUTLASS_MOE_SM90) && ENABLE_CUTLASS_MOE_SM90) ||   \
-    (defined(ENABLE_CUTLASS_MOE_SM100) && ENABLE_CUTLASS_MOE_SM100) || \
+#if (defined(ENABLE_CUTLASS_MOE_SM90) && ENABLE_CUTLASS_MOE_SM90) || \
+    (defined(ENABLE_CUTLASS_MOE_SM10X_OR_SM11X) &&                   \
+     ENABLE_CUTLASS_MOE_SM10X_OR_SM11X) ||                           \
     (defined(ENABLE_CUTLASS_MOE_SM120) && ENABLE_CUTLASS_MOE_SM120)
 void get_cutlass_moe_mm_data_caller(
     const torch::stable::Tensor& topk_ids,
@@ -175,11 +177,14 @@ bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability) {
 
 bool cutlass_group_gemm_supported(int64_t cuda_device_capability) {
   // CUTLASS grouped FP8 kernels need at least CUDA 12.3 and SM90 (Hopper)
-  // or CUDA 12.8 and SM100 (Blackwell). Only report archs that have an
-  // actual cutlass_moe_mm dispatch compiled into this file.
+  // or CUDA 12.8 and SM10x/SM11x (Blackwell / Thor). CUDA 12 reports Thor as
+  // SM101 while CUDA 13 reports it as SM110, but both use this sm100-named
+  // implementation. Only report archs that have an actual cutlass_moe_mm
+  // dispatch compiled into this file.
 
 #if defined CUDA_VERSION
-  #if defined ENABLE_CUTLASS_MOE_SM100 && ENABLE_CUTLASS_MOE_SM100
+  #if defined ENABLE_CUTLASS_MOE_SM10X_OR_SM11X && \
+      ENABLE_CUTLASS_MOE_SM10X_OR_SM11X
   if (cuda_device_capability >= 100 && cuda_device_capability < 120) {
     return CUDA_VERSION >= 12080;
   }
@@ -281,8 +286,11 @@ void cutlass_moe_mm(torch::stable::Tensor& out_tensors,
                     torch::stable::Tensor const& c_strides, bool per_act_token,
                     bool per_out_ch) {
   int32_t version_num = get_sm_version_num();
-#if defined ENABLE_CUTLASS_MOE_SM100 && ENABLE_CUTLASS_MOE_SM100
-  if (version_num >= 100 && version_num < 110) {
+#if defined ENABLE_CUTLASS_MOE_SM10X_OR_SM11X && \
+    ENABLE_CUTLASS_MOE_SM10X_OR_SM11X
+  // Keep runtime dispatch aligned with the CMake arch list and support query:
+  // CUDA 12 Thor is SM101 and CUDA 13 Thor is SM110.
+  if (version_num >= 100 && version_num < 120) {
     cutlass_moe_mm_sm100(out_tensors, a_tensors, b_tensors, a_scales, b_scales,
                          expert_offsets, problem_sizes, a_strides, b_strides,
                          c_strides, per_act_token, per_out_ch);
@@ -316,8 +324,9 @@ void get_cutlass_moe_mm_data(
   // This function currently gets compiled only if we have a valid cutlass moe
   // mm to run it for.
   int32_t version_num = get_sm_version_num();
-#if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) ||   \
-    (defined ENABLE_CUTLASS_MOE_SM100 && ENABLE_CUTLASS_MOE_SM100) || \
+#if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) || \
+    (defined ENABLE_CUTLASS_MOE_SM10X_OR_SM11X &&                   \
+     ENABLE_CUTLASS_MOE_SM10X_OR_SM11X) ||                          \
     (defined ENABLE_CUTLASS_MOE_SM120 && ENABLE_CUTLASS_MOE_SM120)
   get_cutlass_moe_mm_data_caller(topk_ids, expert_offsets, problem_sizes1,
                                  problem_sizes2, input_permutation,
@@ -338,8 +347,9 @@ void get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
     torch::stable::Tensor& problem_sizes2, const int64_t n, const int64_t k,
     const bool swap_ab) {
   int32_t version_num = get_sm_version_num();
-#if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) ||   \
-    (defined ENABLE_CUTLASS_MOE_SM100 && ENABLE_CUTLASS_MOE_SM100) || \
+#if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) || \
+    (defined ENABLE_CUTLASS_MOE_SM10X_OR_SM11X &&                   \
+     ENABLE_CUTLASS_MOE_SM10X_OR_SM11X) ||                          \
     (defined ENABLE_CUTLASS_MOE_SM120 && ENABLE_CUTLASS_MOE_SM120)
   get_cutlass_moe_mm_problem_sizes_from_expert_offsets_caller(
       expert_first_token_offset, problem_sizes1, problem_sizes2, n, k, swap_ab);
@@ -362,8 +372,9 @@ void get_cutlass_batched_moe_mm_data(
   // This function currently gets compiled only if we have a valid cutlass moe
   // mm to run it for.
   int32_t version_num = get_sm_version_num();
-#if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) ||   \
-    (defined ENABLE_CUTLASS_MOE_SM100 && ENABLE_CUTLASS_MOE_SM100) || \
+#if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) || \
+    (defined ENABLE_CUTLASS_MOE_SM10X_OR_SM11X &&                   \
+     ENABLE_CUTLASS_MOE_SM10X_OR_SM11X) ||                          \
     (defined ENABLE_CUTLASS_MOE_SM120 && ENABLE_CUTLASS_MOE_SM120)
   get_cutlass_batched_moe_mm_data_caller(expert_offsets, problem_sizes1,
                                          problem_sizes2, expert_num_tokens,
