@@ -200,14 +200,13 @@ class Gemma4Config(VerifyAndUpdateConfig):
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         """Configure attention for heterogeneous head dimensions.
 
-        Gemma4 uses different head dimensions for sliding window
-        (head_dim) vs full attention (global_head_dim) layers. The
-        default FA3 on Hopper cannot handle head_dim > 256, which
-        causes mixed backend selection and numerical divergence.
+        Gemma4 uses different head dimensions for sliding window vs full attention
+        layers. The default FA3 on Hopper cannot handle head_dim > 256, which causes
+        mixed backend selection and numerical divergence.
 
-        When FA4 is available we force it for ALL layers, giving a
-        uniform kernel path and avoiding the mixed FA3+FA4 penalty.
-        When FA4 is not available we fall back to Triton.
+        When FA4 is available we force it for ALL layers, giving a uniform kernel path
+        and avoiding the mixed FA3+FA4 penalty. When FA4 is not available we fall back
+        to Triton.
         """
         hf_text_config = vllm_config.model_config.hf_text_config
         if hasattr(hf_text_config, "is_heterogeneous"):
