@@ -1022,7 +1022,7 @@ def cutlass_fp4_moe_mm(
     An FP4 Blockscaled Group Gemm that takes in  a_tensors, b_tensors and runs
     the gemms for each combination based on the specified problem sizes.
 
-    This is used as the MoE gemm during NVFP4 Quantized FusedMoEFactory forward.
+    This is used as the MoE gemm during NVFP4 Quantized MoERunner forward.
     - a/b_tensors: the NVFP4 a_ptrs and b_ptrs tensors which are quantized
                      input and expert weights.
     - a_/b_scales: The blockscales in FP8-E4M3 precision
