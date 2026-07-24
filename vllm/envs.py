@@ -1769,7 +1769,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # vLLM (if any). If no JSON matches, it uses a hard-coded heuristic.
     "VLLM_TUNED_CONFIG_FOLDER": lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
     # Opt-in persistence of the startup plan. When enabled, each worker
-    # saves the memory-profiling result (the suggested --kv-cache-memory value
+    # saves the memory-profiling result (the suggested --kv-cache-memory-bytes value
     # and the free-memory baseline) under VLLM_CACHE_ROOT/startup_plan/,
     # keyed by a hardware+config fingerprint, and later boots auto-apply it
     # -- skipping memory profiling -- when the fingerprint matches and

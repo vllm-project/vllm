@@ -3,7 +3,7 @@
 """Persist and reuse the memory-profiling result across engine boots.
 
 On startup, vLLM measures how much GPU memory the KV cache can use and
-computes the ``--kv-cache-memory`` value that reproduces that allocation.
+computes the ``--kv-cache-memory-bytes`` value that reproduces that allocation.
 For a fixed (model, config, hardware, library) combination the result is
 deterministic, yet it is re-measured on every boot.
 
@@ -132,7 +132,7 @@ def _applicable_kv_cache_memory_bytes(
 
 
 def maybe_apply_startup_plan(worker: "Worker") -> None:
-    """If enabled and ``--kv-cache-memory`` was not set explicitly, apply a
+    """If enabled and ``--kv-cache-memory-bytes`` was not set explicitly, apply a
     persisted plan by setting ``worker.cache_config.kv_cache_memory_bytes``.
     No-op unless ``VLLM_ENABLE_STARTUP_PLAN=1``."""
     if (
