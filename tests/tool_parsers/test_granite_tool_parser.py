@@ -11,6 +11,7 @@ from tests.tool_parsers.common_tests import (
     ToolParserTests,
 )
 from tests.tool_parsers.utils import (
+    DummyTokenizer,
     run_tool_extraction,
     run_tool_extraction_streaming,
     split_string_into_token_deltas,
@@ -159,3 +160,22 @@ def test_streaming_parallel_calls_batched_deltas(granite_tokenizer, chunk_size):
     assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
         "city": "Tokyo"
     }
+
+
+def test_streaming_parallel_calls_single_delta():
+    parser = GraniteToolParser(DummyTokenizer())
+    model_output = (
+        '<|tool_call|>[{"name": "get_weather", "arguments": {"x": 42}}, '
+        '{"name": "b", "arguments": {"y": 7}}]'
+    )
+
+    reconstructor = run_tool_extraction_streaming(
+        parser, [model_output], assert_one_tool_per_delta=False
+    )
+
+    assert [tc.function.name for tc in reconstructor.tool_calls] == [
+        "get_weather",
+        "b",
+    ]
+    assert json.loads(reconstructor.tool_calls[0].function.arguments) == {"x": 42}
+    assert json.loads(reconstructor.tool_calls[1].function.arguments) == {"y": 7}

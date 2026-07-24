@@ -7,6 +7,7 @@ import pytest
 from transformers import AutoTokenizer
 
 from tests.tool_parsers.utils import (
+    DummyTokenizer,
     run_tool_extraction,
     run_tool_extraction_streaming,
 )
@@ -350,3 +351,15 @@ def test_streaming_tool_call_with_large_steps(
     assert call.function.name == "manage_user_memory"
     args_dict = json.loads(call.function.arguments)
     assert args_dict == COMPLEX_ARGS_DICT
+
+
+def test_streaming_complete_tool_call_single_delta():
+    tool_parser = ToolParserManager.get_tool_parser("gigachat3")(DummyTokenizer())
+    model_output = '<|function_call|>{"name": "get_weather", "arguments": {"x": 42}}'
+
+    reconstructor = run_tool_extraction_streaming(tool_parser, [model_output])
+
+    assert len(reconstructor.tool_calls) == 1
+    call = reconstructor.tool_calls[0]
+    assert call.function.name == "get_weather"
+    assert json.loads(call.function.arguments) == {"x": 42}
