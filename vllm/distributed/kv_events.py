@@ -44,8 +44,7 @@ class KVCacheEvent(
 
 MEDIUM_GPU = "GPU"
 MEDIUM_CPU = "CPU"
-MEDIUM_FS = "FS"
-MEDIUM_OBJ = "OBJ"
+MEDIUM_STORAGE = "STORAGE"
 
 
 class BlockStored(KVCacheEvent):

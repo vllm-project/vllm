@@ -7,13 +7,13 @@ import time
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, ClassVar, NamedTuple
 
-from vllm.distributed.kv_events import MEDIUM_OBJ
 from vllm.distributed.nixl_utils import NixlWrapper as nixl_agent
 from vllm.distributed.nixl_utils import nixl_agent_config
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
     Locality,
     LookupResult,
+    Medium,
     OffloadingEvent,
     OffloadKey,
     ReqContext,
@@ -98,7 +98,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     primary tier. Object keys are formed as ``{prefix}/{hash_shard}/{hash}.bin``.
     """
 
-    medium: ClassVar[str] = MEDIUM_OBJ
+    medium: ClassVar[Medium] = Medium.STORAGE
 
     def __init__(
         self,

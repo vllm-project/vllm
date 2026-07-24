@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Any, NamedTuple, NewType
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, NewType
 
 import numpy as np
 import torch
@@ -45,10 +45,54 @@ def get_offload_group_idx(key: OffloadKey) -> int:
     return int.from_bytes(key[-4:], "big", signed=False)
 
 
+class Medium(Enum):
+    """Storage medium of an offloading tier."""
+
+    CPU = "CPU"
+    STORAGE = "STORAGE"
+
+
+class Locality(Enum):
+    """Locality of a tier's storage relative to the publishing instance."""
+
+    LOCAL = "LOCAL"
+    REMOTE = "REMOTE"
+
+
+class TierMatcher(NamedTuple):
+    medium: Medium | None = None
+    locality: Locality | None = None
+
+    def matches(self, medium: Medium | None, locality: Locality | None) -> bool:
+        medium_matches = self.medium is None or medium is None or self.medium == medium
+        locality_matches = (
+            self.locality is None or locality is None or self.locality == locality
+        )
+        return medium_matches and locality_matches
+
+
+@dataclass(frozen=True)
+class TierFilter:
+    """Per-request filter controlling which tiers participate."""
+
+    matchers: tuple[TierMatcher, ...] = ()
+
+    ALL: ClassVar["TierFilter"]
+
+    def allows(self, medium: Medium | None, locality: Locality | None) -> bool:
+        if self is TierFilter.ALL:
+            return True
+        return any(m.matches(medium, locality) for m in self.matchers)
+
+
+TierFilter.ALL = TierFilter(matchers=(TierMatcher(),))
+
+
 @dataclass
 class ReqContext:
     req_id: str
     kv_transfer_params: dict[str, Any] | None = None
+    load_tier_filter: TierFilter = TierFilter.ALL
 
 
 class LookupResult(Enum):
@@ -97,17 +141,10 @@ class PrepareStoreOutput:
     evicted_keys: list[OffloadKey]
 
 
-class Locality(Enum):
-    """Locality of a tier's storage relative to the publishing instance."""
-
-    LOCAL = "LOCAL"
-    REMOTE = "REMOTE"
-
-
 @dataclass
 class OffloadingEvent:
     keys: list[OffloadKey]
-    medium: str
+    medium: Medium
     # True if blocks are removed, False if stored
     removed: bool
     locality: Locality | None = None

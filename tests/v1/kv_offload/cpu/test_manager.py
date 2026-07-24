@@ -6,10 +6,10 @@ from dataclasses import dataclass
 import numpy as np
 import pytest
 
-from vllm.distributed.kv_events import MEDIUM_CPU
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
     LookupResult,
+    Medium,
     OffloadingEvent,
     OffloadKey,
     PrepareStoreOutput,
@@ -115,7 +115,7 @@ def verify_events(
     stores: list[set[OffloadKey]] = []
     evictions: list[set[OffloadKey]] = []
     for event in events:
-        assert event.medium == MEDIUM_CPU
+        assert event.medium == Medium.CPU
         if event.removed:
             evictions.append(set(event.keys))
         else:
