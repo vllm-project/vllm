@@ -7,6 +7,7 @@ import os
 import shutil
 import time
 from io import BytesIO
+from pathlib import Path
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 
 import aiohttp
@@ -20,6 +21,7 @@ from PIL import Image, ImageChops
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.media import MediaConnector
+from vllm.multimodal.media.base import MediaIO
 
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
 TEST_IMAGE_ASSETS = [
@@ -33,6 +35,27 @@ TEST_VIDEO_URLS = [
     "https://www.bogotobogo.com/python/OpenCV_Python/images/mean_shift_tracking/slow_traffic_small.mp4",
     "https://github.com/opencv/opencv/raw/refs/tags/4.12.0/samples/data/vtest.avi",
 ]
+
+
+class DummyMediaIO(MediaIO[bytes]):
+    def load_bytes(self, data: bytes) -> bytes:
+        return data
+
+    def load_base64(self, media_type: str, data: str) -> bytes:
+        return f"{media_type}:{data}".encode()
+
+    def load_file(self, filepath: Path) -> bytes:
+        return filepath.read_bytes()
+
+
+class DummyConnection:
+    data = b"downloaded-media"
+
+    def get_bytes(self, *args, **kwargs) -> bytes:
+        return self.data
+
+    async def async_get_bytes(self, *args, **kwargs) -> bytes:
+        return self.data
 
 
 @pytest.fixture(scope="module")
@@ -55,6 +78,72 @@ def get_supported_suffixes() -> tuple[str, ...]:
 
 def _image_equals(a: Image.Image, b: Image.Image) -> bool:
     return (np.asarray(a) == np.asarray(convert_image_mode(b, a.mode))).all()
+
+
+@pytest.mark.asyncio
+async def test_media_connector_records_http_metrics(monkeypatch):
+    downloads: list[tuple[str, int]] = []
+    decodes: list[str] = []
+
+    monkeypatch.setattr(
+        "vllm.multimodal.media.connector.observe_media_download",
+        lambda media_type, duration_s, num_bytes: downloads.append(
+            (media_type, num_bytes)
+        ),
+    )
+    monkeypatch.setattr(
+        "vllm.multimodal.media.connector.observe_media_decode",
+        lambda media_type, duration_s: decodes.append(media_type),
+    )
+
+    connector = MediaConnector(connection=DummyConnection())  # type: ignore[arg-type]
+    media_io = DummyMediaIO()
+
+    assert (
+        connector.load_from_url("https://example.com/media", media_io)
+        == DummyConnection.data
+    )
+    assert downloads == [("dummy", len(DummyConnection.data))]
+    assert decodes == ["dummy"]
+
+    downloads.clear()
+    decodes.clear()
+    assert (
+        await connector.load_from_url_async("https://example.com/media", media_io)
+        == DummyConnection.data
+    )
+    assert downloads == [("dummy", len(DummyConnection.data))]
+    assert decodes == ["dummy"]
+
+
+@pytest.mark.asyncio
+async def test_media_connector_records_decode_metrics_for_non_http(
+    monkeypatch, tmp_path
+):
+    decodes: list[str] = []
+    monkeypatch.setattr(
+        "vllm.multimodal.media.connector.observe_media_decode",
+        lambda media_type, duration_s: decodes.append(media_type),
+    )
+
+    connector = MediaConnector(allowed_local_media_path=str(tmp_path))
+    media_io = DummyMediaIO()
+    media_path = tmp_path / "media.bin"
+    media_path.write_bytes(b"file-media")
+
+    assert connector.load_from_url("data:text/plain;base64,Zm9v", media_io) == (
+        b"text/plain:Zm9v"
+    )
+    assert connector.load_from_url(media_path.as_uri(), media_io) == b"file-media"
+    assert (
+        await connector.load_from_url_async("data:text/plain;base64,YmFy", media_io)
+        == b"text/plain:YmFy"
+    )
+    assert (
+        await connector.load_from_url_async(media_path.as_uri(), media_io)
+        == b"file-media"
+    )
+    assert decodes == ["dummy", "dummy", "dummy", "dummy"]
 
 
 @pytest.mark.asyncio
