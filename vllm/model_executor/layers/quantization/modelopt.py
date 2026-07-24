@@ -922,7 +922,9 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
         # Per tensor kernels require single activation scale. Use the max.
         w13_input_scale, w2_input_scale = process_fp8_input_tensor_strategy_moe(
-            w13_input_scale, w2_input_scale
+            w13_input_scale,
+            w2_input_scale,
+            layer.moe_config.moe_parallel_config.enable_eplb,
         )
         replace_parameter(layer, "w13_input_scale", w13_input_scale)
         replace_parameter(layer, "w2_input_scale", w2_input_scale)
