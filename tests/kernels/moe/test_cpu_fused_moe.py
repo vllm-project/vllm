@@ -5,10 +5,7 @@ import pytest
 import torch
 
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
-from vllm._custom_ops import (
-    cpu_fused_moe,
-    cpu_prepack_moe_weight,
-)
+from vllm._custom_ops import cpu_fused_moe, cpu_prepack_moe_weight
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.cpu_fused_moe import _CPU_MOE_ACT_FN
 from vllm.platforms import CpuArchEnum, current_platform
