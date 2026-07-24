@@ -468,12 +468,24 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
 
     decode_query_start_loc[:1].fill_(0)  # Avoid sync from scalar assignment.
     decode_query_start_loc[1:] = torch.cumsum(num_decode_tokens, dim=0)
-    decode_max_query_len = int(num_decode_tokens.max().item())
-    total_num_decode_tokens = int(num_decode_tokens.sum().item())
+    # Transfer the cumsum tensor to CPU once; derive both scalar values on CPU,
+    # eliminating two separate GPU reduction syncs (.max() and .sum() on the
+    # GPU tensor num_decode_tokens).  The last element of the cumulative sum is
+    # the total token count; adjacent differences reconstruct per-request counts
+    # whose maximum is the max query length.
+    decode_query_start_loc_cpu = decode_query_start_loc.cpu()
+    total_num_decode_tokens = int(decode_query_start_loc_cpu[-1])
+    # Guard against an empty batch: `.max()` on a 0-element tensor raises.
+    if num_reqs > 0:
+        decode_max_query_len = int(
+            (decode_query_start_loc_cpu[1:] - decode_query_start_loc_cpu[:-1]).max()
+        )
+    else:
+        decode_max_query_len = 0
 
     common_attn_metadata = CommonAttentionMetadata(
         query_start_loc=decode_query_start_loc,
-        query_start_loc_cpu=decode_query_start_loc.to("cpu", non_blocking=True),
+        query_start_loc_cpu=decode_query_start_loc_cpu,
         seq_lens=common_attn_metadata.seq_lens,
         num_reqs=num_reqs,
         num_actual_tokens=total_num_decode_tokens,
@@ -549,8 +561,8 @@ def split_decodes_prefills_and_extends(
     num_extends = first_prefill - num_decodes
     num_prefills = num_reqs - first_prefill
 
-    num_prefill_tokens = num_tokens - query_start_loc[first_prefill]
-    num_extend_tokens = num_prefill_or_extend_tokens - num_prefill_tokens
+    num_prefill_tokens = int(num_tokens - query_start_loc[first_prefill])
+    num_extend_tokens = int(num_prefill_or_extend_tokens - num_prefill_tokens)
     return (
         num_decodes,
         num_extends,
