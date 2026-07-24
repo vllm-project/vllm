@@ -194,12 +194,9 @@ steps:
   - vllm/utils/
   - vllm/v1/
   - tests/test_regression
-  - tests/utils.py
-  - tests/test_large_gpu_mark.py
   commands:
   - pip install 'modelscope<1.38'
   - pytest -v -s test_regression.py
-  - pytest -v -s test_large_gpu_mark.py
   working_dir: "/vllm-workspace/tests" # optional
 
 - label: Examples
@@ -362,6 +359,8 @@ steps:
   - tests/test_pooling_params.py
   - tests/test_ray_env.py
   - tests/test_sampling_params.py
+  - tests/utils.py
+  - tests/test_large_gpu_mark.py
   - tests/multimodal
   - tests/renderers
   - tests/standalone_tests/lazy_imports.py
@@ -380,6 +379,7 @@ steps:
   - pytest -v -s test_pooling_params.py
   - pytest -v -s test_ray_env.py
   - pytest -v -s test_sampling_params.py
+  - pytest -v -s test_large_gpu_mark.py
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s renderers
   - pytest -v -s reasoning
