@@ -1,0 +1,554 @@
+group: LM Eval XPU
+depends_on:
+  - image-build-xpu
+steps:
+- label: LM Eval Small Models
+  device: intel_gpu
+  timeout_in_minutes: 45
+  autorun_on_main: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt || true'
+- label: LM Eval Large Models (4xH100)
+  device: intel_gpu
+  num_devices: 4
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 4+
+  _raw_old_commands:
+  - export VLLM_USE_DEEP_GEMM=0
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt --tp-size=4
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'export VLLM_USE_DEEP_GEMM=0 || true &&
+    cd .buildkite/lm-eval-harness &&
+    pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt --tp-size=4 || true'
+- label: LM Eval Small Models (1xB200)
+  device: intel_gpu
+  timeout_in_minutes: 50
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell.txt
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell.txt || true'
+- label: LM Eval Small Models Distributed (2xB200)
+  device: intel_gpu
+  timeout_in_minutes: 120
+  num_devices: 2
+  optional: true
+  autorun_on_main: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small-tp.txt
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small-tp.txt || true'
+- label: LM Eval PCP (4xB200)
+  device: intel_gpu
+  timeout_in_minutes: 360
+  num_devices: 4
+  optional: true
+  autorun_on_main: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 4+
+  _raw_old_commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-pcp.txt
+  source_file_dependencies:
+  - csrc/
+  - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP2-PCP2-EP.yaml
+  - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP1-PCP4-EP.yaml
+  - tests/evals/gsm8k/configs/models-pcp.txt
+  - vllm/model_executor/layers/quantization
+  - vllm/config/parallel.py
+  - vllm/distributed/parallel_state.py
+  - vllm/model_executor/layers/attention/mla_attention.py
+  - vllm/model_executor/layers/attention/pcp.py
+  - vllm/v1/worker/gpu/model_runner.py
+  - vllm/v1/worker/gpu/pcp_manager.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-pcp.txt || true'
+- label: LM Eval Large Models EP (2xB200)
+  device: intel_gpu
+  timeout_in_minutes: 60
+  num_devices: 2
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell-ep.txt
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell-ep.txt || true'
+- label: LM Eval Qwen3.5 Models (2xB200)
+  device: intel_gpu
+  timeout_in_minutes: 45
+  num_devices: 2
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-qwen35-blackwell.txt
+  source_file_dependencies:
+  - vllm/model_executor/models/qwen3_5.py
+  - vllm/model_executor/models/qwen3_5_mtp.py
+  - vllm/transformers_utils/configs/qwen3_5.py
+  - vllm/transformers_utils/configs/qwen3_5_moe.py
+  - vllm/model_executor/models/qwen3_next.py
+  - vllm/model_executor/models/qwen3_next_mtp.py
+  - vllm/third_party/flash_linear_attention/ops/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-qwen35-blackwell.txt || true'
+- label: LM Eval Large Models (8xH200)
+  device: intel_gpu
+  timeout_in_minutes: 50
+  num_devices: 8
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 8+
+  _raw_old_commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200.txt
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200.txt || true'
+- label: MoE Refactor Integration Test (H100 - TEMPORARY)
+  device: intel_gpu
+  num_devices: 2
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-h100.txt
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-h100.txt || true'
+- label: MoE Refactor Integration Test (B200 - TEMPORARY)
+  device: intel_gpu
+  num_devices: 2
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-b200.txt
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-b200.txt || true'
+- label: MoE Refactor Integration Test (B200 DP - TEMPORARY)
+  device: intel_gpu
+  num_devices: 2
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor-dp-ep/config-b200.txt
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor-dp-ep/config-b200.txt || true'
+- label: LM Eval Humming f16 (A100 - TEMPORARY)
+  device: intel_gpu
+  timeout_in_minutes: 75
+  num_devices: 1
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config.txt
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization/humming.py
+  - vllm/model_executor/layers/quantization/utils/humming_utils.py
+  - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
+  - vllm/model_executor/layers/fused_moe/oracle/
+  - vllm/model_executor/kernels/linear/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config.txt || true'
+- label: LM Eval Humming Act int8 (A100 - TEMPORARY)
+  device: intel_gpu
+  timeout_in_minutes: 45
+  num_devices: 1
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-int8.txt
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization/humming.py
+  - vllm/model_executor/layers/quantization/utils/humming_utils.py
+  - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
+  - vllm/model_executor/layers/fused_moe/oracle/
+  - vllm/model_executor/kernels/linear/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-int8.txt || true'
+- label: LM Eval Humming Act fp8/int8 (H100 - TEMPORARY)
+  device: intel_gpu
+  timeout_in_minutes: 70
+  num_devices: 1
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-fp8.txt
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-int8.txt
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization/humming.py
+  - vllm/model_executor/layers/quantization/utils/humming_utils.py
+  - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
+  - vllm/model_executor/layers/fused_moe/oracle/
+  - vllm/model_executor/kernels/linear/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-fp8.txt || true &&
+    pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-int8.txt || true'
+- label: LM Eval TurboQuant KV Cache
+  device: intel_gpu
+  timeout_in_minutes: 55
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant.txt
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization/turboquant/
+  - vllm/v1/attention/backends/turboquant_attn.py
+  - vllm/v1/attention/ops/triton_turboquant_decode.py
+  - vllm/v1/attention/ops/triton_turboquant_store.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant.txt || true'
+- label: GPQA Eval (GPT-OSS) (2xH100)
+  device: intel_gpu
+  timeout_in_minutes: 35
+  num_devices: 2
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - uv pip install --system 'gpt-oss[eval]==0.0.5'
+  - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-h100.txt
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  - tests/evals/gpt_oss/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'uv pip install gpt-oss[eval]==0.0.5 || true &&
+    cd tests &&
+    pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-h100.txt || true'
+- label: GPQA Eval (GPT-OSS) (2xB200)
+  device: intel_gpu
+  timeout_in_minutes: 30
+  num_devices: 2
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - uv pip install --system 'gpt-oss[eval]==0.0.5'
+  - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-b200.txt
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  - tests/evals/gpt_oss/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'uv pip install gpt-oss[eval]==0.0.5 || true &&
+    cd tests &&
+    pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-b200.txt || true'
+- label: GPQA Eval (GPT-OSS) (DGX Spark)
+  device: intel_gpu
+  timeout_in_minutes: 35
+  num_devices: 1
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - uv pip install --system 'gpt-oss[eval]==0.0.5'
+  - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-spark.txt
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  - tests/evals/gpt_oss/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'uv pip install gpt-oss[eval]==0.0.5 || true &&
+    cd tests &&
+    pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-spark.txt || true'
+- label: LM Eval KV-Offload (1xH200)
+  device: intel_gpu
+  timeout_in_minutes: 30
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "nemotron-h-8b or gemma-4-e4b-it"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+  - vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
+  - vllm/v1/kv_offload/
+  - vllm/v1/simple_kv_offload/
+  - tests/evals/gsm8k/test_gsm8k_offloading.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k nemotron-h-8b or gemma-4-e4b-it || true'
+- label: LM Eval KV-Offload (2xH100)
+  device: intel_gpu
+  timeout_in_minutes: 30
+  num_devices: 2
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "qwen3.5-35b"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+  - vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
+  - vllm/v1/kv_offload/
+  - vllm/v1/simple_kv_offload/
+  - tests/evals/gsm8k/test_gsm8k_offloading.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k qwen3.5-35b || true'
+- label: LM Eval KV-Offload (4xH100)
+  device: intel_gpu
+  timeout_in_minutes: 40
+  num_devices: 4
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 4+
+  _raw_old_commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "deepseek-v4-flash"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+  - vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
+  - vllm/v1/kv_offload/
+  - vllm/v1/simple_kv_offload/
+  - tests/evals/gsm8k/test_gsm8k_offloading.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k deepseek-v4-flash || true'
+- label: MRCR Eval Small Models
+  device: intel_gpu
+  timeout_in_minutes: 25
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -s -v evals/mrcr/test_mrcr_correctness.py --config-list-file=evals/mrcr/configs/models-small.txt
+  source_file_dependencies:
+  - tests/evals/mrcr/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -s -v evals/mrcr/test_mrcr_correctness.py --config-list-file=evals/mrcr/configs/models-small.txt || true'

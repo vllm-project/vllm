@@ -1,0 +1,179 @@
+group: Spec Decode XPU
+depends_on:
+  - image-build-xpu
+steps:
+- label: Spec Decode Eagle
+  device: intel_gpu
+  timeout_in_minutes: 25
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s v1/e2e/spec_decode -k "eagle_correctness"
+  source_file_dependencies:
+  - vllm/v1/spec_decode/
+  - vllm/v1/worker/gpu/spec_decode/
+  - tests/v1/e2e/spec_decode/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s v1/e2e/spec_decode -k eagle_correctness || true'
+- label: Spec Decode Speculators + MTP
+  device: intel_gpu
+  timeout_in_minutes: 20
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s v1/e2e/spec_decode -k "speculators or mtp_correctness"
+  source_file_dependencies:
+  - vllm/v1/spec_decode/
+  - vllm/v1/worker/gpu/spec_decode/
+  - vllm/v1/attention/backends/
+  - vllm/transformers_utils/configs/speculators/
+  - tests/v1/e2e/spec_decode/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s v1/e2e/spec_decode -k speculators or mtp_correctness || true'
+- label: Spec Decode Ngram + Suffix
+  device: intel_gpu
+  timeout_in_minutes: 20
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s v1/e2e/spec_decode -k "ngram or suffix"
+  source_file_dependencies:
+  - vllm/v1/spec_decode/
+  - vllm/v1/worker/gpu/spec_decode/
+  - tests/v1/e2e/spec_decode/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s v1/e2e/spec_decode -k ngram or suffix || true'
+- label: Spec Decode Draft Model
+  device: intel_gpu
+  timeout_in_minutes: 45
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s v1/e2e/spec_decode -k "draft_model or no_sync or batch_inference"
+  source_file_dependencies:
+  - vllm/v1/spec_decode/
+  - vllm/v1/worker/gpu/spec_decode/
+  - tests/v1/e2e/spec_decode/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s v1/e2e/spec_decode -k draft_model or no_sync or batch_inference || true'
+- label: Speculators Correctness
+  device: intel_gpu
+  timeout_in_minutes: 30
+  num_devices: 1
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
+  - pytest -v -s v1/spec_decode/test_speculators_correctness.py -m slow_test
+  source_file_dependencies:
+  - vllm/v1/spec_decode/
+  - vllm/model_executor/models/qwen3_dflash.py
+  - tests/v1/spec_decode/test_speculators_correctness.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'export VLLM_ALLOW_INSECURE_SERIALIZATION=1 || true &&
+    cd tests &&
+    pytest -v -s v1/spec_decode/test_speculators_correctness.py -m slow_test || true'
+- label: Spec Decode MTP hybrid (B200)
+  device: intel_gpu
+  timeout_in_minutes: 20
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s v1/e2e/spec_decode -k "qwen3_5-hybrid"
+  source_file_dependencies:
+  - vllm/v1/spec_decode/
+  - vllm/v1/worker/gpu/spec_decode/
+  - vllm/model_executor/models/qwen3_5.py
+  - vllm/model_executor/models/qwen3_5_mtp.py
+  - tests/v1/e2e/spec_decode/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s v1/e2e/spec_decode -k qwen3_5-hybrid || true'
+- label: Spec Decode DeepSeek MTP Parallel Load (B200)
+  device: intel_gpu
+  timeout_in_minutes: 30
+  num_devices: 2
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - pytest -v -s v1/e2e/spec_decode/test_mtp_parallel_load.py
+  source_file_dependencies:
+  - vllm/v1/spec_decode/llm_base_proposer.py
+  - vllm/v1/spec_decode/eagle.py
+  - vllm/v1/worker/gpu/spec_decode/eagle/
+  - vllm/model_executor/models/deepseek_mtp.py
+  - vllm/model_executor/models/deepseek_v2.py
+  - tests/v1/e2e/spec_decode/test_mtp_parallel_load.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s v1/e2e/spec_decode/test_mtp_parallel_load.py || true'

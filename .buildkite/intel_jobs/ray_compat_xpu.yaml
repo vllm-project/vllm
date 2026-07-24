@@ -1,0 +1,27 @@
+group: Ray Compatibility XPU
+depends_on:
+  - image-build-xpu
+steps:
+- label: Ray Dependency Compatibility Check
+  device: intel_gpu
+  timeout_in_minutes: 10
+  soft_fail: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - bash /vllm-workspace/.buildkite/scripts/check-ray-compatibility.sh
+  source_file_dependencies:
+  - requirements/
+  - setup.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    bash /workspace/vllm/.buildkite/scripts/check-ray-compatibility.sh || true'

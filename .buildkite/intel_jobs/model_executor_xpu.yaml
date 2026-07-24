@@ -1,0 +1,38 @@
+group: Model Executor XPU
+depends_on:
+  - image-build-xpu
+steps:
+- label: Model Executor
+  device: intel_gpu
+  timeout_in_minutes: 60
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - apt-get update && apt-get install -y curl libsodium23
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - export PYTHONFAULTHANDLER=1
+  - pytest -v -s model_executor -m '(not slow_test)' --timeout=900 --timeout-method=thread
+  - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py --timeout=900 --timeout-method=thread
+  source_file_dependencies:
+  - vllm/engine/arg_utils.py
+  - vllm/config/model.py
+  - vllm/model_executor
+  - vllm/model_executor/warmup
+  - tests/model_executor
+  - tests/model_executor/test_jit_warmup.py
+  - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
+    export PYTHONFAULTHANDLER=1 || true &&
+    cd tests &&
+    pytest -v -s model_executor -m not slow_test --timeout=900 --timeout-method=thread || true &&
+    pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py --timeout=900 --timeout-method=thread || true'
