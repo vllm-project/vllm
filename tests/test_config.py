@@ -760,7 +760,11 @@ def test_generation_config_loading():
     assert model_config.get_diff_sampling_param() == correct_generation_config
 
     # The generation config could be overridden by the user.
-    override_generation_config = {"temperature": 0.5, "top_k": 5}
+    override_generation_config = {
+        "temperature": 0.5,
+        "top_k": 5,
+        "stop_token_ids": [200012, 200002],
+    }
 
     model_config = ModelConfig(
         model_id,
