@@ -40,12 +40,13 @@ class AnthropicContentBlock(BaseModel):
         "tool_use",
         "tool_result",
         "tool_reference",
+        "search_result",
         "thinking",
         "redacted_thinking",
     ]
     text: str | None = None
-    # For image content
-    source: dict[str, Any] | None = None
+    # For image content and search results
+    source: dict[str, Any] | str | None = None
     # For tool use/result
     id: str | None = None
     tool_use_id: str | None = None
@@ -60,6 +61,16 @@ class AnthropicContentBlock(BaseModel):
     signature: str | None = None
     # For redacted thinking content (safety-filtered by the API)
     data: str | None = None
+
+    @model_validator(mode="after")
+    def validate_source(self):
+        if (
+            self.type == "image"
+            and self.source is not None
+            and not isinstance(self.source, dict)
+        ):
+            raise ValueError("image source must be a dictionary")
+        return self
 
 
 class AnthropicMessage(BaseModel):
