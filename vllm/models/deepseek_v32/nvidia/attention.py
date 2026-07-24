@@ -482,6 +482,7 @@ class DeepseekV32Attention(MLAAttention):
             mla_kv_cache = self.kv_cache
             mla_k_scale = self._k_scale
 
+        assert self.rotary_emb is not None
         q_c = fused_norm_rope(
             positions,
             q_c,

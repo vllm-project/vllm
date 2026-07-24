@@ -690,6 +690,75 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
             (q_concat_shape, vllm_config.model_config.dtype),
         )
 
+        self.use_fused_qk_rope_cache = (
+            rocm_aiter_ops.is_fused_mla_qkprep_enabled()
+            and self.kv_cache_dtype.startswith("fp8")
+            and self.kv_cache_dtype != "fp8_ds_mla"
+        )
+
+    def do_kv_cache_update(
+        self,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        kv_cache_dtype: str,
+        k_scale: torch.Tensor,
+    ) -> None:
+        if self.use_fused_qk_rope_cache:
+            return
+        super().do_kv_cache_update(
+            kv_c_normed, k_pe, kv_cache, slot_mapping, kv_cache_dtype, k_scale
+        )
+
+    def fused_qk_rope_concat_and_cache(
+        self,
+        layer: AttentionLayer,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        k_c_normed: torch.Tensor,  # [T, kv_lora_rank]
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        positions: torch.Tensor,
+        cos_cache: torch.Tensor,
+        sin_cache: torch.Tensor,
+        is_neox: bool,
+    ) -> torch.Tensor:
+        """Fused RoPE + Q-concat + KV-concat + fp8 KV-cache write."""
+        num_tokens, num_q_heads = ql_nope.shape[:2]
+        # aiter kernel requires contiguous ql_nope
+        ql_nope = ql_nope.contiguous()
+        q_out_dtype = (
+            current_platform.fp8_dtype()
+            if self.kv_cache_dtype.startswith("fp8")
+            else ql_nope.dtype
+        )
+        q_out = torch.empty(
+            (num_tokens, num_q_heads, self.head_size),
+            dtype=q_out_dtype,
+            device=ql_nope.device,
+        )
+        kv_cache_3d = kv_cache.view(kv_cache.shape[0], -1, self.head_size)
+
+        rocm_aiter_ops.fused_qk_rope_concat_and_cache_mla(
+            ql_nope,
+            q_pe,
+            k_c_normed,
+            k_pe.squeeze(1),
+            kv_cache_3d,
+            q_out,
+            slot_mapping,
+            layer._k_scale,
+            layer._q_scale,
+            positions,
+            cos_cache,
+            sin_cache,
+            is_neox=is_neox,
+            is_nope_first=True,
+        )
+        return q_out
+
     def _forward_mla(
         self,
         layer: AttentionLayer,

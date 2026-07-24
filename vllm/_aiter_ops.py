@@ -530,6 +530,61 @@ def _rocm_aiter_mla_decode_fwd_fake(
     pass
 
 
+def _rocm_aiter_fused_qk_rope_concat_and_cache_mla_impl(
+    q_nope: torch.Tensor,
+    q_pe: torch.Tensor,
+    kv_c: torch.Tensor,
+    k_pe: torch.Tensor,
+    kv_cache: torch.Tensor,
+    q_out: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    k_scale: torch.Tensor,
+    q_scale: torch.Tensor,
+    positions: torch.Tensor,
+    cos_cache: torch.Tensor,
+    sin_cache: torch.Tensor,
+    is_neox: bool,
+    is_nope_first: bool,
+) -> None:
+    from aiter.ops.cache import fused_qk_rope_concat_and_cache_mla
+
+    fused_qk_rope_concat_and_cache_mla(
+        q_nope,
+        q_pe,
+        kv_c,
+        k_pe,
+        kv_cache,
+        q_out,
+        slot_mapping,
+        k_scale,
+        q_scale,
+        positions,
+        cos_cache,
+        sin_cache,
+        is_neox=is_neox,
+        is_nope_first=is_nope_first,
+    )
+
+
+def _rocm_aiter_fused_qk_rope_concat_and_cache_mla_fake(
+    q_nope: torch.Tensor,
+    q_pe: torch.Tensor,
+    kv_c: torch.Tensor,
+    k_pe: torch.Tensor,
+    kv_cache: torch.Tensor,
+    q_out: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    k_scale: torch.Tensor,
+    q_scale: torch.Tensor,
+    positions: torch.Tensor,
+    cos_cache: torch.Tensor,
+    sin_cache: torch.Tensor,
+    is_neox: bool,
+    is_nope_first: bool,
+) -> None:
+    pass
+
+
 def _rocm_aiter_w8a8_gemm_impl(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -1697,6 +1752,11 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
+    def is_fused_mla_qkprep_enabled(cls) -> bool:
+        return cls._AITER_ENABLED and cls._MLA_ENABLED
+
+    @classmethod
+    @if_aiter_supported
     def is_fp4bmm_enabled(cls) -> bool:
         from vllm.platforms.rocm import on_gfx950
 
@@ -1853,6 +1913,13 @@ class rocm_aiter_ops:
                 op_func=_rocm_aiter_mla_decode_fwd_impl,
                 mutates_args=["o"],
                 fake_impl=_rocm_aiter_mla_decode_fwd_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_fused_qk_rope_concat_and_cache_mla",
+                op_func=_rocm_aiter_fused_qk_rope_concat_and_cache_mla_impl,
+                mutates_args=["kv_cache", "q_out"],
+                fake_impl=_rocm_aiter_fused_qk_rope_concat_and_cache_mla_fake,
             )
 
             direct_register_custom_op(
@@ -2342,6 +2409,41 @@ class rocm_aiter_ops:
             reduce_indptr=reduce_indptr,
             reduce_final_map=reduce_final_map,
             reduce_partial_map=reduce_partial_map,
+        )
+
+    @staticmethod
+    def fused_qk_rope_concat_and_cache_mla(
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv_c: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        q_out: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        k_scale: torch.Tensor,
+        q_scale: torch.Tensor,
+        positions: torch.Tensor,
+        cos_cache: torch.Tensor,
+        sin_cache: torch.Tensor,
+        is_neox: bool,
+        is_nope_first: bool = True,
+    ) -> None:
+        """Fused sparse-MLA decode Q-prep"""
+        torch.ops.vllm.rocm_aiter_fused_qk_rope_concat_and_cache_mla(
+            q_nope,
+            q_pe,
+            kv_c,
+            k_pe,
+            kv_cache,
+            q_out,
+            slot_mapping,
+            k_scale,
+            q_scale,
+            positions,
+            cos_cache,
+            sin_cache,
+            is_neox,
+            is_nope_first,
         )
 
     @staticmethod
