@@ -117,9 +117,15 @@ class Scheduler(SchedulerInterface):
             self.kv_events_config is not None
             and self.kv_events_config.enable_kv_cache_events
         )
-        # Diffusion models may not sample any tokens for a denoising step.
+        # Pooling and diffusion models do not append a sampled token after
+        # prefill, so they should not reserve one context slot while scheduling.
         self.num_sampled_tokens_per_step = (
-            1 if not vllm_config.model_config.is_diffusion else 0
+            0
+            if (
+                vllm_config.model_config.runner_type == "pooling"
+                or vllm_config.model_config.is_diffusion
+            )
+            else 1
         )
 
         # Create KVConnector for the Scheduler. Note that each Worker
