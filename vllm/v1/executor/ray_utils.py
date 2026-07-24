@@ -75,6 +75,9 @@ try:
             """
             if self.rpc_rank in rank_mapping:
                 self.rpc_rank = rank_mapping[self.rpc_rank]
+                # `global_rank` defaults to `rpc_rank` at construction;
+                # keep that invariant when `rpc_rank` is reassigned
+                self.global_rank = self.rpc_rank
 
         def execute_method(self, method: str | bytes, *args, **kwargs):
             try:
