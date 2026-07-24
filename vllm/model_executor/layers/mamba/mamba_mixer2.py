@@ -666,6 +666,71 @@ class MambaMixer2(MambaBase, PluggableLayer):
         logger.debug("Mamba2 SSD kernel warmup completed for layer %s", self.prefix)
         torch.accelerator.empty_cache()
 
+    def _save_block_aligned_ssm_states(
+        self,
+        ssm_state: torch.Tensor,
+        varlen_states: torch.Tensor,
+        state_indices_tensor_p: torch.Tensor,
+        block_idx_first_scheduled_token_p: torch.Tensor,
+        block_idx_last_scheduled_token_p: torch.Tensor,
+        last_chunk_indices_p: torch.Tensor,
+        num_computed_tokens_p: torch.Tensor,
+        mamba_block_size: int,
+        chunk_size: int,
+    ) -> None:
+        """Save the mamba-block-aligned intermediate SSM states of prefill
+        sequences into the cache. The copy is batched across all sequences,
+        since a per-sequence loop causes one kernel launch and one GPU->CPU
+        sync per prefill request.
+        """
+        # The chunk_stride is the number of chunks per mamba block
+        # e.g., if mamba_block_size = 512 and chunk_size = 256,
+        # then chunk_stride = 2
+        chunk_stride = mamba_block_size // chunk_size
+
+        num_prefills = state_indices_tensor_p.size(0)
+
+        # Number of blocks that need to be written per sequence
+        n_blocks_to_fill = (
+            block_idx_last_scheduled_token_p - block_idx_first_scheduled_token_p
+        ).clamp(min=0)
+        total_fill = int(n_blocks_to_fill.sum().item())
+        if total_fill == 0:
+            return
+
+        # First chunk index for each sequence
+        first_chunk = torch.zeros_like(last_chunk_indices_p)
+        first_chunk[1:] = last_chunk_indices_p[:-1] + 1
+
+        # First chunk that is aligned on the mamba block boundary. When the
+        # computed tokens are not block aligned, the first boundary comes
+        # earlier by (num_unaligned_computed_tokens // chunk_size) chunks.
+        num_unaligned_computed_tokens = num_computed_tokens_p % mamba_block_size
+        unaligned_chunk_shift = num_unaligned_computed_tokens // chunk_size
+        first_aligned_chunk = first_chunk + (chunk_stride - 1) - unaligned_chunk_shift
+
+        # Flatten the writes of all sequences into one list,
+        # e.g. fill_counts=[2,1,2] -> seq_ids=[0,0,1,2,2], write_offsets=[0,1,0,0,1]
+        fill_counts = n_blocks_to_fill.long()
+        seq_ids = torch.repeat_interleave(
+            torch.arange(num_prefills, device=ssm_state.device),
+            fill_counts,
+        )
+        write_starts = torch.cumsum(fill_counts, dim=0) - fill_counts
+        write_offsets = torch.arange(
+            total_fill, device=ssm_state.device
+        ) - torch.repeat_interleave(write_starts, fill_counts)
+
+        cache_blocks_to_fill = state_indices_tensor_p[
+            seq_ids,
+            block_idx_first_scheduled_token_p[seq_ids] + write_offsets,
+        ]
+        # Each write goes to a distinct cache block, so there are no
+        # duplicate indices and the indexed copy is deterministic.
+        ssm_state[cache_blocks_to_fill] = varlen_states[
+            first_aligned_chunk[seq_ids] + write_offsets * chunk_stride
+        ]
+
     def conv_ssm_forward(
         self,
         projected_states: torch.Tensor,
@@ -877,68 +942,18 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 assert last_chunk_indices_p is not None
                 assert num_computed_tokens_p is not None
 
-                # The chunk_stride is the number of chunks per mamba block
-                # e.g., if mamba_block_size = 512 and chunk_size = 256,
-                # then chunk_stride = 2
-                chunk_stride = mamba_block_size // chunk_size
-
                 # Save state for sequences with more than just final state
-                for seq_idx in range(num_prefills):
-                    # Block index for the first scheduled token
-                    block_idx_first_scheduled_token = block_idx_first_scheduled_token_p[
-                        seq_idx
-                    ]
-
-                    # Block index for the last scheduled token
-                    block_idx_last_scheduled_token = block_idx_last_scheduled_token_p[
-                        seq_idx
-                    ]
-
-                    # Number of blocks that need to be written
-                    n_blocks_to_fill = (
-                        block_idx_last_scheduled_token - block_idx_first_scheduled_token
-                    )
-
-                    # Skip sequences that don't have any blocks to fill
-                    if n_blocks_to_fill == 0:
-                        continue
-
-                    # Look up the state indices
-                    cache_blocks_to_fill = state_indices_tensor_p[
-                        seq_idx,
-                        block_idx_first_scheduled_token:block_idx_last_scheduled_token,
-                    ]
-
-                    # First chunk index for this sequence
-                    if seq_idx == 0:
-                        first_chunk = 0
-                    else:
-                        first_chunk = 1 + last_chunk_indices_p[seq_idx - 1]
-
-                    # First chunk that is aligned on the mamba block boundary
-                    first_aligned_chunk = first_chunk + chunk_stride - 1
-
-                    # Calculate the number of computed tokens that were not
-                    # already cached
-                    num_unaligned_computed_tokens = (
-                        num_computed_tokens_p[seq_idx] % mamba_block_size
-                    )
-
-                    if num_unaligned_computed_tokens > 0:
-                        # If the number of computed tokens is not block aligned,
-                        # then we need to shift the index accordingly
-                        first_aligned_chunk -= (
-                            num_unaligned_computed_tokens // chunk_size
-                        )
-
-                    # Get states to write
-                    from_where = varlen_states[
-                        first_aligned_chunk : first_aligned_chunk
-                        + n_blocks_to_fill * chunk_stride : chunk_stride
-                    ]
-
-                    # Write the states
-                    ssm_state[cache_blocks_to_fill] = from_where
+                self._save_block_aligned_ssm_states(
+                    ssm_state,
+                    varlen_states,
+                    state_indices_tensor_p,
+                    block_idx_first_scheduled_token_p,
+                    block_idx_last_scheduled_token_p,
+                    last_chunk_indices_p,
+                    num_computed_tokens_p,
+                    mamba_block_size,
+                    chunk_size,
+                )
 
                 # For all seqs, store the last state (note: might be partial):
                 assert state_indices_tensor_p is not None
