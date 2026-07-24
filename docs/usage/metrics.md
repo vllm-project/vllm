@@ -37,6 +37,41 @@ The following metrics are exposed:
 
 --8<-- "docs/generated/metrics/general.inc.md"
 
+## Interpreting prefix caching metrics
+
+`vllm:prefix_cache_queries` and `vllm:prefix_cache_hits` are token-level
+counters. They count the number of tokens queried in the local prefix cache and
+the number found there, rather than the number of requests. A local
+prefix-cache token hit rate can be calculated from counter increases over the
+same time window:
+
+```promql
+increase(vllm:prefix_cache_hits_total[5m])
+/
+increase(vllm:prefix_cache_queries_total[5m])
+```
+
+Prometheus client libraries expose counters with the `_total` suffix in the
+time series name.
+The ratio above is not the fraction of requests with a cache hit because a
+request can reuse only part of its prefix.
+
+Related metrics answer different questions:
+
+- `vllm:prompt_tokens_cached` counts prompt tokens skipped during prefill
+  through local prefix-cache reuse and external KV transfer.
+- `vllm:request_prefill_kv_computed_tokens` is a per-request histogram of newly
+  computed prefill KV tokens, excluding cached tokens.
+- `vllm:kv_cache_usage_perc` reports KV-cache usage from 0 to 1; it is not a
+  prefix-cache hit rate.
+- The sampled `vllm:kv_block_lifetime_seconds`,
+  `vllm:kv_block_idle_before_evict_seconds`, and
+  `vllm:kv_block_reuse_gap_seconds` histograms describe block-level residency
+  and reuse. They do not report per-request cache hit rates.
+
+See [Automatic Prefix Caching](../features/automatic_prefix_caching.md) for a
+workflow to verify prefix reuse.
+
 ## Speculative Decoding Metrics
 
 --8<-- "docs/generated/metrics/spec_decode.inc.md"
