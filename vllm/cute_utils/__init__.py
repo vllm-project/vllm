@@ -33,6 +33,11 @@ EVICT_NORMAL = Int64(0x1000000000000000)
 EVICT_FIRST = Int64(0x12F0000000000000)
 EVICT_LAST = Int64(0x14F0000000000000)
 
+TORCH_TO_CUTE_DTYPE = {
+    torch.bfloat16: BFloat16,
+    torch.float32: Float32,
+}
+
 
 @dsl_user_op
 def recast_val(x, dtype, *, loc=None, ip=None):
