@@ -792,7 +792,7 @@ class NixlBaseConnectorWorker:
         failure_type: str,
         req_id: str | None,
         msg: str = "",
-        error: Exception | None = None,
+        error: BaseException | None = None,
         meta: ReqMeta | None = None,
         **extra_context,
     ):
