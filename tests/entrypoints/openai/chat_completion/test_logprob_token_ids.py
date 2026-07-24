@@ -98,6 +98,90 @@ def test_completion_rejects_explicit_token_ids_without_generated_tokens():
         )
 
 
+@pytest.mark.parametrize(
+    ("logprob_token_ids", "expect_error", "match"),
+    [
+        # Field absent: always fine
+        pytest.param(
+            "OMIT", False, None,
+            id="omitted-no-error",
+        ),
+        # Field explicitly None: treated as absent, fine
+        pytest.param(
+            None, False, None,
+            id="none-no-error",
+        ),
+        # Empty list was the bug: used to silently pass, must now be rejected
+        pytest.param(
+            [], True, "must not be an empty list",
+            id="empty-list-rejected",
+        ),
+        # Non-empty without logprobs: correctly rejected both before and after fix
+        pytest.param(
+            [1, 2, 3], True, r"logprobs.*must be set to true",
+            id="nonempty-without-logprobs-rejected",
+        ),
+    ],
+)
+def test_chat_logprob_token_ids_validation(
+    logprob_token_ids, expect_error, match
+):
+    """Regression: [] must be rejected, not silently discarded."""
+    kwargs: dict = dict(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Hello"}],
+        logprobs=False,
+    )
+    if logprob_token_ids != "OMIT":
+        kwargs["logprob_token_ids"] = logprob_token_ids
+
+    if expect_error:
+        with pytest.raises(ValidationError, match=match):
+            ChatCompletionRequest(**kwargs)
+    else:
+        ChatCompletionRequest(**kwargs)  # must not raise
+
+
+@pytest.mark.parametrize(
+    ("logprob_token_ids", "expect_error", "match"),
+    [
+        pytest.param(
+            "OMIT", False, None,
+            id="omitted-no-error",
+        ),
+        pytest.param(
+            None, False, None,
+            id="none-no-error",
+        ),
+        pytest.param(
+            [], True, "must not be an empty list",
+            id="empty-list-rejected",
+        ),
+        pytest.param(
+            [1, 2, 3], True, r"logprobs.*must be set",
+            id="nonempty-without-logprobs-rejected",
+        ),
+    ],
+)
+def test_completion_logprob_token_ids_validation(
+    logprob_token_ids, expect_error, match
+):
+    """Regression: [] must be rejected on /v1/completions too."""
+    kwargs: dict = dict(
+        model=MODEL_NAME,
+        prompt="Hello",
+        # logprobs omitted → None, so "logprobs must be set" guard fires
+    )
+    if logprob_token_ids != "OMIT":
+        kwargs["logprob_token_ids"] = logprob_token_ids
+
+    if expect_error:
+        with pytest.raises(ValidationError, match=match):
+            CompletionRequest(**kwargs)
+    else:
+        CompletionRequest(**kwargs)  # must not raise
+
+
 def test_requests_reject_explicit_token_ids_with_beam_search():
     with pytest.raises(ValidationError, match="not supported with beam search"):
         ChatCompletionRequest(
