@@ -3,10 +3,10 @@ depends_on:
   - image-build-xpu
 steps:
 - label: Engine
-  timeout_in_minutes: 30
   device: intel_gpu
-  no_plugin: true
+  timeout_in_minutes: 30
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -40,10 +40,10 @@ steps:
     'cd tests &&
     pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py test_jit_monitor.py || true'
 - label: Engine (1 GPU)
-  timeout_in_minutes: 45
   device: intel_gpu
-  no_plugin: true
+  timeout_in_minutes: 45
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -64,10 +64,10 @@ steps:
     pytest -v -s v1/engine/test_preprocess_error_handling.py || true &&
     pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py || true'
 - label: e2e Scheduling (1 GPU)
-  timeout_in_minutes: 35
   device: intel_gpu
-  no_plugin: true
+  timeout_in_minutes: 53
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -88,8 +88,8 @@ steps:
 - label: e2e Core (1 GPU)
   device: intel_gpu
   timeout_in_minutes: 40
-  no_plugin: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -108,12 +108,12 @@ steps:
     'cd tests &&
     pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py || true'
 - label: V1 e2e (2 GPUs)
-  timeout_in_minutes: 25
-  optional: true
-  num_devices: 2
   device: intel_gpu
-  no_plugin: true
+  timeout_in_minutes: 25
+  num_devices: 2
+  optional: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -148,12 +148,12 @@ steps:
     'cd tests &&
     pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k tensor_parallelism || true'
 - label: V1 e2e (4 GPUs)
-  timeout_in_minutes: 20
-  optional: true
-  num_devices: 4
   device: intel_gpu
-  no_plugin: true
+  timeout_in_minutes: 20
+  num_devices: 4
+  optional: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
@@ -188,12 +188,12 @@ steps:
     'cd tests &&
     pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k eagle_correctness_heavy || true'
 - label: V1 e2e (4xH100)
-  timeout_in_minutes: 35
   device: intel_gpu
+  timeout_in_minutes: 35
   num_devices: 4
   optional: true
-  no_plugin: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
