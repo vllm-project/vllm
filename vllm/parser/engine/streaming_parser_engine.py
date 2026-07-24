@@ -228,7 +228,10 @@ class StreamingParserEngine:
         events: list[SemanticEvent] = []
         for item in items:
             if isinstance(item, PreLexedTerminal):
-                events.extend(self._process_lex_tokens(self._lexer.flush()))
+                if self._lexer.buffer and item.text.startswith(self._lexer.buffer):
+                    self._lexer.reset()
+                else:
+                    events.extend(self._process_lex_tokens(self._lexer.flush()))
                 events.extend(self._on_terminal(item.terminal, item.text))
             elif isinstance(item, TextChunk):
                 events.extend(self._process_lex_tokens(self._lexer.feed(item.text)))
