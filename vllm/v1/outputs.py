@@ -14,6 +14,7 @@ from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
+    from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorWorkerMetadata
     from vllm.distributed.kv_events import KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.v1.base import (
         KVConnectorWorkerMetadata,
@@ -23,6 +24,7 @@ else:
     KVConnectorStats = object
     KVConnectorWorkerMetadata = object
     KVConnectorKVEvents = object
+    ECConnectorWorkerMetadata = object
 
 
 class LogprobsLists(NamedTuple):
@@ -253,6 +255,7 @@ class ECConnectorOutput:
     # [mm_hash]
     finished_sending: set[str] | None = None
     finished_recving: set[str] | None = None
+    ec_connector_worker_meta: ECConnectorWorkerMetadata | None = None
 
 
 # ModelRunnerOutput is serialized and sent to the scheduler process.

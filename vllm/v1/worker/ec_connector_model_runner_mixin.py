@@ -74,5 +74,6 @@ class ECConnectorModelRunnerMixin:
             output.finished_sending, output.finished_recving = (
                 ec_connector.get_finished(scheduler_output.finished_req_ids)
             )
+            output.ec_connector_worker_meta = ec_connector.build_connector_worker_meta()
 
             ec_connector.clear_connector_metadata()
