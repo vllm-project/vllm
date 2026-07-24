@@ -280,3 +280,5 @@ class GrammarOutput:
     structured_output_request_ids: list[str]
     # Bitmask ordered as structured_output_request_ids.
     grammar_bitmask: "npt.NDArray[np.int32]"
+    # Number of speculative-token rows for each structured output request.
+    num_spec_tokens: list[int]
