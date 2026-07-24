@@ -17,6 +17,7 @@ from vllm.entrypoints.openai.dp_supervisor import (
 )
 from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
+from vllm.renderers.paged_shm.server import maybe_start_paged_shm_server
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import get_tcp_uri
@@ -327,6 +328,10 @@ def run_multi_api_server(args: argparse.Namespace):
             coordinator.get_stats_publish_address() if coordinator else None
         )
 
+        paged_shm_server = maybe_start_paged_shm_server(
+            vllm_config.model_config.multimodal_config
+        )
+
         if rust_frontend_path:
             if parallel_config.local_engines_only:
                 expected_engine_start_index = parallel_config.data_parallel_rank
@@ -392,3 +397,5 @@ def run_multi_api_server(args: argparse.Namespace):
             local_engine_manager.shutdown(timeout=to_timeout(shutdown_by))
         if coordinator:
             coordinator.shutdown(timeout=to_timeout(shutdown_by))
+        if paged_shm_server is not None:
+            paged_shm_server.close()

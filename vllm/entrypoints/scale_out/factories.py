@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 
+from vllm import envs
+from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.tasks import SupportedTask
 
@@ -76,3 +78,45 @@ def register_scale_out_api_routers(
         )
 
         attach_disagg_router(app)
+
+
+def init_paged_shm_server_state(state: "State", model_config: ModelConfig | None):
+    if not envs.VLLM_SERVER_DEV_MODE:
+        return
+
+    if model_config is None:
+        return
+
+    multimodal_config = model_config.multimodal_config
+    if multimodal_config is None:
+        return
+
+    if not multimodal_config.is_paged_shm_enabled():
+        return
+
+    from vllm.entrypoints.scale_out.object_storage.serving import (
+        ServingObjectStorage,
+    )
+
+    state.serving_object_storage = ServingObjectStorage(
+        server_address=multimodal_config.paged_shm_server_address
+    )
+
+
+def register_paged_shm_server_routers(app: FastAPI, model_config: ModelConfig | None):
+    if not envs.VLLM_SERVER_DEV_MODE:
+        return
+
+    if model_config is None:
+        return
+
+    multimodal_config = model_config.multimodal_config
+    if multimodal_config is None:
+        return
+
+    if not multimodal_config.is_paged_shm_enabled():
+        return
+
+    from .object_storage.api_router import router as object_storage_router
+
+    app.include_router(object_storage_router)
