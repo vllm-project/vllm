@@ -83,6 +83,11 @@ class TopKTopPSampler(nn.Module):
         super().__init__()
         self.logprobs_mode = logprobs_mode
         self.use_fp64_gumbel = use_fp64_gumbel
+        # torch.compile's Inductor C++ backend can fail at runtime on some
+        # platforms/toolchains (e.g. macOS with a non-Apple clang++ first in
+        # PATH cannot find system headers). Disabled permanently after the
+        # first failure; the eager path below is used instead.
+        self._use_compiled_random_sample = True
         if current_platform.is_cuda():
             # FlashInfer doesn't expose post-top-k/top-p logits/logprobs,
             # so it can't be used when the configured mode requires them.
@@ -192,8 +197,20 @@ class TopKTopPSampler(nn.Module):
         elif self.logprobs_mode == "processed_logprobs":
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
 
-        if len(generators) != logits.shape[0] and not self.use_fp64_gumbel:
-            return compiled_random_sample(logits), logits_to_return
+        if (
+            self._use_compiled_random_sample
+            and len(generators) != logits.shape[0]
+            and not self.use_fp64_gumbel
+        ):
+            try:
+                return compiled_random_sample(logits), logits_to_return
+            except Exception as e:
+                logger.warning_once(
+                    "compiled_random_sample failed (%s); falling back to "
+                    "the eager sampling path.",
+                    str(e).splitlines()[0] if str(e) else type(e).__name__,
+                )
+                self._use_compiled_random_sample = False
 
         probs = logits.softmax(dim=-1, dtype=torch.float32)
         q = empty_exponential_noise_like(probs, self.use_fp64_gumbel)
