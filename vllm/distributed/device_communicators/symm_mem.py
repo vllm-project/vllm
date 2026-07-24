@@ -8,6 +8,7 @@ from torch.distributed import ProcessGroup
 import vllm.envs as envs
 from vllm.distributed.device_communicators.all_reduce_utils import (
     SYMM_MEM_ALL_REDUCE_MAX_SIZES,
+    SYMM_MEM_ALL_REDUCE_MIN_SIZES,
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -27,6 +28,8 @@ class SymmMemCommunicator:
         "9.0": [4, 6, 8],
         "10.0": [6, 8],
         "10.3": [6, 8],
+        # 12.0: no multicast hardware; always two-shot P2P.
+        "12.0": [],
     }
 
     def __init__(
@@ -76,6 +79,30 @@ class SymmMemCommunicator:
                 self.world_size,
             )
             return
+        # The one/two-shot kernels synchronize the group through signal
+        # pads with system-scope CAS on peer-mapped memory (put_signal /
+        # wait_signal). P2P read/write access does not imply atomic
+        # support: without native P2P atomics the CAS is not atomic,
+        # barrier tokens are lost or duplicated under load, and the whole
+        # group wedges permanently (observed on PCIe-only topologies).
+        # device.index is a visible ordinal, not a logical local ID.
+        physical_device_id = current_platform.visible_device_id_to_physical_device_id(
+            self.device.index
+        )
+        tensor = torch.tensor([physical_device_id], dtype=torch.int, device="cpu")
+        gather_list = [
+            torch.tensor([0], dtype=torch.int, device="cpu")
+            for _ in range(self.world_size)
+        ]
+        dist.all_gather(gather_list, tensor, group=self.group)
+        physical_device_ids = [t.item() for t in gather_list]
+        if not current_platform.has_native_p2p_atomics(physical_device_ids):
+            logger.warning(
+                "SymmMemCommunicator: native P2P atomics are not supported "
+                "between devices %s, communicator is not available.",
+                physical_device_ids,
+            )
+            return
         # Use override max_size if provided, otherwise use default
         if max_size_override is not None:
             self.max_size = max_size_override
@@ -87,6 +114,7 @@ class SymmMemCommunicator:
             self.max_size = SYMM_MEM_ALL_REDUCE_MAX_SIZES[self.device_capability][
                 self.world_size
             ]
+        self.min_size = SYMM_MEM_ALL_REDUCE_MIN_SIZES.get(self.device_capability, 0)
         try:
             self.buffer = torch_symm_mem.empty(
                 self.max_size // self.dtype.itemsize,
@@ -102,13 +130,27 @@ class SymmMemCommunicator:
                 str(e),
             )
             return
-        if handle.multicast_ptr == 0:
+        # Multicast is only needed by the multimem kernels; the two-shot
+        # all-reduce runs on plain P2P mappings (e.g. PCIe-only devices).
+        may_use_multimem = force_multimem or (
+            force_multimem is None
+            and self.world_size
+            in self._WORLD_SIZES_MULTIMEM.get(self.device_capability, [])
+        )
+        if may_use_multimem and handle.multicast_ptr == 0:
             logger.warning(
                 "SymmMemCommunicator: symmetric memory "
                 "multicast operations are not supported."
             )
             return
         self.force_multimem = force_multimem
+        # The one/two-shot kernels synchronize the group with per-slot
+        # signal-pad exchanges, so their device execution order must match
+        # the group issue order. Callers issue all-reduces from different
+        # streams (profile / compile warmup / capture), which CUDA does not
+        # order; serialize every op of this communicator on a dedicated
+        # stream, fenced with events against the caller's stream.
+        self._comm_stream = torch.cuda.Stream(device=self.device)
         self.disabled = False
         if envs.VLLM_BATCH_INVARIANT:
             self.disabled = True
@@ -121,7 +163,7 @@ class SymmMemCommunicator:
         inp_size = inp.numel() * inp.element_size()
         if inp_size % 4 != 0:
             return False
-        return inp_size <= self.max_size
+        return self.min_size <= inp_size <= self.max_size
 
     def all_reduce(
         self, inp: torch.Tensor, *, out: torch.Tensor | None = None
@@ -130,7 +172,6 @@ class SymmMemCommunicator:
             return None
         if out is None:
             out = torch.empty_like(inp)
-        self.buffer[: inp.numel()].copy_(inp.view(-1))
 
         # Determine which algorithm to use
         use_multimem = False
@@ -139,17 +180,22 @@ class SymmMemCommunicator:
             use_multimem = self.force_multimem
         else:
             # Normal logic: use multimem for supported world sizes
-            use_multimem = (
-                self.world_size in self._WORLD_SIZES_MULTIMEM[self.device_capability]
+            use_multimem = self.world_size in self._WORLD_SIZES_MULTIMEM.get(
+                self.device_capability, []
             )
 
-        if use_multimem:
-            torch.ops.symm_mem.multimem_all_reduce_(
-                self.buffer[: inp.numel()], "sum", self.group.group_name
-            )
-        else:
-            torch.ops.symm_mem.two_shot_all_reduce_(
-                self.buffer[: inp.numel()], "sum", self.group.group_name
-            )
-        out.copy_(self.buffer[: inp.numel()].view(out.shape))
+        current = torch.cuda.current_stream()
+        self._comm_stream.wait_stream(current)
+        with torch.cuda.stream(self._comm_stream):
+            self.buffer[: inp.numel()].copy_(inp.view(-1))
+            if use_multimem:
+                torch.ops.symm_mem.multimem_all_reduce_(
+                    self.buffer[: inp.numel()], "sum", self.group.group_name
+                )
+            else:
+                torch.ops.symm_mem.two_shot_all_reduce_(
+                    self.buffer[: inp.numel()], "sum", self.group.group_name
+                )
+            out.copy_(self.buffer[: inp.numel()].view(out.shape))
+        current.wait_stream(self._comm_stream)
         return out

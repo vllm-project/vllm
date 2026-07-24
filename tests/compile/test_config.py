@@ -410,8 +410,11 @@ def test_should_split():
         (None, 2048, 1, False, 257, CUDAGraphMode.FULL_AND_PIECEWISE, 257),
         # max from list
         ([1, 2, 4, 15], None, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 15),
-        # SP forces full-graph compilation, sizes are filtered by TP
-        ([1, 2, 4, 15], None, 2, True, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 4),
+        # SP only constrains sizes at or above sp_min_token_num (512 here);
+        # smaller captured sizes keep their exact shapes
+        ([1, 2, 4, 15], None, 2, True, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 15),
+        # sizes at or above sp_min_token_num are still filtered by TP
+        ([2, 511, 513], None, 2, True, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 511),
         # limited by the max_tokens
         ([1, 2, 4, 15], None, 1, False, 8, CUDAGraphMode.FULL_AND_PIECEWISE, 4),
         # the list should contain at least 1 element when use cudagraph
@@ -468,6 +471,29 @@ def test_cudagraph_sizes_post_init(
         )
 
 
+def test_spec_decode_capture_rounding_scoped_by_sp_threshold():
+    """SP only binds captured sizes at or above sp_min_token_num."""
+
+    def make_config(sp_min_token_num: int) -> CompilationConfig:
+        return CompilationConfig(
+            pass_config=PassConfig(enable_sp=True, sp_min_token_num=sp_min_token_num),
+            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+            cudagraph_capture_sizes=[1, 2, 8, 512],
+            max_cudagraph_capture_size=512,
+        )
+
+    # uniform_decode_query_len=3 (2 speculative tokens) with tp=4: max(3, 4)
+    # is divisible by neither, but no captured size reaches the threshold,
+    # so only spec-decode divisibility applies.
+    config = make_config(sp_min_token_num=1024)
+    config.adjust_cudagraph_sizes_for_spec_decode(3, 4)
+    assert config.cudagraph_capture_sizes == [3, 9]
+
+    # With captured sizes at or above the threshold the conflict is real.
+    with pytest.raises(ValueError, match="Can't determine cudagraph shapes"):
+        make_config(sp_min_token_num=256).adjust_cudagraph_sizes_for_spec_decode(3, 4)
+
+
 @pytest.mark.skipif(
     not current_platform.support_static_graph_mode(),
     reason="Skip if not cudagraph mode supported",
@@ -483,15 +509,23 @@ def test_cudagraph_sizes_post_init(
         "expected_max_size",
     ),
     [
-        (CUDAGraphMode.PIECEWISE, False, True, CUDAGraphMode.FULL, False, [2, 4], 4),
+        (
+            CUDAGraphMode.PIECEWISE,
+            False,
+            True,
+            CUDAGraphMode.FULL,
+            False,
+            [1, 2, 4, 15],
+            15,
+        ),
         (
             CUDAGraphMode.FULL_DECODE_ONLY,
             False,
             True,
             CUDAGraphMode.FULL_DECODE_ONLY,
             False,
-            [2, 4],
-            4,
+            [1, 2, 4, 15],
+            15,
         ),
         (
             CUDAGraphMode.FULL_AND_PIECEWISE,
@@ -499,8 +533,8 @@ def test_cudagraph_sizes_post_init(
             True,
             CUDAGraphMode.FULL,
             False,
-            [2, 4],
-            4,
+            [1, 2, 4, 15],
+            15,
         ),
         (
             CUDAGraphMode.FULL_AND_PIECEWISE,
@@ -508,8 +542,8 @@ def test_cudagraph_sizes_post_init(
             True,
             CUDAGraphMode.FULL_AND_PIECEWISE,
             True,
-            [2, 4],
-            4,
+            [1, 2, 4, 15],
+            15,
         ),
     ],
 )

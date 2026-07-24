@@ -560,8 +560,14 @@ def is_residual_scattered_for_sp(
         or not vllm_config.compilation_config.splitting_ops
     ), "Sequence parallelism requires full-graph compilation"
 
-    # When sequence parallelism is enabled, we always pad num_input_tokens
-    # to be a multiple of tensor_parallel_size (tp) earlier.
+    sp_min_token_num = vllm_config.compilation_config.pass_config.sp_min_token_num
+    # Below sp_min_token_num the compile range is not SP-rewritten and the
+    # residual stays full-shape.
+    if sp_min_token_num is not None and num_input_tokens < sp_min_token_num:
+        return False
+
+    # When sequence parallelism applies, num_input_tokens was padded to a
+    # multiple of tensor_parallel_size (tp) earlier.
     assert num_input_tokens % tp == 0
 
     return True

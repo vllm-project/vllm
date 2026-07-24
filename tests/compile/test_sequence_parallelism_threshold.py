@@ -110,6 +110,29 @@ class TestGetSequenceParallelismThreshold:
             assert result is not None
 
 
+class TestGetSequenceParallelismThresholdSM120:
+    """Tests for get_sequence_parallelism_threshold on SM120 (PCIe-only)."""
+
+    def test_sm120_hidden_4096_returns_threshold(self, mock_cuda_platform):
+        """SM120 supports SP from hidden_size 4096."""
+        with mock_cuda_platform(capability=(12, 0)):
+            result = get_sequence_parallelism_threshold(
+                hidden_size=4096, tp_size=4, element_size=2
+            )
+            # (2 * 4 * 1024 * 1024) // (4096 * 2) = 1024
+            assert result == 1024
+
+    def test_sm120_small_hidden_returns_none(self, mock_cuda_platform):
+        """SM120 with hidden_size below threshold should return None."""
+        with mock_cuda_platform(capability=(12, 0)):
+            result = get_sequence_parallelism_threshold(
+                hidden_size=SP_MIN_HIDDEN_SIZE[120] - 1,
+                tp_size=4,
+                element_size=2,
+            )
+            assert result is None
+
+
 # XPU-specific constants (must match sequence_parallelism.py values)
 _XPU_MIN_HIDDEN_SIZE = 4096
 _XPU_MIN_PER_GPU_SIZE_MB = 8.0
