@@ -384,7 +384,7 @@ class TranscriptionSegment(OpenAIBaseModel):
 
 
 class TranscriptionResponseVerbose(OpenAIBaseModel):
-    duration: str
+    duration: float
     """The duration of the input audio."""
 
     language: str
