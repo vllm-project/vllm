@@ -4,10 +4,10 @@ depends_on:
 steps:
 - label: Ray Dependency Compatibility Check
   device: intel_gpu
-  soft_fail: true
   timeout_in_minutes: 10
-  no_plugin: true
+  soft_fail: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
