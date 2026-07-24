@@ -469,7 +469,7 @@ def init_kv_cache(
     num_attn_module = (
         2
         if vllm_config.model_config.hf_config.model_type
-        in ("longcat_flash", "longcat_flash_ngram")
+        in ("longcat_flash", "longcat_flash_ngram", "longcat_next")
         else 1
     )
     bind_kv_cache(kv_caches, forward_context, runner_kv_caches, num_attn_module)
