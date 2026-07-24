@@ -77,6 +77,32 @@ llm = LLM(
 
 ---
 
+## Performance Considerations
+
+FP8 halves the KV cache's per-token footprint relative to FP16/BF16, which has two measurable effects:
+
+- **KV cache capacity doubles.** At the same `gpu_memory_utilization`, the engine can hold twice as many tokens. The engine startup log reports both numbers for your configuration (`GPU KV cache size` and `Maximum concurrency`). Measured example — `Qwen/Qwen3-4B` on a 24 GB NVIDIA L4 (vLLM 0.25.1, `--max-model-len 32768`, 11.47 GiB KV reservation in both cases):
+
+  | `kv_cache_dtype` | GPU KV cache size | Max concurrency (32,768-token requests) |
+  |---|---|---|
+  | `auto` (BF16) | 83,488 tokens | 2.55x |
+  | `fp8` | 166,992 tokens | 5.10x |
+
+- **Decode throughput improves with context length.** Decoding at low batch sizes is dominated by reading the KV cache each step, so halving its size raises throughput — and the gain grows as the cache does. Same setup as above, batch size 1, prefix caching disabled:
+
+  | Context length | `auto` (BF16) | `fp8` | Speedup |
+  |---|---|---|---|
+  | 2k | 29.1 tok/s | 29.4 tok/s | +1% |
+  | 8k | 26.4 tok/s | 27.9 tok/s | +6% |
+  | 16k | 23.6 tok/s | 26.2 tok/s | +11% |
+  | 32k | 19.4 tok/s | 23.4 tok/s | +21% |
+
+  Absolute gains depend on the GPU, attention backend, and workload — measure on your own stack before relying on these numbers.
+
+- **Accuracy depends on scale calibration.** With the default scales (`1.0`, no calibration), quantization error can degrade output quality. For quality-sensitive workloads, use calibrated scales via `llm-compressor` (see the calibration example below).
+
+---
+
 ## Examples
 
 ### 1. No Calibration (`kv_cache_dtype="fp8"`, `calculate_kv_scales=False`)
@@ -88,7 +114,7 @@ from vllm import LLM, SamplingParams
 
 sampling_params = SamplingParams(temperature=0.7, top_p=0.8)
 llm = LLM(
-    model="meta-llama/Llama-2-7b-chat-hf",
+    model="Qwen/Qwen3-4B",
     kv_cache_dtype="fp8",
     calculate_kv_scales=False,
 )
@@ -108,7 +134,7 @@ from vllm import LLM, SamplingParams
 
 sampling_params = SamplingParams(temperature=0.7, top_p=0.8)
 llm = LLM(
-    model="meta-llama/Llama-2-7b-chat-hf",
+    model="Qwen/Qwen3-4B",
     kv_cache_dtype="fp8",
     calculate_kv_scales=True,
 )
