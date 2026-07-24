@@ -234,7 +234,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             )
         else:
             # Actually this will be dead code, since we always pass gate into
-            # FusedMoEFactory in the current implementation. But we keep this code
+            # MoERunner in the current implementation. But we keep this code
             # here for clarity and future flexibility.
             router_logits, _ = self.gate(hidden_states)
             final_hidden_states = self.experts(
