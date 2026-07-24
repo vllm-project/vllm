@@ -3544,6 +3544,38 @@ def causal_conv1d_update_cpu(
     )
 
 
+def fused_gdn_decode_cpu(
+    mixed_qkv: torch.Tensor,
+    conv_states: torch.Tensor,
+    packed_conv_weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    silu_activation: bool,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    ssm_state: torch.Tensor,
+    state_indices: torch.Tensor,
+    num_tokens: int,
+    output: torch.Tensor,
+) -> None:
+    torch.ops._C.fused_gdn_decode_cpu(
+        mixed_qkv,
+        conv_states,
+        packed_conv_weight,
+        bias,
+        silu_activation,
+        A_log,
+        dt_bias,
+        a,
+        b,
+        ssm_state,
+        state_indices,
+        num_tokens,
+        output,
+    )
+
+
 class CPUDNNLGEMMHandler:
     def __init__(self) -> None:
         self.handler_tensor: torch.Tensor | None = None

@@ -128,6 +128,15 @@ at::Tensor fused_sigmoid_gating_delta_rule_update_spec_cpu(
     const at::Tensor& cu_seqlens, bool use_qk_l2norm_in_kernel,
     double softplus_beta = 1.0, double softplus_threshold = 20.0);
 
+void fused_gdn_decode_cpu(const at::Tensor& mixed_qkv, at::Tensor& conv_states,
+                          const at::Tensor& packed_conv_weight,
+                          const std::optional<at::Tensor>& bias,
+                          bool silu_activation, const at::Tensor& A_log,
+                          const at::Tensor& dt_bias, const at::Tensor& a,
+                          const at::Tensor& b, at::Tensor& ssm_state,
+                          const at::Tensor& state_indices, int64_t num_tokens,
+                          at::Tensor& output);
+
 std::tuple<at::Tensor, at::Tensor> fused_gdn_gating_cpu(
     const at::Tensor& A_log, const at::Tensor& a, const at::Tensor& b,
     const at::Tensor& dt_bias);
@@ -505,6 +514,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? cache_seqlens, Tensor? conv_state_indices, int pad_slot_id, "
       "bool is_vnni) -> Tensor");
   ops.impl("causal_conv1d_update_cpu", torch::kCPU, &causal_conv1d_update_cpu);
+  ops.def(
+      "fused_gdn_decode_cpu(Tensor mixed_qkv, Tensor(a!) conv_states, Tensor "
+      "packed_conv_weight, Tensor? bias, bool silu_activation, Tensor A_log, "
+      "Tensor dt_bias, Tensor a, Tensor b, Tensor(b!) ssm_state, Tensor "
+      "state_indices, int num_tokens, Tensor(c!) output) -> ()");
+  ops.impl("fused_gdn_decode_cpu", torch::kCPU, &fused_gdn_decode_cpu);
 #endif
 
 #if (defined(__AVX512BF16__) && defined(__AVX512F__) && \
