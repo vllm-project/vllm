@@ -618,7 +618,14 @@ class NaiveBatchedExperts(mk.FusedMoEExpertsModular):
             # Indexing expert_num_tokens doesn't work w/cudagraphs or inductor
             if (
                 torch.compiler.is_compiling()
-                or torch.cuda.is_current_stream_capturing()
+                or (
+                    current_platform.is_cuda_alike()
+                    and torch.cuda.is_current_stream_capturing()
+                )
+                or (
+                    current_platform.is_xpu()
+                    and torch.xpu.is_current_stream_capturing()
+                )
             ):
                 num = hidden_states.shape[1]
             else:
@@ -659,7 +666,14 @@ def batched_moe_kernel_quantize_input(
     per_act_token_quant: bool,
     block_shape: list[int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    if torch.compiler.is_compiling() or torch.cuda.is_current_stream_capturing():
+    if (
+        torch.compiler.is_compiling()
+        or (
+            current_platform.is_cuda_alike()
+            and torch.cuda.is_current_stream_capturing()
+        )
+        or (current_platform.is_xpu() and torch.xpu.is_current_stream_capturing())
+    ):
         # Note: this does a bunch of extra work because expert_num_tokens is
         # ignored but it does support torch.compile + cudagraphs.
         hidden_dim = A.size(-1)
