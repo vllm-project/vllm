@@ -105,7 +105,7 @@ _METRICS_INTERVAL = 2000
 _metrics_calls = 0
 _metrics_last = HiSparseStats()
 _CURRENT_GROUP_LEADER: HiSparseCoordinator | None = None
-_PREFILL_REMAP: tuple | None = None
+_PREFILL_REMAP: tuple[tuple, HiSparsePrefillStagingPlan] | None = None
 
 
 def take_hisparse_stats() -> HiSparseStats | None:
@@ -301,6 +301,41 @@ def hisparse_prefill_staging_remap(
         + torch.arange(block_size, dtype=torch.int32, device=block_table.device)
     ).view(1, -1)
     return new_bt, row_ids
+
+
+@dataclass(frozen=True)
+class HiSparsePrefillStagingPlan:
+    block_table: torch.Tensor
+    row_ids: torch.Tensor
+    dst_rows: torch.Tensor
+    miss_mask: torch.Tensor
+    block_size: int
+
+
+def build_hisparse_prefill_staging_plan(
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    block_size: int,
+) -> HiSparsePrefillStagingPlan:
+    """Build the layer-independent remap for host-cache prefill staging."""
+    device = block_table.device
+    used = (seq_lens.to(torch.int64) + block_size - 1) // block_size
+    bounded = torch.where(
+        torch.arange(block_table.shape[1], device=device)[None, :] < used[:, None],
+        block_table,
+        0,
+    )
+    new_bt, row_ids = hisparse_prefill_staging_remap(bounded, block_size)
+    dst_rows = torch.arange(row_ids.shape[1], dtype=torch.int32, device=device).view(
+        1, -1
+    )
+    return HiSparsePrefillStagingPlan(
+        block_table=new_bt,
+        row_ids=row_ids,
+        dst_rows=dst_rows,
+        miss_mask=torch.ones_like(row_ids),
+        block_size=block_size,
+    )
 
 
 def _has_hisparse_ops() -> bool:
@@ -513,42 +548,58 @@ class HiSparseCoordinator:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Gather referenced host context blocks into a compact GPU cache."""
         global _PREFILL_REMAP
-        device = block_table.device
         block_size = kv_cache.shape[1]
-        row_width = kv_cache.shape[-1]
-        key = (block_table.data_ptr(), block_table.shape, block_table._version)
+        key = (
+            block_table.data_ptr(),
+            block_table.shape,
+            block_table._version,
+            seq_lens.data_ptr(),
+            seq_lens.shape,
+            seq_lens._version,
+            block_size,
+        )
         cached = _PREFILL_REMAP
         if cached is not None and cached[0] == key:
-            _, new_bt, row_ids, dst_rows, miss_mask = cached
+            plan = cached[1]
         else:
-            used = (seq_lens.to(torch.int64) + block_size - 1) // block_size
-            bounded = torch.where(
-                torch.arange(block_table.shape[1], device=device)[None, :]
-                < used[:, None],
-                block_table,
-                0,
+            plan = build_hisparse_prefill_staging_plan(
+                block_table, seq_lens, block_size
             )
-            new_bt, row_ids = hisparse_prefill_staging_remap(bounded, block_size)
-            dst_rows = torch.arange(
-                row_ids.shape[1], dtype=torch.int32, device=device
-            ).view(1, -1)
-            miss_mask = torch.ones_like(row_ids)
-            _PREFILL_REMAP = (key, new_bt, row_ids, dst_rows, miss_mask)
+            _PREFILL_REMAP = (key, plan)
+
+        return self.gather_prefill_cache(kv_cache, plan), plan.block_table
+
+    def gather_prefill_cache(
+        self,
+        kv_cache: torch.Tensor,
+        plan: HiSparsePrefillStagingPlan,
+    ) -> torch.Tensor:
+        """Gather one layer's host cache using a shared staging plan."""
+        if kv_cache.shape[1] != plan.block_size:
+            raise ValueError(
+                f"HiSparse staging block size {plan.block_size} does not match "
+                f"the KV cache block size {kv_cache.shape[1]}."
+            )
+        row_width = kv_cache.shape[-1]
 
         staged = torch.empty(
-            (row_ids.shape[1] // block_size, block_size, row_width),
+            (
+                plan.row_ids.shape[1] // plan.block_size,
+                plan.block_size,
+                row_width,
+            ),
             dtype=kv_cache.dtype,
-            device=device,
+            device=plan.block_table.device,
         )
         torch.ops._C_cache_ops.hisparse_gather_plan(
             kv_cache.view(-1, row_width),
             staged.view(-1, row_width),
-            row_ids,
-            dst_rows,
-            miss_mask,
+            plan.row_ids,
+            plan.dst_rows,
+            plan.miss_mask,
             None,
         )
-        return staged, new_bt
+        return staged
 
     def reset_hot_state(self) -> None:
         """Drop all hot-buffer bookkeeping (hits become misses)."""

@@ -3,7 +3,6 @@
 """Unit tests for the sparse MLA backends and utilities."""
 
 import math
-from dataclasses import dataclass
 from types import MethodType, SimpleNamespace
 
 import pytest
@@ -23,6 +22,9 @@ from tests.v1.attention.utils import (
 from vllm import _custom_ops as ops
 from vllm.config import HiSparseConfig, set_current_vllm_config
 from vllm.model_executor.layers.attention.mla_attention import MLACommonBaseImpl
+from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    SparseMLAPrefillMetadata,
+)
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
 
@@ -50,8 +52,10 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import (
 )
 from vllm.v1.attention.backends.mla.hisparse import (
     HiSparseCoordinator,
+    HiSparsePrefillStagingPlan,
     ResolvedHiSparseConfig,
     _has_hisparse_ops,
+    build_hisparse_prefill_staging_plan,
     hisparse_prefill_staging_remap,
 )
 from vllm.v1.attention.backends.mla.indexer import split_indexer_prefill_chunks
@@ -867,31 +871,28 @@ def test_split_prefill_chunks(seq_lens, max_buf, expected):
     assert out == expected
 
 
-def test_hisparse_mha_staging_preserves_shared_metadata(monkeypatch):
-    @dataclass
-    class PrefillMetadata:
-        block_table: torch.Tensor
-        chunked_context: object
-
-    @dataclass
-    class Metadata:
-        prefill: PrefillMetadata
-        seq_lens: torch.Tensor
-        num_decodes: int
-
-    original_block_table = torch.tensor([[7, 11]], dtype=torch.int32)
+def test_hisparse_mha_uses_shared_staging_plan(monkeypatch):
     staged_block_table = torch.tensor([[0, 1]], dtype=torch.int32)
-    staged_inputs = []
+    plan = HiSparsePrefillStagingPlan(
+        block_table=staged_block_table,
+        row_ids=torch.arange(128, dtype=torch.int32).view(1, -1),
+        dst_rows=torch.arange(128, dtype=torch.int32).view(1, -1),
+        miss_mask=torch.ones(1, 128, dtype=torch.int32),
+        block_size=64,
+    )
+    gathered_plans = []
 
     class Coordinator:
-        def stage_prefill_cache(self, kv_cache, block_table, seq_lens):
-            staged_inputs.append(block_table.clone())
-            return kv_cache, staged_block_table
+        def gather_prefill_cache(self, kv_cache, staging_plan):
+            gathered_plans.append(staging_plan)
+            return kv_cache
 
     observed_block_tables = []
+    observed_metadata = []
 
     def forward_mha(self, *args, **kwargs):
         attn_metadata = args[4]
+        observed_metadata.append(attn_metadata)
         observed_block_tables.append(attn_metadata.prefill.block_table.clone())
 
     monkeypatch.setattr(MLACommonBaseImpl, "forward_mha", forward_mha)
@@ -900,14 +901,15 @@ def test_hisparse_mha_staging_preserves_shared_metadata(monkeypatch):
     for impl in impls:
         impl.hisparse_coordinator = Coordinator()
 
-    prefill = PrefillMetadata(
-        block_table=original_block_table,
+    prefill = SparseMLAPrefillMetadata(
+        block_table=staged_block_table,
+        query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+        max_query_len=1,
         chunked_context=object(),
+        hisparse_staging_plan=plan,
     )
-    metadata = Metadata(
+    metadata = SimpleNamespace(
         prefill=prefill,
-        seq_lens=torch.tensor([128], dtype=torch.int32),
-        num_decodes=0,
     )
     tensor = torch.empty(0)
 
@@ -922,10 +924,10 @@ def test_hisparse_mha_staging_preserves_shared_metadata(monkeypatch):
             tensor,
         )
 
-    assert prefill.block_table is original_block_table
-    assert len(staged_inputs) == len(observed_block_tables) == 2
-    for block_table in staged_inputs:
-        torch.testing.assert_close(block_table, original_block_table)
+    assert len(gathered_plans) == 2
+    assert all(staging_plan is plan for staging_plan in gathered_plans)
+    assert len(observed_metadata) == 2
+    assert all(observed is metadata for observed in observed_metadata)
     for block_table in observed_block_tables:
         torch.testing.assert_close(block_table, staged_block_table)
 
@@ -1804,6 +1806,10 @@ def test_hisparse_mixed_batch_bf16_row_split(
     )
     num_decodes = metadata.num_decodes
     assert num_decodes == 2 and metadata.num_decode_tokens == 2
+    assert isinstance(metadata.prefill, SparseMLAPrefillMetadata)
+    staging_plan = metadata.prefill.hisparse_staging_plan
+    assert staging_plan is not None
+    assert metadata.prefill.block_table is staging_plan.block_table
 
     # Per-token sparse indices bounded by each token's position, with unique
     # offsets and -1 padding (same construction as the decode parity test).
@@ -1925,6 +1931,27 @@ def test_hisparse_prefill_staging_remap():
             staged = int(new_bt[i, j])
             for k in range(block_size):
                 assert int(flat_rows[staged * block_size + k]) == orig * block_size + k
+
+
+def test_hisparse_prefill_staging_plan_masks_unused_blocks():
+    block_table = torch.tensor([[5, 2, 7], [9, 3, 4]], dtype=torch.int32)
+    plan = build_hisparse_prefill_staging_plan(
+        block_table,
+        seq_lens=torch.tensor([5, 8], dtype=torch.int32),
+        block_size=4,
+    )
+
+    expected_bounded = torch.tensor([[5, 2, 0], [9, 3, 0]], dtype=torch.int32)
+    expected_block_table, expected_rows = hisparse_prefill_staging_remap(
+        expected_bounded, 4
+    )
+    torch.testing.assert_close(plan.block_table, expected_block_table)
+    torch.testing.assert_close(plan.row_ids, expected_rows)
+    torch.testing.assert_close(
+        plan.dst_rows,
+        torch.arange(expected_rows.shape[1], dtype=torch.int32).view(1, -1),
+    )
+    assert torch.all(plan.miss_mask == 1)
 
 
 def test_flashmla_cache_dtype_aliases_use_ds_layout():

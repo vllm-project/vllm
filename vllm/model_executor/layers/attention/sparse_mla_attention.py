@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Shared forward_mha implementation and metadata builder for sparse MLA backends."""
 
-from dataclasses import replace
+from dataclasses import dataclass
 from shutil import which
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
 
@@ -28,6 +28,8 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.mla.hisparse import (
     FP8_DS_MLA_ROW_BYTES,
     HiSparseCoordinator,
+    HiSparsePrefillStagingPlan,
+    build_hisparse_prefill_staging_plan,
     create_hisparse_coordinator,
     is_hisparse_decode_batch,
 )
@@ -45,6 +47,11 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 T = TypeVar("T", bound=AttentionMetadata)
+
+
+@dataclass
+class SparseMLAPrefillMetadata(MLACommonPrefillMetadata):
+    hisparse_staging_plan: HiSparsePrefillStagingPlan | None = None
 
 
 class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
@@ -210,19 +217,30 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             prefill_max_seq_len = int(
                 seq_lens_cpu[num_decodes : num_decodes + num_prefills].max().item()
             )
-            prefill = MLACommonPrefillMetadata(
-                block_table=common_attn_metadata.block_table_tensor[num_decodes:, ...],
+            block_table = common_attn_metadata.block_table_tensor[num_decodes:, ...]
+            chunked_context = self._build_chunked_context_fields(
+                common_attn_metadata,
+                num_decodes,
+                num_prefills,
+                prefill_query_lens_cpu,
+            )
+            staging_plan = None
+            if self.batch_to_request_state is not None and chunked_context is not None:
+                staging_plan = build_hisparse_prefill_staging_plan(
+                    block_table,
+                    common_attn_metadata.seq_lens[num_decodes:],
+                    self.kv_cache_spec.block_size,
+                )
+                block_table = staging_plan.block_table
+            prefill = SparseMLAPrefillMetadata(
+                block_table=block_table,
                 query_start_loc=prefill_query_start_loc,
                 max_query_len=prefill_max_query_len,
-                chunked_context=self._build_chunked_context_fields(
-                    common_attn_metadata,
-                    num_decodes,
-                    num_prefills,
-                    prefill_query_lens_cpu,
-                ),
+                chunked_context=chunked_context,
                 q_data_type=self.model_config.dtype,
                 output_dtype=self.model_config.dtype,
                 prefill_backend=self._prefill_backend,
+                hisparse_staging_plan=staging_plan,
             )
             self._prefill_backend.prepare_metadata(prefill)
 
@@ -552,17 +570,10 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             and prefill is not None
             and prefill.chunked_context is not None
         ):
-            assert attn_metadata.seq_lens is not None
-            kv_cache, staged_block_table = (
-                self.hisparse_coordinator.stage_prefill_cache(
-                    kv_cache,
-                    prefill.block_table,
-                    attn_metadata.seq_lens[attn_metadata.num_decodes :],
-                )
-            )
-            attn_metadata = replace(
-                attn_metadata,
-                prefill=replace(prefill, block_table=staged_block_table),
+            assert isinstance(prefill, SparseMLAPrefillMetadata)
+            assert prefill.hisparse_staging_plan is not None
+            kv_cache = self.hisparse_coordinator.gather_prefill_cache(
+                kv_cache, prefill.hisparse_staging_plan
             )
         super().forward_mha(
             q,
