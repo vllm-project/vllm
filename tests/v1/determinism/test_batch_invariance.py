@@ -17,7 +17,6 @@ from utils import (
 
 import vllm.envs as envs
 from vllm import LLM, SamplingParams
-from vllm.platforms import current_platform
 
 
 @skip_unsupported
@@ -51,11 +50,6 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
       seed.
     - Keep max_tokens and max_model_len bounded for speed and memory use.
     """
-    # Not all batch-invariant kernels are registered on XPU yet
-    # (e.g. attention, custom ops), so e2e determinism is not guaranteed.
-    if current_platform.is_xpu():
-        pytest.xfail("Not all batch-invariant kernels registered on XPU yet")
-
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
 
@@ -164,11 +158,6 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     block_m,
     block_n,
 ):
-    # Not all batch-invariant kernels are registered on XPU yet
-    # (e.g. attention, custom ops), so e2e determinism is not guaranteed.
-    if current_platform.is_xpu():
-        pytest.xfail("Not all batch-invariant kernels registered on XPU yet")
-
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
