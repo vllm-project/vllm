@@ -101,6 +101,12 @@ class BlockRemoved(KVCacheEvent):
     group_idx: int | None = None
     locality: str | None = None
     """LOCAL or REMOTE relative to the publisher; None means unspecified."""
+    remaining_copy_counts: list[int] | None = None
+    """Physical copies remaining in the publisher's block pool after each
+    corresponding hash removal. Entries align one-to-one with ``block_hashes``;
+    zero means the last known copy was removed, while ``None`` means the
+    publisher did not provide copy counts.
+    """
 
     def __hash__(self) -> int:
         return hash(
@@ -109,6 +115,9 @@ class BlockRemoved(KVCacheEvent):
                 self.medium,
                 self.group_idx,
                 self.locality,
+                tuple(self.remaining_copy_counts)
+                if self.remaining_copy_counts is not None
+                else None,
             )
         )
 

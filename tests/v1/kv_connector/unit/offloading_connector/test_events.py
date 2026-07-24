@@ -326,6 +326,7 @@ def test_lookup_promotion_factor_gt_1_store_and_remove():
     assert removed[0].block_hashes == expected_hashes
     assert removed[0].medium == _CPU_MEDIUM
     assert removed[0].group_idx == 0
+    assert removed[0].remaining_copy_counts is None
     assert not tracker._pending_event_metadata
 
 
