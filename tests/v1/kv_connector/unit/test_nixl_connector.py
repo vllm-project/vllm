@@ -1757,6 +1757,13 @@ def _run_abort_timeout_test(llm: LLM, timeout: int):
                 reason="Attention backend FLASH_ATTN is not supported on ROCm",
             ),
         ),
+        pytest.param(
+            "ROCM_ATTN",
+            marks=pytest.mark.skipif(
+                not current_platform.is_rocm(),
+                reason="Attention backend ROCM_ATTN is only supported on ROCm",
+            ),
+        ),
         "TRITON_ATTN",
     ],
 )
@@ -1875,7 +1882,7 @@ def test_register_kv_caches(
         kv_caches: dict[str, torch.Tensor]
         if str(enable_cross_layers).lower() == "true":
             assert connector.prefer_cross_layer_blocks == (
-                attn_backend in ("FLASH_ATTN", "FLASHINFER", "TRITON_ATTN")
+                attn_backend in ("FLASH_ATTN", "FLASHINFER", "ROCM_ATTN", "TRITON_ATTN")
             )
         else:
             assert not connector.prefer_cross_layer_blocks

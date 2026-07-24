@@ -291,6 +291,201 @@ def test_paged_attention(
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol)
 
 
+def ref_single_query_cached_kv_attention_sinks(
+    output: torch.Tensor,
+    query: torch.Tensor,
+    num_queries_per_kv: int,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    block_tables: torch.Tensor,
+    seq_lens: torch.Tensor,
+    scale: float,
+    sinks: torch.Tensor | None,
+    sliding_window: int,
+    logits_soft_cap: float = 0.0,
+) -> None:
+    """Golden decode reference with attention sinks, a sliding window and
+    optional logit softcapping.
+
+    A sink is an extra per-head logit that joins the softmax max and
+    denominator but contributes no value. The window keeps only the W most
+    recent keys ``[seq_len - W, seq_len - 1]`` (W <= 0 disables it). Softcapping
+    applies ``cap * tanh(logit / cap)`` to the scaled QK logits before softmax
+    (and, matching the kernel, is not applied to the sink logit).
+    """
+    num_query_heads = query.shape[1]
+    num_kv_heads = value_cache.shape[1]
+    head_size = value_cache.shape[2]
+    block_size = value_cache.shape[3]
+    num_seqs = query.shape[0]
+
+    block_tables_lst = block_tables.cpu().tolist()
+    seq_lens_lst = seq_lens.cpu().tolist()
+    for i in range(num_seqs):
+        q = query[i].unsqueeze(0)
+        block_table = block_tables_lst[i]
+        seq_len = int(seq_lens_lst[i])
+
+        start = 0
+        if sliding_window and sliding_window > 0:
+            start = max(0, seq_len - sliding_window)
+
+        keys_lst: list[torch.Tensor] = []
+        values_lst: list[torch.Tensor] = []
+        for j in range(start, seq_len):
+            block_number = int(block_table[j // block_size])
+            block_offset = j % block_size
+            k = key_cache[block_number, :, :, block_offset, :]
+            k = k.reshape(num_kv_heads, head_size)
+            keys_lst.append(k)
+            v = value_cache[block_number, :, :, block_offset]
+            values_lst.append(v)
+        keys = torch.stack(keys_lst, dim=0)
+        values = torch.stack(values_lst, dim=0)
+        if num_queries_per_kv > 1:
+            keys = torch.repeat_interleave(keys, num_queries_per_kv, dim=1)
+            values = torch.repeat_interleave(values, num_queries_per_kv, dim=1)
+
+        # logits: [num_query_heads, 1, num_windowed_keys]
+        attn = scale * torch.einsum("qhd,khd->hqk", q, keys).float()
+        if logits_soft_cap and logits_soft_cap > 0:
+            attn = logits_soft_cap * torch.tanh(attn / logits_soft_cap)
+        if sinks is not None:
+            sink = sinks.view(num_query_heads, 1, 1).float()
+            attn_ext = torch.cat([attn, sink], dim=-1)
+            probs = torch.softmax(attn_ext, dim=-1)[..., :-1]
+        else:
+            probs = torch.softmax(attn, dim=-1)
+        probs = probs.to(values.dtype)
+        out = torch.einsum("hqk,khd->qhd", probs, values)
+        output[i].copy_(out.view(num_query_heads, head_size), non_blocking=True)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="ROCm-only paged attention kernel"
+)
+@pytest.mark.parametrize("num_seqs", NUM_GEN_SEQS)
+# gpt-oss-shaped: GQA 8, head_size 64. (40, 40) is a non-GQA control.
+@pytest.mark.parametrize("num_heads", [(64, 8), (40, 40)])
+@pytest.mark.parametrize("head_size", [64, 128])
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("use_sinks", [True, False])
+@pytest.mark.parametrize("sliding_window", [0, 128])
+# 0.0 disables softcap; 50.0 exercises native-kernel softcap parity.
+@pytest.mark.parametrize("logits_soft_cap", [0.0, 50.0])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_paged_attention_sinks_sliding_window(
+    kv_cache_factory,
+    num_seqs: int,
+    num_heads: tuple[int, int],
+    head_size: int,
+    block_size: int,
+    use_sinks: bool,
+    sliding_window: int,
+    logits_soft_cap: float,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+) -> None:
+    """The native ROCm paged kernel must match a golden reference for attention
+    sinks, sliding windows, and logit softcapping."""
+    if current_platform.is_navi() and (head_size != 128 or block_size != 16):
+        pytest.skip()
+    if sliding_window == 0 and not use_sinks and not logits_soft_cap:
+        # Covered by test_paged_attention; skip the trivial combination here.
+        pytest.skip()
+
+    set_random_seed(seed)
+    torch.set_default_device(device)
+    scale = float(1.0 / (head_size**0.5))
+    num_query_heads, num_kv_heads = num_heads
+    assert num_query_heads % num_kv_heads == 0
+    num_queries_per_kv = num_query_heads // num_kv_heads
+
+    query = torch.empty(num_seqs, num_query_heads, head_size, dtype=dtype)
+    query.uniform_(-scale, scale)
+
+    # Sinks are per query head, fp32, on the same device as the kernel inputs.
+    sinks = None
+    if use_sinks:
+        sinks = torch.randn(num_query_heads, dtype=torch.float32, device=device)
+
+    # Mix short/long seqs (some shorter than the window); the 4096-token seq
+    # makes many partitions fall out of window and hit the fast-skip path.
+    seq_lens = [random.randint(1, 4096) for _ in range(num_seqs)]
+    seq_lens[-1] = 4096
+    seq_lens[0] = max(1, sliding_window // 2) if sliding_window else 1
+    max_seq_len = max(seq_lens)
+    seq_lens = torch.tensor(seq_lens, dtype=torch.int)
+
+    max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
+    block_tables_lst = [
+        [random.randint(0, NUM_BLOCKS - 1) for _ in range(max_num_blocks_per_seq)]
+        for _ in range(num_seqs)
+    ]
+    block_tables = torch.tensor(block_tables_lst, dtype=torch.int)
+
+    key_caches, value_caches = kv_cache_factory(
+        NUM_BLOCKS, block_size, 1, num_kv_heads, head_size, "auto", dtype, seed, device
+    )
+    key_cache, value_cache = key_caches[0], value_caches[0]
+    k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+
+    output = torch.empty_like(query)
+    num_partitions = (max_seq_len + PARTITION_SIZE_ROCM - 1) // PARTITION_SIZE_ROCM
+    # zeros: out-of-window partitions are skipped without writing tmp_out.
+    tmp_output = torch.zeros(
+        size=(num_seqs, num_query_heads, num_partitions, head_size), dtype=output.dtype
+    )
+    exp_sums = torch.empty(
+        size=(num_seqs, num_query_heads, num_partitions), dtype=torch.float32
+    )
+    max_logits = torch.empty_like(exp_sums)
+
+    ops.paged_attention_rocm(
+        output,
+        exp_sums,
+        max_logits,
+        tmp_output,
+        query,
+        key_cache,
+        value_cache,
+        num_kv_heads,
+        scale,
+        block_tables,
+        seq_lens,
+        None,
+        block_size,
+        max_seq_len,
+        None,
+        "auto",
+        k_scale,
+        v_scale,
+        sinks=sinks,
+        sliding_window=sliding_window,
+        logits_soft_cap=logits_soft_cap,
+    )
+
+    ref_output = torch.empty_like(query)
+    ref_single_query_cached_kv_attention_sinks(
+        ref_output,
+        query,
+        num_queries_per_kv,
+        key_cache,
+        value_cache,
+        block_tables,
+        seq_lens,
+        scale,
+        sinks,
+        sliding_window,
+        logits_soft_cap,
+    )
+
+    torch.testing.assert_close(output, ref_output, atol=2e-2, rtol=1e-2)
+
+
 def ref_multi_query_kv_attention(
     cu_seq_lens: list[int],
     query: torch.Tensor,

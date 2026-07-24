@@ -4,7 +4,10 @@
 import torch
 
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVQuantMode
-from vllm.v1.worker.gpu.attn_utils import _reshape_kv_cache
+from vllm.v1.worker.gpu.attn_utils import (
+    _reshape_attention_kv_cache,
+    _reshape_kv_cache,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -149,6 +152,25 @@ class FakeDiffKVBackend:
         return (0, 1, 2, 3)
 
 
+class FakeContentPackedNHDBackend:
+    @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_dtype_str: str = "auto",
+    ) -> tuple[int, ...]:
+        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
+
+    @staticmethod
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        assert not include_num_layers_dimension
+        return (0, 2, 1, 3)
+
+
 def test_reshape_padded_diff_kv_cache_does_not_infer_kv_dim():
     num_blocks = 3
     spec = FullAttentionSpec(
@@ -182,6 +204,42 @@ def test_reshape_padded_diff_kv_cache_does_not_infer_kv_dim():
     assert kv_cache.shape == (num_blocks, 16, 1, 4)
     assert kv_cache.stride(0) == spec.page_size_bytes // 4
     assert kv_cache.stride(1) == 4
+
+
+def test_reshape_packed_content_kv_cache_keeps_logical_shape():
+    num_blocks = 3
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=8,
+        dtype=torch.float32,
+    )
+    kv_cache_shape = FakeContentPackedNHDBackend.get_kv_cache_shape(
+        num_blocks,
+        spec.block_size,
+        spec.num_kv_heads,
+        spec.head_size,
+    )
+    kv_cache_stride_order = FakeContentPackedNHDBackend.get_kv_cache_stride_order()
+    block_stride = spec.page_size_bytes * 2
+    raw_tensor = torch.zeros(block_stride * num_blocks, dtype=torch.int8)
+
+    kv_cache = _reshape_attention_kv_cache(
+        raw_tensor,
+        spec,
+        kv_cache_shape,
+        kv_cache_stride_order,
+        num_blocks,
+        packing=(0, block_stride),
+    )
+
+    assert kv_cache.shape == (num_blocks, spec.num_kv_heads, spec.block_size, 16)
+    assert kv_cache.stride() == (
+        block_stride // 4,
+        16,
+        spec.num_kv_heads * 16,
+        1,
+    )
 
 
 class FakePerTokenScaleBackend:

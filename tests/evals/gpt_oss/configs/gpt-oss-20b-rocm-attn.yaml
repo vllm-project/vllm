@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# gpt-oss-20b on ROCm using ROCM_ATTN; sinks and sliding-window decode use the
+# native HIP kernel.
+model_name: openai/gpt-oss-20b
+metric_threshold: 0.568
+reasoning_effort: low
+server_args: "--attention-backend ROCM_ATTN --tensor-parallel-size 2 --max-model-len 16384"
+startup_max_wait_seconds: 2400
