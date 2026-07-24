@@ -30,7 +30,7 @@ ENV LD_LIBRARY_PATH=/opt/rocm/lib:/usr/local/lib:
 ARG PYTORCH_ROCM_ARCH=gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151
 ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
 ENV AITER_ROCM_ARCH=gfx942;gfx950
-ENV MORI_GPU_ARCHS=gfx942;gfx950
+# Note: Do not set MORI_GPU_ARCHS here, it is automatically inferred at runtime
 
 # Required for RCCL in ROCm7.1
 ENV HSA_NO_SCRATCH_RECLAIM=1
