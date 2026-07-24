@@ -61,6 +61,12 @@ bm25s==0.2.13
     # via
     #   -r requirements/test/xpu.in
     #   mteb
+boto3==1.43.42
+    # via tensorizer
+botocore==1.43.42
+    # via
+    #   boto3
+    #   s3transfer
 bounded-pool-executor==0.0.3
     # via pqdm
 cachetools==7.1.4
@@ -205,6 +211,8 @@ harfile==0.4.0
     # via schemathesis
 hf-xet==1.5.1
     # via huggingface-hub
+hiredis==3.4.0
+    # via tensorizer
 html2text==2025.4.15
     # via gpt-oss
 httpcore==1.0.9
@@ -309,7 +317,10 @@ jiter==0.15.0
 jiwer==4.0.0
     # via -r requirements/test/xpu.in
 jmespath==1.1.0
-    # via model-hosting-container-standards
+    # via
+    #   boto3
+    #   botocore
+    #   model-hosting-container-standards
 joblib==1.5.3
     # via
     #   librosa
@@ -337,6 +348,8 @@ lazy-loader==0.5
     # via
     #   librosa
     #   scikit-image
+libnacl==2.1.0
+    # via tensorizer
 librosa==0.10.2.post1
     # via -r requirements/test/xpu.in
 llguidance==1.7.6
@@ -449,6 +462,7 @@ numpy==2.2.6
     #   sentence-transformers
     #   soundfile
     #   soxr
+    #   tensorizer
     #   tifffile
     #   torchvision
     #   transformers
@@ -603,10 +617,12 @@ protobuf==7.35.1
     #   -r requirements/test/../common.txt
     #   googleapis-common-protos
     #   opentelemetry-proto
+    #   tensorizer
 psutil==7.2.2
     # via
     #   -r requirements/test/../common.txt
     #   accelerate
+    #   tensorizer
 py==1.11.0
     # via pytest-forked
 py-cpuinfo==9.0.0
@@ -691,6 +707,7 @@ pytest-timeout==2.3.1
     # via -r requirements/test/xpu.in
 python-dateutil==2.9.0.post0
     # via
+    #   botocore
     #   pandas
     #   typepy
 python-dotenv==1.2.2
@@ -727,6 +744,8 @@ rapidfuzz==3.12.1
     # via
     #   -r requirements/test/xpu.in
     #   jiwer
+redis==8.0.1
+    # via tensorizer
 referencing==0.37.0
     # via
     #   jsonschema
@@ -773,6 +792,8 @@ rpds-py==0.30.0
     # via
     #   jsonschema
     #   referencing
+s3transfer==0.19.0
+    # via boto3
 sacrebleu==2.6.0
     # via lm-eval
 safetensors==0.8.0
@@ -890,6 +911,8 @@ tenacity==9.1.4
     #   gpt-oss
     #   lm-eval
     #   schemathesis
+tensorizer==2.12.1
+    # via -r requirements/test/xpu.in
 termcolor==3.3.0
     # via gpt-oss
 threadpoolctl==3.6.0
@@ -917,6 +940,7 @@ torch==2.12.0+xpu
     #   compressed-tensors
     #   mteb
     #   sentence-transformers
+    #   tensorizer
     #   timm
     #   torchvision
     #   xgrammar
@@ -1008,6 +1032,7 @@ umf==1.0.3
 urllib3==2.6.3
     # via
     #   blobfile
+    #   botocore
     #   docker
     #   modelscope
     #   requests
