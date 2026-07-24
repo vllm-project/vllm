@@ -229,6 +229,16 @@ class OpenAIServingModels:
             if error_check_ret is not None:
                 return error_check_ret
 
+            lora_request = self.lora_requests[lora_name]
+            removed = await self.engine_client.remove_lora(lora_request.lora_int_id)
+            if not removed:
+                return create_error_response(
+                    message=f"Failed to remove lora adapter '{lora_name}' from the "
+                    "engine.",
+                    err_type="InternalServerError",
+                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+
             # Safe to delete now since we hold the lock
             del self.lora_requests[lora_name]
             logger.info("Removed LoRA adapter: name '%s'", lora_name)
