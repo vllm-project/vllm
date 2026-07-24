@@ -212,21 +212,6 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         """
         return self._lmcache_engine.get_finished(finished_req_ids)
 
-    def get_block_ids_with_load_errors(self) -> set[int]:
-        """
-        Get the set of block IDs that failed to load.
-
-        Returns:
-            Set of block IDs that encountered load errors.
-            Empty set if no load errors occurred.
-        """
-        method = getattr(self._lmcache_engine, "get_block_ids_with_load_errors", None)
-        if callable(method):
-            return method()
-
-        # Fallback for older versions that don't support this method
-        return set()
-
     def get_kv_connector_kv_cache_events(self) -> LMCacheKVEvents | None:
         """
         Get the KV connector kv cache events collected during the last interval.
