@@ -42,7 +42,9 @@ steps:
     - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py
   mirror:
     amd:
-      device: mi325_1
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 50
       depends_on:
       - image-build-amd
 
