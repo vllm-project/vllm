@@ -21,6 +21,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
+from .gemma4 import _get_layer_attention_geometry
 from .gemma4_mtp import Gemma4MTPAttention, Gemma4MTPDecoderLayer
 from .qwen3_dflash import DFlashQwen3Model
 from .qwen3_dspark import DSparkMarkovHead, Qwen3DSparkForCausalLM
@@ -37,18 +38,10 @@ class Gemma4DSparkAttention(Gemma4MTPAttention):
         quant_config: QuantizationConfig | None,
         prefix: str,
     ) -> None:
-        is_full = config.layer_types[extract_layer_index(prefix)] == "full_attention"
-        head_dim = (
-            getattr(config, "global_head_dim", config.head_dim)
-            if is_full
-            else config.head_dim
-        )
+        layer_idx = extract_layer_index(prefix)
+        is_full = config.layer_types[layer_idx] == "full_attention"
+        head_dim, num_kv_heads = _get_layer_attention_geometry(config, layer_idx)
         use_k_eq_v = is_full and getattr(config, "attention_k_eq_v", False)
-        num_kv_heads = (
-            getattr(config, "num_global_key_value_heads", config.num_key_value_heads)
-            if use_k_eq_v
-            else config.num_key_value_heads
-        )
         super().__init__(
             config=config,
             hidden_size=config.hidden_size,

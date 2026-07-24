@@ -595,38 +595,33 @@ class Gemma4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
         # attention. Return the largest so that attention backends allocate buffers
         # large enough for both.
         text_config = self.hf_text_config
-        if hasattr(text_config, "is_heterogeneous"):
-            # Transformers >= 5.15.0
-            head_dims = {
-                layer_type: text_config.per_layer_config[layer_type].head_dim
-                for layer_type in text_config.layer_types
-            }
-        else:
-            # Transformers < 5.15.0
-            head_dims = {
-                "sliding_attention": getattr(text_config, "head_dim", 0),
-                "full_attention": getattr(text_config, "global_head_dim", 0),
-            }
-        return max(head_dims.values()) or super().get_head_size()
+        # `global_head_dim` exists only on configs written before
+        # huggingface/transformers#47384 moved the full attention values into
+        # `per_layer_config`. Key off the config layout, not the installed
+        # Transformers version: the heterogeneity mixin is present on every
+        # config from 5.15.0 on, including old-layout ones.
+        global_head_dim = getattr(text_config, "global_head_dim", None)
+        if global_head_dim is not None:
+            return max(getattr(text_config, "head_dim", 0), global_head_dim)
+        if getattr(text_config, "is_heterogeneous", False):
+            return max(layer.head_dim for layer in text_config.per_layer_config)
+        return super().get_head_size()
 
     def get_total_num_kv_heads(self) -> int:
         # When attention_k_eq_v is set, Gemma4 also varies KV heads per layer.
         # Return the largest so KV cache buffers allocate large enough for every layer,
         # mirroring get_head_size above.
         text_config = self.hf_text_config
-        if hasattr(text_config, "is_heterogeneous"):
-            # Transformers >= 5.15.0
-            num_key_value_heads = {
-                layer_type: text_config.per_layer_config[layer_type].num_key_value_heads
-                for layer_type in text_config.layer_types
-            }
-        else:
-            # Transformers < 5.15.0
-            num_key_value_heads = {
-                "sliding_attention": getattr(text_config, "num_key_value_heads", 0),
-                "full_attention": getattr(text_config, "num_global_key_value_heads", 0),
-            }
-        return max(num_key_value_heads.values()) or super().get_total_num_kv_heads()
+        num_global_kv_heads = getattr(text_config, "num_global_key_value_heads", None)
+        if num_global_kv_heads is not None:
+            return max(
+                getattr(text_config, "num_key_value_heads", 0), num_global_kv_heads
+            )
+        if getattr(text_config, "is_heterogeneous", False):
+            return max(
+                layer.num_key_value_heads for layer in text_config.per_layer_config
+            )
+        return super().get_total_num_kv_heads()
 
 
 class MossAudioModelArchConfigConvertor(ModelArchConfigConvertorBase):

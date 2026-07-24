@@ -68,3 +68,43 @@ def test_mm_encoder_attn_dtype_hash_updates(tmp_path):
     ).compute_hash()
     assert base_hash != fp8_hash
     assert fp8_hash != fp8_static_hash
+
+
+def test_transformers_backend_cls_with_heterogeneous_config():
+    """Nested-config detection must not walk every config field: `!=` on a
+    heterogeneous config (e.g. Gemma 4) reads its per-layer attributes, which
+    have no global value and raise."""
+    pytest.importorskip(
+        "transformers.integrations.heterogeneity.configuration_utils",
+        reason="requires transformers with heterogeneous config support",
+    )
+    from transformers import PreTrainedConfig
+
+    text_config = PreTrainedConfig(
+        model_type="gemma4_unified_text",
+        num_hidden_layers=2,
+        num_attention_heads=8,
+        num_key_value_heads=8,
+        head_dim=256,
+    )
+    text_config.per_layer_config = {1: {"head_dim": 512, "num_key_value_heads": 1}}
+
+    def _model_config(hf_config, hf_text_config):
+        model_config = ModelConfig.__new__(ModelConfig)
+        model_config.hf_config = hf_config
+        model_config.hf_text_config = hf_text_config
+        model_config.model_arch_config = model_config.get_model_arch_config()
+        model_config.runner = "auto"
+        model_config.convert = "none"
+        return model_config
+
+    nested_hf_config = PreTrainedConfig(
+        model_type="gemma4_unified",
+        architectures=["Gemma4UnifiedForConditionalGeneration"],
+    )
+    nested = _model_config(nested_hf_config, text_config)
+    assert "MultiModal" in nested._get_transformers_backend_cls()
+
+    text_config.architectures = ["Gemma4ForCausalLM"]
+    text_only = _model_config(text_config, text_config)
+    assert "MultiModal" not in text_only._get_transformers_backend_cls()

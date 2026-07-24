@@ -820,8 +820,10 @@ class ModelConfig:
         """Determine which Transformers modeling backend class will be used if
         `model_impl` is set to `transformers` or `auto`."""
         cls = "Transformers"
-        # If 'hf_config != hf_text_config' it's a nested config, i.e. multimodal
-        cls += "MultiModal" if self.hf_config != self.hf_text_config else ""
+        # A nested config, i.e. multimodal, yields a distinct text config object.
+        # Compare identity: `!=` walks every field, which raises on a
+        # heterogeneous config (its per-layer attributes have no global value).
+        cls += "MultiModal" if self.hf_config is not self.hf_text_config else ""
         cls += "MoE" if self.is_moe else ""
         # Check if the architecture we're wrapping has defaults
         runner = None

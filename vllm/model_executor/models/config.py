@@ -209,18 +209,22 @@ class Gemma4Config(VerifyAndUpdateConfig):
         to Triton.
         """
         hf_text_config = vllm_config.model_config.hf_text_config
-        if hasattr(hf_text_config, "is_heterogeneous"):
-            # Transformers >= 5.15.0
-            head_dims = {
-                layer_type: hf_text_config.per_layer_config[layer_type].head_dim
-                for layer_type in hf_text_config.layer_types
-            }
-        else:
-            # Transformers < 5.15.0
+        # `global_head_dim` exists only on configs written before
+        # huggingface/transformers#47384; key off the config layout, not the
+        # installed Transformers version.
+        global_head_dim = getattr(hf_text_config, "global_head_dim", None)
+        if global_head_dim is not None:
             head_dims = {
                 "sliding_attention": getattr(hf_text_config, "head_dim", None),
-                "full_attention": getattr(hf_text_config, "global_head_dim", None),
+                "full_attention": global_head_dim,
             }
+        elif getattr(hf_text_config, "is_heterogeneous", False):
+            head_dims = {
+                layer_type: hf_text_config.per_layer_config[layer_type].head_dim
+                for layer_type in set(hf_text_config.layer_types)
+            }
+        else:
+            return
 
         if (
             any(dim is None for dim in head_dims.values())

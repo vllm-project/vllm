@@ -221,6 +221,44 @@ def _get_text_config(config):
     return config
 
 
+def _get_layer_attention_geometry(config, layer_idx: int) -> tuple[int, int]:
+    """Resolve the attention geometry of a single Gemma4 layer.
+
+    Gemma4 uses a larger head dimension for full attention layers than for
+    sliding attention ones, and with `attention_k_eq_v` the KV head count
+    differs too. Transformers >= 5.15.0 declares both per layer; earlier
+    versions put the full attention values on the global config as
+    `global_head_dim`/`num_global_key_value_heads`.
+
+    Args:
+        config: Gemma4 text config.
+        layer_idx: Index of the layer to resolve.
+
+    Returns:
+        The layer's `(head_dim, num_key_value_heads)`.
+    """
+    # `global_head_dim` exists only on configs written before
+    # huggingface/transformers#47384. Key off the config layout, not the
+    # installed Transformers version: the heterogeneity mixin is present on
+    # every config from 5.15.0 on, including old-layout ones.
+    if hasattr(config, "global_head_dim"):
+        if config.layer_types[layer_idx] != "full_attention":
+            return config.head_dim, config.num_key_value_heads
+        if getattr(config, "attention_k_eq_v", False):
+            num_kv_heads = getattr(
+                config, "num_global_key_value_heads", config.num_key_value_heads
+            )
+        else:
+            num_kv_heads = config.num_key_value_heads
+        return config.global_head_dim, num_kv_heads
+
+    if hasattr(config, "per_layer_config"):
+        layer_config = config.per_layer_config[layer_idx]
+        return layer_config.head_dim, layer_config.num_key_value_heads
+
+    return config.head_dim, config.num_key_value_heads
+
+
 class Gemma4MLP(nn.Module):
     def __init__(
         self,
@@ -572,25 +610,13 @@ class Gemma4DecoderLayer(nn.Module):
         # Gemma4 uses different head dimensions for sliding vs full attention
         layer_type = config.layer_types[layer_idx]
         self.is_full_attention = layer_type == "full_attention"
-        if self.is_full_attention:
-            head_dim = getattr(config, "global_head_dim", config.head_dim)
-        else:
-            head_dim = config.head_dim
+        head_dim, num_kv_heads = _get_layer_attention_geometry(config, layer_idx)
 
         # Determine if this full-attention layer uses k_eq_v
         # (laptop variant: no v_proj, K reused as V on full attention layers)
         use_k_eq_v = self.is_full_attention and getattr(
             config, "attention_k_eq_v", False
         )
-
-        # For k_eq_v full-attention layers, use num_global_key_value_heads
-        # as the KV head count when k_eq_v is enabled.
-        if use_k_eq_v:
-            num_kv_heads = getattr(
-                config, "num_global_key_value_heads", config.num_key_value_heads
-            )
-        else:
-            num_kv_heads = config.num_key_value_heads
 
         self.self_attn = Gemma4Attention(
             config=config,
