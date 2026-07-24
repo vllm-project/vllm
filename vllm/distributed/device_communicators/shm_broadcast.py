@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
+import os
 import pickle
+import shutil
 import sys
 import threading
 import time
@@ -218,6 +220,32 @@ class SpinCondition:
         self.local_notify_socket.send(b"\x00")
 
 
+SHM_PATH = "/dev/shm"
+
+
+def check_shm_free_space(required_bytes: int, shm_path: str = SHM_PATH) -> None:
+    """Raise if ``shm_path`` cannot fit a ``required_bytes`` shared segment.
+
+    Args:
+        required_bytes: Size of the shared-memory segment to be created.
+        shm_path: Mount point backing POSIX shared memory; skipped if absent.
+
+    Raises:
+        RuntimeError: If ``required_bytes`` exceeds the free space.
+    """
+    if not os.path.isdir(shm_path):
+        return
+    free_bytes = shutil.disk_usage(shm_path).free
+    if required_bytes <= free_bytes:
+        return
+    mib = 1 << 20
+    raise RuntimeError(
+        f"Insufficient space in {shm_path}: {required_bytes / mib:.0f} MiB "
+        f"required, {free_bytes / mib:.0f} MiB free. Increase {shm_path} "
+        "(e.g. --shm-size or --ipc=host)."
+    )
+
+
 class ShmRingBuffer:
     def __init__(
         self,
@@ -288,6 +316,7 @@ class ShmRingBuffer:
         if name is None:
             # we are creating a buffer
             self.is_creator = True
+            check_shm_free_space(self.total_bytes_of_buffer)
             self.shared_memory = shared_memory.SharedMemory(
                 create=True, size=self.total_bytes_of_buffer
             )
