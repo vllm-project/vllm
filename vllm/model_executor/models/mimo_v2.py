@@ -498,10 +498,55 @@ def _shard_fp8_qkv_proj(
     groups to float (dropping the block constraint), reorder the rows into the
     layout above (Q, K, and V then each span a whole number of blocks), and
     re-quantize to fp8.
+
+    When ``tp_size > num_kv_heads`` (more ranks than KV heads, the usual GQA
+    case at large TP) each KV head is shared by ``r = tp_size / num_kv_heads``
+    ranks. Such a rank owns ``1/r`` of its group's Q heads plus a *replicated*
+    copy of that group's single K and V head, i.e. ``[Q_sub | K | V]``. Because
+    a group's Q rows are block-aligned, ``Q_sub`` lands on whole blocks and the
+    K/V tail keeps its original blocks, so this rank's weight and scale are a
+    direct slice of the stored stripe -- no de-interleaving or re-quantization
+    (the per-rank row count is not a multiple of ``block``, so re-quantizing
+    would not be possible anyway).
     """
-    assert tp_size <= num_kv_heads and num_kv_heads % tp_size == 0, (
-        "TP size must evenly split the number of KV heads."
+    assert num_kv_heads % tp_size == 0 or tp_size % num_kv_heads == 0, (
+        "TP size and the number of KV heads must divide one another."
     )
+
+    q_rows_per_group = (num_heads // num_kv_heads) * head_dim
+    k_rows_per_group = head_dim
+    v_rows_per_group = v_head_dim
+    rows_per_group = q_rows_per_group + k_rows_per_group + v_rows_per_group
+    scale_rows_per_group = s_full.shape[0] // num_kv_heads
+
+    if tp_size > num_kv_heads:
+        # More TP ranks than KV heads: each KV head is replicated across
+        # ``replicas`` ranks, which split that group's Q heads between them.
+        # The rank's [Q_sub | K | V] is a direct slice of one stored stripe --
+        # Q_sub is a block-aligned sub-range of the group's Q rows and K/V are
+        # the stripe's tail (kept with their original blocks) -- so the fp8
+        # weight and its block scale can be sliced without re-quantizing.
+        replicas = tp_size // num_kv_heads
+        assert q_rows_per_group % replicas == 0, (
+            "Q heads per KV group must be divisible by tp_size / num_kv_heads."
+        )
+        q_rows_per_rank = q_rows_per_group // replicas
+        assert q_rows_per_group % block == 0 and q_rows_per_rank % block == 0, (
+            "Q rows per group and per rank must be multiples of the block size."
+        )
+        g_idx = tp_rank // replicas
+        sub = tp_rank % replicas
+        row0 = g_idx * rows_per_group
+        s0 = g_idx * scale_rows_per_group
+        q_blocks_per_rank = q_rows_per_rank // block
+        kv_block_start = q_rows_per_group // block
+        # Q sub-shard: a block-aligned slice of this group's Q weight and scale.
+        q_w = w_full[row0 + sub * q_rows_per_rank : row0 + (sub + 1) * q_rows_per_rank]
+        q_s = s_full[s0 + sub * q_blocks_per_rank : s0 + (sub + 1) * q_blocks_per_rank]
+        # Replicated K and V: the stripe's tail, kept with their original blocks.
+        kv_w = w_full[row0 + q_rows_per_group : row0 + rows_per_group]
+        kv_s = s_full[s0 + kv_block_start : s0 + scale_rows_per_group]
+        return torch.cat([q_w, kv_w], dim=0), torch.cat([q_s, kv_s], dim=0)
 
     kv_heads_per_rank = num_kv_heads // tp_size
     if kv_heads_per_rank == 1:
@@ -511,11 +556,6 @@ def _shard_fp8_qkv_proj(
         s = s_full.chunk(tp_size, dim=0)[tp_rank]
         return w, s
 
-    q_rows_per_group = (num_heads // num_kv_heads) * head_dim
-    k_rows_per_group = head_dim
-    v_rows_per_group = v_head_dim
-    rows_per_group = q_rows_per_group + k_rows_per_group + v_rows_per_group
-    scale_rows_per_group = s_full.shape[0] // num_kv_heads
     qs, ks, vs = [], [], []
     for g_idx in range(tp_rank * kv_heads_per_rank, (tp_rank + 1) * kv_heads_per_rank):
         row_start = g_idx * rows_per_group
