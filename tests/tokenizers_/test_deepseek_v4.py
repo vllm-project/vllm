@@ -288,3 +288,96 @@ def test_deepseek_v4_matches_reference_golden_fixtures(case_id, kwargs):
 
     expected = (FIXTURES_DIR / f"test_output_{case_id}.txt").read_text()
     assert prompt == expected
+
+
+def test_deepseek_v4_wo_eos_survives_message_parsing():
+    """`wo_eos` set on an assistant message must reach the encoder.
+
+    Regression test: previously `parse_chat_messages` stripped the field
+    so the encoder always rendered the EOS-terminated template.
+    """
+    messages = [
+        {"role": "user", "content": "tell me a saying"},
+        {
+            "role": "assistant",
+            "content": "An apple a day, keeps",
+            "wo_eos": True,
+        },
+    ]
+    conversation, _, _ = parse_chat_messages(
+        messages,
+        _model_config(),
+        content_format="string",
+    )
+
+    assert conversation[-1].get("wo_eos") is True
+
+    prompt = _tokenizer().apply_chat_template(
+        conversation=conversation,
+        messages=messages,
+        tokenize=False,
+    )
+
+    # Prefill: must end with the assistant content, NOT with an EOS token.
+    assert prompt.endswith("An apple a day, keeps")
+    assert "<｜end▁of▁sentence｜>" not in prompt.split("<｜Assistant｜>")[-1]
+
+
+def test_deepseek_v4_continue_final_message_skips_eos():
+    """`continue_final_message=True` must render the final assistant
+    message without a trailing EOS token (HF semantics)."""
+    messages = [
+        {"role": "user", "content": "tell me a saying"},
+        {"role": "assistant", "content": "An apple a day, keeps"},
+    ]
+    conversation, _, _ = parse_chat_messages(
+        messages,
+        _model_config(),
+        content_format="string",
+    )
+    prompt = _tokenizer().apply_chat_template(
+        conversation=conversation,
+        messages=messages,
+        tokenize=False,
+        continue_final_message=True,
+    )
+
+    assert prompt.endswith("An apple a day, keeps")
+    assert "<｜end▁of▁sentence｜>" not in prompt.split("<｜Assistant｜>")[-1]
+
+
+def test_deepseek_v4_continue_final_message_requires_assistant_last():
+    """Mirrors HF: error when the last message isn't from the assistant."""
+    messages = [{"role": "user", "content": "hi"}]
+    conversation, _, _ = parse_chat_messages(
+        messages,
+        _model_config(),
+        content_format="string",
+    )
+    with pytest.raises(ValueError, match="continue_final_message"):
+        _tokenizer().apply_chat_template(
+            conversation=conversation,
+            messages=messages,
+            tokenize=False,
+            continue_final_message=True,
+        )
+
+
+def test_deepseek_v4_default_assistant_message_keeps_eos():
+    """Sanity check: without wo_eos / continue_final_message, the last
+    assistant message still terminates with EOS."""
+    messages = [
+        {"role": "user", "content": "tell me a saying"},
+        {"role": "assistant", "content": "An apple a day, keeps"},
+    ]
+    conversation, _, _ = parse_chat_messages(
+        messages,
+        _model_config(),
+        content_format="string",
+    )
+    prompt = _tokenizer().apply_chat_template(
+        conversation=conversation,
+        messages=messages,
+        tokenize=False,
+    )
+    assert prompt.endswith("<｜end▁of▁sentence｜>")
