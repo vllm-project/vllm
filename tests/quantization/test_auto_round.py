@@ -79,8 +79,8 @@ MODEL_RUNNER_KWARGS = {
     },
     "INC4AI/Qwen3-8B-MXFP8-AR": {
         "block_size": 64,
-        "gpu_memory_utilization": 0.6,
-        "max_model_len": 4096,
+        "gpu_memory_utilization": 0.8,
+        "max_model_len": 512,
     },
 }
 
