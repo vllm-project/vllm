@@ -136,6 +136,9 @@ class SpeculativeConfig:
     will use the default version."""
 
     # Advanced control
+    enable_fused_decode_graph: bool = True
+    """Fuse autoregressive draft decode steps into one CUDA graph when the
+    attention backends support it. Unsupported backends use per-step graphs."""
     disable_padded_drafter_batch: bool = False
     """Disable input padding for speculative decoding. If set to True,
     speculative input batches can contain sequences of different lengths,
@@ -324,6 +327,7 @@ class SpeculativeConfig:
                 # Convert to tuple to make it hashable
                 factors.append(tuple(layer_ids))
 
+        factors.append(self.enable_fused_decode_graph)
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
