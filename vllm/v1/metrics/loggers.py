@@ -105,10 +105,18 @@ class LoggingStatLogger(StatLoggerBase):
         self.last_scheduler_stats = SchedulerStats()
 
         # Caching metrics. This cannot be reset.
-        # TODO: Make the interval configurable.
-        self.prefix_caching_metrics = CachingMetrics()
-        self.connector_prefix_caching_metrics = CachingMetrics()
-        self.mm_caching_metrics = CachingMetrics()
+        prefix_cache_window = (
+            vllm_config.observability_config.prefix_cache_hit_rate_window
+        )
+        self.prefix_caching_metrics = CachingMetrics(
+            max_recent_requests=prefix_cache_window
+        )
+        self.connector_prefix_caching_metrics = CachingMetrics(
+            max_recent_requests=prefix_cache_window
+        )
+        self.mm_caching_metrics = CachingMetrics(
+            max_recent_requests=prefix_cache_window
+        )
 
         model_config = self.vllm_config.model_config
         is_diffusion = model_config is not None and model_config.is_diffusion
