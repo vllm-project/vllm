@@ -435,6 +435,22 @@ def convert_linear_layer_to_humming_standard(
         setattr(layer, name, param)
 
 
+def pack_signed_int4_to_uint4_int32(weight: torch.Tensor) -> torch.Tensor:
+    """Pack dense signed INT4 codes for Humming's unsigned-nibble schema."""
+    if weight.dtype != torch.int8 or weight.ndim < 2:
+        raise ValueError("signed INT4 weights must use an INT8 tensor")
+    if weight.shape[-1] % 8 != 0:
+        raise ValueError("signed INT4 packing requires K divisible by 8")
+    if bool(torch.any((weight < -8) | (weight > 7)).item()):
+        raise ValueError("signed INT4 weights contain codes outside [-8, 7]")
+
+    unsigned = (weight.to(torch.int32) + 8).reshape(*weight.shape[:-1], -1, 8)
+    packed = torch.zeros(unsigned.shape[:-1], dtype=torch.int32, device=weight.device)
+    for lane in range(8):
+        packed.bitwise_or_(unsigned[..., lane] << (lane * 4))
+    return packed
+
+
 def prepare_humming_layer(
     layer: LinearBase,
     quant_config: dict,

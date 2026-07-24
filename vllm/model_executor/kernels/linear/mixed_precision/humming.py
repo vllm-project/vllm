@@ -28,6 +28,7 @@ class HummingLinearKernel(MPLinearKernel):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         from vllm.model_executor.layers.quantization.utils.humming_utils import (
             convert_linear_layer_to_humming_standard,
+            pack_signed_int4_to_uint4_int32,
             prepare_humming_layer,
         )
 
@@ -43,6 +44,10 @@ class HummingLinearKernel(MPLinearKernel):
             assert self.w_zp_name is not None
             name_map["zero_point"] = self.w_zp_name
             quant_config["has_zero_point"] = True
+
+        weight = getattr(layer, self.w_q_name)
+        if self.config.weight_type.size_bits == 4 and weight.dtype == torch.int8:
+            weight.data = pack_signed_int4_to_uint4_int32(weight.data)
 
         convert_linear_layer_to_humming_standard(layer=layer, name_map=name_map)
         input_quant_config = getattr(layer, "_humming_input_quant_config", None)
