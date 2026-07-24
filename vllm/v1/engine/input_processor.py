@@ -27,6 +27,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
+from vllm.utils.hashing import sha256_cbor
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.v1.engine import EngineCoreRequest
 
@@ -167,10 +168,14 @@ class InputProcessor:
         mm_hash: str,
         lora_request: LoRARequest | None,
     ) -> str:
-        """
-        When enable_tower_connector_lora is True, multi-modal embeddings
-        vary depending on the LoRA request. Therefore, the mm_hash must be
-        generated based on the LoRA request to prevent incorrect cache hits.
+        """Fold the active LoRA into the mm encoder-cache identifier.
+
+        With ``enable_tower_connector_lora`` the encoder embeddings depend on
+        the LoRA, so the identifier keys on a fingerprint of ``lora_path`` (not
+        ``lora_name``): a same-name in-place reload keeps the name and reuses
+        ``lora_int_id`` while pointing at a new path, so name-only keying would
+        serve the previous adapter's cached embeddings. Re-uploads to the same
+        path are not distinguished. See issue #44939.
         """
         if (
             lora_request is None
@@ -178,7 +183,8 @@ class InputProcessor:
             or not self.lora_config.enable_tower_connector_lora
         ):
             return mm_hash
-        return f"{lora_request.lora_name}:{mm_hash}"
+        lora_fingerprint = sha256_cbor(lora_request.lora_path).hex()
+        return f"{lora_request.lora_name}:{lora_fingerprint}:{mm_hash}"
 
     def inject_into_mm_cache(
         self,
