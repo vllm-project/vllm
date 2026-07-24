@@ -343,27 +343,34 @@ class MistralParser(ParserEngine):
                 # survives for tool detection.
                 request.skip_special_tokens = False
             # Inject a guided JSON schema for pre-v11 required/named tool choice
-            # so the model emits a well-formed bare JSON array instead of rambling.
+            # so the model emits a well-formed bare JSON array instead of
+            # rambling. tool_choice forces a tool call, so a json_object /
+            # json_schema response_format is cleared here (the tool schema is
+            # the sole structured-output constraint), mirroring the base
+            # ToolParser; a structural_tag response_format is left untouched.
+            req_tool_choice = request.tool_choice
+            is_required_or_named = req_tool_choice == "required" or isinstance(
+                req_tool_choice, ChatCompletionNamedToolChoiceParam
+            )
+            response_format = getattr(request, "response_format", None)
+            response_format_overridable = response_format is None or (
+                response_format.type in ("text", "json_object", "json_schema")
+            )
+            # This runs only in the non-grammar (legacy) branch, so it covers
+            # both pre-v11 Mistral tokenizers and non-Mistral (e.g. HF-mode)
+            # tokenizers driving the Mistral tool parser. The remaining guards
+            # keep it off when the user supplied their own structured output.
             if (
-                is_mistral_tokenizer(self.model_tokenizer)
-                and not self.model_tokenizer.supports_grammar
-                and not isinstance(request, ResponsesRequest)
+                not isinstance(request, ResponsesRequest)
                 and request.tools
                 and request.structured_outputs is None
-                and (
-                    request.response_format is None
-                    or request.response_format.type == "text"
-                )
+                and is_required_or_named
+                and response_format_overridable
             ):
-                req_tool_choice = request.tool_choice
-                if req_tool_choice == "required" or isinstance(
-                    req_tool_choice, ChatCompletionNamedToolChoiceParam
-                ):
-                    schema = self._build_guided_schema_pre_v11(request)
-                    if schema is not None:
-                        request.structured_outputs = StructuredOutputsParams(
-                            json=schema
-                        )
+                schema = self._build_guided_schema_pre_v11(request)
+                if schema is not None:
+                    request.structured_outputs = StructuredOutputsParams(json=schema)
+                    request.response_format = None
             return request
 
         json_schema: dict[str, Any] | None = None

@@ -2111,6 +2111,47 @@ def test_adjust_request_pre_v11_guided_schema_injected(
 
 
 @pytest.mark.parametrize(
+    "response_format",
+    [{"type": "json_object"}, {"type": "json_schema", "json_schema": {"name": "s"}}],
+    ids=["json_object", "json_schema"],
+)
+def test_adjust_request_pre_v11_required_clears_response_format(
+    mistral_pre_v11_tool_parser: MistralToolParser,
+    response_format: dict,
+) -> None:
+    """required + response_format must inject the tool schema and clear
+    response_format so the tool schema is the sole structured-output
+    constraint, matching the base ToolParser (otherwise the request either
+    hits the "multiple constraints" engine error or, with no constraint,
+    rambles to finish_reason='length')."""
+    request = _make_request(tool_choice="required", response_format=response_format)
+    result = mistral_pre_v11_tool_parser.adjust_request(request)
+
+    assert result.response_format is None
+    assert result.structured_outputs is not None
+    schema = result.structured_outputs.json
+    if isinstance(schema, str):
+        schema = json.loads(schema)
+    assert schema["type"] == "array"
+
+
+def test_adjust_request_non_mistral_tokenizer_required_injects_schema(
+    non_mistral_parser: MistralToolParser,
+) -> None:
+    """The guided-schema injection must also fire for non-Mistral (e.g. HF-mode)
+    tokenizers driving the Mistral tool parser, mirroring the base ToolParser so
+    required + response_format does not fall back to an unconstrained ramble."""
+    request = _make_request(
+        tool_choice="required", response_format={"type": "json_object"}
+    )
+    result = non_mistral_parser.adjust_request(request)
+
+    assert result.response_format is None
+    assert result.structured_outputs is not None
+    assert result.structured_outputs.json is not None
+
+
+@pytest.mark.parametrize(
     "tool_choice",
     ["auto", "none"],
     ids=["auto", "none"],
