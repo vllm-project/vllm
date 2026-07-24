@@ -4,7 +4,7 @@
 import dataclasses
 import weakref
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack
 from typing import Any, ClassVar
 from unittest.mock import patch
@@ -129,6 +129,7 @@ class CUDAGraphEntry:
     batch_descriptor: BatchDescriptor
     cudagraph: torch.cuda.CUDAGraph | None = None
     output: Any | None = None
+    captured_forward_context_tensors: Any | None = None
 
     # for cudagraph debugging, track the input addresses
     # during capture, and check if they are the same during replay
@@ -140,6 +141,89 @@ class CUDAGraphOptions:
     debug_log_enable: bool = True
     gc_disable: bool = False
     weak_ref_output: bool = True
+
+
+def _clone_tensor_tree(obj: Any, memo: dict[int, Any] | None = None) -> Any:
+    if memo is None:
+        memo = {}
+    obj_id = id(obj)
+    if obj_id in memo:
+        return memo[obj_id]
+
+    if isinstance(obj, torch.Tensor):
+        memo[obj_id] = obj
+        return obj
+    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        clone = {}
+        memo[obj_id] = clone
+        for field in dataclasses.fields(obj):
+            clone[field.name] = _clone_tensor_tree(getattr(obj, field.name), memo)
+        return clone
+    if isinstance(obj, Mapping):
+        clone = {}
+        memo[obj_id] = clone
+        for key, value in obj.items():
+            clone[key] = _clone_tensor_tree(value, memo)
+        return clone
+    if isinstance(obj, tuple):
+        clone = tuple(_clone_tensor_tree(value, memo) for value in obj)
+        memo[obj_id] = clone
+        return clone
+    if isinstance(obj, list):
+        clone = [_clone_tensor_tree(value, memo) for value in obj]
+        memo[obj_id] = clone
+        return clone
+    return None
+
+
+def _copy_tensor_tree(src: Any, dst: Any) -> None:
+    if dst is None:
+        return
+    if isinstance(src, torch.Tensor) and isinstance(dst, torch.Tensor):
+        dst.copy_(src)
+        return
+    if dataclasses.is_dataclass(src) and not isinstance(src, type):
+        src = {field.name: getattr(src, field.name) for field in dataclasses.fields(src)}
+    if isinstance(src, Mapping) and isinstance(dst, Mapping):
+        for key, dst_value in dst.items():
+            if key in src:
+                _copy_tensor_tree(src[key], dst_value)
+        return
+    if (
+        isinstance(src, Sequence)
+        and isinstance(dst, Sequence)
+        and not isinstance(src, (str, bytes, bytearray))
+        and not isinstance(dst, (str, bytes, bytearray))
+    ):
+        for src_value, dst_value in zip(src, dst):
+            _copy_tensor_tree(src_value, dst_value)
+
+
+def _capture_forward_context_tensors() -> dict[str, Any]:
+    forward_context = get_forward_context()
+    return {
+        "attn_metadata": _clone_tensor_tree(forward_context.attn_metadata),
+        "slot_mapping": _clone_tensor_tree(forward_context.slot_mapping),
+        "batch_descriptor": _clone_tensor_tree(forward_context.batch_descriptor),
+        "ubatch_slices": _clone_tensor_tree(forward_context.ubatch_slices),
+        "dp_metadata": _clone_tensor_tree(forward_context.dp_metadata),
+        "additional_kwargs": _clone_tensor_tree(forward_context.additional_kwargs),
+    }
+
+
+def _refresh_captured_forward_context_tensors(captured: Any) -> None:
+    if not captured:
+        return
+    forward_context = get_forward_context()
+    _copy_tensor_tree(forward_context.attn_metadata, captured.get("attn_metadata"))
+    _copy_tensor_tree(forward_context.slot_mapping, captured.get("slot_mapping"))
+    _copy_tensor_tree(forward_context.batch_descriptor, captured.get("batch_descriptor"))
+    _copy_tensor_tree(forward_context.ubatch_slices, captured.get("ubatch_slices"))
+    _copy_tensor_tree(forward_context.dp_metadata, captured.get("dp_metadata"))
+    _copy_tensor_tree(
+        forward_context.additional_kwargs,
+        captured.get("additional_kwargs"),
+    )
 
 
 class CUDAGraphWrapper:
@@ -280,6 +364,10 @@ class CUDAGraphWrapper:
                 x.data_ptr() for x in args if isinstance(x, torch.Tensor)
             ]
             entry.input_addresses = input_addresses
+            if self.runtime_mode == CUDAGraphMode.FULL:
+                entry.captured_forward_context_tensors = (
+                    _capture_forward_context_tensors()
+                )
             cudagraph = torch.cuda.CUDAGraph()
 
             with ExitStack() as stack:
@@ -357,5 +445,9 @@ class CUDAGraphWrapper:
         # Sync offloader before replay - ensures any external dependencies
         # from pre-capture prefetches are satisfied.
         get_offloader().sync_prev_onload()
+        if self.runtime_mode == CUDAGraphMode.FULL:
+            _refresh_captured_forward_context_tensors(
+                entry.captured_forward_context_tensors
+            )
         entry.cudagraph.replay()
         return entry.output
