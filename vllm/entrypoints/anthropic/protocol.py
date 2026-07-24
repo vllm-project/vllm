@@ -68,6 +68,21 @@ class AnthropicMessage(BaseModel):
     role: Literal["user", "assistant", "system"]
     content: str | list[AnthropicContentBlock]
 
+    @field_validator("role", mode="before")
+    @classmethod
+    def normalize_role(cls, v: str) -> str:
+        """Normalize non-standard roles from Claude Code CLI >= 2.1.154.
+
+        Recent versions of Claude Code send roles such as 'ctx' and 'msg'
+        which are not part of the Anthropic spec. We map them to their
+        closest standard equivalent so validation does not fail.
+        """
+        _ROLE_MAP: dict[str, str] = {
+            "ctx": "user",
+            "msg": "user",
+        }
+        return _ROLE_MAP.get(v, v)
+
 
 class AnthropicTool(BaseModel):
     """Tool definition"""
