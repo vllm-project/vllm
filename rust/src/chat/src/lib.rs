@@ -37,7 +37,7 @@ pub use renderer::{
 };
 pub use request::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,
-    ChatToolChoice, GenerationPromptMode, ReasoningEffort, SamplingParams,
+    ChatToolChoice, GenerationPromptMode, ImageDetail, ReasoningEffort, SamplingParams,
 };
 pub use stream::{ChatEventStream, ChatEventStreamTrait, CollectedAssistantMessage};
 pub use vllm_llm::FinishReason;
@@ -277,9 +277,9 @@ impl ChatLlm {
 
     /// Render through the chat template and tokenize, without submitting to the engine.
     ///
-    /// Same render → [`multimodal::finalize_rendered_prompt`] → encode pipeline as
-    /// [`Self::chat`], but stops after token IDs so `/tokenize` counts match what
-    /// generation would see. Used by `POST /tokenize` (chat form).
+    /// Uses the same render, multimodal finalization, and encoding pipeline as
+    /// [`Self::chat`], but stops after token IDs so `/tokenize` counts match
+    /// what generation would see. Used by `POST /tokenize` (chat form).
     pub async fn tokenize_chat(&self, request: ChatRequest) -> Result<Vec<u32>> {
         request.validate()?;
 

@@ -277,7 +277,7 @@ impl InklingChatRenderer {
         tool_call_id: &str,
         tool_call_id_to_name: &HashMap<String, String>,
     ) -> Result<()> {
-        let text = content.try_flatten_to_text()?;
+        let text = content.try_flatten_to_text().map_err(Error::UnsupportedMultimodalContent)?;
         let tool_name = tool_call_id_to_name.get(tool_call_id).map(String::as_str).unwrap_or("");
         self.write_text_block(out, self.special.message_tool, Some(tool_name), &text)
     }

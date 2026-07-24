@@ -19,7 +19,7 @@ use futures::StreamExt as _;
 use serial_test::serial;
 use vllm_chat::{
     ChatBackend, ChatLlm, ChatRenderer, ChatRequest, ChatTextBackend, DefaultChatOutputProcessor,
-    DynChatOutputProcessor, DynChatRenderer, NewChatOutputProcessorOptions, RenderedPrompt,
+    DynChatOutputProcessor, DynChatRenderer, Error, NewChatOutputProcessorOptions, RenderedPrompt,
 };
 use vllm_engine_core_client::protocol::output::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs,
@@ -188,7 +188,7 @@ impl ChatRenderer for FakeChatBackend {
         for message in &request.messages {
             prompt.push_str(message.role().as_str());
             prompt.push_str(": ");
-            prompt.push_str(&message.text_content()?);
+            prompt.push_str(&message.text_content().map_err(Error::UnsupportedMultimodalContent)?);
             prompt.push('\n');
         }
         if request.chat_options.add_generation_prompt() {

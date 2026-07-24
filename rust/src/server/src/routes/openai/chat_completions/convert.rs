@@ -399,11 +399,10 @@ mod tests {
 
     use axum::http::HeaderMap;
     use expect_test::expect;
-    use llm_multimodal::ImageDetail;
     use serde_json::json;
     use vllm_chat::{
         AssistantContentBlock, AssistantToolCall, ChatContentPart, ChatMessage as VllmChatMessage,
-        ChatTool as VllmChatTool, ChatToolChoice, GenerationPromptMode,
+        ChatTool as VllmChatTool, ChatToolChoice, GenerationPromptMode, ImageDetail,
         SamplingParams as VllmSamplingParams,
     };
     use vllm_text::output::TextDecodeOptions;
