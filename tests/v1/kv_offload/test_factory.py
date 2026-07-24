@@ -137,6 +137,8 @@ def _make_layout_vllm_config(
     config.cache_config.prefix_match_unit = None
     config.cache_config.cache_dtype = torch.float16
     config.model_config.model = "test-model"
+    config.model_config.hf_config_path = None
+    config.model_config.revision = None
     world_size = (
         tensor_parallel_size * pipeline_parallel_size * prefill_context_parallel_size
     )
@@ -406,6 +408,48 @@ def test_offloading_config_preserves_data_parallel_index():
     offloading_config = build_offloading_config(config, _make_kv_cache_config())
 
     assert offloading_config.parallel.data_parallel_index == 2
+
+
+def test_offloading_config_uses_resolved_model_revision():
+    config = _make_layout_vllm_config()
+    config.model_config.revision = "requested-branch"
+    config.model_config.hf_config._commit_hash = "resolved-commit"
+
+    offloading_config = build_offloading_config(config, _make_kv_cache_config())
+
+    assert offloading_config.model.revision == "resolved-commit"
+
+
+def test_offloading_config_falls_back_to_requested_model_revision():
+    config = _make_layout_vllm_config()
+    config.model_config.revision = "requested-commit"
+    config.model_config.hf_config._commit_hash = None
+
+    offloading_config = build_offloading_config(config, _make_kv_cache_config())
+
+    assert offloading_config.model.revision == "requested-commit"
+
+
+def test_offloading_config_does_not_use_separate_config_revision_for_weights():
+    config = _make_layout_vllm_config()
+    config.model_config.hf_config_path = "org/separate-config"
+    config.model_config.revision = "weights-revision"
+    config.model_config.hf_config._commit_hash = "config-commit"
+
+    offloading_config = build_offloading_config(config, _make_kv_cache_config())
+
+    assert offloading_config.model.revision == "weights-revision"
+
+
+def test_offloading_config_omits_unavailable_model_revision():
+    config = _make_layout_vllm_config()
+    config.model_config.hf_config_path = "org/separate-config"
+    config.model_config.revision = None
+    config.model_config.hf_config._commit_hash = "config-commit"
+
+    offloading_config = build_offloading_config(config, _make_kv_cache_config())
+
+    assert offloading_config.model.revision is None
 
 
 def test_offloading_spec_resolves_heterogeneous_hybrid_block_sizes():

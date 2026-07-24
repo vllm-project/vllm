@@ -36,6 +36,7 @@ def make_mapper_from_offloading_spec(**kwargs) -> FileMapper:
         model=OffloadingModelConfig(
             name=kwargs.get("model_name", "test-model"),
             dtype=kwargs.get("dtype", "float16"),
+            revision=kwargs.get("model_revision"),
         ),
         cache=OffloadingCacheConfig(
             tokens_per_hash=kwargs.get("tokens_per_hash", 16),
@@ -120,6 +121,35 @@ def test_get_run_config_fields():
         ],
         "inference_engine": "vllm",
     }
+
+
+def test_model_revision_namespaces_cache_files():
+    common = dict(
+        root_dir="/tmp/cache",
+        model_name="org/model",
+        tokens_per_hash=16,
+        blocks_per_file=1,
+        tp_size=1,
+        pp_size=1,
+        pcp_size=1,
+        dcp_size=1,
+        rank=0,
+        dtype="float16",
+    )
+
+    revision_a = FileMapper(**common, model_revision="commit-a")
+    revision_b = FileMapper(**common, model_revision="commit-b")
+    same_revision = FileMapper(**common, model_revision="commit-a")
+
+    assert revision_a.base_path != revision_b.base_path
+    assert revision_a.base_path == same_revision.base_path
+    assert revision_a.fields["model_revision"] == "commit-a"
+
+
+def test_offloading_spec_propagates_model_revision():
+    fm = make_mapper_from_offloading_spec(model_revision="resolved-commit")
+
+    assert fm.fields["model_revision"] == "resolved-commit"
 
 
 def test_get_config_file_path():

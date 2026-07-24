@@ -16,7 +16,21 @@ from vllm.v1.kv_offload.config import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.config.model import ModelConfig
     from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor
+
+
+def _get_model_weights_revision(model_config: "ModelConfig") -> str | None:
+    """Return the best available identity for the loaded model weights."""
+    requested_revision = model_config.revision
+    config_source = model_config.hf_config_path or model_config.model
+    if config_source == model_config.model:
+        resolved_revision = getattr(model_config.hf_config, "_commit_hash", None)
+        if isinstance(resolved_revision, str) and resolved_revision:
+            return resolved_revision
+    if isinstance(requested_revision, str) and requested_revision:
+        return requested_revision
+    return None
 
 
 def is_kv_cache_tensor_packed(kv_cache_tensor: "KVCacheTensor") -> bool:
@@ -34,6 +48,9 @@ def build_offloading_config(
     extra_config = kv_transfer_config.kv_connector_extra_config
     assert kv_transfer_config.engine_id is not None
     engine_id = kv_transfer_config.engine_id
+
+    model_config = vllm_config.model_config
+    model_revision = _get_model_weights_revision(model_config)
 
     parallel_config = vllm_config.parallel_config
     groups = tuple(
@@ -127,8 +144,9 @@ def build_offloading_config(
         extra_config=extra_config,
         engine_id=engine_id,
         model=OffloadingModelConfig(
-            name=vllm_config.model_config.model,
+            name=model_config.model,
             dtype=str(vllm_config.cache_config.cache_dtype).replace("torch.", ""),
+            revision=model_revision,
         ),
         cache=OffloadingCacheConfig(
             tokens_per_hash=tokens_per_hash,
