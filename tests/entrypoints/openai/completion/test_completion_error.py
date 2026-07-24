@@ -13,6 +13,7 @@ from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.openai.engine.protocol import (
     GenerationError,
+    RequestRejectedError,
     RequestResponseMetadata,
 )
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
@@ -243,6 +244,58 @@ async def test_completion_error_non_stream():
 
     with pytest.raises(GenerationError):
         await serving_completion.create_completion(request)
+
+
+@pytest.mark.asyncio
+async def test_completion_rejected_non_stream():
+    """test finish_reason='rejected' returns 429 TooManyRequests (non-streaming)"""
+    from http import HTTPStatus
+
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_completion = _build_serving_completion(mock_engine)
+
+    completion_output = CompletionOutput(
+        index=0,
+        text="",
+        token_ids=[],
+        cumulative_logprob=None,
+        logprobs=None,
+        finish_reason="rejected",
+    )
+
+    request_output = RequestOutput(
+        request_id="test-id",
+        prompt="Test prompt",
+        prompt_token_ids=[1, 2, 3],
+        prompt_logprobs=None,
+        outputs=[completion_output],
+        finished=True,
+        metrics=None,
+        lora_request=None,
+        encoder_prompt=None,
+        encoder_prompt_token_ids=None,
+    )
+
+    async def mock_generate(*args, **kwargs):
+        yield request_output
+
+    mock_engine.generate = MagicMock(side_effect=mock_generate)
+
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="Test prompt",
+        max_tokens=10,
+        stream=False,
+    )
+
+    with pytest.raises(RequestRejectedError) as exc_info:
+        await serving_completion.create_completion(request)
+    assert exc_info.value.status_code == HTTPStatus.TOO_MANY_REQUESTS
 
 
 @pytest.mark.asyncio

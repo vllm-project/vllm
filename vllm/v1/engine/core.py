@@ -1479,6 +1479,8 @@ class EngineCoreProc(EngineCore):
             req, request_wave = request
             if self._reject_add_in_shutdown(req):
                 return
+            if self._reject_add_if_queue_full(req):
+                return
             self.add_request(req, request_wave)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
@@ -1512,6 +1514,23 @@ class EngineCoreProc(EngineCore):
             request.request_id,
         )
         self._send_abort_outputs_to_client([request.request_id], request.client_index)
+        return True
+
+    def _reject_add_if_queue_full(self, request: Request) -> bool:
+        limit = self.vllm_config.scheduler_config.max_waiting_queue_length
+        if limit <= 0:
+            return False
+        _, num_waiting = self.scheduler.get_request_counts()
+        if num_waiting < limit:
+            return False
+        logger.debug(
+            "EngineCore: rejecting request request_id=%s, waiting queue is full "
+            "(%d >= %d)",
+            request.request_id,
+            num_waiting,
+            limit,
+        )
+        self._send_reject_outputs_to_client([request.request_id], request.client_index)
         return True
 
     def _reject_utility_in_shutdown(
@@ -1829,6 +1848,13 @@ class EngineCoreProc(EngineCore):
         self, req_ids: list[str], client_index: int
     ) -> None:
         self._send_finish_outputs_to_client(req_ids, client_index, FinishReason.ERROR)
+
+    def _send_reject_outputs_to_client(
+        self, req_ids: list[str], client_index: int
+    ) -> None:
+        self._send_finish_outputs_to_client(
+            req_ids, client_index, FinishReason.REJECTED
+        )
 
     def _send_abort_outputs(self, aborted_reqs: list[Request]) -> None:
         # TODO(nick) this will be moved inside the scheduler

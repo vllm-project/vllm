@@ -488,6 +488,19 @@ def test_prefix_cache_default():
     assert not engine_args.enable_prefix_caching
 
 
+def test_max_waiting_queue_length_arg():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    # disabled (0) by default.
+    engine_args = EngineArgs.from_cli_args(args=parser.parse_args([]))
+    assert engine_args.max_waiting_queue_length == 0
+
+    # picked up from the flag.
+    args = parser.parse_args(["--max-waiting-queue-length", "5"])
+    engine_args = EngineArgs.from_cli_args(args=args)
+    assert engine_args.max_waiting_queue_length == 5
+
+
 @pytest.mark.parametrize(
     ("arg", "expected", "option"),
     [
