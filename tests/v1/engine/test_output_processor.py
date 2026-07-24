@@ -141,6 +141,77 @@ def test_incremental_detokenization(
     assert not output_processor.has_unfinished_requests()
 
 
+def test_per_request_stream_interval_overrides_engine_default(dummy_test_vectors):
+    """A per-request stream_interval wins over the engine-level default,
+    in both directions, without altering the generated text."""
+    engine_stream_interval = 5
+    request_stream_intervals = [1, 10]
+    output_processor = OutputProcessor(
+        dummy_test_vectors.tokenizer,
+        log_stats=False,
+        stream_interval=engine_stream_interval,
+    )
+
+    requests = [
+        EngineCoreRequest(
+            request_id=f"request-{idx}-int",
+            external_req_id=f"request-{idx}",
+            prompt_token_ids=prompt_tokens,
+            mm_features=None,
+            arrival_time=0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+            sampling_params=SamplingParams(
+                skip_special_tokens=False,
+                spaces_between_special_tokens=False,
+                output_kind=RequestOutputKind.DELTA,
+                stop=[],
+                include_stop_str_in_output=False,
+                stream_interval=request_stream_intervals[idx],
+            ),
+            pooling_params=None,
+        )
+        for idx, prompt_tokens in enumerate(
+            dummy_test_vectors.prompt_tokens[: len(request_stream_intervals)]
+        )
+    ]
+
+    num_requests = len(requests)
+    engine_core = MockEngineCore(
+        tokens_list=dummy_test_vectors.generation_tokens[:num_requests],
+        prompts_list=dummy_test_vectors.prompt_tokens[:num_requests],
+        request_ids=[req.request_id for req in requests],
+    )
+
+    for request, prompt in zip(requests, dummy_test_vectors.prompt_strings):
+        output_processor.add_request(request, prompt)
+
+    gen_strings: dict[str, str] = {}
+    gen_tokens: dict[str, list[int]] = {}
+    while outputs := engine_core.get_outputs():
+        for request_output in output_processor.process_outputs(outputs).request_outputs:
+            request_id = request_output.request_id
+            new_tokens = request_output.outputs[0].token_ids
+            if request_id not in gen_strings:
+                gen_strings[request_id] = request_output.outputs[0].text
+                gen_tokens[request_id] = list(new_tokens)
+                assert len(new_tokens) == 1, f"{len(new_tokens)=}"
+                continue
+            gen_strings[request_id] += request_output.outputs[0].text
+            gen_tokens[request_id].extend(new_tokens)
+            if not request_output.finished:
+                interval = request_stream_intervals[int(request_id.split("-")[1])]
+                assert len(new_tokens) == interval, f"{len(new_tokens)=}, {interval=}"
+
+    for idx in range(num_requests):
+        request_id = f"request-{idx}"
+        assert gen_strings[request_id] == dummy_test_vectors.generation_strings[idx]
+        assert gen_tokens[request_id] == dummy_test_vectors.generation_tokens[idx]
+
+    assert not output_processor.has_unfinished_requests()
+
+
 def _validate_logprobs(
     gen_tokens: dict[str, list[int]],
     gen_logprobs: dict[str, SampleLogprobs | None],

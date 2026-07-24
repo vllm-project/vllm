@@ -299,6 +299,10 @@ class SamplingParams(
     include_stop_str_in_output: bool = False
     """Whether to include the stop strings in output text."""
     output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE
+    stream_interval: int | None = None
+    """Number of newly generated tokens to batch into each streamed
+    `RequestOutput`, overriding the engine-level `--stream-interval` for this
+    request. The first and final outputs are always emitted immediately."""
     skip_clone: bool = False
     """Internal flag indicating that this SamplingParams instance is safe to
     reuse without cloning. When True, clone() will return self without
@@ -377,6 +381,7 @@ class SamplingParams(
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
         output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
+        stream_interval: int | None = None,
         structured_outputs: StructuredOutputsParams | None = None,
         logit_bias: dict[int, float] | dict[str, float] | None = None,
         allowed_token_ids: list[int] | None = None,
@@ -439,6 +444,7 @@ class SamplingParams(
             skip_special_tokens=skip_special_tokens,
             spaces_between_special_tokens=spaces_between_special_tokens,
             output_kind=output_kind,
+            stream_interval=stream_interval,
             structured_outputs=structured_outputs,
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
@@ -584,6 +590,12 @@ class SamplingParams(
             raise ValueError(
                 f"min_tokens must be less than or equal to "
                 f"max_tokens={self.max_tokens}, got {self.min_tokens}."
+            )
+        if self.stream_interval is not None and self.stream_interval < 1:
+            raise VLLMValidationError(
+                f"stream_interval must be at least 1, got {self.stream_interval}.",
+                parameter="stream_interval",
+                value=self.stream_interval,
             )
         if self.logprobs is not None and self.logprobs != -1 and self.logprobs < 0:
             raise VLLMValidationError(
