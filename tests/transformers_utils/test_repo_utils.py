@@ -7,13 +7,18 @@ from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+import requests
 from huggingface_hub import _CACHED_NO_EXIST
+from huggingface_hub.utils import RepositoryNotFoundError
 
 from vllm.transformers_utils.repo_utils import (
     any_pattern_in_repo_files,
     get_hf_file_to_dict,
     is_mistral_model_repo,
+    is_transient_hf_error,
     list_filtered_repo_files,
+    maybe_resolve_latest_hf_revision,
+    retry_with_kwargs,
 )
 
 
@@ -185,3 +190,200 @@ def test_is_mistral_model_repo(files: list[str], expected_bool: bool):
             repo_type="model",
             token="token",
         )
+
+
+def test_retry_with_kwargs_retries_with_kwargs():
+    calls: list[dict[str, object]] = []
+
+    def flaky_call(**kwargs):
+        calls.append(kwargs.copy())
+        if len(calls) == 1:
+            raise RuntimeError("transient failure")
+        return kwargs["local_files_only"]
+
+    call_with_retry = retry_with_kwargs(
+        flaky_call,
+        retry_on_exception=lambda _: True,
+        local_files_only=True,
+    )
+    assert call_with_retry(model="cached-model") is True
+
+    assert calls == [
+        {"model": "cached-model"},
+        {"model": "cached-model", "local_files_only": True},
+    ]
+
+
+def test_retry_with_kwargs_does_not_retry_when_predicate_rejects():
+    calls = 0
+
+    def failing_call(**kwargs):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("failure")
+
+    call_with_retry = retry_with_kwargs(
+        failing_call,
+        retry_on_exception=lambda e: False,
+        local_files_only=True,
+    )
+    with pytest.raises(RuntimeError, match="failure"):
+        call_with_retry()
+
+    assert calls == 1
+
+
+def test_retry_with_kwargs_retries_with_missing_none_kwarg():
+    calls: list[dict[str, object | None]] = []
+
+    def flaky_call(**kwargs):
+        calls.append(kwargs.copy())
+        if len(calls) == 1:
+            raise RuntimeError("transient failure")
+        return kwargs["revision"]
+
+    call_with_retry = retry_with_kwargs(
+        flaky_call,
+        retry_on_exception=lambda _: True,
+        revision=None,
+    )
+    assert call_with_retry(model="cached-model") is None
+
+    assert calls == [
+        {"model": "cached-model"},
+        {"model": "cached-model", "revision": None},
+    ]
+
+
+def test_is_transient_hf_error_rejects_wrapped_hub_access_errors():
+    response = requests.Response()
+    response.status_code = 403
+
+    try:
+        raise requests.HTTPError(response=response)
+    except requests.HTTPError as e:
+        try:
+            raise RepositoryNotFoundError("private repo", response=response) from e
+        except RepositoryNotFoundError as exc:
+            assert not is_transient_hf_error(exc)
+
+
+@pytest.mark.parametrize("status_code", [408, 429, 500, 503])
+def test_is_transient_hf_error_accepts_retryable_statuses(status_code: int):
+    response = requests.Response()
+    response.status_code = status_code
+
+    assert is_transient_hf_error(requests.HTTPError(response=response))
+
+
+@pytest.mark.parametrize("status_code", [400, 401, 403, 404])
+def test_is_transient_hf_error_rejects_non_retryable_statuses(status_code: int):
+    response = requests.Response()
+    response.status_code = status_code
+
+    assert not is_transient_hf_error(requests.HTTPError(response=response))
+
+
+def test_maybe_resolve_latest_hf_revision_preserves_explicit_revision(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    hf_api_mock = MagicMock()
+    monkeypatch.setattr(
+        "vllm.transformers_utils.repo_utils.hf_api",
+        hf_api_mock,
+    )
+
+    assert (
+        maybe_resolve_latest_hf_revision("org/model", "pinned-revision")
+        == "pinned-revision"
+    )
+    hf_api_mock.assert_not_called()
+
+
+def test_maybe_resolve_latest_hf_revision_can_force_dataset_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class Info:
+        sha = "latest-dataset-sha"
+
+    class FakeHfApi:
+        def dataset_info(self, repo_id, token=None):
+            assert repo_id == "org/dataset"
+            assert token is None
+            return Info()
+
+    monkeypatch.setattr(
+        "vllm.transformers_utils.repo_utils.envs.VLLM_CI_ENSURE_LATEST_HF_REVISION",
+        False,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "vllm.transformers_utils.repo_utils.envs.VLLM_USE_MODELSCOPE",
+        False,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "vllm.transformers_utils.repo_utils.huggingface_hub.constants.HF_HUB_OFFLINE",
+        False,
+    )
+    monkeypatch.setattr(
+        "vllm.transformers_utils.repo_utils.hf_api",
+        lambda: FakeHfApi(),
+    )
+
+    assert (
+        maybe_resolve_latest_hf_revision(
+            "org/dataset",
+            None,
+            repo_type="dataset",
+            ensure_latest=True,
+        )
+        == "latest-dataset-sha"
+    )
+
+
+def test_maybe_resolve_latest_hf_revision_propagates_access_errors(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    response = requests.Response()
+    response.status_code = 403
+
+    class FakeHfApi:
+        def model_info(self, repo_id, token=None):
+            raise RepositoryNotFoundError("private repo", response=response)
+
+    monkeypatch.setattr(
+        "vllm.transformers_utils.repo_utils.envs.VLLM_CI_ENSURE_LATEST_HF_REVISION",
+        True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "vllm.transformers_utils.repo_utils.hf_api",
+        lambda: FakeHfApi(),
+    )
+
+    with pytest.raises(RepositoryNotFoundError):
+        maybe_resolve_latest_hf_revision("org/private-model", None)
+
+
+def test_maybe_resolve_latest_hf_revision_falls_back_on_transient_errors(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    response = requests.Response()
+    response.status_code = 503
+
+    class FakeHfApi:
+        def model_info(self, repo_id, token=None):
+            raise requests.HTTPError(response=response)
+
+    monkeypatch.setattr(
+        "vllm.transformers_utils.repo_utils.envs.VLLM_CI_ENSURE_LATEST_HF_REVISION",
+        True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "vllm.transformers_utils.repo_utils.hf_api",
+        lambda: FakeHfApi(),
+    )
+
+    assert maybe_resolve_latest_hf_revision("org/model", None) is None

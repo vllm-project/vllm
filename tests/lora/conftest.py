@@ -4,6 +4,7 @@
 import tempfile
 from collections import OrderedDict
 from importlib import reload
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -25,6 +26,10 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.interfaces import SupportsLoRA
 from vllm.platforms import current_platform
+from vllm.transformers_utils.repo_utils import (
+    is_transient_hf_error,
+    retry_with_kwargs,
+)
 
 
 @pytest.fixture()
@@ -301,6 +306,23 @@ def llama32_lora_files(llama32_lora_huggingface_id):
 @pytest.fixture(scope="session")
 def whisper_lora_files():
     return snapshot_download(repo_id="chengyili2005/whisper-small-mandarin-lora")
+
+
+@pytest.fixture(scope="session")
+def whisper_model_files():
+    download_with_cache_fallback = retry_with_kwargs(
+        snapshot_download,
+        retry_on_exception=is_transient_hf_error,
+        local_files_only=True,
+    )
+    model_path = Path(download_with_cache_fallback(repo_id="openai/whisper-small"))
+    preprocessor_config = model_path / "preprocessor_config.json"
+    if not preprocessor_config.is_file():
+        raise RuntimeError(
+            "Incomplete openai/whisper-small snapshot: "
+            f"{preprocessor_config} is missing"
+        )
+    return str(model_path)
 
 
 @pytest.fixture(scope="session")
