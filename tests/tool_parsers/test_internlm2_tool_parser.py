@@ -9,6 +9,8 @@ from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
+from tests.tool_parsers.utils import run_tool_extraction_nonstreaming
+from vllm.tool_parsers import ToolParserManager
 from vllm.tokenizers import TokenizerLike
 
 
@@ -120,3 +122,19 @@ class TestInternLM2ToolParser(ToolParserTests):
                 ),
             },
         )
+
+    def test_multiple_action_start_markers_no_valueerror(self, tokenizer):
+        """Regression: output with two <|action_start|><|plugin|> markers must not
+        raise ValueError (too many values to unpack) — fixed by split(..., 1)."""
+        model_output = (
+            "Some text"
+            "<|action_start|><|plugin|>"
+            '{"name": "get_weather", "parameters": {"city": "Tokyo"}}'
+            "<|action_end|>"
+            "<|action_start|><|plugin|>"
+            '{"name": "get_time", "parameters": {}}'
+            "<|action_end|>"
+        )
+        parser = ToolParserManager.get_tool_parser("internlm")(tokenizer)
+        result = run_tool_extraction_nonstreaming(parser, model_output)
+        assert result.tools_called is True
