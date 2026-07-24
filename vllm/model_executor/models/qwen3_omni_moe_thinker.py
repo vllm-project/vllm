@@ -2059,6 +2059,9 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                     second_per_grid_ts = mm_feature.data[
                         "second_per_grid_ts"
                     ].data.item()
+                if not np.isfinite(second_per_grid_ts):
+                    second_per_grid_ts = 2.0
+                second_per_grid_ts = max(second_per_grid_ts, 1e-3)
                 use_audio_in_video = bool(
                     mm_feature.data.get("use_audio_in_video")
                     and mm_feature.data["use_audio_in_video"].data.item()
@@ -2096,6 +2099,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         t_factor = data["t_factor"]
         audio_feature_length = data["audio_feature_length"]
 
+        max_mrope_pos = getattr(self.config, "max_position_embeddings", 32768) * 4
         audio_len = self._compute_audio_token_count(audio_feature_length)
 
         h_index = np.tile(
@@ -2105,7 +2109,10 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             np.arange(grid_w).reshape(1, 1, -1), (grid_t, grid_h, 1)
         ).flatten()
         t_index_raw = np.arange(grid_t)
-        t_index_scaled = (t_index_raw * t_factor).astype(np.int64)
+        t_index_scaled = np.minimum(
+            t_index_raw * t_factor,
+            max_mrope_pos - 1,
+        ).astype(np.int64)
         t_index = np.repeat(t_index_scaled, grid_h * grid_w)
 
         video_pos = np.stack([t_index, h_index, w_index]) + start_idx
@@ -2210,6 +2217,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
     ) -> tuple[torch.Tensor, int]:
         """Compute M-RoPE input positions using mm_features directly."""
         seq_len = len(input_tokens)
+        max_mrope_pos = getattr(self.config, "max_position_embeddings", 32768) * 4
 
         llm_pos_ids_list: list[np.ndarray] = []
         st = 0
@@ -2250,7 +2258,10 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
 
                 grid_indices = np.indices((grid_t, grid_h, grid_w))
                 if t_factor != 1.0:
-                    grid_indices[0] = (grid_indices[0] * t_factor).astype(np.int64)
+                    grid_indices[0] = np.minimum(
+                        grid_indices[0] * t_factor,
+                        max_mrope_pos - 1,
+                    ).astype(np.int64)
                 llm_pos_ids_list.append(grid_indices.reshape(3, -1) + st_idx)
 
                 image_len = grid_t * grid_h * grid_w
@@ -2269,7 +2280,10 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                 if not data["use_audio_in_video"]:
                     grid_indices = np.indices((grid_t, grid_h, grid_w))
                     if t_factor != 1.0:
-                        grid_indices[0] = (grid_indices[0] * t_factor).astype(np.int64)
+                        grid_indices[0] = np.minimum(
+                            grid_indices[0] * t_factor,
+                            max_mrope_pos - 1,
+                        ).astype(np.int64)
                     llm_pos_ids_list.append(grid_indices.reshape(3, -1) + st_idx)
 
                     video_len = grid_t * grid_h * grid_w
@@ -2307,6 +2321,14 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         if llm_positions.shape[1] != seq_len:
             raise RuntimeError("Position ids length mismatch with input ids length")
 
+        if llm_positions.max() >= max_mrope_pos:
+            logger.warning(
+                "MRoPE positions exceed cache bounds (max=%d, limit=%d). "
+                "Clamping to prevent out-of-bounds access.",
+                llm_positions.max(),
+                max_mrope_pos,
+            )
+            np.clip(llm_positions, 0, max_mrope_pos - 1, out=llm_positions)
         mrope_position_delta = int(llm_positions.max()) + 1 - seq_len
         return torch.from_numpy(llm_positions), mrope_position_delta
 
