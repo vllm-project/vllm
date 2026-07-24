@@ -398,7 +398,10 @@ class DeepseekV32Attention(MLAAttention):
         assert isinstance(slot_mapping, dict)
         mla_slot = slot_mapping.get(self.layer_name)
 
-        if self.indexer is not None:
+        # index_k is None when skip_topk (MTP draft steps 1+ under
+        # index_share_for_mtp_iteration): treat this forward as a shared
+        # layer so the step-0 top-k is reused instead of cleared/recomputed.
+        if self.indexer is not None and index_k is not None:
             has_indexer = True
             indexer_k_norm_w = self.indexer.k_norm.weight
             indexer_k_norm_bias = self.indexer.k_norm.bias
@@ -456,7 +459,7 @@ class DeepseekV32Attention(MLAAttention):
         q_nope = q_nope.transpose(0, 1)
         ql_nope = torch.bmm(q_nope, self.W_UK_T).transpose(0, 1)
 
-        if self.indexer is not None:
+        if self.indexer is not None and has_indexer:
             index_q = self.indexer.wq_b(q_c)[0]
             index_q = index_q.view(-1, self.indexer.n_head, self.indexer.head_dim)
         else:
@@ -478,7 +481,7 @@ class DeepseekV32Attention(MLAAttention):
             quantize_mqa=self._fp8_query,
         )
 
-        if self.indexer is not None:
+        if self.indexer is not None and has_indexer:
             sparse_attn_indexer(
                 q_c,
                 self.indexer.k_cache.prefix,
