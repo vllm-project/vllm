@@ -15,7 +15,9 @@ from vllm.config import PoolerConfig
     ["Qwen/Qwen3-Embedding-0.6B"],
 )
 @torch.inference_mode
-def test_embed_models(hf_runner, vllm_runner, model: str):
+def test_embed_models(hf_runner, vllm_runner, monkeypatch, model: str):
+    # MRV2 rejects token-wise pooling, so keep this token_embed test on MRV1.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     chunk_size = 10
     n_prompt_tokens = [55, 56, 57]
     token_prompts = [[1024 + i for i in range(n)] for n in n_prompt_tokens]
@@ -103,4 +105,44 @@ def test_last_pool_score_chunked_prefill_matches_unchunked(vllm_runner, model: s
 
     assert chunked == pytest.approx(unchunked, abs=5e-2), (
         f"chunked score {chunked} diverged from unchunked {unchunked}"
+    )
+
+
+@torch.inference_mode
+def test_sequence_embed_model_runner_v2(hf_runner, vllm_runner, monkeypatch) -> None:
+    model = "Qwen/Qwen3-Embedding-0.6B"
+    chunk_size = 10
+    token_prompts = [[1024 + i for i in range(n)] for n in (25, 27)]
+    prompts = [TokensPrompt(prompt_token_ids=t) for t in token_prompts]
+
+    with hf_runner(model, auto_cls=AutoModel) as hf_model:
+        hf_outputs = []
+        for token_prompt in token_prompts:
+            inputs = hf_model.wrap_device({"input_ids": torch.tensor([token_prompt])})
+            output = hf_model.model(inputs["input_ids"])
+            embedding = torch.nn.functional.normalize(
+                output.last_hidden_state.float()[0, -1], dim=0
+            )
+            hf_outputs.append(embedding.cpu().tolist())
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    with vllm_runner(
+        model,
+        runner="pooling",
+        pooler_config=PoolerConfig(task="embed"),
+        max_model_len=64,
+        max_num_batched_tokens=chunk_size,
+        max_num_seqs=2,
+        gpu_memory_utilization=0.25,
+        enforce_eager=True,
+        enable_chunked_prefill=True,
+    ) as vllm_model:
+        vllm_outputs = vllm_model.embed(prompts)
+
+    check_embeddings_close(
+        embeddings_0_lst=hf_outputs,
+        embeddings_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+        tol=1e-2,
     )

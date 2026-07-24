@@ -87,3 +87,35 @@ def test_models(
         name_1="vllm",
         tol=1e-2,
     )
+
+
+@pytest.mark.core_model
+def test_encoder_model_runner_v2(hf_runner, vllm_runner, monkeypatch) -> None:
+    model = "sentence-transformers/all-MiniLM-L6-v2"
+    prompt_batches = [
+        ["short input"],
+        [
+            "short input",
+            "a longer input that exercises mixed sequence lengths",
+        ],
+    ]
+
+    with hf_runner(model, is_sentence_transformer=True) as hf_model:
+        hf_outputs = [hf_model.encode(prompts) for prompts in prompt_batches]
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    with vllm_runner(
+        model,
+        runner="pooling",
+        max_model_len=64,
+    ) as vllm_model:
+        vllm_outputs = [vllm_model.embed(prompts) for prompts in prompt_batches]
+
+    for hf_batch, vllm_batch in zip(hf_outputs, vllm_outputs):
+        check_embeddings_close(
+            embeddings_0_lst=hf_batch,
+            embeddings_1_lst=vllm_batch,
+            name_0="hf",
+            name_1="vllm",
+            tol=1e-2,
+        )

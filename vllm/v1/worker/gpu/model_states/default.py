@@ -7,11 +7,19 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.model_executor.layers.attention import Attention
+from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.v1.attention.backend import AttentionType, CommonAttentionMetadata
 from vllm.v1.core.sched.output import NewRequestData
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    EncoderOnlyAttentionSpec,
+    KVCacheConfig,
+    KVCacheSpec,
+)
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
     compute_mm_prefix_ranges,
+    create_attn_groups,
 )
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
@@ -45,8 +53,92 @@ class DefaultModelState(ModelState):
         self.mm_pruner = maybe_create_mm_pruner(
             self.model_config, model, self.rope_state, encoder_cache
         )
+        self.token_type_ids: dict[str, torch.Tensor] = {}
+        self.encoder_only_attn_groups = self._init_encoder_only_attn_groups()
+
+    def _init_encoder_only_attn_groups(self) -> list[AttentionGroup]:
+        if self.model_config.runner_type != "pooling":
+            return []
+
+        layer_specs: dict[str, KVCacheSpec] = {}
+        for (
+            layer_name,
+            layer,
+        ) in self.vllm_config.compilation_config.static_forward_context.items():
+            if (
+                not isinstance(layer, Attention)
+                or layer.attn_type != AttentionType.ENCODER_ONLY
+            ):
+                continue
+            layer_specs[layer_name] = EncoderOnlyAttentionSpec(
+                block_size=self.vllm_config.cache_config.block_size,
+                num_kv_heads=layer.num_kv_heads,
+                head_size=layer.head_size,
+                dtype=layer.kv_cache_torch_dtype,
+            )
+        # Encoder-only attention does not allocate a KV cache group.
+        return create_attn_groups(self.vllm_config, layer_specs, -1)
+
+    def get_additional_attn_groups(self) -> list[AttentionGroup]:
+        return self.encoder_only_attn_groups
+
+    def _add_encoder_only_attn_metadata(
+        self,
+        attn_metadata: dict[str, Any],
+        *,
+        num_reqs: int,
+        num_tokens: int,
+        query_start_loc_gpu: torch.Tensor,
+        query_start_loc_cpu: torch.Tensor,
+        max_query_len: int,
+        seq_lens: torch.Tensor,
+        max_seq_len: int,
+        seq_lens_cpu_upper_bound: torch.Tensor,
+        for_capture: bool,
+    ) -> None:
+        if not self.encoder_only_attn_groups:
+            return
+        common_attn_metadata = CommonAttentionMetadata(
+            query_start_loc=query_start_loc_gpu,
+            query_start_loc_cpu=query_start_loc_cpu,
+            seq_lens=seq_lens[:num_reqs],
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound[:num_reqs],
+            num_reqs=num_reqs,
+            num_actual_tokens=num_tokens,
+            max_query_len=max_query_len,
+            max_seq_len=max_seq_len,
+            block_table_tensor=torch.empty(
+                (num_reqs, 0), dtype=torch.int32, device=self.device
+            ),
+            slot_mapping=torch.empty(0, dtype=torch.int64, device=self.device),
+            causal=False,
+        )
+        for group in self.encoder_only_attn_groups:
+            assert group.metadata_builders, (
+                "GPUModelRunner.initialize_kv_cache must initialize encoder-only "
+                "metadata builders before attention metadata is built."
+            )
+            builder = group.get_metadata_builder()
+            if for_capture:
+                metadata = builder.build_for_cudagraph_capture(common_attn_metadata)
+            else:
+                metadata = builder.build(0, common_attn_metadata)
+            for layer_name in group.layer_names:
+                attn_metadata[layer_name] = metadata
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
+        pooling_params = new_req_data.pooling_params
+        if pooling_params is not None and pooling_params.extra_kwargs is not None:
+            token_type_start = pooling_params.extra_kwargs.get(
+                "compressed_token_type_ids"
+            )
+            if token_type_start is not None:
+                assert new_req_data.prompt_token_ids is not None
+                self.token_type_ids[new_req_data.req_id] = (
+                    torch.arange(len(new_req_data.prompt_token_ids), dtype=torch.int32)
+                    >= token_type_start
+                ).to(torch.int32)
+
         if self.rope_state is not None:
             assert new_req_data.prefill_token_ids is not None
             self.rope_state.init_prefill_positions(
@@ -55,6 +147,9 @@ class DefaultModelState(ModelState):
                 new_req_data.prefill_token_ids,
                 mm_features=new_req_data.mm_features,
             )
+
+    def remove_request(self, req_id: str) -> None:
+        self.token_type_ids.pop(req_id, None)
 
     def apply_staged_writes(self) -> None:
         if self.rope_state is not None:
@@ -108,8 +203,29 @@ class DefaultModelState(ModelState):
     def prepare_inputs(
         self, input_batch: InputBatch, req_states: RequestState
     ) -> dict[str, torch.Tensor | None]:
+        model_inputs: dict[str, torch.Tensor | None] = {}
+        if self.token_type_ids:
+            token_type_ids_cpu = torch.zeros(
+                input_batch.num_tokens_after_padding,
+                dtype=torch.int32,
+                pin_memory=PIN_MEMORY,
+            )
+            offset = 0
+            for i, req_id in enumerate(input_batch.req_ids):
+                num_tokens = int(input_batch.num_scheduled_tokens[i])
+                request_token_type_ids = self.token_type_ids.get(req_id)
+                if request_token_type_ids is not None:
+                    start = int(input_batch.num_computed_tokens_np[i])
+                    token_type_ids_cpu[offset : offset + num_tokens].copy_(
+                        request_token_type_ids[start : start + num_tokens]
+                    )
+                offset += num_tokens
+            model_inputs["token_type_ids"] = token_type_ids_cpu.to(
+                self.device, non_blocking=True
+            )
+
         if self.rope_state is None:
-            return {}  # Common case (1D positions).
+            return model_inputs  # Common case (1D positions).
 
         self.rope_state.prepare_positions(
             input_batch.idx_mapping,
@@ -117,8 +233,10 @@ class DefaultModelState(ModelState):
             req_states.prefill_len.gpu,
             req_states.num_computed_tokens.gpu,
         )
-        positions = self.rope_state.get_positions(input_batch.num_tokens_after_padding)
-        return {"positions": positions}
+        model_inputs["positions"] = self.rope_state.get_positions(
+            input_batch.num_tokens_after_padding
+        )
+        return model_inputs
 
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         model_inputs = {}
@@ -188,5 +306,17 @@ class DefaultModelState(ModelState):
             mm_req_doc_ranges=req_doc_ranges,
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
+        )
+        self._add_encoder_only_attn_metadata(
+            attn_metadata,
+            num_reqs=num_reqs,
+            num_tokens=num_tokens,
+            query_start_loc_gpu=input_batch.query_start_loc,
+            query_start_loc_cpu=query_start_loc_cpu,
+            max_query_len=max_query_len,
+            seq_lens=input_batch.seq_lens,
+            max_seq_len=max_seq_len,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+            for_capture=for_capture,
         )
         return attn_metadata

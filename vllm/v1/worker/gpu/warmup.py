@@ -213,12 +213,17 @@ def warmup_kernels(
     ]
     max_blocks_per_req = sum(decode_block_counts)
 
+    max_reqs_by_blocks = model_runner.scheduler_config.max_num_seqs
+    if max_blocks_per_req:
+        max_reqs_by_blocks = max(
+            1,
+            (model_runner.kv_cache_config.num_blocks - 1) // max_blocks_per_req,
+        )
     num_reqs = min(
         model_runner.scheduler_config.max_num_seqs,
         model_runner.scheduler_config.max_num_batched_tokens
         // max(prompt_len, decode_query_len),
-        # Reserve block 0 (null block) and ensure we have enough blocks.
-        max(1, (model_runner.kv_cache_config.num_blocks - 1) // max_blocks_per_req),
+        max_reqs_by_blocks,
     )
 
     req_ids = [f"_warmup_{i}_" for i in range(num_reqs)]
@@ -226,7 +231,17 @@ def warmup_kernels(
     # SamplingParams exercising all sampling features.
     if model_runner.is_pooling_model:
         sampling_params = None
-        pooling_params = PoolingParams()
+        pooling_task = model_runner.model_config.get_pooling_task(
+            model_runner.get_supported_tasks()
+        )
+        if pooling_task is None:
+            raise ValueError(
+                "Model Runner V2 does not support any pooling task exposed by "
+                f"{model_runner.model_config.model}. Set "
+                "VLLM_USE_V2_MODEL_RUNNER=0 to use this model."
+            )
+        pooling_params = PoolingParams(task=pooling_task)
+        pooling_params.verify(model_runner.model_config)
     else:
         sampling_params = SamplingParams.for_sampler_warmup()
         pooling_params = None

@@ -120,6 +120,8 @@ class BlockTables:
             self.num_blocks.np[i, req_index] = start + len(block_ids)
 
     def apply_staged_writes(self) -> None:
+        if self.num_kv_cache_groups == 0:
+            return
         if self.num_kv_cache_groups == 1:
             # Single group: write directly, skipping the per-write group lookup.
             self.block_tables[0].apply_write()
@@ -138,6 +140,8 @@ class BlockTables:
         out: tuple[torch.Tensor, ...] | None = None,
         out_ptrs: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, ...]:
+        if self.num_kv_cache_groups == 0:
+            return ()
         if out is None:
             out = tuple(self.input_block_tables)
             out_ptrs = self.input_block_table_ptrs
@@ -173,6 +177,8 @@ class BlockTables:
         num_tokens_padded: int,
         out: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if self.num_kv_cache_groups == 0:
+            return self.slot_mappings[:, :num_tokens_padded]
         num_reqs = idx_mapping.shape[0]
         num_groups = self.num_kv_cache_groups
         slot_mappings = self.slot_mappings if out is None else out
