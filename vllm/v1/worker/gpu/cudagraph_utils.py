@@ -197,10 +197,15 @@ class CudaGraphManager:
         # When using Dynamic SD, num_speculative_tokens is the max number of
         # draft tokens. The scheduler might use a smaller number so we need
         # to capture graphs for all possible values during decode.
+        # Only the target model manager uses the DSD schedule. Draft decode
+        # managers (e.g. AutoRegressiveSpeculator with decode_query_len=1)
+        # always process one token per request and must not derive query lengths
+        # from the target verification schedule.
         speculative_config = self.vllm_config.speculative_config
         if (
             speculative_config
             and speculative_config.uses_dynamic_speculative_decoding()
+            and self.decode_query_len > self.vllm_config.num_speculative_tokens
         ):
             num_spec_per_batch_size = (
                 speculative_config.num_speculative_tokens_per_batch_size
