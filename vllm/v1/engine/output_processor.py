@@ -765,9 +765,9 @@ class OutputProcessor:
         }
 
         # Add optional request parameters
-        if req_state.top_p:
+        if req_state.top_p is not None:
             attributes[SpanAttributes.GEN_AI_REQUEST_TOP_P] = req_state.top_p
-        if req_state.max_tokens_param:
+        if req_state.max_tokens_param is not None:
             attributes[SpanAttributes.GEN_AI_REQUEST_MAX_TOKENS] = (
                 req_state.max_tokens_param
             )
@@ -775,7 +775,7 @@ class OutputProcessor:
             attributes[SpanAttributes.GEN_AI_REQUEST_TEMPERATURE] = (
                 req_state.temperature
             )
-        if req_state.n:
+        if req_state.n is not None:
             attributes[SpanAttributes.GEN_AI_REQUEST_N] = req_state.n
 
         instrument_manual(
