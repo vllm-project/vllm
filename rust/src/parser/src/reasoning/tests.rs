@@ -7,7 +7,7 @@ use vllm_tokenizer::test_utils::TestTokenizer;
 
 use super::{
     DeepSeekR1ReasoningParser, DelimitedReasoningParser, MiniMaxM3ReasoningParser,
-    Qwen3ReasoningParser, ReasoningParser,
+    PoolsideV1ReasoningParser, Qwen3ReasoningParser, ReasoningParser,
 };
 
 pub(crate) const THINK_START_ID: u32 = 256;
@@ -21,6 +21,7 @@ pub(crate) const MM_THINK_START_ID: u32 = 263;
 pub(crate) const MM_THINK_END_ID: u32 = 264;
 pub(crate) const SEED_THINK_START_ID: u32 = 265;
 pub(crate) const SEED_THINK_END_ID: u32 = 266;
+pub(crate) const ASSISTANT_START_ID: u32 = 267;
 
 pub(crate) fn fake_tokenizer() -> TestTokenizer {
     TestTokenizer::new()
@@ -35,6 +36,7 @@ pub(crate) fn fake_tokenizer() -> TestTokenizer {
         .with_regular_token("</mm:think>", MM_THINK_END_ID)
         .with_regular_token("<seed:think>", SEED_THINK_START_ID)
         .with_regular_token("</seed:think>", SEED_THINK_END_ID)
+        .with_regular_token("<assistant>", ASSISTANT_START_ID)
 }
 
 #[test]
@@ -217,4 +219,67 @@ fn minimax_m3_uses_prompt_prefilled_end_marker() {
     let delta = parser.push("answer").unwrap();
     assert_eq!(delta.reasoning, None);
     assert_eq!(delta.content.as_deref(), Some("answer"));
+}
+
+#[test]
+fn poolside_v1_ignores_end_marker_before_assistant_turn() {
+    // A `</think>` from a prior turn must not disable reasoning parsing for
+    // the current assistant turn: the boundary scan starts after the last
+    // `<assistant>` token, so the stale marker is invisible and the
+    // no-boundary default (`in_reasoning = true`) wins.
+    let tokenizer = Arc::new(fake_tokenizer());
+    let mut parser = PoolsideV1ReasoningParser::new(tokenizer).unwrap();
+    parser.initialize(&[THINK_END_ID, ASSISTANT_START_ID]).unwrap();
+
+    let delta = parser.push("reason</think>answer").unwrap();
+    assert_eq!(delta.reasoning.as_deref(), Some("reason"));
+    assert_eq!(delta.content.as_deref(), Some("answer"));
+}
+
+#[test]
+fn poolside_v1_respects_end_marker_in_current_turn() {
+    let tokenizer = Arc::new(fake_tokenizer());
+    let mut parser = PoolsideV1ReasoningParser::new(tokenizer).unwrap();
+    parser.initialize(&[ASSISTANT_START_ID, THINK_END_ID]).unwrap();
+
+    let delta = parser.push("answer").unwrap();
+    assert_eq!(delta.reasoning, None);
+    assert_eq!(delta.content.as_deref(), Some("answer"));
+}
+
+#[test]
+fn poolside_v1_respects_start_marker_in_current_turn() {
+    let tokenizer = Arc::new(fake_tokenizer());
+    let mut parser = PoolsideV1ReasoningParser::new(tokenizer).unwrap();
+    parser.initialize(&[ASSISTANT_START_ID, THINK_START_ID]).unwrap();
+
+    let delta = parser.push("reason</think>answer").unwrap();
+    assert_eq!(delta.reasoning.as_deref(), Some("reason"));
+    assert_eq!(delta.content.as_deref(), Some("answer"));
+}
+
+#[test]
+fn poolside_v1_defaults_to_reasoning_without_prompt_boundary() {
+    let tokenizer = Arc::new(fake_tokenizer());
+    let mut parser = PoolsideV1ReasoningParser::new(tokenizer).unwrap();
+
+    let delta = parser.push("reason</think>answer").unwrap();
+    assert_eq!(delta.reasoning.as_deref(), Some("reason"));
+    assert_eq!(delta.content.as_deref(), Some("answer"));
+}
+
+#[test]
+fn poolside_v1_requires_assistant_token() {
+    use thiserror_ext::AsReport;
+
+    let tokenizer = Arc::new(
+        TestTokenizer::new()
+            .with_regular_token("<think>", THINK_START_ID)
+            .with_regular_token("</think>", THINK_END_ID),
+    );
+
+    let Err(error) = PoolsideV1ReasoningParser::new(tokenizer) else {
+        panic!("expected missing `<assistant>` token error");
+    };
+    assert!(error.to_report_string().contains("<assistant>"));
 }

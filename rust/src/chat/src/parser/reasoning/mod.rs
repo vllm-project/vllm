@@ -9,8 +9,8 @@ pub use vllm_parser::reasoning::{
     CohereCmdReasoningParser, DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser,
     DeepSeekV4ReasoningParser, Glm45ReasoningParser, KimiK2ReasoningParser, KimiReasoningParser,
     MiniMaxM2ReasoningParser, MiniMaxM3ReasoningParser, NemotronV3ReasoningParser,
-    Qwen3ReasoningParser, ReasoningDelta, ReasoningError, ReasoningParser, SeedOssReasoningParser,
-    Step3ReasoningParser, Step3p5ReasoningParser,
+    PoolsideV1ReasoningParser, Qwen3ReasoningParser, ReasoningDelta, ReasoningError,
+    ReasoningParser, SeedOssReasoningParser, Step3ReasoningParser, Step3p5ReasoningParser,
 };
 use vllm_tokenizer::DynTokenizer;
 
@@ -30,6 +30,7 @@ pub mod names {
     pub const MINIMAX_M2: &str = "minimax_m2";
     pub const MINIMAX_M3: &str = "minimax_m3";
     pub const NEMOTRON_V3: &str = "nemotron_v3";
+    pub const POOLSIDE_V1: &str = "poolside_v1";
     pub const QWEN3: &str = "qwen3";
     pub const SEED_OSS: &str = "seed_oss";
     pub const STEP3: &str = "step3";
@@ -71,6 +72,7 @@ impl ReasoningParserFactory {
             .register_parser::<MiniMaxM2ReasoningParser>(names::MINIMAX_M2)
             .register_parser::<MiniMaxM3ReasoningParser>(names::MINIMAX_M3)
             .register_parser::<NemotronV3ReasoningParser>(names::NEMOTRON_V3)
+            .register_parser::<PoolsideV1ReasoningParser>(names::POOLSIDE_V1)
             .register_parser::<Qwen3ReasoningParser>(names::QWEN3)
             .register_parser::<SeedOssReasoningParser>(names::SEED_OSS)
             .register_parser::<Step3ReasoningParser>(names::STEP3)
@@ -102,6 +104,7 @@ impl ReasoningParserFactory {
             .register_pattern("mm-m3", names::MINIMAX_M3)
             .register_pattern("minimax", names::MINIMAX_M2)
             .register_pattern("mm-m2", names::MINIMAX_M2)
+            .register_pattern("poolside", names::POOLSIDE_V1)
             .register_pattern("cohere", names::COHERE_CMD)
             .register_pattern("command", names::COHERE_CMD)
             .register_pattern("nano", names::NEMOTRON_V3)
