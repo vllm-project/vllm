@@ -5,8 +5,8 @@ steps:
 - label: Samplers Test
   device: intel_gpu
   timeout_in_minutes: 40
-  no_plugin: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo
