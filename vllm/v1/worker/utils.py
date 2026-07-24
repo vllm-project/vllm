@@ -43,10 +43,11 @@ logger = init_logger(__name__)
 @triton.jit
 def _zero_kv_blocks_kernel(
     seg_addrs_ptr,
+    seg_page_sizes_ptr,
     block_ids_ptr,
     n_blocks,
     N_SEGS: tl.constexpr,
-    PAGE_SIZE_EL: tl.constexpr,
+    MAX_CHUNKS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     """Zero KV cache blocks across all segments in a single launch.
@@ -56,25 +57,33 @@ def _zero_kv_blocks_kernel(
     buffer.  For backends where K/V is outermost (block_dim=1) there are
     two segments per buffer (one for K, one for V).
 
+    Segments may have different page sizes (e.g. models with multiple KV
+    cache groups like MLA + DSA indexer).  Each segment's page size is
+    read from seg_page_sizes_ptr; programs whose chunk_index falls beyond
+    their segment's page size early-exit.
+
     seg_addrs_ptr holds absolute byte addresses (int64) for each segment,
     allowing segments to live in different CUDA allocations.
 
     Programs are mapped as (block_index, seg_index, chunk_index).
     """
     pid = tl.program_id(0)
-    chunks = PAGE_SIZE_EL // BLOCK_SIZE
-    work_per_block = N_SEGS * chunks
+    work_per_block = N_SEGS * MAX_CHUNKS
     block_index = pid // work_per_block
     if block_index >= n_blocks:
         return
     remainder = pid % work_per_block
-    seg_index = remainder // chunks
-    chunk_index = remainder % chunks
+    seg_index = remainder // MAX_CHUNKS
+    chunk_index = remainder % MAX_CHUNKS
+    page_size_el = tl.load(seg_page_sizes_ptr + seg_index)
+    if chunk_index >= page_size_el // BLOCK_SIZE:
+        return
     block_id = tl.load(block_ids_ptr + block_index)
     seg_addr = tl.load(seg_addrs_ptr + seg_index)
     ptr = tl.cast(seg_addr, tl.pointer_type(tl.int32))
     offset = (
-        block_id.to(tl.int64) * PAGE_SIZE_EL + chunk_index.to(tl.int64) * BLOCK_SIZE
+        block_id.to(tl.int64) * page_size_el.to(tl.int64)
+        + chunk_index.to(tl.int64) * BLOCK_SIZE
     )
     cols = tl.arange(0, BLOCK_SIZE).to(tl.int64)
     tl.store(ptr + offset + cols, tl.zeros([BLOCK_SIZE], dtype=tl.int32))
@@ -104,19 +113,19 @@ class KVBlockZeroer:
 
         Block IDs from the scheduler reference logical blocks whose size
         may differ from the kernel block size (virtual block splitting).
-        PAGE_SIZE_EL accounts for this ratio so that
-        ``block_id * PAGE_SIZE_EL`` lands at the correct offset.
+        Each segment's page_size_el accounts for this ratio so that
+        ``block_id * page_size_el`` lands at the correct offset.
 
         Only AttentionSpec layers are processed; Mamba layers are skipped.
         """
         self.device = device
-        self._meta: tuple[torch.Tensor, int, int, int] | None = None
+        self._meta: tuple[torch.Tensor, torch.Tensor, int, int, int] | None = None
 
         if runner_only_attn_layers is None:
             runner_only_attn_layers = set()
         seen_ptrs: set[int] = set()
         seg_addrs: list[int] = []
-        page_size_el: int | None = None
+        seg_page_sizes: list[int] = []
 
         for group in attn_groups_iter:
             spec = group.kv_cache_spec
@@ -149,12 +158,6 @@ class KVBlockZeroer:
                 assert cur_bytes % 4 == 0
                 kernel_block_el = cur_bytes // 4
                 cur_page_el = kernel_block_el * ratio
-                if page_size_el is None:
-                    page_size_el = cur_page_el
-                else:
-                    assert page_size_el == cur_page_el, (
-                        f"Non-uniform page sizes: {page_size_el} vs {cur_page_el}"
-                    )
 
                 block_stride_bytes = cur_bytes
                 outer_dims = [
@@ -166,15 +169,21 @@ class KVBlockZeroer:
                 for outer in iprod(*(range(kv.shape[d]) for d in outer_dims)):
                     off_bytes = sum(i * s for i, s in zip(outer, outer_strides))
                     seg_addrs.append(dp + off_bytes)
+                    seg_page_sizes.append(cur_page_el)
 
-        if not seg_addrs or page_size_el is None:
+        if not seg_addrs:
             self._meta = None
             return
 
-        blk_size = min(largest_power_of_2_divisor(page_size_el), 1024)
+        max_page_size_el = max(seg_page_sizes)
+        blk_size = min(
+            min(largest_power_of_2_divisor(ps) for ps in seg_page_sizes),
+            1024,
+        )
         self._meta = (
             torch.tensor(seg_addrs, dtype=torch.uint64, device=self.device),
-            page_size_el,
+            torch.tensor(seg_page_sizes, dtype=torch.int64, device=self.device),
+            max_page_size_el // blk_size,
             blk_size,
             len(seg_addrs),
         )
@@ -183,16 +192,17 @@ class KVBlockZeroer:
         """Zero the KV cache memory for the given block IDs."""
         if not block_ids or self._meta is None:
             return
-        seg_addrs, page_size_el, blk_size, n_segs = self._meta
+        seg_addrs, seg_page_sizes, max_chunks, blk_size, n_segs = self._meta
         n_blocks = len(block_ids)
         idx = async_tensor_h2d(block_ids, device=self.device, dtype=torch.int64)
-        grid = (n_blocks * n_segs * (page_size_el // blk_size),)
+        grid = (n_blocks * n_segs * max_chunks,)
         _zero_kv_blocks_kernel[grid](
             seg_addrs,
+            seg_page_sizes,
             idx,
             n_blocks,
             N_SEGS=n_segs,
-            PAGE_SIZE_EL=page_size_el,
+            MAX_CHUNKS=max_chunks,
             BLOCK_SIZE=blk_size,
         )
 
