@@ -102,6 +102,7 @@ from .qwen2_5_vl import (
 from .qwen3_moe import Qwen3MoeForCausalLM, Qwen3MoeModel
 from .utils import (
     AutoWeightsLoader,
+    StageMissingLayer,
     WeightsMapper,
     _merge_multimodal_embeddings,
     maybe_prefix,
@@ -1659,17 +1660,6 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "audio_tower"),
             )
 
-        self.use_deepstack = hasattr(
-            thinker_config.vision_config, "deepstack_visual_indexes"
-        )
-        self.deepstack_num_level = (
-            len(thinker_config.vision_config.deepstack_visual_indexes)
-            if self.use_deepstack
-            else 0
-        )
-        self.visual_dim = thinker_config.vision_config.out_hidden_size
-        self.multiscale_dim = self.visual_dim * self.deepstack_num_level
-
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Qwen3Omni_VisionTransformer(
                 vision_config=thinker_config.vision_config,
@@ -1678,18 +1668,28 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
-            # register buffer for deepstack
-            if self.use_deepstack:
-                self.deepstack_input_embeds = [
-                    torch.zeros(
-                        vllm_config.scheduler_config.max_num_batched_tokens,
-                        thinker_config.text_config.hidden_size,
-                    )
-                    for _ in range(self.deepstack_num_level)
-                ]
-                # Tracks the valid token span currently stored in the buffer.
-                # Zero means there is no active deepstack payload to consume.
-                self.deepstack_input_embeds_num_tokens = 0
+        self.use_deepstack = hasattr(
+            thinker_config.vision_config, "deepstack_visual_indexes"
+        ) and not isinstance(self.visual, StageMissingLayer)
+        self.deepstack_num_level = (
+            len(thinker_config.vision_config.deepstack_visual_indexes)
+            if self.use_deepstack
+            else 0
+        )
+        self.visual_dim = thinker_config.vision_config.out_hidden_size
+        self.multiscale_dim = self.visual_dim * self.deepstack_num_level
+
+        if self.use_deepstack:
+            self.deepstack_input_embeds = [
+                torch.zeros(
+                    vllm_config.scheduler_config.max_num_batched_tokens,
+                    thinker_config.text_config.hidden_size,
+                )
+                for _ in range(self.deepstack_num_level)
+            ]
+            # Tracks the valid token span currently stored in the buffer.
+            # Zero means there is no active deepstack payload to consume.
+            self.deepstack_input_embeds_num_tokens = 0
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3MoeLLMForCausalLM(
