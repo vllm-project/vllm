@@ -30,6 +30,7 @@ from ..vllm_inductor_pass import (
     VllmPatternReplacement,
     _fx_view_to_reshape,
     fold_consecutive_reshapes,
+    normalize_single_dynamic_dim_reshapes,
 )
 from .matcher_utils import (
     MatcherQuantFP8,
@@ -653,6 +654,13 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
+        normalized_count = normalize_single_dynamic_dim_reshapes(graph)
+        if normalized_count:
+            logger.debug(
+                "%s normalized %s reshape shape(s)",
+                self.__class__.__name__,
+                normalized_count,
+            )
         self.matched_count = self.patterns.apply(graph)
         logger.debug(
             "%s Replaced %s patterns", self.__class__.__name__, self.matched_count
