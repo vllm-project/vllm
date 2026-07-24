@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import logging
+import mmap
 import os
 import random
 import threading
@@ -24,6 +26,34 @@ def _get_tmp_suffix() -> str:
         return _thread_local.tmp_suffix
 
 
+def probe_o_direct(directory: str) -> bool:
+    """Return whether ``O_DIRECT`` I/O works in *directory*.
+
+    ``O_DIRECT`` is unsupported on some filesystems (e.g. the overlayfs backing
+    a container ``/tmp``, older tmpfs, or some NFS mounts), where opening or
+    writing a file with it fails with ``EINVAL``. Probe once with an aligned
+    single-page write so callers can fall back to buffered I/O instead of
+    failing on every block.
+    """
+    if not O_DIRECT:
+        return False
+    path = os.path.join(directory, f".o_direct_probe{_get_tmp_suffix()}")
+    page = mmap.mmap(-1, mmap.PAGESIZE)
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC | O_DIRECT, 0o644)
+        try:
+            os.write(fd, page)
+        finally:
+            os.close(fd)
+        return True
+    except OSError:
+        return False
+    finally:
+        page.close()
+        with contextlib.suppress(OSError):
+            os.remove(path)
+
+
 def _ensure_dirs(path: str) -> None:
     """Create parent directories of *path* if they don't exist."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -34,6 +64,7 @@ def store_block(
     buffer: memoryview,
     offset: int,
     block_size: int,
+    use_o_direct: bool = True,
 ) -> None:
     """
     Store callback: Writes to a temp file then atomically replaces the destination.
@@ -49,10 +80,11 @@ def store_block(
     # Write block atomically. Cast to a flat byte view so the slice uses byte
     # indices; the raw memoryview may be multi-dimensional with itemsize > 1.
     view_slice = buffer.cast("B")[offset : offset + block_size]
+    o_direct = O_DIRECT if use_o_direct else 0
     try:
         fd = os.open(
             tmp_path,
-            os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_TRUNC | O_DIRECT,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_TRUNC | o_direct,
             0o644,
         )
         try:
@@ -77,14 +109,16 @@ def load_block(
     view: memoryview,
     offset: int,
     block_size: int,
+    use_o_direct: bool = True,
 ) -> None:
     """
     Load callback: read one KV block from disk. Remove the file on failure.
     """
     fd: int | None = None
     view_slice = view.cast("B")[offset : offset + block_size]
+    o_direct = O_DIRECT if use_o_direct else 0
     try:
-        fd = os.open(source_path, os.O_RDONLY | O_DIRECT)
+        fd = os.open(source_path, os.O_RDONLY | o_direct)
         bytes_read = os.readv(fd, [view_slice])
         if bytes_read < block_size:
             raise OSError(f"Short read: expected {block_size} bytes, read {bytes_read}")

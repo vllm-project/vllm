@@ -10,6 +10,9 @@ from unittest.mock import patch
 import pytest
 import zmq
 
+from tests.entrypoints.unit_tests._api_server_spawn_workers import (
+    exit_before_report_worker,
+)
 from vllm.utils.network_utils import make_zmq_socket, split_zmq_path
 from vllm.v1.utils import (
     APIServerProcessManager,
@@ -228,6 +231,7 @@ def test_normal_completion(api_server_args):
 def test_external_process_monitoring(api_server_args):
     """Test that wait_for_completion_or_failure handles additional processes."""
     global WORKER_RUNTIME_SECONDS
+    prev_worker_runtime = WORKER_RUNTIME_SECONDS
     WORKER_RUNTIME_SECONDS = 100
 
     # Create and start the external process
@@ -307,6 +311,7 @@ def test_external_process_monitoring(api_server_args):
         manager.shutdown()
         mock_coordinator.shutdown()
         time.sleep(0.2)
+        WORKER_RUNTIME_SECONDS = prev_worker_runtime
 
 
 @pytest.mark.timeout(60)
@@ -383,10 +388,10 @@ def test_gather_actual_addresses_child_crash_before_report():
         num_servers=num_servers,
         input_addresses=placeholder_inputs,
         output_addresses=placeholder_outputs,
-        # mock_run_api_server_worker exits without touching
+        # exit_before_report_worker exits without touching
         # ``actual_address_pipe`` — simulates a child that dies before
         # reporting its bound addresses.
-        target_server_fn=mock_run_api_server_worker,
+        target_server_fn=exit_before_report_worker,
     )
     try:
         # Sentinel-first vs pipe-EOF-first both produce "reporting".

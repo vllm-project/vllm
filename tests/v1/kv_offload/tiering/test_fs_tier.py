@@ -379,6 +379,43 @@ def test_store_load_data_integrity(fs_tier):
         )
 
 
+def test_store_load_roundtrip_without_o_direct(tmp_path, monkeypatch):
+    """Buffered fallback must round-trip data when O_DIRECT is unsupported.
+
+    Simulates filesystems (e.g. overlayfs, some NFS) that reject O_DIRECT by
+    forcing the capability probe to report it unavailable.
+    """
+    monkeypatch.setattr(
+        "vllm.v1.kv_offload.tiering.fs.manager.probe_o_direct",
+        lambda _dir: False,
+    )
+    tensor = _page_aligned_rand_tensor(4, _BLOCK_ELEMENTS)
+    tier = FileSystemTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=memoryview(tensor.numpy()),
+        tier_type="fs",
+        root_dir=str(tmp_path),
+        n_read_threads=4,
+        n_write_threads=4,
+    )
+    try:
+        assert tier._use_o_direct is False
+
+        keys = [key(0), key(1)]
+        expected = tensor[:2].clone()
+        tier.submit_store(make_job(1, keys, [0, 1]))
+        assert all(r.success for r in drain(tier))
+
+        tensor[:2] = 0.0
+        tier.submit_load(make_job(2, keys, [2, 3], is_promotion=True))
+        assert all(r.success for r in drain(tier))
+
+        for i, bid in enumerate([2, 3]):
+            assert torch.allclose(tensor[bid], expected[i])
+    finally:
+        tier.shutdown()
+
+
 def test_wait_idle_blocks_until_tasks_complete():
     """wait_idle must not return while a task is still in flight."""
     pool = DualQueueThreadPool(n_read_threads=1, n_write_threads=1)
