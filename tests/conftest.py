@@ -39,8 +39,16 @@ from transformers import (
     AutoTokenizer,
     BatchEncoding,
     BatchFeature,
+    PreTrainedModel,
 )
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
+
+# Transformers v5 sets ``all_tied_weights_keys`` only in ``post_init``, which some
+# custom remote-code models never call, so loading them raises AttributeError in
+# ``_move_missing_keys_from_meta_to_device``. Provide a safe empty default; models
+# that call ``post_init`` override it per-instance.
+if not hasattr(PreTrainedModel, "all_tied_weights_keys"):
+    PreTrainedModel.all_tied_weights_keys = {}
 
 from tests.models.utils import (
     TokensTextLogprobs,
