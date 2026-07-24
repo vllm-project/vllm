@@ -51,10 +51,7 @@ class BenchmarkMMProcessorSubcommand(BenchmarkSubcommandBase):
     (default: p99) and `--output-json` to save results.
 
     For more examples (HF datasets, warmup, JSON output), see the
-    [multimodal processor benchmark guide][mm-bench].
-
-    <!-- Path is relative to the rendered page: docs/cli/bench/mm_processor.md -->
-    [mm-bench]: ../../benchmarking/cli.md#multimodal-processor-benchmark
+    [multimodal processor benchmark guide](https://docs.vllm.ai/en/latest/benchmarking/cli/#multimodal-processor-benchmark).
     """
 
     name = "mm-processor"

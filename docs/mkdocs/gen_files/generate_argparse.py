@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import mkdocs_gen_files
+import regex as re
 from pydantic_core import core_schema
 
 logger = logging.getLogger("mkdocs")
@@ -265,6 +266,17 @@ def format_help(parser: FlexibleArgumentParser) -> str:
     return super(type(parser), parser).format_help()
 
 
+# Absolute docs URLs are kept in the help text because they are useful in the
+# terminal. Wrap them as markdown links so the `url_schemes` hook can rewrite
+# them into doc-relative links / cross-references at render time.
+_DOCS_URL = re.compile(r"https://docs\.vllm\.ai/en/[^/\s]+/[^\s)>]+")
+
+
+def linkify_docs_urls(text: str) -> str:
+    """Wrap bare docs.vllm.ai URLs in help text as markdown links."""
+    return _DOCS_URL.sub(lambda m: f"[{m.group()}]({m.group()})", text)
+
+
 logger.info("Generating argparse documentation")
 logger.debug("Root directory: %s", ROOT_DIR.resolve())
 
@@ -293,8 +305,10 @@ fill_markers(
     "configuration/engine_args.md",
     {
         "engine-args": (
-            f"{JSON_TIP}## `EngineArgs`\n\n{format_help(engine_args)}"
-            f"## `AsyncEngineArgs`\n\n{format_help(async_engine_args)}"
+            f"{JSON_TIP}## `EngineArgs`\n\n"
+            f"{linkify_docs_urls(format_help(engine_args))}"
+            f"## `AsyncEngineArgs`\n\n"
+            f"{linkify_docs_urls(format_help(async_engine_args))}"
         )
     },
 )
@@ -348,7 +362,7 @@ for doc_path, (parser, json_tip) in pages.items():
         parser.description = None
     if json_tip:
         content += JSON_TIP
-    content += f"## Arguments\n\n{format_help(parser)}"
+    content += f"## Arguments\n\n{linkify_docs_urls(format_help(parser))}"
     with mkdocs_gen_files.open(doc_path, "w") as f:
         f.write(content)
     logger.debug("CLI reference generated: %s", doc_path)

@@ -60,8 +60,7 @@ class RenderSubcommand(LaunchSubcommandBase):
 
     This command reuses the standard serving parser, so model, frontend,
     networking, and related CLI options follow the same conventions as
-    [`vllm serve`](../serve.md).
-    <!-- Path is relative to the rendered page: docs/cli/launch.md -->
+    [`vllm serve`](https://docs.vllm.ai/en/latest/cli/serve/).
     """
 
     name = "render"

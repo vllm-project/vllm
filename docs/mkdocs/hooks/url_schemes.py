@@ -19,6 +19,7 @@ The on_page_markdown hook passes the current page context to the preprocessor be
 each page is converted.
 """
 
+import posixpath
 from pathlib import Path
 
 import regex as re
@@ -38,18 +39,22 @@ TITLE = r"(?P<title>[^\[\]<>]+?)"
 REPO = r"(?P<repo>.+?/.+?)"
 TYPE = r"(?P<type>issues|pull|projects)"
 NUMBER = r"(?P<number>\d+)"
+VERSION = r"[^/\s]+"
 PATH = r"(?P<path>[^\s]+?)"
 FRAGMENT = r"(?P<fragment>#[^\s]+)?"
-URL = f"https://github.com/{REPO}/{TYPE}/{NUMBER}{FRAGMENT}"
+URL_GITHUB = f"https://github.com/{REPO}/{TYPE}/{NUMBER}{FRAGMENT}"
 RELATIVE = rf"(?!(https?|ftp)://|#){PATH}{FRAGMENT}"
+URL_DOCS = f"https://docs.vllm.ai/en/{VERSION}/{PATH}{FRAGMENT}"
 
 # Common titles to use for GitHub links when none is provided in the link.
 TITLES = {"issues": "Issue ", "pull": "Pull Request ", "projects": "Project "}
 
 # Regex to match GitHub issue, PR, and project links with optional titles.
-github_link = re.compile(rf"(\[{TITLE}\]\(|<){URL}(\)|>)")
+github_link = re.compile(rf"(\[{TITLE}\]\(|<){URL_GITHUB}(\)|>)")
 # Regex to match relative file links with optional titles.
 relative_link = re.compile(rf"\[{TITLE}\]\({RELATIVE}\)")
+# Regex to match absolute docs.vllm.ai links (should only exist in CLI).
+docs_link = re.compile(rf"\[{TITLE}\]\({URL_DOCS}\)")
 
 
 class UrlSchemesPreprocessor(Preprocessor):
@@ -61,6 +66,7 @@ class UrlSchemesPreprocessor(Preprocessor):
 
     def run(self, lines):
         page = self.ext.page
+        files = self.ext.files
         if page is None:
             return lines
 
@@ -105,9 +111,36 @@ class UrlSchemesPreprocessor(Preprocessor):
             url = f"https://github.com/{repo}/{type}/{number}{fragment}"
             return f"[{gh_icon} {title}]({url})"
 
+        def replace_docs_link(match: re.Match) -> str:
+            """Rewrite absolute docs.vllm.ai links as doc-relative links."""
+            title = match.group("title")
+            path = match.group("path").rstrip("/")
+            fragment = match.group("fragment") or ""
+
+            # vllm.config.<Class> API reference -> mkdocstrings cross-reference
+            if path == "api/vllm/config" and re.fullmatch(
+                r"#vllm\.config\.\w+", fragment
+            ):
+                ident = fragment[1:]
+                return f"[`{ident}`][{ident}]"
+
+            # Other docs pages -> link relative to the current page, but only
+            # when the target is a known docs page (real or generated); leave
+            # unknown/external URLs untouched. This is correct even when the same
+            # docstring is also rendered on its API reference page.
+            src = f"{path.removesuffix('.html')}.md"
+            if files.get_file_from_path(src) is None:
+                return match.group(0)
+            rel = posixpath.relpath(src, posixpath.dirname(page.file.src_uri))
+            # Auto-wrapped bare URLs use the URL as their title; make it readable.
+            if title.startswith("http"):
+                title = path.removesuffix(".html")
+            return f"[{title}]({rel}{fragment})"
+
         markdown = "\n".join(lines)
         markdown = github_link.sub(replace_github_link, markdown)
         markdown = relative_link.sub(replace_relative_link, markdown)
+        markdown = docs_link.sub(replace_docs_link, markdown)
         return markdown.split("\n")
 
 
@@ -116,6 +149,7 @@ class UrlSchemesExtension(Extension):
 
     def __init__(self, **kwargs):
         self.page = None
+        self.files = None
         super().__init__(**kwargs)
 
     def extendMarkdown(self, md):
@@ -138,4 +172,5 @@ def on_page_markdown(
 ) -> str:
     """Pass the current page context to the preprocessor."""
     _ext.page = page
+    _ext.files = files
     return markdown

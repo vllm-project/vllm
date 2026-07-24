@@ -255,10 +255,13 @@ NEEDS_HELP = (
 
 def _maybe_add_docs_url(cls: Any) -> str:
     """Generate API docs URL for a vllm config class."""
-    if not cls.__module__.startswith("vllm.config"):
+    import vllm.config
+
+    name = cls.__name__
+    if getattr(vllm.config, name, None) is not cls:
         return ""
     version = f"v{VLLM_VERSION}" if "dev" not in VLLM_VERSION else "latest"
-    return f"\n\nAPI docs: https://docs.vllm.ai/en/{version}/api/vllm/config/#vllm.config.{cls.__name__}"
+    return f"\n\nAPI docs: https://docs.vllm.ai/en/{version}/api/vllm/config/#vllm.config.{name}"
 
 
 def _expand_json_human_readable_numbers(val: str) -> str:
