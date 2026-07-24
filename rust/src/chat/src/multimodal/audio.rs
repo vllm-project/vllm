@@ -161,7 +161,10 @@ mod tests {
             info.placeholder_token(Modality::Audio),
             Some("<|content_audio_input|>")
         );
-        assert_eq!(support.placeholder.marker_token_id, INKLING_AUDIO_MARKER_ID);
+        assert_eq!(
+            support.placeholder.marker_token_ids,
+            vec![INKLING_AUDIO_MARKER_ID]
+        );
         assert_eq!(
             support.placeholder.embed_token_id,
             INKLING_AUDIO_EMBED_ID as u32
@@ -195,7 +198,7 @@ mod tests {
             info.placeholder_token(Modality::Audio),
             Some("<|audio_pad|>")
         );
-        assert_eq!(support.placeholder.marker_token_id, AUDIO_PAD_ID);
+        assert_eq!(support.placeholder.marker_token_ids, vec![AUDIO_PAD_ID]);
         assert_eq!(support.placeholder.embed_token_id, AUDIO_PAD_ID);
         assert!(matches!(
             support.spec.field_layouts.encoder_input,
