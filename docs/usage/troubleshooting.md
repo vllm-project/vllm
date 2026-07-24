@@ -75,9 +75,9 @@ If it's not, override the IP address using the environment variable `export VLLM
 
 You might also need to set `export NCCL_SOCKET_IFNAME=<your_network_interface>` and `export GLOO_SOCKET_IFNAME=<your_network_interface>` to specify the network interface for the IP address.
 
-## Error near `self.graph.replay()`
+## Error near `cudagraph.replay()`
 
-If vLLM crashes and the error trace captures it somewhere around `self.graph.replay()` in `vllm/worker/model_runner.py`, it is a CUDA error inside CUDAGraph.
+If vLLM crashes and the error trace captures it somewhere around `cudagraph.replay()` in `vllm/compilation/cuda_graph.py`, it is a CUDA error inside CUDAGraph.
 To identify the particular CUDA operation that causes the error, you can add `--enforce-eager` to the command line, or `enforce_eager=True` to the [LLM][vllm.LLM] class to disable the CUDAGraph optimization and isolate the exact CUDA operation that causes the error.
 
 ## Incorrect hardware/driver
