@@ -432,7 +432,7 @@ def test_hybrid_full_attention_partial_hash_hit_uses_cow():
         in copies
     )
     assert partial_full_block[0].ref_cnt == 1
-    manager.block_pool.free_blocks(retained)
+    manager.free_popped_blocks(retained)
     assert partial_full_block[0].ref_cnt == 0
 
 
@@ -635,13 +635,14 @@ def test_cow_retained_blocks_returned_for_release():
     req0.append_output_token_ids([3])
     assert manager.allocate_slots(req0, 1) is not None
     (cow_copy,), retained = manager.take_kv_cache_block_copies()
-    assert {b.block_id for b in retained} == {
+    retained_blocks = [block for group in retained.blocks for block in group]
+    assert {b.block_id for b in retained_blocks} == {
         cow_copy.src_block_id,
         cow_copy.dst_block_id,
     }
     # Not freed yet: the retention refs are still held.
-    assert all(b.ref_cnt > 0 for b in retained)
-    manager.block_pool.free_blocks(retained)
+    assert all(b.ref_cnt > 0 for b in retained_blocks)
+    manager.free_popped_blocks(retained)
 
 
 def test_free_cow_retained_blocks_defers_until_copy_step_processed():
@@ -649,26 +650,33 @@ def test_free_cow_retained_blocks_defers_until_copy_step_processed():
     been processed (or deferral is off), and defers them otherwise."""
     from collections import deque
 
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+
     freed: list = []
     blocks = [SimpleNamespace(block_id=7), SimpleNamespace(block_id=9)]
+
+    def free_popped_blocks(retained: KVCacheBlocks) -> None:
+        freed.extend(reversed(retained.blocks[0]))
+
     mock = SimpleNamespace(
         kv_cache_manager=SimpleNamespace(
-            block_pool=SimpleNamespace(free_blocks=freed.extend)
+            free_popped_blocks=free_popped_blocks,
         ),
         deferred_frees=deque(),
         defer_block_free=True,
         processed_step_seq=2,
     )
     free = Scheduler._free_cow_retained_blocks
+    retained = KVCacheBlocks((blocks[::-1],))
 
     # Copy step still in flight: deferred with its fence.
-    free(mock, list(blocks), fence_seq=3)
+    free(mock, retained, fence_seq=3)
     assert not freed
-    assert mock.deferred_frees == deque([(3, blocks[::-1])])
+    assert mock.deferred_frees == deque([(3, retained)])
 
     # Copy step processed: freed immediately.
     mock.processed_step_seq = 3
-    free(mock, list(blocks), fence_seq=3)
+    free(mock, retained, fence_seq=3)
     assert freed == blocks
 
     # Deferral disabled: freed immediately regardless of the fence.
@@ -676,7 +684,7 @@ def test_free_cow_retained_blocks_defers_until_copy_step_processed():
     mock.deferred_frees.clear()
     mock.defer_block_free = False
     mock.processed_step_seq = 0
-    free(mock, list(blocks), fence_seq=3)
+    free(mock, retained, fence_seq=3)
     assert freed == blocks
 
 

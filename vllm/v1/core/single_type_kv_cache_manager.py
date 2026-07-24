@@ -22,6 +22,7 @@ from vllm.v1.kv_cache_interface import (
     HiddenStateCacheSpec,
     KVCacheSpec,
     MambaSpec,
+    MemoryModel,
     MLAAttentionSpec,
     RSWASpec,
     SinkFullAttentionSpec,
@@ -1236,6 +1237,11 @@ class MambaManager(SingleTypeKVCacheManager):
         # class applies for attention groups whose KV cache is partitioned.
         self.block_size = kv_cache_spec.block_size
         self.mamba_cache_mode = kv_cache_spec.mamba_cache_mode
+        self._fixed_request_blocks = (
+            kv_cache_spec.memory_model == MemoryModel.REQUEST_CONSTANT
+            and kv_cache_spec.mamba_cache_mode != "align"
+            and not self.enable_caching
+        )
         self.num_speculative_blocks: int = kv_cache_spec.num_speculative_blocks
         self.cached_blocks_this_step: set[BlockHashWithGroupId] = set()
         if self.mamba_cache_mode == "align":
@@ -1388,6 +1394,8 @@ class MambaManager(SingleTypeKVCacheManager):
         num_prompt_tokens: int | None = None,
     ) -> None:
         assert isinstance(self.kv_cache_spec, MambaSpec)
+        if self._fixed_request_blocks:
+            return
 
         super().remove_skipped_blocks(
             request_id, processed_computed_tokens, num_prompt_tokens
@@ -1417,6 +1425,27 @@ class MambaManager(SingleTypeKVCacheManager):
         """
         return 0
 
+    def allocate_external_computed_blocks(
+        self,
+        request_id: str,
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        if not self._fixed_request_blocks:
+            return super().allocate_external_computed_blocks(
+                request_id,
+                num_local_computed_tokens,
+                num_external_computed_tokens,
+            )
+        if num_external_computed_tokens <= 0:
+            return
+        req_blocks = self.req_to_blocks[request_id]
+        if req_blocks:
+            return
+        req_blocks.extend(
+            self.block_pool.get_new_blocks(self.kv_cache_spec.blocks_per_request)
+        )
+
     def get_num_blocks_to_allocate(
         self,
         request_id: str,
@@ -1437,6 +1466,13 @@ class MambaManager(SingleTypeKVCacheManager):
             # that kv_cache_manager will think there is no enough blocks to allocate now
             # and don't schedule it in the current step.
             return self.block_pool.num_gpu_blocks + 1
+        if self._fixed_request_blocks:
+            if self.req_to_blocks.get(request_id):
+                return 0
+            return (
+                self.kv_cache_spec.blocks_per_request
+                + self._get_num_evictable_blocks(new_computed_blocks)
+            )
         if self.mamba_cache_mode != "align":
             # Allocate extra `num_speculative_blocks` blocks for
             # speculative decoding (MTP/EAGLE) with linear attention.
@@ -1501,6 +1537,15 @@ class MambaManager(SingleTypeKVCacheManager):
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
     ) -> list[KVCacheBlock]:
         assert isinstance(self.kv_cache_spec, MambaSpec)
+        if self._fixed_request_blocks:
+            req_blocks = self.req_to_blocks[request_id]
+            if req_blocks:
+                return []
+            new_blocks = self.block_pool.get_new_blocks(
+                self.kv_cache_spec.blocks_per_request
+            )
+            req_blocks.extend(new_blocks)
+            return new_blocks
         if self.mamba_cache_mode != "align":
             # Allocate extra `num_speculative_blocks` blocks for
             # speculative decoding (MTP/EAGLE) with linear attention.
@@ -1516,7 +1561,7 @@ class MambaManager(SingleTypeKVCacheManager):
             # We can ignore lookahead tokens because current draft models don't have
             # mamba layers.
             num_tokens = num_tokens_main_model
-            req_blocks: list[KVCacheBlock] = self.req_to_blocks[request_id]
+            align_req_blocks: list[KVCacheBlock] = self.req_to_blocks[request_id]
             # NOTE(tdouble): this is an over-estimate of how many blocks we need because
             # num_tokens can include draft tokens that will later be rejected.
             num_required_blocks = (
@@ -1526,10 +1571,10 @@ class MambaManager(SingleTypeKVCacheManager):
             has_partial_hit = partial_hit is not None
             # `num_required_blocks` might be less than `len(req_blocks)` if blocks are
             # over-allocated at last round.
-            if num_required_blocks <= len(req_blocks) and not has_partial_hit:
+            if num_required_blocks <= len(align_req_blocks) and not has_partial_hit:
                 return []
             else:
-                prev_block_len = len(req_blocks)
+                prev_block_len = len(align_req_blocks)
                 blocks_allocated = request_id in self._allocated_block_reqs
                 # Record the last state block
                 if blocks_allocated:
@@ -1548,7 +1593,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 )
                 # null blocks
                 if prev_block_len < num_skipped_blocks:
-                    req_blocks.extend(
+                    align_req_blocks.extend(
                         [
                             self._null_block
                             for _ in range(prev_block_len, num_skipped_blocks)
@@ -1561,11 +1606,11 @@ class MambaManager(SingleTypeKVCacheManager):
                         prev_block_len - self.num_speculative_blocks, prev_block_len
                     ):
                         if block_idx < num_skipped_blocks:
-                            req_blocks.append(req_blocks[block_idx])
-                            req_blocks[block_idx] = self._null_block
+                            align_req_blocks.append(align_req_blocks[block_idx])
+                            align_req_blocks[block_idx] = self._null_block
                         else:
                             break
-                num_new_blocks = num_required_blocks - len(req_blocks)
+                num_new_blocks = num_required_blocks - len(align_req_blocks)
                 if has_partial_hit:
                     num_new_blocks = max(num_new_blocks, 0) + 1
                 if blocks_allocated:
@@ -1575,7 +1620,7 @@ class MambaManager(SingleTypeKVCacheManager):
                         has_partial_hit
                     )
                 new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
-                returned_blocks = req_blocks[prev_block_len:]
+                returned_blocks = align_req_blocks[prev_block_len:]
                 if partial_hit is not None:
                     block_idx, source_block = partial_hit
                     cow_block = new_blocks[0]
@@ -1586,7 +1631,7 @@ class MambaManager(SingleTypeKVCacheManager):
                         # source_block. Move the cache entry to cow_block
                         # instead; the queued copy fills it before forward
                         # overwrites source_block.
-                        assert req_blocks[block_idx] is source_block
+                        assert align_req_blocks[block_idx] is source_block
                         self.block_pool.move_block_hashes(source_block, cow_block)
                         self._pending_cow_copies.append((source_block, cow_block))
                         source_block.ref_cnt += 1
@@ -1597,7 +1642,7 @@ class MambaManager(SingleTypeKVCacheManager):
                     else:
                         self._apply_cow(request_id, block_idx, source_block, cow_block)
                         returned_blocks = [cow_block] + returned_blocks
-                req_blocks.extend(new_blocks)
+                align_req_blocks.extend(new_blocks)
                 self._allocated_block_reqs.add(request_id)
                 self._partial_hit_reqs.pop(request_id, None)
                 returned_blocks.extend(new_blocks)

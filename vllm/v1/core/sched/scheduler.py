@@ -37,7 +37,6 @@ from vllm.v1.core.encoder_cache_manager import (
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -323,7 +322,7 @@ class Scheduler(SchedulerInterface):
         self.processed_step_seq = 0
         # FIFO of (fence_seq, blocks): blocks become safe to free once
         # processed_step_seq >= fence_seq.
-        self.deferred_frees: deque[tuple[int, list[KVCacheBlock]]] = deque()
+        self.deferred_frees: deque[tuple[int, KVCacheBlocks]] = deque()
 
         self.perf_metrics: ModelMetrics | None = None
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
@@ -2250,19 +2249,17 @@ class Scheduler(SchedulerInterface):
             self.kv_cache_manager.free(request)
             return
         blocks = self.kv_cache_manager.pop_blocks_for_free(request)
-        if blocks:
+        if any(blocks.blocks):
             self.deferred_frees.append((self.sched_step_seq, blocks))
 
-    def _free_cow_retained_blocks(
-        self, blocks: list[KVCacheBlock], fence_seq: int
-    ) -> None:
+    def _free_cow_retained_blocks(self, blocks: KVCacheBlocks, fence_seq: int) -> None:
         """Release CoW copy retentions, deferring their return to the block
         pool while the step that runs the copy may still be in flight.
         """
         if not self.defer_block_free or fence_seq <= self.processed_step_seq:
-            self.kv_cache_manager.block_pool.free_blocks(blocks)
+            self.kv_cache_manager.free_popped_blocks(blocks)
             return
-        self.deferred_frees.append((fence_seq, blocks[::-1]))
+        self.deferred_frees.append((fence_seq, blocks))
 
     def _drain_deferred_frees(self):
         """Return deferred blocks whose fence step has completed.
@@ -2277,7 +2274,7 @@ class Scheduler(SchedulerInterface):
                 break
             _, blocks = self.deferred_frees.popleft()
             # Free in reverse order so that the tail blocks are evicted first.
-            self.kv_cache_manager.block_pool.free_blocks(reversed(blocks))
+            self.kv_cache_manager.free_popped_blocks(blocks)
 
     def get_num_unfinished_requests(self) -> int:
         if self._pause_state == PauseState.PAUSED_ALL:
