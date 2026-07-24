@@ -278,6 +278,8 @@ class RequestOffloadState:
     # time.monotonic() of this request's first deferred offload lookup;
     # None once consumed (observed) or while no lookup is pending.
     deferred_lookup_start_time: float | None = None
+    # True once on_request_finished has been signaled to the manager.
+    finished_signaled: bool = False
 
     def __post_init__(self) -> None:
         self.group_states = tuple(
@@ -480,13 +482,6 @@ class OffloadingConnectorScheduler:
         if self.config.offload_prompt_only:
             num = min(num, req_status.req.num_prompt_tokens)
         return num
-
-    def _maybe_cleanup_finished_req(
-        self, req_id: str, req_status: RequestOffloadState
-    ) -> None:
-        """Clean up req_status if finished and no in-flight jobs."""
-        if req_status.req.is_finished() and not req_status.transfer_jobs:
-            del self._req_status[req_id]
 
     def _maximal_prefix_lookup(
         self,
@@ -1039,7 +1034,6 @@ class OffloadingConnectorScheduler:
 
             if not new_offload_keys:
                 req_status.advance_stored_idx(num_offloadable_tokens)
-                self._maybe_cleanup_finished_req(req_id, req_status)
                 continue
 
             store_output = self.manager.prepare_store(
@@ -1050,12 +1044,10 @@ class OffloadingConnectorScheduler:
                     _ConnectorMetricName.ALLOCATION_FAILURE
                 )
                 logger.warning("Request %s: cannot store chunks", req_id)
-                self._maybe_cleanup_finished_req(req_id, req_status)
                 continue
 
             if not store_output.keys_to_store:
                 req_status.advance_stored_idx(num_offloadable_tokens)
-                self._maybe_cleanup_finished_req(req_id, req_status)
                 continue
 
             self._touch(req_status)
@@ -1199,6 +1191,17 @@ class OffloadingConnectorScheduler:
             store_jobs=self._build_store_jobs(scheduler_output),
             jobs_to_flush=self._current_batch_jobs_to_flush,
         )
+
+        # All prepare_store calls for finished requests have been issued.
+        # Signal on_request_finished and clean up state where possible.
+        for req_id in scheduler_output.finished_req_ids or ():
+            req_status = self._req_status.get(req_id)
+            if req_status is None:
+                continue
+            req_status.finished_signaled = True
+            self.manager.on_request_finished(req_status.req_context)
+            if not req_status.transfer_jobs:
+                del self._req_status[req_id]
         self._current_batch_load_jobs = {}
         self._current_batch_jobs_to_flush = set()
         self._current_batch_allocated_block_ids = set()
@@ -1289,7 +1292,7 @@ class OffloadingConnectorScheduler:
 
             del self._jobs[job_id]
             req_status.transfer_jobs.remove(job_id)
-            if not req_status.transfer_jobs and req_status.req.is_finished():
+            if req_status.finished_signaled and not req_status.transfer_jobs:
                 del self._req_status[job_status.req_id]
 
     def get_stats(self) -> OffloadingConnectorStats | None:
@@ -1331,7 +1334,6 @@ class OffloadingConnectorScheduler:
             self.manager.on_request_finished(req_context)
             return False, None
 
-        self.manager.on_request_finished(req_status.req_context)
         self._maybe_observe_lookup_async_delay(req_status)
 
         # Update offload keys with final block hash so _build_store_jobs can
@@ -1375,6 +1377,8 @@ class OffloadingConnectorScheduler:
 
         for req_id, status in list(self._req_status.items()):
             if status.req.is_finished():
+                if not status.finished_signaled:
+                    self.manager.on_request_finished(status.req_context)
                 del self._req_status[req_id]
 
         # Reset offloading manager cache
