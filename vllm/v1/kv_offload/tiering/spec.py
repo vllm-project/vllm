@@ -39,6 +39,8 @@ from typing_extensions import override
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
+    OffloadingCounterMetadata,
+    OffloadingGaugeMetadata,
     OffloadingHistogramMetadata,
     OffloadingManager,
     OffloadingMetricMetadata,
@@ -121,6 +123,24 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     5,
                     10,
                 ),
+            )
+        )
+        metrics[TieringOffloadingMetrics.BACKPRESSURE_ACTIVE] = (
+            OffloadingGaugeMetadata(
+                documentation=(
+                    "Whether back-pressure is active on a secondary tier "
+                    "(1 = active, 0 = inactive)."
+                ),
+                labelnames=("tier_type",),
+            )
+        )
+        metrics[TieringOffloadingMetrics.BACKPRESSURE_STORES_DROPPED] = (
+            OffloadingCounterMetadata(
+                documentation=(
+                    "Number of store operations dropped due to back-pressure "
+                    "on a secondary tier."
+                ),
+                labelnames=("tier_type",),
             )
         )
         secondary_tier_configs = extra_config.get("secondary_tiers", [])

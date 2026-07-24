@@ -67,6 +67,18 @@ class PendingPromotion:
 
 
 @dataclass(slots=True)
+class BackpressureState:
+    store_latency_ema: float = 0.0
+    is_under_pressure: bool = False
+    stores_dropped: int = 0
+
+
+_BP_EMA_ALPHA = 0.3
+_BP_HIGH_WATER_S = 1.0
+_BP_LOW_WATER_S = 0.5
+
+
+@dataclass(slots=True)
 class RequestState:
     req_context: ReqContext
     pending_primary_stores: int = 0
@@ -218,6 +230,11 @@ class TieringOffloadingManager(OffloadingManager):
             for tier in self.secondary_tiers
         }
 
+        # Per-tier back-pressure state derived from store completion latencies.
+        self._backpressure: dict[SecondaryTierManager, BackpressureState] = {
+            tier: BackpressureState() for tier in self.secondary_tiers
+        }
+
         # Buffers manager-level observations (e.g. lookup delay) between
         # get_stats() calls; merged in and reset each time get_stats() runs.
         self._stats = OffloadingConnectorStats()
@@ -275,6 +292,31 @@ class TieringOffloadingManager(OffloadingManager):
                     self.primary_tier.complete_read(
                         job_metadata.keys, job_metadata.req_context
                     )
+                    self._update_backpressure(tier, job_metadata)
+
+    def _update_backpressure(
+        self, tier: SecondaryTierManager, job_metadata: JobMetadata
+    ) -> None:
+        if job_metadata.submit_time <= 0:
+            return
+        elapsed = time.monotonic() - job_metadata.submit_time
+        bp = self._backpressure[tier]
+        bp.store_latency_ema = (
+            _BP_EMA_ALPHA * elapsed
+            + (1 - _BP_EMA_ALPHA) * bp.store_latency_ema
+        )
+        was_under_pressure = bp.is_under_pressure
+        if bp.store_latency_ema > _BP_HIGH_WATER_S:
+            bp.is_under_pressure = True
+        elif bp.store_latency_ema < _BP_LOW_WATER_S:
+            bp.is_under_pressure = False
+        if bp.is_under_pressure != was_under_pressure:
+            logger.info(
+                "Tier %s back-pressure %s (EMA=%.3fs)",
+                tier.tier_type,
+                "activated" if bp.is_under_pressure else "cleared",
+                bp.store_latency_ema,
+            )
 
     @override
     def lookup(
@@ -577,8 +619,13 @@ class TieringOffloadingManager(OffloadingManager):
         if not ready_keys:
             return
 
+        now = time.monotonic()
         for tier in request_level_tiers:
+            if self._backpressure[tier].is_under_pressure:
+                self._backpressure[tier].stores_dropped += 1
+                continue
             job_metadata = self.create_store_job(ready_keys, req_context)
+            job_metadata.submit_time = now
             tier.submit_store(job_metadata)
 
     @override
@@ -615,8 +662,13 @@ class TieringOffloadingManager(OffloadingManager):
             # LoadStoreSpec AND to increment ref_cnt (protecting blocks from
             # eviction during the async transfer). One prepare_read() call per
             # secondary tier.
+            now = time.monotonic()
             for tier in self.secondary_tiers:
+                if self._backpressure[tier].is_under_pressure:
+                    self._backpressure[tier].stores_dropped += 1
+                    continue
                 job_metadata = self.create_store_job(keys, req_context)
+                job_metadata.submit_time = now
                 tier.submit_store(job_metadata)
 
         # Note: The async transfers are now in flight. Their completion is
@@ -816,6 +868,10 @@ class TieringOffloadingManager(OffloadingManager):
             del self._req_state[req_id]
         self._processed_jobs_this_step = False
 
+        for bp in self._backpressure.values():
+            bp.store_latency_ema = 0.0
+            bp.is_under_pressure = False
+
     @override
     def get_stats(self) -> OffloadingConnectorStats | None:
         stats = self.primary_tier.get_stats()
@@ -831,6 +887,22 @@ class TieringOffloadingManager(OffloadingManager):
                 stats = tier_stats
             else:
                 stats.aggregate(tier_stats)
+
+        for tier in self.secondary_tiers:
+            bp = self._backpressure[tier]
+            label = (tier.tier_type,)
+            self._stats.set_gauge(
+                TieringOffloadingMetrics.BACKPRESSURE_ACTIVE,
+                int(bp.is_under_pressure),
+                labelvalues=label,
+            )
+            if bp.stores_dropped > 0:
+                self._stats.increase_counter(
+                    TieringOffloadingMetrics.BACKPRESSURE_STORES_DROPPED,
+                    bp.stores_dropped,
+                    labelvalues=label,
+                )
+                bp.stores_dropped = 0
 
         if not self._stats.is_empty():
             if stats is None:
