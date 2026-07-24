@@ -39,16 +39,25 @@ class FbgemmNvFp4LinearKernel(NvFp4LinearKernel):
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
+        *,
+        input_global_scale_inv: torch.Tensor | None = None,
+        alpha: torch.Tensor | None = None,
     ) -> torch.Tensor:
         import fbgemm_gpu  # noqa: F401 - registers torch.ops.fbgemm.*
 
+        input_global_scale_inv = (
+            layer.input_global_scale_inv
+            if input_global_scale_inv is None
+            else input_global_scale_inv
+        )
+        alpha = layer.alpha if alpha is None else alpha
         output_size = layer.output_size_per_partition
         output_dtype = x.dtype
         output_shape = [*x.shape[:-1], output_size]
 
         x_fp4, x_blockscale = scaled_fp4_quant(
             x,
-            layer.input_global_scale_inv,
+            input_global_scale_inv,
             is_sf_swizzled_layout=True,
             backend="fbgemm",
         )
@@ -58,7 +67,7 @@ class FbgemmNvFp4LinearKernel(NvFp4LinearKernel):
             layer.weight,
             x_blockscale.view(-1).view(torch.uint8),
             layer.weight_scale,
-            layer.alpha,
+            alpha,
             use_mx=False,
         ).to(output_dtype)
 
