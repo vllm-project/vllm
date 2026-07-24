@@ -366,8 +366,8 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
 
 
 ChatCompletionMessageParam: TypeAlias = (
-    OpenAIChatCompletionMessageParam
-    | CustomChatCompletionMessageParam
+    CustomChatCompletionMessageParam
+    | OpenAIChatCompletionMessageParam
     | OpenAIHarmonyMessage
 )
 
