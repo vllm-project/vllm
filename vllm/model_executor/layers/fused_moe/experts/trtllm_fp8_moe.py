@@ -231,16 +231,13 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             weight_layout = WeightLayout.BlockMajorK
             hidden_states_scale = a1q_scale.t().contiguous()
 
-        flashinfer.fused_moe.trtllm_fp8_block_scale_routed_moe(
+        kwargs = dict(
             topk_ids=packed_topk_ids,
             routing_bias=None,
             hidden_states=hidden_states,
             hidden_states_scale=hidden_states_scale,
             gemm1_weights=w1,
             gemm1_weights_scale=self.quant_config.w1_scale,
-            gemm1_alpha=self.gemm1_alpha,
-            gemm1_beta=self.gemm1_beta,
-            gemm1_clamp_limit=self.gemm1_clamp_limit,
             gemm2_weights=w2,
             gemm2_weights_scale=self.quant_config.w2_scale,
             num_experts=global_num_experts,
@@ -258,6 +255,11 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             output=output,
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
         )
+        if is_mxfp8:
+            kwargs["gemm1_alpha"] = self.gemm1_alpha
+            kwargs["gemm1_beta"] = self.gemm1_beta
+            kwargs["gemm1_clamp_limit"] = self.gemm1_clamp_limit
+        flashinfer.fused_moe.trtllm_fp8_block_scale_routed_moe(**kwargs)
 
 
 class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolithic):
@@ -418,9 +420,6 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             hidden_states_scale=hidden_states_scale,
             gemm1_weights=w1,
             gemm1_weights_scale=self.quant_config.w1_scale,
-            gemm1_alpha=self.gemm1_alpha,
-            gemm1_beta=self.gemm1_beta,
-            gemm1_clamp_limit=self.gemm1_clamp_limit,
             gemm2_weights=w2,
             gemm2_weights_scale=self.quant_config.w2_scale,
             num_experts=global_num_experts,
@@ -438,6 +437,10 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             routing_replay_out=routing_replay_out,
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
         )
+        if is_mxfp8:
+            kwargs["gemm1_alpha"] = self.gemm1_alpha
+            kwargs["gemm1_beta"] = self.gemm1_beta
+            kwargs["gemm1_clamp_limit"] = self.gemm1_clamp_limit
         if is_mxfp8 or activation == MoEActivation.RELU2_NO_MUL:
             kwargs["activation_type"] = activation_type
         result = flashinfer.fused_moe.trtllm_fp8_block_scale_moe(**kwargs)
