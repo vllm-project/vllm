@@ -3221,6 +3221,31 @@ if hasattr(torch.ops._C, "dynamic_4bit_int_moe"):
         return x.new_empty((x.size(0), hidden_size))
 
 
+if hasattr(torch.ops._C, "fused_experts_cpu_local_skip"):
+
+    @register_fake("_C::fused_experts_cpu_local_skip")
+    def fused_experts_cpu_local_skip_fake(
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        expert_map: torch.Tensor,
+        moe_comp_method: CPUQuantMethod,
+        w1_scale: torch.Tensor | None,
+        w2_scale: torch.Tensor | None,
+        w1_zero: torch.Tensor | None,
+        w2_zero: torch.Tensor | None,
+        block_size: list[int] | None,
+        w1_bias: torch.Tensor | None,
+        w2_bias: torch.Tensor | None,
+        alpha: float | None,
+        limit: float | None,
+        is_vnni: bool,
+    ) -> torch.Tensor:
+        return torch.empty_like(hidden_states)
+
+
 def fused_experts_cpu(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -3247,6 +3272,46 @@ def fused_experts_cpu(
         topk_weights,
         topk_ids,
         inplace,
+        moe_comp_method,
+        w1_scale,
+        w2_scale,
+        w1_zero,
+        w2_zero,
+        block_size,
+        w1_bias,
+        w2_bias,
+        alpha,
+        limit,
+        is_vnni,
+    )
+
+
+def fused_experts_cpu_local_skip(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    expert_map: torch.Tensor,
+    moe_comp_method: CPUQuantMethod,
+    w1_scale: torch.Tensor | None,
+    w2_scale: torch.Tensor | None,
+    w1_zero: torch.Tensor | None,
+    w2_zero: torch.Tensor | None,
+    block_size: list[int] | None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
+    alpha: float | None = None,
+    limit: float | None = None,
+    is_vnni: bool = True,
+) -> torch.Tensor:
+    return torch.ops._C.fused_experts_cpu_local_skip(
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+        expert_map,
         moe_comp_method,
         w1_scale,
         w2_scale,

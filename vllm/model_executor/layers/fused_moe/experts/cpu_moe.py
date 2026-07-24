@@ -10,6 +10,7 @@ from vllm._custom_ops import (
     CPUQuantMethod,
     convert_weight_packed_scale_zp,
     fused_experts_cpu,
+    fused_experts_cpu_local_skip,
 )
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -162,6 +163,32 @@ class CPUExpertsFp8(mk.FusedMoEExpertsMonolithic):
             )
         )
 
+        if expert_map is not None:
+            # Expert parallelism: select_experts returns global expert ids, but
+            # w1/w2 only hold this rank's local experts. Skip the non-local
+            # selections entirely (instead of masking them to weight 0 and
+            # still running their GEMMs), saving ~world_size x of expert
+            # compute per rank.
+            return fused_experts_cpu_local_skip(
+                hidden_states,
+                w1,
+                w2,
+                topk_weights,
+                topk_ids,
+                expert_map,
+                CPUQuantMethod.FP8_W8A16,  # moe_comp_method
+                self.w1_scale,  # w1_scale
+                self.w2_scale,  # w2_scale
+                None,  # w1_zero
+                None,  # w2_zero
+                block_shape,  # block_size
+                None,  # w1_bias
+                None,  # w2_bias
+                None,  # alpha
+                None,  # limit
+                True,  # is_vnni
+            )
+
         return fused_experts_cpu(
             hidden_states,
             w1,
@@ -239,7 +266,7 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsMonolithic):
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
-        return True
+        return not moe_parallel_config.use_ep
 
     @staticmethod
     def _supports_quant_scheme(
@@ -446,7 +473,7 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
-        return True
+        return not moe_parallel_config.use_ep
 
     @staticmethod
     def _supports_quant_scheme(
@@ -600,7 +627,7 @@ class CPUExpertsInt8(mk.FusedMoEExpertsMonolithic):
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
-        return True
+        return not moe_parallel_config.use_ep
 
     @staticmethod
     def _supports_quant_scheme(

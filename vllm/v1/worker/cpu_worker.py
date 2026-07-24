@@ -13,6 +13,7 @@ import psutil
 import torch
 
 from vllm.config import VllmConfig
+from vllm.config.parallel import ParallelConfig
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.profiler.wrapper import TorchProfilerWrapper
@@ -28,6 +29,32 @@ from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environmen
 from vllm.v1.worker.worker_base import CompilationTimes
 
 logger = init_logger(__name__)
+
+
+def _peek_next_dp_init_port(parallel_config: ParallelConfig) -> int:
+    if parallel_config._data_parallel_master_port_list:
+        return parallel_config._data_parallel_master_port_list[-1]
+    return parallel_config.data_parallel_master_port
+
+
+def _get_cpushm_dist_ident(
+    parallel_config: ParallelConfig,
+    distributed_init_method: str,
+) -> str:
+    # Keep multi-node DP on the torch.distributed fallback path. The CPU SHM
+    # fastpath is only expected to work for single-node groups.
+    if (
+        parallel_config.data_parallel_size > 1
+        and parallel_config.nnodes == 1
+        and not parallel_config.enable_elastic_ep
+        and parallel_config.distributed_executor_backend != "external_launcher"
+    ):
+        return (
+            f"{parallel_config.data_parallel_master_ip}:"
+            f"{_peek_next_dp_init_port(parallel_config)}"
+        )
+
+    return distributed_init_method.rsplit(":", maxsplit=1)[-1]
 
 
 class CPUWorker(Worker):
@@ -157,8 +184,11 @@ class CPUWorker(Worker):
 
         torch.set_num_threads = skip_set_num_threads
 
-        # Note: unique identifier for creating allreduce shared memory
-        os.environ["VLLM_DIST_IDENT"] = self.distributed_init_method.split(":")[-1]
+        # Note: unique identifier for creating allreduce shared memory.
+        os.environ["VLLM_DIST_IDENT"] = _get_cpushm_dist_ident(
+            self.parallel_config,
+            self.distributed_init_method,
+        )
         # Initialize the distributed environment.
         init_worker_distributed_environment(
             self.vllm_config,
