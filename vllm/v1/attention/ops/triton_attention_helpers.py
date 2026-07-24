@@ -176,10 +176,14 @@ def compute_tile_loop_bounds(
     """
     # compute the length of the longest sequence prefix spanned by any
     # query token in the current q_block (q_block_local_idx)
+    # The largest in-block query-position offset is BLOCK_Q - 1. Compute it from
+    # BLOCK_Q directly rather than (BLOCK_M - 1) // num_queries_per_kv, which
+    # overshoots when BLOCK_M is padded for non-pow2 GQA (BLOCK_M = BLOCK_Q *
+    # next_pow2(nq)). For pow2 GQA the two are identical.
     max_seq_prefix_len = (
         context_len
         + q_block_local_idx * BLOCK_Q
-        + (BLOCK_M - 1) // num_queries_per_kv
+        + (BLOCK_Q - 1)
         + 1
     )
     if USE_MM_PREFIX or USE_PER_SEQ_CAUSAL or (not USE_CAUSAL):
@@ -203,7 +207,7 @@ def compute_tile_loop_bounds(
         # Query rows covered by this Q-block
         qpos_lo = q_block_local_idx * BLOCK_Q
         qpos_hi = tl.minimum(
-            qpos_lo + (BLOCK_M - 1) // num_queries_per_kv,
+            qpos_lo + (BLOCK_Q - 1),
             cur_batch_query_len - 1,
         )
         # For sliding window, each query position q can only attend to
