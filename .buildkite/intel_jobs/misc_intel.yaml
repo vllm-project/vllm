@@ -259,3 +259,25 @@ steps:
     pytest -v -s detokenizer &&
     pytest -v -s -m "not cpu_test" ./multimodal &&
     pytest -v -s utils_ --ignore=utils_/test_mem_utils.py'
+
+- label: Fusion Unit Tests
+  timeout_in_minutes: 30
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/compilation/
+    - tests/compile/passes/test_qk_norm_rope_fusion.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pytest -v -s compile/passes/test_qk_norm_rope_fusion.py'
