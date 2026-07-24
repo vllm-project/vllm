@@ -16,6 +16,7 @@ from huggingface_hub import hf_hub_download
 from transformers import AutoConfig, AutoTokenizer
 
 from tests.utils import RemoteOpenAIServer
+from vllm.platforms import current_platform
 from vllm.utils.serial_utils import tensor2base64
 
 QWEN2AUDIO_MODEL = "Qwen/Qwen2-Audio-7B-Instruct"
@@ -148,6 +149,10 @@ def qwen2audio_aligned_content_and_embeds_b64() -> tuple[str, str]:
             False,
             id="text-then-audio_embeds",
             marks=pytest.mark.xfail(
+                # On ROCm the outputs coincide and the test passes, so scope
+                # the strict xfail to non-ROCm to avoid an XPASS(strict)
+                # failure on AMD CI.
+                condition=not current_platform.is_rocm(),
                 reason="torch 2.12 regression: prompt_embeds output diverges "
                 "from raw-text when text precedes audio; "
                 "https://github.com/pytorch/pytorch/issues/184431",
