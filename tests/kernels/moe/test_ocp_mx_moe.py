@@ -29,6 +29,7 @@ ROCM_AVAILABLE = current_platform.is_rocm()
 ROCM_TRITON_KERNELS_AVAILABLE = False
 ROCM_AITER_AVAILABLE = is_aiter_found()
 ROCM_GFX950 = False
+_ROCM_QUANT_UTILS_AVAILABLE = False
 
 if ROCM_AVAILABLE:
     from vllm.platforms.rocm import on_gfx950
@@ -38,8 +39,13 @@ if ROCM_AVAILABLE:
     ROCM_GFX950 = on_gfx950()
 
     if ROCM_AITER_AVAILABLE:
-        from aiter.ops.triton.moe.quant_moe import upcast_from_mxfp
-        from aiter.ops.triton.quant import dynamic_mxfp4_quant
+        try:
+            from aiter.ops.triton.moe.quant_moe import upcast_from_mxfp
+            from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
+            _ROCM_QUANT_UTILS_AVAILABLE = True
+        except ImportError:
+            _ROCM_QUANT_UTILS_AVAILABLE = False
 
 if TRTLLM_GEN_MXFP4_AVAILABLE:
     from flashinfer import (
@@ -1181,6 +1187,18 @@ def test_trtllm_gen_mxfp8_block_scale_moe(
     check_accuracy(ref, out, atol=0.1, rtol=0.85, percent=0.8)
 
 
+@pytest.fixture
+def dist_init_single_rank(dist_init):
+    from types import SimpleNamespace
+
+    from vllm.config import get_current_vllm_config
+
+    vllm_config = get_current_vllm_config()
+    if vllm_config.model_config is None:
+        vllm_config.model_config = SimpleNamespace(quantization_config=None)
+    yield
+
+
 # -----------------------------------------------------------------------------
 # ROCm Oracle-based kernel execution tests
 # -----------------------------------------------------------------------------
@@ -1229,6 +1247,7 @@ ROCM_BACKEND_CONFIGS = {
 )
 @torch.inference_mode()
 def test_rocm_mxfp4_moe_oracle(
+    dist_init_single_rank,
     backend_name: str,
     topk: int,
     num_experts: int,
@@ -1252,13 +1271,17 @@ def test_rocm_mxfp4_moe_oracle(
     # Check platform requirements
     if not ROCM_TRITON_KERNELS_AVAILABLE:
         pytest.skip("triton_kernels required for quantization")
+    if not _ROCM_QUANT_UTILS_AVAILABLE:
+        pytest.skip(
+            "dynamic_mxfp4_quant / upcast_from_mxfp require AITER; "
+            "these are test-only weight-generation utilities, not the kernel under test"
+        )
     if config["requires_aiter"] and not ROCM_AITER_AVAILABLE:
         pytest.skip(f"Backend {backend_name} requires AITER")
     if config["requires_gfx950"] and not ROCM_GFX950:
         pytest.skip(f"Backend {backend_name} requires GFX950")
 
     import vllm.distributed.parallel_state as ps
-    from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
         Mxfp4MoeBackend,
@@ -1398,50 +1421,49 @@ def test_rocm_mxfp4_moe_oracle(
 
     # Build kernel using oracle
     assert quant_config is not None, "Failed to create quant config"
-    with set_current_vllm_config(VllmConfig()):
-        kernel = make_mxfp4_moe_kernel(
-            moe_quant_config=quant_config,
-            moe_config=moe_config,
-            mxfp4_backend=backend,
-            experts_cls=experts_cls,
-            routing_tables=None,
-            layer=None,
-        )
+    kernel = make_mxfp4_moe_kernel(
+        moe_quant_config=quant_config,
+        moe_config=moe_config,
+        mxfp4_backend=backend,
+        experts_cls=experts_cls,
+        routing_tables=None,
+        layer=None,
+    )
 
-        # Create inputs
-        x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
-        router_logits = torch.randn(
-            num_tokens, num_experts, dtype=torch.float32, device=device
-        )
-        topk_weights, topk_ids = torch.topk(router_logits, k=topk, dim=-1, sorted=True)
-        topk_weights = torch.nn.functional.softmax(topk_weights, dim=-1)
+    # Create inputs
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+    router_logits = torch.randn(
+        num_tokens, num_experts, dtype=torch.float32, device=device
+    )
+    topk_weights, topk_ids = torch.topk(router_logits, k=topk, dim=-1, sorted=True)
+    topk_weights = torch.nn.functional.softmax(topk_weights, dim=-1)
 
-        # Run kernel - use appropriate method based on impl type
-        if kernel.is_monolithic:
-            # Monolithic impl uses router_logits
-            out = kernel.apply_monolithic(
-                hidden_states=x,
-                w1=w13_conv,
-                w2=w2_conv,
-                router_logits=router_logits,
-                activation=activation,
-                global_num_experts=num_experts,
-                expert_map=None,
-                apply_router_weight_on_input=False,
-            )
-        else:
-            # Modular impl uses topk_weights and topk_ids
-            out = kernel.apply(
-                hidden_states=x,
-                w1=w13_conv,
-                w2=w2_conv,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                activation=activation,
-                global_num_experts=num_experts,
-                expert_map=None,
-                apply_router_weight_on_input=False,
-            )
+    # Run kernel - use appropriate method based on impl type
+    if kernel.is_monolithic:
+        # Monolithic impl uses router_logits
+        out = kernel.apply_monolithic(
+            hidden_states=x,
+            w1=w13_conv,
+            w2=w2_conv,
+            router_logits=router_logits,
+            activation=activation,
+            global_num_experts=num_experts,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+        )
+    else:
+        # Modular impl uses topk_weights and topk_ids
+        out = kernel.apply(
+            hidden_states=x,
+            w1=w13_conv,
+            w2=w2_conv,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=activation,
+            global_num_experts=num_experts,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+        )
 
     # Verify output is valid (no NaN/Inf) and has expected shape
     assert out.shape == (num_tokens, hidden_size), f"Unexpected shape: {out.shape}"
