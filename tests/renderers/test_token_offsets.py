@@ -15,10 +15,27 @@ from vllm.renderers.params import TokenizeParams
 
 @pytest.fixture
 def fast_tokenizer():
-    """gpt2 ships a Fast tokenizer; use it to test the offsets happy path."""
-    from transformers import AutoTokenizer
+    """Build a local fast tokenizer so offset tests never need the network."""
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from tokenizers.pre_tokenizers import Whitespace
+    from transformers import PreTrainedTokenizerFast
 
-    return AutoTokenizer.from_pretrained("openai-community/gpt2", use_fast=True)
+    backend = Tokenizer(
+        WordLevel(
+            vocab={
+                "[UNK]": 0,
+                "Hello": 1,
+                "world": 2,
+                "Goodbye": 3,
+                ",": 4,
+                ".": 5,
+            },
+            unk_token="[UNK]",
+        )
+    )
+    backend.pre_tokenizer = Whitespace()
+    return PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="[UNK]")
 
 
 def _make_base_renderer_with(tokenizer):
@@ -70,6 +87,53 @@ class TestTokenizePromptOffsets:
         for s, e in offsets:
             assert isinstance(s, int) and isinstance(e, int)
             assert 0 <= s <= e <= text_len
+
+    def test_batch_text_prompts_with_flag_return_offsets(self, fast_tokenizer):
+        renderer = _make_base_renderer_with(fast_tokenizer)
+        params = TokenizeParams(max_total_tokens=None, return_token_offsets=True)
+        prompts = [{"prompt": "Hello, world."}, {"prompt": "Goodbye."}]
+
+        results = renderer.tokenize_prompts(prompts, params)
+
+        assert len(results) == len(prompts)
+        for result, prompt in zip(results, prompts):
+            assert "prompt_token_ids" in result
+            offsets = result["prompt_token_offsets"]
+            assert offsets is not None
+            assert len(offsets) == len(result["prompt_token_ids"])
+            text_len = len(prompt["prompt"])
+            for s, e in offsets:
+                assert isinstance(s, int) and isinstance(e, int)
+                assert 0 <= s <= e <= text_len
+
+    def test_malformed_batch_offsets_fall_back_per_prompt(
+        self, fast_tokenizer, monkeypatch
+    ):
+        renderer = _make_base_renderer_with(fast_tokenizer)
+        params = TokenizeParams(max_total_tokens=None, return_token_offsets=True)
+        prompts = [{"prompt": "Hello, world."}, {"prompt": "Goodbye."}]
+
+        def malformed_batch_encode_plus(texts, **kwargs):
+            return {
+                "input_ids": [[1, 2], [3]],
+                # The first row does not contain one offset per token.
+                "offset_mapping": [[(0, 1)], [(0, 1)]],
+            }
+
+        monkeypatch.setattr(
+            fast_tokenizer,
+            "batch_encode_plus",
+            malformed_batch_encode_plus,
+            raising=False,
+        )
+
+        results = renderer.tokenize_prompts(prompts, params)
+
+        assert len(results) == len(prompts)
+        for result in results:
+            assert len(result["prompt_token_offsets"]) == len(
+                result["prompt_token_ids"]
+            )
 
     def test_base_renderer_without_override_yields_no_offsets(self, fast_tokenizer):
         """A renderer that does not override ``_can_produce_offsets`` never
