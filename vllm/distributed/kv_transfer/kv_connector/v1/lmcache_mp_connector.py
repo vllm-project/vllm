@@ -1183,12 +1183,26 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
         Clean up request tracker and associated lookup future for a request.
         This should be called when a request is finished to prevent memory leak.
         """
-        # Clean up request tracker
-        if self.request_trackers.pop(request_id, None):
-            logger.debug(
-                "[KVConnector] Cleaned up request_tracker for request %s",
-                request_id,
-            )
+        tracker = self.request_trackers.pop(request_id, None)
+        if tracker is None:
+            return
+
+        # update_state_after_alloc was never called (aborted in PREFETCHING):
+        # clean up lookup state that it would normally handle.
+        if tracker.state == LMCacheMPRequestState.PREFETCHING:
+            self.scheduler_adapter.cleanup_lookup_result(request_id)
+            if tracker.num_lmcache_hit_blocks > 0:
+                self.scheduler_adapter.free_lookup_locks(
+                    token_ids=list(tracker.all_token_ids),
+                    start=0,
+                    end=tracker.num_lmcache_hit_blocks * self.vllm_block_size,
+                    request_id=request_id,
+                )
+
+        logger.debug(
+            "[KVConnector] Cleaned up request_tracker for request %s",
+            request_id,
+        )
 
 
 # At module load time, prefer the external LMCacheMPConnector shipped with the
