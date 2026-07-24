@@ -4,7 +4,7 @@
 
 import json
 import math
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
@@ -32,10 +32,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import (
-    _resize_cache,
-    swiglu_limit_func,
-)
+from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -59,8 +56,15 @@ from vllm.utils.import_utils import has_humming
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe import RoutedExperts
-    from vllm.utils.humming import GemmType as HummingGemmType
+    from vllm.model_executor.layers.quantization.utils.humming_utils import (
+        HummingMoEQuantConfig,
+    )
+    from vllm.utils.humming import (
+        GemmType as HummingGemmType,
+    )
+    from vllm.utils.humming import (
+        LayerConfig as HummingLayerConfig,
+    )
 
 
 logger = init_logger(__name__)
@@ -85,15 +89,20 @@ def get_humming_moe_gemm_type() -> str:
 class HummingExpertsBase(mk.FusedMoEExpertsModular):
     def __init__(
         self,
-        layer: "RoutedExperts",
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
-        self.layer = layer
-        self.num_experts = self.layer.local_num_experts
-        self.global_num_experts = self.layer.global_num_experts
+        humming_quant_config = cast("HummingMoEQuantConfig", quant_config)
+        self.humming_configs: dict[str, HummingLayerConfig] = {
+            "w13": humming_quant_config.w1_humming_config,
+            "w2": humming_quant_config.w2_humming_config,
+        }
+        self.locks = torch.zeros(1024, dtype=torch.int32, device=moe_config.device)
+        self.num_experts = moe_config.num_local_experts
+        self.global_num_experts = moe_config.num_experts
+        self.quant_config = quant_config
         self.init_humming_moe()
 
         if self.is_batched():
@@ -108,30 +117,72 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         self._permute_scratch: MoEPermuteScratch | None = None
 
     def init_humming_moe(self):
-        from vllm.utils.humming import HummingMethod
+        from vllm.utils.humming import get_heuristics_config
 
         self.compute_config = {
             "use_batch_invariant": envs.VLLM_BATCH_INVARIANT,
             "use_f16_accum": envs.VLLM_HUMMING_USE_F16_ACCUM,
             "gemm_type": self.humming_gemm_type().value,
         }
-        self.w13_tuning_config = HummingMethod.get_default_tuning_configs(
-            layer=self.layer,
+        self.w13_tuning_config = get_heuristics_config(
+            layer_config=self.humming_configs["w13"],
             use_f16_accum=envs.VLLM_HUMMING_USE_F16_ACCUM,
             use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
             gemm_type=self.humming_gemm_type(),
-            sublayer_name="w13",
         )
-        self.w2_tuning_config = HummingMethod.get_default_tuning_configs(
-            layer=self.layer,
+        self.w2_tuning_config = get_heuristics_config(
+            layer_config=self.humming_configs["w2"],
             use_f16_accum=envs.VLLM_HUMMING_USE_F16_ACCUM,
             use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
             gemm_type=self.humming_gemm_type(),
-            sublayer_name="w2",
         )
         self.compute_config_str = json.dumps(self.compute_config)
         self.w13_tuning_config_str = json.dumps(self.w13_tuning_config)
         self.w2_tuning_config_str = json.dumps(self.w2_tuning_config)
+
+    def quantize_input(
+        self,
+        sublayer_name: str,
+        inputs: torch.Tensor,
+        quanted_input: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        from vllm.utils.humming import may_quant_input
+
+        return may_quant_input(
+            self.humming_configs[sublayer_name],
+            inputs=inputs,
+            quanted_input=quanted_input,
+        )
+
+    def humming_forward(
+        self,
+        sublayer_name: str,
+        inputs: torch.Tensor,
+        weight: torch.Tensor,
+        input_scale: torch.Tensor | None,
+        outputs: torch.Tensor,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        from vllm.utils.humming import humming_forward
+
+        is_w13 = sublayer_name == "w13"
+        return humming_forward(
+            self.humming_configs[sublayer_name],
+            inputs=inputs,
+            weight=weight,
+            weight_scale=(
+                self.quant_config.w1_scale if is_w13 else self.quant_config.w2_scale
+            ),
+            zero_point=(self.quant_config.w1_zp if is_w13 else self.quant_config.w2_zp),
+            bias=(self.quant_config.w1_bias if is_w13 else self.quant_config.w2_bias),
+            weight_scale_2=(
+                self.quant_config.g1_alphas if is_w13 else self.quant_config.g2_alphas
+            ),
+            input_scale=input_scale,
+            outputs=outputs,
+            locks=self.locks,
+            **kwargs,
+        )
 
     def _get_permute_scratch(self) -> MoEPermuteScratch | None:
         if self._permute_scratch is None and moe_permute_unpermute_supported():
@@ -215,8 +266,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
     @property
     def expects_unquantized_inputs(self) -> bool:
         """
-        Humming kernels handle input quantization internally via
-        HummingMethod.may_quant_input() in the apply() method.
+        Humming kernels handle input quantization internally in apply().
 
         This property tells the prepare/finalize step to skip input
         quantization (by setting defer_input_quant=True) and pass
@@ -251,6 +301,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             MoEActivation.GELU,
             MoEActivation.GELU_TANH,
             MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
             MoEActivation.SWIGLUSTEP,
             MoEActivation.SILU_NO_MUL,
             MoEActivation.GELU_NO_MUL,
@@ -262,6 +313,10 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return True
 
+    @staticmethod
+    def _supports_batch_invariance() -> bool:
+        return True
+
     def moe_problem_size(
         self,
         a1: torch.Tensor,
@@ -269,10 +324,8 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         w2: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> tuple[int, int, int, int, int]:
-        from vllm.utils.humming import HummingLayerMeta
-
-        meta1: HummingLayerMeta = self.layer.humming_metas["w13"]
-        meta2: HummingLayerMeta = self.layer.humming_metas["w2"]
+        meta1 = self.humming_configs["w13"]
+        meta2 = self.humming_configs["w2"]
 
         assert meta1.num_experts == meta2.num_experts
 
@@ -289,18 +342,21 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             assert a1.size(0) == num_experts
             num_tokens = a1.size(1)
 
-        return meta1.num_experts, num_tokens, meta1.shape_n // 2, meta1.shape_k, top_k
+        return meta1.num_experts, num_tokens, meta1.shape_n, meta1.shape_k, top_k
 
     def get_buffer_metas(self, M: int, topk: int, activation: MoEActivation):
         from vllm.utils.humming import GemmType as HummingGemmType
         from vllm.utils.humming import dtypes
 
         num_experts = self.num_experts
-        N = self.layer.intermediate_size_per_partition
-        K = self.layer.hidden_size
+        gate_up_dim = self.humming_configs["w13"].shape_n
+        intermediate_dim = self.humming_configs["w2"].shape_k
+        K = self.humming_configs["w13"].shape_k
         assert isinstance(num_experts, int)
-        assert isinstance(N, int)
+        assert isinstance(gate_up_dim, int)
+        assert isinstance(intermediate_dim, int)
         assert isinstance(K, int)
+        assert intermediate_dim == self.adjust_N_for_activation(gate_up_dim, activation)
 
         # hidden_states
         # (-> quanted_gate_up_input) (if not BF16/FP16 activation)
@@ -327,9 +383,8 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             real_shape_m = M * topk
             output_shape = (M, K)
 
-        down_input_size = N if activation.is_gated else (N * 2)
-        a_dtype = self.layer.humming_metas["w13"].a_dtype
-        c_dtype = self.layer.humming_metas["w13"].c_dtype
+        a_dtype = self.humming_configs["w13"].a_dtype
+        c_dtype = self.humming_configs["w13"].c_dtype
         num_bits = a_dtype.num_bits
         torch_dtype_map = {
             dtypes.float16: torch.float16,
@@ -347,15 +402,15 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
                 "dtype": torch_dtype_map[a_dtype],
             },
             "gate_up_output": {
-                "shape": (real_shape_m, N * 2),
+                "shape": (real_shape_m, gate_up_dim),
                 "dtype": torch_dtype_map[c_dtype],
             },
             "activation_output": {
-                "shape": (real_shape_m, down_input_size),
+                "shape": (real_shape_m, intermediate_dim),
                 "dtype": torch_dtype_map[c_dtype],
             },
             "quanted_down_input": {
-                "shape": (real_shape_m, down_input_size),
+                "shape": (real_shape_m, intermediate_dim),
                 "dtype": torch_dtype_map[a_dtype],
             },
             "down_output": {
@@ -413,7 +468,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
 
         output_key = "down_output" if self.is_batched() else "output"
         output_shape = buffer_metas[output_key]["shape"]
-        elem_size = self.layer.params_dtype.itemsize
+        elem_size = self.moe_config.in_dtype.itemsize
 
         return (
             (workspace1_nbytes // elem_size,),
@@ -437,7 +492,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
     def make_workspaces(self, M: int, topk: int, activation: MoEActivation):
         shapes = self._workspace_shapes(M, topk, activation)
         workspace1_shape, workspace2_shape, output_shape = shapes
-        torch_dtype = self.layer.params_dtype
+        torch_dtype = self.moe_config.in_dtype
         workspace1, workspace2 = current_workspace_manager().get_simultaneous(
             (workspace1_shape, torch_dtype),
             (workspace2_shape, torch_dtype),
@@ -501,11 +556,24 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         output: torch.Tensor,
         input: torch.Tensor,
     ) -> None:
-        swiglu_limit = self.quant_config.gemm1_clamp_limit
-        if activation == MoEActivation.SILU and swiglu_limit is not None:
-            swiglu_limit_func(output=output, input=input, swiglu_limit=swiglu_limit)
-        else:
-            self.activation(activation=activation, input=input, output=output)
+        clamp_limit = self.quant_config.gemm1_clamp_limit
+
+        self.activation(
+            activation=activation,
+            input=input,
+            output=output,
+            clamp_limit=clamp_limit,
+            alpha=(
+                self.quant_config.gemm1_alpha
+                if self.quant_config.gemm1_alpha is not None
+                else 1.0
+            ),
+            beta=(
+                self.quant_config.gemm1_beta
+                if self.quant_config.gemm1_beta is not None
+                else 0.0
+            ),
+        )
 
 
 class HummingIndexedExperts(HummingExpertsBase):
@@ -588,12 +656,10 @@ class HummingIndexedExperts(HummingExpertsBase):
         """
         Standard apply implementation for Humming indexed experts.
 
-        Note: Humming kernels handle weights and quantization internally through
-        the layer object, so w1, w2, a1q_scale, a2_scale parameters are not used.
+        Humming performs activation quantization internally and consumes the
+        weights supplied by the modular kernel interface.
         The output is written into workspace13 via the buffer management.
         """
-        from vllm.utils.humming import HummingMethod
-
         assert not apply_router_weight_on_input
 
         hidden_states = hidden_states.view(-1, hidden_states.size(-1))
@@ -611,19 +677,18 @@ class HummingIndexedExperts(HummingExpertsBase):
             expert_tokens_meta=expert_tokens_meta,
         )
 
-        inputs, input_scale = HummingMethod.may_quant_input(
-            layer=self.layer,
+        inputs, input_scale = self.quantize_input(
+            "w13",
             inputs=hidden_states,
             quanted_input=buffers.get("quanted_gate_up_input", None),
-            sublayer_name="w13",
         )
 
-        HummingMethod.forward_layer(
-            layer=self.layer,
+        self.humming_forward(
+            "w13",
             inputs=inputs,
+            weight=w1,
             input_scale=input_scale,
             outputs=buffers["gate_up_output"],
-            sublayer_name="w13",
             **moe_kwargs1,
         )
 
@@ -633,19 +698,18 @@ class HummingIndexedExperts(HummingExpertsBase):
             output=buffers["activation_output"],
         )
 
-        inputs, input_scale = HummingMethod.may_quant_input(
-            layer=self.layer,
+        inputs, input_scale = self.quantize_input(
+            "w2",
             inputs=buffers["activation_output"],
             quanted_input=buffers.get("quanted_down_input", None),
-            sublayer_name="w2",
         )
 
-        HummingMethod.forward_layer(
-            layer=self.layer,
+        self.humming_forward(
+            "w2",
             inputs=inputs,
+            weight=w2,
             input_scale=input_scale,
             outputs=buffers["down_output"].view(-1, hidden_states.size(-1)),
-            sublayer_name="w2",
             **moe_kwargs2,
         )
 
@@ -696,12 +760,10 @@ class HummingGroupedExperts(HummingExpertsBase):
         """
         Standard apply implementation for Humming grouped experts.
 
-        Note: Humming kernels handle weights and quantization internally through
-        the layer object, so w1, w2, a1q_scale, a2_scale parameters are not used.
+        Humming performs activation quantization internally and consumes the
+        weights supplied by the modular kernel interface.
         The output is written into workspace13 via the buffer management.
         """
-        from vllm.utils.humming import HummingMethod
-
         assert not apply_router_weight_on_input
 
         valid_shape_m = self.estimate_local_valid_shape_m(topk_ids)
@@ -724,23 +786,22 @@ class HummingGroupedExperts(HummingExpertsBase):
             scratch=self._get_permute_scratch(),
         )
 
-        inputs, input_scale = HummingMethod.may_quant_input(
-            layer=self.layer,
+        inputs, input_scale = self.quantize_input(
+            "w13",
             inputs=hidden_states,
             quanted_input=buffers.get("quanted_gate_up_input", None),
-            sublayer_name="w13",
         )
 
-        HummingMethod.forward_layer(
-            layer=self.layer,
+        self.humming_forward(
+            "w13",
             inputs=inputs,
+            weight=w1,
             input_scale=input_scale,
             outputs=buffers["gate_up_output"],
             valid_shape_m=valid_shape_m,
             expert_layout=expert_first_token_offset,
             compute_config=self.compute_config_str,
             tuning_config=self.w13_tuning_config_str,
-            sublayer_name="w13",
         )
 
         self.apply_activation(
@@ -749,23 +810,22 @@ class HummingGroupedExperts(HummingExpertsBase):
             output=buffers["activation_output"],
         )
 
-        inputs, input_scale = HummingMethod.may_quant_input(
-            layer=self.layer,
+        inputs, input_scale = self.quantize_input(
+            "w2",
             inputs=buffers["activation_output"],
             quanted_input=buffers.get("quanted_down_input", None),
-            sublayer_name="w2",
         )
 
-        HummingMethod.forward_layer(
-            layer=self.layer,
+        self.humming_forward(
+            "w2",
             inputs=inputs,
+            weight=w2,
             input_scale=input_scale,
             outputs=buffers["down_output"],
             valid_shape_m=valid_shape_m,
             expert_layout=expert_first_token_offset,
             compute_config=self.compute_config_str,
             tuning_config=self.w2_tuning_config_str,
-            sublayer_name="w2",
         )
 
         moe_unpermute(
@@ -815,12 +875,10 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
         """
         Standard apply implementation for Humming batched grouped experts.
 
-        Note: Humming kernels handle weights and quantization internally through
-        the layer object, so w1, w2, a1q_scale, a2_scale parameters are not used.
+        Humming performs activation quantization internally and consumes the
+        weights supplied by the modular kernel interface.
         The output is written into workspace13 via the buffer management.
         """
-        from vllm.utils.humming import HummingMethod
-
         assert not apply_router_weight_on_input
         assert expert_tokens_meta is not None
 
@@ -836,23 +894,22 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
             activation,
         )
 
-        inputs, input_scale = HummingMethod.may_quant_input(
-            layer=self.layer,
+        inputs, input_scale = self.quantize_input(
+            "w13",
             inputs=hidden_states,
             quanted_input=buffers.get("quanted_gate_up_input", None),
-            sublayer_name="w13",
         )
 
-        HummingMethod.forward_layer(
-            layer=self.layer,
+        self.humming_forward(
+            "w13",
             inputs=inputs,
+            weight=w1,
             input_scale=input_scale,
             outputs=buffers["gate_up_output"],
             valid_shape_m=valid_shape_m,
             expert_layout=expert_num_tokens,
             compute_config=self.compute_config_str,
             tuning_config=self.w13_tuning_config_str,
-            sublayer_name="w13",
         )
 
         self.apply_activation(
@@ -861,23 +918,22 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
             output=buffers["activation_output"],
         )
 
-        inputs, input_scale = HummingMethod.may_quant_input(
-            layer=self.layer,
+        inputs, input_scale = self.quantize_input(
+            "w2",
             inputs=buffers["activation_output"],
             quanted_input=buffers.get("quanted_down_input", None),
-            sublayer_name="w2",
         )
 
-        HummingMethod.forward_layer(
-            layer=self.layer,
+        self.humming_forward(
+            "w2",
             inputs=inputs,
+            weight=w2,
             input_scale=input_scale,
             outputs=buffers["down_output"].view(-1, hidden_states.size(-1)),
             valid_shape_m=valid_shape_m,
             expert_layout=expert_num_tokens,
             compute_config=self.compute_config_str,
             tuning_config=self.w2_tuning_config_str,
-            sublayer_name="w2",
         )
 
         # Note: output is already written to buffers["down_output"]

@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import json
 import math
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -32,6 +31,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.utils.humming_utils import (
     convert_to_humming_moe_kernel_format,
+    get_humming_linear_compute_config,
     get_humming_moe_quant_config,
     input_schema_to_quant_key,
     make_humming_moe_kernel,
@@ -425,7 +425,6 @@ class HummingLinearMethod(LinearMethodBase):
                     for name, _ in list(layer.named_parameters()):
                         if name != "bias":
                             delattr(layer, name)
-                    delattr(layer, "locks")
                     self.__class__ = UnquantizedLinearMethod  # type: ignore
                     tensor = torch.empty(
                         (
@@ -513,9 +512,6 @@ class HummingLinearMethod(LinearMethodBase):
             param = prepare_param(tensor, name, extra_attrs)
             setattr(layer, name, param)
 
-        locks = torch.zeros(1024, dtype=torch.int32)
-        layer.register_buffer("locks", locks)
-
         if self.force_input_schema is not None:
             self.input_schema = self.force_input_schema
 
@@ -574,9 +570,7 @@ class HummingLinearMethod(LinearMethodBase):
 
             del tensors
 
-        # prepare layer config from humming kernel
-        _hm.HummingMethod.prepare_layer_meta(
-            layer=layer,
+        self.layer_config = _hm.prepare_layer_config(
             shape_n=layer.output_partition_sizes_sum,
             shape_k=layer.input_size_per_partition,
             weight_schema=self.weight_schema,
@@ -586,19 +580,17 @@ class HummingLinearMethod(LinearMethodBase):
             has_bias=layer.has_bias,
             torch_dtype=layer.param_dtype,
         )
+        tensors = _hm.transform_humming_tensors(
+            self.layer_config, dict(layer.named_parameters())
+        )
+        for name, _ in list(layer.named_parameters()):
+            delattr(layer, name)
+        for name, tensor in tensors.items():
+            param = torch.nn.Parameter(tensor, requires_grad=False)
+            setattr(layer, name, param)
 
-        # preprocess weight for inference
-        _hm.HummingMethod.transform_humming_layer(layer)
-
-        # compute_config: kernel configs that do not directly affect weights
-        # but significantly impact kernel behavior or computation precision.
-        # see https://github.com/inclusionAI/humming/blob/main/docs/config.md
-        compute_config = {
-            "use_batch_invariant": envs.VLLM_BATCH_INVARIANT,
-            "use_f16_accum": envs.VLLM_HUMMING_USE_F16_ACCUM,
-            "gemm_type": "dense",
-        }
-        self.compute_config = json.dumps(compute_config)
+        self.compute_config = get_humming_linear_compute_config()
+        self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)
 
     def apply(
         self,
@@ -606,10 +598,16 @@ class HummingLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        flatten_inputs = x.view(-1, x.size(-1))
-        output = _hm.HummingMethod.forward_layer(
-            layer=layer,
+        flatten_inputs = x.reshape(-1, x.size(-1))
+        output = _hm.humming_forward(
+            self.layer_config,
             inputs=flatten_inputs,
+            weight=layer.weight,
+            weight_scale=getattr(layer, "weight_scale", None),
+            zero_point=getattr(layer, "zero_point", None),
+            bias=getattr(layer, "bias", None),
+            weight_scale_2=getattr(layer, "weight_scale_2", None),
+            locks=self.locks,
             compute_config=self.compute_config,
         )
         output = output.view(*x.shape[:-1], output.size(-1))
@@ -726,12 +724,15 @@ class HummingMoEMethod(FusedMoEMethodBase):
         # sublayer: a layer contains multiple sets of weights for quantized GEMM
         # (e.g., weight, weight_scale, etc.).
         # The weight names of sublayer start with the prefix "{sublayer_name}_"
+        w13_output_size = intermediate_size_per_partition * (
+            2 if self.moe.activation.is_gated else 1
+        )
         layer.sublayer_configs = {
             "w13": {
-                "shape_n": intermediate_size_per_partition * 2,
+                "shape_n": w13_output_size,
                 "shape_k": hidden_size,
                 "tensors_attrs": self.weight_schema.get_padded_tensors_attrs(
-                    shape_n=intermediate_size_per_partition * 2,
+                    shape_n=w13_output_size,
                     shape_k=hidden_size,
                     num_experts=num_experts,
                     param_dtype=params_dtype,
@@ -763,11 +764,14 @@ class HummingMoEMethod(FusedMoEMethodBase):
         if self.force_input_schema is not None:
             self.input_schema = self.force_input_schema
 
-        locks = torch.zeros(1024, dtype=torch.int32)
-        layer.register_buffer("locks", locks)
-
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
-        return get_humming_moe_quant_config(layer)
+        return get_humming_moe_quant_config(
+            layer,
+            self.humming_configs,
+            gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+            gemm1_beta=getattr(layer, "swiglu_beta", None),
+            gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
+        )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         if getattr(self, "processed", False):
@@ -775,7 +779,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
         self.processed = True
 
         # Convert weights to Humming kernel format
-        convert_to_humming_moe_kernel_format(
+        self.humming_configs = convert_to_humming_moe_kernel_format(
             layer=layer,
             sublayer_configs=layer.sublayer_configs,
             weight_schema=self.weight_schema,
@@ -791,7 +795,6 @@ class HummingMoEMethod(FusedMoEMethodBase):
             self.moe_quant_config,
             self.moe,
             self.experts_cls,
-            layer=layer,
             routing_tables=layer._expert_routing_tables(),
         )
 
@@ -814,13 +817,11 @@ class HummingMoEMethod(FusedMoEMethodBase):
         3. Finalization (weight application & reduction - no-op for Humming
            since it's already done internally)
 
-        Humming handles all quantization, weight application, and reduction
-        internally in the experts.apply() method via HummingMethod calls.
+        Humming handles quantization, weight application, and reduction
+        internally in the experts implementation.
 
-        Note: Although w1/w2 weights are passed to the kernel for interface
-        consistency, Humming's experts.apply() reads weights directly from
-        the layer object via HummingMethod.forward_layer() and ignores the
-        w1/w2 parameters.
+        Humming experts consume the weights and quantization tensors passed
+        through the standard modular kernel interface.
         """
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(

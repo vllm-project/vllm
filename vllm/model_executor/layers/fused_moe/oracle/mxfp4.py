@@ -1701,7 +1701,6 @@ def make_mxfp4_moe_kernel(
     experts_cls: type[mk.FusedMoEExperts],
     mxfp4_backend: Mxfp4MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    layer: RoutedExperts | None = None,
 ) -> mk.FusedMoEKernel:
     """Create a FusedMoEKernel for the given MXFP4 backend."""
     is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
@@ -1718,11 +1717,6 @@ def make_mxfp4_moe_kernel(
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
     logger.info_once("Using %s", experts_cls.__name__)
 
-    extra_kwargs = {}
-    if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
-        assert layer is not None
-        extra_kwargs["layer"] = layer
-
     # Create Experts.
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
@@ -1732,13 +1726,11 @@ def make_mxfp4_moe_kernel(
             quant_config=moe_quant_config,
             max_num_tokens=max_num_tokens,
             num_dispatchers=prepare_finalize.num_dispatchers(),
-            **extra_kwargs,
         )
     else:
         experts = experts_cls(
             moe_config=moe_config,
             quant_config=moe_quant_config,
-            **extra_kwargs,
         )
 
     kernel = mk.FusedMoEKernel(

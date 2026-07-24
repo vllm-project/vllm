@@ -714,7 +714,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             fp8_backend=self.fp8_backend,
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
-            layer=layer,
         )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:

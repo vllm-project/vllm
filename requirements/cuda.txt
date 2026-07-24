@@ -32,4 +32,4 @@ quack-kernels>=0.6.1  # Required for CUTLASS DSL 4.6 by MSA
 tokenspeed-mla==0.1.8; platform_system == "Linux"
 
 # Humming kernels for quantization gemm
-humming-kernels[cu13]==0.1.10
+humming-kernels[cu13] @ https://github.com/inclusionAI/humming/archive/d18be0e967e8d96d3597539ccf60b2329dee9eb1.zip

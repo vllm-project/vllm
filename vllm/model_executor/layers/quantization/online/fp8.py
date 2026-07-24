@@ -458,7 +458,6 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
                 fp8_backend=self.fp8_backend,
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
-                layer=layer,
             )
 
     def get_fused_moe_quant_config(
