@@ -4,6 +4,22 @@
 import torch
 
 
+def validate_owner_history_peer_cache_binding(
+    *,
+    owner_history_expected: bool,
+    peer_cache: torch.Tensor | None,
+) -> None:
+    """Reject missing or unexpected owner-history peer-cache bindings."""
+    if owner_history_expected and peer_cache is None:
+        raise RuntimeError(
+            "VLLM_USE_PCP_OWNER_HISTORY=1 requires a bound Main-KV peer cache."
+        )
+    if not owner_history_expected and peer_cache is not None:
+        raise RuntimeError(
+            "Peer-mapped PCP caches require VLLM_USE_PCP_OWNER_HISTORY=1."
+        )
+
+
 def select_owner_slot_mapping(
     mla_slot: torch.Tensor | None,
     *,

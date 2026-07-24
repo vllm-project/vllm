@@ -45,7 +45,7 @@ class AttentionLayerBase(ABC):
 
         The ordinary ``kv_cache`` remains the rank-local consumer view. The
         peer view adds a leading PCP-rank dimension and is only present when
-        the experimental direct-store path is enabled.
+        owner-sharded history is enabled.
         """
         from vllm.model_executor.layers.attention.pcp_peer_cache import (
             make_rank_major_block_tensor_view,

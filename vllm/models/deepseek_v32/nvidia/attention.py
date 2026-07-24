@@ -43,6 +43,7 @@ from vllm.v1.attention.backends.mla.owner_compute import (
 from vllm.v1.attention.backends.mla.owner_history import (
     select_owner_slot_mapping,
     validate_owner_fused_cache_contract,
+    validate_owner_history_peer_cache_binding,
 )
 from vllm.v1.attention.backends.mla.owner_peer_slot_cache import (
     OwnerPeerSlotCache,
@@ -63,6 +64,16 @@ def _owner_history_uses_peer_slots(
         and not getattr(attn_metadata, "fp8_use_mixed_batch", True)
     )
     return not materialized_prefill
+
+
+def _use_pcp_collective_cache_update(
+    *,
+    attn_metadata: object | None,
+    use_pcp: bool,
+    peer_cache: torch.Tensor | None,
+) -> bool:
+    """Whether this forward must use standard PCP cache publication."""
+    return attn_metadata is not None and use_pcp and peer_cache is None
 
 
 class DeepseekV32Indexer(nn.Module):
@@ -557,18 +568,19 @@ class DeepseekV32Attention(MLAAttention):
         pcp_rank = 0
         pcp_size = 1
         pcp_owner_slot_mapping = None
-        owner_history_expected = False
+        owner_history_expected = (
+            attn_metadata is not None and envs.VLLM_USE_PCP_OWNER_HISTORY
+        )
         if attn_metadata is not None:
             pcp_peer_mla_kv_cache = getattr(self, "pcp_peer_kv_cache", None)
+            validate_owner_history_peer_cache_binding(
+                owner_history_expected=owner_history_expected,
+                peer_cache=pcp_peer_mla_kv_cache,
+            )
             if pcp_peer_mla_kv_cache is not None:
                 pcp_group = get_pcp_group()
                 pcp_rank = pcp_group.rank_in_group
                 pcp_size = pcp_group.world_size
-                owner_history_expected = envs.VLLM_USE_PCP_OWNER_HISTORY
-                if not owner_history_expected:
-                    raise RuntimeError(
-                        "Peer-mapped PCP caches require VLLM_USE_PCP_OWNER_HISTORY=1."
-                    )
                 if self.indexer is not None:
                     pcp_peer_indexer_k_cache = getattr(
                         self.indexer.k_cache, "pcp_peer_kv_cache", None
@@ -587,22 +599,24 @@ class DeepseekV32Attention(MLAAttention):
                     num_tokens=positions.shape[0],
                     device=positions.device,
                 )
-        # PCP validation rejects speculative decoding for this direct path.
+        # PCP validation rejects speculative decoding for owner history.
         # Retain a runtime guard so future MTP plumbing cannot silently consume
         # stale physical slots after logical top-k compaction.
         if owner_history_expected and self.skip_topk:
             raise RuntimeError(
-                "Owner-sharded direct history does not yet support MTP "
+                "Owner-sharded history does not yet support MTP "
                 "top-k reuse or compaction."
             )
 
         # Keep the specialized model implementation usable as the correctness
-        # baseline when direct peer caches are disabled. Its local inputs are
+        # baseline when owner history is disabled. Its local inputs are
         # PCP-partitioned, so fused local cache writes would otherwise use the
         # rank-0 slot row on every rank. Materialize the prepared BF16 values
         # instead and feed them through the ordinary collective update path.
-        use_pcp_collective_cache_update = (
-            attn_metadata is not None and self.use_pcp and pcp_peer_mla_kv_cache is None
+        use_pcp_collective_cache_update = _use_pcp_collective_cache_update(
+            attn_metadata=attn_metadata,
+            use_pcp=self.use_pcp,
+            peer_cache=pcp_peer_mla_kv_cache,
         )
 
         q_c = fused_norm_rope(
@@ -759,8 +773,7 @@ class DeepseekV32Attention(MLAAttention):
                     )
                 if self.owner_peer_slot_cache is None:
                     raise RuntimeError(
-                        "Owner-sharded direct history requires a shared peer-slot "
-                        "cache."
+                        "Owner-sharded history requires a shared peer-slot cache."
                     )
                 peer_block_stride = getattr(self, "pcp_peer_block_stride", None)
                 if not isinstance(peer_block_stride, int) or peer_block_stride <= 0:

@@ -29,45 +29,6 @@ def _make_owner_slot_manager(max_num_tokens: int = 8) -> PCPManager:
     )
 
 
-def test_owner_math_maps_pages_and_offsets() -> None:
-    block_size = 64
-    cp_size = 4
-    cp_interleave = 64
-    positions = torch.tensor(
-        [0, 63, 64, 127, 128, 191, 192, 255, 256, 319, 511],
-        dtype=torch.int64,
-    )
-    block_numbers = torch.tensor(
-        [5, 5, 5, 5, 5, 5, 5, 5, 7, 7, 7],
-        dtype=torch.int64,
-    )
-
-    block_offsets = positions % (block_size * cp_size)
-    owner_rank = block_offsets // cp_interleave % cp_size
-    rounds = block_offsets // (cp_interleave * cp_size)
-    local_offsets = rounds * cp_interleave + block_offsets % cp_interleave
-    owner_slots = torch.stack(
-        (owner_rank, block_numbers * block_size + local_offsets), dim=-1
-    )
-    expected = torch.tensor(
-        [
-            [0, 320],
-            [0, 383],
-            [1, 320],
-            [1, 383],
-            [2, 320],
-            [2, 383],
-            [3, 320],
-            [3, 383],
-            [0, 448],
-            [0, 511],
-            [3, 511],
-        ],
-        dtype=torch.int64,
-    )
-    torch.testing.assert_close(owner_slots, expected)
-
-
 def test_owner_slots_expand_to_pcp_rank_major_layout_and_pad(monkeypatch) -> None:
     manager = _make_owner_slot_manager()
 

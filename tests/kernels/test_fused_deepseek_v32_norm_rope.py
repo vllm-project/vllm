@@ -851,7 +851,7 @@ def _owner_history_64k_vmm_materialization_worker(
     world_size: int,
     port: int,
 ) -> None:
-    """Compose owner stores, publication, translation, and >64K gathers."""
+    """Compose owner stores, publication, translation, and >64K materialization."""
     os.environ.update(
         MASTER_ADDR="127.0.0.1",
         MASTER_PORT=str(port),
@@ -1431,7 +1431,9 @@ def test_owner_history_64k_vmm_store_publish_translate_and_materialize() -> None
         for source in range(world_size)
         for destination in range(world_size)
     ):
-        pytest.skip("owner-sharded 64K gather requires four peer-accessible CUDA GPUs")
+        pytest.skip(
+            "owner-sharded 64K materialization requires four peer-accessible CUDA GPUs"
+        )
     mp.spawn(
         _owner_history_64k_vmm_materialization_worker,
         args=(world_size, get_open_port()),

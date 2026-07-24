@@ -287,7 +287,7 @@ def _fused_norm_rope_kernel(
         tl.store(q_c_out_ptr + tok_idx * q_c_out_stride + q_block, q_c, mask=q_mask)
         return
 
-    # The direct/single-rank path skips all cache preparation for padding just
+    # The owner-sharded/single-rank path skips cache preparation for padding
     # as before.  The collective PCP fallback, however, must prepare every
     # local row first: replicated decode rows are deliberately PAD on nonzero
     # ranks, while their local Q/KV values are still needed by attention.
