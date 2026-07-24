@@ -3,7 +3,7 @@
 """Unit tests for NixlConnectorScheduler with HMA and Mamba N-1 prefill."""
 
 import gc
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -61,6 +61,37 @@ def test_sw_sizes(mock_platform, swa_enabled, expected_sw_sizes):
     assert scheduler.blocks_per_sw == expected_sw_sizes, (
         f"Expected sw_sizes={expected_sw_sizes}, got {scheduler.blocks_per_sw}"
     )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "use_mla,source_ranks,tp_ratio,expected",
+    [
+        pytest.param(True, (0,), -2, False, id="pure_mla_with_remote_dcp"),
+        pytest.param(True, (0, 1), -2, True, id="hybrid_mla_ssm"),
+        pytest.param(False, (0,), -2, True, id="full_attention"),
+        pytest.param(False, (0,), 2, False, id="local_tp_greater"),
+    ],
+)
+def test_needs_split_local_xfer_handles(
+    use_mla, source_ranks, tp_ratio, expected
+):
+    """Handle creation and selection must use the same TP-mapping predicate.
+
+    In pure MLA, DCP can target several physical remote workers even though
+    the TP mapping has one replicated attention source. Those workers own
+    disjoint blocks, so every read uses the whole local-region handle.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker.use_mla = use_mla
+    plan = MagicMock()
+    plan.all_source_ranks = source_ranks
+
+    assert worker._needs_split_local_xfer_handles(tp_ratio, plan) is expected
 
 
 @pytest.mark.cpu_test
