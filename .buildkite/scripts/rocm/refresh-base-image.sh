@@ -25,19 +25,52 @@ metadata_set() {
     fi
 }
 
+hash_content_file() {
+    local file="$1"
+
+    if [[ -L "${file}" ]]; then
+        printf 'symlink:%s\n' "${file}"
+        printf 'target:%s\n' "$(readlink "${file}")"
+        return 0
+    fi
+
+    printf 'file:%s\n' "${file}"
+    printf 'mode:%s\n' "$(stat -c '%a' "${file}")"
+    sha256sum "${file}"
+}
+
 compute_content_hash() {
     local path=""
     local file=""
 
     for path in "$@"; do
-        if [[ -d "${path}" ]]; then
+        if [[ -L "${path}" ]]; then
+            hash_content_file "${path}"
+        elif [[ -d "${path}" ]]; then
             while IFS= read -r -d '' file; do
-                printf 'file:%s\n' "${file}"
-                sha256sum "${file}"
-            done < <(find "${path}" -type f -print0 | sort -z)
+                hash_content_file "${file}"
+            done < <(
+                find "${path}" \
+                    -type d \( \
+                        -name __pycache__ -o -name .mypy_cache -o \
+                        -name .venv -o -name build -o -name dist -o \
+                        -name 'cmake-build-*' -o -name develop-eggs -o \
+                        -name downloads -o -name eggs -o -name .eggs -o \
+                        -name lib -o -name lib64 -o -name parts -o \
+                        -name sdist -o -name var -o -name wheels -o \
+                        -name python-wheels -o -name '*.egg-info' \
+                        -o -path '*/rust/target' \
+                    \) -prune -o \
+                    \( -type f -o -type l \) \
+                    ! -name '*.py[cod]' ! -name '*$py.class' \
+                    ! -name .Python ! -name .installed.cfg \
+                    ! -name '*.egg' ! -name MANIFEST \
+                    ! -name CMakeUserPresets.json \
+                    ! -path '*/vllm/*.so' ! -path '*/vllm/vllm-rs' -print0 \
+                    | LC_ALL=C sort -z
+            )
         elif [[ -f "${path}" ]]; then
-            printf 'file:%s\n' "${path}"
-            sha256sum "${path}"
+            hash_content_file "${path}"
         else
             printf 'missing:%s\n' "${path}"
         fi
@@ -338,6 +371,7 @@ build_base_image() {
     local build_suffix=""
     local base_image_arg=""
     local base_image_digest=""
+    local base_image_pinned=""
     local rocm_version=""
     local triton_arg=""
     local pytorch_arg=""
@@ -376,6 +410,12 @@ build_base_image() {
     fi
     base_image_arg="$(extract_arg_default BASE_IMAGE)"
     base_image_digest="$(resolve_image_digest "${base_image_arg}")"
+    if [[ -z "${base_image_digest}" ]]; then
+        echo "Error: could not resolve base image digest for ${base_image_arg}" >&2
+        echo "Refusing to publish cache metadata for a mutable base tag." >&2
+        return 1
+    fi
+    base_image_pinned="${base_image_arg%@*}@${base_image_digest}"
     read -r -a content_paths <<< "${content_files}"
     content_files_hash="$(compute_content_hash "${content_paths[@]}")"
     base_hash=$(compute_base_content_hash "${use_sccache}" "${base_image_digest}")
@@ -426,6 +466,7 @@ build_base_image() {
     echo "Descriptive tag: ${descriptive_tag}"
     echo "Stable tag: ${stable_tag} ($(should_push_stable_tag && echo enabled || echo disabled))"
     echo "Content hash: ${base_hash}"
+    echo "Pinned upstream base image: ${base_image_pinned}"
     echo "Dependency summary: ${dependency_summary}"
     echo "USE_SCCACHE: ${use_sccache}"
 
@@ -434,6 +475,7 @@ build_base_image() {
         --pull \
         --progress "${BUILDKIT_PROGRESS:-plain}" \
         --file "${DOCKERFILE}" \
+        --build-arg "BASE_IMAGE=${base_image_pinned}" \
         --build-arg "USE_SCCACHE=${use_sccache}" \
         "${sccache_args[@]}" \
         --label "org.opencontainers.image.source=https://github.com/vllm-project/vllm" \

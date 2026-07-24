@@ -15,14 +15,17 @@ set -euo pipefail
 
 DEFAULT_REPO_SLUG="vllm-project/vllm"
 DEFAULT_CI_HCL_SOURCE="docker/ci-rocm.hcl"
-DEFAULT_CI_BASE_CONTENT_FILES="requirements/common.txt requirements/rocm.txt requirements/test/rocm.txt docker/Dockerfile.rocm_base docker/ci-rocm.hcl docker/docker-bake-rocm.hcl tools/install_torchcodec_rocm.sh tools/install_protoc.sh rust-toolchain.toml tests/vllm_test_utils .buildkite/scripts/ci-bake-rocm.sh .buildkite/scripts/rocm/build-ci-base.sh"
+DEFAULT_CI_BASE_CONTENT_FILES="requirements/common.txt requirements/rocm.txt requirements/test/rocm.txt docker/ci-rocm.hcl docker/docker-bake-rocm.hcl tools/install_torchcodec_rocm.sh tools/install_protoc.sh rust-toolchain.toml tests/vllm_test_utils .buildkite/scripts/ci-bake-rocm.sh .buildkite/scripts/rocm/build-ci-base.sh"
+# Local builds hash these inputs directly instead of their checkout coordinates.
+DEFAULT_CI_BASE_CONTENT_ARG_EXCLUDES="REMOTE_VLLM VLLM_REPO VLLM_BRANCH"
 DEFAULT_CI_BASE_DOCKERFILE="docker/Dockerfile.rocm"
-DEFAULT_CI_BASE_DOCKERFILE_STAGES="base rust_toolchain_input_0 rust_toolchain_input_1 rust-toolchain-input rust-toolchain build_nixl build_rocshmem build_deepep mori_base ci_nixl_wheel_manifest ci_comm_runtime ci_base"
+DEFAULT_CI_BASE_DOCKERFILE_STAGES="base rust_toolchain_input_0 rust_toolchain_input_1 rust-toolchain-input rust-toolchain build_nixl build_rocshmem build_deepep mori_base ci_comm_runtime ci_base"
 DEFAULT_CI_BASE_METADATA_VERSION="2"
 IMAGE_EXISTED_BEFORE_BUILD=0
 BASE_IMAGE_DIGEST_CACHE_REF=""
 BASE_IMAGE_DIGEST_CACHE_VALUE=""
 BASE_IMAGE_DIGEST_CACHE_READY=0
+BASE_IMAGE_PINNED_REF=""
 
 TARGET=""
 CI_HCL_SOURCE="${CI_HCL_SOURCE:-}"
@@ -148,19 +151,52 @@ hash_string_short() {
     printf '%s' "$1" | sha256sum | cut -c1-16
 }
 
+hash_content_file() {
+    local file="$1"
+
+    if [[ -L "${file}" ]]; then
+        printf 'symlink:%s\n' "${file}"
+        printf 'target:%s\n' "$(readlink "${file}")"
+        return 0
+    fi
+
+    printf 'file:%s\n' "${file}"
+    printf 'mode:%s\n' "$(stat -c '%a' "${file}")"
+    sha256sum "${file}"
+}
+
 compute_content_hash() {
     local path
     local file
 
     for path in "$@"; do
-        if [[ -d "${path}" ]]; then
+        if [[ -L "${path}" ]]; then
+            hash_content_file "${path}"
+        elif [[ -d "${path}" ]]; then
             while IFS= read -r -d '' file; do
-                printf 'file:%s\n' "${file}"
-                sha256sum "${file}"
-            done < <(find "${path}" -type f -print0 | sort -z)
+                hash_content_file "${file}"
+            done < <(
+                find "${path}" \
+                    -type d \( \
+                        -name __pycache__ -o -name .mypy_cache -o \
+                        -name .venv -o -name build -o -name dist -o \
+                        -name 'cmake-build-*' -o -name develop-eggs -o \
+                        -name downloads -o -name eggs -o -name .eggs -o \
+                        -name lib -o -name lib64 -o -name parts -o \
+                        -name sdist -o -name var -o -name wheels -o \
+                        -name python-wheels -o -name '*.egg-info' \
+                        -o -path '*/rust/target' \
+                    \) -prune -o \
+                    \( -type f -o -type l \) \
+                    ! -name '*.py[cod]' ! -name '*$py.class' \
+                    ! -name .Python ! -name .installed.cfg \
+                    ! -name '*.egg' ! -name MANIFEST \
+                    ! -name CMakeUserPresets.json \
+                    ! -path '*/vllm/*.so' ! -path '*/vllm/vllm-rs' -print0 \
+                    | LC_ALL=C sort -z
+            )
         elif [[ -f "${path}" ]]; then
-            printf 'file:%s\n' "${path}"
-            sha256sum "${path}"
+            hash_content_file "${path}"
         else
             printf 'missing:%s\n' "${path}"
         fi
@@ -292,11 +328,25 @@ get_content_arg_names() {
     fi | awk 'NF && !seen[$0]++'
 }
 
-filter_content_hash_arg_names() {
-    # These select where remote inputs are fetched from. The hashes already
-    # include the exact checked-out file contents, so including a commit/ref or
-    # repository URL would defeat cross-commit reuse for identical inputs.
-    awk '$0 != "VLLM_BRANCH" && $0 != "VLLM_REPO"'
+get_ci_base_content_arg_names() {
+    local excludes=""
+
+    if [[ -v CI_BASE_CONTENT_ARG_EXCLUDES ]]; then
+        excludes="${CI_BASE_CONTENT_ARG_EXCLUDES}"
+    elif [[ "${REMOTE_VLLM:-0}" == "0" ]]; then
+        excludes="${DEFAULT_CI_BASE_CONTENT_ARG_EXCLUDES}"
+    fi
+
+    get_content_arg_names "$@" \
+        | awk -v excludes="${excludes}" '
+            BEGIN {
+                count = split(excludes, names, /[[:space:]]+/)
+                for (idx = 1; idx <= count; idx++) {
+                    excluded[names[idx]] = 1
+                }
+            }
+            NF && !excluded[$0]
+        '
 }
 
 compute_ci_base_content_hash_once() {
@@ -307,8 +357,8 @@ compute_ci_base_content_hash_once() {
 
     read -r -a content_paths <<< "${CI_BASE_CONTENT_FILES}"
     mapfile -t content_args < <(
-        get_content_arg_names "${dockerfile}" "${stages}" "${CI_BASE_CONTENT_ARGS:-}" \
-            | filter_content_hash_arg_names
+        get_ci_base_content_arg_names \
+            "${dockerfile}" "${stages}" "${CI_BASE_CONTENT_ARGS:-}"
     )
 
     {
@@ -331,7 +381,7 @@ compute_ci_base_content_hash_once() {
 }
 
 compute_ci_base_content_hash() {
-    local attempts="${CI_BASE_HASH_ATTEMPTS:-3}"
+    local attempts="${CI_BASE_HASH_ATTEMPTS:-1}"
     local delay_secs="${CI_BASE_HASH_RETRY_DELAY:-5}"
     local attempt=0
     local hash=""
@@ -466,7 +516,9 @@ prime_base_image_digest_cache() {
         return 1
     fi
     BASE_IMAGE_DIGEST_CACHE_READY=1
+    BASE_IMAGE_PINNED_REF="${base_image%@*}@${BASE_IMAGE_DIGEST_CACHE_VALUE}"
     echo "Resolved base image digest once for cache metadata: ${BASE_IMAGE_DIGEST_CACHE_VALUE}"
+    echo "Pinned base image for this build: ${BASE_IMAGE_PINNED_REF}"
 }
 
 is_ci_base_target() {
@@ -770,12 +822,17 @@ compute_ci_base_hash_if_needed() {
         return 0
     fi
 
+    prime_base_image_digest_cache
     CI_BASE_CONTENT_HASH=$(compute_ci_base_content_hash)
     export CI_BASE_CONTENT_HASH
     echo "ci_base content hash: ${CI_BASE_CONTENT_HASH:0:16}..."
 }
 
 should_push_stable_ci_base_tag() {
+    if [[ "${BUILDKITE_PULL_REQUEST:-false}" != "false" ]]; then
+        return 1
+    fi
+
     if [[ "${CI_BASE_PUSH_STABLE_TAG:-}" == "1" ]]; then
         return 0
     fi
@@ -799,7 +856,14 @@ configure_ci_base_image_refs() {
     local commit_tag=""
     local primary_tag=""
 
+    CI_BASE_STABLE_CACHE_REF="${CI_BASE_STABLE_CACHE_REF:-${stable_tag}}"
+    export CI_BASE_STABLE_CACHE_REF
+
     if [[ -z "${CI_BASE_CONTENT_HASH:-}" ]]; then
+        if is_ci_base_target; then
+            echo "Error: ci_base builds require a content hash" >&2
+            return 1
+        fi
         CI_BASE_IMAGE="${CI_BASE_IMAGE:-${stable_tag}}"
         export CI_BASE_IMAGE
         return 0
@@ -854,6 +918,7 @@ configure_ci_base_image_refs() {
             fi
         fi
         echo "ci_base content image tag: ${content_tag}"
+        echo "ci_base stable cache source: ${CI_BASE_STABLE_CACHE_REF}"
         if [[ -n "${CI_BASE_IMAGE_TAG_STABLE}" ]]; then
             echo "ci_base stable alias will also be pushed: ${CI_BASE_IMAGE_TAG_STABLE}"
         else
@@ -876,7 +941,7 @@ configure_ci_base_image_refs() {
     fi
 }
 
-ci_base_candidate_refs() {
+ci_base_output_refs() {
     printf '%s\n' \
         "${IMAGE_TAG:-}" \
         "${CI_BASE_IMAGE_TAG:-}" \
@@ -884,6 +949,13 @@ ci_base_candidate_refs() {
         "${CI_BASE_IMAGE_TAG_CONTENT_EXTRA:-}" \
         "${CI_BASE_IMAGE_TAG_STABLE:-}" \
         | awk 'NF && !seen[$0]++'
+}
+
+ci_base_candidate_refs() {
+    {
+        ci_base_output_refs
+        printf '%s\n' "${CI_BASE_STABLE_CACHE_REF:-}"
+    } | awk 'NF && !seen[$0]++'
 }
 
 find_matching_ci_base_ref() {
@@ -922,13 +994,28 @@ refresh_ci_base_tags_from_ref() {
         fi
         echo "Updating ci_base tag ${tag} -> ${source_ref}"
         docker buildx imagetools create -t "${tag}" "${source_ref}"
-    done < <(ci_base_candidate_refs)
+    done < <(ci_base_output_refs)
+}
+
+maybe_reuse_matching_ci_base_ref() {
+    local matching_ref=""
+
+    matching_ref=$(find_matching_ci_base_ref || true)
+    [[ -n "${matching_ref}" ]] || return 1
+
+    echo "Found existing ci_base image with matching content hash: ${matching_ref}"
+    if ! refresh_ci_base_tags_from_ref "${matching_ref}"; then
+        echo "ci_base tag refresh failed; rebuilding to push expected tags"
+        return 1
+    fi
+    echo "Content hashes match -- ci_base is current"
+    echo "Skipping build"
+    exit 0
 }
 
 maybe_skip_existing_image() {
     local remote_hash=""
     local remote_revision=""
-    local matching_ref=""
 
     if [[ -z "${IMAGE_TAG:-}" ]]; then
         return 0
@@ -944,17 +1031,7 @@ maybe_skip_existing_image() {
 
     if ! remote_image_exists "${IMAGE_TAG}"; then
         if is_ci_base_target && [[ -n "${CI_BASE_CONTENT_HASH:-}" ]]; then
-            matching_ref=$(find_matching_ci_base_ref || true)
-            if [[ -n "${matching_ref}" ]]; then
-                echo "Found existing ci_base image with matching content hash: ${matching_ref}"
-                if ! refresh_ci_base_tags_from_ref "${matching_ref}"; then
-                    echo "ci_base tag refresh failed; rebuilding to push expected tags"
-                    return 0
-                fi
-                echo "Content hashes match -- ci_base is current"
-                echo "Skipping build"
-                exit 0
-            fi
+            maybe_reuse_matching_ci_base_ref || true
         fi
         echo "Image not found, proceeding with build"
         return 0
@@ -974,6 +1051,9 @@ maybe_skip_existing_image() {
             echo "Remote ci_base content hash: ${remote_hash:0:16}..."
             if [[ "${remote_hash}" == "${CI_BASE_CONTENT_HASH}" ]]; then
                 if ! remote_ci_base_metadata_is_current "${IMAGE_TAG}"; then
+                    if maybe_reuse_matching_ci_base_ref; then
+                        return 0
+                    fi
                     echo "Content hashes match but ci_base metadata is stale; rebuilding to refresh metadata"
                     return 0
                 fi
@@ -987,10 +1067,12 @@ maybe_skip_existing_image() {
             fi
 
             echo "Content hashes differ -- ci_base is stale, rebuilding"
+            maybe_reuse_matching_ci_base_ref || true
             return 0
         fi
 
         echo "Remote ci_base has no content-hash label; rebuilding to add one"
+        maybe_reuse_matching_ci_base_ref || true
         return 0
     fi
 
@@ -1082,6 +1164,8 @@ prepare_git_cache_metadata() {
     local cache_base_branch="${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-main}"
     local target_repo_slug=""
     local target_repo_url=""
+    local origin_repo_url=""
+    local origin_repo_slug=""
     local merge_base_ref=""
     local local_base_ref=""
 
@@ -1144,9 +1228,19 @@ prepare_git_cache_metadata() {
 
     if [[ -z "${VLLM_MERGE_BASE_COMMIT:-}" ]]; then
         target_repo_url=$(get_buildkite_target_repo_url)
+        target_repo_slug=$(get_buildkite_target_repo_slug)
         merge_base_ref="refs/remotes/vllm-cache-upstream/${cache_base_branch}"
         local_base_ref="refs/remotes/origin/${cache_base_branch}"
-        VLLM_MERGE_BASE_COMMIT=$(git merge-base HEAD "${local_base_ref}" 2>/dev/null || echo "")
+        origin_repo_url=$(git remote get-url origin 2>/dev/null || true)
+        if [[ -n "${origin_repo_url}" ]]; then
+            origin_repo_slug=$(parse_repo_slug "${origin_repo_url}")
+        fi
+        if [[ -n "${origin_repo_slug}" && "${origin_repo_slug}" == "${target_repo_slug}" ]]; then
+            VLLM_MERGE_BASE_COMMIT=$(git merge-base HEAD "${local_base_ref}" 2>/dev/null || echo "")
+        else
+            VLLM_MERGE_BASE_COMMIT=""
+            echo "Skipping local ${local_base_ref}: origin does not match ${target_repo_slug}"
+        fi
         if [[ -n "${VLLM_MERGE_BASE_COMMIT}" ]]; then
             echo "Using local ${local_base_ref} for cache merge base"
         else
@@ -1186,8 +1280,8 @@ ci_base_metadata_pairs() {
         content_files_hash=$(compute_content_hash "${content_paths[@]}")
     fi
     mapfile -t content_args < <(
-        get_content_arg_names "${dockerfile}" "${stages}" "${CI_BASE_CONTENT_ARGS:-}" \
-            | filter_content_hash_arg_names
+        get_ci_base_content_arg_names \
+            "${dockerfile}" "${stages}" "${CI_BASE_CONTENT_ARGS:-}"
     )
 
     base_image=$(resolve_dockerfile_arg_value "${dockerfile}" "BASE_IMAGE")
@@ -1413,8 +1507,10 @@ compute_rocm_rust_content_hash() {
     bake_dir=$(dirname "${VLLM_BAKE_FILE}")
     dockerfile_rocm="${bake_dir}/Dockerfile.rocm"
     mapfile -t content_args < <(
-        get_content_arg_names "${dockerfile_rocm}" "base rust_toolchain_input_0 rust_toolchain_input_1 rust-toolchain-input rust_input_0 rust_input_1 rust-input rust-toolchain rust-build" "${ROCM_RUST_CONTENT_ARGS:-}" \
-            | filter_content_hash_arg_names
+        get_ci_base_content_arg_names \
+            "${dockerfile_rocm}" \
+            "base rust_toolchain_input_0 rust_toolchain_input_1 rust-toolchain-input rust_input_0 rust_input_1 rust-input rust-toolchain rust-build" \
+            "${ROCM_RUST_CONTENT_ARGS:-}"
     )
 
     {
@@ -1514,6 +1610,9 @@ EOF
         for arg_name in "${arg_names[@]}"; do
             [[ -n "${arg_name}" ]] || continue
             arg_value=$(resolve_dockerfile_arg_value "${dockerfile_rocm}" "${arg_name}")
+            if [[ "${arg_name}" == "BASE_IMAGE" && -n "${BASE_IMAGE_PINNED_REF}" ]]; then
+                arg_value="${BASE_IMAGE_PINNED_REF}"
+            fi
             [[ -n "${arg_value}" ]] || continue
             printf '    %s = "%s"\n' "${arg_name}" "$(hcl_escape_string "${arg_value}")"
         done
@@ -2216,7 +2315,6 @@ main() {
     validate_inputs
     load_ci_hcl
     init_bake_files
-    prime_base_image_digest_cache
     compute_ci_base_hash_if_needed
     configure_ci_base_image_refs
     maybe_skip_existing_image

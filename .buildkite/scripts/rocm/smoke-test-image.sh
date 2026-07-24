@@ -14,6 +14,9 @@ docker run --rm --network=none --entrypoint /bin/bash "${image_ref}" -ec '
   command -v python3
   command -v uv
   command -v pytest
+  cargo --version
+  rustup --version
+  protoc --version
 
   if ! command -v amd-smi >/dev/null 2>&1 && ! command -v rocminfo >/dev/null 2>&1; then
     echo No ROCm CLI found in image >&2

@@ -44,8 +44,7 @@ steps:
       TERM: "xterm-256color"
       VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
       PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
-      REMOTE_VLLM: "1"
-      VLLM_BRANCH: "$BUILDKITE_COMMIT"
+      REMOTE_VLLM: "0"
     retry:
       automatic:
         - exit_status: 1  # Transient Docker/BuildKit failure
