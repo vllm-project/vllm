@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import multiprocessing
+import os
 import random
 
 import pytest
@@ -266,8 +267,17 @@ def graph_quickreduce(
             for dtype in [torch.float16, torch.bfloat16]:
                 with graph_capture(device=device) as graph_capture_context:
                     device_idx = torch.accelerator.current_device_index()
-                    inp1 = torch.randint(1, 23, (sz,), dtype=dtype, device=device_idx)
-                    inp2 = torch.randint(-23, 1, (sz,), dtype=dtype, device=device_idx)
+                    int_range = (
+                        23
+                        if os.getenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION") != "INT3"
+                        else 11
+                    )
+                    inp1 = torch.randint(
+                        1, int_range, (sz,), dtype=dtype, device=device_idx
+                    )
+                    inp2 = torch.randint(
+                        -int_range, 1, (sz,), dtype=dtype, device=device_idx
+                    )
                     _assert_quickreduce(fa, inp1)
                     _assert_quickreduce(fa, inp2)
 
@@ -304,15 +314,25 @@ def eager_quickreduce(
         # Size over 8MB is sufficient for custom quick allreduce.
         sz = 16 * 1024 * 1024
         fa = get_tp_group().device_communicator.qr_comm
+
+        # The 23 interval for INT3 quantization is too large for the test to pass.
+        # Reduce the interval to 11 for INT3 quantization.
+        int_range = (
+            23 if os.getenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION") != "INT3" else 11
+        )
         inp = torch.tensor(
-            [1.0 * ((i) % 23) for i in range(sz)], dtype=torch.float16, device=device
+            [1.0 * ((i) % int_range) for i in range(sz)],
+            dtype=torch.float16,
+            device=device,
         )
         _assert_quickreduce(fa, inp)
         out = fa.quick_all_reduce(inp)
         torch.testing.assert_close(out, inp * tp_size, atol=2.5, rtol=0.1)
 
         inp = torch.tensor(
-            [1.0 * ((i) % 23) for i in range(sz)], dtype=torch.bfloat16, device=device
+            [1.0 * ((i) % int_range) for i in range(sz)],
+            dtype=torch.bfloat16,
+            device=device,
         )
         _assert_quickreduce(fa, inp)
         out = fa.quick_all_reduce(inp)

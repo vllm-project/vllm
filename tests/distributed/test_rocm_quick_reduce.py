@@ -30,7 +30,7 @@ pytestmark = pytest.mark.skipif(
 
 MB = 1024 * 1024
 WORLD_SIZE = 2
-QUANT_LEVELS = ["FP", "INT8", "INT6", "INT4"]
+QUANT_LEVELS = ["FP", "INT8", "INT6", "INT4", "INT3"]
 
 
 def _log(message: str) -> None:
