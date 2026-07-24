@@ -74,6 +74,9 @@ pub struct LoadModelBackendsOptions {
     /// Optional server-default keyword arguments merged into every
     /// chat-template render before request-level `chat_template_kwargs`.
     pub default_chat_template_kwargs: HashMap<String, Value>,
+    /// Maximum number of input items allowed per prompt for each modality.
+    /// Unspecified modalities fall back to the engine's default of 999.
+    pub limit_mm_per_prompt: HashMap<String, usize>,
 }
 
 /// Shared backends loaded from a model id.

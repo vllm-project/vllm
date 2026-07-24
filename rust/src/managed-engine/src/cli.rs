@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 
 use clap::error::ErrorKind;
@@ -86,6 +86,7 @@ impl ManagedEngineArgs {
         disable_log_stats: bool,
         shutdown_timeout: u64,
         handshake_port: u16,
+        limit_mm_per_prompt: HashMap<String, usize>,
     ) -> ManagedEngineConfig {
         let mut python_args = self.python_args;
         // Manually forward some args to the Python engine.
@@ -120,6 +121,13 @@ impl ManagedEngineArgs {
         if let Some(data_parallel_size_local) = self.data_parallel_size_local {
             python_args.push("--data-parallel-size-local".to_string());
             python_args.push(data_parallel_size_local.to_string());
+        }
+        if !limit_mm_per_prompt.is_empty() {
+            python_args.push("--limit-mm-per-prompt".to_string());
+            python_args.push(
+                serde_json::to_string(&limit_mm_per_prompt)
+                    .expect("HashMap<String, usize> always serializes"),
+            );
         }
 
         ManagedEngineConfig {

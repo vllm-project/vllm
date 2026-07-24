@@ -191,6 +191,13 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub default_chat_template_kwargs: Option<HashMap<String, Value>>,
 
+    /// The maximum number of input items allowed per prompt for each
+    /// modality, as a JSON object (e.g. `{"image": 16, "video": 2}`).
+    /// Unspecified modalities default to 999.
+    #[arg(long, value_parser = parse_json::<HashMap<String, usize>>, value_name = "JSON", default_value = "{}")]
+    #[serde(default)]
+    pub limit_mm_per_prompt: HashMap<String, usize>,
+
     /// The format to render message content within a chat template.
     ///
     /// * "auto" detects the format from the template
@@ -404,6 +411,7 @@ impl SharedRuntimeArgs {
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
+            limit_mm_per_prompt: self.limit_mm_per_prompt,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             api_server_options,
@@ -456,6 +464,7 @@ impl SharedRuntimeArgs {
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
+            limit_mm_per_prompt: self.limit_mm_per_prompt,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             api_server_options,
@@ -672,6 +681,7 @@ impl ServeArgs {
             self.runtime.disable_log_stats,
             self.runtime.shutdown_timeout,
             handshake_port,
+            self.runtime.limit_mm_per_prompt.clone(),
         )
     }
 }

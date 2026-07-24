@@ -184,6 +184,9 @@ pub struct Config {
     pub chat_template: Option<String>,
     /// Server-default keyword arguments merged into every chat-template render.
     pub default_chat_template_kwargs: Option<HashMap<String, Value>>,
+    /// Maximum number of input items allowed per prompt for each modality.
+    /// Unspecified modalities fall back to the engine's default of 999.
+    pub limit_mm_per_prompt: HashMap<String, usize>,
     /// How to serialize `message.content` for chat-template rendering.
     pub chat_template_content_format: ChatTemplateContentFormatOption,
     /// Optional maximum number of top log probabilities accepted by the

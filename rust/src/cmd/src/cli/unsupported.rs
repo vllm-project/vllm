@@ -299,11 +299,6 @@ pub struct EngineUnsupportedArgs {
     )]
     pub kv_sharing_fast_prefill: Option<Unsupported>,
 
-    /// The maximum number of input items and options allowed per
-    /// prompt for each modality.
-    #[arg(long)]
-    pub limit_mm_per_prompt: Option<Unsupported>,
-
     /// Additional args passed to process media inputs, keyed by modalities.
     #[arg(long)]
     pub media_io_kwargs: Option<Unsupported>,

@@ -57,6 +57,7 @@ impl HfChatBackend {
                     processor_config: files.processor_config_path.as_deref(),
                 },
                 tokenizer.clone(),
+                options.limit_mm_per_prompt.clone(),
             )?
         };
         let multimodal_render_info = resolve_multimodal_render_info(multimodal_model_info.as_ref());
@@ -230,6 +231,7 @@ mod tests {
                 chat_template_content_format: Default::default(),
                 chat_template: None,
                 default_chat_template_kwargs: HashMap::new(),
+                limit_mm_per_prompt: HashMap::new(),
             },
             test_tokenizer(),
         )
