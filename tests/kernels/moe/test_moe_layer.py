@@ -1271,7 +1271,7 @@ def _test_body_eplb(
     ):
         output_before = sp_wrapper(moe_layer)(hidden_states, router_logits)
 
-    # Create a fresh FusedMoEFactory layer with enable_eplb=True
+    # Create a fresh MoERunner layer with enable_eplb=True
     # Delete the original layer's registration so the constructor can
     # re-use the same "from_forward_context" prefix
     cc = vllm_config.compilation_config
