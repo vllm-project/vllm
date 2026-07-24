@@ -45,14 +45,30 @@ class AsyncOutput(AsyncModelRunnerOutput):
             if sampler_output.num_nans is not None:
                 self.num_nans = async_copy_to_np(sampler_output.num_nans)
             self.num_sampled_tokens_np = async_copy_to_np(num_sampled_tokens)
-            self.sampling_mask_token_ids: np.ndarray | None = None
+            self.sampling_mask_sparse_token_ids: np.ndarray | None = None
+            self.sampling_mask_sparse_row_indices: list[int] | None = None
+            self.sampling_mask_packed: np.ndarray | None = None
+            self.sampling_mask_packed_row_indices: list[int] | None = None
             self.sampling_mask_counts: np.ndarray | None = None
+            self.sampling_mask_vocab_size: int | None = None
             if sampler_output.sampling_mask_tensors is not None:
-                self.sampling_mask_token_ids = async_copy_to_np(
-                    sampler_output.sampling_mask_tensors.token_ids
+                self.sampling_mask_sparse_token_ids = async_copy_to_np(
+                    sampler_output.sampling_mask_tensors.sparse_token_ids
+                )
+                self.sampling_mask_sparse_row_indices = (
+                    sampler_output.sampling_mask_tensors.sparse_row_indices
+                )
+                self.sampling_mask_packed = async_copy_to_np(
+                    sampler_output.sampling_mask_tensors.packed_mask
+                )
+                self.sampling_mask_packed_row_indices = (
+                    sampler_output.sampling_mask_tensors.packed_row_indices
                 )
                 self.sampling_mask_counts = async_copy_to_np(
                     sampler_output.sampling_mask_tensors.counts
+                )
+                self.sampling_mask_vocab_size = (
+                    sampler_output.sampling_mask_tensors.vocab_size
                 )
             self.prompt_logprobs_dict = {
                 k: v.to_cpu_nonblocking() if v is not None else None
@@ -73,14 +89,22 @@ class AsyncOutput(AsyncModelRunnerOutput):
             del token_ids[num_tokens:]
         self.model_runner_output.sampled_token_ids = sampled_token_ids
 
-        if self.sampling_mask_token_ids is not None:
+        if self.sampling_mask_packed is not None:
+            assert self.sampling_mask_sparse_token_ids is not None
+            assert self.sampling_mask_sparse_row_indices is not None
+            assert self.sampling_mask_packed_row_indices is not None
             assert self.sampling_mask_counts is not None
+            assert self.sampling_mask_vocab_size is not None
             self.model_runner_output.sampling_masks = _build_sampling_mask_lists(
-                self.sampling_mask_token_ids,
-                self.sampling_mask_counts,
-                num_sampled_tokens,
-                sampled_token_ids,
-                self.model_runner_output.req_ids,
+                sparse_token_ids=self.sampling_mask_sparse_token_ids,
+                sparse_row_indices=self.sampling_mask_sparse_row_indices,
+                packed_mask=self.sampling_mask_packed,
+                packed_row_indices=self.sampling_mask_packed_row_indices,
+                counts=self.sampling_mask_counts,
+                vocab_size=self.sampling_mask_vocab_size,
+                num_sampled_tokens=num_sampled_tokens,
+                sampled_token_ids=sampled_token_ids,
+                req_ids=self.model_runner_output.req_ids,
             )
 
         if self.num_nans is not None:
@@ -135,25 +159,46 @@ def async_copy_to_np(x: torch.Tensor) -> np.ndarray:
 
 
 def _build_sampling_mask_lists(
-    token_ids: np.ndarray,
+    sparse_token_ids: np.ndarray,
+    sparse_row_indices: list[int],
+    packed_mask: np.ndarray,
+    packed_row_indices: list[int],
     counts: np.ndarray,
+    vocab_size: int,
     num_sampled_tokens: list[int],
     sampled_token_ids: list[list[int]],
     req_ids: list[str],
 ) -> SamplingMaskLists:
     num_reqs = len(req_ids)
+    packed_width = (vocab_size + 7) // 8
     if (
-        token_ids.ndim != 2
+        sparse_token_ids.ndim != 2
+        or sparse_token_ids.shape[0] != len(sparse_row_indices)
+        or sparse_token_ids.dtype != np.int32
+        or packed_mask.shape != (len(packed_row_indices), packed_width)
+        or packed_mask.dtype != np.uint8
         or counts.shape != (num_reqs,)
-        or token_ids.shape[0] != num_reqs
+        or counts.dtype != np.int32
         or len(num_sampled_tokens) != num_reqs
         or len(sampled_token_ids) != num_reqs
     ):
         raise RuntimeError("sampling mask tensors are not aligned with requests")
 
+    row_sources: list[tuple[bool, int] | None] = [None] * num_reqs
+    for is_sparse, row_indices in (
+        (True, sparse_row_indices),
+        (False, packed_row_indices),
+    ):
+        for source_idx, req_idx in enumerate(row_indices):
+            if req_idx < 0 or req_idx >= num_reqs or row_sources[req_idx] is not None:
+                raise RuntimeError("sampling mask row indices are invalid")
+            row_sources[req_idx] = (is_sparse, source_idx)
+    if any(source is None for source in row_sources):
+        raise RuntimeError("sampling mask row indices do not cover every request")
+
     generated_indices: list[int] = []
+    generated_rows: list[np.ndarray] = []
     cu_num_generated_tokens = [0]
-    row_width = token_ids.shape[1]
     for req_idx, (req_id, num_tokens, sampled_ids) in enumerate(
         zip(req_ids, num_sampled_tokens, sampled_token_ids)
     ):
@@ -169,30 +214,58 @@ def _build_sampling_mask_lists(
             )
         if num_tokens:
             count = int(counts[req_idx])
-            if count > row_width:
+            if count > vocab_size:
                 raise RuntimeError(
                     f"sampling mask for request {req_id} has invalid count "
-                    f"{count} for row width {row_width}"
+                    f"{count} for vocab size {vocab_size}"
                 )
             if count <= 0:
                 raise RuntimeError(
                     f"sampling mask for request {req_id} has an empty kept set"
                 )
-            kept_ids = token_ids[req_idx, :count]
-            if np.any(kept_ids < 0):
-                raise RuntimeError(
-                    f"sampling mask for request {req_id} contains invalid padding"
+
+            source = row_sources[req_idx]
+            assert source is not None
+            is_sparse, source_idx = source
+            if is_sparse:
+                if count > sparse_token_ids.shape[1]:
+                    raise RuntimeError(
+                        f"sampling mask for request {req_id} has count {count}, "
+                        f"but the sparse row width is {sparse_token_ids.shape[1]}"
+                    )
+                kept_ids = sparse_token_ids[source_idx, :count]
+                if np.any((kept_ids < 0) | (kept_ids >= vocab_size)):
+                    raise RuntimeError(
+                        f"sampling mask for request {req_id} contains an invalid "
+                        "token ID"
+                    )
+            else:
+                unpacked = np.unpackbits(
+                    packed_mask[source_idx], count=vocab_size, bitorder="little"
                 )
-            if sampled_ids[0] not in kept_ids:
+                kept_ids = np.flatnonzero(unpacked).astype(np.int32, copy=False)
+                if len(kept_ids) != count:
+                    raise RuntimeError(
+                        f"sampling mask for request {req_id} has count {count}, "
+                        f"but the packed mask contains {len(kept_ids)} token IDs"
+                    )
+
+            if not np.any(kept_ids == sampled_ids[0]):
                 raise RuntimeError(
                     f"sampled token {sampled_ids[0]} is absent from the sampling "
                     f"mask for request {req_id}"
                 )
             generated_indices.append(req_idx)
+            generated_rows.append(kept_ids)
         cu_num_generated_tokens.append(len(generated_indices))
 
+    row_width = max((len(row) for row in generated_rows), default=0)
+    token_ids = np.full((len(generated_rows), row_width), -1, dtype=np.int32)
+    for row_idx, kept_ids in enumerate(generated_rows):
+        token_ids[row_idx, : len(kept_ids)] = kept_ids
+
     return SamplingMaskLists(
-        token_ids[generated_indices],
+        token_ids,
         counts[generated_indices],
         cu_num_generated_tokens,
     )

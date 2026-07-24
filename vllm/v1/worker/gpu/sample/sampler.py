@@ -21,30 +21,11 @@ from vllm.v1.worker.gpu.sample.logprob import (
     LogprobTokenIdsState,
     compute_topk_scores,
 )
-from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
+from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
+from vllm.v1.worker.gpu.sample.sampling_mask import compact_sampling_mask
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
 from vllm.v1.worker.gpu.states import RequestState
-
-
-def compact_sampling_mask(processed_logits: torch.Tensor) -> SamplingMaskTensors:
-    kept_mask = torch.isfinite(processed_logits)
-    counts = kept_mask.sum(dim=-1, dtype=torch.int32)
-    vocab_size = processed_logits.shape[-1]
-    token_indices = torch.arange(
-        vocab_size, device=processed_logits.device, dtype=torch.int32
-    ).expand_as(processed_logits)
-    # Map each finite token to its ascending position in the compact output.
-    compact_indices = kept_mask.cumsum(dim=-1) - 1
-    token_ids = torch.full_like(token_indices, -1)
-    token_ids.scatter_reduce_(
-        1,
-        compact_indices.clamp_min_(0),
-        torch.where(kept_mask, token_indices, -1),
-        reduce="amax",
-        include_self=True,
-    )
-    return SamplingMaskTensors(token_ids=token_ids, counts=counts)
 
 
 class Sampler:
@@ -155,7 +136,8 @@ class Sampler:
         )
         sampling_mask_tensors = None
         if self.enable_return_sampling_mask:
-            sampling_mask_tensors = compact_sampling_mask(processed_logits)
+            top_k = self.sampling_states.top_k.np[idx_mapping_np]
+            sampling_mask_tensors = compact_sampling_mask(processed_logits, top_k)
 
         if return_logprobs:
             if self.logprobs_mode in PROCESSED_LOGPROBS_MODES:

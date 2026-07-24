@@ -357,20 +357,13 @@ class RequestState:
                 f"{self.request_id}: {len(sampling_mask.counts)} rows for "
                 f"{len(new_token_ids)} tokens"
             )
-        for sampled_token, row, raw_count in zip(
-            new_token_ids, sampling_mask.token_ids, sampling_mask.counts
-        ):
+        for row, raw_count in zip(sampling_mask.token_ids, sampling_mask.counts):
             count = int(raw_count)
             if count <= 0 or count > len(row):
                 raise RuntimeError(
                     f"invalid sampling mask count {count} for request {self.request_id}"
                 )
             kept_ids = [int(token_id) for token_id in row[:count]]
-            if sampled_token not in kept_ids:
-                raise RuntimeError(
-                    f"sampled token {sampled_token} is absent from the sampling "
-                    f"mask for request {self.request_id}"
-                )
             self.sampling_mask_token_ids.extend(kept_ids)
             self.sampling_mask_offsets.append(len(self.sampling_mask_token_ids))
 
