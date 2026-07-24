@@ -8,6 +8,7 @@ import pytest
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from vllm.benchmarks.datasets import (
+    MixedServingBoundaryDataset,
     RandomDataset,
     RandomMultiModalDataset,
     SampleRequest,
@@ -134,6 +135,48 @@ def test_random_dataset_different_seeds(
         output_len=p.output_len,
     )
     assert a != b
+
+
+@pytest.mark.benchmark
+@pytest.mark.skip_global_cleanup
+def test_mixed_serving_boundary_dataset_labels_classes(
+    hf_tokenizer: PreTrainedTokenizerBase,
+) -> None:
+    dataset = MixedServingBoundaryDataset(random_seed=123, disable_shuffle=True)
+    samples = dataset.sample(
+        tokenizer=hf_tokenizer,
+        num_requests=9,
+        repeated_prefix_fraction=1 / 3,
+        long_prefill_fraction=1 / 3,
+        repeated_prefix_len=12,
+        repeated_suffix_len=4,
+        repeated_output_len=6,
+        repeated_prefix_groups=2,
+        long_prefill_input_len=20,
+        long_prefill_output_len=3,
+        long_decode_input_len=5,
+        long_decode_output_len=18,
+        request_id_prefix="mixed-",
+    )
+
+    classes = [sample.request_metadata["workload_class"] for sample in samples]
+    assert classes == [
+        "repeated_prefix",
+        "repeated_prefix",
+        "repeated_prefix",
+        "long_prefill",
+        "long_prefill",
+        "long_prefill",
+        "long_decode",
+        "long_decode",
+        "long_decode",
+    ]
+    assert [sample.expected_output_len for sample in samples[:3]] == [6, 6, 6]
+    assert [sample.expected_output_len for sample in samples[3:6]] == [3, 3, 3]
+    assert [sample.expected_output_len for sample in samples[6:]] == [18, 18, 18]
+    assert all(sample.request_id.startswith("mixed-") for sample in samples)
+    assert samples[0].request_metadata["prefix_group"] == 0
+    assert samples[1].request_metadata["prefix_group"] == 1
 
 
 # -----------------------------
