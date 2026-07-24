@@ -48,7 +48,12 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
-from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
+from vllm.utils.network_utils import (
+    get_ip,
+    is_valid_ipv6_address,
+    make_zmq_path,
+    make_zmq_socket,
+)
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -1129,37 +1134,53 @@ class MooncakeConnectorWorker:
                 )
                 raise e
 
-    async def _mooncake_sender_listener(self, ready_event: threading.Event):
+    async def _mooncake_sender_listener(
+        self,
+        ready_event: threading.Event,
+        startup_error: list[BaseException],
+    ):
         """
         Background thread that listens for Mooncake requests, dispatches them
         to a thread pool, and sends acknowledgments upon completion.
         """
 
         sock = self.async_zmq_ctx.socket(zmq.ROUTER)
-        self.side_channel_port = sock.bind_to_random_port(f"tcp://{self.hostname}")
-        logger.debug(
-            "Mooncake sender starting listening on path: tcp://%s:%d",
-            self.hostname,
-            self.side_channel_port,
-        )
-
-        await self.register_worker_with_bootstrap()
-
-        # Create async worker tasks that process items from the queue
-        sender_tasks = [
-            asyncio.create_task(self._sender_worker(sock))
-            for _ in range(self.num_sender_tasks)
-        ]
-
-        ready_event.set()
-
+        sender_tasks = []
         try:
+            try:
+                bind_host = self.hostname
+                if is_valid_ipv6_address(bind_host):
+                    sock.setsockopt(zmq.IPV6, 1)
+                    bind_host = f"[{bind_host}]"
+                self.side_channel_port = sock.bind_to_random_port(f"tcp://{bind_host}")
+                logger.debug(
+                    "Mooncake sender starting listening on path: tcp://%s:%d",
+                    self.hostname,
+                    self.side_channel_port,
+                )
+
+                await self.register_worker_with_bootstrap()
+
+                # Create async worker tasks that process items from the queue
+                sender_tasks = [
+                    asyncio.create_task(self._sender_worker(sock))
+                    for _ in range(self.num_sender_tasks)
+                ]
+
+                ready_event.set()
+            except BaseException as e:
+                startup_error.append(e)
+                ready_event.set()
+                raise
+
             while True:
                 identity, metadata_bytes = await sock.recv_multipart()
                 await self.sender_worker_queue.put((identity, metadata_bytes))
         except zmq.ContextTerminated:
             logger.debug("ZMQ context terminated, exiting Mooncake sender thread.")
         except Exception as e:
+            if startup_error:
+                raise
             logger.error("Error in Mooncake sender thread: %s. Exiting thread.", str(e))
         finally:
             # Clean up worker tasks
@@ -1738,10 +1759,20 @@ class MooncakeConnectorWorker:
             return
 
         ready_event = threading.Event()
-        asyncio.run_coroutine_threadsafe(
-            self._mooncake_sender_listener(ready_event), self.sender_loop
+        startup_error: list[BaseException] = []
+        listener_future = asyncio.run_coroutine_threadsafe(
+            self._mooncake_sender_listener(ready_event, startup_error),
+            self.sender_loop,
         )
-        ready_event.wait()  # Wait for listener ZMQ socket to be ready.
+        if not ready_event.wait(timeout=30):
+            listener_future.cancel()
+            raise RuntimeError(
+                "Mooncake sender listener failed to start in 30 seconds."
+            )
+        if startup_error:
+            raise RuntimeError(
+                "Mooncake sender listener failed to start."
+            ) from startup_error[0]
 
     async def fetch_finished_recving_reqs(self) -> set[ReqId]:
         finished_recving_reqs = self.finished_recving_reqs
