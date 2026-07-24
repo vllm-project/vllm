@@ -34,6 +34,7 @@ from transformers import LlamaConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import (
     Attention,
@@ -74,6 +75,8 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
+
+logger = init_logger(__name__)
 
 
 class LlamaMLP(nn.Module):
@@ -443,6 +446,94 @@ class LlamaModel(nn.Module, EagleModelMixin):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
+class _LlamaTroughModelImpl(LlamaModel):
+    """Inner model that collects candidate-layer hidden states for Confident
+    Decoding. Norm and logits run outside the compiled graph."""
+
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        layer_type: type[nn.Module] = LlamaDecoderLayer,
+    ):
+        super().__init__(vllm_config=vllm_config, prefix=prefix, layer_type=layer_type)
+
+        from .trough_utils import compute_trough_layer_range, read_trough_config
+
+        config = read_trough_config(vllm_config)
+        num_layers = self.end_layer - self.start_layer
+        start_layer, candidate_layers = compute_trough_layer_range(
+            num_layers, config
+        )
+        self._trough_candidate_layers = candidate_layers
+        self._trough_start_layer = self.start_layer + start_layer
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None = None,
+        **extra_layer_kwargs,
+    ) -> (
+        torch.Tensor
+        | IntermediateTensors
+        | tuple[torch.Tensor, list[torch.Tensor]]
+        | tuple[torch.Tensor, list[torch.Tensor], list[torch.Tensor]]
+    ):
+        if get_pp_group().is_first_rank:
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
+            else:
+                hidden_states = self.embed_input_ids(input_ids)
+            residual = None
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+            residual = intermediate_tensors["residual"]
+
+        aux_hidden_states: list[torch.Tensor] = []
+        trough_states: list[torch.Tensor] = []
+        self._maybe_add_hidden_state(aux_hidden_states, 0, hidden_states, residual)
+        for idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer)
+        ):
+            hidden_states, residual = layer(
+                positions, hidden_states, residual, **extra_layer_kwargs
+            )
+            self._maybe_add_hidden_state(
+                aux_hidden_states, idx + 1, hidden_states, residual
+            )
+            if (self.start_layer + idx) >= self._trough_start_layer:
+                current_h = (
+                    hidden_states + residual if residual is not None else hidden_states
+                )
+                trough_states.append(current_h)
+
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors(
+                {"hidden_states": hidden_states, "residual": residual}
+            )
+
+        hidden_states, _ = self.norm(hidden_states, residual)
+        if aux_hidden_states:
+            return hidden_states, aux_hidden_states, trough_states
+        return hidden_states, trough_states
+
+
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": {0: "b"},
+        "positions": {0: "b"},
+        "intermediate_tensors": {0: "b"},
+        "inputs_embeds": {0: "b"},
+    },
+)
+class LlamaTroughModel(_LlamaTroughModelImpl, EagleModelMixin):
+    pass
+
+
 class LlamaForCausalLM(
     LocalArgmaxMixin,
     nn.Module,
@@ -475,6 +566,17 @@ class LlamaForCausalLM(
         quant_config = vllm_config.quant_config
         self.config = config
 
+        from .trough_utils import read_trough_config
+
+        trough_config = read_trough_config(vllm_config)
+        self.enable_trough_decoding = trough_config["enable_trough_decoding"]
+        if self.enable_trough_decoding and get_pp_group().world_size > 1:
+            logger.warning(
+                "Disabling Confident Decoding because pipeline parallelism is "
+                "enabled; current implementation only supports PP=1."
+            )
+            self.enable_trough_decoding = False
+
         self.model = self._init_model(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
@@ -502,12 +604,50 @@ class LlamaForCausalLM(
             self.model.make_empty_intermediate_tensors
         )
 
+        if self.enable_trough_decoding:
+            self.trough_max_backtrack_layers = trough_config[
+                "trough_max_backtrack_layers"
+            ]
+            self.trough_backtrack_ratio = trough_config["trough_backtrack_ratio"]
+            self.trough_select_method = trough_config["trough_select_method"]
+            self.trough_p = trough_config["trough_p"]
+            self.trough_log_interval = trough_config["trough_log_interval"]
+            self._trough_call_count = 0
+            self._trough_buffers: dict[int, torch.Tensor] = {}
+            self._last_seq_len = 0
+            self._last_logits_indices: torch.Tensor | None = None
+
+            compilation_config = getattr(vllm_config, "compilation_config", None)
+            cg_sizes = (
+                getattr(compilation_config, "cudagraph_capture_sizes", None)
+                if compilation_config is not None
+                else None
+            )
+            self._trough_captured_shapes: frozenset[int] = (
+                frozenset(cg_sizes) if cg_sizes else frozenset()
+            )
+            logger.info(
+                "Llama Confident Decoding init: enabled=%s, select_method=%s, "
+                "p=%.2f, max_backtrack_layers=%d, backtrack_ratio=%.3f, "
+                "trough_log_interval=%d",
+                self.enable_trough_decoding,
+                self.trough_select_method,
+                self.trough_p,
+                self.trough_max_backtrack_layers,
+                self.trough_backtrack_ratio,
+                self.trough_log_interval,
+            )
+
     def _init_model(
         self,
         vllm_config: VllmConfig,
         prefix: str = "",
         layer_type: type[nn.Module] = LlamaDecoderLayer,
     ):
+        if self.enable_trough_decoding:
+            return LlamaTroughModel(
+                vllm_config=vllm_config, prefix=prefix, layer_type=layer_type
+            )
         return LlamaModel(vllm_config=vllm_config, prefix=prefix, layer_type=layer_type)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -519,18 +659,52 @@ class LlamaForCausalLM(
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        **kwargs,
     ) -> torch.Tensor | IntermediateTensors:
-        model_output = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds
+        output = self.model(
+            input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
         )
-        return model_output
+
+        is_trough_model = isinstance(self.model, _LlamaTroughModelImpl)
+        if not (
+            self.enable_trough_decoding
+            and is_trough_model
+            and get_pp_group().is_last_rank
+        ):
+            return output
+
+        if isinstance(output, tuple) and len(output) == 3:
+            hidden_states, aux_hidden_states, trough_states = output
+        else:
+            hidden_states, trough_states = output
+            aux_hidden_states = None
+        if not trough_states:
+            if aux_hidden_states:
+                return hidden_states, aux_hidden_states
+            return hidden_states
+
+        normed_layers = [self.model.norm(hs, None) for hs in trough_states]
+        self._trough_buffers[hidden_states.shape[0]] = torch.stack(normed_layers)
+        if aux_hidden_states:
+            return hidden_states, aux_hidden_states
+        return hidden_states
 
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        logits = self.logits_processor(self.lm_head, hidden_states)
-        return logits
+        if not self.enable_trough_decoding:
+            return self.logits_processor(self.lm_head, hidden_states)
+
+        from .trough_utils import compute_confident_decoding_logits
+
+        return compute_confident_decoding_logits(self, hidden_states)
+
+    def clear_trough_buffers(self) -> None:
+        captured = self._trough_captured_shapes
+        for key in list(self._trough_buffers.keys()):
+            if key not in captured:
+                self._trough_buffers.pop(key, None)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
