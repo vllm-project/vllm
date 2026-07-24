@@ -110,6 +110,37 @@ def test_rocm_aiter_sampler_defers_import_when_generators_force_native(
     assert logits_to_return is None
 
 
+def test_flashinfer_sampler_supported_degrades_when_flashinfer_missing(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """flashinfer is optional and unavailable on some CUDA platforms (e.g.
+    aarch64). When it is absent, flashinfer_sampler_supported() must fall back
+    to native sampling instead of crashing engine init with
+    ModuleNotFoundError from the unguarded backend import.
+    """
+    import vllm.utils.flashinfer as flashinfer_utils
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    class MockCudaPlatform:
+        @staticmethod
+        def is_cuda():
+            return True
+
+    monkeypatch.setattr(topk_topp_sampler, "current_platform", MockCudaPlatform())
+    monkeypatch.setattr(flashinfer_utils, "has_flashinfer", lambda: False)
+
+    # Default (sampler enabled by default) with flashinfer absent: fall back
+    # to native sampling, do not raise.
+    monkeypatch.delenv("VLLM_USE_FLASHINFER_SAMPLER", raising=False)
+    assert topk_topp_sampler.flashinfer_sampler_supported() is False
+
+    # Explicit opt-in with flashinfer absent: a clear RuntimeError, not the
+    # raw ModuleNotFoundError from the import.
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "1")
+    with pytest.raises(RuntimeError, match="flashinfer is not installed"):
+        topk_topp_sampler.flashinfer_sampler_supported()
+
+
 def test_random_sample_uses_fp64_exponential_race_when_requested():
     torch.set_default_device(DEVICE_TYPE)
     probs = torch.tensor(

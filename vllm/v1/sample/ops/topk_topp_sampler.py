@@ -26,8 +26,10 @@ def flashinfer_sampler_supported() -> bool:
     unsupported. Raises ``RuntimeError`` if the user explicitly opted in
     via the env var but FlashInfer is unavailable.
 
-    Assumes flashinfer is installed, as guaranteed by ``requirements/cuda.txt``;
-    otherwise importing the FlashInfer backend below raises ``ImportError``.
+    Returns False (falling back to native sampling) when flashinfer is not
+    installed, rather than raising ``ImportError`` -- flashinfer is not
+    available on every CUDA platform (e.g. aarch64), and the rest of the
+    codebase treats it as optional via ``has_flashinfer()``.
 
     Note: callers must additionally ensure ``logprobs_mode`` doesn't require
     post-top-k/top-p logits/logprobs for any request whose logprobs will be
@@ -41,15 +43,20 @@ def flashinfer_sampler_supported() -> bool:
             "VLLM_USE_FLASHINFER_SAMPLER=0."
         )
         return False
-    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+    from vllm.utils.flashinfer import has_flashinfer
 
-    capability = current_platform.get_device_capability()
-    assert capability is not None
     unsupported_reason: str | None = None
-    if not FlashInferBackend.supports_compute_capability(capability):
-        unsupported_reason = (
-            f"unsupported compute capability {capability.as_version_str()}"
-        )
+    if not has_flashinfer():
+        unsupported_reason = "flashinfer is not installed"
+    else:
+        from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+        capability = current_platform.get_device_capability()
+        assert capability is not None
+        if not FlashInferBackend.supports_compute_capability(capability):
+            unsupported_reason = (
+                f"unsupported compute capability {capability.as_version_str()}"
+            )
 
     if unsupported_reason is None:
         logger.info_once("Using FlashInfer for top-p & top-k sampling.", scope="global")
