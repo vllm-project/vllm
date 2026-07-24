@@ -362,6 +362,75 @@ def _p_less_validate(
                 )
 
 
+@create_new_process_for_each_test()
+@pytest.mark.parametrize("device", DEVICES)
+def test_p_less_fixed_logits(device: str):
+    """
+    Test a fixed input logit distribution for a fixed output logit distribution.
+    """
+    logits = torch.tensor([[1.1, -0.3, 0.5, -0.1, 0.9]])
+    p_less_logits_processor = PLessLogitsProcessor(
+        VllmConfig(), device, PIN_MEMORY_AVAILABLE
+    )
+    if "cpu" in device:
+        p_less_logits_processor.p_less = torch.tensor(
+            [[True]], device=device, pin_memory=PIN_MEMORY_AVAILABLE
+        )
+    else:
+        p_less_logits_processor.p_less = torch.tensor([[True]], device=device)
+    p_less_logits_processor.p_less_count = 1
+    p_less_logits_processor.apply(logits)
+    torch.testing.assert_close(
+        logits, torch.tensor([[1.1, float("-inf"), float("-inf"), float("-inf"), 0.9]])
+    )
+
+
+@create_new_process_for_each_test()
+@pytest.mark.parametrize("device", DEVICES)
+def test_p_less_deterministic_logits(device: str):
+    """
+    Test a deterministic input logit distribution for a deterministic output logit
+    distribution.
+    """
+    logits = torch.full((1, 123987), float("-inf"))
+    logits[0, 123] = -0.1
+    expected_logits = torch.full((1, 123987), float("-inf"))
+    expected_logits[0, 123] = -0.1
+    p_less_logits_processor = PLessLogitsProcessor(
+        VllmConfig(), device, PIN_MEMORY_AVAILABLE
+    )
+    if "cpu" in device:
+        p_less_logits_processor.p_less = torch.tensor(
+            [[True]], device=device, pin_memory=PIN_MEMORY_AVAILABLE
+        )
+    else:
+        p_less_logits_processor.p_less = torch.tensor([[True]], device=device)
+    p_less_logits_processor.p_less_count = 1
+    p_less_logits_processor.apply(logits)
+    torch.testing.assert_close(logits, expected_logits)
+
+
+@create_new_process_for_each_test()
+@pytest.mark.parametrize("device", DEVICES)
+def test_p_less_uniform_logits(device: str):
+    """
+    Test a uniform input logit distribution for a uniform output logit distribution.
+    """
+    logits = torch.full((1, 234876), 0.567)
+    p_less_logits_processor = PLessLogitsProcessor(
+        VllmConfig(), device, PIN_MEMORY_AVAILABLE
+    )
+    if "cpu" in device:
+        p_less_logits_processor.p_less = torch.tensor(
+            [[True]], device=device, pin_memory=PIN_MEMORY_AVAILABLE
+        )
+    else:
+        p_less_logits_processor.p_less = torch.tensor([[True]], device=device)
+    p_less_logits_processor.p_less_count = 1
+    p_less_logits_processor.apply(logits)
+    torch.testing.assert_close(logits, torch.full((1, 234876), 0.567))
+
+
 def _min_p_params(kwargs: dict) -> None:
     """Min-p logitproc config"""
     kwargs["min_p"] = 0.1
