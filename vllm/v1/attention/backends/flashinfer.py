@@ -852,10 +852,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # if cache_config requests a quantized dtype globally.
         cache_dtype = self.cache_dtype
 
-        # On SM90, XQA decode requires BF16/FP16-Q even with FP8 KV cache.
-        # FI native prefill on SM90 still uses FP8-Q in that case.
+        # On SM90/SM12x, XQA decode requires BF16/FP16-Q even with FP8 KV cache.
+        # FI native prefill on SM90 still uses FP8-Q in that case; SM12x prefill
+        # is fa2-only and keeps the model dtype (handled below).
         if (
-            current_platform.is_device_capability(90)
+            (
+                current_platform.is_device_capability(90)
+                or current_platform.is_device_capability_family(120)
+            )
             and not is_prefill
             and force_use_trtllm_attention() is not False
             and cache_dtype.startswith("fp8")
@@ -897,11 +901,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     ) -> AttentionCGSupport:
         """Get the cudagraph support level for FlashInfer attention.
 
-        The SM90 XQA integration only enables single-token decode today. Keep
-        specdec CUDA graphs limited to trtllm-gen until vLLM wires the XQA
+        The SM90/SM12x XQA integration only enables single-token decode today.
+        Keep specdec CUDA graphs limited to trtllm-gen until vLLM wires the XQA
         specdec mask.
         """
-        if current_platform.is_device_capability(90):
+        if current_platform.is_device_capability(
+            90
+        ) or current_platform.is_device_capability_family(120):
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
         # For UniformTypeKVCacheSpecs, check all contained specs
@@ -963,7 +969,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     @staticmethod
     def _get_flashinfer_trtllm_api_decode_kernel() -> FlashInferDecodeKernel:
-        if current_platform.is_device_capability(90):
+        # SM90 (Hopper) and SM12x (consumer Blackwell) decode through XQA;
+        # the SM100 family uses trtllm-gen.
+        if current_platform.is_device_capability(
+            90
+        ) or current_platform.is_device_capability_family(120):
             return FlashInferDecodeKernel.XQA
         assert current_platform.is_device_capability_family(100)
         return FlashInferDecodeKernel.TRTLLM_GEN

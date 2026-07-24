@@ -737,10 +737,19 @@ def test_flashinfer_attention_sinks_refreshed_after_reload(dtype):
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )
-def test_flashinfer_sm90_xqa_decode_correctness(default_vllm_config):
-    """FlashInfer should route Hopper decode through XQA and match SDPA."""
-    if not current_platform.is_cuda() or not current_platform.is_device_capability(90):
-        pytest.skip("FlashInfer XQA decode requires SM90.")
+def test_flashinfer_xqa_decode_correctness(default_vllm_config):
+    """FlashInfer should route SM90/SM12x decode through XQA and match SDPA.
+
+    XQA is the auto-selected decode kernel on Hopper (SM90) and consumer
+    Blackwell (SM12x). The SM100 family decodes through trtllm-gen instead and
+    is covered separately.
+    """
+    supported = current_platform.is_cuda() and (
+        current_platform.is_device_capability(90)
+        or current_platform.is_device_capability_family(120)
+    )
+    if not supported:
+        pytest.skip("FlashInfer XQA decode requires SM90 or SM12x.")
 
     import unittest.mock
 
