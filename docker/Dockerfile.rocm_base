@@ -11,7 +11,7 @@ ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
 ARG AITER_BRANCH="v0.1.16.post5"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
-ARG MORI_BRANCH="v1.1.0"
+ARG MORI_BRANCH="a0c52dee"
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
 
 # Sccache configuration (only used in release pipeline)
@@ -58,6 +58,7 @@ RUN apt-get update -y \
     && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 
+RUN apt-get update && apt-get install -y libgrpc++-dev protobuf-compiler-grpc && rm -rf /var/lib/apt/lists/*
 RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11 Cython
 RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
 

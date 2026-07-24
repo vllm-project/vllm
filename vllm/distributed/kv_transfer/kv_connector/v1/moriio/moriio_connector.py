@@ -17,6 +17,7 @@ import torch
 import zmq
 
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -68,7 +69,6 @@ from vllm.utils.network_utils import (
     make_zmq_path,
     make_zmq_socket,
 )
-from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
@@ -1023,12 +1023,6 @@ class MoRIIOConnectorWorker:
         self.use_mla = self.model_config.use_mla
         self.built_session = False
         self.built_write_session: defaultdict[str, list] = defaultdict(list)
-        backend = get_attn_backend(
-            self.model_config.get_head_size(),
-            self.model_config.dtype,
-            self.cache_config.cache_dtype,
-            use_mla=self.use_mla,
-        )
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
         # READ-mode producer: a decode release-ACK can arrive BEFORE
         # start_load_kv populates transfer_id_to_request_id (the notify races
@@ -1040,10 +1034,6 @@ class MoRIIOConnectorWorker:
         # (on the tick its mapping exists) -- the heterogeneous-TP ack-counting
         # is preserved.
         self._pending_unmapped_acks: list = []
-
-        # TODO: consider the integration of flashinfer or other backends.
-        self.backend_name = backend.get_name()
-        logger.debug("Detected attention backend %s", self.backend_name)
 
     def schedule_write_blocks(
         self,
@@ -1415,6 +1405,10 @@ class MoRIIOConnectorWorker:
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in moriio."""
 
+        backends = get_current_attn_backends(self.vllm_config)
+        self.backend_name = backends[0].get_name()
+        logger.debug("Detected attention backend %s", self.backend_name)
+
         self.kv_caches = kv_caches  # layer name to kv cache
         self.kv_cache_shapes = {
             layer_name: kv_cache.shape for layer_name, kv_cache in kv_caches.items()
@@ -1477,7 +1471,18 @@ class MoRIIOConnectorWorker:
             if layer_name not in self.layer_name_to_local_kv_cache_metadata:
                 self.layer_name_to_local_kv_cache_metadata[layer_name] = []
 
-            moriio_mem_metadata = self.moriio_wrapper.register_local_tensor(kv_cache)
+            if kv_cache.is_contiguous():
+                reg_tensor = kv_cache
+            else:
+                cache_u8 = kv_cache.view(torch.uint8)
+                total_bytes = (
+                    kv_cache.shape[0] * kv_cache.stride(0) * kv_cache.element_size()
+                )
+                reg_tensor = torch.as_strided(
+                    cache_u8, (total_bytes,), (1,), cache_u8.storage_offset()
+                )
+            moriio_mem_metadata = self.moriio_wrapper.register_local_tensor(reg_tensor)
+
             self.layer_name_to_local_kv_cache_metadata[layer_name].append(
                 moriio_mem_metadata
             )
