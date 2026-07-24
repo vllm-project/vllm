@@ -467,6 +467,10 @@ class CommonAttentionMetadata:
     decode rows (assumes every draft was accepted). Not safe for kernels
     that need exact per-row context lengths on decode rows."""
 
+    global_prefill_max_seq_len: int | None = None
+    """Scheduler-global prefill maximum replicated before PCP localizes rows.
+    Use this for decisions that change the PCP collective schedule."""
+
     mm_req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None
     """PrefixLM bidirectional ranges for multimodal tokens. Maps
     request index to list of (start, end) token position ranges
@@ -821,6 +825,14 @@ class AttentionImplBase(ABC, Generic[T]):
     supports_pcp: bool = False
     # Whether the attention impl supports Decode Context Parallelism.
     supports_dcp: bool = True
+    # Whether this impl can move sparse prefill queries to owner-local KV
+    # shards and merge per-owner partials. Backends opt in only when their
+    # kernel supports per-row valid lengths and returns a mergeable LSE.
+    supports_owner_compute: bool = False
+    # Whether owner compute returns values after the MLA W_UV projection.
+    # The model layer uses this explicit contract to skip its ordinary
+    # origin-side projection only for that specialized owner path.
+    owner_compute_returns_projected_values: bool = False
     # Whether the attention impl(or ops) supports MTP
     # when cp_kv_cache_interleave_size > 1
     supports_mtp_with_cp_non_trivial_interleave_size: bool = False

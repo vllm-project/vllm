@@ -40,6 +40,10 @@ from vllm.model_executor.models.utils import (
     sequence_parallel_chunk,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backends.mla.owner_peer_slot_cache import (
+    OwnerPeerSlotCache,
+    maybe_allocate_owner_peer_slot_cache,
+)
 from vllm.v1.attention.backends.mla.sparse_utils import register_phys_shadow
 
 from .attention import DeepseekV32Attention
@@ -65,6 +69,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         prefix: str,
         config=None,
         topk_indices_buffer: torch.Tensor | None = None,
+        owner_peer_slot_cache: OwnerPeerSlotCache | None = None,
     ) -> None:
         super().__init__()
 
@@ -84,6 +89,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             config=config,
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
+            owner_peer_slot_cache=owner_peer_slot_cache,
         )
 
         if (
@@ -204,6 +210,10 @@ class DeepseekV32Model(torch.nn.Module):
             device=self.device,
         )
         register_phys_shadow(topk_indices_buffer)
+        self.owner_peer_slot_cache = maybe_allocate_owner_peer_slot_cache(
+            vllm_config,
+            topk_indices_buffer,
+        )
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -221,6 +231,7 @@ class DeepseekV32Model(torch.nn.Module):
                 vllm_config=vllm_config,
                 prefix=prefix,
                 topk_indices_buffer=topk_indices_buffer,
+                owner_peer_slot_cache=self.owner_peer_slot_cache,
             ),
             prefix=f"{prefix}.layers",
         )
@@ -248,6 +259,8 @@ class DeepseekV32Model(torch.nn.Module):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        if self.owner_peer_slot_cache is not None:
+            self.owner_peer_slot_cache.invalidate()
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds

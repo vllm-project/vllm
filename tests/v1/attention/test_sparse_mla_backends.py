@@ -21,6 +21,9 @@ from tests.v1.attention.utils import (
 )
 from vllm import _custom_ops as ops
 from vllm.config import set_current_vllm_config
+from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    SparseMLACommonMetadataBuilder,
+)
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
 
@@ -36,6 +39,7 @@ if not current_platform.is_cuda():
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+    FlashInferMLASparseImpl,
     FlashInferMLASparseTRTLLMBackend,
 )
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
@@ -71,6 +75,46 @@ SPARSE_BACKEND_BATCH_SPECS["large_q_pure_prefill"] = BatchSpec(
 )
 
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_flashinfer_sparse_mla_accepts_zero_local_tokens() -> None:
+    impl = object.__new__(FlashInferMLASparseImpl)
+    impl.num_heads = 4
+    impl.kv_lora_rank = 512
+    q = torch.empty((0, 4, 192), device=DEVICE_TYPE)
+
+    output, lse = impl.forward_mqa(
+        q,
+        torch.empty((1,), device=DEVICE_TYPE),
+        SimpleNamespace(),
+        SimpleNamespace(),
+    )
+
+    assert output.shape == (0, 4, 512)
+    assert output.device == q.device
+    assert lse is None
+
+
+def test_flashmla_sparse_mla_accepts_zero_local_tokens() -> None:
+    impl = object.__new__(FlashMLASparseImpl)
+    impl.num_heads = 4
+    impl.kv_lora_rank = 512
+    impl.q_concat_buffer = torch.empty(
+        (0, 4, 576), dtype=torch.bfloat16, device=DEVICE_TYPE
+    )
+    q_nope = torch.empty((0, 4, 512), dtype=torch.bfloat16, device=DEVICE_TYPE)
+    q_pe = torch.empty((0, 4, 64), dtype=torch.bfloat16, device=DEVICE_TYPE)
+
+    output, lse = impl.forward_mqa(
+        (q_nope, q_pe),
+        torch.empty((1,), device=DEVICE_TYPE),
+        SimpleNamespace(),
+        SimpleNamespace(),
+    )
+
+    assert output.shape == (0, 4, 512)
+    assert output.device == q_nope.device
+    assert lse is None
 
 
 def _float_to_e8m0_truncate(f: float) -> float:
@@ -640,7 +684,8 @@ def test_triton_convert_req_index_to_global_index_decode_only(
 
     # Set some to out of bounds
     token_indices[2, 100:110] = max_blocks_per_req * block_size
-    token_indices[6, 150:160] = max_blocks_per_req * block_size
+    # A second decode row also carries out-of-bounds paged-cache indices.
+    token_indices[6, 110:120] = max_blocks_per_req * block_size
 
     result = triton_convert_req_index_to_global_index(
         req_id,
@@ -698,11 +743,18 @@ def test_triton_convert_req_index_to_global_index_with_prefill_workspace(block_s
     token_indices[0, :10] = -1
     token_indices[3, 50:60] = -1
 
-    # Set some to out of bounds
+    # Decode rows must reject paged-cache indices beyond the BlockTable.
     token_indices[2, 100:110] = max_blocks_per_req * block_size
-    token_indices[6, 150:160] = max_blocks_per_req * block_size
+    # Dense prefill workspaces use global token IDs and are not bounded by the
+    # owner-local BlockTable width. Include both the DCP4 32K boundary and a
+    # 64K-history token, plus a sentinel that must remain invalid.
+    token_indices[6, 110:114] = torch.tensor(
+        [max_blocks_per_req * block_size, 32768, 65535, -1],
+        dtype=torch.int32,
+        device=device,
+    )
 
-    result = triton_convert_req_index_to_global_index(
+    result, valid_counts = triton_convert_req_index_to_global_index(
         req_id,
         block_table,
         token_indices,
@@ -711,6 +763,7 @@ def test_triton_convert_req_index_to_global_index_with_prefill_workspace(block_s
         HAS_PREFILL_WORKSPACE=True,
         prefill_workspace_request_ids=prefill_workspace_request_ids,
         prefill_workspace_starts=prefill_workspace_starts,
+        return_valid_counts=True,
     )
 
     reference_result = _triton_convert_reference_impl(
@@ -725,6 +778,8 @@ def test_triton_convert_req_index_to_global_index_with_prefill_workspace(block_s
     )
 
     torch.testing.assert_close(result, reference_result, rtol=0, atol=0)
+    expected_valid_counts = (reference_result >= 0).sum(dim=1, dtype=torch.int32)
+    torch.testing.assert_close(valid_counts, expected_valid_counts, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(
@@ -1451,3 +1506,459 @@ def test_flashmla_fp8_paths_accept_decode_subset(monkeypatch, use_mixed_batch: b
     assert kernel_q_shapes == [(1, num_decode_tokens, 2, 3)]
     assert output.shape == (num_decode_tokens, 2, 1)
     assert lse is None
+
+
+def test_flashmla_direct_owner_history_uses_cached_peer_slots(monkeypatch):
+    num_tokens = 3
+    topk = 4
+    q = torch.empty(num_tokens, 2, 3, device=DEVICE_TYPE)
+    logical_topk = torch.arange(
+        num_tokens * topk, dtype=torch.int32, device=DEVICE_TYPE
+    ).view(num_tokens, topk)
+    peer_topk = logical_topk + 100
+    calls = []
+
+    class FakeOwnerPeerSlotCache:
+        def get(self, rows, block_table, **kwargs):
+            calls.append((rows, block_table, kwargs))
+            return peer_topk, torch.full(
+                (num_tokens,), topk, dtype=torch.int32, device=DEVICE_TYPE
+            )
+
+    def reject_generic_conversion(*args, **kwargs):  # noqa: ARG001
+        pytest.fail("owner history must not use the replicated slot conversion")
+
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.mla.flashmla_sparse."
+        "triton_convert_req_index_to_global_index",
+        reject_generic_conversion,
+    )
+
+    captured_indices = []
+
+    def run_kernel(**kwargs):
+        captured_indices.append(kwargs["topk_indices"])
+        return kwargs["q"][..., :1], None
+
+    metadata = SimpleNamespace(
+        fp8_extra_metadata=FlashMLASparseMetadata.FP8KernelMetadata(
+            scheduler_metadata=object(),  # type: ignore[arg-type]
+            dummy_block_table=torch.empty(1, 1, dtype=torch.int32, device=DEVICE_TYPE),
+            cache_lens=torch.empty(1, dtype=torch.int32, device=DEVICE_TYPE),
+        ),
+        req_id_per_token=torch.zeros(num_tokens, dtype=torch.int32, device=DEVICE_TYPE),
+        block_table=torch.empty(1, 1, dtype=torch.int32, device=DEVICE_TYPE),
+        block_size=64,
+        cp_kv_cache_interleave_size=64,
+    )
+    impl = SimpleNamespace(
+        dcp_world_size=4,
+        _fp8_flash_mla_kernel=run_kernel,
+    )
+    layer = SimpleNamespace(
+        pcp_owner_history_direct=True,
+        pcp_peer_block_stride=17,
+        owner_peer_slot_cache=FakeOwnerPeerSlotCache(),
+    )
+
+    output = FlashMLASparseImpl._forward_fp8_kv_mixed_batch(
+        impl,
+        q,
+        torch.empty(0, device=DEVICE_TYPE),
+        logical_topk,
+        metadata,
+        layer,
+    )
+
+    assert output.shape == (num_tokens, 2, 1)
+    assert len(calls) == 1
+    assert calls[0][0] == num_tokens
+    assert calls[0][2] == {
+        "dcp_size": 4,
+        "blocks_per_peer": 17,
+        "cp_kv_cache_interleave_size": 64,
+        "block_size": 64,
+    }
+    torch.testing.assert_close(captured_indices[0], peer_topk.unsqueeze(0))
+
+
+def test_flashmla_owner_decode_preserves_per_request_schedule(monkeypatch):
+    num_tokens = 2
+    topk = 4
+    q = torch.empty(num_tokens, 2, 3, device=DEVICE_TYPE)
+    logical_topk = torch.arange(
+        num_tokens * topk, dtype=torch.int32, device=DEVICE_TYPE
+    ).view(num_tokens, topk)
+    peer_topk = logical_topk + 200
+
+    class FakeOwnerPeerSlotCache:
+        def get(self, rows, block_table, **kwargs):  # noqa: ARG002
+            assert rows == num_tokens
+            return peer_topk, torch.full(
+                (num_tokens,), topk, dtype=torch.int32, device=DEVICE_TYPE
+            )
+
+    def reject_generic_conversion(*args, **kwargs):  # noqa: ARG001
+        pytest.fail("owner decode must not use replicated slot conversion")
+
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.mla.flashmla_sparse."
+        "triton_convert_req_index_to_global_index",
+        reject_generic_conversion,
+    )
+    captured = []
+
+    def run_kernel(**kwargs):
+        captured.append((kwargs["q"].shape, kwargs["topk_indices"]))
+        return kwargs["q"][..., :1], None
+
+    KernelMeta = FlashMLASparseMetadata.FP8KernelMetadata
+    FP8Meta = FlashMLASparseMetadata.FP8SeparatePrefillDecode
+    metadata = SimpleNamespace(
+        fp8_extra_metadata=FP8Meta(
+            num_decodes=num_tokens,
+            num_prefills=0,
+            num_decode_tokens=num_tokens,
+            num_prefill_tokens=0,
+            decode=FP8Meta.Decode(
+                seq_lens=torch.full(
+                    (num_tokens,), topk, dtype=torch.int32, device=DEVICE_TYPE
+                ),
+                kernel_metadata=KernelMeta(
+                    scheduler_metadata=object(),  # type: ignore[arg-type]
+                    dummy_block_table=torch.empty(
+                        num_tokens, 1, dtype=torch.int32, device=DEVICE_TYPE
+                    ),
+                    cache_lens=torch.empty(
+                        num_tokens, dtype=torch.int32, device=DEVICE_TYPE
+                    ),
+                ),
+                decode_query_len=1,
+            ),
+        ),
+        req_id_per_token=torch.zeros(num_tokens, dtype=torch.int32, device=DEVICE_TYPE),
+        block_table=torch.empty(1, 1, dtype=torch.int32, device=DEVICE_TYPE),
+        block_size=64,
+        cp_kv_cache_interleave_size=64,
+    )
+    impl = SimpleNamespace(
+        dcp_world_size=4,
+        num_heads=2,
+        kv_lora_rank=1,
+        _fp8_flash_mla_kernel=run_kernel,
+    )
+    layer = SimpleNamespace(
+        pcp_owner_history_direct=True,
+        pcp_peer_block_stride=19,
+        owner_peer_slot_cache=FakeOwnerPeerSlotCache(),
+    )
+
+    output = FlashMLASparseImpl._forward_fp8_kv_separate_prefill_decode(
+        impl,
+        q,
+        torch.empty(0, device=DEVICE_TYPE),
+        logical_topk,
+        metadata,
+        layer,
+    )
+
+    assert output.shape == (num_tokens, 2, 1)
+    assert captured[0][0] == (num_tokens, 1, 2, 3)
+    torch.testing.assert_close(captured[0][1], peer_topk.view(num_tokens, 1, topk))
+
+
+def test_flashmla_owner_prefill_caches_translation_but_materializes_each_layer(
+    monkeypatch,
+):
+    num_tokens = 2
+    topk = 3
+    total_history_tokens = 4
+    q = torch.empty(num_tokens, 2, 3, device=DEVICE_TYPE)
+    logical_topk = torch.arange(
+        num_tokens * topk, dtype=torch.int32, device=DEVICE_TYPE
+    ).view(num_tokens, topk)
+    workspace_topk = torch.tensor(
+        [[0, 2, 3], [1, 3, -1]], dtype=torch.int32, device=DEVICE_TYPE
+    )
+    workspace_lengths = torch.tensor([3, 2], dtype=torch.int32, device=DEVICE_TYPE)
+    local_block_table = torch.tensor([[2, 5]], dtype=torch.int32, device=DEVICE_TYPE)
+    translated_block_table = torch.tensor(
+        [[2, 19, 36, 53, 5, 22, 39, 56]],
+        dtype=torch.int32,
+        device=DEVICE_TYPE,
+    )
+    workspace_starts = torch.zeros(1, dtype=torch.int32, device=DEVICE_TYPE)
+
+    FP8Meta = FlashMLASparseMetadata.FP8SeparatePrefillDecode
+    chunk = FP8Meta.Prefill.Chunk(
+        tokens_slice=slice(0, num_tokens),
+        block_table=local_block_table,
+        req_start_idx=0,
+        workspace_starts=workspace_starts,
+        chunk_tot_seqlen=total_history_tokens,
+    )
+    metadata = SimpleNamespace(
+        fp8_extra_metadata=FP8Meta(
+            num_decodes=0,
+            num_prefills=1,
+            num_decode_tokens=0,
+            num_prefill_tokens=num_tokens,
+            prefill=FP8Meta.Prefill(
+                request_ids=torch.zeros(
+                    num_tokens, dtype=torch.int32, device=DEVICE_TYPE
+                ),
+                workspace_starts=workspace_starts,
+                chunks=[chunk],
+            ),
+        ),
+        req_id_per_token=torch.zeros(num_tokens, dtype=torch.int32, device=DEVICE_TYPE),
+        block_table=local_block_table,
+        block_size=64,
+        cp_kv_cache_interleave_size=64,
+    )
+
+    conversion_calls = []
+
+    def convert_indices(*args, **kwargs):  # noqa: ARG001
+        conversion_calls.append(kwargs)
+        return workspace_topk, workspace_lengths
+
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.mla.flashmla_sparse."
+        "triton_convert_req_index_to_global_index",
+        convert_indices,
+    )
+
+    translation_calls = []
+
+    def translate(owner_block_tables, **kwargs):
+        translation_calls.append((owner_block_tables, kwargs))
+        return translated_block_table
+
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.mla.flashmla_sparse."
+        "build_rotated_dcp_peer_block_table",
+        translate,
+    )
+
+    peer_cache = torch.empty(0, device=DEVICE_TYPE)
+    materialization_calls = []
+
+    def materialize(src, dst, block_table, starts, num_reqs):
+        materialization_calls.append((src, dst, block_table, starts, num_reqs))
+
+    monkeypatch.setattr(
+        ops,
+        "cp_gather_and_upconvert_fp8_kv_cache",
+        materialize,
+    )
+
+    kernel_calls = []
+
+    def run_bf16_kernel(kernel_q, workspace, indices, lengths):
+        kernel_calls.append((kernel_q, workspace, indices, lengths))
+        return kernel_q[..., :1]
+
+    prefill_workspace = torch.empty(
+        total_history_tokens, 576, dtype=torch.bfloat16, device=DEVICE_TYPE
+    )
+    impl = SimpleNamespace(
+        dcp_world_size=4,
+        num_heads=2,
+        kv_lora_rank=1,
+        prefill_bf16_workspace=prefill_workspace,
+        _bf16_flash_mla_kernel=run_bf16_kernel,
+    )
+    layer = SimpleNamespace(
+        pcp_owner_history_direct=True,
+        pcp_peer_block_stride=17,
+        owner_peer_slot_cache=object(),
+    )
+
+    for _ in range(2):
+        output = FlashMLASparseImpl._forward_fp8_kv_separate_prefill_decode(
+            impl,
+            q,
+            peer_cache,
+            logical_topk,
+            metadata,
+            layer,
+        )
+        assert output.shape == (num_tokens, 2, 1)
+
+    assert len(translation_calls) == 1
+    owner_tables, translation_kwargs = translation_calls[0]
+    assert owner_tables.shape == (4, 1, 2)
+    assert owner_tables.stride(0) == 0
+    assert translation_kwargs == {
+        "local_rank": 0,
+        "peer_block_stride": 17,
+        "cp_kv_cache_interleave_size": 64,
+        "block_size": 64,
+    }
+    assert len(materialization_calls) == 2
+    assert all(call[0] is peer_cache for call in materialization_calls)
+    assert all(call[2] is translated_block_table for call in materialization_calls)
+    assert all(call[4] == 1 for call in materialization_calls)
+    assert all(call["HAS_PREFILL_WORKSPACE"] for call in conversion_calls)
+    assert len(kernel_calls) == 2
+    torch.testing.assert_close(kernel_calls[0][2], workspace_topk)
+    torch.testing.assert_close(kernel_calls[0][3], workspace_lengths)
+
+
+def test_flashmla_owner_materialization_reuses_reserved_padded_query(monkeypatch):
+    buffer_tokens = 4
+    num_tokens = 2
+    num_heads = 2
+    padded_heads = 4
+    head_dim = 3
+    q_padded_buffer = torch.full(
+        (buffer_tokens, padded_heads, head_dim),
+        float("nan"),
+        device=DEVICE_TYPE,
+    )
+    # Exercise a later pure-prefill chunk. Its query is a nonzero row slice of
+    # the initialization-time padded workspace and must not allocate fallback
+    # storage in every attention layer.
+    q = q_padded_buffer[1:3, :num_heads, :]
+    q.fill_(1)
+
+    captured_q = []
+
+    def sparse_fwd(kernel_q, *args, **kwargs):  # noqa: ARG001
+        captured_q.append(kernel_q)
+        output = kernel_q.new_zeros((num_tokens, padded_heads, 1))
+        return output, None, None
+
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.mla.flashmla_sparse.flash_mla_sparse_fwd",
+        sparse_fwd,
+    )
+
+    impl = SimpleNamespace(
+        num_heads=num_heads,
+        prefill_padding=padded_heads,
+        q_padded_buffer=q_padded_buffer,
+        softmax_scale=1.0,
+    )
+    output = FlashMLASparseImpl._bf16_flash_mla_kernel(
+        impl,
+        q,
+        torch.empty((4, 576), device=DEVICE_TYPE),
+        torch.zeros((num_tokens, 1), dtype=torch.int32, device=DEVICE_TYPE),
+    )
+
+    assert output.shape == (num_tokens, num_heads, 1)
+    assert captured_q[0].data_ptr() == q_padded_buffer[1].data_ptr()
+    torch.testing.assert_close(
+        captured_q[0][:, :num_heads],
+        torch.ones_like(captured_q[0][:, :num_heads]),
+    )
+    torch.testing.assert_close(
+        captured_q[0][:, num_heads:],
+        torch.zeros_like(captured_q[0][:, num_heads:]),
+    )
+
+
+def test_flashmla_materialization_does_not_reinterpret_packed_query_as_padded(
+    monkeypatch,
+):
+    num_tokens = 2
+    num_heads = 2
+    padded_heads = 4
+    head_dim = 3
+    q_padded_buffer = torch.full(
+        (num_tokens, padded_heads, head_dim),
+        float("nan"),
+        device=DEVICE_TYPE,
+    )
+    q = q_padded_buffer.view(-1)[: num_tokens * num_heads * head_dim].view(
+        num_tokens, num_heads, head_dim
+    )
+    q.copy_(torch.arange(q.numel(), device=DEVICE_TYPE, dtype=q.dtype).view_as(q))
+    expected = q.clone()
+
+    captured_q = []
+
+    def sparse_fwd(kernel_q, *args, **kwargs):  # noqa: ARG001
+        captured_q.append(kernel_q)
+        output = kernel_q.new_zeros((num_tokens, padded_heads, 1))
+        return output, None, None
+
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.mla.flashmla_sparse.flash_mla_sparse_fwd",
+        sparse_fwd,
+    )
+
+    impl = SimpleNamespace(
+        num_heads=num_heads,
+        prefill_padding=padded_heads,
+        q_padded_buffer=q_padded_buffer,
+        softmax_scale=1.0,
+    )
+    FlashMLASparseImpl._bf16_flash_mla_kernel(
+        impl,
+        q,
+        torch.empty((4, 576), device=DEVICE_TYPE),
+        torch.zeros((num_tokens, 1), dtype=torch.int32, device=DEVICE_TYPE),
+    )
+
+    assert captured_q[0].data_ptr() != q_padded_buffer.data_ptr()
+    torch.testing.assert_close(captured_q[0][:, :num_heads], expected)
+    torch.testing.assert_close(
+        captured_q[0][:, num_heads:],
+        torch.zeros_like(captured_q[0][:, num_heads:]),
+    )
+
+
+@pytest.mark.parametrize(
+    "owner_prefill_mode,num_heads,num_prefills,num_decodes,expect_mixed",
+    [
+        ("auto", 64, 1, 0, True),
+        ("auto", 16, 1, 0, True),
+        ("direct", 64, 1, 0, True),
+        ("materialize", 64, 1, 0, False),
+        ("materialize", 16, 1, 0, False),
+        ("materialize", 64, 1, 1, True),
+        ("materialize", 64, 0, 1, False),
+    ],
+)
+def test_flashmla_direct_pcp_selects_requested_prefill_path(
+    monkeypatch,
+    owner_prefill_mode: str,
+    num_heads: int,
+    num_prefills: int,
+    num_decodes: int,
+    expect_mixed: bool,
+):
+    monkeypatch.setenv("VLLM_PCP_OWNER_PREFILL_MODE", owner_prefill_mode)
+    metadata = SimpleNamespace(num_prefills=num_prefills, num_decodes=num_decodes)
+    monkeypatch.setattr(
+        SparseMLACommonMetadataBuilder,
+        "build",
+        lambda *args, **kwargs: metadata,  # noqa: ARG005
+    )
+    builder = object.__new__(FlashMLASparseMetadataBuilder)
+    builder.num_heads = num_heads
+    builder.use_peer_pcp_fp8 = True
+    builder.use_fp8_kv_cache = True
+    mixed_metadata = object()
+    separate_metadata = object()
+    builder._build_fp8_mixed_decode_prefill = MethodType(  # type: ignore[method-assign]
+        lambda self, common: mixed_metadata,
+        builder,  # noqa: ARG005
+    )
+    builder._build_fp8_separate_prefill_decode = MethodType(  # type: ignore[method-assign]
+        lambda self, common, metadata: separate_metadata,  # noqa: ARG005
+        builder,
+    )
+
+    result = FlashMLASparseMetadataBuilder.build(
+        builder,
+        common_prefix_len=0,
+        common_attn_metadata=object(),  # type: ignore[arg-type]
+    )
+
+    assert result.fp8_use_mixed_batch is expect_mixed
+    expected_metadata = mixed_metadata if expect_mixed else separate_metadata
+    assert result.fp8_extra_metadata is expected_metadata

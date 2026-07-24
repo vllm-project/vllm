@@ -125,6 +125,254 @@ def split_indexer_prefill_chunks(
     return chunks
 
 
+_PCP_ROUTE_NUM_FIELDS = 4
+
+
+@dataclass
+class DeepseekV32IndexerPCPRoutedPrefillChunkMetadata:
+    """One collective-free compute chunk of the PCP+DCP prefill query route.
+
+    Every DCP owner builds the same list of chunks and evaluates the same
+    rank-major source query rows. Only the owner-local KV bounds differ.
+    Candidate exchange happens once after all chunks have been evaluated.
+    """
+
+    block_table: torch.Tensor
+    cu_seqlen_ks: torch.Tensor
+    cu_seqlen_ke: torch.Tensor
+    local_cu_seq_lens: torch.Tensor
+    source_ranks: torch.Tensor
+    source_token_indices: torch.Tensor
+    local_total_seq_lens: int
+    max_local_total_seq_lens: int
+
+
+def _dcp_local_count_interleave_one(length: int, rank: int, world: int) -> int:
+    if length <= rank:
+        return 0
+    return (length + world - 1 - rank) // world
+
+
+def build_pcp_routed_prefill_chunks_from_gathered(
+    gathered_req_metadata_cpu: torch.Tensor,
+    gathered_block_table: torch.Tensor,
+    *,
+    req_capacity_per_rank: int,
+    dcp_rank: int,
+    dcp_world_size: int,
+    workspace_size: int,
+    max_logits_bytes: int,
+    source_token_capacity_per_rank: int | None = None,
+) -> list[DeepseekV32IndexerPCPRoutedPrefillChunkMetadata]:
+    """Build an identical PCP source-row plan on every DCP owner.
+
+    ``gathered_req_metadata_cpu`` and ``gathered_block_table`` are fixed-shape,
+    rank-major all-gathers. Invalid padded request rows have ``valid == 0``.
+    The CPU descriptor is intentionally small; using it to plan chunks keeps
+    all owners on exactly the same collective schedule even when DualChunkSwap
+    gives them uneven request and token counts.
+
+    Only interleave-one DCP is supported. The metadata builder rejects other
+    layouts before calling this helper.
+    """
+    if gathered_req_metadata_cpu.device.type != "cpu":
+        raise ValueError("PCP route request metadata must be on CPU.")
+    if gathered_req_metadata_cpu.dtype != torch.int32:
+        raise ValueError("PCP route request metadata must use int32.")
+    if gathered_req_metadata_cpu.ndim != 2 or gathered_req_metadata_cpu.shape[1] != (
+        _PCP_ROUTE_NUM_FIELDS
+    ):
+        raise ValueError(
+            "PCP route request metadata must have shape [rows, 4], got "
+            f"{tuple(gathered_req_metadata_cpu.shape)}."
+        )
+    if dcp_world_size <= 1 or not 0 <= dcp_rank < dcp_world_size:
+        raise ValueError(
+            f"Invalid DCP route rank/world: rank={dcp_rank}, world={dcp_world_size}."
+        )
+    expected_rows = dcp_world_size * req_capacity_per_rank
+    if gathered_req_metadata_cpu.shape[0] != expected_rows:
+        raise ValueError(
+            "PCP route request metadata is not fixed rank-major shape: "
+            f"rows={gathered_req_metadata_cpu.shape[0]}, expected={expected_rows}."
+        )
+    if gathered_block_table.ndim != 2 or gathered_block_table.shape[0] != expected_rows:
+        raise ValueError(
+            "PCP route block table must align with request metadata, got "
+            f"{tuple(gathered_block_table.shape)} for {expected_rows} rows."
+        )
+    if workspace_size <= 0 or max_logits_bytes < 4:
+        raise ValueError("PCP route workspace and logits budgets must be positive.")
+
+    # (gathered row, source rank, query start, query len, global seq len)
+    requests: list[tuple[int, int, int, int, int]] = []
+    seen_source_rows: set[tuple[int, int]] = set()
+    for gathered_row, row in enumerate(gathered_req_metadata_cpu.tolist()):
+        valid, query_start, query_len, seq_len = row
+        if valid == 0:
+            if query_len != 0:
+                raise ValueError(
+                    "Padded PCP route request rows must have zero query length."
+                )
+            continue
+        if valid != 1:
+            raise ValueError(f"PCP route valid flag must be 0 or 1, got {valid}.")
+        source_rank = gathered_row // req_capacity_per_rank
+        if query_start < 0 or query_len <= 0:
+            raise ValueError(
+                "PCP route query bounds must be non-negative and non-empty, got "
+                f"start={query_start}, len={query_len}."
+            )
+        if seq_len < query_len:
+            raise ValueError(
+                "PCP route sequence length cannot be shorter than its query: "
+                f"seq_len={seq_len}, query_len={query_len}."
+            )
+        if (
+            source_token_capacity_per_rank is not None
+            and query_start + query_len > source_token_capacity_per_rank
+        ):
+            raise ValueError(
+                "PCP route query rows exceed the fixed source payload: "
+                f"stop={query_start + query_len}, "
+                f"capacity={source_token_capacity_per_rank}."
+            )
+        for source_token_idx in range(query_start, query_start + query_len):
+            source_row = (source_rank, source_token_idx)
+            if source_row in seen_source_rows:
+                raise ValueError(
+                    "PCP route contains a duplicate source query row: "
+                    f"rank={source_rank}, token={source_token_idx}."
+                )
+            seen_source_rows.add(source_row)
+        max_local_len = _dcp_local_count_interleave_one(seq_len, 0, dcp_world_size)
+        if max_local_len > workspace_size:
+            raise RuntimeError(
+                "A PCP-routed sparse-indexer request exceeds the KV gather "
+                f"workspace: required={max_local_len}, capacity={workspace_size}."
+            )
+        requests.append((gathered_row, source_rank, query_start, query_len, seq_len))
+
+    if not requests:
+        return []
+
+    max_logits_elems = max_logits_bytes // 4
+    # Each entry is (request start, request stop, flattened query start/stop).
+    chunk_specs: list[tuple[int, int, int, int]] = []
+    req_end = 0
+    while req_end < len(requests):
+        req_start = req_end
+        chunk_m = 0
+        chunk_n = 0
+        while req_end < len(requests):
+            _, _, _, query_len, seq_len = requests[req_end]
+            max_local_len = _dcp_local_count_interleave_one(seq_len, 0, dcp_world_size)
+            new_m = chunk_m + query_len
+            new_n = chunk_n + max_local_len
+            if new_n <= workspace_size and new_m * new_n <= max_logits_elems:
+                chunk_m = new_m
+                chunk_n = new_n
+                req_end += 1
+            else:
+                break
+
+        if req_end == req_start:
+            _, _, _, chunk_m, seq_len = requests[req_end]
+            chunk_n = _dcp_local_count_interleave_one(seq_len, 0, dcp_world_size)
+            req_end += 1
+
+        max_query_rows = (
+            max(1, max_logits_elems // chunk_n) if chunk_n > 0 else max(1, chunk_m)
+        )
+        for query_start in range(0, chunk_m, max_query_rows):
+            query_stop = min(query_start + max_query_rows, chunk_m)
+            chunk_specs.append((req_start, req_end, query_start, query_stop))
+
+    device = gathered_block_table.device
+    chunks: list[DeepseekV32IndexerPCPRoutedPrefillChunkMetadata] = []
+    for req_start, req_end, query_slice_start, query_slice_stop in chunk_specs:
+        chunk_requests = requests[req_start:req_end]
+        gathered_rows = torch.tensor(
+            [request[0] for request in chunk_requests],
+            dtype=torch.int64,
+            device=device,
+        )
+        chunk_block_table = gathered_block_table.index_select(0, gathered_rows)
+
+        local_counts = [
+            _dcp_local_count_interleave_one(request[4], dcp_rank, dcp_world_size)
+            for request in chunk_requests
+        ]
+        local_cu_seq_lens_cpu = [0]
+        for count in local_counts:
+            local_cu_seq_lens_cpu.append(local_cu_seq_lens_cpu[-1] + count)
+        local_cu_seq_lens = torch.tensor(
+            local_cu_seq_lens_cpu, dtype=torch.int32, device=device
+        )
+
+        max_local_total_seq_lens = max(
+            sum(
+                _dcp_local_count_interleave_one(request[4], owner_rank, dcp_world_size)
+                for request in chunk_requests
+            )
+            for owner_rank in range(dcp_world_size)
+        )
+
+        source_ranks: list[int] = []
+        source_token_indices: list[int] = []
+        row_request_indices: list[int] = []
+        global_causal_lens: list[int] = []
+        for chunk_req_idx, request in enumerate(chunk_requests):
+            _, source_rank, query_start, query_len, seq_len = request
+            context_start = seq_len - query_len
+            for query_offset in range(query_len):
+                source_ranks.append(source_rank)
+                source_token_indices.append(query_start + query_offset)
+                row_request_indices.append(chunk_req_idx)
+                global_causal_lens.append(context_start + query_offset + 1)
+
+        row_slice = slice(query_slice_start, query_slice_stop)
+        source_ranks = source_ranks[row_slice]
+        source_token_indices = source_token_indices[row_slice]
+        row_request_indices = row_request_indices[row_slice]
+        global_causal_lens = global_causal_lens[row_slice]
+
+        cu_seqlen_ks_cpu: list[int] = []
+        cu_seqlen_ke_cpu: list[int] = []
+        for request_idx, global_causal_len in zip(
+            row_request_indices, global_causal_lens
+        ):
+            row_start = local_cu_seq_lens_cpu[request_idx]
+            causal_count = _dcp_local_count_interleave_one(
+                global_causal_len, dcp_rank, dcp_world_size
+            )
+            cu_seqlen_ks_cpu.append(row_start)
+            cu_seqlen_ke_cpu.append(row_start + causal_count)
+
+        chunks.append(
+            DeepseekV32IndexerPCPRoutedPrefillChunkMetadata(
+                block_table=chunk_block_table,
+                cu_seqlen_ks=torch.tensor(
+                    cu_seqlen_ks_cpu, dtype=torch.int32, device=device
+                ),
+                cu_seqlen_ke=torch.tensor(
+                    cu_seqlen_ke_cpu, dtype=torch.int32, device=device
+                ),
+                local_cu_seq_lens=local_cu_seq_lens,
+                source_ranks=torch.tensor(
+                    source_ranks, dtype=torch.int32, device=device
+                ),
+                source_token_indices=torch.tensor(
+                    source_token_indices, dtype=torch.int64, device=device
+                ),
+                local_total_seq_lens=local_cu_seq_lens_cpu[-1],
+                max_local_total_seq_lens=max_local_total_seq_lens,
+            )
+        )
+
+    return chunks
+
+
 class DeepseekV32IndexerBackend(AttentionBackend):
     @classmethod
     def supports_pcp(cls) -> bool:
@@ -196,6 +444,12 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     local_cu_seq_lens: torch.Tensor | None = None
     local_total_seq_lens: int = 0
     max_local_total_seq_lens: int = 0
+    pcp_owner_block_tables: torch.Tensor | None = None
+    # Lazily translated once on the first Indexer layer, then reused by every
+    # remaining Indexer layer in this forward. Metadata is rebuilt each
+    # scheduler step, so the cache cannot outlive its source BlockTable.
+    pcp_peer_block_table: torch.Tensor | None = None
+    pcp_peer_block_table_key: tuple[int, int, int] | None = None
 
 
 _BUILD_PREFILL_CHUNK_METADATA_INPUT_VARIANTS = (
@@ -406,6 +660,10 @@ _BUILD_PREFILL_CHUNK_METADATA_KERNEL = BuildPrefillChunkMetadataKernel()
 @dataclass
 class DeepseekV32IndexerPrefillMetadata:
     chunks: list[DeepseekV32IndexerPrefillChunkMetadata]
+    pcp_routed_chunks: list[DeepseekV32IndexerPCPRoutedPrefillChunkMetadata] | None = (
+        None
+    )
+    pcp_source_stride: int = 0
 
 
 @dataclass
@@ -476,15 +734,49 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.pcp_world_size = parallel_config.prefill_context_parallel_size
         self.use_pcp = self.pcp_world_size > 1
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
-        # The DCP sparse-indexer code is parameterized by interleave size, but
-        # interleave > 1 is not yet validated end-to-end (gsm8k parity fails),
-        # so fail closed here rather than silently produce wrong output.
-        if self.dcp_world_size > 1 and self.cp_kv_cache_interleave_size > 1:
+        self.use_pcp_dcp_direct_prefill = (
+            self.use_pcp and self.dcp_world_size > 1 and envs.VLLM_USE_PCP_OWNER_HISTORY
+        )
+        if self.use_pcp_dcp_direct_prefill and (
+            self.cp_kv_cache_interleave_size != self.kv_cache_spec.block_size
+        ):
+            raise NotImplementedError(
+                "Direct PCP sparse-indexer prefill requires page-granular "
+                "ownership: cp_kv_cache_interleave_size must equal the indexer "
+                f"block size ({self.kv_cache_spec.block_size})."
+            )
+        if (
+            self.dcp_world_size > 1
+            and self.cp_kv_cache_interleave_size > 1
+            and not self.use_pcp_dcp_direct_prefill
+        ):
             raise NotImplementedError(
                 "DCP sparse indexer currently supports only "
                 f"cp_kv_cache_interleave_size=1 (got "
                 f"{self.cp_kv_cache_interleave_size})."
             )
+        self.use_pcp_dcp_prefill_route = (
+            self.use_pcp
+            and self.dcp_world_size > 1
+            and not self.use_pcp_dcp_direct_prefill
+        )
+        if self.use_pcp_dcp_prefill_route:
+            if self.dcp_world_size != self.pcp_world_size:
+                raise NotImplementedError(
+                    "Sparse-indexer PCP+DCP query routing requires DCP to span "
+                    "exactly the PCP axis: "
+                    f"PCP={self.pcp_world_size}, DCP={self.dcp_world_size}."
+                )
+            pcp_rank = get_pcp_group().rank_in_group
+            if pcp_rank != self.dcp_rank:
+                raise NotImplementedError(
+                    "Sparse-indexer PCP+DCP query routing requires identical "
+                    "PCP and DCP rank order: "
+                    f"pcp_rank={pcp_rank}, dcp_rank={self.dcp_rank}."
+                )
+        # DualChunkSwap can materialize two disjoint local segments for every
+        # global request. Match PCPManager's local InputBuffers capacity.
+        self.pcp_route_req_capacity = 2 * scheduler_config.max_num_seqs
         # NOTE(Chen):an estimated max size of flattened_kv. Need to double check.
         self.max_prefill_buffer_size = get_max_prefill_buffer_size(self.vllm_config)
         self.num_speculative_tokens = (
@@ -769,6 +1061,89 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.global_decode_seq_lens_buffer[actual_expanded:num_decode_tokens] = 0
         return self.global_decode_seq_lens_buffer[:num_decode_tokens]
 
+    def _build_pcp_dcp_prefill_route(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        num_decodes: int,
+        num_prefills: int,
+    ) -> list[DeepseekV32IndexerPCPRoutedPrefillChunkMetadata]:
+        """Gather fixed request descriptors, then build an aligned route.
+
+        This method is called on every PCP/DCP rank even when the local
+        DualChunkSwap partition has no prefill rows. That is required both for
+        collective safety and for owners with no source rows to evaluate the
+        other ranks' rows against their local history.
+        """
+        num_reqs = common_attn_metadata.num_reqs
+        req_capacity = self.pcp_route_req_capacity
+        if num_reqs > req_capacity:
+            raise RuntimeError(
+                "PCP sparse-indexer route request count exceeds its fixed "
+                f"capacity: {num_reqs} > {req_capacity}."
+            )
+
+        local_req_metadata_cpu = torch.zeros(
+            (req_capacity, _PCP_ROUTE_NUM_FIELDS), dtype=torch.int32
+        )
+        if num_prefills > 0:
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+            if seq_lens_cpu is None:
+                raise RuntimeError(
+                    "PCP sparse-indexer routing requires exact prefill "
+                    "seq_lens_cpu_upper_bound metadata."
+                )
+            query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+            for req_idx in range(num_decodes, num_decodes + num_prefills):
+                query_start = int(query_start_loc_cpu[req_idx].item())
+                query_stop = int(query_start_loc_cpu[req_idx + 1].item())
+                query_len = query_stop - query_start
+                if query_len <= 0:
+                    continue
+                seq_len = int(seq_lens_cpu[req_idx].item())
+                local_req_metadata_cpu[req_idx] = torch.tensor(
+                    (1, query_start, query_len, seq_len), dtype=torch.int32
+                )
+
+        device = common_attn_metadata.block_table_tensor.device
+        local_req_metadata = local_req_metadata_cpu.to(device=device)
+        block_table = common_attn_metadata.block_table_tensor
+        if block_table.ndim != 2 or block_table.dtype != torch.int32:
+            raise RuntimeError(
+                "PCP sparse-indexer routing requires a 2D int32 block table, "
+                f"got shape={tuple(block_table.shape)}, dtype={block_table.dtype}."
+            )
+        local_block_table = torch.zeros(
+            (req_capacity, block_table.shape[1]),
+            dtype=block_table.dtype,
+            device=device,
+        )
+        local_block_table[:num_reqs].copy_(block_table[:num_reqs])
+
+        # Both all-gathers are fixed shape. No collective is issued from the
+        # variable compute-chunk loop produced below.
+        gathered_req_metadata = get_dcp_group().all_gather(local_req_metadata, dim=0)
+        gathered_block_table = get_dcp_group().all_gather(local_block_table, dim=0)
+        gathered_req_metadata_cpu = gathered_req_metadata.to("cpu")
+
+        positions = common_attn_metadata.positions
+        if positions is None:
+            raise RuntimeError(
+                "PCP sparse-indexer routing requires the fixed padded "
+                "positions payload to validate source query rows."
+            )
+        source_stride = positions.shape[0]
+        max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+        return build_pcp_routed_prefill_chunks_from_gathered(
+            gathered_req_metadata_cpu,
+            gathered_block_table,
+            req_capacity_per_rank=req_capacity,
+            dcp_rank=self.dcp_rank,
+            dcp_world_size=self.dcp_world_size,
+            workspace_size=self.max_prefill_buffer_size,
+            max_logits_bytes=max_logits_bytes,
+            source_token_capacity_per_rank=source_stride,
+        )
+
     def build(
         self,
         common_prefix_len: int,
@@ -819,7 +1194,26 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             compressed_seq_lens = seq_lens // self.compress_ratio
 
         prefill_metadata = None
-        if num_prefills > 0:
+        if self.use_pcp_dcp_prefill_route:
+            positions = common_attn_metadata.positions
+            if positions is None:
+                raise RuntimeError(
+                    "PCP sparse-indexer routing requires the fixed padded "
+                    "positions payload."
+                )
+            pcp_routed_chunks = self._build_pcp_dcp_prefill_route(
+                common_attn_metadata,
+                num_decodes,
+                num_prefills,
+            )
+            # Keep metadata present on every rank, including ranks whose local
+            # DualChunkSwap partition has zero prefill rows.
+            prefill_metadata = DeepseekV32IndexerPrefillMetadata(
+                chunks=[],
+                pcp_routed_chunks=pcp_routed_chunks,
+                pcp_source_stride=positions.shape[0],
+            )
+        elif num_prefills > 0:
             # This CPU value is an upper bound for async-spec extend rows.  It
             # is safe for chunking/allocation because CUDA metadata below is
             # built from exact device seq_lens and gather ignores the tail.
@@ -860,12 +1254,28 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     self.compress_ratio,
                     query_slice=query_slice,
                     skip_kv_gather=query_slice.start > 0,
-                    dcp_rank=self.dcp_rank,
-                    dcp_world_size=self.dcp_world_size,
+                    dcp_rank=(0 if self.use_pcp_dcp_direct_prefill else self.dcp_rank),
+                    dcp_world_size=(
+                        1 if self.use_pcp_dcp_direct_prefill else self.dcp_world_size
+                    ),
                     cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
                 )
                 # Skip when total_seq_lens is 0 (i.e., no compressed token).
                 if metadata is not None:
+                    if self.use_pcp_dcp_direct_prefill:
+                        # DCP BlockTables replicate scheduler virtual block IDs
+                        # on every owner; only the token offset within a page is
+                        # localized. Therefore one rank-local table is also the
+                        # physical-block table for every owner. Keep this
+                        # zero-stride alias explicit: the runtime translator
+                        # adds the owner-specific VMM rank stride.
+                        metadata.pcp_owner_block_tables = (
+                            metadata.block_table.unsqueeze(0).expand(
+                                self.dcp_world_size,
+                                -1,
+                                -1,
+                            )
+                        )
                     chunks.append(metadata)
             prefill_metadata = DeepseekV32IndexerPrefillMetadata(chunks)
 

@@ -6,6 +6,9 @@ import pytest
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.v1.attention.backends.mla.sparse_utils import (
+    build_rotated_dcp_peer_block_table,
+)
 
 # DeepSeek V3 MLA dimensions
 NOPE_DIM = 512  # NoPE latent dimension (FP8 quantized in cache)
@@ -314,6 +317,96 @@ def test_cp_gather_fp8_shuffled_blocks():
         dst[:, :NOPE_DIM], expected[:, :NOPE_DIM], atol=1e-3, rtol=1e-2
     )
     assert torch.equal(dst[:, NOPE_DIM:], expected[:, NOPE_DIM:])
+
+
+def test_cp_gather_fp8_rank_major_owner_translated_full_prefix():
+    """Compose the owner block-table translation with FP8 prefix gathering.
+
+    A single CUDA allocation models the flattened rank-major VMM view.  Each of
+    four owner segments has padding between its two shuffled physical blocks.
+    The translated table then gathers a full eight-page logical prefix through
+    all four segments.
+    """
+    block_size = 64
+    dcp_size = 4
+    peer_block_stride = 6
+    owner_local_blocks = torch.tensor([[2, 0]], dtype=torch.int32, device="cuda")
+    owner_block_tables = owner_local_blocks.unsqueeze(0).expand(dcp_size, -1, -1)
+    translated_block_table = build_rotated_dcp_peer_block_table(
+        owner_block_tables,
+        local_rank=0,
+        peer_block_stride=peer_block_stride,
+        cp_kv_cache_interleave_size=block_size,
+        block_size=block_size,
+        BLOCK_N=8,
+    )
+    expected_blocks = torch.tensor(
+        [[2, 8, 14, 20, 0, 6, 12, 18]],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    torch.testing.assert_close(translated_block_table, expected_blocks)
+
+    num_logical_pages = expected_blocks.shape[1]
+    full_prefix_len = num_logical_pages * block_size
+    (
+        canonical_cache,
+        _canonical_block_table,
+        _canonical_workspace_starts,
+        _num_reqs,
+        total_tokens,
+        expected,
+    ) = _build_test_case([full_prefix_len], block_size, seed=314)
+    assert total_tokens == full_prefix_len
+
+    # Model a rank-major peer view with allocation padding.  Copy each logical
+    # page into the translated owner segment while leaving every other block as
+    # a decoy.  Reading an unrotated or unpadded block ID therefore cannot
+    # accidentally match the reference.
+    peer_cache = torch.full(
+        (dcp_size * peer_block_stride, block_size, ENTRY_BYTES),
+        0xA5,
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    for logical_page, peer_block in enumerate(expected_blocks[0].tolist()):
+        peer_cache[peer_block].copy_(canonical_cache[logical_page])
+
+    workspace = torch.empty(
+        total_tokens,
+        NOPE_DIM + ROPE_DIM,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    workspace_starts = torch.zeros(1, dtype=torch.int32, device="cuda")
+    ops.cp_gather_and_upconvert_fp8_kv_cache(
+        peer_cache,
+        workspace,
+        translated_block_table,
+        workspace_starts,
+        1,
+    )
+
+    torch.testing.assert_close(
+        workspace[:, :NOPE_DIM],
+        expected[:, :NOPE_DIM],
+        atol=1e-3,
+        rtol=1e-2,
+    )
+    assert torch.equal(workspace[:, NOPE_DIM:], expected[:, NOPE_DIM:])
+
+    # Make the intended boundary coverage explicit: first/last token in a page
+    # and the first token after each owner/page transition.
+    boundary_rows = torch.tensor(
+        [0, 63, 64, 127, 255, 256, 319, 320, 511],
+        device="cuda",
+    )
+    torch.testing.assert_close(
+        workspace[boundary_rows],
+        expected[boundary_rows],
+        atol=1e-3,
+        rtol=1e-2,
+    )
 
 
 @pytest.mark.parametrize(

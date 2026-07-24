@@ -5,11 +5,16 @@ import torch.nn as nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
 import vllm._custom_ops as ops
+from vllm import envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention import MLAAttention
+from vllm.model_executor.layers.attention.pcp import (
+    maybe_gather_mla_latent_cache_inputs,
+)
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -31,8 +36,33 @@ from vllm.model_executor.models.deepseek_v2 import (
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import _encode_layer_name, is_quantized_kv_cache
+from vllm.v1.attention.backends.mla.owner_compute import (
+    should_use_owner_compute,
+    validate_owner_prefill_materialization_support,
+)
+from vllm.v1.attention.backends.mla.owner_history import (
+    select_direct_owner_slot_mapping,
+    validate_direct_pcp_fused_cache_contract,
+)
+from vllm.v1.attention.backends.mla.owner_peer_slot_cache import (
+    OwnerPeerSlotCache,
+)
 
 from .kernels import fused_norm_rope, fused_q
+
+
+def _owner_history_uses_peer_slots(
+    impl: object,
+    attn_metadata: object,
+) -> bool:
+    """Whether the selected owner-history path consumes translated top-k slots."""
+    materialized_prefill = (
+        getattr(impl, "supports_owner_history_prefill_materialization", False)
+        and getattr(attn_metadata, "num_prefills", 0) > 0
+        and getattr(attn_metadata, "num_decodes", 0) == 0
+        and not getattr(attn_metadata, "fp8_use_mixed_batch", True)
+    )
+    return not materialized_prefill
 
 
 class DeepseekV32Indexer(nn.Module):
@@ -167,6 +197,7 @@ class DeepseekV32Attention(MLAAttention):
         config: DeepseekV2Config | DeepseekV3Config,
         prefix: str,
         topk_indices_buffer: torch.Tensor | None = None,
+        owner_peer_slot_cache: OwnerPeerSlotCache | None = None,
     ) -> None:
         quant_config = vllm_config.quant_config
         cache_config = vllm_config.cache_config
@@ -266,10 +297,17 @@ class DeepseekV32Attention(MLAAttention):
             topk_indices_buffer=topk_indices_buffer,
         )
 
+        parallel_config = vllm_config.parallel_config
+        self.handles_dcp_decode_internally = (
+            envs.VLLM_USE_PCP_OWNER_HISTORY
+            and parallel_config.prefill_context_parallel_size > 1
+            and parallel_config.decode_context_parallel_size > 1
+        )
         self.num_local_heads = num_local_heads
         self.qk_head_dim = qk_head_dim
         self.indexer = indexer
         self.topk_indices_buffer = topk_indices_buffer
+        self.owner_peer_slot_cache = owner_peer_slot_cache
         # Runtime toggle for index_share_for_mtp_iteration: MTP draft step 0
         # computes the top-k, steps 1+ set this True to reuse it.
         self.skip_topk = False
@@ -423,6 +461,38 @@ class DeepseekV32Attention(MLAAttention):
         )
         return self.o_proj(output)[0]
 
+    def _write_mqa_output(
+        self,
+        attn_out: torch.Tensor,
+        output: torch.Tensor,
+        *,
+        num_actual: int,
+        owner_compute: bool,
+    ) -> None:
+        if owner_compute and self.impl.owner_compute_returns_projected_values:
+            expected_shape = (
+                num_actual,
+                self.num_local_heads,
+                self.v_head_dim,
+            )
+            if attn_out.shape != expected_shape:
+                raise RuntimeError(
+                    "Projected owner-compute output has an invalid shape: "
+                    f"{tuple(attn_out.shape)} != {expected_shape}."
+                )
+            output[:num_actual].view(expected_shape).copy_(attn_out)
+            return
+
+        x = attn_out.view(
+            num_actual, self.num_local_heads, self.kv_lora_rank
+        ).transpose(0, 1)
+        out = (
+            output[:num_actual]
+            .view(num_actual, self.num_local_heads, self.v_head_dim)
+            .transpose(0, 1)
+        )
+        torch.bmm(x, self.W_UV, out=out)
+
     @eager_break_during_capture
     def _fused_attention(
         self,
@@ -482,6 +552,59 @@ class DeepseekV32Attention(MLAAttention):
             mla_kv_cache = self.kv_cache
             mla_k_scale = self._k_scale
 
+        pcp_peer_mla_kv_cache = None
+        pcp_peer_indexer_k_cache = None
+        pcp_rank = 0
+        pcp_size = 1
+        pcp_owner_slot_mapping = None
+        owner_history_expected = False
+        if attn_metadata is not None:
+            pcp_peer_mla_kv_cache = getattr(self, "pcp_peer_kv_cache", None)
+            if pcp_peer_mla_kv_cache is not None:
+                pcp_group = get_pcp_group()
+                pcp_rank = pcp_group.rank_in_group
+                pcp_size = pcp_group.world_size
+                owner_history_expected = envs.VLLM_USE_PCP_OWNER_HISTORY
+                if not owner_history_expected:
+                    raise RuntimeError(
+                        "Peer-mapped PCP caches require VLLM_USE_PCP_OWNER_HISTORY=1."
+                    )
+                if self.indexer is not None:
+                    pcp_peer_indexer_k_cache = getattr(
+                        self.indexer.k_cache, "pcp_peer_kv_cache", None
+                    )
+                    validate_direct_pcp_fused_cache_contract(
+                        mla_slot=mla_slot,
+                        indexer_slot=slot_mapping.get(self.indexer.k_cache.prefix),
+                        mla_peer_cache=pcp_peer_mla_kv_cache,
+                        indexer_peer_cache=pcp_peer_indexer_k_cache,
+                    )
+                pcp_owner_slot_mapping = select_direct_owner_slot_mapping(
+                    mla_slot,
+                    owner_history_expected=owner_history_expected,
+                    pcp_rank=pcp_rank,
+                    pcp_size=pcp_size,
+                    num_tokens=positions.shape[0],
+                    device=positions.device,
+                )
+        # PCP validation rejects speculative decoding for this direct path.
+        # Retain a runtime guard so future MTP plumbing cannot silently consume
+        # stale physical slots after logical top-k compaction.
+        if owner_history_expected and self.skip_topk:
+            raise RuntimeError(
+                "Owner-sharded direct history does not yet support MTP "
+                "top-k reuse or compaction."
+            )
+
+        # Keep the specialized model implementation usable as the correctness
+        # baseline when direct peer caches are disabled. Its local inputs are
+        # PCP-partitioned, so fused local cache writes would otherwise use the
+        # rank-0 slot row on every rank. Materialize the prepared BF16 values
+        # instead and feed them through the ordinary collective update path.
+        use_pcp_collective_cache_update = (
+            attn_metadata is not None and self.use_pcp and pcp_peer_mla_kv_cache is None
+        )
+
         q_c = fused_norm_rope(
             positions,
             q_c,
@@ -498,14 +621,44 @@ class DeepseekV32Attention(MLAAttention):
             indexer_k_norm_eps,
             indexer_k_rope_cos_sin_cache,
             self.topk_indices_buffer,
-            slot_mapping=mla_slot,
-            indexer_k_cache=indexer_k_cache,
-            mla_kv_cache=mla_kv_cache,
+            slot_mapping=None if use_pcp_collective_cache_update else mla_slot,
+            indexer_k_cache=(
+                None if use_pcp_collective_cache_update else indexer_k_cache
+            ),
+            mla_kv_cache=None if use_pcp_collective_cache_update else mla_kv_cache,
+            pcp_peer_indexer_k_cache=pcp_peer_indexer_k_cache,
+            pcp_peer_mla_kv_cache=pcp_peer_mla_kv_cache,
+            pcp_rank=pcp_rank,
+            pcp_size=pcp_size,
+            pcp_owner_slot_mapping=pcp_owner_slot_mapping,
             mla_kv_cache_dtype=self.kv_cache_dtype,
             mla_k_scale=mla_k_scale,
             has_indexer=has_indexer,
             index_rope_interleave=self._index_rope_interleave,
+            materialize_cache_inputs=use_pcp_collective_cache_update,
         )
+        if pcp_peer_mla_kv_cache is not None:
+            self.pcp_peer_cache_fence()
+        elif use_pcp_collective_cache_update:
+            assert attn_metadata is not None and mla_slot is not None
+            kv_for_cache, kpe_for_cache, cache_slot_mapping = (
+                maybe_gather_mla_latent_cache_inputs(
+                    kv_c,
+                    k_pe,
+                    mla_slot,
+                    attn_metadata.num_decode_tokens,  # type: ignore[attr-defined]
+                    True,
+                )
+            )
+            assert cache_slot_mapping is not None
+            self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
+                kv_for_cache,
+                kpe_for_cache,
+                self.kv_cache,
+                cache_slot_mapping,
+                self.kv_cache_dtype,
+                self._k_scale,
+            )
 
         if self._q_b_skinny_max is not None and q_c.shape[0] <= 16:
             q = self._decode_m_gemm(q_c, self.q_b_proj.weight, self._q_b_skinny_max)
@@ -539,13 +692,44 @@ class DeepseekV32Attention(MLAAttention):
         )
 
         if self.indexer is not None and not self.skip_topk:
+            dcp_world_size = get_dcp_group().world_size
+            dcp_rank = get_dcp_group().rank_in_group if dcp_world_size > 1 else 0
+            pcp_peer_indexer_read_cache = None
+            pcp_peer_indexer_block_stride = None
+            if owner_history_expected:
+                from vllm.model_executor.layers.attention.pcp_peer_cache import (
+                    make_rank_major_block_tensor_view,
+                )
+
+                pcp_peer_indexer_read_cache = getattr(
+                    self.indexer.k_cache,
+                    "pcp_peer_block_kv_cache",
+                    None,
+                )
+                if pcp_peer_indexer_read_cache is None:
+                    (
+                        pcp_peer_indexer_read_cache,
+                        pcp_peer_indexer_block_stride,
+                    ) = make_rank_major_block_tensor_view(
+                        self.indexer.k_cache.pcp_peer_kv_cache
+                    )
+                    self.indexer.k_cache.pcp_peer_block_kv_cache = (
+                        pcp_peer_indexer_read_cache
+                    )
+                    self.indexer.k_cache.pcp_peer_block_stride = (
+                        pcp_peer_indexer_block_stride
+                    )
+                else:
+                    pcp_peer_indexer_block_stride = (
+                        self.indexer.k_cache.pcp_peer_block_stride
+                    )
             torch.ops.vllm.sparse_attn_indexer(
                 q_c,
                 _encode_layer_name(self.indexer.k_cache.prefix),
                 self.indexer.k_cache.kv_cache,
                 index_q_fp8,
                 None,  # q_scale folded into weights on the fp8 path
-                None,  # k unused when skip_k_cache_insert=True
+                index_k if use_pcp_collective_cache_update else None,
                 index_weights_out,
                 self.indexer.quant_block_size,
                 self.indexer.scale_fmt,
@@ -554,38 +738,103 @@ class DeepseekV32Attention(MLAAttention):
                 self.indexer.max_model_len,
                 self.indexer.max_total_seq_len,
                 self.topk_indices_buffer,
-                True,  # skip_k_cache_insert
-                False,  # use_fp4_cache
+                skip_k_cache_insert=not use_pcp_collective_cache_update,
+                use_pcp=use_pcp_collective_cache_update,
+                use_fp4_cache=False,
+                dcp_rank=dcp_rank,
+                dcp_world_size=dcp_world_size,
+                cp_kv_cache_interleave_size=(
+                    self._vllm_config.parallel_config.cp_kv_cache_interleave_size
+                ),
                 # fused_norm_rope already cleared the topk buffer this forward.
                 skip_topk_buffer_clear=True,
+                pcp_peer_kv_cache=pcp_peer_indexer_read_cache,
+                pcp_peer_block_stride=pcp_peer_indexer_block_stride,
             )
+            if owner_history_expected and _owner_history_uses_peer_slots(
+                self.impl, attn_metadata
+            ):
+                if attn_metadata is None:
+                    raise RuntimeError(
+                        "Owner peer-slot refresh requires attention metadata."
+                    )
+                if self.owner_peer_slot_cache is None:
+                    raise RuntimeError(
+                        "Owner-sharded direct history requires a shared peer-slot "
+                        "cache."
+                    )
+                peer_block_stride = getattr(self, "pcp_peer_block_stride", None)
+                if not isinstance(peer_block_stride, int) or peer_block_stride <= 0:
+                    raise RuntimeError(
+                        "Owner peer-slot refresh requires a positive Main-KV peer "
+                        "block stride."
+                    )
+                num_actual = attn_metadata.num_actual_tokens
+                self.owner_peer_slot_cache.refresh(
+                    attn_metadata.req_id_per_token[:num_actual],
+                    attn_metadata.block_table,
+                    self.topk_indices_buffer[:num_actual],
+                    dcp_size=dcp_world_size,
+                    blocks_per_peer=peer_block_stride,
+                    cp_kv_cache_interleave_size=(
+                        attn_metadata.cp_kv_cache_interleave_size
+                    ),
+                    block_size=attn_metadata.block_size,
+                )
 
         if attn_metadata is None:
             output.zero_()
             return
 
         num_actual = attn_metadata.num_actual_tokens  # type: ignore[attr-defined]
-        kv_cache = self.kv_cache
+        use_owner_history = owner_history_expected
+        if use_owner_history and pcp_owner_slot_mapping is None:
+            raise RuntimeError(
+                "Owner-sharded PCP history requires a validated owner-slot mapping."
+            )
+        validate_owner_prefill_materialization_support(
+            owner_history_enabled=use_owner_history,
+            supports_materialization=getattr(
+                self.impl,
+                "supports_owner_history_prefill_materialization",
+                False,
+            ),
+        )
+        owner_compute = self.impl.supports_owner_compute and should_use_owner_compute(
+            owner_history_enabled=use_owner_history,
+            num_decodes=attn_metadata.num_decodes,
+            max_prefill_seq_len=attn_metadata.prefill_max_seq_len,
+        )
+        self.pcp_owner_compute = owner_compute
+        self.pcp_owner_compute_source_stride = (
+            positions.shape[0] if owner_compute else None
+        )
+        self.pcp_owner_history_direct = use_owner_history and not owner_compute
+        kv_cache = (
+            self.pcp_peer_block_kv_cache
+            if self.pcp_owner_history_direct
+            else self.kv_cache
+        )
         if self._fp8_kv_needs_view:
             kv_cache = kv_cache.view(torch.float8_e4m3fn)
         if self._fp8_query:
             # FlashInfer sparse: single packed fp8 query.
-            mqa_q_arg: torch.Tensor | tuple[torch.Tensor, torch.Tensor] = mqa_q[
-                :num_actual
-            ]
+            mqa_q_arg: torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+            mqa_q_arg = mqa_q if owner_compute else mqa_q[:num_actual]
         else:
             # FlashMLA sparse: bf16 (ql_nope, q_pe) tuple. mqa_q is the RoPE'd
             # q_pe; ql_nope is consumed directly.
-            mqa_q_arg = (ql_nope[:num_actual], mqa_q[:num_actual])
+            mqa_q_arg = (
+                (ql_nope, mqa_q)
+                if owner_compute
+                else (ql_nope[:num_actual], mqa_q[:num_actual])
+            )
         attn_out, _ = self.impl.forward_mqa(  # type: ignore[attr-defined]
             mqa_q_arg, kv_cache, attn_metadata, self
         )
-        x = attn_out.view(
-            num_actual, self.num_local_heads, self.kv_lora_rank
-        ).transpose(0, 1)
-        out = (
-            output[:num_actual]
-            .view(num_actual, self.num_local_heads, self.v_head_dim)
-            .transpose(0, 1)
+        self._write_mqa_output(
+            attn_out,
+            output,
+            num_actual=num_actual,
+            owner_compute=owner_compute,
         )
-        torch.bmm(x, self.W_UV, out=out)
