@@ -347,6 +347,8 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
     PlatformEnum.XPU: [
         XPUW8A16FP8LinearKernel,
         XPUW8A8FP8LinearKernel,
+        PerTensorTorchFP8ScaledMMLinearKernel,
+        ChannelWiseTorchFP8ScaledMMLinearKernel,
     ],
 }
 
