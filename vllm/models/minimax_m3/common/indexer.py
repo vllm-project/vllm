@@ -474,13 +474,15 @@ def select_indexer_impl_cls(
     *,
     topk_blocks: int,
     indexer_kv_dtype: IndexerKVDType = "bf16",
+    use_flashinfer_msa: bool = False,
 ) -> type[MiniMaxM3IndexerImpl]:
     """Pick the indexer impl off the platform, top-k count, and cache dtype.
 
     On Blackwell (SM100) with ``topk_blocks`` in ``(4, 8, 16, 32)`` (matching the
     main MSA attend), the fmha_sm100 score path + Triton top-k is used for both
-    bf16 and fp8 index caches. Everything else falls back to the Triton indexer
-    (bf16 only).
+    bf16 and fp8 index caches. On SM120/SM121, the flashinfer.msa_ops impl is
+    used when the caller passes the ``minimax_m3_use_flashinfer_msa`` verdict.
+    Everything else falls back to the Triton indexer (bf16 only).
     """
     if indexer_kv_dtype in ("mxfp4", "nvfp4"):
         raise NotImplementedError(
@@ -508,6 +510,19 @@ def select_indexer_impl_cls(
             indexer_kv_dtype,
         )
         return MiniMaxM3IndexerMSAImpl
+    if use_flashinfer_msa:
+        # Lazy import so non-SM12x / flashinfer-less setups never import it.
+        from vllm.models.minimax_m3.nvidia.indexer_flashinfer import (
+            MiniMaxM3IndexerFlashInferImpl,
+        )
+
+        logger.info_once(
+            "MiniMax M3 indexer: selected FlashInfer MSA (proxy score + top-k) "
+            "[topk_blocks=%d, indexer_kv_dtype=%s]",
+            topk_blocks,
+            indexer_kv_dtype,
+        )
+        return MiniMaxM3IndexerFlashInferImpl
     if indexer_kv_dtype != "bf16":
         raise NotImplementedError(
             f"indexer_kv_dtype={indexer_kv_dtype!r} is not supported by the "
@@ -546,11 +561,13 @@ class MiniMaxM3Indexer(nn.Module):
         cache_config: CacheConfig | None = None,
         indexer_kv_dtype: IndexerKVDType = "bf16",
         topk_indices_buffer: torch.Tensor | None = None,
+        use_flashinfer_msa: bool = False,
     ) -> None:
         super().__init__()
         impl_cls = select_indexer_impl_cls(
             topk_blocks=topk_blocks,
             indexer_kv_dtype=indexer_kv_dtype,
+            use_flashinfer_msa=use_flashinfer_msa,
         )
         self.impl = impl_cls(
             num_kv_heads=num_kv_heads,

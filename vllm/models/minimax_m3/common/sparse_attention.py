@@ -27,6 +27,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.models.minimax_m3.common.ops.sparse_attn import SPARSE_BLOCK_SIZE
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer_msa_packed_kv
 
 # AMD/ROCm uses the gfx942/gfx950-optimized block-sparse kernels in amd.ops;
 # every other platform uses the generic common.ops implementation.
@@ -435,19 +436,48 @@ class MiniMaxM3SparseTritonImpl(MiniMaxM3SparseImpl):
         return output
 
 
+def minimax_m3_use_flashinfer_msa(
+    *,
+    topk_blocks: int,
+    kv_cache_dtype: str,
+    num_heads: int,
+    num_kv_heads: int,
+    indexer_kv_dtype: str,
+) -> bool:
+    """Whether to use the flashinfer.msa_ops impls on SM120/SM121.
+
+    One predicate feeds both selectors: the FlashInfer indexer and attend
+    share the top-k buffer token-major while the Triton impls read it
+    head-major, so they must be selected together or not at all.
+    """
+    return (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability_family(120)
+        and topk_blocks == 16  # msa_topk_select constraint
+        and kv_cache_dtype != "fp8_e5m2"
+        and indexer_kv_dtype in ("bf16", "fp8", "fp8_e4m3")
+        # The decode kernel takes GQA group sizes up to 16.
+        and num_heads % num_kv_heads == 0
+        and num_heads // num_kv_heads <= 16
+        and has_flashinfer_msa_packed_kv()
+    )
+
+
 def select_main_impl_cls(
     *,
     topk_blocks: int,
     kv_cache_dtype: str,
     num_kv_heads: int,
+    use_flashinfer_msa: bool = False,
 ) -> type[MiniMaxM3SparseImpl]:
     """Pick the main attend impl off the main KV-cache dtype.
 
-    Blackwell (SM100) uses the MSA attend for supported top-k block counts
-    when the KV cache is BF16 or FP8 E4M3; MI355 uses AITER sparse PA
-    with shuffle KV cache layout; Other platforms and FP8 E5M2 fall
-    back to Triton. The MSA modules are imported lazily avoid import errors
-    on unsupported platforms.
+    SM100 uses the MSA attend for supported top-k block counts when the KV
+    cache is BF16 or FP8 E4M3; SM120/SM121 uses the FlashInfer MSA attend
+    when the caller passes the ``minimax_m3_use_flashinfer_msa`` verdict;
+    MI355 uses AITER sparse PA with shuffle KV cache layout; everything else
+    falls back to Triton. The MSA/FlashInfer modules are imported lazily to
+    avoid import errors on unsupported platforms.
     """
     use_aiter_sparse_pa = minimax_m3_use_aiter_sparse_pa(num_kv_heads)
     use_msa = (
@@ -456,9 +486,15 @@ def select_main_impl_cls(
         and topk_blocks in (4, 8, 16, 32)
         and kv_cache_dtype != "fp8_e5m2"
     )
-    selected = (
-        "AITER_SPARSE_PA" if use_aiter_sparse_pa else ("MSA" if use_msa else "Triton")
-    )
+    use_flashinfer_msa = use_flashinfer_msa and not use_msa and not use_aiter_sparse_pa
+    if use_aiter_sparse_pa:
+        selected = "AITER_SPARSE_PA"
+    elif use_msa:
+        selected = "MSA"
+    elif use_flashinfer_msa:
+        selected = "FlashInfer MSA"
+    else:
+        selected = "Triton"
     logger.info_once(
         "MiniMax M3 sparse attention selected %s (kv_cache_dtype=%s, topk_blocks=%s)",
         selected,
@@ -477,4 +513,10 @@ def select_main_impl_cls(
         )
 
         return MiniMaxM3SparseMSAImpl
+    if use_flashinfer_msa:
+        from vllm.models.minimax_m3.nvidia.sparse_attention_flashinfer import (
+            MiniMaxM3SparseFlashInferImpl,
+        )
+
+        return MiniMaxM3SparseFlashInferImpl
     return MiniMaxM3SparseTritonImpl
