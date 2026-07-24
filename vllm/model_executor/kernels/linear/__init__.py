@@ -116,6 +116,9 @@ from vllm.model_executor.kernels.linear.nvfp4 import (
 from vllm.model_executor.kernels.linear.nvfp4.cutlass import (
     CutlassNvFp4LinearKernel,
 )
+from vllm.model_executor.kernels.linear.nvfp4.helion import (
+    HelionNvFp4LinearKernel
+)
 from vllm.model_executor.kernels.linear.nvfp4.emulation import (
     EmulationNvFp4LinearKernel,
 )
@@ -220,6 +223,9 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         CutlassFp8BlockScaledMMKernel,
         CutlassW4A8LinearKernel,
         CutlassNvFp4LinearKernel,
+    },
+    "helion":{
+        HelionNvFp4LinearKernel,
     },
     "flashinfer_cutlass": {
         FlashInferFP8ScaledMMLinearKernel,
@@ -450,6 +456,7 @@ _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
         # upstream CUTLASS SM121 MMA op guard is resolved; use
         # --linear-backend flashinfer_b12x to opt in explicitly.
         FlashInferCutlassNvFp4LinearKernel,
+        HelionNvFp4LinearKernel,
         CutlassNvFp4LinearKernel,
         MarlinNvFp4LinearKernel,
         FlashInferTrtllmNvFp4LinearKernel,
