@@ -188,6 +188,15 @@ docker run \
     vllm/vllm-openai-cpu:latest-x86_64 <args...>
 ```
 
+You can also access the latest code with Docker images. These are not intended for production use and are meant for CI and testing only. They will expire after several days.
+
+The latest code can contain bugs and may not be stable. Please use it with caution.
+
+```bash
+export VLLM_COMMIT=<full commit hash from the main branch>
+docker pull public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:${VLLM_COMMIT}-cpu
+```
+
 --8<-- [end:pre-built-images]
 --8<-- [start:build-image-from-source]
 

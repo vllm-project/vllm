@@ -6,7 +6,13 @@ toc_depth: 2
 
 ## Pre-built images
 
---8<-- "docs/getting_started/installation/gpu.md:pre-built-images"
+=== "GPU"
+
+    --8<-- "docs/getting_started/installation/gpu.md:pre-built-images"
+
+=== "CPU"
+
+    --8<-- "docs/getting_started/installation/cpu.md:pre-built-images"
 
 ## Run as a non-root user
 
