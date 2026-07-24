@@ -31,12 +31,28 @@ Then query the endpoint to get the latest metrics from the server:
     ...
     ```
 
+The following metrics are exposed:
+
+## General Metrics
+
+--8<-- "gen:metrics-general"
+
+## Speculative Decoding Metrics
+
+--8<-- "gen:metrics-spec-decode"
+
+## NIXL KV Connector Metrics
+
+--8<-- "gen:metrics-nixl"
+
+## Model Flops Utilization (MFU) Performance Metrics
+
+These metrics are available via `--enable-mfu-metrics`:
+
+--8<-- "gen:metrics-mfu"
+
 ## Deprecation Policy
 
 Note: when metrics are deprecated in version `X.Y`, they are hidden in version `X.Y+1`
 but can be re-enabled using the `--show-hidden-metrics-for-version=X.Y` escape hatch,
 and are then removed in version `X.Y+2`.
-
-The following metrics are exposed:
-
---8<-- "gen:metrics-tables"

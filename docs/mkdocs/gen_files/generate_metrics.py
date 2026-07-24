@@ -13,22 +13,17 @@ logger = logging.getLogger("mkdocs")
 
 ROOT_DIR = Path(__file__).parent.parent.parent.parent
 
-# Files to scan for metric definitions - each will generate a separate table
+# Files to scan for metric definitions - each fills a `gen:` marker in
+# docs/usage/metrics.md with its table (the section heading and any preamble
+# live in the tracked page next to the marker).
 METRIC_SOURCE_FILES = [
-    {"path": "vllm/v1/metrics/loggers.py", "title": "General Metrics"},
-    {
-        "path": "vllm/v1/spec_decode/metrics.py",
-        "title": "Speculative Decoding Metrics",
-    },
+    {"path": "vllm/v1/metrics/loggers.py", "key": "metrics-general"},
+    {"path": "vllm/v1/spec_decode/metrics.py", "key": "metrics-spec-decode"},
     {
         "path": "vllm/distributed/kv_transfer/kv_connector/v1/nixl/stats.py",
-        "title": "NIXL KV Connector Metrics",
+        "key": "metrics-nixl",
     },
-    {
-        "path": "vllm/v1/metrics/perf.py",
-        "title": "Model Flops Utilization (MFU) Performance Metrics",
-        "preamble": "These metrics are available via `--enable-mfu-metrics`:",
-    },
+    {"path": "vllm/v1/metrics/perf.py", "key": "metrics-mfu"},
 ]
 
 
@@ -118,7 +113,7 @@ def generate_markdown_table(metrics: list[dict[str, str]]) -> str:
 
 logger.info("Generating metrics documentation")
 
-content = ""
+blocks = {}
 total_metrics = 0
 for source_config in METRIC_SOURCE_FILES:
     source_path = source_config["path"]
@@ -131,13 +126,10 @@ for source_config in METRIC_SOURCE_FILES:
     metrics = extract_metrics_from_file(filepath)
     logger.debug("Found %d metrics in %s", len(metrics), source_path)
 
-    content += f"## {source_config['title']}\n\n"
-    if preamble := source_config.get("preamble"):
-        content += f"{preamble}\n\n"
-    content += f"{generate_markdown_table(metrics)}\n"
+    blocks[source_config["key"]] = generate_markdown_table(metrics).strip()
     total_metrics += len(metrics)
 
-fill_markers("usage/metrics.md", {"metrics-tables": content})
+fill_markers("usage/metrics.md", blocks)
 logger.info(
     "Total metrics generated: %d across %d files",
     total_metrics,
