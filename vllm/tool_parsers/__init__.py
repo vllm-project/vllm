@@ -122,6 +122,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "qwen3_engine_tool_parser",
         "Qwen3EngineToolParser",
     ),
+    "nanbeige": (
+        "qwen3_engine_tool_parser",
+        "Qwen3EngineToolParser",
+    ),
     "minimax_m2": (
         "minimax_m2_tool_parser",
         "MinimaxM2ToolParser",
