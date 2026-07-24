@@ -95,7 +95,8 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
         pytest.param(
             True,
             marks=pytest.mark.skipif(
-                current_platform.is_rocm(), reason="marlin not supported"
+                current_platform.is_rocm() or current_platform.is_xpu(),
+                reason="marlin not supported",
             ),
         ),
     ],
@@ -135,7 +136,8 @@ def test_gpt_oss_lora(
         pytest.param(
             True,
             marks=pytest.mark.skipif(
-                current_platform.is_rocm(), reason="marlin not supported"
+                current_platform.is_rocm() or current_platform.is_xpu(),
+                reason="marlin not supported",
             ),
         ),
     ],
