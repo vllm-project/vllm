@@ -75,7 +75,10 @@ class Step3ToolParser(ToolParser):
             action_text,
         )
         for name, value in param_matches:
-            params[name] = value.strip()
+            # Keep the value verbatim: it is inline between `>` and
+            # `</steptml:parameter>`, so surrounding whitespace is data rather
+            # than markup. Scalar types are normalised in _cast_arguments.
+            params[name] = value
         return func_name, params
 
     def _cast_arguments(
@@ -93,7 +96,10 @@ class Step3ToolParser(ToolParser):
                     prop = properties.get(key, {})
                     typ = prop.get("type")
                     if typ == "string":
-                        params[key] = value.strip()
+                        # Verbatim. Leading indentation and trailing newlines
+                        # are part of a string argument, and stripping them
+                        # breaks exact-match edit tools.
+                        continue
                     elif typ == "integer":
                         with contextlib.suppress(ValueError):
                             params[key] = int(value)
@@ -101,14 +107,17 @@ class Step3ToolParser(ToolParser):
                         with contextlib.suppress(ValueError):
                             params[key] = float(value)
                     elif typ == "boolean":
-                        lower_val = value.lower()
+                        # .strip() here, not at parse time: these comparisons
+                        # need the bare literal, but string values must keep
+                        # their whitespace.
+                        lower_val = value.strip().lower()
                         params[key] = (
                             lower_val == "true"
                             if lower_val in ("true", "false")
                             else value
                         )
                     elif typ == "null":
-                        params[key] = None if value.lower() == "null" else value
+                        params[key] = None if value.strip().lower() == "null" else value
                 break
         return params
 

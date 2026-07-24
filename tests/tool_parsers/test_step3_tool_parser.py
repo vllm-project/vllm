@@ -2,13 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import json
+
 import pytest
 
 from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tokenizers import TokenizerLike, get_tokenizer
+from vllm.tool_parsers.step3_tool_parser import Step3ToolParser
 
 
 class TestStep3ToolParser(ToolParserTests):
@@ -110,3 +114,74 @@ class TestStep3ToolParser(ToolParserTests):
             },
             supports_typed_arguments=False,
         )
+
+
+class _FakeTokenizer:
+    """Minimal fake tokenizer; the parser only stores it for streaming."""
+
+    def get_vocab(self) -> dict[str, int]:
+        return {}
+
+
+_WS_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "old_string": {"type": "string"},
+                    "indent": {"type": "integer"},
+                    "enabled": {"type": "boolean"},
+                },
+            },
+        },
+    }
+]
+
+
+def _ws_output(value: str) -> str:
+    return (
+        "<｜tool_calls_begin｜><｜tool_call_begin｜>"
+        "function<｜tool_sep｜>edit_file\n"
+        '<steptml:invoke name="edit_file">'
+        f'<steptml:parameter name="old_string">{value}</steptml:parameter>'
+        '<steptml:parameter name="indent"> 4 </steptml:parameter>'
+        '<steptml:parameter name="enabled"> true </steptml:parameter>'
+        "</steptml:invoke><｜tool_call_end｜><｜tool_calls_end｜>"
+    )
+
+
+class TestStep3ParameterWhitespace:
+    """String parameter values must preserve surrounding whitespace.
+
+    The value sits inline between ``>`` and ``</steptml:parameter>``, so
+    whitespace around it is data rather than markup -- the same reasoning
+    applied to MiniMax M2 and MiniCPM5 XML, and already implemented by the
+    poolside_v1 parser. Stripping it breaks exact-match edit tools.
+    """
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "    if x:",
+            "return 1\n",
+            "    if x:\n        return 1\n",
+            "hello ",
+            "hello\u00a0",
+            "hello",
+        ],
+    )
+    def test_string_value_preserved(self, value: str) -> None:
+        request = ChatCompletionRequest(messages=[], model="step3", tools=_WS_TOOLS)
+        parser = Step3ToolParser(_FakeTokenizer(), request.tools)
+        result = parser.extract_tool_calls(_ws_output(value), request)
+
+        assert result.tools_called
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args["old_string"] == value
+        # Non-string types are still normalised, so surrounding whitespace on
+        # them stays harmless.
+        assert args["indent"] == 4
+        assert args["enabled"] is True
