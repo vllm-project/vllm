@@ -13,6 +13,22 @@ from vllm.triton_utils import HAS_TRITON, tl, tldevice, triton
 # attribute is `None`, and `tl.constexpr(...)` would crash at import time.
 _TL_RAND_MIN = tl.constexpr(4.6566127342e-10) if HAS_TRITON else 4.6566127342e-10
 
+def _temperature_torch(
+    logits: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    temperature: torch.Tensor,
+) -> None:
+    """纯 torch 版本，替换 `_temperature_kernel`（平台不支持 triton）。
+
+    对每个 token 取其请求的 temperature，温度不为 0.0 或 1.0 时把该行 logits 除以温度；
+    温度为 0.0/1.0 的行保持不变（与原 kernel 的 early return 一致）。
+    """
+    temps = temperature[expanded_idx_mapping.long()].to(torch.float32)  # [num_tokens]
+    apply = (temps != 0.0) & (temps != 1.0)
+    if not bool(apply.any()):
+        return
+    divisor = torch.where(apply, temps, torch.ones_like(temps))
+    logits.div_(divisor.unsqueeze(1).to(logits.dtype))
 
 @triton.jit
 def _temperature_kernel(
@@ -56,6 +72,7 @@ def apply_temperature(
         vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
     )
+    _temperature_torch(logits, expanded_idx_mapping, temperature)
 
 
 @triton.jit
@@ -211,6 +228,43 @@ def _gumbel_sample_kernel(
     tl.store(local_argmax_ptr + token_idx * local_argmax_stride + block_idx, token_id)
     tl.store(local_max_ptr + token_idx * local_max_stride + block_idx, value)
 
+def gumbel_sample(
+    logits: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    temperature: torch.Tensor,
+    seed: torch.Tensor,
+    pos: torch.Tensor,
+    apply_temperature: bool,
+    output_processed_logits: torch.Tensor | None = None,
+    output_processed_logits_col: torch.Tensor | None = None,
+    use_fp64: bool = False,
+) -> torch.Tensor:
+    """
+    Gumbel采样（纯Python实现，等价于原Triton版本的功能）。
+    返回: [num_tokens] 每个token采样的token id。
+    """
+    if apply_temperature:
+        if temperature.numel() == 1:
+            scaled_logits = logits / temperature.item()
+        else:
+            scaled_logits = logits / temperature.view(-1, 1)
+    else:
+        scaled_logits = logits
+
+    dtype = torch.float64 if use_fp64 else torch.float32
+    U = torch.rand_like(scaled_logits, dtype=dtype)
+    eps = 1e-8
+    gumbel_noise = -torch.log(-torch.log(U + eps) + eps)
+    noisy_logits = scaled_logits + gumbel_noise
+
+    sampled = noisy_logits.argmax(dim=-1)
+
+    if output_processed_logits is not None:
+        output_processed_logits.copy_(scaled_logits)
+    if output_processed_logits_col is not None:
+        pass
+
+    return sampled
 
 def gumbel_sample(
     logits: torch.Tensor,  # [num_tokens, vocab_size]

@@ -102,6 +102,72 @@ class PenaltiesState:
             self.output_bin_counts,
         )
 
+def _penalties_torch(
+    logits: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    token_ids: torch.Tensor,
+    expanded_local_pos: torch.Tensor,
+    repetition_penalty: torch.Tensor,
+    frequency_penalty: torch.Tensor,
+    presence_penalty: torch.Tensor,
+    prompt_bin_mask: torch.Tensor,
+    output_bin_counts: torch.Tensor,
+) -> None:
+    """纯 torch 版本，替换 `_penalties_kernel`（平台不支持 triton）。
+
+    对每个 token_idx 对应的请求 req_state_idx：
+    - 在 output_bin_counts 基础上累加同一 speculative 组前序位置的 draft token 计数；
+    - repetition penalty：对出现在 prompt 或输出中的 token，正 logits 除以惩罚、负 logits
+      乘以惩罚；
+    - frequency penalty：减去 freq * 计数；
+    - presence penalty：减去 pres * 是否出现。
+    output_bin_counts 全局张量不被修改（与原 kernel 一致，仅在局部累加）。
+    """
+    num_tokens, vocab_size = logits.shape
+    device = logits.device
+    shifts = torch.arange(32, device=device, dtype=torch.int32)
+
+    for token_idx in range(num_tokens):
+        req = int(expanded_idx_mapping[token_idx])
+        rep = float(repetition_penalty[req])
+        freq = float(frequency_penalty[req])
+        pres = float(presence_penalty[req])
+
+        use_rep = rep != 1.0
+        use_freq = freq != 0.0
+        use_pres = pres != 0.0
+        if not (use_rep or use_freq or use_pres):
+            # Early return to avoid touching logits.
+            continue
+
+        counts = output_bin_counts[req].clone().to(torch.int32)
+        pos = int(expanded_local_pos[token_idx])
+        start_idx = token_idx - pos
+        for prev_pos in range(pos):
+            prev_token = int(token_ids[start_idx + prev_pos + 1])
+            counts[prev_token] += 1
+        output_bin_mask = counts > 0
+
+        logits_f = logits[token_idx].to(torch.float32)
+
+        # Apply repetition penalties.
+        if use_rep:
+            packed = prompt_bin_mask[req]  # [num_words]
+            bits = (packed.unsqueeze(-1) >> shifts) & 1  # [num_words, 32]
+            prompt_mask = bits.reshape(-1)[:vocab_size].to(torch.bool)
+            scale = torch.where(
+                prompt_mask | output_bin_mask,
+                torch.full_like(logits_f, rep),
+                torch.ones_like(logits_f),
+            )
+            logits_f = logits_f * torch.where(logits_f > 0, 1.0 / scale, scale)
+
+        # Apply frequency penalties.
+        logits_f = logits_f - freq * counts.to(torch.float32)
+        # Apply presence penalties.
+        logits_f = logits_f - pres * output_bin_mask.to(torch.float32)
+
+        logits[token_idx].copy_(logits_f.to(logits.dtype))
 
 @triton.jit
 def _penalties_kernel(
@@ -213,6 +279,17 @@ def apply_penalties(
         vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
     )
+    _penalties_torch(
+        logits,
+        expanded_idx_mapping,
+        token_ids,
+        expanded_local_pos,
+        repetition_penalty,
+        frequency_penalty,
+        presence_penalty,
+        prompt_bin_mask,
+        output_bin_counts,
+    )
 
 
 @triton.jit
@@ -266,6 +343,72 @@ def _bincount_kernel(
             mask=mask,
         )
 
+def _penalties_torch(
+    logits: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    token_ids: torch.Tensor,
+    expanded_local_pos: torch.Tensor,
+    repetition_penalty: torch.Tensor,
+    frequency_penalty: torch.Tensor,
+    presence_penalty: torch.Tensor,
+    prompt_bin_mask: torch.Tensor,
+    output_bin_counts: torch.Tensor,
+) -> None:
+    """纯 torch 版本，替换 `_penalties_kernel`（平台不支持 triton）。
+
+    对每个 token_idx 对应的请求 req_state_idx：
+    - 在 output_bin_counts 基础上累加同一 speculative 组前序位置的 draft token 计数；
+    - repetition penalty：对出现在 prompt 或输出中的 token，正 logits 除以惩罚、负 logits
+      乘以惩罚；
+    - frequency penalty：减去 freq * 计数；
+    - presence penalty：减去 pres * 是否出现。
+    output_bin_counts 全局张量不被修改（与原 kernel 一致，仅在局部累加）。
+    """
+    num_tokens, vocab_size = logits.shape
+    device = logits.device
+    shifts = torch.arange(32, device=device, dtype=torch.int32)
+
+    for token_idx in range(num_tokens):
+        req = int(expanded_idx_mapping[token_idx])
+        rep = float(repetition_penalty[req])
+        freq = float(frequency_penalty[req])
+        pres = float(presence_penalty[req])
+
+        use_rep = rep != 1.0
+        use_freq = freq != 0.0
+        use_pres = pres != 0.0
+        if not (use_rep or use_freq or use_pres):
+            # Early return to avoid touching logits.
+            continue
+
+        counts = output_bin_counts[req].clone().to(torch.int32)
+        pos = int(expanded_local_pos[token_idx])
+        start_idx = token_idx - pos
+        for prev_pos in range(pos):
+            prev_token = int(token_ids[start_idx + prev_pos + 1])
+            counts[prev_token] += 1
+        output_bin_mask = counts > 0
+
+        logits_f = logits[token_idx].to(torch.float32)
+
+        # Apply repetition penalties.
+        if use_rep:
+            packed = prompt_bin_mask[req]  # [num_words]
+            bits = (packed.unsqueeze(-1) >> shifts) & 1  # [num_words, 32]
+            prompt_mask = bits.reshape(-1)[:vocab_size].to(torch.bool)
+            scale = torch.where(
+                prompt_mask | output_bin_mask,
+                torch.full_like(logits_f, rep),
+                torch.ones_like(logits_f),
+            )
+            logits_f = logits_f * torch.where(logits_f > 0, 1.0 / scale, scale)
+
+        # Apply frequency penalties.
+        logits_f = logits_f - freq * counts.to(torch.float32)
+        # Apply presence penalties.
+        logits_f = logits_f - pres * output_bin_mask.to(torch.float32)
+
+        logits[token_idx].copy_(logits_f.to(logits.dtype))
 
 def bincount(
     expanded_idx_mapping: torch.Tensor,
@@ -294,6 +437,14 @@ def bincount(
         output_bin_counts,
         output_bin_counts.stride(0),
         BLOCK_SIZE=BLOCK_SIZE,
+    )
+    _bincount_torch(
+        expanded_idx_mapping,
+        all_token_ids,
+        prompt_len,
+        prefill_len,
+        prompt_bin_mask,
+        output_bin_counts,
     )
 
 

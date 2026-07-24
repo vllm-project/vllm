@@ -143,6 +143,48 @@ class LogitBiasState:
             self.stop_token_ids.gpu,
         )
 
+def _bias_torch(
+    logits: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    pos: torch.Tensor,
+    num_allowed_token_ids: torch.Tensor,
+    allowed_token_ids: torch.Tensor,
+    num_logit_bias: torch.Tensor,
+    logit_bias_token_ids: torch.Tensor,
+    logit_bias: torch.Tensor,
+    min_lens: torch.Tensor,
+    num_stop_token_ids: torch.Tensor,
+    stop_token_ids: torch.Tensor,
+) -> None:
+    """纯 torch 版本，替换 `_bias_kernel`（平台不支持 triton）。
+
+    对每个 token_idx 对应的请求 req_state_idx，依次应用：
+    - allowed token ids：只保留允许 token 的 logits，其余置 -inf；
+    - logit bias：给指定 token 的 logits 加上偏置；
+    - min tokens：当 pos+1 < min_len 时，把 stop token 的 logits 置 -inf。
+    """
+    neg_inf = -float("inf")
+    num_tokens = logits.shape[0]
+    for token_idx in range(num_tokens):
+        req = int(expanded_idx_mapping[token_idx])
+        row = logits[token_idx]
+
+        n_allowed = int(num_allowed_token_ids[req])
+        if n_allowed > 0:
+            ids = allowed_token_ids[req][:n_allowed].long()
+            saved = row[ids].clone()
+            row.fill_(neg_inf)
+            row[ids] = saved
+
+        n_bias = int(num_logit_bias[req])
+        if n_bias > 0:
+            ids = logit_bias_token_ids[req][:n_bias].long()
+            row[ids] += logit_bias[req][:n_bias]
+
+        n_stop = int(num_stop_token_ids[req])
+        if n_stop > 0 and int(pos[token_idx]) + 1 < int(min_lens[req]):
+            ids = stop_token_ids[req][:n_stop].long()
+            row[ids] = neg_inf
 
 @triton.jit
 def _bias_kernel(
@@ -281,4 +323,17 @@ def apply_logit_bias(
         stop_token_ids.stride(0),
         BLOCK_SIZE=BLOCK_SIZE,
         LOGITS_BLOCK_SIZE=LOGITS_BLOCK_SIZE,
+    )
+    _bias_torch(
+        logits,
+        expanded_idx_mapping,
+        pos,
+        num_allowed_token_ids,
+        allowed_token_ids,
+        num_logit_bias,
+        logit_bias_token_ids,
+        logit_bias,
+        min_lens,
+        num_stop_token_ids,
+        stop_token_ids,
     )

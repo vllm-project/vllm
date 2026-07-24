@@ -141,6 +141,30 @@ class PromptLogprobsWorker:
             prompt_logprobs_dict[req_id] = logprobs
         return prompt_logprobs_dict
 
+def _prompt_logprobs_token_ids_torch(
+    token_ids: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+    all_token_ids: torch.Tensor,
+) -> None:
+    """纯 torch 版本，替换 `_prompt_logprobs_token_ids_kernel`（平台不支持 triton）。
+
+    对每个 batch_idx 对应的请求 req_state_idx，把该请求 query 范围内每个位置的
+    "下一个 token"（pos 向后移一位，因为 logprob 是对下一个 token 计算的）从
+    all_token_ids 拷到 token_ids[query_start:query_end]。
+    """
+    num_reqs = idx_mapping.shape[0]
+    for batch_idx in range(num_reqs):
+        req = int(idx_mapping[batch_idx])
+        q_start = int(query_start_loc[batch_idx])
+        q_end = int(query_start_loc[batch_idx + 1])
+        q_len = q_end - q_start
+        if q_len <= 0:
+            continue
+        num_computed = int(num_computed_tokens[req])
+        src_start = num_computed + 1
+        token_ids[q_start:q_end] = all_token_ids[req][src_start : src_start + q_len]
 
 @triton.jit
 def _prompt_logprobs_token_ids_kernel(
@@ -192,6 +216,13 @@ def get_prompt_logprobs_token_ids(
         all_token_ids,
         all_token_ids.stride(0),
         BLOCK_SIZE=1024,
+    )
+    _prompt_logprobs_token_ids_torch(
+        token_ids,
+        query_start_loc,
+        idx_mapping,
+        num_computed_tokens,
+        all_token_ids,
     )
     return token_ids
 
