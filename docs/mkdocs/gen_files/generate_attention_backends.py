@@ -15,11 +15,14 @@ time rather than being committed to the repository.
 
 import ast
 import logging
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-import mkdocs_gen_files
+sys.path.insert(0, str(Path(__file__).parent))
+
+from generated_content import fill_markers  # noqa: E402
 
 logger = logging.getLogger("mkdocs")
 
@@ -1636,113 +1639,12 @@ def _render_table(
     return lines
 
 
-def generate_markdown_table(
-    backends: list[dict[str, Any]], title: str, is_mla_table: bool = False
-) -> str:
-    """Generate a titled markdown table from backend info."""
-    if not backends:
-        return f"## {title}\n\nNo backends found.\n"
-    has_versions = any(b.get("version") for b in backends)
-    columns = _build_columns(is_mla_table, has_versions)
-    lines = [f"## {title}", ""]
-    lines.extend(_render_table(columns, backends))
-    lines.append("")
-    return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# Markdown section generators (usage, priority, legend, MLA)
-# ---------------------------------------------------------------------------
-
-
-def generate_usage_section() -> str:
-    """Generate the usage documentation section."""
-    return """## Setting the Attention Backend
-
-### Command Line
-
-There are two ways to specify the backend from the command line:
-
-**Option 1: Using `--attention-backend` (simple)**
-
-```bash
-vllm serve <model> --attention-backend FLASH_ATTN
-```
-
-**Option 2: Using `--attention-config.backend` / `-ac.backend` (structured config)**
-
-```bash
-# Dot notation
-vllm serve <model> --attention-config.backend FLASH_ATTN
-vllm serve <model> -ac.backend FLASH_ATTN
-
-# JSON format
-vllm serve <model> --attention-config '{"backend": "FLASH_ATTN"}'
-vllm serve <model> -ac '{"backend": "FLASH_ATTN"}'
-```
-
-> **Note:** `--attention-backend` and `--attention-config.backend` are mutually
-> exclusive. Use one or the other, not both.
-
-### Python API
-
-Use `AttentionConfig` with the `LLM` class:
-
-```python
-from vllm import LLM
-from vllm.config import AttentionConfig
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
-
-# Method 1: Using AttentionConfig with enum
-llm = LLM(
-    model="Qwen/Qwen3-0.6B",
-    attention_config=AttentionConfig(backend=AttentionBackendEnum.FLASH_ATTN),
-)
-
-# Method 2: Using attention_backend parameter with string
-llm = LLM(
-    model="Qwen/Qwen3-0.6B",
-    attention_backend="FLASH_ATTN",
-)
-```
-
-## Backend Selection Behavior
-
-### Manual Selection
-
-When you explicitly set a backend via `--attention-backend` or `AttentionConfig`:
-
-1. The backend is **validated** against your configuration (model dtype, head
-   size, compute capability, etc.)
-2. If the backend **doesn't support** your configuration, an error is raised
-   with the specific reason
-3. If valid, the backend is used
-
-Example error when selecting an incompatible backend:
-
-```text
-ValueError: Selected backend FLASHMLA is not valid for this configuration.
-Reason: ['compute capability not supported']
-```
-
-### Automatic Selection
-
-When no backend is specified (the default):
-
-1. vLLM iterates through backends in **priority order** (see tables below)
-2. Each backend is validated against your configuration
-3. The **first compatible backend** is selected
-4. If no backend is compatible, an error is raised listing all backends and
-   their incompatibility reasons
-"""
-
-
 def _priority_table(
     title: str,
     backends: list[str],
     annotations: dict[str, str] | None = None,
 ) -> list[str]:
-    """Generate a priority table for a list of backends."""
+    """Render a priority table for a list of backends."""
 
     def _fmt(b: str) -> str:
         suffix = annotations.get(b, "") if annotations else ""
@@ -1758,102 +1660,38 @@ def _priority_table(
     ]
 
 
-def generate_priority_section(priorities: dict[str, list[str]]) -> str:
-    """Generate the priority ranking section."""
-    lines = [
-        "## Backend Priority (CUDA)",
-        "",
-        "When no backend is explicitly selected, vLLM chooses the first",
-        "compatible backend from these priority-ordered lists.",
-        "",
-        "Priority is **1 = highest** (tried first).",
-        "",
-        "### Standard Attention (MHA, MQA, GQA)",
-        "",
-    ]
-
-    sm100 = "Blackwell (SM 10.x)"
-    ampere = "Ampere/Hopper (SM 8.x-9.x)"
-
-    if "standard_sm100" in priorities:
-        lines.extend(_priority_table(sm100, priorities["standard_sm100"]))
-    if "standard_default" in priorities:
-        lines.extend(_priority_table(ampere, priorities["standard_default"]))
-
-    lines.extend(["### MLA Attention (DeepSeek-style)", ""])
-
-    mla_sm100_annotations = {
-        "FLASHINFER_MLA_SPARSE": "**\\***",
-    }
-    if "mla_sm100" in priorities:
-        lines.extend(
-            _priority_table(sm100, priorities["mla_sm100"], mla_sm100_annotations)
-        )
-    if "mla_default" in priorities:
-        lines.extend(_priority_table(ampere, priorities["mla_default"]))
-
-    if "mla_sm100" in priorities:
-        lines.append(
-            "> **\\*** For sparse MLA, FP8 KV cache always prefers "
-            "`FLASHINFER_MLA_SPARSE`. With BF16 KV cache, `FLASHINFER_MLA_SPARSE` "
-            "is preferred for low query-head counts (<= 16), while "
-            "`FLASHMLA_SPARSE` is preferred otherwise."
-        )
-        lines.append(">")
-
-    lines.append(
-        "> **Note:** ROCm and CPU platforms have their own selection logic. "
-        "See the platform-specific documentation for details."
-    )
-    lines.append("")
-
-    return "\n".join(lines)
+_SM100 = "Blackwell (SM 10.x)"
+_AMPERE = "Ampere/Hopper (SM 8.x-9.x)"
 
 
-def generate_legend() -> str:
-    """Generate a legend explaining the table columns."""
-    return """## Legend
-
-| Column | Description |
-| ------ | ----------- |
-| **Dtypes** | Supported model data types (fp16, bf16, fp32) |
-| **KV Dtypes** | Supported KV cache data types (`auto`, `fp8`, `fp8_e4m3`, etc.) |
-| **Block Sizes** | Supported KV cache block sizes (%N means multiples of N) |
-| **Head Sizes** | Supported attention head sizes |
-| **Sink** | Attention sink support (for StreamingLLM) |
-| **Non-Causal** | Non-causal (bidirectional) attention support for decoder models |
-| **Sparse** | Sparse attention support (MLA only) |
-| **MM Prefix** | Multimodal prefix full attention support |
-| **DCP** | Decode Context Parallelism support (`--decode-context-parallel-size`) |
-| **Attention Types** | Supported attention patterns (Decoder, Encoder, Enc-Dec) |
-| **Compute Cap.** | Required CUDA compute capability (N/A for non-CUDA backends) |
-
-**Symbols:** ✅ = Supported, ❌ = Not supported
-"""
-
-
-def generate_mla_section(
-    prefill_backends: list[dict[str, Any]],
-    decode_backends: list[dict[str, Any]],
-    v4_decode_backends: list[dict[str, Any]] | None = None,
+def _priority_block(
+    priorities: dict[str, list[str]],
+    sm100_key: str,
+    default_key: str,
+    sm100_annotations: dict[str, str] | None = None,
 ) -> str:
-    """Generate the complete MLA section with prefill and decode tables."""
+    """Render whichever priority tables exist for one attention category."""
+    lines: list[str] = []
+    if sm100_key in priorities:
+        lines += _priority_table(_SM100, priorities[sm100_key], sm100_annotations)
+    if default_key in priorities:
+        lines += _priority_table(_AMPERE, priorities[default_key])
+    return "\n".join(lines).strip()
+
+
+def _feature_table(backends: list[dict[str, Any]], is_mla: bool) -> str:
+    """Render a backend feature table (header, separator, one row per backend)."""
+    has_versions = any(b.get("version") for b in backends)
+    columns = _build_columns(is_mla, has_versions)
+    return "\n".join(_render_table(columns, backends))
+
+
+def _mla_prefill_table(prefill_backends: list[dict[str, Any]]) -> str:
+    """Render the MLA prefill backend table."""
     lines = [
-        "## MLA (Multi-head Latent Attention) Backends",
-        "",
-        "MLA uses separate backends for prefill and decode phases.",
-        "",
-        "### Prefill Backends",
-        "",
-        "To explicitly select a prefill backend, use",
-        "`-ac.mla_prefill_backend=<BACKEND>` (e.g., `FLASH_ATTN`, `FLASHINFER`).",
-        "Otherwise, the prefill backend is selected automatically at runtime based on",
-        "hardware and configuration.",
-        "",
         "| Backend | Description | Dtypes | Compute Cap. | Notes |",
         "| ------- | ----------- | ------ | ------------ | ----- |",
     ]
-
     for backend in prefill_backends:
         row = "| `{}`{} | {} | {} | {} | {} |".format(
             backend["name"],
@@ -1864,87 +1702,21 @@ def generate_mla_section(
             backend.get("notes", ""),
         )
         lines.append(row.replace("  ", " "))
-
-    lines.extend(
-        [
-            "",
-            "> **‡** Automatic selection tries FlashAttention first. On Blackwell",
-            "> (SM100), the fallback order is TRT-LLM Ragged, FlashInfer, then",
-            "> TokenSpeed MLA. On other GPUs, only FlashAttention is considered.",
-            "",
-            "### Decode Backends",
-            "",
-            "MLA decode backends are selected using the standard",
-            "`-ac.backend=<BACKEND>` argument (e.g., `FLASHMLA`, `TRITON_MLA`).",
-            "",
-        ]
-    )
-
-    # Reuse data-driven table rendering for decode backends
-    columns = _build_columns(is_mla=True, has_versions=False)
-    lines.extend(_render_table(columns, decode_backends))
-
-    if v4_decode_backends:
-        lines.extend(
-            [
-                "",
-                "### DeepSeek V4 Decode Backends",
-                "",
-                "DeepSeek V4 sparse MLA uses its own decode backends, selected via",
-                "`--attention-backend=<BACKEND>` (e.g., `FLASHMLA_SPARSE_DSV4`,",
-                "`FLASHINFER_MLA_SPARSE_DSV4`). They share the V4 sparse-index",
-                "pipeline (compressor + SWA + indexer, 256-token blocks, head 512);",
-                "default on NVIDIA is `FLASHINFER_MLA_SPARSE_DSV4` on SM12x and",
-                "`FLASHMLA_SPARSE_DSV4` on other supported CUDA architectures.",
-                "",
-            ]
-        )
-        lines.extend(_render_table(columns, v4_decode_backends))
-
-    lines.append("")
     return "\n".join(lines)
 
 
-def generate_minimax_section(backends: list[dict[str, Any]]) -> str:
-    """Generate the MiniMax M3 sparse attention section."""
-    lines = [
-        "## MiniMax M3 Sparse Attention Backends",
-        "",
-        'Block-sparse GQA backend used by MiniMax M3 sparse ("lightning indexer")',
-        "layers. It is wired in directly by the model and is not part of the",
-        "automatic priority lists above. A lightning indexer scores KV blocks, the",
-        "top-k blocks (plus fixed init/local blocks) are selected, and attention",
-        "attends only to those blocks; index keys live in a separate side cache.",
-        "",
-    ]
-    columns = _build_columns(is_mla=False, has_versions=False)
-    lines.extend(_render_table(columns, backends))
-    lines.append("")
-    return "\n".join(lines)
+def build_blocks() -> dict[str, str]:
+    """Build the generated table blocks keyed by their `gen:` marker name.
 
-
-# ---------------------------------------------------------------------------
-# Top-level orchestration
-# ---------------------------------------------------------------------------
-
-
-def generate_docs() -> str:
-    """Generate the complete documentation."""
+    Only the tables are generated here; the surrounding prose lives in the
+    handwritten ``docs/design/attention_backends.md`` page.
+    """
     attention_backends_map = parse_registry()
-
-    # Parse priority lists from cuda.py
     priorities = parse_cuda_priority_lists()
-
-    # Parse FlashAttention FA2/FA3 feature differences
     fa_features = parse_flash_attn_features()
-
-    # Parse FlashInfer TRTLLM feature differences (native vs TRTLLM on Blackwell)
     fi_features = parse_flashinfer_trtllm_features()
-
-    # Parse MLA prefill backends
     mla_prefill_backends = parse_mla_prefill_backends()
 
-    # Collect backend info
     all_backends = []
     for backend_name, class_path in attention_backends_map.items():
         if backend_name in SKIP_BACKENDS:
@@ -1952,17 +1724,14 @@ def generate_docs() -> str:
         info = analyze_backend(backend_name, class_path)
         if info:
             all_backends.append(info)
-
-    # Expand backends into version variants
     if fa_features:
         all_backends = _expand_flash_attn_variants(all_backends, fa_features)
     if fi_features:
         all_backends = _expand_flashinfer_variants(all_backends, fi_features)
 
-    # DeepSeek V4 (*_DSV4) decode backends and MiniMax M3 sparse backends each
-    # get their own subsection rather than mixing into the main MLA / standard
-    # tables (the ROCm V4 backend isn't flagged is_mla by the AST heuristic, so
-    # filter purely on the name).
+    # DeepSeek V4 (*_DSV4) and MiniMax M3 sparse backends get their own tables
+    # rather than mixing into the main MLA / standard tables (the ROCm V4 backend
+    # isn't flagged is_mla by the AST heuristic, so filter purely on the name).
     def _is_v4(b: dict[str, Any]) -> bool:
         return b["name"].endswith("_DSV4")
 
@@ -1978,65 +1747,21 @@ def generate_docs() -> str:
         if not b["is_mla"] and not _is_v4(b) and not _is_minimax(b)
     ]
 
-    # Generate documentation
-    script_path = "docs/mkdocs/gen_files/generate_attention_backends.py"
-    doc_lines = [
-        "# Attention Backend Feature Support",
-        "",
-        f"This page is auto-generated at docs build time by `{script_path}`.",
-        "It shows the feature support for each registered attention backend",
-        "based on the checks in `AttentionBackend.validate_configuration()`.",
-        "",
-    ]
+    mla_sm100_annotations = {"FLASHINFER_MLA_SPARSE": "**\\***"}
+    return {
+        "priority-standard": _priority_block(
+            priorities, "standard_sm100", "standard_default"
+        ),
+        "priority-mla": _priority_block(
+            priorities, "mla_sm100", "mla_default", mla_sm100_annotations
+        ),
+        "table-standard": _feature_table(non_mla_backends, is_mla=False),
+        "table-minimax": _feature_table(minimax_backends, is_mla=False),
+        "table-mla-prefill": _mla_prefill_table(mla_prefill_backends),
+        "table-mla-decode": _feature_table(mla_backends, is_mla=True),
+        "table-mla-v4-decode": _feature_table(v4_decode_backends, is_mla=True),
+    }
 
-    # Add usage documentation
-    doc_lines.append(generate_usage_section())
-
-    # Add priority section
-    doc_lines.append(generate_priority_section(priorities))
-
-    # Add legend and feature tables
-    doc_lines.append(generate_legend())
-    standard_title = "Standard Attention (MHA, MQA, GQA) Backends"
-    doc_lines.append(
-        generate_markdown_table(non_mla_backends, standard_title, is_mla_table=False)
-    )
-    # Add footnotes for version/variant distinctions (in table order)
-    footnotes = []
-    if fi_features:
-        footnotes.append(
-            "> **†** FlashInfer Native is the regular FlashInfer path. XQA is the "
-            "SM90 decode path exposed through FlashInfer's TRTLLM decode API. "
-            "trtllm-gen is used on SM100 and supports sinks. Disable XQA/trtllm-gen "
-            "via `--attention-config.use_trtllm_attention=0`."
-        )
-    if fa_features:
-        footnotes.append(
-            "> **\\*** Specify the FlashAttention version via "
-            "`--attention-config.flash_attn_version=2`, `3`, or `4`. "
-            "Default is FA4 on SM100+ (Blackwell), FA3 on SM90 (Hopper), "
-            "FA2 otherwise."
-        )
-    if footnotes:
-        doc_lines.append("\n>\n".join(footnotes) + "\n")
-
-    # Add MiniMax M3 sparse section (separate category after standard GQA)
-    if minimax_backends:
-        doc_lines.append(generate_minimax_section(minimax_backends))
-
-    # Add MLA section with prefill and decode backends
-    doc_lines.append(
-        generate_mla_section(mla_prefill_backends, mla_backends, v4_decode_backends)
-    )
-
-    return "\n".join(doc_lines)
-
-
-DOC_PATH = "design/attention_backends.md"
-EDIT_PATH = "docs/mkdocs/gen_files/generate_attention_backends.py"
 
 logger.info("Generating attention backend documentation")
-with mkdocs_gen_files.open(DOC_PATH, "w") as f:
-    f.write(generate_docs())
-# Point the "edit this page" button at the generator, not the generated file
-mkdocs_gen_files.set_edit_path(DOC_PATH, EDIT_PATH)
+fill_markers("design/attention_backends.md", build_blocks())

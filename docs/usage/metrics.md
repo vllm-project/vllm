@@ -38,3 +38,5 @@ but can be re-enabled using the `--show-hidden-metrics-for-version=X.Y` escape h
 and are then removed in version `X.Y+2`.
 
 The following metrics are exposed:
+
+--8<-- "gen:metrics-tables"

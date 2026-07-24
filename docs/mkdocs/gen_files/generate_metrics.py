@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from generated_content import append_to_page  # noqa: E402
+from generated_content import fill_markers  # noqa: E402
 
 logger = logging.getLogger("mkdocs")
 
@@ -137,7 +137,7 @@ for source_config in METRIC_SOURCE_FILES:
     content += f"{generate_markdown_table(metrics)}\n"
     total_metrics += len(metrics)
 
-append_to_page("usage/metrics.md", content)
+fill_markers("usage/metrics.md", {"metrics-tables": content})
 logger.info(
     "Total metrics generated: %d across %d files",
     total_metrics,

@@ -23,7 +23,7 @@ ROOT_DIR = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 sys.path.insert(0, str(Path(__file__).parent))
 
-from generated_content import append_to_page  # noqa: E402
+from generated_content import fill_markers  # noqa: E402
 
 
 def mock_if_no_torch(mock_module: str, mock: MagicMock):
@@ -135,8 +135,8 @@ def auto_mock(module_name: str, attr: str, max_mocks: int = 100):
 
 
 bench_latency = auto_mock("vllm.benchmarks", "latency")
-bench_mm_processor = auto_mock("vllm.benchmarks", "mm_processor")
 bench_serve = auto_mock("vllm.benchmarks", "serve")
+bench_startup = auto_mock("vllm.benchmarks", "startup")
 bench_sweep_plot = auto_mock("vllm.benchmarks.sweep.plot", "SweepPlotArgs")
 bench_sweep_plot_pareto = auto_mock(
     "vllm.benchmarks.sweep.plot_pareto", "SweepPlotParetoArgs"
@@ -145,12 +145,28 @@ bench_sweep_serve = auto_mock("vllm.benchmarks.sweep.serve", "SweepServeArgs")
 bench_sweep_serve_workload = auto_mock(
     "vllm.benchmarks.sweep.serve_workload", "SweepServeWorkloadArgs"
 )
+bench_sweep_startup = auto_mock("vllm.benchmarks.sweep.startup", "SweepStartupArgs")
 bench_throughput = auto_mock("vllm.benchmarks", "throughput")
 AsyncEngineArgs = auto_mock("vllm.engine.arg_utils", "AsyncEngineArgs")
 EngineArgs = auto_mock("vllm.engine.arg_utils", "EngineArgs")
 ChatCommand = auto_mock("vllm.entrypoints.cli.openai", "ChatCommand")
 CompleteCommand = auto_mock("vllm.entrypoints.cli.openai", "CompleteCommand")
+BenchmarkSubcommand = auto_mock(
+    "vllm.entrypoints.cli.benchmark.main", "BenchmarkSubcommand"
+)
+import_bench_subcommands = auto_mock(
+    "vllm.entrypoints.cli.benchmark.main", "_import_bench_subcommand_modules"
+)
+BenchmarkSubcommandBase = auto_mock(
+    "vllm.entrypoints.cli.benchmark.base", "BenchmarkSubcommandBase"
+)
+BenchmarkMMProcessorSubcommand = auto_mock(
+    "vllm.entrypoints.cli.benchmark.mm_processor", "BenchmarkMMProcessorSubcommand"
+)
+LaunchSubcommandBase = auto_mock("vllm.entrypoints.cli.launch", "LaunchSubcommandBase")
+launch_description = auto_mock("vllm.entrypoints.cli.launch", "DESCRIPTION")
 RenderSubcommand = auto_mock("vllm.entrypoints.cli.launch", "RenderSubcommand")
+sweep_subcommands = auto_mock("vllm.benchmarks.sweep.cli", "SUBCOMMANDS")
 openai_cli_args = auto_mock("vllm.entrypoints.openai", "cli_args")
 openai_run_batch = auto_mock("vllm.entrypoints.openai", "run_batch")
 
@@ -252,17 +268,35 @@ def format_help(parser: FlexibleArgumentParser) -> str:
 logger.info("Generating argparse documentation")
 logger.debug("Root directory: %s", ROOT_DIR.resolve())
 
-# Argument sections appended to handwritten pages
+# The JSON tip is always rendered immediately before generated argument content,
+# and the generator is its only consumer, so it lives here rather than in a
+# separate snippet file. (The runtime terminal equivalent is
+# `FlexibleArgumentParser._json_tip` in vllm/utils/argparse_utils.py.)
+JSON_TIP = """## JSON CLI Arguments
+
+When passing JSON CLI arguments, the following sets of arguments are equivalent:
+
+- `--json-arg '{"key1": "value1", "key2": {"key3": "value2"}}'`
+- `--json-arg.key1 value1 --json-arg.key2.key3 value2`
+
+Additionally, list elements can be passed individually using `+`:
+
+- `--json-arg '{"key4": ["value3", "value4", "value5"]}'`
+- `--json-arg.key4+ value3 --json-arg.key4+='value4,value5'`
+
+"""
+
+# Argument sections filled into `gen:` markers on handwritten pages
 engine_args = create_parser(EngineArgs.add_cli_args)
 async_engine_args = create_parser(AsyncEngineArgs.add_cli_args, async_args_only=True)
-append_to_page(
+fill_markers(
     "configuration/engine_args.md",
-    f"## `EngineArgs`\n\n{format_help(engine_args)}"
-    f"## `AsyncEngineArgs`\n\n{format_help(async_engine_args)}",
-)
-append_to_page(
-    "cli/bench/mm_processor.md",
-    f"## Arguments\n\n{format_help(create_parser(bench_mm_processor.add_cli_args))}",
+    {
+        "engine-args": (
+            f"{JSON_TIP}## `EngineArgs`\n\n{format_help(engine_args)}"
+            f"## `AsyncEngineArgs`\n\n{format_help(async_engine_args)}"
+        )
+    },
 )
 
 # CLI reference pages generated entirely from their parser: page -> (parser, JSON tip)
@@ -273,7 +307,13 @@ pages = {
     "cli/run-batch.md": (create_parser(openai_run_batch.make_arg_parser), True),
     "cli/launch/render.md": (create_parser(RenderSubcommand.add_cli_args), True),
     "cli/bench/latency.md": (create_parser(bench_latency.add_cli_args), True),
+    # URL kept as `mm_processor` for back-compat; command name is `mm-processor`
+    "cli/bench/mm_processor.md": (
+        create_parser(BenchmarkMMProcessorSubcommand.add_cli_args),
+        True,
+    ),
     "cli/bench/serve.md": (create_parser(bench_serve.add_cli_args), True),
+    "cli/bench/startup.md": (create_parser(bench_startup.add_cli_args), True),
     "cli/bench/throughput.md": (create_parser(bench_throughput.add_cli_args), True),
     "cli/bench/sweep/plot.md": (create_parser(bench_sweep_plot.add_cli_args), True),
     "cli/bench/sweep/plot_pareto.md": (
@@ -285,13 +325,23 @@ pages = {
         create_parser(bench_sweep_serve_workload.add_cli_args),
         True,
     ),
+    "cli/bench/sweep/startup.md": (
+        create_parser(bench_sweep_startup.add_cli_args),
+        True,
+    ),
 }
 
-JSON_TIP = '## JSON CLI Arguments\n\n--8<-- "docs/cli/json_tip.inc.md"\n\n'
+# Command name for pages whose file stem differs (URL kept for back-compat).
+COMMAND_NAMES = {"cli/bench/mm_processor.md": "mm-processor"}
 
 for doc_path, (parser, json_tip) in pages.items():
-    title = "vllm " + Path(doc_path).relative_to("cli").with_suffix("").as_posix()
-    content = f"# {title.replace('/', ' ')}\n\n"
+    segments = Path(doc_path).relative_to("cli").with_suffix("").parts
+    label = COMMAND_NAMES.get(doc_path, segments[-1])
+    command = " ".join([*segments[:-1], label])
+    # `title` frontmatter keeps the nav label to just this command's segment,
+    # while the H1 stays the full `vllm ...` command for the page heading.
+    content = f"---\ntitle: {label}\n---\n\n"
+    content += f"# vllm {command}\n\n"
     if parser.description:
         content += f"## Overview\n\n{parser.description}\n\n"
         # Rendered above instead of at the top of the Arguments section
@@ -304,3 +354,56 @@ for doc_path, (parser, json_tip) in pages.items():
     logger.debug("CLI reference generated: %s", doc_path)
 
 logger.info("Total argparse docs generated: %d", len(pages) + 2)
+
+
+# --- Bare subcommand (group) pages -------------------------------------------
+# Mirror `vllm <group> --help`: an overview plus a table of child subcommands,
+# each linked to its reference page. Children are read from the CLI registries
+# so the listing can never drift from the actual subcommands. Each page is the
+# `README.md` of its command directory so it becomes that section's index and is
+# picked up by the existing nav globs.
+import_bench_subcommands()  # populate BenchmarkSubcommandBase.__subclasses__()
+bench_subcommands = BenchmarkSubcommandBase.__subclasses__()
+bench_children = [(cmd.name, cmd.help) for cmd in bench_subcommands]
+
+groups = {
+    "cli/bench/README.md": (BenchmarkSubcommand.help, bench_children),
+    "cli/launch/README.md": (
+        launch_description,
+        [(cmd.name, cmd.help) for cmd in LaunchSubcommandBase.__subclasses__()],
+    ),
+    "cli/bench/sweep/README.md": (
+        dict(bench_children).get("sweep"),
+        [(args.parser_name, args.parser_help) for args, _ in sweep_subcommands],
+    ),
+}
+
+# Doc paths that exist, so we only link a child that has a reference page.
+existing_pages = set(pages) | set(groups)
+
+
+def child_link(group_doc: str, name: str) -> str | None:
+    group_dir = Path(group_doc).parent  # cli/bench/README.md -> cli/bench
+    for stem in (name, name.replace("-", "_")):
+        # A leaf page (bench/latency.md) or a nested group index (sweep/README.md)
+        for candidate in (group_dir / f"{stem}.md", group_dir / stem / "README.md"):
+            if candidate.as_posix() in existing_pages:
+                return candidate.relative_to(group_dir).as_posix()
+    return None
+
+
+for doc_path, (overview, children) in groups.items():
+    title = "vllm " + Path(doc_path).parent.relative_to("cli").as_posix()
+    lines = [f"# {title.replace('/', ' ')}", ""]
+    if overview:
+        lines += ["## Overview", "", overview.strip(), ""]
+    lines += ["## Subcommands", "", "| Command | Description |", "| --- | --- |"]
+    for name, summary in children:
+        link = child_link(doc_path, name)
+        command = f"[`{name}`]({link})" if link else f"`{name}`"
+        lines.append(f"| {command} | {(summary or '').strip()} |")
+    with mkdocs_gen_files.open(doc_path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    logger.debug("CLI group reference generated: %s", doc_path)
+
+logger.info("CLI group reference pages generated: %d", len(groups))

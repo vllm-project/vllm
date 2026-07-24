@@ -4,7 +4,9 @@ nav:
   - chat.md
   - complete.md
   - run-batch.md
-  - vllm bench:
-    - bench/**/*.md
-  - vllm launch:
+  - bench:
+    - bench/*.md
+    - sweep:
+      - bench/sweep/**/*.md
+  - launch:
     - launch/**/*.md
