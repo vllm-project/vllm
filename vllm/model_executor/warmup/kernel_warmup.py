@@ -82,6 +82,24 @@ def kernel_warmup(worker: "Worker"):
         )
     qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
 
+    if envs.VLLM_USE_HELION_KERNELS:
+        from vllm.kernels.helion_generated.dispatcher import (
+            warmup_per_token_group_fp8_quant,
+        )
+
+        compilation_config = worker.vllm_config.compilation_config
+        warmup_sizes = [
+            size
+            for size in (compilation_config.compile_sizes or [])
+            if isinstance(size, int)
+        ]
+        warmup_sizes.extend(compilation_config.cudagraph_capture_sizes or [])
+        warmup_sizes.append(worker.scheduler_config.max_num_batched_tokens)
+        warmup_per_token_group_fp8_quant(
+            warmup_sizes,
+            getattr(worker.model_runner, "device", torch.device("cuda")),
+        )
+
     # DSv4 mHC TileLang kernels (hc_pre/hc_post/hc_head_op) run every decoder
     # layer per token; warm them across token sizes first so the first real
     # request doesn't pay JIT cost. No-op for non-DSv4 models (gated inside).

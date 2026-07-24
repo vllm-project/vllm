@@ -240,6 +240,7 @@ repos:
     entry: python tools/pre_commit/check_forbidden_imports.py
     language: python
     types: [python]
+    exclude: ^vllm/kernels/helion_generated/kernels/
     additional_dependencies: [regex]
   # prevent use torch.cuda APIs
   - id: check-torch-cuda-call

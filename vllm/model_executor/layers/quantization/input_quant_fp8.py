@@ -108,10 +108,11 @@ class QuantFP8(CustomOp):
 
             if (
                 envs.VLLM_USE_HELION_KERNELS
+                and not torch.compiler.is_compiling()
                 and x.is_contiguous()
                 and torch.cuda.is_current_stream_capturing()
             ):
-                return fp8_utils.per_token_group_quant_fp8_helion(
+                return fp8_utils.per_token_group_quant_fp8_helion_generated(
                     x,
                     group_size=self.group_size,
                     column_major_scales=self.column_major_scales,

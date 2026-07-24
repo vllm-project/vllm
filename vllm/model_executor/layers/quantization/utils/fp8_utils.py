@@ -693,7 +693,7 @@ def per_token_group_quant_fp8(
     return x_q, x_s
 
 
-def per_token_group_quant_fp8_helion(
+def per_token_group_quant_fp8_helion_generated(
     x: torch.Tensor,
     group_size: int,
     eps: float = 1e-10,
@@ -702,7 +702,7 @@ def per_token_group_quant_fp8_helion(
     tma_aligned_scales: bool = False,
     use_ue8m0: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Helion variant of `per_token_group_quant_fp8`.
+    """Checked-in Helion-generated variant of `per_token_group_quant_fp8`.
 
     Output allocation matches `per_token_group_quant_fp8`; the scale layout
     (row-major / column-major / TMA-aligned) is carried by `x_s`'s strides,
@@ -710,9 +710,8 @@ def per_token_group_quant_fp8_helion(
     while a CUDA graph is capturing; the eager router that decides when to call
     it lives in `input_quant_fp8.QuantFP8.forward_cuda`.
     """
-    # Import triggers @register_kernel for torch.ops.vllm_helion.*; the caller
-    # only reaches here with VLLM_USE_HELION_KERNELS enabled.
-    import vllm.kernels.helion.ops.per_token_group_fp8_quant  # noqa: F401
+    # Import registers torch.ops.vllm_helion_generated.*.
+    import vllm.kernels.helion_generated.dispatcher  # noqa: F401
 
     if use_ue8m0 is None:
         use_ue8m0 = is_deep_gemm_e8m0_used()
@@ -744,7 +743,7 @@ def per_token_group_quant_fp8_helion(
         shape = x.shape[:-1] + (x.shape[-1] // group_size,)
         x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
 
-    torch.ops.vllm_helion.per_token_group_fp8_quant(
+    torch.ops.vllm_helion_generated.per_token_group_fp8_quant(
         x,
         x_q,
         x_s,
