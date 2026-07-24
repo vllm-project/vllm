@@ -543,6 +543,17 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
         config.validate_rope()
 
 
+def allow_global_per_layer_attribute_access(config: PretrainedConfig) -> None:
+    """Allow reading per-layer attributes from the global config.
+
+    Transformers heterogeneous configs (e.g. Gemma 4) raise if an attribute
+    that varies across layers is read from the global config. Setting this
+    flag downgrades those reads to a warning returning the global value.
+    """
+    if getattr(config, "is_heterogeneous", False):
+        config.allow_global_per_layer_attribute_access = True
+
+
 def _uses_mrope(config: PretrainedConfig) -> bool:
     rope_parameters = getattr(config, "rope_parameters", None)
     if rope_parameters is None:
@@ -809,6 +820,16 @@ def get_config(
     if sub_configs:
         for sub_config in sub_configs:
             patch_rope_parameters(getattr(config, sub_config))
+
+    # Heterogeneous configs raise if a per-layer attribute is read from the
+    # global config. Layer geometry is handled per layer where it matters
+    # (e.g. `create_attention_instances` in the Transformers backend), so
+    # allow the global reads done elsewhere in vLLM.
+    allow_global_per_layer_attribute_access(config)
+    allow_global_per_layer_attribute_access(config.get_text_config())
+    if sub_configs:
+        for sub_config in sub_configs:
+            allow_global_per_layer_attribute_access(getattr(config, sub_config))
 
     if trust_remote_code:
         maybe_register_config_serialize_by_value()

@@ -769,11 +769,26 @@ class ModelConfig:
 
     def get_model_arch_config(
         self,
+        layer_idx: int | None = None,
     ) -> ModelArchitectureConfig:
+        hf_config = self.hf_config
+        hf_text_config = self.hf_text_config
+        if layer_idx is not None:
+            # Heterogeneous configs (e.g. Gemma 4) vary attributes like
+            # head_dim across layers, so resolve the per-layer copy instead
+            # of the ambiguous global config (huggingface/transformers#47384).
+            # `per_layer_config` exists (and is indexable) on every config via
+            # the heterogeneity mixin regardless of whether the config is
+            # actually heterogeneous, so gate on `per_layer_attributes`
+            # instead — it is only non-empty when overrides are declared.
+            if getattr(hf_config, "per_layer_attributes", None):
+                hf_config = hf_config.per_layer_config[layer_idx]
+            if getattr(hf_text_config, "per_layer_attributes", None):
+                hf_text_config = hf_text_config.per_layer_config[layer_idx]
         convertor_cls = MODEL_ARCH_CONFIG_CONVERTORS.get(
             self.hf_config.model_type, ModelArchConfigConvertorBase
         )
-        convertor = convertor_cls(self.hf_config, self.hf_text_config)
+        convertor = convertor_cls(hf_config, hf_text_config)
         return convertor.convert()
 
     @field_validator("tokenizer", "max_model_len", mode="wrap")
@@ -1322,20 +1337,26 @@ class ModelConfig:
     def rswa_window(self) -> int | None:
         return self.model_arch_config.rswa_window
 
-    def get_head_size(self) -> int:
-        return self.model_arch_config.head_size
+    def get_head_size(self, layer_idx: int | None = None) -> int:
+        if layer_idx is None:
+            return self.model_arch_config.head_size
+        return self.get_model_arch_config(layer_idx=layer_idx).head_size
 
-    def get_total_num_kv_heads(self) -> int:
+    def get_total_num_kv_heads(self, layer_idx: int | None = None) -> int:
         """Returns the total number of KV heads."""
-        return self.model_arch_config.total_num_kv_heads
+        if layer_idx is None:
+            return self.model_arch_config.total_num_kv_heads
+        return self.get_model_arch_config(layer_idx=layer_idx).total_num_kv_heads
 
-    def get_num_kv_heads(self, parallel_config: ParallelConfig) -> int:
+    def get_num_kv_heads(
+        self, parallel_config: ParallelConfig, layer_idx: int | None = None
+    ) -> int:
         """Returns the number of KV heads per GPU."""
         if self.use_mla:
             # When using MLA during decode it becomes MQA
             return 1
 
-        total_num_kv_heads = self.get_total_num_kv_heads()
+        total_num_kv_heads = self.get_total_num_kv_heads(layer_idx=layer_idx)
         # If tensor parallelism is used, we divide the number of KV heads by
         # the tensor parallel size. We will replicate the KV heads in the
         # case where the number of KV heads is smaller than the tensor
