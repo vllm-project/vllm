@@ -7,6 +7,7 @@ import torch
 import vllm.envs as envs
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.sampling_params import SamplingParams
+from vllm.triton_utils import tl, triton
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
     flashinfer_sample,
@@ -25,6 +26,36 @@ from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
 from vllm.v1.worker.gpu.states import RequestState
+
+
+@triton.jit
+def _expand_compact_values_kernel(
+    compact_values_ptr,
+    expanded_values_ptr,
+    cu_num_values_ptr,
+    FILL_VALUE: tl.constexpr,
+):
+    req_idx = tl.program_id(0)
+    start = tl.load(cu_num_values_ptr + req_idx)
+    end = tl.load(cu_num_values_ptr + req_idx + 1)
+    value = tl.load(compact_values_ptr + start, mask=start < end, other=FILL_VALUE)
+    tl.store(expanded_values_ptr + req_idx, value)
+
+
+def _expand_compact_values(
+    compact_values: torch.Tensor,
+    cu_num_values: torch.Tensor,
+    fill_value: int,
+) -> torch.Tensor:
+    num_reqs = cu_num_values.shape[0] - 1
+    expanded_values = compact_values.new_empty(num_reqs)
+    _expand_compact_values_kernel[(num_reqs,)](
+        compact_values,
+        expanded_values,
+        cu_num_values,
+        FILL_VALUE=fill_value,
+    )
+    return expanded_values
 
 
 class Sampler:
@@ -128,6 +159,18 @@ class Sampler:
             input_batch.idx_mapping,
             self.req_states.prefill_len.gpu,
         )
+
+        if (
+            input_batch.num_draft_tokens_per_req is None
+            and sampled.shape[0] != input_batch.num_reqs
+        ):
+            sampled = _expand_compact_values(
+                sampled, input_batch.cu_num_logits, fill_value=-1
+            )
+            if num_nans is not None:
+                num_nans = _expand_compact_values(
+                    num_nans, input_batch.cu_num_logits, fill_value=0
+                )
 
         # These are GPU tensors.
         sampler_output = SamplerOutput(
