@@ -4,6 +4,19 @@
 
 """Gemma4 tool call parsing utilities for offline inference.
 
+.. deprecated::
+    This module is deprecated and will be removed in a future release.
+    Use ``tokenizer.parse_response()`` from Transformers v5 instead::
+
+        from transformers import AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained("google/gemma-4-it")
+        tool_calls = tokenizer.parse_response(output_token_ids)
+
+    Note: ``tokenizer.parse_response()`` requires a tokenizer instance and
+    token IDs (or a decoded string), unlike the standalone functions here.
+    There is no Transformers v5 equivalent for :func:`has_tool_response_tag`.
+
 Standalone functions that parse decoded model text to extract tool calls
 from Gemma4 models. These are pure-Python utilities with zero heavy
 dependencies — they work on raw decoded strings from any inference
@@ -34,6 +47,8 @@ Usage with vLLM offline inference::
 Ported from ``transformers.models.gemma4.utils_gemma4`` so that vLLM users
 do not need a transformers dependency for output parsing.
 """
+
+import warnings
 
 import regex as re
 
@@ -72,9 +87,12 @@ def _parse_tool_arguments(args_str: str) -> dict[str, str]:
 def parse_tool_calls(text: str, *, strict: bool = False) -> list[dict]:
     """Parse tool calls from decoded Gemma4 model output.
 
+    .. deprecated::
+        Use ``tokenizer.parse_response()`` from Transformers v5 instead.
+        See module docstring for migration guidance.
+
     Uses a tiered parsing strategy to handle known output variations in
-    Gemma4 models, which may emit
-    non-standard tool call formats.
+    Gemma4 models, which may emit non-standard tool call formats.
 
     Parsing tiers:
         1. **Standard**: ``<|tool_call>call:name{args}<tool_call|>``
@@ -103,6 +121,14 @@ def parse_tool_calls(text: str, *, strict: bool = False) -> list[dict]:
         >>> for tc in tool_calls:
         ...     print(f"Call: {tc['name']}({tc['arguments']})")
     """
+    warnings.warn(
+        "parse_tool_calls is deprecated and will be removed in a future "
+        "release. Use tokenizer.parse_response() from Transformers v5 "
+        "instead (requires a tokenizer instance).",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
     results = []
 
     # Tier 1: Standard format with special tokens.
@@ -139,6 +165,11 @@ def parse_tool_calls(text: str, *, strict: bool = False) -> list[dict]:
 def has_tool_response_tag(text: str) -> bool:
     """Check if model output properly ends with a tool response tag.
 
+    .. deprecated::
+        This function is deprecated and will be removed in a future release.
+        There is no direct equivalent in Transformers v5;
+        use ``tokenizer.parse_response()`` for general response parsing.
+
     Some Gemma4 models sometimes emit ``<eos>`` instead of
     ``<|tool_response>`` after a tool call. This helper detects
     whether the model used the proper termination, so callers can
@@ -158,5 +189,12 @@ def has_tool_response_tag(text: str) -> bool:
         ...     # Model used <eos> instead — inject <|tool_response> manually
         ...     next_prompt = "<|tool_response>" + tool_result
     """
+    warnings.warn(
+        "has_tool_response_tag is deprecated and will be removed in a future "
+        "release. There is no direct equivalent in Transformers v5; use "
+        "tokenizer.parse_response() for general response parsing.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     stripped = text.rstrip()
     return stripped.endswith(_TOOL_RESPONSE_START_TAG)
