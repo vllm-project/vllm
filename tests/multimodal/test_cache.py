@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing as mp
+import threading
+import time
 
 import numpy as np
 import pytest
@@ -591,3 +593,57 @@ def test_sleep_wake_preserves_mm_cache_consistency():
     llm.wake_up()
     output2 = llm.generate([prompt], sampling_params)
     assert output2[0].outputs[0].text
+
+
+def test_receiver_cache_thread_safe_under_concurrent_clear():
+    """Adds from EngineCore's input socket thread can race
+    `reset_mm_cache` on the busy loop thread; unsynchronized access
+    corrupted the LRU bookkeeping and livelocked the eviction loop
+    (vllm-project/vllm#47958).
+    """
+    model_config = ModelConfig(
+        model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+        mm_processor_cache_gb=32 / GiB_bytes,
+    )
+    receiver_cache = MultiModalReceiverCache(model_config)
+
+    errors: list[Exception] = []
+    stop = threading.Event()
+
+    def add_items() -> None:
+        i = 0
+        while not stop.is_set():
+            mm_hash = f"image_{i % 16}"
+            try:
+                receiver_cache.get_and_update_item(
+                    MultiModalKwargsItem.dummy(5), mm_hash
+                )
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+                break
+            i += 1
+
+    def clear_cache() -> None:
+        while not stop.is_set():
+            try:
+                receiver_cache.clear_cache()
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+                break
+
+    threads = [
+        threading.Thread(target=add_items, daemon=True),
+        threading.Thread(target=add_items, daemon=True),
+        threading.Thread(target=clear_cache, daemon=True),
+    ]
+    for t in threads:
+        t.start()
+    time.sleep(0.5)
+    stop.set()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert not errors, f"concurrent cache access raised: {errors[0]!r}"
+    assert all(not t.is_alive() for t in threads), (
+        "cache operation livelocked (vllm-project/vllm#47958)"
+    )

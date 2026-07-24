@@ -7,6 +7,10 @@ from typing import NamedTuple, TypeVar, cast, overload
 
 import cachetools
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 _K = TypeVar("_K", bound=Hashable)
 _V = TypeVar("_V")
 _T = TypeVar("_T")
@@ -188,18 +192,35 @@ class LRUCache(cachetools.LRUCache[_K, _V]):
 
     def popitem(self, remove_pinned: bool = False):
         """Remove and return the `(key, value)` pair least recently used."""
-        if not remove_pinned:
-            # pop the oldest item in the cache that is not pinned
-            lru_key = next(
-                (key for key in self.order if key not in self.pinned_items),
-                ALL_PINNED_SENTINEL,
-            )
-            if lru_key is ALL_PINNED_SENTINEL:
-                raise RuntimeError(
-                    "All items are pinned, cannot remove oldest from the cache."
+        while True:
+            if not remove_pinned:
+                # pop the oldest item in the cache that is not pinned
+                lru_key = next(
+                    (key for key in self.order if key not in self.pinned_items),
+                    ALL_PINNED_SENTINEL,
                 )
-        else:
-            lru_key = next(iter(self.order))
+                if lru_key is ALL_PINNED_SENTINEL:
+                    raise RuntimeError(
+                        "All items are pinned, cannot remove oldest from the cache."
+                    )
+            else:
+                lru_key = next(iter(self.order))
+            if lru_key in self:
+                break
+            # A stale order entry (in the order dict but not in the data
+            # dict) makes pop() a silent no-op, which would turn
+            # cachetools' eviction loop in Cache.__setitem__ into an
+            # infinite spin because currsize never decreases. Such
+            # entries should not exist, but unsynchronized concurrent
+            # access can produce them; drop the stale entry and pick
+            # the next candidate instead of hanging.
+            logger.warning(
+                "LRUCache order/data desync detected for key %s; "
+                "dropping the stale order entry. This indicates the "
+                "cache was mutated concurrently without a lock.",
+                lru_key,
+            )
+            del self._LRUCache__order[lru_key]  # type: ignore
         value = self.pop(cast(_K, lru_key))
         return (lru_key, value)
 

@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import threading
+
 from vllm.utils.cache import CacheInfo, LRUCache
 
 
@@ -123,3 +125,61 @@ def test_lru_cache():
     assert 2 in cache
     assert 4 in cache
     assert 6 in cache
+
+
+def _desync_order_from_data(cache: LRUCache, key) -> None:
+    """Remove *key* from the data/size bookkeeping but leave it in the
+    order dict — the torn state unsynchronized concurrent mutation can
+    produce (see vllm-project/vllm#47958)."""
+    del cache._Cache__data[key]  # type: ignore[attr-defined]
+    cache._Cache__currsize -= (  # type: ignore[attr-defined]
+        cache._Cache__size.pop(key)  # type: ignore[attr-defined]
+    )
+
+
+def test_popitem_skips_stale_order_entry():
+    """A stale order entry must be dropped, not silently no-op popped.
+
+    pop() returns the default when the key is missing from the data
+    dict, so a stale order entry made popitem() remove nothing; the
+    eviction loop in cachetools' Cache.__setitem__ then spun forever
+    (vllm-project/vllm#47958).
+    """
+    cache = LRUCache(10, getsizeof=len)
+    cache.put("a", "xxxx")
+    cache.put("b", "yyyy")
+    _desync_order_from_data(cache, "a")
+
+    key, value = cache.popitem()
+
+    assert (key, value) == ("b", "yyyy")
+    assert "a" not in cache.order
+    assert len(cache) == 0
+
+
+def test_eviction_terminates_with_stale_order_entry():
+    """Inserting past capacity must terminate despite a stale order
+    entry (regression test for the vllm-project/vllm#47958 livelock)."""
+    cache = LRUCache(10, getsizeof=len)
+    cache.put("a", "xxxx")
+    cache.put("b", "yyyy")
+    _desync_order_from_data(cache, "a")
+
+    # currsize is 4 ("b"); size 8 forces the eviction loop, which must
+    # heal the stale "a" entry and evict "b" instead of spinning.
+    # Run in a worker thread so a regression fails fast instead of
+    # hanging the test session.
+    done = threading.Event()
+
+    def insert() -> None:
+        cache.put("c", "z" * 8)
+        done.set()
+
+    threading.Thread(target=insert, daemon=True).start()
+    assert done.wait(timeout=10), (
+        "eviction loop livelocked on a stale order entry (vllm-project/vllm#47958)"
+    )
+
+    assert set(cache.cache) == {"c"}
+    assert set(cache.order) == {"c"}
+    assert cache.currsize == 8
