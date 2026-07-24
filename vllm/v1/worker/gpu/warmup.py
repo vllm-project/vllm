@@ -277,7 +277,9 @@ def warmup_kernels(
                 (len(req_ids), bitmask_width), fill_value=-1, dtype=np.int32
             )
             grammar_output = GrammarOutput(
-                structured_output_request_ids=req_ids, grammar_bitmask=grammar_bitmask
+                structured_output_request_ids=req_ids,
+                grammar_bitmask=grammar_bitmask,
+                num_spec_tokens=[0] * len(req_ids),
             )
 
         worker_sample_tokens(grammar_output)
