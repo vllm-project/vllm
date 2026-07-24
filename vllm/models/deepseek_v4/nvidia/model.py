@@ -994,7 +994,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         )
         self.eager_scratch_pool: DeepseekV4EagerScratchPool | None = None
         if not vllm_config.parallel_config.use_ubatching:
-            # TODO: exploration with dbo
+            # TODO: support dbo if needed
+            # this requires the buffer to have ubatch dim
             self.eager_scratch_pool = DeepseekV4EagerScratchPool(
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 padded_heads,
