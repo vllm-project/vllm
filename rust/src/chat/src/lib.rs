@@ -148,8 +148,7 @@ impl ChatRequestProcessor {
         // Stamp before rendering so render and tokenize count toward TTFT/e2e.
         let arrival_time = vllm_llm::current_unix_timestamp_secs();
         let output_processor = self.backend.new_chat_output_processor(&mut request, options)?;
-        let render_request = request.as_render_request();
-        let rendered = self.backend.chat_renderer().render(render_request)?;
+        let rendered = self.backend.chat_renderer().render(request.as_render_request())?;
         let reasoning_parser_kwargs =
             request
                 .sampling_params
@@ -286,8 +285,8 @@ impl ChatLlm {
     pub async fn tokenize_chat(&self, request: ChatRequest) -> Result<Vec<u32>> {
         request.validate()?;
 
-        let render_request = request.as_render_request();
-        let rendered = self.processor.backend.chat_renderer().render(render_request)?;
+        let rendered =
+            self.processor.backend.chat_renderer().render(request.as_render_request())?;
         let (prompt, _mm_features) =
             self.processor.finalize_rendered_prompt(&request, rendered).await?;
 
