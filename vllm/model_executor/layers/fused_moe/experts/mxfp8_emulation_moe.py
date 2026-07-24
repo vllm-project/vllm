@@ -67,6 +67,11 @@ class Mxfp8EmulationTritonExperts(Mxfp8TritonExpertsBase):
         quant_config: FusedMoEQuantConfig,
     ):
         super().__init__(moe_config, quant_config)
+        logger.info_once(
+            "No native MXFP8 MoE backend available on this device; "
+            "MXFP8 weights will be dequantized to BF16 once at load time and the "
+            "MoE will run in BF16 (no per-step dequant)."
+        )
         logger.warning_once(
             "Using Mxfp8EmulationTritonExperts MoE backend. Weights are "
             "dequantized to BF16 on the fly; this is slower than a native "

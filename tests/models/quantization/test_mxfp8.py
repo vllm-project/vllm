@@ -17,8 +17,10 @@ diverse prompts from ``tests/prompts/example.txt``.
 """
 
 import pytest
+import torch
 
 from tests.quantization.utils import is_quant_method_supported
+from vllm.platforms import current_platform
 
 from ..utils import check_logprobs_close
 
@@ -79,6 +81,172 @@ def test_mxfp8_logprobs(
             name_0="bf16",
             name_1="mxfp8",
         )
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("mxfp8"),
+    reason="mxfp8 is not supported on this GPU type (requires sm_100+).",
+)
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="AITER MXFP8 MoE backend is ROCm-only.",
+)
+@pytest.mark.quant_model
+def test_mxfp8_aiter_requires_swigluoai_activation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.fused_moe.experts import aiter_mxfp8_moe
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
+        select_mxfp8_moe_backend,
+    )
+
+    monkeypatch.setattr(
+        aiter_mxfp8_moe.AiterMxfp8Experts,
+        "_supports_current_device",
+        staticmethod(lambda: True),
+    )
+    monkeypatch.setattr(
+        aiter_mxfp8_moe,
+        "is_aiter_mxfp8_moe_available",
+        lambda: True,
+    )
+
+    config = FusedMoEConfig(
+        num_experts=8,
+        experts_per_token=2,
+        hidden_dim=256,
+        intermediate_size=256,
+        num_local_experts=8,
+        num_logical_experts=8,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation=MoEActivation.SILU,
+        in_dtype=torch.bfloat16,
+        device="cuda",
+        routing_method=RoutingMethodType.Renormalize,
+        moe_backend="aiter",
+    )
+
+    with pytest.raises(
+        ValueError, match="requires activation='swigluoai_uninterleave'"
+    ):
+        select_mxfp8_moe_backend(config)
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("mxfp8"),
+    reason="mxfp8 is not supported on this GPU type (requires sm_100+).",
+)
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="AITER MXFP8 MoE backend is ROCm-only.",
+)
+@pytest.mark.quant_model
+def test_mxfp8_aiter_requires_swigluoai_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.fused_moe.experts import aiter_mxfp8_moe
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
+        select_mxfp8_moe_backend,
+    )
+
+    monkeypatch.setattr(
+        aiter_mxfp8_moe.AiterMxfp8Experts,
+        "_supports_current_device",
+        staticmethod(lambda: True),
+    )
+    monkeypatch.setattr(
+        aiter_mxfp8_moe,
+        "is_aiter_mxfp8_moe_available",
+        lambda: True,
+    )
+
+    config = FusedMoEConfig(
+        num_experts=8,
+        experts_per_token=2,
+        hidden_dim=256,
+        intermediate_size=256,
+        num_local_experts=8,
+        num_logical_experts=8,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        in_dtype=torch.bfloat16,
+        device="cuda",
+        routing_method=RoutingMethodType.Renormalize,
+        moe_backend="aiter",
+    )
+
+    with pytest.raises(ValueError, match="hardcodes SwiGLU-OAI"):
+        select_mxfp8_moe_backend(config)
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("mxfp8"),
+    reason="mxfp8 is not supported on this GPU type (requires sm_100+).",
+)
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="AITER MXFP8 MoE backend is ROCm-only.",
+)
+@pytest.mark.quant_model
+def test_mxfp8_aiter_accepts_swigluoai_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.fused_moe.experts import aiter_mxfp8_moe
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
+        select_mxfp8_moe_backend,
+    )
+
+    monkeypatch.setattr(
+        aiter_mxfp8_moe.AiterMxfp8Experts,
+        "_supports_current_device",
+        staticmethod(lambda: True),
+    )
+    monkeypatch.setattr(
+        aiter_mxfp8_moe,
+        "is_aiter_mxfp8_moe_available",
+        lambda: True,
+    )
+
+    config = FusedMoEConfig(
+        num_experts=8,
+        experts_per_token=2,
+        hidden_dim=256,
+        intermediate_size=256,
+        num_local_experts=8,
+        num_logical_experts=8,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        in_dtype=torch.bfloat16,
+        device="cuda",
+        routing_method=RoutingMethodType.Renormalize,
+        moe_backend="aiter",
+        swiglu_alpha=aiter_mxfp8_moe._AITER_SWIGLU_ALPHA,
+        swiglu_beta=aiter_mxfp8_moe._AITER_SWIGLU_BETA,
+    )
+
+    backend, experts_cls = select_mxfp8_moe_backend(config)
+
+    assert backend == Fp8MoeBackend.AITER_MXFP8
+    assert experts_cls is aiter_mxfp8_moe.AiterMxfp8Experts
 
 
 @pytest.mark.skipif(
