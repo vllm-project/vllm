@@ -128,6 +128,10 @@ class EngineCore:
         # Opaque weight version supplied by the caller.
         self._weight_version = "default"
 
+        # Normalize values cached by model layers before configs are copied to
+        # executor subprocesses and the model is loaded there.
+        vllm_config.adjust_dcp_kv_cache_interleave_size()
+
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
         self._pooler_config_logged = False
