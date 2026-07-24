@@ -41,12 +41,15 @@ llm_config = LLMConfig(
         "tensor_parallel_size": 8,
         "pipeline_parallel_size": 2,
         "gpu_memory_utilization": 0.92,
-        "dtype": "auto",
+        # Use bfloat16 for stability with DeepSeek V4 on H20
+        "dtype": "bfloat16",
         "max_num_seqs": 40,
         "max_model_len": 16384,
         "enable_chunked_prefill": True,
         "enable_prefix_caching": True,
         "trust_remote_code": True,
+        # Disable dynamic quantization to avoid triton version issues
+        "quantization": None,
     },
 )
 
