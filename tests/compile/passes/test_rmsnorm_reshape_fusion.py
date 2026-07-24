@@ -4,7 +4,6 @@
 import pytest
 import torch
 
-import vllm.config
 import vllm.ir.ops
 from tests.compile.backend import TestBackend
 from vllm.compilation.passes.fusion.add_rms_fusion import (
