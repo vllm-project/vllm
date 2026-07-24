@@ -13,6 +13,9 @@ from huggingface_hub import snapshot_download
 
 from vllm import LLM, SamplingParams
 from vllm.model_executor.model_loader import ShardedStateLoader
+from vllm.model_executor.model_loader.sharded_state_loader import (
+    _has_loaded_alias,
+)
 from vllm.platforms import current_platform
 
 prompts = [
@@ -48,6 +51,28 @@ def test_filter_subtensors():
     for key, tensor in filtered_state_dict.items():
         # NOTE: don't use `equal` here, as the tensor might contain NaNs
         assert tensor is state_dict[key]
+
+
+class TestHasLoadedAlias:
+    """Tests for _has_loaded_alias, which bridges save/load asymmetry
+    for buffer/parameter pairs like _q_scale and q_scale (#41174)."""
+
+    def test_underscore_alias_detected(self):
+        loaded = {"layer.attn._q_scale", "layer.attn._k_scale"}
+        assert _has_loaded_alias("layer.attn.q_scale", loaded)
+        assert _has_loaded_alias("layer.attn.k_scale", loaded)
+
+    def test_no_alias_when_underscore_version_not_loaded(self):
+        loaded = {"layer.attn.weight", "layer.attn.bias"}
+        assert not _has_loaded_alias("layer.attn.q_scale", loaded)
+
+    def test_already_underscore_prefixed_key_not_aliased(self):
+        loaded = {"layer.attn.__q_scale"}
+        assert not _has_loaded_alias("layer.attn._q_scale", loaded)
+
+    def test_top_level_key_no_alias(self):
+        loaded = {"_weight"}
+        assert not _has_loaded_alias("weight", loaded)
 
 
 @pytest.fixture(scope="module")
