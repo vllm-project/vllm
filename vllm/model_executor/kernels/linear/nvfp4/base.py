@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import torch
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.utils.flashinfer import has_flashinfer_cutedsl_nvfp4_quant
 
 
 @dataclass
@@ -30,10 +31,48 @@ class NvFp4LinearKernel(ABC):
     match for the current hardware.
     """
 
+    # Subclasses that route their NVFP4 activation quantization through
+    # FlashInfer (see ``KernelConfig.nvfp4_input_quant_backend``) set this to True.
+    uses_flashinfer_input_quant: bool = False
+
+    # Resolved per instance in __init__; the class-level default keeps
+    # input_quant_key() safe on instances probed without running __init__.
+    use_flashinfer_cutedsl_input_quant: bool = False
+
     def __init__(self, config: NvFp4LinearLayerConfig) -> None:
         assert self.can_implement(config)[0]
         assert self.is_supported()[0]
         self.config = config
+        self.use_flashinfer_cutedsl_input_quant = (
+            self._resolve_use_flashinfer_cutedsl_input_quant()
+        )
+
+    def _resolve_use_flashinfer_cutedsl_input_quant(self) -> bool:
+        """Resolve once at setup whether this kernel's activation quant uses
+        FlashInfer CuTe-DSL, so apply_weights only reads a plain attribute."""
+        from vllm.config import get_current_vllm_config_or_none
+
+        config = get_current_vllm_config_or_none()
+        if config is None:
+            return False
+        if config.kernel_config.nvfp4_input_quant_backend != "flashinfer_cutedsl":
+            return False
+        # An explicit backend request that cannot be honored is an error, matching
+        # how linear_backend rejects unsatisfiable selections.
+        if not self.uses_flashinfer_input_quant:
+            raise ValueError(
+                f"nvfp4_input_quant_backend=flashinfer_cutedsl was requested but "
+                f"{type(self).__name__} does not route activation quant through "
+                f"FlashInfer. Select a FlashInfer NVFP4 linear backend (e.g. "
+                f"flashinfer_cutlass) or set nvfp4_input_quant_backend=auto."
+            )
+        if not has_flashinfer_cutedsl_nvfp4_quant():
+            raise ValueError(
+                "nvfp4_input_quant_backend=flashinfer_cutedsl requires SM100+ and a "
+                "FlashInfer build with CuTe-DSL available "
+                "(flashinfer.cute_dsl.is_cute_dsl_available())."
+            )
+        return True
 
     def input_quant_key(self) -> QuantKey | None:
         """Return the input quantization key supported by this kernel. If the kernel

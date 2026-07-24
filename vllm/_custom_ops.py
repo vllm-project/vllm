@@ -1526,6 +1526,7 @@ def scaled_fp4_quant(
     is_sf_swizzled_layout: bool = True,
     backend: str = "none",
     padded_n: int | None = None,
+    flashinfer_cutedsl: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize input tensor to FP4 and return quantized tensor and scale.
@@ -1546,6 +1547,12 @@ def scaled_fp4_quant(
             batches (m <= 32) instead of the 128x4 layout.
         padded_n: Optional padded K dimension. When provided, the quantized
             output and scale tensors are allocated for ``padded_n``
+        flashinfer_cutedsl: Internal; normally set by the NVFP4 linear kernels,
+            which validate availability. When ``True`` quantize via FlashInfer's
+            CuTe-DSL ``nvfp4_quantize`` (128x4, linear, or 8x4 layout) instead of
+            the built-in kernel. There is no availability check here (to stay
+            torch.compile-safe), so direct callers must first ensure
+            has_flashinfer_cutedsl_nvfp4_quant(). ``False`` is the default.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]: The output tensor in FP4 but every
@@ -1569,14 +1576,40 @@ def scaled_fp4_quant(
             f"padded_n has to be a multiple of {block_size}, but got {padded_n}."
         )
 
-    use_8x4_sf_layout = True if "trtllm" in backend and m <= 32 else False  # noqa: SIM210
+    use_8x4_sf_layout = "trtllm" in backend and m <= 32
     if use_8x4_sf_layout and padded_n is not None and padded_n != n:
         # TODO: support this case
         raise ValueError("padded_n is not supported with TRTLLM 8x4 scale layout.")
     if use_8x4_sf_layout:
-        output, output_scale = flashinfer_quant_nvfp4_8x4_sf_layout(
-            input, input_global_scale
-        )
+        # 8x4 layout (TRTLLM small-M). CuTe-DSL supports it, so honor
+        # flashinfer_cutedsl instead of always using the CUDA kernel.
+        if flashinfer_cutedsl:
+            output, output_scale = torch.ops.vllm.flashinfer_cutedsl_nvfp4_quantize(
+                input, input_global_scale, "8x4"
+            )
+        else:
+            output, output_scale = flashinfer_quant_nvfp4_8x4_sf_layout(
+                input, input_global_scale
+            )
+    elif flashinfer_cutedsl:
+        # CuTe-DSL 128x4 or linear quant; output uses the same packed layout as
+        # the vLLM C++ kernel (drop-in replaceable) and is numerically equivalent
+        # aside from occasional adjacent-FP4 rounding from CuTe-DSL's approximate
+        # reciprocal. It zero-fills padded scale factors itself (unlike the C++
+        # kernel), so create_fp4_scale_tensor's zero-init is skipped here.
+        # FlashInfer has no padded_n, so zero-pad the width first (zero blocks
+        # quantize to zero, matching the C++ padded output).
+        quant_input = input
+        if padded_n is not None and padded_n != n:
+            quant_input = torch.nn.functional.pad(input, (0, padded_n - n))
+        if is_sf_swizzled_layout:
+            output, output_scale = torch.ops.vllm.flashinfer_cutedsl_nvfp4_quantize(
+                quant_input, input_global_scale, "128x4"
+            )
+        else:
+            output, output_scale = torch.ops.vllm.flashinfer_cutedsl_nvfp4_quantize(
+                quant_input, input_global_scale, "linear"
+            )
     else:
         # Pre-allocate and call .out variant (same behavior as old in-place API)
         output, output_scale = create_fp4_output_tensors(

@@ -161,6 +161,11 @@ LinearBackend = Literal[
     "xpu_woq",
 ]
 
+NvFp4InputQuantBackend = Literal[
+    "auto",
+    "flashinfer_cutedsl",
+]
+
 
 @config
 class KernelConfig:
@@ -234,6 +239,18 @@ class KernelConfig:
     - "xpu_woq": Use XPU kernels for weight-only quantization (e.g. W8A16)
     """
 
+    nvfp4_input_quant_backend: NvFp4InputQuantBackend = "auto"
+    """Backend for the NVFP4 activation (input) quantization used by NVFP4 dense
+    linear layers. Available options:
+
+    - "auto": Use vLLM's built-in CUDA kernel (default; no behavior change)
+    - "flashinfer_cutedsl": Use FlashInfer's CuTe-DSL nvfp4_quantize kernel
+
+    "flashinfer_cutedsl" requires a Blackwell (SM100+) device and a FlashInfer
+    build exposing the CuTe-DSL nvfp4_quantize backend; it is only honored by the
+    FlashInfer NVFP4 linear kernels.
+    """
+
     @field_validator("moe_backend", mode="before")
     @classmethod
     def _normalize_moe_backend(cls, value: Any) -> Any:
@@ -244,6 +261,13 @@ class KernelConfig:
     @field_validator("linear_backend", mode="before")
     @classmethod
     def _normalize_linear_backend(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.lower().replace("-", "_")
+        return value
+
+    @field_validator("nvfp4_input_quant_backend", mode="before")
+    @classmethod
+    def _normalize_nvfp4_input_quant_backend(cls, value: Any) -> Any:
         if isinstance(value, str):
             return value.lower().replace("-", "_")
         return value
