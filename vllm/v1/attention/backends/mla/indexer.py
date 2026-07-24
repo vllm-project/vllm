@@ -60,7 +60,7 @@ def _prepare_uniform_decode_kernel(
 
     # Compute number of KVs attended to by this token.
     seq_len = tl.load(seq_lens_ptr + req_id)
-    per_token_seq_len = seq_len - max_decode_len + local_idx + 1
+    per_token_seq_len = tl.maximum(seq_len - max_decode_len + local_idx + 1, 0)
     tl.store(decode_seq_lens_ptr + idx, per_token_seq_len)
 
     # Copy block table row.
@@ -737,7 +737,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     - max_decode_len
                     + 1
                     + self.offsets_buffer[:max_decode_len]
-                )
+                ).clamp_(min=0)
                 seq_lens = seq_lens_buffer
             return seq_lens, block_table, decode_lens, num_decodes, requires_padding
 

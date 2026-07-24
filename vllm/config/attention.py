@@ -4,13 +4,24 @@
 from dataclasses import field
 from typing import Any, Literal
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 
 from vllm.config.utils import config
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 IndexerKVDType = Literal["bf16", "fp8", "mxfp4", "nvfp4"]
+
+
+@config
+class HiSparseConfig:
+    """Configuration for HiSparse sparse-MLA decode."""
+
+    host_pool_gib: float = Field(gt=0)
+    """Per-rank pinned host pool size in GiB."""
+
+    device_buffer_size: int | None = Field(default=None, gt=0)
+    """Per-request GPU hot-buffer rows. Defaults to twice the model top-k."""
 
 
 @config
@@ -67,6 +78,10 @@ class AttentionConfig:
     indexer_kv_dtype: IndexerKVDType = "bf16"
     """Data type for the sparse-attention indexer K cache. Quantized formats
     (fp8, mxfp4, nvfp4) require indexer kernel support in the backend."""
+
+    hisparse_config: HiSparseConfig | None = None
+    """HiSparse host-resident KV configuration. Setting this enables experimental
+    Model Runner V2-only HiSparse sparse-MLA decode hot-buffering."""
 
     use_non_causal: bool = False
     """Whether to use non-causal (bidirectional) attention."""

@@ -480,6 +480,10 @@ class CommonAttentionMetadata:
     fixed sliding window. None disables R-SWA. The attention backend copies this
     into its own persistent buffer and reads ``rswa_window`` from model config."""
 
+    batch_to_request_state: torch.Tensor | None = None
+    """Maps compacted V2 batch rows to stable request-state rows. Padded rows
+    map to -1."""
+
     # WARNING: Deprecated fields. Will be removed in a future release (v0.15.0)
     _seq_lens_cpu: torch.Tensor | None = None
     _num_computed_tokens_cpu: torch.Tensor | None = None

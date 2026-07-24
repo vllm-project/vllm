@@ -522,20 +522,27 @@ def copy_kv_cache_blocks_inplace(
 
     if not storage_tensors:
         return
-    device = storage_tensors[0].device
     indices_np = np.array(kv_cache_block_copies, dtype=np.int64)
-    indices = async_tensor_h2d(indices_np, device=device)
-    src_indices, dst_indices = indices.unbind(dim=1)
+    for device in {tensor.device for tensor in storage_tensors}:
+        if device.type == "cpu":
+            # Pinned host pages may still be read or written by CUDA kernels from
+            # the prior step. COW is rare; synchronize before the host copy.
+            torch.accelerator.synchronize()
+            indices = torch.from_numpy(indices_np)
+        else:
+            indices = async_tensor_h2d(indices_np, device=device)
+        src_indices, dst_indices = indices.unbind(dim=1)
 
-    for tensor in storage_tensors:
-        assert tensor.device == device
-        blocks = torch.empty(0, dtype=torch.uint8, device=device)
-        blocks.set_(tensor.untyped_storage())
-        # Block-major backing storage: block i owns the contiguous byte range
-        # [i * page_size, (i + 1) * page_size).
-        assert blocks.numel() % num_blocks == 0
-        blocks = blocks.view(num_blocks, -1)
-        blocks[dst_indices] = blocks[src_indices]
+        for tensor in storage_tensors:
+            if tensor.device != device:
+                continue
+            blocks = torch.empty(0, dtype=torch.uint8, device=device)
+            blocks.set_(tensor.untyped_storage())
+            # Block-major backing storage: block i owns the contiguous byte range
+            # [i * page_size, (i + 1) * page_size).
+            assert blocks.numel() % num_blocks == 0
+            blocks = blocks.view(num_blocks, -1)
+            blocks[dst_indices] = blocks[src_indices]
 
 
 def is_residual_scattered_for_sp(

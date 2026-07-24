@@ -391,17 +391,17 @@ class KVTransferThread(threading.Thread):
     def run(self):
         self.ready_event.set()
         while True:
-            request_data = None
+            request_data = self.request_queue.get()
             try:
-                request_data = self.request_queue.get()
                 if request_data is None:
                     logger.warning("Received a None request!")
-                    self.request_queue.task_done()
                     continue
                 self._handle_request(request_data)
             except Exception:
                 req_id = getattr(request_data, "req_id", "<unknown>")
                 logger.exception("Error in %s (req=%s)", self.name, req_id)
+            finally:
+                self.request_queue.task_done()
 
     def _handle_request(self, req_meta: Any):
         pass
@@ -532,12 +532,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         current_event = req_meta.current_event
 
         if req_id not in self.stored_requests:
-            self.request_queue.task_done()
             return
 
-        # Decrement the in-flight counter and signal task_done() in `finally`
-        # so the scheduler can release the GPU blocks it pinned for this
-        # request (via `delay_free_blocks`) even when the store path raises.
         try:
             if token_len == 0:
                 return
@@ -746,7 +742,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 self.update_kv_event(stored_events)
         finally:
             self.dec_stored_request(req_id)
-            self.request_queue.task_done()
 
 
 class KVCacheStoreRecvingThread(KVTransferThread):
@@ -871,7 +866,6 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                         self.disk_offload_buffer_budget_bytes,
                     )
                     self.set_finished_request(req_id)
-                    self.request_queue.task_done()
                     return
                 load_batches = []
                 block_id_offset = 0
@@ -949,7 +943,6 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             )
 
         self.set_finished_request(req_id)
-        self.request_queue.task_done()
 
 
 # ============================================================
@@ -997,6 +990,9 @@ class MooncakeStoreWorker:
             "load_async", True
         )
         self.cache_config = vllm_config.cache_config
+        self._hisparse_enabled = (
+            vllm_config.attention_config.hisparse_config is not None
+        )
         self.block_size, self.hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
         )
@@ -1213,6 +1209,11 @@ class MooncakeStoreWorker:
         existing stride-based logic in register_kv_caches() produces
         the correct single-segment result (block_len = page_size * num_layers).
         """
+        if self._hisparse_enabled:
+            raise ValueError(
+                "HiSparse host-resident KV is incompatible with "
+                "enable_cross_layers_blocks. Disable it for HiSparse."
+            )
         self.register_kv_caches({"__cross_layer__": kv_cache})
 
     def register_kv_caches(
@@ -1238,23 +1239,27 @@ class MooncakeStoreWorker:
         seen_ptrs: set[int] = set()
         addrs: list[int] = []
         block_lens: list[int] = []
+        mem_kinds: list[str] = []
 
         for value in kv_caches.values():
             cache = _repr_tensor(value)
             cache_storage = cache.untyped_storage()
-            base_addr = cache_storage.data_ptr()
+            if cache.device.type == "cpu":
+                base_addr = cache.data_ptr()
+                region_len = cache.nbytes
+            else:
+                base_addr = cache_storage.data_ptr()
+                region_len = cache_storage.nbytes()
             if base_addr in seen_ptrs:
                 continue
             seen_ptrs.add(base_addr)
-            region_len = cache_storage.nbytes()
+            mem_kind = "host" if cache.device.type == "cpu" else "device"
 
             ret = self.store.register_buffer(base_addr, region_len)
             if ret != 0:
-                logger.error(
-                    "register_buffer failed for addr %#x len %d: %d",
-                    base_addr,
-                    region_len,
-                    ret,
+                raise RuntimeError(
+                    f"Mooncake register_buffer failed for addr {base_addr:#x} "
+                    f"len {region_len} ({mem_kind}): {ret}"
                 )
 
             # Detect layout via stride: a dim whose byte-stride exceeds
@@ -1270,17 +1275,23 @@ class MooncakeStoreWorker:
                 # Blocks-first layout (FlashInfer / MLA): one segment.
                 addrs.append(base_addr)
                 block_lens.append(page_size_bytes)
+                mem_kinds.append(mem_kind)
             else:
                 # K/V-first layout (FlashAttn / ROCm): split segments.
                 seg_stride = cache.stride(outer_dims[0]) * el
                 for idx in range(cache.shape[outer_dims[0]]):
                     addrs.append(base_addr + idx * seg_stride)
                     block_lens.append(seg_stride // self.num_blocks)
+                    mem_kinds.append(mem_kind)
 
+        num_host = sum(1 for kind in mem_kinds if kind == "host")
         logger.info(
-            "Registered KV caches: num_groups=%d, num_segments=%d, num_blocks=%d",
+            "Registered KV caches: num_groups=%d, num_segments=%d "
+            "(host=%d, device=%d), num_blocks=%d",
             len(self.token_dbs),
             len(addrs),
+            num_host,
+            len(addrs) - num_host,
             self.num_blocks,
         )
 
@@ -1574,6 +1585,19 @@ class MooncakeStoreWorker:
         if store is None:
             return
         self.store = None
+        deadline = time.monotonic() + 5.0
+        for thread in (self.kv_send_thread, *self.kv_recv_threads):
+            if thread is None:
+                continue
+            while thread.request_queue.unfinished_tasks and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if thread.request_queue.unfinished_tasks:
+                logger.warning(
+                    "Mooncake store %s still has %d in-flight requests at "
+                    "close; closing anyway.",
+                    thread.name,
+                    thread.request_queue.unfinished_tasks,
+                )
         try:
             store.close()
         except Exception as e:

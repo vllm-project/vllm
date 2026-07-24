@@ -393,7 +393,15 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
-        if self.dcp_world_size > 1:
+        hisparse_cache = self._hisparse_decode_cache(
+            kv_c_and_k_pe_cache,
+            topk_indices,
+            attn_metadata,
+            return_valid_counts=True,
+        )
+        if hisparse_cache is not None:
+            kv_c_and_k_pe_cache, topk_indices_physical, seq_lens = hisparse_cache
+        elif self.dcp_world_size > 1:
             topk_indices_physical, seq_lens = triton_filter_and_convert_dcp_index(
                 attn_metadata.req_id_per_token[:num_actual_toks],
                 attn_metadata.block_table,

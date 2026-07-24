@@ -1300,8 +1300,15 @@ class Worker(WorkerBase):
         gc.unfreeze()
 
         # has_kv_transfer_group can be None during interpreter shutdown.
+        # Transfer registrations must be released before the model runner frees
+        # their backing KV cache allocations. Continue teardown after failures.
         if ensure_kv_transfer_shutdown is not None:
-            ensure_kv_transfer_shutdown()
+            try:
+                ensure_kv_transfer_shutdown()
+            except Exception:
+                logger.exception(
+                    "KV-transfer shutdown failed; continuing worker teardown."
+                )
         if ensure_ec_transfer_shutdown is not None:
             ensure_ec_transfer_shutdown()
         if self.profiler is not None:

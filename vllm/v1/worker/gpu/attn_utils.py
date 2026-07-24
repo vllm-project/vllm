@@ -21,6 +21,10 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
 )
+from vllm.v1.attention.backends.mla.hisparse import (
+    allocate_pinned_host_pool,
+    check_hisparse_host_memory,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -170,12 +174,26 @@ def init_attn_backend(
 
 
 def _allocate_kv_cache(
-    kv_cache_config: KVCacheConfig, shared_layers: dict[str, str], device: torch.device
+    kv_cache_config: KVCacheConfig,
+    shared_layers: dict[str, str],
+    device: torch.device,
+    vllm_config: VllmConfig,
 ):
+    use_hisparse = vllm_config.attention_config.hisparse_config is not None
+    if use_hisparse:
+        host_bytes = sum(
+            tensor.size
+            for tensor in kv_cache_config.kv_cache_tensors
+            if tensor.host_resident
+        )
+        check_hisparse_host_memory(vllm_config, host_bytes)
+
     kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
     packed_backing: torch.Tensor | None = None
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-        if kv_cache_tensor.block_stride > 0:
+        if kv_cache_tensor.host_resident:
+            tensor = allocate_pinned_host_pool(kv_cache_tensor.size)
+        elif kv_cache_tensor.block_stride > 0:
             # Allocate once; all packed tensors alias the same backing.
             if packed_backing is None:
                 packed_backing = torch.zeros(
@@ -453,7 +471,7 @@ def init_kv_cache(
 ) -> dict[str, Any]:
     shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
     kv_cache_raw_tensors = _allocate_kv_cache(
-        kv_cache_config, shared_kv_cache_layers, device
+        kv_cache_config, shared_kv_cache_layers, device, vllm_config
     )
     flattened_attn_groups = list(group for groups in attn_groups for group in groups)
     kv_caches = _reshape_kv_cache(
@@ -508,6 +526,7 @@ def build_attn_metadata(
     for_cudagraph_capture: bool = False,
     causal: bool | torch.Tensor | Mapping[int, bool] = True,
     rswa_prefix_lens: torch.Tensor | None = None,
+    batch_to_request_state: torch.Tensor | None = None,
 ) -> dict[str, Any]:
     seq_lens = seq_lens[:num_reqs]
     if dcp_local_seq_lens is not None:
@@ -552,6 +571,7 @@ def build_attn_metadata(
             is_prefilling=group_is_prefilling,
             mm_req_doc_ranges=mm_req_doc_ranges,
             rswa_prefix_lens=rswa_prefix_lens,
+            batch_to_request_state=batch_to_request_state,
             **common_attn_metadata_extra_kwargs,
         )
 
