@@ -396,14 +396,24 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
   # match — e.g. SRC="12.0f" matches TGT="12.1a" since SM121 is in the SM12x
   # family. The output uses TGT's value to preserve the user's compilation flags.
   set(_CUDA_ARCHS)
+  # Resolve exact base matches before family fallbacks so a generic entry such
+  # as 10.0f cannot consume a 10.7 target that has a 10.7f source entry.
+  foreach(_arch ${_SRC_CUDA_ARCHS})
+    if(_arch MATCHES "[af]$")
+      string(REGEX REPLACE "[af]$" "" _base "${_arch}")
+      if("${_base}" IN_LIST _TGT_CUDA_ARCHS)
+        list(REMOVE_ITEM _SRC_CUDA_ARCHS "${_arch}")
+        list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}")
+        list(APPEND _CUDA_ARCHS "${_arch}")
+      endif()
+    endif()
+  endforeach()
+
   foreach(_arch ${_SRC_CUDA_ARCHS})
     if(_arch MATCHES "[af]$")
       list(REMOVE_ITEM _SRC_CUDA_ARCHS "${_arch}")
       string(REGEX REPLACE "[af]$" "" _base "${_arch}")
-      if ("${_base}" IN_LIST TGT_CUDA_ARCHS)
-        list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}")
-        list(APPEND _CUDA_ARCHS "${_arch}")
-      elseif("${_base}a" IN_LIST _TGT_CUDA_ARCHS)
+      if("${_base}a" IN_LIST _TGT_CUDA_ARCHS)
         list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}a")
         list(APPEND _CUDA_ARCHS "${_base}a")
       elseif("${_base}f" IN_LIST _TGT_CUDA_ARCHS)
@@ -487,7 +497,7 @@ endfunction()
 
 function(cuda_archs_sm90plus OUT_CUDA_ARCHS TGT_CUDA_ARCHS)
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(_archs "9.0a;10.0f;11.0f;12.0f" "${TGT_CUDA_ARCHS}")
+    cuda_archs_loose_intersection(_archs "9.0a;10.0f;10.7f;11.0f;12.0f" "${TGT_CUDA_ARCHS}")
   else()
     cuda_archs_loose_intersection(_archs "9.0a;10.0a;10.1a;10.3a;12.0a;12.1a" "${TGT_CUDA_ARCHS}")
   endif()
