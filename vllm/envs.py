@@ -116,6 +116,7 @@ if TYPE_CHECKING:
     VLLM_FORCE_AOT_LOAD: bool = False
     VLLM_USE_MEGA_AOT_ARTIFACT: bool = False
     VLLM_USE_TRITON_AWQ: bool = False
+    VLLM_USE_TORCHEMBED: bool = False
     VLLM_FASTSAFETENSORS_QUEUE_SIZE: int = 0
     VLLM_TRITON_FORCE_FIRST_CONFIG: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
@@ -1132,6 +1133,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # If set, vLLM will use Triton implementations of AWQ.
     "VLLM_USE_TRITON_AWQ": lambda: bool(int(os.getenv("VLLM_USE_TRITON_AWQ", "0"))),
+    # If set, vLLM will use the torchembed fused Triton kernel for RoPE.
+    # NOTE: In standard vLLM inference (packed-token layout), the built-in CUDA
+    # kernel is typically faster due to in-place operation and no format
+    # conversion. Enable this only when benchmarking or when the native C++
+    # ops are unavailable.
+    "VLLM_USE_TORCHEMBED": lambda: bool(int(os.getenv("VLLM_USE_TORCHEMBED", "0"))),
     # If set, monkey-patch triton.runtime.autotuner.Autotuner.run to skip
     # benchmarking and select the first valid config (walking past invalid
     # ones). Used to eliminate autotuning variability when measuring kernel

@@ -6,6 +6,7 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.custom_op import CustomOp
+from vllm.utils.torchembed import is_torchembed_available
 
 from .common import ApplyRotaryEmb
 
@@ -72,6 +73,16 @@ class RotaryEmbeddingBase(CustomOp):
                 )
             else:
                 self.cos_sin_cache_bf16 = None
+
+        # Auto-detect torchembed for standard 2D cos/sin cache layouts.
+        self.use_torchembed = (
+            self.enabled()
+            and is_torchembed_available()
+            and self.is_neox_style
+            and hasattr(self, "cos_sin_cache")
+            and self.cos_sin_cache.dim() == 2
+            and self.cos_sin_cache.shape[-1] == self.rotary_dim
+        )
 
         self.apply_rotary_emb = ApplyRotaryEmb(
             is_neox_style=self.is_neox_style,
@@ -218,6 +229,67 @@ class RotaryEmbedding(RotaryEmbeddingBase):
             self.is_neox_style,
         )
 
+    def _forward_torchembed(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Apply RoPE via the torchembed fused Triton kernel.
+
+        The kernel expects ``(..., seq_len, dim)`` layout (seq second-to-last).
+        vLLM's packed-token layout is ``(num_tokens, num_heads * head_dim)``,
+        so we reshape to ``(num_heads, num_tokens, dim)`` with two contiguous
+        transpose copies before and after the kernel call.
+
+        **Performance note (GB10 GPU, GQA 32Q/8KV, float16):**
+
+        =========  =============  ============  =========
+        S tokens   vLLM C++ (ms)  Triton (ms)   ratio
+        =========  =============  ============  =========
+            512         0.013        0.106       0.12×
+           2048         0.115        0.586       0.20×
+           8192         0.690        2.420       0.28×
+          16384         1.402        4.763       0.29×
+        =========  =============  ============  =========
+
+        In standard inference the built-in C++ kernel is faster because it
+        operates in-place on the native packed layout.  torchembed wins in
+        training or (batch, heads, seq, dim) contexts where no copies are
+        needed.  Enable via ``VLLM_USE_TORCHEMBED=1``.
+        """
+        from torchembed._triton import fused_rope_forward
+
+        positions = positions.flatten()
+        num_tokens = positions.shape[0]
+        cos_sin = self.cos_sin_cache.index_select(0, positions)
+        # c, s: (num_tokens, rotary_dim // 2) — passed as-is to the kernel,
+        # which flattens the leading head dims of q/k internally.
+        c, s = cos_sin.chunk(2, dim=-1)
+
+        q = query.view(num_tokens, -1, self.head_size)
+        q_rot = q[..., :self.rotary_dim]
+        q_pass = q[..., self.rotary_dim:]
+
+        q_t = q_rot.transpose(0, 1).contiguous()  # (num_qh, num_tokens, rotary_dim)
+
+        if key is not None:
+            k = key.view(num_tokens, -1, self.head_size)
+            k_rot = k[..., :self.rotary_dim]
+            k_pass = k[..., self.rotary_dim:]
+            k_t = k_rot.transpose(0, 1).contiguous()  # (num_kvh, num_tokens, rotary_dim)
+
+            q_out_t, k_out_t = fused_rope_forward(q_t, k_t, c, s)
+            k_out = k_out_t.transpose(0, 1).contiguous()
+            key_out = torch.cat((k_out, k_pass), dim=-1).reshape(key.shape)
+        else:
+            q_out_t, _ = fused_rope_forward(q_t, q_t, c, s)
+            key_out = None
+
+        q_out = q_out_t.transpose(0, 1).contiguous()
+        query_out = torch.cat((q_out, q_pass), dim=-1).reshape(query.shape)
+        return query_out, key_out
+
     def forward_cuda(
         self,
         positions: torch.Tensor,
@@ -234,6 +306,9 @@ class RotaryEmbedding(RotaryEmbeddingBase):
                 self.is_neox_style,
             )
             return query, key
+
+        if self.use_torchembed:
+            return self._forward_torchembed(positions, query, key)
 
         from vllm import _custom_ops as ops
 
