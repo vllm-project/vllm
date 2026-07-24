@@ -281,7 +281,7 @@ __device__ __forceinline__ void storeElemsFp8(
 // Slots per token:
 //     Q : nq                            (always — norm+RoPE)
 //     K : nkv                           (always — norm+RoPE; +K-cache insert)
-//     V : nkv  only if kInsertKV        (V-cache insert; no warps in dense)
+//     V : nkv  only if kInsertKV        (V-cache insert)
 //     IQ: niq  only if kProcessIndex    (norm+RoPE)
 //     IK: 1    only if kProcessIndex    (norm+RoPE; +index-cache insert)
 // cache_t/kv_dt: main attention KV-cache dtype (auto/fp8). out_idx_t/kFp8Idx:
@@ -583,9 +583,12 @@ void launchFusedMiniMaxM3(
         LAUNCH(true, false, true, false, scalar_t);  // sparse profiling, bf16
       }
     }
+  } else if (insert_kv) {
+    // Dense layer with the KV insert fused in (the generic Attention layer
+    // skips its own cache update).
+    LAUNCH(false, true, false, false, scalar_t);
   } else {
-    // Dense layer: never has an index branch and never inserts here (the
-    // generic Attention layer owns the KV insert).
+    // Dense layer, norm+RoPE only (profiling run or non-fusable backend).
     LAUNCH(false, false, false, false, scalar_t);
   }
 #undef LAUNCH
@@ -699,11 +702,6 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
                   " + num_index_heads + 1) * 128 for sparse, "
                   "(num_heads + 2*num_kv_heads) * 128 for dense");
 
-  // Only the sparse layer inserts here (dense lets the generic Attention layer
-  // own the KV write); there is no dense+insert kernel instantiation.
-  STD_TORCH_CHECK(
-      !insert_kv || has_index,
-      "insert mode (kv_cache) requires the index branch (sparse layer)");
   STD_TORCH_CHECK(has_index || !skip_index_branch,
                   "skip_index_branch requires sparse qkv rows");
   if (process_index) {

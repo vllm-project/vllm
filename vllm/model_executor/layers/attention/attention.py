@@ -453,6 +453,12 @@ class Attention(nn.Module, AttentionLayerBase):
                 compilation_config.static_forward_context,
             )
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
+        # When True, the owning model layer inserts this step's k/v into the
+        # paged cache itself (fused into a preceding kernel), so forward()
+        # skips the separate unified_kv_cache_update. Set post-init by the
+        # owning layer; only valid when the backend performs the KV update as
+        # a separate step (forward_includes_kv_cache_update == False).
+        self.skip_kv_cache_update_by_layer = False
         # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window
         # (read by the Triton backend impl). Default False for all other models.
         self.mm_prefix_clamp_sliding_window = mm_prefix_clamp_sliding_window
@@ -541,10 +547,12 @@ class Attention(nn.Module, AttentionLayerBase):
             value = value.view(-1, self.num_kv_heads, self.head_size_v)
         kv_cache_dummy_dep = None
         if self.use_direct_call:
-            # Skip this if sharing KV cache with an earlier attention layer.
+            # Skip this if sharing KV cache with an earlier attention layer
+            # or if the model layer already inserted k/v itself.
             if (
                 not self.attn_backend.forward_includes_kv_cache_update
                 and self.kv_sharing_target_layer_name is None
+                and not self.skip_kv_cache_update_by_layer
                 and key is not None
                 and value is not None
             ):
@@ -560,11 +568,13 @@ class Attention(nn.Module, AttentionLayerBase):
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
             )
         else:
-            # Skip this if sharing KV cache with an earlier attention layer.
+            # Skip this if sharing KV cache with an earlier attention layer
+            # or if the model layer already inserted k/v itself.
             encoded = _encode_layer_name(self.layer_name)
             if (
                 not self.attn_backend.forward_includes_kv_cache_update
                 and self.kv_sharing_target_layer_name is None
+                and not self.skip_kv_cache_update_by_layer
                 and key is not None
                 and value is not None
             ):
