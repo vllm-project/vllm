@@ -42,6 +42,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.offloader import create_offloader, set_offloader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import (
     MultiModalBudget,
@@ -283,6 +284,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.load_config.load_format = "dummy"
         self.eplb.prepare_load()
         eplb_models_added = False
+        set_offloader(create_offloader(self.vllm_config.offload_config))
         with DeviceMemoryProfiler() as m:
             model_loader = get_model_loader(self.vllm_config.load_config)
             logger.info("Loading model from scratch...")
