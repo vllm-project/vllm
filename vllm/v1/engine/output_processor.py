@@ -446,6 +446,17 @@ class OutputProcessor:
     def get_num_unfinished_requests(self):
         return len(self.request_states)
 
+    def get_num_queued_tokens(self) -> int:
+        """Total prompt tokens of requests currently in the prefill phase.
+
+        Uses ``prompt_len`` rather than remaining prefill work because the
+        scheduler's ``num_computed_tokens`` is not propagated to the API
+        server until prefill completes.  See ``SchedulerConfig`` docs.
+        """
+        return sum(
+            req.prompt_len for req in self.request_states.values() if req.is_prefilling
+        )
+
     def has_unfinished_requests(self) -> bool:
         return len(self.request_states) > 0
 

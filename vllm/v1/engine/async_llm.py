@@ -21,6 +21,7 @@ from vllm.distributed.weight_transfer.base import (
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient, StreamingInput
 from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
+from vllm.exceptions import MaxQueuedTokensError, QueueOverflowError
 from vllm.inputs import EngineInput, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -109,6 +110,7 @@ class AsyncLLM(EngineClient):
 
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
+        self.scheduler_config = vllm_config.scheduler_config
         self.observability_config = vllm_config.observability_config
 
         tracing_endpoint = self.observability_config.otlp_traces_endpoint
@@ -270,6 +272,61 @@ class AsyncLLM(EngineClient):
         if handler is not None:
             cancel_task_threadsafe(handler)
 
+    def get_num_unfinished_requests(self) -> int:
+        return self.output_processor.get_num_unfinished_requests()
+
+    def get_num_queued_tokens(self) -> int:
+        return self.output_processor.get_num_queued_tokens()
+
+    def _validate_request_scheduling(
+        self,
+        request_id: str,
+        params: SamplingParams | PoolingParams,
+    ) -> None:
+        """Reject the request if it would exceed queue limits.
+
+        Both limits return HTTP 503 (Service Unavailable) so that load
+        balancers and client SDKs retry on a different instance.
+
+        - ``max_num_queued_reqs``: hard cap on the number of unfinished requests
+          (waiting + running).  A request with ``n > 1`` counts as ``n`` slots.
+        - ``max_num_queued_tokens``: TTFT QoS — cap on the total prompt
+          tokens of requests still in prefill.
+
+        Note: ``get_num_queued_tokens`` uses ``prompt_len`` for all prefilling requests.
+        Chunked prefill progress and prefix-cache hits are not subtracted because the
+        scheduler's ``num_computed_tokens`` and ``num_cached_tokens`` are only
+        propagated to the API server after prefill completes. The overestimation is
+        conservative — earlier rejection, preserving TTFT targets.
+        """
+        max_num_reqs = self.scheduler_config.max_num_queued_reqs
+        if max_num_reqs is not None:
+            current = self.get_num_unfinished_requests()
+            n = getattr(params, "n", 1)
+            if current + n > max_num_reqs:
+                logger.info(
+                    "Request queue full - rejecting request %s "
+                    "(current=%d, n=%d, max=%d).",
+                    request_id,
+                    current,
+                    n,
+                    max_num_reqs,
+                )
+                raise QueueOverflowError()
+
+        max_queued_tokens = self.scheduler_config.max_num_queued_tokens
+        if max_queued_tokens is not None:
+            current_tokens = self.get_num_queued_tokens()
+            if current_tokens >= max_queued_tokens:
+                logger.info(
+                    "Max queued tokens reached - rejecting request %s "
+                    "(current_tokens=%d, max=%d).",
+                    request_id,
+                    current_tokens,
+                    max_queued_tokens,
+                )
+                raise MaxQueuedTokensError()
+
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         if not hasattr(self, "_supported_tasks"):
             # Cache the result
@@ -312,6 +369,8 @@ class AsyncLLM(EngineClient):
                 "prompt tokens, please disable it when the requests need "
                 "prompt logprobs"
             )
+
+        self._validate_request_scheduling(request_id, params)
 
         if isinstance(prompt, AsyncGenerator):
             if reasoning_ended is not None or reasoning_parser_kwargs is not None:
