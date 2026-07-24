@@ -47,6 +47,24 @@ def _gelu_and_mul(
     return F.gelu(x[..., :d], approximate="none") * x[..., d:]
 
 
+def _swiglustep_and_mul(
+    x: torch.Tensor,
+    limit: float = 7.0,
+) -> torch.Tensor:
+    gate, up = x.chunk(2, dim=-1)
+    gate = F.silu(gate)
+    gate = gate.clamp(max=limit)
+    up = up.clamp(min=-limit, max=limit)
+    return gate * up
+
+
+def _relu2_and_mul(
+    x: torch.Tensor,
+) -> torch.Tensor:
+    d = x.shape[-1] // 2
+    return torch.square(F.relu(x[..., :d])) * x[..., d:]
+
+
 # Map activation names to their native forward functions.
 # Uses static methods or standalone functions to avoid instantiating CustomOp
 # classes, which would call get_current_vllm_config() before config is set.
@@ -58,6 +76,8 @@ _CPU_MOE_ACT_FN: dict[MoEActivation, Callable[[torch.Tensor], torch.Tensor]] = {
         lambda x: F.gelu(x[..., : x.shape[-1] // 2], approximate="tanh")
         * x[..., x.shape[-1] // 2 :]
     ),
+    MoEActivation.SWIGLUSTEP: _swiglustep_and_mul,
+    MoEActivation.RELU2: _relu2_and_mul,
 }
 
 
