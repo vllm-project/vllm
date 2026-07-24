@@ -503,10 +503,18 @@ def triton_turboquant_decode_attention(
     lse_buf: torch.Tensor | None = None,
     buf_holder: Any = None,
     max_num_kv_splits: int = 32,  # fixed split count (must be constant for cudagraph)
+    padded_head_dim: int = 0,
 ) -> torch.Tensor:
     """Launch fused TQ decode attention (Triton stage1 + stage2).
 
     Returns: output tensor [B, Hq, D] in query's dtype.
+
+    For non-power-of-2 head_dim on the MSE path, the K cache and V cache are
+    stored at padded_head_dim (see triton_turboquant_store). This launcher
+    pads Q for the rotation, runs the kernels at padded width, and slices
+    the output back to head_dim before returning. The FP8 K path is
+    unaffected: keys are stored raw at head_dim and kernels mask non-pow-2
+    loads directly.
     """
     B, Hq, D = query.shape
     Hk = kv_cache.shape[2]
@@ -514,7 +522,10 @@ def triton_turboquant_decode_attention(
     kv_group_size = Hq // Hk
     device = query.device
 
-    cfg = _get_layout(D, mse_bits, value_quant_bits, key_packed_size)
+    # On the MSE path we run kernels in WHT space at padded_head_dim. FP8
+    # path stays at head_dim because keys are not rotated.
+    D_pad = padded_head_dim if (padded_head_dim > D and not key_fp8) else D
+    cfg = _get_layout(D_pad, mse_bits, value_quant_bits, key_packed_size)
 
     # Compute q_rot = q @ Pi.T (rotated query for MSE key scoring)
     # FP8 path: pass query directly (float16); kernel casts inline.
@@ -523,6 +534,8 @@ def triton_turboquant_decode_attention(
         q_rot = query.contiguous()
     else:
         q_float = query.float()
+        if D_pad > D:
+            q_float = torch.nn.functional.pad(q_float, (0, D_pad - D))
         if PiT is None:
             PiT = Pi.T.contiguous()
         q_rot = (q_float @ PiT).contiguous()
@@ -533,14 +546,15 @@ def triton_turboquant_decode_attention(
         mid_o_buf is not None
         and mid_o_buf.shape[0] >= B
         and mid_o_buf.shape[2] >= NUM_KV_SPLITS
+        and mid_o_buf.shape[3] >= D_pad + 1
     ):
-        mid_o = mid_o_buf[:B, :Hq, :NUM_KV_SPLITS, :]
+        mid_o = mid_o_buf[:B, :Hq, :NUM_KV_SPLITS, : D_pad + 1]
     else:
         mid_o = torch.empty(
             B,
             Hq,
             NUM_KV_SPLITS,
-            D + 1,
+            D_pad + 1,
             dtype=torch.float32,
             device=device,
         )
@@ -568,7 +582,7 @@ def triton_turboquant_decode_attention(
         mid_o.stride(1),
         mid_o.stride(2),
         NUM_KV_HEADS=Hk,
-        HEAD_DIM=D,
+        HEAD_DIM=D_pad,
         BLOCK_SIZE=block_size,
         NUM_KV_SPLITS=NUM_KV_SPLITS,
         KV_GROUP_SIZE=kv_group_size,
@@ -588,16 +602,21 @@ def triton_turboquant_decode_attention(
     )
 
     # Stage 2: Reduce across KV splits
-    # Output in query dtype — eliminates float16_copy kernel after stage2
+    # Output in query dtype — eliminates float16_copy kernel after stage2.
+    # On the MSE path with non-pow-2 head_dim we reduce in padded space and
+    # slice to head_dim before returning. The padded V columns hold zeros
+    # by construction (see triton_turboquant_store) so they contribute
+    # nothing to the reduction.
     out_dtype = query.dtype
     if (
         output_buf is not None
         and output_buf.shape[0] >= B
+        and output_buf.shape[2] >= D_pad
         and output_buf.dtype == out_dtype
     ):
-        output = output_buf[:B, :Hq, :D]
+        output = output_buf[:B, :Hq, :D_pad]
     else:
-        output = torch.empty(B, Hq, D, dtype=out_dtype, device=device)
+        output = torch.empty(B, Hq, D_pad, dtype=out_dtype, device=device)
         if buf_holder is not None:
             buf_holder._tq_output_buf = output
     if lse_buf is not None and lse_buf.shape[0] >= B:
@@ -621,10 +640,12 @@ def triton_turboquant_decode_attention(
         lse.stride(0),
         NUM_KV_SPLITS=NUM_KV_SPLITS,
         BLOCK_DV=cfg["BLOCK_D"],
-        Lv=D,
+        Lv=D_pad,
         OUTPUT_FP16=1 if out_dtype == torch.float16 else 0,
         num_warps=4,
         num_stages=2,
     )
 
+    if D_pad > D:
+        return output[:, :, :D].contiguous()
     return output  # already in query dtype
