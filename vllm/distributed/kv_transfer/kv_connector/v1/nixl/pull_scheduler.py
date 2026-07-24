@@ -160,8 +160,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                     )
                     parallel_config = self.vllm_config.parallel_config
                     dcp_size = parallel_config.decode_context_parallel_size
-                    pcp_size = parallel_config.prefill_context_parallel_size
-                    scheduler_block_size = self.block_size * dcp_size * pcp_size
+                    scheduler_block_size = self.block_size * dcp_size
                     num_hashed_blocks = (
                         sum(
                             block.block_hash is not None and not block.is_null
