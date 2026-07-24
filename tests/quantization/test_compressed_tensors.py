@@ -934,6 +934,72 @@ def test_wna16_marlin_moe_w2_scale_sharding(actorder, group_size, part, full, ex
     assert result == expected
 
 
+@pytest.mark.parametrize(
+    ("moe_backend", "expected_method"),
+    [("auto", "marlin"), ("marlin", "marlin"), ("triton", "triton")],
+)
+def test_wna16_moe_respects_backend(monkeypatch, moe_backend, expected_method):
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
+        compressed_tensors_moe,
+    )
+
+    weight_quant = QuantizationArgs(
+        num_bits=4,
+        type=QuantizationType.INT,
+        strategy=QuantizationStrategy.GROUP,
+        group_size=128,
+        symmetric=True,
+        dynamic=False,
+    )
+    quant_config = Mock()
+    quant_config.get_scheme_dict.return_value = {
+        "weights": weight_quant,
+        "input_activations": None,
+        "format": "pack-quantized",
+    }
+    quant_config._is_mxfp4.return_value = False
+    quant_config._is_mxfp8.return_value = False
+    quant_config._is_wNa16_group_channel.return_value = True
+    layer = Mock()
+
+    class DummyMarlinMethod:
+        def __init__(self, *_args):
+            self.name = "marlin"
+
+    class DummyTritonMethod:
+        def __init__(self, *_args):
+            self.name = "triton"
+
+    monkeypatch.setattr(
+        compressed_tensors_moe,
+        "get_current_vllm_config",
+        lambda: Mock(kernel_config=Mock(moe_backend=moe_backend), lora_config=None),
+    )
+    monkeypatch.setattr(
+        compressed_tensors_moe,
+        "check_moe_marlin_supports_layer",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.compressed_tensors."
+        "compressed_tensors_moe.compressed_tensors_moe_wna16_marlin."
+        "CompressedTensorsWNA16MarlinMoEMethod",
+        DummyMarlinMethod,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.compressed_tensors."
+        "compressed_tensors_moe.compressed_tensors_moe_wna16."
+        "CompressedTensorsWNA16MoEMethod",
+        DummyTritonMethod,
+    )
+
+    method = compressed_tensors_moe.CompressedTensorsMoEMethod.get_moe_method(
+        quant_config, layer, "model.layers.0.mlp.experts"
+    )
+
+    assert method.name == expected_method
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda() or not current_platform.has_device_capability(80),
     reason="MXFP4 requires ampere or newer",
