@@ -324,6 +324,35 @@ class TestTritonTopkTopp:
 
         self._compare_results(logits, k=None, p=p)
 
+    @pytest.mark.parametrize("k_value", [None, 32000])
+    def test_topp_peaked_logits(self, k_value: int | None):
+        """Test the peaked distribution used by the target workload."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        batch_size, vocab_size = 4, 128256
+        logits = torch.randn(
+            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+        )
+        boosts = torch.tensor(
+            [13.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0],
+            dtype=torch.float32,
+        )
+        logits[:, :8] += boosts
+        k = (
+            None
+            if k_value is None
+            else torch.full((batch_size,), k_value, dtype=torch.int32)
+        )
+        p = torch.full((batch_size,), 0.95, dtype=torch.float32)
+
+        reference = apply_top_k_top_p_pytorch(logits.clone(), k, p)
+        result = apply_top_k_top_p_triton(logits.clone(), k, p)
+        total_variation = 0.5 * (
+            reference.softmax(dim=-1) - result.softmax(dim=-1)
+        ).abs().sum(dim=-1)
+
+        assert total_variation.max().item() < 1e-4
+
     @pytest.mark.parametrize("batch_size", [1, 8, 32, 128, 512, 1024])
     @pytest.mark.parametrize("vocab_size", [1024, 32000, 128256])
     def test_topk_and_topp(self, batch_size: int, vocab_size: int):
