@@ -105,6 +105,13 @@ class InputBatch:
         self.min_p_cpu = self.min_p_cpu_tensor.numpy()
         self.min_p_reqs: set[str] = set()
 
+        self.p_less = torch.empty((max_num_reqs,), dtype=torch.float32, device=device)
+        self.p_less_cpu_tensor = torch.empty(
+            (max_num_reqs,), dtype=torch.float32, device="cpu", pin_memory=pin_memory
+        )
+        self.p_less_cpu = self.p_less_cpu_tensor.numpy()
+        self.p_less_reqs: set[str] = set()
+
         # Frequency penalty related data structures
         self.frequency_penalties = torch.empty(
             (max_num_reqs,), dtype=torch.float, device=device
@@ -226,9 +233,12 @@ class InputBatch:
             top_k = self.vocab_size
         self.top_k_cpu[req_index] = top_k
         self.min_p_cpu[req_index] = sampling_params.min_p
+        self.p_less_cpu[req_index] = sampling_params.p_less
         self.frequency_penalties_cpu[req_index] = sampling_params.frequency_penalty
         if sampling_params.min_p > _SAMPLING_EPS:
             self.min_p_reqs.add(req_id)
+        if sampling_params.p_less:
+            self.p_less_reqs.add(req_id)
         if sampling_params.frequency_penalty != 0.0:
             self.frequency_penalties_reqs.add(req_id)
         self.presence_penalties_cpu[req_index] = sampling_params.presence_penalty
@@ -303,6 +313,7 @@ class InputBatch:
         self.top_p_reqs.discard(req_id)
         self.top_k_reqs.discard(req_id)
         self.min_p_reqs.discard(req_id)
+        self.p_less_reqs.discard(req_id)
         self.min_tokens.pop(req_index, None)
         self.frequency_penalties_reqs.discard(req_id)
         self.presence_penalties_reqs.discard(req_id)
@@ -372,6 +383,10 @@ class InputBatch:
             self.repetition_penalties_cpu[i1],
         )
         self.min_p_cpu[i1], self.min_p_cpu[i2] = self.min_p_cpu[i2], self.min_p_cpu[i1]
+        self.p_less_cpu[i1], self.p_less_cpu[i2] = (
+            self.p_less_cpu[i2],
+            self.p_less_cpu[i1],
+        )
 
         # NOTE: the following is unsafe
         # self.token_ids_cpu[i1, ...], self.token_ids_cpu[i2, ...], =\
@@ -466,6 +481,7 @@ class InputBatch:
                 last_req_index
             ]
             self.min_p_cpu[empty_index] = self.min_p_cpu[last_req_index]
+            self.p_less_cpu[empty_index] = self.p_less_cpu[last_req_index]
             generator = self.generators.pop(last_req_index, None)
             if generator is not None:
                 self.generators[empty_index] = generator
@@ -557,6 +573,10 @@ class InputBatch:
     @property
     def no_min_p(self) -> bool:
         return len(self.min_p_reqs) == 0
+
+    @property
+    def no_p_less(self) -> bool:
+        return len(self.p_less_reqs) == 0
 
     @property
     def no_penalties(self) -> bool:
