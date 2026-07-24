@@ -1076,11 +1076,11 @@ def unify_kv_cache_spec_page_size(
     size by increasing the block size of layers with smaller page size. Two
     cases cannot be unified by block size alone and pad their physical page to
     the maximum instead: Mamba layers, whose page size comes from state shapes
-    and is independent of block size; and attention layers whose page does not
-    evenly divide the maximum and whose backend opts in via
-    ``AttentionSpec.indexes_kv_by_block_stride`` (the padded page is read through
-    a strided view, which not every backend handles). Raise NotImplementedError
-    if failed to unify the page size.
+    and is independent of block size; and attention layers, which set
+    ``page_size_padded`` (the padded page is read through a strided view when
+    ``indexes_kv_by_block_stride`` is True, or read physically when False).
+    Raise NotImplementedError only for non-attention layers that cannot be
+    unified.
 
     Args:
         kv_cache_spec: The KVCacheSpec of each attention layer in the model
@@ -1118,6 +1118,8 @@ def unify_kv_cache_spec_page_size(
                 isinstance(layer_spec, AttentionSpec)
                 and layer_spec.indexes_kv_by_block_stride
             ):
+                new_spec = replace(layer_spec, page_size_padded=max_page_size)
+            elif isinstance(layer_spec, AttentionSpec):
                 new_spec = replace(layer_spec, page_size_padded=max_page_size)
             else:
                 raise NotImplementedError(
