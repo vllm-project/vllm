@@ -1458,6 +1458,39 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
+        if envs.VLLM_PCP_HIDDEN_RESTORE_MODE == "direct":
+            if not self.use_v2_model_runner:
+                raise ValueError(
+                    "Direct PCP hidden-state restore requires "
+                    "VLLM_USE_V2_MODEL_RUNNER=1."
+                )
+            if self.parallel_config.prefill_context_parallel_size <= 1:
+                raise ValueError(
+                    "Direct PCP hidden-state restore requires "
+                    "--prefill-context-parallel-size greater than 1."
+                )
+            if not current_platform.is_cuda():
+                raise NotImplementedError(
+                    "Direct PCP hidden-state restore requires CUDA."
+                )
+            if self.model_config.runner_type != "generate":
+                raise NotImplementedError(
+                    "Direct PCP hidden-state restore supports generation models only."
+                )
+            if self.scheduler_config.async_scheduling:
+                raise NotImplementedError(
+                    "Direct PCP hidden-state restore does not support "
+                    "asynchronous scheduling."
+                )
+            if self.parallel_config.use_ubatching:
+                raise NotImplementedError(
+                    "Direct PCP hidden-state restore does not support ubatching."
+                )
+            if self.model_config.enable_sleep_mode:
+                raise NotImplementedError(
+                    "Direct PCP hidden-state restore does not support sleep mode."
+                )
+
         if self.use_v2_model_runner:
             self._validate_v2_model_runner()
 

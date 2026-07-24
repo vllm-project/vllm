@@ -187,6 +187,7 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES: bool = True
     VLLM_DCP_Q_REPLICATE: bool = False
+    VLLM_PCP_HIDDEN_RESTORE_MODE: Literal["collective", "direct"] = "collective"
     VLLM_DEEP_GEMM_WARMUP: Literal[
         "skip",
         "full",
@@ -1493,6 +1494,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Opt-in MLA DCP query replication: skip the decode query all-gather.
     "VLLM_DCP_Q_REPLICATE": lambda: bool(int(os.getenv("VLLM_DCP_Q_REPLICATE", "0"))),
+    # Select the final PCP hidden-state restoration path.
+    "VLLM_PCP_HIDDEN_RESTORE_MODE": env_with_choices(
+        "VLLM_PCP_HIDDEN_RESTORE_MODE",
+        "collective",
+        ["collective", "direct"],
+    ),
     # DeepGemm JITs the kernels on-demand. The warmup attempts to make DeepGemm
     # JIT all the required kernels before model execution so there is no
     # JIT'ing in the hot-path. However, this warmup increases the engine

@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 import numpy as np
 import torch
 
+from vllm import envs
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
@@ -18,6 +19,7 @@ from vllm.v1.worker.gpu.input_batch import (
     combine_sampled_and_draft_tokens,
     prepare_pos_seq_lens,
 )
+from vllm.v1.worker.gpu.pcp_hidden_restore import PCPHiddenStateRestorer
 from vllm.v1.worker.gpu.states import RequestState
 
 logger = init_logger(__name__)
@@ -55,6 +57,7 @@ class PCPManager:
         dcp_world_size: int = 1,
         dcp_rank: int = 0,
         cp_interleave: int = 1,
+        hidden_state_restorer: PCPHiddenStateRestorer | None = None,
     ) -> None:
         self.pcp_world_size = pcp_world_size
         self.pcp_rank = pcp_rank
@@ -62,11 +65,13 @@ class PCPManager:
         self.dcp_world_size = dcp_world_size
         self.dcp_rank = dcp_rank
         self.cp_interleave = cp_interleave
+        self._hidden_state_restorer = hidden_state_restorer
 
         self._global_batch: InputBatch | None = None
         self._req_states = req_states
         self._block_tables = block_tables
         self._hidden_restore_idx: torch.Tensor | None = None
+        self._hidden_publish_idx: torch.Tensor | None = None
         self._padded_gather_idx: torch.Tensor | None = None
         self._gathered_kv_write_mask: torch.Tensor | None = None
         self._pad_slot_id = torch.tensor(PAD_SLOT_ID, dtype=torch.int64, device=device)
@@ -276,13 +281,20 @@ class PCPManager:
         #   padded gathered:    [A B G _ | C D E F]
         #   hidden_restore_idx: [0, 1, 4, 5, 6, 7, 2]
         #   padded_gather_idx:  [0, 1, 6, 0, 2, 3, 4, 5]
+        #   hidden_publish_idx: [0, 1, 6, - | 2, 3, 4, 5]
         # Therefore global = gathered[hidden_restore_idx] and
         # padded_gathered = global[padded_gather_idx].
-        hidden_restore_idx = np.empty(int(query_start_loc_np[-1]), dtype=np.int64)
+        num_global_tokens = int(query_start_loc_np[-1])
+        hidden_restore_idx = np.empty(num_global_tokens, dtype=np.int64)
         padded_num_tokens = max(per_rank_num_tokens)
         num_expanded_tokens = padded_num_tokens * self.pcp_world_size
         padded_gather_idx = np.zeros(num_expanded_tokens, dtype=np.int64)
         gathered_kv_write_mask = np.zeros(num_expanded_tokens, dtype=np.bool_)
+        hidden_publish_idx = (
+            np.full(num_expanded_tokens, -1, dtype=np.int64)
+            if self._hidden_state_restorer is not None
+            else None
+        )
         for rank, segments in enumerate(segments_by_rank):
             expanded_rank_offset = rank * padded_num_tokens
             for segment in segments:
@@ -299,11 +311,31 @@ class PCPManager:
                 if not bool(is_prefilling[segment.global_batch_req_idx]) and rank != 0:
                     continue
                 gathered_kv_write_mask[padded_gathered_slice] = True
+                if hidden_publish_idx is not None:
+                    hidden_publish_idx[padded_gathered_slice] = np.arange(
+                        segment.global_batch_slice.start,
+                        segment.global_batch_slice.stop,
+                        dtype=np.int64,
+                    )
                 hidden_restore_idx[segment.global_batch_slice] = np.arange(
                     padded_gathered_slice.start,
                     padded_gathered_slice.stop,
                     dtype=np.int64,
                 )
+
+        if hidden_publish_idx is not None:
+            published_rows = hidden_publish_idx[hidden_publish_idx >= 0]
+            publish_counts = np.bincount(published_rows, minlength=num_global_tokens)
+            if publish_counts.shape != (num_global_tokens,) or np.any(
+                publish_counts != 1
+            ):
+                raise RuntimeError(
+                    "PCP hidden-state layout must assign exactly one publisher "
+                    "to every global row."
+                )
+            self._hidden_publish_idx = async_copy_to_gpu(
+                hidden_publish_idx, device=self.device
+            )
 
         self._hidden_restore_idx = async_copy_to_gpu(
             hidden_restore_idx, device=self.device
@@ -607,6 +639,30 @@ class PCPManager:
     def restore_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self._hidden_restore_idx is None:
             return hidden_states
+        if self._hidden_state_restorer is not None:
+            if self._hidden_publish_idx is None:
+                raise RuntimeError("PCP hidden publish map is not initialized.")
+            num_expanded_tokens = self._hidden_publish_idx.shape[0]
+            if num_expanded_tokens % self.pcp_world_size:
+                raise RuntimeError(
+                    "PCP hidden publish map is not evenly partitioned by rank."
+                )
+            padded_num_tokens = num_expanded_tokens // self.pcp_world_size
+            if hidden_states.shape[0] != padded_num_tokens:
+                raise ValueError(
+                    "PCP local hidden-state rows do not match the padded "
+                    f"publish layout: {hidden_states.shape[0]} != "
+                    f"{padded_num_tokens}."
+                )
+            rank_start = self.pcp_rank * padded_num_tokens
+            local_publish_idx = self._hidden_publish_idx[
+                rank_start : rank_start + padded_num_tokens
+            ]
+            return self._hidden_state_restorer.restore(
+                hidden_states,
+                local_publish_idx,
+                num_global_tokens=self._hidden_restore_idx.shape[0],
+            )
         gathered = get_pcp_group().all_gather(hidden_states, dim=0)
         return gathered[self._hidden_restore_idx]
 
@@ -616,6 +672,11 @@ class PCPManager:
     ) -> tuple[torch.Tensor, InputBatch]:
         assert self._global_batch is not None
         return self.restore_hidden_states(hidden_states), self._global_batch
+
+    def close(self) -> None:
+        if self._hidden_state_restorer is not None:
+            self._hidden_state_restorer.close()
+            self._hidden_state_restorer = None
 
 
 def maybe_partition_pcp_batch(
@@ -648,19 +709,52 @@ def maybe_restore_pcp_for_sampling(
     return manager.restore_for_sampling(hidden_states)
 
 
+def maybe_create_pcp_hidden_state_restorer(
+    vllm_config: VllmConfig,
+    device: torch.device,
+    supports_mm_inputs: bool,
+) -> PCPHiddenStateRestorer | None:
+    """Allocate the direct output slab before memory profiling.
+
+    The allocation is persistent non-KV memory. Creating it with the model
+    runner ensures vLLM's normal memory profiler subtracts it before sizing the
+    KV cache.
+    """
+    if envs.VLLM_PCP_HIDDEN_RESTORE_MODE != "direct":
+        return None
+    PCPManager.validate_config(vllm_config, supports_mm_inputs)
+    return PCPHiddenStateRestorer(
+        group=get_pcp_group().cpu_group,
+        device=device,
+        max_num_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
+        hidden_size=vllm_config.model_config.get_hidden_size(),
+        dtype=vllm_config.model_config.dtype,
+    )
+
+
 def maybe_build_pcp_manager(
     vllm_config: VllmConfig,
     device: torch.device,
     supports_mm_inputs: bool,
     req_states: RequestState,
     block_tables: BlockTables,
+    hidden_state_restorer: PCPHiddenStateRestorer | None = None,
 ) -> PCPManager | None:
     parallel_config = vllm_config.parallel_config
     pcp_size = parallel_config.prefill_context_parallel_size
     if pcp_size <= 1:
+        if hidden_state_restorer is not None:
+            raise RuntimeError(
+                "Direct PCP hidden-state restore was allocated with PCP disabled."
+            )
         return None
 
     PCPManager.validate_config(vllm_config, supports_mm_inputs)
+    direct_restore_enabled = envs.VLLM_PCP_HIDDEN_RESTORE_MODE == "direct"
+    if direct_restore_enabled != (hidden_state_restorer is not None):
+        raise RuntimeError(
+            "Direct PCP hidden-state restore allocation does not match its mode."
+        )
 
     pcp_rank = get_pcp_group().rank_in_group
     dcp_size = parallel_config.decode_context_parallel_size
@@ -677,4 +771,5 @@ def maybe_build_pcp_manager(
         dcp_world_size=dcp_size,
         dcp_rank=dcp_rank,
         cp_interleave=parallel_config.cp_kv_cache_interleave_size,
+        hidden_state_restorer=hidden_state_restorer,
     )
