@@ -71,6 +71,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
     """
 
     BLOCK_SIZE_ALIGNMENT = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    SUPPORTS_REPLICATED_LAYOUT = True
 
     @classmethod
     @override
@@ -229,10 +230,13 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
     @override
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
-        # Fold the global physical device index into the replica-local
-        # [0, world_size) slot range.
         world_size = self.config.parallel.world_size
-        rank = torch.accelerator.current_device_index() % world_size
+        if self.replicated_layout:
+            rank = 0
+        else:
+            # Fold the global physical device index into the replica-local
+            # [0, world_size) slot range.
+            rank = torch.accelerator.current_device_index() % world_size
         worker_mmap = SharedOffloadRegion(
             engine_id=self._engine_id,
             num_blocks=self.num_blocks,
