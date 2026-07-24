@@ -22,6 +22,7 @@ from tests.kernels.moe.utils import (
     modular_triton_fused_moe,
 )
 from tests.kernels.utils import opcheck, stack_and_dev, torch_experts, torch_moe
+from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import (
     MoEActivation,
@@ -35,6 +36,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     batched_fused_marlin_moe,
     fused_marlin_moe,
+)
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    invoke_fused_moe_wna16_cuda_kernel,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_permute_bias,
@@ -119,6 +123,39 @@ NUM_EXPERTS_LARGE = [128, 256]
 EP_SIZE = [1, 4]
 TOP_KS = [2, 6]
 TOP_KS_SMALL = [1, 2]
+
+
+def test_moe_wna16_cuda_block_config_uses_expert_dimension(monkeypatch):
+    selected_config = {}
+
+    def capture_moe_wna16_gemm(*args):
+        selected_config["BLOCK_SIZE_N"] = args[11]
+        selected_config["BLOCK_SIZE_K"] = args[12]
+
+    monkeypatch.setattr(ops, "moe_wna16_gemm", capture_moe_wna16_gemm)
+
+    num_experts = 8
+    size_n = 1024
+    size_k = 1024
+    top_k = 2
+    invoke_fused_moe_wna16_cuda_kernel(
+        A=torch.empty(16, size_k),
+        B=torch.empty(num_experts, size_n, size_k // 2, dtype=torch.uint8),
+        C=torch.empty(16, top_k, size_n),
+        B_scale=torch.empty(num_experts, size_n, size_k // 128),
+        B_zp=None,
+        topk_weights=None,
+        sorted_token_ids=None,
+        expert_ids=torch.empty(0, dtype=torch.int32),
+        num_tokens_post_padded=torch.zeros(1, dtype=torch.int32),
+        mul_routed_weight=False,
+        top_k=top_k,
+        config={"BLOCK_SIZE_M": 16},
+        block_shape=[0, 128],
+    )
+
+    assert selected_config == {"BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 512}
+
 
 MOE_MARLIN_QUANT_TEST_CONFIGS = [
     # AWQ-INT4
