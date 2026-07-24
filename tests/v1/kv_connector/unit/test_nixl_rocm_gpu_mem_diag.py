@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Verify that GPU memory is fully released after RixlConnector shutdown on ROCm.
+"""Verify that GPU memory is released after NixlConnector shutdown on ROCm.
 
 Regression test for ROCm/ucx#33: UCX rocm_ipc transport permanently pinned
 GPU memory via hsa_amd_ipc_memory_create during ucp_mem_map, causing
@@ -62,7 +62,7 @@ def _full_gpu_cleanup():
 
 
 @pytest.mark.parametrize("model_name, sw_size", [("google/gemma-3-1b-it", 512)])
-def test_gpu_memory_rixl_hma(model_name, sw_size):
+def test_gpu_memory_nixl_hma(model_name, sw_size):
     """Track GPU memory through NixlConnector create/infer/shutdown cycle."""
     from vllm import LLM, SamplingParams
     from vllm.config import KVTransferConfig
@@ -84,7 +84,7 @@ def test_gpu_memory_rixl_hma(model_name, sw_size):
     }
 
     print("\n" + "=" * 90)
-    print("GPU MEMORY -- RIXL NixlConnector HMA (ROCm)")
+    print("GPU MEMORY -- NIXL NixlConnector HMA (ROCm)")
     print("=" * 90)
     gc.collect()
     torch.accelerator.empty_cache()
@@ -169,14 +169,14 @@ def test_gpu_memory_rixl_hma(model_name, sw_size):
 
 
 @pytest.mark.parametrize("model_name", ["google/gemma-3-1b-it"])
-def test_gpu_memory_no_rixl_baseline(model_name):
+def test_gpu_memory_no_nixl_baseline(model_name):
     """Same workload without NixlConnector.  Comparing driver-level memory
-    between this and test_gpu_memory_rixl_hma isolates UCX/RIXL impact."""
+    between this and test_gpu_memory_nixl_hma isolates UCX/NIXL impact."""
     from vllm import LLM, SamplingParams
     from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
 
     print("\n" + "=" * 90)
-    print("CONTROL -- same model, no RIXL connector")
+    print("CONTROL -- same model, no NIXL connector")
     print("=" * 90)
     gc.collect()
     torch.accelerator.empty_cache()
@@ -209,7 +209,7 @@ def test_gpu_memory_no_rixl_baseline(model_name):
     drv_base = snap0["drv_used_mb"]
     drv_leaked = snap_final["drv_used_mb"] - drv_base
     drv_peak = snap_peak["drv_used_mb"] - drv_base
-    print(f"\n  Driver leaked (no rixl): {drv_leaked:.0f} MB")
+    print(f"\n  Driver leaked (no NIXL): {drv_leaked:.0f} MB")
     print("=" * 90)
 
     leak_pct = (drv_leaked / drv_peak * 100) if drv_peak > 0 else 0

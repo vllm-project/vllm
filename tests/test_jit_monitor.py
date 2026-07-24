@@ -320,6 +320,26 @@ class TestCuTeDSLHook:
             with pytest.raises(RuntimeError, match="CuTeDSL JIT compilation"):
                 cute.compile(lambda: None, "arg", option=True)
 
+    def test_subscripted_compile_is_monitored(self):
+        """``cute.compile[options](...)`` (flashinfer >= 0.6.14) must work."""
+
+        class FakeCompileCallable:
+            def __getitem__(self, options):
+                return self
+
+            def __call__(self, *args, **kwargs):
+                return "compiled"
+
+        with _patch_jit_modules(_make_fake_knobs(), cute_compile=FakeCompileCallable()):
+            import cutlass.cute as cute
+
+            jit_monitor.activate()
+            with mock.patch.object(jit_monitor.logger, "warning_once") as warning_once:
+                result = cute.compile[("opt_level", 3)](lambda: None, "arg")
+
+        assert result == "compiled"
+        warning_once.assert_called_once()
+
 
 class TestTileLangHook:
     def test_jit_kernel_logs_warning(self):

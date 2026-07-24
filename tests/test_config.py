@@ -213,6 +213,26 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
         ),
         (
             SimpleNamespace(
+                model="thinkingmachines/Inkling",
+                architectures=["InklingForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="thinkingmachines/Inkling",
+                architectures=["InklingForConditionalGeneration"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
                 model="mistralai/Mixtral-8x7B-Instruct-v0.1",
                 architectures=["MixtralForCausalLM"],
                 runner_type="generate",
@@ -386,26 +406,41 @@ class _TestNestedConfig:
     a: _TestConfigFields = field(default_factory=lambda: _TestConfigFields(a=0))
 
 
+@dataclass
+class _TestDerivedConfigFields(_TestConfigFields):
+    pass
+
+
 def test_update_config():
     # Simple update
     config1 = _TestConfigFields(a=0)
     new_config1 = update_config(config1, {"a": 42})
     assert new_config1.a == 42
     # Nonexistent field
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError, match=r"_TestConfigFields\.nonexistent"):
         new_config1 = update_config(config1, {"nonexistent": 1})
     # Nested update with dataclass
     config2 = _TestNestedConfig()
     new_inner_config = _TestConfigFields(a=1, c="new_value")
     new_config2 = update_config(config2, {"a": new_inner_config})
     assert new_config2.a == new_inner_config
+    # Declared field type, not the live value's subtype, defines valid overrides
+    config_with_derived = _TestNestedConfig(a=_TestDerivedConfigFields(a=0))
+    new_config2 = update_config(config_with_derived, {"a": new_inner_config})
+    assert new_config2.a is new_inner_config
+    # Nested update with unrelated dataclass
+    with pytest.raises(ValueError, match=r"_TestNestedConfig\.a"):
+        update_config(config2, {"a": _TestNestedConfig()})
     # Nested update with dict
     config3 = _TestNestedConfig()
     new_config3 = update_config(config3, {"a": {"c": "new_value"}})
     assert new_config3.a.c == "new_value"
     # Nested update with invalid type
-    with pytest.raises(AssertionError):
-        new_config3 = update_config(config3, {"a": "new_value"})
+    with pytest.raises(ValueError, match=r"_TestNestedConfig\.a"):
+        update_config(config3, {"a": "new_value"})
+    # Invalid nested field preserves its full path
+    with pytest.raises(ValueError, match=r"_TestNestedConfig\.a\.nonexistent"):
+        update_config(config3, {"a": {"nonexistent": 1}})
 
 
 @pytest.mark.parametrize(

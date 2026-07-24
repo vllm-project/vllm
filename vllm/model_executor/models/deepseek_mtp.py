@@ -11,7 +11,6 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_gather
-from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -21,6 +20,9 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
+)
+from vllm.model_executor.model_loader.mtp_validation import (
+    is_mtp_completeness_check_enabled,
 )
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
@@ -34,20 +36,22 @@ from .deepseek_v2 import (
     DeepseekV2MixtureOfExperts,
     DeepseekV2MoE,
     _try_load_fp8_indexer_wk,
-    get_spec_layer_idx_from_weight_name,
 )
-from .utils import get_pp_missing_layer_names, maybe_prefix
-
-logger = init_logger(__name__)
+from .utils import (
+    get_pp_missing_layer_names,
+    get_spec_layer_idx_from_weight_name,
+    maybe_prefix,
+)
 
 
 def _restore_full_token_layout_if_needed(
     hidden_states: torch.Tensor,
     residual: torch.Tensor,
     num_tokens: int,
+    is_sequence_parallel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Restore full token rows for the MTP proposer after SP MoE layers."""
-    if hidden_states.shape[0] == num_tokens:
+    if not is_sequence_parallel and hidden_states.shape[0] == num_tokens:
         return hidden_states, residual
 
     combined_states = torch.cat([hidden_states, residual], dim=-1)
@@ -142,6 +146,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
             hidden_states,
             residual,
             positions.shape[0],
+            is_sequence_parallel=self.mtp_block.use_sequence_parallel_moe,
         )
         hidden_states = residual + hidden_states  # pre-final-norm (logits hidden)
         # Recycle the post-final-norm hidden into the next draft step.
@@ -514,7 +519,7 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
             self.model.mtp_start_layer_idx,
             self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
         ):
-            if layer_idx not in loaded_layers:
+            if layer_idx not in loaded_layers and is_mtp_completeness_check_enabled():
                 raise ValueError(
                     f"MTP speculative decoding layer {layer_idx} weights "
                     f"missing from checkpoint. The checkpoint may have "

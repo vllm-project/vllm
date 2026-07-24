@@ -272,6 +272,11 @@ def test_bert_for_masked_lm(
     if current_platform.is_rocm():
         hf_model_kwargs["attn_implementation"] = "eager"
 
+    # Run hf_runner reference with "highest" fp32 precision to match
+    # default behvior of vLLM. This is needed on ROCm since the
+    # pooling tests set matmul precision to "high" in conftest.py
+    prev_matmul_precision = torch.get_float32_matmul_precision()
+    torch.set_float32_matmul_precision("highest")
     with hf_runner(
         model,
         dtype=dtype,
@@ -285,6 +290,7 @@ def test_bert_for_masked_lm(
             inputs = hf_model.wrap_device(inputs)
             output = hf_model.model(**inputs)
             hf_outputs.append(softmax(output.logits[0]))
+    torch.set_float32_matmul_precision(prev_matmul_precision)
 
     # Compare the per-token vocabulary distributions position by position.
     for hf_output, vllm_output in zip(hf_outputs, vllm_outputs):

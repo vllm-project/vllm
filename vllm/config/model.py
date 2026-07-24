@@ -83,11 +83,17 @@ _REGISTERED_MODEL_CLASS_OVERRIDES: set[tuple[str, str]] = set()
 RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify"]
 ConvertOption = Literal["auto", ConvertType]
-TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32", "deepseek_v4"]
+TokenizerMode = Literal[
+    "auto", "hf", "slow", "mistral", "deepseek_v32", "deepseek_v4", "inkling"
+]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal[
     "raw_logits", "raw_logprobs", "processed_logits", "processed_logprobs"
 ]
+PROCESSED_LOGPROBS_MODES: tuple[LogprobsMode, ...] = (
+    "processed_logits",
+    "processed_logprobs",
+)
 HfOverrides = dict[str, Any] | Callable[[PretrainedConfig], PretrainedConfig]
 ModelImpl = Literal["auto", "vllm", "transformers", "terratorch"]
 LayerBlockType = Literal["attention", "linear_attention", "mamba"]
@@ -231,6 +237,8 @@ class ModelConfig:
     Raw means the values before applying any logit processors, like bad words.
     Processed means the values after applying all processors, including
     temperature and top_k/top_p.
+    Note: for prompt_logprobs, processed_* and raw_* yield identical results
+    because prompt tokens do not go through sampling processors.
     """
     use_fp64_gumbel: bool = False
     """Whether to use FP64 (instead of FP32) random noise for Gumbel-max and
@@ -571,9 +579,9 @@ class ModelConfig:
             self.hf_text_config, "attention_chunk_size", None
         )
         self.encoder_config = self._get_encoder_config()
-        self.hf_image_processor_config = get_hf_image_processor_config(
-            self.model, hf_token=self.hf_token, revision=self.revision
-        )
+        # Image-processor metadata is only consumed by multimodal models.
+        # Probing it for text-only models causes avoidable Hub requests.
+        self.hf_image_processor_config: dict[str, Any] = {}
 
         architectures = self.architectures
         registry = self.registry
@@ -628,6 +636,8 @@ class ModelConfig:
                 self.tokenizer_mode = "deepseek_v32"
             elif arch == "DeepseekV4ForCausalLM":
                 self.tokenizer_mode = "deepseek_v4"
+            elif arch in ("InklingForCausalLM", "InklingForConditionalGeneration"):
+                self.tokenizer_mode = "inkling"
 
             if self.tokenizer_mode != "auto":
                 logger.info(
@@ -693,6 +703,9 @@ class ModelConfig:
 
         # Init multimodal config if needed
         if self._model_info.supports_multimodal:
+            self.hf_image_processor_config = get_hf_image_processor_config(
+                self.model, hf_token=self.hf_token, revision=self.revision
+            )
             if (
                 mm_encoder_tp_mode == "data"
                 and not self._model_info.supports_multimodal_encoder_tp_data
@@ -1435,7 +1448,7 @@ class ModelConfig:
         """
         Returns the mamba chunk size if it exists
         """
-        # used by e.g. Bamba, FalconH1, Granite, PLaMo2
+        # used by e.g. Bamba, FalconH1, Granite
         chunk_size = getattr(self.hf_text_config, "mamba_chunk_size", None)
         if chunk_size is None:
             # used by e.g. Mamba2, NemotronH, Zamba
@@ -1685,6 +1698,10 @@ class ModelConfig:
     @property
     def supports_mamba_prefix_caching(self) -> bool:
         return self._model_info.supports_mamba_prefix_caching
+
+    @property
+    def supports_replayssm(self) -> bool:
+        return self._model_info.supports_replayssm
 
     @property
     def use_mla(self) -> bool:
@@ -2005,7 +2022,6 @@ _FLOAT16_NOT_SUPPORTED_MODELS = {
     "gemma2": "Numerical instability. Please use bfloat16 or float32 instead.",
     "gemma3": "Numerical instability. Please use bfloat16 or float32 instead.",
     "gemma3_text": "Numerical instability. Please use bfloat16 or float32 instead.",
-    "plamo2": "Numerical instability. Please use bfloat16 or float32 instead.",
     "glm4": "Numerical instability. Please use bfloat16 or float32 instead.",
 }
 

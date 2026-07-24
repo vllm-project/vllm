@@ -47,7 +47,7 @@ class TestDataTransportBase:
     def test_config_fingerprint_deterministic(self):
         """Same config fields → same fingerprint."""
         view = self._make_view()
-        fields = {"model": "llama", "dtype": "float16", "block_size_factor": 1}
+        fields = {"model": "llama", "dtype": "float16", "blocks_per_chunk": 1}
         with patch("vllm.v1.kv_offload.tiering.p2p.data.nixl._NixlAgent", None):
             t1 = NixlTransport("test:1", view, config_fields=fields)
             t2 = NixlTransport("test:2", view, config_fields=fields)
