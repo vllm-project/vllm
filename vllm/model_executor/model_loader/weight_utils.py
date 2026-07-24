@@ -8,6 +8,7 @@ import fnmatch
 import glob
 import hashlib
 import json
+import random
 import os
 import tempfile
 import threading
@@ -149,6 +150,20 @@ def _natural_sort_key(filepath: str) -> list:
         int(s) if s.isdigit() else s
         for s in re.split(r"(\d+)", os.path.basename(filepath))
     ]
+
+
+def _shuffle_files(files: list[str], shuffle: bool) -> None:
+    """Shuffle *files* in place with a rank-dependent seed when *shuffle* is set."""
+    if not shuffle:
+        return
+    rank = get_world_group().rank
+    random.Random(42 + rank).shuffle(files)
+    logger.info(
+        "Shuffled %d safetensors files with seed %d (rank=%d)",
+        len(files),
+        42 + rank,
+        rank,
+    )
 
 
 def maybe_download_from_modelscope(
@@ -845,6 +860,7 @@ def safetensors_weights_iterator(
     *,
     safetensors_prefetch_num_threads: int = DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
     safetensors_prefetch_block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
+    shuffle_safetensors_files: bool = False,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files.
 
@@ -922,6 +938,8 @@ def safetensors_weights_iterator(
             block_size=safetensors_prefetch_block_size,
         )
 
+    _shuffle_files(sorted_files, shuffle_safetensors_files)
+
     leftover_state_dict: dict[str, torch.Tensor] = {}
     for st_file in tqdm(
         sorted_files,
@@ -978,6 +996,7 @@ def multi_thread_safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
     max_workers: int = 4,
+    shuffle_safetensors_files: bool = False,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Multi-Thread iterate over the weights in the model safetensor files."""
 
@@ -985,13 +1004,18 @@ def multi_thread_safetensors_weights_iterator(
         result = load_file(st_file, device="cpu")
         return result
 
+    sorted_files = sorted(hf_weights_files, key=_natural_sort_key)
+    _shuffle_files(sorted_files, shuffle_safetensors_files)
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Note to use generator here so we do not store all the loaded files in memory
         # at the same time, which can cause OOM for large models.
-        futures = (executor.submit(_load_file, st_file) for st_file in hf_weights_files)
+        futures = (
+            executor.submit(_load_file, st_file) for st_file in sorted_files
+        )
         futures_iter = tqdm(
             concurrent.futures.as_completed(futures),
-            total=len(hf_weights_files),
+            total=len(sorted_files),
             desc="Multi-thread loading shards",
             disable=not enable_tqdm(use_tqdm_on_load),
             bar_format=_BAR_FORMAT,
