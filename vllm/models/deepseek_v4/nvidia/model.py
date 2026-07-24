@@ -82,6 +82,7 @@ from vllm.models.deepseek_v4.nvidia.fi_utils import (
     is_fi_moe_ep_backend,
     is_mega_moe_backend,
     make_fi_mega_moe_experts_cls,
+    validate_fi_moe_ep_config,
 )
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.platforms import current_platform
@@ -539,6 +540,7 @@ class DeepseekV4MoE(nn.Module):
         self.prefix = prefix
         self.use_sequence_parallel = use_sequence_parallel
         moe_backend = vllm_config.kernel_config.moe_backend
+        validate_fi_moe_ep_config(vllm_config)
         self.use_mega_moe = is_mega_moe_backend(moe_backend)
         self.use_fi_mega_moe = is_fi_moe_ep_backend(moe_backend)
         if self.use_mega_moe and not vllm_config.parallel_config.enable_expert_parallel:
@@ -565,7 +567,7 @@ class DeepseekV4MoE(nn.Module):
             raise NotImplementedError(
                 "DeepSeek V4 MegaMoE only supports fp4 experts; got expert_dtype="
                 f"{config.expert_dtype!r}. Drop --kernel-config moe_backend="
-                "deep_gemm_mega_moe for this checkpoint."
+                f"{moe_backend} for this checkpoint."
             )
 
         self.gate = GateLinear(

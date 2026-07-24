@@ -130,6 +130,9 @@ MoEBackend = Literal[
     "flashinfer_cutlass",
     "flashinfer_cutedsl",
     "flashinfer_b12x",
+    "flashinfer_moe_ep_mega_deep_gemm_sm100",
+    "flashinfer_moe_ep_mega_cutedsl_sm100_nvfp4",
+    "flashinfer_moe_ep_mega_cutedsl_sm100_mxfp8",
     "marlin",
     "humming",
     "triton_unfused",
@@ -203,6 +206,13 @@ class KernelConfig:
     - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels (FP4 only)
     - "flashinfer_b12x": Use FlashInfer CuteDSL fused MoE for SM12x
       (RTX Pro 6000 / DGX Spark)
+    - "flashinfer_moe_ep_mega_deep_gemm_sm100": Use the FlashInfer moe_ep
+      expert-parallel mega-MoE with the DeepGEMM megakernel (SM100, requires
+      expert parallel; DeepSeek-V4 only)
+    - "flashinfer_moe_ep_mega_cutedsl_sm100_nvfp4": Same, with the NVFP4
+      CuteDSL megakernel (SM100, additionally requires NVSHMEM)
+    - "flashinfer_moe_ep_mega_cutedsl_sm100_mxfp8": Same, with the MXFP8
+      CuteDSL megakernel (SM100, additionally requires NVSHMEM)
     - "marlin": Use Marlin kernels (weight-only quantization)
     - "humming": Use Humming Mixed Precision kernels
     - "triton_unfused": Use Triton unfused MoE kernels
