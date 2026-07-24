@@ -3,10 +3,10 @@ depends_on:
   - image-build-xpu
 steps:
 - label: Docker Build Metadata
-  timeout_in_minutes: 20
   device: intel_gpu
-  no_plugin: true
+  timeout_in_minutes: 20
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo

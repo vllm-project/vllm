@@ -3,10 +3,10 @@ depends_on:
   - image-build-xpu
 steps:
 - label: Sequence Parallel Correctness Tests (2 GPUs)
-  timeout_in_minutes: 80
-  working_dir: .
-  num_devices: 2
   device: intel_gpu
+  timeout_in_minutes: 80
+  num_devices: 2
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -30,11 +30,11 @@ steps:
     'export VLLM_TEST_CLEAN_GPU_MEMORY=1 || true &&
     pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py || true'
 - label: AsyncTP Correctness Tests (2xH100)
-  timeout_in_minutes: 30
-  working_dir: .
   device: intel_gpu
-  optional: true
+  timeout_in_minutes: 30
   num_devices: 2
+  optional: true
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -52,10 +52,10 @@ steps:
     'export VLLM_TEST_CLEAN_GPU_MEMORY=1 || true &&
     pytest -v -s tests/compile/correctness_e2e/test_async_tp.py || true'
 - label: Distributed Compile Unit Tests (2xH100)
-  timeout_in_minutes: 45
-  working_dir: .
   device: intel_gpu
+  timeout_in_minutes: 45
   num_devices: 2
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -77,9 +77,9 @@ steps:
     'export VLLM_TEST_CLEAN_GPU_MEMORY=1 || true &&
     pytest -s -v tests/compile/passes/distributed || true'
 - label: Fusion and Compile Unit Tests (2xB200)
+  device: intel_gpu
   timeout_in_minutes: 30
   working_dir: .
-  device: intel_gpu
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -117,10 +117,10 @@ steps:
     pytest -v -s tests/compile/passes/distributed/test_fusion_all_reduce.py || true &&
     pytest -v -s tests/compile/fullgraph/test_full_graph.py::test_fp8_kv_scale_compile || true'
 - label: Fusion E2E Quick (H100)
-  timeout_in_minutes: 25
-  working_dir: .
   device: intel_gpu
+  timeout_in_minutes: 25
   num_devices: 1
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -145,10 +145,10 @@ steps:
     'pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k inductor_partition and not +rms_norm and not +quant_fp8 || true &&
     pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k inductor_partition and not +rms_norm and +quant_fp8 and (qwen3 or deepseek) || true'
 - label: Fusion E2E Config Sweep (H100)
-  timeout_in_minutes: 25
-  working_dir: .
   device: intel_gpu
+  timeout_in_minutes: 25
   num_devices: 1
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -173,11 +173,11 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k llama-3 || true'
 - label: Fusion E2E Config Sweep (B200)
-  timeout_in_minutes: 30
-  working_dir: .
   device: intel_gpu
+  timeout_in_minutes: 30
   num_devices: 1
   optional: true
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -194,10 +194,10 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k inductor_partition and (FLASHINFER and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek)) or llama-3) || true'
 - label: Fusion E2E TP2 Quick (H100)
-  timeout_in_minutes: 35
-  working_dir: .
   device: intel_gpu
+  timeout_in_minutes: 35
   num_devices: 2
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -222,10 +222,10 @@ steps:
     'pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek)) || true &&
     pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek)) || true'
 - label: Fusion E2E TP2 AR-RMS Config Sweep (H100)
-  timeout_in_minutes: 30
-  working_dir: .
   device: intel_gpu
+  timeout_in_minutes: 30
   num_devices: 2
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -250,10 +250,10 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k llama-3 || true'
 - label: Fusion E2E TP2 AsyncTP Config Sweep (H100)
-  timeout_in_minutes: 40
-  working_dir: .
   device: intel_gpu
+  timeout_in_minutes: 40
   num_devices: 2
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -278,10 +278,10 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k llama-3 || true'
 - label: Fusion E2E TP2 (B200)
-  timeout_in_minutes: 45
-  working_dir: .
   device: intel_gpu
+  timeout_in_minutes: 45
   num_devices: 2
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7

@@ -3,10 +3,10 @@ depends_on:
   - image-build-xpu
 steps:
 - label: Plugin Tests (2 GPUs)
-  timeout_in_minutes: 35
-  working_dir: .
-  num_devices: 2
   device: intel_gpu
+  timeout_in_minutes: 35
+  num_devices: 2
+  working_dir: .
   no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
@@ -76,10 +76,10 @@ steps:
 - label: GGUF Plugin
   device: intel_gpu
   timeout_in_minutes: 30
-  soft_fail: true
   optional: true
-  no_plugin: true
+  soft_fail: true
   working_dir: .
+  no_plugin: true
   env:
     REGISTRY: public.ecr.aws/q9t5s3a7
     REPO: vllm-ci-test-repo

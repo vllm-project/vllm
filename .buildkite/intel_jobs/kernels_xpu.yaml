@@ -3,8 +3,8 @@ depends_on:
   - image-build-xpu
 steps:
 - label: vLLM IR Tests
-  timeout_in_minutes: 35
   device: intel_gpu
+  timeout_in_minutes: 35
   working_dir: .
   no_plugin: true
   env:
