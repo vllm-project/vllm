@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 import socket
+import subprocess
+import sys
+from contextlib import closing
+from pathlib import Path
 
 import pytest
 import zmq
@@ -15,6 +20,59 @@ from vllm.utils.network_utils import (
     split_host_port,
     split_zmq_path,
 )
+
+NETWORK_UTILS_PATH = str(
+    Path(__file__).parents[2] / "vllm" / "utils" / "network_utils.py"
+)
+
+
+def _get_unused_port() -> int:
+    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
+        s.bind(("localhost", 0))
+        return s.getsockname()[1]
+
+
+def _run_port_subprocess(
+    base_port: int,
+    count: int,
+    call: str,
+) -> subprocess.Popen[str]:
+    """Spawn a subprocess that imports network_utils.py and calls a port
+    allocation function (get_open_port or get_open_ports_list).
+
+    Uses a lightweight module shim to avoid importing the full vllm stack.
+    """
+    code = r"""
+import importlib.util, logging, os, sys, types
+
+fake_vllm = types.ModuleType("vllm")
+fake_envs = types.ModuleType("vllm.envs")
+fake_envs.VLLM_PORT = int(os.environ["VLLM_PORT"])
+
+fake_logger = types.ModuleType("vllm.logger")
+fake_logger.init_logger = lambda _: logging.getLogger("test")
+
+sys.modules["vllm"] = fake_vllm
+sys.modules["vllm.envs"] = fake_envs
+sys.modules["vllm.logger"] = fake_logger
+
+spec = importlib.util.spec_from_file_location("net", os.environ["NETWORK_UTILS_PATH"])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+count = int(os.environ["NETWORK_UTILS_COUNT"])
+print(",".join(str(p) for p in mod.get_open_ports_list(count)))
+"""
+    env = os.environ.copy()
+    env["VLLM_PORT"] = str(base_port)
+    env["NETWORK_UTILS_PATH"] = NETWORK_UTILS_PATH
+    env["NETWORK_UTILS_COUNT"] = str(count)
+    return subprocess.Popen(
+        [sys.executable, "-c", code],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
 
 
 def test_get_open_port(monkeypatch: pytest.MonkeyPatch):
@@ -144,3 +202,28 @@ def test_split_host_port():
 def test_join_host_port():
     assert join_host_port("127.0.0.1", 5555) == "127.0.0.1:5555"
     assert join_host_port("::1", 5555) == "[::1]:5555"
+
+
+def test_get_open_ports_list_no_collisions_across_processes():
+    """Spawn 5 concurrent processes, each calling get_open_ports_list(5).
+
+    Verifies that concurrent port allocation does not produce collisions,
+    which was the TOCTOU race described in #28498.  Before the port=0
+    atomic fix, all processes scanned from the same VLLM_PORT and
+    produced near-total collisions.
+    """
+    base_port = _get_unused_port()
+    procs = [_run_port_subprocess(base_port, count=5, call="list") for _ in range(5)]
+
+    all_ports: list[int] = []
+    for p in procs:
+        out, err = p.communicate(timeout=30)
+        assert p.returncode == 0, f"Subprocess failed: {err}"
+        ports = [int(x) for x in out.strip().split(",")]
+        assert len(ports) == 5, f"Expected 5 ports, got {ports}"
+        all_ports.extend(ports)
+
+    assert len(all_ports) == len(set(all_ports)), (
+        f"Port collisions detected: {len(all_ports)} total, "
+        f"{len(set(all_ports))} unique"
+    )
