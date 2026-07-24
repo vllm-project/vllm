@@ -5,21 +5,65 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
 
 from vllm.distributed import get_ep_group
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from flashinfer.moe_ep import BootstrapConfig, MoEEpMegaLayer
+
     from vllm.config import VllmConfig
 
 DeepseekV4MegaMoEExpertsFI: type | None = None
 
-MEGA_MOE_BACKENDS = frozenset({"deep_gemm_mega_moe", "fi_moe_ep"})
-FI_MEGA_KERNELS = frozenset({"deep_gemm_mega", "nvfp4_cutedsl", "mxfp8_cutedsl"})
+
+@dataclass(frozen=True)
+class FiMoeEpBackendSpec:
+    """Static properties of one ``flashinfer_moe_ep_*`` backend string.
+
+    The backend string names the megakernel, so everything the integration
+    needs to know about a selection is a table lookup: which flashinfer
+    megakernel to build, whether that kernel needs NVSHMEM in the runtime
+    requirement set, and the compute capability its code was generated for.
+    """
+
+    megakernel: str
+    needs_nvshmem: bool
+    min_capability: tuple[int, int]
+
+
+FI_MOE_EP_BACKENDS: dict[str, FiMoeEpBackendSpec] = {
+    "flashinfer_moe_ep_mega_deep_gemm_sm100": FiMoeEpBackendSpec(
+        megakernel="deep_gemm_mega",
+        needs_nvshmem=False,
+        min_capability=(10, 0),
+    ),
+    "flashinfer_moe_ep_mega_cutedsl_sm100_nvfp4": FiMoeEpBackendSpec(
+        megakernel="nvfp4_cutedsl",
+        needs_nvshmem=True,
+        min_capability=(10, 0),
+    ),
+    "flashinfer_moe_ep_mega_cutedsl_sm100_mxfp8": FiMoeEpBackendSpec(
+        megakernel="mxfp8_cutedsl",
+        needs_nvshmem=True,
+        min_capability=(10, 0),
+    ),
+}
+
+# Backends that run the DeepSeek-V4 mega-MoE model path (fused expert module
+# plus prepare_megamoe routing), whether the experts compute natively or
+# through flashinfer.
+MEGA_MOE_BACKENDS = frozenset({"deep_gemm_mega_moe", *FI_MOE_EP_BACKENDS})
+
+# Environment variables that used to select the flashinfer path and its
+# megakernel. Both are now encoded in the backend string; a stale export would
+# otherwise silently produce native numbers under a flashinfer label.
+_RETIRED_SELECTION_ENVS = ("FI_MOE_EP", "FI_MOE_EP_MEGAKERNEL")
 
 _FI_RUNTIME_HANDLE: Any = None
 _FI_MOE_EP_RUNTIME_AVAILABLE: bool | None = None
@@ -48,36 +92,79 @@ def is_mega_moe_backend(moe_backend: str) -> bool:
 
 
 def is_fi_moe_ep_backend(moe_backend: str) -> bool:
-    # ``deep_gemm_mega_moe`` stays the only KernelConfig backend string; the
-    # flashinfer moe_ep compute path is opted into with FI_MOE_EP=1 so a single
-    # install can A/B the native vs flashinfer mega paths run-by-run.
-    if moe_backend == "fi_moe_ep" or (
-        moe_backend == "deep_gemm_mega_moe"
-        and os.environ.get("FI_MOE_EP", "0").lower() in ("1", "true", "yes")
-    ):
-        if not _has_fi_moe_ep_runtime():
-            raise ImportError(
-                "FI_MOE_EP=1 requires flashinfer.moe_ep runtime support "
-                "(install the flashinfer moe_ep branch), or unset FI_MOE_EP "
-                "to use the native deep_gemm_mega_moe path."
-            )
-        return True
-    return False
-
-
-def resolve_fi_megakernel(vllm_config: "VllmConfig") -> str:
-    """Select the flashinfer mega sub-kernel for ``fi_moe_ep``."""
-    kernel_config = vllm_config.kernel_config
-    megakernel = getattr(kernel_config, "fi_moe_ep_megakernel", None)
-    if megakernel is None:
-        megakernel = os.environ.get("FI_MOE_EP_MEGAKERNEL", "deep_gemm_mega")
-    megakernel = str(megakernel).lower().replace("-", "_")
-    if megakernel not in FI_MEGA_KERNELS:
-        raise ValueError(
-            f"Unsupported fi_moe_ep megakernel {megakernel!r}; "
-            f"expected one of {sorted(FI_MEGA_KERNELS)}"
+    if moe_backend not in FI_MOE_EP_BACKENDS:
+        return False
+    if not _has_fi_moe_ep_runtime():
+        raise ImportError(
+            f"moe_backend={moe_backend!r} requires the flashinfer.moe_ep "
+            "runtime, which the installed flashinfer does not provide. "
+            "Install a flashinfer build with moe_ep support, or use "
+            "moe_backend=deep_gemm_mega_moe for the native mega path."
         )
-    return megakernel
+    return True
+
+
+def fi_moe_ep_backend_spec(moe_backend: str) -> FiMoeEpBackendSpec:
+    try:
+        return FI_MOE_EP_BACKENDS[moe_backend]
+    except KeyError:
+        raise ValueError(
+            f"{moe_backend!r} is not a flashinfer moe_ep backend; expected "
+            f"one of {sorted(FI_MOE_EP_BACKENDS)}"
+        ) from None
+
+
+def fi_megakernel(vllm_config: "VllmConfig") -> str:
+    """The flashinfer megakernel named by the configured backend."""
+    return fi_moe_ep_backend_spec(vllm_config.kernel_config.moe_backend).megakernel
+
+
+def fi_spec_for_megakernel(megakernel: str) -> FiMoeEpBackendSpec:
+    """Spec for a megakernel named directly rather than via a backend string."""
+    for spec in FI_MOE_EP_BACKENDS.values():
+        if spec.megakernel == megakernel:
+            return spec
+    known = sorted({s.megakernel for s in FI_MOE_EP_BACKENDS.values()})
+    raise ValueError(f"Unknown megakernel {megakernel!r}; expected one of {known}")
+
+
+def validate_fi_moe_ep_config(vllm_config: "VllmConfig") -> None:
+    """Config-time checks for the mega-MoE backends, native and flashinfer."""
+    for env in _RETIRED_SELECTION_ENVS:
+        if os.environ.get(env):
+            raise ValueError(
+                f"{env} is set but no longer selects anything: the flashinfer "
+                "moe_ep path and its megakernel are chosen by backend string "
+                f"(--moe-backend {'|'.join(sorted(FI_MOE_EP_BACKENDS))}). "
+                f"Unset {env}."
+            )
+
+    moe_backend = vllm_config.kernel_config.moe_backend
+    if not is_fi_moe_ep_backend(moe_backend):
+        return
+
+    spec = fi_moe_ep_backend_spec(moe_backend)
+    # flashinfer validates the arch too, but not until the layer constructor
+    # runs during weight load; check here so the error names the flag the user
+    # actually typed.
+    capability = current_platform.get_device_capability()
+    if capability is not None:
+        cc = (capability.major, capability.minor)
+        if cc < spec.min_capability:
+            raise ValueError(
+                f"moe_backend={moe_backend!r} requires compute capability "
+                f"{spec.min_capability[0]}.{spec.min_capability[1]}+, but this "
+                f"device is {cc[0]}.{cc[1]}."
+            )
+
+    if vllm_config.parallel_config.enable_eplb:
+        raise NotImplementedError(
+            f"EPLB is not supported with moe_backend={moe_backend!r}: the "
+            "flashinfer moe_ep experts neither apply the logical-to-physical "
+            "expert map nor report per-expert load, so rebalancing would move "
+            "weights without moving routing. Use "
+            "moe_backend=deep_gemm_mega_moe to run the mega path with EPLB."
+        )
 
 
 def make_fi_moe_ep_bootstrap() -> "BootstrapConfig":
@@ -92,18 +179,22 @@ def make_fi_moe_ep_bootstrap() -> "BootstrapConfig":
     )
 
 
-def megakernel_runtime_requirements(megakernel: str) -> frozenset[str]:
+def megakernel_runtime_requirements(spec: FiMoeEpBackendSpec) -> frozenset[str]:
     from flashinfer.moe_ep.core.runtime import NVSHMEM, TORCH_DIST
 
-    if megakernel == "deep_gemm_mega":
-        return frozenset({TORCH_DIST})
-    if megakernel in ("nvfp4_cutedsl", "mxfp8_cutedsl"):
+    if spec.needs_nvshmem:
         return frozenset({TORCH_DIST, NVSHMEM})
-    raise ValueError(f"Unsupported fi_moe_ep megakernel {megakernel!r}")
+    return frozenset({TORCH_DIST})
 
 
-def ensure_fi_moe_ep_runtime(vllm_config: "VllmConfig") -> None:
-    """Acquire the process-wide flashinfer moe_ep runtime once per worker."""
+def ensure_fi_moe_ep_runtime(
+    vllm_config: "VllmConfig", *, megakernel: str | None = None
+) -> None:
+    """Acquire the process-wide flashinfer moe_ep runtime once per worker.
+
+    ``megakernel`` names the kernel directly for callers that pick it outside
+    KernelConfig; by default it comes from the configured backend string.
+    """
     global _FI_RUNTIME_HANDLE
     if _FI_RUNTIME_HANDLE is not None:
         return
@@ -117,7 +208,11 @@ def ensure_fi_moe_ep_runtime(vllm_config: "VllmConfig") -> None:
         )
 
     bootstrap = make_fi_moe_ep_bootstrap()
-    megakernel = resolve_fi_megakernel(vllm_config)
+    spec = (
+        fi_spec_for_megakernel(megakernel)
+        if megakernel is not None
+        else fi_moe_ep_backend_spec(vllm_config.kernel_config.moe_backend)
+    )
     # flashinfer's runtime/layer constructors bind the process to
     # cuda:LOCAL_RANK (falling back to bootstrap.rank). vLLM has already bound
     # this worker to its (possibly remapped) visible device, and a mismatched
@@ -129,12 +224,12 @@ def ensure_fi_moe_ep_runtime(vllm_config: "VllmConfig") -> None:
     print(
         f"[fi_moe_ep] ep_rank={bootstrap.rank} world={bootstrap.world_size} "
         f"cuda.current_device={torch.cuda.current_device()} "
-        f"megakernel={megakernel}",
+        f"megakernel={spec.megakernel}",
         flush=True,
     )
     _FI_RUNTIME_HANDLE = bootstrap_moe_ep_runtime(
         bootstrap,
-        megakernel_runtime_requirements(megakernel),
+        megakernel_runtime_requirements(spec),
     )
 
 
@@ -409,10 +504,12 @@ def build_fi_mega_layer(
     activation_clamp: float | None,
     weights,
     fast_math: bool = True,
+    megakernel: str | None = None,
 ) -> "MoEEpMegaLayer":
     from flashinfer.moe_ep import FleetParams, MoEEpLayer
 
-    megakernel = resolve_fi_megakernel(vllm_config)
+    if megakernel is None:
+        megakernel = fi_megakernel(vllm_config)
     mega_config = build_fi_mega_config(
         intermediate_size=intermediate_size,
         top_k=top_k,
@@ -595,11 +692,12 @@ def make_fi_mega_moe_experts_cls(mega_moe_experts_cls: type[nn.Module]) -> type[
             self._epilogue_alphas: tuple[torch.Tensor, torch.Tensor] | None = None
             self._nvfp4_prequant = ckpt_uses_nvfp4_experts(vllm_config)
             if self._nvfp4_prequant:
-                megakernel = resolve_fi_megakernel(vllm_config)
+                megakernel = fi_megakernel(vllm_config)
                 if megakernel != "nvfp4_cutedsl":
                     raise ValueError(
-                        f"NVFP4-quantized expert checkpoint requires "
-                        f"FI_MOE_EP_MEGAKERNEL=nvfp4_cutedsl, got {megakernel!r} "
+                        "NVFP4-quantized expert checkpoint requires "
+                        "moe_backend=flashinfer_moe_ep_mega_cutedsl_sm100_nvfp4"
+                        f", got a backend using megakernel {megakernel!r} "
                         "(deep_gemm consumes the mx-format checkpoint instead)."
                     )
                 self._realloc_nvfp4_params()
@@ -705,7 +803,7 @@ def make_fi_mega_moe_experts_cls(mega_moe_experts_cls: type[nn.Module]) -> type[
                     self.w13_weight_scale,
                     self.w2_weight,
                     self.w2_weight_scale,
-                    megakernel=resolve_fi_megakernel(self._vllm_config),
+                    megakernel=fi_megakernel(self._vllm_config),
                 )
             self._mega_layer = build_fi_mega_layer(
                 make_fi_moe_ep_bootstrap(),
@@ -737,6 +835,19 @@ def make_fi_mega_moe_experts_cls(mega_moe_experts_cls: type[nn.Module]) -> type[
                 self.w13_input_scale = None
                 self.w2_input_scale = None
 
+        # EPLB is rejected for these backends in validate_fi_moe_ep_config, so
+        # nothing constructs an EplbState and none of these run. They are kept
+        # as explicit errors rather than deleted because inheriting the native
+        # implementations would be worse: set_eplb_state would record a map
+        # this forward path never consults, silently splitting routing from
+        # weights, and get_expert_weights reads transformed-weight attributes
+        # the flashinfer path releases after preprocess.
+        _EPLB_UNSUPPORTED = (
+            "EPLB is not supported with the flashinfer moe_ep backends; "
+            "validate_fi_moe_ep_config should have rejected this "
+            "configuration at startup."
+        )
+
         def set_eplb_state(
             self,
             moe_layer_idx: int,
@@ -744,15 +855,13 @@ def make_fi_mega_moe_experts_cls(mega_moe_experts_cls: type[nn.Module]) -> type[
             logical_to_physical_map: torch.Tensor,
             logical_replica_count: torch.Tensor,
         ) -> None:
-            pass
+            raise NotImplementedError(self._EPLB_UNSUPPORTED)
 
         def get_expert_weights(self) -> list[torch.Tensor]:
-            raise NotImplementedError(
-                "EPLB expert weight export is not supported for fi_moe_ep yet."
-            )
+            raise NotImplementedError(self._EPLB_UNSUPPORTED)
 
         def update_expert_map(self) -> None:
-            pass
+            raise NotImplementedError(self._EPLB_UNSUPPORTED)
 
         def forward(
             self,
@@ -855,7 +964,8 @@ def make_fi_mega_moe_experts_cls(mega_moe_experts_cls: type[nn.Module]) -> type[
 
 __all__ = [
     "DeepseekV4MegaMoEExpertsFI",
-    "FI_MEGA_KERNELS",
+    "FI_MOE_EP_BACKENDS",
+    "FiMoeEpBackendSpec",
     "MEGA_MOE_BACKENDS",
     "apply_mega_moe_routing_preprocess",
     "build_fi_mega_config",
@@ -863,6 +973,9 @@ __all__ = [
     "ckpt_uses_nvfp4_experts",
     "nvfp4_prequant_pack_and_alphas",
     "ensure_fi_moe_ep_runtime",
+    "fi_megakernel",
+    "fi_moe_ep_backend_spec",
+    "fi_spec_for_megakernel",
     "finalize_fi_moe_ep_runtime",
     "is_fi_moe_ep_backend",
     "is_mega_moe_backend",
@@ -870,6 +983,6 @@ __all__ = [
     "make_fi_moe_ep_bootstrap",
     "mega_moe_weight_pack_from_params",
     "megakernel_runtime_requirements",
-    "resolve_fi_megakernel",
     "resolve_mega_moe_is_padding",
+    "validate_fi_moe_ep_config",
 ]
