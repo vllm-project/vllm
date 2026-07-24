@@ -70,6 +70,7 @@ from vllm.v1.engine import (
     UtilityOutput,
     UtilityResult,
 )
+from vllm.v1.engine.prefill_delayer import PrefillDelayer
 from vllm.v1.engine.tensor_ipc import TensorIpcReceiver
 from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,
@@ -1862,6 +1863,10 @@ class DPEngineCoreProc(EngineCoreProc):
         scheduler_config = vllm_config.scheduler_config
         self.prefill_schedule_interval = scheduler_config.prefill_schedule_interval
 
+        # Content-aware prefill alignment/throttling. Its decision is
+        # refreshed once per busy-loop iteration in lockstep across ranks.
+        self._prefill_delayer: PrefillDelayer | None = None
+
         # Counts forward-passes of the model so that we can synchronize
         # finished with DP peers every N steps.
         self.step_counter = 0
@@ -1892,6 +1897,14 @@ class DPEngineCoreProc(EngineCoreProc):
             engine_index=dp_rank,
             tensor_queue=tensor_queue,
         )
+
+        if scheduler_config.enable_prefill_delayer:
+            # Needs to run after _init_data_parallel sets self.dp_size
+            self._prefill_delayer = PrefillDelayer(
+                dp_size=self.dp_size,
+                max_delay_passes=scheduler_config.prefill_delayer_max_delay_passes,
+                max_delay_ms=scheduler_config.prefill_delayer_max_delay_ms,
+            )
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
         # Configure GPUs and stateless process group for data parallel.
@@ -2016,6 +2029,10 @@ class DPEngineCoreProc(EngineCoreProc):
         # Throttle new prefills to cadence-aligned steps for DP balancing.
         # step_counter is identical across DP ranks. On a fresh wave the
         # counter is 0, so prefills are admitted immediately after idle.
+        if self._prefill_delayer is not None:
+            # Content-aware path: return the decision computed from the previous
+            # iteration's DP sync (see _has_global_unfinished_reqs).
+            return self._prefill_delayer.should_throttle
         return (
             self.prefill_schedule_interval > 1
             and self.step_counter % self.prefill_schedule_interval != 0
@@ -2083,20 +2100,39 @@ class DPEngineCoreProc(EngineCoreProc):
                 # Increment wave count and reset step counter.
                 self.current_wave += 1
                 self.step_counter = 0
+                if self._prefill_delayer is not None:
+                    # Clear any in-flight delay so a stale "mixed" decision does
+                    # not carry across the idle gap into the next wave.
+                    self._prefill_delayer.reset()
 
         raise SystemExit
 
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
         # Optimization - only perform finish-sync all-reduce every 32 steps.
         self.step_counter += 1
-        if self.step_counter % 32 != 0:
+        # With the PrefillDelayer active we sync every step instead, so its
+        # cross-DP signal (how many ranks are prefillable) can ride this same
+        # collective rather than needing its own. The delay decision is stored
+        # on the delayer and applied on the next iteration's schedule().
+        should_sync_every_step = self._prefill_delayer is not None
+        if not should_sync_every_step and self.step_counter % 32 != 0:
             return True
 
-        has_unfinished, pause_consensus = ParallelConfig.sync_dp_state(
-            self.dp_group,
-            has_unfinished=local_unfinished,
-            pending_pause=self.pending_pause,
+        local_prefillable = (
+            self._prefill_delayer is not None
+            and self.scheduler.get_request_counts()[1] > 0
         )
+        has_unfinished, pause_consensus, prefillable_count = (
+            ParallelConfig.sync_dp_state(
+                self.dp_group,
+                has_unfinished=local_unfinished,
+                pending_pause=self.pending_pause,
+                local_prefillable=local_prefillable,
+            )
+        )
+
+        if self._prefill_delayer is not None:
+            self._prefill_delayer.update_throttle(prefillable_count)
 
         if pause_consensus:
             self.ignore_start_dp_wave = True

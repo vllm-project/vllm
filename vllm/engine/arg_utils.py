@@ -612,6 +612,11 @@ class EngineArgs:
 
     scheduler_reserve_full_isl: bool = SchedulerConfig.scheduler_reserve_full_isl
     prefill_schedule_interval: int = SchedulerConfig.prefill_schedule_interval
+    enable_prefill_delayer: bool = SchedulerConfig.enable_prefill_delayer
+    prefill_delayer_max_delay_passes: int = (
+        SchedulerConfig.prefill_delayer_max_delay_passes
+    )
+    prefill_delayer_max_delay_ms: float = SchedulerConfig.prefill_delayer_max_delay_ms
 
     watermark: float = SchedulerConfig.watermark
 
@@ -1469,6 +1474,21 @@ class EngineArgs:
             "--prefill-schedule-interval",
             **scheduler_kwargs["prefill_schedule_interval"],
         )
+        # Only applicable to data-parallel deployments (data-parallel-size > 1);
+        # a no-op otherwise since the delayer is only constructed by the DP
+        # engine core.
+        scheduler_group.add_argument(
+            "--enable-prefill-delayer",
+            **scheduler_kwargs["enable_prefill_delayer"],
+        )
+        scheduler_group.add_argument(
+            "--prefill-delayer-max-delay-passes",
+            **scheduler_kwargs["prefill_delayer_max_delay_passes"],
+        )
+        scheduler_group.add_argument(
+            "--prefill-delayer-max-delay-ms",
+            **scheduler_kwargs["prefill_delayer_max_delay_ms"],
+        )
         scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"],
@@ -2214,6 +2234,9 @@ class EngineArgs:
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,
             prefill_schedule_interval=self.prefill_schedule_interval,
+            enable_prefill_delayer=self.enable_prefill_delayer,
+            prefill_delayer_max_delay_passes=self.prefill_delayer_max_delay_passes,
+            prefill_delayer_max_delay_ms=self.prefill_delayer_max_delay_ms,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,

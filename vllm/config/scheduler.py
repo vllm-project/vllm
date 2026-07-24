@@ -145,6 +145,21 @@ class SchedulerConfig:
     once every N engine steps, aligned across DP ranks, to better balance
     per-step forward-pass times."""
 
+    enable_prefill_delayer: bool = True
+    """For data-parallel deployments, enable the content-aware PrefillDelayer:
+    delay admitting new prefills on a rank until sibling DP ranks are also
+    ready, so dense prefills fire together and reduce per-step padding waste.
+    When enabled, this overrides `prefill_schedule_interval`."""
+
+    prefill_delayer_max_delay_passes: int = Field(default=30, ge=1)
+    """Max consecutive engine steps the PrefillDelayer will defer a prefill in a
+    mixed (skewed) state before force-allowing to bound worst-case TTFT."""
+
+    prefill_delayer_max_delay_ms: float = Field(default=5000.0, ge=0.0)
+    """Max wall-clock time the PrefillDelayer will defer a prefill in a mixed
+    state before force-allowing, whichever comes first with
+    `prefill_delayer_max_delay_passes`."""
+
     async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to
     avoid gaps in GPU utilization, leading to better latency and throughput.
