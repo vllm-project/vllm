@@ -1,0 +1,25 @@
+group: Zen CPU
+depends_on: []
+steps:
+- label: Zen-CPU-Kernel Tests
+  depends_on: []
+  soft_fail: false
+  device: zen5
+  no_plugin: true
+  source_file_dependencies:
+  - setup.py
+  - docker/Dockerfile.cpu
+  - requirements/cpu.txt
+  - requirements/build/cpu.txt
+  - csrc/cpu/
+  - cmake/cpu_extension.cmake
+  - CMakeLists.txt
+  - vllm/model_executor/layers/utils.py
+  - vllm/platforms/cpu.py
+  - vllm/platforms/zen_cpu.py
+  - vllm/platforms/__init__.py
+  - tests/model_executor/test_cpu_unquantized_gemm_dispatch.py
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-zen-cpu-test.sh 20m "
+      pytest -x -v -s tests/model_executor/test_cpu_unquantized_gemm_dispatch.py"
