@@ -377,13 +377,11 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
 
     @classmethod
     def is_supported(cls, compute_capability=None):
-        if current_platform.is_rocm():
-            from vllm.platforms.rocm import on_rdna4
-
-            if rocm_aiter_ops.is_linear_enabled() or (
-                rocm_aiter_ops.is_enabled() and on_rdna4()
-            ):
-                return True, None
+        if (
+            rocm_aiter_ops.is_linear_enabled()
+            or rocm_aiter_ops.is_rdna_linear_enabled()
+        ):
+            return True, None
         return (
             False,
             "Only supported on ROCm platform with aiter package installed.",
@@ -403,14 +401,10 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 "quantization with group_shape=(1,128).",
             )
 
-        # On arches without an aiter CK build (gfx12 today), the only
-        # backend that works is the aiter Triton path, which requires a
-        # per-(N,K) tune.
-        from vllm.platforms.rocm import on_rdna4
-
-        if not rocm_aiter_ops.is_linear_enabled() and (
-            rocm_aiter_ops.is_enabled() and on_rdna4()
-        ):
+        # RDNA4 (gfx12) only has the aiter Triton blockscale backend, which
+        # needs a per-(N,K) tune. Reject untuned shapes so the dispatcher falls
+        # through to the generic backend.
+        if rocm_aiter_ops.is_rdna_linear_enabled():
             n, k = config.weight_shape
             if not rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k):
                 return (

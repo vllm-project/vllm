@@ -439,10 +439,9 @@ def _get_backend_priorities(
     if rocm_aiter_ops.is_mha_enabled():
         backends.append(AttentionBackendEnum.ROCM_AITER_FA)
     if is_aiter_found_and_supported():
-        if on_rdna4():
-            backends.insert(0, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
-        else:
-            backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
+        backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
+    elif rocm_aiter_ops.is_rdna_aiter_enabled():
+        backends.insert(0, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     backends.append(AttentionBackendEnum.TRITON_ATTN)
     backends.append(AttentionBackendEnum.TURBOQUANT)
 
@@ -1037,6 +1036,7 @@ class RocmPlatform(Platform):
             cc.cudagraph_mode != CUDAGraphMode.NONE
             and envs.VLLM_ROCM_USE_AITER
             and envs.VLLM_ROCM_USE_AITER_RMSNORM
+            and not on_rdna4()
         ):
             rms_norm = ["aiter"] + default
         else:
