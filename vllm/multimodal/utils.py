@@ -16,13 +16,13 @@ from typing_extensions import deprecated
 from vllm.inputs import MultiModalPlaceholders
 from vllm.utils.import_utils import LazyLoader
 
-from .hasher import MultiModalHasher
 from .inputs import (
     BatchedTensorInputs,
     MultiModalFeatureSpec,
     MultiModalFieldElem,
     MultiModalKwargsItem,
     MultiModalSharedField,
+    nested_tensors_equal,
 )
 from .media import AudioMediaIO, ImageMediaIO, MediaConnector, VideoMediaIO
 
@@ -159,11 +159,28 @@ def argsort_mm_positions(
     return [(modality, idx) for modality, idx, _ in sorted_flat_items]
 
 
-def _get_group_hash(elem: MultiModalFieldElem):
-    if not isinstance(elem.field, MultiModalSharedField):
-        return None
+def _can_batch_mm_items(
+    left: MultiModalKwargsItem,
+    right: MultiModalKwargsItem,
+) -> bool:
+    if left.keys() != right.keys():
+        return False
 
-    return MultiModalHasher.hash_kwargs("sha256", data=elem.data)
+    for key, left_elem in left.items():
+        right_elem = right[key]
+        left_field, right_field = left_elem.field, right_elem.field
+        is_shared_field = isinstance(left_field, MultiModalSharedField) and isinstance(
+            right_field, MultiModalSharedField
+        )
+        if (type(left_field) is not type(right_field)) or (
+            is_shared_field
+            and not nested_tensors_equal(
+                left_elem.data, right_elem.data, check_dtype=True
+            )
+        ):
+            return False
+
+    return True
 
 
 def _batch_mm_items(
@@ -211,26 +228,21 @@ def group_and_batch_mm_items(
         - `kwargs` is a dictionary of keyword arguments to pass to the model;
         - `num_items` is the corresponding number of items.
     """
-    group_ids = [
-        tuple(
-            (key, _get_group_hash(elem))
-            for key, elem in sorted(item.items(), key=lambda kv: kv[0])
-        )
-        for item in items
-    ]
-    group_sizes = [sum(1 for _ in group) for _, group in groupby(group_ids)]
-
     start_idx = 0
-    for group_size in group_sizes:
+    for end_idx in range(1, len(items) + 1):
+        if end_idx < len(items) and _can_batch_mm_items(
+            items[end_idx - 1], items[end_idx]
+        ):
+            continue
+
         group_data = _batch_mm_items(
-            items[start_idx : start_idx + group_size],
+            items[start_idx:end_idx],
             device=device,
             pin_memory=pin_memory,
         )
 
-        yield group_size, group_data
-
-        start_idx += group_size
+        yield end_idx - start_idx, group_data
+        start_idx = end_idx
 
     assert start_idx == len(items)
 
