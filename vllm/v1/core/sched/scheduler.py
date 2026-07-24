@@ -2740,6 +2740,26 @@ class Scheduler(SchedulerInterface):
                     )
                     request.num_computed_tokens = req_num_computed_tokens
 
+                # Under async scheduling, output frames already in flight when the
+                # KV load failed are stale: the request is being recomputed from a
+                # truncated prefix, so their placeholders must be rolled back or
+                # they inflate the number of tokens scheduled for the recompute.
+                # One in-flight frame is the one consumed (and skipped) in this same
+                # recovery step's output loop, so the others must be discarded.
+                # NOTE: num_output_placeholders counts TOKENS, while
+                # async_tokens_to_discard is consumed one-per-FRAME
+                # (_update_request_with_output). With one token per frame -- the
+                # common case, including pipeline parallelism -- that is
+                # num_output_placeholders - 1. With speculative decoding / diffusion
+                # a frame carries multiple tokens, so this over-discards; a general
+                # fix needs the true in-flight frame count. reset_prefix_cache has
+                # the same token-vs-frame conflation.
+                if request.num_output_placeholders > 0:
+                    request.async_tokens_to_discard += (
+                        request.num_output_placeholders - 1
+                    )
+                    request.num_output_placeholders = 0
+
                 affected_req_ids.add(request.request_id)
 
         return affected_req_ids, total_affected_tokens, blocks_to_evict
