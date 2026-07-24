@@ -1481,8 +1481,8 @@ def _run_one_config(
         torch.accelerator.empty_cache()
 
         with set_current_vllm_config(vllm_config):
-            # Chunk weights for EP BEFORE creating FusedMoEFactory
-            # FusedMoEFactory uses EP-chunked weights and handles reductions internally
+            # Chunk weights for EP BEFORE creating MoERunner.
+            # MoERunner uses EP-chunked weights and handles reductions internally.
             if ep_size > 1:
                 # Split experts across ranks (dimension 0 is the expert dimension)
                 # When EP is enabled, use EP group rank and ep_size for chunking
