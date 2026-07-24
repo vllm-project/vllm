@@ -1667,3 +1667,23 @@ def test_load_config_rejects_invalid_safetensors_load_strategy():
 def test_load_config_rejects_non_string_load_format(bad_load_format):
     with pytest.raises(pydantic.ValidationError):
         LoadConfig(load_format=bad_load_format)
+
+
+def test_v2_model_runner_requires_uva(monkeypatch):
+    model_config = ModelConfig("facebook/opt-125m")
+
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
+    monkeypatch.setattr(vllm_config_module, "is_uva_available", lambda: True)
+    config = VllmConfig(model_config=model_config)
+    assert config.use_v2_model_runner
+
+    # Fall back to the V1 model runner when UVA is unavailable
+    # (e.g. WSL2 without VLLM_WSL2_ENABLE_PIN_MEMORY=1).
+    monkeypatch.setattr(vllm_config_module, "is_uva_available", lambda: False)
+    config = VllmConfig(model_config=model_config)
+    assert not config.use_v2_model_runner
+
+    # Explicitly forcing V2 without UVA raises an actionable error.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    with pytest.raises(ValueError, match="UVA"):
+        VllmConfig(model_config=model_config)
