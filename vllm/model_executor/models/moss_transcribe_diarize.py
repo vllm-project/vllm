@@ -67,6 +67,7 @@ from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 WHISPER_ENCODER_STRIDE = 2
+MAX_AUDIO_DURATION_S = 90 * 60
 
 AUDIO_PLACEHOLDER = "<|audio_start|><|audio_pad|><|audio_end|>"
 
@@ -145,9 +146,7 @@ def _compute_total_audio_tokens(
 
 
 def _get_max_audio_samples(feature_extractor: Any) -> int:
-    if hasattr(feature_extractor, "chunk_length"):
-        return int(feature_extractor.chunk_length * feature_extractor.sampling_rate)
-    return int(feature_extractor.n_samples)
+    return int(MAX_AUDIO_DURATION_S * feature_extractor.sampling_rate)
 
 
 def _as_audio_embedding_list(audio_embeds: object) -> list[torch.Tensor]:
