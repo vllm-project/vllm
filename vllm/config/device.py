@@ -7,10 +7,28 @@ from typing import Any, Literal
 import torch
 from pydantic import ConfigDict, SkipValidation
 
+from vllm.config.device_diagnostics import (
+    build_failed_device_type_message,
+    environment_looks_like_rocm,
+)
 from vllm.config.utils import config
 from vllm.utils.hashing import safe_hash
 
 Device = Literal["auto", "cuda", "cpu", "tpu", "xpu"]
+
+
+def _get_current_platform_device_type() -> str:
+    from vllm.platforms import current_platform
+
+    return current_platform.device_type
+
+
+def _get_failed_device_type_message() -> str:
+    return build_failed_device_type_message(
+        getattr(torch.version, "cuda", None),
+        getattr(torch.version, "hip", None),
+        environment_looks_like_rocm=environment_looks_like_rocm(),
+    )
 
 
 @config(config=ConfigDict(arbitrary_types_allowed=True))
@@ -49,15 +67,9 @@ class DeviceConfig:
     def __post_init__(self):
         if self.device == "auto":
             # Automated device type detection
-            from vllm.platforms import current_platform
-
-            self.device_type = current_platform.device_type
+            self.device_type = _get_current_platform_device_type()
             if not self.device_type:
-                raise RuntimeError(
-                    "Failed to infer device type, please set "
-                    "the environment variable `VLLM_LOGGING_LEVEL=DEBUG` "
-                    "to turn on verbose logging to help debug the issue."
-                )
+                raise RuntimeError(_get_failed_device_type_message())
         else:
             # Device type is assigned explicitly
             if isinstance(self.device, str):
