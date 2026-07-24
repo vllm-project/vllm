@@ -41,13 +41,24 @@ vllm serve az://<container>/<model-path> \
 
 Authentication uses `DefaultAzureCredential`, which supports `az login`, managed identity, environment variables (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_CLIENT_SECRET`), and other methods.
 
-To run model from a S3 compatible object store run:
+To run model from a S3 compatible object store, point the streamer at the store's endpoint with `AWS_ENDPOINT_URL`. For example, with Google Cloud Storage:
 
 ```bash
 RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING=0 \
 AWS_EC2_METADATA_DISABLED=true \
 AWS_ENDPOINT_URL=https://storage.googleapis.com \
 vllm serve s3://core-llm/Llama-3-8b \
+    --load-format runai_streamer
+```
+
+[Tigris](https://www.tigrisdata.com) is another S3-compatible store that's useful when serving across multiple regions: it exposes a single global endpoint and serves reads from the nearest region, so the same `s3://` URI works from every worker without per-region bucket replicas or cross-region egress on repeat weight loads.
+
+```bash
+AWS_EC2_METADATA_DISABLED=true \
+AWS_ENDPOINT_URL=https://t3.storage.dev \
+AWS_ACCESS_KEY_ID=tid_your_access_key_id \
+AWS_SECRET_ACCESS_KEY=tsec_your_secret_access_key \
+vllm serve s3://my-bucket/Llama-3-8b \
     --load-format runai_streamer
 ```
 
