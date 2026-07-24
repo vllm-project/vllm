@@ -5,7 +5,7 @@ import numpy as np
 import torch
 
 import vllm.envs as envs
-from vllm.config.model import LogprobsMode
+from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
@@ -100,7 +100,7 @@ class Sampler:
         )
 
         if return_logprobs:
-            if self.logprobs_mode in ("processed_logprobs", "processed_logits"):
+            if self.logprobs_mode in PROCESSED_LOGPROBS_MODES:
                 logits = processed_logits
             expanded_logits = logits.shape[0] != idx_mapping_np.shape[0]
             cu_num_logits = cu_num_logits_np.tolist() if expanded_logits else None
@@ -221,10 +221,7 @@ class Sampler:
             # any greedy requests or per-request seeds, or if post-processed
             # logprobs need to be returned for any requests.
             (top_k is None and top_p is None)
-            or (
-                return_logprobs
-                and self.logprobs_mode in ("processed_logprobs", "processed_logits")
-            )
+            or (return_logprobs and self.logprobs_mode in PROCESSED_LOGPROBS_MODES)
             or self.sampling_states.any_greedy(idx_mapping_np)
             or self.sampling_states.any_explicit_seed(idx_mapping_np)
         )
