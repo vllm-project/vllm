@@ -50,36 +50,44 @@ class TrtLlmMxfp4ExpertsBase:
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
 
-        # MXFP4-specific TRTLLM parameters from quant_config
-        device = torch.accelerator.current_device_index()
-        if quant_config.gemm1_alpha is not None:
-            self.gemm1_alpha = torch.tensor(
-                [quant_config.gemm1_alpha] * self.local_num_experts,
-                dtype=torch.float32,
-                device=device,
-            )
-        else:
-            self.gemm1_alpha = None
-
-        if quant_config.gemm1_beta is not None:
-            self.gemm1_beta = torch.tensor(
-                [quant_config.gemm1_beta] * self.local_num_experts,
-                dtype=torch.float32,
-                device=device,
-            )
-        else:
-            self.gemm1_beta = None
-
-        if quant_config.gemm1_clamp_limit is not None:
-            self.gemm1_clamp_limit = torch.tensor(
-                [quant_config.gemm1_clamp_limit] * self.local_num_experts,
-                dtype=torch.float32,
-                device=device,
-            )
-        else:
-            self.gemm1_clamp_limit = None
+        # MXFP4-specific TRTLLM parameters from quant_config. Keep the
+        # storage stable across reloads because CUDA graphs may capture these
+        # tensors' addresses.
+        self.gemm1_alpha: torch.Tensor | None = None
+        self.gemm1_beta: torch.Tensor | None = None
+        self.gemm1_clamp_limit: torch.Tensor | None = None
+        self.refresh_activation_constants()
 
         self.max_capture_size = moe_config.max_capture_size
+
+    def refresh_activation_constants(self) -> None:
+        """Refresh static activation constants without replacing storage."""
+        values = (
+            self.quant_config.gemm1_alpha,
+            self.quant_config.gemm1_beta,
+            self.quant_config.gemm1_clamp_limit,
+        )
+        device = torch.accelerator.current_device_index()
+        for name, value in zip(
+            ("gemm1_alpha", "gemm1_beta", "gemm1_clamp_limit"), values
+        ):
+            if value is None:
+                setattr(self, name, None)
+                continue
+            tensor = getattr(self, name, None)
+            if isinstance(tensor, torch.Tensor):
+                tensor.fill_(float(value))
+            else:
+                setattr(
+                    self,
+                    name,
+                    torch.full(
+                        (self.local_num_experts,),
+                        float(value),
+                        dtype=torch.float32,
+                        device=device,
+                    ),
+                )
 
     @staticmethod
     def _supports_current_device() -> bool:
