@@ -167,7 +167,11 @@ def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, padded_a, bias_mode
     out = ops.wvSplitKrc(A, B, cu_count, BIAS)
 
     if xnorm:
-        torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-8)
+        # Normalized outputs are ~O(1), where one bf16 rounding step (~0.0039)
+        # exceeds the old 1e-3 atol. Bound by the dtype epsilon, like
+        # test_rocm_wvsplitk_kernel below.
+        atol = torch.finfo(dtype).eps if dtype == torch.bfloat16 else 1e-3
+        torch.testing.assert_close(out, ref_out, atol=atol, rtol=1e-3)
     else:
         torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-2)
 
