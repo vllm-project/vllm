@@ -493,7 +493,11 @@ def _post_update_kernel(
             token_id,
         )
 
-        if output_bin_counts_ptr is not None:
+        if (
+            output_bin_counts_ptr is not None
+            and token_id >= 0
+            and token_id < output_bin_counts_stride
+        ):
             token_ptr = (
                 output_bin_counts_ptr
                 + req_state_idx * output_bin_counts_stride
