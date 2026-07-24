@@ -935,7 +935,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.window_left = self.global_hyperparameters.window_left
         self.logits_soft_cap = self.global_hyperparameters.logits_soft_cap
         self.has_sinks = self.global_hyperparameters.has_sinks
-        if self.has_sinks and not FlashInferBackend.supports_sink():
+        # supports_sink() calls force_use_trtllm_attention() ->
+        # get_current_vllm_config(), which is only valid during initialization
+        # (not during the warmup dummy_run where build() may run). Resolve it
+        # once here, where the config context is active, and reuse in build().
+        self._supports_sink = FlashInferBackend.supports_sink()
+        if self.has_sinks and not self._supports_sink:
             raise NotImplementedError(
                 "FlashInfer backend currently does not support attention "
                 "sinks, please use trtllm on blackwell or flash attention on "
@@ -1422,9 +1427,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # for sink models even though sinks are fully supported there.
             # Only reject when sinks would actually be dropped.
             sinks_would_be_dropped = self.use_dcp or use_cascade
-            if self.has_sinks and (
-                not FlashInferBackend.supports_sink() or sinks_would_be_dropped
-            ):
+            if self.has_sinks and (not self._supports_sink or sinks_would_be_dropped):
                 raise NotImplementedError(
                     "FlashInfer backend does not support attention sinks on "
                     "this path (DCP prefill / cascade, or a FlashInfer build "
