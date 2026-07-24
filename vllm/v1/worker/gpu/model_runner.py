@@ -1542,9 +1542,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.num_speculative_steps > 0:
             # Spec-decode and diffusion LLMs both use draft tokens but the latter does
             # not have a speculator (i.e. self.speculator is None)
+            proposal_lengths = getattr(self.speculator, "proposal_lengths", None)
+            if proposal_lengths is not None:
+                num_reqs = len(input_batch.req_ids)
+                proposal_lengths = proposal_lengths[:num_reqs]
             self.draft_tokens_handler.set_draft_tokens(
                 input_batch,
                 self.req_states.draft_tokens[input_batch.idx_mapping],
+                proposal_lengths=proposal_lengths,
             )
 
         # Post-step KV connector related operations.

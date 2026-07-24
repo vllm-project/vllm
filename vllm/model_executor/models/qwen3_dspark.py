@@ -67,6 +67,26 @@ class DSparkMarkovHead(nn.Module):
         return logits_processor(self.markov_w2, markov_embed)
 
 
+class DSparkConfidenceHead(nn.Module):
+    """Per-position acceptance-confidence head shipped in DSpark checkpoints.
+
+    A single linear over ``[backbone_hidden, markov_w1[prev_token]]``
+    predicting the acceptance probability (as a logit) of the draft token at
+    each position, following the DeepSpec training recipe
+    (``confidence_head_with_markov=True``). Replicated: the output dim is 1,
+    TP sharding is not worth it.
+    """
+
+    def __init__(self, hidden_size: int, markov_rank: int) -> None:
+        super().__init__()
+        self.proj = nn.Linear(hidden_size + markov_rank, 1)
+
+    def forward(self, hidden: torch.Tensor, markov_embed: torch.Tensor) -> torch.Tensor:
+        dtype = self.proj.weight.dtype
+        features = torch.cat([hidden.to(dtype), markov_embed.to(dtype)], dim=-1)
+        return self.proj(features).squeeze(-1).float()
+
+
 class Qwen3DSparkModel(DFlashQwen3Model):
     """DFlash Qwen3 backbone + DSpark Markov head."""
 
@@ -90,6 +110,12 @@ class Qwen3DSparkModel(DFlashQwen3Model):
             config.markov_rank,
             prefix=maybe_prefix(prefix, "markov_head"),
         )
+        spec_config = vllm_config.speculative_config
+        self.confidence_head: DSparkConfidenceHead | None = None
+        if spec_config is not None and spec_config.confidence_threshold > 0.0:
+            self.confidence_head = DSparkConfidenceHead(
+                config.hidden_size, config.markov_rank
+            )
 
 
 class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
@@ -146,6 +172,17 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
     def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
         return self.model.markov_head.bias(markov_embed, self.logits_processor)
 
+    @property
+    def has_confidence_head(self) -> bool:
+        return self.model.confidence_head is not None
+
+    def compute_confidence(
+        self, hidden: torch.Tensor, markov_embed: torch.Tensor
+    ) -> torch.Tensor:
+        """Acceptance-confidence logits for draft positions ([N] float32)."""
+        assert self.model.confidence_head is not None
+        return self.model.confidence_head(hidden, markov_embed)
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         model_weights = {}
         includes_embed_tokens = False
@@ -170,10 +207,14 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
             process_eagle_weight(self, name)
 
         # mask_embedding is an unused placeholder param; DSpark masks via the vocab row.
-        # confidence_head is not wired into inference yet; skip its weights.
+        # confidence_head weights are loaded only when confidence-based
+        # proposal truncation is enabled (speculative_config.confidence_threshold
+        # > 0); otherwise they are skipped as before.
         # embed_tokens / lm_head are optional; when omitted they are shared from
         # the target by load_dspark_model, so skip the unloaded params here.
-        skip_substrs = ["mask_embedding", "confidence_head"]
+        skip_substrs = ["mask_embedding"]
+        if not self.has_confidence_head:
+            skip_substrs.append("confidence_head")
         if not includes_embed_tokens:
             skip_substrs.append("embed_tokens")
         if not includes_lm_head:

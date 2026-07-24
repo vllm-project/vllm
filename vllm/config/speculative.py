@@ -182,6 +182,15 @@ class SpeculativeConfig:
     inclusive batch-size range.
     """
 
+    confidence_threshold: float = 0.0
+    """Per-request draft-confidence early-stop threshold (DSpark only for
+    now). When > 0, drafters that expose a confidence head truncate each
+    request's proposal at the first position whose predicted acceptance
+    probability falls below this value, so requests in the same batch may
+    propose different effective lengths. 0 (default) disables truncation and
+    preserves the uniform-K behavior exactly. Currently effective only with
+    async scheduling disabled; see the per-request proposal-lengths RFC."""
+
     # params generated in the post-init stage
     draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the draft model initialized internal."""
@@ -677,6 +686,12 @@ class SpeculativeConfig:
         # will be detected automatically if possible. If the speculative method
         # can not be detected, it will be considered as the "draft_model" by
         # default.
+
+        if not 0.0 <= self.confidence_threshold < 1.0:
+            raise ValueError(
+                "confidence_threshold must be in [0.0, 1.0); got "
+                f"{self.confidence_threshold}."
+            )
 
         # infer method from user args
         if self.method is None and SpeculativeConfig._is_custom_proposer_path(
@@ -1260,6 +1275,12 @@ class SpeculativeConfig:
         if self.draft_model_config:
             self.draft_model_config.verify_with_parallel_config(
                 self.draft_parallel_config
+            )
+
+        if self.confidence_threshold > 0.0 and self.method != "dspark":
+            raise ValueError(
+                "confidence_threshold currently requires method='dspark' "
+                "(the only draft model exposing a confidence head)."
             )
 
         if self.use_heterogeneous_vocab and not self.uses_draft_model():
