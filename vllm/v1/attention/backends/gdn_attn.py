@@ -14,6 +14,7 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    PersistentWorkspaceProfilingSupport,
 )
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
@@ -83,6 +84,14 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
     reorder_batch_threshold: int = 1
+
+    @classmethod
+    def get_persistent_workspace_memory_profiling_support(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> PersistentWorkspaceProfilingSupport:
+        return PersistentWorkspaceProfilingSupport.NEUTRAL
 
     def __init__(
         self,

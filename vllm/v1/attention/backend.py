@@ -614,6 +614,17 @@ class AttentionCGSupport(Enum):
     """NO cudagraph support"""
 
 
+class PersistentWorkspaceProfilingSupport(Enum):
+    """Persistent workspace profiling support for an attention builder."""
+
+    UNSUPPORTED = 0
+    """The builder cannot participate in the global profiling lifecycle."""
+    NEUTRAL = 1
+    """The builder can participate but does not require global reservation."""
+    REQUIRED = 2
+    """The builder requires and supports pre-profile workspace reservation."""
+
+
 class AttentionMetadataBuilder(ABC, Generic[M]):
     # Does this backend/builder support CUDA Graphs for attention (default: no).
     # Do not access directly. Call get_cudagraph_support() instead.
@@ -647,6 +658,54 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     ) -> AttentionCGSupport:
         """Get the cudagraph support level of this builder class."""
         return cls._cudagraph_support
+
+    @classmethod
+    def requires_separate_cudagraph_memory_profiling(
+        cls,
+        vllm_config: "VllmConfig",
+        kv_cache_spec: Any,
+    ) -> bool:
+        """Return whether CUDA graph memory profiling should separate warmup
+        allocations from graph-pool allocations for this builder class.
+
+        Most backends have small or already-accounted persistent warmup
+        allocations, so the default sampled estimator is retained.
+        """
+        return False
+
+    def reserve_workspace_for_cudagraph_capture(self) -> int:
+        """Reserve backend workspace that must not grow after CUDA graph capture.
+
+        Backends that use the global WorkspaceManager can override this to size
+        their worst-case execution workspace before the manager is locked.
+        """
+        return 0
+
+    @classmethod
+    def get_persistent_workspace_memory_profiling_support(
+        cls,
+        vllm_config: "VllmConfig",
+        kv_cache_spec: Any,
+    ) -> PersistentWorkspaceProfilingSupport:
+        """Return support for the global persistent-workspace lifecycle.
+
+        Builders must explicitly declare ``NEUTRAL`` when their constructor
+        state can be retained by the common lease without an additional
+        reserve/rebind contract. The fail-closed default prevents an unknown
+        builder from being treated as neutral in a mixed-backend model.
+        """
+        return PersistentWorkspaceProfilingSupport.UNSUPPORTED
+
+    def reserve_workspace_for_memory_profiling(self) -> int:
+        """Materialize persistent workspace before activation profiling.
+
+        The default reuses the CUDA graph reservation contract. Backends with
+        additional eager-only persistent workspace can extend this method.
+        """
+        return self.reserve_workspace_for_cudagraph_capture()
+
+    def rebind_workspace_after_reservation(self) -> None:
+        """Rebind consumers after all shared workspace arenas are finalized."""
 
     def _init_reorder_batch_threshold(
         self,

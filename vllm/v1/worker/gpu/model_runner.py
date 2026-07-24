@@ -29,7 +29,7 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import (
     get_dcp_group,
@@ -54,6 +54,7 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu import pcp_manager as pcp
@@ -118,6 +119,12 @@ from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import KVBlockZeroer, copy_kv_cache_blocks_inplace
+from vllm.v1.worker.workspace import (
+    PersistentWorkspaceLease,
+    current_workspace_manager,
+    lock_workspace,
+    use_workspace_ubatch_id,
+)
 
 logger = init_logger(__name__)
 
@@ -412,7 +419,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def get_kv_cache_spec(self):
         return get_kv_cache_spec(self.vllm_config)
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_kv_cache(
+        self, kv_cache_config: KVCacheConfig, is_profiling: bool = False
+    ) -> None:
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
 
@@ -490,7 +499,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             lora_capture_cases=self.lora_capture_cases,
         )
         check_attention_cp_compatibility(self.vllm_config)
-        if isinstance(self.speculator, DraftModelSpeculator):
+        if isinstance(self.speculator, DraftModelSpeculator) and not is_profiling:
             # HACK(woosuk)
             self.speculator.set_attn(
                 self.model_state,
@@ -515,7 +524,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kernel_block_sizes,
             self.vllm_config,
         )
-        self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+        if not is_profiling:
+            self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
@@ -721,9 +731,449 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # SP is not supported yet.
         return num_scheduled_tokens
 
-    def profile_cudagraph_memory(self) -> int:
-        # NOTE(woosuk): It is TBD whether we keep this API or not.
-        return 0
+    def _init_minimal_kv_cache_for_profiling(self) -> None:
+        from vllm.v1.core.kv_cache_utils import (
+            get_kv_cache_config_from_groups,
+            get_kv_cache_groups,
+        )
+
+        kv_cache_spec = self.get_kv_cache_spec()
+        KVCacheSpecRegistry.check_kv_cache_spec_registry(kv_cache_spec)
+        kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
+        min_blocks = self.compilation_config.max_cudagraph_capture_size or 1
+
+        # Temporarily allocate just enough KV cache state to instantiate
+        # attention metadata builders for workspace sizing.
+        saved_override = self.cache_config.num_gpu_blocks_override
+        self.cache_config.num_gpu_blocks_override = min_blocks
+        try:
+            minimal_config = get_kv_cache_config_from_groups(
+                self.vllm_config,
+                kv_cache_groups,
+                available_memory=0,
+            )
+        finally:
+            self.cache_config.num_gpu_blocks_override = saved_override
+
+        self.initialize_kv_cache(minimal_config, is_profiling=True)
+        self.cache_config.num_gpu_blocks = minimal_config.num_blocks
+
+        logger.debug("Initialized minimal KV cache for CUDA graph profiling")
+
+    def _cleanup_profiling_kv_cache(self) -> None:
+        torch.accelerator.synchronize()
+
+        if hasattr(self, "kv_caches") and self.kv_caches:
+            for i in range(len(self.kv_caches)):
+                self.kv_caches[i] = None  # type: ignore[assignment]
+            self.kv_caches.clear()
+        if hasattr(self, "attn_groups"):
+            self.attn_groups.clear()
+        for attr in (
+            "attn_groups",
+            "kv_cache_config",
+            "block_tables",
+            "kernel_block_sizes",
+            "cudagraph_manager",
+        ):
+            if hasattr(self, attr):
+                delattr(self, attr)
+        self.cache_config.num_gpu_blocks = None
+
+        for layer in self.compilation_config.static_forward_context.values():
+            if hasattr(layer, "kv_cache"):
+                kv_cache = layer.kv_cache
+                layer.kv_cache = (
+                    torch.tensor([]) if isinstance(kv_cache, torch.Tensor) else []
+                )
+            # Clean up quantized KV cache scale views
+            # (int8_per_token_head, fp8_per_token_head).
+            if hasattr(layer, "impl"):
+                if hasattr(layer.impl, "_k_scale_cache"):
+                    layer.impl._k_scale_cache = None
+                if hasattr(layer.impl, "_v_scale_cache"):
+                    layer.impl._v_scale_cache = None
+
+        gc.collect()
+        torch.accelerator.empty_cache()
+        logger.debug("Cleaned up profiling KV cache and CUDA graphs")
+
+    def _reserve_attention_workspace(self, *, memory_profiling: bool) -> int:
+        if not getattr(self, "attn_groups", None):
+            return 0
+
+        reserved_before = torch.accelerator.memory_reserved(self.device)
+        allocated_before = torch.accelerator.memory_allocated(self.device)
+        requested_total = 0
+        builder_records: list[
+            tuple[str, int, int, int, int | None, int, dict[str, int] | None]
+        ] = []
+        builders: list[tuple[int, Any]] = []
+        for groups in self.attn_groups:
+            for attn_group in groups:
+                for ubatch_id, builder in enumerate(attn_group.metadata_builders):
+                    builder_reserved_before = torch.accelerator.memory_reserved(
+                        self.device
+                    )
+                    builder_allocated_before = torch.accelerator.memory_allocated(
+                        self.device
+                    )
+                    with use_workspace_ubatch_id(ubatch_id):
+                        if memory_profiling:
+                            requested_bytes = int(
+                                builder.reserve_workspace_for_memory_profiling() or 0
+                            )
+                        else:
+                            requested_bytes = int(
+                                builder.reserve_workspace_for_cudagraph_capture() or 0
+                            )
+                    builders.append((ubatch_id, builder))
+                    workspace_debug_info = None
+                    get_workspace_reserve_debug_info = getattr(
+                        builder, "get_workspace_reserve_debug_info", None
+                    )
+                    if callable(get_workspace_reserve_debug_info):
+                        workspace_debug_info = get_workspace_reserve_debug_info()
+                    builder_reserved_after = torch.accelerator.memory_reserved(
+                        self.device
+                    )
+                    builder_allocated_after = torch.accelerator.memory_allocated(
+                        self.device
+                    )
+                    requested_total += max(requested_bytes, 0)
+                    workspace_buffer_ptr = None
+                    workspace_buffer_bytes = 0
+                    get_workspace_buffer_state = getattr(
+                        builder, "get_workspace_buffer_state", None
+                    )
+                    if callable(get_workspace_buffer_state):
+                        workspace_state = get_workspace_buffer_state()
+                        workspace_buffer = getattr(workspace_state, "buffer", None)
+                        if isinstance(workspace_buffer, torch.Tensor):
+                            workspace_buffer_ptr = workspace_buffer.data_ptr()
+                            workspace_buffer_bytes = (
+                                workspace_buffer.numel()
+                                * workspace_buffer.element_size()
+                            )
+                    builder_records.append(
+                        (
+                            type(builder).__name__,
+                            requested_bytes,
+                            max(
+                                builder_reserved_after - builder_reserved_before,
+                                0,
+                            ),
+                            max(
+                                builder_allocated_after - builder_allocated_before,
+                                0,
+                            ),
+                            workspace_buffer_ptr,
+                            workspace_buffer_bytes,
+                            workspace_debug_info,
+                        )
+                    )
+        for ubatch_id, builder in builders:
+            with use_workspace_ubatch_id(ubatch_id):
+                builder.rebind_workspace_after_reservation()
+        torch.accelerator.synchronize()
+        torch.accelerator.empty_cache()
+        reserved_after = torch.accelerator.memory_reserved(self.device)
+        allocated_after = torch.accelerator.memory_allocated(self.device)
+        reserved_delta = max(reserved_after - reserved_before, 0)
+        allocated_delta = max(allocated_after - allocated_before, 0)
+
+        if builder_records:
+            unique_workspace_buffers: dict[int, int] = {}
+            for (
+                _builder_name,
+                _requested_bytes,
+                _builder_reserved_delta,
+                _builder_allocated_delta,
+                buffer_ptr,
+                buffer_bytes,
+                _workspace_debug_info,
+            ) in builder_records:
+                if buffer_ptr is not None:
+                    unique_workspace_buffers[buffer_ptr] = max(
+                        unique_workspace_buffers.get(buffer_ptr, 0), buffer_bytes
+                    )
+            unique_workspace_buffer_bytes = sum(unique_workspace_buffers.values())
+            workspace_debug_infos = [
+                workspace_debug_info
+                for _, _, _, _, _, _, workspace_debug_info in builder_records
+                if workspace_debug_info is not None
+            ]
+            logger.debug(
+                "Reserved attention workspace before CUDA graph capture: "
+                "%.2f MiB allocator reserved delta, %.2f MiB allocated delta, "
+                "%.2f MiB requested by builders, %.2f MiB unexplained "
+                "(%d builders, %d unique workspace buffers, %.2f MiB unique "
+                "workspace bytes)",
+                reserved_delta / (1 << 20),
+                allocated_delta / (1 << 20),
+                requested_total / (1 << 20),
+                max(reserved_delta - requested_total, 0) / (1 << 20),
+                len(builder_records),
+                len(unique_workspace_buffers),
+                unique_workspace_buffer_bytes / (1 << 20),
+            )
+            if workspace_debug_infos:
+                actual_int_workspace_bytes = sum(
+                    info["actual_int_workspace_bytes"] for info in workspace_debug_infos
+                )
+                reserved_int_workspace_bytes = sum(
+                    info["reserved_int_workspace_bytes"]
+                    for info in workspace_debug_infos
+                )
+                int_workspace_over_reserved_bytes = sum(
+                    info["int_workspace_over_reserved_bytes"]
+                    for info in workspace_debug_infos
+                )
+                unique_wrapper_float_workspace_bytes = max(
+                    (
+                        info.get("unique_float_workspace_bytes", 0)
+                        for info in workspace_debug_infos
+                    ),
+                    default=0,
+                )
+                logger.debug(
+                    "Reserved attention workspace wrapper breakdown: "
+                    "%d wrappers, %d decode CUDA graph wrappers, "
+                    "%d default-or-larger int workspaces, "
+                    "%.2f MiB actual int workspace, %.2f MiB requested int "
+                    "workspace, %.2f MiB int workspace over request, "
+                    "%.2f MiB max unique float workspace",
+                    sum(
+                        info["workspace_wrapper_count"]
+                        for info in workspace_debug_infos
+                    ),
+                    sum(
+                        info["decode_cudagraph_wrappers"]
+                        for info in workspace_debug_infos
+                    ),
+                    sum(
+                        info["default_int_workspace_wrappers"]
+                        for info in workspace_debug_infos
+                    ),
+                    actual_int_workspace_bytes / (1 << 20),
+                    reserved_int_workspace_bytes / (1 << 20),
+                    int_workspace_over_reserved_bytes / (1 << 20),
+                    unique_wrapper_float_workspace_bytes / (1 << 20),
+                )
+            for (
+                builder_name,
+                requested_bytes,
+                builder_reserved_delta,
+                builder_allocated_delta,
+                workspace_buffer_ptr,
+                workspace_buffer_bytes,
+                workspace_debug_info,
+            ) in builder_records:
+                logger.debug(
+                    "Reserved attention workspace builder=%s requested=%.2f MiB "
+                    "reserved_delta=%.2f MiB allocated_delta=%.2f MiB "
+                    "workspace_buffer_ptr=%s workspace_buffer=%.2f MiB",
+                    builder_name,
+                    requested_bytes / (1 << 20),
+                    builder_reserved_delta / (1 << 20),
+                    builder_allocated_delta / (1 << 20),
+                    workspace_buffer_ptr,
+                    workspace_buffer_bytes / (1 << 20),
+                )
+                if workspace_debug_info is not None:
+                    logger.debug(
+                        "Reserved attention workspace builder=%s wrappers=%d "
+                        "decode_cudagraph_wrappers=%d "
+                        "default_int_workspaces=%d actual_int=%.2f MiB "
+                        "requested_int=%.2f MiB int_over_request=%.2f MiB "
+                        "unique_int_buffers=%d unique_float_buffers=%d "
+                        "unique_float=%.2f MiB "
+                        "workspace_state_live_wrappers=%d",
+                        builder_name,
+                        workspace_debug_info["workspace_wrapper_count"],
+                        workspace_debug_info["decode_cudagraph_wrappers"],
+                        workspace_debug_info["default_int_workspace_wrappers"],
+                        workspace_debug_info["actual_int_workspace_bytes"] / (1 << 20),
+                        workspace_debug_info["reserved_int_workspace_bytes"]
+                        / (1 << 20),
+                        workspace_debug_info["int_workspace_over_reserved_bytes"]
+                        / (1 << 20),
+                        workspace_debug_info["unique_int_workspace_buffers"],
+                        workspace_debug_info["unique_float_workspace_buffers"],
+                        workspace_debug_info.get("unique_float_workspace_bytes", 0)
+                        / (1 << 20),
+                        workspace_debug_info["workspace_state_live_wrappers"],
+                    )
+
+        return reserved_delta
+
+    def _reserve_attention_workspace_for_cudagraph_capture(self) -> int:
+        return self._reserve_attention_workspace(memory_profiling=False)
+
+    @staticmethod
+    def _workspace_sizes_exceed(
+        limits: tuple[int, ...], current: tuple[int, ...]
+    ) -> bool:
+        return len(current) != len(limits) or any(
+            current_size > limit for current_size, limit in zip(current, limits)
+        )
+
+    def record_persistent_attention_workspace_profile(self) -> None:
+        self._profiled_persistent_workspace_sizes = (
+            current_workspace_manager().workspace_sizes_bytes()
+        )
+
+    def reserve_persistent_attention_workspace(self) -> int:
+        manager = current_workspace_manager()
+        arena_before = manager.workspace_sizes_bytes()
+        profiled_sizes = getattr(self, "_profiled_persistent_workspace_sizes", None)
+        if profiled_sizes is not None and self._workspace_sizes_exceed(
+            profiled_sizes, arena_before
+        ):
+            raise AssertionError(
+                "Attention workspace arena exceeded its profiled size before "
+                "persistent workspace finalization: "
+                f"profiled={profiled_sizes}, current={arena_before}."
+            )
+        reserved_bytes = self._reserve_attention_workspace(memory_profiling=True)
+        arena_after = manager.workspace_sizes_bytes()
+        if profiled_sizes is not None and self._workspace_sizes_exceed(
+            profiled_sizes, arena_after
+        ):
+            raise AssertionError(
+                "Attention workspace arena exceeded its profiled size during "
+                "persistent workspace finalization: "
+                f"profiled={profiled_sizes}, current={arena_after}."
+            )
+        if profiled_sizes is None:
+            self._profiled_persistent_workspace_sizes = arena_after
+        return reserved_bytes
+
+    def prepare_profiling_workspace(
+        self,
+    ) -> PersistentWorkspaceLease:
+        manager = current_workspace_manager()
+        arena_before = manager.workspace_sizes_bytes()
+        allocated_before = torch.accelerator.memory_allocated(self.device)
+        reserved_before = torch.accelerator.memory_reserved(self.device)
+
+        lease: PersistentWorkspaceLease | None = None
+        try:
+            with set_current_vllm_config(self.vllm_config):
+                self._init_minimal_kv_cache_for_profiling()
+
+            arena_after_init = manager.workspace_sizes_bytes()
+            allocated_after_init = torch.accelerator.memory_allocated(self.device)
+            reserved_after_init = torch.accelerator.memory_reserved(self.device)
+            self._reserve_attention_workspace(memory_profiling=True)
+            arena_after_reserve = manager.workspace_sizes_bytes()
+            allocated_after_reserve = torch.accelerator.memory_allocated(self.device)
+            reserved_after_reserve = torch.accelerator.memory_reserved(self.device)
+
+            owners = [
+                builder
+                for groups in self.attn_groups
+                for attn_group in groups
+                for builder in attn_group.metadata_builders
+            ]
+            lease = PersistentWorkspaceLease(owners)
+            self._cleanup_profiling_kv_cache()
+        except Exception:
+            if lease is not None:
+                lease.release()
+            try:
+                self._cleanup_profiling_kv_cache()
+            except Exception:
+                logger.exception(
+                    "Failed to clean up profiling KV cache after persistent "
+                    "workspace preparation failed"
+                )
+            raise
+
+        torch.accelerator.reset_peak_memory_stats(self.device)
+
+        scratch_bytes = sum(
+            max(after - before, 0)
+            for before, after in zip(arena_before, arena_after_init)
+        )
+        arena_growth_bytes = sum(
+            max(after - before, 0)
+            for before, after in zip(arena_after_init, arena_after_reserve)
+        )
+        logger.info(
+            "Persistent attention workspace profiling: arenas before=%s, "
+            "after init=%s, after reserve=%s; scratch/init growth %.2f MiB, "
+            "post-init growth %.2f MiB",
+            [round(size / (1 << 20), 2) for size in arena_before],
+            [round(size / (1 << 20), 2) for size in arena_after_init],
+            [round(size / (1 << 20), 2) for size in arena_after_reserve],
+            scratch_bytes / (1 << 20),
+            arena_growth_bytes / (1 << 20),
+        )
+        logger.info(
+            "Persistent attention workspace allocation checkpoints: "
+            "before=(allocated %.2f MiB, reserved %.2f MiB), "
+            "after_init=(allocated %.2f MiB, reserved %.2f MiB), "
+            "after_reserve=(allocated %.2f MiB, reserved %.2f MiB)",
+            allocated_before / (1 << 20),
+            reserved_before / (1 << 20),
+            allocated_after_init / (1 << 20),
+            reserved_after_init / (1 << 20),
+            allocated_after_reserve / (1 << 20),
+            reserved_after_reserve / (1 << 20),
+        )
+        assert lease is not None
+        return lease
+
+    def profile_cudagraph_memory(
+        self, *, persistent_workspace_profiled: bool = False
+    ) -> int:
+        self.cudagraph_memory_persistent_estimate = 0
+        self.cudagraph_memory_graph_pool_estimate = 0
+
+        arena_before_init = current_workspace_manager().workspace_sizes_bytes()
+        try:
+            with set_current_vllm_config(self.vllm_config):
+                self._init_minimal_kv_cache_for_profiling()
+            arena_after_init = current_workspace_manager().workspace_sizes_bytes()
+            if persistent_workspace_profiled and self._workspace_sizes_exceed(
+                arena_before_init, arena_after_init
+            ):
+                raise AssertionError(
+                    "Attention workspace arena grew while rebuilding CUDA graph "
+                    "profiling metadata after persistent workspace profiling: "
+                    f"{arena_before_init} -> {arena_after_init}."
+                )
+            arena_before_reserve = current_workspace_manager().workspace_sizes_bytes()
+            persistent_estimate = (
+                self._reserve_attention_workspace_for_cudagraph_capture()
+            )
+            arena_after_reserve = current_workspace_manager().workspace_sizes_bytes()
+            if persistent_workspace_profiled and self._workspace_sizes_exceed(
+                arena_before_init, arena_after_reserve
+            ):
+                raise AssertionError(
+                    "Attention workspace arena grew during CUDA graph profiling "
+                    "after persistent workspace profiling: "
+                    f"{arena_before_reserve} -> {arena_after_reserve}."
+                )
+        finally:
+            self._cleanup_profiling_kv_cache()
+
+        if persistent_workspace_profiled:
+            logger.debug(
+                "V2 CUDA graph profiling added no persistent workspace "
+                "estimate; persistent workspace is included in the "
+                "activation peak."
+            )
+            persistent_estimate = 0
+        else:
+            logger.info(
+                "Estimated CUDA graph persistent workspace memory: %.2f GiB",
+                persistent_estimate / (1 << 30),
+            )
+        self.cudagraph_memory_persistent_estimate = int(persistent_estimate)
+        return int(persistent_estimate)
 
     @torch.inference_mode()
     def capture_model(self) -> int:
@@ -739,6 +1189,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         start_time = time.perf_counter()
         gc.collect()
+        self._reserve_attention_workspace_for_cudagraph_capture()
+        torch.accelerator.synchronize()
         torch.accelerator.empty_cache()
         start_free_gpu_memory = torch.accelerator.get_memory_info()[0]
 
@@ -768,6 +1220,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             elapsed_time,
             cuda_graph_size / (1 << 30),
         )
+        lock_workspace()
         return cuda_graph_size
 
     def _remove_request(self, req_id: str) -> bool:
