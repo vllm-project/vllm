@@ -304,6 +304,8 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal):
             for name, weight in weights:
                 if name.startswith("mtp."):
                     name = name.replace("mtp.", "model.")
+                elif "embed_tokens_extend" in name:
+                    continue
                 elif any(key in name for key in ["embed_tokens", "lm_head"]):
                     if "embed_tokens" in name:
                         name = name.replace("language_model.", "")
