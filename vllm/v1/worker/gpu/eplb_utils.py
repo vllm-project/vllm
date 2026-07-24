@@ -25,7 +25,14 @@ def _unwrap_moe(model: nn.Module) -> nn.Module:
     # MixtureOfExperts themselves. Mirror the V1 path
     # (see vllm/v1/worker/gpu_model_runner.py, PR #39805).
     if not is_mixture_of_experts(model) and isinstance(model, SupportsMultiModal):
-        return model.get_language_model()
+        try:
+            return model.get_language_model()
+        except NotImplementedError:
+            # Some multimodal models (e.g. geospatial segmentation like
+            # Terratorch) have no separable language model and thus no MoE;
+            # return the model unchanged so the caller's
+            # is_mixture_of_experts() check resolves to False. See #45806.
+            return model
     return model
 
 

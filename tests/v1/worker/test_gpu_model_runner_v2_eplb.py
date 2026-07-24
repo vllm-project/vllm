@@ -155,6 +155,43 @@ def test_v2_load_model_with_dummy_weights_skips_eplb_registration(monkeypatch):
     assert runner.eplb_state.async_started is False
 
 
+def test_unwrap_moe_handles_multimodal_without_language_model(monkeypatch):
+    """Regression for #45806.
+
+    A multimodal model with no separable language model (e.g. a geospatial
+    segmentation model like Terratorch) raises ``NotImplementedError`` from
+    ``get_language_model()``. MoE detection must treat that as "no MoE" and
+    return the model unchanged rather than letting the exception abort model
+    load.
+    """
+
+    class _NoLMMultiModal:
+        def get_language_model(self):
+            raise NotImplementedError("No language model found in _NoLMMultiModal!")
+
+    model = _NoLMMultiModal()
+    # Enter the unwrap branch: not an MoE itself, but "multimodal".
+    monkeypatch.setattr(eplb, "is_mixture_of_experts", lambda _m: False)
+    monkeypatch.setattr(eplb, "SupportsMultiModal", _NoLMMultiModal)
+
+    # Must not raise; with no language model there is nothing to unwrap.
+    assert eplb._unwrap_moe(model) is model
+
+
+def test_unwrap_moe_returns_language_model_when_present(monkeypatch):
+    """Happy path: a multimodal wrapper still unwraps to its language model."""
+
+    class _WithLM:
+        def get_language_model(self):
+            return "inner_language_model"
+
+    model = _WithLM()
+    monkeypatch.setattr(eplb, "is_mixture_of_experts", lambda _m: False)
+    monkeypatch.setattr(eplb, "SupportsMultiModal", _WithLM)
+
+    assert eplb._unwrap_moe(model) == "inner_language_model"
+
+
 def test_v2_setup_eplb_from_mapping_rebuilds_state(monkeypatch):
     FakeEplbState.instances.clear()
     FakeEplbState.from_mapping_kwargs = None
