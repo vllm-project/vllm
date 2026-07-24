@@ -14,6 +14,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
     ResponseTextConfig,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import StructuredOutputsParams
 
 
@@ -163,7 +164,7 @@ class TestResponsesRequestSamplingParams:
             text=text_config,
         )
 
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(VLLMValidationError) as exc_info:
             request.to_sampling_params(default_max_tokens=1000)
 
         assert "Cannot specify both structured_outputs and text.format" in str(

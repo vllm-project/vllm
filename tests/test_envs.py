@@ -15,6 +15,7 @@ from vllm.envs import (
     env_with_choices,
     environment_variables,
 )
+from vllm.exceptions import VLLMValidationError
 
 
 def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
@@ -538,7 +539,7 @@ class TestVllmMaxNSequences:
         max_n = envs.VLLM_MAX_N_SEQUENCES
         SamplingParams(n=max_n)
 
-        with pytest.raises(ValueError, match="n must be at most"):
+        with pytest.raises(VLLMValidationError, match="n must be at most"):
             SamplingParams(n=max_n + 1)
 
     def test_sampling_params_respects_custom_limit(
@@ -554,5 +555,5 @@ class TestVllmMaxNSequences:
 
         SamplingParams(n=128)
 
-        with pytest.raises(ValueError, match="n must be at most 128"):
+        with pytest.raises(VLLMValidationError, match="n must be at most 128"):
             SamplingParams(n=129)

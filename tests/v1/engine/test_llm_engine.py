@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from vllm import LLM
+from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
 
@@ -115,7 +116,7 @@ def test_compatibility_with_skip_tokenizer_init(
         structured_outputs=True,
     )
     llm: LLM = vllm_model_skip_tokenizer_init.llm
-    with pytest.raises(ValueError):
+    with pytest.raises(VLLMValidationError):
         _ = llm.generate(example_prompts, sampling_params_list)
 
 

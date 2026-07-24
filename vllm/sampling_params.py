@@ -100,12 +100,12 @@ class StructuredOutputsParams:
             ]
         )
         if count > 1:
-            raise ValueError(
+            raise VLLMValidationError(
                 "You can only use one kind of structured outputs constraint "
                 f"but multiple are specified: {self.__dict__}"
             )
         if count < 1:
-            raise ValueError(
+            raise VLLMValidationError(
                 "You must use one kind of structured outputs constraint "
                 f"but none are specified: {self.__dict__}"
             )
@@ -166,13 +166,13 @@ class RepetitionDetectionParams:
             or self.min_pattern_size < 0
             or self.min_pattern_size > self.max_pattern_size
         ):
-            raise ValueError(
+            raise VLLMValidationError(
                 "max_pattern_size, min_pattern_size must be >=0, "
                 "with min_pattern_size <= max_pattern_size. "
                 "Set both to 0 to disable repetitive pattern detection."
             )
         if self.max_pattern_size > 0 and self.min_count < 2:
-            raise ValueError(
+            raise VLLMValidationError(
                 "min_count must be >= 2 to detect repetitive patterns "
                 "in engine output. If you do not wish to detect repetitive "
                 "patterns, set max_pattern_size to 0."
@@ -507,31 +507,33 @@ class SamplingParams(
 
     def _verify_args(self) -> None:
         if not isinstance(self.n, int):
-            raise ValueError(f"n must be an int, but is of type {type(self.n)}")
+            raise VLLMValidationError(
+                f"n must be an int, but is of type {type(self.n)}"
+            )
         if self.n < 1:
-            raise ValueError(f"n must be at least 1, got {self.n}.")
+            raise VLLMValidationError(f"n must be at least 1, got {self.n}.")
         max_n = envs.VLLM_MAX_N_SEQUENCES
         if self.n > max_n:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"n must be at most {max_n}, got {self.n}. "
                 "To increase this limit, set the VLLM_MAX_N_SEQUENCES "
                 "environment variable."
             )
         if not -2.0 <= self.presence_penalty <= 2.0:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"presence_penalty must be in [-2, 2], got {self.presence_penalty}."
             )
         if not -2.0 <= self.frequency_penalty <= 2.0:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"frequency_penalty must be in [-2, 2], got {self.frequency_penalty}."
             )
         if not math.isfinite(self.repetition_penalty):
-            raise ValueError(
+            raise VLLMValidationError(
                 "repetition_penalty must be a finite number, "
                 f"got {self.repetition_penalty}."
             )
         if self.repetition_penalty <= 0.0:
-            raise ValueError(
+            raise VLLMValidationError(
                 "repetition_penalty must be greater than zero, got "
                 f"{self.repetition_penalty}."
             )
@@ -561,15 +563,15 @@ class SamplingParams(
             )
         # quietly accept -1 as disabled, but prefer 0
         if self.top_k < -1:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"top_k must be 0 (disable), or at least 1, got {self.top_k}."
             )
         if not isinstance(self.top_k, int):
-            raise TypeError(
+            raise VLLMValidationError(
                 f"top_k must be an integer, got {type(self.top_k).__name__}"
             )
         if not 0.0 <= self.min_p <= 1.0:
-            raise ValueError(f"min_p must be in [0, 1], got {self.min_p}.")
+            raise VLLMValidationError(f"min_p must be in [0, 1], got {self.min_p}.")
         if self.max_tokens is not None and self.max_tokens < 1:
             raise VLLMValidationError(
                 f"max_tokens must be at least 1, got {self.max_tokens}.",
@@ -577,11 +579,11 @@ class SamplingParams(
                 value=self.max_tokens,
             )
         if self.min_tokens < 0:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"min_tokens must be greater than or equal to 0, got {self.min_tokens}."
             )
         if self.max_tokens is not None and self.min_tokens > self.max_tokens:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"min_tokens must be less than or equal to "
                 f"max_tokens={self.max_tokens}, got {self.min_tokens}."
             )
@@ -604,27 +606,29 @@ class SamplingParams(
             )
         assert isinstance(self.stop_token_ids, list)
         if not all(isinstance(st_id, int) for st_id in self.stop_token_ids):
-            raise ValueError(
+            raise VLLMValidationError(
                 f"stop_token_ids must contain only integers, got {self.stop_token_ids}."
             )
         assert isinstance(self.stop, list)
         if any(not stop_str for stop_str in self.stop):
-            raise ValueError("stop cannot contain an empty string.")
+            raise VLLMValidationError("stop cannot contain an empty string.")
         if self.stop and not self.detokenize:
-            raise ValueError(
+            raise VLLMValidationError(
                 "stop strings are only supported when detokenize is True. "
                 "Set detokenize=True to use stop."
             )
         assert isinstance(self.bad_words, list)
         if any(not bad_word for bad_word in self.bad_words):
-            raise ValueError(
+            raise VLLMValidationError(
                 f"bad_words cannot contain an empty string. "
                 f"Got bad_words={self.bad_words}"
             )
 
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:
-            raise ValueError(f"n must be 1 when using greedy sampling, got {self.n}.")
+            raise VLLMValidationError(
+                f"n must be 1 when using greedy sampling, got {self.n}."
+            )
 
     def update_from_generation_config(
         self,
@@ -876,7 +880,7 @@ class SamplingParams(
 
         # Some sampling parameters are not yet compatible with spec decoding.
         if self.min_p > _SAMPLING_EPS or self.logit_bias:
-            raise ValueError(
+            raise VLLMValidationError(
                 "The min_p and logit_bias sampling parameters "
                 "are not yet supported with speculative decoding."
             )
@@ -897,7 +901,7 @@ class SamplingParams(
             or self.bad_words
             or self.allowed_token_ids
         ):
-            raise ValueError(
+            raise VLLMValidationError(
                 "The temperature, min_p, seed, min_tokens, logit_bias, "
                 "bad_words, and allowed_token_ids sampling parameters "
                 "are not yet supported with diffusion models."
@@ -917,7 +921,7 @@ class SamplingParams(
             # rather than sampling left-to-right, which the grammar FSM
             # requires. Without this check, requests fail mid-generation
             # with an FSM rejection (HTTP 500). See issue #45436.
-            raise ValueError(
+            raise VLLMValidationError(
                 "Structured outputs are not yet supported for diffusion "
                 "language models. Remove the structured output constraint "
                 "(e.g. `response_format`, `structured_outputs`) from the "
@@ -925,7 +929,7 @@ class SamplingParams(
             )
 
         if tokenizer is None:
-            raise ValueError(
+            raise VLLMValidationError(
                 "Structured outputs requires a tokenizer so it can't be used with 'skip_tokenizer_init'"  # noqa: E501
             )
 
@@ -939,7 +943,7 @@ class SamplingParams(
             if backend != _backend and not (
                 backend == "auto" and self.structured_outputs._backend_was_auto
             ):
-                raise ValueError(
+                raise VLLMValidationError(
                     "Request-level structured output backend selection is not "
                     f"supported. The request specified '{_backend}', but vLLM "
                     f"was initialised with '{backend}'. This error can be "
@@ -954,7 +958,7 @@ class SamplingParams(
             and not self.structured_outputs.choice
         ):
             # It is invalid for choice to be an empty list
-            raise ValueError(
+            raise VLLMValidationError(
                 f"Choice '{self.structured_outputs.choice}' cannot be an empty list"  # noqa: E501
             )
         # Reject empty string grammar early to avoid engine-side crashes
@@ -962,16 +966,20 @@ class SamplingParams(
             isinstance(self.structured_outputs.grammar, str)
             and self.structured_outputs.grammar.strip() == ""
         ):
-            raise ValueError("structured_outputs.grammar cannot be an empty string")
+            raise VLLMValidationError(
+                "structured_outputs.grammar cannot be an empty string"
+            )
         # Reject empty string json schema early to avoid engine-side crashes
         if (
             isinstance(self.structured_outputs.json, str)
             and self.structured_outputs.json.strip() == ""
         ):
-            raise ValueError("structured_outputs.json cannot be an empty string")
+            raise VLLMValidationError(
+                "structured_outputs.json cannot be an empty string"
+            )
         # Reject json_object=False early to avoid engine-side crashes
         if self.structured_outputs.json_object is False:
-            raise ValueError(
+            raise VLLMValidationError(
                 "structured_outputs.json_object must be True if set; omit "
                 "structured_outputs to disable structured outputs"
             )
@@ -993,7 +1001,7 @@ class SamplingParams(
             validate_xgrammar_grammar(self)
         elif backend.startswith("guidance"):
             if _is_non_tekken_mistral(tokenizer=tokenizer):
-                raise ValueError(
+                raise VLLMValidationError(
                     "Non-tekken Mistral tokenizers are not supported for the 'guidance'"
                     " structured output backend. Please either use a more recent "
                     "Mistral model, the ['xgrammar', 'outlines'] "
@@ -1013,7 +1021,7 @@ class SamplingParams(
         elif backend == "lm-format-enforcer":
             # lm format enforcer backend
             if is_mistral_tokenizer(tokenizer):
-                raise ValueError(
+                raise VLLMValidationError(
                     "Mistral tokenizer is not supported for the 'lm-format-enforcer' "
                     "structured output backend. Please use ['xgrammar', 'outlines'] "
                     "backends or tokenizer_mode='hf' instead."

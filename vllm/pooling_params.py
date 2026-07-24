@@ -7,6 +7,7 @@ from typing import Any
 import msgspec
 
 from vllm.config import ModelConfig, PoolerConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.sampling_params import RequestOutputKind
 from vllm.tasks import PoolingTask, check_removed_pooling_task
@@ -145,7 +146,7 @@ class PoolingParams(
                     invalid_parameters.append(k)
 
             if invalid_parameters:
-                raise ValueError(
+                raise VLLMValidationError(
                     f"Task {self.task} only supports {valid_parameters} "
                     f"parameters, does not support "
                     f"{invalid_parameters} parameters"
@@ -170,21 +171,21 @@ class PoolingParams(
                 valid_range = f"[1, {embedding_size}]"
                 dimensions_in_range = 1 <= dimensions <= embedding_size
                 if not model_config.is_matryoshka:
-                    raise ValueError(
+                    raise VLLMValidationError(
                         f"Model {model_name!r} does not support Matryoshka "
                         f"embeddings; dimensions must be unset "
                         f"(received dimensions={dimensions})."
                     )
 
                 if not dimensions_in_range:
-                    raise ValueError(
+                    raise VLLMValidationError(
                         f"Model {model_name!r} only supports dimensions in "
                         f"range {valid_range}, got {dimensions}."
                     )
 
                 mds = model_config.matryoshka_dimensions
                 if mds is not None and dimensions not in mds:
-                    raise ValueError(
+                    raise VLLMValidationError(
                         f"Model {model_name!r} only supports Matryoshka "
                         f"dimensions {str(mds)}, got {dimensions}."
                     )
@@ -208,7 +209,7 @@ class PoolingParams(
                 invalid_parameters.append(k)
 
         if invalid_parameters:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"Task {self.task!r} only supports {valid_parameters} "
                 f"parameters, does not support "
                 f"{invalid_parameters} parameters"
@@ -231,7 +232,7 @@ class PoolingParams(
     def __post_init__(self) -> None:
         check_removed_pooling_task(self.task)
         if self.output_kind != RequestOutputKind.FINAL_ONLY:
-            raise ValueError(
+            raise VLLMValidationError(
                 "For pooling output_kind has to be FINAL_ONLY, "
                 f"got {self.output_kind!r}"
             )
