@@ -238,8 +238,22 @@ class Worker(WorkerBase):
                     inner._build_fused_kv_buffers()
             self._sleep_rebuild_draft_metadata_buffers = False
 
+        # Reset attention metadata builders' cached state
+        # (e.g. FlashInfer wrappers that reference kv_cache-tagged memory).
+        if tags is None or "kv_cache" in tags:
+            for builder in self._iter_attn_metadata_builders():
+                if hasattr(builder, "reset_for_sleep_mode"):
+                    builder.reset_for_sleep_mode()
+
         if tags is None or "kv_cache" in tags:
             self.model_runner.post_kv_cache_wake_up()
+
+    def _iter_attn_metadata_builders(self):
+        runner = self.model_runner
+        if hasattr(runner, "attn_groups"):
+            for group_list in runner.attn_groups:
+                for group in group_list:
+                    yield from group.metadata_builders
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if (
