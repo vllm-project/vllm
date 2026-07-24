@@ -623,6 +623,32 @@ def _topk_indices_torch(
     return padded
 
 
+def _rocm_top_k_per_row_decode(
+    logits: torch.Tensor,
+    next_n: int,
+    seq_lens: torch.Tensor,
+    topk_indices: torch.Tensor,
+) -> None:
+    finite_min = torch.finfo(logits.dtype).min
+    finite_max = torch.finfo(logits.dtype).max
+    logits.nan_to_num_(
+        nan=finite_min,
+        posinf=finite_max,
+        neginf=finite_min,
+    )
+
+    torch.ops._C.top_k_per_row_decode(
+        logits,
+        next_n,
+        seq_lens,
+        topk_indices,
+        logits.shape[0],
+        logits.stride(0),
+        logits.stride(1),
+        topk_indices.shape[1],
+    )
+
+
 def rocm_aiter_sparse_attn_indexer_fake(
     hidden_states: torch.Tensor,
     k_cache_prefix: LayerNameType,
@@ -827,17 +853,11 @@ def rocm_aiter_sparse_attn_indexer(
         )
 
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
-        num_rows = logits.shape[0]
-
-        torch.ops._C.top_k_per_row_decode(
+        _rocm_top_k_per_row_decode(
             logits,
             next_n,
             decode_metadata.seq_lens,
             topk_indices,
-            num_rows,
-            logits.stride(0),
-            logits.stride(1),
-            topk_tokens,
         )
 
         if decode_metadata.requires_padding:

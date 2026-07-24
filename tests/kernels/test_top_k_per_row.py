@@ -374,6 +374,28 @@ def test_top_k_per_row_decode_large_vocab_size(clean_logits: bool) -> None:
     )
 
 
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific regression")
+@torch.inference_mode()
+def test_rocm_decode_topk_nonfinite_logits_return_bounded_indices() -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_top_k_per_row_decode,
+    )
+
+    top_k = 32
+    row_end = 64
+    logits = torch.full((1, row_end), float("nan"), dtype=torch.float32, device="cuda")
+    logits[0, 0] = float("inf")
+    logits[0, 1] = float("-inf")
+    seq_lens = torch.tensor([row_end], dtype=torch.int32, device="cuda")
+    indices = torch.full((1, top_k), row_end + 1, dtype=torch.int32, device="cuda")
+
+    _rocm_top_k_per_row_decode(logits, 1, seq_lens, indices)
+    torch.accelerator.synchronize()
+
+    valid_indices = (indices == -1) | ((indices >= 0) & (indices < row_end))
+    assert bool(valid_indices.all()), f"out-of-range top-k indices: {indices}"
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @pytest.mark.parametrize(
     "seq_len_range,test_id",
