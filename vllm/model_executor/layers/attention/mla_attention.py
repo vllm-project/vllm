@@ -218,6 +218,7 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.attention.attention import (
+    _get_layer_slot_mapping,
     _init_kv_cache_quant,
     get_attention_context,
     set_default_quant_scales,
@@ -617,12 +618,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             else:
                 attn_metadata = attn_metadata_raw
             self_kv_cache = self.kv_cache
-            slot_mapping = forward_context.slot_mapping
-
-            assert isinstance(slot_mapping, dict), (
-                f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
+            layer_slot_mapping = _get_layer_slot_mapping(
+                forward_context, self.layer_name
             )
-            layer_slot_mapping = slot_mapping.get(self.layer_name)
             kv_for_cache, kpe_for_cache, layer_slot_mapping = (
                 maybe_gather_mla_latent_cache_inputs(
                     kv_c_normed,
