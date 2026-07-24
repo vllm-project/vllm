@@ -99,6 +99,10 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         return True
 
     @staticmethod
+    def supports_invalid_expert_routes() -> bool:
+        return True
+
+    @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
@@ -259,6 +263,13 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             hidden_states, w1, w2, topk_ids
         )
 
+        skip_invalid_expert_routes = (
+            self.moe_config.skip_invalid_expert_routes
+            and expert_map is not None
+            and self._lora_context is None
+            and not apply_router_weight_on_input
+        )
+
         if global_num_experts == -1:
             global_num_experts = E
 
@@ -304,6 +315,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 use_int8_w8a16=self.quant_config.use_int8_w8a16,
                 use_int4_w4a16=self.quant_config.use_int4_w4a16,
                 block_shape=self.block_shape,
+                ignore_invalid_experts=skip_invalid_expert_routes,
             )
         )
 
@@ -535,11 +547,23 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                     top_k_num=top_k_num,
                 )
 
-        # separate function is required for MoE + LoRA
-        self.moe_sum(intermediate_cache3, output)
+        # Invalid routes were intentionally left unwritten by the GEMMs. The
+        # pad-aware reducer must not read those route slots.
+        self.moe_sum(
+            intermediate_cache3,
+            output,
+            topk_ids if skip_invalid_expert_routes else None,
+            expert_map if skip_invalid_expert_routes else None,
+        )
 
-    def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
-        ops.moe_sum(input, output)
+    def moe_sum(
+        self,
+        input: torch.Tensor,
+        output: torch.Tensor,
+        topk_ids: torch.Tensor | None = None,
+        expert_map: torch.Tensor | None = None,
+    ) -> None:
+        ops.moe_sum(input, output, topk_ids, expert_map)
 
 
 class TritonWNA16Experts(TritonExperts):

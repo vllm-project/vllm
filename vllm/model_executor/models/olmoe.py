@@ -20,6 +20,7 @@ from itertools import islice
 
 import torch
 from torch import nn
+from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -34,6 +35,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
+    clear_mone_load_state,
+    make_mone_replacement,
+    validate_mone_weights_loaded,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -81,9 +85,22 @@ class OlmoeMoE(nn.Module):
         quant_config: QuantizationConfig | None = None,
         tp_size: int | None = None,
         prefix: str = "",
+        config: PretrainedConfig | None = None,
+        layer_idx: int | None = None,
     ):
         super().__init__()
         self.hidden_size = hidden_size
+        replacement = None
+        if config is not None and layer_idx is not None:
+            replacement = make_mone_replacement(
+                config=config,
+                layer_idx=layer_idx,
+                num_logical_experts=num_experts,
+                hidden_size=hidden_size,
+                params_dtype=getattr(
+                    config, "dtype", getattr(config, "torch_dtype", None)
+                ),
+            )
 
         # Gate always runs at half / full precision for now.
         self.gate = ReplicatedLinear(
@@ -95,7 +112,13 @@ class OlmoeMoE(nn.Module):
         )
 
         self.experts = FusedMoE(
-            num_experts=num_experts,
+            num_experts=(
+                replacement.num_compute_experts
+                if replacement is not None
+                else num_experts
+            ),
+            num_logical_experts=num_experts,
+            expert_replacement=replacement,
             top_k=top_k,
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
@@ -224,6 +247,7 @@ class OlmoeDecoderLayer(nn.Module):
         quant_config = vllm_config.quant_config
 
         self.hidden_size = config.hidden_size
+        layer_idx = int(prefix.rsplit(".", 1)[-1])
 
         self.self_attn = OlmoeAttention(
             vllm_config=vllm_config,
@@ -237,6 +261,8 @@ class OlmoeDecoderLayer(nn.Module):
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
+            config=config,
+            layer_idx=layer_idx,
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
@@ -403,5 +429,8 @@ class OlmoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        clear_mone_load_state(self)
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        validate_mone_weights_loaded(self)
+        return loaded_params

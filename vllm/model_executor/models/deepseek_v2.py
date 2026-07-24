@@ -52,7 +52,11 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     GateLinear,
+    RoutedExperts,
+    clear_mone_load_state,
     fused_moe_make_expert_params_mapping,
+    make_mone_replacement,
+    validate_mone_weights_loaded,
 )
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -285,6 +289,7 @@ class DeepseekV2MoE(nn.Module):
         reduce_results: bool = True,
         prefix: str = "",
         apply_routed_scale_to_output: bool = False,
+        layer_idx: int | None = None,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -326,7 +331,23 @@ class DeepseekV2MoE(nn.Module):
 
         self.n_redundant_experts = eplb_config.num_redundant_experts
         self.n_logical_experts = self.n_routed_experts
-        self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
+        replacement = None
+        if layer_idx is not None:
+            replacement = make_mone_replacement(
+                config=config,
+                layer_idx=layer_idx,
+                num_logical_experts=self.n_logical_experts,
+                hidden_size=config.hidden_size,
+                params_dtype=getattr(
+                    config, "dtype", getattr(config, "torch_dtype", None)
+                ),
+            )
+        num_compute_experts = (
+            replacement.num_compute_experts
+            if replacement is not None
+            else self.n_logical_experts
+        )
+        self.n_physical_experts = num_compute_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
         self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
@@ -364,7 +385,9 @@ class DeepseekV2MoE(nn.Module):
         self.experts = FusedMoE(
             shared_experts=self.shared_experts,
             gate=self.gate,
-            num_experts=config.n_routed_experts,
+            num_experts=num_compute_experts,
+            num_logical_experts=self.n_logical_experts,
+            expert_replacement=replacement,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
@@ -1264,6 +1287,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                 prefix=f"{prefix}.mlp",
                 # aiter applies routed_scaling_factor internally
                 apply_routed_scale_to_output=not rocm_aiter_ops.is_fused_moe_enabled(),
+                layer_idx=layer_idx,
             )
         else:
             self.mlp = DeepseekV2MLP(
@@ -1510,6 +1534,75 @@ class DeepseekV2Model(nn.Module):
             return hidden_states, aux_hidden_states
         return hidden_states
 
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        replacements = {
+            layer_idx: layer.mlp.experts.routed_experts.expert_replacement
+            for layer_idx, layer in enumerate(self.layers)
+            if not isinstance(layer, PPMissingLayer)
+            and isinstance(layer.mlp, DeepseekV2MoE)
+            and layer.mlp.experts.routed_experts.expert_replacement is not None
+        }
+        if not replacements:
+            return fused_moe_make_expert_params_mapping(
+                self,
+                ckpt_gate_proj_name="gate_proj",
+                ckpt_down_proj_name="down_proj",
+                ckpt_up_proj_name="up_proj",
+                num_experts=self.config.n_routed_experts
+                + (
+                    self.config.n_shared_experts
+                    if rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+                    else 0
+                ),
+                num_redundant_experts=self.num_redundant_experts,
+            )
+
+        base_layer = (
+            "base_layer."
+            if any(".base_layer." in name for name, _ in self.named_parameters())
+            else ""
+        )
+        mapping: list[tuple[str, str, int, str]] = []
+        for layer_idx, layer in enumerate(self.layers):
+            if isinstance(layer, PPMissingLayer) or not isinstance(
+                layer.mlp, DeepseekV2MoE
+            ):
+                continue
+            layer_prefix = f"layers.{layer_idx}.mlp"
+            moe_prefix = f"{layer_prefix}.experts"
+            replacement = replacements.get(layer_idx)
+            if replacement is not None:
+                mapping.extend(
+                    replacement.make_expert_params_mapping(
+                        moe_prefix=moe_prefix,
+                        ckpt_prefix=f"{layer_prefix}.experts",
+                        ckpt_gate_proj_name="gate_proj",
+                        ckpt_down_proj_name="down_proj",
+                        ckpt_up_proj_name="up_proj",
+                        base_layer=base_layer,
+                    )
+                )
+                continue
+
+            layer_mapping = RoutedExperts.build_expert_params_mapping(
+                "gate_proj",
+                "down_proj",
+                "up_proj",
+                num_experts=self.config.n_routed_experts,
+                routed_experts_prefix="routed_experts",
+                lora_base_layer_prefix=base_layer,
+            )
+            mapping.extend(
+                (
+                    f"{layer_prefix}.{param_name}",
+                    f"{layer_prefix}.{weight_name}",
+                    expert_id,
+                    shard_id,
+                )
+                for param_name, weight_name, expert_id, shard_id in layer_mapping
+            )
+        return mapping
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         rocm_aiter_moe_shared_expert_enabled = (
             rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
@@ -1546,19 +1639,15 @@ class DeepseekV2Model(nn.Module):
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts
-            + (
-                self.config.n_shared_experts
-                if rocm_aiter_moe_shared_expert_enabled
-                else 0
-            ),
-            num_redundant_experts=self.num_redundant_experts,
-        )
+        if rocm_aiter_moe_shared_expert_enabled and any(
+            isinstance(module, DeepseekV2MoE)
+            and module.experts.routed_experts.expert_replacement is not None
+            for module in self.modules()
+        ):
+            raise NotImplementedError(
+                "DeepSeek MoNE does not support AITER fused shared experts"
+            )
+        expert_params_mapping = self.get_expert_mapping()
 
         pp_missing_layer_names = get_pp_missing_layer_names(self)
         params_dict = dict(self.named_parameters())
@@ -1903,20 +1992,14 @@ class DeepseekV2ForCausalLM(
         return logits
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        # Params for weights, fp8 weight scales, fp8 activation scales
-        # (param_name, weight_name, expert_id, shard_id)
-        return fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts,
-            num_redundant_experts=0,
-        )
+        return self.model.get_expert_mapping()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        clear_mone_load_state(self)
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        loaded_params = loader.load_weights(weights)
+        validate_mone_weights_loaded(self)
+        return loaded_params
 
 
 class DeepseekForCausalLM(DeepseekV2ForCausalLM):
@@ -1928,4 +2011,4 @@ class DeepseekV3ForCausalLM(DeepseekV2ForCausalLM):
 
 
 class GlmMoeDsaForCausalLM(DeepseekV2ForCausalLM):
-    pass
+    """GLM-5/5.2, including checkpoints using shared MoNE replacements."""

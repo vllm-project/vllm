@@ -16,6 +16,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.expert_map_manager import (
     ExpertMapManager,
 )
+from vllm.model_executor.layers.fused_moe.expert_replacement import (
+    ExpertReplacement,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
@@ -78,6 +81,7 @@ class RoutedExperts(PluggableLayer):
         swiglu_beta: float | None = None,
         e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
+        expert_replacement: ExpertReplacement | None = None,
     ):
         super().__init__()
         self.layer_name = layer_name
@@ -113,6 +117,7 @@ class RoutedExperts(PluggableLayer):
         self.swiglu_beta = swiglu_beta
         self.e_score_correction_bias = e_score_correction_bias
         self.apply_router_weight_on_input = apply_router_weight_on_input
+        self.expert_replacement = expert_replacement
         # End random parameters
         self._loaded_expert_biases: set[str] = set()
 
@@ -225,6 +230,8 @@ class RoutedExperts(PluggableLayer):
 
     @property
     def expert_map(self) -> torch.Tensor | None:
+        if self.expert_replacement is not None:
+            return self.expert_replacement.expert_map
         return (
             self._expert_map if not self.rocm_aiter_fmoe_enabled else self.expert_mask
         )
@@ -904,7 +911,7 @@ class RoutedExperts(PluggableLayer):
                 matched = True
                 weight_name = qual_name.replace(weight_name, param_name)
                 param_name = weight_name.removeprefix(f"{self.layer_name}.")
-                param = getattr(self, param_name)
+                param = self.get_parameter(param_name)
                 if is_fused:
                     # w1 and w3 share one fused tensor; use a local copy so the
                     # transpose below doesn't mutate loaded_weight across
@@ -956,6 +963,20 @@ class RoutedExperts(PluggableLayer):
         ckpt_up_proj_name: str | None = None,
         include_fused: bool = False,
     ) -> list[tuple[str, str, int, str]]:
+        if self.expert_replacement is not None:
+            if include_fused:
+                logger.warning_once(
+                    "Fused expert checkpoint tensors are not supported with MoNE"
+                )
+            return self.expert_replacement.make_expert_params_mapping(
+                moe_prefix=self.layer_name,
+                ckpt_gate_proj_name=ckpt_gate_proj_name or self.ckpt_gate_proj_name,
+                ckpt_down_proj_name=ckpt_down_proj_name or self.ckpt_down_proj_name,
+                ckpt_up_proj_name=ckpt_up_proj_name or self.ckpt_up_proj_name,
+                routed_experts_prefix="",
+                base_layer=self.lora_base_layer_prefix,
+            )
+
         moe_config = self.moe_config
         num_fused_shared_experts = self.expert_map_manager.num_fused_shared_experts
         num_redundant_experts = moe_config.num_experts - moe_config.num_logical_experts
@@ -1147,7 +1168,7 @@ class RoutedExperts(PluggableLayer):
 
         # Parameters of non-expert submodules that live inside runner (RoutedExperts).
         # These must be excluded from EPLB weight rearrangement.
-        NON_EXPERT_PREFIXES = ()
+        NON_EXPERT_PREFIXES = ("expert_replacement.",)
 
         assert all(
             weight.is_contiguous()

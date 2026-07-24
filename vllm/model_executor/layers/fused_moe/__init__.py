@@ -15,6 +15,14 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.expert_replacement import (
+    ConstantExpertReplacement,
+    ExpertReplacement,
+    clear_mone_load_state,
+    get_mone_expert_ids,
+    make_mone_replacement,
+    validate_mone_weights_loaded,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
@@ -69,6 +77,9 @@ __all__ = [
     "FusedMoEQuantConfig",
     "FusedMoEParallelConfig",
     "FusedMoEMethodBase",
+    "ConstantExpertReplacement",
+    "ExpertReplacement",
+    "clear_mone_load_state",
     "MoEActivation",
     "UnquantizedFusedMoEMethod",
     "FusedMoeWeightScaleSupported",
@@ -83,6 +94,9 @@ __all__ = [
     "activation_without_mul",
     "apply_moe_activation",
     "fused_moe_make_expert_params_mapping",
+    "get_mone_expert_ids",
+    "make_mone_replacement",
+    "validate_mone_weights_loaded",
     "override_config",
     "get_config",
 ]

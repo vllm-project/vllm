@@ -41,6 +41,9 @@ from vllm.distributed import (
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
+    clear_mone_load_state,
+    make_mone_replacement,
+    validate_mone_weights_loaded,
 )
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -75,6 +78,7 @@ class MiniMaxM2MoE(nn.Module):
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        layer_idx: int | None = None,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -85,6 +89,17 @@ class MiniMaxM2MoE(nn.Module):
                 f"the number of experts {config.num_local_experts}."
             )
         self.use_routing_bias = getattr(config, "use_routing_bias", False)
+        replacement = None
+        if layer_idx is not None:
+            replacement = make_mone_replacement(
+                config=config,
+                layer_idx=layer_idx,
+                num_logical_experts=config.num_local_experts,
+                hidden_size=config.hidden_size,
+                params_dtype=getattr(
+                    config, "dtype", getattr(config, "torch_dtype", None)
+                ),
+            )
         if self.use_routing_bias:
             self.e_score_correction_bias = nn.Parameter(
                 torch.empty(config.num_local_experts, dtype=torch.float32)
@@ -96,7 +111,13 @@ class MiniMaxM2MoE(nn.Module):
             self.e_score_correction_bias = None
 
         self.experts = FusedMoE(
-            num_experts=config.num_local_experts,
+            num_experts=(
+                replacement.num_compute_experts
+                if replacement is not None
+                else config.num_local_experts
+            ),
+            num_logical_experts=config.num_local_experts,
+            expert_replacement=replacement,
             top_k=config.num_experts_per_tok,
             scoring_func=config.scoring_func,
             e_score_correction_bias=self.e_score_correction_bias,
@@ -288,6 +309,7 @@ class MiniMaxM2DecoderLayer(nn.Module):
             config=config,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
+            layer_idx=layer_idx,
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
@@ -488,5 +510,8 @@ class MiniMaxM2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        clear_mone_load_state(self)
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        loaded_params = loader.load_weights(weights)
+        validate_mone_weights_loaded(self)
+        return loaded_params

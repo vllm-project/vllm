@@ -1496,13 +1496,19 @@ def _prepare_expert_assignment(
     ignore_invalid_experts: bool = False,
 ) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor]:
     """Prepare expert assignments for the aligned and low-latency Triton paths."""
+    # Routed IDs are logical/global when an expert map is present. Alignment
+    # must inspect that input space before mapping to compact physical rows.
+    align_num_experts = (
+        expert_map.numel() if expert_map is not None else global_num_experts
+    )
     # SPARSITY_FACTOR is a heuristic margin ensuring tokens_in_chunk * top_k
     # activates only a small fraction of total experts
     # Skips moe_align_block_size and activates the `sorted_token_ids is None`
     # path of the fused_moe_kernel kernel
     naive_block_assignment = (
         expert_map is None
-        and num_tokens * top_k_num * 4 <= global_num_experts
+        and not ignore_invalid_experts
+        and num_tokens * top_k_num * 4 <= align_num_experts
         and not (
             (use_int8_w8a16 or use_int4_w4a16)
             and block_shape is not None
@@ -1525,7 +1531,7 @@ def _prepare_expert_assignment(
     return moe_align_block_size(
         topk_ids,
         config["BLOCK_SIZE_M"],
-        global_num_experts,
+        align_num_experts,
         expert_map,
         ignore_invalid_experts=ignore_invalid_experts,
     )

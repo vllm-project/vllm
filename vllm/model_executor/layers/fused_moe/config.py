@@ -1307,6 +1307,10 @@ class FusedMoEConfig:
     # Only honored on the non-reduced (late-AR) TP path. Default False.
     skip_final_all_reduce: bool = False
 
+    # Drop expert-map-invalid routes from GEMM scheduling and from the final
+    # top-k reduction. Expert replacements produce those routes separately.
+    skip_invalid_expert_routes: bool = False
+
     # SwiGLU clamp limit. When set, backends that do not implement the clamp
     # are filtered out by `FusedMoEExperts.is_supported_config` so the oracle
     # cannot silently select one and drop the clamp.

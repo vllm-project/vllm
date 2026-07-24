@@ -260,7 +260,8 @@ class ModelArchConfigConvertorBase:
     def is_deepseek_mla(self) -> bool:
         if not hasattr(self.hf_text_config, "model_type"):
             return False
-        elif self.hf_text_config.model_type in (
+        model_type = self.hf_text_config.model_type.removesuffix("_compressed")
+        if model_type in (
             "AXK1",
             "deepseek_v2",
             "deepseek_v3",
@@ -284,7 +285,7 @@ class ModelArchConfigConvertorBase:
                 return getattr(self.hf_text_config, "head_dim", None) is not None
             else:
                 return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
-        elif self.hf_text_config.model_type == "eagle":
+        elif model_type == "eagle":
             # if the model is an EAGLE module, check for the
             # underlying architecture
             return (
