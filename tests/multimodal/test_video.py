@@ -34,7 +34,11 @@ from vllm.multimodal.video import (
 from vllm.platforms import current_platform
 from vllm.transformers_utils.processor import get_video_processor_cls_name_from_config
 
-from .utils import create_long_gop_video, create_video_from_image
+from .utils import (
+    create_edit_list_trimmed_video,
+    create_long_gop_video,
+    create_video_from_image,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -458,6 +462,44 @@ def test_video_backend_handles_broken_frames(monkeypatch: pytest.MonkeyPatch):
             f"Expected fewer than {metadata['total_num_frames']} frames, "
             f"but loaded {frames.shape[0]} frames"
         )
+
+
+def test_video_backend_handles_edit_list_trimmed_video(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    An mp4 edit list (e.g. from a lossless ``ffmpeg -ss ... -c copy`` cut)
+    hides the decode lead-in: the header still counts every physical sample
+    while sequential decode only yields the visible frames. Sampling over the
+    header count used to collapse such videos to the few indices below the
+    visible count (a single frame for the Qwen loaders) — the loader must
+    resample over the true stream length instead.
+    """
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv")
+
+        video_data, num_visible = create_edit_list_trimmed_video(
+            num_frames=90, trim_start_frame=60
+        )
+
+        loader = VIDEO_LOADER_REGISTRY.load("opencv")
+        for backend in ["opencv", "pyav"]:
+            frames, metadata = loader.load_bytes(
+                video_data, num_frames=-1, backend=backend
+            )
+            assert metadata["total_num_frames"] == num_visible, backend
+            assert frames.shape[0] == num_visible, backend
+            assert len(metadata["frames_indices"]) == num_visible, backend
+            # The green channel encodes the source frame index: the visible
+            # frames must be the trailing ones (60..89), not the lead-in.
+            mean_green = frames[..., 1].reshape(frames.shape[0], -1).mean(axis=1)
+            assert abs(mean_green[0] - 60) <= 5, backend
+            assert abs(mean_green[-1] - 89) <= 5, backend
+
+        # The Qwen samplers used to degenerate to a single frame here.
+        qwen_frames, qwen_metadata = Qwen2VLVideoBackend.load_bytes(video_data)
+        assert qwen_metadata["total_num_frames"] == num_visible
+        assert qwen_frames.shape[0] >= 4
 
 
 # ============================================================================

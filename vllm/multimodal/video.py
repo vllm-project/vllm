@@ -310,13 +310,83 @@ class OpenCVVideoBackendMixin:
         limit = next_target_map.get(oldest_failed, total_frames)
         return idx < limit
 
+    @staticmethod
+    def _stream_end_count(
+        grabbed: int, last_grab_ok: int, max_frame_idx: int
+    ) -> int | None:
+        """True stream length when grabs succeeded contiguously from frame 0 and
+        then failed through max_frame_idx — the header frame count overstated the
+        presentable frames (e.g. an mp4 edit list hides the decode lead-in of a
+        stream-copied cut, yet CAP_PROP_FRAME_COUNT still counts the hidden
+        samples). Mid-stream corruption (failures with later successes) returns
+        None, keeping the existing skip behavior."""
+        if grabbed == last_grab_ok + 1 and last_grab_ok < max_frame_idx:
+            return grabbed
+        return None
+
+    @classmethod
+    def read_frames_resampling_truncated(
+        cls,
+        data: bytes,
+        cap: "cv2.VideoCapture",
+        source: VideoSourceMetadata,
+        sample_fn,
+        *,
+        frame_recovery: bool = False,
+    ) -> tuple[npt.NDArray, list[int], list[int], VideoSourceMetadata]:
+        """Sample and read frames, resampling once if the stream ends early.
+
+        When the header frame count exceeds the true stream length (see
+        _stream_end_count), indices sampled over the header count point at
+        frames that don't exist and the video silently collapses to the few
+        real ones. On a clean early stream end, rebuild the source over the
+        true length, resample via ``sample_fn(source)``, and reread from a
+        fresh capture — one cheap extra pass over the visible frames, only
+        when triggered.
+
+        Returns (frames, valid_frame_indices, frame_indices, source), with
+        source corrected when a resample happened.
+        """
+        frame_idx = sample_fn(source)
+        frames, valid, frames_in_stream = cls.read_frames(
+            cap,
+            frame_idx,
+            total_frames_num=source.total_frames_num,
+            frame_recovery=frame_recovery,
+        )
+        if (
+            frames_in_stream is not None
+            and 0 < frames_in_stream < source.total_frames_num
+        ):
+            logger.warning(
+                "Video header claims %d frames but the stream ends after %d; "
+                "resampling over the true frame count.",
+                source.total_frames_num,
+                frames_in_stream,
+            )
+            source = VideoSourceMetadata(
+                total_frames_num=frames_in_stream,
+                original_fps=source.original_fps,
+                duration=frames_in_stream / source.original_fps
+                if source.original_fps > 0
+                else 0,
+            )
+            frame_idx = sample_fn(source)
+            frames, valid, _ = cls.read_frames(
+                cls.open_video_capture(data),
+                frame_idx,
+                total_frames_num=source.total_frames_num,
+                frame_recovery=frame_recovery,
+            )
+        return frames, valid, frame_idx, source
+
     @classmethod
     def _read_frames_with_recovery(
         cls,
         cap: "cv2.VideoCapture",
         frame_indices: list[int],
         total_frames: int,
-    ) -> tuple[npt.NDArray, list[int], dict[int, int]]:
+    ) -> tuple[npt.NDArray, list[int], dict[int, int], int | None]:
         """
         Read frames with dynamic window forward-scan recovery.
 
@@ -329,10 +399,13 @@ class OpenCVVideoBackendMixin:
             total_frames: Total number of frames in the video
 
         Returns:
-            Tuple of (frames_array, valid_frame_indices, recovered_map)
+            Tuple of (frames_array, valid_frame_indices, recovered_map,
+            frames_in_stream)
             - frames_array: Array of loaded frames
             - valid_frame_indices: List of frame indices that were loaded
             - recovered_map: Dict mapping recovered_idx -> source_idx
+            - frames_in_stream: True stream frame count when the stream ended
+              cleanly before the last target index, else None
         """
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -356,11 +429,16 @@ class OpenCVVideoBackendMixin:
         recovered_map: dict[int, int] = {}
 
         i = 0
+        grabbed = 0
+        last_grab_ok = -1
         for idx in range(max_frame_idx + 1):
             is_target_frame = idx in frame_idx_set
 
             # Attempt to grab the current frame
             ok = cap.grab()
+            if ok:
+                grabbed += 1
+                last_grab_ok = idx
 
             if not ok:
                 if is_target_frame:
@@ -414,7 +492,8 @@ class OpenCVVideoBackendMixin:
         else:
             frames = np.empty((0, height, width, 3), dtype=np.uint8)
 
-        return frames, valid_frame_indices, recovered_map
+        frames_in_stream = cls._stream_end_count(grabbed, last_grab_ok, max_frame_idx)
+        return frames, valid_frame_indices, recovered_map, frames_in_stream
 
     @classmethod
     def _read_frames_no_recovery(
@@ -422,7 +501,7 @@ class OpenCVVideoBackendMixin:
         cap,
         frame_indices: set[int],
         max_frame_idx: int,
-    ) -> tuple[npt.NDArray, list[int]]:
+    ) -> tuple[npt.NDArray, list[int], int | None]:
         num_expected_frames = len(frame_indices)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -430,8 +509,13 @@ class OpenCVVideoBackendMixin:
 
         i = 0
         valid_frame_indices = []
+        grabbed = 0
+        last_grab_ok = -1
         for idx in range(max_frame_idx + 1):
             ok = cap.grab()
+            if ok:
+                grabbed += 1
+                last_grab_ok = idx
             if not ok:
                 # Frame is broken/unreadable, skip it
                 if idx in frame_indices:
@@ -465,7 +549,8 @@ class OpenCVVideoBackendMixin:
                 valid_num_frames,
             )
 
-        return frames[:valid_num_frames], valid_frame_indices
+        frames_in_stream = cls._stream_end_count(grabbed, last_grab_ok, max_frame_idx)
+        return frames[:valid_num_frames], valid_frame_indices, frames_in_stream
 
     @classmethod
     def read_frames(
@@ -475,11 +560,11 @@ class OpenCVVideoBackendMixin:
         total_frames_num: int,
         *,
         frame_recovery: bool = False,
-    ) -> tuple[npt.NDArray, list[int]]:
+    ) -> tuple[npt.NDArray, list[int], int | None]:
         if frame_recovery:
             num_frames_to_sample = len(frame_idx)
-            frames, valid_frame_indices, recovered_map = cls._read_frames_with_recovery(
-                cap, frame_idx, total_frames_num
+            frames, valid_frame_indices, recovered_map, frames_in_stream = (
+                cls._read_frames_with_recovery(cap, frame_idx, total_frames_num)
             )
 
             if recovered_map:
@@ -490,8 +575,8 @@ class OpenCVVideoBackendMixin:
         else:
             frame_idx_set = set(frame_idx)
             num_frames_to_sample = len(frame_idx_set)
-            frames, valid_frame_indices = cls._read_frames_no_recovery(
-                cap, frame_idx_set, max(frame_idx)
+            frames, valid_frame_indices, frames_in_stream = (
+                cls._read_frames_no_recovery(cap, frame_idx_set, max(frame_idx))
             )
         valid_num_frames = len(valid_frame_indices)
         if valid_num_frames < num_frames_to_sample:
@@ -502,7 +587,7 @@ class OpenCVVideoBackendMixin:
                 num_frames_to_sample,
                 valid_num_frames,
             )
-        return frames, valid_frame_indices
+        return frames, valid_frame_indices, frames_in_stream
 
 
 class PyAVVideoBackendMixin:
@@ -526,6 +611,14 @@ class PyAVVideoBackendMixin:
         duration = float(stream.duration * stream.time_base) if stream.duration else 0.0
         if total_frames == 0 and duration > 0 and fps > 0:
             total_frames = int(duration * fps)
+        elif duration > 0 and fps > 0 and total_frames > round(duration * fps) + 1:
+            # The header sample count can exceed the frames the presentation
+            # timeline actually holds — e.g. an mp4 edit list hides the decode
+            # lead-in of a stream-copied cut, but ``stream.frames`` still counts
+            # the hidden samples. Sampling indices past the visible range would
+            # silently collapse onto the last visible frame, so trust the
+            # (edit-list-aware) duration instead.
+            total_frames = round(duration * fps)
         return VideoSourceMetadata(total_frames, fps, duration)
 
     @staticmethod
@@ -1040,13 +1133,13 @@ class VideoBackend(
                 int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
             )
             source = cls._prepare_source(cls.get_video_metadata(cap))
-            frame_idx = cls.compute_frames_index_to_sample(
-                source=source, target=target, **kwargs
-            )
-            frames, valid = cls.read_frames(
+            frames, valid, frame_idx, source = cls.read_frames_resampling_truncated(
+                data,
                 cap,
-                frame_idx,
-                total_frames_num=source.total_frames_num,
+                source,
+                lambda s: cls.compute_frames_index_to_sample(
+                    source=s, target=target, **kwargs
+                ),
                 frame_recovery=frame_recovery,
             )
         elif backend == "pyav":
@@ -1877,24 +1970,22 @@ class Molmo2VideoBackend(VideoLoader, OpenCVVideoBackendMixin):
         )
 
         source = OpenCVVideoBackendMixin.get_video_metadata(cap)
-        target = VideoTargetMetadata(
-            num_frames=num_frames,
-            fps=sampling_fps,
-            max_duration=source.duration,
-        )
 
-        frame_idx = cls.compute_frames_index_to_sample(
-            source=source,
-            target=target,
-            frame_sample_mode=frame_sample_mode,
-            max_fps=max_fps,
-        )
+        def _frame_indices(source):
+            target = VideoTargetMetadata(
+                num_frames=num_frames,
+                fps=sampling_fps,
+                max_duration=source.duration,
+            )
+            return cls.compute_frames_index_to_sample(
+                source=source,
+                target=target,
+                frame_sample_mode=frame_sample_mode,
+                max_fps=max_fps,
+            )
 
-        frames, valid_frame_indices = cls.read_frames(
-            cap,
-            frame_idx,
-            total_frames_num=source.total_frames_num,
-            frame_recovery=frame_recovery,
+        frames, valid_frame_indices, _, source = cls.read_frames_resampling_truncated(
+            data, cap, source, _frame_indices, frame_recovery=frame_recovery
         )
 
         metadata = cls.create_hf_metadata(
@@ -2041,15 +2132,11 @@ class OpenCVDynamicOpenPanguVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
             max_duration=max_duration,
         )
 
-        frame_indices_list = cls.compute_frames_index_to_sample(
-            source=source,
-            target=target,
-        )
-
-        frames, valid_frame_indices = cls.read_frames(
+        frames, valid_frame_indices, _, source = cls.read_frames_resampling_truncated(
+            data,
             cap,
-            frame_indices_list,
-            total_frames_num=source.total_frames_num,
+            source,
+            lambda s: cls.compute_frames_index_to_sample(source=s, target=target),
             frame_recovery=frame_recovery,
         )
 
