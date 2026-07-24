@@ -12,11 +12,16 @@ import torch.multiprocessing as mp
 import vllm.envs as envs
 from tests.utils import ensure_current_vllm_config
 from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
+from vllm.distributed.device_communicators.cuda_communicator import (
+    NCCL_DIRECT_SYMM_RS_OUTPUT_MIN_VERSION,
+    CudaCommunicator,
+)
 from vllm.distributed.device_communicators.pynccl import register_nccl_symmetric_ops
 from vllm.distributed.device_communicators.pynccl_allocator import (
     get_nccl_mem_pool,
     is_symmetric_memory_enabled,
+    is_symmetric_memory_tensor,
+    nccl_symm_mem_context,
 )
 from vllm.distributed.parallel_state import (
     get_tp_group,
@@ -193,15 +198,82 @@ def nccl_symm_mem_reduce_scatter_worker(local_rank: int, world_size: int):
             pytest.skip("NCCL symmetric memory is disabled.")
 
         per_rank_size = test_size_elements // world_size
-        input_tensor = torch.randint(
+        ordinary_input = torch.randint(
             1, 23, (test_size_elements,), dtype=dtype, device=device
         )
-        input_clone = input_tensor.clone()
-        output = cuda_communicator.reduce_scatter(input_tensor, dim=0)
+        ordinary_clone = ordinary_input.clone()
+        ordinary_output = cuda_communicator.reduce_scatter(ordinary_input, dim=0)
 
         group = get_tp_group().device_group
-        expected = torch.empty(per_rank_size, dtype=dtype, device=device)
+        ordinary_expected = torch.empty(per_rank_size, dtype=dtype, device=device)
+        dist.reduce_scatter_tensor(ordinary_expected, ordinary_clone, group=group)
+        torch.testing.assert_close(
+            ordinary_output, ordinary_expected, atol=2.5, rtol=0.1
+        )
+        assert is_symmetric_memory_tensor(ordinary_output)
+
+        ordinary_v_output = cuda_communicator.reduce_scatterv(
+            ordinary_input, dim=0, sizes=None
+        )
+        torch.testing.assert_close(
+            ordinary_v_output, ordinary_expected, atol=2.5, rtol=0.1
+        )
+        assert is_symmetric_memory_tensor(ordinary_v_output)
+
+        pynccl_comm = cuda_communicator.pynccl_comm
+        assert pynccl_comm is not None
+        if pynccl_comm.nccl_version < NCCL_DIRECT_SYMM_RS_OUTPUT_MIN_VERSION:
+            return
+
+        from vllm.v1.worker import ubatching
+
+        m.setattr(ubatching, "dbo_current_ubatch_id", lambda: 0)
+        ubatch0 = cuda_communicator.get_symmetric_memory_buffer(
+            "test_dbo_combine", (128,), dtype, device
+        )
+        m.setattr(ubatching, "dbo_current_ubatch_id", lambda: 1)
+        ubatch1 = cuda_communicator.get_symmetric_memory_buffer(
+            "test_dbo_combine", (128,), dtype, device
+        )
+        assert ubatch0 is not None and ubatch1 is not None
+        assert ubatch0.data_ptr() != ubatch1.data_ptr()
+
+        with nccl_symm_mem_context(pynccl_comm):
+            input_tensor = torch.empty(test_size_elements, dtype=dtype, device=device)
+        input_tensor.random_(1, 23)
+        input_clone = input_tensor.clone()
+        output = torch.empty(per_rank_size, dtype=dtype, device=device)
+        assert is_symmetric_memory_tensor(input_tensor)
+        assert not is_symmetric_memory_tensor(output)
+
+        result = cuda_communicator.reduce_scatterv_into_output(
+            input_tensor,
+            output,
+            dim=0,
+            sizes=[per_rank_size] * world_size,
+        )
+        assert result.data_ptr() == output.data_ptr()
+
+        expected = torch.empty_like(output)
         dist.reduce_scatter_tensor(expected, input_clone, group=group)
+        torch.testing.assert_close(result, expected, atol=2.5, rtol=0.1)
+
+        dist.barrier(group=get_tp_group().cpu_group)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            graph_result = cuda_communicator.reduce_scatterv_into_output(
+                input_tensor,
+                output,
+                dim=0,
+                sizes=[per_rank_size] * world_size,
+            )
+        assert graph_result.data_ptr() == output.data_ptr()
+
+        input_tensor.random_(24, 47)
+        input_clone.copy_(input_tensor)
+        dist.reduce_scatter_tensor(expected, input_clone, group=group)
+        graph.replay()
+        torch.accelerator.synchronize()
         torch.testing.assert_close(output, expected, atol=2.5, rtol=0.1)
 
 

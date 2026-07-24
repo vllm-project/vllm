@@ -718,6 +718,19 @@ class GroupCoordinator:
             raise ValueError("No device communicator found")
         return self.device_communicator.reduce_scatterv(input_, dim, sizes)
 
+    def reduce_scatterv_into_output(
+        self,
+        input_: torch.Tensor,
+        output: torch.Tensor,
+        dim: int = -1,
+        sizes: list[int] | None = None,
+    ) -> torch.Tensor:
+        if self.device_communicator is None:
+            raise ValueError("No device communicator found")
+        return self.device_communicator.reduce_scatterv_into_output(
+            input_, output, dim, sizes
+        )
+
     def _reduce_scatter_out_place(self, input_: torch.Tensor, dim: int) -> torch.Tensor:
         if self.device_communicator is None:
             raise ValueError("No device communicator found")
@@ -1263,6 +1276,32 @@ class GroupCoordinator:
             return self.device_communicator.combine(hidden_states, is_sequence_parallel)
         else:
             return hidden_states
+
+    def allocate_combine_input(
+        self,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+        is_sequence_parallel: bool = False,
+    ) -> torch.Tensor | None:
+        if self.device_communicator is None:
+            return None
+        return self.device_communicator.allocate_combine_input(
+            shape, dtype, device, is_sequence_parallel
+        )
+
+    def combine_into_output(
+        self,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+        is_sequence_parallel: bool = False,
+    ) -> torch.Tensor:
+        if self.device_communicator is None:
+            output.copy_(hidden_states)
+            return output
+        return self.device_communicator.combine_into_output(
+            hidden_states, output, is_sequence_parallel
+        )
 
 
 _WORLD: GroupCoordinator | None = None
