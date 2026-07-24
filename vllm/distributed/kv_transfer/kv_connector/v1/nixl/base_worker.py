@@ -633,7 +633,9 @@ class NixlBaseConnectorWorker:
         best_offset: float | None = None
 
         with zmq_ctx(zmq.REQ, path) as sock:
-            for remote_worker_key in remote_worker_keys:
+            for remote_pp_rank, remote_worker_key in itertools.product(
+                range(remote_pp_size), remote_worker_keys
+            ):
                 remote_tp_rank, remote_dcp_rank = remote_worker_key
                 remote_pcp_rank = self._tp_dcp_to_pcp_rank(
                     remote_tp_rank,
@@ -641,7 +643,6 @@ class NixlBaseConnectorWorker:
                     remote_pcp_size,
                     remote_dcp_size,
                 )
-                remote_pp_rank = 0
                 logger.debug(
                     "Querying metadata on path: %s at PP rank %s, PCP rank %s, "
                     "TP rank %s for worker key %s",
@@ -778,6 +779,12 @@ class NixlBaseConnectorWorker:
                         remote_dcp_size,
                         remote_pcp_size,
                     )
+                    # Notification-only callers iterate over values; use a key
+                    # that remains unique across PP, PCP, and TP workers.
+                    agent_key: RemoteWorkerKey = (
+                        remote_pp_rank,
+                        remote_pcp_rank * remote_tp_size + remote_tp_rank,
+                    )
                 else:
                     remote_agent_name = self.add_remote_agent(
                         metadata,
@@ -787,13 +794,14 @@ class NixlBaseConnectorWorker:
                         metadata.dcp_size,
                         metadata.pcp_size,
                     )
+                    agent_key = remote_worker_key
                 setup_agent_time = time.perf_counter()
                 logger.debug(
                     "NIXL handshake: add agent took: %s (notif_agents_only=%s)",
                     setup_agent_time - got_metadata_time,
                     notif_agents_only,
                 )
-                remote_worker_to_agent_name[remote_worker_key] = remote_agent_name
+                remote_worker_to_agent_name[agent_key] = remote_agent_name
         if not remote_worker_to_agent_name:
             raise RuntimeError(
                 "Handshake completed but found no remote worker with overlapping "

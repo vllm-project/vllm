@@ -331,9 +331,7 @@ class NixlBaseConnectorScheduler:
                 # listener must run in the same process that stamps the block
                 # expiry deadline (`_reqs_need_send`).
                 ts = msgspec.msgpack.encode(time.perf_counter())
-                sock.send_multipart(
-                    (identity, b"", encoded_data[target_key], ts)
-                )
+                sock.send_multipart((identity, b"", encoded_data[target_key], ts))
 
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """D-side only. Returns N-1 for Mamba models since the decoder

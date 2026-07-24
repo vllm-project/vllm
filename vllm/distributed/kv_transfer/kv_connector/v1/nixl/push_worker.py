@@ -312,7 +312,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             return
 
         def _on_handshake(
-            f: Future[dict[RemoteWorkerKey, str]],
+            f: Future[tuple[dict[RemoteWorkerKey, str], float]],
             rid: str = req_id,
             rd: dict[str, Any] = reg_data,
         ) -> None:
@@ -516,9 +516,11 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # attention groups need widening; pure MLA writes to all handshaked
         # ranks (only the dst differs per rank).
         replicate_attn = self.use_mla and tp_ratio < 0
+        mla_remote_worker_keys: list[RemoteWorkerKey] = []
         if replicate_attn and not self._has_mamba:
             assert len(plan.all_source_ranks) == 1
-            write_ranks = sorted(self.dst_xfer_side_handles[engine_id])
+            mla_remote_worker_keys = list(self.dst_xfer_side_handles[engine_id])
+            write_ranks = [worker_key[0] for worker_key in mla_remote_worker_keys]
         else:
             write_ranks = list(plan.all_source_ranks)
 
@@ -562,7 +564,11 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     remote_block_size
                 ]
 
-            remote_worker_key: RemoteWorkerKey = (spec.remote_rank, 0)
+            remote_worker_key: RemoteWorkerKey = (
+                mla_remote_worker_keys[i]
+                if mla_remote_worker_keys
+                else (spec.remote_rank, 0)
+            )
             remote_xfer_side_handle = self.dst_xfer_side_handles[meta.remote.engine_id][
                 remote_worker_key
             ]
