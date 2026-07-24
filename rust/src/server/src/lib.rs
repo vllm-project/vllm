@@ -9,6 +9,7 @@ mod grpc;
 mod listener;
 mod lora;
 mod middleware;
+mod otel;
 mod routes;
 mod runtime;
 mod server_info;
@@ -28,7 +29,7 @@ use axum::body::Body;
 use axum::http::Request;
 pub use config::{
     ApiServerOptions, Config, CoordinatorMode, CorsConfig, DEFAULT_KEEP_ALIVE_TIMEOUT,
-    HttpListenerMode, TlsConfig,
+    HttpListenerMode, ObservabilityConfig, TlsConfig,
 };
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
@@ -225,6 +226,9 @@ where
         None
     };
 
+    // Init after all fallible setup, so an early return has no provider to leak.
+    let tracer_provider = otel::init_tracer_provider(&config.observability)?;
+
     let scheme = if tls_config.is_some() {
         "https"
     } else {
@@ -340,13 +344,21 @@ where
     };
 
     let (http_res, grpc_res) = tokio::join!(http_fut, grpc_fut);
-    http_res.and(grpc_res)?;
+    let serve_result = http_res.and(grpc_res);
 
     let shutdown_deadline = shutdown_deadline
         .get()
         .copied()
         .unwrap_or_else(|| Instant::now() + config.shutdown_timeout);
-    state.shutdown(shutdown_deadline).await
+    let state_result = state.shutdown(shutdown_deadline).await;
+
+    // Flush on every exit path (clean or error); `shutdown_provider` bounds the
+    // budget by the shutdown deadline.
+    if let Some(provider) = tracer_provider {
+        otel::shutdown_provider(provider, shutdown_deadline).await;
+    }
+
+    serve_result.and(state_result)
 }
 
 /// Per-connection timeouts applied while serving HTTP/HTTPS.

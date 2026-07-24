@@ -28,7 +28,8 @@ use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_server::{
     ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
-    DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, ParserSelection, RendererSelection, TlsConfig,
+    DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, ObservabilityConfig, ParserSelection,
+    RendererSelection, TlsConfig,
 };
 
 use crate::cli::unsupported::UnsupportedArgs;
@@ -312,6 +313,18 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub profiler_config: Option<ProfilerConfig>,
 
+    /// Target URL to which OpenTelemetry traces will be sent. Enables the Rust
+    /// frontend trace exporter; also forwarded to the managed Python engine.
+    #[arg(long)]
+    #[serde(default)]
+    pub otlp_traces_endpoint: Option<String>,
+
+    /// Modules to collect detailed traces for, forwarded verbatim to the engine.
+    /// Requires `--otlp-traces-endpoint`.
+    #[arg(long)]
+    #[serde(default)]
+    pub collect_detailed_traces: Option<String>,
+
     /// Unsupported Python vLLM frontend arguments recognized but not yet
     /// implemented in Rust.
     #[educe(Debug(ignore))]
@@ -382,6 +395,7 @@ impl SharedRuntimeArgs {
         let cors = self.cors_config();
         let tls = self.tls_config();
         let profiler = self.profiler();
+        let observability = self.observability_config();
 
         Config {
             transport_mode: TransportMode::Bootstrapped {
@@ -415,6 +429,7 @@ impl SharedRuntimeArgs {
             shutdown_timeout,
             keep_alive_timeout,
             profiler,
+            observability,
         }
     }
 
@@ -436,6 +451,7 @@ impl SharedRuntimeArgs {
         let cors = self.cors_config();
         let tls = self.tls_config();
         let profiler = self.profiler();
+        let observability = self.observability_config();
 
         Config {
             transport_mode: TransportMode::HandshakeOwner {
@@ -467,6 +483,7 @@ impl SharedRuntimeArgs {
             shutdown_timeout,
             keep_alive_timeout,
             profiler,
+            observability,
         }
     }
 
@@ -502,6 +519,15 @@ impl SharedRuntimeArgs {
             cert_reqs: self.ssl_cert_reqs,
             ciphers: self.ssl_ciphers.clone(),
         })
+    }
+
+    /// Build the observability config. Public so the managed `serve` path can
+    /// validate it before spawning the Python engine.
+    pub fn observability_config(&self) -> ObservabilityConfig {
+        ObservabilityConfig {
+            otlp_traces_endpoint: self.otlp_traces_endpoint.clone(),
+            collect_detailed_traces: self.collect_detailed_traces.clone(),
+        }
     }
 }
 
@@ -667,6 +693,8 @@ impl ServeArgs {
             self.runtime.max_model_len,
             self.runtime.max_logprobs,
             profiler_config,
+            self.runtime.otlp_traces_endpoint.clone(),
+            self.runtime.collect_detailed_traces.clone(),
             reasoning_parser.as_deref(),
             self.runtime.language_model_only,
             self.runtime.disable_log_stats,
