@@ -472,8 +472,6 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         self.pcp_world_size = pcp_world_size
         if dcp_world_size > 1:
             self.block_size *= dcp_world_size
-        if pcp_world_size > 1:
-            self.block_size *= pcp_world_size
         # For models using only Mamba, block_size is set to max_model_len when
         # prefix caching is disabled, and hash_block_size validation is skipped.
         assert not enable_caching or (hash_block_size == self.block_size), (
@@ -634,6 +632,15 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # a tighter initial bound, reducing work for subsequent groups.
         self.attention_groups.sort(
             key=lambda g: not isinstance(g.spec, FullAttentionSpec)
+        )
+
+        # Dense reference group for per-group lookups (None when the model
+        # has no full-attention layers): full attention is downward-closed,
+        # so any group reporting a longer per-group hit implies the union of
+        # per-group hits is not consistent at a single boundary (#46453).
+        first = self.attention_groups[0]
+        self.full_attention_group_id: int | None = (
+            first.group_ids[0] if isinstance(first.spec, FullAttentionSpec) else None
         )
 
         # Propagate the eagle bit to each manager (default to ``use_eagle=False``).

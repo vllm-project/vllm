@@ -40,10 +40,11 @@ BATCH_SIZE = 128
 CONTEXT_LEN = 8192
 PAGE_SIZE = 1
 
-# Expected dtypes for this fold path: bf16 model dtype -> bf16 query; fp8
-# KV-cache -> fp8_e4m3 kv.
-EXPECTED_Q_DTYPE = torch.bfloat16
-EXPECTED_KV_DTYPE = torch.float8_e4m3fn
+# On the fp8 KV-cache path the builder forwards the platform fp8 dtype (aiter
+# dtypes.fp8) for both q and kv. Mirror it via current_platform.fp8_dtype()
+# instead of hardcoding a literal (see #47276).
+EXPECTED_Q_DTYPE = current_platform.fp8_dtype()
+EXPECTED_KV_DTYPE = current_platform.fp8_dtype()
 
 # The split/reduce content tensors filled by get_mla_metadata_v1. work_meta_data
 # is excluded: it holds raw device pointers, never equal across allocations.

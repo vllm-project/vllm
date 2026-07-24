@@ -17,7 +17,7 @@ DEFAULT_REPO_SLUG="vllm-project/vllm"
 DEFAULT_CI_HCL_SOURCE="docker/ci-rocm.hcl"
 DEFAULT_CI_BASE_CONTENT_FILES="requirements/common.txt requirements/rocm.txt requirements/test/rocm.txt docker/Dockerfile.rocm_base docker/ci-rocm.hcl docker/docker-bake-rocm.hcl tools/install_torchcodec_rocm.sh tools/install_protoc.sh rust-toolchain.toml tests/vllm_test_utils .buildkite/scripts/ci-bake-rocm.sh .buildkite/scripts/rocm/build-ci-base.sh"
 DEFAULT_CI_BASE_DOCKERFILE="docker/Dockerfile.rocm"
-DEFAULT_CI_BASE_DOCKERFILE_STAGES="base rust_toolchain_input_0 rust_toolchain_input_1 rust-toolchain-input rust-toolchain build_rixl build_rocshmem build_deepep mori_base ci_base"
+DEFAULT_CI_BASE_DOCKERFILE_STAGES="base rust_toolchain_input_0 rust_toolchain_input_1 rust-toolchain-input rust-toolchain build_nixl build_rocshmem build_deepep mori_base ci_base"
 DEFAULT_CI_BASE_METADATA_VERSION="1"
 IMAGE_EXISTED_BEFORE_BUILD=0
 
@@ -285,7 +285,7 @@ get_content_arg_names() {
     fi | awk 'NF && !seen[$0]++'
 }
 
-compute_ci_base_content_hash() {
+compute_ci_base_content_hash_once() {
     local -a content_paths=()
     local -a content_args=()
     local dockerfile="${CI_BASE_DOCKERFILE:-}"
@@ -301,7 +301,8 @@ compute_ci_base_content_hash() {
         if [[ -n "${dockerfile}" ]]; then
             printf 'dockerfile:%s\n' "${dockerfile}"
             printf 'resolved-build-args:\n'
-            hash_dockerfile_arg_values "${dockerfile}" "${content_args[@]}"
+            hash_dockerfile_arg_values "${dockerfile}" "${content_args[@]}" \
+                || return 1
             if [[ -n "${stages}" ]]; then
                 printf 'dockerfile-stages:%s\n' "${stages}"
                 if [[ -f "${dockerfile}" ]]; then
@@ -312,6 +313,53 @@ compute_ci_base_content_hash() {
             fi
         fi
     } | sha256sum | cut -d' ' -f1
+}
+
+compute_ci_base_content_hash() {
+    local attempts="${CI_BASE_HASH_ATTEMPTS:-3}"
+    local delay_secs="${CI_BASE_HASH_RETRY_DELAY:-5}"
+    local attempt=0
+    local hash=""
+    local failed=0
+    local -a hashes=()
+
+    if [[ ! "${attempts}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Invalid CI_BASE_HASH_ATTEMPTS: ${attempts}" >&2
+        return 1
+    fi
+    if [[ ! "${delay_secs}" =~ ^[0-9]+$ ]]; then
+        echo "Invalid CI_BASE_HASH_RETRY_DELAY: ${delay_secs}" >&2
+        return 1
+    fi
+
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+        if ! hash=$(compute_ci_base_content_hash_once); then
+            echo "ci_base content hash calculation ${attempt}/${attempts} failed" >&2
+            failed=1
+        else
+            hashes+=("${hash}")
+            echo "ci_base content hash calculation ${attempt}/${attempts}: ${hash}" >&2
+        fi
+
+        if ((attempt < attempts)); then
+            sleep "${delay_secs}"
+        fi
+    done
+
+    if ((failed)) || ((${#hashes[@]} != attempts)); then
+        echo "Could not calculate a reliable ci_base content hash" >&2
+        return 1
+    fi
+
+    for hash in "${hashes[@]:1}"; do
+        if [[ "${hash}" != "${hashes[0]}" ]]; then
+            echo "ci_base content hash changed between calculations" >&2
+            printf '  observed: %s\n' "${hashes[@]}" >&2
+            return 1
+        fi
+    done
+
+    printf '%s\n' "${hashes[0]}"
 }
 
 extract_dockerfile_arg_default() {
@@ -366,7 +414,11 @@ hash_dockerfile_arg_values() {
         printf 'arg:%s=%s\n' "${arg_name}" "${arg_value:-<empty>}"
         if [[ "${arg_name}" == "BASE_IMAGE" && -n "${arg_value}" ]]; then
             digest=$(resolve_image_digest "${arg_value}")
-            printf 'arg:%s.digest=%s\n' "${arg_name}" "${digest:-unknown}"
+            if [[ -z "${digest}" ]]; then
+                echo "Failed to resolve digest for BASE_IMAGE=${arg_value}" >&2
+                return 1
+            fi
+            printf 'arg:%s.digest=%s\n' "${arg_name}" "${digest}"
         fi
     done
 }
@@ -1107,8 +1159,8 @@ ci_base_metadata_pairs() {
     metadata_pair "vllm.rocm.nic_backend" "$(resolve_dockerfile_arg_value "${dockerfile}" "NIC_BACKEND")"
     metadata_pair "vllm.rocm.ainic_version" "$(resolve_dockerfile_arg_value "${dockerfile}" "AINIC_VERSION")"
     metadata_pair "vllm.rocm.ubuntu_codename" "$(resolve_dockerfile_arg_value "${dockerfile}" "UBUNTU_CODENAME")"
-    metadata_pair "vllm.rocm.rixl_repo" "$(resolve_dockerfile_arg_value "${dockerfile}" "RIXL_REPO")"
-    metadata_pair "vllm.rocm.rixl_commit" "${RIXL_BRANCH:-$(resolve_dockerfile_arg_value "${dockerfile}" "RIXL_BRANCH")}"
+    metadata_pair "vllm.rocm.nixl_repo" "$(resolve_dockerfile_arg_value "${dockerfile}" "NIXL_REPO")"
+    metadata_pair "vllm.rocm.nixl_commit" "${NIXL_BRANCH:-$(resolve_dockerfile_arg_value "${dockerfile}" "NIXL_BRANCH")}"
     metadata_pair "vllm.rocm.ucx_repo" "$(resolve_dockerfile_arg_value "${dockerfile}" "UCX_REPO")"
     metadata_pair "vllm.rocm.ucx_commit" "${UCX_BRANCH:-$(resolve_dockerfile_arg_value "${dockerfile}" "UCX_BRANCH")}"
     metadata_pair "vllm.rocm.rocshmem_repo" "$(resolve_dockerfile_arg_value "${dockerfile}" "ROCSHMEM_REPO")"
@@ -1117,7 +1169,7 @@ ci_base_metadata_pairs() {
     metadata_pair "vllm.rocm.deepep_commit" "${DEEPEP_BRANCH:-$(resolve_dockerfile_arg_value "${dockerfile}" "DEEPEP_BRANCH")}"
     metadata_pair "vllm.rocm.deepep_nic" "$(resolve_dockerfile_arg_value "${dockerfile}" "DEEPEP_NIC")"
     metadata_pair "vllm.rocm.deepep_rocm_arch" "$(resolve_dockerfile_arg_value "${dockerfile}" "DEEPEP_ROCM_ARCH")"
-    metadata_pair "vllm.rocm.rixl_cache_key" "${RIXL_CACHE_KEY:-}"
+    metadata_pair "vllm.rocm.nixl_cache_key" "${NIXL_CACHE_KEY:-}"
     metadata_pair "vllm.rocm.rocshmem_cache_key" "${ROCSHMEM_CACHE_KEY:-}"
     metadata_pair "vllm.rocm.deepep_cache_key" "${DEEPEP_CACHE_KEY:-}"
 
@@ -1634,7 +1686,7 @@ extract_dependency_pins() {
         return 0
     fi
 
-    for var in RIXL_BRANCH UCX_BRANCH ROCSHMEM_BRANCH DEEPEP_BRANCH; do
+    for var in NIXL_BRANCH UCX_BRANCH ROCSHMEM_BRANCH DEEPEP_BRANCH; do
         if [[ -n "${!var:-}" ]]; then
             echo "Using provided ${var}: ${!var}"
             continue
@@ -1654,30 +1706,30 @@ extract_dependency_pins() {
 compute_dependency_cache_keys() {
     local bake_dir=""
     local dockerfile_rocm=""
-    local rixl_branch=""
+    local nixl_branch=""
     local ucx_branch=""
     local rocshmem_branch=""
     local deepep_branch=""
-    local rixl_material=""
+    local nixl_material=""
     local rocshmem_material=""
     local deepep_material=""
 
     bake_dir=$(dirname "${VLLM_BAKE_FILE}")
     dockerfile_rocm="${bake_dir}/Dockerfile.rocm"
-    rixl_branch=$(resolve_dockerfile_arg_value "${dockerfile_rocm}" "RIXL_BRANCH")
+    nixl_branch=$(resolve_dockerfile_arg_value "${dockerfile_rocm}" "NIXL_BRANCH")
     ucx_branch=$(resolve_dockerfile_arg_value "${dockerfile_rocm}" "UCX_BRANCH")
     rocshmem_branch=$(resolve_dockerfile_arg_value "${dockerfile_rocm}" "ROCSHMEM_BRANCH")
     deepep_branch=$(resolve_dockerfile_arg_value "${dockerfile_rocm}" "DEEPEP_BRANCH")
 
-    if [[ -n "${rixl_branch}" && -n "${ucx_branch}" ]]; then
-        rixl_material=$(compose_stage_cache_material "${dockerfile_rocm}" "base build_rixl")
-        RIXL_CACHE_KEY=$(
+    if [[ -n "${nixl_branch}" && -n "${ucx_branch}" ]]; then
+        nixl_material=$(compose_stage_cache_material "${dockerfile_rocm}" "base build_nixl")
+        NIXL_CACHE_KEY=$(
             compose_dependency_cache_key \
-                "${rixl_branch}-ucx-${ucx_branch}" \
-                "${rixl_material}"
+                "${nixl_branch}-ucx-${ucx_branch}" \
+                "${nixl_material}"
         )
-        export RIXL_CACHE_KEY
-        echo "RIXL dependency cache key: ${RIXL_CACHE_KEY}"
+        export NIXL_CACHE_KEY
+        echo "NIXL dependency cache key: ${NIXL_CACHE_KEY}"
     fi
 
     if [[ -n "${rocshmem_branch}" ]]; then
@@ -1728,11 +1780,11 @@ dependency_cache_ref_for_target() {
     local cache_repo="${DOCKERHUB_CACHE_REPO:-rocm/vllm-ci-cache}"
 
     case "${target}" in
-        rixl-rocm-ci)
-            if [[ -n "${RIXL_CACHE_KEY:-}" ]]; then
-                printf '%s\n' "${cache_repo}:rixl-rocm-${RIXL_CACHE_KEY}"
-            elif [[ -n "${RIXL_BRANCH:-}" ]]; then
-                printf '%s\n' "${cache_repo}:rixl-rocm-${RIXL_BRANCH}-ucx-${UCX_BRANCH:-}"
+        nixl-rocm-ci)
+            if [[ -n "${NIXL_CACHE_KEY:-}" ]]; then
+                printf '%s\n' "${cache_repo}:nixl-rocm-${NIXL_CACHE_KEY}"
+            elif [[ -n "${NIXL_BRANCH:-}" ]]; then
+                printf '%s\n' "${cache_repo}:nixl-rocm-${NIXL_BRANCH}-ucx-${UCX_BRANCH:-}"
             fi
             ;;
         rocshmem-rocm-ci)
@@ -1763,7 +1815,7 @@ add_dependency_cache_target() {
 
 resolve_ci_base_dependency_targets() {
     local mode="${ROCM_DEP_CACHE_EXPORT_MODE:-missing}"
-    local rixl_ref=""
+    local nixl_ref=""
     local rocshmem_ref=""
     local deepep_ref=""
 
@@ -1772,7 +1824,7 @@ resolve_ci_base_dependency_targets() {
     case "${mode}" in
         always)
             echo "ROCM_DEP_CACHE_EXPORT_MODE=always; exporting all dependency caches serially"
-            for target in rixl-rocm-ci rocshmem-rocm-ci deepep-rocm-ci; do
+            for target in nixl-rocm-ci rocshmem-rocm-ci deepep-rocm-ci; do
                 if [[ -n "$(dependency_cache_ref_for_target "${target}")" ]]; then
                     add_dependency_cache_target "${target}"
                 fi
@@ -1792,13 +1844,13 @@ resolve_ci_base_dependency_targets() {
             ;;
     esac
 
-    if [[ "${mode}" != "always" && -n "${RIXL_CACHE_KEY:-}" ]]; then
-        rixl_ref=$(dependency_cache_ref_for_target "rixl-rocm-ci")
-        if dependency_cache_ref_exists "${rixl_ref}"; then
-            echo "RIXL dependency cache exists: ${rixl_ref}"
+    if [[ "${mode}" != "always" && -n "${NIXL_CACHE_KEY:-}" ]]; then
+        nixl_ref=$(dependency_cache_ref_for_target "nixl-rocm-ci")
+        if dependency_cache_ref_exists "${nixl_ref}"; then
+            echo "NIXL dependency cache exists: ${nixl_ref}"
         else
-            echo "RIXL dependency cache missing; will seed: ${rixl_ref}"
-            add_dependency_cache_target "rixl-rocm-ci"
+            echo "NIXL dependency cache missing; will seed: ${nixl_ref}"
+            add_dependency_cache_target "nixl-rocm-ci"
         fi
     fi
 
