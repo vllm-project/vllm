@@ -768,6 +768,29 @@ class TestBuildExtractedResult:
 # ── TestEngineBasedPath ──────────────────────────────────────────────
 
 
+def _collect_streamed_tool_arguments(
+    engine: ParserEngine,
+    request: ChatCompletionRequest,
+    chunks: list[str],
+) -> str:
+    parts: list[str] = []
+    engine.initialize_streaming()
+    for chunk in chunks:
+        delta = engine.parse_delta(chunk, [], request, finished=False)
+        if delta is None:
+            continue
+        for tc in delta.tool_calls or []:
+            if tc.function and tc.function.arguments:
+                parts.append(tc.function.arguments)
+
+    delta = engine.parse_delta("", [], request, finished=True)
+    if delta is not None:
+        for tc in delta.tool_calls or []:
+            if tc.function and tc.function.arguments:
+                parts.append(tc.function.arguments)
+    return "".join(parts)
+
+
 class TestEngineBasedPath:
     """Tests for the _engine_based accumulation behavior in
     DelegatingParser.parse_delta."""
@@ -809,6 +832,48 @@ class TestEngineBasedPath:
         )
         assert result is not None
         assert len(result.tool_calls) > 0
+
+    @pytest.mark.parametrize(
+        "chunked",
+        [False, True],
+        ids=["single_delta", "char_by_char"],
+    )
+    def test_streaming_json_envelope_arguments_match_non_streaming(
+        self, mock_request, chunked
+    ):
+        text = '<tool_call>{"name": "f", "arguments": {"city": "NYC"}}</tool_call>'
+        chunks = list(text) if chunked else [text]
+
+        streaming_args = _collect_streamed_tool_arguments(
+            _make_engine(_hermes_config()),
+            mock_request,
+            chunks,
+        )
+        non_streaming = _make_engine(_hermes_config()).extract_tool_calls(
+            text, mock_request
+        )
+        expected_args = non_streaming.tool_calls[0].function.arguments
+
+        assert streaming_args == expected_args
+        assert streaming_args == '{"city": "NYC"}'
+        assert '"arguments"' not in streaming_args
+
+    def test_streaming_json_envelope_parameters_match_non_streaming(self, mock_request):
+        text = '<tool_call>{"name": "f", "parameters": [1, [2, 3]]}</tool_call>'
+
+        streaming_args = _collect_streamed_tool_arguments(
+            _make_engine(_hermes_config()),
+            mock_request,
+            list(text),
+        )
+        non_streaming = _make_engine(_hermes_config()).extract_tool_calls(
+            text, mock_request
+        )
+        expected_args = non_streaming.tool_calls[0].function.arguments
+
+        assert streaming_args == expected_args
+        assert streaming_args == "[1, [2, 3]]"
+        assert '"parameters"' not in streaming_args
 
 
 # ── TestParseTokenIdPassthrough ────────────────────────────────────
