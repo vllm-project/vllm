@@ -1067,6 +1067,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.environ.get("VLLM_TEST_FORCE_FP8_MARLIN", "0").strip().lower()
         in ("1", "true")
     ),
+    # If set, skips the pre-tuned config coverage check for Helion linear
+    # backends, allowing them to run even when no config exactly covers the
+    # layer's shapes. The kernel's config picker falls back to the closest
+    # available config.
+    "VLLM_HELION_LINEAR_SKIP_CONFIG_CHECK": lambda: (
+        os.environ.get("VLLM_HELION_LINEAR_SKIP_CONFIG_CHECK", "0").strip().lower()
+        in ("1", "true")
+    ),
     "VLLM_TEST_FORCE_LOAD_FORMAT": lambda: os.getenv(
         "VLLM_TEST_FORCE_LOAD_FORMAT", "dummy"
     ),

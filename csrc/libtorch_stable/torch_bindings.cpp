@@ -118,6 +118,14 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "                  Tensor b, Tensor a_scales,"
       "                  Tensor b_scales, Tensor? bias) -> ()");
 
+  // Hybrid scaled_mm: dispatch to Helion when a.size(0) <= helion_threshold,
+  // otherwise to cutlass_scaled_mm.
+  ops.def(
+      "helion_cutlass_hybrid_scaled_mm(Tensor! out, Tensor a,"
+      "                  Tensor b, Tensor a_scales,"
+      "                  Tensor b_scales, Tensor? bias,"
+      "                  int helion_threshold) -> ()");
+
   // CUTLASS w8a8 GEMM, supporting asymmetric per-tensor or per-row/column
   // quantization.
   ops.def(
@@ -633,6 +641,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 #ifndef USE_ROCM
   // CUTLASS scaled_mm ops
   ops.impl("cutlass_scaled_mm", TORCH_BOX(&cutlass_scaled_mm));
+  ops.impl("helion_cutlass_hybrid_scaled_mm",
+           TORCH_BOX(&helion_cutlass_hybrid_scaled_mm));
   ops.impl("cutlass_scaled_mm_azp", TORCH_BOX(&cutlass_scaled_mm_azp));
   ops.impl("cutlass_moe_mm", TORCH_BOX(&cutlass_moe_mm));
   ops.impl("get_cutlass_moe_mm_data", TORCH_BOX(&get_cutlass_moe_mm_data));
