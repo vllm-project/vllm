@@ -1,11 +1,146 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass, field
+
 import torch
 
 from vllm import _custom_ops as ops
 from vllm.triton_utils import triton
 from vllm.utils.math_utils import round_up
+
+# The stable one-block decode path is explicitly bounded to 256 routes.
+# Every larger input uses the near-linear radix path.
+RADIX_SORT_MIN_ROUTED_ENTRIES = 257
+
+
+@dataclass
+class MoEAlignRadixScratch:
+    max_num_tokens: int
+    topk: int
+    num_experts: int
+    device: torch.device
+    max_numel: int = field(init=False)
+    sort_workspace: torch.Tensor = field(init=False)
+    sorted_expert_ids: torch.Tensor = field(init=False)
+    compact_sorted_token_ids: torch.Tensor = field(init=False)
+    token_indices: torch.Tensor = field(init=False)
+    topk_ids_for_sort: torch.Tensor = field(init=False)
+    padded_expert_offsets: torch.Tensor = field(init=False)
+    unpadded_expert_offsets: torch.Tensor = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.max_numel = self.max_num_tokens * self.topk
+        self.sorted_expert_ids = torch.empty(
+            self.max_numel, dtype=torch.int32, device=self.device
+        )
+        self.compact_sorted_token_ids = torch.empty_like(self.sorted_expert_ids)
+        self.token_indices = torch.arange(
+            self.max_numel, dtype=torch.int32, device=self.device
+        )
+        self.topk_ids_for_sort = torch.empty_like(self.sorted_expert_ids)
+        self.padded_expert_offsets = torch.empty(
+            self.num_experts + 1, dtype=torch.int32, device=self.device
+        )
+        self.unpadded_expert_offsets = torch.empty(
+            self.num_experts + 1, dtype=torch.int64, device=self.device
+        )
+        workspace_size = torch.ops._moe_C.moe_permute_sort_workspace_size(
+            self.max_numel, self.num_experts
+        )
+        self.sort_workspace = torch.empty(
+            workspace_size, dtype=torch.int8, device=self.device
+        )
+
+    def validate(self, topk_ids: torch.Tensor, num_experts: int) -> None:
+        assert topk_ids.device == self.token_indices.device
+        assert topk_ids.size(1) == self.topk
+        assert topk_ids.numel() <= self.max_numel
+        assert num_experts == self.num_experts
+
+
+def _allocate_outputs(
+    topk_ids: torch.Tensor,
+    block_size: int,
+    num_experts: int,
+    pad_sorted_ids: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
+    if pad_sorted_ids:
+        max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
+    if topk_ids.numel() < num_experts:
+        max_num_tokens_padded = min(
+            topk_ids.numel() * block_size, max_num_tokens_padded
+        )
+    sorted_ids = torch.empty(
+        (max_num_tokens_padded,), dtype=torch.int32, device=topk_ids.device
+    )
+    max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
+    expert_ids = torch.empty(
+        (max_num_m_blocks,), dtype=torch.int32, device=topk_ids.device
+    )
+    num_tokens_post_pad = torch.empty((1), dtype=torch.int32, device=topk_ids.device)
+    return sorted_ids, expert_ids, num_tokens_post_pad
+
+
+def moe_align_block_size_stable_small(
+    topk_ids: torch.Tensor,
+    block_size: int,
+    num_experts: int,
+    expert_map: torch.Tensor | None = None,
+    pad_sorted_ids: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Deterministically align at most 256 flattened routed entries."""
+    if topk_ids.numel() >= RADIX_SORT_MIN_ROUTED_ENTRIES:
+        raise ValueError(
+            "small stable alignment supports at most "
+            f"{RADIX_SORT_MIN_ROUTED_ENTRIES - 1} routed entries"
+        )
+    sorted_ids, expert_ids, num_tokens_post_pad = _allocate_outputs(
+        topk_ids, block_size, num_experts, pad_sorted_ids
+    )
+    ops.moe_align_block_size_stable_small(
+        topk_ids,
+        num_experts,
+        block_size,
+        sorted_ids,
+        expert_ids,
+        num_tokens_post_pad,
+        expert_map,
+    )
+    return sorted_ids, expert_ids, num_tokens_post_pad
+
+
+def moe_align_block_size_radix(
+    topk_ids: torch.Tensor,
+    block_size: int,
+    num_experts: int,
+    scratch: MoEAlignRadixScratch,
+    expert_map: torch.Tensor | None = None,
+    pad_sorted_ids: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    scratch.validate(topk_ids, num_experts)
+    sorted_ids, expert_ids, num_tokens_post_pad = _allocate_outputs(
+        topk_ids, block_size, num_experts, pad_sorted_ids
+    )
+    numel = topk_ids.numel()
+    ops.moe_align_block_size_radix(
+        topk_ids,
+        num_experts,
+        block_size,
+        sorted_ids,
+        expert_ids,
+        num_tokens_post_pad,
+        scratch.sort_workspace,
+        scratch.sorted_expert_ids[:numel],
+        scratch.compact_sorted_token_ids[:numel],
+        scratch.token_indices[:numel],
+        scratch.topk_ids_for_sort[:numel],
+        scratch.padded_expert_offsets,
+        scratch.unpadded_expert_offsets,
+        expert_map,
+    )
+    return sorted_ids, expert_ids, num_tokens_post_pad
 
 
 def moe_align_block_size(
@@ -19,6 +154,12 @@ def moe_align_block_size(
     """
     Aligns the token distribution across experts to be compatible with block
     size for matrix multiplication.
+
+    This is the legacy compatibility entry point. It preserves the existing
+    expert-level grouping and padding behavior, but does not guarantee stable
+    within-expert token order. Callers that require deterministic within-expert
+    order should explicitly select `moe_align_block_size_stable_small` for at
+    most 256 routed entries or `moe_align_block_size_radix` for larger inputs.
 
     Note: In the case of expert_parallel, moe_align_block_size initially
     considers all experts as valid and aligns all tokens appropriately.
@@ -71,21 +212,9 @@ def moe_align_block_size(
     - The padding ensures that the total number of tokens is now divisible
         by block_size for proper block matrix operations.
     """
-    max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
-    if pad_sorted_ids:
-        max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
-    if topk_ids.numel() < num_experts:
-        max_num_tokens_padded = min(
-            topk_ids.numel() * block_size, max_num_tokens_padded
-        )
-    sorted_ids = torch.empty(
-        (max_num_tokens_padded,), dtype=torch.int32, device=topk_ids.device
+    sorted_ids, expert_ids, num_tokens_post_pad = _allocate_outputs(
+        topk_ids, block_size, num_experts, pad_sorted_ids
     )
-    max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
-    expert_ids = torch.empty(
-        (max_num_m_blocks,), dtype=torch.int32, device=topk_ids.device
-    )
-    num_tokens_post_pad = torch.empty((1), dtype=torch.int32, device=topk_ids.device)
 
     ops.moe_align_block_size(
         topk_ids,

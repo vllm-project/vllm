@@ -40,6 +40,25 @@ void moe_align_block_size(
     torch::stable::Tensor num_tokens_post_pad,
     std::optional<torch::stable::Tensor> maybe_expert_map);
 
+void moe_align_block_size_stable_small(
+    torch::stable::Tensor topk_ids, int64_t num_experts, int64_t block_size,
+    torch::stable::Tensor sorted_token_ids, torch::stable::Tensor experts_ids,
+    torch::stable::Tensor num_tokens_post_pad,
+    std::optional<torch::stable::Tensor> maybe_expert_map);
+
+void moe_align_block_size_radix(
+    torch::stable::Tensor topk_ids, int64_t num_experts, int64_t block_size,
+    torch::stable::Tensor sorted_token_ids, torch::stable::Tensor experts_ids,
+    torch::stable::Tensor num_tokens_post_pad,
+    torch::stable::Tensor sort_workspace,
+    torch::stable::Tensor sorted_expert_ids,
+    torch::stable::Tensor compact_sorted_token_ids,
+    torch::stable::Tensor token_indices,
+    torch::stable::Tensor topk_ids_for_sort,
+    torch::stable::Tensor padded_expert_offsets,
+    torch::stable::Tensor unpadded_expert_offsets,
+    std::optional<torch::stable::Tensor> maybe_expert_map);
+
 void batched_moe_align_block_size(
     int64_t max_tokens_per_batch, int64_t block_size,
     const torch::stable::Tensor& expert_num_tokens,

@@ -2254,6 +2254,60 @@ def moe_align_block_size(
     )
 
 
+def moe_align_block_size_stable_small(
+    topk_ids: torch.Tensor,
+    num_experts: int,
+    block_size: int,
+    sorted_token_ids: torch.Tensor,
+    experts_ids: torch.Tensor,
+    num_tokens_post_pad: torch.Tensor,
+    expert_map: torch.Tensor | None = None,
+) -> None:
+    torch.ops._moe_C.moe_align_block_size_stable_small(
+        topk_ids,
+        num_experts,
+        block_size,
+        sorted_token_ids,
+        experts_ids,
+        num_tokens_post_pad,
+        expert_map,
+    )
+
+
+def moe_align_block_size_radix(
+    topk_ids: torch.Tensor,
+    num_experts: int,
+    block_size: int,
+    sorted_token_ids: torch.Tensor,
+    experts_ids: torch.Tensor,
+    num_tokens_post_pad: torch.Tensor,
+    sort_workspace: torch.Tensor,
+    sorted_expert_ids: torch.Tensor,
+    compact_sorted_token_ids: torch.Tensor,
+    token_indices: torch.Tensor,
+    topk_ids_for_sort: torch.Tensor,
+    padded_expert_offsets: torch.Tensor,
+    unpadded_expert_offsets: torch.Tensor,
+    expert_map: torch.Tensor | None = None,
+) -> None:
+    torch.ops._moe_C.moe_align_block_size_radix(
+        topk_ids,
+        num_experts,
+        block_size,
+        sorted_token_ids,
+        experts_ids,
+        num_tokens_post_pad,
+        sort_workspace,
+        sorted_expert_ids,
+        compact_sorted_token_ids,
+        token_indices,
+        topk_ids_for_sort,
+        padded_expert_offsets,
+        unpadded_expert_offsets,
+        expert_map,
+    )
+
+
 def batched_moe_align_block_size(
     max_tokens_per_batch: int,
     block_size: int,
