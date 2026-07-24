@@ -50,6 +50,10 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
                         }
 
         merged = super().merge_kwargs(default_kwargs, runtime_kwargs)
+        if default_kwargs and "max_video_size_mb" in default_kwargs:
+            merged["max_video_size_mb"] = default_kwargs["max_video_size_mb"]
+        else:
+            merged.pop("max_video_size_mb", None)
         # fps and num_frames interact with each other, so if either is
         # overridden at request time, wipe the other from defaults to
         # avoid unintuitive cross-field interactions.
@@ -84,10 +88,34 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
         video_loader_backend = (
             kwargs.pop("video_backend", None) or envs.VLLM_VIDEO_LOADER_BACKEND
         )
+        max_video_size_mb = kwargs.pop("max_video_size_mb", None)
+        if max_video_size_mb is not None and (
+            not isinstance(max_video_size_mb, int) or max_video_size_mb < 0
+        ):
+            raise ValueError("max_video_size_mb must be a non-negative integer")
+        self.max_video_size_mb = max_video_size_mb
+        self.max_video_size_bytes = (
+            None
+            if max_video_size_mb in (None, 0)
+            else max_video_size_mb * 1024 * 1024
+        )
         self.kwargs = kwargs
         self.video_loader = VIDEO_LOADER_REGISTRY.load(video_loader_backend)
 
+    def _validate_video_size(self, size_bytes: int, *, source: str) -> None:
+        if self.max_video_size_bytes is None or size_bytes <= self.max_video_size_bytes:
+            return
+
+        size_mib = size_bytes / (1024 * 1024)
+        limit_mib = self.max_video_size_bytes / (1024 * 1024)
+        raise ValueError(
+            f"Refusing to load {source} because it is {size_mib:.2f} MiB, "
+            f"which exceeds the configured limit of {limit_mib:.2f} MiB. "
+            "Lower the input size or increase --max-video-size-mb."
+        )
+
     def load_bytes(self, data: bytes) -> tuple[npt.NDArray, dict[str, Any]]:
+        self._validate_video_size(len(data), source="video payload")
         return self.video_loader.load_bytes(
             data, num_frames=self.num_frames, **self.kwargs
         )
@@ -96,6 +124,9 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
         self, media_type: str, data: str
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         if media_type.lower() == "video/jpeg":
+            # Approximate the decoded payload size before processing frames.
+            raw_size = len(data) * 3 // 4
+            self._validate_video_size(raw_size, source="video/jpeg base64 payload")
             load_frame = partial(
                 self.image_io.load_base64,
                 "image/jpeg",
@@ -161,6 +192,10 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
         return self.load_bytes(pybase64.b64decode(data))
 
     def load_file(self, filepath: Path) -> tuple[npt.NDArray, dict[str, Any]]:
+        self._validate_video_size(
+            filepath.stat().st_size,
+            source=f"local video file {filepath}",
+        )
         with filepath.open("rb") as f:
             data = f.read()
 

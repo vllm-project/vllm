@@ -216,6 +216,11 @@ def test_video_media_io_backend_kwarg_not_passed_to_loader(
                     "video_backend should be consumed by VideoMediaIO, "
                     "not passed to loader"
                 )
+            if "max_video_size_mb" in kwargs:
+                raise AssertionError(
+                    "max_video_size_mb should be consumed by VideoMediaIO, "
+                    "not passed to loader"
+                )
             return FAKE_OUTPUT_1, {"received_kwargs": list(kwargs.keys())}
 
     with monkeypatch.context() as m:
@@ -228,6 +233,7 @@ def test_video_media_io_backend_kwarg_not_passed_to_loader(
             imageio,
             num_frames=10,
             video_backend="test_reject_video_backend_kwarg",
+            max_video_size_mb=1,
             other_kwarg="should_pass_through",
         )
 
@@ -236,6 +242,16 @@ def test_video_media_io_backend_kwarg_not_passed_to_loader(
         np.testing.assert_array_equal(frames, FAKE_OUTPUT_1)
         # Verify other kwargs are still passed through
         assert "other_kwarg" in metadata["received_kwargs"]
+
+
+def test_video_media_io_rejects_oversized_bytes(monkeypatch: pytest.MonkeyPatch):
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "test_reject_video_backend_kwarg")
+
+        videoio = VideoMediaIO(ImageMediaIO(), num_frames=10, max_video_size_mb=1)
+
+        with pytest.raises(ValueError, match="exceeds the configured limit"):
+            videoio.load_bytes(b"0" * (2 * 1024 * 1024))
 
 
 def test_video_media_io_backend_env_var_fallback(monkeypatch: pytest.MonkeyPatch):

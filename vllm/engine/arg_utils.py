@@ -431,6 +431,7 @@ class EngineArgs:
     trust_remote_code: bool = ModelConfig.trust_remote_code
     allowed_local_media_path: str = ModelConfig.allowed_local_media_path
     allowed_media_domains: list[str] | None = ModelConfig.allowed_media_domains
+    max_video_size_mb: int | None = ModelConfig.max_video_size_mb
     download_dir: str | None = LoadConfig.download_dir
     safetensors_load_strategy: SafetensorsLoadStrategy | None = (
         LoadConfig.safetensors_load_strategy
@@ -1258,6 +1259,9 @@ class EngineArgs:
             "--media-io-kwargs", **multimodal_kwargs["media_io_kwargs"]
         )
         multimodal_group.add_argument(
+            "--max-video-size-mb", **multimodal_kwargs["max_video_size_mb"]
+        )
+        multimodal_group.add_argument(
             "--mm-processor-kwargs", **multimodal_kwargs["mm_processor_kwargs"]
         )
         multimodal_group.add_argument(
@@ -1638,6 +1642,7 @@ class EngineArgs:
             trust_remote_code=self.trust_remote_code,
             allowed_local_media_path=self.allowed_local_media_path,
             allowed_media_domains=self.allowed_media_domains,
+            max_video_size_mb=self.max_video_size_mb,
             dtype=self.dtype,
             seed=self.seed,
             revision=self.revision,
