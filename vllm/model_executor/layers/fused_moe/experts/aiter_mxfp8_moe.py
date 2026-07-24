@@ -146,7 +146,7 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
         # call is captured under HIP graphs / torch.compile (a direct
         # ``aiter.fused_moe`` is opaque to the dispatcher). aiter requires FP32
         # routing weights / INT32 ids.
-        out = rocm_aiter_ops.fused_moe(
+        result = rocm_aiter_ops.fused_moe(
             hidden_states,
             w1,
             w2,
@@ -164,4 +164,18 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
             swiglu_limit=swiglu_limit,
             output_dtype=output.dtype,
         )
-        output.copy_(out.to(output.dtype))
+        result = result if result.dtype == output.dtype else result.to(output.dtype)
+        # Match the generic AITER MoE path: adopt the returned storage when the
+        # caller provided an owning contiguous output. Views and incompatible
+        # layouts retain copy semantics.
+        if (
+            output.shape == result.shape
+            and output.dtype == result.dtype
+            and output.device == result.device
+            and output.is_contiguous()
+            and result.is_contiguous()
+            and output._base is None
+        ):
+            output.set_(result)
+        else:
+            output.copy_(result)
