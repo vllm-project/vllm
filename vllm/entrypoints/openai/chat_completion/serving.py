@@ -717,6 +717,11 @@ class OpenAIServingChat(GenerateBaseServing):
                             token_ids=(
                                 as_list(output.token_ids) if include_token_ids else None
                             ),
+                            speculative_decoding_stats=(
+                                output.spec_decode_stats.to_dict()
+                                if output.spec_decode_stats is not None
+                                else None
+                            ),
                         )
 
                         finish_reason_sent[i] = True
@@ -1004,6 +1009,11 @@ class OpenAIServingChat(GenerateBaseServing):
                     else None
                 ),
                 routed_experts=routed_experts_b64,
+                speculative_decoding_stats=(
+                    output.spec_decode_stats.to_dict()
+                    if output.spec_decode_stats is not None
+                    else None
+                ),
             )
             choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
 

@@ -610,6 +610,10 @@ class CompletionResponseChoice(OpenAIBaseModel):
     # ``None`` if (a) the request was aborted before any forward pass,
     # or (b) ``enable_return_routed_experts`` is off server-side.
     routed_experts: str | None = None
+    # Per-sequence speculative-decoding stats (mean acceptance length +
+    # step-by-draft-length histogram). Present only under speculative decoding
+    # with --per-request-spec-decode-stats. See RequestSpecDecodeStats.to_dict().
+    speculative_decoding_stats: dict[str, Any] | None = None
 
 
 class CompletionResponse(OpenAIBaseModel):
@@ -649,6 +653,8 @@ class CompletionResponseStreamChoice(OpenAIBaseModel):
     # prompt tokens is put into choice to align with CompletionResponseChoice
     prompt_token_ids: list[int] | None = None
     token_ids: list[int] | None = None
+    # Per-sequence speculative-decoding stats; set on the choice's final chunk.
+    speculative_decoding_stats: dict[str, Any] | None = None
 
 
 class CompletionStreamResponse(OpenAIBaseModel):

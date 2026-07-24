@@ -418,6 +418,11 @@ class OpenAIServingCompletion(GenerateBaseServing):
                                     if request.return_token_ids
                                     else None
                                 ),
+                                speculative_decoding_stats=(
+                                    output.spec_decode_stats.to_dict()
+                                    if output.spec_decode_stats is not None
+                                    else None
+                                ),
                             )
                         ],
                     )
@@ -593,6 +598,11 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
                     routed_experts=routed_experts_b64,
+                    speculative_decoding_stats=(
+                        output.spec_decode_stats.to_dict()
+                        if output.spec_decode_stats is not None
+                        else None
+                    ),
                 )
                 choices.append(choice_data)
 
