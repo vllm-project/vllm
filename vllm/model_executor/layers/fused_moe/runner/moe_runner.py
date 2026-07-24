@@ -841,7 +841,7 @@ class MoERunner(MoERunnerInterface):
 
     #########################################################
     #
-    # Old methods from FusedMoEFactory layer. Remove when possible.
+    # Old methods from FusedMoE layer. Remove when possible.
     #
     #########################################################
 
