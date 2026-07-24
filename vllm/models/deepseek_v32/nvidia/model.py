@@ -40,7 +40,6 @@ from vllm.model_executor.models.utils import (
     sequence_parallel_chunk,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.v1.attention.backends.mla.sparse_utils import register_phys_shadow
 
 from .attention import DeepseekV32Attention
 from .fused_ops import fused_allreduce_rms_norm
@@ -203,8 +202,6 @@ class DeepseekV32Model(torch.nn.Module):
             dtype=torch.int32,
             device=self.device,
         )
-        register_phys_shadow(topk_indices_buffer)
-
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,

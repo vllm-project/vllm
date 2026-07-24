@@ -243,7 +243,6 @@ def triton_convert_req_index_to_global_index(
         return out, valid_counts
     return out
 
-
 def triton_filter_and_convert_dcp_index(
     req_id: torch.Tensor,
     block_table: torch.Tensor,
@@ -349,47 +348,3 @@ def triton_filter_and_convert_dcp_index(
         assert valid_counts is not None
         return out, valid_counts
     return out
-
-
-# --- Physical-index shadow (DSA index_topk_freq > 1) -------------------------
-# GLM-5.2 uses index_topk_freq=4: only ~1/4 of layers write a fresh top-k into
-# the single shared topk_indices_buffer; the rest reuse it. Since block_table
-# and req_id_per_token are constant within a decode step, the physical indices
-# (block_table lookup of the logical top-k) are identical across a freq-group.
-# Fresh layers convert once into a STABLE shadow of the logical buffer and
-# skip layers read it -- eliminating ~3/4 of the per-layer convert kernels.
-#
-# Invariant: shadow[j] == convert(logical[j]) row-wise. Whoever re-arranges
-# the logical buffer (e.g. the MTP draft compact between the multi-token
-# step-0 layout and the single-token steps-1+ layout) must apply the same
-# gather to the shadow.
-#
-# Shadows are registered ONLY at buffer creation time (model init, never
-# inside cudagraph capture) via register_phys_shadow; every other access is
-# the read-only phys_shadow lookup, so addresses are stable across graph
-# replays and no allocation can happen during capture.
-import weakref as _weakref  # noqa: E402
-
-_PHYS_SHADOWS: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
-
-
-def register_phys_shadow(topk_buf: torch.Tensor) -> None:
-    """Allocate the (physical-index, valid-count) shadow for a logical top-k
-    buffer. Call once where the buffer is created. The finalizer drops the
-    entry with the owning buffer, so a recycled id can never alias a stale
-    shadow."""
-    key = id(topk_buf)
-    if key not in _PHYS_SHADOWS:
-        _PHYS_SHADOWS[key] = (
-            torch.empty_like(topk_buf),
-            torch.empty(topk_buf.shape[0], dtype=torch.int32, device=topk_buf.device),
-        )
-        _weakref.finalize(topk_buf, _PHYS_SHADOWS.pop, key, None)
-
-
-def phys_shadow(
-    topk_buf: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor] | None:
-    """The registered shadow for this buffer, or None if it was never
-    registered. Never allocates; capture-safe."""
-    return _PHYS_SHADOWS.get(id(topk_buf))
