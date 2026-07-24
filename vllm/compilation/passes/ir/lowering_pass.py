@@ -25,10 +25,17 @@ logger = init_logger(__name__)
 class VllmIRLoweringPass(VllmInductorPass):
     """
     This pass lowers vLLM IR ops to their implementations the priority list.
+
+    When ``early=True``, only ops resolving to the ``native`` impl are
+    lowered. This variant runs at ``post_grad_custom_pre_pass``, before
+    Inductor's pointwise fusion patterns, so the native decomposition is
+    visible to fusion (see #41804). Kernel-backed impls are left for the
+    standard pass that runs after vLLM's own fusion passes.
     """
 
-    def __init__(self, vllm_config: VllmConfig) -> None:
+    def __init__(self, vllm_config: VllmConfig, *, early: bool = False) -> None:
         super().__init__(vllm_config)
+        self.early = early
         self.patterns = PatternMatcherPass(self.pass_name)
         self.selected_impls: dict[str, dict[str, str]] = defaultdict(lambda: {})
         self.ops = [ir_op.torch_op for ir_op in IrOp.registry.values()]
@@ -52,6 +59,12 @@ class VllmIRLoweringPass(VllmInductorPass):
         # Select and record the implementation, using fake args
         fake_args = fx.map_arg(node.args, lambda arg: arg.meta["val"])
         ir_op_impl = ir_op.dispatch(*fake_args)
+        # In early mode, only lower native impls — they need to be inlined
+        # before Inductor's pointwise fusion patterns run. Kernel-backed
+        # impls are opaque to Inductor anyway, so they wait for the
+        # standard pass after vLLM's fusion passes.
+        if self.early and ir_op_impl.provider != "native":
+            return
         self.selected_impls[ir_op.name][node.name] = ir_op_impl.provider
 
         # replace_by_example wants node args, not the fake tensors
@@ -62,10 +75,12 @@ class VllmIRLoweringPass(VllmInductorPass):
         # Defaults not present on node.args but required for replacement tracing
         bound_args = ir_op._py_signature.bind(*node.args)
         bound_args.apply_defaults()
-        # It is not safe to run functional passes (like DCE) on the replacements
-        # as they might not be functional.
+        # func_impl_fn clones inputs for inplace impls, so the replacement
+        # subgraph is always functional. Run inductor's functional passes
+        # (DCE, noop removal, reinplacing) on it so the lowered native
+        # decomposition fuses with surrounding ops downstream (#41804).
         match.replace_by_example(
-            ir_op_impl.func_impl_fn, bound_args.args, run_functional_passes=False
+            ir_op_impl.func_impl_fn, bound_args.args, run_functional_passes=True
         )
 
     @VllmInductorPass.time_and_log
@@ -98,6 +113,10 @@ class VllmIRLoweringPass(VllmInductorPass):
             ),
         )
 
+        if self.early:
+            # The late pass will catch any kernel-backed nodes left here.
+            return
+
         failed_nodes: list[fx.Node] = []
         failed_ops: set[str] = set()
         # Check no vllm_ir nodes were left in the graph
@@ -128,4 +147,4 @@ class VllmIRLoweringPass(VllmInductorPass):
             for name, p in priorities.items()
         )
 
-        return f"{super().uuid()}|{priorities_str}|{impl_uuids_str}"
+        return f"{super().uuid()}|early={self.early}|{priorities_str}|{impl_uuids_str}"
