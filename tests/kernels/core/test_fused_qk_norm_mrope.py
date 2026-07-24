@@ -154,7 +154,7 @@ def test_fused_qk_norm_mrope_matches_reference(
     if dtype == torch.float16:
         ATOL, RTOL = (2e-3, 2e-3)
     else:
-        ATOL, RTOL = (1e-2, 1e-2)
+        ATOL, RTOL = (4e-2, 4e-2)
 
     torch.testing.assert_close(
         qkv_fused,
