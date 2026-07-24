@@ -197,29 +197,25 @@ async def test_anthropic_structured_output(client: anthropic.AsyncAnthropic):
 @pytest.mark.asyncio
 async def test_anthropic_streaming_cache_usage(client: anthropic.AsyncAnthropic):
     async def get_stream_usage(resp):
-        prompt_tokens = None
-        usage = None
+        initial_usage = None
         async for chunk in resp:
             if (
                 chunk.type == "message_start"
                 and chunk.message is not None
                 and chunk.message.usage is not None
             ):
-                prompt_tokens = chunk.message.usage.input_tokens
-            elif chunk.type == "message_delta" and chunk.usage is not None:
-                usage = chunk.usage
+                initial_usage = chunk.message.usage
 
-        assert usage is not None
-        assert usage.input_tokens >= 0
-        assert usage.output_tokens >= 0
-        cache_created = usage.cache_creation_input_tokens
-        cache_read = usage.cache_read_input_tokens
+        assert initial_usage is not None
+        assert initial_usage.input_tokens >= 0
+        assert initial_usage.output_tokens >= 0
+        cache_created = initial_usage.cache_creation_input_tokens
+        cache_read = initial_usage.cache_read_input_tokens
         assert cache_read is not None
         assert cache_created is not None
         assert cache_created >= 0
         assert cache_read >= 0
-        assert prompt_tokens == usage.input_tokens + cache_created + cache_read
-        return usage
+        return initial_usage
 
     request = dict(
         model="claude-3-7-sonnet-latest",

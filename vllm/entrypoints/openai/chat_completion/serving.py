@@ -524,11 +524,22 @@ class OpenAIServingChat(GenerateBaseServing):
 
                         # if continuous usage stats are requested, add it
                         if include_continuous_usage:
-                            chunk.usage = UsageInfo(
+                            initial_usage = UsageInfo(
                                 prompt_tokens=num_prompt_tokens,
                                 completion_tokens=0,
                                 total_tokens=num_prompt_tokens,
                             )
+                            prompt_tokens_details = _make_prompt_tokens_details(
+                                self.enable_prompt_tokens_details,
+                                num_cached_tokens,
+                                num_cache_creation_tokens,
+                                mm_token_counts,
+                            )
+                            if prompt_tokens_details is not None:
+                                initial_usage.prompt_tokens_details = (
+                                    prompt_tokens_details
+                                )
+                            chunk.usage = initial_usage
 
                         data = chunk.model_dump_json(exclude_unset=True)
                         yield f"data: {data}\n\n"

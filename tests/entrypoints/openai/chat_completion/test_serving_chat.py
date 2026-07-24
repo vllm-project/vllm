@@ -639,6 +639,8 @@ def _build_minimal_metrics_serving_chat(
 def _make_metrics_request_output(
     metrics: RequestStateStats | None = _PER_REQUEST_STATS,
     token_ids: tuple[int, ...] = (100, 101),
+    num_cached_tokens: int | None = None,
+    num_cache_creation_tokens: int | None = None,
 ) -> RequestOutput:
     return RequestOutput(
         request_id="test-id",
@@ -657,6 +659,8 @@ def _make_metrics_request_output(
         ],
         finished=True,
         metrics=metrics,
+        num_cached_tokens=num_cached_tokens,
+        num_cache_creation_tokens=num_cache_creation_tokens,
     )
 
 
@@ -669,11 +673,12 @@ async def _single_request_output(
 async def _collect_metrics_stream_chunks(
     serving: OpenAIServingChat,
     request: ChatCompletionRequest,
+    request_output: RequestOutput | None = None,
 ) -> list[dict[str, Any]]:
     chunks: list[dict[str, Any]] = []
     async for line in serving.chat_completion_stream_generator(
         request,
-        _single_request_output(_make_metrics_request_output()),
+        _single_request_output(request_output or _make_metrics_request_output()),
         "chatcmpl-test-id",
         "test-model",
         conversation=[{"role": "user", "content": "Test"}],
@@ -779,6 +784,34 @@ async def test_chat_streaming_metrics_ride_on_usage_chunk():
     usage_chunks = [chunk for chunk in chunks if chunk.get("usage")]
     assert usage_chunks
     assert usage_chunks[-1]["metrics"]["time_to_first_token_ms"] == pytest.approx(500.0)
+
+
+@pytest.mark.asyncio
+async def test_chat_streaming_initial_usage_includes_prompt_cache_details():
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving.enable_prompt_tokens_details = True
+    chunks = await _collect_metrics_stream_chunks(
+        serving,
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "Test prompt"}],
+            max_tokens=10,
+            stream=True,
+            stream_options={
+                "include_usage": True,
+                "continuous_usage_stats": True,
+            },
+        ),
+        _make_metrics_request_output(
+            num_cached_tokens=2,
+            num_cache_creation_tokens=1,
+        ),
+    )
+
+    initial_usage = chunks[0]["usage"]
+    details = initial_usage["prompt_tokens_details"]
+    assert details["cached_tokens"] == 2
+    assert details["created_cache_tokens"] == 1
 
 
 @dataclass

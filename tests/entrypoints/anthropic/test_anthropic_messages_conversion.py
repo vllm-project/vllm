@@ -1172,28 +1172,20 @@ class TestMessageStartIncludesTypeAndRole:
 
 
 class TestStreamingCacheUsageSemantics:
-    """Locks in the documented streaming behavior of cache usage fields.
-
-    vLLM's OpenAI chat completion streaming only attaches
-    ``prompt_tokens_details`` to the terminal usage chunk. The Anthropic layer
-    mirrors that contract: cache fields are omitted on ``message_start`` (key
-    absence signals "unknown") and populated on ``message_delta`` (the final
-    cumulative count). This is intentionally consistent with vLLM's OpenAI
-    behavior, even though Anthropic's upstream API populates cache fields on
-    ``message_start``; closing that gap requires plumbing cache info into the
-    first chunk at the OpenAI layer, which is out of scope here.
-    """
+    """Locks in cache usage fields on Anthropic streaming events."""
 
     @pytest.mark.asyncio
-    async def test_streaming_cache_fields_absent_then_populated(self):
-        """First chunk lacks prompt_tokens_details (vLLM contract);
-        message_start omits cache fields. The final chunk carries
-        prompt_tokens_details, so message_delta carries resolved values."""
-
+    async def test_streaming_cache_fields_populated(self):
         async def sse_input():
             yield _make_stream_chunk(
                 delta=DeltaMessage(role="assistant", content="hi"),
-                usage=UsageInfo(prompt_tokens=100, total_tokens=100),
+                usage=UsageInfo(
+                    prompt_tokens=100,
+                    total_tokens=100,
+                    prompt_tokens_details=PromptTokenUsageInfo(
+                        cached_tokens=80, created_cache_tokens=10
+                    ),
+                ),
             )
             yield _make_stream_chunk(finish_reason="stop")
             yield _make_stream_chunk(
@@ -1215,14 +1207,12 @@ class TestStreamingCacheUsageSemantics:
             output.append(event)
         events = _parse_sse_events(output)
 
-        # message_start: cache fields unknown → omitted from JSON entirely.
         start_usage = events[0][1]["message"]["usage"]
         assert events[0][0] == "message_start"
-        assert start_usage["input_tokens"] == 100
-        assert "cache_read_input_tokens" not in start_usage
-        assert "cache_creation_input_tokens" not in start_usage
+        assert start_usage["input_tokens"] == 10
+        assert start_usage["cache_read_input_tokens"] == 80
+        assert start_usage["cache_creation_input_tokens"] == 10
 
-        # message_delta: authoritative usage with cache fields populated.
         delta_usage = next(
             data["usage"] for ev, data in events if ev == "message_delta"
         )
@@ -1232,13 +1222,16 @@ class TestStreamingCacheUsageSemantics:
 
     @pytest.mark.asyncio
     async def test_streaming_no_cache_hit(self):
-        """When the final chunk reports cached_tokens=0, message_delta carries
-        cache fields = 0 (cache miss); message_start still omits them."""
-
         async def sse_input():
             yield _make_stream_chunk(
                 delta=DeltaMessage(role="assistant"),
-                usage=UsageInfo(prompt_tokens=50, total_tokens=50),
+                usage=UsageInfo(
+                    prompt_tokens=50,
+                    total_tokens=50,
+                    prompt_tokens_details=PromptTokenUsageInfo(
+                        cached_tokens=0, created_cache_tokens=0
+                    ),
+                ),
             )
             yield _make_stream_chunk(finish_reason="stop")
             yield _make_stream_chunk(
@@ -1265,8 +1258,8 @@ class TestStreamingCacheUsageSemantics:
             data["usage"] for ev, data in events if ev == "message_delta"
         )
         assert start_usage["input_tokens"] == 50
-        assert "cache_read_input_tokens" not in start_usage
-        assert "cache_creation_input_tokens" not in start_usage
+        assert start_usage["cache_read_input_tokens"] == 0
+        assert start_usage["cache_creation_input_tokens"] == 0
         assert delta_usage["input_tokens"] == 50  # 50 - 0 - 0
         assert delta_usage["cache_read_input_tokens"] == 0
         assert delta_usage["cache_creation_input_tokens"] == 0
