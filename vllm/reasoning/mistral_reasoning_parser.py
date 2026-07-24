@@ -5,6 +5,8 @@ from collections.abc import Iterable, Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING
 
+from mistral_common.tokens.tokenizers.base import SpecialTokens
+
 from vllm.reasoning import ReasoningParser
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.tokenizers.mistral import MistralTokenizer
@@ -48,24 +50,76 @@ class MistralReasoningParser(BaseThinkingReasoningParser):
                 "tokens in the tokenizer!"
             )
 
+        self._turn_boundary_token_ids: frozenset[int] = (
+            self._resolve_turn_boundary_token_ids(tokenizer)
+        )
+
+    def _resolve_turn_boundary_token_ids(
+        self, tokenizer: MistralTokenizer
+    ) -> frozenset[int]:
+        """Resolve the token ids that close a turn preceding the current one.
+
+        Real `[THINK]`/`[/THINK]` control tokens can only enter the prompt from
+        a system message think chunk, a tool message think chunk, or a prior
+        assistant turn.
+
+        Args:
+            tokenizer: The Mistral tokenizer used to resolve special tokens.
+
+        Returns:
+            The resolved boundary token ids, excluding the think tokens.
+        """
+
+        boundary_names = (
+            SpecialTokens.end_system,
+            SpecialTokens.end_tool_results,
+            SpecialTokens.eos,
+        )
+        boundary_token_ids: set[int] = set()
+        for name in boundary_names:
+            try:
+                boundary_token_ids.add(tokenizer.tokenizer.get_special_token(name))
+            except ValueError:
+                # Tokenizer version without this control token; skip it.
+                continue
+        return frozenset(boundary_token_ids)
+
     @cached_property
     def start_token(self) -> str:
         """The token that starts reasoning content."""
-        from mistral_common.tokens.tokenizers.base import SpecialTokens
-
         return SpecialTokens.begin_think
 
     @cached_property
     def end_token(self) -> str:
         """The token that ends reasoning content."""
-        from mistral_common.tokens.tokenizers.base import SpecialTokens
-
         return SpecialTokens.end_think
 
-    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        has_eot_token = False
+    def _current_turn_start_index(self, input_ids: Sequence[int]) -> int:
+        """Return the index of the first token of the current assistant turn.
 
-        for id in reversed(input_ids):
+        Args:
+            input_ids: The full token sequence to inspect.
+
+        Returns:
+            The start index of the current turn, or 0 if no boundary is found.
+        """
+        for i in range(len(input_ids) - 1, -1, -1):
+            if input_ids[i] in self._turn_boundary_token_ids:
+                return i + 1
+        return 0
+
+    def _reasoning_ended_in_current_turn(self, input_ids: Sequence[int]) -> bool:
+        """Whether the current assistant turn's reasoning has ended.
+
+        Args:
+            input_ids: The full token sequence to inspect.
+
+        Returns:
+            True if reasoning ended in the current turn, False otherwise.
+        """
+        start_index = self._current_turn_start_index(input_ids)
+        has_eot_token = False
+        for id in reversed(input_ids[start_index:]):
             if id == self.start_token_id:
                 # Reasoning ends only if a BOT token is found before a EOT token.
                 return has_eot_token
@@ -73,14 +127,19 @@ class MistralReasoningParser(BaseThinkingReasoningParser):
                 has_eot_token = True
         return False
 
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
+        return self._reasoning_ended_in_current_turn(input_ids)
+
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:
         if self.end_token_id in delta_ids:
             return True
-        # Grammar's think? is optional — if [THINK] was never generated,
-        # reasoning was skipped entirely.
-        return self.start_token_id not in input_ids
+        # Grammar's think? is optional — if [THINK] was never generated in the
+        # current turn, reasoning was skipped entirely. Scope the check to the
+        # current turn so a prompt-injected [THINK] example is not counted.
+        start_index = self._current_turn_start_index(input_ids)
+        return self.start_token_id not in input_ids[start_index:]
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """
