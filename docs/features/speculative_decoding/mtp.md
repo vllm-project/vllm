@@ -30,6 +30,12 @@ Gemma 4 Unified variant (12B) uses `model_type: gemma4_unified_assistant`.
 vLLM maps both to `Gemma4MTPModel` internally and wires the assistant layers
 to share KV cache with the target model.
 
+When the target model is quantized, only set `quantization` inside
+`speculative_config` if the assistant checkpoint is quantized in the same way.
+For example, a compressed-tensors target can still use an unquantized assistant;
+in that case, leave the speculative `quantization` field unset so the assistant
+weights are loaded according to their own checkpoint metadata.
+
 If an older vLLM release logs `SpeculativeConfig(method='draft_model', ...)`
 for a Gemma 4 assistant checkpoint, that release is treating the assistant as a
 generic draft model and may fail during initialization for multimodal Gemma 4
