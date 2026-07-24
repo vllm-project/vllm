@@ -117,6 +117,15 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "cutlass_scaled_mm(Tensor! out, Tensor a,"
       "                  Tensor b, Tensor a_scales,"
       "                  Tensor b_scales, Tensor? bias) -> ()");
+  ops.def(
+      "cutlass_scaled_mm_gemma4_gated(Tensor! out, Tensor a,"
+      "                               Tensor b, Tensor a_scales,"
+      "                               Tensor b_scales) -> ()");
+  ops.def(
+      "cutlass_scaled_mm_gemma4_gated_amax(Tensor! out, Tensor! row_amax,"
+      "                                    Tensor a, Tensor b,"
+      "                                    Tensor a_scales,"
+      "                                    Tensor b_scales) -> ()");
 
   // CUTLASS w8a8 GEMM, supporting asymmetric per-tensor or per-row/column
   // quantization.
@@ -629,6 +638,10 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 #ifndef USE_ROCM
   // CUTLASS scaled_mm ops
   ops.impl("cutlass_scaled_mm", TORCH_BOX(&cutlass_scaled_mm));
+  ops.impl("cutlass_scaled_mm_gemma4_gated",
+           TORCH_BOX(&cutlass_scaled_mm_gemma4_gated));
+  ops.impl("cutlass_scaled_mm_gemma4_gated_amax",
+           TORCH_BOX(&cutlass_scaled_mm_gemma4_gated_amax));
   ops.impl("cutlass_scaled_mm_azp", TORCH_BOX(&cutlass_scaled_mm_azp));
   ops.impl("cutlass_moe_mm", TORCH_BOX(&cutlass_moe_mm));
   ops.impl("get_cutlass_moe_mm_data", TORCH_BOX(&get_cutlass_moe_mm_data));

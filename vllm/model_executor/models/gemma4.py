@@ -43,6 +43,9 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8DynamicTokenSym,
+)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -242,8 +245,18 @@ class Gemma4MLP(nn.Module):
         self.act_fn = get_act_and_mul_fn(hidden_activation)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
+        fused_gated = getattr(
+            self.gate_up_proj.quant_method, "apply_gemma4_gated_amax", None
+        )
+        if (
+            fused_gated is not None
+            and getattr(self.down_proj, "input_quant_key", None)
+            == kFp8DynamicTokenSym
+        ):
+            x = fused_gated(self.gate_up_proj, x)
+        else:
+            gate_up, _ = self.gate_up_proj(x)
+            x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
 
