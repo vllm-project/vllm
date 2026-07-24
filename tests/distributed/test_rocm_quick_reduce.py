@@ -23,6 +23,8 @@ from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
+from ..utils import multi_gpu_test
+
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(),
     reason="ROCm-only quick-reduce tests",
@@ -149,6 +151,116 @@ def _run_two_gpu_quick_allreduce_test(
         f"finished 2-GPU case: quant={quant_level} "
         f"dtype={dtype_name} cast_bf16={cast_bf16}"
     )
+
+
+CUDAGRAPH_WORLD_SIZE = 2
+CUDAGRAPH_ROUNDS = 10
+CUDAGRAPH_NUM_ELEMENTS = 1 << 21  # 2M fp16 = 4 MB, above the quick-reduce thresholds
+
+
+def _quick_allreduce_cudagraph_worker(
+    rank: int,
+    world_size: int,
+    port: int,
+    quant_level: str,
+):
+    # FP keeps the all-reduce bit-exact for small fp16 integers, so every
+    # replayed round can be checked exactly.
+    os.environ["VLLM_ROCM_QUICK_REDUCE_QUANTIZATION"] = quant_level
+    os.environ["VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16"] = "0"
+    _log(f"cudagraph worker start: rank={rank} quant={quant_level}")
+
+    device = torch.device(f"cuda:{rank}")
+    torch.accelerator.set_device_index(device)
+    dist.init_process_group(
+        backend="gloo",
+        init_method=f"tcp://127.0.0.1:{port}",
+        rank=rank,
+        world_size=world_size,
+    )
+
+    qar = None
+    try:
+        from vllm.distributed.device_communicators.quick_all_reduce import (
+            QuickAllReduce,
+        )
+
+        qar = QuickAllReduce(group=dist.GroupMember.WORLD, device=rank)
+        assert not qar.disabled
+
+        N = CUDAGRAPH_NUM_ELEMENTS
+        inp = torch.empty(N, dtype=torch.float16, device=device)
+        out = torch.empty(N, dtype=torch.float16, device=device)
+        assert qar.should_quick_allreduce(inp)
+
+        # Every rank contributes the same value v in a round, so the true
+        # cross-rank all-reduce sum is simply world_size * v.
+        def expected(v):
+            return float(world_size * v)
+
+        if rank == 0:
+            print(
+                f"[repro] world_size={world_size} elems={N} regime={quant_level} fp16",
+                flush=True,
+            )
+
+        # Warmup, then capture a graph with EXACTLY ONE quick-reduce (isolated
+        # qr, so it is the sole writer of its flag slot -- the condition that
+        # triggers the stale-flag bug).
+        inp.fill_(1.0)
+        qar.quick_all_reduce(inp, out=out)
+        torch.accelerator.synchronize()
+        dist.barrier()
+
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            qar.quick_all_reduce(inp, out=out)
+        torch.accelerator.synchronize()
+        dist.barrier()
+
+        for v in range(CUDAGRAPH_ROUNDS):
+            inp.fill_(float(v))  # in-place: same value on every rank
+            dist.barrier()
+            g.replay()
+            torch.accelerator.synchronize()
+            dist.barrier()
+            got = out.float()
+            expect = expected(v)
+            if rank == 0:
+                print(f"round {v}: got={got[:10]}, expected={expect}", flush=True)
+            mismatch = ~torch.isclose(got, torch.full_like(got, expect))
+            num_mismatch = int(mismatch.sum().item())
+            assert num_mismatch == 0, (
+                f"rank={rank} round={v} expected={expect} "
+                f"mismatched {num_mismatch}/{got.numel()} elements; "
+                f"unique wrong values={torch.unique(got[mismatch])[:8].tolist()}"
+            )
+        _log(f"cudagraph worker complete: rank={rank} rounds={CUDAGRAPH_ROUNDS}")
+    finally:
+        if qar is not None:
+            qar.close()
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
+def _run_cudagraph_replay_test(*, world_size: int, quant_level: str):
+    _log(f"launch {world_size}-GPU cudagraph replay case: quant={quant_level}")
+    ctx = mp.get_context("spawn")
+    port = get_open_port()
+    procs = []
+
+    for rank in range(world_size):
+        proc = ctx.Process(
+            target=_quick_allreduce_cudagraph_worker,
+            args=(rank, world_size, port, quant_level),
+        )
+        proc.start()
+        procs.append(proc)
+
+    for proc in procs:
+        proc.join(timeout=120)
+        assert proc.exitcode == 0, f"worker exited with code {proc.exitcode}"
+    _log(f"finished {world_size}-GPU cudagraph replay case: quant={quant_level}")
 
 
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -726,6 +838,18 @@ def test_quick_allreduce_two_gpu_correctness(quant_level):
         quant_level=quant_level,
         dtype_name="float16",
         cast_bf16=False,
+    )
+
+
+@multi_gpu_test(num_gpus=CUDAGRAPH_WORLD_SIZE)
+def test_quick_allreduce_cudagraph_replay():
+    # Regression test for the stale flag_color bug: a quick-reduce captured in a
+    # CUDA graph must return correct results on every replay, not the data from
+    # a previous round.
+    _log("cudagraph replay case")
+    _run_cudagraph_replay_test(
+        world_size=CUDAGRAPH_WORLD_SIZE,
+        quant_level="FP",
     )
 
 
