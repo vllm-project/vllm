@@ -1675,6 +1675,24 @@ class NixlBaseConnectorWorker:
             )
             return self._remote_agents[engine_id][remote_worker_key]
 
+        # Compare physical regions, not self.num_regions (doubled by
+        # FlashInfer's virtual K/V split).
+        num_local_regions = len(self.block_len_per_layer)
+        if (
+            self.pp_size > 1
+            and len(nixl_agent_meta.kv_caches_base_addr) > num_local_regions
+        ):
+            # This worker holds a PP layer-slice; the PP=1 remote registered
+            # the full model. Slice its regions to our layer window so the
+            # logic below sees congruent local/remote lists.
+            start = self._remote_region_offset
+            end = start + num_local_regions
+            assert len(nixl_agent_meta.kv_caches_base_addr) >= end
+            nixl_agent_meta.kv_caches_base_addr = nixl_agent_meta.kv_caches_base_addr[
+                start:end
+            ]
+            nixl_agent_meta.block_lens = nixl_agent_meta.block_lens[start:end]
+
         ### Register remote engine in TransferTopology (idempotent).
         assert self.transfer_topo is not None
         transfer_topo = self.transfer_topo
@@ -2308,6 +2326,8 @@ class NixlBaseConnectorWorker:
                     hb_info.tp_size,
                     hb_info.dcp_size,
                     hb_info.pcp_size,
+                    hb_info.pp_size,
+                    self._hb_handshake_notif_only and hb_info.pp_size > 1,
                 )
                 is not None
             ):
