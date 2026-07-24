@@ -45,16 +45,30 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_LL_BF16_WARMUP_MODEL_SHAPES: tuple[tuple[int, int], ...] = (
-    (6144, 264),  # Inkling
-    (7168, 256),  # DSV3
-    (7168, 384),  # DSV4-Pro
-    (14400, 256),  # DSV4-Flash
-)
 _LL_BF16_WARMUP_M_RANGE = range(1, 17)
 
 
-def _warmup_ll_bf16_router_gemm() -> None:
+def _ll_bf16_router_shapes_from_model(
+    model: torch.nn.Module,
+) -> tuple[tuple[int, int], ...]:
+    from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
+
+    shapes: set[tuple[int, int]] = set()
+    for module in model.modules():
+        if not isinstance(module, GateLinear):
+            continue
+        weight = getattr(module, "weight", None)
+        if not isinstance(weight, torch.Tensor):
+            continue
+        if weight.dim() != 2 or weight.dtype != torch.bfloat16:
+            continue
+        n, k = weight.shape
+        if k % 8 == 0:
+            shapes.add((int(k), int(n)))
+    return tuple(sorted(shapes))
+
+
+def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
     from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
         is_available as is_ll_bf16_gemm_available,
     )
@@ -65,9 +79,16 @@ def _warmup_ll_bf16_router_gemm() -> None:
     if not is_ll_bf16_gemm_available():
         return
 
-    logger.info("Warming up ll_bf16 router GEMM kernels.")
+    shapes = _ll_bf16_router_shapes_from_model(model)
+    if not shapes:
+        logger.info(
+            "Skipping ll_bf16 router GEMM warmup: no bf16 GateLinear shapes found."
+        )
+        return
+
+    logger.info("Warming up ll_bf16 router GEMM kernels for shapes: %s.", shapes)
     ll_bf16_gemm_kernel.warmup(
-        shapes=_LL_BF16_WARMUP_MODEL_SHAPES,
+        shapes=shapes,
         m_values=_LL_BF16_WARMUP_M_RANGE,
     )
 
@@ -123,7 +144,7 @@ def kernel_warmup(worker: "Worker"):
         flashinfer_autotune(worker.model_runner)
 
     if current_platform.has_device_capability(90):
-        _warmup_ll_bf16_router_gemm()
+        _warmup_ll_bf16_router_gemm(worker.get_model())
 
     # FlashInfer attention warmup
     # Only warmup if the model has FlashInfer attention groups
