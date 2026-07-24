@@ -205,3 +205,28 @@ def test_target_worker_keys_preserve_pcp_identity() -> None:
     )
 
     assert keys == [(0, 0), (1, 0)]
+
+
+def test_pp_stage_routing_matches_equal_size_stage() -> None:
+    assert TransferTopology.get_target_remote_pp_ranks(
+        local_pp_rank=1,
+        local_pp_size=2,
+        remote_pp_size=2,
+    ) == [1]
+
+
+def test_pp_stage_routing_maps_sharded_local_to_unsharded_remote() -> None:
+    assert TransferTopology.get_target_remote_pp_ranks(
+        local_pp_rank=1,
+        local_pp_size=2,
+        remote_pp_size=1,
+    ) == [0]
+
+
+def test_pp_stage_routing_rejects_ambiguous_remote_stages() -> None:
+    with pytest.raises(NotImplementedError, match="multiple remote PP stages"):
+        TransferTopology.get_target_remote_pp_ranks(
+            local_pp_rank=0,
+            local_pp_size=1,
+            remote_pp_size=2,
+        )
