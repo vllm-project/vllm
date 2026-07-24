@@ -181,6 +181,18 @@ pull_request_rules:
       add:
         - performance
 
+- name: label-quantization
+  description: Automatically apply quantization label
+  conditions:
+    - label != stale
+    - or:
+      - files~=^vllm/model_executor/layers/quantization/
+      - title~=(?i)quant
+  actions:
+    label:
+      add:
+        - quantization
+
 - name: label-qwen
   description: Automatically apply qwen label
   conditions:
