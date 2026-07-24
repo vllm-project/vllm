@@ -518,6 +518,20 @@ class FusedMoEExperts(ABC):
         """
         return False
 
+    @property
+    def expects_aiter_expert_mask(self) -> bool:
+        """
+        Whether this experts kernel consumes the AITER 0/1 ``expert_mask``
+        (shape ``[global_num_experts + 1]``) rather than the canonical
+        global->local ``expert_map`` (local slot index, -1 for non-local).
+
+        Only AITER fused-MoE kernels reinterpret their ``expert_map`` argument
+        as a mask; every other kernel (Triton, Marlin, DeepGEMM, ...) indexes
+        weights by the -1/local-slot map and would misroute if handed the mask.
+        Callers select the right tensor via ``RoutedExperts.expert_map_for``.
+        """
+        return False
+
     @staticmethod
     @abstractmethod
     def activation_format() -> FusedMoEActivationFormat:

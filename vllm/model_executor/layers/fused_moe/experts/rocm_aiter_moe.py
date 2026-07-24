@@ -414,6 +414,12 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         # internally via a single fused kernel.
         return not self.moe_config.use_mori_kernels
 
+    @property
+    def expects_aiter_expert_mask(self) -> bool:
+        # rocm_aiter_fused_experts reinterprets its expert_map arg as the
+        # AITER 0/1 expert_mask (see rocm_aiter_fused_experts_impl).
+        return True
+
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard

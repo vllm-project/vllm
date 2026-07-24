@@ -27,6 +27,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 
 if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEExperts
     from vllm.model_executor.layers.fused_moe.runner.shared_experts import SharedExperts
 
 
@@ -228,6 +229,22 @@ class RoutedExperts(PluggableLayer):
         return (
             self._expert_map if not self.rocm_aiter_fmoe_enabled else self.expert_mask
         )
+
+    def expert_map_for(
+        self, experts: "FusedMoEExperts"
+    ) -> torch.Tensor | None:
+        """Routing table in the representation ``experts`` expects.
+
+        AITER fused-MoE kernels consume the 0/1 ``expert_mask``; every other
+        kernel needs the canonical global->local ``expert_map`` (-1 for
+        non-local experts). The ``expert_map`` property alone is not enough
+        because it returns the mask for *any* consumer whenever AITER fused MoE
+        is enabled, which misroutes non-AITER kernels (e.g. the Triton
+        moe_wna16 / emulation experts) under EP.
+        """
+        if experts.expects_aiter_expert_mask:
+            return self.expert_mask
+        return self._expert_map
 
     def update_expert_map_info(self):
         # Update local attributes from ExpertMapManager

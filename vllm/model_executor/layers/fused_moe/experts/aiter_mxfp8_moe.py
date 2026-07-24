@@ -69,6 +69,12 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
         # aiter.fused_moe MXFP8-quantizes the activations internally.
         return True
 
+    @property
+    def expects_aiter_expert_mask(self) -> bool:
+        # apply() consumes the AITER 0/1 expert_mask (branches on
+        # rocm_aiter_fmoe_enabled expecting the mask under EP).
+        return True
+
     @staticmethod
     def _supports_current_device() -> bool:
         # Device capability only (gfx950 / MX-capable ROCm). The flydsl package

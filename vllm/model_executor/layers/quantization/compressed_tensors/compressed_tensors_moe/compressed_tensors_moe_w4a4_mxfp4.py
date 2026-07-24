@@ -227,7 +227,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             topk_ids,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,
-            expert_map=layer.expert_map,
+            expert_map=layer.expert_map_for(self.moe_kernel.fused_experts),
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
