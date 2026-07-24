@@ -161,3 +161,22 @@ steps:
     - tests/v1/e2e/test_hybrid_chunked_prefill.py
   commands:
     - pytest -v -s v1/e2e/test_hybrid_chunked_prefill.py
+
+- label: Hybrid Mamba prefix cache correctness (4xH200)
+  key: v1-e2e-hybrid-mamba-prefix-cache-4xh200
+  # Two e2e tests x two engine boots each, incl. a 120B BF16 TP4 model
+  # (~240 GB weights: needs 141 GB/GPU H200-class capacity; validated on
+  # GB200 — 4x80GB H100 would leave no headroom at gpu_mem_util=0.8).
+  # Non-gating because of the hardware footprint, but any red here is a
+  # real #43559-class regression: the tests carry no xfail markers.
+  timeout_in_minutes: 240
+  device: h200
+  num_devices: 4
+  optional: true
+  source_file_dependencies:
+    - vllm/v1/core/
+    - vllm/v1/worker/gpu_model_runner.py
+    - vllm/v1/engine/llm_engine.py
+    - tests/v1/e2e/test_hybrid_mamba_prefix_cache_correctness.py
+  commands:
+    - pytest -v -s -rA v1/e2e/test_hybrid_mamba_prefix_cache_correctness.py
