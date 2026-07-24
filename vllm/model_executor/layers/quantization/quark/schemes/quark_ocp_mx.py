@@ -145,7 +145,7 @@ class QuarkOCP_MX(QuarkScheme):
         from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
         w_q, w_s = dynamic_mxfp4_quant(layer.weight)
-        layer.weight_scale = torch.nn.Parameter(w_s.T.contiguous(), requires_grad=False)
+        layer.weight_scale = torch.nn.Parameter(w_s, requires_grad=False)
         layer.weight = torch.nn.Parameter(w_q, requires_grad=False)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
