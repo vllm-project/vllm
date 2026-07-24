@@ -81,10 +81,8 @@
 #                                                     the above test.) Also run if model initialization test file is modified.      #
 #   * [Language Models Tests (Extra Standard) %N]: Shard slow subset of standard language models tests. Only run when model         #
 #                                                  source is modified, or when specified test files are modified.                   #
-#   * [Language Models Tests (Hybrid) %N]: Install fast path packages for testing against transformers (mamba, conv1d) and to       #
-#                                          run plamo2 model in vLLM.                                                                #
-#   * [Language Models Test (Extended Generation)]: Install fast path packages for testing against transformers (mamba, conv1d)     #
-#                                                   and to run plamo2 model in vLLM.                                                #
+#   * [Language Models Tests (Hybrid) %N]: Install fast path packages for testing against transformers (mamba, conv1d).             #
+#   * [Language Models Test (Extended Generation)]: Install fast path packages for testing against transformers (mamba, conv1d).    #
 #   * [Multi-Modal Models (Standard) 1-4]:                                                                                          #
 #     - Do NOT remove `VLLM_WORKER_MULTIPROC_METHOD=spawn` setting as ROCm requires this for certain models to function.            #
 #   * [Transformers Nightly Models]: Whisper needs `VLLM_WORKER_MULTIPROC_METHOD=spawn` to avoid deadlock.                          #
