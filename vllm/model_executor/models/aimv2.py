@@ -180,7 +180,9 @@ class AIMv2Transformer(nn.Module):
             ]
         )
         if require_post_norm:
-            self.post_trunk_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            self.post_trunk_norm: RMSNorm | None = RMSNorm(
+                config.hidden_size, eps=config.rms_norm_eps
+            )
         else:
             self.post_trunk_norm = None
 
