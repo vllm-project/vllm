@@ -165,6 +165,8 @@ To set up the cluster to use InfiniBand, append additional arguments like `--pri
 [examples/ray_serving/run_cluster.sh](../../examples/ray_serving/run_cluster.sh) helper script.
 Contact your system administrator for more information about the required flags.
 
+For cross-node tensor parallelism with compiled `PIECEWISE` CUDA graphs (notably hybrid Mamba2 models under speculative decoding over RDMA), the in-graph TP all-reduce can stall. The experimental `CompilationConfig.enable_eager_tp_all_reduce` option runs that all-reduce eagerly and in place via PyNccl outside the CUDA graphs while keeping the rest of the model compiled; see [CUDA Graphs](../design/cuda_graphs.md#experimental-eager-in-place-tp-all-reduce-split-enable_eager_tp_all_reduce) for the supported envelope and a launch example.
+
 ## Enabling GPUDirect RDMA
 
 GPUDirect RDMA (Remote Direct Memory Access) is an NVIDIA technology that allows network adapters to directly access GPU memory, bypassing the CPU and system memory. This direct access reduces latency and CPU overhead, which is beneficial for large data transfers between GPUs across nodes.

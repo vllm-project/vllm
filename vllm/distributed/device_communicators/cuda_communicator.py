@@ -338,6 +338,24 @@ class CudaCommunicator(DeviceCommunicatorBase):
             torch.distributed.all_reduce(out, group=self.device_group)
         return out
 
+    def all_reduce_in_place(self, input_: torch.Tensor) -> None:
+        # Opt-in eager TP all-reduce split: reduce ``input_`` in place through
+        # PyNccl on vLLM's current model stream (stream=None selects it). This
+        # deliberately does NOT dispatch to custom/symmetric-memory/FlashInfer
+        # all-reduce or ProcessGroupNCCL; the caller relies on the same-pointer,
+        # void-return contract to keep the collective out of CUDA graphs.
+        pynccl_comm = self.pynccl_comm
+        if pynccl_comm is None or pynccl_comm.disabled:
+            raise RuntimeError(
+                "all_reduce_in_place requires an enabled PyNccl communicator "
+                "(enable_eager_tp_all_reduce is set but PyNccl is unavailable "
+                "or disabled)."
+            )
+        result = pynccl_comm.all_reduce(input_, input_)
+        assert result is input_, (
+            "PyNccl in-place all-reduce must return the input buffer"
+        )
+
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         # Route uniform dim-0 all-gathers through NVLS symmetric memory when
         # enabled (mirrors reduce_scatter); otherwise fall back to the

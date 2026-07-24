@@ -196,6 +196,19 @@ class DeviceCommunicatorBase:
         dist.all_reduce(input_, group=self.device_group)
         return input_
 
+    def all_reduce_in_place(self, input_: torch.Tensor) -> None:
+        """In-place all-reduce backing the eager TP all-reduce split.
+
+        Only communicators that can reduce on vLLM's current model stream
+        implement this (see ``CudaCommunicator``). The base class does not fall
+        back to ``torch.distributed`` so the opt-in path fails loudly on
+        platforms without such a backend.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support all_reduce_in_place; "
+            "enable_eager_tp_all_reduce is only supported on CUDA with PyNccl."
+        )
+
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         if dim < 0:
             # Convert negative dim to positive.

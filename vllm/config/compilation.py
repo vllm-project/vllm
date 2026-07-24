@@ -532,6 +532,23 @@ class CompilationConfig:
 
     If None, defaults to attention ops for piecewise cudagraphs.
     If empty list [], no ops are excluded (suitable for full cudagraphs)."""
+
+    enable_eager_tp_all_reduce: bool = False
+    """Experimental, default off. When True, execute the tensor-parallel
+    all-reduce eagerly and in place through PyNccl on vLLM's current model
+    stream, split out of the piecewise CUDA graphs, instead of the default
+    functional out-of-place all-reduce. This preserves compiled PIECEWISE CUDA
+    graphs for hybrid (e.g. Mamba2) models while running the collective outside
+    the graph, which stabilizes cross-node TP over RDMA. Only the tensor-parallel
+    group is affected; feature-off behavior is unchanged.
+
+    Requires NVIDIA CUDA, tensor_parallel_size > 1, mode=VLLM_COMPILE,
+    cudagraph_mode=PIECEWISE, FX graph partitioning
+    (use_inductor_graph_partition=False), PyNccl enabled, and the
+    all-reduce/RMS/attention/GEMM-communication fusion passes disabled. The
+    supported envelope is validated in
+    `VllmConfig._validate_eager_tp_all_reduce`; O2/O3 defaults may need explicit
+    overrides. See also `set_splitting_ops_for_v1`."""
     compile_mm_encoder: bool = False
     """Whether or not to compile the multimodal encoder.
     Currently, this only works for `Qwen2_5_vl` and `mLLaMa4` models on selected
@@ -1200,6 +1217,14 @@ class CompilationConfig:
                     )
                     self.cudagraph_mode = CUDAGraphMode.FULL
                 self.splitting_ops = []
+
+        if self.enable_eager_tp_all_reduce:
+            # Append (never replace) so the eager in-place TP all-reduce is a
+            # piecewise boundary alongside the attention/Mamba/KV-cache defaults.
+            # Done before any SP/async-TP normalization below can clear the list.
+            assert self.splitting_ops is not None
+            if "vllm::all_reduce_inplace_" not in self.splitting_ops:
+                self.splitting_ops.append("vllm::all_reduce_inplace_")
 
         if (
             not self.use_inductor_graph_partition
