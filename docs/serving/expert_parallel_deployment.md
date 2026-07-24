@@ -12,6 +12,11 @@ Before using EP, you need to install the necessary dependencies. We are actively
 2. **Install DeepGEMM library**: Follow the [official instructions](https://github.com/deepseek-ai/DeepGEMM#installation).
 3. **For disaggregated serving**: Install `gdrcopy` by running the [`install_gdrcopy.sh`](../../tools/install_gdrcopy.sh) script (e.g., `install_gdrcopy.sh "${GDRCOPY_OS_VERSION}" "12.8" "x64"`). You can find available OS versions [here](https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%2012.8/).
 
+!!! note "NCCL version (CUDA 13+)"
+    The `deepep_v2` backend requires NCCL >= 2.30.4. PyTorch ships an older
+    NCCL, so you must upgrade it before building or running DeepEP. See the
+    [EP kernels guide](../../tools/ep_kernels) for instructions.
+
 ### Backend Selection Guide
 
 vLLM provides multiple communication backends for EP. Use `--all2all-backend` to select one:
