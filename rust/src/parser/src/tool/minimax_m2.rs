@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use winnow::ascii::{multispace0 as ws0, multispace1 as ws1};
 use winnow::combinator::{alt, delimited, eof, repeat, seq, terminated};
 use winnow::prelude::*;
@@ -7,7 +10,7 @@ use winnow::token::{literal, rest, take_until};
 use super::parameters::ToolSchemas;
 use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len, take_until_marker};
 use super::{Result, ToolCallDelta, ToolParser, ToolParserOutput};
-use crate::tool::{StructuralTagModel, Tool};
+use crate::tool::{StructuralTagBuilder, Tool};
 
 const TOOL_CALL_START: &str = "<minimax:tool_call>";
 const TOOL_CALL_END: &str = "</minimax:tool_call>";
@@ -112,8 +115,8 @@ impl ToolParser for MinimaxM2ToolParser {
         Ok(Box::new(Self::new(tools)))
     }
 
-    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
-        Some(StructuralTagModel::Minimax)
+    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
+        Some(xgrammar_structural_tag::Model::Minimax.builder())
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
@@ -593,6 +596,7 @@ mod tests {
         let mut parser = MinimaxM2ToolParser::new(&test_tools());
         let error = parser.parse_chunk("<minimax:tool_call><bad></minimax:tool_call>").unwrap_err();
 
-        expect!["tool parser parsing failed: "].assert_eq(&error.to_report_string());
+        expect![[r#"tool parser parsing failed: near "<bad></minimax:tool_call>": "#]]
+            .assert_eq(&error.to_report_string());
     }
 }
