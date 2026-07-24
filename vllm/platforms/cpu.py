@@ -237,8 +237,10 @@ class CpuPlatform(Platform):
         # Avoid inductor generates num_thread() and breaks the thread binding
         os.environ["TORCHINDUCTOR_CPP_DYNAMIC_THREADS"] = "1"
 
-        # For efficient conv state memory access
-        if torch.cpu._is_amx_tile_supported():
+        # For efficient conv state memory access. The C++ causal_conv1d
+        # kernels (VDPBF16PS, no AMX tiles) consume the SD layout on any
+        # AVX-512BF16 CPU, so apply it beyond AMX (e.g. AMD Zen5/Turin).
+        if torch.cpu._is_avx512_bf16_supported():
             os.environ["VLLM_SSM_CONV_STATE_LAYOUT"] = "SD"
 
         ld_preload_str = os.getenv("LD_PRELOAD", "")

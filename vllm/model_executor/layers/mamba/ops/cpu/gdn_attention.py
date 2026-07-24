@@ -103,13 +103,21 @@ def _cpu_gdn_attention_nonspec(
     assert state_indices_tensor is not None
     assert query_start_loc is not None
 
-    is_amx = torch.cpu._is_amx_tile_supported()
+    # The C++ causal_conv1d kernels (conv.cpp) use VDPBF16PS vector
+    # instructions, not AMX tiles, so they run on any AVX-512BF16 CPU.
+    # AMX is a strict subset of AVX-512BF16,
+    # so GNR keeps its existing code path unchanged; only non-AMX AVX-512BF16
+    # CPUs move from the pure-torch fallback onto the C++ conv path. The conv
+    # weight is VNNI-packed at load time on the same predicate (see
+    # dispatch_cpu_unquantized_gemm), so `layer.conv1d.weight` is packed here
+    # and must only be fed to the C++ ops, never to the torch `.view()` path.
+    use_cpp_conv = torch.cpu._is_avx512_bf16_supported()
 
     conv_state = layer.kv_cache[0]
-    if is_amx:
-        # AMX causal conv requires [num_allocated_slots, kernel - 1, conv_dim].
+    if use_cpp_conv:
+        # C++ conv requires [num_allocated_slots, kernel - 1, conv_dim] (SD).
         if is_conv_state_dim_first():
-            raise RuntimeError("AMX GDN attention requires `SD` conv_state layout.")
+            raise RuntimeError("C++ CPU GDN attention requires `SD` conv_state layout.")
         conv_state = conv_state.transpose(1, 2)
     else:
         if not is_conv_state_dim_first():
@@ -138,7 +146,7 @@ def _cpu_gdn_attention_nonspec(
         decode_b = b[:num_decode_tokens]
         decode_a = a[:num_decode_tokens]
         decode_state_indices = state_indices_tensor[:num_decodes]
-        if is_amx:
+        if use_cpp_conv:
             decode_mixed_qkv = ops.causal_conv1d_update_cpu(
                 x=decode_mixed_qkv,
                 conv_states=conv_state,
@@ -207,7 +215,7 @@ def _cpu_gdn_attention_nonspec(
             num_decodes : num_decodes + num_prefills
         ]
 
-        if is_amx:
+        if use_cpp_conv:
             prefill_mixed_qkv = ops.causal_conv1d_fwd_cpu(
                 x=prefill_mixed_qkv.transpose(0, 1),
                 weight=layer.conv1d.weight,

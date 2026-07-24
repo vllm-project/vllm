@@ -474,17 +474,18 @@ def test_causal_conv1d_torch_two_call_split(total_tokens: int, split: int) -> No
 
 
 @pytest.mark.skipif(
-    not torch.cpu._is_amx_tile_supported(),
-    reason="causal_conv1d_fwd_cpu requires AMX/AVX512",
+    not torch.cpu._is_avx512_bf16_supported(),
+    reason="causal_conv1d_fwd_cpu requires AVX-512BF16 (Intel Xeon or AMD EPYC)",
 )
 @pytest.mark.parametrize("total_tokens, split", TWO_CALL_SPLITS)
 @torch.inference_mode()
 def test_causal_conv1d_fwd_cpu_two_call_split(total_tokens: int, split: int) -> None:
-    """AMX prefill conv op must honor ``has_initial_state`` so a two-call split
+    """C++ prefill conv op must honor ``has_initial_state`` so a two-call split
     matches the single-call result.
 
     Regression test for ``causal_conv1d_fwd_varlen_kernel_impl`` (``conv.cpp``)
-    ignoring the carried conv state on continued chunks.
+    ignoring the carried conv state on continued chunks. Runs on any
+    AVX-512BF16 CPU since conv.cpp uses VDPBF16PS, not AMX tiles.
     """
     state_len = CONV_KERNEL - 1
     x, weight, bias = _conv_inputs(total_tokens)
@@ -513,6 +514,290 @@ def test_causal_conv1d_fwd_cpu_two_call_split(total_tokens: int, split: int) -> 
     out_split = torch.cat([out1, out2], dim=1)
 
     torch.testing.assert_close(out_split, out_full, atol=1e-2, rtol=1e-2)
+
+
+# ---------------------------------------------------------------------------
+# C++ conv kernels on any AVX-512BF16 CPU (Intel Xeon, AMD EPYC etc).
+#
+# conv.cpp's compute path uses `_mm512_dpbf16_ps` (VDPBF16PS), a plain
+# AVX-512BF16 vector instruction (no AMX tiles), gated on CPU_CAPABILITY_AVX512.
+# It therefore runs correctly on any AVX-512BF16 CPU. These tests prove the
+# C++ conv ops match the pure-torch fallback (`causal_conv1d_torch` /
+# `causal_conv1d_update_torch`) and are no less accurate than a float32 oracle,
+# covering: prefill, decode, the in-place conv_state write-back, and the exact
+# packed-weight + `SD`-layout + `is_vnni=True` sequence the C++ branch of
+# `cpu_gdn_attention_core` uses.
+# ---------------------------------------------------------------------------
+
+_HAS_AVX512_BF16 = torch.cpu._is_avx512_bf16_supported()
+
+_STATE_LEN = CONV_KERNEL - 1
+
+CONV_EQUIV_SEQ_LENS = [[1], [7], [64], [65], [1, 2, 3], [63, 64, 65], [128, 129]]
+
+
+def _conv_fp32_oracle(x, weight, bias, seq_lens, activation="silu"):
+    """High-precision conv reference: everything in float32, no bf16 rounding.
+    x: [total_tokens, dim] (no initial state). Returns [total_tokens, dim]."""
+    xf = x.float()
+    wf = weight.float().unsqueeze(1)
+    bf = bias.float()
+    out = torch.empty_like(xf)
+    start = 0
+    for n in seq_lens:
+        seg = xf[start : start + n].transpose(0, 1).unsqueeze(0)  # [1, dim, n]
+        conv_in = F.pad(seg, (_STATE_LEN, 0))
+        seg_out = F.conv1d(conv_in, wf, bf, padding=0, groups=CONV_DIM)[..., -n:]
+        if activation in ("silu", "swish"):
+            seg_out = F.silu(seg_out)
+        out[start : start + n] = seg_out.squeeze(0).transpose(0, 1)
+        start += n
+    return out
+
+
+def _run_prefill_torch(x, weight, bias, seq_lens):
+    from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
+        causal_conv1d_fn_cpu as causal_conv1d_torch,
+    )
+
+    num_seqs = len(seq_lens)
+    conv_states = torch.zeros(num_seqs, CONV_DIM, _STATE_LEN, dtype=x.dtype)
+    qsl = torch.tensor(
+        [0, *torch.tensor(seq_lens).cumsum(0).tolist()], dtype=torch.int32
+    )
+    out = causal_conv1d_torch(
+        x=x.transpose(0, 1).contiguous(),
+        weight=weight,
+        bias=bias,
+        conv_states=conv_states,
+        query_start_loc=qsl,
+        cache_indices=torch.arange(num_seqs, dtype=torch.int32),
+        has_initial_state=torch.zeros(num_seqs, dtype=torch.bool),
+        activation="silu",
+    )
+    return out.transpose(0, 1).contiguous(), conv_states
+
+
+def _run_prefill_cpp(x, weight, bias, seq_lens, is_vnni=False):
+    num_seqs = len(seq_lens)
+    packed_w = ops.causal_conv1d_weight_pack(weight) if is_vnni else weight
+    if is_vnni:
+        # C++-branch layout: kv-cache "SD" [slots, state_len, dim] transposed to
+        # [slots, dim, state_len] (a non-contiguous view).
+        conv_state = torch.zeros(
+            num_seqs, _STATE_LEN, CONV_DIM, dtype=x.dtype
+        ).transpose(1, 2)
+    else:
+        conv_state = torch.zeros(num_seqs, CONV_DIM, _STATE_LEN, dtype=x.dtype)
+    qsl = torch.tensor(
+        [0, *torch.tensor(seq_lens).cumsum(0).tolist()], dtype=torch.int32
+    )
+    out = ops.causal_conv1d_fwd_cpu(
+        x=x.transpose(0, 1),
+        weight=packed_w,
+        bias=bias,
+        conv_states=conv_state,
+        query_start_loc=qsl,
+        cache_indices=torch.arange(num_seqs, dtype=torch.int32),
+        has_initial_state=torch.zeros(num_seqs, dtype=torch.bool),
+        silu_activation=True,
+        is_vnni=is_vnni,
+    )
+    return out.transpose(0, 1).contiguous(), conv_state
+
+
+@pytest.mark.skipif(
+    not _HAS_AVX512_BF16, reason="C++ causal_conv1d requires AVX-512BF16"
+)
+@pytest.mark.parametrize("seq_lens", CONV_EQUIV_SEQ_LENS)
+@torch.inference_mode()
+def test_conv_cpp_matches_torch(seq_lens):
+    """C++ causal_conv1d_fwd_cpu matches the torch fallback within bf16 tol."""
+    x, weight, bias = _conv_inputs(sum(seq_lens))
+    out_torch, state_torch = _run_prefill_torch(x, weight, bias, seq_lens)
+    out_cpp, state_cpp = _run_prefill_cpp(x, weight, bias, seq_lens)
+    torch.testing.assert_close(out_cpp, out_torch, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(state_cpp, state_torch, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not _HAS_AVX512_BF16, reason="C++ causal_conv1d requires AVX-512BF16"
+)
+@pytest.mark.parametrize("seq_lens", CONV_EQUIV_SEQ_LENS)
+@torch.inference_mode()
+def test_conv_cpp_no_worse_than_torch_vs_fp32(seq_lens):
+    """Swapping torch -> C++ conv must not increase error vs an fp32 oracle."""
+    x, weight, bias = _conv_inputs(sum(seq_lens))
+    oracle = _conv_fp32_oracle(x, weight, bias, seq_lens)
+    out_torch, _ = _run_prefill_torch(x, weight, bias, seq_lens)
+    out_cpp, _ = _run_prefill_cpp(x, weight, bias, seq_lens)
+    err_torch = (out_torch.float() - oracle).abs().mean().item()
+    err_cpp = (out_cpp.float() - oracle).abs().mean().item()
+    assert err_cpp <= err_torch + 1e-3, (
+        f"C++ conv less accurate than torch: "
+        f"err_cpp={err_cpp:.2e} err_torch={err_torch:.2e}"
+    )
+
+
+@pytest.mark.skipif(
+    not _HAS_AVX512_BF16, reason="C++ causal_conv1d requires AVX-512BF16"
+)
+@pytest.mark.parametrize("seq_lens", CONV_EQUIV_SEQ_LENS)
+@torch.inference_mode()
+def test_conv_cpp_vnni_packed_matches_torch(seq_lens):
+    """The exact runtime prefill sequence (VNNI-packed weight + SD-layout
+    conv_state view + is_vnni=True) must match the torch fallback. Validates
+    the packing + layout handoff on any AVX-512BF16 CPU."""
+    x, weight, bias = _conv_inputs(sum(seq_lens))
+    out_torch, _ = _run_prefill_torch(x, weight, bias, seq_lens)
+    out_vnni, _ = _run_prefill_cpp(x, weight, bias, seq_lens, is_vnni=True)
+    torch.testing.assert_close(out_vnni, out_torch, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not _HAS_AVX512_BF16, reason="C++ causal_conv1d requires AVX-512BF16"
+)
+@pytest.mark.parametrize("batch", DECODE_BATCH_SIZES)
+@torch.inference_mode()
+def test_conv_update_cpp_matches_torch(batch):
+    """Decode conv: causal_conv1d_update_cpu matches causal_conv1d_update_torch,
+    including the in-place conv_state update (the next-step handoff)."""
+    from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
+        causal_conv1d_update_torch,
+    )
+
+    x = tensor_cache(batch * CONV_DIM, torch.bfloat16).view(batch, CONV_DIM)
+    weight = tensor_cache(CONV_DIM * CONV_KERNEL, torch.bfloat16).view(
+        CONV_DIM, CONV_KERNEL
+    )
+    bias = tensor_cache(CONV_DIM, torch.bfloat16)
+    conv_state = tensor_cache(batch * CONV_DIM * _STATE_LEN, torch.bfloat16).view(
+        batch, CONV_DIM, _STATE_LEN
+    )
+
+    cs_torch = conv_state.clone()
+    out_torch = causal_conv1d_update_torch(
+        x=x.unsqueeze(-1),
+        conv_state=cs_torch,
+        weight=weight,
+        bias=bias,
+        activation="silu",
+    ).squeeze(-1)
+
+    cs_cpp = conv_state.clone()
+    out_cpp = ops.causal_conv1d_update_cpu(
+        x=x.contiguous(),
+        conv_states=cs_cpp,
+        weight=weight,
+        bias=bias,
+        silu_activation=True,
+        conv_state_indices=torch.arange(batch, dtype=torch.int32),
+        is_vnni=False,
+    )
+    torch.testing.assert_close(out_cpp, out_torch, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(cs_cpp, cs_torch, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not _HAS_AVX512_BF16, reason="C++ causal_conv1d requires AVX-512BF16"
+)
+@torch.inference_mode()
+def test_conv_weight_pack_roundtrip_unpacked_matches():
+    """`causal_conv1d_weight_pack` is a pure repacking of the (dim, width)
+    weight, so the C++ conv op with the packed weight + is_vnni=True must equal
+    the same op with the unpacked weight + is_vnni=False.
+
+    This guards the spec-decode correctness contract: on any AVX-512BF16 CPU
+    the runtime VNNI-packs `layer.conv1d.weight` in place and stashes the
+    un-packed copy (`_cpu_unpacked_conv_weight`). The torch spec-decode path
+    consumes the stash, so packed and unpacked must be interchangeable for the
+    same math.
+    """
+    seq_lens = [7, 64, 65]
+    x, weight, bias = _conv_inputs(sum(seq_lens))
+    out_unpacked, _ = _run_prefill_cpp(x, weight, bias, seq_lens, is_vnni=False)
+    out_packed, _ = _run_prefill_cpp(x, weight, bias, seq_lens, is_vnni=True)
+    torch.testing.assert_close(out_packed, out_unpacked, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not _HAS_AVX512_BF16, reason="C++ causal_conv1d requires AVX-512BF16"
+)
+@torch.inference_mode()
+def test_spec_decode_unpacked_conv_weight_stash():
+    """Speculative-decode correctness contract.
+
+    On any AVX-512BF16 CPU the runtime VNNI-packs ``conv1d.weight`` in place at
+    load time (``dispatch_cpu_unquantized_gemm``) and stashes the un-packed
+    ``(dim, width)`` copy as ``_cpu_unpacked_conv_weight``. The spec-decode GDN
+    path runs a plain ``F.conv1d`` and MUST use that stash. Reading the packed
+    ``conv1d.weight`` directly would silently produce garbage (packed layout is
+    not ``(dim, width)``).
+
+    This reproduces the load-time dispatch on a mock conv module, mirrors
+    ``_unpacked_conv_weight``'s lookup, and verifies the recovered weight (a)
+    equals the original and (b) makes the torch spec conv agree with the C++
+    conv fed the packed weight.
+    """
+    from vllm.model_executor.layers.utils import dispatch_cpu_unquantized_gemm
+
+    torch.manual_seed(0)
+    # conv1d weight is stored [dim, 1, width]; bias [dim].
+    orig_2d = torch.rand(CONV_DIM, CONV_KERNEL, dtype=torch.bfloat16)
+    bias = torch.rand(CONV_DIM, dtype=torch.bfloat16)
+
+    conv = torch.nn.Module()
+    conv.weight = torch.nn.Parameter(
+        orig_2d.view(CONV_DIM, 1, CONV_KERNEL).clone(), requires_grad=False
+    )
+
+    # Load-time dispatch: packs weight in place + stashes the unpacked copy.
+    dispatch_cpu_unquantized_gemm(conv, remove_weight=False)
+
+    # 1. The stash must exist and equal the original (dim, width) weight.
+    assert hasattr(conv, "_cpu_unpacked_conv_weight"), (
+        "dispatch_cpu_unquantized_gemm did not stash _cpu_unpacked_conv_weight "
+        "on an AVX-512BF16 CPU"
+    )
+    stash = conv._cpu_unpacked_conv_weight
+    torch.testing.assert_close(stash, orig_2d, atol=0, rtol=0)
+
+    # 2. Mirror _unpacked_conv_weight()'s lookup: stash wins over conv.weight.
+    recovered = getattr(conv, "_cpu_unpacked_conv_weight", None)
+    assert recovered is not None
+    # conv.weight is now packed; using it directly (the bug) would differ.
+    packed_weight = conv.weight  # [dim, 1, width], VNNI-packed contents
+
+    # 3. Spec-path torch conv with the recovered unpacked weight must match the
+    #    nonspec C++ conv with the packed weight (is_vnni=True).
+    seq_lens = [7, 65]
+    total = sum(seq_lens)
+    x = tensor_cache(total * CONV_DIM, torch.bfloat16).view(total, CONV_DIM)
+
+    out_torch, _ = _run_prefill_torch(x, recovered, bias, seq_lens)
+
+    num_seqs = len(seq_lens)
+    cs = torch.zeros(num_seqs, _STATE_LEN, CONV_DIM, dtype=x.dtype).transpose(1, 2)
+    qsl = torch.tensor(
+        [0, *torch.tensor(seq_lens).cumsum(0).tolist()], dtype=torch.int32
+    )
+    out_cpp = (
+        ops.causal_conv1d_fwd_cpu(
+            x=x.transpose(0, 1),
+            weight=packed_weight.view(CONV_DIM, CONV_KERNEL),
+            bias=bias,
+            conv_states=cs,
+            query_start_loc=qsl,
+            cache_indices=torch.arange(num_seqs, dtype=torch.int32),
+            has_initial_state=torch.zeros(num_seqs, dtype=torch.bool),
+            silu_activation=True,
+            is_vnni=True,
+        )
+        .transpose(0, 1)
+        .contiguous()
+    )
+
+    torch.testing.assert_close(out_cpp, out_torch, atol=1e-2, rtol=1e-2)
 
 
 @torch.inference_mode()
