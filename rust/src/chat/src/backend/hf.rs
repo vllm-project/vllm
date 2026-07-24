@@ -253,7 +253,7 @@ mod tests {
         let request = request_with_user_text("hello");
         backend
             .chat_renderer()
-            .render(&request.as_render_request())
+            .render(request.as_render_request())
             .unwrap()
             .content
             .into_text()
@@ -296,7 +296,7 @@ mod tests {
         let render_request = request_with_user_text("hello");
         let prompt = backend
             .chat_renderer()
-            .render(&render_request.as_render_request())
+            .render(render_request.as_render_request())
             .unwrap()
             .content;
         assert!(matches!(prompt, RenderedPromptContent::TokenIds(_)));

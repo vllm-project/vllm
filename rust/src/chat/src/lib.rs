@@ -149,7 +149,7 @@ impl ChatRequestProcessor {
         let arrival_time = vllm_llm::current_unix_timestamp_secs();
         let output_processor = self.backend.new_chat_output_processor(&mut request, options)?;
         let render_request = request.as_render_request();
-        let rendered = self.backend.chat_renderer().render(&render_request)?;
+        let rendered = self.backend.chat_renderer().render(render_request)?;
         let reasoning_parser_kwargs =
             request
                 .sampling_params
@@ -287,7 +287,7 @@ impl ChatLlm {
         request.validate()?;
 
         let render_request = request.as_render_request();
-        let rendered = self.processor.backend.chat_renderer().render(&render_request)?;
+        let rendered = self.processor.backend.chat_renderer().render(render_request)?;
         let (prompt, _mm_features) =
             self.processor.finalize_rendered_prompt(&request, rendered).await?;
 

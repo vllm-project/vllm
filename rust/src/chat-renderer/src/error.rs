@@ -35,5 +35,20 @@ pub enum Error {
     Tokenizer(#[from] vllm_tokenizer::TokenizerError),
 }
 
+impl Error {
+    /// Whether this error should be reported as invalid request input when
+    /// raised while rendering.
+    pub fn is_request_validation_error(&self) -> bool {
+        matches!(
+            self,
+            Self::EmptyMessages
+                | Self::ContinueFinalAssistantWithoutFinalAssistant
+                | Self::MissingChatTemplate
+                | Self::ChatTemplate(_)
+                | Self::UnsupportedMultimodalContent(_)
+        )
+    }
+}
+
 /// Result returned by chat renderer operations.
 pub type Result<T> = std::result::Result<T, Error>;

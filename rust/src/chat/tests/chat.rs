@@ -249,7 +249,7 @@ impl ChatBackend for FakeChatBackend {
 }
 
 impl ChatRenderer for FakeChatBackend {
-    fn render(&self, request: &RenderRequest<'_>) -> RendererResult<RenderedPrompt> {
+    fn render(&self, request: RenderRequest<'_>) -> RendererResult<RenderedPrompt> {
         if !self.has_template {
             return Err(RendererError::MissingChatTemplate);
         }
@@ -655,7 +655,7 @@ fn chat_request_accepts_continue_final_assistant_mode_with_final_assistant() {
 fn backend_requires_a_template() {
     let request = sample_request("chat-3");
     let backend = FakeChatBackend::without_template();
-    let error = backend.chat_renderer().render(&request.as_render_request()).unwrap_err();
+    let error = backend.chat_renderer().render(request.as_render_request()).unwrap_err();
     assert!(matches!(error, RendererError::MissingChatTemplate));
 }
 

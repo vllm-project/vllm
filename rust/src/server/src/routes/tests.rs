@@ -508,7 +508,7 @@ impl ChatBackend for FakeChatBackend {
 }
 
 impl ChatRenderer for FakeChatBackend {
-    fn render(&self, request: &RenderRequest<'_>) -> RendererResult<vllm_chat::RenderedPrompt> {
+    fn render(&self, request: RenderRequest<'_>) -> RendererResult<vllm_chat::RenderedPrompt> {
         let placeholder = self
             .multimodal_model_info
             .as_ref()

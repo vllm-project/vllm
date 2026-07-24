@@ -286,7 +286,7 @@ impl InklingChatRenderer {
 }
 
 impl ChatRenderer for InklingChatRenderer {
-    fn render(&self, request: &RenderRequest<'_>) -> Result<RenderedPrompt> {
+    fn render(&self, request: RenderRequest<'_>) -> Result<RenderedPrompt> {
         request.validate()?;
         if request.chat_options.continue_final_message() {
             return Err(Error::ChatTemplate(
@@ -296,8 +296,8 @@ impl ChatRenderer for InklingChatRenderer {
 
         let mut out = Vec::new();
         let mut tool_call_id_to_name = HashMap::new();
-        let effective_template_kwargs = request_template_kwargs(request);
-        let tools = rendered_tools(request);
+        let effective_template_kwargs = request_template_kwargs(&request);
+        let tools = rendered_tools(&request);
         self.write_tool_declarations(&mut out, &tools)?;
         let mut reasoning_effort =
             resolve_reasoning_effort(effective_template_kwargs.get("reasoning_effort"));

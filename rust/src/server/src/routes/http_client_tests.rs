@@ -184,7 +184,7 @@ impl ChatBackend for FakeChatBackend {
 }
 
 impl ChatRenderer for FakeChatBackend {
-    fn render(&self, request: &RenderRequest<'_>) -> RendererResult<RenderedPrompt> {
+    fn render(&self, request: RenderRequest<'_>) -> RendererResult<RenderedPrompt> {
         let mut prompt = String::new();
         for message in request.messages {
             prompt.push_str(message.role().as_str());

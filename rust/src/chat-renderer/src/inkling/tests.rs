@@ -84,7 +84,7 @@ fn renderer() -> InklingChatRenderer {
 
 fn render_token_ids(request: &TestRenderRequest) -> Vec<u32> {
     renderer()
-        .render(&request.as_request())
+        .render(request.as_request())
         .unwrap()
         .content
         .into_token_ids()
@@ -317,7 +317,7 @@ fn rejects_out_of_range_reasoning_effort() {
             .template_kwargs
             .insert("reasoning_effort".to_string(), json!(value));
 
-        let error = renderer().render(&request.as_request()).unwrap_err();
+        let error = renderer().render(request.as_request()).unwrap_err();
         assert!(error.as_report().to_string().contains("must be in [0.0, 0.99]"));
     }
 }
@@ -333,7 +333,7 @@ fn rejects_continue_final_message() {
         ..TestRenderRequest::for_test()
     };
 
-    let error = renderer().render(&request.as_request()).unwrap_err();
+    let error = renderer().render(request.as_request()).unwrap_err();
     assert!(matches!(error, Error::ChatTemplate(_)));
     assert!(error.as_report().to_string().contains("continue_final_message"));
 }
@@ -366,6 +366,6 @@ fn rejects_non_object_tool_call_arguments() {
         ..TestRenderRequest::for_test()
     };
 
-    let error = renderer().render(&request.as_request()).unwrap_err();
+    let error = renderer().render(request.as_request()).unwrap_err();
     assert!(error.as_report().to_string().contains("JSON object"));
 }

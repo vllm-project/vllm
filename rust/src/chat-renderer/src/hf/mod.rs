@@ -249,8 +249,8 @@ impl HfChatRenderer {
 }
 
 impl ChatRenderer for HfChatRenderer {
-    fn render(&self, request: &RenderRequest<'_>) -> Result<RenderedPrompt> {
-        self.apply_chat_template(request)
+    fn render(&self, request: RenderRequest<'_>) -> Result<RenderedPrompt> {
+        self.apply_chat_template(&request)
     }
 }
 
@@ -627,7 +627,7 @@ mod tests {
             HashMap::new(),
             ChatTemplateContentFormatOption::Auto,
         )?
-        .render(&request.as_request())?
+        .render(request.as_request())?
         .content;
         Ok(rendered.into_text().expect("HF renderer should return text prompt"))
     }
@@ -643,7 +643,7 @@ mod tests {
                 video_token: Some("<video>".to_string()),
                 audio_token: Some("<audio>".to_string()),
             }))
-            .render(&request.as_request())
+            .render(request.as_request())
     }
 
     fn image_request() -> TestRenderRequest {
@@ -774,7 +774,7 @@ mod tests {
             video_token: None,
             audio_token: None,
         }))
-        .render(&video_request().as_request())
+        .render(video_request().as_request())
         .unwrap_err();
 
         assert!(matches!(
@@ -1083,7 +1083,7 @@ mod tests {
             ChatTemplateContentFormatOption::String,
         )
         .unwrap()
-        .render(&request.as_request())
+        .render(request.as_request())
         .unwrap()
         .content;
 
@@ -1106,7 +1106,7 @@ mod tests {
             ChatTemplateContentFormatOption::OpenAi,
         )
         .unwrap()
-        .render(&request.as_request())
+        .render(request.as_request())
         .unwrap()
         .content;
 
@@ -1134,7 +1134,7 @@ mod tests {
         )
         .unwrap();
 
-        let rendered = renderer.render(&request.as_request()).unwrap().content;
+        let rendered = renderer.render(request.as_request()).unwrap().content;
 
         assert_eq!(rendered, RenderedPromptContent::Text("true|x".to_string()));
     }
@@ -1158,7 +1158,7 @@ mod tests {
         )
         .unwrap();
 
-        let rendered = renderer.render(&request.as_request()).unwrap();
+        let rendered = renderer.render(request.as_request()).unwrap();
 
         assert_eq!(
             rendered.content,
@@ -1190,7 +1190,7 @@ mod tests {
         )
         .unwrap();
 
-        let rendered = renderer.render(&request.as_request()).unwrap();
+        let rendered = renderer.render(request.as_request()).unwrap();
 
         assert_eq!(
             rendered.content,

@@ -115,10 +115,10 @@ impl HarmonyChatRenderer {
 impl ChatRenderer for HarmonyChatRenderer {
     /// Render a chat request as token IDs with template kwargs echoed for
     /// downstream accounting/debugging.
-    fn render(&self, request: &RenderRequest<'_>) -> Result<RenderedPrompt> {
+    fn render(&self, request: RenderRequest<'_>) -> Result<RenderedPrompt> {
         Ok(RenderedPrompt {
-            content: RenderedPromptContent::TokenIds(self.render_token_ids(request)?),
-            effective_template_kwargs: request_template_kwargs(request),
+            content: RenderedPromptContent::TokenIds(self.render_token_ids(&request)?),
+            effective_template_kwargs: request_template_kwargs(&request),
         })
     }
 }

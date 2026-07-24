@@ -564,7 +564,7 @@ fn render_closed_completion(
     prompt_request.chat_options.generation_prompt_mode = GenerationPromptMode::StartNewAssistant;
     let prompt = lower_rendered_content(
         renderer
-            .render(&prompt_request.as_render_request())
+            .render(prompt_request.as_render_request())
             .context("failed to render prompt")?
             .content,
     );
@@ -574,7 +574,7 @@ fn render_closed_completion(
     full_request.messages.push(ChatMessage::from(assistant.clone()));
     let full = lower_rendered_content(
         renderer
-            .render(&full_request.as_render_request())
+            .render(full_request.as_render_request())
             .context("failed to render full prompt")?
             .content,
     );

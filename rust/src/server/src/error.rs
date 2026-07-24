@@ -188,6 +188,22 @@ mod tests {
     }
 
     #[test]
+    fn renderer_validation_maps_to_invalid_request() {
+        let error = vllm_chat::RendererError::ChatTemplate("invalid message sequence".to_string());
+        let api_error = chat_submit_error("failed to submit chat request", error.into());
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn renderer_infrastructure_errors_stay_internal() {
+        let error = vllm_chat::RendererError::Tokenizer(vllm_tokenizer::TokenizerError(
+            "backend exploded".to_string(),
+        ));
+        let api_error = chat_submit_error("failed to submit chat request", error.into());
+        assert_eq!(api_error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
     fn out_of_vocab_validation_maps_to_invalid_request() {
         let error = vllm_text::Error::TokenIds(vllm_text::TokenIdsError::OutOfVocab {
             parameter: "logprob_token_ids",

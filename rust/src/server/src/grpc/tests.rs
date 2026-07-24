@@ -189,7 +189,7 @@ impl ChatBackend for FakeTextBackend {
 }
 
 impl ChatRenderer for FakeTextBackend {
-    fn render(&self, _request: &RenderRequest<'_>) -> RendererResult<RenderedPrompt> {
+    fn render(&self, _request: RenderRequest<'_>) -> RendererResult<RenderedPrompt> {
         Ok(RenderedPrompt {
             content: RenderedPromptContent::Text(String::new()),
             effective_template_kwargs: Default::default(),

@@ -18,7 +18,7 @@ use crate::{ChatRenderer, ChatRole};
 
 fn render_request(request: &TestRenderRequest) -> String {
     DeepSeekV32ChatRenderer::new()
-        .render(&request.as_request())
+        .render(request.as_request())
         .unwrap()
         .content
         .into_text()
@@ -26,7 +26,7 @@ fn render_request(request: &TestRenderRequest) -> String {
 }
 
 fn render_result(request: &TestRenderRequest) -> Result<String, Error> {
-    DeepSeekV32ChatRenderer::new().render(&request.as_request()).map(|rendered| {
+    DeepSeekV32ChatRenderer::new().render(request.as_request()).map(|rendered| {
         rendered
             .content
             .into_text()
@@ -294,7 +294,7 @@ fn render_rejects_multimodal_input() {
         ..TestRenderRequest::for_test()
     };
 
-    let error = DeepSeekV32ChatRenderer::new().render(&request.as_request()).unwrap_err();
+    let error = DeepSeekV32ChatRenderer::new().render(request.as_request()).unwrap_err();
 
     assert!(matches!(
         error,

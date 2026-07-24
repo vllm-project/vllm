@@ -45,7 +45,7 @@ fn render_token_ids(request: &TestRenderRequest) -> Vec<u32> {
 
 fn render_token_ids_with(renderer: &HarmonyChatRenderer, request: &TestRenderRequest) -> Vec<u32> {
     renderer
-        .render(&request.as_request())
+        .render(request.as_request())
         .unwrap()
         .content
         .into_token_ids()
@@ -140,7 +140,7 @@ fn rejects_invalid_reasoning_effort() {
     let mut request = TestRenderRequest::for_test();
     request.chat_options.reasoning_effort = Some(ReasoningEffort::None);
 
-    let error = test_renderer(false).render(&request.as_request()).unwrap_err();
+    let error = test_renderer(false).render(request.as_request()).unwrap_err();
 
     expect![[r#"chat template error: reasoning_effort="none" is not supported by Harmony. Supported values are: low, medium, high."#]]
         .assert_eq(&error.to_report_string());
@@ -162,7 +162,7 @@ fn rejects_unknown_tool_response_id() {
         ..TestRenderRequest::for_test()
     };
 
-    let error = test_renderer(false).render(&request.as_request()).unwrap_err();
+    let error = test_renderer(false).render(request.as_request()).unwrap_err();
 
     expect![
         "chat template error: invalid Harmony tool message: unknown tool_call_id `call-unknown`"
@@ -179,7 +179,7 @@ fn rejects_multimodal_input() {
         ..TestRenderRequest::for_test()
     };
 
-    let error = test_renderer(false).render(&request.as_request()).unwrap_err();
+    let error = test_renderer(false).render(request.as_request()).unwrap_err();
 
     assert!(matches!(
         error,
@@ -198,7 +198,7 @@ fn rejects_continue_final_assistant() {
     };
     request.chat_options.generation_prompt_mode = GenerationPromptMode::ContinueFinalAssistant;
 
-    let error = test_renderer(false).render(&request.as_request()).unwrap_err();
+    let error = test_renderer(false).render(request.as_request()).unwrap_err();
 
     expect!["chat template error: Harmony renderer does not support continue_final_message"]
         .assert_eq(&error.to_report_string());

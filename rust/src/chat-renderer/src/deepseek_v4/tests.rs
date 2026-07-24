@@ -14,7 +14,7 @@ use crate::{ChatMessage, GenerationPromptMode, ReasoningEffort, TestRenderReques
 
 fn render_request(request: &TestRenderRequest) -> String {
     DeepSeekV4ChatRenderer::new()
-        .render(&request.as_request())
+        .render(request.as_request())
         .unwrap()
         .content
         .into_text()

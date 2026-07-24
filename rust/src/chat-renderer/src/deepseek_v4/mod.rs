@@ -20,12 +20,12 @@ impl DeepSeekV4ChatRenderer {
 }
 
 impl ChatRenderer for DeepSeekV4ChatRenderer {
-    fn render(&self, request: &RenderRequest<'_>) -> Result<RenderedPrompt> {
+    fn render(&self, request: RenderRequest<'_>) -> Result<RenderedPrompt> {
         request.validate()?;
 
         Ok(RenderedPrompt {
-            content: RenderedPromptContent::Text(encoding::render_request(request)?),
-            effective_template_kwargs: request_template_kwargs(request),
+            content: RenderedPromptContent::Text(encoding::render_request(&request)?),
+            effective_template_kwargs: request_template_kwargs(&request),
         })
     }
 }

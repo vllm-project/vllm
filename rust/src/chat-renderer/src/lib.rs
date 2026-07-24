@@ -64,7 +64,7 @@ pub struct RenderedPrompt {
 /// Synchronous chat-prompt renderer.
 pub trait ChatRenderer: Send + Sync {
     /// Render one borrowed chat request into text or token IDs.
-    fn render(&self, request: &RenderRequest<'_>) -> Result<RenderedPrompt>;
+    fn render(&self, request: RenderRequest<'_>) -> Result<RenderedPrompt>;
 }
 
 /// Shared trait-object form of [`ChatRenderer`].
