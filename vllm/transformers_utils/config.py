@@ -101,6 +101,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     kimi_k25="KimiK25Config",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
+    ministral_dlm="MinistralDLMConfig",
     mlp_speculator="MLPSpeculatorConfig",
     medusa="MedusaConfig",
     mellum="MellumConfig",

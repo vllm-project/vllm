@@ -885,11 +885,13 @@ class SamplingParams(
         if not model_config.is_diffusion:
             return
 
-        # Diffusion models denoise a whole canvas per step with a fixed
-        # temperature schedule, so per-request sampling parameters are not
-        # supported. Penalties are ignored by the sampler with a warning.
+        # Diffusion models denoise a whole canvas per step with an
+        # engine-level temperature schedule, so per-request sampling
+        # parameters are not supported. Per-request temperature may only
+        # select greedy (0.0) or the engine schedule (1.0). Penalties are
+        # ignored by the sampler with a warning.
         if (
-            self.temperature != 1.0
+            self.temperature not in (0.0, 1.0)
             or self.min_p > _SAMPLING_EPS
             or self.seed is not None
             or self.min_tokens > 0
@@ -898,9 +900,10 @@ class SamplingParams(
             or self.allowed_token_ids
         ):
             raise ValueError(
-                "The temperature, min_p, seed, min_tokens, logit_bias, "
-                "bad_words, and allowed_token_ids sampling parameters "
-                "are not yet supported with diffusion models."
+                "Diffusion models only support temperature 0 (greedy) or "
+                "1 (the engine-level schedule); the min_p, seed, min_tokens, "
+                "logit_bias, bad_words, and allowed_token_ids sampling "
+                "parameters are not yet supported."
             )
 
     def _validate_structured_outputs(
