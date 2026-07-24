@@ -1449,7 +1449,13 @@ class AiterFlashAttentionImpl(AttentionImpl):
         )
 
     def fused_qk_norm_rope_kvcache_supported(self):
-        return rocm_aiter_ops.is_enabled()
+        # Only support fusion when the shuffle KV cache layout is not used;
+        # shuffle uses a different cache update path that the shared contiguous
+        # copy-back cannot reproduce, so fall back to the non-fused path.
+        return (
+            rocm_aiter_ops.is_enabled()
+            and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+        )
 
     def do_qk_norm_rope_kvcache_update(
         self,
@@ -1466,7 +1472,11 @@ class AiterFlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
     ):
-        key_cache, value_cache = kv_cache.unbind(1)
+        # KV cache is packed as (B, H, N, 2*hs). The fused AITER kernel
+        # expects K/V in flash layout (B, N, H, hs) with block_size at dim 1
+        # (see block_size=key_cache.shape[1] in _aiter_ops), so transpose
+        # then split the content dim, matching do_rope_and_kv_cache_update.
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         rocm_aiter_ops.do_qk_norm_rope_kvcache_update(
             qkv=qkv,
             q_weight=q_weight,

@@ -2492,6 +2492,14 @@ class rocm_aiter_ops:
         if kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(current_platform.fp8_dtype())
             value_cache = value_cache.view(current_platform.fp8_dtype())
+        # The fused AITER kernel requires contiguous K/V buffers, but callers
+        # pass non-contiguous views split from the packed KV cache. Run on
+        # contiguous copies and copy the results back.
+        # NOTE: interim bridge only; the extra .contiguous() + copy_ add two
+        # full-size KV-cache copies per update (a performance regression).
+        # TODO: drop the copies once AITER supports strided K/V.
+        kc = key_cache.contiguous()
+        vc = value_cache.contiguous()
         # Partial-rotary support (e.g. GLM-4.7 applies rotary to only a prefix
         # of each head's channel dim).
         rotary_dim = cos_sin_cache.shape[-1]
@@ -2509,8 +2517,8 @@ class rocm_aiter_ops:
             is_neox=is_neox,
             rms_norm_eps=rms_norm_eps,
             q_out=q_out,
-            k_cache=key_cache,
-            v_cache=value_cache,
+            k_cache=kc,
+            v_cache=vc,
             slot_mapping=slot_mapping,
             k_scale=k_scale,
             v_scale=v_scale,
@@ -2518,10 +2526,12 @@ class rocm_aiter_ops:
             v_out=None,
             return_kv=True,
             use_shuffle_layout=use_shuffle_layout,
-            block_size=key_cache.shape[1],
-            x=16 // key_cache.element_size(),
+            block_size=kc.shape[1],
+            x=16 // kc.element_size(),
             rotary_dim=kernel_rotary_dim,
         )
+        key_cache.copy_(kc)
+        value_cache.copy_(vc)
 
     @staticmethod
     def triton_rope_and_cache(
