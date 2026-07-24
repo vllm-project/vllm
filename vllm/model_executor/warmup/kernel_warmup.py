@@ -102,9 +102,7 @@ def kernel_warmup(worker: "Worker"):
 
     # Deep GEMM warmup
     do_deep_gemm_warmup = (
-        envs.VLLM_USE_DEEP_GEMM
-        and is_deep_gemm_supported()
-        and envs.VLLM_DEEP_GEMM_WARMUP != "skip"
+        is_deep_gemm_supported() and envs.VLLM_DEEP_GEMM_WARMUP != "skip"
     )
     if do_deep_gemm_warmup:
         model = worker.get_model()

@@ -46,7 +46,7 @@ class PluggableLayer(nn.Module):
 
     def __new__(cls, *args, **kwargs):
         try:
-            layer_class_name = cls.__name__
+            layer_class_name = cls.name
         except AttributeError:
             raise TypeError(
                 f"Cannot instantiate '{cls.__name__}': its 'name' attribute "
@@ -108,7 +108,7 @@ class CustomOp(nn.Module):
 
     def __new__(cls, *args, **kwargs):
         try:
-            op_name = cls.__name__
+            op_name = cls.name
         except AttributeError:
             raise TypeError(
                 f"Cannot instantiate '{cls.__name__}': its 'name' attribute "

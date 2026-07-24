@@ -84,7 +84,7 @@ def get_kv_cache_layout():
     # Format specified by the code.
     global _KV_CACHE_LAYOUT_OVERRIDE
 
-    cache_layout: Literal["NHD", "HND"] | None = None
+    cache_layout: KVCacheLayoutType | None = None
     if _KV_CACHE_LAYOUT_OVERRIDE is not None:
         cache_layout = _KV_CACHE_LAYOUT_OVERRIDE
         logger.info_once(
