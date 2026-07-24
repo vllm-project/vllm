@@ -2183,7 +2183,7 @@ def test_mla_draft_prefers_standard_layout_when_pages_can_be_unified():
     )
 
 
-def test_mla_with_incompatible_swa_uses_one_full_allocation_group(caplog):
+def test_mla_with_incompatible_swa_uses_one_full_allocation_group(caplog_vllm):
     # Sparse MLA pages cannot be padded safely. Keeping the draft's attention
     # compute sliding-window while promoting only its allocation semantics lets
     # every layer share the target's block table and remain contiguous.
@@ -2206,7 +2206,7 @@ def test_mla_with_incompatible_swa_uses_one_full_allocation_group(caplog):
     assert promoted_draft.block_size == 64
     assert promoted_draft.sliding_window == draft.sliding_window
     assert specs["draft.0"] is draft
-    assert "attention compute is unchanged" in caplog.text
+    assert "attention compute is unchanged" in caplog_vllm.text
 
 
 def test_get_kv_cache_spec_kind_prefers_specific_attention_subclasses():
