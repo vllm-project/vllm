@@ -1248,6 +1248,7 @@ class SupportsTranscription(Protocol):
     def get_language_token_ids(
         cls,
         tokenizer: object,
+        languages: Sequence[str] | None = None,
     ) -> list[int] | None:
         """Return token IDs that represent valid language tokens.
 

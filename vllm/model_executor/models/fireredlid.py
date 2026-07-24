@@ -25,7 +25,7 @@ from transformers import BatchFeature
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.config.speech_to_text import SpeechToTextConfig
+from vllm.config.speech_to_text import SpeechToTextConfig, SpeechToTextParams
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict, PromptType
 from vllm.logger import init_logger
@@ -732,13 +732,7 @@ class FireRedLIDForConditionalGeneration(
     @classmethod
     def get_generation_prompt(
         cls,
-        audio: np.ndarray,
-        stt_config: SpeechToTextConfig,
-        model_config: ModelConfig,
-        language: str | None,
-        task_type: Literal["transcribe", "translate"],
-        request_prompt: str,
-        to_language: str | None,
+        params: SpeechToTextParams,
     ) -> PromptType:
         """Build the prompt for the FireRedLID encoder-decoder model.
 
@@ -749,7 +743,7 @@ class FireRedLIDForConditionalGeneration(
             "encoder_prompt": {
                 "prompt": "",
                 "multi_modal_data": {
-                    "audio": (audio, int(stt_config.sample_rate)),
+                    "audio": (params.audio, int(params.stt_config.sample_rate)),
                 },
             },
             "decoder_prompt": {
