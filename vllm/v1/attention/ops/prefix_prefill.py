@@ -36,6 +36,74 @@ float8_info = torch.finfo(current_platform.fp8_dtype())
 #     key=["BLOCK_SIZE", "MAX_Q_LEN", "MAX_CTX_LEN"]
 # )
 @triton.jit
+def _paged_kv_cache_offsets(
+    B_Loc,
+    cur_batch,
+    token_indices,
+    token_valid,
+    offs_d,
+    cur_kv_head,
+    x,
+    stride_b_loc_b,
+    stride_b_loc_s,
+    stride_k_cache_bs,
+    stride_k_cache_h,
+    stride_k_cache_d,
+    stride_k_cache_bl,
+    stride_k_cache_x,
+    stride_v_cache_bs,
+    stride_v_cache_h,
+    stride_v_cache_d,
+    stride_v_cache_bl,
+    PHYSICAL_BLOCK_SIZE: tl.constexpr,
+    MASK_BLOCK_TABLE: tl.constexpr = False,
+):
+    """Compute paged K/V cache element offsets for a tile of token positions.
+
+    `token_indices` holds the absolute sequence positions of the tile. The
+    logical block for each token is looked up in `B_Loc` (handling cross-block
+    tiles), then the physical element offsets are built with the same layout the
+    kernel uses everywhere:
+      K cache: [num_blocks, num_kv_heads, head_size // x, block_size, x]
+      V cache: [num_blocks, num_kv_heads, head_size, block_size]
+    Returns `(off_k, off_v)` with shapes [D, N] and [N, D] respectively.
+
+    When `MASK_BLOCK_TABLE` is set, the block-table load is masked with
+    `token_valid` so padded lanes (a tile that extends past the end of the
+    sequence) cannot read a block-table entry past this batch's row. Invalid
+    lanes resolve to block 0 (always in-bounds) and are dropped by the caller's
+    later K/V load mask. When it is not set, `token_valid` is unused and the
+    load is emitted exactly as before.
+    """
+    bn_logical = token_indices // PHYSICAL_BLOCK_SIZE
+    if MASK_BLOCK_TABLE:
+        bn = tl.load(
+            B_Loc + cur_batch * stride_b_loc_b + bn_logical * stride_b_loc_s,
+            mask=token_valid,
+            other=0,
+        ).to(tl.int64)
+    else:
+        bn = tl.load(
+            B_Loc + cur_batch * stride_b_loc_b + bn_logical * stride_b_loc_s
+        ).to(tl.int64)
+    internal = token_indices % PHYSICAL_BLOCK_SIZE
+    off_k = (
+        bn[None, :] * stride_k_cache_bs
+        + cur_kv_head * stride_k_cache_h
+        + (offs_d[:, None] // x) * stride_k_cache_d
+        + internal[None, :] * stride_k_cache_bl
+        + (offs_d[:, None] % x) * stride_k_cache_x
+    )
+    off_v = (
+        bn[:, None] * stride_v_cache_bs
+        + cur_kv_head * stride_v_cache_h
+        + offs_d[None, :] * stride_v_cache_d
+        + internal[:, None] * stride_v_cache_bl
+    )
+    return off_k, off_v
+
+
+@triton.jit
 def _fwd_kernel(
     Q,
     K,
@@ -94,6 +162,11 @@ def _fwd_kernel(
     MAX_CTX_LEN: tl.constexpr = 0,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
+    # When True, the current-chunk K/V are not provided as dense tensors
+    # (`K`/`V` are unused placeholders); instead they are read back from the
+    # paged KV cache. This supports layers that re-attend an already-cached
+    # sequence with query only (e.g. IQuest LoopCoder's `attn(q, None, None)`).
+    KV_FROM_CACHE: tl.constexpr = False,
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
@@ -162,33 +235,34 @@ def _fwd_kernel(
         # replace one physical block every 17 32-Tile blocks
         # Calculate the logical block index of each of the 32 tokens
         # in the current Tile (handling cross-block cases).
+        # Physical-block K/V cache offsets for the context tokens in this tile
+        # (handles cross-block tiles via B_Loc). Same addressing is reused for
+        # the current-chunk cache read below.
         token_indices = start_n + offs_bs_n
-        bn_logical_indices = token_indices // PHYSICAL_BLOCK_SIZE
-
-        # 2. Vectorized loading of physical block IDs from B_Loc
-        bn = tl.load(
-            B_Loc + cur_batch * stride_b_loc_b + bn_logical_indices * stride_b_loc_s
-        ).to(tl.int64)
-
-        # 3. Calculate the exact offset of
-        # each token within its physical block.
-        internal_offsets = token_indices % PHYSICAL_BLOCK_SIZE
-
-        # Addressing of K (5D)
-        off_k = (
-            bn[None, :] * stride_k_cache_bs
-            + cur_kv_head * stride_k_cache_h
-            + (offs_d[:, None] // x) * stride_k_cache_d
-            + internal_offsets[None, :] * stride_k_cache_bl
-            + (offs_d[:, None] % x) * stride_k_cache_x
-        )
-
-        # Addressing of V (4D)
-        off_v = (
-            bn[:, None] * stride_v_cache_bs
-            + cur_kv_head * stride_v_cache_h
-            + offs_d[None, :] * stride_v_cache_d
-            + internal_offsets[:, None] * stride_v_cache_bl
+        # Context tokens are always followed by the current chunk, so the tile
+        # never steps past this batch's block-table row; the block-table load
+        # stays unmasked (MASK_BLOCK_TABLE=False) and offs_bs_n is an unused
+        # placeholder for token_valid.
+        off_k, off_v = _paged_kv_cache_offsets(
+            B_Loc,
+            cur_batch,
+            token_indices,
+            offs_bs_n,
+            offs_d,
+            cur_kv_head,
+            x,
+            stride_b_loc_b,
+            stride_b_loc_s,
+            stride_k_cache_bs,
+            stride_k_cache_h,
+            stride_k_cache_d,
+            stride_k_cache_bl,
+            stride_k_cache_x,
+            stride_v_cache_bs,
+            stride_v_cache_h,
+            stride_v_cache_d,
+            stride_v_cache_bl,
+            PHYSICAL_BLOCK_SIZE,
         )
 
         if (
@@ -300,12 +374,54 @@ def _fwd_kernel(
     ):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
-        k = tl.load(
-            k_ptrs + (cur_batch_in_all_start_index + start_n) * stride_kbs,
-            mask=dim_mask[:, None]
-            & ((start_n + offs_n[None, :]) < cur_batch_query_len),
-            other=0.0,
-        )
+        if KV_FROM_CACHE:
+            # Current-chunk K/V are not passed densely; read them from the paged
+            # cache at their absolute positions [ctx_len, ctx_len + query_len),
+            # reusing the same addressing as the context loop above.
+            cache_token_idx = cur_batch_ctx_len + start_n + offs_n
+            # Padded lanes of the last tile can index past the sequence end;
+            # mask the block-table load so they don't read past this batch's
+            # row (they are dropped by the K/V load mask below anyway).
+            cache_token_valid = (start_n + offs_n) < cur_batch_query_len
+            off_k_cur, off_v_cur = _paged_kv_cache_offsets(
+                B_Loc,
+                cur_batch,
+                cache_token_idx,
+                cache_token_valid,
+                offs_d,
+                cur_kv_head,
+                x,
+                stride_b_loc_b,
+                stride_b_loc_s,
+                stride_k_cache_bs,
+                stride_k_cache_h,
+                stride_k_cache_d,
+                stride_k_cache_bl,
+                stride_k_cache_x,
+                stride_v_cache_bs,
+                stride_v_cache_h,
+                stride_v_cache_d,
+                stride_v_cache_bl,
+                PHYSICAL_BLOCK_SIZE,
+                MASK_BLOCK_TABLE=True,
+            )
+            k_cur_load = tl.load(
+                K_cache + off_k_cur,
+                mask=dim_mask[:, None]
+                & ((start_n + offs_n[None, :]) < cur_batch_query_len),
+                other=0.0,
+            )
+            if k_cur_load.dtype.is_fp8():
+                k = (k_cur_load.to(tl.float32) * tl.load(k_scale)).to(q.dtype)
+            else:
+                k = k_cur_load
+        else:
+            k = tl.load(
+                k_ptrs + (cur_batch_in_all_start_index + start_n) * stride_kbs,
+                mask=dim_mask[:, None]
+                & ((start_n + offs_n[None, :]) < cur_batch_query_len),
+                other=0.0,
+            )
 
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         qk = tl.dot(q, k, acc=qk, input_precision=IN_PRECISION)
@@ -333,12 +449,25 @@ def _fwd_kernel(
         acc = acc * alpha[:, None]
 
         # update acc
-        v = tl.load(
-            v_ptrs + (cur_batch_in_all_start_index + start_n) * stride_vbs,
-            mask=dim_mask[None, :]
-            & ((start_n + offs_n[:, None]) < cur_batch_query_len),
-            other=0.0,
-        )
+        if KV_FROM_CACHE:
+            # off_v_cur was computed together with off_k_cur above.
+            v_cur_load = tl.load(
+                V_cache + off_v_cur,
+                mask=dim_mask[None, :]
+                & ((start_n + offs_n[:, None]) < cur_batch_query_len),
+                other=0.0,
+            )
+            if v_cur_load.dtype.is_fp8():
+                v = (v_cur_load.to(tl.float32) * tl.load(v_scale)).to(q.dtype)
+            else:
+                v = v_cur_load
+        else:
+            v = tl.load(
+                v_ptrs + (cur_batch_in_all_start_index + start_n) * stride_vbs,
+                mask=dim_mask[None, :]
+                & ((start_n + offs_n[:, None]) < cur_batch_query_len),
+                other=0.0,
+            )
         p = p.to(v.dtype)
 
         acc = tl.dot(p, v, acc=acc, input_precision=IN_PRECISION)
@@ -703,8 +832,33 @@ def context_attention_fwd(
             FP8 KV Cache prefill kernel"
         )
 
+    # When the current-chunk K/V are not provided (`k`/`v` is None), the layer
+    # is re-attending an already-cached sequence with query only. In that case
+    # derive the head dim / KV head count from the paged cache and use `q` as a
+    # (never-dereferenced) placeholder for the dense K/V pointer arguments.
+    # k and v must be provided together: both None selects the cached-K/V path,
+    # both tensors the dense path. A partial input (only one None) is a caller
+    # bug and must not silently switch both sides to the cache.
+    assert (k is None) == (v is None), (
+        "k and v must both be None (cached-K/V path) or both be tensors"
+    )
+    kv_from_cache = k is None
+    if kv_from_cache:
+        if alibi_slopes is not None:
+            raise NotImplementedError(
+                "context_attention_fwd with cached K/V (key=None) is not "
+                "supported together with ALiBi slopes."
+            )
+        # k_cache: [num_blocks, num_kv_heads, head_size // x, block_size, x]
+        num_kv_heads = k_cache.shape[1]
+        Lq = Lk = Lv = q.shape[-1]
+        k = q
+        v = q
+    else:
+        num_kv_heads = k.shape[1]
+        Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
+
     # shape constraints
-    Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
     assert Lq == Lk and Lk == Lv
     # round up Lk to a power of 2 - this is required for Triton block size
     Lk_padded = triton.next_power_of_2(Lk)
@@ -712,7 +866,7 @@ def context_attention_fwd(
     if sm_scale is None:
         sm_scale = 1.0 / (Lq**0.5)
     batch, head = b_seq_len.shape[0], q.shape[1]
-    num_queries_per_kv = q.shape[1] // k.shape[1]
+    num_queries_per_kv = q.shape[1] // num_kv_heads
 
     assert batch + 1 == len(b_start_loc)
 
@@ -873,6 +1027,7 @@ def context_attention_fwd(
         num_stages=1,
         USE_SINKS=sinks is not None,
         CAUSAL=causal,
+        KV_FROM_CACHE=kv_from_cache,
         **extra_kargs,
     )
     return
