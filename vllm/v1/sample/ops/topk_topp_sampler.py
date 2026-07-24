@@ -134,11 +134,17 @@ class TopKTopPSampler(nn.Module):
         """
         logits = apply_top_k_top_p(logits, k, p)
         logits_to_return = None
-        if self.logprobs_mode == "processed_logits":
-            logits_to_return = logits
-        elif self.logprobs_mode == "processed_logprobs":
+        if self.logprobs_mode == "processed_logprobs":
+            # Compute log-probs once and reuse them to derive the sampling
+            # probabilities via exp(), instead of running a second softmax
+            # over the vocab. This also makes the returned log-probs exactly
+            # consistent with the probabilities used for sampling.
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
-        probs = logits.softmax(dim=-1, dtype=torch.float32)
+            probs = logits_to_return.exp()
+        else:
+            if self.logprobs_mode == "processed_logits":
+                logits_to_return = logits
+            probs = logits.softmax(dim=-1, dtype=torch.float32)
         return (
             random_sample(probs, generators, self.use_fp64_gumbel),
             logits_to_return,
