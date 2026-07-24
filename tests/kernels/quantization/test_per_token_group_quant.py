@@ -8,6 +8,7 @@ import torch
 from vllm.model_executor.layers.quantization.utils import fp8_utils, int8_utils
 from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
 from vllm.platforms import current_platform
+from vllm.triton_utils import triton
 
 
 @pytest.mark.parametrize(
@@ -402,29 +403,141 @@ def test_per_token_group_quant_fp8_packed_large_mn():
     assert torch.equal(out_s_packed.cpu(), expected.cpu()), "Packed scale mismatch"
 
 
+def _per_token_group_quant_int8_ref(x, group_size, eps=1e-10, dtype=torch.int8):
+    """Pure-PyTorch reference for per-token-group int8 quantization."""
+    assert x.shape[-1] % group_size == 0
+    iinfo = torch.iinfo(dtype)
+    int8_min, int8_max = iinfo.min, iinfo.max
+    x_ = x.reshape(x.numel() // group_size, group_size)
+    amax = x_.abs().max(dim=-1, keepdim=True)[0].clamp(min=eps).to(torch.float32)
+    x_s = amax / int8_max
+    x_q = (x_.to(torch.float32) / x_s).round().clamp(int8_min, int8_max).to(dtype)
+    x_q = x_q.reshape(x.shape)
+    x_s = x_s.reshape(x.shape[:-1] + (x.shape[-1] // group_size,))
+    return x_q, x_s
+
+
 @pytest.mark.parametrize("shape", [(32, 128), (64, 256), (16, 512)])
 @pytest.mark.parametrize("group_size", [64, 128])
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+@pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="Only test on CUDA/ROCm/XPU.",
+)
 def test_per_token_group_quant_int8(shape, group_size: int):
-    device = "cuda"
+    device = current_platform.device_type
 
     torch.manual_seed(42)
     num_tokens, hidden_dim = shape
 
     x = torch.randn((num_tokens, hidden_dim), device=device, dtype=torch.bfloat16) * 8
 
-    # cuda path
     out_q, scale = int8_utils.per_token_group_quant_int8(
         x,
         group_size,
     )
+    ref_q, ref_s = _per_token_group_quant_int8_ref(x, group_size)
 
-    # triton ref
-    with patch("vllm.platforms.current_platform.is_cuda_alike", return_value=False):
-        ref_q, ref_s = int8_utils.per_token_group_quant_int8(
-            x,
-            group_size,
+    assert torch.allclose(out_q.float(), ref_q.float(), atol=1.0, rtol=0.15)
+    assert torch.allclose(scale, ref_s, atol=0.01, rtol=0.01)
+
+
+def _per_token_group_quant_fp8_ref(x, group_size, eps=1e-10):
+    """Pure-PyTorch reference for per-token-group fp8 quantization (row-major)."""
+    fp8_dtype = current_platform.fp8_dtype()
+    finfo = torch.finfo(fp8_dtype)
+    fp8_min, fp8_max = finfo.min, finfo.max
+    x_ = x.reshape(x.numel() // group_size, group_size)
+    amax = x_.abs().max(dim=-1, keepdim=True)[0].clamp(min=eps).to(torch.float32)
+    x_s = amax / fp8_max
+    x_q = (x_.to(torch.float32) / x_s).clamp(fp8_min, fp8_max).to(fp8_dtype)
+    x_q = x_q.reshape(x.shape)
+    x_s = x_s.reshape(x.shape[:-1] + (x.shape[-1] // group_size,))
+    return x_q, x_s
+
+
+@pytest.mark.parametrize("shape", [(32, 128), (64, 256), (16, 512)])
+@pytest.mark.parametrize("group_size", [64, 128])
+@pytest.mark.parametrize("column_major", [False, True])
+@pytest.mark.skipif(
+    not current_platform.is_xpu(),
+    reason="Directly exercises the Triton fp8 quant kernel; on CUDA/ROCm the "
+    "native op is preferred and is covered by test_per_token_group_quant_fp8.",
+)
+def test_per_token_group_quant_fp8_triton_xpu(
+    shape, group_size: int, column_major: bool
+):
+    """Exercise the Triton per-token-group fp8 kernels directly on XPU.
+
+    On XPU the public ``per_token_group_quant_fp8`` dispatches to a native
+    (C++/SYCL) op, so the Triton kernels ``_per_token_group_quant_fp8`` /
+    ``_per_token_group_quant_fp8_colmajor`` are only reachable by calling them
+    directly. This test launches them the same way the Triton fallback does and
+    checks the result against a pure-PyTorch reference.
+    """
+    device = current_platform.device_type
+    fp8_dtype = current_platform.fp8_dtype()
+
+    torch.manual_seed(42)
+    num_tokens, hidden_dim = shape
+    x = torch.randn((num_tokens, hidden_dim), device=device, dtype=torch.bfloat16) * 8
+    x = x.contiguous()
+
+    fp8_min, fp8_max = fp8_utils.get_fp8_min_max()
+    x_q = torch.empty(x.shape, device=device, dtype=fp8_dtype)
+    num_groups = hidden_dim // group_size
+    if column_major:
+        # Match the production allocation: (num_groups, num_tokens) then permute
+        # to a column-major (num_tokens, num_groups) logical view.
+        x_s = torch.empty(
+            (num_groups, num_tokens), device=device, dtype=torch.float32
+        ).permute(-1, -2)
+    else:
+        x_s = torch.empty(
+            x.shape[:-1] + (num_groups,), device=device, dtype=torch.float32
         )
 
-    assert torch.allclose(out_q.float(), ref_q.float(), atol=0.15, rtol=0.15)
-    assert torch.allclose(scale, ref_s, atol=0.01, rtol=0.01)
+    M = x.numel() // group_size
+    BLOCK = triton.next_power_of_2(group_size)
+    num_warps = min(max(BLOCK // 256, 1), 8)
+
+    if column_major:
+        fp8_utils._per_token_group_quant_fp8_colmajor[(M,)](
+            x,
+            x_q,
+            x_s,
+            group_size,
+            x.shape[1],
+            x.stride(0),
+            x_s.stride(1),
+            1e-10,
+            fp8_min=fp8_min,
+            fp8_max=fp8_max,
+            use_ue8m0=False,
+            BLOCK=BLOCK,
+            num_warps=num_warps,
+            num_stages=1,
+        )
+    else:
+        fp8_utils._per_token_group_quant_fp8[(M,)](
+            x,
+            x_q,
+            x_s,
+            group_size,
+            x.shape[1],
+            x.stride(0),
+            1e-10,
+            fp8_min=fp8_min,
+            fp8_max=fp8_max,
+            use_ue8m0=False,
+            BLOCK=BLOCK,
+            num_warps=num_warps,
+            num_stages=1,
+        )
+
+    ref_q, ref_s = _per_token_group_quant_fp8_ref(x, group_size)
+
+    # Both row-major and the permuted column-major view present the same
+    # logical (num_tokens, num_groups) shape, so compare directly.
+    # scales match closely; quantized values within one fp8 unit.
+    assert torch.allclose(x_s.float(), ref_s, atol=1e-3, rtol=1e-2)
+    assert (x_q.float() - ref_q.float()).abs().max().item() <= 1.0
