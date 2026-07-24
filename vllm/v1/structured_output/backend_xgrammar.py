@@ -17,6 +17,7 @@ from vllm.v1.structured_output.backend_types import (
     StructuredOutputGrammar,
     StructuredOutputOptions,
 )
+from vllm.v1.structured_output.schema import is_string_schema_with_pattern_length
 from vllm.v1.structured_output.utils import (
     choice_as_grammar,
     compile_regex_with_timeout,
@@ -238,6 +239,12 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
             key in obj
             for key in ("uniqueItems", "contains", "minContains", "maxContains")
         ):
+            return True
+
+        # See https://github.com/vllm-project/vllm/issues/45592.
+        # xgrammar currently accepts this schema shape, but vLLM may generate
+        # strings that match the regex pattern while exceeding maxLength.
+        if is_string_schema_with_pattern_length(obj):
             return True
 
         # Unsupported keywords for strings

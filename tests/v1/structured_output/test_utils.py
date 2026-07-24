@@ -3,6 +3,9 @@
 
 import pytest
 
+from vllm.v1.structured_output.backend_guidance import (
+    has_guidance_unsupported_json_features,
+)
 from vllm.v1.structured_output.backend_xgrammar import (
     has_xgrammar_unsupported_json_features,
 )
@@ -14,6 +17,12 @@ pytestmark = pytest.mark.cpu_test
 def unsupported_string_schemas():
     return [
         {"type": "string", "format": "non_existing_format"},
+        {"type": "string", "pattern": "^[a-z]+$", "maxLength": 8},
+        {"type": "string", "pattern": "^[a-z]+$", "minLength": 2},
+        # format + length: xgrammar compiles the format grammar but drops the
+        # length bound, so uuid with maxLength=5 would produce invalid output.
+        {"type": "string", "format": "uuid", "maxLength": 5},
+        {"type": "string", "format": "email", "minLength": 1, "maxLength": 10},
     ]
 
 
@@ -104,3 +113,16 @@ def test_supported_json_features(supported_schema):
     assert not has_xgrammar_unsupported_json_features(supported_schema), (
         "Schema should be supported"
     )
+
+
+def test_guidance_rejects_pattern_with_length():
+    schema = {
+        "type": "array",
+        "items": {
+            "type": "string",
+            "pattern": r"^[\x20-\x7E]+$",
+            "maxLength": 8,
+        },
+    }
+
+    assert has_guidance_unsupported_json_features(schema)
