@@ -611,6 +611,22 @@ def prepare_moe_mxfp4_layer_for_marlin(
     n = w13.shape[1] // 2  # intermediate_size_per_partition
     k = w13.shape[2] * 2  # hidden_size
 
+    # maybe_roundup_sizes() rounds n up to 128 and k up to 256 (128 on XPU)
+    # for the Marlin backends before the weights are created, so the repack
+    # below is always tile-aligned. Check it rather than trusting it: an
+    # unaligned repack reads out of bounds, and the resulting illegal memory
+    # access is asynchronous, so it surfaces at an unrelated later call and
+    # is very hard to trace back to here.
+    if n % 64 != 0 or k % 128 != 0:
+        raise ValueError(
+            f"MXFP4 Marlin repack requires an intermediate size divisible "
+            f"by 64 and a hidden size divisible by 128, got n={n}, k={k}. "
+            f"This is guaranteed by "
+            f"mxfp4_round_up_hidden_size_and_intermediate_size() for the "
+            f"MARLIN and BATCHED_MARLIN backends; reaching this error means "
+            f"that contract was broken upstream."
+        )
+
     device = w13.device
     param_dtype = layer.params_dtype
     is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
