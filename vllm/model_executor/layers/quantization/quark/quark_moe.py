@@ -21,6 +21,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
+    int4_w4a16_moe_quant_config,
     int8_w8a8_moe_quant_config,
     mxfp4_w4a8_moe_quant_config,
     mxfp4_w4a16_moe_quant_config,
@@ -49,6 +50,9 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
 )
+from vllm.model_executor.layers.quantization.quark.utils import (
+    parse_w4a16_int4_weight_config,
+)
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
     OCP_MX_Scheme,
@@ -75,6 +79,7 @@ logger = init_logger(__name__)
 
 __all__ = [
     "QuarkMoEMethod",
+    "QuarkW4A16Int4MoEMethod",
     "QuarkW8A8Fp8MoEMethod",
     "QuarkOCP_MX_MoEMethod",
     "QuarkNvfp4MoEMethod",
@@ -106,6 +111,10 @@ class QuarkMoEMethod(FusedMoEMethodBase):
 
         if quant_config._is_fp8_w4a8(weight_config, input_config):
             return QuarkW4A8Fp8MoEMethod(weight_config, input_config, module.moe_config)
+        elif quant_config._is_w4a16_int4(weight_config, input_config):
+            return QuarkW4A16Int4MoEMethod(
+                weight_config, quant_config.pack_method, module.moe_config
+            )
         elif quant_config._is_nvfp4(weight_config, input_config):
             return QuarkNvfp4MoEMethod(
                 weight_config, input_config, module.moe_config, quant_config
@@ -124,6 +133,238 @@ class QuarkMoEMethod(FusedMoEMethodBase):
             )
         else:
             raise RuntimeError("Unsupported FusedMoe scheme")
+
+
+class QuarkW4A16Int4MoEMethod(QuarkMoEMethod):
+    """Quark packed INT4 weight-only MoE method."""
+
+    def __init__(
+        self,
+        weight_config: dict[str, Any],
+        pack_method: str,
+        moe: FusedMoEConfig,
+    ):
+        super().__init__(moe)
+        self.weight_quant = weight_config
+        self.group_size, self.is_symmetric = parse_w4a16_int4_weight_config(
+            weight_config
+        )
+        self.bit8_pack_factor = 2
+        self.pack_reorder = pack_method == "reorder"
+
+    def create_weights(
+        self,
+        layer: RoutedExperts,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        group_size = self.group_size
+        group_size_div_factor = 1
+
+        while intermediate_size_per_partition % group_size or hidden_size % group_size:
+            group_size = group_size // 2
+            group_size_div_factor *= 2
+            assert group_size >= 32
+        layer.group_size = group_size
+        layer.group_size_div_factor = group_size_div_factor
+
+        strategy = FusedMoeWeightScaleSupported.GROUP.value
+        extra_weight_attrs.update({"quant_method": strategy, "is_transposed": False})
+
+        assert "weight_loader" in extra_weight_attrs
+        weight_loader = extra_weight_attrs["weight_loader"]
+        extra_weight_attrs["weight_loader"] = self.get_weight_loader(
+            layer, weight_loader
+        )
+
+        w13_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                hidden_size // self.bit8_pack_factor,
+                dtype=torch.uint8,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight", w13_weight)
+        set_weight_attrs(w13_weight, extra_weight_attrs)
+
+        w2_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition // self.bit8_pack_factor,
+                dtype=torch.uint8,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight", w2_weight)
+        set_weight_attrs(w2_weight, extra_weight_attrs)
+
+        w13_weight_scale = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                hidden_size // group_size,
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight_scale", w13_weight_scale)
+        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+
+        w2_weight_scale = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition // group_size,
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight_scale", w2_weight_scale)
+        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+
+        w13_weight_zero_point = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                2 * intermediate_size_per_partition // self.bit8_pack_factor,
+                hidden_size // group_size,
+                dtype=torch.uint8,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight_zero_point", w13_weight_zero_point)
+        set_weight_attrs(w13_weight_zero_point, extra_weight_attrs)
+
+        w2_weight_zero_point = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                hidden_size // self.bit8_pack_factor,
+                intermediate_size_per_partition // group_size,
+                dtype=torch.uint8,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight_zero_point", w2_weight_zero_point)
+        set_weight_attrs(w2_weight_zero_point, extra_weight_attrs)
+
+    def get_fused_moe_quant_config(
+        self, layer: RoutedExperts
+    ) -> FusedMoEQuantConfig | None:
+        return int4_w4a16_moe_quant_config(
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            w1_zp=layer.w13_weight_zero_point,
+            w2_zp=layer.w2_weight_zero_point,
+            block_shape=[0, layer.group_size],
+        )
+
+    def apply(
+        self,
+        layer: RoutedExperts,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts: SharedExperts | None,
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor:
+        from vllm.model_executor.layers.fused_moe import fused_experts
+
+        return fused_experts(
+            x,
+            layer.w13_weight,
+            layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=layer.activation,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            quant_config=self.moe_quant_config,
+        )
+
+    def get_weight_loader(self, layer: RoutedExperts, weight_loader):
+        def convert_quark_tensor(tensor: torch.Tensor, tensor_type: str):
+            size0 = tensor.size(0)
+            tensor = tensor.view(torch.uint8)
+
+            shifter = torch.tensor([0, 4], dtype=torch.uint8, device=tensor.device)
+            tensor = (tensor[:, :, None] >> shifter) & 0xF
+
+            if self.pack_reorder:
+                reverse_awq_pack_order = [0, 4, 1, 5, 2, 6, 3, 7]
+                tensor = tensor.view(-1, 8)[:, reverse_awq_pack_order]
+            else:
+                tensor = tensor.view(-1, 8)
+            if self.is_symmetric:
+                tensor = tensor ^ 0x8
+            tensor = tensor.view(size0, -1)
+
+            tensor = tensor.T.contiguous()
+            if tensor_type == "weight":
+                tensor = tensor[:, 1::2] * 16 + tensor[:, ::2]
+            elif tensor_type == "zero_point":
+                tensor = tensor[1::2, :] * 16 + tensor[::2, :]
+            return tensor
+
+        def quark_int4_weight_loader(
+            param: torch.nn.Parameter,
+            loaded_weight: torch.Tensor,
+            weight_name: str,
+            shard_id: str,
+            expert_id: int,
+            return_success: bool = False,
+        ):
+            loaded_weight = loaded_weight.to(param.data.device)
+            shard_size = layer.intermediate_size_per_partition
+
+            if weight_name.endswith("_weight"):
+                loaded_weight = convert_quark_tensor(loaded_weight, "weight")
+            elif weight_name.endswith("_weight_zero_point"):
+                loaded_weight = convert_quark_tensor(loaded_weight, "zero_point")
+            elif weight_name.endswith("_weight_scale"):
+                loaded_weight = loaded_weight.T
+
+            if (
+                layer.group_size_div_factor > 1
+                and (
+                    "weight_zero_point" in weight_name
+                    or "weight_scale" in weight_name
+                )
+            ):
+                loaded_weight = loaded_weight.repeat_interleave(
+                    layer.group_size_div_factor, 1
+                )
+
+            if "w13_weight_zero_point" in weight_name:
+                tensor = loaded_weight.view(
+                    layer.moe_config.tp_size, -1, loaded_weight.size(1)
+                )[layer.moe_config.tp_rank]
+                if shard_id == "w1":
+                    param.data[expert_id, : shard_size // 2] = tensor
+                else:
+                    param.data[expert_id, shard_size // 2 :] = tensor
+                return True if return_success else None
+            elif "w2_weight_zero_point" in weight_name:
+                param.data[expert_id] = loaded_weight.view(
+                    loaded_weight.size(0), layer.moe_config.tp_size, -1
+                )[:, layer.moe_config.tp_rank]
+                return True if return_success else None
+
+            return weight_loader(
+                param,
+                loaded_weight,
+                weight_name,
+                shard_id,
+                expert_id,
+                return_success=return_success,
+            )
+
+        return quark_int4_weight_loader
 
 
 class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):

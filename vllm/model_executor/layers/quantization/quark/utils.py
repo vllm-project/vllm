@@ -123,6 +123,65 @@ def _is_equal_or_regex_match(
     return False
 
 
+def parse_w4a16_int4_weight_config(
+    weight_config: Mapping[str, Any],
+) -> tuple[int, bool]:
+    """Parse required W4A16 INT4/UINT4 weight fields from Quark config."""
+    if "group_size" not in weight_config:
+        raise ValueError(
+            "Quark W4A16 INT4/UINT4 configs must specify weight.group_size"
+        )
+    if "symmetric" not in weight_config:
+        raise ValueError(
+            "Quark W4A16 INT4/UINT4 configs must specify weight.symmetric"
+        )
+
+    group_size = weight_config["group_size"]
+    is_symmetric = weight_config["symmetric"]
+    if not isinstance(group_size, int) or group_size <= 0:
+        raise ValueError(
+            f"Quark W4A16 weight.group_size must be a positive int, got {group_size!r}"
+        )
+    if not isinstance(is_symmetric, bool):
+        raise ValueError(
+            "Quark W4A16 weight.symmetric must be a bool, "
+            f"got {is_symmetric!r}"
+        )
+    return group_size, is_symmetric
+
+
+_AWQ_PACK_ORDER = (0, 4, 1, 5, 2, 6, 3, 7)
+
+
+def canonicalize_quark_packed_int4(
+    packed_weight: torch.Tensor,
+    *,
+    pack_reorder: bool,
+    is_symmetric: bool,
+    pack_factor: int = 8,
+) -> torch.Tensor:
+    """Convert Quark export nibble layout to AWQ checkpoint layout."""
+    if pack_reorder:
+        source_order = torch.tensor(
+            _AWQ_PACK_ORDER, device=packed_weight.device, dtype=torch.int32
+        )
+    else:
+        source_order = torch.arange(
+            pack_factor, device=packed_weight.device, dtype=torch.int32
+        )
+    target_order = torch.tensor(
+        _AWQ_PACK_ORDER, device=packed_weight.device, dtype=torch.int32
+    )
+    source_shifts = source_order * 4
+    target_shifts = target_order * 4
+
+    values = (packed_weight.to(torch.int32)[..., None] >> source_shifts) & 0xF
+    if is_symmetric:
+        values = values ^ 0x8
+    packed = (values.to(torch.int64) << target_shifts.to(torch.int64)).sum(dim=-1)
+    return packed.to(torch.int32)
+
+
 # utility for tensor dims > 2 cases
 def quark_quantize_weight_to_mxfp4(w: torch.Tensor):
     assert w.dtype == torch.bfloat16, (
