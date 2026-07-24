@@ -1,4 +1,5 @@
 include(FetchContent)
+include(CheckCXXCompilerFlag)
 
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 20)
@@ -126,6 +127,12 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64" OR ENABLE_X86_ISA)
             CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3))
         message(FATAL_ERROR "X86 backend requires gcc/g++ >= 12.3")
     endif()
+    # Work around a GCC 15 optimizer crash in oneDNN (tree-ssa-pre pass).
+    # Keep this scoped to GCC 15+ so older toolchains are unaffected.
+    if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+        CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15)
+        list(APPEND CXX_COMPILE_FLAGS "-fno-tree-pre")
+    endif()
     list(APPEND CXX_COMPILE_FLAGS "-mf16c")
     list(APPEND CXX_COMPILE_FLAGS_AVX512 ${CXX_COMPILE_FLAGS})
     list(APPEND CXX_COMPILE_FLAGS_AVX2 ${CXX_COMPILE_FLAGS})
@@ -140,6 +147,16 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64" OR ENABLE_X86_ISA)
         "-mamx-tile"
         "-mavx512bf16"
         "-mavx512vnni")
+    # Some packaged GCC 14 builds still do not accept -mamx-fp8, so gate on
+    # actual flag support rather than compiler version alone.
+    check_cxx_compiler_flag("-mamx-fp8" COMPILER_SUPPORTS_AMX_FP8_FLAG)
+    if (COMPILER_SUPPORTS_AMX_FP8_FLAG)
+        list(APPEND CXX_COMPILE_FLAGS_AVX512_AMX "-mamx-fp8")
+        set(AMX_FP8_SUPPORTED TRUE)
+    else()
+        set(AMX_FP8_SUPPORTED FALSE)
+        message(STATUS "AMX-FP8 disabled: compiler does not support -mamx-fp8 (compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION})")
+    endif()
     list(APPEND CXX_COMPILE_FLAGS_AVX2
         "-mavx2")
 elseif (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
@@ -536,6 +553,10 @@ if (ENABLE_X86_ISA)
 
     # For AMX kernels
     target_compile_definitions(_C PRIVATE "-DCPU_CAPABILITY_AMXBF16")
+    if (AMX_FP8_SUPPORTED)
+        target_compile_definitions(_C PRIVATE "-DCPU_CAPABILITY_AMXFP8")
+        message(STATUS "AMX-FP8 (Diamond Rapids) enabled")
+    endif()
 
     # AVX512F 
     define_extension_target(
