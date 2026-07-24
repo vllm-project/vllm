@@ -938,6 +938,30 @@ class VllmConfig:
             "expandable_segments is automatically disabled)."
         )
 
+    def _verify_sampling_replay_config(self) -> None:
+        model_config = self.model_config
+        if model_config is None or not model_config.enable_return_sampling_mask:
+            return
+        if not self.use_v2_model_runner:
+            raise ValueError("sampling distribution replay requires Model Runner V2")
+        if model_config.logprobs_mode != "processed_logprobs":
+            raise ValueError(
+                "sampling distribution replay requires "
+                "logprobs_mode='processed_logprobs'"
+            )
+        if self.speculative_config is not None:
+            raise ValueError(
+                "sampling distribution replay does not support speculative decoding"
+            )
+        if model_config.is_diffusion:
+            raise ValueError(
+                "sampling distribution replay does not support diffusion models"
+            )
+        if model_config.logits_processors:
+            raise ValueError(
+                "sampling distribution replay does not support custom logits processors"
+            )
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
 
@@ -978,6 +1002,8 @@ class VllmConfig:
                     "--enable-return-routed-experts is incompatible with KV "
                     "connectors (PD disaggregation, KV cache offload)."
                 )
+
+        self._verify_sampling_replay_config()
 
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)

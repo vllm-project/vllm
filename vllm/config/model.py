@@ -225,6 +225,8 @@ class ModelConfig:
     flexibility."""
     enable_return_routed_experts: bool = False
     """Whether to return routed experts."""
+    enable_return_sampling_mask: bool = False
+    """Whether to return the post-processing token support for each sample."""
     max_logprobs: int = Field(default=20, ge=-1)
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
@@ -402,6 +404,7 @@ class ModelConfig:
             "tokenizer_revision",
             "spec_target_max_model_len",
             "enforce_eager",
+            "enable_return_sampling_mask",
             "logprobs_mode",
             "use_fp64_gumbel",
             "disable_cascade_attn",

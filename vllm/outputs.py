@@ -19,6 +19,20 @@ logger = init_logger(__name__)
 
 
 @dataclass
+class SamplingMask:
+    """CSR token support sets aligned with completion token IDs.
+
+    Args:
+        token_ids: Flattened token IDs from every support set.
+        offsets: Start offsets for each support set, including the final end
+            offset.
+    """
+
+    token_ids: GenericSequence[int]
+    offsets: GenericSequence[int]
+
+
+@dataclass
 class CompletionOutput:
     """The output data of one completion output of a request.
 
@@ -30,6 +44,8 @@ class CompletionOutput:
             output text.
         logprobs: The log probabilities of the top probability words at each
             position if the logprobs are requested.
+        sampling_mask: The post-processing token support set for each generated
+            token, if requested.
         finish_reason: The reason why the sequence is finished.
         stop_reason: The stop string or token id that caused the completion
             to stop, None if the completion finished for some other reason
@@ -46,6 +62,7 @@ class CompletionOutput:
     finish_reason: str | None = None
     stop_reason: int | str | None = None
     lora_request: LoRARequest | None = None
+    sampling_mask: SamplingMask | None = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -56,6 +73,7 @@ class CompletionOutput:
             f"text={self.text!r}, "
             f"token_ids={self.token_ids}, "
             f"routed_experts={self.routed_experts}, "
+            f"sampling_mask={self.sampling_mask}, "
             f"cumulative_logprob={self.cumulative_logprob}, "
             f"logprobs={self.logprobs}, "
             f"finish_reason={self.finish_reason}, "
@@ -168,6 +186,7 @@ class RequestOutput:
                         if next_completion.logprobs:
                             assert completion.logprobs is not None
                             completion.logprobs.extend(next_completion.logprobs)  # type: ignore[arg-type]
+                        _merge_sampling_masks(completion, next_completion)
                         completion.cumulative_logprob = (
                             next_completion.cumulative_logprob
                         )
@@ -195,6 +214,23 @@ class RequestOutput:
             f"num_cached_tokens={self.num_cached_tokens}, "
             f"num_cache_creation_tokens={self.num_cache_creation_tokens})"
         )
+
+
+def _merge_sampling_masks(
+    completion: CompletionOutput, next_completion: CompletionOutput
+) -> None:
+    current_mask = completion.sampling_mask
+    next_mask = next_completion.sampling_mask
+    if current_mask is None and next_mask is None:
+        return
+    if current_mask is None or next_mask is None:
+        raise RuntimeError("cannot merge partially missing sampling masks")
+    current_token_ids = list(current_mask.token_ids)
+    current_offsets = list(current_mask.offsets)
+    offset = len(current_token_ids)
+    current_token_ids.extend(next_mask.token_ids)
+    current_offsets.extend(offset + item for item in next_mask.offsets[1:])
+    completion.sampling_mask = SamplingMask(current_token_ids, current_offsets)
 
 
 # Sentinel to indicate request is finished, used with streaming inputs.

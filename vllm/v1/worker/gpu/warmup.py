@@ -25,6 +25,19 @@ from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 logger = init_logger(__name__)
 
 
+def _get_sampling_replay_warmup_params() -> SamplingParams:
+    return SamplingParams(
+        max_tokens=2,
+        temperature=0.9,
+        top_p=0.9,
+        top_k=50,
+        min_p=0.1,
+        min_tokens=2,
+        logprobs=1,
+        prompt_logprobs=1,
+    )
+
+
 def run_mixed_prefill_decode_warmup(
     model_runner: GPUModelRunner,
     worker_execute_model: Callable[[SchedulerOutput], Any],
@@ -81,7 +94,10 @@ def run_mixed_prefill_decode_warmup(
         next_block_id += num_blocks
         return block_ids
 
-    sampling_params = SamplingParams(max_tokens=2, temperature=0.0)
+    if model_runner.model_config.enable_return_sampling_mask:
+        sampling_params = _get_sampling_replay_warmup_params()
+    else:
+        sampling_params = SamplingParams(max_tokens=2, temperature=0.0)
 
     decode_prefill_output = SchedulerOutput.make_empty()
     decode_prefill_output.scheduled_new_reqs = [
@@ -227,6 +243,9 @@ def warmup_kernels(
     if model_runner.is_pooling_model:
         sampling_params = None
         pooling_params = PoolingParams()
+    elif model_runner.model_config.enable_return_sampling_mask:
+        sampling_params = _get_sampling_replay_warmup_params()
+        pooling_params = None
     else:
         sampling_params = SamplingParams.for_sampler_warmup()
         pooling_params = None
