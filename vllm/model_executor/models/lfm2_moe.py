@@ -255,8 +255,8 @@ class Lfm2MoeAttention(nn.Module):
         n_tokens, _ = hidden_states.shape
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q = q.view(n_tokens, self.num_heads, self.head_dim).contiguous()
-        k = k.view(n_tokens, self.num_kv_heads, self.head_dim).contiguous()
+        q = q.view(n_tokens, self.num_heads, self.head_dim)
+        k = k.view(n_tokens, self.num_kv_heads, self.head_dim)
         q = self.q_layernorm(q)
         k = self.k_layernorm(k)
         q, k = self.rotary_emb(positions, q, k)
