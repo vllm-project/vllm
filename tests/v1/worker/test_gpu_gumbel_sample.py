@@ -21,7 +21,8 @@ pytest.importorskip("triton")
 if not torch.cuda.is_available():
     pytest.skip("CUDA required for Gumbel sampler tests", allow_module_level=True)
 
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.triton_utils import tl, triton
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample, tl_rand32, tl_rand64
 
 DEVICE = "cuda"
 VOCAB_SIZE = 200_000
@@ -162,6 +163,40 @@ def test_full_vocab_distribution_fidelity():
     chi2 = (((hist - expected) ** 2) / expected).sum().item()
     df = VOCAB_SIZE - 1
     assert chi2 < df + 10 * math.sqrt(2 * df), f"chi2={chi2:.0f}, df={df}"
+
+
+# ----------------------------- RNG precision --------------------------------
+
+
+@triton.jit
+def _draw_uniform_kernel(offset_ptr, out32_ptr, out64_ptr, seed, N: tl.constexpr):
+    idx = tl.arange(0, N)
+    offs = tl.load(offset_ptr + idx)
+    u32 = tl_rand32(seed, offs, includes_zero=False)
+    u64 = tl_rand64(seed, offs, includes_zero=False)
+    tl.store(out32_ptr + idx, u32)
+    tl.store(out64_ptr + idx, u64)
+
+
+def test_rand32_resolves_below_tl_rand_floor():
+    """`tl_rand32` draws 64 random bits, so its u -> 0 tail resolves below
+    `tl.rand`'s 2**-31 floor, and it must agree with `tl_rand64` up to fp32
+    rounding. The offsets are draws from the seed=12345 Philox stream found
+    (by scan) to fall below 2**-31; they are impossible for a 31-bit uniform.
+    """
+    seed = 12345
+    offsets = torch.tensor(
+        [4982566788, 5277073014, 5357046532, 12285768576],
+        dtype=torch.int64,
+        device=DEVICE,
+    )
+    u32 = torch.empty(4, dtype=torch.float32, device=DEVICE)
+    u64 = torch.empty(4, dtype=torch.float64, device=DEVICE)
+    _draw_uniform_kernel[(1,)](offsets, u32, u64, seed, N=4)
+
+    assert (u32 > 0).all()
+    assert (u32 < 2.0**-31).all(), f"u32={u32.tolist()}"
+    assert torch.equal(u32, u64.float()), f"u32={u32.tolist()}, u64={u64.tolist()}"
 
 
 # ----------------------------- Edge cases ----------------------------------
