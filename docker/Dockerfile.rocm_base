@@ -6,8 +6,13 @@ ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
 ARG AITER_BRANCH="v0.1.16.post5"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 
-# Sccache configuration - LOCAL DISK MODE
+# Sccache configuration (only used in release pipeline)
+ARG USE_SCCACHE
 ARG SCCACHE_DOWNLOAD_URL
+ARG SCCACHE_ENDPOINT
+ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
+ARG SCCACHE_REGION_NAME=us-west-2
+ARG SCCACHE_S3_NO_CREDENTIALS=0
 
 FROM ${BASE_IMAGE} AS base
 
@@ -45,12 +50,18 @@ RUN apt-get update -y \
     && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 
-RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11
+RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11 Cython
 RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
 
-# Install sccache - always enabled for local disk caching
+# Install sccache if USE_SCCACHE is enabled (for release builds)
+ARG USE_SCCACHE
 ARG SCCACHE_DOWNLOAD_URL
-RUN echo "Installing sccache for local disk caching..." \
+ARG SCCACHE_ENDPOINT
+ARG SCCACHE_BUCKET_NAME
+ARG SCCACHE_REGION_NAME
+ARG SCCACHE_S3_NO_CREDENTIALS
+RUN if [ "$USE_SCCACHE" = "1" ]; then \
+        echo "Installing sccache..." \
     && SCCACHE_ARCH="x86_64" \
     && SCCACHE_VERSION="v0.14.0" \
     && SCCACHE_DL_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
@@ -59,16 +70,19 @@ RUN echo "Installing sccache for local disk caching..." \
     && mv /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
     && chmod +x /usr/bin/sccache \
     && rm -rf /tmp/sccache.tar.gz /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl \
-    && sccache --version
+    && sccache --version; \
+    fi
 
 # NOTE: sccache wrappers are created AFTER TheRock ROCm install (below)
 # because clang++ path depends on rocm-sdk init
 
-# Configure sccache for LOCAL DISK mode
-# Cache will be mounted at build time via --mount=type=cache
-ENV SCCACHE_DIR=/sccache
-ENV SCCACHE_IDLE_TIMEOUT=0
-ENV SCCACHE_CACHE_SIZE="50G"
+# Set sccache environment variables only when USE_SCCACHE=1
+# This prevents S3 config from leaking into images when sccache is not used
+ARG USE_SCCACHE
+ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET_NAME}}
+ENV SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION_NAME}}
+ENV SCCACHE_S3_NO_CREDENTIALS=${USE_SCCACHE:+${SCCACHE_S3_NO_CREDENTIALS}}
+ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
 
 ###
 ### TheROCK install
@@ -166,7 +180,9 @@ ENV PYTHONPATH=$SITE_PACKAGES/_rocm_sdk_core/share/amd_smi:$PYTHONPATH
 
 # Setup sccache wrappers for HIP compilation via HIP_CLANG_PATH
 # Must run AFTER rocm-sdk init so clang++ is installed
-RUN echo "Setting up sccache wrappers for HIP compilation..." \
+ARG USE_SCCACHE
+RUN if [ "$USE_SCCACHE" = "1" ]; then \
+    echo "Setting up sccache wrappers for HIP compilation..." \
         && mkdir -p /opt/sccache-wrappers \
         && REAL_CLANGXX="" \
         && for p in \
@@ -196,7 +212,8 @@ RUN echo "Setting up sccache wrappers for HIP compilation..." \
              "${REAL_CLANG}" "${REAL_CLANG}" > /opt/sccache-wrappers/clang \
         && chmod +x /opt/sccache-wrappers/clang \
         && echo "sccache wrappers created (with fallback):" \
-        && cat /opt/sccache-wrappers/clang++
+        && cat /opt/sccache-wrappers/clang++; \
+    fi
 
 ###
 ### Triton Build
