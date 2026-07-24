@@ -216,6 +216,11 @@ async def test_mcp_tool_call(client: OpenAI, model_name: str):
     output_types = [getattr(o, "type", None) for o in response.output]
     log_response_diagnostics(response, label="test_mcp_tool_call")
 
+    assert response.usage.input_tokens_details.input_tokens_per_turn
+    assert response.usage.output_tokens_details.output_tokens_per_turn
+    assert response.usage.output_tokens_details.tool_output_tokens > 0
+    assert response.usage.output_tokens_details.tool_output_tokens_per_turn
+
     assert response.status == "completed", (
         f"Response status={response.status} "
         f"(details={getattr(response, 'incomplete_details', None)}). "
