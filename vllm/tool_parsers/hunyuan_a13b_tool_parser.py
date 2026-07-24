@@ -313,7 +313,19 @@ class HunyuanA13BToolParser(ToolParser):
         self, current_text: str, current_idx: int, tool_count: int
     ):
         if current_idx >= 0 and current_idx < tool_count:
-            empty_args_match = self.tool_empty_arg_reg.search(current_text)
+            # The empty-args pattern starts at a tool's "name" key, so anchor
+            # the match to the current tool's name position; a match for any
+            # other tool must not mark the current one as empty-args.
+            name_matches = list(self.tool_name_reg.finditer(current_text))
+            empty_args_match = next(
+                (
+                    m
+                    for m in self.tool_empty_arg_reg.finditer(current_text)
+                    if current_idx < len(name_matches)
+                    and m.start() == name_matches[current_idx].start()
+                ),
+                None,
+            )
             if empty_args_match and empty_args_match.start() > 0:
                 for i in range(tool_count):
                     if i == current_idx:
