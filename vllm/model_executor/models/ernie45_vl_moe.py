@@ -37,7 +37,7 @@ from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -260,7 +260,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 prefix=f"{prefix}.text_experts_gate",
             )
 
-            self.text_experts = FusedMoE(
+            self.text_experts = FusedMoEFactory(
                 shared_experts=self.shared_experts,
                 num_experts=config.moe_num_experts[0],
                 top_k=config.moe_k,
@@ -297,7 +297,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 prefix=f"{prefix}.vision_experts_gate",
             )
 
-            self.vision_experts = FusedMoE(
+            self.vision_experts = FusedMoEFactory(
                 shared_experts=self.shared_experts,
                 num_experts=config.moe_num_experts[1],
                 top_k=config.moe_k,
