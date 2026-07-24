@@ -62,6 +62,7 @@ class PrepareFinalizeInfo:
     blocked_quantization_support: bool
     backend: str | None
     supports_apply_weight_on_input: bool = True
+    per_act_token_quant_support: bool = True
 
 
 @dataclass
@@ -104,6 +105,7 @@ def register_prepare_and_finalize(
     backend: str | None,
     force_multigpu: bool = False,
     supports_apply_weight_on_input: bool = True,
+    per_act_token_quant_support: bool = True,
 ):
     global PREPARE_FINALIZE_INFO
     global MK_ALL_PREPARE_FINALIZE_TYPES
@@ -117,6 +119,7 @@ def register_prepare_and_finalize(
         blocked_quantization_support,
         backend,
         supports_apply_weight_on_input,
+        per_act_token_quant_support,
     )
     MK_ALL_PREPARE_FINALIZE_TYPES.append(kind)
     if backend is not None or force_multigpu:
@@ -258,9 +261,9 @@ if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability
         standard_format,
         nvfp4_types + fp8_types,
         blocked_quantization_support=True,
-        backend=None,
-        force_multigpu=True,
+        backend="flashinfer_nvlink_two_sided",
         supports_apply_weight_on_input=False,
+        per_act_token_quant_support=False,
     )
 
     register_experts(
@@ -286,10 +289,11 @@ if (
     register_prepare_and_finalize(
         FlashInferNVLinkOneSidedPrepareAndFinalize,
         standard_format,
-        nvfp4_types,
+        nvfp4_types + fp8_types,
         blocked_quantization_support=False,
         backend="flashinfer_nvlink_one_sided",
         supports_apply_weight_on_input=False,
+        per_act_token_quant_support=False,
     )
 
 if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability(100):

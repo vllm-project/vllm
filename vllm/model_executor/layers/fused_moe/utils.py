@@ -47,6 +47,7 @@ def _count_expert_num_tokens(
     num_experts,
     topk_numel,
     expert_map,
+    expert_map_size,
     HAS_EXPERT_MAP: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -61,7 +62,7 @@ def _count_expert_num_tokens(
         expert_ids = tl.load(topk_ids_ptrs, mask=mask, other=-1)
         if HAS_EXPERT_MAP:
             expert_map_ptrs = expert_map + expert_ids
-            expert_map_mask = expert_ids >= 0
+            expert_map_mask = (expert_ids >= 0) & (expert_ids < expert_map_size)
             expert_ids = tl.load(expert_map_ptrs, mask=expert_map_mask, other=-1)
 
         has_curr_expert = tl.where(expert_ids == curr_expert, 1, 0)
@@ -90,7 +91,9 @@ def count_expert_num_tokens(
     A tensor of size num_local_experts, where tensor[i] holds the number
     of tokens assigned to the ith expert.
     """
-    assert topk_ids.dtype.is_signed, "The kernel uses -1 to represent invalid topk_ids"
+    assert topk_ids.dtype.is_signed, (
+        "The kernel detects invalid topk_ids with signed comparisons"
+    )
     expert_num_tokens = torch.empty(
         (num_local_experts), device=topk_ids.device, dtype=torch.int32
     )
@@ -105,6 +108,7 @@ def count_expert_num_tokens(
         num_local_experts,
         topk_ids.numel(),
         expert_map,
+        expert_map.numel() if expert_map is not None else 0,
         HAS_EXPERT_MAP=expert_map is not None,
         BLOCK_SIZE=BLOCK_SIZE,
     )

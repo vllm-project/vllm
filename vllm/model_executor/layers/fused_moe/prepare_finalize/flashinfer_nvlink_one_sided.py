@@ -100,9 +100,14 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         if defer_input_quant:
             a1q, a1q_scale = a1, None
         else:
+            input_sf = (
+                quant_config.a1_gscale
+                if quant_config.use_nvfp4_w4a4
+                else quant_config.a1_scale
+            )
             a1q, a1q_scale = moe_kernel_quantize_input(
                 a1,
-                quant_config.a1_gscale,
+                input_sf,
                 quant_config.quant_dtype,
                 quant_config.per_act_token_quant,
                 quant_config.block_shape,
@@ -110,23 +115,27 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
                 mx_alignment=quant_config.mx_alignment,
             )
 
-        payloads = []
+        dispatch_scale = a1q_scale is not None and self.scale_elems_per_token > 0
+
+        payloads: list[torch.Tensor] = []
         payloads.append(a1q)
-        if a1q_scale is not None:
+        if dispatch_scale:
+            assert a1q_scale is not None
             payloads.append(a1q_scale)
         topk_ids_payload_index = len(payloads)
         payloads.append(topk_ids)
         payloads.append(topk_weights)
 
         assert self.all2all_manager.moe_alltoall is not None  # type: ignore[attr-defined]
+        assert expert_map is not None, "expert_map required to filter padding sentinel"
         recv_payloads = self.all2all_manager.moe_alltoall.dispatch(  # type: ignore[attr-defined]
             token_selected_experts=topk_ids,
             input_payloads=payloads,
             runtime_max_tokens_per_rank=self.runtime_max_tokens_per_rank,
-            invalid_token_expert_id=-1,  # Follow TRTLLM Pattern
+            invalid_token_expert_id=num_experts,
             expert_id_payload_index=topk_ids_payload_index,
         )
-        if a1q_scale is not None:
+        if dispatch_scale:
             a1q_recv, a1q_scale_recv, topk_ids_recv, topk_weights_recv = recv_payloads
             # Apply scale interleaving only for CUTLASS (not TRT-LLM)
             if quant_config.quant_dtype == "nvfp4" and quant_config.is_scale_swizzled:
@@ -137,7 +146,7 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
             a1q_scale_recv = a1q_scale_recv.view(-1, self.scale_elems_per_token)
         else:
             a1q_recv, topk_ids_recv, topk_weights_recv = recv_payloads
-            a1q_scale_recv = None
+            a1q_scale_recv = a1q_scale
         a1q_recv = a1q_recv.view(-1, a1q_recv.shape[-1])
         topk_ids_recv = topk_ids_recv.view(-1, topk_ids_recv.shape[-1])
         topk_weights_recv = topk_weights_recv.view(-1, topk_weights_recv.shape[-1])

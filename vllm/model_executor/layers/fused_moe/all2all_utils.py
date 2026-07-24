@@ -299,10 +299,26 @@ def maybe_make_prepare_finalize(
             else:
                 padded_k = moe.hidden_dim
             dispatch_scale_bytes_per_token = padded_k // 32
+        elif quant_config.quant_dtype == current_platform.fp8_dtype():
+            # Only shared, per tensor scale is supported for fp8 at this time.
+            if (
+                quant_config.is_per_act_token
+                or quant_config.is_block_quantized
+                or quant_config.a1_scale is None
+            ):
+                raise NotImplementedError(
+                    "flashinfer_nvlink_one_sided fp8 dispatch currently supports "
+                    "per-tensor-static scaling only; got "
+                    f"per_act_token={quant_config.is_per_act_token}, "
+                    f"block_shape={quant_config.block_shape}, "
+                    f"static={quant_config.a1_scale is not None}"
+                )
+            dispatch_dtype_bytes_per_elem = 1
+            dispatch_scale_bytes_per_token = 0
         else:
             raise NotImplementedError(
                 "flashinfer_nvlink_one_sided dispatch supports nvfp4, mxfp8, "
-                "and bf16 (quant_dtype=None) today; got "
+                "fp8 (e4m3) per-tensor, and bf16 (quant_dtype=None) today; got "
                 f"quant_dtype={quant_config.quant_dtype!r}"
             )
         prepare_finalize = FlashInferNVLinkOneSidedPrepareAndFinalize(

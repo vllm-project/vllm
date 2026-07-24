@@ -672,6 +672,9 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
                 self.mapping = None
                 self.initialized = False
 
+    def destroy(self):
+        self.cleanup()
+
 
 class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
     """
@@ -859,6 +862,9 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
                 self.moe_alltoall = None
                 self.mapping = None
                 self.initialized = False
+
+    def destroy(self):
+        self.cleanup()
 
 
 class MoriAll2AllManager(All2AllManagerBase):
