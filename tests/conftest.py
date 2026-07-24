@@ -997,6 +997,21 @@ class VllmRunner:
             from tests.utils import wait_for_rocm_memory_to_settle
 
             wait_for_rocm_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
+        elif current_platform.is_xpu():
+            # The XPU/oneAPI runtime keeps ~1 GiB of context resident in the
+            # parent pytest process for its whole lifetime (grown by in-process
+            # HfRunner models), and distributed tests additionally allocate a
+            # CCL context in the engine subprocess. The default utilization of
+            # 0.92 leaves too little headroom for both, so lower it on XPU when
+            # the caller did not request an explicit value.
+            if "gpu_memory_utilization" not in kwargs:
+                kwargs["gpu_memory_utilization"] = 0.9
+            gpu_memory_utilization = kwargs["gpu_memory_utilization"]
+            # XPU (Level Zero) can also release device memory lazily after a
+            # previous engine shuts down, so wait before constructing LLM.
+            from tests.utils import wait_for_xpu_memory_to_settle
+
+            wait_for_xpu_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
 
         with init_ctx:
             self.llm = LLM(
@@ -1331,6 +1346,15 @@ class VllmRunner:
         # wait is bounded so cleanup failures fail this test instead of hanging.
         wait_for_rocm_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
 
+    def _wait_for_xpu_memory_release(self, gpu_memory_utilization: float) -> None:
+        from tests.utils import wait_for_xpu_memory_to_settle
+
+        # V1 startup requires free_memory >= total * gpu_memory_utilization.
+        # XPU (Level Zero) releases device memory lazily after an engine shuts
+        # down, so wait for the complementary used-memory ratio to settle before
+        # the next allocation. Bounded so cleanup failures do not hang the suite.
+        wait_for_xpu_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
+
     def __exit__(self, exc_type, exc_value, traceback):
         # Explicitly shutdown the engine core to release GPU resources
         # This is needed because when executing consecutive tests, the GC
@@ -1356,6 +1380,7 @@ class VllmRunner:
         torch._dynamo.reset()
         cleanup_dist_env_and_memory()
         self._wait_for_rocm_memory_release(gpu_memory_utilization)
+        self._wait_for_xpu_memory_release(gpu_memory_utilization)
 
 
 @pytest.fixture(scope="session")
