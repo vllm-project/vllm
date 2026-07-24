@@ -58,10 +58,11 @@ def _compute_global_residual_mass(
     draft_sampled_ptr,
     logit_idx,
     vocab_num_blocks,
+    use_draft_logits,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
 ):
-    if HAS_DRAFT_LOGITS:
+    if HAS_DRAFT_LOGITS and use_draft_logits:
         blocks = tl.arange(0, PADDED_VOCAB_NUM_BLOCKS)
         mask = blocks < vocab_num_blocks
         partials = tl.load(
@@ -129,7 +130,7 @@ def _compute_global_logprobs_and_logsumexp(
     target_local_max_stride,
     target_local_sumexp_ptr,
     target_local_sumexp_stride,
-    # [max_num_reqs, num_speculative_steps, V]
+    # [num_cached_reqs, num_speculative_steps, V]
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
@@ -139,6 +140,7 @@ def _compute_global_logprobs_and_logsumexp(
     draft_local_sumexp_ptr,
     draft_local_sumexp_stride,
     vocab_num_blocks,
+    use_draft_logits,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
 ):
@@ -157,7 +159,7 @@ def _compute_global_logprobs_and_logsumexp(
         PADDED_VOCAB_NUM_BLOCKS,
     )
     target_log_prob = target_logit - target_lse
-    if HAS_DRAFT_LOGITS:
+    if HAS_DRAFT_LOGITS and use_draft_logits:
         draft_logit = tl.load(
             draft_logits_ptr
             + req_state_idx * draft_logits_stride_0
@@ -203,10 +205,11 @@ def _compute_local_logits_stats_kernel(
     # [num_logits, V]
     target_logits_ptr,
     target_logits_stride,
-    # [max_num_reqs, num_speculative_steps, V]
+    # [num_cached_reqs, num_speculative_steps, V]
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
+    draft_logits_num_rows,
     # [num_logits]
     expanded_idx_mapping_ptr,
     # [num_logits]
@@ -269,7 +272,7 @@ def _compute_local_logits_stats_kernel(
             + block_idx,
             target_sumexp,
         )
-        if HAS_DRAFT_LOGITS:
+        if HAS_DRAFT_LOGITS and req_state_idx < draft_logits_num_rows:
             # Get local draft max and summed exponentials.
             draft_logits = tl.load(
                 draft_logits_ptr
@@ -307,10 +310,11 @@ def _compute_cumulative_log_p_kernel(
     target_local_sumexp_stride,
     # [num_logits]
     draft_sampled_ptr,
-    # [max_num_reqs, num_speculative_steps, V]
+    # [num_cached_reqs, num_speculative_steps, V]
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
+    draft_logits_num_rows,
     # [num_logits, num_blocks]
     draft_local_max_ptr,
     draft_local_max_stride,
@@ -336,6 +340,7 @@ def _compute_cumulative_log_p_kernel(
     if temp == 0.0:
         return
 
+    use_draft_logits = req_state_idx < draft_logits_num_rows
     log_p = 0.0
     for step in range(num_draft_tokens):
         logit_idx = start_idx + step
@@ -360,6 +365,7 @@ def _compute_cumulative_log_p_kernel(
             draft_local_sumexp_ptr,
             draft_local_sumexp_stride,
             vocab_num_blocks,
+            use_draft_logits,
             PADDED_VOCAB_NUM_BLOCKS,
             HAS_DRAFT_LOGITS,
         )
@@ -383,10 +389,11 @@ def _compute_local_residual_mass_kernel(
     # [num_logits, num_blocks]
     target_local_sumexp_ptr,
     target_local_sumexp_stride,
-    # [max_num_reqs, num_speculative_steps, V]
+    # [num_cached_reqs, num_speculative_steps, V]
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
+    draft_logits_num_rows,
     # [num_logits, num_blocks]
     draft_local_max_ptr,
     draft_local_max_stride,
@@ -414,6 +421,10 @@ def _compute_local_residual_mass_kernel(
         return
 
     req_state_idx = tl.load(expanded_idx_mapping_ptr + logit_idx).to(tl.int64)
+    if req_state_idx >= draft_logits_num_rows:
+        # Slot outside the capped buffer: verification treats the draft as
+        # one-hot and uses the closed-form residual mass instead.
+        return
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
     if temp == 0.0:
         return
@@ -441,6 +452,7 @@ def _compute_local_residual_mass_kernel(
         draft_local_sumexp_ptr,
         draft_local_sumexp_stride,
         vocab_num_blocks,
+        True,  # use_draft_logits (uncached slots returned above)
         PADDED_VOCAB_NUM_BLOCKS,
         True,  # HAS_DRAFT_LOGITS
     )
@@ -481,10 +493,11 @@ def _rejection_kernel(
     target_local_sumexp_stride,
     # [num_logits]
     draft_sampled_ptr,
-    # [max_num_reqs, num_speculative_steps, V]
+    # [num_cached_reqs, num_speculative_steps, V]
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
+    draft_logits_num_rows,
     # [num_logits, num_blocks]
     draft_local_max_ptr,
     draft_local_max_stride,
@@ -522,6 +535,7 @@ def _rejection_kernel(
     seed = tl.load(seed_ptr + req_state_idx)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
     is_greedy = temp == 0.0
+    use_draft_logits = req_state_idx < draft_logits_num_rows
 
     accepted_length = tl.zeros((), tl.int64)
     target_lse = 0.0
@@ -551,6 +565,7 @@ def _rejection_kernel(
                     draft_sampled_ptr,
                     logit_idx + 1,
                     vocab_num_blocks,
+                    use_draft_logits,
                     PADDED_VOCAB_NUM_BLOCKS,
                     HAS_DRAFT_LOGITS,
                 )
@@ -611,6 +626,7 @@ def _rejection_kernel(
                         draft_local_sumexp_ptr,
                         draft_local_sumexp_stride,
                         vocab_num_blocks,
+                        use_draft_logits,
                         PADDED_VOCAB_NUM_BLOCKS,
                         HAS_DRAFT_LOGITS,
                     )
@@ -639,7 +655,7 @@ def _rejection_kernel(
             vocab_num_blocks,
             PADDED_VOCAB_NUM_BLOCKS,
         )
-        if HAS_DRAFT_LOGITS:
+        if HAS_DRAFT_LOGITS and use_draft_logits:
             draft_lse = _compute_global_logsumexp(
                 draft_local_max_ptr,
                 draft_local_max_stride,
@@ -666,10 +682,11 @@ def _resample_kernel(
     target_logits_stride,
     # [num_reqs]
     target_rejected_logsumexp_ptr,
-    # [max_num_reqs, num_speculative_steps, V]
+    # [num_cached_reqs, num_speculative_steps, V]
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
+    draft_logits_num_rows,
     # [num_reqs]
     draft_rejected_logsumexp_ptr,
     # [num_reqs]
@@ -721,7 +738,7 @@ def _resample_kernel(
     if is_bonus:
         # Bonus token (no rejections). Directly use the target logits.
         residual_logits = target_logits
-    elif HAS_DRAFT_LOGITS:
+    elif HAS_DRAFT_LOGITS and req_state_idx < draft_logits_num_rows:
         draft_logits = tl.load(
             draft_logits_ptr
             + req_state_idx * draft_logits_stride_0
@@ -785,6 +802,7 @@ def _resample_kernel(
         None,  # processed_logits_ptr
         0,  # processed_logits_stride
         None,  # processed_logits_col_ptr
+        0,
         vocab_size,
         APPLY_TEMPERATURE=False,
         USE_FP64=USE_FP64,
@@ -864,7 +882,7 @@ def _insert_resampled_kernel(
 def rejection_sample(
     # [num_logits, V]
     target_logits: torch.Tensor,
-    # [max_num_reqs, num_speculative_steps, V]
+    # [num_cached_reqs, num_speculative_steps, V]
     draft_logits: torch.Tensor | None,
     # [num_logits]
     draft_sampled: torch.Tensor,
@@ -896,9 +914,11 @@ def rejection_sample(
     num_logits, vocab_size = target_logits.shape
     draft_logits_stride_0 = 0
     draft_logits_stride_1 = 0
+    draft_logits_num_rows = 0
     if has_draft_logits := draft_logits is not None:
         draft_logits_stride_0 = draft_logits.stride(0)
         draft_logits_stride_1 = draft_logits.stride(1)
+        draft_logits_num_rows = draft_logits.shape[0]
         # In some cases (e.g. MiMo v2.5 Pro + DFlash) the target model's
         # vocab size is larger than the draft's due to padding.
         vocab_size = min(vocab_size, draft_logits.size(-1))
@@ -940,6 +960,7 @@ def rejection_sample(
         draft_logits,
         draft_logits_stride_0,
         draft_logits_stride_1,
+        draft_logits_num_rows,
         expanded_idx_mapping,
         expanded_local_pos,
         temperature,
@@ -972,6 +993,7 @@ def rejection_sample(
             draft_logits,
             draft_logits_stride_0,
             draft_logits_stride_1,
+            draft_logits_num_rows,
             draft_local_max,
             draft_local_max.stride(0),
             draft_local_sumexp,
@@ -1006,6 +1028,7 @@ def rejection_sample(
                 draft_logits,
                 draft_logits_stride_0,
                 draft_logits_stride_1,
+                draft_logits_num_rows,
                 draft_local_max,
                 draft_local_max.stride(0),
                 draft_local_sumexp,
@@ -1051,6 +1074,7 @@ def rejection_sample(
         draft_logits,
         draft_logits_stride_0,
         draft_logits_stride_1,
+        draft_logits_num_rows,
         draft_local_max,
         draft_local_max.stride(0),
         draft_local_sumexp,
@@ -1095,6 +1119,7 @@ def rejection_sample(
         draft_logits,
         draft_logits_stride_0,
         draft_logits_stride_1,
+        draft_logits_num_rows,
         draft_rejected_logsumexp,
         num_sampled,
         cu_num_logits,

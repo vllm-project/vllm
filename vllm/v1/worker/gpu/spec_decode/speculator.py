@@ -12,6 +12,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
@@ -127,9 +128,29 @@ class DraftModelSpeculator(BaseSpeculator):
         )
 
         self.draft_logits: torch.Tensor | None = None
-        if self.speculative_config.draft_sample_method == "probabilistic":
+        if not (
+            self.use_local_argmax_reduction
+            or self.speculative_config.use_heterogeneous_vocab
+        ):
+            buffer_bytes = int(
+                self.speculative_config.draft_logits_buffer_gb * GiB_bytes
+            )
+            slot_bytes = (
+                self.num_speculative_steps * self.vocab_size * torch.float32.itemsize
+            )
+            max_num_cached_reqs = min(self.max_num_reqs, buffer_bytes // slot_bytes)
+            if max_num_cached_reqs < self.max_num_reqs:
+                logger.warning(
+                    "Draft logits buffer holds %d of %d request slots "
+                    "(draft_logits_buffer_gb=%s). Requests outside the "
+                    "buffer fall back to one-hot rejection sampling, "
+                    "reducing their acceptance rate.",
+                    max_num_cached_reqs,
+                    self.max_num_reqs,
+                    self.speculative_config.draft_logits_buffer_gb,
+                )
             self.draft_logits = torch.zeros(
-                self.max_num_reqs,
+                max_num_cached_reqs,
                 self.num_speculative_steps,
                 self.vocab_size,
                 dtype=torch.float32,
@@ -257,11 +278,6 @@ class DraftModelSpeculator(BaseSpeculator):
     def _validate_local_argmax_reduction(self) -> None:
         if not self.use_local_argmax_reduction:
             return
-        if self.speculative_config.draft_sample_method == "probabilistic":
-            raise ValueError(
-                "use_local_argmax_reduction is not compatible with "
-                "draft_sample_method='probabilistic'."
-            )
         if not hasattr(self.model, "get_top_tokens"):
             raise ValueError(
                 "use_local_argmax_reduction is enabled but draft model "

@@ -215,6 +215,60 @@ def test_greedy_rejection_sample(num_speculative_steps: int):
     )
 
 
+@pytest.mark.parametrize("use_block_verification", [False, True])
+def test_capped_draft_logits_per_request_fallback(use_block_verification: bool):
+    """With a draft-logits buffer covering only the first request slots,
+    cached requests must verify exactly as with a full buffer and uncached
+    requests exactly as with one-hot (no draft logits) verification.
+
+    idx_mapping is arange(num_trials), so a buffer of num_rows slots caches
+    exactly the first num_rows requests.
+    """
+    torch.manual_seed(42)
+    device = "cuda"
+    num_speculative_steps = 3
+    num_trials = 64
+    num_rows = 24
+
+    target_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32)
+    draft_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32)
+    inputs = _build_rejection_sample_inputs(
+        target_logits_1d,
+        draft_logits_1d,
+        num_speculative_steps,
+        temperature=0.6,
+        num_trials=num_trials,
+    )
+
+    def run(draft_logits: torch.Tensor | None):
+        return rejection_sample(
+            **{**inputs, "draft_logits": draft_logits},
+            num_speculative_steps=num_speculative_steps,
+            use_block_verification=use_block_verification,
+        )
+
+    full_sampled, full_num = run(inputs["draft_logits"])
+    onehot_sampled, onehot_num = run(None)
+    capped_sampled, capped_num = run(inputs["draft_logits"][:num_rows])
+
+    ref_num = torch.cat([full_num[:num_rows], onehot_num[num_rows:]])
+    ref_sampled = torch.cat([full_sampled[:num_rows], onehot_sampled[num_rows:]])
+    assert torch.equal(capped_num, ref_num)
+    for i in range(num_trials):
+        n = int(ref_num[i])
+        kind = "cached" if i < num_rows else "uncached"
+        assert torch.equal(capped_sampled[i, :n], ref_sampled[i, :n]), (
+            f"{kind} request {i} diverged from its reference path"
+        )
+
+    # An empty buffer (zero cached slots) must behave exactly like one-hot.
+    empty_sampled, empty_num = run(inputs["draft_logits"][:0])
+    assert torch.equal(empty_num, onehot_num)
+    for i in range(num_trials):
+        n = int(onehot_num[i])
+        assert torch.equal(empty_sampled[i, :n], onehot_sampled[i, :n])
+
+
 @pytest.mark.parametrize(
     "num_speculative_steps,temperature,unconditional_rates",
     [

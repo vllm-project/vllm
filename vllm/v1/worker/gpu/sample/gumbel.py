@@ -94,6 +94,7 @@ def gumbel_block_argmax(
     processed_logits_ptr,
     processed_logits_stride,
     processed_logits_col_ptr,
+    processed_logits_num_rows,
     vocab_size,
     APPLY_TEMPERATURE: tl.constexpr,
     USE_FP64: tl.constexpr,
@@ -110,7 +111,7 @@ def gumbel_block_argmax(
         # E.g., if the kernel uses tl.div_rn, we should use tl.div_rn here too.
         logits = logits / temp
 
-    if processed_logits_ptr is not None:
+    if processed_logits_ptr is not None and req_state_idx < processed_logits_num_rows:
         # Store the temperature-applied logits.
         if processed_logits_col_ptr is not None:
             if PER_TOKEN_COL:
@@ -167,6 +168,7 @@ def _gumbel_sample_kernel(
     processed_logits_ptr,
     processed_logits_stride,
     processed_logits_col_ptr,
+    processed_logits_num_rows,
     logits_ptr,
     logits_stride,
     expanded_idx_mapping_ptr,
@@ -202,6 +204,7 @@ def _gumbel_sample_kernel(
         processed_logits_ptr,
         processed_logits_stride,
         processed_logits_col_ptr,
+        processed_logits_num_rows,
         vocab_size,
         APPLY_TEMPERATURE=APPLY_TEMPERATURE,
         USE_FP64=USE_FP64,
@@ -246,6 +249,7 @@ def gumbel_sample(
         output_processed_logits,
         output_processed_logits.stride(0) if output_processed_logits is not None else 0,
         output_processed_logits_col,
+        output_processed_logits.shape[0] if output_processed_logits is not None else 0,
         logits,
         logits.stride(0),
         expanded_idx_mapping,
