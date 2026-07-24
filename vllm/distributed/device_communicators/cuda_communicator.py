@@ -93,6 +93,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.symm_mem_comm: SymmMemCommunicator | None = None
         self.fi_ar_comm: FlashInferAllReduce | None = None
         self.aiter_ar_comm: AiterCustomAllreduce | None = None
+        self.aiter_ag_rs_comm: AiterCustomAllreduce | None = None
 
         if use_torch_symm_mem and current_platform.is_cuda():
             self.symm_mem_comm = SymmMemCommunicator(
@@ -121,6 +122,20 @@ class CudaCommunicator(DeviceCommunicatorBase):
                     self.symm_mem_comm is not None and not self.symm_mem_comm.disabled
                 ),
             )
+
+        # AITER custom all-gather/reduce-scatter DP-attention dispatch/combine
+        if (
+            "dp" in unique_name
+            and self.world_size in (2, 4, 8)
+            and current_platform.is_rocm()
+            and rocm_aiter_ops.is_custom_ag_rs_enabled()
+        ):
+            self.aiter_ag_rs_comm = AiterCustomAllreduce(
+                group=self.cpu_group,
+                device=self.device,
+            )
+            if self.aiter_ag_rs_comm.disabled:
+                self.aiter_ag_rs_comm = None
 
         if use_custom_allreduce and self.world_size > 1 and current_platform.is_rocm():
             # Initialize a custom quick all-reduce implementation for AMD.
@@ -411,6 +426,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
             # Convert negative dim to positive.
             dim += input_.dim()
 
+        # 'sizes' is not needed if all inputs in the same group have the same
+        # shape
+        if sizes is not None and all(s == sizes[0] for s in sizes):
+            sizes = None
+
         # Note: This will produce an incorrect answer if we don't make
         # the input_tensor contiguous. Possible bug in reduce_scatter_tensor?
         input_tensor = input_.movedim(0, dim).contiguous()
@@ -423,6 +443,16 @@ class CudaCommunicator(DeviceCommunicatorBase):
             assert input_tensor.shape[0] % world_size == 0
             chunk_size = input_tensor.shape[0] // world_size
         output_shape = (chunk_size,) + input_tensor.shape[1:]
+
+        if self._can_use_aiter_ag_rs(sizes):
+            aiter_comm = self.aiter_ag_rs_comm
+            assert aiter_comm is not None
+            if aiter_comm.should_custom_rs(input_tensor, dim=0):
+                output = torch.empty(
+                    output_shape, dtype=input_tensor.dtype, device=input_tensor.device
+                )
+                aiter_comm.custom_reduce_scatter(input_tensor, output, dim=0)
+                return output.movedim(0, dim).contiguous()
 
         # Symmetric memory is only used when all ranks have uniform sizes.
         # ncclCommWindowRegister is collective: asymmetric pool allocations
@@ -564,12 +594,39 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if self.aiter_ar_comm is not None:
             self.aiter_ar_comm.close()
             self.aiter_ar_comm = None
+        if self.aiter_ag_rs_comm is not None:
+            self.aiter_ag_rs_comm.close()
+            self.aiter_ag_rs_comm = None
         if self.fi_ar_comm is not None:
             self.fi_ar_comm.destroy()
             self.fi_ar_comm = None
         if self.all2all_manager is not None:
             self.all2all_manager.destroy()
             self.all2all_manager = None  # type: ignore[assignment]
+
+    def _can_use_aiter_ag_rs(self, sizes: list[int] | None) -> bool:
+        """Whether the AITER custom AG/RS fast path may run for this collective.
+
+        Requires:
+        - uniform batches
+        - FULL CUDAgraphs
+        """
+        if self.aiter_ag_rs_comm is None or self.aiter_ag_rs_comm.disabled:
+            return False
+        if sizes is not None:
+            return False
+
+        from vllm.config.compilation import CUDAGraphMode
+        from vllm.forward_context import get_forward_context
+
+        try:
+            ctx = get_forward_context()
+        except AssertionError:
+            return False
+        if ctx.cudagraph_runtime_mode != CUDAGraphMode.FULL:
+            return False
+        bd = ctx.batch_descriptor
+        return bd is not None and bd.uniform
 
     def all_gatherv(
         self,
@@ -587,6 +644,19 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # shape
         if sizes is not None and all(s == sizes[0] for s in sizes):
             sizes = None
+
+        if self._can_use_aiter_ag_rs(sizes):
+            aiter_comm = self.aiter_ag_rs_comm
+            assert aiter_comm is not None
+            if isinstance(input_, torch.Tensor):
+                if aiter_comm.should_custom_ag(input_):
+                    out = aiter_comm.custom_all_gather(input_, dim=0)
+                    if out is not None:
+                        return out
+            elif all(aiter_comm.should_custom_ag(inp) for inp in input_):
+                outs = [aiter_comm.custom_all_gather(inp, dim=0) for inp in input_]
+                if all(o is not None for o in outs):
+                    return outs
 
         # Symmetric memory is only used when all ranks have uniform sizes.
         # ncclCommWindowRegister is collective: asymmetric pool allocations
