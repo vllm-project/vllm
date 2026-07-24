@@ -102,7 +102,7 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 num_local_experts, self.max_num_tokens, hidden_dim
             )
 
-            b_a1_scale = torch.empty(scale_shape, dtype=torch.float32, device=a1.device)
+            b_a1_scale = torch.ones(scale_shape, dtype=torch.float32, device=a1.device)
         else:
             assert quant_config.a1_scale is None
             b_a1_scale = None

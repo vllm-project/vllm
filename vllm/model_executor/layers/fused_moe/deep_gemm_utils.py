@@ -505,7 +505,7 @@ def deepgemm_moe_permute(
             dtype=torch.int32,
         )
     else:
-        aq_scale_out = torch.empty((M_sum, sf_k), device=device, dtype=torch.float32)
+        aq_scale_out = torch.ones((M_sum, sf_k), device=device, dtype=torch.float32)
 
     # DeepGEMM uses negative values in m_indices (here expert_ids) to mark
     # completely invalid / padded blocks that should be skipped. We always
