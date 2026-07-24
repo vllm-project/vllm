@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, TypeVar, cast
 
 import numpy as np
 
@@ -31,6 +32,10 @@ class MediaWithBytes(Generic[_T]):
     def __array__(self, *args, **kwargs) -> np.ndarray:
         """Allow np.array(obj) to return np.array(obj.media)."""
         return np.array(self.media, *args, **kwargs)
+
+    def __iter__(self) -> Iterator[Any]:
+        """Allow unpacking obj to unpack obj.media (e.g. video tuples)."""
+        return iter(cast(Iterable[Any], self.media))
 
     def __getstate__(self):
         return self.__dict__.copy()

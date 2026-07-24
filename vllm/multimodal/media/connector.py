@@ -29,7 +29,7 @@ from vllm.multimodal.video import get_video_loader_backend_for_processor
 from vllm.utils.registry import ExtensionManager
 
 from .audio import AudioEmbeddingMediaIO, AudioMediaIO
-from .base import MediaIO
+from .base import MediaIO, MediaWithBytes
 from .image import ImageEmbeddingMediaIO, ImageMediaIO
 from .video import VideoMediaIO
 
@@ -532,7 +532,7 @@ class MediaConnector:
         *,
         image_mode: str | None = "RGB",
         video_processor: str | None = None,
-    ) -> tuple[npt.NDArray, dict[str, Any]]:
+    ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
         """
         Load video from an HTTP or base64 data URL.
         """
@@ -558,7 +558,7 @@ class MediaConnector:
         *,
         image_mode: str | None = "RGB",
         video_processor: str | None = None,
-    ) -> tuple[npt.NDArray, dict[str, Any]]:
+    ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
         """
         Asynchronously load video from an HTTP or base64 data URL.
 
