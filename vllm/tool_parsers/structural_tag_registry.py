@@ -136,6 +136,33 @@ def get_model_structural_tag(
     )
 
 
+def build_reasoning_json_structural_tag(
+    model: str,
+    schema: dict,
+    reasoning: bool = True,
+) -> StructuralTag:
+    suffix_tag = JSONSchemaFormat(json_schema=schema)
+
+    if not reasoning:
+        return StructuralTag(format=suffix_tag)
+
+    prefix_tag = SequenceFormat(
+        elements=[
+            TagFormat(begin="", content=AnyTextFormat(), end="</think>"),
+            ConstStringFormat(value="\n\n"),
+        ]
+    )
+
+    return StructuralTag(
+        format=SequenceFormat(
+            elements=[
+                prefix_tag,
+                suffix_tag,
+            ]
+        )
+    )
+
+
 def _dump_tool_for_xgrammar(
     tool: ChatCompletionToolsParam | ResponsesTool,
 ) -> dict[str, Any]:

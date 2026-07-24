@@ -358,6 +358,16 @@ class StructuredOutputManager:
         # and deserialization when sending this to the GPU workers.
         return bitmask_tensor.numpy()
 
+    def _grammar_handles_reasoning(self, request: "Request") -> bool:
+        structured_req = request.structured_output_request
+        if structured_req is None:
+            return False
+        return (
+            isinstance(self.backend, XgrammarBackend)
+            and structured_req.structured_output_key[0]
+            == StructuredOutputOptions.STRUCTURAL_TAG
+        )
+
     def should_fill_bitmask(self, request: "Request") -> bool:
         # NOTE (Hanchen) if enable_in_reasoning is True, it means that
         # the model needs to be constrained in reasoning. So we should always
@@ -365,6 +375,10 @@ class StructuredOutputManager:
         reasoner = self._get_reasoner(request)
         if reasoner is not None:
             if self.enable_in_reasoning:
+                return True
+            # The grammar is reasoning-aware and handles the thinking phase
+            # itself, so keep the bitmask active from the first token.
+            if self._grammar_handles_reasoning(request):
                 return True
             assert request.structured_output_request is not None
             if request.structured_output_request.reasoning_ended is None:
@@ -399,6 +413,12 @@ class StructuredOutputManager:
 
         # if the model needs structured in reasoning, we should advance
         if self.enable_in_reasoning:
+            return True
+
+        # xgrammar reasoning-aware structural_tag grammars handle the thinking
+        # phase inside the grammar itself, so advance the FSM from the first
+        # token instead of relying on vLLM's reasoning skip.
+        if self._grammar_handles_reasoning(request):
             return True
 
         structured_req = request.structured_output_request
