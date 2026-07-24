@@ -210,12 +210,14 @@ class Gemma4Config(VerifyAndUpdateConfig):
         When FA4 is not available we fall back to Triton.
         """
         hf_text_config = vllm_config.model_config.hf_text_config
-        if getattr(hf_text_config, "is_heterogeneous", False):
+        if hasattr(hf_text_config, "is_heterogeneous"):
+            # Transformers >= 5.15.0
             head_dims = {
                 layer_type: hf_text_config.per_layer_config[layer_type].head_dim
                 for layer_type in hf_text_config.layer_types
             }
         else:
+            # Transformers < 5.15.0
             head_dims = {
                 "sliding_attention": getattr(hf_text_config, "head_dim", None),
                 "full_attention": getattr(hf_text_config, "global_head_dim", None),
