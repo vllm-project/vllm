@@ -144,6 +144,16 @@ class BlockTable:
         block_table_np = self.block_table.np
         block_table_np[tgt, :num_blocks] = block_table_np[src, :num_blocks]
         self.num_blocks_per_row[tgt] = num_blocks
+        # Clear the vacated source row. Stale block ids left behind get
+        # dereferenced as mamba state slots by the padded rows of dummy-run
+        # batches (which bypass the NULL_BLOCK_ID fill of real decode
+        # padding), and by then may point at freed blocks that have been
+        # reallocated — e.g. to an in-flight NIXL load, whose received state
+        # the dummy forward's in-place state write would corrupt. Cleared
+        # rows route those writes to the reserved null block instead
+        # (the remove_request counterpart of this clearing).
+        block_table_np[src, :num_blocks] = 0
+        self.num_blocks_per_row[src] = 0
 
     def swap_row(self, src: int, tgt: int) -> None:
         src_tgt, tgt_src = [src, tgt], [tgt, src]

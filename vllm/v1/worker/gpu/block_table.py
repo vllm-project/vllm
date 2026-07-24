@@ -163,6 +163,16 @@ class BlockTables:
         # Therefore, this method must return the persistent tensor
         # with the same memory address as that used during the model's forward pass,
         # rather than allocating a new tensor.
+        #
+        # Zero the rows: dummy runs skip the gather, so they otherwise hold
+        # whatever the last real step left behind. Dummy slot mappings are
+        # PAD-filled, but mamba/GDN metadata routes its in-place state writes
+        # through block_table[:, 0], and the stale ids can point at freed
+        # blocks that have since been reallocated — e.g. to an in-flight NIXL
+        # load, whose received state a dummy forward would then corrupt.
+        # Zeroed rows route dummy state writes to the reserved null block.
+        for block_table in self.input_block_tables:
+            block_table[:num_reqs].zero_()
         return tuple(block_table[:num_reqs] for block_table in self.input_block_tables)
 
     def compute_slot_mappings(
