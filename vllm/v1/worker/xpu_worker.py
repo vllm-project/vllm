@@ -35,6 +35,8 @@ class XPUWorker(Worker):
         super().__init__(
             vllm_config, local_rank, rank, distributed_init_method, is_driver_worker
         )
+        if self.profiler_config.profiler == "proton":
+            raise ValueError("The Proton profiler is not supported by XPU workers.")
         device_config = self.device_config
         assert device_config.device_type == "xpu"
         assert current_platform.is_xpu()

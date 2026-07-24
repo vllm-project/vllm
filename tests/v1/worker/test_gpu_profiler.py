@@ -281,6 +281,17 @@ class TestAnnotateProfile:
             "execute_5_context_1(sq4sk4sqsq16sqsk16)_generation_1(sq1sk11sqsq1sqsk11)"
         )
 
+    def test_skips_annotations_outside_profile_window(self):
+        worker = MagicMock()
+        worker.profiler.is_running = False
+
+        context = Worker.annotate_profile(worker, MagicMock())
+
+        worker.profiler.step.assert_called_once_with()
+        worker.profiler.annotate_context_manager.assert_not_called()
+        with context:
+            pass
+
 
 def test_profiler_entered_during_capture():
     """Profiler is used as a context manager in _warmup_and_capture,

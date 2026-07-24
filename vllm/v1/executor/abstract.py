@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from concurrent.futures import Future
 from functools import cached_property
-from typing import TYPE_CHECKING, Literal, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -32,6 +32,17 @@ logger = init_logger(__name__)
 _R = TypeVar("_R")
 
 FailureCallback = Callable[[], None]
+
+
+def _run_profile(worker: Any, is_start: bool, profile_prefix: str | None) -> str | None:
+    """Run profiling without aborting result collection on one rank's error."""
+    try:
+        worker.profile(is_start=is_start, profile_prefix=profile_prefix)
+    except Exception as exc:
+        rank = getattr(worker, "global_rank", "unknown")
+        logger.exception("Profiling failed on rank %s.", rank)
+        return f"rank {rank}: {type(exc).__name__}: {exc}"
+    return None
 
 
 class Executor(ABC):
@@ -254,7 +265,29 @@ class Executor(ABC):
         return output[0]
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
-        self.collective_rpc("profile", args=(is_start, profile_prefix))
+        # The callable overload does not express the additional RPC args.
+        results: list[str | None] = self.collective_rpc(
+            _run_profile,  # type: ignore[arg-type]
+            args=(is_start, profile_prefix),
+        )
+        errors = [result for result in results if result is not None]
+        if not errors:
+            return
+
+        rollback_errors: list[str] = []
+        if is_start:
+            rollback_results: list[str | None] = self.collective_rpc(
+                _run_profile,  # type: ignore[arg-type]
+                args=(False, None),
+            )
+            rollback_errors = [
+                result for result in rollback_results if result is not None
+            ]
+
+        message = f"Profiling failed: {'; '.join(errors)}"
+        if rollback_errors:
+            message += f". Rollback failed: {'; '.join(rollback_errors)}"
+        raise RuntimeError(message)
 
     def save_sharded_state(
         self,
