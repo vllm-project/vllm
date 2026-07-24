@@ -213,25 +213,41 @@ def align_fp4_moe_weights_for_fi(
         padded_intermediate,
     )
 
-    up_mult = 2 if is_act_and_mul else 1
-    padded_gate_up_dim = up_mult * padded_intermediate
+    pad_amount = padded_intermediate - intermediate
 
-    # Pad w13 and w2 along its intermediate dimension.
-    padded_w13 = w13.new_zeros((num_experts, padded_gate_up_dim, hidden_size // 2))
-    padded_w13[:, : w13.shape[1], :] = w13
-
+    # w2 and w2_scale: pad along the intermediate dim (last dim).
     padded_w2 = w2.new_zeros((num_experts, hidden_size, padded_intermediate // 2))
     padded_w2[:, :, : w2.shape[2]] = w2
-
-    padded_w13_scale = w13_scale.new_zeros(
-        (num_experts, padded_gate_up_dim, hidden_size // 16)
-    )
-    padded_w13_scale[:, : w13_scale.shape[1], :] = w13_scale
 
     padded_w2_scale = w2_scale.new_zeros(
         (num_experts, hidden_size, padded_intermediate // 16)
     )
     padded_w2_scale[:, :, : w2_scale.shape[2]] = w2_scale
+
+    if is_act_and_mul:
+        # Gated activation: w13 is [gate, up] concatenated along dim 1.
+        # Pad each half independently so the kernel can split them at
+        # padded_intermediate boundaries.
+        half = w13.shape[1] // 2
+        gate, up = w13[:, :half], w13[:, half:]
+        gate = torch.nn.functional.pad(gate, (0, 0, 0, pad_amount))
+        up = torch.nn.functional.pad(up, (0, 0, 0, pad_amount))
+        padded_w13 = torch.cat([gate, up], dim=1)
+
+        half_s = w13_scale.shape[1] // 2
+        gate_s, up_s = w13_scale[:, :half_s], w13_scale[:, half_s:]
+        gate_s = torch.nn.functional.pad(gate_s, (0, 0, 0, pad_amount))
+        up_s = torch.nn.functional.pad(up_s, (0, 0, 0, pad_amount))
+        padded_w13_scale = torch.cat([gate_s, up_s], dim=1)
+    else:
+        # Non-gated: w13 has no gate/up split, simple end-pad is correct.
+        padded_w13 = w13.new_zeros((num_experts, padded_intermediate, hidden_size // 2))
+        padded_w13[:, : w13.shape[1], :] = w13
+
+        padded_w13_scale = w13_scale.new_zeros(
+            (num_experts, padded_intermediate, hidden_size // 16)
+        )
+        padded_w13_scale[:, : w13_scale.shape[1], :] = w13_scale
 
     return padded_w13, padded_w13_scale, padded_w2, padded_w2_scale, padded_intermediate
 
@@ -303,15 +319,25 @@ def align_moe_weights_for_fi(
         padded_intermediate,
     )
 
-    up_mult = 2 if is_act_and_mul else 1
-    padded_gate_up_dim = up_mult * padded_intermediate
+    pad_amount = padded_intermediate - intermediate
 
-    # Pad w13 and w2 along its intermediate dimension.
-    padded_w13 = w13.new_zeros((num_experts, padded_gate_up_dim, hidden_size))
-    padded_w13[:, : w13.shape[1], :] = w13
-
+    # w2: pad along the intermediate dim (last dim).
     padded_w2 = w2.new_zeros((num_experts, hidden_size, padded_intermediate))
     padded_w2[:, :, :intermediate] = w2
+
+    if is_act_and_mul:
+        # Gated activation: w13 is [gate, up] concatenated along dim 1.
+        # Pad each half independently so the kernel can split them at
+        # padded_intermediate boundaries.
+        half = w13.shape[1] // 2
+        gate, up = w13[:, :half], w13[:, half:]
+        gate = torch.nn.functional.pad(gate, (0, 0, 0, pad_amount))
+        up = torch.nn.functional.pad(up, (0, 0, 0, pad_amount))
+        padded_w13 = torch.cat([gate, up], dim=1)
+    else:
+        # Non-gated: w13 has no gate/up split, simple end-pad is correct.
+        padded_w13 = w13.new_zeros((num_experts, padded_intermediate, hidden_size))
+        padded_w13[:, : w13.shape[1], :] = w13
 
     return padded_w13, padded_w2, padded_intermediate
 
