@@ -581,6 +581,11 @@ _EMBEDDING_EXAMPLE_MODELS = {
         hf_overrides={"architectures": ["BertSpladeSparseEmbeddingModel"]},
     ),
     "BgeM3EmbeddingModel": _HfExamplesInfo("BAAI/bge-m3"),
+    "EuroBertForMaskedLM": _HfExamplesInfo("EuroBERT/EuroBERT-210m"),
+    "EuroBertModel": _HfExamplesInfo(
+        "EuroBERT/EuroBERT-210m",
+        hf_overrides={"architectures": ["EuroBertModel"]},
+    ),
     "Gemma2Model": _HfExamplesInfo("BAAI/bge-multilingual-gemma2"),
     "Gemma3TextModel": _HfExamplesInfo("google/embeddinggemma-300m"),
     "GritLM": _HfExamplesInfo("parasail-ai/GritLM-7B-vllm"),
