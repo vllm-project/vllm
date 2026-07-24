@@ -66,10 +66,9 @@ def selective_state_update_ref(
     dB = rearrange(dt, "b h d -> b h d 1") * rearrange(
         B, "b h n -> b h 1 n"
     )  # (batch, nheads, dim, dstate)
-    state.copy_(
-        state * dA + dB * rearrange(x, "b h d -> b h d 1")
-    )  # (batch, dim, dstate
-    out = torch.einsum("bhdn,bhn->bhd", state.to(C.dtype), C)
+    updated_state = state * dA + dB * rearrange(x, "b h d -> b h d 1")
+    out = torch.einsum("bhdn,bhn->bhd", updated_state.to(C.dtype), C)
+    state.copy_(updated_state)  # (batch, dim, dstate)
     if D is not None:
         out += (x * D).to(out.dtype)
     out = (out if z is None else out * F.silu(z)).to(x.dtype)
