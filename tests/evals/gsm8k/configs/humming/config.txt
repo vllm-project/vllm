@@ -11,3 +11,6 @@ Qwen3-30B-A3B-NVFP4-humming.yaml
 Qwen3-30B-A3B-AWQ-humming.yaml
 Qwen3.5-35B-A3B-FP8-humming.yaml
 Qwen3.5-35B-A3B-experts-int8-humming.yaml
+Qwen3-30B-A3B-online-int5-humming.yaml
+Qwen3-30B-A3B-online-int3-zp-g32-humming.yaml
+Qwen3-30B-A3B-online-float7e3m3-humming.yaml
