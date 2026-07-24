@@ -179,3 +179,8 @@ class XPUWorker(Worker):
             self.rank,
             self.local_rank,
         )
+
+    def shutdown_for_process_exit(self) -> None:
+        # XPU terminal GC skipping is not covered by this optimization.
+        # Preserve the existing full XPU shutdown semantics.
+        self.shutdown()

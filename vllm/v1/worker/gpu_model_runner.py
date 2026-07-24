@@ -6517,14 +6517,14 @@ class GPUModelRunner(
                 gc.unfreeze()
                 gc.collect()
 
-    def shutdown(self) -> None:
+    def shutdown(self, collect_gc: bool = True) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
         from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
         from vllm.v1.worker.workspace import reset_workspace_manager
 
         # Calls torch.accelerator.synchronize()
-        self._cleanup_profiling_kv_cache()
+        self._cleanup_profiling_kv_cache_for_shutdown(collect_gc=collect_gc)
         if current_platform.is_rocm():
             # Drop captured graphs before distributed teardown. On ROCm, delayed
             # graph destruction can surface HSA faults in the next engine startup.
@@ -6537,11 +6537,18 @@ class GPUModelRunner(
 
         reset_workspace_manager()
         if current_platform.is_rocm() or current_platform.is_xpu():
-            gc.collect()
+            if collect_gc:
+                gc.collect()
             torch.accelerator.empty_cache()
             torch.accelerator.synchronize()
 
+    def shutdown_for_process_exit(self) -> None:
+        self.shutdown(collect_gc=False)
+
     def _cleanup_profiling_kv_cache(self) -> None:
+        self._cleanup_profiling_kv_cache_for_shutdown(collect_gc=True)
+
+    def _cleanup_profiling_kv_cache_for_shutdown(self, collect_gc: bool) -> None:
         torch.accelerator.synchronize()
         if hasattr(self, "kv_caches") and self.kv_caches:
             for i in range(len(self.kv_caches)):
@@ -6570,7 +6577,8 @@ class GPUModelRunner(
                 if hasattr(layer.impl, "_v_scale_cache"):
                     layer.impl._v_scale_cache = None
 
-        gc.collect()
+        if collect_gc:
+            gc.collect()
         torch.accelerator.empty_cache()
 
         logger.debug("Cleaned up profiling KV cache and CUDA graphs")

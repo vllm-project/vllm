@@ -1605,7 +1605,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.query_start_loc,
         )
 
-    def shutdown(self) -> None:
+    def shutdown(self, collect_gc: bool = True) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
         torch.accelerator.synchronize()
@@ -1623,9 +1623,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if hasattr(self, "model"):
             del self.model
 
-        gc.collect()
+        if collect_gc:
+            gc.collect()
         torch.accelerator.empty_cache()
         logger.debug("Cleaned up model weights, KV caches, and workspace")
+
+    def shutdown_for_process_exit(self) -> None:
+        self.shutdown(collect_gc=False)
 
     ########### EPLB methods start ###########
     @property

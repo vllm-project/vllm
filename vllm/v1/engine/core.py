@@ -740,22 +740,26 @@ class EngineCore:
             # More efficient to abort all as a single batch.
             self.abort_requests(request_ids)
 
-    def shutdown(self):
+    def shutdown(self, *, process_exiting: bool = False) -> None:
         logger.debug_once("[shutdown] EngineCore: tearing down local resources")
         self.structured_output_manager.clear_backend()
         if self.model_executor:
-            self.model_executor.shutdown()
+            if process_exiting:
+                self.model_executor.shutdown_for_process_exit()
+            else:
+                self.model_executor.shutdown()
         if self.scheduler:
             self.scheduler.shutdown()
 
-        # Undo the gc.freeze() from __init__ so that the objects allocated
-        # during engine startup (model weights, KV caches, etc.) become
-        # visible to the garbage collector again. Without this, deleting
-        # the engine in-process (e.g. unit tests) leaks GPU memory.
-        gc.unfreeze()
+        if not process_exiting:
+            # Undo the gc.freeze() from __init__ so that the objects allocated
+            # during engine startup (model weights, KV caches, etc.) become
+            # visible to the garbage collector again. Without this, deleting
+            # the engine in-process (e.g. unit tests) leaks GPU memory.
+            gc.unfreeze()
         # Tear down distributed state initialized in this EngineCore process
         # before it exits and release cached memory.
-        cleanup_dist_env_and_memory()
+        cleanup_dist_env_and_memory(collect_gc=not process_exiting)
         logger.debug_once("[shutdown] EngineCore: local resource teardown complete")
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
@@ -1338,7 +1342,7 @@ class EngineCoreProc(EngineCore):
             if signal_callback is not None:
                 signal_callback.stop()
             if engine_core is not None:
-                engine_core.shutdown()
+                engine_core.shutdown(process_exiting=True)
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
         pass
@@ -1909,8 +1913,8 @@ class DPEngineCoreProc(EngineCoreProc):
         dp_group, dp_store = parallel_config.stateless_init_dp_group(return_store=True)
         self.dp_group, self.dp_store = dp_group, dp_store
 
-    def shutdown(self):
-        super().shutdown()
+    def shutdown(self, *, process_exiting: bool = False) -> None:
+        super().shutdown(process_exiting=process_exiting)
         if dp_group := getattr(self, "dp_group", None):
             stateless_destroy_torch_distributed_process_group(dp_group)
 
@@ -2350,6 +2354,8 @@ class EngineCoreActorMixin:
             logger.exception("EngineCore encountered a fatal error.")
             raise
         finally:
+            # Ray actors can remain alive after run() returns, so this is not
+            # a process-exit path. Keep the full in-process cleanup semantics.
             self.shutdown()  # type: ignore[attr-defined]
 
 

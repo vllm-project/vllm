@@ -1296,8 +1296,9 @@ class Worker(WorkerBase):
             self.weight_transfer_engine.reset_weight_update_target()
             self._weight_update_active = False
 
-    def shutdown(self) -> None:
-        gc.unfreeze()
+    def shutdown(self, collect_gc: bool = True) -> None:
+        if collect_gc:
+            gc.unfreeze()
 
         # has_kv_transfer_group can be None during interpreter shutdown.
         if ensure_kv_transfer_shutdown is not None:
@@ -1313,7 +1314,10 @@ class Worker(WorkerBase):
         # Release GPU resources held by the model runner so that memory
         # can be reclaimed when running in-process
         if model_runner := getattr(self, "model_runner", None):
-            model_runner.shutdown()
+            if collect_gc:
+                model_runner.shutdown()
+            else:
+                model_runner.shutdown(collect_gc=False)
 
         # Release kept-alive cumem pools while the pluggable allocator wrappers
         # and callbacks are still alive, so MemPool teardown is not deferred to
@@ -1323,6 +1327,15 @@ class Worker(WorkerBase):
 
             if CuMemAllocator.instance is not None:
                 CuMemAllocator.instance.release_pools()
+
+    def shutdown_for_process_exit(self) -> None:
+        model_runner = getattr(self, "model_runner", None)
+        if callable(getattr(model_runner, "shutdown_for_process_exit", None)):
+            self.shutdown(collect_gc=False)
+        else:
+            # CPU, XPU, and out-of-tree workers inherit this class but do not
+            # use the GPU model runners whose full GC can be skipped here.
+            self.shutdown()
 
     def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
         return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)
