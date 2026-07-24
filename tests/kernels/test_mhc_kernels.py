@@ -1,18 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import itertools
+
 import pytest
 import torch
 
 import vllm.model_executor.kernels.mhc  # noqa: F401
 from vllm.model_executor.kernels.mhc.tilelang import (
+    _hc_prenorm_gemm,
     _tilelang_hc_prenorm_gemm,
     _torch_hc_prenorm_gemm,
 )
 from vllm.model_executor.layers.mhc import HAS_TILELANG_MHC
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_cutedsl
 from vllm.utils.torch_utils import set_random_seed
 
 DEVICE = current_platform.device_type
+requires_cutedsl_mhc = pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or not current_platform.is_device_capability_family(100)
+    or not has_cutedsl(),
+    reason="CuTeDSL MHC requires CUDA SM100 and cutlass",
+)
 
 
 def sinkhorn_normalize_ref(x: torch.Tensor, repeat: int, eps: float) -> torch.Tensor:
@@ -187,6 +197,59 @@ def test_hc_prenorm_gemm_tilelang(num_tokens, hidden_size):
 
     torch.testing.assert_close(out, out_ref, atol=1e-5, rtol=1e-4)
     torch.testing.assert_close(sqrsum, sqrsum_ref, atol=8.0, rtol=5e-4)
+
+
+@requires_cutedsl_mhc
+@pytest.mark.parametrize(
+    ("num_tokens", "k", "n_splits"),
+    [
+        *itertools.product(
+            [13, 137],
+            [5120, 7168, 7680, 16384, 28672],
+            [1, 4, 16],
+        ),
+        pytest.param(137, 16384, 49, id="non-power-split"),
+        pytest.param(128, 16384, 64, id="max-split"),
+    ],
+)
+def test_hc_prenorm_gemm_cutedsl(num_tokens, k, n_splits):
+    set_random_seed(0)
+
+    hc_mult = 4
+    hc_mult3 = 24
+    hidden_size = k // hc_mult
+
+    x = torch.randn((num_tokens, k), dtype=torch.bfloat16, device=DEVICE)
+    fn = torch.randn((hc_mult3, k), dtype=torch.float32, device=DEVICE) * 1e-4
+
+    out_ref = torch.empty((1, num_tokens, hc_mult3), dtype=torch.float32, device=DEVICE)
+    sqrsum_ref = torch.empty((1, num_tokens), dtype=torch.float32, device=DEVICE)
+    out = torch.full(
+        (n_splits, num_tokens, hc_mult3),
+        float("nan"),
+        dtype=torch.float32,
+        device=DEVICE,
+    )
+    sqrsum = torch.full(
+        (n_splits, num_tokens),
+        float("nan"),
+        dtype=torch.float32,
+        device=DEVICE,
+    )
+
+    _torch_hc_prenorm_gemm(x, fn, out_ref, sqrsum_ref)
+    _hc_prenorm_gemm(
+        x,
+        fn,
+        out,
+        sqrsum,
+        hidden_size,
+        hc_mult,
+        n_splits=n_splits,
+    )
+
+    torch.testing.assert_close(out.sum(0), out_ref[0], atol=2e-5, rtol=1e-4)
+    torch.testing.assert_close(sqrsum.sum(0), sqrsum_ref[0], atol=8.0, rtol=5e-4)
 
 
 @pytest.mark.skipif(
