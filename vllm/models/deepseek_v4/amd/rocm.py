@@ -6,9 +6,15 @@ from typing import cast
 
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
-from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
+from vllm.models.deepseek_v4.common.ops import (
+    dequantize_and_gather_k_cache,
+    fused_q_kv_rmsnorm,
+)
 from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLABackend,
     DeepseekV4FlashMLAMetadata,
@@ -441,6 +447,124 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
     """ROCm sparse MLA attention layer for DeepSeek V4."""
 
     backend_cls = DeepseekV4ROCMAiterMLASparseBackend
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str,
+        topk_indices_buffer: torch.Tensor | None = None,
+        aux_stream_list: list[torch.cuda.Stream] | None = None,
+    ):
+        super().__init__(vllm_config, prefix, topk_indices_buffer, aux_stream_list)
+        self._tgemm_static_eligible = (
+            self.compressor is not None
+            and rocm_aiter_ops.is_tgemm_enabled()
+            and self.compressor.fused_wkv_wgate.weight.dtype == torch.bfloat16
+            and (
+                self.indexer is None
+                or self.indexer.compressor.fused_wkv_wgate.weight.dtype
+                == torch.bfloat16
+            )
+        )
+
+    def _use_aiter_tgemm(self, hidden_states: torch.Tensor) -> bool:
+        forward_context = get_forward_context()
+
+        return (
+            self._tgemm_static_eligible
+            and hidden_states.dtype == torch.bfloat16
+            and (
+                forward_context.additional_kwargs.get("cudagraph_warmup_mode")
+                == CUDAGraphMode.FULL
+                or (
+                    torch.cuda.is_current_stream_capturing()
+                    and forward_context.cudagraph_runtime_mode
+                    in (
+                        CUDAGraphMode.FULL,
+                        CUDAGraphMode.NONE,
+                    )
+                )
+            )
+        )
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        llama_4_scaling: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if not self._use_aiter_tgemm(hidden_states):
+            return super().forward(positions, hidden_states, llama_4_scaling)
+
+        num_tokens = hidden_states.shape[0]
+        output = torch.empty(
+            (num_tokens, self.padded_heads, self.head_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        self._forward_aiter_tgemm(
+            hidden_states,
+            positions,
+            output,
+        )
+        return self._o_proj(output[:, : self.n_local_heads], positions)
+
+    @eager_break_during_capture
+    def _forward_aiter_tgemm(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        from aiter.tuned_gemm import tgemm
+
+        assert self.compressor is not None
+
+        kv_score = tgemm.mm(
+            hidden_states,
+            self.compressor.fused_wkv_wgate.weight,
+            otype=torch.bfloat16,
+        )
+        indexer_kv_score = None
+        if self.indexer is not None:
+            indexer_compressor = self.indexer.compressor
+            indexer_kv_score = tgemm.mm(
+                hidden_states,
+                indexer_compressor.fused_wkv_wgate.weight,
+                otype=torch.bfloat16,
+            )
+
+        qr_kv, _ = self.fused_wqa_wkv(hidden_states)
+        qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
+        qr, kv = fused_q_kv_rmsnorm(
+            qr,
+            kv,
+            self.q_norm.weight.data,
+            self.kv_norm.weight.data,
+            self.eps,
+        )
+        q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
+        q = self._fused_qnorm_rope_kv_insert(
+            q,
+            kv,
+            positions,
+            get_forward_context().attn_metadata,
+        )
+
+        self.compressor(kv_score, positions, self.rotary_emb)
+        if self.indexer is not None:
+            assert indexer_kv_score is not None
+            indexer_weights, _ = self.indexer.weights_proj(hidden_states)
+            self.indexer(
+                hidden_states,
+                qr,
+                indexer_kv_score,
+                indexer_weights,
+                positions,
+                self.indexer_rotary_emb,
+            )
+
+        self.forward_mqa(q, kv, positions, output)
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:

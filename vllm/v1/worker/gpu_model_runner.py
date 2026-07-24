@@ -6857,18 +6857,19 @@ class GPUModelRunner(
         if num_warmups is None:
             num_warmups = self.compilation_config.cudagraph_num_of_warmups
         force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
-        for _ in range(num_warmups):
-            self._dummy_run(
-                desc.num_tokens,
-                cudagraph_runtime_mode=CUDAGraphMode.NONE,
-                force_attention=force_attention,
-                uniform_decode=desc.uniform,
-                allow_microbatching=allow_microbatching,
-                skip_eplb=True,
-                remove_lora=False,
-                num_active_loras=desc.num_active_loras,
-                profile_seq_lens=profile_seq_lens,
-            )
+        with current_platform.cudagraph_warmup_context(cudagraph_runtime_mode):
+            for _ in range(num_warmups):
+                self._dummy_run(
+                    desc.num_tokens,
+                    cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                    force_attention=force_attention,
+                    uniform_decode=desc.uniform,
+                    allow_microbatching=allow_microbatching,
+                    skip_eplb=True,
+                    remove_lora=False,
+                    num_active_loras=desc.num_active_loras,
+                    profile_seq_lens=profile_seq_lens,
+                )
         with (
             profiler,
             torch.profiler.record_function(

@@ -356,6 +356,7 @@ class UBatchWrapper:
     ) -> list[UbatchMetadata]:
         # Create one forward context per ubatch
         forward_contexts = []
+        additional_kwargs = get_forward_context().additional_kwargs
         # slot_mapping can be None, an empty dict (from create_forward_context
         # converting None to {}), or a list of dicts (one per ubatch)
         has_slot_mapping = slot_mapping and isinstance(slot_mapping, list)
@@ -368,6 +369,7 @@ class UBatchWrapper:
                     batch_descriptor=batch_descriptor,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     slot_mapping=slot_mapping[i] if has_slot_mapping else None,
+                    additional_kwargs=additional_kwargs.copy(),
                 )
             )
 
