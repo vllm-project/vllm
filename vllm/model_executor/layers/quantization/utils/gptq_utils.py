@@ -130,6 +130,35 @@ def is_layer_gptq_quantized(
     return is_quantized
 
 
+def is_moe_layer_gptq_quantized(prefix: str, quantized_layers: list[str]) -> bool:
+    """Whether the routed experts at `prefix` are quantized in the checkpoint.
+
+    `prefix` is the absolute name of the fused expert layer
+    (`...mlp.experts`), while `modules_in_block_to_quantize` names the
+    individual expert projections (`...mlp.experts.0.down_proj`) or the fused
+    expert module itself, using either absolute or block-relative names. Match
+    on the `experts` portion of the name so that a layer whose experts are
+    stored unquantized -- e.g. the MTP layer of a partially quantized
+    checkpoint -- is not given a quantized method.
+
+    Configs that enumerate no expert module at all say nothing about the
+    experts, so the layer is assumed to be quantized.
+    """
+    expert_parents = set()
+    for layer in flatten_list(quantized_layers):
+        head, sep, _ = layer.partition(".experts.")
+        parent = f"{head}.experts" if sep else layer
+        if parent.rsplit(".", 1)[-1] == "experts":
+            expert_parents.add(parent)
+
+    if not expert_parents:
+        return True
+
+    return any(
+        prefix == parent or prefix.endswith(f".{parent}") for parent in expert_parents
+    )
+
+
 def get_linear_quant_method(
     config: AutoGPTQConfig,
     layer: torch.nn.Module,
