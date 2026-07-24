@@ -136,26 +136,40 @@ class PriorityRequestQueue(RequestQueue):
     requests with a smaller value of `priority` are processed first.
     If multiple requests have the same priority, the one with the earlier
     `arrival_time` is processed first.
+
+    Uses lazy deletion: ``remove_request`` and ``remove_requests`` mark
+    entries as removed instead of rebuilding the heap, reducing the cost
+    of removal from O(n + heapify) to O(1) per request. Stale entries
+    are transparently skipped during ``pop_request`` / ``peek_request``
+    and periodically compacted when they accumulate.
     """
 
     def __init__(self) -> None:
         self._heap: list[Request] = []
+        self._active_ids: set[int] = set()
 
     def add_request(self, request: Request) -> None:
         """Add a request to the queue according to priority policy."""
         heapq.heappush(self._heap, request)
+        self._active_ids.add(id(request))
 
     def pop_request(self) -> Request:
         """Pop a request from the queue according to priority policy."""
-        if not self._heap:
-            raise IndexError("pop from empty heap")
-        return heapq.heappop(self._heap)
+        while self._heap:
+            request = heapq.heappop(self._heap)
+            rid = id(request)
+            if rid in self._active_ids:
+                self._active_ids.remove(rid)
+                return request
+        raise IndexError("pop from empty heap")
 
     def peek_request(self) -> Request:
         """Peek at the next request in the queue without removing it."""
-        if not self._heap:
-            raise IndexError("peek from empty heap")
-        return self._heap[0]
+        while self._heap:
+            if id(self._heap[0]) in self._active_ids:
+                return self._heap[0]
+            heapq.heappop(self._heap)
+        raise IndexError("peek from empty heap")
 
     def prepend_request(self, request: Request) -> None:
         """Add a request to the queue according to priority policy.
@@ -173,29 +187,45 @@ class PriorityRequestQueue(RequestQueue):
             self.add_request(request)
 
     def remove_request(self, request: Request) -> None:
-        """Remove a specific request from the queue."""
-        self._heap.remove(request)
-        heapq.heapify(self._heap)
+        """Remove a specific request from the queue.
+
+        Uses lazy deletion: the entry remains in the heap but is skipped
+        during pop/peek, making this O(1) instead of O(n + heapify).
+        """
+        self._active_ids.discard(id(request))
+        self._maybe_cleanup()
 
     def remove_requests(self, requests: Iterable[Request]) -> None:
-        """Remove multiple specific requests from the queue."""
-        requests_to_remove = requests if isinstance(requests, set) else set(requests)
-        self._heap = [r for r in self._heap if r not in requests_to_remove]
-        heapq.heapify(self._heap)
+        """Remove multiple specific requests from the queue.
+
+        Uses lazy deletion to avoid the O(n) heapify cost of the eager
+        approach.  Stale entries are compacted lazily when they
+        accumulate beyond a threshold.
+        """
+        for request in requests:
+            self._active_ids.discard(id(request))
+        self._maybe_cleanup()
+
+    def _maybe_cleanup(self) -> None:
+        """Compact the heap when removed entries accumulate."""
+        # Rebuild the heap when stale entries dominate.
+        if len(self._heap) > 2 * len(self._active_ids):
+            self._heap = [r for r in self._heap if id(r) in self._active_ids]
+            heapq.heapify(self._heap)
 
     def __bool__(self) -> bool:
         """Check if queue has any requests."""
-        return bool(self._heap)
+        return bool(self._active_ids)
 
     def __len__(self) -> int:
         """Get number of requests in queue."""
-        return len(self._heap)
+        return len(self._active_ids)
 
     def __iter__(self) -> Iterator[Request]:
         """Iterate over the queue according to priority policy."""
-        heap_copy = self._heap[:]
-        while heap_copy:
-            yield heapq.heappop(heap_copy)
+        for request in sorted(self._heap):
+            if id(request) in self._active_ids:
+                yield request
 
 
 def create_request_queue(policy: SchedulingPolicy) -> RequestQueue:
