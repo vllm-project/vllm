@@ -273,7 +273,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             num_reqs, self.num_speculative_steps
         )
 
-    def _build_draft_attn_metadata(
+    def _build_uniform_draft_attn_metadata(
         self,
         num_reqs: int,
         num_reqs_padded: int,
@@ -286,7 +286,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         if not self.draft_attn_layer_names:
             return None
         assert num_query_per_req is None  # Omitted for DFlash, read from self instead
-        return super()._build_draft_attn_metadata(
+        return super()._build_uniform_draft_attn_metadata(
             num_reqs,
             num_reqs_padded,
             num_tokens_padded,
@@ -436,7 +436,7 @@ class DFlashSpeculator(DraftModelSpeculator):
 
         # Rebuild the draft attention metadata even when replaying the FULL
         # graph so that any attention metadata builder state is updated.
-        draft_attn_metadata = self._build_draft_attn_metadata(
+        draft_attn_metadata = self._build_uniform_draft_attn_metadata(
             num_reqs=num_reqs,
             num_reqs_padded=num_reqs_padded,
             num_tokens_padded=num_tokens_padded,
