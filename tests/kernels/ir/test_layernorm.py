@@ -19,6 +19,19 @@ from vllm.platforms import current_platform
 rms_norm_native = ir.ops.rms_norm.impls["native"].impl_fn
 
 
+@pytest.fixture(autouse=True)
+def reset_default_torch_device():
+    """Override tests/kernels/conftest.py's fixture of the same name.
+
+    The conftest fixture resets it to None after every test, leaving later
+    tests in the same class with CPU-default tensors against GPU-only
+    kernels. Restore the GPU default here instead of clearing it.
+    """
+    torch.set_default_device(current_platform.device_type)
+    yield
+    torch.set_default_device(current_platform.device_type)
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike() and not current_platform.is_xpu(),
     reason="Currently only kernels on CUDA, ROCm and XPU",
