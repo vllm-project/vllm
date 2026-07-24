@@ -484,7 +484,15 @@ class FlexibleArgumentParser(ArgumentParser):
 
         file_path = args[index + 1]
 
-        config_args = self.load_config_file(file_path)
+        config_parser = self
+        for action in self._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                subparser = action.choices.get(args[0])
+                if isinstance(subparser, FlexibleArgumentParser):
+                    config_parser = subparser
+                break
+
+        config_args = config_parser.load_config_file(file_path)
 
         # 0th index might be the sub command {serve,chat,complete,...}
         # optionally followed by model_tag (only for serve)
@@ -571,8 +579,35 @@ class FlexibleArgumentParser(ArgumentParser):
 
         for key, value in config.items():
             if isinstance(value, bool):
-                if value:
-                    processed_args.append("--" + key)
+                option = "--" + key
+                normalized_option = option.replace("_", "-")
+                action = self._option_string_actions.get(normalized_option)
+
+                if isinstance(action, argparse.BooleanOptionalAction):
+                    if value:
+                        processed_args.append(option)
+                    else:
+                        negative_option = next(
+                            (
+                                option_string
+                                for option_string in action.option_strings
+                                if option_string.startswith("--no-")
+                                and option_string.removeprefix("--no-")
+                                == normalized_option.removeprefix("--")
+                            ),
+                            None,
+                        )
+                        if negative_option is not None:
+                            processed_args.append(negative_option)
+                elif (
+                    action is not None
+                    and action.nargs == 0
+                    and isinstance(action.const, bool)
+                ):
+                    if action.const is value:
+                        processed_args.append(option)
+                elif value:
+                    processed_args.append(option)
             elif isinstance(value, list):
                 if value:
                     processed_args.append("--" + key)
