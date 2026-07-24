@@ -94,6 +94,11 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # No active LoRA in this batch: skip the added LoRA embedding lookup and
+        # accumulation, returning the base embedding directly (eager mode only).
+        if self._can_skip_empty_lora():
+            return self.base_layer.forward(x)
+
         # NB: Don't use torch.narrow here. torch.narrow triggers some
         # Dynamic Shape specialization in torch.compile
         num_tokens = x.shape[0]

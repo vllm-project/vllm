@@ -7,7 +7,9 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
+from vllm.config import CUDAGraphMode
 from vllm.config.lora import LoRAConfig
+from vllm.forward_context import get_forward_context, is_forward_context_available
 
 if TYPE_CHECKING:
     from vllm.lora.punica_wrapper import PunicaWrapperBase
@@ -65,6 +67,20 @@ class BaseLayerWithLoRA(nn.Module):
         punica_wrapper,
     ):
         self.punica_wrapper: PunicaWrapperBase = punica_wrapper
+
+    def _can_skip_empty_lora(self) -> bool:
+        """Whether the LoRA path can be skipped for this forward pass.
+
+        Only safe in eager execution. Under cudagraph capture/replay a Python
+        branch would be baked into the captured graph and could be replayed for
+        a batch that does contain LoRA requests, producing wrong results. The
+        in-kernel no_lora_flag_cpu early-exit still guards those paths.
+        """
+        if not self.punica_wrapper.no_lora:
+            return False
+        if not is_forward_context_available():
+            return False
+        return get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.NONE
 
     @classmethod
     def can_replace_layer(
