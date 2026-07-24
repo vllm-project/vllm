@@ -41,6 +41,7 @@ class QKNormMRoPETestModel(torch.nn.Module):
         mrope_section: list[int],
         vllm_config: VllmConfig,
         dtype: torch.dtype,
+        mrope_interleaved: bool = False,
         prefix: str = "model.layers.0.self_attn.attn",
     ) -> None:
         super().__init__()
@@ -74,7 +75,7 @@ class QKNormMRoPETestModel(torch.nn.Module):
             is_neox_style=True,
             dtype=self.dtype,
             mrope_section=mrope_section,
-            mrope_interleaved=False,
+            mrope_interleaved=mrope_interleaved,
         )
 
     def forward(self, qkv: torch.Tensor, positions: torch.Tensor):
@@ -96,12 +97,13 @@ class QKNormMRoPETestModel(torch.nn.Module):
 
 
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
+@pytest.mark.parametrize("mrope_interleaved", [False, True])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
     reason="Only test on cuda and rocm platform",
 )
-def test_qk_norm_mrope_fusion(monkeypatch, eps, dtype):
+def test_qk_norm_mrope_fusion(monkeypatch, eps, mrope_interleaved, dtype):
     if not hasattr(torch.ops._C, "fused_qk_norm_mrope"):
         pytest.skip("fused_qk_norm_mrope custom op not available")
 
@@ -118,7 +120,7 @@ def test_qk_norm_mrope_fusion(monkeypatch, eps, dtype):
     monkeypatch.setattr(
         mrope_fusion_mod,
         "_discover_mrope_configs",
-        lambda config: ((tuple(mrope_section), False),),
+        lambda config: ((tuple(mrope_section), mrope_interleaved),),
     )
 
     vllm_config = VllmConfig(
@@ -145,6 +147,7 @@ def test_qk_norm_mrope_fusion(monkeypatch, eps, dtype):
             mrope_section=mrope_section,
             vllm_config=vllm_config,
             dtype=dtype,
+            mrope_interleaved=mrope_interleaved,
         )
 
         noop_pass = NoOpEliminationPass(vllm_config)

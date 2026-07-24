@@ -102,18 +102,34 @@ inline __device__ __host__ T divUp(T m, T n) {
 namespace tensorrt_llm::kernels {
 
 // Select the mRoPE section (0=time, 1=height, 2=width) that owns half-dimension
-// `half_dim` for the non-interleaved layout, then return the token's position id
-// for that section. position_ids is laid out row-major as [3, num_tokens].
+// `half_dim`, then return the token's position id for that section.
+// position_ids is laid out row-major as [3, num_tokens].
+//   - Contiguous layout (mrope_interleaved == false): [T..T H..H W..W].
+//   - Interleaved layout (mrope_interleaved == true, the Qwen3-VL default):
+//     [T H W T H W ... T T] -- half-dim d is H if d%3==1 and d<3*h, W if
+//     d%3==2 and d<3*w, else T. Matches apply_interleaved_rope /
+//     triton_mrope's is_interleaved branch in mrope.py.
 __device__ __forceinline__ int64_t mropePositionForHalfDim(
     int64_t const* position_ids, int const num_tokens, int const tokenIdx,
-    int const half_dim, int const mrope_section_t, int const mrope_section_h) {
+    int const half_dim, int const mrope_section_t, int const mrope_section_h,
+    int const mrope_section_w, bool const mrope_interleaved) {
   int section;
-  if (half_dim < mrope_section_t) {
-    section = 0;
-  } else if (half_dim < mrope_section_t + mrope_section_h) {
-    section = 1;
+  if (mrope_interleaved) {
+    if ((half_dim % 3 == 1) && (half_dim < 3 * mrope_section_h)) {
+      section = 1;
+    } else if ((half_dim % 3 == 2) && (half_dim < 3 * mrope_section_w)) {
+      section = 2;
+    } else {
+      section = 0;
+    }
   } else {
-    section = 2;
+    if (half_dim < mrope_section_t) {
+      section = 0;
+    } else if (half_dim < mrope_section_t + mrope_section_h) {
+      section = 1;
+    } else {
+      section = 2;
+    }
   }
   return position_ids[section * num_tokens + tokenIdx];
 }
@@ -138,7 +154,8 @@ __global__ void fusedQKNormMRopeKernel(
     int const num_tokens,            // Number of tokens
     int const rotary_dim,            // Dimension for RoPE
     int const mrope_section_t,       // mRoPE time-section size (half-dims)
-    int const mrope_section_h        // mRoPE height-section size (half-dims)
+    int const mrope_section_h,       // mRoPE height-section size (half-dims)
+    bool const mrope_interleaved     // Interleaved (Qwen3-VL) vs contiguous
 ) {
 #if (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800) && !defined(USE_ROCM)
   if constexpr ((std::is_same_v<scalar_t_in, c10::BFloat16>) ||
@@ -240,6 +257,7 @@ __global__ void fusedQKNormMRopeKernel(
     float elements2[numElemsPerThread];  // Additional buffer required for RoPE.
 
     int const embed_dim = rotary_dim / 2;
+    int const mrope_section_w = embed_dim - mrope_section_t - mrope_section_h;
     int const rotary_lanes = rotary_dim / numElemsPerThread;
     if (laneId < rotary_lanes) {
       if constexpr (interleave) {
@@ -256,7 +274,7 @@ __global__ void fusedQKNormMRopeKernel(
           int const half_dim = dim_idx / 2;
           int64_t const pos_id = mropePositionForHalfDim(
               position_ids, num_tokens, tokenIdx, half_dim, mrope_section_t,
-              mrope_section_h);
+              mrope_section_h, mrope_section_w, mrope_interleaved);
           T_cache const* cache_ptr = cos_sin_cache + pos_id * rotary_dim;
           float const cos_val =
               CacheConverter::convert(VLLM_LDG(cache_ptr + half_dim));
@@ -284,7 +302,7 @@ __global__ void fusedQKNormMRopeKernel(
           int half_dim = dim_idx / 2;
           int64_t const pos_id = mropePositionForHalfDim(
               position_ids, num_tokens, tokenIdx, half_dim, mrope_section_t,
-              mrope_section_h);
+              mrope_section_h, mrope_section_w, mrope_interleaved);
           T_cache const* cache_ptr = cos_sin_cache + pos_id * rotary_dim;
           float cos_val =
               CacheConverter::convert(VLLM_LDG(cache_ptr + half_dim));
@@ -332,7 +350,7 @@ void launchFusedQKNormMRope(void* qkv, int const num_tokens,
                             void const* cos_sin_cache, bool const interleave,
                             int64_t const* position_ids,
                             int const mrope_section_t, int const mrope_section_h,
-                            cudaStream_t stream) {
+                            bool const mrope_interleaved, cudaStream_t stream) {
   constexpr int blockSize = 256;
   int const warpsPerBlock = blockSize / 32;
   int const totalQKHeads = num_heads_q + num_heads_k;
@@ -347,7 +365,7 @@ void launchFusedQKNormMRope(void* qkv, int const num_tokens,
             <<<gridDim, blockDim, 0, stream>>>(
                 qkv, num_heads_q, num_heads_k, num_heads_v, eps, q_weight,
                 k_weight, cos_sin_cache, position_ids, num_tokens, rotary_dim,
-                mrope_section_t, mrope_section_h);
+                mrope_section_t, mrope_section_h, mrope_interleaved);
       });
       break;
     case 128:
@@ -356,7 +374,7 @@ void launchFusedQKNormMRope(void* qkv, int const num_tokens,
             <<<gridDim, blockDim, 0, stream>>>(
                 qkv, num_heads_q, num_heads_k, num_heads_v, eps, q_weight,
                 k_weight, cos_sin_cache, position_ids, num_tokens, rotary_dim,
-                mrope_section_t, mrope_section_h);
+                mrope_section_t, mrope_section_h, mrope_interleaved);
       });
       break;
     case 256:
@@ -365,7 +383,7 @@ void launchFusedQKNormMRope(void* qkv, int const num_tokens,
             <<<gridDim, blockDim, 0, stream>>>(
                 qkv, num_heads_q, num_heads_k, num_heads_v, eps, q_weight,
                 k_weight, cos_sin_cache, position_ids, num_tokens, rotary_dim,
-                mrope_section_t, mrope_section_h);
+                mrope_section_t, mrope_section_h, mrope_interleaved);
       });
       break;
     default:
@@ -393,7 +411,8 @@ void fused_qk_norm_mrope(
     torch::stable::Tensor&
         position_ids,          // mRoPE position IDs [3, num_tokens] (t/h/w)
     int64_t mrope_section_t,   // mRoPE time-section size (in half-dims)
-    int64_t mrope_section_h    // mRoPE height-section size (in half-dims)
+    int64_t mrope_section_h,   // mRoPE height-section size (in half-dims)
+    bool mrope_interleaved     // Interleaved (Qwen3-VL) vs contiguous layout
 ) {
   // Input validation
   CHECK_INPUT(qkv);
@@ -460,7 +479,7 @@ void fused_qk_norm_mrope(
                   k_weight.data_ptr(), cos_sin_cache.data_ptr(), !is_neox,
                   reinterpret_cast<int64_t const*>(position_ids.data_ptr()),
                   static_cast<int>(mrope_section_t),
-                  static_cast<int>(mrope_section_h), stream);
+                  static_cast<int>(mrope_section_h), mrope_interleaved, stream);
             });
       });
 }

@@ -279,8 +279,9 @@ class QkNormMRopePattern:
     """mRoPE analogue of QkNormRopePattern for Qwen3-VL-class models.
 
     Matches Q/K RMSNorm followed by the ``torch.ops.vllm.mrope`` custom op and
-    replaces the pair with ``fused_qk_norm_mrope``. v1 supports the contiguous
-    section layout only (mrope_interleaved=False).
+    replaces the pair with ``fused_qk_norm_mrope``. Both the interleaved
+    (Qwen3-VL) and contiguous section layouts are supported via
+    ``mrope_interleaved``.
     """
 
     def __init__(
@@ -370,6 +371,7 @@ class QkNormMRopePattern:
                 position_ids=positions,
                 mrope_section_t=self.mrope_section[0],
                 mrope_section_h=self.mrope_section[1],
+                mrope_interleaved=self.mrope_interleaved,
             )
             result_qkv = result[1]
             return result_qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)  # type: ignore[no-any-return]
@@ -443,9 +445,8 @@ class QKNormMRoPEFusionPass(VllmPatternMatcherPass):
 
         for head_dim, num_heads, num_kv_heads in self._attention_geometries:
             for section, interleaved in mrope_configs:
-                # v1: contiguous section layout only; mRoPE is full-rotary, so
-                # sum(section) == head_dim / 2.
-                if interleaved or 2 * sum(section) != head_dim:
+                # mRoPE is full-rotary, so sum(section) == head_dim / 2.
+                if 2 * sum(section) != head_dim:
                     continue
                 for epsilon in [1e-5, 1e-6]:
                     for neox in [True, False]:
