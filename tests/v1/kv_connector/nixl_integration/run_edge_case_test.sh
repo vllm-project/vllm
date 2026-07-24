@@ -100,7 +100,7 @@ run_tests_for_model() {
 
   # Build the command for the proxy server with all the hosts and ports
   PROXY_PORT=8192
-  PROXY_CMD="python ${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/toy_proxy_server.py --port $PROXY_PORT"
+  PROXY_CMD="python3 ${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/toy_proxy_server.py --port $PROXY_PORT"
   PROXY_CMD+=" --prefiller-ports ${PREFILL_PORT}"
   PROXY_CMD+=" --decoder-ports ${DECODE_PORT}"
   # Start the proxy server
@@ -112,7 +112,7 @@ run_tests_for_model() {
 
   # Run lm eval for this model
   echo "Running tests for $model_name"
-  PREFILL_PORT=$PREFILL_PORT DECODE_PORT=$DECODE_PORT PROXY_PORT=$PROXY_PORT python -m pytest -s -v "${GIT_ROOT}"/tests/v1/kv_connector/nixl_integration/test_edge_cases.py
+  PREFILL_PORT=$PREFILL_PORT DECODE_PORT=$DECODE_PORT PROXY_PORT=$PROXY_PORT python3 -m pytest -s -v "${GIT_ROOT}"/tests/v1/kv_connector/nixl_integration/test_edge_cases.py
 
   # Clean up before running next model
   cleanup_instances
