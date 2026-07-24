@@ -261,6 +261,45 @@ def test_restorer_rejects_output_beyond_capacity(
         )
 
 
+def test_restorer_close_retries_after_partial_allocation_failure() -> None:
+    events: list[str] = []
+
+    class RetryAllocation:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        def close(self) -> None:
+            self.attempts += 1
+            events.append(f"allocation_close_{self.attempts}")
+            if self.attempts == 1:
+                raise RuntimeError("partial unmap")
+
+    class IdempotentFence:
+        def close(self) -> None:
+            if "fence_close" not in events:
+                events.append("fence_close")
+
+    restorer = object.__new__(PCPHiddenStateRestorer)
+    restorer._closed = False
+    restorer._fence = IdempotentFence()
+    restorer._allocation = RetryAllocation()
+    restorer._local_outputs = torch.empty(0)
+    restorer._peer_outputs = torch.empty(0)
+
+    with pytest.raises(RuntimeError, match="partial unmap"):
+        restorer.close()
+    assert not restorer._closed
+    assert restorer._fence is not None
+
+    restorer.close()
+    assert restorer._closed
+    assert events == [
+        "fence_close",
+        "allocation_close_1",
+        "allocation_close_2",
+    ]
+
+
 def test_manager_builds_exactly_one_hidden_publisher_per_global_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

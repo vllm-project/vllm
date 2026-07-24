@@ -215,8 +215,8 @@ class PCPHiddenStateRestorer:
             return
         assert self._fence is not None
         self._fence.close()
+        self._allocation.close()
         self._fence = None
         self._local_outputs = None
         self._peer_outputs = None
-        self._allocation.close()
         self._closed = True
