@@ -6,16 +6,22 @@
 ``convert_to_fp8_moe_kernel_format``.
 """
 
+import math
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.experts.mxfp8_emulation_moe import (
     Mxfp8TritonExpertsBase,
 )
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+_AITER_SWIGLU_ALPHA = 1.702
+_AITER_SWIGLU_BETA = 1.0
 
 
 def is_aiter_mxfp8_moe_available() -> bool:
@@ -92,6 +98,27 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
         if is_supported and not is_aiter_mxfp8_moe_available():
             return False, (
                 "kernel requires the aiter flydsl package, which is not installed"
+            )
+        if (
+            is_supported
+            and moe_config.activation != MoEActivation.SWIGLUOAI_UNINTERLEAVE
+        ):
+            return False, (
+                "kernel hardcodes SwiGLU-OAI activation and requires "
+                f"activation={MoEActivation.SWIGLUOAI_UNINTERLEAVE.value}; "
+                f"got activation={moe_config.activation.value}"
+            )
+        if is_supported and (
+            moe_config.swiglu_alpha is None
+            or not math.isclose(float(moe_config.swiglu_alpha), _AITER_SWIGLU_ALPHA)
+            or moe_config.swiglu_beta is None
+            or not math.isclose(float(moe_config.swiglu_beta), _AITER_SWIGLU_BETA)
+        ):
+            return False, (
+                "kernel hardcodes SwiGLU-OAI with "
+                f"alpha={_AITER_SWIGLU_ALPHA} and beta={_AITER_SWIGLU_BETA}; "
+                f"got swiglu_alpha={moe_config.swiglu_alpha} and "
+                f"swiglu_beta={moe_config.swiglu_beta}"
             )
         return is_supported, reason
 
