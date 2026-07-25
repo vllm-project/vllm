@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 from typing_extensions import Self, override
 
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.collection_utils import full_groupby
 from vllm.utils.import_utils import PlaceholderModule
 
@@ -51,6 +52,7 @@ class PlotFilterBase(ABC):
 class PlotEqualTo(PlotFilterBase):
     @override
     def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
+        target: float | str
         try:
             target = float(self.target)
         except ValueError:
@@ -63,6 +65,7 @@ class PlotEqualTo(PlotFilterBase):
 class PlotNotEqualTo(PlotFilterBase):
     @override
     def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
+        target: float | str
         try:
             target = float(self.target)
         except ValueError:
@@ -182,7 +185,7 @@ def _convert_inf_nan_strings(data: list[dict[str, object]]) -> list[dict[str, ob
     """
     converted_data = []
     for record in data:
-        converted_record = {}
+        converted_record: dict[str, object] = {}
         for key, value in record.items():
             if isinstance(value, str):
                 if value in ["inf", "-inf", "nan"]:
@@ -531,7 +534,7 @@ class SweepPlotArgs:
         )
 
     @classmethod
-    def add_cli_args(cls, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    def add_cli_args(cls, parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         parser.add_argument(
             "EXPERIMENT_DIR",
             type=str,
@@ -682,7 +685,7 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=SweepPlotArgs.parser_help)
+    parser = FlexibleArgumentParser(description=SweepPlotArgs.parser_help)
     SweepPlotArgs.add_cli_args(parser)
 
     main(parser.parse_args())

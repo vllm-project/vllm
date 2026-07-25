@@ -73,7 +73,10 @@ def _spawn_workers(worker_fn, world_size, *, dp_size=None):
     err_queue.close()
     err_queue.join_thread()
     if errors:
-        pytest.fail("Worker(s) failed:\n" + "\n---\n".join(errors))
+        combined = "\n---\n".join(errors)
+        if "NCCL GIN" in combined:
+            pytest.skip("NCCL GIN not available on this system")
+        pytest.fail("Worker(s) failed:\n" + combined)
 
 
 def _run_worker(rank, world_size, port, worker_fn, dp_size, dp_port, err_queue):
@@ -204,6 +207,36 @@ requires_deep_ep_v2 = pytest.mark.skipif(
 # their own @requires_two_sided / @requires_one_sided decorators, and
 # test_args_dispatch_combine uses only standard torch.distributed ops and
 # should run even when FlashInfer NVLink backends are not installed.
+
+
+@pytest.mark.parametrize("supports_output", [False, True])
+def test_one_sided_combine_into_compatibility(supports_output):
+    from vllm.distributed.device_communicators.all2all import (
+        FlashInferNVLinkOneSidedManager,
+    )
+
+    class FakeMoeAlltoAll:
+        def combine(
+            self,
+            payload,
+            runtime_max_tokens_per_rank,
+            output=None,
+        ):
+            result = payload + runtime_max_tokens_per_rank
+            if output is None:
+                return result
+            output.copy_(result)
+            return output
+
+    manager = FlashInferNVLinkOneSidedManager.__new__(FlashInferNVLinkOneSidedManager)
+    manager.moe_alltoall = FakeMoeAlltoAll()
+    manager._combine_supports_output = supports_output
+    payload = torch.arange(4, dtype=torch.float32)
+    output = torch.empty_like(payload)
+
+    manager.combine_into(payload, runtime_max_tokens_per_rank=2, output=output)
+
+    torch.testing.assert_close(output, payload + 2)
 
 
 # ---------------------------------------------------------------------------
@@ -747,6 +780,11 @@ def _one_sided_data_worker(rank, world_size):
         top_k=experts_per_token,
         num_experts=num_experts,
         hidden_size=hidden_size,
+        # Account for the fp8 block-scale payload (a1q_scale: hidden//16 bytes
+        # per token) that is dispatched alongside the nvfp4 hidden states.
+        # Without this the dispatch region is under-reserved and the combine
+        # payload overflows the per-rank workspace.
+        dispatch_scale_bytes_per_token=hidden_size // 16,
     )
     assert manager.initialized
     assert manager.moe_alltoall is not None
@@ -881,8 +919,11 @@ def _deepep_v2_lifecycle_worker(rank, world_size):
         DeepEPV2All2AllManager,
     )
 
-    cpu_group = get_ep_group().cpu_group
-    manager = DeepEPV2All2AllManager(cpu_group)
+    ep_group = get_ep_group()
+    manager = DeepEPV2All2AllManager(
+        ep_group.cpu_group,
+        device_group=ep_group.device_group,
+    )
 
     assert manager.rank == rank
     assert manager.world_size == world_size

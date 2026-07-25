@@ -4,7 +4,10 @@
 import pytest
 from pydantic import ValidationError
 
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.openai.responses.protocol import (
+    ResponsesRequest,
+    ResponsesResponse,
+)
 
 SAMPLE_TOOL = {
     "type": "function",
@@ -182,3 +185,42 @@ def test_responses_request_empty_tools_named_tool_choice():
                 "tool_choice": NAMED_TOOL_CHOICE,
             }
         )
+
+
+# Regression tests for parallel_tool_calls=null crash in Responses API
+# (from_request() passed None to ResponsesResponse.parallel_tool_calls,
+#  a non-optional bool field, causing a Pydantic ValidationError during
+#  response construction)
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (True, True),
+        (False, False),
+        (None, True),  # null must resolve to the documented default (true)
+    ],
+)
+def test_responses_response_parallel_tool_calls_null_resolves_to_default(
+    value, expected
+):
+    request = ResponsesRequest.model_validate(
+        {"input": "Hello", "model": "test-model", "parallel_tool_calls": value}
+    )
+    sampling_params = request.to_sampling_params(default_max_tokens=16)
+    r = ResponsesResponse.from_request(
+        request=request,
+        sampling_params=sampling_params,
+        model_name="test-model",
+        created_time=0,
+        output=[],
+        status="completed",
+        usage=None,
+    )
+    assert r.parallel_tool_calls == expected
+
+
+def test_responses_request_parallel_tool_calls_null_accepted():
+    """Client sending null must be accepted at request validation time."""
+    req = ResponsesRequest.model_validate(
+        {"input": "Hello", "model": "test-model", "parallel_tool_calls": None}
+    )
+    assert req.parallel_tool_calls is None

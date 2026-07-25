@@ -16,10 +16,12 @@ from multiprocessing.queues import Queue
 from threading import Thread
 from typing import Any, TypeAlias, TypeVar
 
+import msgspec
 import msgspec.msgpack
 import zmq
 import zmq.asyncio
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
@@ -34,6 +36,7 @@ from vllm.utils.network_utils import (
 )
 from vllm.v1.engine import (
     EEP_NOTIFICATION_CALL_ID,
+    FT_STATUS_CALL_ID,
     EEPNotificationType,
     EngineCoreOutputs,
     EngineCoreReadyResponse,
@@ -55,6 +58,11 @@ from vllm.v1.engine.utils import (
     launch_core_engines,
 )
 from vllm.v1.executor import Executor
+from vllm.v1.fault_tolerance.engine_core_sentinel import FT_UTILITY_METHOD
+from vllm.v1.fault_tolerance.utils import (
+    FaultToleranceRequest,
+    FaultToleranceResult,
+)
 from vllm.v1.pool.late_interaction import get_late_interaction_engine_index
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 
@@ -271,6 +279,14 @@ class EngineCoreClient(ABC):
     ) -> list[_R]:
         raise NotImplementedError
 
+    async def handle_fault(
+        self, fault_tolerance_request: FaultToleranceRequest
+    ) -> FaultToleranceResult:
+        raise NotImplementedError
+
+    async def get_status(self):
+        raise NotImplementedError
+
 
 class InprocClient(EngineCoreClient):
     """
@@ -394,7 +410,9 @@ class BackgroundResources:
         logger.debug_once("[shutdown] MPClient: background resource cleanup start")
         self.engine_dead = True
         if self.engine_manager is not None:
-            self.engine_manager.shutdown()
+            self.engine_manager.shutdown(
+                timeout=envs.VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS
+            )
         if self.coordinator is not None:
             self.coordinator.shutdown()
 
@@ -720,14 +738,26 @@ class MPClient(EngineCoreClient):
         )
 
         # Setup KV cache config with initialization state from
-        # engine core process. Sum values from all engines in DP case.
+        # engine core process. Sum num_gpu_blocks from all engines in DP case.
         num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks or 0
         num_gpu_blocks += response.num_gpu_blocks
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
 
         # Sync block_size: may be enlarged by _align_hybrid_block_size in the
         # worker for hybrid Mamba models.
-        vllm_config.cache_config.block_size = response.block_size
+        cache_config = vllm_config.cache_config
+        cache_config.block_size = response.block_size
+        # Keep these as per-engine cache_config_info values; do not sum across DP.
+        cache_config.kv_cache_size_tokens = (
+            getattr(cache_config, "kv_cache_size_tokens", None)
+            if getattr(cache_config, "kv_cache_size_tokens", None) is not None
+            else response.kv_cache_size_tokens
+        )
+        cache_config.kv_cache_max_concurrency = (
+            getattr(cache_config, "kv_cache_max_concurrency", None)
+            if getattr(cache_config, "kv_cache_max_concurrency", None) is not None
+            else response.kv_cache_max_concurrency
+        )
 
         # In external DP LB mode, the coordinator address that the
         # front-end procs connect to is obtained by each engine via it's
@@ -956,6 +986,14 @@ class AsyncMPClient(MPClient):
         self.client_count = client_count
         self.client_index = client_index
         self.outputs_queue = asyncio.Queue[EngineCoreOutputs | Exception]()
+
+        # locally-cached engine status
+        self._engine_status: dict[int, dict] = {}
+        if self.vllm_config.parallel_config.enable_fault_tolerance:
+            self._engine_status = {
+                rank: {"id": rank, "status": "healthy"}
+                for rank in self.engine_ranks_managed
+            }
         try:
             # If we are running in an asyncio event loop, start the queue task.
             # Otherwise, it will be started lazily. If it is not started here,
@@ -979,7 +1017,7 @@ class AsyncMPClient(MPClient):
         output_handler: (
             Callable[[AsyncMPClient, EngineCoreOutputs], Awaitable[None]] | None
         ) = getattr(self.__class__, "process_engine_outputs", None)
-        _self_ref = weakref.ref(self) if output_handler else None
+        _self_ref = weakref.ref(self)
         output_socket = resources.output_socket
         assert output_socket is not None
 
@@ -1010,6 +1048,14 @@ class AsyncMPClient(MPClient):
                             asyncio.create_task(
                                 notification_callback_handler(_self, notification_data)
                             )
+                        elif outputs.utility_output.call_id == FT_STATUS_CALL_ID:
+                            _self = _self_ref()
+                            if not _self:
+                                return
+                            if outputs.utility_output.result is not None:
+                                _self._engine_status[outputs.engine_index] = (
+                                    outputs.utility_output.result.result
+                                )
                         else:
                             _process_utility_output(
                                 outputs.utility_output, utility_results
@@ -1180,6 +1226,25 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_async(
             "collective_rpc", method, timeout, args, kwargs
         )
+
+    async def handle_fault(
+        self, ft_request: FaultToleranceRequest
+    ) -> FaultToleranceResult:
+        res = await self.call_utility_async(FT_UTILITY_METHOD, ft_request)
+        result = msgspec.convert(res, FaultToleranceResult)
+        if not result.success:
+            status = self._engine_status.get(self.engine_ranks_managed[0])
+            if status is not None:
+                status["last_ft_request_id"] = result.request_id
+                status["ft_error"] = result.reason
+        return result
+
+    async def get_status(self):
+        return {
+            "schema_version": 1,
+            "total_engines": len(self.engine_ranks_managed),
+            "engines": list(self._engine_status.values()),
+        }
 
 
 class DPAsyncMPClient(AsyncMPClient):
@@ -1419,6 +1484,12 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             # Increment local waiting count for better balancing between stats
             # updates from the coordinator (which happen every 100ms).
             current_counts[eng_index][0] += self.client_count
+            # Rotate the scan start so that ties (equal scores, e.g. right
+            # after a coordinator stats reset when engines look equally loaded)
+            # don't systematically favor the same engine. This removes the
+            # fixed tie-break bias without affecting load-aware decisions when
+            # scores actually differ.
+            self.eng_start_index = (self.eng_start_index + 1) % num_engines
 
         chosen_engine = self.core_engines[eng_index]
         # Record which engine is chosen for this request, to handle aborts.

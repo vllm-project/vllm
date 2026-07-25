@@ -14,6 +14,18 @@
   #define AMX_DISPATCH(...) case cpu_utils::ISA::AMX:
 #endif
 
+#if defined(ARM_BF16_SUPPORT)
+  #include "cpu/micro_gemm/cpu_micro_gemm_neon.hpp"
+  #define NEON_DISPATCH(...)                                         \
+    case cpu_utils::ISA::NEON: {                                     \
+      using gemm_t =                                                 \
+          cpu_micro_gemm::MicroGemm<cpu_utils::ISA::NEON, scalar_t>; \
+      return __VA_ARGS__();                                          \
+    }
+#else
+  #define NEON_DISPATCH(...) case cpu_utils::ISA::NEON:
+#endif
+
 #define CPU_ISA_DISPATCH_IMPL(ISA_TYPE, ...)                          \
   [&] {                                                               \
     switch (ISA_TYPE) {                                               \
@@ -23,6 +35,7 @@
             cpu_micro_gemm::MicroGemm<cpu_utils::ISA::VEC, scalar_t>; \
         return __VA_ARGS__();                                         \
       }                                                               \
+        NEON_DISPATCH(__VA_ARGS__)                                    \
       default: {                                                      \
         TORCH_CHECK(false, "Invalid CPU ISA type.");                  \
       }                                                               \
@@ -57,10 +70,12 @@ void swigluoai_and_mul(float* __restrict__ input, scalar_t* __restrict__ output,
                        const int32_t input_stride,
                        const int32_t output_stride) {
   using scalar_vec_t = typename cpu_utils::VecTypeTrait<scalar_t>::vec_t;
+#if !defined(__aarch64__)
   // For GPT-OSS interleaved gate-up weights
   alignas(64) static int32_t index[16] = {0,  2,  4,  6,  8,  10, 12, 14,
                                           16, 18, 20, 22, 24, 26, 28, 30};
   vec_op::INT32Vec16 index_vec(index);
+#endif
   vec_op::FP32Vec16 gate_up_max_vec(7.0);
   vec_op::FP32Vec16 up_min_vec(-7.0);
   vec_op::FP32Vec16 alpha_vec(1.702);
@@ -70,8 +85,15 @@ void swigluoai_and_mul(float* __restrict__ input, scalar_t* __restrict__ output,
 
   for (int32_t m = 0; m < m_size; ++m) {
     for (int32_t n = 0; n < n_size; n += 32) {
+      // Note: AdvSIMD does not support gather loads
+#if defined(__aarch64__)
+      vec_op::FP32Vec16 gate_vec(vec_op::uninit);
+      vec_op::FP32Vec16 up_vec(vec_op::uninit);
+      vec_op::FP32Vec16::load_even_odd(input + n, gate_vec, up_vec);
+#else
       vec_op::FP32Vec16 gate_vec(input + n, index_vec);
       vec_op::FP32Vec16 up_vec(input + n + 1, index_vec);
+#endif
       gate_vec = gate_vec.min(gate_up_max_vec);
       up_vec = up_vec.clamp(up_min_vec, gate_up_max_vec);
       auto sigmoid_vec = one_vec / (one_vec + fast_exp(-gate_vec * alpha_vec));
@@ -163,7 +185,6 @@ void gelu_tanh_and_mul(float* __restrict__ input, scalar_t* __restrict__ output,
   vec_op::FP32Vec16 w1_vec(0.7978845608028654);
   vec_op::FP32Vec16 w2_vec(0.5);
   vec_op::FP32Vec16 w3_vec(0.044715);
-  alignas(64) float temp[16];
 
   for (int32_t m = 0; m < m_size; ++m) {
     for (int32_t n = 0; n < dim; n += 16) {
@@ -171,12 +192,9 @@ void gelu_tanh_and_mul(float* __restrict__ input, scalar_t* __restrict__ output,
       vec_op::FP32Vec16 up_vec(up + n);
       auto gate_pow3_vec = gate_vec * gate_vec * gate_vec;
       auto inner_vec = w1_vec * (gate_vec + w3_vec * gate_pow3_vec);
-
-      inner_vec.save(temp);
-      for (int32_t i = 0; i < 16; ++i) {
-        temp[i] = std::tanh(temp[i]);
-      }
-      vec_op::FP32Vec16 tanh_vec(temp);
+      // Note: can't use fast_exp form because diffusiongemma will generate
+      // wrong results
+      auto tanh_vec = inner_vec.tanh();
       auto gelu_tanh = gate_vec * w2_vec * (one_vec + tanh_vec);
       auto gated_output_fp32 = up_vec * gelu_tanh;
       scalar_vec_t gated_output = scalar_vec_t(gated_output_fp32);
@@ -242,13 +260,14 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
   constexpr int32_t gemm_n_tile_size = gemm_t::NSize;
   constexpr int32_t gemm_m_tile_size = gemm_t::MaxMSize;
   constexpr int32_t min_w13_n_tile_size = 2 * gemm_n_tile_size;
+  constexpr bool pack_a = gemm_t::PackA;
   static_assert(gemm_n_tile_size % 16 == 0);
 
   TORCH_CHECK_EQ(output_size_13 % min_w13_n_tile_size, 0);
   TORCH_CHECK_EQ(output_size_2 % gemm_n_tile_size, 0);
   TORCH_CHECK_EQ(output_size_13 / 2, input_size_2);
 
-  const int32_t thread_num = omp_get_max_threads();
+  const int32_t thread_num = cpu_utils::get_max_threads();
 
   const int32_t w13_input_buffer_size = cpu_utils::round_up<64>(
       gemm_m_tile_size * input_size_13 * sizeof(scalar_t));
@@ -268,12 +287,18 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
 
   const int32_t w2_input_tile_size = cpu_utils::round_up<64>(
       gemm_m_tile_size * input_size_2 * sizeof(scalar_t));
+  // use w2 input buffer only when we need to pack input
+  const int32_t w2_input_buffer_size =
+      pack_a ? cpu_utils::round_up<64>(gemm_m_tile_size * input_size_2 *
+                                       sizeof(scalar_t))
+             : 0;
 
   const int32_t w2_n_tile_size = [&]() {
     const int64_t cache_size = cpu_utils::get_available_l2_size();
-    // input tile + weight
+    // input tile + optional packed input + weight
     const int32_t n_size_cache_limit =
-        (cache_size - w2_input_tile_size) / (input_size_2 * sizeof(scalar_t));
+        (cache_size - (pack_a ? w2_input_buffer_size : w2_input_tile_size)) /
+        (input_size_2 * sizeof(scalar_t));
     const int32_t n_size_thread_limit =
         output_size_2 / std::max(1, thread_num / topk_num);
     const int32_t n_size = cpu_utils::round_down<gemm_n_tile_size>(
@@ -325,6 +350,9 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
       gemm_m_tile_size * w13_n_tile_size * sizeof(float));
   const int32_t w13_output_buffer_offset = w13_thread_buffer_offset;
   w13_thread_buffer_offset += w13_output_buffer_size;
+
+  const int32_t w2_input_buffer_offset = w13_thread_buffer_offset;
+  w13_thread_buffer_offset += w2_input_buffer_size;
 
   // Weighted sum thread buffer
   const int32_t ws_output_buffer_size =
@@ -405,7 +433,8 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
       gemm_t gemm;
 
       const int32_t input_size_13_bytes = input_size_13 * sizeof(scalar_t);
-      const int32_t w13_n_group_stride = 16 * input_size_13;
+      const int32_t w13_n_group_stride =
+          gemm_t::WeightOCGroupSize * input_size_13;
       const int32_t w13_n_tile_stride = gemm_n_tile_size * input_size_13;
 
       for (;;) {
@@ -468,8 +497,23 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
              token_idx += gemm_m_tile_size) {
           const int32_t actual_token_num =
               std::min(gemm_m_tile_size, curr_token_num - token_idx);
-          // copy inputs
-          {
+
+          scalar_t* __restrict__ curr_w13_gemm_input_buffer = nullptr;
+          if constexpr (pack_a) {
+            // copy and pack inputs
+            curr_w13_gemm_input_buffer = w13_input_buffer;
+            const scalar_t* w13_input_rows[gemm_m_tile_size];
+            for (int32_t i = 0; i < actual_token_num; ++i) {
+              w13_input_rows[i] =
+                  input + curr_expand_token_id_buffer[i] * input_size_13;
+            }
+            gemm_t::pack_input_from_rows(w13_input_rows,
+                                         curr_w13_gemm_input_buffer,
+                                         actual_token_num, input_size_13);
+            curr_expand_token_id_buffer += actual_token_num;
+          } else {
+            // copy inputs
+            curr_w13_gemm_input_buffer = curr_w13_input_buffer;
             scalar_t* __restrict__ curr_w13_input_buffer_iter =
                 curr_w13_input_buffer;
             for (int32_t i = 0; i < actual_token_num; ++i) {
@@ -501,14 +545,12 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
             scalar_t* __restrict__ w13_weight_ptr_1_iter = w13_weight_ptr_1;
             scalar_t* __restrict__ w13_bias_ptr_0_iter = w13_bias_ptr_0;
             scalar_t* __restrict__ w13_bias_ptr_1_iter = w13_bias_ptr_1;
-            scalar_t* __restrict__ curr_w13_input_buffer_iter =
-                curr_w13_input_buffer;
             float* __restrict__ w13_output_buffer_0_iter = w13_output_buffer;
             float* __restrict__ w13_output_buffer_1_iter =
                 w13_output_buffer + actual_n_tile_size / 2;
             for (int32_t i = 0; i < actual_n_tile_size;
                  i += min_w13_n_tile_size) {
-              gemm.gemm(curr_w13_input_buffer_iter, w13_weight_ptr_0_iter,
+              gemm.gemm(curr_w13_gemm_input_buffer, w13_weight_ptr_0_iter,
                         w13_output_buffer_0_iter, actual_token_num,
                         input_size_13, input_size_13, w13_n_group_stride,
                         actual_n_tile_size, false);
@@ -521,7 +563,7 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
                 w13_bias_ptr_0_iter += gemm_n_tile_size;
               }
 
-              gemm.gemm(curr_w13_input_buffer_iter, w13_weight_ptr_1_iter,
+              gemm.gemm(curr_w13_gemm_input_buffer, w13_weight_ptr_1_iter,
                         w13_output_buffer_1_iter, actual_token_num,
                         input_size_13, input_size_13, w13_n_group_stride,
                         actual_n_tile_size, false);
@@ -574,7 +616,8 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
       gemm_t gemm;
 
       const int32_t w2_n_tile_stride = gemm_n_tile_size * input_size_2;
-      const int32_t w2_n_group_stride = 16 * input_size_2;
+      const int32_t w2_n_group_stride =
+          gemm_t::WeightOCGroupSize * input_size_2;
 
       for (;;) {
         int32_t task_id = counter_ptr->acquire_counter();
@@ -613,13 +656,30 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
              token_idx += gemm_m_tile_size) {
           const int32_t actual_token_num =
               std::min(gemm_m_tile_size, curr_token_num - token_idx);
+          scalar_t* __restrict__ curr_w2_gemm_input_buffer =
+              curr_w13_gemm_output_buffer;
+          if constexpr (pack_a) {
+            uint8_t* __restrict__ thread_buffer =
+                thread_buffer_start + thread_id * w13_thread_buffer_offset;
+            scalar_t* __restrict__ w2_input_buffer =
+                reinterpret_cast<scalar_t*>(thread_buffer +
+                                            w2_input_buffer_offset);
+            curr_w2_gemm_input_buffer = w2_input_buffer;
+            const scalar_t* w2_input_rows[gemm_m_tile_size];
+            for (int32_t i = 0; i < actual_token_num; ++i) {
+              w2_input_rows[i] = curr_w13_gemm_output_buffer + i * input_size_2;
+            }
+            gemm_t::pack_input_from_rows(w2_input_rows,
+                                         curr_w2_gemm_input_buffer,
+                                         actual_token_num, input_size_2);
+          }
 
           scalar_t* __restrict__ w2_weight_ptr_iter = w2_weight_ptr;
           scalar_t* __restrict__ w2_bias_ptr_iter = w2_bias_ptr;
           float* __restrict__ curr_w2_gemm_output_buffer_iter =
               curr_w2_gemm_output_buffer;
           for (int32_t i = 0; i < actual_n_tile_size; i += gemm_n_tile_size) {
-            gemm.gemm(curr_w13_gemm_output_buffer, w2_weight_ptr_iter,
+            gemm.gemm(curr_w2_gemm_input_buffer, w2_weight_ptr_iter,
                       curr_w2_gemm_output_buffer_iter, actual_token_num,
                       input_size_2, input_size_2, w2_n_group_stride,
                       output_size_2, false);

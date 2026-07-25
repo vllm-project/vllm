@@ -1,0 +1,62 @@
+group: Model Runner V2 Intel
+depends_on:
+  - image-build-xpu
+steps:
+- label: Model Runner V2 Core Tests (Intel)
+  timeout_in_minutes: 45
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 2+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/v1/worker/gpu/
+    - vllm/v1/worker/gpu_worker.py
+    - vllm/v1/core/sched/
+    - vllm/v1/attention/
+    - tests/v1/engine/test_llm_engine.py
+    - tests/v1/e2e/
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'export VLLM_USE_V2_MODEL_RUNNER=1 &&
+      cd tests &&
+      pytest -v -s v1/engine/test_llm_engine.py -k "not test_engine_metrics" &&
+      ENFORCE_EAGER=1 pytest -v -s v1/e2e/general/test_async_scheduling.py -k "not ngram" &&
+      pytest -v -s v1/e2e/general/test_min_tokens.py'
+
+- label: Model Runner V2 Examples (Intel)
+  timeout_in_minutes: 45
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 24+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/v1/worker/gpu/
+    - vllm/v1/core/sched/
+    - vllm/v1/worker/gpu_worker.py
+    - examples/basic/offline_inference/
+    - examples/generate/multimodal/
+    - examples/features/
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'export VLLM_USE_V2_MODEL_RUNNER=1 &&
+      cd examples &&
+      python3 basic/offline_inference/chat.py &&
+      python3 basic/offline_inference/generate.py --model facebook/opt-125m &&
+      python3 generate/multimodal/vision_language_offline.py --seed 0 &&
+      python3 features/automatic_prefix_caching/prefix_caching_offline.py'

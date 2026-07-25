@@ -29,6 +29,9 @@ SKIP_TENSORS: set[str] = {
     "expert_physical_to_global",
     "expert_local_to_global",
     "e_score_correction_bias",
+    # Built after create_weights(), so it is not tracked by the layerwise-reload
+    # trigger and would be re-materialized into uninitialized memory. Skip it.
+    "bias",
 }
 
 
@@ -117,6 +120,7 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
     if layer.__class__.__name__ in SKIP_MODULES:
         return
 
+    non_persistent = set(layer._non_persistent_buffers_set)
     for name in get_layer_tensors(layer):
         if name not in SKIP_TENSORS:
             delattr(layer, name)
@@ -130,7 +134,7 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
     for name, buffer in restore_buffers.items():
         if name not in SKIP_TENSORS:
             buffer = restore_layer_refs(buffer, layer)
-            layer.register_buffer(name, buffer)
+            layer.register_buffer(name, buffer, persistent=name not in non_persistent)
 
 
 def materialize_layer(layer: torch.nn.Module, info: LayerReloadingInfo):
@@ -185,4 +189,18 @@ def get_numel_loaded(
     """
     with CopyCounter() as counter:
         return_value = weight_loader(*args.args, **args.kwargs)
-    return counter.copied_numel, return_value
+
+    # A weight loader fills a single destination parameter, so the number of
+    # loaded elements is at most that parameter's size. Some loaders copy into
+    # the parameter more than once -- e.g. ``composed_weight_loader`` runs an
+    # in-place post-load transform (``param.copy_(fn(param))``) on top of the
+    # initial copy -- which would make CopyCounter report twice the parameter
+    # size. Over-counting inflates the layer's loaded-element total and can
+    # finalize the layer before every parameter is loaded, silently dropping
+    # the trailing parameter(s) (e.g. Mamba ``mixer.D``). Cap the count at the
+    # destination size to keep the per-layer accounting correct.
+    numel = counter.copied_numel
+    param = args.arguments.get("param", None)
+    if isinstance(param, torch.Tensor):
+        numel = min(numel, param.numel())
+    return numel, return_value

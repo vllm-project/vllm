@@ -96,11 +96,12 @@ def _make_worker(kv_cache_config: KVCacheConfig):
     )
 
     spec = MagicMock(spec=OffloadingSpec)
-    spec.kv_cache_config = kv_cache_config
-    spec.vllm_config = MagicMock()
-    spec.get_handlers.return_value = iter([])
+    spec.get_worker.return_value = MagicMock()
 
-    worker = OffloadingConnectorWorker(spec=spec)
+    worker = OffloadingConnectorWorker(
+        spec=spec,
+        kv_cache_config=kv_cache_config,
+    )
     worker.worker = MagicMock()
 
     return worker, spec
@@ -124,8 +125,7 @@ def test_register_kv_caches(backend):
     own dedicated tensors.
 
     Uses the real GPUModelRunner.initialize_kv_cache_tensors to produce
-    kv_caches, which automatically applies
-    _update_hybrid_attention_mamba_layout for hybrid models.
+    the raw per-layer kv_caches registered by the connector.
 
     Verifies that the canonicalized CanonicalKVCaches has the correct
     block tensors, tensor_idx references, and page sizes across all groups.
@@ -279,7 +279,7 @@ def test_register_kv_caches(backend):
     worker, spec = _make_worker(kv_cache_config)
     worker.register_kv_caches(kv_caches)
 
-    canonical = spec.get_handlers.call_args[0][0]
+    canonical = spec.get_worker.call_args[0][0]
     assert isinstance(canonical, CanonicalKVCaches)
 
     # -- Expected block tensors ----------------------------------------------
@@ -422,7 +422,7 @@ def test_register_kv_caches_uniform_type(backend):
     worker, spec = _make_worker(kv_cache_config)
     worker.register_kv_caches(kv_caches)
 
-    canonical = spec.get_handlers.call_args[0][0]
+    canonical = spec.get_worker.call_args[0][0]
     assert isinstance(canonical, CanonicalKVCaches)
 
     for block_tensor in canonical.tensors:

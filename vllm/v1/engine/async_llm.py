@@ -44,6 +44,7 @@ from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.executor import Executor
+from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
 from vllm.v1.metrics.loggers import (
     StatLoggerFactory,
     StatLoggerManager,
@@ -1041,6 +1042,15 @@ class AsyncLLM(EngineClient):
         finally:
             set_scaling_elastic_ep(False)
 
+    async def handle_fault(
+        self, fault_tolerance_request: FaultToleranceRequest
+    ) -> FaultToleranceResult:
+        """send fault tolerance instruction to the engine"""
+        return await self.engine_core.handle_fault(fault_tolerance_request)
+
+    async def get_status(self):
+        return await self.engine_core.get_status()
+
     @property
     def is_running(self) -> bool:
         # Is None before the loop is started.
@@ -1067,25 +1077,17 @@ class AsyncLLM(EngineClient):
         Args:
             request: Weight transfer initialization request with backend-specific info
         """
-        from vllm.distributed.weight_transfer.base import (
-            WeightTransferInitRequest,
-        )
-
-        if isinstance(request, WeightTransferInitRequest):
-            init_info_dict = request.init_info
-        else:
-            raise TypeError(f"Expected WeightTransferInitRequest, got {type(request)}")
-
         await self.collective_rpc(
-            "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
+            "init_weight_transfer_engine", kwargs={"init_info": request.init_info}
         )
 
-    async def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
+    async def start_weight_update(self) -> None:
         """Start a new weight update."""
-        await self.collective_rpc(
-            "start_weight_update",
-            kwargs={"is_checkpoint_format": is_checkpoint_format},
-        )
+        await self.collective_rpc("start_weight_update")
+
+    async def start_draft_weight_update(self) -> None:
+        """Start a new weight update targeting the speculative draft model."""
+        await self.collective_rpc("start_draft_weight_update")
 
     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
         """
@@ -1094,16 +1096,8 @@ class AsyncLLM(EngineClient):
         Args:
             request: Weight update request with backend-specific update info
         """
-
-        if isinstance(request, WeightTransferUpdateRequest):
-            update_info_dict = request.update_info
-        else:
-            raise TypeError(
-                f"Expected WeightTransferUpdateRequest, got {type(request)}"
-            )
-
         await self.collective_rpc(
-            "update_weights", kwargs={"update_info": update_info_dict}
+            "update_weights", kwargs={"update_info": request.update_info}
         )
 
     async def finish_weight_update(self) -> None:

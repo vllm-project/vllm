@@ -22,13 +22,12 @@ import uvicorn
 import uvloop
 from fastapi import FastAPI, Response
 
+import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils.system_utils import (
     decorate_logs,
     kill_process_tree,
     set_process_title,
-    update_environment_variables,
 )
 
 logger = init_logger(__name__)
@@ -127,22 +126,29 @@ def _build_vllm_dp_server_args(
     child_args.data_parallel_multi_port_external_lb = False
     child_args.data_parallel_supervisor_port = None
     child_args.api_server_count = 1
+    child_args.device_ids = _build_device_ids(args, local_rank)
     return child_args
 
 
-def _build_vllm_dp_server_env(
-    args: argparse.Namespace, local_rank: int
-) -> dict[str, str]:
-    # set visible devices for the child process
+def _build_device_ids(args: argparse.Namespace, local_rank: int) -> list[int | str]:
+    """Build the --device-ids value for a DP child process.
+
+    The child resolves these against its own inherited device-control env
+    var (e.g. CUDA_VISIBLE_DEVICES), so integer IDs must stay env-relative
+    here rather than being translated to physical IDs.
+    """
     devices_per_rank = args.tensor_parallel_size * args.pipeline_parallel_size
     start = local_rank * devices_per_rank
     stop = start + devices_per_rank
-    device_env = current_platform.device_control_env_var
-    visible_devices = ",".join(
-        str(current_platform.device_id_to_physical_device_id(idx))
-        for idx in range(start, stop)
-    )
-    return {device_env: visible_devices}
+    device_ids = getattr(args, "device_ids", None)
+    if device_ids is not None:
+        if stop > len(device_ids):
+            raise ValueError(
+                f"--device-ids has {len(device_ids)} entries, but DP rank "
+                f"{local_rank} needs devices [{start}, {stop})"
+            )
+        return device_ids[start:stop]
+    return list(range(start, stop))
 
 
 def _child_base_url(args: argparse.Namespace, port: int) -> str:
@@ -228,23 +234,33 @@ def _build_dp_supervisor_app(supervisor: DPSupervisor) -> FastAPI:
     return app
 
 
-def _run_vllm_dp_server(
-    child_args: argparse.Namespace, env_updates: dict[str, str]
-) -> None:
+def _run_python_vllm_dp_server(child_args: argparse.Namespace) -> None:
+    from vllm.entrypoints.openai.api_server import run_server
+
+    uvloop.run(run_server(child_args))
+
+
+def _run_rust_vllm_dp_server(child_args: argparse.Namespace) -> None:
+    from vllm.entrypoints.cli.serve import run_multi_api_server
+
+    run_multi_api_server(child_args)
+
+
+def _run_vllm_dp_server(child_args: argparse.Namespace) -> None:
     """
     Entrypoint function for the vLLM DP Server.
     """
-    from vllm.entrypoints.openai.api_server import run_server
-
     # Create a fresh process group for the vLLM DP Server,
     # so that CTRL-C is propagated cleanly.
     os.setpgrp()
 
     name = f"APIServer_DP{child_args.data_parallel_rank}"
-    update_environment_variables(env_updates)
     set_process_title(name)
     decorate_logs(name)
-    uvloop.run(run_server(child_args))
+    if envs.VLLM_RUST_FRONTEND_PATH:
+        _run_rust_vllm_dp_server(child_args)
+    else:
+        _run_python_vllm_dp_server(child_args)
 
 
 class DPSupervisor:
@@ -267,14 +283,46 @@ class DPSupervisor:
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
+        decorate_logs("DPSupervisor")
 
         # K8s sends SIGTERM for shutdown - begin graceful termination.
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, partial(self._handle_signal, sig))
 
-        # Launch DPSupervisor Server.
+        supervisor_server: uvicorn.Server | None = None
+        supervisor_server_task: asyncio.Task[None] | None = None
+        try:
+            # Launch vLLM DP Servers and begin monitoring them.
+            self._start_children()
+            monitor_task = asyncio.create_task(
+                self._monitor_children(), name="dp-monitor"
+            )
+
+            # Only start the DPSupervisor server once the vLLM DP Servers are
+            # ready. This avoids the supervisor /health endpoint returning 503
+            # to external load balancer probes while the engines initialize.
+            await self._wait_until_ready(monitor_task)
+            if self.is_ready and not monitor_task.done():
+                supervisor_server, supervisor_server_task = await self._start_server()
+
+            await monitor_task
+        finally:
+            self._is_ready = False
+            await self._shutdown_children()
+
+            # Shutdown the DP Supervisor server.
+            if supervisor_server is not None and supervisor_server_task is not None:
+                supervisor_server.should_exit = True
+                await supervisor_server_task
+
+    async def _start_server(self) -> tuple[uvicorn.Server, asyncio.Task[None]]:
+        """
+        Launch the DPSupervisor HTTP server.
+
+        Called only after the vLLM DP Servers are ready so that /health does
+        not return 503 to external probes while the engines are initializing.
+        """
         app = _build_dp_supervisor_app(self)
-        decorate_logs("DPSupervisor")
         host = self.args.host or "0.0.0.0"
         config = uvicorn.Config(
             app,
@@ -303,18 +351,20 @@ class DPSupervisor:
                 raise RuntimeError("DPSupervisor exited before startup.")
             await asyncio.sleep(0.05)
         logger.info("Started DPSupervisor on %s:%d", host, self.supervisor_port)
+        return supervisor_server, supervisor_server_task
 
-        # Launch and Monitor vLLM Server Processes.
-        try:
-            self._start_children()
-            await self._monitor_children()
-        finally:
-            self._is_ready = False
-            await self._shutdown_children()
+    async def _wait_until_ready(self, monitor_task: asyncio.Task[None]) -> None:
+        """
+        Block until the vLLM DP Servers are ready or shutdown is triggered.
 
-            # Shutdown the DP Supervisor server.
-            supervisor_server.should_exit = True
-            await supervisor_server_task
+        Returns early if monitoring stops (e.g. a DP Server dies during
+        startup), in which case the supervisor server is never started.
+        """
+        logger.info("Waiting for vLLM DP Servers to become ready.")
+        while not self._is_ready and not self._shutdown_event.is_set():
+            if monitor_task.done():
+                return
+            await asyncio.sleep(0.05)
 
     def _handle_signal(self, signum: int) -> None:
         """
@@ -345,11 +395,10 @@ class DPSupervisor:
         context = multiprocessing.get_context("spawn")
         for local_rank in range(self.args.data_parallel_size_local):
             child_args = _build_vllm_dp_server_args(self.args, local_rank)
-            child_env = _build_vllm_dp_server_env(self.args, local_rank)
             process = context.Process(
                 target=_run_vllm_dp_server,
                 name=f"APIServer_DPRank_{child_args.data_parallel_rank}",
-                args=(child_args, child_env),
+                args=(child_args,),
             )
             process.start()
             self._processes.append(process)

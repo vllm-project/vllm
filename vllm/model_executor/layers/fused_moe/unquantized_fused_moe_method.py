@@ -11,7 +11,6 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
-    FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEConfig,
     FusedMoEQuantConfig,
     biased_moe_quant_config,
@@ -140,10 +139,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def _maybe_pad_weight(self, weight: torch.Tensor) -> torch.Tensor:
         # Pad the weight tensor. This is an optimization on ROCm platform, which
-        # can benefit from tensors located far enough from one another in memory
+        # can benefit from tensors located far enough from one another in memory.
+        # Skip padding when EPLB is enabled because EPLB requires contiguous
+        # weights for the view/rearrangement operations.
         if (
             envs.VLLM_ROCM_MOE_PADDING
             and current_platform.is_rocm()
+            and not self.moe.moe_parallel_config.enable_eplb
             and weight.stride(-1) == 1
             and (weight.stride(-2) * weight.element_size()) % 512 == 0
         ):
@@ -162,7 +164,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         # Shuffle weights to runtime format.
         w13_new, w2_new = convert_to_unquantized_kernel_format(
             self.unquantized_backend,
-            layer=layer,
+            moe_config=layer.moe_config,
             w13_weight=w13,
             w2_weight=w2,
         )
@@ -184,11 +186,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
         if not is_weight_update:
             # Setup moe kernel only on the first call. For the unquantized
-            # method, moe_quant_config is either the constant
-            # FUSED_MOE_UNQUANTIZED_CONFIG or biased_moe_quant_config(...)
-            # which references layer.w{13,2}_bias; since weight updates
-            # mutate those bias tensors in place, the kernel does not need
-            # to be re-built.
+            # method, moe_quant_config carries no quantized scales -- only
+            # optional w{13,2}_bias references and SwiGLU gate params. Since
+            # weight updates mutate those bias tensors in place, the kernel
+            # does not need to be re-built.
             self.moe_quant_config = self.get_fused_moe_quant_config(layer)
             assert self.moe_quant_config is not None
             assert self.experts_cls is not None
@@ -272,13 +273,27 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             )
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
+        # SwiGLU/swigluoai gate params live on the layer; plumb them into the
+        # quant config so the fused activation (e.g. swigluoai_uninterleave on
+        # MiniMax-M3) receives gemm1_clamp_limit/alpha/beta.
+        gemm1_alpha = getattr(layer, "swiglu_alpha", None)
+        gemm1_beta = getattr(layer, "swiglu_beta", None)
+        gemm1_clamp_limit = getattr(layer, "swiglu_limit", None)
+
         if self.moe.has_bias:
             return biased_moe_quant_config(
                 layer.w13_bias,
                 layer.w2_bias,
+                gemm1_alpha=gemm1_alpha,
+                gemm1_beta=gemm1_beta,
+                gemm1_clamp_limit=gemm1_clamp_limit,
             )
-        else:
-            return FUSED_MOE_UNQUANTIZED_CONFIG
+
+        return FusedMoEQuantConfig.make(
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
+            gemm1_clamp_limit=gemm1_clamp_limit,
+        )
 
     def apply(
         self,

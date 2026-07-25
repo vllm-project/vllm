@@ -23,14 +23,30 @@ from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
     QuarkW8A8Int8,
 )
 from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
+    QuarkW4A8Fp8MoEMethod,
     QuarkW8A8Int8MoEMethod,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    is_layer_skipped,
+)
 from vllm.platforms import current_platform
+from vllm.transformers_utils.repo_utils import hf_api
+
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx942, on_gfx950
+else:
+
+    def on_gfx942() -> bool:
+        return False
+
+    def on_gfx950() -> bool:
+        return False
+
 
 from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
 
 # Minimum amd-quark version for MXFP4/OCP_MX tests (single source of truth).
-QUARK_MXFP4_MIN_VERSION = "0.8.99"
+QUARK_MXFP4_MIN_VERSION = "0.12"
 
 QUARK_MXFP4_AVAILABLE = find_spec("quark") is not None and version.parse(
     importlib.metadata.version("amd-quark")
@@ -44,7 +60,7 @@ if QUARK_MXFP4_AVAILABLE:
     from quark.torch.quantization.config.config import FP4PerGroupSpec
 
 try:
-    huggingface_hub.list_repo_refs(
+    hf_api().list_repo_refs(
         "amd/Llama-3.3-70B-Instruct-WMXFP4-AMXFP4-KVFP8-Scale-UINT8-SQ"
     )
     HF_HUB_AMD_ORG_ACCESS = True
@@ -152,6 +168,38 @@ def test_quark_int8_w8a8_moe(vllm_runner, tp):
             # Non-MoE linear layers should use QuarkW8A8Int8
             qkv_proj = layer.self_attn.qkv_proj
             assert isinstance(qkv_proj.scheme, QuarkW8A8Int8)
+
+        llm.apply_model(check_model)
+
+        output = llm.generate_greedy("Hello", max_tokens=4)
+        assert output
+
+
+@pytest.mark.skipif(
+    not (on_gfx950() or on_gfx942()),
+    reason="Quark W4A8 (INT4-FP8) MoE requires the AITER kernel on gfx942/gfx950",
+)
+@pytest.mark.parametrize("tp", [1])
+def test_quark_w4a8_fp8_moe(vllm_runner, monkeypatch, tp):
+    """Test W4A8 (INT4 weight + FP8 activation) MoE with a tiny Qwen3 MoE model.
+
+    W4A8 dispatches through the AITER fused MoE kernel, so AITER must be on.
+    """
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+    model_path = "amd/tiny-qwen3-moe-w4a8"
+    with vllm_runner(
+        model_path,
+        enforce_eager=True,
+        tensor_parallel_size=tp,
+        gpu_memory_utilization=0.1,
+    ) as llm:
+
+        def check_model(model):
+            moe = model.model.layers[0].mlp.experts
+            assert isinstance(moe._quant_method, QuarkW4A8Fp8MoEMethod), (
+                f"Expected QuarkW4A8Fp8MoEMethod, got {type(moe._quant_method)}"
+            )
 
         llm.apply_model(check_model)
 
@@ -437,3 +485,88 @@ def test_mxfp4_dequant_kernel_match_quark(
     out_torch = dq_mxfp4_torch(w_mxfp4, scale, float_dtype)
 
     assert torch.equal(out_hip, out_torch)
+
+
+# Unit tests for ``is_layer_skipped`` fused-name handling.
+
+FUSED_MAPPING = {
+    "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+    "gate_up_proj": ["gate_proj", "up_proj"],
+}
+
+
+def test_fused_name_listed_directly_is_skipped():
+    # Regression for Step-3.5-Flash-FP8: the checkpoint lists the fused
+    # name (``qkv_proj``) directly in ``modules_to_not_convert``. When a
+    # ``packed_modules_mapping`` is registered on the model, the fused
+    # match must still win over per-shard expansion.
+    ignored = ["model.layers.0.self_attn.qkv_proj"]
+    assert is_layer_skipped(
+        prefix="model.layers.0.self_attn.qkv_proj",
+        ignored_layers=ignored,
+        fused_mapping=FUSED_MAPPING,
+    )
+    assert is_layer_skipped(
+        prefix="model.layers.0.mlp.gate_up_proj",
+        ignored_layers=["model.layers.0.mlp.gate_up_proj"],
+        fused_mapping=FUSED_MAPPING,
+    )
+
+
+def test_unfused_shards_listed_is_skipped():
+    # Quark INT8 style: per-shard names listed; all shards present means
+    # the fused layer is skipped via expansion.
+    ignored = [
+        "model.layers.0.self_attn.q_proj",
+        "model.layers.0.self_attn.k_proj",
+        "model.layers.0.self_attn.v_proj",
+    ]
+    assert is_layer_skipped(
+        prefix="model.layers.0.self_attn.qkv_proj",
+        ignored_layers=ignored,
+        fused_mapping=FUSED_MAPPING,
+    )
+
+
+def test_partial_shards_raises():
+    # Only some shards listed -> ambiguous, must raise. Fused name is
+    # not in ignored_layers, so we fall through to per-shard expansion.
+    ignored = ["model.layers.0.self_attn.q_proj"]
+    with pytest.raises(ValueError):
+        is_layer_skipped(
+            prefix="model.layers.0.self_attn.qkv_proj",
+            ignored_layers=ignored,
+            fused_mapping=FUSED_MAPPING,
+        )
+
+
+def test_not_skipped_when_nothing_listed():
+    assert not is_layer_skipped(
+        prefix="model.layers.0.self_attn.qkv_proj",
+        ignored_layers=["model.layers.0.mlp.gate_up_proj"],
+        fused_mapping=FUSED_MAPPING,
+    )
+
+
+def test_non_fused_layer_unaffected():
+    assert is_layer_skipped(
+        prefix="model.layers.0.self_attn.o_proj",
+        ignored_layers=["model.layers.0.self_attn.o_proj"],
+        fused_mapping=FUSED_MAPPING,
+    )
+    assert not is_layer_skipped(
+        prefix="model.layers.0.self_attn.o_proj",
+        ignored_layers=["model.layers.1.self_attn.o_proj"],
+        fused_mapping=FUSED_MAPPING,
+    )
+
+
+def test_substr_match_on_fused_name():
+    # skip_with_substr=True path: fused-name substring match should also
+    # short-circuit before shard expansion.
+    assert is_layer_skipped(
+        prefix="model.layers.0.self_attn.qkv_proj",
+        ignored_layers=["self_attn.qkv_proj"],
+        fused_mapping=FUSED_MAPPING,
+        skip_with_substr=True,
+    )

@@ -2,7 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import sys
+from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
+
+
+@dataclass(frozen=True)
+class HeaderStyle:
+    """Comment syntax and preamble handling for an SPDX header."""
+
+    comment_prefix: str
+    preserve_shebang: bool = False
 
 
 class SPDXStatus(Enum):
@@ -15,37 +25,56 @@ class SPDXStatus(Enum):
     MISSING_BOTH = "missing_both"  # Completely missing
 
 
-FULL_SPDX_HEADER = (
-    "# SPDX-License-Identifier: Apache-2.0\n"
-    "# SPDX-FileCopyrightText: Copyright contributors to the vLLM project"
-)
+LICENSE_TEXT = "SPDX-License-Identifier: Apache-2.0"
+COPYRIGHT_TEXT = "SPDX-FileCopyrightText: Copyright contributors to the vLLM project"
+FILE_STYLES = {
+    ".py": HeaderStyle("#", preserve_shebang=True),
+    ".rs": HeaderStyle("//"),
+    ".proto": HeaderStyle("//"),
+}
 
-LICENSE_LINE = "# SPDX-License-Identifier: Apache-2.0"
-COPYRIGHT_LINE = "# SPDX-FileCopyrightText: Copyright contributors to the vLLM project"  # noqa: E501
+
+def file_style(file_path):
+    """Return the declared header style for a file."""
+    suffix = Path(file_path).suffix
+    try:
+        return FILE_STYLES[suffix]
+    except KeyError:
+        raise ValueError(f"Unsupported file type: {file_path}") from None
+
+
+def spdx_header(style):
+    """Return the SPDX header for a file style."""
+    license_line = f"{style.comment_prefix} {LICENSE_TEXT}"
+    copyright_line = f"{style.comment_prefix} {COPYRIGHT_TEXT}"
+    return license_line, copyright_line
+
+
+def header_insertion_index(style, lines):
+    """Return the line index where a missing header should be inserted."""
+    if style.preserve_shebang and lines and lines[0].startswith("#!"):
+        return 1
+    return 0
 
 
 def check_spdx_header_status(file_path):
     """Check SPDX header status of the file"""
+    license_line, copyright_line = spdx_header(file_style(file_path))
     with open(file_path, encoding="UTF-8") as file:
         lines = file.readlines()
         if not lines:
             # Empty file
             return SPDXStatus.EMPTY
 
-        # Skip shebang line
-        start_idx = 0
-        if lines and lines[0].startswith("#!"):
-            start_idx = 1
-
         has_license = False
         has_copyright = False
 
         # Check all lines for SPDX headers (not just the first two)
-        for i in range(start_idx, len(lines)):
-            line = lines[i].strip()
-            if line == LICENSE_LINE:
+        for raw_line in lines:
+            line = raw_line.strip()
+            if line == license_line:
                 has_license = True
-            elif line == COPYRIGHT_LINE:
+            elif line == copyright_line:
                 has_copyright = True
 
         # Determine status based on what we found
@@ -54,8 +83,8 @@ def check_spdx_header_status(file_path):
         elif has_license and not has_copyright:
             # Only has license line
             return SPDXStatus.MISSING_COPYRIGHT
-            # Only has copyright line
         elif not has_license and has_copyright:
+            # Only has copyright line
             return SPDXStatus.MISSING_LICENSE
         else:
             # Completely missing both lines
@@ -64,6 +93,9 @@ def check_spdx_header_status(file_path):
 
 def add_header(file_path, status):
     """Add or supplement SPDX header based on status"""
+    style = file_style(file_path)
+    license_line, copyright_line = spdx_header(style)
+    full_spdx_header = f"{license_line}\n{copyright_line}"
     with open(file_path, "r+", encoding="UTF-8") as file:
         lines = file.readlines()
         file.seek(0, 0)
@@ -71,25 +103,23 @@ def add_header(file_path, status):
 
         if status == SPDXStatus.MISSING_BOTH:
             # Completely missing, add complete header
-            if lines and lines[0].startswith("#!"):
-                # Preserve shebang line
-                file.write(lines[0])
-                file.write(FULL_SPDX_HEADER + "\n")
-                file.writelines(lines[1:])
-            else:
-                # Add header directly
-                file.write(FULL_SPDX_HEADER + "\n")
-                file.writelines(lines)
+            insertion_index = header_insertion_index(style, lines)
+            file.writelines(lines[:insertion_index])
+            file.write(full_spdx_header + "\n")
+            remaining_lines = lines[insertion_index:]
+            if remaining_lines and remaining_lines[0].strip():
+                file.write("\n")
+            file.writelines(remaining_lines)
 
         elif status == SPDXStatus.MISSING_COPYRIGHT:
             # Only has license line, need to add copyright line
             # Find the license line and add copyright line after it
             for i, line in enumerate(lines):
-                if line.strip() == LICENSE_LINE:
+                if line.strip() == license_line:
                     # Insert copyright line after license line
                     lines.insert(
                         i + 1,
-                        f"{COPYRIGHT_LINE}\n",
+                        f"{copyright_line}\n",
                     )
                     break
 
@@ -99,9 +129,9 @@ def add_header(file_path, status):
             # Only has copyright line, need to add license line
             # Find the copyright line and add license line before it
             for i, line in enumerate(lines):
-                if line.strip() == COPYRIGHT_LINE:
+                if line.strip() == copyright_line:
                     # Insert license line before copyright line
-                    lines.insert(i, f"{LICENSE_LINE}\n")
+                    lines.insert(i, f"{license_line}\n")
                     break
             file.writelines(lines)
 

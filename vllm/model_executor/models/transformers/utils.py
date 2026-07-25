@@ -23,10 +23,8 @@ from typing import TYPE_CHECKING, Literal
 import torch
 from torch import nn
 
-from vllm.config.utils import getattr_iter
 from vllm.logger import init_logger
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
-from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     ReplicatedLinear,
@@ -101,8 +99,6 @@ Style = Literal[
     "replicate",
     "colwise_gather_output",
     "rowwise_split_input",
-    "colwise_rep",
-    "rowwise_rep",
 ]
 
 
@@ -131,12 +127,8 @@ def replace_linear_class(
         "colwise": (ColumnParallelLinear, {}),
         "rowwise": (RowParallelLinear, {}),
         "replicate": (ReplicatedLinear, {}),
-        # Transformers v5
         "colwise_gather_output": (ColumnParallelLinear, {"gather_output": True}),
         "rowwise_split_input": (RowParallelLinear, {"input_is_parallel": False}),
-        # Transformers v4
-        "colwise_rep": (ColumnParallelLinear, {"gather_output": True}),
-        "rowwise_rep": (RowParallelLinear, {"input_is_parallel": False}),
     }.get(style, (ReplicatedLinear, {}))
 
     return vllm_linear_cls(
@@ -187,45 +179,6 @@ def replace_conv_class(conv: TorchConv) -> VllmConv | TorchConv:
         padding_mode=conv.padding_mode,
         params_dtype=conv.weight.dtype,
     )
-
-
-def replace_rms_norm_class(rms_norm: nn.Module, hidden_size: int) -> RMSNorm:
-    """Replace a Transformers RMSNorm with vLLM's RMSNorm.
-
-    This method assumes:
-    - Weight is stored as `weight`.
-    - Epsilon is stored as `eps` or `variance_epsilon`.
-    - `with_scale` indicates whether the layer has a weight (Gemma3n only).
-    - `var_hidden_size` is only ever used for Intern vision encoder in vLLM
-    and Transformers doesn't appear to have the same concept.
-    """
-    eps = getattr_iter(rms_norm, ("eps", "variance_epsilon"), 1e-6)
-    kwargs = {"hidden_size": hidden_size, "eps": eps}
-    # Update hidden size if weight is available
-    weight_meta = getattr(rms_norm, "weight", None)
-    if weight_meta is not None:
-        kwargs["hidden_size"] = weight_meta.size(0)
-    # Check if weight is all zeros, which indicates GemmaRMSNorm
-    # We must create a new instance because rms_norm is on meta
-    try:
-        with torch.device("cpu"):
-            weight_test = getattr(rms_norm.__class__(1), "weight", None)
-    except Exception:
-        logger.warning(
-            "Failed to determine if RMSNorm weight is centered on zero or one. "
-            "Defaulting to one."
-        )
-        weight_test = None
-    if weight_test is not None and torch.all(weight_test == 0):
-        return GemmaRMSNorm(**kwargs)
-    # Otherwise assume it's a regular RMSNorm
-    kwargs["has_weight"] = getattr(rms_norm, "with_scale", True)
-    if weight_meta is not None:
-        kwargs["dtype"] = weight_meta.dtype
-    else:
-        # No weight, fall back to weightless RMSNorm
-        kwargs["has_weight"] = False
-    return RMSNorm(**kwargs)
 
 
 def recursive_replace_linear(
