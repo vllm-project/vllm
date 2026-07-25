@@ -1126,7 +1126,12 @@ class MooncakeStoreWorker:
         # Single-group + PCP/DCP > 1: scale the lone group's spec.block_size to
         # self.block_size (= scheduler_block_size) so the coordinator's
         # ``block_size % hash_block_size == 0`` invariant holds.
-        groups = list(kv_cache_config.kv_cache_groups)
+        groups = [
+            group
+            for group in kv_cache_config.kv_cache_groups
+            if group.enable_kv_transfer
+        ]
+        assert groups
         if len(groups) == 1 and groups[0].kv_cache_spec.block_size != self.block_size:
             g = groups[0]
             groups = [
@@ -1209,7 +1214,7 @@ class MooncakeStoreWorker:
         existing stride-based logic in register_kv_caches() produces
         the correct single-segment result (block_len = page_size * num_layers).
         """
-        if self._hisparse_enabled:
+        if getattr(self, "_hisparse_enabled", False):
             raise ValueError(
                 "HiSparse host-resident KV is incompatible with "
                 "enable_cross_layers_blocks. Disable it for HiSparse."

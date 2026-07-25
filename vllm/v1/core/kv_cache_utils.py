@@ -12,6 +12,8 @@ from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any, NamedTuple, NewType, TypeAlias, cast, overload
 
+import regex as re
+
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -24,6 +26,7 @@ from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
+    HiSparseHotSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -179,6 +182,7 @@ class KVCacheBlock:
 class KVCacheBlockCopy(NamedTuple):
     src_block_id: int
     dst_block_id: int
+    block_pool_id: int = 0
 
 
 class FreeKVCacheBlockQueue:
@@ -941,22 +945,23 @@ def get_max_concurrency_for_kv_cache_config(
     Get the maximum concurrency for the given KV cache configuration.
 
     A request at max_model_len consumes whole blocks from each group's block
-    table — cdiv(per-request bytes, page bytes) of the group's spec — and all
-    groups draw those block ids from one shared pool, so the per-request
-    total is the sum over groups. The memory/page ratio is identical whether
-    a group carries an aggregated UniformTypeKVCacheSpecs (worker config) or
-    a representative per-layer spec (scheduler config), so both capacity
-    call sites agree.
+    table. Requirements are summed within each allocator domain, then the
+    tightest domain determines concurrency.
     """
-    num_blocks_per_request = sum(
-        cdiv(
+    assert kv_cache_config.num_blocks_by_pool is not None
+    blocks_per_request = [0] * len(kv_cache_config.num_blocks_by_pool)
+    for group in kv_cache_config.kv_cache_groups:
+        blocks_per_request[group.block_pool_id] += cdiv(
             group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
             group.kv_cache_spec.page_size_bytes,
         )
-        for group in kv_cache_config.kv_cache_groups
+    return min(
+        num_blocks / required
+        for num_blocks, required in zip(
+            kv_cache_config.num_blocks_by_pool, blocks_per_request
+        )
+        if required > 0
     )
-    max_concurrency = kv_cache_config.num_blocks / num_blocks_per_request
-    return max_concurrency
 
 
 def may_override_num_blocks(vllm_config: VllmConfig, num_blocks: int) -> int:
@@ -1349,6 +1354,162 @@ def _is_hisparse_host_layer(layer_name: str) -> bool:
     return ".indexer" not in layer_name
 
 
+HISPARSE_HOT_SUFFIX = ".hisparse_hot"
+HISPARSE_INDEXER_SOURCE_SUFFIX = ".hisparse_source"
+
+
+def _get_hisparse_hma_config(
+    vllm_config: VllmConfig,
+    group: KVCacheGroupSpec,
+    available_memory: int,
+    host_budget: int,
+    *,
+    log_layout: bool = True,
+) -> KVCacheConfig:
+    """Build independent host-source and GPU-HMA allocator domains."""
+    from vllm.v1.attention.backends.mla.hisparse import ResolvedHiSparseConfig
+
+    assert isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+    specs = group.kv_cache_spec.kv_cache_specs
+    host_specs = {
+        name: spec for name, spec in specs.items() if _is_hisparse_host_layer(name)
+    }
+    indexer_specs = {
+        name: spec for name, spec in specs.items() if not _is_hisparse_host_layer(name)
+    }
+    assert host_specs and indexer_specs
+
+    block_sizes = {spec.block_size for spec in specs.values()}
+    assert len(block_sizes) == 1, "HiSparse HMA requires one scheduler block size."
+    block_size = block_sizes.pop()
+    if block_size != 64:
+        raise ValueError(f"HiSparse HMA requires block_size=64, got {block_size}.")
+    config = ResolvedHiSparseConfig.from_vllm_config(
+        vllm_config, vllm_config.model_config.hf_config.index_topk
+    )
+    assert config is not None
+    hot_blocks_per_request = cdiv(config.device_buffer_size + 1, block_size)
+
+    source_specs = {
+        (
+            f"{name}{HISPARSE_INDEXER_SOURCE_SUFFIX}" if name in indexer_specs else name
+        ): spec
+        for name, spec in specs.items()
+    }
+    host_group_spec = UniformTypeKVCacheSpecs.from_specs(source_specs)
+    indexer_group_spec = UniformTypeKVCacheSpecs.from_specs(indexer_specs)
+    assert host_group_spec is not None and indexer_group_spec is not None
+    host_group = KVCacheGroupSpec(list(source_specs), host_group_spec, block_pool_id=0)
+    indexer_group = KVCacheGroupSpec(
+        list(indexer_specs),
+        indexer_group_spec,
+        block_pool_id=1,
+        enable_prefix_caching=False,
+        enable_kv_transfer=False,
+    )
+
+    indexer_page = sum(spec.page_size_bytes for spec in indexer_specs.values())
+
+    def layer_prefix(name: str) -> str:
+        if ".self_attn." in name:
+            return name.partition(".self_attn.")[0]
+        match = re.match(r"(.*\.layers\.\d+)(?:\.|$)", name)
+        return match.group(1) if match is not None else name
+
+    indexer_prefixes = {layer_prefix(name) for name in indexer_specs}
+    hot_units: list[list[tuple[str, KVCacheSpec]]] = []
+    for layer_name, layer_spec in host_specs.items():
+        if layer_prefix(layer_name) in indexer_prefixes or not hot_units:
+            hot_units.append([])
+        hot_units[-1].append((f"{layer_name}{HISPARSE_HOT_SUFFIX}", layer_spec))
+
+    hot_groups: list[KVCacheGroupSpec] = []
+    current: list[tuple[str, KVCacheSpec]] = []
+    current_page = 0
+
+    def append_hot_group(layers: list[tuple[str, KVCacheSpec]]) -> None:
+        page_sizes = {spec.page_size_bytes for _, spec in layers}
+        assert len(page_sizes) == 1
+        hot_groups.append(
+            KVCacheGroupSpec(
+                [name for name, _ in layers],
+                HiSparseHotSpec(
+                    block_size=block_size,
+                    page_size=page_sizes.pop(),
+                    blocks_per_request=hot_blocks_per_request,
+                ),
+                block_pool_id=1,
+                enable_prefix_caching=False,
+                enable_kv_transfer=False,
+            )
+        )
+
+    for unit in hot_units:
+        unit_page = sum(spec.page_size_bytes for _, spec in unit)
+        if current and current_page + unit_page > indexer_page:
+            append_hot_group(current)
+            current = []
+            current_page = 0
+        current.extend(unit)
+        current_page += unit_page
+    if current:
+        append_hot_group(current)
+
+    gpu_groups = [indexer_group, *hot_groups]
+    gpu_stride, gpu_layers_by_offset = _get_packed_kv_cache_layout(gpu_groups)
+    hot_page_alignment = math.lcm(
+        *(group.kv_cache_spec.page_size_bytes for group in hot_groups)
+    )
+    gpu_stride = round_up(gpu_stride, hot_page_alignment)
+    host_page = sum(spec.page_size_bytes for spec in source_specs.values())
+    host_num_blocks = host_budget // host_page
+    gpu_num_blocks = available_memory // gpu_stride
+    override = vllm_config.cache_config.num_gpu_blocks_override
+    if override is not None:
+        host_num_blocks = gpu_num_blocks = override
+    if host_num_blocks <= 0 or gpu_num_blocks <= 0:
+        raise ValueError(
+            "HiSparse HMA has no allocatable blocks: "
+            f"host={host_num_blocks}, gpu={gpu_num_blocks}."
+        )
+
+    tensors = [
+        KVCacheTensor(
+            size=spec.page_size_bytes * host_num_blocks,
+            shared_by=[name],
+            host_resident=True,
+        )
+        for name, spec in source_specs.items()
+    ]
+    gpu_size = gpu_stride * gpu_num_blocks
+    tensors.extend(
+        KVCacheTensor(
+            size=gpu_size,
+            shared_by=names,
+            offset=offset,
+            block_stride=gpu_stride,
+            block_pool_id=1,
+        )
+        for offset, names in sorted(gpu_layers_by_offset.items())
+    )
+    if log_layout:
+        logger.info(
+            "HiSparse HMA: %.1f GiB host source (%d blocks), %.1f GiB shared "
+            "GPU indexer/hot pool (%d blocks, %d hot groups).",
+            host_num_blocks * host_page / 2**30,
+            host_num_blocks,
+            gpu_num_blocks * gpu_stride / 2**30,
+            gpu_num_blocks,
+            len(hot_groups),
+        )
+    return KVCacheConfig(
+        num_blocks=host_num_blocks,
+        num_blocks_by_pool=[host_num_blocks, gpu_num_blocks],
+        kv_cache_tensors=tensors,
+        kv_cache_groups=[host_group, indexer_group, *hot_groups],
+    )
+
+
 def _hisparse_gpu_host_usage_split(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
@@ -1368,10 +1529,9 @@ def _hisparse_gpu_host_usage_split(
     ):
         return None
     per_layer_specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
+    # The CPU source-of-truth stores both MLA KV and indexer K.
     host_bytes = sum(
-        spec.max_memory_usage_bytes(vllm_config)
-        for name, spec in per_layer_specs.items()
-        if _is_hisparse_host_layer(name)
+        spec.max_memory_usage_bytes(vllm_config) for spec in per_layer_specs.values()
     )
     if host_bytes == 0:
         return None
@@ -1417,58 +1577,11 @@ def get_kv_cache_config_from_groups(
         # layer based on its hidden size.
         hisparse_host_budget = _hisparse_host_pool_bytes(vllm_config)
         if hisparse_host_budget is not None:
-            specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
-            host_page = sum(
-                spec.page_size_bytes
-                for name, spec in specs.items()
-                if _is_hisparse_host_layer(name)
-            )
-            gpu_page = sum(
-                spec.page_size_bytes
-                for name, spec in specs.items()
-                if not _is_hisparse_host_layer(name)
-            )
-            assert host_page > 0, "HiSparse host-resident mode requires MLA KV layers."
-            num_blocks = hisparse_host_budget // host_page
-            if gpu_page > 0:
-                num_blocks = min(num_blocks, available_memory // gpu_page)
-            num_blocks = may_override_num_blocks(vllm_config, num_blocks)
-            if num_blocks <= 0:
-                raise ValueError(
-                    "HiSparse host-resident KV has no allocatable blocks. "
-                    f"host_budget={hisparse_host_budget / 2**30:.2f} GiB, "
-                    f"host_page={host_page / 2**20:.2f} MiB, "
-                    f"gpu_page={gpu_page / 2**20:.2f} MiB."
-                )
-            # Derive the requirement from the spec so rounding and context-
-            # parallel sharding cannot disagree with the fits()/admission
-            # checks (max_memory_usage_bytes divides by dcp*pcp per rank).
-            # Skip when num_blocks was forced (num_gpu_blocks_override): the
-            # CUDA-graph profiling path builds a deliberately minimal config,
-            # and an explicit operator override owns its own sizing.
-            group_spec = kv_cache_groups[0].kv_cache_spec
-            max_len_blocks = cdiv(
-                group_spec.max_memory_usage_bytes(vllm_config),
-                group_spec.page_size_bytes,
-            )
-            override = vllm_config.cache_config.num_gpu_blocks_override
-            if override is None and max_len_blocks > num_blocks:
-                raise ValueError(
-                    "HiSparse host-resident KV cannot hold one max_model_len "
-                    f"({vllm_config.model_config.max_model_len}) request: it "
-                    f"needs {max_len_blocks} blocks but only {num_blocks} fit "
-                    f"(host budget {hisparse_host_budget / 2**30:.1f} GiB, "
-                    f"GPU indexer budget {available_memory / 2**30:.1f} "
-                    "GiB). Raise hisparse_config.host_pool_gib / GPU "
-                    "memory, or lower max_model_len."
-                )
-            logger.info(
-                "HiSparse host-resident KV: %.1f GiB pinned host per rank for "
-                "MLA layers, %.1f GiB GPU for indexer layers (%d logical "
-                "blocks).",
-                num_blocks * host_page / 2**30,
-                num_blocks * gpu_page / 2**30,
-                num_blocks,
+            return _get_hisparse_hma_config(
+                vllm_config,
+                kv_cache_groups[0],
+                available_memory,
+                hisparse_host_budget,
             )
         else:
             num_blocks = (
@@ -1891,6 +2004,10 @@ def generate_scheduler_kv_cache_config(
     assert all(
         [cfg.num_blocks == kv_cache_configs[0].num_blocks for cfg in kv_cache_configs]
     )
+    assert all(
+        cfg.num_blocks_by_pool == kv_cache_configs[0].num_blocks_by_pool
+        for cfg in kv_cache_configs
+    )
     # All workers have the same kv_cache_config except layer names, so use
     # an arbitrary one to initialize the scheduler.
     cfg = copy.deepcopy(kv_cache_configs[0])
@@ -2005,10 +2122,17 @@ def _estimate_max_model_len_from_groups(
     def fits(model_len: int) -> bool:
         vllm_config.model_config.max_model_len = model_len
         if hisparse_host_budget is not None:
-            split = _hisparse_gpu_host_usage_split(vllm_config, kv_cache_groups)
-            assert split is not None
-            gpu_bytes, host_bytes = split
-            return gpu_bytes <= available_memory and host_bytes <= hisparse_host_budget
+            try:
+                config = _get_hisparse_hma_config(
+                    vllm_config,
+                    kv_cache_groups[0],
+                    available_memory,
+                    hisparse_host_budget,
+                    log_layout=False,
+                )
+            except ValueError:
+                return False
+            return get_max_concurrency_for_kv_cache_config(vllm_config, config) >= 1
         return (
             _max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
             <= available_memory
@@ -2253,20 +2377,35 @@ def get_kv_cache_configs(
             )
         )
 
-    # Change the num_blocks of each rank to the smallest among all ranks.
-    # We also need to shrink the tensor size proportionally to avoid
-    # allocating unused memory.
-    min_num_blocks = min(
-        kv_cache_config.num_blocks for kv_cache_config in kv_cache_configs
+    # Change each physical pool's block count to the smallest among all ranks.
+    # We also shrink tensor sizes proportionally to avoid unused memory.
+    block_counts_by_config: list[list[int]] = []
+    for config in kv_cache_configs:
+        assert config.num_blocks_by_pool is not None
+        block_counts_by_config.append(config.num_blocks_by_pool)
+    num_pools = len(block_counts_by_config[0])
+    assert all(
+        len(block_counts) == num_pools for block_counts in block_counts_by_config
     )
+    min_num_blocks_by_pool = [
+        min(block_counts[pool_id] for block_counts in block_counts_by_config)
+        for pool_id in range(num_pools)
+    ]
     for kv_cache_config in kv_cache_configs:
-        num_blocks_old = kv_cache_config.num_blocks
-        kv_cache_config.num_blocks = min_num_blocks
+        assert kv_cache_config.num_blocks_by_pool is not None
+        old_num_blocks_by_pool = kv_cache_config.num_blocks_by_pool
+        kv_cache_config.num_blocks_by_pool = min_num_blocks_by_pool.copy()
+        kv_cache_config.num_blocks = min_num_blocks_by_pool[0]
 
         # Shrink tensor size proportionally
         for tensor in kv_cache_config.kv_cache_tensors:
-            assert tensor.size % num_blocks_old == 0
-            tensor.size = tensor.size // num_blocks_old * min_num_blocks
+            old_num_blocks = old_num_blocks_by_pool[tensor.block_pool_id]
+            assert tensor.size % old_num_blocks == 0
+            tensor.size = (
+                tensor.size
+                // old_num_blocks
+                * min_num_blocks_by_pool[tensor.block_pool_id]
+            )
 
         if len(kv_cache_config.kv_cache_groups) > 0:
             max_model_len = vllm_config.model_config.max_model_len

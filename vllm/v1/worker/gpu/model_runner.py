@@ -53,7 +53,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+from vllm.v1.kv_cache_interface import HiSparseHotSpec, KVCacheConfig, MambaSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu import pcp_manager as pcp
@@ -434,12 +434,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # When using DCP, each request's KV cache is sharded among different ranks.
             # As a result, one block on the current rank covers `block_size * cp_size`
             # tokens in the full, global (unsharded) sequence.
-            max_num_blocks = cdiv(
-                block_table_max_model_len, spec.block_size * self.dcp_size
-            )
+            if isinstance(spec, HiSparseHotSpec):
+                max_num_blocks = spec.blocks_per_request
+            else:
+                max_num_blocks = cdiv(
+                    block_table_max_model_len, spec.block_size * self.dcp_size
+                )
             # Align to a multiple of (128 / block_size) as required by some attention
             # backends such as TRTLLM (#39324)
-            if spec.block_size <= 128:
+            if spec.block_size <= 128 and not isinstance(spec, HiSparseHotSpec):
                 alignment = 128 // spec.block_size
                 max_num_blocks = cdiv(max_num_blocks, alignment) * alignment
             # For Mamba/Hybrid Model, KVCaches need extra blocks for speculative tokens
@@ -505,7 +508,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculator.init_cudagraph_manager(cudagraph_mode)
 
         self.kv_caches: list[torch.Tensor] = []
-        kv_caches_dict = init_kv_cache(
+        kv_caches_dict, self.hisparse_runtime = init_kv_cache(
             self.kv_caches,
             self.compilation_config.static_forward_context,
             self.kv_cache_config,
@@ -514,7 +517,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.cache_config.cache_dtype,
             self.kernel_block_sizes,
             self.vllm_config,
+            self.block_tables,
         )
+        self.kv_caches_by_pool: dict[int, list[torch.Tensor]] = {}
+        for group in self.kv_cache_config.kv_cache_groups:
+            pool_caches = self.kv_caches_by_pool.setdefault(group.block_pool_id, [])
+            pool_caches.extend(
+                kv_caches_dict[name]
+                for name in group.layer_names
+                if name in kv_caches_dict
+            )
         self.kv_connector = get_kv_connector(
             self.vllm_config, kv_caches_dict, self.kv_cache_config
         )
@@ -886,11 +898,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Apply copy-on-write block copies for partial prefix-cache hits, after
         # zeroing new blocks and before the forward pass reads them.
         if scheduler_output.kv_cache_block_copies:
-            copy_kv_cache_blocks_inplace(
-                self.kv_caches,
-                self.kv_cache_config.num_blocks,
-                scheduler_output.kv_cache_block_copies,
-            )
+            assert self.kv_cache_config.num_blocks_by_pool is not None
+            for pool_id, num_blocks in enumerate(
+                self.kv_cache_config.num_blocks_by_pool
+            ):
+                copies = [
+                    copy
+                    for copy in scheduler_output.kv_cache_block_copies
+                    if copy.block_pool_id == pool_id
+                ]
+                copy_kv_cache_blocks_inplace(
+                    self.kv_caches_by_pool.get(pool_id, ()),
+                    num_blocks,
+                    copies,
+                )
+        if self.hisparse_runtime is not None:
+            self.hisparse_runtime.restore_prefix(scheduler_output)
 
     def prepare_inputs(
         self, scheduler_output: SchedulerOutput, batch_desc: BatchExecutionDescriptor

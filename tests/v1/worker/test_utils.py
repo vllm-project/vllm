@@ -3,7 +3,29 @@
 
 import torch
 
-from vllm.v1.worker.utils import bind_kv_cache
+from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+from vllm.v1.worker.utils import bind_kv_cache, copy_kv_cache_blocks_inplace
+
+
+def test_copy_cpu_kv_cache_blocks_ignores_storage_padding():
+    backing = torch.full((6, 2, 3), -1, dtype=torch.float32)
+    cache = backing[1:5]
+    cache[1] = 7
+    cache[3] = 11
+
+    copy_kv_cache_blocks_inplace(
+        [cache],
+        num_blocks=4,
+        kv_cache_block_copies=[
+            KVCacheBlockCopy(1, 0),
+            KVCacheBlockCopy(3, 2),
+        ],
+    )
+
+    torch.testing.assert_close(cache[0], torch.full_like(cache[0], 7))
+    torch.testing.assert_close(cache[2], torch.full_like(cache[2], 11))
+    assert (backing[0] == -1).all()
+    assert (backing[5] == -1).all()
 
 
 def test_bind_kv_cache(default_vllm_config):

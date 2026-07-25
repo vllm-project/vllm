@@ -173,6 +173,24 @@ class KVCacheSpec:
 
 
 @dataclass(frozen=True, kw_only=True)
+class HiSparseHotSpec(KVCacheSpec):
+    """Ephemeral per-request HiSparse hot-cache allocation."""
+
+    page_size: int
+    blocks_per_request: int
+
+    @property
+    def page_size_bytes(self) -> int:
+        return self.page_size
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        return self.blocks_per_request * self.page_size
+
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        return self.blocks_per_request
+
+
+@dataclass(frozen=True, kw_only=True)
 class AttentionSpec(KVCacheSpec):
     num_kv_heads: int
     head_size: int
@@ -933,6 +951,7 @@ class KVCacheTensor:
     offset: int = 0  # byte offset of this layer within a contiguous block
     block_stride: int = 0  # total bytes per block in a packed layout (0 = not packed)
     host_resident: bool = False  # allocate in host rather than device memory
+    block_pool_id: int = 0
 
 
 @dataclass
@@ -948,6 +967,18 @@ class KVCacheGroupSpec:
     kv_cache_spec: KVCacheSpec
     # Whether this group contains EAGLE/MTP draft attention layers.
     is_eagle_group: bool = False
+    # Physical block-pool domain used by this group. Groups in the same domain
+    # share block IDs and may overlap in a packed HMA layout. Groups in
+    # different domains have independent block-ID spaces.
+    block_pool_id: int = 0
+    # Whether this group participates in persistent prefix-cache lookup.
+    # Ephemeral accelerator-side replicas set this to False; their source
+    # group remains authoritative and they are rebuilt when a prefix is reused.
+    enable_prefix_caching: bool = True
+    # Whether this group is part of the externally transferable KV state.
+    # Ephemeral accelerator-side replicas are rebuilt from their transferable
+    # source group after a connector load.
+    enable_kv_transfer: bool = True
 
 
 @dataclass
@@ -968,6 +999,34 @@ class KVCacheConfig:
     For models with multiple types of attention, there will be multiple groups,
     see `_get_kv_cache_config_uniform_page_size` for more details.
     """
+    num_blocks_by_pool: list[int] | None = None
+    """Number of blocks in each physical block-pool domain.
+
+    ``None`` preserves the traditional single pool of ``num_blocks`` blocks.
+    """
+
+    def __post_init__(self) -> None:
+        if self.num_blocks_by_pool is None:
+            self.num_blocks_by_pool = [self.num_blocks]
+        if not self.num_blocks_by_pool or any(n < 0 for n in self.num_blocks_by_pool):
+            raise ValueError("KV cache block-pool sizes must be non-negative.")
+        if self.num_blocks != self.num_blocks_by_pool[0]:
+            raise ValueError(
+                "KVCacheConfig.num_blocks must equal num_blocks_by_pool[0]."
+            )
+        num_pools = len(self.num_blocks_by_pool)
+        for group in self.kv_cache_groups:
+            if not 0 <= group.block_pool_id < num_pools:
+                raise ValueError(
+                    f"Invalid block_pool_id={group.block_pool_id}; "
+                    f"configuration has {num_pools} block pools."
+                )
+        for tensor in self.kv_cache_tensors:
+            if not 0 <= tensor.block_pool_id < num_pools:
+                raise ValueError(
+                    f"Invalid tensor block_pool_id={tensor.block_pool_id}; "
+                    f"configuration has {num_pools} block pools."
+                )
 
     @property
     def has_mamba_layers(self) -> bool:
@@ -992,4 +1051,12 @@ class KVCacheConfig:
         groups can be reinterpreted under a different precision and decode stale
         bytes to NaN/Inf. Uniform-precision caches skip zeroing.
         """
+        if any(
+            isinstance(group.kv_cache_spec, HiSparseHotSpec)
+            for group in self.kv_cache_groups
+        ):
+            # HiSparse source/indexer/hot pages are fully initialized before
+            # use; zeroing also cannot address its independent pool domains
+            # with one unqualified block-ID list.
+            return False
         return self.has_mamba_layers or self.has_mixed_precision_kv_cache

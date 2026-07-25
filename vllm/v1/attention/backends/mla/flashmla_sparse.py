@@ -262,9 +262,12 @@ class FlashMLASparseMetadataBuilder(
             )
         else:
             threshold = {16: 128, 32: 128, 64: 256, 128: 256}.get(num_q_heads, 256)
+        self.use_hisparse = vllm_config.attention_config.hisparse_config is not None
+        if self.use_hisparse:
+            threshold = 1
         self._init_reorder_batch_threshold(
             threshold,
-            supports_spec_as_decode=True,
+            supports_spec_as_decode=not self.use_hisparse,
         )
 
         sm_count = num_compute_units(device.index)
@@ -276,7 +279,6 @@ class FlashMLASparseMetadataBuilder(
         )
 
         self.use_fp8_kv_cache = cache_config.cache_dtype == "fp8_ds_mla"
-        self.use_hisparse = vllm_config.attention_config.hisparse_config is not None
         max_num_seqs = vllm_config.scheduler_config.max_num_seqs
         # Shape: [max_num_seqs], all elements = topk_tokens (constant for full-CG)
         self.topk_tokens_tensor = torch.full(
@@ -639,7 +641,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                     decode_topk,
                     decode_topk_length,
                 )
-                if num_decode_tokens == attn_metadata.num_actual_tokens:
+                if num_decode_tokens == q.shape[0]:
                     return decode_out
                 q = q[num_decode_tokens:]
                 topk_indices = topk_indices[num_decode_tokens:]
@@ -889,7 +891,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                     kernel_metadata=decode_metadata,
                 )
                 decode_out = _decode_out.squeeze(0)
-                if num_decode_tokens == attn_metadata.num_actual_tokens:
+                if num_decode_tokens == q.shape[0]:
                     return decode_out
                 q = q[num_decode_tokens:]
                 topk_indices = topk_indices[num_decode_tokens:]

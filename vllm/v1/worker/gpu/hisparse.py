@@ -1,0 +1,168 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+import torch
+
+from vllm.utils.math_utils import cdiv
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    HiSparseHotSpec,
+    KVCacheConfig,
+    UniformTypeKVCacheSpecs,
+)
+
+if TYPE_CHECKING:
+    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.worker.gpu.block_table import BlockTables
+
+
+class HiSparseRuntime:
+    def __init__(
+        self,
+        cache_pairs: list[tuple[torch.Tensor, torch.Tensor]],
+        max_num_reqs: int,
+        max_model_len: int,
+        block_size: int,
+        device: torch.device,
+    ) -> None:
+        self.cache_pairs = cache_pairs
+        self.block_size = block_size
+        capacity = max_num_reqs * cdiv(max_model_len, block_size)
+        self.src_cpu = torch.empty(capacity, dtype=torch.int32, pin_memory=True)
+        self.dst_cpu = torch.empty(capacity, dtype=torch.int32, pin_memory=True)
+        self.src_gpu = torch.empty(capacity, dtype=torch.int32, device=device)
+        self.dst_gpu = torch.empty(capacity, dtype=torch.int32, device=device)
+
+    def restore_prefix(self, scheduler_output: SchedulerOutput) -> None:
+        src = self.src_cpu.numpy()
+        dst = self.dst_cpu.numpy()
+        num_pairs = 0
+
+        def append_pairs(block_ids: tuple[list[int], ...], num_tokens: int) -> None:
+            nonlocal num_pairs
+            if num_tokens <= 0:
+                return
+            source_blocks = block_ids[0]
+            indexer_blocks = block_ids[1]
+            count = min(
+                cdiv(num_tokens, self.block_size),
+                len(source_blocks),
+                len(indexer_blocks),
+            )
+            end = num_pairs + count
+            if end > src.size:
+                raise RuntimeError(
+                    "HiSparse prefix restore exceeded its preallocated block-ID "
+                    f"capacity ({end} > {src.size})."
+                )
+            src[num_pairs:end] = source_blocks[:count]
+            dst[num_pairs:end] = indexer_blocks[:count]
+            num_pairs = end
+
+        for request in scheduler_output.scheduled_new_reqs:
+            append_pairs(request.block_ids, request.num_computed_tokens)
+        cached = scheduler_output.scheduled_cached_reqs
+        for req_id, block_ids, num_tokens in zip(
+            cached.req_ids, cached.new_block_ids, cached.num_computed_tokens
+        ):
+            if req_id in cached.resumed_req_ids:
+                assert block_ids is not None
+                append_pairs(block_ids, num_tokens)
+
+        if num_pairs == 0:
+            return
+        self.src_gpu[:num_pairs].copy_(self.src_cpu[:num_pairs], non_blocking=True)
+        self.dst_gpu[:num_pairs].copy_(self.dst_cpu[:num_pairs], non_blocking=True)
+        for source_cache, indexer_cache in self.cache_pairs:
+            torch.ops._C_cache_ops.hisparse_copy_blocks(
+                source_cache,
+                indexer_cache,
+                self.src_gpu[:num_pairs],
+                self.dst_gpu[:num_pairs],
+            )
+
+
+def init_hisparse_runtime(
+    *,
+    forward_context: dict[str, Any],
+    kv_cache_config: KVCacheConfig,
+    raw_tensors: dict[str, torch.Tensor],
+    kv_caches: dict[str, torch.Tensor],
+    block_tables: BlockTables,
+    max_num_reqs: int,
+    max_model_len: int,
+    device: torch.device,
+) -> HiSparseRuntime | None:
+    from vllm.v1.attention.backends.mla.hisparse import (
+        bind_indexer_source_slot_mapping,
+        get_indexer_source,
+        register_indexer_source,
+    )
+    from vllm.v1.core.kv_cache_utils import (
+        HISPARSE_HOT_SUFFIX,
+        HISPARSE_INDEXER_SOURCE_SUFFIX,
+    )
+
+    tensor_configs = {
+        name: tensor_config
+        for tensor_config in kv_cache_config.kv_cache_tensors
+        for name in tensor_config.shared_by
+    }
+    group_specs = {
+        name: (group.kv_cache_spec, group_id)
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+        for name in group.layer_names
+    }
+    for cache_name, raw_tensor in raw_tensors.items():
+        if cache_name.endswith(HISPARSE_INDEXER_SOURCE_SUFFIX):
+            layer_name = cache_name[: -len(HISPARSE_INDEXER_SOURCE_SUFFIX)]
+            source_group_spec, _ = group_specs[cache_name]
+            assert isinstance(source_group_spec, UniformTypeKVCacheSpecs)
+            source_spec = source_group_spec.kv_cache_specs[cache_name]
+            assert isinstance(source_spec, AttentionSpec)
+            assert kv_cache_config.num_blocks_by_pool is not None
+            source_cache = raw_tensor.view(source_spec.dtype).view(
+                kv_cache_config.num_blocks_by_pool[0],
+                source_spec.block_size,
+                source_spec.head_size,
+            )
+            register_indexer_source(layer_name, source_cache)
+            kv_caches[cache_name] = source_cache
+            continue
+        if not cache_name.endswith(HISPARSE_HOT_SUFFIX):
+            continue
+        layer_name = cache_name[: -len(HISPARSE_HOT_SUFFIX)]
+        coordinator = forward_context[layer_name].impl.hisparse_coordinator
+        tensor_config = tensor_configs[cache_name]
+        hot_spec, hot_group_id = group_specs[cache_name]
+        assert isinstance(hot_spec, HiSparseHotSpec)
+        assert kv_cache_config.num_blocks_by_pool is not None
+        coordinator.bind_hot_cache(
+            raw_tensor,
+            byte_offset=tensor_config.offset,
+            block_stride=tensor_config.block_stride,
+            num_blocks=kv_cache_config.num_blocks_by_pool[tensor_config.block_pool_id],
+            block_size=hot_spec.block_size,
+            hot_group_id=hot_group_id,
+        )
+        coordinator.bind_hot_block_table(block_tables.input_block_tables[hot_group_id])
+
+    cache_pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
+    indexer_group = kv_cache_config.kv_cache_groups[1]
+    for layer_name in indexer_group.layer_names:
+        source = get_indexer_source(layer_name)
+        assert source is not None
+        cache_pairs.append((source[0], kv_caches[layer_name]))
+        bind_indexer_source_slot_mapping(layer_name, block_tables.slot_mappings[0])
+
+    block_size = kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
+    return HiSparseRuntime(
+        cache_pairs,
+        max_num_reqs,
+        max_model_len,
+        block_size,
+        device,
+    )

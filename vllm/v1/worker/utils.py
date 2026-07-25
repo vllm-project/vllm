@@ -30,6 +30,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
     FullAttentionSpec,
+    HiSparseHotSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -343,6 +344,12 @@ def prepare_kernel_block_sizes(
         elif isinstance(kv_cache_spec, MambaSpec):
             # This is likely Mamba or other non-attention cache, no splitting.
             kernel_block_sizes.append(kv_cache_spec.block_size)
+        elif isinstance(kv_cache_spec, HiSparseHotSpec):
+            if kv_cache_spec.block_size % 64 != 0:
+                raise ValueError(
+                    "HiSparse hot-cache block size must be divisible by 64."
+                )
+            kernel_block_sizes.append(64)
         else:
             raise NotImplementedError(
                 f"unknown kv cache spec {kv_cache_group.kv_cache_spec}"
@@ -522,13 +529,22 @@ def copy_kv_cache_blocks_inplace(
 
     if not storage_tensors:
         return
-    indices_np = np.array(kv_cache_block_copies, dtype=np.int64)
+    indices_np = np.array(
+        [(copy.src_block_id, copy.dst_block_id) for copy in kv_cache_block_copies],
+        dtype=np.int64,
+    )
     for device in {tensor.device for tensor in storage_tensors}:
         if device.type == "cpu":
             # Pinned host pages may still be read or written by CUDA kernels from
             # the prior step. COW is rare; synchronize before the host copy.
             torch.accelerator.synchronize()
             indices = torch.from_numpy(indices_np)
+            src_indices, dst_indices = indices.unbind(dim=1)
+            for tensor in storage_tensors:
+                if tensor.device == device:
+                    assert tensor.shape[0] == num_blocks
+                    tensor[dst_indices] = tensor[src_indices]
+            continue
         else:
             indices = async_tensor_h2d(indices_np, device=device)
         src_indices, dst_indices = indices.unbind(dim=1)

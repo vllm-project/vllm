@@ -61,6 +61,15 @@ class NixlBaseConnectorScheduler:
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id: EngineId = engine_id
         self.kv_cache_config = kv_cache_config
+        self._transfer_group_ids = tuple(
+            i
+            for i, group in enumerate(kv_cache_config.kv_cache_groups)
+            if group.enable_kv_transfer
+        )
+        assert self._transfer_group_ids
+        transfer_groups = [
+            kv_cache_config.kv_cache_groups[i] for i in self._transfer_group_ids
+        ]
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
         self.side_channel_port = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT
@@ -85,12 +94,11 @@ class NixlBaseConnectorScheduler:
             # Also handle unlikely SW-only model case instead of checking num_groups>1.
             and any(
                 not isinstance(g.kv_cache_spec, FullAttentionSpec)
-                for g in kv_cache_config.kv_cache_groups
+                for g in transfer_groups
             )
         )
         self._has_mamba = any(
-            isinstance(g.kv_cache_spec, MambaSpec)
-            for g in kv_cache_config.kv_cache_groups
+            isinstance(g.kv_cache_spec, MambaSpec) for g in transfer_groups
         )
 
         logger.info("Initializing NIXL Scheduler %s", engine_id)
@@ -226,6 +234,11 @@ class NixlBaseConnectorScheduler:
         the entire sequence length, and successively cleans up blocks that are outside
         the window prior to the `request_finished_all_groups` hook.
         """
+        if len(block_ids) == len(self.kv_cache_config.kv_cache_groups):
+            block_ids = tuple(block_ids[i] for i in self._transfer_group_ids)
+        assert len(block_ids) in (0, len(self._transfer_group_ids)), (
+            "Number of transferable KV cache groups must match"
+        )
         if len(block_ids) == 0 or not self._is_hma_required:
             # No blocks to clip eg Full prefix cache hit or not a hybrid model.
             return block_ids

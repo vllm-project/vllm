@@ -58,6 +58,13 @@ class MooncakeStoreScheduler:
         self.load_async = kvc_extra_config.get("load_async", True)
         self.lookup_async = kvc_extra_config.get("lookup_async", False)
         self.client = LookupKeyClient(vllm_config)
+        self._all_group_count = len(kv_cache_config.kv_cache_groups)
+        self._transfer_group_ids = tuple(
+            i
+            for i, group in enumerate(kv_cache_config.kv_cache_groups)
+            if group.enable_kv_transfer
+        )
+        assert self._transfer_group_ids
 
         # Align with the engine's own scheduler_block_size and hash_block_size.
         self._block_size, self._hash_block_size = resolve_kv_cache_block_sizes(
@@ -69,6 +76,17 @@ class MooncakeStoreScheduler:
         self._request_trackers: dict[str, RequestTracker] = {}  # scheduled new requests
         self._unfinished_requests: dict[str, tuple[Request, tuple[list[int], ...]]] = {}
         self._unfinished_request_ids: set[str] = set()
+
+    def _transfer_block_ids(
+        self, block_ids: tuple[list[int], ...] | list[list[int]]
+    ) -> tuple[list[int], ...]:
+        transfer_group_ids = getattr(self, "_transfer_group_ids", None)
+        if transfer_group_ids is None:
+            return tuple(block_ids)
+        if len(block_ids) == len(transfer_group_ids):
+            return tuple(block_ids)
+        assert len(block_ids) == self._all_group_count
+        return tuple(block_ids[i] for i in transfer_group_ids)
 
     def get_num_new_matched_tokens(
         self,
@@ -126,7 +144,7 @@ class MooncakeStoreScheduler:
         """Update state after block allocation."""
         local_block_ids: tuple[list[int], ...] = ()
         if num_external_tokens > 0:
-            local_block_ids = blocks.get_block_ids()
+            local_block_ids = self._transfer_block_ids(blocks.get_block_ids())
 
         self._unfinished_requests[request.request_id] = (request, local_block_ids)
         self._unfinished_request_ids.add(request.request_id)
@@ -190,7 +208,9 @@ class MooncakeStoreScheduler:
 
             if isinstance(request.block_ids, tuple):
                 # Multi-group: preserve per-group structure.
-                unfolded_block_ids = tuple(b.copy() for b in request.block_ids)
+                unfolded_block_ids = tuple(
+                    b.copy() for b in self._transfer_block_ids(request.block_ids)
+                )
             else:
                 # Single-group legacy: list[int] -> 1-tuple.
                 unfolded_block_ids = (request.block_ids.copy(),)
@@ -228,6 +248,8 @@ class MooncakeStoreScheduler:
                 new_block_ids = cached_reqs.new_block_ids[i]
                 if not new_block_ids:
                     continue
+                if isinstance(new_block_ids, tuple):
+                    new_block_ids = self._transfer_block_ids(new_block_ids)
 
                 req_meta = None
                 if req_id in cached_reqs.resumed_req_ids:

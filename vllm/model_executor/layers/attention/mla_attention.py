@@ -2210,6 +2210,20 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         assert prefill_metadata.prefill_backend is not None
         assert prefill_metadata.chunked_context is not None
 
+        block_table = prefill_metadata.block_table
+        if kv_c_and_k_pe_cache.device.type == "cpu":
+            stage_host_cache = getattr(self, "_hisparse_host_prefill_cache", None)
+            assert stage_host_cache is not None, (
+                "CPU-resident MLA context requires a host-cache staging backend"
+            )
+            seq_lens = getattr(attn_metadata, "seq_lens", None)
+            assert seq_lens is not None
+            kv_c_and_k_pe_cache, block_table = stage_host_cache(
+                kv_c_and_k_pe_cache,
+                block_table,
+                seq_lens[attn_metadata.num_decodes :],
+            )
+
         use_fp8_prefill = prefill_metadata.q_data_type == current_platform.fp8_dtype()
 
         output = None
@@ -2226,7 +2240,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                 ops.cp_gather_and_upconvert_fp8_kv_cache(
                     src_cache=kv_c_and_k_pe_cache,
                     dst=workspace[:toks],
-                    block_table=prefill_metadata.block_table,
+                    block_table=block_table,
                     workspace_starts=prefill_metadata.chunked_context.cu_seq_lens[i],
                     batch_size=attn_metadata.num_prefills,
                     seq_starts=prefill_metadata.chunked_context.starts[i],
@@ -2235,7 +2249,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                 ops.gather_and_maybe_dequant_cache(
                     src_cache=kv_c_and_k_pe_cache,
                     dst=workspace,
-                    block_table=prefill_metadata.block_table,
+                    block_table=block_table,
                     cu_seq_lens=prefill_metadata.chunked_context.cu_seq_lens[i],
                     token_to_seq=prefill_metadata.chunked_context.token_to_seq[i],
                     num_tokens=prefill_metadata.chunked_context.chunk_total_token[i],
@@ -2248,7 +2262,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                 ops.cp_gather_cache(
                     src_cache=kv_c_and_k_pe_cache,
                     dst=workspace,
-                    block_table=prefill_metadata.block_table,
+                    block_table=block_table,
                     cu_seq_lens=prefill_metadata.chunked_context.cu_seq_lens[i],
                     batch_size=attn_metadata.num_prefills,
                     seq_starts=prefill_metadata.chunked_context.starts[i],

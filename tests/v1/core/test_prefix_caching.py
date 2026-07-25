@@ -42,6 +42,7 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    HiSparseHotSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpecKind,
@@ -129,6 +130,121 @@ def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
             )
         ],
     )
+
+
+def test_independent_block_pool_domains():
+    block_size = 16
+    spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    config = KVCacheConfig(
+        num_blocks=4,
+        num_blocks_by_pool=[4, 3],
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["host"], spec, block_pool_id=0),
+            KVCacheGroupSpec(["device"], spec, block_pool_id=1),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=128,
+        enable_caching=False,
+        hash_block_size=block_size,
+    )
+    reserved = make_request("reserved", list(range(16)), block_size, sha256)
+    assert (
+        manager.allocate_slots(
+            reserved,
+            num_new_tokens=16,
+            reserved_blocks=(2, 0),
+        )
+        is not None
+    )
+    manager.free(reserved)
+
+    request = make_request("r", list(range(48)), block_size, sha256)
+
+    blocks = manager.allocate_slots(request, num_new_tokens=32)
+    assert blocks is not None
+    assert blocks.get_block_ids() == ([1, 2], [1, 2])
+    assert [pool.get_num_free_blocks() for pool in manager.block_pools] == [1, 0]
+
+    request.num_computed_tokens = 32
+    assert manager.allocate_slots(request, num_new_tokens=16) is None
+
+    manager.free(request)
+    assert [pool.get_num_free_blocks() for pool in manager.block_pools] == [3, 2]
+
+
+def test_prefix_cache_source_rebuilds_ephemeral_groups():
+    block_size = 16
+    full = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    config = KVCacheConfig(
+        num_blocks=10,
+        num_blocks_by_pool=[10, 20],
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["source"], full, block_pool_id=0),
+            KVCacheGroupSpec(
+                ["indexer"],
+                full,
+                block_pool_id=1,
+                enable_prefix_caching=False,
+                enable_kv_transfer=False,
+            ),
+            KVCacheGroupSpec(
+                ["hot"],
+                HiSparseHotSpec(
+                    block_size=block_size,
+                    page_size=block_size * 4,
+                    blocks_per_request=2,
+                ),
+                block_pool_id=1,
+                enable_prefix_caching=False,
+                enable_kv_transfer=False,
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=128,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    assert [g.enable_kv_transfer for g in config.kv_cache_groups] == [
+        True,
+        False,
+        False,
+    ]
+    tokens = list(range(32))
+    request = make_request("source", tokens, block_size, sha256)
+    assert manager.allocate_slots(request, num_new_tokens=32) is not None
+    source_block_id = manager.get_block_ids(request.request_id)[0][0]
+    manager.free(request)
+
+    reused = make_request("reused", tokens, block_size, sha256)
+    computed, num_computed, _ = manager.get_computed_blocks(reused)
+    assert num_computed == block_size
+    assert computed.get_block_ids() == ([source_block_id], [], [])
+
+    new_blocks = manager.allocate_slots(
+        reused,
+        num_new_tokens=block_size,
+        num_new_computed_tokens=num_computed,
+        new_computed_blocks=computed,
+    )
+    assert new_blocks is not None
+    assert [len(group) for group in new_blocks.blocks] == [1, 2, 2]
+    assert manager.get_block_ids(reused.request_id)[0][0] == source_block_id
 
 
 def make_kv_cache_config_hybrid_model(

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -33,6 +34,64 @@ from vllm.v1.attention.selector import _cached_get_attn_backend, get_attn_backen
 def clear_cache():
     """Clear lru cache to ensure each test case runs without caching."""
     _cached_get_attn_backend.cache_clear()
+
+
+def _hisparse_selector_config(backend=None):
+    return SimpleNamespace(
+        attention_config=AttentionConfig(
+            backend=backend,
+            hisparse_config={"host_pool_gib": 1.0},
+        ),
+        cache_config=None,
+        kv_transfer_config=None,
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
+    )
+
+
+def test_hisparse_selects_flashmla_sparse():
+    sentinel = object()
+    with (
+        patch(
+            "vllm.config.get_current_vllm_config",
+            return_value=_hisparse_selector_config(),
+        ),
+        patch(
+            "vllm.v1.attention.selector._cached_get_attn_backend",
+            return_value=sentinel,
+        ) as select_backend,
+    ):
+        result = get_attn_backend(
+            576,
+            torch.bfloat16,
+            "fp8_ds_mla",
+            use_mla=True,
+            use_sparse=True,
+        )
+
+    assert result is sentinel
+    assert (
+        select_backend.call_args.kwargs["backend"]
+        == AttentionBackendEnum.FLASHMLA_SPARSE
+    )
+
+
+def test_hisparse_rejects_incompatible_backend():
+    with (
+        patch(
+            "vllm.config.get_current_vllm_config",
+            return_value=_hisparse_selector_config(
+                AttentionBackendEnum.FLASHINFER_MLA_SPARSE
+            ),
+        ),
+        pytest.raises(ValueError, match="requires the FLASHMLA_SPARSE"),
+    ):
+        get_attn_backend(
+            576,
+            torch.bfloat16,
+            "fp8_ds_mla",
+            use_mla=True,
+            use_sparse=True,
+        )
 
 
 # Define MLA and non-MLA backends separately

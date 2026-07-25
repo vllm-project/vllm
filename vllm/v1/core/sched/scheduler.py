@@ -905,7 +905,7 @@ class Scheduler(SchedulerInterface):
                         for i in encoder_inputs_to_schedule
                     )
 
-                reserved_blocks = 0
+                reserved_blocks: int | tuple[int, ...] = 0
                 if load_kv_async:
                     # An async load holds its blocks for the whole transfer with
                     # no forward progress and isn't preemptible here. Admit it
@@ -2260,7 +2260,10 @@ class Scheduler(SchedulerInterface):
         pool while the step that runs the copy may still be in flight.
         """
         if not self.defer_block_free or fence_seq <= self.processed_step_seq:
-            self.kv_cache_manager.block_pool.free_blocks(blocks)
+            if hasattr(self.kv_cache_manager, "free_blocks"):
+                self.kv_cache_manager.free_blocks(blocks)
+            else:
+                self.kv_cache_manager.block_pool.free_blocks(blocks)
             return
         self.deferred_frees.append((fence_seq, blocks[::-1]))
 
@@ -2277,7 +2280,10 @@ class Scheduler(SchedulerInterface):
                 break
             _, blocks = self.deferred_frees.popleft()
             # Free in reverse order so that the tail blocks are evicted first.
-            self.kv_cache_manager.block_pool.free_blocks(reversed(blocks))
+            if hasattr(self.kv_cache_manager, "free_blocks"):
+                self.kv_cache_manager.free_blocks(reversed(blocks))
+            else:
+                self.kv_cache_manager.block_pool.free_blocks(reversed(blocks))
 
     def get_num_unfinished_requests(self) -> int:
         if self._pause_state == PauseState.PAUSED_ALL:
@@ -2514,10 +2520,10 @@ class Scheduler(SchedulerInterface):
 
         return self.connector.request_finished_all_groups(request, block_ids)
 
-    def _request_remaining_blocks(self, request: Request) -> int:
-        """Blocks `request` still needs to allocate to hold its full sequence."""
+    def _request_remaining_blocks(self, request: Request) -> tuple[int, ...]:
+        """Per-pool blocks needed to hold the request's full sequence."""
         full_num_tokens = min(request.num_tokens, self.max_model_len)
-        return self.kv_cache_manager.coordinator.get_num_blocks_to_allocate(
+        return self.kv_cache_manager.coordinator.get_num_blocks_to_allocate_by_pool(
             request_id=request.request_id,
             num_tokens=full_num_tokens,
             new_computed_blocks=self.kv_cache_manager.empty_kv_cache_blocks.blocks,
@@ -2528,12 +2534,13 @@ class Scheduler(SchedulerInterface):
             apply_admission_cap=True,
         )
 
-    def _inflight_prefill_reserved_blocks(self) -> int:
-        """Num blocks in-flight prefills still need to finish (their reservation)."""
-
-        return sum(
-            self._request_remaining_blocks(req) for req in self._inflight_prefills
-        )
+    def _inflight_prefill_reserved_blocks(self) -> tuple[int, ...]:
+        """Per-pool reservations needed by all in-flight prefills."""
+        reserved = [0] * len(self.kv_cache_manager.block_pools)
+        for request in self._inflight_prefills:
+            for pool_id, count in enumerate(self._request_remaining_blocks(request)):
+                reserved[pool_id] += count
+        return tuple(reserved)
 
     def _update_waiting_for_remote_kv(self, request: Request) -> None:
         """

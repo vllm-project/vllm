@@ -20,6 +20,7 @@ from vllm.v1.kv_cache_interface import (
     CrossAttentionSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
+    HiSparseHotSpec,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
@@ -801,6 +802,85 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             else:
                 break
         return num_common_blocks
+
+
+class HiSparseHotManager(SingleTypeKVCacheManager):
+    """Allocate a fixed ephemeral hot region for each active request."""
+
+    def __init__(self, kv_cache_spec: HiSparseHotSpec, **kwargs) -> None:
+        super().__init__(kv_cache_spec, **kwargs)
+        self.blocks_per_request = kv_cache_spec.blocks_per_request
+
+    def get_num_blocks_to_allocate(
+        self,
+        request_id: str,
+        num_tokens: int,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        total_computed_tokens: int,
+        num_local_computed_tokens: int,
+        num_tokens_main_model: int,
+        apply_admission_cap: bool = False,
+    ) -> int:
+        assert not new_computed_blocks
+        return max(
+            self.blocks_per_request - len(self.req_to_blocks.get(request_id, ())),
+            0,
+        )
+
+    def add_local_computed_blocks(
+        self,
+        request_id: str,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        assert not new_computed_blocks
+        self.num_cached_block[request_id] = 0
+
+    def allocate_external_computed_blocks(
+        self,
+        request_id: str,
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        return None
+
+    def allocate_new_blocks(
+        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+    ) -> list[KVCacheBlock]:
+        req_blocks = self.req_to_blocks[request_id]
+        num_new_blocks = self.blocks_per_request - len(req_blocks)
+        if num_new_blocks <= 0:
+            return []
+        new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
+        req_blocks.extend(new_blocks)
+        return new_blocks
+
+    def cache_blocks(
+        self,
+        request: Request,
+        num_tokens: int,
+        retention_interval: int | None = None,
+    ) -> None:
+        return None
+
+    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
+        return 0
+
+    @classmethod
+    def find_longest_cache_hit(
+        cls,
+        block_hashes: BlockHashList,
+        max_length: int,
+        kv_cache_group_ids: list[int],
+        block_pool: BlockPool,
+        kv_cache_spec: KVCacheSpec,
+        drop_eagle_block: bool,
+        alignment_tokens: int,
+        dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+        return tuple([] for _ in kv_cache_group_ids), 0
 
 
 class RSWAManager(FullAttentionManager):
@@ -1824,6 +1904,11 @@ def register_all_kvcache_specs(vllm_config):
         FullAttentionSpec,
         FullAttentionManager,
         uniform_type_base_spec=FullAttentionSpec,
+    )
+    KVCacheSpecRegistry.register(
+        HiSparseHotSpec,
+        HiSparseHotManager,
+        uniform_type_base_spec=HiSparseHotSpec,
     )
 
     KVCacheSpecRegistry.register(

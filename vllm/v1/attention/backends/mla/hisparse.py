@@ -13,9 +13,8 @@ concurrency.
   reserved hot slot and are scattered back to the host pool by a CUDA kernel
   writing straight into pinned memory, so the backup is stream-ordered with
   the decode kernels and needs no host synchronization.
-- Each batch row owns a fixed per-layer hot region of
-  ``region_stride = round_up(device_buffer_size + 1, 128)`` KV rows (padded to
-  128 so the flat buffer can be viewed with any kernel page size up to 128).
+- Each active request owns ``device_buffer_size + 1`` logical hot rows backed
+  by ephemeral blocks from the shared GPU HMA pool.
   Slots ``[0, device_buffer_size)`` are LRU-managed; slot ``device_buffer_size``
   is reserved for the newest token, which the KV-cache update writes there
   directly.
@@ -50,10 +49,6 @@ logger = init_logger(__name__)
 
 # fp8_ds_mla KV row: 512 B quantized NoPE + 16 B scales + 128 B RoPE.
 FP8_DS_MLA_ROW_BYTES = 656
-
-# Hot regions are padded to a multiple of this so the flat hot buffer can be
-# viewed with any kernel page size up to 128.
-HOT_REGION_ALIGN = 128
 
 
 def is_hisparse_decode_batch(
@@ -148,6 +143,7 @@ _PINNED_STAGING_EVENT: torch.Event | None = None
 # for the fail-loud "pool must be pinned" check.
 _REGISTERED_HOST_RANGES: list[tuple[int, int]] = []
 _PINNED_HOST_POOLS: list[torch.Tensor] = []
+_INDEXER_SOURCES: dict[str, tuple[torch.Tensor, torch.Tensor | None]] = {}
 
 
 def check_hisparse_host_memory(vllm_config: VllmConfig, rank_bytes: int) -> None:
@@ -181,6 +177,23 @@ def note_registered_host_range(ptr: int, nbytes: int) -> None:
 def discard_registered_host_range(ptr: int) -> None:
     global _REGISTERED_HOST_RANGES
     _REGISTERED_HOST_RANGES = [(p, n) for p, n in _REGISTERED_HOST_RANGES if p != ptr]
+
+
+def register_indexer_source(layer_name: str, cache: torch.Tensor) -> None:
+    _INDEXER_SOURCES[layer_name] = (cache, None)
+
+
+def bind_indexer_source_slot_mapping(
+    layer_name: str, slot_mapping: torch.Tensor
+) -> None:
+    cache, _ = _INDEXER_SOURCES[layer_name]
+    _INDEXER_SOURCES[layer_name] = (cache, slot_mapping)
+
+
+def get_indexer_source(
+    layer_name: str,
+) -> tuple[torch.Tensor, torch.Tensor | None] | None:
+    return _INDEXER_SOURCES.get(layer_name)
 
 
 def _covers_registered_host_range(ptr: int, nbytes: int) -> bool:
@@ -245,6 +258,7 @@ def release_pinned_state() -> bool:
     _PREFILL_REMAP = None
     with suppress(RuntimeError):
         torch._C._host_emptyCache()
+    _INDEXER_SOURCES.clear()
     return released
 
 
@@ -429,9 +443,9 @@ class HiSparseCoordinator:
         self.row_width = row_width
         self.kv_dtype = kv_dtype
         self.device = torch.device(device)
-        # One reserved slot for the newest token. Sparse MLA kernels consume a
-        # paged layout, and the page size is only known at swap-in time.
-        self.region_stride = round_up(config.device_buffer_size + 1, HOT_REGION_ALIGN)
+        # Logical slots per request. Physical rows come from its ephemeral HMA
+        # block table and need not be contiguous in the shared slab.
+        self.region_stride = config.device_buffer_size + 1
 
         row_bytes = row_width * kv_dtype.itemsize
         if row_bytes % 16 != 0:
@@ -439,12 +453,18 @@ class HiSparseCoordinator:
                 f"HiSparse requires 16-byte aligned KV rows, got {row_bytes}B."
             )
 
-        hot_rows = max_num_reqs * self.region_stride
-        # Allocated eagerly so vLLM's memory profiling accounts for it when
-        # sizing the main KV cache.
-        self.hot_cache = torch.zeros(
-            (hot_rows, row_width), dtype=kv_dtype, device=self.device
+        self.hot_cache: torch.Tensor | None = None
+        self.attention_hot_cache: torch.Tensor | None = None
+        self.hot_block_table: torch.Tensor | None = None
+        self.hot_group_id = -1
+        self.attention_block_stride = 0
+        self._hot_indices = torch.empty(
+            (max_num_reqs, config.top_k), dtype=torch.int32, device=self.device
         )
+        self._attention_indices = torch.empty_like(self._hot_indices)
+        # Per-request LRU state; released in join_group for index-sharing
+        # "shared" layers, which replay their leader's plan and never resolve
+        # the LRU themselves.
         self.device_global_indices: torch.Tensor | None = torch.full(
             (max_num_reqs, config.device_buffer_size),
             -1,
@@ -462,6 +482,10 @@ class HiSparseCoordinator:
             max_num_reqs, dtype=torch.int32, device=self.device
         )
 
+        # In-kernel hit/miss counters (telemetry). stats_row_bytes converts
+        # misses to gathered bytes; plan-once wiring adds each shared
+        # layer's row bytes to its leader (the shared layers re-gather the
+        # leader's misses), so the leader's counter covers the whole group.
         self._swap_stats = torch.zeros(2, dtype=torch.uint64, device=self.device)
         self.stats_row_bytes = row_bytes
         _COORDINATORS.append(self)
@@ -505,7 +529,41 @@ class HiSparseCoordinator:
 
     def hot_cache_paged(self, block_size: int) -> torch.Tensor:
         """Hot buffer shaped like a regular paged MLA cache."""
-        return self.hot_cache.view(-1, block_size, self.row_width)
+        assert self.attention_hot_cache is not None
+        assert self.attention_hot_cache.shape[1] == block_size
+        return self.attention_hot_cache
+
+    def bind_hot_cache(
+        self,
+        raw_tensor: torch.Tensor,
+        *,
+        byte_offset: int,
+        block_stride: int,
+        num_blocks: int,
+        block_size: int,
+        hot_group_id: int,
+    ) -> None:
+        """Bind this layer's strided view into the shared GPU HMA slab."""
+        itemsize = self.kv_dtype.itemsize
+        assert byte_offset % itemsize == 0 and block_stride % itemsize == 0
+        row_bytes = self.row_width * itemsize
+        page_bytes = block_size * row_bytes
+        assert byte_offset % page_bytes == 0 and block_stride % page_bytes == 0
+        self.hot_cache = torch.as_strided(
+            raw_tensor.view(self.kv_dtype),
+            size=(num_blocks, block_size, self.row_width),
+            stride=(block_stride // itemsize, self.row_width, 1),
+            storage_offset=byte_offset // itemsize,
+        )
+        attention_storage = raw_tensor[byte_offset:].view(self.kv_dtype)
+        self.attention_hot_cache = attention_storage.view(
+            -1, block_size, self.row_width
+        )
+        self.attention_block_stride = block_stride // row_bytes
+        self.hot_group_id = hot_group_id
+
+    def bind_hot_block_table(self, block_table: torch.Tensor) -> None:
+        self.hot_block_table = block_table
 
     def bind_source_cache(self, kv_cache: torch.Tensor) -> None:
         flat = kv_cache.view(-1, kv_cache.shape[-1])
@@ -662,6 +720,7 @@ class HiSparseCoordinator:
         if kv_cache.numel() == 0:
             return
         self.bind_source_cache(kv_cache)
+        assert self.hot_cache is not None and self.hot_block_table is not None
         # Pad clamp: the forward can run more rows than the scheduler
         # produced (DP alignment pads to a peer's batch, eager/PIECEWISE pads
         # to a capture size) while slot_mapping stays unpadded. Real rows are
@@ -670,12 +729,16 @@ class HiSparseCoordinator:
         # (and with it the whole DP fleet).
         num_tokens = min(kv_c_normed.shape[0], slot_mapping.numel(), self.max_num_reqs)
         state_rows = self.request_state_indices[:num_tokens]
-        newest_slots = torch.where(
-            state_rows >= 0,
-            state_rows.to(torch.int64) * self.region_stride
-            + self.config.device_buffer_size,
-            -1,
+        newest_logical = self.config.device_buffer_size
+        hot_block_size = self.hot_cache.shape[1]
+        physical_slots = (
+            self.hot_block_table[:num_tokens, newest_logical // hot_block_size].to(
+                torch.int64
+            )
+            * hot_block_size
+            + newest_logical % hot_block_size
         )
+        newest_slots = torch.where(state_rows >= 0, physical_slots, -1)
         global_slots = slot_mapping[:num_tokens].to(torch.int64)
 
         # -1-padded slots (CUDA-graph padding) are skipped by the backup
@@ -683,7 +746,7 @@ class HiSparseCoordinator:
         ops.concat_and_cache_mla(
             kv_c_normed[:num_tokens],
             k_pe[:num_tokens].squeeze(1),
-            self.hot_cache.view(-1, 1, self.row_width),
+            self.hot_cache,
             newest_slots,
             kv_cache_dtype=kv_cache_dtype,
             scale=k_scale,
@@ -779,12 +842,8 @@ class HiSparseCoordinator:
         """
         num_tokens = topk_indices.shape[0]
         top_k = topk_indices.shape[1]
-        if self.region_stride % block_size != 0:
-            raise ValueError(
-                f"HiSparse region_stride {self.region_stride} is not "
-                f"divisible by the kernel block_size {block_size}."
-            )
         self.bind_source_cache(kv_cache)
+        assert self.hot_cache is not None and self.hot_block_table is not None
 
         converted = triton_convert_req_index_to_global_index(
             req_id_per_token[:num_tokens],
@@ -822,14 +881,17 @@ class HiSparseCoordinator:
             miss_mask = self._plan.miss_mask[:num_tokens]
             hot_indices.fill_(-1)
         else:
-            hot_indices = torch.full_like(global_indices, -1)
+            hot_indices = self._hot_indices[:num_tokens]
             miss_mask = None
+
+        attention_indices = self._attention_indices[:num_tokens]
 
         # Padded rows are skipped by the kernel (request_state_indices) and must
         # come out as -1 so the attention kernel masks them.
         torch.ops._C_cache_ops.hisparse_swap_in(
             self._host_cache,
             self.hot_cache,
+            self.hot_block_table,
             global_indices,
             newest_global,
             hot_indices,
@@ -839,6 +901,8 @@ class HiSparseCoordinator:
             self.region_stride,
             miss_mask,
             self._swap_stats,
+            attention_indices,
+            self.attention_block_stride,
         )
 
         if produce_plan:
@@ -851,8 +915,8 @@ class HiSparseCoordinator:
                         shared._prefetch_event = None
 
         if valid_counts is None:
-            return self.hot_cache_paged(block_size), hot_indices
-        return self.hot_cache_paged(block_size), hot_indices, valid_counts
+            return self.hot_cache_paged(block_size), attention_indices
+        return self.hot_cache_paged(block_size), attention_indices, valid_counts
 
     def _gather_plan_into(self, num_tokens: int) -> None:
         torch.ops._C_cache_ops.hisparse_gather_plan(
@@ -862,6 +926,8 @@ class HiSparseCoordinator:
             self._plan.hot_indices[:num_tokens],
             self._plan.miss_mask[:num_tokens],
             self.request_state_indices,
+            self._attention_indices[:num_tokens],
+            self.attention_block_stride,
         )
 
     def _prefetch_group(self, num_tokens: int) -> None:
@@ -888,7 +954,14 @@ class HiSparseCoordinator:
         tuple[torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
     ):
-        hot_indices = self._plan.hot_indices[:num_tokens]
+        """Replay the group's plan for an index-sharing "shared" layer.
+
+        A "full" layer resolved the plan via ``swap_in(produce_plan=True)``;
+        this gathers only THIS layer's own missed rows into the identical
+        planned hot slots, with no LRU resolution. Fixed shape -> capture-safe.
+        """
+        n = num_tokens
+        attention_indices = self._attention_indices[:n]
         if self._prefetch_event is not None:
             torch.accelerator.current_stream(self.device).wait_event(
                 self._prefetch_event
@@ -901,10 +974,10 @@ class HiSparseCoordinator:
             assert self._plan.valid_counts is not None
             return (
                 self.hot_cache_paged(block_size),
-                hot_indices,
-                self._plan.valid_counts[:num_tokens],
+                attention_indices,
+                self._plan.valid_counts[:n],
             )
-        return self.hot_cache_paged(block_size), hot_indices
+        return self.hot_cache_paged(block_size), attention_indices
 
 
 def create_hisparse_coordinator(
@@ -932,16 +1005,12 @@ def create_hisparse_coordinator(
         kv_dtype=kv_dtype,
         device=device,
     )
-    hot_bytes = coordinator.hot_cache.numel() * kv_dtype.itemsize
     logger.info_once(
-        "Enabled experimental HiSparse sparse MLA hot buffer: top_k=%d, "
-        "device_buffer_size=%d (region_stride=%d), host_pool_gib=%s, "
-        "%.1f MiB GPU hot buffer per layer (max_num_seqs=%d).",
+        "Enabled experimental HiSparse HMA hot cache: top_k=%d, "
+        "device_buffer_size=%d, host_pool_gib=%s, max_num_seqs=%d.",
         config.top_k,
         config.device_buffer_size,
-        coordinator.region_stride,
         config.host_pool_gib,
-        hot_bytes / 2**20,
         max_num_reqs,
     )
     return coordinator

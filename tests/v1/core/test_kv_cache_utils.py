@@ -65,7 +65,7 @@ from vllm.v1.request import Request
 pytestmark = pytest.mark.cpu_test
 
 
-def test_hisparse_memory_usage_splits_host_mla_from_gpu_indexer():
+def test_hisparse_memory_usage_keeps_indexer_source_on_host():
     class FixedMemorySpec:
         def __init__(self, size: int):
             self.size = size
@@ -86,7 +86,7 @@ def test_hisparse_memory_usage_splits_host_mla_from_gpu_indexer():
     )
     config = SimpleNamespace(attention_config=SimpleNamespace(hisparse_config=object()))
 
-    assert kv_cache_utils._hisparse_gpu_host_usage_split(config, [group]) == (50, 300)
+    assert kv_cache_utils._hisparse_gpu_host_usage_split(config, [group]) == (50, 350)
 
 
 @pytest.fixture(autouse=True)

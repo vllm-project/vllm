@@ -12,6 +12,7 @@ from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.v1.attention.backends.registry import (
+    AttentionBackendEnum,
     MambaAttentionBackendEnum,
 )
 
@@ -166,6 +167,16 @@ def get_attn_backend(
             attn_type=attn_type,
         )
         backend = attention_config.backend_per_kind.get(kind.value, backend)
+
+    if attention_config.hisparse_config is not None and use_mla and use_sparse:
+        hisparse_backend = AttentionBackendEnum.FLASHMLA_SPARSE
+        if backend is None:
+            backend = hisparse_backend
+        elif backend != hisparse_backend:
+            raise ValueError(
+                "HiSparse requires the FLASHMLA_SPARSE attention backend, "
+                f"but {backend.name} was selected."
+            )
 
     return _cached_get_attn_backend(
         backend=backend,

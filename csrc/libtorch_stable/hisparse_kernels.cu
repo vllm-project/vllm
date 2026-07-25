@@ -36,25 +36,35 @@ __device__ __forceinline__ int32_t hash_slot(int32_t key, int32_t hash_size) {
                               static_cast<uint32_t>(hash_size));
 }
 
-// Copy one row of `row_bytes` bytes with a single warp (16B vectorized;
-// callers guarantee 16B-aligned rows). Paired 64-bit loads with the .nc
-// (non-coherent, read-only path) hint and .cg (L2-only) stores keep the
-// one-shot KV rows out of L1.
+// Copy one row of `row_bytes` bytes with a single warp. MLA rows take the
+// 16-byte vectorized path; packed indexer rows use the scalar tail-safe path.
 __device__ __forceinline__ void copy_row_warp(int lane_id, const char* src,
                                               char* dst, int64_t row_bytes) {
-  const int64_t num_vec = row_bytes / 16;
-  const uint64_t* src8 = reinterpret_cast<const uint64_t*>(src);
-  uint64_t* dst8 = reinterpret_cast<uint64_t*>(dst);
-  for (int64_t j = lane_id; j < num_vec; j += kWarpSize) {
-    uint64_t lo, hi;
-    const uint64_t* s = src8 + j * 2;
-    asm volatile("ld.global.nc.v2.b64 {%0,%1},[%2];"
-                 : "=l"(lo), "=l"(hi)
-                 : "l"(s)
-                 : "memory");
-    uint64_t* d = dst8 + j * 2;
-    asm volatile("st.global.cg.v2.b64 [%0],{%1,%2};" ::"l"(d), "l"(lo), "l"(hi)
-                 : "memory");
+  const auto alignment = reinterpret_cast<uintptr_t>(src) |
+                         reinterpret_cast<uintptr_t>(dst) |
+                         static_cast<uintptr_t>(row_bytes);
+  if ((alignment & 15) == 0) {
+    const int64_t num_vec = row_bytes / 16;
+    const uint4* src4 = reinterpret_cast<const uint4*>(src);
+    uint4* dst4 = reinterpret_cast<uint4*>(dst);
+    for (int64_t j = lane_id; j < num_vec; j += kWarpSize) {
+      __stcg(dst4 + j, __ldcg(src4 + j));
+    }
+    return;
+  }
+
+  if ((alignment & 3) == 0) {
+    const int64_t num_words = row_bytes / 4;
+    const unsigned int* src_words = reinterpret_cast<const unsigned int*>(src);
+    unsigned int* dst_words = reinterpret_cast<unsigned int*>(dst);
+    for (int64_t j = lane_id; j < num_words; j += kWarpSize) {
+      __stcg(dst_words + j, __ldcg(src_words + j));
+    }
+    return;
+  }
+
+  for (int64_t j = lane_id; j < row_bytes; j += kWarpSize) {
+    __stcg(dst + j, __ldcg(src + j));
   }
 }
 
@@ -91,6 +101,29 @@ __device__ __forceinline__ int warp_inclusive_scan(int32_t* s_data, int lane_id,
   return __shfl_sync(0xffffffff, val, 31);
 }
 
+__device__ __forceinline__ int64_t
+get_physical_hot_row(const int32_t* hot_block_table, int32_t row,
+                     int64_t table_stride, int32_t block_size, int32_t slot) {
+  const int32_t block =
+      hot_block_table[static_cast<int64_t>(row) * table_stride +
+                      slot / block_size];
+  return static_cast<int64_t>(block) * block_size + slot % block_size;
+}
+
+__device__ __forceinline__ void store_hot_index(
+    int32_t* hot_indices, int32_t* attention_indices, int32_t index,
+    int32_t physical_row, int32_t hot_block_size,
+    int64_t attention_block_stride) {
+  hot_indices[index] = physical_row;
+  if (attention_indices != nullptr) {
+    attention_indices[index] =
+        physical_row < 0
+            ? -1
+            : (physical_row / hot_block_size) * attention_block_stride +
+                  physical_row % hot_block_size;
+  }
+}
+
 // One block per batch row.
 //
 // Shared memory layout (int32 region followed by int16 region):
@@ -103,19 +136,23 @@ __device__ __forceinline__ int warp_inclusive_scan(int32_t* s_data, int lane_id,
 //   s_hash_vals[hash_size]   int16 hash values (top-k index)
 // Valid global ids must be unique within each row.
 __global__ void hisparse_swap_in_kernel(
-    const char* __restrict__ host_cache,         // [host_rows, row_bytes]
-    char* __restrict__ hot_cache,                // [n_rows*stride, row_bytes]
-    const int32_t* __restrict__ global_indices,  // [num_rows, top_k]
-    const int32_t* __restrict__ newest_global,   // [num_rows] or nullptr
-    int32_t* __restrict__ hot_indices,           // [num_rows, top_k]
-    int32_t* __restrict__ miss_mask,             // [num_rows, top_k] or nullptr
-    int32_t* __restrict__ device_global_indices,        // [max_rows, hot_size]
-    int16_t* __restrict__ lru_slots,                    // [max_rows, hot_size]
-    unsigned long long* __restrict__ stats,             // [2] hits, misses
+    const char* __restrict__ host_cache,          // [host_rows, row_bytes]
+    char* __restrict__ hot_cache,                 // packed HMA pages
+    const int32_t* __restrict__ hot_block_table,  // [max_rows, hot_blocks]
+    const int32_t* __restrict__ global_indices,   // [num_rows, top_k]
+    const int32_t* __restrict__ newest_global,    // [num_rows] or nullptr
+    int32_t* __restrict__ hot_indices,            // [num_rows, top_k]
+    int32_t* __restrict__ attention_indices,      // [num_rows, top_k]
+    int32_t* __restrict__ miss_mask,  // [num_rows, top_k] or nullptr
+    int32_t* __restrict__ device_global_indices,  // [max_rows, hot_size]
+    int16_t* __restrict__ lru_slots,              // [max_rows, hot_size]
+    unsigned long long* __restrict__ stats,       // [2] hits,misses or nullptr
     const int32_t* __restrict__ request_state_indices,  // [num_rows] or nullptr
-    const int64_t host_rows, const int64_t row_bytes, const int32_t top_k,
-    const int32_t hot_size, const int32_t hash_size,
-    const int64_t region_stride) {
+    const int64_t host_rows, const int64_t row_bytes,
+    const int64_t hot_block_stride, const int64_t hot_table_stride,
+    const int32_t hot_block_size, const int32_t top_k, const int32_t hot_size,
+    const int32_t hash_size, const int64_t region_stride,
+    const int64_t attention_block_stride) {
   const int NUM_WARPS = blockDim.x / kWarpSize;
   const int num_buffer_chunks = (hot_size + kWarpSize - 1) / kWarpSize;
   const int num_token_chunks = (top_k + kWarpSize - 1) / kWarpSize;
@@ -126,6 +163,11 @@ __global__ void hisparse_swap_in_kernel(
                             : batch_row;
   // V2 publishes -1 for CUDA-graph padding rows.
   if (state_row < 0) {
+    for (int i = threadIdx.x; i < top_k; i += blockDim.x) {
+      const int64_t index = static_cast<int64_t>(batch_row) * top_k + i;
+      hot_indices[index] = -1;
+      if (attention_indices != nullptr) attention_indices[index] = -1;
+    }
     return;
   }
   const int tid = threadIdx.x;
@@ -133,13 +175,16 @@ __global__ void hisparse_swap_in_kernel(
   const int lane_id = tid % kWarpSize;
   const unsigned int lanes_before = ((unsigned int)1 << lane_id) - 1;
 
-  const int64_t hot_base = static_cast<int64_t>(state_row) * region_stride;
   const int32_t newest_id =
       (newest_global != nullptr) ? newest_global[batch_row] : -1;
 
   const int32_t* row_topk =
       global_indices + static_cast<int64_t>(batch_row) * top_k;
   int32_t* row_out = hot_indices + static_cast<int64_t>(batch_row) * top_k;
+  int32_t* row_attention =
+      attention_indices != nullptr
+          ? attention_indices + static_cast<int64_t>(batch_row) * top_k
+          : nullptr;
   int32_t* row_miss = (miss_mask != nullptr)
                           ? miss_mask + static_cast<int64_t>(batch_row) * top_k
                           : nullptr;
@@ -173,12 +218,17 @@ __global__ void hisparse_swap_in_kernel(
     const int32_t g = row_topk[i];
     if (row_miss != nullptr) row_miss[i] = 0;
     if (g < 0) {
-      row_out[i] = -1;
+      store_hot_index(row_out, row_attention, i, -1, hot_block_size,
+                      attention_block_stride);
       s_topk[i] = kTokenDone;
       atomicAdd(&s_counters[1], 1);
     } else if (g == newest_id) {
       // Newest token lives in the reserved slot past the LRU range.
-      row_out[i] = static_cast<int32_t>(hot_base) + hot_size;
+      store_hot_index(row_out, row_attention, i,
+                      static_cast<int32_t>(get_physical_hot_row(
+                          hot_block_table, batch_row, hot_table_stride,
+                          hot_block_size, hot_size)),
+                      hot_block_size, attention_block_stride);
       s_topk[i] = kTokenDone;
       atomicAdd(&s_counters[1], 1);
     } else {
@@ -233,7 +283,11 @@ __global__ void hisparse_swap_in_kernel(
 
     if (is_hit) {
       s_topk[found_topk_idx] = kTokenDone;
-      row_out[found_topk_idx] = static_cast<int32_t>(hot_base) + slot;
+      store_hot_index(row_out, row_attention, found_topk_idx,
+                      static_cast<int32_t>(get_physical_hot_row(
+                          hot_block_table, batch_row, hot_table_stride,
+                          hot_block_size, slot)),
+                      hot_block_size, attention_block_stride);
     }
 
     int local_hit_off = 0;
@@ -327,12 +381,17 @@ __global__ void hisparse_swap_in_kernel(
         // entry as invalid (-1, masked by attention, not in the miss set);
         // it re-misses on a later step. Phase 5 re-checks the same
         // s_lru_out value, so its copy is skipped consistently.
-        row_out[i] = -1;
+        store_hot_index(row_out, row_attention, i, -1, hot_block_size,
+                        attention_block_stride);
       } else {
         // Reuse s_topk as compacted miss scratch: m < i always holds (done
         // entries are skipped), so writes never overrun pending reads.
         s_topk[m] = g;
-        row_out[i] = static_cast<int32_t>(hot_base) + evict_slot;
+        store_hot_index(row_out, row_attention, i,
+                        static_cast<int32_t>(get_physical_hot_row(
+                            hot_block_table, batch_row, hot_table_stride,
+                            hot_block_size, evict_slot)),
+                        hot_block_size, attention_block_stride);
         if (row_miss != nullptr) row_miss[i] = 1;
         row_dgi[evict_slot] = g;
       }
@@ -343,7 +402,8 @@ __global__ void hisparse_swap_in_kernel(
   const int total_hits = s_counters[0];
   const int total_misses = top_k - total_hits - s_counters[1];
 
-  if (threadIdx.x == 0) {
+  // Aggregate hit/miss counters (hit rate + PCIe gather volume telemetry).
+  if (stats != nullptr && threadIdx.x == 0) {
     atomicAdd(&stats[0], static_cast<unsigned long long>(total_hits));
     atomicAdd(&stats[1], static_cast<unsigned long long>(total_misses));
   }
@@ -370,7 +430,11 @@ __global__ void hisparse_swap_in_kernel(
       // s_topk[m] is stale; skip the copy instead of writing out of range.
       continue;
     }
-    char* dst = hot_cache + (hot_base + evict_slot) * row_bytes;
+    const int64_t physical_row =
+        get_physical_hot_row(hot_block_table, batch_row, hot_table_stride,
+                             hot_block_size, evict_slot);
+    char* dst = hot_cache + (physical_row / hot_block_size) * hot_block_stride +
+                (physical_row % hot_block_size) * row_bytes;
 
     if (g >= 0 && g < host_rows) {
       copy_row_warp(lane_id, host_cache + static_cast<int64_t>(g) * row_bytes,
@@ -401,33 +465,48 @@ __global__ void hisparse_gather_plan_kernel(
     const int32_t* __restrict__ global_indices,  // [num_rows, top_k]
     const int32_t* __restrict__ hot_indices,  // [num_rows, top_k] abs hot rows
     const int32_t* __restrict__ miss_mask,    // [num_rows, top_k]
+    int32_t* __restrict__ attention_indices,  // [num_rows, top_k]
     const int32_t* __restrict__ request_state_indices,  // [num_rows] or nullptr
     const int64_t host_rows, const int64_t hot_rows, const int64_t row_bytes,
-    const int32_t top_k) {
+    const int64_t hot_block_stride, const int32_t hot_block_size,
+    const int32_t top_k, const int64_t attention_block_stride) {
   const int NUM_WARPS = blockDim.x / kWarpSize;
   // Columns are interleaved across gridDim.y blocks per row so few-row
   // launches (local-prefill staging's single-row layout, small decode
   // batches) still fill the device with outstanding host reads instead of
   // starving on one block per row.
   const int row = blockIdx.x;
-  if (request_state_indices != nullptr && request_state_indices[row] < 0) {
-    return;
-  }
+  const bool is_padding =
+      request_state_indices != nullptr && request_state_indices[row] < 0;
   const int warp_id = threadIdx.x / kWarpSize;
   const int lane_id = threadIdx.x % kWarpSize;
   const int col_start = blockIdx.y * NUM_WARPS + warp_id;
   const int col_stride = gridDim.y * NUM_WARPS;
   const int64_t base = static_cast<int64_t>(row) * top_k;
   for (int col = col_start; col < top_k; col += col_stride) {
+    const int32_t dst = hot_indices[base + col];
+    if (lane_id == 0 && attention_indices != nullptr) {
+      attention_indices[base + col] =
+          is_padding
+              ? -1
+              : (dst < 0 ? -1
+                         : (dst / hot_block_size) * attention_block_stride +
+                               dst % hot_block_size);
+    }
+    if (is_padding) {
+      continue;
+    }
     if (miss_mask[base + col] == 0) {
       continue;
     }
     const int32_t g = global_indices[base + col];
-    const int32_t dst = hot_indices[base + col];
     if (g < 0 || dst < 0 || dst >= hot_rows) {
       continue;
     }
-    char* dst_row = hot_cache + static_cast<int64_t>(dst) * row_bytes;
+    char* dst_row =
+        hot_cache +
+        static_cast<int64_t>(dst / hot_block_size) * hot_block_stride +
+        static_cast<int64_t>(dst % hot_block_size) * row_bytes;
     if (g < host_rows) {
       copy_row_warp(lane_id, host_cache + static_cast<int64_t>(g) * row_bytes,
                     dst_row, row_bytes);
@@ -445,8 +524,9 @@ __global__ void hisparse_gather_plan_kernel(
 __global__ void hisparse_backup_kernel(
     const char* __restrict__ src_cache, const int64_t* __restrict__ src_indices,
     char* __restrict__ host_cache, const int64_t* __restrict__ dst_slots,
-    const int64_t row_bytes, const int32_t num_items, const int64_t src_rows,
-    const int64_t host_rows) {
+    const int64_t row_bytes, const int64_t src_block_stride,
+    const int32_t src_block_size, const int32_t num_items,
+    const int64_t src_rows, const int64_t host_rows) {
   const int NUM_WARPS = blockDim.x / kWarpSize;
   const int lane_id = threadIdx.x % kWarpSize;
   const int warp_id = blockIdx.x * NUM_WARPS + threadIdx.x / kWarpSize;
@@ -458,8 +538,80 @@ __global__ void hisparse_backup_kernel(
     if (s < 0 || s >= src_rows || d < 0 || d >= host_rows) {
       continue;
     }
-    copy_row_warp(lane_id, src_cache + s * row_bytes,
-                  host_cache + d * row_bytes, row_bytes);
+    const char* src = src_cache + (s / src_block_size) * src_block_stride +
+                      (s % src_block_size) * row_bytes;
+    copy_row_warp(lane_id, src, host_cache + d * row_bytes, row_bytes);
+  }
+}
+
+// Indexer pages store all quantized values first, followed by all per-token
+// scales. The apparent [block_size, value_bytes + scale_bytes] tensor shape is
+// only an allocation view; a logical token row is split across those regions.
+__global__ void hisparse_backup_indexer_kernel(
+    const char* __restrict__ src_cache, const int64_t* __restrict__ src_indices,
+    char* __restrict__ host_cache, const int64_t* __restrict__ dst_slots,
+    const int64_t value_bytes, const int64_t scale_bytes,
+    const int64_t src_block_stride, const int64_t dst_block_stride,
+    const int32_t block_size, const int32_t num_items, const int64_t src_blocks,
+    const int64_t dst_blocks) {
+  const int NUM_WARPS = blockDim.x / kWarpSize;
+  const int lane_id = threadIdx.x % kWarpSize;
+  const int warp_id = blockIdx.x * NUM_WARPS + threadIdx.x / kWarpSize;
+  const int total_warps = gridDim.x * NUM_WARPS;
+
+  for (int item = warp_id; item < num_items; item += total_warps) {
+    const int64_t s = src_indices[item];
+    const int64_t d = dst_slots[item];
+    if (s < 0 || s >= src_blocks * block_size || d < 0 ||
+        d >= dst_blocks * block_size) {
+      continue;
+    }
+    const int64_t src_block = s / block_size;
+    const int64_t src_offset = s % block_size;
+    const int64_t dst_block = d / block_size;
+    const int64_t dst_offset = d % block_size;
+    const char* src_page = src_cache + src_block * src_block_stride;
+    char* dst_page = host_cache + dst_block * dst_block_stride;
+    copy_row_warp(lane_id, src_page + src_offset * value_bytes,
+                  dst_page + dst_offset * value_bytes, value_bytes);
+    copy_row_warp(
+        lane_id, src_page + block_size * value_bytes + src_offset * scale_bytes,
+        dst_page + block_size * value_bytes + dst_offset * scale_bytes,
+        scale_bytes);
+  }
+}
+
+// Copy complete cache blocks from the pinned CPU prefix source into newly
+// allocated GPU HMA blocks. One warp copies one row.
+__global__ void hisparse_copy_blocks_kernel(
+    const char* __restrict__ src_cache, char* __restrict__ dst_cache,
+    const int32_t* __restrict__ src_block_ids,
+    const int32_t* __restrict__ dst_block_ids, const int64_t row_bytes,
+    const int64_t src_block_stride, const int64_t dst_block_stride,
+    const int32_t block_size, const int32_t num_pairs,
+    const int64_t num_src_blocks, const int64_t num_dst_blocks) {
+  const int NUM_WARPS = blockDim.x / kWarpSize;
+  const int lane_id = threadIdx.x % kWarpSize;
+  const int warp_id = blockIdx.x * NUM_WARPS + threadIdx.x / kWarpSize;
+  const int total_warps = gridDim.x * NUM_WARPS;
+  const int num_rows = num_pairs * block_size;
+
+  for (int row = warp_id; row < num_rows; row += total_warps) {
+    const int pair = row / block_size;
+    const int block_offset = row % block_size;
+    const int32_t src_block = src_block_ids[pair];
+    const int32_t dst_block = dst_block_ids[pair];
+    if (src_block < 0 || src_block >= num_src_blocks || dst_block < 0 ||
+        dst_block >= num_dst_blocks) {
+      continue;
+    }
+    copy_row_warp(
+        lane_id,
+        src_cache + static_cast<int64_t>(src_block) * src_block_stride +
+            static_cast<int64_t>(block_offset) * row_bytes,
+        dst_cache + static_cast<int64_t>(dst_block) * dst_block_stride +
+            static_cast<int64_t>(block_offset) * row_bytes,
+        row_bytes);
   }
 }
 
@@ -476,6 +628,7 @@ int64_t check_2d_rows(const torch::stable::Tensor& t, const char* name,
 
 void hisparse_swap_in(
     torch::stable::Tensor const& host_cache, torch::stable::Tensor& hot_cache,
+    torch::stable::Tensor const& hot_block_table,
     torch::stable::Tensor const& global_indices,
     std::optional<torch::stable::Tensor> const& newest_global_indices,
     torch::stable::Tensor& hot_indices,
@@ -484,10 +637,17 @@ void hisparse_swap_in(
     std::optional<torch::stable::Tensor> const& request_state_indices,
     int64_t region_stride,
     std::optional<torch::stable::Tensor> const& miss_mask,
-    torch::stable::Tensor& stats) {
+    std::optional<torch::stable::Tensor> const& stats,
+    std::optional<torch::stable::Tensor> const& attention_indices,
+    int64_t attention_block_stride) {
   STD_TORCH_CHECK(host_cache.device().is_cpu(),
                   "host_cache must be CPU memory");
   STD_TORCH_CHECK(hot_cache.is_cuda(), "hot_cache must be on CUDA");
+  STD_TORCH_CHECK(
+      hot_block_table.is_cuda() &&
+          hot_block_table.scalar_type() == torch::headeronly::ScalarType::Int &&
+          hot_block_table.dim() == 2,
+      "hot_block_table must be a 2D int32 CUDA tensor");
   STD_TORCH_CHECK(global_indices.is_cuda() && hot_indices.is_cuda() &&
                       device_global_indices.is_cuda() && lru_slots.is_cuda(),
                   "index tensors must be on CUDA");
@@ -515,11 +675,16 @@ void hisparse_swap_in(
                       lru_slots.is_contiguous(),
                   "lru_slots must match device_global_indices");
 
+  STD_TORCH_CHECK(hot_cache.dim() == 3,
+                  "hot_cache must be [num_blocks, block_size, row_width]");
   const int64_t row_bytes = hot_cache.size(-1) * hot_cache.element_size();
   STD_TORCH_CHECK(row_bytes % 16 == 0, "KV row must be 16-byte aligned");
-  auto hot_cache_2d =
-      torch::stable::reshape(hot_cache, {-1, hot_cache.size(-1)});
-  const int64_t hot_rows = hot_cache_2d.size(0);
+  STD_TORCH_CHECK(hot_cache.stride(1) * hot_cache.element_size() == row_bytes,
+                  "hot-cache rows must be contiguous");
+  const int64_t hot_block_size = hot_cache.size(1);
+  const int64_t hot_rows = hot_cache.size(0) * hot_block_size;
+  const int64_t hot_block_stride =
+      hot_cache.stride(0) * hot_cache.element_size();
   const int64_t host_rows = check_2d_rows(host_cache, "host_cache", row_bytes);
 
   const auto num_rows = static_cast<int32_t>(global_indices.size(0));
@@ -531,8 +696,10 @@ void hisparse_swap_in(
                   "region_stride must reserve a newest slot past hot_size");
   STD_TORCH_CHECK(device_global_indices.size(0) >= num_rows,
                   "device_global_indices has too few rows");
-  STD_TORCH_CHECK(static_cast<int64_t>(num_rows) * region_stride <= hot_rows,
-                  "hot_cache has too few rows");
+  STD_TORCH_CHECK(hot_block_table.size(0) >= num_rows &&
+                      hot_block_table.size(1) >=
+                          (region_stride + hot_block_size - 1) / hot_block_size,
+                  "hot_block_table has too few entries");
   STD_TORCH_CHECK(hot_rows < INT32_MAX, "hot indices must fit int32");
 
   const int32_t* newest_ptr = nullptr;
@@ -574,11 +741,32 @@ void hisparse_swap_in(
     miss_mask_ptr = mm.mutable_data_ptr<int32_t>();
   }
 
-  STD_TORCH_CHECK(
-      stats.is_cuda() &&
-          stats.scalar_type() == torch::headeronly::ScalarType::UInt64 &&
-          stats.numel() >= 2,
-      "stats must be a uint64 CUDA tensor with >= 2 elements");
+  unsigned long long* stats_ptr = nullptr;
+  if (stats.has_value()) {
+    auto const& st = stats.value();
+    STD_TORCH_CHECK(
+        st.is_cuda() &&
+            st.scalar_type() == torch::headeronly::ScalarType::UInt64 &&
+            st.numel() >= 2,
+        "stats must be a uint64 CUDA tensor with >= 2 elements");
+    stats_ptr = static_cast<unsigned long long*>(st.mutable_data_ptr());
+  }
+
+  int32_t* attention_indices_ptr = nullptr;
+  if (attention_indices.has_value()) {
+    auto const& indices = attention_indices.value();
+    STD_TORCH_CHECK(
+        indices.is_cuda() &&
+            indices.scalar_type() == torch::headeronly::ScalarType::Int &&
+            indices.dim() == 2 && indices.is_contiguous() &&
+            indices.size(0) == global_indices.size(0) &&
+            indices.size(1) == global_indices.size(1),
+        "attention_indices must be a contiguous int32 CUDA tensor matching "
+        "global_indices");
+    STD_TORCH_CHECK(attention_block_stride >= hot_block_size,
+                    "attention block stride must cover one hot block");
+    attention_indices_ptr = indices.mutable_data_ptr<int32_t>();
+  }
 
   if (num_rows == 0 || top_k == 0) {
     return;
@@ -601,14 +789,15 @@ void hisparse_swap_in(
   }
   kernel<<<num_rows, kBlockSize, smem_bytes, stream>>>(
       static_cast<const char*>(host_cache.const_data_ptr()),
-      static_cast<char*>(hot_cache_2d.mutable_data_ptr()),
+      static_cast<char*>(hot_cache.mutable_data_ptr()),
+      hot_block_table.const_data_ptr<int32_t>(),
       global_indices.const_data_ptr<int32_t>(), newest_ptr,
-      hot_indices.mutable_data_ptr<int32_t>(), miss_mask_ptr,
-      device_global_indices.mutable_data_ptr<int32_t>(),
-      lru_slots.mutable_data_ptr<int16_t>(),
-      static_cast<unsigned long long*>(stats.mutable_data_ptr()),
-      request_state_ptr, host_rows, row_bytes, top_k, hot_size, hash_size,
-      region_stride);
+      hot_indices.mutable_data_ptr<int32_t>(), attention_indices_ptr,
+      miss_mask_ptr, device_global_indices.mutable_data_ptr<int32_t>(),
+      lru_slots.mutable_data_ptr<int16_t>(), stats_ptr, request_state_ptr,
+      host_rows, row_bytes, hot_block_stride, hot_block_table.stride(0),
+      hot_block_size, top_k, hot_size, hash_size, region_stride,
+      attention_block_stride);
 }
 
 void hisparse_gather_plan(
@@ -616,7 +805,9 @@ void hisparse_gather_plan(
     torch::stable::Tensor const& global_indices,
     torch::stable::Tensor const& hot_indices,
     torch::stable::Tensor const& miss_mask,
-    std::optional<torch::stable::Tensor> const& request_state_indices) {
+    std::optional<torch::stable::Tensor> const& request_state_indices,
+    std::optional<torch::stable::Tensor> const& attention_indices,
+    int64_t attention_block_stride) {
   STD_TORCH_CHECK(host_cache.device().is_cpu(),
                   "host_cache must be CPU memory");
   STD_TORCH_CHECK(hot_cache.is_cuda(), "hot_cache must be on CUDA");
@@ -638,10 +829,14 @@ void hisparse_gather_plan(
           hot_indices.is_contiguous() && miss_mask.is_contiguous(),
       "hot_indices/miss_mask must match contiguous 2D global_indices");
 
+  STD_TORCH_CHECK(hot_cache.dim() == 2 || hot_cache.dim() == 3,
+                  "hot_cache must be a 2D staging buffer or paged 3D cache");
   const int64_t row_bytes = hot_cache.size(-1) * hot_cache.element_size();
   STD_TORCH_CHECK(row_bytes % 16 == 0, "KV row must be 16-byte aligned");
-  auto hot_cache_2d =
-      torch::stable::reshape(hot_cache, {-1, hot_cache.size(-1)});
+  STD_TORCH_CHECK(
+      hot_cache.stride(hot_cache.dim() - 2) * hot_cache.element_size() ==
+          row_bytes,
+      "hot-cache rows must be contiguous");
   const int64_t host_rows = check_2d_rows(host_cache, "host_cache", row_bytes);
 
   const auto num_rows = static_cast<int32_t>(global_indices.size(0));
@@ -656,6 +851,20 @@ void hisparse_gather_plan(
             state_indices.numel() >= num_rows,
         "request_state_indices must be int32 on CUDA with one entry per row");
     request_state_ptr = state_indices.const_data_ptr<int32_t>();
+  }
+
+  int32_t* attention_indices_ptr = nullptr;
+  if (attention_indices.has_value()) {
+    auto const& indices = attention_indices.value();
+    STD_TORCH_CHECK(
+        indices.is_cuda() &&
+            indices.scalar_type() == torch::headeronly::ScalarType::Int &&
+            indices.dim() == 2 && indices.is_contiguous() &&
+            indices.size(0) == global_indices.size(0) &&
+            indices.size(1) == global_indices.size(1),
+        "attention_indices must be a contiguous int32 CUDA tensor matching "
+        "global_indices");
+    attention_indices_ptr = indices.mutable_data_ptr<int32_t>();
   }
 
   if (num_rows == 0 || top_k == 0) {
@@ -675,17 +884,22 @@ void hisparse_gather_plan(
   const int num_chunks =
       std::min(max_chunks, std::max(1, kTargetBlocks / num_rows));
   const dim3 grid(num_rows, num_chunks);
-  const int64_t hot_rows = hot_cache_2d.size(0);
+  const int32_t hot_block_size =
+      hot_cache.dim() == 3 ? static_cast<int32_t>(hot_cache.size(1)) : 1;
+  const int64_t hot_rows = hot_cache.size(0) * hot_block_size;
+  const int64_t hot_block_stride =
+      hot_cache.stride(0) * hot_cache.element_size();
   const torch::stable::accelerator::DeviceGuard device_guard(
       hot_cache.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
   hisparse_gather_plan_kernel<<<grid, kBlockSize, 0, stream>>>(
       static_cast<const char*>(host_cache.const_data_ptr()),
-      static_cast<char*>(hot_cache_2d.mutable_data_ptr()),
+      static_cast<char*>(hot_cache.mutable_data_ptr()),
       global_indices.const_data_ptr<int32_t>(),
       hot_indices.const_data_ptr<int32_t>(),
-      miss_mask.const_data_ptr<int32_t>(), request_state_ptr, host_rows,
-      hot_rows, row_bytes, top_k);
+      miss_mask.const_data_ptr<int32_t>(), attention_indices_ptr,
+      request_state_ptr, host_rows, hot_rows, row_bytes, hot_block_stride,
+      hot_block_size, top_k, attention_block_stride);
 }
 
 void hisparse_backup(torch::stable::Tensor const& src_cache,
@@ -709,9 +923,15 @@ void hisparse_backup(torch::stable::Tensor const& src_cache,
                   "src_indices and dst_slots must have the same length");
 
   const int64_t row_bytes = src_cache.size(-1) * src_cache.element_size();
-  STD_TORCH_CHECK(row_bytes % 16 == 0, "KV row must be 16-byte aligned");
-  auto src_2d = torch::stable::reshape(src_cache, {-1, src_cache.size(-1)});
-  const int64_t src_rows = src_2d.size(0);
+  STD_TORCH_CHECK(src_cache.dim() == 2 || src_cache.dim() == 3,
+                  "src_cache must be 2D or paged 3D");
+  const int32_t src_block_size =
+      src_cache.dim() == 3 ? static_cast<int32_t>(src_cache.size(1)) : 1;
+  const int64_t src_rows = src_cache.size(0) * src_block_size;
+  const int64_t src_block_stride =
+      src_cache.stride(0) * src_cache.element_size();
+  STD_TORCH_CHECK(src_cache.stride(-2) * src_cache.element_size() == row_bytes,
+                  "src-cache rows must be contiguous");
   const int64_t host_rows = check_2d_rows(host_cache, "host_cache", row_bytes);
 
   const auto num_items = static_cast<int32_t>(src_indices.numel());
@@ -727,9 +947,119 @@ void hisparse_backup(torch::stable::Tensor const& src_cache,
       src_cache.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
   hisparse_backup_kernel<<<grid, kBlockSize, 0, stream>>>(
-      static_cast<const char*>(src_2d.const_data_ptr()),
+      static_cast<const char*>(src_cache.const_data_ptr()),
       src_indices.const_data_ptr<int64_t>(),
       static_cast<char*>(host_cache.mutable_data_ptr()),
-      dst_slots.const_data_ptr<int64_t>(), row_bytes, num_items, src_rows,
-      host_rows);
+      dst_slots.const_data_ptr<int64_t>(), row_bytes, src_block_stride,
+      src_block_size, num_items, src_rows, host_rows);
+}
+
+void hisparse_backup_indexer(torch::stable::Tensor const& src_cache,
+                             torch::stable::Tensor const& src_indices,
+                             torch::stable::Tensor& host_cache,
+                             torch::stable::Tensor const& dst_slots,
+                             int64_t value_bytes) {
+  STD_TORCH_CHECK(src_cache.is_cuda(), "src_cache must be on CUDA");
+  STD_TORCH_CHECK(host_cache.device().is_cpu(),
+                  "host_cache must be CPU memory");
+  STD_TORCH_CHECK(src_cache.dim() == 3 && host_cache.dim() == 3,
+                  "indexer caches must be paged 3D tensors");
+  STD_TORCH_CHECK(src_indices.is_cuda() && dst_slots.is_cuda(),
+                  "slot tensors must be on CUDA");
+  STD_TORCH_CHECK(
+      src_indices.scalar_type() == torch::headeronly::ScalarType::Long &&
+          dst_slots.scalar_type() == torch::headeronly::ScalarType::Long &&
+          src_indices.is_contiguous() && dst_slots.is_contiguous(),
+      "slot tensors must be contiguous int64 tensors");
+  STD_TORCH_CHECK(src_indices.numel() == dst_slots.numel(),
+                  "src_indices and dst_slots must have the same length");
+  STD_TORCH_CHECK(src_cache.size(1) == host_cache.size(1),
+                  "indexer cache block sizes must match");
+
+  const int64_t src_page_row_bytes =
+      src_cache.size(2) * src_cache.element_size();
+  const int64_t dst_page_row_bytes =
+      host_cache.size(2) * host_cache.element_size();
+  STD_TORCH_CHECK(src_page_row_bytes == dst_page_row_bytes,
+                  "indexer cache page widths must match");
+  STD_TORCH_CHECK(value_bytes > 0 && value_bytes < src_page_row_bytes,
+                  "value_bytes must leave a non-empty scale region");
+  STD_TORCH_CHECK(
+      src_cache.stride(1) * src_cache.element_size() == src_page_row_bytes &&
+          host_cache.stride(1) * host_cache.element_size() ==
+              dst_page_row_bytes,
+      "indexer cache pages must be contiguous within each block");
+
+  const auto num_items = static_cast<int32_t>(src_indices.numel());
+  if (num_items == 0) {
+    return;
+  }
+  const auto block_size = static_cast<int32_t>(src_cache.size(1));
+  const int64_t scale_bytes = src_page_row_bytes - value_bytes;
+  constexpr int kBlockSize = 256;
+  constexpr int kNumWarps = kBlockSize / kWarpSize;
+  const int grid = (num_items + kNumWarps - 1) / kNumWarps;
+
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      src_cache.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream();
+  hisparse_backup_indexer_kernel<<<grid, kBlockSize, 0, stream>>>(
+      static_cast<const char*>(src_cache.const_data_ptr()),
+      src_indices.const_data_ptr<int64_t>(),
+      static_cast<char*>(host_cache.mutable_data_ptr()),
+      dst_slots.const_data_ptr<int64_t>(), value_bytes, scale_bytes,
+      src_cache.stride(0) * src_cache.element_size(),
+      host_cache.stride(0) * host_cache.element_size(), block_size, num_items,
+      src_cache.size(0), host_cache.size(0));
+}
+
+void hisparse_copy_blocks(torch::stable::Tensor const& src_cache,
+                          torch::stable::Tensor& dst_cache,
+                          torch::stable::Tensor const& src_block_ids,
+                          torch::stable::Tensor const& dst_block_ids) {
+  STD_TORCH_CHECK(src_cache.device().is_cpu(), "src_cache must be CPU memory");
+  STD_TORCH_CHECK(dst_cache.is_cuda(), "dst_cache must be on CUDA");
+  STD_TORCH_CHECK(src_cache.dim() == 3 && dst_cache.dim() == 3,
+                  "cache tensors must be paged 3D tensors");
+  STD_TORCH_CHECK(src_block_ids.is_cuda() && dst_block_ids.is_cuda(),
+                  "block IDs must be on CUDA");
+  STD_TORCH_CHECK(
+      src_block_ids.scalar_type() == torch::headeronly::ScalarType::Int &&
+          dst_block_ids.scalar_type() == torch::headeronly::ScalarType::Int &&
+          src_block_ids.is_contiguous() && dst_block_ids.is_contiguous(),
+      "block IDs must be contiguous int32 tensors");
+  STD_TORCH_CHECK(src_block_ids.numel() == dst_block_ids.numel(),
+                  "source and destination block IDs must have equal length");
+  STD_TORCH_CHECK(src_cache.size(1) == dst_cache.size(1),
+                  "cache block sizes must match");
+
+  const int64_t row_bytes = src_cache.size(2) * src_cache.element_size();
+  STD_TORCH_CHECK(dst_cache.size(2) * dst_cache.element_size() == row_bytes,
+                  "cache row widths must match");
+  STD_TORCH_CHECK(
+      src_cache.stride(1) * src_cache.element_size() == row_bytes &&
+          dst_cache.stride(1) * dst_cache.element_size() == row_bytes,
+      "cache rows must be contiguous");
+
+  const auto num_pairs = static_cast<int32_t>(src_block_ids.numel());
+  if (num_pairs == 0) {
+    return;
+  }
+  const auto block_size = static_cast<int32_t>(src_cache.size(1));
+  constexpr int kBlockSize = 256;
+  constexpr int kNumWarps = kBlockSize / kWarpSize;
+  const int64_t num_rows = static_cast<int64_t>(num_pairs) * block_size;
+  const int grid = static_cast<int>((num_rows + kNumWarps - 1) / kNumWarps);
+
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      dst_cache.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream();
+  hisparse_copy_blocks_kernel<<<grid, kBlockSize, 0, stream>>>(
+      static_cast<const char*>(src_cache.const_data_ptr()),
+      static_cast<char*>(dst_cache.mutable_data_ptr()),
+      src_block_ids.const_data_ptr<int32_t>(),
+      dst_block_ids.const_data_ptr<int32_t>(), row_bytes,
+      src_cache.stride(0) * src_cache.element_size(),
+      dst_cache.stride(0) * dst_cache.element_size(), block_size, num_pairs,
+      src_cache.size(0), dst_cache.size(0));
 }

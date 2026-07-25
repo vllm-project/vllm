@@ -816,6 +816,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
   ops.def(
       "hisparse_swap_in(Tensor host_cache,"
       "                 Tensor! hot_cache,"
+      "                 Tensor hot_block_table,"
       "                 Tensor global_indices,"
       "                 Tensor? newest_global_indices,"
       "                 Tensor! hot_indices,"
@@ -823,8 +824,10 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                 Tensor! lru_slots,"
       "                 Tensor? request_state_indices,"
       "                 int region_stride,"
-      "                 Tensor(a!)? miss_mask,"
-      "                 Tensor(b!) stats) -> ()");
+      "                 Tensor(a!)? miss_mask=None,"
+      "                 Tensor(b!)? stats=None,"
+      "                 Tensor(c!)? attention_indices=None,"
+      "                 int attention_block_stride=0) -> ()");
 
   ops.def(
       "hisparse_gather_plan(Tensor host_cache,"
@@ -832,13 +835,28 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                     Tensor global_indices,"
       "                     Tensor hot_indices,"
       "                     Tensor miss_mask,"
-      "                     Tensor? request_state_indices) -> ()");
+      "                     Tensor? request_state_indices,"
+      "                     Tensor(a!)? attention_indices=None,"
+      "                     int attention_block_stride=0) -> ()");
 
   ops.def(
       "hisparse_backup(Tensor src_cache,"
       "                Tensor src_indices,"
       "                Tensor! host_cache,"
       "                Tensor dst_slots) -> ()");
+
+  ops.def(
+      "hisparse_backup_indexer(Tensor src_cache,"
+      "                        Tensor src_indices,"
+      "                        Tensor! host_cache,"
+      "                        Tensor dst_slots,"
+      "                        int value_bytes) -> ()");
+
+  ops.def(
+      "hisparse_copy_blocks(Tensor src_cache,"
+      "                      Tensor! dst_cache,"
+      "                      Tensor src_block_ids,"
+      "                      Tensor dst_block_ids) -> ()");
 #endif  // !USE_ROCM
 
   // Rotate Q and K, then write to kv cache for MLA
@@ -943,6 +961,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C_cache_ops, CUDA, ops) {
   ops.impl("hisparse_swap_in", TORCH_BOX(&hisparse_swap_in));
   ops.impl("hisparse_gather_plan", TORCH_BOX(&hisparse_gather_plan));
   ops.impl("hisparse_backup", TORCH_BOX(&hisparse_backup));
+  ops.impl("hisparse_backup_indexer", TORCH_BOX(&hisparse_backup_indexer));
+  ops.impl("hisparse_copy_blocks", TORCH_BOX(&hisparse_copy_blocks));
 #endif  // !USE_ROCM
   ops.impl("concat_and_cache_mla_rope_fused",
            TORCH_BOX(&concat_and_cache_mla_rope_fused));

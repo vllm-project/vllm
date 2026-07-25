@@ -401,6 +401,23 @@ def sparse_attn_indexer(
             quant_block_size,
             scale_fmt,
         )
+        from vllm.v1.attention.backends.mla.hisparse import get_indexer_source
+
+        source = get_indexer_source(k_cache_prefix)
+        if source is not None:
+            host_cache, source_slot_mapping = source
+            assert source_slot_mapping is not None
+            if use_pcp:
+                raise NotImplementedError(
+                    "HiSparse indexer source backup does not support PCP."
+                )
+            torch.ops._C_cache_ops.hisparse_backup_indexer(
+                kv_cache,
+                slot_mapping_for_cache,
+                host_cache,
+                source_slot_mapping[: slot_mapping_for_cache.numel()],
+                head_dim,
+            )
 
     # The buffer must be pre-filled with -1 (the "no token" sentinel) before the
     # top-k kernels scatter valid indices into it. On the fused deepseek_v32
