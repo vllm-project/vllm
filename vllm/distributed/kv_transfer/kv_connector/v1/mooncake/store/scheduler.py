@@ -86,36 +86,23 @@ class MooncakeStoreScheduler:
         Returns ``(None, False)`` when an async lookup is still in flight,
         signaling the scheduler to retry this request on a later step.
         """
-        # Fine-grained hits may land on a hash boundary inside a block; else
-        # hits stay block-aligned. The lookup range floors to that granularity.
+        # Fine-grained hits may land on a hash boundary inside a block; without
+        # partial hits, prefixes shorter than one physical block are skipped.
         align = (
             self._hash_block_size if self.enable_partial_hash_hits else self._block_size
         )
-        # Fine-grained partial hits make even a sub-block prefix worth looking
-        # up, so the floor is the align unit. The bound must cover the full
-        # prefill range: the lookup's eagle drop and retention masks anchor on
-        # the queried length; a shorter bound would discard an extra block.
-        token_len = request.num_tokens // align * align
-        if token_len < align:
+        if request.num_tokens < align:
             return 0, False
 
         num_external_hit_tokens = self.client.lookup(
             request.request_id,
-            token_len,
+            request.num_tokens,
             request.block_hashes,
             non_block=self.lookup_async,
         )
         if num_external_hit_tokens is None:
             # Lookup not ready yet; scheduler will retry on a later step.
             return None, False
-
-        if num_external_hit_tokens == request.num_tokens:
-            # Leave a sub-block tail uncomputed for sampling, on a block
-            # boundary so the recv-side load mask covers every yielded chunk.
-            num_external_hit_tokens = max(
-                0,
-                (request.num_tokens - 1) // self._block_size * self._block_size,
-            )
 
         if num_external_hit_tokens < num_computed_tokens:
             need_to_allocate = 0

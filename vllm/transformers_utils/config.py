@@ -72,6 +72,7 @@ class LazyConfigDict(dict):
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     afmoe="AfmoeConfig",
     arctic="ArcticConfig",
+    axk1="AXK1Config",
     bagel="BagelConfig",
     umm="CheersConfig",
     chatglm="ChatGLMConfig",
@@ -731,13 +732,17 @@ def get_config(
             raise ValueError(error_message) from e
 
     config_parser = get_config_parser(config_format)
-    config_dict, config = config_parser.parse(
-        model,
-        trust_remote_code=trust_remote_code,
-        revision=revision,
-        code_revision=code_revision,
-        hf_overrides=hf_overrides_kw or hf_overrides_fn,
-        **kwargs,
+    # Retry to tolerate a concurrent HF cache refresh briefly hiding config.json.
+    config_dict, config = with_retry(
+        lambda: config_parser.parse(
+            model,
+            trust_remote_code=trust_remote_code,
+            revision=revision,
+            code_revision=code_revision,
+            hf_overrides=hf_overrides_kw or hf_overrides_fn,
+            **kwargs,
+        ),
+        f"Error parsing config for {model}",
     )
 
     # Architecture mapping for models without explicit architectures field
