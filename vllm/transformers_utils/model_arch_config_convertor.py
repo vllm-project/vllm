@@ -215,8 +215,13 @@ class ModelArchConfigConvertorBase:
         else:
             # Set quant_method for ModelOpt models.
             producer_name = quant_cfg.get("producer", {}).get("name")
-            if producer_name == "modelopt":
-                quant_algo = quant_cfg.get("quantization", {}).get("quant_algo")
+            modelopt_quant_cfg = quant_cfg.get("quantization", {})
+            is_legacy_modelopt = (
+                isinstance(modelopt_quant_cfg, dict)
+                and "modelopt_quant_config" in modelopt_quant_cfg
+            )
+            if producer_name == "modelopt" or is_legacy_modelopt:
+                quant_algo = modelopt_quant_cfg.get("quant_algo")
                 if quant_algo is not None:
                     quant_algo_upper = str(quant_algo).upper()
                     if quant_algo_upper in {
@@ -256,7 +261,7 @@ class ModelArchConfigConvertorBase:
         if not hasattr(self.hf_text_config, "model_type"):
             return False
         elif self.hf_text_config.model_type in (
-            "AXK1",
+            "axk1",
             "deepseek_v2",
             "deepseek_v3",
             "deepseek_v32",
@@ -285,7 +290,7 @@ class ModelArchConfigConvertorBase:
             return (
                 self.hf_text_config.model.model_type
                 in (
-                    "AXK1",
+                    "axk1",
                     "deepseek_v2",
                     "deepseek_v3",
                     "deepseek_v32",

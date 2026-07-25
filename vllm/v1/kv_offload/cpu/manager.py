@@ -66,6 +66,8 @@ class CPUOffloadingManager(OffloadingManager):
         self._policy: CachePolicy = policy_cls(cache_capacity=num_blocks)
         # Track the number of blocks in the cache that are evictable. i.e. ref_cnt 0.
         self._num_evictable_cache_blocks: int = 0
+        # Track blocks with an in-flight store (ref_cnt -1, not yet completed).
+        self._num_write_pending_blocks: int = 0
 
         self.store_threshold: int = store_threshold
         self.max_tracker_size: int = max_tracker_size
@@ -229,6 +231,7 @@ class CPUOffloadingManager(OffloadingManager):
 
         for key, block in zip(keys_to_store, blocks):
             self._policy.insert(key, block)
+        self._num_write_pending_blocks += len(keys_to_store)
 
         # build store specs for allocated blocks
         store_spec = self._get_load_store_spec(keys_to_store, blocks)
@@ -253,6 +256,7 @@ class CPUOffloadingManager(OffloadingManager):
                 block = self._policy.get(key)
                 if block is not None and not block.is_ready:
                     block.ref_cnt = 0
+                    self._num_write_pending_blocks -= 1
                     self._num_evictable_cache_blocks += 1
                     self._policy.mark_evictable(key)
                     stored_keys.append(key)
@@ -260,6 +264,7 @@ class CPUOffloadingManager(OffloadingManager):
             for key in keys:
                 block = self._policy.get(key)
                 if block is not None and not block.is_ready:
+                    self._num_write_pending_blocks -= 1
                     self._policy.remove(key)
                     self._free_block(block)
 
@@ -281,6 +286,7 @@ class CPUOffloadingManager(OffloadingManager):
         # can begin, preventing a cross-direction data race on reused offload block IDs.
         self._policy.clear()
         self._num_evictable_cache_blocks = 0
+        self._num_write_pending_blocks = 0
 
         self._free_list.clear()
         self._num_allocated_blocks = 0
@@ -308,6 +314,15 @@ class CPUOffloadingManager(OffloadingManager):
                 CPUOffloadingMetrics.CPU_ALLOCATION_SIZE, allocation_size
             )
         self.allocation_sizes_in_current_batch.clear()
+
+        write_usage = (
+            self._num_write_pending_blocks / self._num_blocks
+            if self._num_blocks > 0
+            else 0.0
+        )
+        read_usage = max(usage - write_usage, 0.0)
+        stats.set_gauge(CPUOffloadingMetrics.CPU_CACHE_WRITE_USAGE_PERC, write_usage)
+        stats.set_gauge(CPUOffloadingMetrics.CPU_CACHE_READ_USAGE_PERC, read_usage)
 
         if self.store_threshold >= 2:
             stats.increase_counter(

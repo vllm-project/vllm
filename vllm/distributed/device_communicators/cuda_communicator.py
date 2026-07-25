@@ -352,6 +352,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if pynccl_comm is None or pynccl_comm.disabled:
             return super().all_gather(input_, dim)
 
+        # On ROCm, the base-class all_gather (all_gather_into_tensor) is faster
+        # than the manual pynccl + torch.empty + movedim + reshape path below,
+        # which adds a per-call output allocation and (for dim != 0) an extra
+        # copy on every step. This is on the hot path for TP forward passes, so
+        # keep ROCm on the base-class collective to avoid a decode regression.
+        if current_platform.is_rocm():
+            return super().all_gather(input_, dim)
+
         input_size = input_.size()
         output_size = (input_size[0] * self.world_size,) + input_size[1:]
         output_tensor = torch.empty(

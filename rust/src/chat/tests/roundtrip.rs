@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Roundtrip tests for the real chat-template and output-processor pairing.
 //!
 //! The invariant under test is that a structured assistant message rendered as history can be
@@ -260,19 +263,32 @@ impl RoundtripCase {
             sort_json_keys: false,
         }
     }
+
+    /// Inkling typed content blocks with native token-id rendering.
+    fn inkling() -> Self {
+        Self {
+            model_id: "thinkingmachines/Inkling",
+            assistant_stop_suffix: "",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Always { value: true },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: true,
+        }
+    }
 }
 
 macro_rules! roundtrip_tests {
-    ($($case:ident => [$($(#[$fixture_attr:meta])* $fixture:ident),* $(,)?]),+ $(,)?) => {
+    ($($case:ident => $(#[$case_attr:meta])* [$($fixture:ident),* $(,)?]),+ $(,)?) => {
         paste::paste! {
             $(
                 #[tokio::test]
                 #[file_serial([<hf_ $case>])]
+                $(#[$case_attr])*
                 async fn [<roundtrip_ $case>]() -> Result<()> {
                     let case = RoundtripCase::$case();
                     let backends = load_roundtrip_backends(&case).await?;
                     $(
-                        $(#[$fixture_attr])*
                         [<run_roundtrip_ $fixture>](&case, &backends).await?;
                     )*
                     Ok(())
@@ -291,12 +307,13 @@ roundtrip_tests! {
     deepseek_v32 => [tool_call_mix],
     glm45 => [reasoning_and_content, tool_call_mix],
     glm47 => [reasoning_and_content, tool_call_mix],
-    seed_oss => [reasoning_and_content],
+    seed_oss => [reasoning_and_content, tool_call_mix],
     step3p5 => [reasoning_and_content],
     nemotron_v3 => [reasoning_and_content],
     gemma4 => [tool_call_mix], // Gemma4 strips reasoning in history if there's no tool call
     kimi_k25 => [tool_call_mix], // Kimi K2.5 strips reasoning in history
     gpt_oss => [tool_call_mix], // Harmony strips reasoning in history if there's no tool call
+    inkling => [reasoning_and_content, tool_call_mix],
 }
 
 /// Run the fixed reasoning+content fixture for one model/parser case.
@@ -676,6 +693,7 @@ fn decoded_completion_stream(
                     usage: Default::default(),
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 }),
             }
         });
@@ -686,6 +704,7 @@ fn decoded_completion_stream(
                 usage: Default::default(),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             });
             events.push(DecodedTextEvent::TextDelta {
                 delta: chunk.delta,
