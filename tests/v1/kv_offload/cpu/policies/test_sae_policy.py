@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
 
+import pytest
+
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext, make_offload_key
 from vllm.v1.kv_offload.cpu.policies.base import BlockStatus
 from vllm.v1.kv_offload.cpu.policies.sae import SAECachePolicy
@@ -96,7 +98,7 @@ def test_record_lookup_counts_pending_blocks():
     open_and_insert(policy, [(key(1), make_block(0))])
     assert policy.blocks[key(1)].is_ready is False
     policy.record_lookup(key(1), ReqContext(req_id="r_pending"))
-    assert policy.pending_merge_pointers == {"r_pending": (0, 1)}
+    assert policy.pending_merge_pointers == {"r_pending": 0}
 
 
 def test_record_lookup_hit_populates_lookup_state():
@@ -107,7 +109,7 @@ def test_record_lookup_hit_populates_lookup_state():
     policy = SAECachePolicy(cache_capacity=4)
     open_and_insert(policy, [(key(1), make_ready_block(0))])
     policy.record_lookup(key(1), ReqContext(req_id="r_lookup"))
-    assert policy.pending_merge_pointers == {"r_lookup": (0, 1)}
+    assert policy.pending_merge_pointers == {"r_lookup": 0}
 
 
 def test_get_hit_does_not_populate_lookup_state():
@@ -133,7 +135,7 @@ def test_record_lookup_miss_does_not_clear_lookup_state():
     policy.record_lookup(
         key(99), ReqContext(req_id="r_lookup")
     )  # miss on unrelated key
-    assert policy.pending_merge_pointers == {"r_lookup": (0, 1)}
+    assert policy.pending_merge_pointers == {"r_lookup": 0}
 
 
 def test_record_lookup_state_is_keyed_per_req_id():
@@ -148,7 +150,7 @@ def test_record_lookup_state_is_keyed_per_req_id():
     # Both entries live. The sids come from the order of open_and_insert
     # calls above: sid 0 owns key(1), sid 1 owns key(2). Each got exactly
     # one hit so hit_count == 1 for both.
-    assert policy.pending_merge_pointers == {"A": (0, 1), "B": (1, 1)}
+    assert policy.pending_merge_pointers == {"A": 0, "B": 1}
 
 
 def test_merge_fires_within_request():
@@ -180,7 +182,7 @@ def test_merge_does_not_fire_across_req_ids():
     assert policy.key_to_session[key(2)] != policy.key_to_session[key(1)]
     assert policy.next_session_id == 2
     # Request A's entry is still live; only B was consumed.
-    assert policy.pending_merge_pointers == {"A": (0, 1)}
+    assert policy.pending_merge_pointers == {"A": 0}
 
 
 def test_merge_fires_regardless_of_start_pos_drift():
@@ -232,7 +234,7 @@ def test_merge_does_not_fire_when_recorded_sid_is_gone():
     open_and_insert(policy, [(key(1), make_ready_block(0))])
     policy.record_lookup(key(1), ReqContext(req_id="r"))
     # Simulate the recorded sid being evicted away.
-    recorded_sid = policy.pending_merge_pointers["r"][0]
+    recorded_sid = policy.pending_merge_pointers["r"]
     policy.session_stats.pop(recorded_sid, None)
     policy.session_keys.pop(recorded_sid, None)
     open_and_insert(policy, [(key(2), make_block(1))], req_id="r", start_pos=1)
@@ -286,26 +288,26 @@ def test_insert_seeds_initial_hits_from_ghost_sum():
     policy.ghost_scores[key(1)] = 4.0
     policy.ghost_scores[key(2)] = 6.0
     open_and_insert(policy, [(key(1), make_block(0)), (key(2), make_block(1))])
-    # (4.0 + 6.0) / 2.0 = 5.0, then int() on close_session -> 5.
-    assert policy.session_stats[0]["hits"] == 5
+    # (4.0 + 6.0) / 2.0 = 5.0.
+    assert policy.session_stats[0]["hits"] == pytest.approx(5.0)
 
 
-def test_close_session_truncates_float_hits_to_int():
-    """Reference computes initial_hits = int(ghost_sum / ghost_norm). The port
-    accumulates the ghost seed as a float while the session is open, then
-    truncates to int when close_session runs."""
+def test_session_hits_seeded_from_ghost_scores_stay_float():
+    """``insert`` seeds ``hits`` from each key's ghost score divided
+    by ``ghost_norm`` — a fractional quantity. Both the seed and the
+    later per-touch increments live on ``hits`` as float; the score
+    math is float either way and no truncation is applied."""
     policy = SAECachePolicy(cache_capacity=4, ghost_norm=3.0)
     policy.ghost_scores[key(1)] = 5.0
     policy.ghost_scores[key(2)] = 5.0
     policy.open_session(ReqContext(req_id="r0"), 0)
     policy.insert(key(1), make_block(0))
     policy.insert(key(2), make_block(1))
-    # While open, accumulated float: (5.0 + 5.0) / 3.0 = 3.333...
-    assert policy.session_stats[0]["hits"] > 3.0
+    # Accumulated float: (5.0 + 5.0) / 3.0 = 3.333...
+    assert policy.session_stats[0]["hits"] == pytest.approx(10.0 / 3.0)
     policy.close_session()
-    # int(3.333...) = 3
-    assert policy.session_stats[0]["hits"] == 3
-    assert isinstance(policy.session_stats[0]["hits"], int)
+    # close_session no longer mutates hits.
+    assert policy.session_stats[0]["hits"] == pytest.approx(10.0 / 3.0)
 
 
 def test_new_session_records_prefix_depth():
@@ -428,7 +430,7 @@ def test_decay_runs_every_interval():
     policy.touch([key(1)], _CTX)
     policy.touch([key(1)], _CTX)
     policy.touch([key(1)], _CTX)
-    assert policy.session_stats[0]["hits"] == int(13 * 0.5)
+    assert policy.session_stats[0]["hits"] == pytest.approx(13 * 0.5)
     # resident key(1) accumulated 3 hits before decay: (4.0 + 3.0) * 0.5 = 3.5
     assert policy.ghost_scores[key(1)] == 3.5
 
@@ -442,22 +444,6 @@ def test_decay_prunes_below_threshold():
     policy.ghost_scores[key(99)] = 0.05  # non-resident
     policy.touch([key(1)], _CTX)  # triggers decay; 0.05 * 0.1 = 0.005 < 0.01
     assert key(99) not in policy.ghost_scores
-
-
-def test_decay_truncates_session_hits_to_int():
-    """Reference does int(hits * decay_factor); the port must too."""
-    policy = SAECachePolicy(
-        cache_capacity=4,
-        decay_interval=1,
-        decay_factor=0.9,
-    )
-    open_and_insert(policy, [(key(1), make_block(0))])
-    policy.session_stats[0]["hits"] = 7
-    # Empty batch: triggers the decay tick without touch()'s own hits += 1
-    # bump, isolating the truncation behavior: int(7 * 0.9) = int(6.3) = 6.
-    policy.touch([], _CTX)
-    assert policy.session_stats[0]["hits"] == 6
-    assert isinstance(policy.session_stats[0]["hits"], int)
 
 
 def test_mark_evictable_adds_to_evictable_set():
