@@ -856,28 +856,6 @@ fi
 
 echo "Final commands: $commands"
 
-standalone_merge_base_env=()
-if [[ "$commands" == *python_only_compile.sh* ]]; then
-  # The ROCm test image often ships /vllm-workspace without .git. Resolve the
-  # wheels.vllm.ai commit from the agent checkout for this test only.
-  vllm_standalone_merge_base=""
-  checkout="${BUILDKITE_BUILD_CHECKOUT_PATH:-}"
-  if [[ -z "${checkout}" || ! -d "${checkout}" ]]; then
-    checkout="."
-  fi
-  # Pass safe.directory per-command because Buildkite uses mixed user IDs.
-  if git -c "safe.directory=${checkout}" -C "${checkout}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    vllm_standalone_merge_base="$(
-      git -c "safe.directory=${checkout}" -C "${checkout}" merge-base HEAD origin/main 2>/dev/null || true
-    )"
-  fi
-  if [[ -z "${vllm_standalone_merge_base}" ]]; then
-    vllm_standalone_merge_base="${BUILDKITE_COMMIT:-}"
-  fi
-  echo "INFO: passing CI_STANDALONE_MERGE_BASE into container: ${vllm_standalone_merge_base}"
-  standalone_merge_base_env=(-e "CI_STANDALONE_MERGE_BASE=${vllm_standalone_merge_base}")
-fi
-
 MYPYTHONPATH="/vllm-workspace"
 
 container_job_id="${BUILDKITE_JOB_ID:-${BUILDKITE_PARALLEL_JOB:-0}}"
@@ -1008,7 +986,6 @@ else
     -e "VLLM_CACHE_ROOT=${CONTAINER_CACHE_ROOT}/vllm" \
     -e "XDG_CACHE_HOME=${CONTAINER_CACHE_ROOT}/xdg" \
     -e "PYTORCH_ROCM_ARCH=" \
-    "${standalone_merge_base_env[@]}" \
     --name "${container_name}" \
     "${image_name}" \
     /bin/bash -c "${CONTAINER_PREFLIGHT} && ${commands}"
