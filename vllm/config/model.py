@@ -1268,11 +1268,11 @@ class ModelConfig:
             max_dcp_size = tensor_parallel_size // total_num_kv_heads
             if decode_context_parallel_size > max_dcp_size:
                 raise ValueError(
-                    f"`--decode-context-parallel-size` "
-                    f"({decode_context_parallel_size}) must be at most "
-                    f"`--tensor-parallel-size` ({tensor_parallel_size}) divided "
-                    "by the model's total number of KV heads "
-                    f"({total_num_kv_heads}), which is {max_dcp_size}."
+                    "`--decode-context-parallel-size` "
+                    f"({decode_context_parallel_size}) exceeds the maximum "
+                    f"supported value ({max_dcp_size}) for "
+                    f"`--tensor-parallel-size` ({tensor_parallel_size}) and "
+                    f"{total_num_kv_heads} model KV heads."
                 )
 
             num_q_per_kv = total_num_attention_heads // total_num_kv_heads
