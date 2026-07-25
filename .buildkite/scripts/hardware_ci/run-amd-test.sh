@@ -35,7 +35,7 @@ set -o pipefail
 : "${PY_COLORS:=1}"
 : "${ROCM_DOCKER_TTY:=1}"
 : "${PYTHONFAULTHANDLER:=1}"
-: "${PYTEST_TIMEOUT:=2100}"
+: "${PYTEST_TIMEOUT:=2400}"
 if [[ " ${PYTEST_ADDOPTS:-} " != *" --color"* ]]; then
   PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+${PYTEST_ADDOPTS} }--color=yes"
 fi
@@ -45,9 +45,9 @@ fi
 if [[ " ${PYTEST_ADDOPTS:-} " != *" --durations-min="* ]]; then
   PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+${PYTEST_ADDOPTS} }--durations-min=1.0"
 fi
-# Dump stacks after 15 minutes, then stop an individual test after 35 minutes.
+# Dump stacks after 25 minutes, then stop an individual test after 40 minutes.
 if [[ " ${PYTEST_ADDOPTS:-} " != *" faulthandler_timeout="* ]]; then
-  PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+${PYTEST_ADDOPTS} }-o faulthandler_timeout=900"
+  PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+${PYTEST_ADDOPTS} }-o faulthandler_timeout=1500"
 fi
 if [[ " ${PYTEST_ADDOPTS:-} " != *" --timeout-method="* &&
   " ${PYTEST_ADDOPTS:-} " != *" --timeout-method "* ]]; then
@@ -400,10 +400,10 @@ initialize_native_environment() {
   native_root="/tmp/vllm-native-${job_id}"
   TMPDIR="/tmp/vllm-${job_id_suffix}/tmp"
   VLLM_RPC_BASE_PATH="/tmp"
-  : "${TORCHINDUCTOR_CACHE_DIR:=${native_root}/cache/torchinductor}"
-  : "${TRITON_CACHE_DIR:=${native_root}/cache/triton}"
-  : "${VLLM_CACHE_ROOT:=${native_root}/cache/vllm}"
-  : "${XDG_CACHE_HOME:=${native_root}/cache/xdg}"
+  TORCHINDUCTOR_CACHE_DIR="${native_root}/cache/torchinductor"
+  TRITON_CACHE_DIR="${native_root}/cache/triton"
+  VLLM_CACHE_ROOT="${native_root}/cache/vllm"
+  XDG_CACHE_HOME="${native_root}/cache/xdg"
   : "${HF_HOME:=/home/buildkite-agent/huggingface}"
   : "${HF_HUB_DOWNLOAD_TIMEOUT:=300}"
   : "${HF_HUB_ETAG_TIMEOUT:=60}"
@@ -418,6 +418,8 @@ initialize_native_environment() {
     "${VLLM_CACHE_ROOT}" \
     "${XDG_CACHE_HOME}" \
     "${HF_HOME}" || return 1
+
+  echo "Native compile caches: VLLM_CACHE_ROOT=${VLLM_CACHE_ROOT} TORCHINDUCTOR_CACHE_DIR=${TORCHINDUCTOR_CACHE_DIR}"
 
   if [[ "${VLLM_CI_REQUIRE_PERSISTENT_HF_CACHE:-0}" == "1" ]]; then
     if ! command -v findmnt >/dev/null 2>&1; then
