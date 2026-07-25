@@ -1905,13 +1905,15 @@ def test_lookup_rejects_boundary_missing_one_mamba_shard():
     )
     _refresh_group_tp_replication_factors(worker)
 
+    # 33 tokens for two 16-token blocks: the hit stops below the request end,
+    # so the full-hit re-derivation stays out of the shard accounting.
     worker.store.batch_is_exist.side_effect = lambda keys: [1] * len(keys)
-    assert worker.lookup(32, [b"h0", b"h1"]) == 32
+    assert worker.lookup(33, [b"h0", b"h1"]) == 32
 
     worker.store.batch_is_exist.side_effect = lambda keys: [
         0 if "tp_rank:1" in k and "group:1" in k else 1 for k in keys
     ]
-    assert worker.lookup(32, [b"h0", b"h1"]) == 0
+    assert worker.lookup(33, [b"h0", b"h1"]) == 0
 
 
 def test_lookup_requires_all_dcp_rank_namespaces():
