@@ -5,6 +5,7 @@ import logging
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import patch
 
 import pydantic
@@ -78,6 +79,20 @@ def test_rocm_defaults_deepseek_v4_to_mrv1(monkeypatch):
         assert "DeepseekV4ForCausalLM" not in default_v2_model_runner_architectures()
     finally:
         default_v2_model_runner_architectures.cache_clear()
+
+
+def test_v2_model_runner_supports_extract_hidden_states():
+    config = VllmConfig()
+    config.speculative_config = cast(
+        SpeculativeConfig,
+        SimpleNamespace(
+            method="extract_hidden_states",
+            parallel_drafting=False,
+            enable_adaptive_verification=False,
+        ),
+    )
+
+    assert config._get_v2_model_runner_unsupported_features() == []
 
 
 @pytest.mark.parametrize(
