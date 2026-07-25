@@ -3,6 +3,7 @@
 import contextlib
 import enum
 import functools
+import math
 import os
 import platform
 import sys
@@ -590,6 +591,15 @@ class Platform:
         cls, vllm_config: "VllmConfig"
     ) -> "type[AttentionBackend] | None":
         """Find the first non-SSM attention backend from model layers."""
+        backends = cls._find_non_ssm_backends(vllm_config)
+        return backends[0] if backends else None
+
+    @classmethod
+    def _find_non_ssm_backends(
+        cls, vllm_config: "VllmConfig"
+    ) -> "list[type[AttentionBackend]]":
+        """Find all distinct non-SSM attention backends from model layers,
+        in layer order."""
         from vllm.config.vllm import get_layers_from_vllm_config
         from vllm.model_executor.layers.attention_layer_base import (
             AttentionLayerBase,
@@ -599,11 +609,34 @@ class Platform:
             vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
+        backends: list[type[AttentionBackend]] = []
         for layer in attn_layers.values():
             b = layer.get_attn_backend()
-            if not b.is_ssm():
-                return b
-        return None
+            if not b.is_ssm() and b not in backends:
+                backends.append(b)
+        return backends
+
+    @classmethod
+    def _preferred_block_size_for_backends(
+        cls,
+        backend_classes: "list[type[AttentionBackend]]",
+        default_block_size: int,
+    ) -> int:
+        """Pick the smallest block size supported by every backend.
+
+        A block size satisfies a backend when it is a multiple of one of the
+        backend's supported kernel block sizes, so extending a candidate by
+        the least common multiple of an unsatisfied backend's own preference
+        preserves the already-satisfied backends.
+        """
+        preferred = backend_classes[0].get_preferred_block_size(default_block_size)
+        for backend_cls in backend_classes[1:]:
+            if not backend_cls.supports_block_size(preferred):
+                preferred = math.lcm(
+                    preferred,
+                    backend_cls.get_preferred_block_size(default_block_size),
+                )
+        return preferred
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
@@ -621,21 +654,26 @@ class Platform:
         if not model_config:
             return
 
-        backend_cls = cls._find_non_ssm_backend(vllm_config)
-        if backend_cls is None:
+        backend_classes = cls._find_non_ssm_backends(vllm_config)
+        if not backend_classes:
             return
+        backend_cls = backend_classes[0]
 
-        # Phase 1: Pick block size from backend (skip if user set --block-size)
+        # Phase 1: Pick a block size every attention backend supports (skip if
+        # user set --block-size). Models can mix backends with disjoint
+        # preferences — e.g. a sparse-MLA main backend preferring 32 alongside
+        # DeepseekV32IndexerBackend, which only supports 64 — and a size chosen
+        # from the first backend alone later fails select_common_block_size().
         if not cache_config.user_specified_block_size:
             with set_current_vllm_config(vllm_config):
-                preferred = backend_cls.get_preferred_block_size(
-                    CacheConfig.DEFAULT_BLOCK_SIZE
+                preferred = cls._preferred_block_size_for_backends(
+                    backend_classes, CacheConfig.DEFAULT_BLOCK_SIZE
                 )
             if preferred != CacheConfig.DEFAULT_BLOCK_SIZE:
                 logger.info(
-                    "Setting kv cache block size to %d for %s backend.",
+                    "Setting kv cache block size to %d for %s backend(s).",
                     preferred,
-                    backend_cls.get_name(),
+                    "/".join(b.get_name() for b in backend_classes),
                 )
             cache_config.block_size = preferred
 
