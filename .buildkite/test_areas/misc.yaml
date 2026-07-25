@@ -425,6 +425,7 @@ steps:
     - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
     - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
     - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
+    - VLLM_TEST_MODEL=Qwen/Qwen3.5-0.8B VLLM_NEEDLE_BATCH_SIZE=8 VLLM_NEEDLE_TRIALS=2 VLLM_MIN_PROMPT=64 VLLM_MAX_PROMPT=256 VLLM_NEEDLE_MAX_TOKENS=32 VLLM_MAX_MODEL_LEN=1024 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
 
 - label: Batch Invariance (B200)
   key: batch-invariance-b200
@@ -441,6 +442,7 @@ steps:
     - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
     - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
     - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
+    - VLLM_TEST_MODEL=Qwen/Qwen3.5-0.8B VLLM_NEEDLE_BATCH_SIZE=8 VLLM_NEEDLE_TRIALS=2 VLLM_MIN_PROMPT=64 VLLM_MAX_PROMPT=256 VLLM_NEEDLE_MAX_TOKENS=32 VLLM_MAX_MODEL_LEN=1024 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
     - pytest -v -s v1/determinism/test_nvfp4_batch_invariant.py
     - pytest -v -s v1/determinism/test_nvfp4_batch_invariant_scaled_mm.py
     - pytest -v -s v1/determinism/test_matmul_batch_invariant.py

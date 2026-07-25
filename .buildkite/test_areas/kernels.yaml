@@ -289,6 +289,7 @@ steps:
   - vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_cutedsl.py
   - vllm/models/minimax_m3/nvidia/
   - cmake/external_projects/fmha_sm100.cmake
+  - tests/kernels/mamba/test_gdn_forward_core_split.py
   - tests/kernels/mamba/test_gdn_prefill_cutedsl.py
   - tests/kernels/test_bf16x3_router_gemm_cutedsl.py
   - tests/kernels/attention/test_minimax_m3.py
@@ -321,6 +322,7 @@ steps:
     - pytest -v -s tests/kernels/moe/test_flashinfer_moe.py
     - pytest -v -s tests/kernels/moe/test_trtllm_nvfp4_moe.py
     - pytest -v -s tests/kernels/moe/test_cutedsl_moe.py
+    - pytest -v -s tests/kernels/mamba/test_gdn_forward_core_split.py
     - pytest -v -s tests/kernels/mamba/test_gdn_prefill_cutedsl.py
     - pytest -v -s tests/kernels/test_bf16x3_router_gemm_cutedsl.py
     - pytest -v -s tests/kernels/attention/test_minimax_m3.py

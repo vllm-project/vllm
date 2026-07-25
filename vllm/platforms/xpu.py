@@ -379,7 +379,7 @@ class XPUPlatform(Platform):
         kernel_block_size = None
         for layer in attn_layers.values():
             b = layer.get_attn_backend()
-            if b.get_name() == "GDN_ATTN":
+            if b.get_name() in ("GDN_ATTN", "QWEN_GDN_ATTN"):
                 kernel_block_size = 64
                 break
 
