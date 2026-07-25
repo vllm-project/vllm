@@ -1231,7 +1231,7 @@ def row_parallel_weight_loader(
     return default_weight_loader(param, loaded_weight)
 
 
-LoaderFunction = Callable[[torch.Tensor, torch.Tensor], None]
+LoaderFunction = Callable[[torch.Tensor, torch.Tensor], object]
 
 
 def sharded_weight_loader(shard_axis: int) -> LoaderFunction:
@@ -1254,10 +1254,12 @@ def composed_weight_loader(
 ) -> LoaderFunction:
     """Create a weight loader that post-processes the weights after loading"""
 
-    def composed_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
-        loader(param, loaded_weight)
+    def composed_loader(param: torch.Tensor, loaded_weight: torch.Tensor):
+        receipt = loader(param, loaded_weight)
         param.data.copy_(fn(param))
-        return
+        # Preserve a structured LoadReceipt returned by the logical source
+        # loader. The post-load transform is not a second load event.
+        return receipt
 
     return composed_loader
 

@@ -17,6 +17,10 @@ import pytest
 import torch
 from torch import nn
 
+from vllm.model_executor.load_receipt import (
+    LoadReceipt,
+    returns_load_receipt,
+)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase)
 from vllm.model_executor.model_loader.reload.layerwise import (
@@ -27,7 +31,10 @@ from vllm.model_executor.model_loader.reload.layerwise import (
     record_direct_load_consumption, record_dummy_load_manifest,
     record_metadata_for_reloading)
 from vllm.model_executor.model_loader.reload.source import observe_weight_sources
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    composed_weight_loader,
+    default_weight_loader,
+)
 
 
 class _Cfg:
@@ -48,6 +55,62 @@ def _named_param_loader(model, name_value_pairs):
 
 
 class TestObservation:
+
+    def test_receipt_adapter_handles_conditional_loader(self):
+        @returns_load_receipt("shard_id", "expert_id")
+        def loader(param, loaded_weight, shard_id, expert_id,
+                   return_success=False):
+            return expert_id == 0 if return_success else None
+
+        accepted = loader(None, None, "w1", 0, return_success=True)
+        skipped = loader(None, None, "w1", 1, return_success=True)
+        assert isinstance(accepted, LoadReceipt)
+        assert accepted.consumed
+        assert accepted.fragment.format() == "shard_id='w1',expert_id=0"
+        assert not skipped
+
+    def test_composed_loader_preserves_receipt(self):
+        def base_loader(param, loaded_weight):
+            param.data.copy_(loaded_weight)
+            return LoadReceipt.accepted(transform="source")
+
+        loader = composed_weight_loader(base_loader, lambda value: -value)
+        param = nn.Parameter(torch.zeros(4))
+        receipt = loader(param, torch.ones(4))
+        assert receipt == LoadReceipt.accepted(transform="source")
+        assert torch.equal(param, -torch.ones(4))
+
+    def test_structured_receipt_defines_fragment_schema(self):
+        class Layer(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.zeros(4))
+
+                def loader(param, loaded_weight, opaque_partition):
+                    param.data.copy_(loaded_weight)
+                    return LoadReceipt.accepted(
+                        partition=opaque_partition,
+                        layout="custom",
+                    )
+
+                self.weight.weight_loader = loader
+
+        layer = Layer()
+        model = nn.Sequential(layer)
+        record_load_consumption(model)
+        for _, weight in observe_weight_sources(
+            [("checkpoint.weight", torch.ones(4))]
+        ):
+            layer.weight.weight_loader(
+                layer.weight,
+                weight,
+                opaque_partition=7,
+            )
+        finalize_load_recording(model)
+
+        assert get_layerwise_info(layer).required_keys == {
+            "checkpoint.weight=>weight[partition=7,layout='custom']"
+        }
 
     def test_direct_write_loader_records_source_and_target(self):
         model = nn.Sequential(nn.Linear(4, 4, bias=False))
@@ -125,7 +188,11 @@ class TestObservation:
                                   expert_id, return_success=False):
                     shard_idx = {"w1": 0, "w2": 1, "w3": 2}[shard_id]
                     param.data[expert_id, shard_idx].copy_(loaded_weight)
-                    return True if return_success else None
+                    return LoadReceipt.accepted(
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                        weight_name=weight_name,
+                    )
 
                 self.packed.weight_loader = expert_loader
 
@@ -161,7 +228,16 @@ class TestObservation:
                     success = expert_id == 0
                     if success:
                         param.data.copy_(loaded_weight)
-                    return success if return_success else None
+                    receipt = (
+                        LoadReceipt.accepted
+                        if success
+                        else LoadReceipt.skipped
+                    )
+                    return receipt(
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                        weight_name=weight_name,
+                    )
 
                 self.packed.weight_loader = expert_loader
 
@@ -195,6 +271,9 @@ class TestObservation:
                 def qkv_loader(param, loaded_weight, loaded_shard_id):
                     offset = {"q": 0, "k": 4, "v": 8}[loaded_shard_id]
                     param.data[offset:offset + 4].copy_(loaded_weight)
+                    return LoadReceipt.accepted(
+                        loaded_shard_id=loaded_shard_id
+                    )
 
                 self.weight.weight_loader = qkv_loader
 
@@ -304,6 +383,7 @@ class _CountedLayer(nn.Module):
         def composed(param, w):        # copies twice: numel counts 2x
             param.data.copy_(w)
             param.data.copy_(-torch.exp(w.float()))
+            return LoadReceipt.accepted()
 
         self.A.weight_loader = composed
 

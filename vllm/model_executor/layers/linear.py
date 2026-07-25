@@ -31,6 +31,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.utils import (
     dispatch_unquantized_gemm,
 )
+from vllm.model_executor.load_receipt import returns_load_receipt
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
     BlockQuantScaleParameter,
@@ -662,6 +663,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             return True
         raise ValueError("This line should not be reached")
 
+    @returns_load_receipt("loaded_shard_id")
     def weight_loader(
         self,
         param: Parameter,
@@ -847,6 +849,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             )
             self.weight_loader_v2(param, loaded_weight_shard, shard_id)
 
+    @returns_load_receipt("loaded_shard_id")
     def weight_loader_v2(
         self,
         param: BasevLLMParameter,
@@ -1095,6 +1098,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             )
             self.weight_loader_v2(param, loaded_weight_shard, shard_id)
 
+    @returns_load_receipt("loaded_shard_id")
     def weight_loader_v2(
         self,
         param: BasevLLMParameter,
@@ -1142,6 +1146,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             tp_rank=self.tp_rank,
         )
 
+    @returns_load_receipt("loaded_shard_id")
     def weight_loader(
         self,
         param: Parameter,

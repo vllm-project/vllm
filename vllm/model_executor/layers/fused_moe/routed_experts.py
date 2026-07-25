@@ -25,6 +25,10 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
+from vllm.model_executor.load_receipt import (
+    LoadReceipt,
+    returns_load_receipt,
+)
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.runner.shared_experts import SharedExperts
@@ -569,7 +573,7 @@ class RoutedExperts(PluggableLayer):
         shard_id: str,
         expert_id: int,
         return_success: Literal[False],
-    ) -> None: ...
+    ) -> LoadReceipt: ...
 
     @overload
     def weight_loader(
@@ -580,8 +584,9 @@ class RoutedExperts(PluggableLayer):
         shard_id: str,
         expert_id: int,
         return_success: Literal[True],
-    ) -> bool: ...
+    ) -> LoadReceipt: ...
 
+    @returns_load_receipt("shard_id", "expert_id", "weight_name")
     def weight_loader(
         self,
         param: torch.nn.Parameter,
@@ -590,7 +595,7 @@ class RoutedExperts(PluggableLayer):
         shard_id: str,
         expert_id: int,
         return_success: bool = False,
-    ) -> bool | None:
+    ) -> LoadReceipt:
         quant_config_name = self.quant_config and self.quant_config.get_name()
         if quant_config_name == "gpt_oss_mxfp4":
             # (FIXME) for gpt-oss all experts are combined

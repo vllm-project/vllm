@@ -11,7 +11,9 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.load_receipt import LoadFragment, LoadReceipt
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.reload_arena import peek_reload_arena
 
 from .meta import (
     SKIP_TENSORS,
@@ -311,8 +313,9 @@ def _make_recording_loader(info: LayerReloadingInfo, name: str,
         bound_args.apply_defaults()
         result = original(*args, **kwargs)
         assert info.required_keys is not None
-        if _load_call_consumed(bound_args, result):
-            info.required_keys.add(_load_event_key(name, bound_args))
+        receipt = _get_load_receipt(bound_args, result)
+        if receipt.consumed:
+            info.required_keys.add(_load_event_key(name, receipt))
         return result
 
     # A distinct __name__ so _get_original_loader (which unwraps only
@@ -333,8 +336,37 @@ _LOAD_FRAGMENT_ARGUMENTS = (
 )
 
 
-def _load_event_key(param_name: str,
-                    args: inspect.BoundArguments) -> str:
+def _legacy_load_receipt(
+    args: inspect.BoundArguments,
+    result: object,
+) -> LoadReceipt:
+    """Adapt existing None/bool loaders during the receipt migration."""
+    consumed = (
+        result is True
+        if args.arguments.get("return_success") is True
+        else True
+    )
+    fields = {
+        name: args.arguments.get(name)
+        for name in _LOAD_FRAGMENT_ARGUMENTS
+        if args.arguments.get(name) is not None
+    }
+    return LoadReceipt(
+        consumed=consumed,
+        fragment=LoadFragment.from_fields(**fields),
+    )
+
+
+def _get_load_receipt(
+    args: inspect.BoundArguments,
+    result: object,
+) -> LoadReceipt:
+    if isinstance(result, LoadReceipt):
+        return result
+    return _legacy_load_receipt(args, result)
+
+
+def _load_event_key(param_name: str, receipt: LoadReceipt) -> str:
     """Return the logical target fragment consumed by one loader call.
 
     A loader invocation is one event regardless of how many internal writes
@@ -343,24 +375,12 @@ def _load_event_key(param_name: str,
     Keeping the no-fragment representation equal to ``param_name`` preserves
     compatibility for ordinary parameters and existing diagnostics.
     """
-    fragments = []
-    for name in _LOAD_FRAGMENT_ARGUMENTS:
-        value = args.arguments.get(name)
-        if value is not None:
-            fragments.append(f"{name}={value!r}")
-    target = (param_name if not fragments else
-              f"{param_name}[{','.join(fragments)}]")
+    fragment = receipt.fragment.format()
+    target = param_name if not fragment else f"{param_name}[{fragment}]"
     source_key = get_current_source_key()
     if source_key is None:
         return target
     return f"{source_key}=>{target}"
-
-
-def _load_call_consumed(args: inspect.BoundArguments, result: object) -> bool:
-    """Whether a conditional loader reports that it consumed this fragment."""
-    if args.arguments.get("return_success") is True:
-        return result is True
-    return True
 
 
 def finalize_load_recording(model: torch.nn.Module) -> None:
@@ -568,8 +588,9 @@ def _make_receipt_observer(info: LayerReloadingInfo, param_name: str,
         bound_args = loader_signature.bind(*args, **kwargs)
         bound_args.apply_defaults()
         result = original_loader(*args, **kwargs)
-        if _load_call_consumed(bound_args, result):
-            info.received_keys.add(_load_event_key(param_name, bound_args))
+        receipt = _get_load_receipt(bound_args, result)
+        if receipt.consumed:
+            info.received_keys.add(_load_event_key(param_name, receipt))
             info.received_target_keys.add(param_name)
         return result
 
@@ -611,8 +632,9 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         # This distinguishes Q/K/V shards and MoE expert/shard calls that
         # share one packed destination parameter. Internal copy_ calls remain
         # invisible: the loader invocation, not a storage write, is the event.
-        if _load_call_consumed(bound_args, ret):
-            info.received_keys.add(_load_event_key(param_name, bound_args))
+        receipt = _get_load_receipt(bound_args, ret)
+        if receipt.consumed:
+            info.received_keys.add(_load_event_key(param_name, receipt))
             info.received_target_keys.add(param_name)
 
         logger.debug(

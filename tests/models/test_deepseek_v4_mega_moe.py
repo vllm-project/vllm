@@ -60,16 +60,13 @@ def test_deepseek_v4_mega_moe_weight_loader_uses_ep_expert_ownership():
     )
 
     nonlocal_weight = torch.ones(128, 64, dtype=torch.uint8)
-    assert (
-        experts.weight_loader(
-            experts.w13_weight,
-            nonlocal_weight,
-            "experts.w13_weight",
-            shard_id="w1",
-            expert_id=1,
-            return_success=True,
-        )
-        is False
+    assert not experts.weight_loader(
+        experts.w13_weight,
+        nonlocal_weight,
+        "experts.w13_weight",
+        shard_id="w1",
+        expert_id=1,
+        return_success=True,
     )
 
     w1 = torch.full((128, 64), 3, dtype=torch.uint8)
