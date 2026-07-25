@@ -36,13 +36,12 @@ def build_offloading_config(
     engine_id = kv_transfer_config.engine_id
 
     parallel_config = vllm_config.parallel_config
-    context_parallel_factor = (
-        parallel_config.decode_context_parallel_size
-        * parallel_config.prefill_context_parallel_size
-    )
     groups = tuple(
         OffloadingGroupConfig(
-            tokens_per_block=(group.kv_cache_spec.block_size * context_parallel_factor),
+            tokens_per_block=(
+                group.kv_cache_spec.block_size
+                * parallel_config.decode_context_parallel_size
+            ),
             layer_names=tuple(group.layer_names),
         )
         for group in kv_cache_config.kv_cache_groups

@@ -385,7 +385,7 @@ def test_tiering_spec_aligns_row_size():
     assert spec.num_blocks == cpu_bytes_to_use // alignment
 
 
-def test_offloading_spec_resolves_prefill_context_parallel_block_sizes():
+def test_offloading_spec_kv_sharding_ignores_prefill_context_parallel():
     config = _make_layout_vllm_config(
         cpu_bytes_to_use=65536,
         extra_config={"block_size": 64},
@@ -394,9 +394,9 @@ def test_offloading_spec_resolves_prefill_context_parallel_block_sizes():
 
     spec = _create_spec(config, _make_kv_cache_config())
 
-    assert spec.tokens_per_block == (32,)
-    assert spec.tokens_per_hash == 32
-    assert spec.blocks_per_chunk == 2
+    assert spec.tokens_per_block == (16,)
+    assert spec.tokens_per_hash == 16
+    assert spec.blocks_per_chunk == 4
 
 
 def test_offloading_config_preserves_data_parallel_index():

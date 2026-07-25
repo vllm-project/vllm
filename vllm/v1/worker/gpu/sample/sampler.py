@@ -5,7 +5,7 @@ import numpy as np
 import torch
 
 import vllm.envs as envs
-from vllm.config.model import LogprobsMode
+from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
@@ -83,7 +83,11 @@ class Sampler:
         # that num_nans is computed before applying penalties and temperature.
         num_nans = get_num_nans(logits) if self.compute_nans else None
 
-        return_logprobs = self.returns_logprobs(idx_mapping_np)
+        max_num_logprobs = self.sampling_states.max_num_logprobs(idx_mapping_np)
+        max_per_req_token_ids = self.logprob_token_ids_state.max_num_token_ids(
+            idx_mapping_np
+        )
+        return_logprobs = max_num_logprobs != NO_LOGPROBS or max_per_req_token_ids > 0
 
         sampled, processed_logits = self.sample(
             logits,
@@ -96,12 +100,8 @@ class Sampler:
         )
 
         if return_logprobs:
-            if self.logprobs_mode in ("processed_logprobs", "processed_logits"):
+            if self.logprobs_mode in PROCESSED_LOGPROBS_MODES:
                 logits = processed_logits
-            max_num_logprobs = self.sampling_states.max_num_logprobs(idx_mapping_np)
-            max_per_req_token_ids = self.logprob_token_ids_state.max_num_token_ids(
-                idx_mapping_np
-            )
             expanded_logits = logits.shape[0] != idx_mapping_np.shape[0]
             cu_num_logits = cu_num_logits_np.tolist() if expanded_logits else None
             num_logprobs = max_num_logprobs if max_num_logprobs != NO_LOGPROBS else 0
@@ -142,13 +142,6 @@ class Sampler:
         )
         return sampler_output
 
-    def returns_logprobs(self, idx_mapping_np: np.ndarray) -> bool:
-        """Whether any request in the batch produces logprobs this step."""
-        return (
-            self.sampling_states.max_num_logprobs(idx_mapping_np) != NO_LOGPROBS
-            or self.logprob_token_ids_state.max_num_token_ids(idx_mapping_np) > 0
-        )
-
     def apply_sampling_params(
         self,
         logits: torch.Tensor,
@@ -159,13 +152,8 @@ class Sampler:
         expanded_local_pos: torch.Tensor,
         skip_top_k_top_p: bool = False,
     ) -> torch.Tensor:
-        # The ops below upcast to fp32 internally, so the input dtype is kept and
-        # mutated in place. Only raw_logprobs reads the unmodified logits
-        # afterward, so copy just for that case.
-        if self.logprobs_mode.startswith("raw_") and self.returns_logprobs(
-            idx_mapping_np
-        ):
-            logits = logits.clone()
+        # Copy logits to a new FP32 tensor.
+        logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
 
         # Apply logit bias (e.g., allowed_token_ids, min_tokens) in place.
         self.logit_bias_state.apply_logit_bias(
@@ -233,10 +221,7 @@ class Sampler:
             # any greedy requests or per-request seeds, or if post-processed
             # logprobs need to be returned for any requests.
             (top_k is None and top_p is None)
-            or (
-                return_logprobs
-                and self.logprobs_mode in ("processed_logprobs", "processed_logits")
-            )
+            or (return_logprobs and self.logprobs_mode in PROCESSED_LOGPROBS_MODES)
             or self.sampling_states.any_greedy(idx_mapping_np)
             or self.sampling_states.any_explicit_seed(idx_mapping_np)
         )

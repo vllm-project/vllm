@@ -75,8 +75,8 @@ class SingleTypeKVCacheManager(ABC):
         self.block_size = kv_cache_spec.block_size
         self.dcp_world_size = dcp_world_size
         self.pcp_world_size = pcp_world_size
-        if dcp_world_size * pcp_world_size > 1:
-            self.block_size *= dcp_world_size * pcp_world_size
+        if dcp_world_size > 1:
+            self.block_size *= dcp_world_size
         self.kv_cache_spec = kv_cache_spec
         self.block_pool = block_pool
         self.enable_caching = enable_caching
@@ -674,10 +674,10 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             "and chunked local attention groups"
         )
         block_size = kv_cache_spec.block_size
-        if dcp_world_size * pcp_world_size > 1:
-            # DCP/PCP shard each block's KV across ranks; hashes must be
-            # viewed at the sharded (scaled) block size.
-            block_size *= dcp_world_size * pcp_world_size
+        if dcp_world_size > 1:
+            # DCP shards each block's KV across ranks; hashes must be viewed at
+            # the sharded block size.
+            block_size *= dcp_world_size
         block_hashes = resolve_block_hashes(
             block_hashes,
             block_pool.hash_block_size,
