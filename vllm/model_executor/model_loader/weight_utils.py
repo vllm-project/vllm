@@ -260,12 +260,8 @@ def get_quant_config(
         and hf_quant_config.get("quant_method") == "compressed-tensors"
         and "config_groups" in hf_quant_config
     ):
-        if hf_text_config is not None:
-            n_heads = getattr(hf_text_config, "num_attention_heads", None)
-            n_kv_heads = getattr(hf_text_config, "num_key_value_heads", None)
-        else:
-            n_heads = getattr(model_config.hf_config, "num_attention_heads", None)
-            n_kv_heads = getattr(model_config.hf_config, "num_key_value_heads", None)
+        n_heads = model_config.model_arch_config.total_num_attention_heads
+        n_kv_heads = model_config.model_arch_config.total_num_kv_heads
 
         hf_quant_config["total_num_heads"] = n_heads
         hf_quant_config["total_num_kv_heads"] = (
