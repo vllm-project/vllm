@@ -408,6 +408,25 @@ def _check_set_completion(layer: torch.nn.Module,
         info.required_target_keys = None
 
 
+def _has_exact_manifest(info: LayerReloadingInfo) -> bool:
+    """Whether this layer has a real source/fragment baseline.
+
+    ``required_keys == set()`` is deliberately not authoritative: that is the
+    provisional state installed by DummyModelLoader before the first real
+    transfer.  Such a transfer still uses the legacy completion path while it
+    learns the rank-local exact event set.
+    """
+    return bool(info.required_keys) and info.required_target_keys is None
+
+
+def _manifest_complete(info: LayerReloadingInfo) -> bool:
+    return (
+        _has_exact_manifest(info)
+        and info.required_keys is not None
+        and info.required_keys <= info.received_keys
+    )
+
+
 def get_layerwise_info(layer: torch.nn.Module) -> LayerReloadingInfo:
     """
     Get information related to restoring and layerwise processing. If no previous
@@ -491,14 +510,36 @@ def initialize_online_processing(layer: torch.nn.Module):
     # Track loading progress to determine when to process/copy
     info.received_keys.clear()
     info.received_target_keys.clear()
-    info.load_numel = 0
-    info.load_numel_total = get_layer_size(layer)
+    info.is_loading = True
+    info.copied_numel_diagnostic = 0
+    info.layer_numel_diagnostic = get_layer_size(layer)
+    if info.required_keys is None and info.required_target_keys is None:
+        # Online quantization can install this machinery while the model is
+        # still being constructed, before BaseModelLoader starts observing
+        # the first checkpoint stream. Establish a provisional target
+        # manifest so even that first load is event-driven.
+        targets = {
+            name
+            for name, tensor in get_layer_tensors(layer).items()
+            if tensor is not None and name not in SKIP_TENSORS
+        }
+        if targets:
+            info.required_target_keys = targets
     _wrap_parameters_weight_loader(layer)
 
 
 def _wrap_parameters_weight_loader(layer: torch.nn.Module) -> None:
     """Wrap each parameter's weight loader."""
     info = get_layerwise_info(layer)
+    if info.required_target_keys is not None:
+        # A loader may register additional parameters dynamically. Re-running
+        # this function after every loader call grows the provisional target
+        # manifest before completion can be declared.
+        info.required_target_keys.update(
+            name
+            for name, tensor in get_layer_tensors(layer).items()
+            if tensor is not None and name not in SKIP_TENSORS
+        )
     # Note that nested wrapping will occur for shared tensors
     for name, tensor in get_layer_tensors(layer).items():
         if name in SKIP_TENSORS:
@@ -547,27 +588,13 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
     @wraps(original_loader, assigned=("__doc__", "__annotations__"))
     def online_process_loader(*args, **kwargs):
         if not info.can_load():
-            # Unfortunately, some qconfigs are set up to load the same weight
-            # multiple times. For example, CT_WNA16 loads `weight_shape` for
-            # each of the qkv partitions. This results in layers loading extra
-            # weights (beyond load_numel_total) after it's already processed.
-            #
-            # Best solution is to ensure that `load_numel_total` reflects the
-            # actual number of weights loaded, either by modifying qconfigs to
-            # create as many weights as loaded (see padding issue as well)
-            # or maybe capturing how many weights are loaded on first pass
-            #
-            # For now, `load_numel_total` is still safe to use as long as
-            # there's no way to reach `load_numel_total` without loading all
-            # necessary weights. `weight_shape` is very small, so this is safe.
-            # see Limitations(4)
-            logger.debug("%s: Excessive loading", layer.__class__.__name__)
+            logger.debug("%s: Event arrived after layer completion",
+                         layer.__class__.__name__)
             return
 
-        # Re-run on each load: layers may register parameters later (e.g., `bias`).
-        # Wrap late parameters and refresh `load_numel_total` so processing waits
-        # until all parameters are loaded.
-        info.load_numel_total = get_layer_size(layer)
+        # Re-run on each load: layers may register parameters later (e.g.,
+        # ``bias``). The provisional target manifest is extended below.
+        info.layer_numel_diagnostic = get_layer_size(layer)
         _wrap_parameters_weight_loader(layer)
 
         # Bind and normalize arguments
@@ -577,7 +604,8 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         # Buffer loaded weights, track loading progress
         info.loaded_weights.append((param_name, bound_args))
         num_loaded, ret = get_numel_loaded(original_loader, bound_args)
-        info.load_numel += num_loaded
+        info.copied_numel_diagnostic += num_loaded
+        _wrap_parameters_weight_loader(layer)
 
         # Observe the same logical target fragment as the first-load wrapper.
         # This distinguishes Q/K/V shards and MoE expert/shard calls that
@@ -590,8 +618,8 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         logger.debug(
             "%s: %d / %d",
             layer.__class__.__name__,
-            info.load_numel,
-            info.load_numel_total,
+            info.copied_numel_diagnostic,
+            info.layer_numel_diagnostic,
         )
 
         # Do not online process attention layers, must wait until finalize
@@ -614,8 +642,13 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
                     str(list(names)),
                 )
 
-        # Process and copy when all weights are loaded
-        if info.load_numel >= info.load_numel_total:  # type: ignore[operator]
+        # Once an exact first-load manifest exists, it is the authoritative
+        # layer completion criterion.  Numel remains the compatibility path
+        # only for the dummy first transfer and loaders without a manifest.
+        # This prevents composed loaders from finalizing a layer early merely
+        # because one logical event performs multiple internal copy_ calls.
+        manifest_driven = _has_exact_manifest(info)
+        if manifest_driven and _manifest_complete(info):
             _layerwise_process(layer, info)
             LOADING_LAYERS.discard(layer)
 
@@ -657,15 +690,17 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
             deferred_attn.append((layer, info))
             continue
 
+        has_loaded_events = bool(info.loaded_weights)
+
         # No weights were loaded
-        if info.load_numel <= 0:
+        if not has_loaded_events:
             # first load: checkpoint did not contain weights for this layer
             if info.kernel_tensors is None:
                 _layerwise_process(layer, info)
                 continue
 
             # reloading: place kernel tensors back as a fallback
-            elif info.load_numel_total > 0:  # type: ignore[operator]
+            elif get_layer_size(layer) > 0:
                 logger.warning("%s: Failed to load weights", layer.__class__.__name__)
                 _place_kernel_tensors(layer, info)
 
@@ -673,7 +708,7 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
         # if the created weight has extra padding elements which are not loaded
         # Having too many of these delayed layers can lead to excess memory usage
         # see Limitations(4)
-        elif info.load_numel > 0 and info.load_numel < info.load_numel_total:  # type: ignore[operator]
+        elif has_loaded_events:
             logger.debug("%s: Delayed processing", layer.__class__.__name__)
             _layerwise_process(layer, info)
 
@@ -706,11 +741,12 @@ def finalize_layerwise_reload(*args, **kwargs):
 def _finalize_attention_layer(
     layer: torch.nn.Module, info: LayerReloadingInfo, model_config: ModelConfig
 ) -> None:
-    if info.load_numel > 0 and info.kernel_tensors is not None:
+    has_loaded_events = bool(info.loaded_weights)
+    if has_loaded_events and info.kernel_tensors is not None:
         # Reload with new scale weights from checkpoint
         _place_kernel_tensors(layer, info)
         _reload_attention_scales(layer, info)
-    elif info.load_numel > 0 or info.kernel_tensors is None:
+    elif has_loaded_events or info.kernel_tensors is None:
         raise ValueError(
             "Layerwise loading of attention layers is not supported. "
             "Attention must always process after linears."

@@ -71,9 +71,11 @@ class LayerReloadingInfo:
     # device to materialize layers with, recorded by `record_metadata_for_reloading`
     restore_device: torch.device
 
-    # track how many elements are ready for loading, used by `online_process_loader`
-    load_numel: int = 0
-    load_numel_total: int | None = None
+    # Whether this layer currently has online reload wrappers installed.
+    # Completion is manifest-driven; copied element counts are diagnostics only.
+    is_loading: bool = False
+    copied_numel_diagnostic: int = 0
+    layer_numel_diagnostic: int | None = None
 
     # used by `online_process_loader` to buffer args and tensors until ready to load
     loaded_weights: list[tuple[str, BoundArguments]] = field(default_factory=list)
@@ -122,4 +124,4 @@ class LayerReloadingInfo:
         )
 
     def can_load(self) -> bool:
-        return self.load_numel_total is not None
+        return self.is_loading

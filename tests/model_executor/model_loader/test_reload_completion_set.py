@@ -9,8 +9,8 @@ from layer structure (`get_layer_size`, minus a hand-maintained
 required key set from the first load, reconcile against it on reload.
 
 Runs on CPU over the real reload machinery on synthetic layers -- no GPU, no
-checkpoint. Dual-run: numel stays authoritative; the set criterion records
-disagreements.
+checkpoint. These tests cover both the historical disagreement and the
+manifest-authoritative completion path that replaces copied-numel accounting.
 """
 
 import pytest
@@ -378,6 +378,35 @@ class TestDualRunCatchesDroppedKey:
             "layer.D=>D",
             "layer.dt_bias=>dt_bias",
         }
+
+    def test_dummy_target_manifest_replaces_numel_completion(self, monkeypatch):
+        m = _CountedModel()
+        record_metadata_for_reloading(m)
+        record_dummy_load_manifest(m)
+        initialize_layerwise_reload(m)
+
+        # Even a permanently zero diagnostic counter must not prevent target
+        # manifest completion during the first real transfer.
+        monkeypatch.setattr(
+            "vllm.model_executor.model_loader.reload.layerwise.get_numel_loaded",
+            lambda loader, args: (
+                0,
+                loader(*args.args, **args.kwargs),
+            ),
+        )
+        m.load_weights(observe_weight_sources([
+            ("layer.A", torch.ones(4)),
+            ("layer.D", torch.full((4,), 2.0)),
+            ("layer.dt_bias", torch.full((4,), 3.0)),
+        ]))
+
+        # A provisional target set cannot say how many QKV/MoE fragments map
+        # to one target, so the first source-bearing load remains buffered
+        # until transaction finalization.
+        assert get_layerwise_info(m.layer).can_load()
+        finalize_layerwise_reload(m, _Cfg())
+        assert torch.equal(m.layer.D, torch.full((4,), 2.0))
+        assert get_layerwise_info(m.layer).required_target_keys is None
 
     def test_checkpoint_backed_skip_tensor_receipt_can_arrive_last(self):
         """A skipped alias remains device-resident but is still load-required.

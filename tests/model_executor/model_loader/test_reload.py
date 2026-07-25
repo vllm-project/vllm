@@ -9,10 +9,14 @@ import torch
 from torch.nn.parameter import UninitializedParameter
 
 import vllm.model_executor.model_loader.reload.meta as reload_meta
+import vllm.model_executor.model_loader.reload.layerwise as reload_layerwise
 from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.model_loader.reload.layerwise import (
     finalize_layerwise_reload,
+    finalize_load_recording,
+    get_layerwise_info,
     initialize_layerwise_reload,
+    record_load_consumption,
     record_metadata_for_reloading,
 )
 from vllm.model_executor.model_loader.reload.meta import (
@@ -252,18 +256,16 @@ def test_get_numel_loaded():
     assert ret == "value"
 
 
-def test_get_numel_loaded_caps_at_param_size():
-    # composed_weight_loader copies into the param twice (the load and the
-    # in-place post-load transform), but only param.numel() distinct elements
-    # are loaded. get_numel_loaded must not double-count, otherwise a layer's
-    # loaded-element total can be reached early and trailing params get dropped.
+def test_get_numel_loaded_is_diagnostic_for_composed_loader():
+    # The diagnostic reports both internal writes. This no longer controls
+    # layer completion, which is driven by logical manifest events.
     param = torch.empty(10)
     loaded_weight = torch.ones(10)
     loader = composed_weight_loader(default_weight_loader, lambda x: x + 1)
 
     args = inspect.signature(loader).bind(param, loaded_weight)
     num_loaded, _ = get_numel_loaded(loader, args)
-    assert num_loaded == 10
+    assert num_loaded == 20
 
 
 class _ComposedLoaderLayer(torch.nn.Module):
@@ -324,6 +326,59 @@ def test_layerwise_reload_composed_loader_does_not_drop_params(monkeypatch):
         param.weight_loader(param, loaded[name])
     finalize_layerwise_reload(model, model_config=None)
 
+    assert torch.equal(layer.A, -torch.exp(loaded["A"]))
+    assert torch.equal(layer.dt_bias, loaded["dt_bias"])
+    assert torch.equal(layer.D, loaded["D"])
+
+
+def test_exact_manifest_replaces_numel_completion_for_composed_loader(
+    monkeypatch,
+):
+    """An established event manifest, not copy_ numel, completes the layer."""
+    layer = _ComposedLoaderLayer()
+    model = torch.nn.Sequential(layer)
+    loaded = {
+        "A": torch.full((4,), 0.5),
+        "dt_bias": torch.full((4,), 3.0),
+        "D": torch.full((4,), 7.0),
+    }
+
+    # Establish the exact baseline through the same wrappers used by a normal
+    # checkpoint-backed first model load.
+    record_load_consumption(model)
+    for name in ("A", "dt_bias", "D"):
+        param = getattr(layer, name)
+        param.weight_loader(param, loaded[name])
+    finalize_load_recording(model)
+
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+
+    # Recreate the pre-#44814 over-count. If numel still controlled completion,
+    # A + dt_bias would finalize the layer and D would remain uninitialized.
+    monkeypatch.setattr(
+        reload_layerwise,
+        "get_numel_loaded",
+        lambda loader, args: (
+            (
+                2 * args.arguments["param"].numel()
+                if args.arguments["param"] is layer.A
+                else args.arguments["param"].numel()
+            ),
+            loader(*args.args, **args.kwargs),
+        ),
+    )
+
+    params = dict(layer.named_parameters())
+    for name in ("A", "dt_bias", "D"):
+        param = params[name]
+        param.weight_loader(param, loaded[name])
+        if name == "dt_bias":
+            # Numel has already reached the old threshold, but the D event is
+            # still missing, so manifest-driven processing must remain active.
+            assert get_layerwise_info(layer).can_load()
+
+    finalize_layerwise_reload(model, model_config=None)
     assert torch.equal(layer.A, -torch.exp(loaded["A"]))
     assert torch.equal(layer.dt_bias, loaded["dt_bias"])
     assert torch.equal(layer.D, loaded["D"])
