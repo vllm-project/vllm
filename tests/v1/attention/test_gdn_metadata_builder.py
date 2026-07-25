@@ -365,13 +365,17 @@ GDN_REPLAYSSM_BUILD_CASES = {
 
 
 def _create_replayssm_gdn_builder(
-    buffer_len: int, mamba_cache_mode: str = "none"
+    buffer_len: int,
+    mamba_cache_mode: str = "none",
+    full_cuda_graph: bool = False,
 ) -> GDNAttentionMetadataBuilder:
     """Create a GDNAttentionMetadataBuilder with ReplaySSM cached decode on."""
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
         block_size=BLOCK_SIZE,
     )
+    if full_cuda_graph:
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
     # Enable after config construction so validate_mamba_cached_kernel (Triton
     # only) does not run; the builder reads the flags in __init__.
     vllm_config.cache_config.use_replayssm = True
@@ -400,6 +404,53 @@ def _build_replayssm(
         replayssm_decode_base_cpu=torch.tensor(case.decode_base, dtype=torch.int32),
     )
     return builder.build(common_prefix_len=0, common_attn_metadata=common)
+
+
+def test_replayssm_single_token_prefill_runs_as_decode():
+    # A final single-token prefill chunk lands in a shape-uniform batch that the
+    # runner dispatches as a FULL cudagraph. It must stay in the decode group,
+    # or num_prefills > 0 skips the persistent-buffer refresh and the replayed
+    # graph reads last step's cursor.
+    builder = _create_replayssm_gdn_builder(16, full_cuda_graph=True)
+    case = GDNReplaySSMBuildCase(
+        seq_lens=[106, 100],
+        query_lens=[1, 1],
+        is_prefilling=[False, True],
+        decode_base=[100, 100],
+        buffer_len=16,
+        expected_write_pos=[5, 0],
+        expected_is_flush=[0, 1],
+    )
+    meta = _build_replayssm(builder, case)
+
+    assert meta.num_decodes == 2
+    assert meta.num_prefills == 0
+    assert meta.write_pos_d is not None and meta.is_flush_d is not None
+    assert meta.write_pos_d.tolist() == case.expected_write_pos
+    assert meta.is_flush_d.tolist() == case.expected_is_flush
+    # The cursor must live in the captured buffers, not a fresh allocation.
+    assert meta.write_pos_d.data_ptr() == builder.decode_write_pos_d.data_ptr()
+    assert meta.is_flush_d.data_ptr() == builder.decode_is_flush_d.data_ptr()
+
+
+def test_replayssm_first_token_prefill_stays_prefill():
+    # A first-token prefill has no prior GDN state, so it must not be pulled
+    # into the decode group.
+    builder = _create_replayssm_gdn_builder(16)
+    case = GDNReplaySSMBuildCase(
+        seq_lens=[1],
+        query_lens=[1],
+        is_prefilling=[True],
+        decode_base=[1],
+        buffer_len=16,
+        expected_write_pos=[],
+        expected_is_flush=[],
+    )
+    meta = _build_replayssm(builder, case)
+
+    assert meta.num_decodes == 0
+    assert meta.num_prefills == 1
+    assert meta.write_pos_d is None
 
 
 @pytest.mark.parametrize(

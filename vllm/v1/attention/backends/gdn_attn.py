@@ -243,7 +243,25 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 )
 
         if spec_sequence_masks is None:
-            # ReplaySSM routes single-token prefill-as-decode rows to prefill.
+            if self.use_replayssm:
+                # FULL-CG dispatch is shape-based, so a single-token prefill
+                # chunk with prior GDN state can replay a decode graph while
+                # is_prefilling is still true. Run those rows as decodes; the
+                # write-position derivation below makes them one-token flushes.
+                # A first-token prefill has no prior state, so seq_lens > 1
+                # keeps it a prefill.
+                is_prefilling = m.is_prefilling
+                assert is_prefilling is not None
+                seq_lens_cpu = m.seq_lens_cpu_upper_bound
+                assert seq_lens_cpu is not None
+                query_lens_cpu = torch.diff(query_start_loc_cpu)
+                prefill_to_decode = (
+                    is_prefilling & (query_lens_cpu == 1) & (seq_lens_cpu > 1)
+                )
+                if torch.any(prefill_to_decode).item():
+                    is_prefilling = is_prefilling.clone()
+                    is_prefilling[prefill_to_decode] = False
+                    m = m.replace(is_prefilling=is_prefilling)
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
                 split_decodes_and_prefills(
                     m,
