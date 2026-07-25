@@ -1,6 +1,6 @@
 # Reload as a Transaction — the Top-Down Design for #48312
 
-Status: **partially implemented**. This document defines what a correct weight update must guarantee, which failure category each mechanism addresses, and where the remaining gaps are. It intentionally describes the correctness contract before the implementation. Detailed manifest and receipt internals belong in `LOAD_MANIFEST_DESIGN.md`.
+Status: **partially implemented**. This document is the transaction design for [RFC #48312: Weight Reload Correctness for RL](https://github.com/vllm-project/vllm/issues/48312). It defines what a correct weight update must guarantee, which RFC failure category each mechanism addresses, and where the remaining gaps are. It intentionally describes the correctness contract before the implementation. Detailed manifest and receipt internals belong in `LOAD_MANIFEST_DESIGN.md`.
 
 Status labels used below:
 
@@ -24,6 +24,31 @@ The reload investigation found several independent classes of failure. Stable st
 | 7. Cache coherence | Consumers do not use state from an old weight generation | Prefix, LoRA, or multimodal cache survives an update | Generation-aware cache invalidation | To be implemented |
 
 These invariants do not share one mechanism. They share one **decision point**: immediately before the engine resumes inference. A weight update is correct only if every applicable invariant is proven at that point.
+
+### 1.1 RFC categories 1–4 and their tracked issues
+
+The following table maps every numbered issue listed by RFC #48312 under categories 1–4 to the checker or policy in this document. Cross-category issues intentionally appear more than once when one fix cannot prove both invariants.
+
+| RFC category | Tracked issue | Failure represented in this design | Transaction section |
+|---|---|---|---|
+| 1. Storage identity | [#48251](https://github.com/vllm-project/vllm/issues/48251) | Generic MLA post-load tensors are rebound after graph capture | C1 `StorageIdentityChecker`; its stale attention-sink copy also maps to C2 |
+| 1. Storage identity | [#40390](https://github.com/vllm-project/vllm/issues/40390) | ROCm AITER unquantized-MoE shuffle replaces graph-visible runtime parameters | C1 `StorageIdentityChecker` |
+| 1. Storage identity | [#46009](https://github.com/vllm-project/vllm/issues/46009) | ROCm unquantized-MoE padding replaces parameter storage through `.data` | C1 `StorageIdentityChecker` |
+| 1. Storage identity | [#41670](https://github.com/vllm-project/vllm/issues/41670) | Rebuilding CUTLASS grouped-GEMM FP8 experts replaces stride and staged-scale storage | C1 `StorageIdentityChecker`, with C2 refresh implications |
+| 1. Storage identity | [#48438](https://github.com/vllm-project/vllm/issues/48438) | Marlin workspace and act-order sort-index storage are rebound | C1 `StorageIdentityChecker` |
+| 1. Storage identity | [#48539](https://github.com/vllm-project/vllm/issues/48539) | Machete act-order permutation storage is recreated on every post-load pass | C1 `StorageIdentityChecker` |
+| 1. Storage identity | [RFC #48478](https://github.com/vllm-project/vllm/issues/48478) | Defines the production fail-closed graph-storage contract for category 1 | C1 production registration/verification boundary |
+| 2. Runtime value refresh | [#48251](https://github.com/vllm-project/vllm/issues/48251) | A BF16/FP16 checkpoint sink changes while its FP32 runtime copy remains stale | C2 `DerivedValueRefreshChecker` |
+| 3. Loader lifecycle | [#42821](https://github.com/vllm-project/vllm/issues/42821), fix [#42823](https://github.com/vllm-project/vllm/pull/42823) | A loader survives layout conversion and corrupts the second `model.load_weights` call | C3a `LoaderEpochChecker` and transaction entry-point wrapping |
+| 3. Loader lifecycle | [#44814](https://github.com/vllm-project/vllm/pull/44814) | A composed loader double-counts copied elements and finalizes Mamba2 before `mixer.D` arrives | C3b `CompletionManifestChecker` |
+| 3. Loader lifecycle | [#37334](https://github.com/vllm-project/vllm/issues/37334), [#38746](https://github.com/vllm-project/vllm/issues/38746) | Skipped/shared tensors make numel completion finish too early or never finish | C3b `CompletionManifestChecker` |
+| 4. Reload state preservation | [#42481](https://github.com/vllm-project/vllm/issues/42481) | Parent/child parameter-buffer aliasing is not preserved during copy-back | C4a `KeylessStateChecker` |
+| 4. Reload state preservation | [#44371](https://github.com/vllm-project/vllm/issues/44371) | Unloaded non-persistent buffers are overwritten from materialized/meta state | C4a `KeylessStateChecker` |
+| 4. Reload state preservation | [#44613](https://github.com/vllm-project/vllm/issues/44613) | Backend rebuild depends on a global config value that was not snapshotted | C4b `ConfigContextChecker` |
+| 4. Reload state preservation | [#45989](https://github.com/vllm-project/vllm/issues/45989) | Reload rebuilds MoE with a missing or incorrect active `VllmConfig` | C4b `ConfigContextChecker` |
+| 4. Reload state preservation | [#48284](https://github.com/vllm-project/vllm/issues/48284) | Identity reload changes unquantized hybrid/Mamba state and output | C4c `IdempotencyChecker` |
+| 4. Reload state preservation | [#40647](https://github.com/vllm-project/vllm/issues/40647) | Historical umbrella for config-context, alias, and unloaded-state failures | C4a plus C4b; tracked by the more specific issues above |
+| 4. Reload state preservation | [#45835](https://github.com/vllm-project/vllm/pull/45835) | Partial FP8 updates need an explicit preserve-or-reject policy for omitted scales | C4a state policy plus C3b/C6 exact key accounting |
 
 The transaction model is therefore:
 
