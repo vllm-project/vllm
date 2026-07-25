@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Protocol
 
 import torch
 import torch.nn as nn
@@ -36,6 +36,14 @@ class ModelSpecificAttnMetadata:
         return {}
 
 
+class AdditionalCudaGraph(Protocol):
+    def profile_memory(self) -> int: ...
+
+    def capture(self) -> None: ...
+
+    def clear(self) -> None: ...
+
+
 class ModelState(ABC):
     def __init__(
         self,
@@ -55,6 +63,7 @@ class ModelState(ABC):
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.inputs_embeds_size = self.model_config.get_inputs_embeds_size()
         self.dtype = self.model_config.dtype
+        self.additional_cudagraphs: list[AdditionalCudaGraph] = []
 
         self.supports_mm_inputs = encoder_cache is not None
         if encoder_cache is not None:
@@ -66,7 +75,24 @@ class ModelState(ABC):
                 encoder_cache=encoder_cache,
                 dtype=self.dtype,
                 device=self.device,
+                vllm_config=self.vllm_config,
             )
+            if self.encoder_runner.cudagraph is not None:
+                self.additional_cudagraphs.append(self.encoder_runner.cudagraph)
+
+    def has_additional_cudagraphs(self) -> bool:
+        return bool(self.additional_cudagraphs)
+
+    def profile_additional_cudagraph_memory(self) -> int:
+        return sum(graph.profile_memory() for graph in self.additional_cudagraphs)
+
+    def capture_additional_cudagraphs(self) -> None:
+        for graph in self.additional_cudagraphs:
+            graph.capture()
+
+    def clear_additional_cudagraphs(self) -> None:
+        for graph in self.additional_cudagraphs:
+            graph.clear()
 
     def get_supported_generation_tasks(self) -> tuple[GenerationTask, ...]:
         from vllm.model_executor.models.interfaces import (

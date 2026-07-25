@@ -3,6 +3,7 @@
 import numpy as np
 import torch
 
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMultiModal, supports_realtime
 from vllm.multimodal.encoder_budget import MultiModalBudget
@@ -13,6 +14,7 @@ from vllm.multimodal.utils import (
     set_mm_embedding_modality,
 )
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
+from vllm.v1.worker.gpu.mm.encoder_cudagraph import EncoderCudaGraph
 from vllm.v1.worker.utils import sanity_check_mm_encoder_outputs
 
 logger = init_logger(__name__)
@@ -27,6 +29,7 @@ class EncoderRunner:
         encoder_cache: EncoderCache,
         dtype: torch.dtype,
         device: torch.device,
+        vllm_config: VllmConfig | None = None,
     ):
         self.model = model
         self.max_num_tokens = max_num_tokens
@@ -35,6 +38,7 @@ class EncoderRunner:
         self.dtype = dtype
         self.device = device
         self.is_realtime = supports_realtime(model)
+        self.cudagraph = EncoderCudaGraph.create(vllm_config, model, device, dtype)
 
         self.inputs_embeds = torch.zeros(
             max_num_tokens, hidden_size, dtype=dtype, device=device
@@ -103,7 +107,16 @@ class EncoderRunner:
         for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
             mm_kwargs, device=self.device, pin_memory=True
         ):
-            batch_outputs = self.model.embed_multimodal(**mm_kwargs_batch)
+            cudagraph_output = (
+                self.cudagraph.execute(modality, mm_kwargs_batch)
+                if self.cudagraph is not None
+                else None
+            )
+            batch_outputs = (
+                cudagraph_output
+                if cudagraph_output is not None
+                else self.model.embed_multimodal(**mm_kwargs_batch)
+            )
             sanity_check_mm_encoder_outputs(batch_outputs, expected_num_items=num_items)
             encoder_outputs.extend(batch_outputs)
         return encoder_outputs

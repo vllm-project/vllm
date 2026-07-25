@@ -729,16 +729,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return num_scheduled_tokens
 
     def profile_cudagraph_memory(self) -> int:
-        # NOTE(woosuk): It is TBD whether we keep this API or not.
-        return 0
+        # NOTE(woosuk): Decoder CUDA graph memory profiling for V2 is TBD.
+        return self.model_state.profile_additional_cudagraph_memory()
+
+    def needs_cudagraph_memory_profile(self) -> bool:
+        return (
+            self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            or self.model_state.has_additional_cudagraphs()
+        )
 
     @torch.inference_mode()
     def capture_model(self) -> int:
         assert self.cudagraph_manager is not None
-        if not self.cudagraph_manager.needs_capture():
+        capture_decoder = self.cudagraph_manager.needs_capture()
+        capture_additional = self.model_state.has_additional_cudagraphs()
+        if not capture_decoder and not capture_additional:
             logger.warning(
-                "Skipping CUDA graph capture. To turn on CUDA graph capture, "
-                "ensure `cudagraph_mode` was not manually set to `NONE`"
+                "Skipping CUDA graph capture because no CUDA graphs are configured"
             )
             return 0
 
@@ -750,20 +757,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         start_free_gpu_memory = torch.accelerator.get_memory_info()[0]
 
         with self.maybe_setup_dummy_loras(self.lora_config):
-            self.cudagraph_manager.capture(
-                self.model,
-                self.model_state,
-                self.input_buffers,
-                self.intermediate_tensors,
-                self.block_tables,
-                self.attn_groups,
-                self.kv_cache_config,
-                has_lora=self.lora_config is not None,
-                use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
-                lora_capture_hook=create_lora_capture_hook(self.lora_config, self),
-            )
-            if self.speculator is not None:
-                self.speculator.capture()
+            if capture_decoder:
+                self.cudagraph_manager.capture(
+                    self.model,
+                    self.model_state,
+                    self.input_buffers,
+                    self.intermediate_tensors,
+                    self.block_tables,
+                    self.attn_groups,
+                    self.kv_cache_config,
+                    has_lora=self.lora_config is not None,
+                    use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
+                    lora_capture_hook=create_lora_capture_hook(self.lora_config, self),
+                )
+                if self.speculator is not None:
+                    self.speculator.capture()
+
+            if capture_additional:
+                self.model_state.capture_additional_cudagraphs()
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
@@ -1623,6 +1634,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.attn_groups.clear()
         if hasattr(self, "kv_cache_config"):
             del self.kv_cache_config
+        if hasattr(self, "model_state"):
+            self.model_state.clear_additional_cudagraphs()
         free_before_shutdown(self.vllm_config)
         if hasattr(self, "model_state"):
             del self.model_state
