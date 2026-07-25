@@ -260,7 +260,7 @@ Taking `MMEncoderAttention` as an example:
 
 ### Register a New CustomOp in OOT Device Plugins
 
-Currently, thanks to [vLLM's hardware-plugin mechanism](./plugin_system.md), there are various OOT device plugins emerging out to enable vLLM seamlessly runs on different hardwares. You can also find more details about this mechanism at [Introducing vLLM Hardware Plugin, Best Practice from Ascend NPU](https://blog.vllm.ai/2025/05/12/hardware-plugin.html).
+Currently, thanks to [vLLM's hardware-plugin mechanism](./plugin_system.md), there are various OOT device plugins emerging out to enable vLLM to run seamlessly on different hardware. You can also find more details about this mechanism at [Introducing vLLM Hardware Plugin, Best Practice from Ascend NPU](https://blog.vllm.ai/2025/05/12/hardware-plugin.html).
 
 - **Official device plugins:** [vllm-ascend](https://github.com/vllm-project/vllm-ascend) (for Huawei Ascend NPU), [vllm-spyre](https://github.com/vllm-project/vllm-spyre)
 (for Spyre), [vllm-gaudi](https://github.com/vllm-project/vllm-gaudi) (for Intel Gaudi), [vllm-neuron](https://github.com/vllm-project/vllm-neuron) (for AWS Neuron), [vllm-meta](https://github.com/vllm-project/vllm-metal) (for Apple Silicon), etc.
@@ -295,7 +295,7 @@ Taking `MMEncoderAttention` as an example:
 
 In this case, a new item `{"MMEncoderAttention": CustomMMEncoderAttention}` will be added into `op_registry_oot`. When initializing a `MMEncoderAttention` op object, if the class name (i.e., `MMEncoderAttention`) is contained in the keys of `op_registry_oot`, vLLM will replace it with our registered class (i.e., `CustomMMEncoderAttention`) and instantiate it.
 
-After that, when this `MMEncoderAttention` op is called, your `forward_oot()` will be called if it is enabled. Thus, you will get expected performance on your hardwares without directly modify vLLM.
+After that, when this `MMEncoderAttention` op is called, your `forward_oot()` will be called if it is enabled. Thus, you will get expected performance on your hardware without directly modifying vLLM.
 
 In addition, you can also register all your `CustomOp` at one place for better management.
 
