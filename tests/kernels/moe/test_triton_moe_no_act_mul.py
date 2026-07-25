@@ -18,6 +18,20 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.platforms import current_platform
 
+DEVICE = current_platform.device_type
+
+# Skip the whole module on platforms that cannot run Triton MoE kernels.
+pytestmark = pytest.mark.skipif(
+    not (
+        (
+            current_platform.is_cuda_alike()
+            and current_platform.has_device_capability(80)
+        )
+        or current_platform.is_xpu()
+    ),
+    reason="Requires CUDA/ROCm compute capability >= 8.0 or XPU.",
+)
+
 # Test parameters
 M_SIZES = [1, 16, 64]
 N_SIZES = [128, 256]
@@ -38,7 +52,7 @@ def make_test_tensors(
     num_experts: int,
     topk: int,
     dtype: torch.dtype = torch.bfloat16,
-    device: str = "cuda",
+    device: str = DEVICE,
 ):
     """Create test tensors for MoE with non-gated activation.
 
@@ -58,10 +72,6 @@ def make_test_tensors(
     return hidden_states, w1, w2, topk_weights, topk_ids
 
 
-@pytest.mark.skipif(
-    not current_platform.has_device_capability(80),
-    reason="Requires compute capability >= 8.0",
-)
 @pytest.mark.parametrize("m", M_SIZES)
 @pytest.mark.parametrize("n", N_SIZES)
 @pytest.mark.parametrize("k", K_SIZES)
@@ -144,10 +154,6 @@ def test_triton_experts_no_mul_activation(
     assert output.abs().sum() > 0, "Output is all zeros"
 
 
-@pytest.mark.skipif(
-    not current_platform.has_device_capability(80),
-    reason="Requires compute capability >= 8.0",
-)
 @torch.inference_mode()
 def test_workspace_shapes_no_mul_vs_gated():
     """Test that workspace shapes differ correctly between gated and non-gated."""
@@ -185,10 +191,6 @@ def test_workspace_shapes_no_mul_vs_gated():
     assert out_no_mul == out_gated == (M, K)
 
 
-@pytest.mark.skipif(
-    not current_platform.has_device_capability(80),
-    reason="Requires compute capability >= 8.0",
-)
 @torch.inference_mode()
 def test_adjust_n_for_activation():
     """Test the adjust_N_for_activation method."""
