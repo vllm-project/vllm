@@ -9,7 +9,64 @@ from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionToolsParam,
+)
 from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers.internlm2_tool_parser import Internlm2ToolParser
+
+_GET_WEATHER_TOOL = ChatCompletionToolsParam(
+    type="function",
+    function={
+        "name": "get_weather",
+        "description": "Get the current weather",
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+        },
+    },
+)
+
+
+def _weather_output(name: str) -> str:
+    return (
+        f'<|action_start|><|plugin|>{{"name": "{name}", '
+        '"parameters": {"city": "Tokyo"}}<|action_end|>'
+    )
+
+
+def test_extract_unknown_tool_name_not_emitted(
+    default_tokenizer: TokenizerLike,
+) -> None:
+    # A tool name the client never offered must NOT be surfaced as a tool call.
+    # Regression test: the whitelist guard was dead code (missing `return`), so
+    # any hallucinated tool name was emitted as a real tool call anyway.
+    parser = Internlm2ToolParser(default_tokenizer, [_GET_WEATHER_TOOL])
+    result = parser.extract_tool_calls(
+        _weather_output("delete_everything"), MagicMock()
+    )
+    assert result.tools_called is False
+    assert result.tool_calls == []
+
+
+def test_extract_known_tool_name_emitted(default_tokenizer: TokenizerLike) -> None:
+    # A tool name present in the request must still be emitted.
+    parser = Internlm2ToolParser(default_tokenizer, [_GET_WEATHER_TOOL])
+    result = parser.extract_tool_calls(_weather_output("get_weather"), MagicMock())
+    assert result.tools_called is True
+    assert result.tool_calls[0].function.name == "get_weather"
+
+
+def test_extract_without_tools_not_over_rejected(
+    default_tokenizer: TokenizerLike,
+) -> None:
+    # When no tools are provided (e.g. the batch API constructs the parser with
+    # tools=None) there is no whitelist to validate against, so a tool call must
+    # still be emitted rather than dropped.
+    parser = Internlm2ToolParser(default_tokenizer, None)
+    result = parser.extract_tool_calls(_weather_output("get_weather"), MagicMock())
+    assert result.tools_called is True
+    assert result.tool_calls[0].function.name == "get_weather"
 
 
 class TestInternLM2ToolParser(ToolParserTests):
