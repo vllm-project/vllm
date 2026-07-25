@@ -149,6 +149,7 @@ class Worker(WorkerBase):
 
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+        self._sleep_saved_draft_buffers: dict[str, torch.Tensor] = {}
         self._sleep_rebuild_draft_metadata_buffers = False
 
         # Weight transfer engine is created in `load_model` once the model
@@ -195,6 +196,15 @@ class Worker(WorkerBase):
                 name: buffer.cpu().clone() for name, buffer in model.named_buffers()
             }
             draft = self.get_draft_model()
+            if draft is not None:
+                self._sleep_saved_draft_buffers = {
+                    name: buffer.cpu().clone()
+                    for name, buffer in draft.named_buffers()
+                }
+                logger.info(
+                    "Saved %d unique draft buffers before level-2 sleep.",
+                    len(self._sleep_saved_draft_buffers),
+                )
             inner = getattr(draft, "model", None) if draft is not None else None
             self._sleep_rebuild_draft_metadata_buffers = inner is not None and hasattr(
                 inner, "_build_fused_kv_buffers"
@@ -229,6 +239,14 @@ class Worker(WorkerBase):
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
+
+        if len(self._sleep_saved_draft_buffers):
+            draft = self.get_draft_model()
+            if draft is not None:
+                for name, buffer in draft.named_buffers():
+                    if name in self._sleep_saved_draft_buffers:
+                        buffer.data.copy_(self._sleep_saved_draft_buffers[name].data)
+            self._sleep_saved_draft_buffers = {}
 
         if self._sleep_rebuild_draft_metadata_buffers:
             draft = self.get_draft_model()
