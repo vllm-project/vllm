@@ -11,6 +11,8 @@ from typing import Any, Literal
 
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel, zip_inputs
+
 logger = logging.getLogger(__name__)
 
 _cutedsl_available: bool | None = None
@@ -43,6 +45,7 @@ _TUNED_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int]]] = {
         **{M: (5, 4) for M in range(6, 17)},
     },
 }
+_EMPTY_TUNED_CONFIG: dict[int, tuple[int, int]] = {}
 
 
 _cute_ctx = None
@@ -72,7 +75,7 @@ def _use_pdl() -> bool:
     return current_platform.is_arch_support_pdl()
 
 
-class LLBf16Gemm:
+class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
     @dataclass(frozen=True, slots=True)
     class CompileKey:
         backend: Literal["dotprod", "splitk"]
@@ -87,13 +90,36 @@ class LLBf16Gemm:
         self._compiled_cache: dict[tuple[int, int, int], Any] = {}
         # Split-K: keyed on (split_k, num_stages), fully shape-dynamic.
         self._splitk_cache: dict[tuple[int, int], Any] = {}
+        super().__init__()
+
+    @staticmethod
+    def kernel(compile_key: CompileKey) -> Any:
+        if compile_key.backend == "splitk":
+            from ._ll_bf16_splitk import LLBf16SplitK
+
+            return LLBf16SplitK(
+                tile_n=16,
+                tile_k=256,
+                num_stages=compile_key.num_stages,
+                num_dma_warps=4,
+                split_k=compile_key.split_k,
+                use_pdl=_use_pdl(),
+            )
+
+        from ._ll_bf16_dotprod import LLBf16Dotprod
+
+        return LLBf16Dotprod(
+            k=compile_key.K,
+            bs=compile_key.bs,
+            use_pdl=_use_pdl(),
+        )
 
     def dispatch(self, *, M: int, K: int, N: int) -> CompileKey:
         dotprod_max_m = _TUNED_DOTPROD_MAX_M.get((K, N), _DEFAULT_DOTPROD_MAX_M)
         if dotprod_max_m >= M or K < 2048:
             return self.CompileKey(backend="dotprod", M=M, K=K, bs=_DEFAULT_DOTPROD_BS)
 
-        split_k, num_stages = _TUNED_CONFIGS.get((K, N), {}).get(
+        split_k, num_stages = _TUNED_CONFIGS.get((K, N), _EMPTY_TUNED_CONFIG).get(
             M, _DEFAULT_SPLITK_CONFIG
         )
         return self.CompileKey(backend="splitk", split_k=split_k, num_stages=num_stages)
@@ -104,10 +130,14 @@ class LLBf16Gemm:
         shapes: Iterable[tuple[int, int]],
         m_values: Iterable[int],
     ) -> list[CompileKey]:
-        return list(
-            dict.fromkeys(
-                self.dispatch(M=M, K=K, N=N) for K, N in shapes for M in m_values
-            )
+        shape_rows = tuple(dict(K=K, N=N) for K, N in shapes)
+        m_options = tuple(m_values)
+        if not shape_rows or not m_options:
+            return []
+
+        return self._trace_dispatch(self.dispatch)(
+            zip_inputs(*shape_rows),
+            M=m_options,
         )
 
     @staticmethod
@@ -122,22 +152,13 @@ class LLBf16Gemm:
 
     def _compile_splitk(self, compile_key: CompileKey) -> None:
         cute, _ = _cute()
-        from ._ll_bf16_splitk import LLBf16SplitK
-
         hidden_states, router_weight, output = self._fake_gemm_tensors(
             M=cute.sym_int(),
             K=cute.sym_int(),
             N=cute.sym_int(),
             divisibility=8,
         )
-        gemm = LLBf16SplitK(
-            tile_n=16,
-            tile_k=256,
-            num_stages=compile_key.num_stages,
-            num_dma_warps=4,
-            split_k=compile_key.split_k,
-            use_pdl=_use_pdl(),
-        )
+        gemm = self.kernel(compile_key)
         compiled = cute.compile(
             gemm,
             hidden_states,
@@ -155,8 +176,6 @@ class LLBf16Gemm:
 
     def _compile_dotprod(self, compile_key: CompileKey) -> None:
         cute, _ = _cute()
-        from ._ll_bf16_dotprod import LLBf16Dotprod
-
         N = cute.sym_int()
         stride_divisibility = math.gcd(8, compile_key.K)
         hidden_states, router_weight, output = self._fake_gemm_tensors(
@@ -165,7 +184,7 @@ class LLBf16Gemm:
             N=N,
             divisibility=stride_divisibility,
         )
-        gemm = LLBf16Dotprod(k=compile_key.K, bs=compile_key.bs, use_pdl=_use_pdl())
+        gemm = self.kernel(compile_key)
         compiled = cute.compile(
             gemm,
             hidden_states,
@@ -195,15 +214,6 @@ class LLBf16Gemm:
         dotprod_cache_key = (compile_key.M, compile_key.K, compile_key.bs)
         if dotprod_cache_key not in self._compiled_cache:
             self._compile_dotprod(compile_key)
-
-    def warmup(
-        self,
-        *,
-        shapes: Iterable[tuple[int, int]],
-        m_values: Iterable[int],
-    ) -> None:
-        for compile_key in self.get_warmup_keys(shapes=shapes, m_values=m_values):
-            self.compile(compile_key)
 
     @staticmethod
     def _validate_inputs(

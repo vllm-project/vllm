@@ -382,9 +382,6 @@ class ComputePrefillMetadataKernel(
         )
 
 
-_COMPUTE_PREFILL_METADATA_KERNEL = ComputePrefillMetadataKernel()
-
-
 class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
     """Builds metadata for DeepseekV4 SWA cache.
 
@@ -547,9 +544,8 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
                         device=self.device,
                     )
                 decode_swa_indices = self.decode_swa_indices_noncausal
-                _compute_dspark_noncausal_swa_indices_kernel[(num_decode_tokens,)](
+                _COMPUTE_DSPARK_NONCAUSAL_SWA_INDICES_KERNEL(
                     decode_swa_indices,
-                    decode_swa_indices.stride(0),
                     self.decode_swa_lens,
                     self.window_size,
                     self.noncausal_index_width,
@@ -558,15 +554,13 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
                     token_to_req_indices,
                     is_valid_token,
                     block_table,
-                    block_table.stride(0),
                     self.block_size,
+                    num_tokens=num_decode_tokens,
                     token_offset=0,
-                    TRITON_BLOCK_SIZE=1024,
                 )
             else:
-                _compute_swa_indices_and_lens_kernel[(num_decode_tokens,)](
+                _COMPUTE_SWA_INDICES_AND_LENS_KERNEL(
                     decode_swa_indices,
-                    decode_swa_indices.stride(0),
                     self.decode_swa_lens,
                     self.window_size,
                     query_start_loc,
@@ -574,10 +568,9 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
                     token_to_req_indices,
                     is_valid_token,
                     block_table,
-                    block_table.stride(0),
                     self.block_size,
+                    num_tokens=num_decode_tokens,
                     token_offset=0,
-                    TRITON_BLOCK_SIZE=1024,
                 )
 
         # Prefill SWA indices live in paged coordinates. `token_offset` lets
@@ -586,9 +579,8 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         if num_prefill_tokens > 0:
             prefill_swa_indices = self.prefill_swa_indices[:num_prefill_tokens]
             prefill_swa_lens = self.prefill_swa_lens[:num_prefill_tokens]
-            _compute_swa_indices_and_lens_kernel[(num_prefill_tokens,)](
+            _COMPUTE_SWA_INDICES_AND_LENS_KERNEL(
                 prefill_swa_indices,
-                prefill_swa_indices.stride(0),
                 prefill_swa_lens,
                 self.window_size,
                 query_start_loc,
@@ -596,10 +588,9 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
                 token_to_req_indices,
                 is_valid_token,
                 block_table,
-                block_table.stride(0),
                 self.block_size,
+                num_tokens=num_prefill_tokens,
                 token_offset=num_decode_tokens,
-                TRITON_BLOCK_SIZE=1024,
             )
 
         # Pre-compute DeepseekV4 prefill metadata shared across all attention layers.
@@ -731,126 +722,329 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         return result
 
 
-@triton.jit(do_not_specialize=["token_offset"])
-def _compute_swa_indices_and_lens_kernel(
-    swa_indices_ptr,
-    swa_indices_stride,
-    swa_lens_ptr,
-    window_size,
-    query_start_loc_ptr,
-    seq_lens_ptr,
-    token_to_req_indices_ptr,
-    is_valid_token_ptr,
-    block_table_ptr,
-    block_table_stride,
-    block_size,
-    token_offset,
-    TRITON_BLOCK_SIZE: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    token_idx = pid + token_offset
-    is_valid = tl.load(is_valid_token_ptr + token_idx)
-    if not is_valid:
-        tl.store(swa_lens_ptr + pid, 0)
-        return
-
-    req_idx = tl.load(token_to_req_indices_ptr + token_idx)
-
-    query_start = tl.load(query_start_loc_ptr + req_idx)
-    query_end = tl.load(query_start_loc_ptr + req_idx + 1)
-    query_len = query_end - query_start
-
-    seq_len = tl.load(seq_lens_ptr + req_idx)
-    prefix_len = seq_len - query_len
-
-    pos = prefix_len + token_idx - query_start
-    start_pos = tl.maximum(pos - window_size + 1, 0)
-    end_pos = pos + 1
-
-    swa_len = end_pos - start_pos
-    tl.store(swa_lens_ptr + pid, swa_len)
-
-    for i in range(0, window_size, TRITON_BLOCK_SIZE):
-        offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
-
-        pos_offset = start_pos + offset
-        block_indices = pos_offset // block_size
-        block_numbers = tl.load(
-            block_table_ptr + req_idx * block_table_stride + block_indices,
-            mask=pos_offset < end_pos,
-        )
-        block_offsets = pos_offset % block_size
-        slot_ids = block_numbers * block_size + block_offsets
-
-        slot_ids = tl.where(offset < swa_len, slot_ids, -1)
-        tl.store(
-            swa_indices_ptr + pid * swa_indices_stride + offset,
-            slot_ids,
-            mask=offset < window_size,
-        )
 
 
 # TODO(ben): unify this kernel to reduce duplication
-@triton.jit(do_not_specialize=["token_offset"])
-def _compute_dspark_noncausal_swa_indices_kernel(
-    swa_indices_ptr,
-    swa_indices_stride,
-    swa_lens_ptr,
-    window_size,
-    index_width,
-    query_start_loc_ptr,
-    seq_lens_ptr,
-    token_to_req_indices_ptr,
-    is_valid_token_ptr,
-    block_table_ptr,
-    block_table_stride,
-    block_size,
-    token_offset,
-    TRITON_BLOCK_SIZE: tl.constexpr,
+
+
+class ComputeSWAIndicesAndLensKernel(
+    VllmJitKernel["ComputeSWAIndicesAndLensKernel.CompileKey"]
 ):
-    """Non-causal per-token indices for the DSpark draft block.
+    @dataclass(frozen=True)
+    class CompileKey:
+        WINDOW_SIZE: int
+        block_size: int
+        TRITON_BLOCK_SIZE: int
 
-    Here, we populate the topk indices with the trailing window of context tokens,
-    plus all query tokens (including future ones).
-    """
-    pid = tl.program_id(0)
-    token_idx = pid + token_offset
-    is_valid = tl.load(is_valid_token_ptr + token_idx)
-    if not is_valid:
-        tl.store(swa_lens_ptr + pid, 0)
-        return
+    @staticmethod
+    @triton.jit(
+        do_not_specialize=[
+            "swa_indices_stride",
+            "block_table_stride",
+            "token_offset",
+        ]
+    )
+    def kernel(
+        swa_indices_ptr,
+        swa_indices_stride,
+        swa_lens_ptr,
+        window_size,
+        query_start_loc_ptr,
+        seq_lens_ptr,
+        token_to_req_indices_ptr,
+        is_valid_token_ptr,
+        block_table_ptr,
+        block_table_stride,
+        block_size,
+        token_offset,
+        TRITON_BLOCK_SIZE: tl.constexpr,
+    ):
+        pid = tl.program_id(0)
+        token_idx = pid + token_offset
+        is_valid = tl.load(is_valid_token_ptr + token_idx)
+        if not is_valid:
+            tl.store(swa_lens_ptr + pid, 0)
+            return
 
-    req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+        req_idx = tl.load(token_to_req_indices_ptr + token_idx)
 
-    query_start = tl.load(query_start_loc_ptr + req_idx)
-    query_end = tl.load(query_start_loc_ptr + req_idx + 1)
-    query_len = query_end - query_start
+        query_start = tl.load(query_start_loc_ptr + req_idx)
+        query_end = tl.load(query_start_loc_ptr + req_idx + 1)
+        query_len = query_end - query_start
 
-    seq_len = tl.load(seq_lens_ptr + req_idx)
-    prefix_len = seq_len - query_len
+        seq_len = tl.load(seq_lens_ptr + req_idx)
+        prefix_len = seq_len - query_len
 
-    # Block-anchored window (shared by every token in the block) + full block.
-    start_pos = tl.maximum(prefix_len - window_size, 0)
-    end_pos = seq_len
+        pos = prefix_len + token_idx - query_start
+        start_pos = tl.maximum(pos - window_size + 1, 0)
+        end_pos = pos + 1
 
-    swa_len = end_pos - start_pos
-    tl.store(swa_lens_ptr + pid, swa_len)
+        swa_len = end_pos - start_pos
+        tl.store(swa_lens_ptr + pid, swa_len)
 
-    for i in range(0, index_width, TRITON_BLOCK_SIZE):
-        offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
+        for i in range(0, window_size, TRITON_BLOCK_SIZE):
+            offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
 
-        pos_offset = start_pos + offset
-        block_indices = pos_offset // block_size
-        block_numbers = tl.load(
-            block_table_ptr + req_idx * block_table_stride + block_indices,
-            mask=pos_offset < end_pos,
+            pos_offset = start_pos + offset
+            block_indices = pos_offset // block_size
+            block_numbers = tl.load(
+                block_table_ptr + req_idx * block_table_stride + block_indices,
+                mask=pos_offset < end_pos,
+            )
+            block_offsets = pos_offset % block_size
+            slot_ids = block_numbers * block_size + block_offsets
+
+            slot_ids = tl.where(offset < swa_len, slot_ids, -1)
+            tl.store(
+                swa_indices_ptr + pid * swa_indices_stride + offset,
+                slot_ids,
+                mask=offset < window_size,
+            )
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        window_size: int,
+        block_size: int,
+    ) -> CompileKey:
+        return self.CompileKey(
+            WINDOW_SIZE=window_size,
+            block_size=block_size,
+            TRITON_BLOCK_SIZE=1024,
         )
-        block_offsets = pos_offset % block_size
-        slot_ids = block_numbers * block_size + block_offsets
 
-        slot_ids = tl.where(offset < swa_len, slot_ids, -1)
-        tl.store(
-            swa_indices_ptr + pid * swa_indices_stride + offset,
-            slot_ids,
-            mask=offset < index_width,
+    def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
+        scheduler_config = vllm_config.scheduler_config
+        if scheduler_config.max_num_batched_tokens <= 0:
+            return []
+        hf_config = vllm_config.model_config.hf_config
+        return self._trace_dispatch(self.dispatch)(
+            window_size=int(getattr(hf_config, "sliding_window", 128) or 128),
+            block_size=64,
         )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        warmup = getattr(self.kernel, "warmup", None)
+        assert warmup is not None
+        int32_ptr = TritonWarmupTensor(torch.int32)
+        warmup(
+            int32_ptr,
+            1,  # do not specialize swa_indices_stride
+            int32_ptr,
+            compile_key.WINDOW_SIZE,
+            int32_ptr,
+            int32_ptr,
+            int32_ptr,
+            TritonWarmupTensor(torch.bool),
+            int32_ptr,
+            1,  # do not specialize block_table_stride
+            compile_key.block_size,
+            0,  # do not specialize token_offset
+            TRITON_BLOCK_SIZE=compile_key.TRITON_BLOCK_SIZE,
+            grid=(1,),
+        )
+
+    def __call__(
+        self,
+        swa_indices: torch.Tensor,
+        swa_lens: torch.Tensor,
+        window_size: int,
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        token_to_req_indices: torch.Tensor,
+        is_valid_token: torch.Tensor,
+        block_table: torch.Tensor,
+        block_size: int,
+        *,
+        num_tokens: int,
+        token_offset: int,
+    ) -> None:
+        self.kernel[(num_tokens,)](
+            swa_indices,
+            swa_indices.stride(0),
+            swa_lens,
+            window_size,
+            query_start_loc,
+            seq_lens,
+            token_to_req_indices,
+            is_valid_token,
+            block_table,
+            block_table.stride(0),
+            block_size,
+            token_offset,
+            TRITON_BLOCK_SIZE=1024,
+        )
+
+
+class ComputeDSparkNoncausalSWAIndicesKernel(
+    VllmJitKernel["ComputeDSparkNoncausalSWAIndicesKernel.CompileKey"]
+):
+    @dataclass(frozen=True)
+    class CompileKey:
+        WINDOW_SIZE: int
+        INDEX_WIDTH: int
+        block_size: int
+        TRITON_BLOCK_SIZE: int
+
+    @staticmethod
+    @triton.jit(
+        do_not_specialize=[
+            "swa_indices_stride",
+            "block_table_stride",
+            "token_offset",
+        ]
+    )
+    def kernel(
+        swa_indices_ptr,
+        swa_indices_stride,
+        swa_lens_ptr,
+        window_size,
+        index_width,
+        query_start_loc_ptr,
+        seq_lens_ptr,
+        token_to_req_indices_ptr,
+        is_valid_token_ptr,
+        block_table_ptr,
+        block_table_stride,
+        block_size,
+        token_offset,
+        TRITON_BLOCK_SIZE: tl.constexpr,
+    ):
+        """Non-causal per-token indices for the DSpark draft block.
+
+        Here, we populate the topk indices with the trailing window of context tokens,
+        plus all query tokens (including future ones).
+        """
+        pid = tl.program_id(0)
+        token_idx = pid + token_offset
+        is_valid = tl.load(is_valid_token_ptr + token_idx)
+        if not is_valid:
+            tl.store(swa_lens_ptr + pid, 0)
+            return
+
+        req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+
+        query_start = tl.load(query_start_loc_ptr + req_idx)
+        query_end = tl.load(query_start_loc_ptr + req_idx + 1)
+        query_len = query_end - query_start
+
+        seq_len = tl.load(seq_lens_ptr + req_idx)
+        prefix_len = seq_len - query_len
+
+        # Block-anchored window (shared by every token in the block) + full block.
+        start_pos = tl.maximum(prefix_len - window_size, 0)
+        end_pos = seq_len
+
+        swa_len = end_pos - start_pos
+        tl.store(swa_lens_ptr + pid, swa_len)
+
+        for i in range(0, index_width, TRITON_BLOCK_SIZE):
+            offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
+
+            pos_offset = start_pos + offset
+            block_indices = pos_offset // block_size
+            block_numbers = tl.load(
+                block_table_ptr + req_idx * block_table_stride + block_indices,
+                mask=pos_offset < end_pos,
+            )
+            block_offsets = pos_offset % block_size
+            slot_ids = block_numbers * block_size + block_offsets
+
+            slot_ids = tl.where(offset < swa_len, slot_ids, -1)
+            tl.store(
+                swa_indices_ptr + pid * swa_indices_stride + offset,
+                slot_ids,
+                mask=offset < index_width,
+            )
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        window_size: int,
+        num_speculative_tokens: int,
+        block_size: int,
+    ) -> CompileKey:
+        return self.CompileKey(
+            WINDOW_SIZE=window_size,
+            INDEX_WIDTH=cdiv(window_size + num_speculative_tokens, 128) * 128,
+            block_size=block_size,
+            TRITON_BLOCK_SIZE=1024,
+        )
+
+    def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
+        spec_config = vllm_config.speculative_config
+        if spec_config is None or not spec_config.use_dspark():
+            return []
+
+        scheduler_config = vllm_config.scheduler_config
+        if scheduler_config.max_num_batched_tokens <= 0:
+            return []
+
+        hf_config = vllm_config.model_config.hf_config
+        return self._trace_dispatch(self.dispatch)(
+            window_size=int(getattr(hf_config, "sliding_window", 128) or 128),
+            num_speculative_tokens=spec_config.num_speculative_tokens,
+            block_size=64,
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        warmup = getattr(self.kernel, "warmup", None)
+        assert warmup is not None
+        int32_ptr = TritonWarmupTensor(torch.int32)
+        warmup(
+            int32_ptr,
+            1,  # do not specialize swa_indices_stride
+            int32_ptr,
+            compile_key.WINDOW_SIZE,
+            compile_key.INDEX_WIDTH,
+            int32_ptr,
+            int32_ptr,
+            int32_ptr,
+            TritonWarmupTensor(torch.bool),
+            int32_ptr,
+            1,  # do not specialize block_table_stride
+            compile_key.block_size,
+            0,  # do not specialize token_offset
+            TRITON_BLOCK_SIZE=compile_key.TRITON_BLOCK_SIZE,
+            grid=(1,),
+        )
+
+    def __call__(
+        self,
+        swa_indices: torch.Tensor,
+        swa_lens: torch.Tensor,
+        window_size: int,
+        index_width: int,
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        token_to_req_indices: torch.Tensor,
+        is_valid_token: torch.Tensor,
+        block_table: torch.Tensor,
+        block_size: int,
+        *,
+        num_tokens: int,
+        token_offset: int,
+    ) -> None:
+        self.kernel[(num_tokens,)](
+            swa_indices,
+            swa_indices.stride(0),
+            swa_lens,
+            window_size,
+            index_width,
+            query_start_loc,
+            seq_lens,
+            token_to_req_indices,
+            is_valid_token,
+            block_table,
+            block_table.stride(0),
+            block_size,
+            token_offset,
+            TRITON_BLOCK_SIZE=1024,
+        )
+
+
+_COMPUTE_PREFILL_METADATA_KERNEL = ComputePrefillMetadataKernel()
+_COMPUTE_SWA_INDICES_AND_LENS_KERNEL = ComputeSWAIndicesAndLensKernel()
+_COMPUTE_DSPARK_NONCAUSAL_SWA_INDICES_KERNEL = (
+    ComputeDSparkNoncausalSWAIndicesKernel()
+)

@@ -225,167 +225,244 @@ def quantize_and_insert_k_cache(
     )
 
 
-@triton.jit
-def _dequantize_and_gather_k_kernel(
-    out_ptr,
-    out_stride0,
-    out_stride1,
-    k_cache_ptr,
-    seq_lens_ptr,
-    block_table_ptr,
-    offset,
-    gather_lens_ptr,
-    # Constants
-    max_blocks_per_seq: tl.constexpr,
-    fp8_dim: tl.constexpr,  # 448
-    bf16_dim: tl.constexpr,  # 64
-    scale_dim: tl.constexpr,  # 8
-    quant_block: tl.constexpr,  # 64 (quantization block size)
-    cache_block_size: tl.constexpr,  # 64 or 128 (paged cache block size)
-    token_data_size: tl.constexpr,  # 576 bytes per token data
-    block_stride: tl.constexpr,  # total bytes per block (padded) int32
-    output_dim: tl.constexpr,  # 512
-    fp8_max: tl.constexpr,
-    n_quant_blocks: tl.constexpr,  # 7 real blocks
-    use_fnuz: tl.constexpr = False,
+_DEQUANTIZE_AND_GATHER_K_NUM_WORKERS = 128
+
+
+class DequantizeAndGatherKCacheKernel(
+    VllmJitKernel["DequantizeAndGatherKCacheKernel.CompileKey"]
 ):
-    batch_idx = tl.program_id(0)
-    worker_id = tl.program_id(1)
-    num_workers = tl.num_programs(1)
+    @dataclass(frozen=True)
+    class CompileKey:
+        max_blocks_per_seq: int
+        cache_block_size: int
+        block_stride: int
+        use_fnuz: bool
+        has_gather_lens: bool
 
-    seq_len = tl.load(seq_lens_ptr + batch_idx)
-    if gather_lens_ptr is not None:  # noqa: SIM108
-        gather_len = tl.load(gather_lens_ptr + batch_idx)
-    else:
-        # Gather all tokens
-        gather_len = seq_len
-    start_pos = seq_len - gather_len
+    @staticmethod
+    @triton.jit
+    def kernel(
+        out_ptr,
+        out_stride0,
+        out_stride1,
+        k_cache_ptr,
+        seq_lens_ptr,
+        block_table_ptr,
+        offset,
+        gather_lens_ptr,
+        # Constants
+        max_blocks_per_seq: tl.constexpr,
+        fp8_dim: tl.constexpr,  # 448
+        bf16_dim: tl.constexpr,  # 64
+        scale_dim: tl.constexpr,  # 8
+        quant_block: tl.constexpr,  # 64 (quantization block size)
+        cache_block_size: tl.constexpr,  # 64 or 128 (paged cache block size)
+        token_data_size: tl.constexpr,  # 576 bytes per token data
+        block_stride: tl.constexpr,  # total bytes per block (padded) int32
+        output_dim: tl.constexpr,  # 512
+        fp8_max: tl.constexpr,
+        n_quant_blocks: tl.constexpr,  # 7 real blocks
+        use_fnuz: tl.constexpr = False,
+    ):
+        batch_idx = tl.program_id(0)
+        worker_id = tl.program_id(1)
+        num_workers = tl.num_programs(1)
 
-    for i in range(worker_id, gather_len, num_workers):
-        # Calculate the actual token index in the sequence
-        pos = start_pos + i
+        seq_len = tl.load(seq_lens_ptr + batch_idx)
+        if gather_lens_ptr is not None:  # noqa: SIM108
+            gather_len = tl.load(gather_lens_ptr + batch_idx)
+        else:
+            # Gather all tokens
+            gather_len = seq_len
+        start_pos = seq_len - gather_len
 
-        # Calculate which block and position within block
-        block_in_seq = pos // cache_block_size
-        pos_in_block = pos % cache_block_size
+        for i in range(worker_id, gather_len, num_workers):
+            # Calculate the actual token index in the sequence
+            pos = start_pos + i
 
-        # Get physical block index from block table
-        block_table_row_ptr = block_table_ptr + batch_idx * max_blocks_per_seq
-        physical_block_idx = tl.load(block_table_row_ptr + block_in_seq)  # int32
+            # Calculate which block and position within block
+            block_in_seq = pos // cache_block_size
+            pos_in_block = pos % cache_block_size
 
-        # int64: physical_block_idx * block_stride can exceed 2^31 with many
-        # KV-cache blocks (e.g. >= 57K at block_stride ~37K).
-        cache_block_ptr = k_cache_ptr + physical_block_idx.to(tl.int64) * block_stride
+            # Get physical block index from block table
+            block_table_row_ptr = block_table_ptr + batch_idx * max_blocks_per_seq
+            physical_block_idx = tl.load(block_table_row_ptr + block_in_seq)  # int32
 
-        # Token data pointer
-        token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
+            # int64: physical_block_idx * block_stride can exceed 2^31 with many
+            # KV-cache blocks (e.g. >= 57K at block_stride ~37K).
+            cache_block_ptr = k_cache_ptr + physical_block_idx.to(tl.int64) * block_stride
 
-        # Scale pointer: after all token data
-        token_scale_ptr = (
-            cache_block_ptr
-            + cache_block_size * token_data_size
-            + pos_in_block * scale_dim
+            # Token data pointer
+            token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
+
+            # Scale pointer: after all token data
+            token_scale_ptr = (
+                cache_block_ptr
+                + cache_block_size * token_data_size
+                + pos_in_block * scale_dim
+            )
+
+            # Token data layout: [0:448] fp8, [448:576] bf16
+            token_fp8_ptr = token_data_ptr
+            token_bf16_ptr = token_data_ptr + fp8_dim
+
+            # Output pointer for this token (flattened)
+            output_row_ptr = out_ptr + batch_idx * out_stride0 + (offset + i) * out_stride1
+
+            # ========== Dequantize FP8 portion using UE8M0 ==========
+            for qblock_idx in tl.static_range(n_quant_blocks):
+                qblock_start = qblock_idx * quant_block
+
+                if qblock_start < fp8_dim:
+                    offsets = qblock_start + tl.arange(0, quant_block)
+                    mask = offsets < fp8_dim
+
+                    # Load quantized fp8 values (stored as uint8)
+                    x_uint8 = tl.load(token_fp8_ptr + offsets, mask=mask, other=0)
+
+                    # Bitcast uint8 back to fp8 (FNUZ on gfx942, OCP elsewhere).
+                    if use_fnuz:
+                        x_fp8 = x_uint8.to(tl.float8e4b8, bitcast=True)
+                    else:
+                        x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
+
+                    # Convert fp8 to float32 for computation
+                    x_float = x_fp8.to(tl.float32)
+
+                    # Load and decode UE8M0 scale
+                    # UE8M0: scale = 2^(stored_value - 127)
+                    encoded_scale = tl.load(token_scale_ptr + qblock_idx)
+                    exponent = encoded_scale.to(tl.float32) - 127.0
+                    scale = tl.exp2(exponent)
+
+                    # Dequantize: bf16_value = fp8_value * scale
+                    x_dequant = x_float * scale
+
+                    # Store as bf16
+                    tl.store(output_row_ptr + offsets, x_dequant.to(tl.bfloat16), mask=mask)
+
+            # ========== Copy BF16 portion directly ==========
+            bf16_output_offset = fp8_dim  # After 448 elements in output
+
+            # Read bf16 from cache
+            bf16_cache_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
+
+            # Process in chunks of 16
+            for j in tl.static_range(bf16_dim // 16):
+                chunk_offsets = j * 16 + tl.arange(0, 16)
+                bf16_vals = tl.load(bf16_cache_ptr + chunk_offsets)
+                tl.store(output_row_ptr + bf16_output_offset + chunk_offsets, bf16_vals)
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        max_model_len: int,
+        cache_block_size: int,
+        use_fnuz: bool,
+        has_gather_lens: bool,
+    ) -> CompileKey:
+        token_stride = 576
+        scale_stride = 8
+        unpadded = cache_block_size * (token_stride + scale_stride)
+        block_stride = ((unpadded + token_stride - 1) // token_stride) * token_stride
+        return self.CompileKey(
+            max_blocks_per_seq=(max_model_len + cache_block_size - 1)
+            // cache_block_size,
+            cache_block_size=cache_block_size,
+            block_stride=block_stride,
+            use_fnuz=use_fnuz,
+            has_gather_lens=has_gather_lens,
         )
 
-        # Token data layout: [0:448] fp8, [448:576] bf16
-        token_fp8_ptr = token_data_ptr
-        token_bf16_ptr = token_data_ptr + fp8_dim
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        model_config = getattr(vllm_config, "model_config", None)
+        max_model_len = int(getattr(model_config, "max_model_len", 1) or 1)
+        cache_config = getattr(vllm_config, "cache_config", None)
+        block_size = int(getattr(cache_config, "block_size", 64) or 64)
+        if max_model_len <= 0 or block_size <= 0:
+            return []
 
-        # Output pointer for this token (flattened)
-        output_row_ptr = out_ptr + batch_idx * out_stride0 + (offset + i) * out_stride1
+        quarter_block_size = block_size // 4
+        quarter_block_size = (
+            quarter_block_size if quarter_block_size >= 1 else 1
+        )
+        tiny_block_size = block_size // 128
+        tiny_block_size = tiny_block_size if tiny_block_size >= 1 else 1
+        return self._trace_dispatch(self.dispatch)(
+            zip_inputs(
+                dict(cache_block_size=block_size, has_gather_lens=True),
+                dict(cache_block_size=block_size, has_gather_lens=False),
+                dict(cache_block_size=quarter_block_size, has_gather_lens=True),
+                dict(cache_block_size=tiny_block_size, has_gather_lens=True),
+            ),
+            max_model_len=max_model_len,
+            use_fnuz=False,
+        )
 
-        # ========== Dequantize FP8 portion using UE8M0 ==========
-        for qblock_idx in tl.static_range(n_quant_blocks):
-            qblock_start = qblock_idx * quant_block
+    def compile(self, compile_key: CompileKey) -> None:
+        warmup = getattr(self.kernel, "warmup", None)
+        assert warmup is not None
+        int32_ptr = TritonWarmupTensor(torch.int32)
+        gather_lens_ptr = int32_ptr if compile_key.has_gather_lens else None
+        warmup(
+            TritonWarmupTensor(torch.bfloat16, shape=(1, 1, 512)),
+            512,
+            512,
+            TritonWarmupTensor(torch.uint8),
+            int32_ptr,
+            int32_ptr,
+            0,
+            gather_lens_ptr,
+            max_blocks_per_seq=compile_key.max_blocks_per_seq,
+            fp8_dim=448,
+            bf16_dim=64,
+            scale_dim=8,
+            quant_block=64,
+            cache_block_size=compile_key.cache_block_size,
+            token_data_size=576,
+            block_stride=compile_key.block_stride,
+            output_dim=512,
+            fp8_max=448.0,
+            n_quant_blocks=7,
+            use_fnuz=compile_key.use_fnuz,
+            grid=(1, _DEQUANTIZE_AND_GATHER_K_NUM_WORKERS),
+        )
 
-            if qblock_start < fp8_dim:
-                offsets = qblock_start + tl.arange(0, quant_block)
-                mask = offsets < fp8_dim
-
-                # Load quantized fp8 values (stored as uint8)
-                x_uint8 = tl.load(token_fp8_ptr + offsets, mask=mask, other=0)
-
-                # Bitcast uint8 back to fp8 (FNUZ on gfx942, OCP elsewhere).
-                if use_fnuz:
-                    x_fp8 = x_uint8.to(tl.float8e4b8, bitcast=True)
-                else:
-                    x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
-
-                # Convert fp8 to float32 for computation
-                x_float = x_fp8.to(tl.float32)
-
-                # Load and decode UE8M0 scale
-                # UE8M0: scale = 2^(stored_value - 127)
-                encoded_scale = tl.load(token_scale_ptr + qblock_idx)
-                exponent = encoded_scale.to(tl.float32) - 127.0
-                scale = tl.exp2(exponent)
-
-                # Dequantize: bf16_value = fp8_value * scale
-                x_dequant = x_float * scale
-
-                # Store as bf16
-                tl.store(output_row_ptr + offsets, x_dequant.to(tl.bfloat16), mask=mask)
-
-        # ========== Copy BF16 portion directly ==========
-        bf16_output_offset = fp8_dim  # After 448 elements in output
-
-        # Read bf16 from cache
-        bf16_cache_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
-
-        # Process in chunks of 16
-        for j in tl.static_range(bf16_dim // 16):
-            chunk_offsets = j * 16 + tl.arange(0, 16)
-            bf16_vals = tl.load(bf16_cache_ptr + chunk_offsets)
-            tl.store(output_row_ptr + bf16_output_offset + chunk_offsets, bf16_vals)
-
-
-def dequantize_and_gather_k_cache_triton(
-    # [num_reqs, max_num_tokens, head_size]
-    out: torch.Tensor,
-    # [num_blocks, block_size, head_bytes]
-    k_cache: torch.Tensor,
-    # [num_reqs]
-    seq_lens: torch.Tensor,
-    # [num_reqs]
-    gather_lens: torch.Tensor | None,
-    # [num_reqs, max_blocks_per_seq]
-    block_table: torch.Tensor,
-    block_size: int,
-    offset: int,
-    use_fnuz: bool = False,
-) -> None:
-    TOKEN_FP8_DIM = 448
-    TOKEN_BF16_DIM = 64
-    TOKEN_SCALE_DIM = 8
-    QUANT_BLOCK_SIZE = 64
-    FP8_MAX = 448.0
-    TOKEN_DATA_SIZE = TOKEN_FP8_DIM + TOKEN_BF16_DIM * 2
-
-    num_reqs = seq_lens.shape[0]
-    NUM_WORKERS = 128
-    _dequantize_and_gather_k_kernel[(num_reqs, NUM_WORKERS)](
-        out,
-        out.stride(0),
-        out.stride(1),
-        k_cache,
-        seq_lens,
-        block_table,
-        offset,
-        gather_lens,
-        max_blocks_per_seq=block_table.shape[-1],
-        fp8_dim=TOKEN_FP8_DIM,
-        bf16_dim=TOKEN_BF16_DIM,
-        scale_dim=TOKEN_SCALE_DIM,
-        quant_block=QUANT_BLOCK_SIZE,
-        cache_block_size=block_size,
-        token_data_size=TOKEN_DATA_SIZE,
-        block_stride=k_cache.stride(0),
-        output_dim=512,
-        fp8_max=FP8_MAX,
-        n_quant_blocks=7,
-        use_fnuz=use_fnuz,
-    )
-
+    def __call__(
+        self,
+        out: torch.Tensor,
+        k_cache: torch.Tensor,
+        seq_lens: torch.Tensor,
+        gather_lens: torch.Tensor | None,
+        block_table: torch.Tensor,
+        block_size: int,
+        offset: int,
+        *,
+        use_fnuz: bool = False,
+    ) -> None:
+        num_reqs = seq_lens.shape[0]
+        self.kernel[(num_reqs, _DEQUANTIZE_AND_GATHER_K_NUM_WORKERS)](
+            out,
+            out.stride(0),
+            out.stride(1),
+            k_cache,
+            seq_lens,
+            block_table,
+            offset,
+            gather_lens,
+            max_blocks_per_seq=block_table.shape[-1],
+            fp8_dim=448,
+            bf16_dim=64,
+            scale_dim=8,
+            quant_block=64,
+            cache_block_size=block_size,
+            token_data_size=576,
+            block_stride=k_cache.stride(0),
+            output_dim=512,
+            fp8_max=448.0,
+            n_quant_blocks=7,
+            use_fnuz=use_fnuz,
+        )
 
 def dequantize_and_gather_k_cache(
     # [num_reqs, max_num_tokens, head_size]
@@ -420,7 +497,7 @@ def dequantize_and_gather_k_cache(
         )
         return
 
-    dequantize_and_gather_k_cache_triton(
+    _DEQUANTIZE_AND_GATHER_K_CACHE_KERNEL(
         out,
         k_cache,
         seq_lens,
@@ -449,72 +526,162 @@ def compute_global_topk_indices_and_lens(
     num_tokens = topk_indices.shape[0]
     global_topk_indices = torch.empty_like(topk_indices)
     topk_lens = torch.empty(num_tokens, dtype=torch.int32, device=topk_indices.device)
-    _compute_global_topk_indices_and_lens_kernel[(num_tokens,)](
+    _COMPUTE_GLOBAL_TOPK_INDICES_AND_LENS_KERNEL(
         global_topk_indices,
-        global_topk_indices.stride(0),
         topk_lens,
         topk_indices,
-        topk_indices.stride(0),
-        topk_indices.shape[-1],
         token_to_req_indices,
         block_table,
-        block_table.stride(0),
         block_size,
         is_valid_token,
-        TRITON_BLOCK_SIZE=1024,
     )
     return global_topk_indices, topk_lens
 
 
-@triton.jit
-def _compute_global_topk_indices_and_lens_kernel(
-    global_topk_indices_ptr,
-    global_topk_indices_stride,
-    topk_lens_ptr,
-    topk_indices_ptr,
-    topk_indices_stride,
-    topk,
-    token_to_req_indices_ptr,
-    block_table_ptr,
-    block_table_stride,
-    block_size,
-    is_valid_token_ptr,
-    TRITON_BLOCK_SIZE: tl.constexpr,
+
+
+_COMPUTE_GLOBAL_TOPK_TRITON_BLOCK_SIZE = 1024
+
+
+class ComputeGlobalTopkIndicesAndLensKernel(
+    VllmJitKernel["ComputeGlobalTopkIndicesAndLensKernel.CompileKey"]
 ):
-    token_idx = tl.program_id(0)
-    is_valid_token = tl.load(is_valid_token_ptr + token_idx)
-    req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+    @dataclass(frozen=True)
+    class CompileKey:
+        global_topk_indices_stride: int
+        topk_indices_stride: int
+        topk: int
+        block_table_stride: int
+        block_size: int
 
-    count = tl.zeros((), dtype=tl.int32)
-    for i in range(0, topk, TRITON_BLOCK_SIZE):
-        offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
-        mask = offset < topk
+    @staticmethod
+    @triton.jit
+    def kernel(
+        global_topk_indices_ptr,
+        global_topk_indices_stride,
+        topk_lens_ptr,
+        topk_indices_ptr,
+        topk_indices_stride,
+        topk,
+        token_to_req_indices_ptr,
+        block_table_ptr,
+        block_table_stride,
+        block_size,
+        is_valid_token_ptr,
+        TRITON_BLOCK_SIZE: tl.constexpr,
+    ):
+        token_idx = tl.program_id(0)
+        is_valid_token = tl.load(is_valid_token_ptr + token_idx)
+        req_idx = tl.load(token_to_req_indices_ptr + token_idx)
 
-        local_idx = tl.load(
-            topk_indices_ptr + token_idx * topk_indices_stride + offset,
-            mask=mask,
-            other=-1,
+        count = tl.zeros((), dtype=tl.int32)
+        for i in range(0, topk, TRITON_BLOCK_SIZE):
+            offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
+            mask = offset < topk
+
+            local_idx = tl.load(
+                topk_indices_ptr + token_idx * topk_indices_stride + offset,
+                mask=mask,
+                other=-1,
+            )
+            is_valid = local_idx >= 0
+
+            block_indices = local_idx // block_size
+            block_numbers = tl.load(
+                block_table_ptr + req_idx * block_table_stride + block_indices,
+                mask=mask & is_valid,
+            )
+            block_offsets = local_idx % block_size
+
+            slot_ids = block_numbers * block_size + block_offsets
+            slot_ids = tl.where(is_valid, slot_ids, -1)
+            tl.store(
+                global_topk_indices_ptr + token_idx * global_topk_indices_stride + offset,
+                slot_ids,
+                mask=mask,
+            )
+            count += tl.sum(is_valid.to(tl.int32), axis=0)
+
+        # Zero out length for padding tokens.
+        tl.store(topk_lens_ptr + token_idx, tl.where(is_valid_token, count, 0))
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        topk_width: int,
+        block_size: int,
+        max_model_len: int,
+    ) -> CompileKey:
+        return self.CompileKey(
+            global_topk_indices_stride=topk_width,
+            topk_indices_stride=topk_width,
+            topk=topk_width,
+            block_table_stride=(max_model_len + block_size - 1) // block_size,
+            block_size=block_size,
         )
-        is_valid = local_idx >= 0
 
-        block_indices = local_idx // block_size
-        block_numbers = tl.load(
-            block_table_ptr + req_idx * block_table_stride + block_indices,
-            mask=mask & is_valid,
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        model_config = getattr(vllm_config, "model_config", None)
+        hf_config = getattr(model_config, "hf_config", None)
+        index_topk = int(getattr(hf_config, "index_topk", 0) or 0)
+        cache_config = getattr(vllm_config, "cache_config", None)
+        cache_block_size = int(getattr(cache_config, "block_size", 64) or 64)
+        if index_topk <= 0 or cache_block_size <= 0:
+            return []
+
+        warmup_block_size = cache_block_size // 4
+        warmup_block_size = warmup_block_size if warmup_block_size >= 1 else 1
+        return self._trace_dispatch(self.dispatch)(
+            topk_width=index_topk,
+            block_size=warmup_block_size,
+            max_model_len=int(getattr(model_config, "max_model_len", 1) or 1),
         )
-        block_offsets = local_idx % block_size
 
-        slot_ids = block_numbers * block_size + block_offsets
-        slot_ids = tl.where(is_valid, slot_ids, -1)
-        tl.store(
-            global_topk_indices_ptr + token_idx * global_topk_indices_stride + offset,
-            slot_ids,
-            mask=mask,
+    def compile(self, compile_key: CompileKey) -> None:
+        warmup = getattr(self.kernel, "warmup", None)
+        assert warmup is not None
+        int32_ptr = TritonWarmupTensor(torch.int32)
+        warmup(
+            int32_ptr,
+            compile_key.global_topk_indices_stride,
+            int32_ptr,
+            int32_ptr,
+            compile_key.topk_indices_stride,
+            compile_key.topk,
+            int32_ptr,
+            int32_ptr,
+            compile_key.block_table_stride,
+            compile_key.block_size,
+            TritonWarmupTensor(torch.bool),
+            TRITON_BLOCK_SIZE=_COMPUTE_GLOBAL_TOPK_TRITON_BLOCK_SIZE,
+            grid=(1,),
         )
-        count += tl.sum(is_valid.to(tl.int32), axis=0)
 
-    # Zero out length for padding tokens.
-    tl.store(topk_lens_ptr + token_idx, tl.where(is_valid_token, count, 0))
+    def __call__(
+        self,
+        global_topk_indices: torch.Tensor,
+        topk_lens: torch.Tensor,
+        topk_indices: torch.Tensor,
+        token_to_req_indices: torch.Tensor,
+        block_table: torch.Tensor,
+        block_size: int,
+        is_valid_token: torch.Tensor,
+    ) -> None:
+        num_tokens = topk_indices.shape[0]
+        self.kernel[(num_tokens,)](
+            global_topk_indices,
+            global_topk_indices.stride(0),
+            topk_lens,
+            topk_indices,
+            topk_indices.stride(0),
+            topk_indices.shape[-1],
+            token_to_req_indices,
+            block_table,
+            block_table.stride(0),
+            block_size,
+            is_valid_token,
+            TRITON_BLOCK_SIZE=_COMPUTE_GLOBAL_TOPK_TRITON_BLOCK_SIZE,
+        )
 
 
 # FlashMLA sparse prefill asserts `params.topk % B_TOPK == 0` (see
@@ -603,17 +770,6 @@ _DSV4_COMBINE_TOPK_SWA_WARMUP_INPUTS = zip_inputs(
     # DSv4-Pro C128A.
     dict(compress_ratio=128, topk=8192, topk_width=8192),
 )
-
-
-def _hf_config_int(vllm_config: Any, name: str, default: int) -> int:
-    model_config = getattr(vllm_config, "model_config", None)
-    hf_config = getattr(model_config, "hf_config", None)
-    return int(getattr(hf_config, name, default) or default)
-
-
-def _scheduler_config_int(vllm_config: Any, name: str, default: int) -> int:
-    scheduler_config = getattr(vllm_config, "scheduler_config", None)
-    return int(getattr(scheduler_config, name, default) or default)
 
 
 class CombineTopkSwaIndicesKernel(
@@ -735,10 +891,16 @@ class CombineTopkSwaIndicesKernel(
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        if _scheduler_config_int(vllm_config, "max_num_batched_tokens", 0) <= 0:
+        scheduler_config = getattr(vllm_config, "scheduler_config", None)
+        max_num_batched_tokens = int(
+            getattr(scheduler_config, "max_num_batched_tokens", 0) or 0
+        )
+        if max_num_batched_tokens <= 0:
             return []
 
-        window_size = _hf_config_int(vllm_config, "sliding_window", 128)
+        model_config = getattr(vllm_config, "model_config", None)
+        hf_config = getattr(model_config, "hf_config", None)
+        window_size = int(getattr(hf_config, "sliding_window", 128) or 128)
         return self._trace_dispatch(self.dispatch)(
             _DSV4_COMBINE_TOPK_SWA_WARMUP_INPUTS,
             _COMBINE_TOPK_SWA_POINTER_INPUTS,
@@ -800,9 +962,6 @@ class CombineTopkSwaIndicesKernel(
             WINDOW_SIZE=WINDOW_SIZE,
             PADDED_TOP_K=next_power_of_2(topk_indices.shape[-1]),
         )
-
-
-_COMBINE_TOPK_SWA_INDICES_KERNEL = CombineTopkSwaIndicesKernel()
 
 
 def build_flashinfer_mixed_sparse_indices(
@@ -907,40 +1066,34 @@ def build_flashinfer_mixed_sparse_indices(
         if compressed_block_span is None
         else compressed_block_span
     )
-    _build_flashinfer_mixed_sparse_indices_kernel[(num_tokens,)](
+    _BUILD_FLASHINFER_MIXED_SPARSE_INDICES_KERNEL(
         sparse_indices,
-        sparse_indices.stride(0),
         sparse_topk_lens,
         decode_swa_indices,
-        decode_swa_indices.stride(0),
         decode_compressed_indices,
-        decode_compressed_indices.stride(0),
         decode_compressed_topk_lens,
         decode_is_valid_token,
         prefill_topk_indices,
-        prefill_topk_indices.stride(0),
         query_start_loc,
         seq_lens,
         token_to_req_indices,
         swa_block_table,
-        swa_block_table.stride(0),
         swa_block_size,
         swa_span,
         compressed_block_table,
-        compressed_block_table.stride(0),
         compressed_block_size,
         compressed_span,
-        NUM_DECODE_TOKENS=num_decode_tokens,
-        WINDOW_SIZE=window_size,
-        COMPRESS_RATIO=compress_ratio,
-        TOP_K=topk,
-        PADDED_TOP_K=padded_topk,
-        PREFILL_TOPK_STRIDE=prefill_topk_indices.shape[-1],
-        DECODE_COMPRESSED_TOPK=decode_compressed_topk,
-        DECODE_COMPRESSED_INDICES_ARE_LOCAL=decode_compressed_indices_are_local,
-        HAS_DECODE_COMPRESSED_LENS=has_decode_compressed_lens,
-        WINDOW_BLOCK_SIZE=window_block_size,
-        TOPK_BLOCK_SIZE=topk_block_size,
+        num_decode_tokens=num_decode_tokens,
+        window_size=window_size,
+        compress_ratio=compress_ratio,
+        topk=topk,
+        padded_topk=padded_topk,
+        prefill_topk_stride=prefill_topk_indices.shape[-1],
+        decode_compressed_topk=decode_compressed_topk,
+        decode_compressed_indices_are_local=decode_compressed_indices_are_local,
+        has_decode_compressed_lens=has_decode_compressed_lens,
+        window_block_size=window_block_size,
+        topk_block_size=topk_block_size,
         num_warps=num_warps,
     )
     return sparse_indices, sparse_topk_lens
@@ -958,188 +1111,441 @@ def _remap_flashinfer_index(values, block_size, block_span):
     return tl.where(is_valid, values, -1)
 
 
-@triton.jit(
-    do_not_specialize=[
-        "sparse_indices_stride",
-        "decode_swa_stride",
-        "decode_compressed_stride",
-        "prefill_topk_stride",
-        "swa_block_table_stride",
-        "swa_block_size",
-        "swa_block_span",
-        "compressed_block_table_stride",
-        "compressed_block_size",
-        "compressed_block_span",
-        "NUM_DECODE_TOKENS",
-        "PREFILL_TOPK_STRIDE",
-    ]
-)
-def _build_flashinfer_mixed_sparse_indices_kernel(
-    sparse_indices_ptr,
-    sparse_indices_stride,
-    sparse_topk_lens_ptr,
-    decode_swa_indices_ptr,
-    decode_swa_stride,
-    decode_compressed_indices_ptr,
-    decode_compressed_stride,
-    decode_compressed_topk_lens_ptr,
-    decode_is_valid_token_ptr,
-    prefill_topk_indices_ptr,
-    prefill_topk_stride,
-    query_start_loc_ptr,
-    seq_lens_ptr,
-    token_to_req_indices_ptr,
-    swa_block_table_ptr,
-    swa_block_table_stride,
-    swa_block_size,
-    swa_block_span,
-    compressed_block_table_ptr,
-    compressed_block_table_stride,
-    compressed_block_size,
-    compressed_block_span,
-    NUM_DECODE_TOKENS,
-    WINDOW_SIZE: tl.constexpr,
-    COMPRESS_RATIO: tl.constexpr,
-    TOP_K: tl.constexpr,
-    PADDED_TOP_K: tl.constexpr,
-    PREFILL_TOPK_STRIDE,
-    DECODE_COMPRESSED_TOPK: tl.constexpr,
-    DECODE_COMPRESSED_INDICES_ARE_LOCAL: tl.constexpr,
-    HAS_DECODE_COMPRESSED_LENS: tl.constexpr,
-    WINDOW_BLOCK_SIZE: tl.constexpr,
-    TOPK_BLOCK_SIZE: tl.constexpr,
-):
-    token_idx = tl.program_id(0)
 
-    if token_idx < NUM_DECODE_TOKENS:
+
+_DSV4_FLASHINFER_MIXED_SPARSE_WARMUP_INPUTS = zip_inputs(
+    # SWA-only.
+    dict(
+        compress_ratio=1,
+        topk=0,
+        topk_width=0,
+        decode_compressed_topk=0,
+        decode_compressed_indices_are_local=False,
+        has_decode_compressed_lens=False,
+    ),
+    # DSv4-Flash C4A decode/prefill.
+    dict(
+        compress_ratio=4,
+        topk=512,
+        topk_width=512,
+        decode_compressed_topk=512,
+        decode_compressed_indices_are_local=False,
+        has_decode_compressed_lens=True,
+    ),
+    dict(
+        compress_ratio=4,
+        topk=512,
+        topk_width=512,
+        decode_compressed_topk=512,
+        decode_compressed_indices_are_local=True,
+        has_decode_compressed_lens=False,
+    ),
+    # DSv4-Pro C4A and C128A.
+    dict(
+        compress_ratio=4,
+        topk=1024,
+        topk_width=1024,
+        decode_compressed_topk=1024,
+        decode_compressed_indices_are_local=False,
+        has_decode_compressed_lens=True,
+    ),
+    dict(
+        compress_ratio=128,
+        topk=8192,
+        topk_width=8192,
+        decode_compressed_topk=8192,
+        decode_compressed_indices_are_local=False,
+        has_decode_compressed_lens=True,
+    ),
+)
+
+
+class BuildFlashinferMixedSparseIndicesKernel(
+    VllmJitKernel["BuildFlashinferMixedSparseIndicesKernel.CompileKey"]
+):
+    @dataclass(frozen=True)
+    class CompileKey:
+        WINDOW_SIZE: int
+        COMPRESS_RATIO: int
+        TOP_K: int
+        PADDED_TOP_K: int
+        DECODE_COMPRESSED_TOPK: int
+        DECODE_COMPRESSED_INDICES_ARE_LOCAL: bool
+        HAS_DECODE_COMPRESSED_LENS: bool
+        SWA_BLOCK_SIZE: int
+        COMPRESSED_BLOCK_SIZE: int
+        WINDOW_BLOCK_SIZE: int
+        TOPK_BLOCK_SIZE: int
+
+    @staticmethod
+    @triton.jit(
+        do_not_specialize=[
+            "sparse_indices_stride",
+            "decode_swa_stride",
+            "decode_compressed_stride",
+            "prefill_topk_stride",
+            "swa_block_table_stride",
+            "swa_block_span",
+            "compressed_block_table_stride",
+            "compressed_block_span",
+            "NUM_DECODE_TOKENS",
+            "PREFILL_TOPK_STRIDE",
+        ]
+    )
+    def kernel(
+        sparse_indices_ptr,
+        sparse_indices_stride,
+        sparse_topk_lens_ptr,
+        decode_swa_indices_ptr,
+        decode_swa_stride,
+        decode_compressed_indices_ptr,
+        decode_compressed_stride,
+        decode_compressed_topk_lens_ptr,
+        decode_is_valid_token_ptr,
+        prefill_topk_indices_ptr,
+        prefill_topk_stride,
+        query_start_loc_ptr,
+        seq_lens_ptr,
+        token_to_req_indices_ptr,
+        swa_block_table_ptr,
+        swa_block_table_stride,
+        swa_block_size,
+        swa_block_span,
+        compressed_block_table_ptr,
+        compressed_block_table_stride,
+        compressed_block_size,
+        compressed_block_span,
+        NUM_DECODE_TOKENS,
+        WINDOW_SIZE: tl.constexpr,
+        COMPRESS_RATIO: tl.constexpr,
+        TOP_K: tl.constexpr,
+        PADDED_TOP_K: tl.constexpr,
+        PREFILL_TOPK_STRIDE,
+        DECODE_COMPRESSED_TOPK: tl.constexpr,
+        DECODE_COMPRESSED_INDICES_ARE_LOCAL: tl.constexpr,
+        HAS_DECODE_COMPRESSED_LENS: tl.constexpr,
+        WINDOW_BLOCK_SIZE: tl.constexpr,
+        TOPK_BLOCK_SIZE: tl.constexpr,
+    ):
+        token_idx = tl.program_id(0)
+
+        if token_idx < NUM_DECODE_TOKENS:
+            for i in range(0, WINDOW_SIZE, WINDOW_BLOCK_SIZE):
+                offset = i + tl.arange(0, WINDOW_BLOCK_SIZE)
+                mask = offset < WINDOW_SIZE
+                values = tl.load(
+                    decode_swa_indices_ptr + token_idx * decode_swa_stride + offset,
+                    mask=mask,
+                    other=-1,
+                )
+                values = _remap_flashinfer_index(values, swa_block_size, swa_block_span)
+                tl.store(
+                    sparse_indices_ptr + token_idx * sparse_indices_stride + offset,
+                    values,
+                    mask=mask,
+                )
+
+            compressed_len = tl.zeros((), dtype=tl.int32)
+            for i in range(0, PADDED_TOP_K, TOPK_BLOCK_SIZE):
+                offset = i + tl.arange(0, TOPK_BLOCK_SIZE)
+                mask = offset < PADDED_TOP_K
+                values = tl.load(
+                    decode_compressed_indices_ptr
+                    + token_idx * decode_compressed_stride
+                    + offset,
+                    mask=offset < DECODE_COMPRESSED_TOPK,
+                    other=-1,
+                )
+                if DECODE_COMPRESSED_INDICES_ARE_LOCAL:
+                    token_valid = tl.load(decode_is_valid_token_ptr + token_idx)
+                    is_valid = values >= 0
+                    req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+                    block_indices = values // compressed_block_size
+                    block_numbers = tl.load(
+                        compressed_block_table_ptr
+                        + req_idx * compressed_block_table_stride
+                        + block_indices,
+                        mask=mask & is_valid,
+                        other=-1,
+                    )
+                    block_offsets = values % compressed_block_size
+                    values = block_numbers * compressed_block_size + block_offsets
+                    values = tl.where(is_valid, values, -1)
+                    compressed_len += tl.sum((is_valid & token_valid).to(tl.int32), axis=0)
+                values = _remap_flashinfer_index(
+                    values, compressed_block_size, compressed_block_span
+                )
+                tl.store(
+                    sparse_indices_ptr
+                    + token_idx * sparse_indices_stride
+                    + WINDOW_SIZE
+                    + offset,
+                    values,
+                    mask=mask,
+                )
+
+            if DECODE_COMPRESSED_TOPK == 0:
+                compressed_len = tl.zeros((), dtype=tl.int32)
+            elif not DECODE_COMPRESSED_INDICES_ARE_LOCAL:
+                if HAS_DECODE_COMPRESSED_LENS:
+                    compressed_len = tl.load(decode_compressed_topk_lens_ptr + token_idx)
+                else:
+                    compressed_len = tl.full((), DECODE_COMPRESSED_TOPK, dtype=tl.int32)
+
+            tl.store(sparse_topk_lens_ptr + token_idx, WINDOW_SIZE + compressed_len)
+            return
+
+        prefill_idx = token_idx - NUM_DECODE_TOKENS
+        req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+        query_start = tl.load(query_start_loc_ptr + req_idx)
+        query_end = tl.load(query_start_loc_ptr + req_idx + 1)
+        query_len = query_end - query_start
+        seq_len = tl.load(seq_lens_ptr + req_idx)
+        start_pos = seq_len - query_len
+        token_idx_in_query = token_idx - query_start
+        pos = start_pos + token_idx_in_query
+        swa_len = tl.minimum(pos + 1, WINDOW_SIZE)
+        swa_start_pos = pos - swa_len + 1
+        topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
+
         for i in range(0, WINDOW_SIZE, WINDOW_BLOCK_SIZE):
             offset = i + tl.arange(0, WINDOW_BLOCK_SIZE)
             mask = offset < WINDOW_SIZE
-            values = tl.load(
-                decode_swa_indices_ptr + token_idx * decode_swa_stride + offset,
-                mask=mask,
+            pos_offset = swa_start_pos + offset
+            block_indices = pos_offset // swa_block_size
+            block_numbers = tl.load(
+                swa_block_table_ptr + req_idx * swa_block_table_stride + block_indices,
+                mask=mask & (offset < swa_len),
                 other=-1,
             )
-            values = _remap_flashinfer_index(values, swa_block_size, swa_block_span)
+            block_offsets = pos_offset % swa_block_size
+            slot_ids = block_numbers * swa_block_size + block_offsets
+            slot_ids = tl.where(offset < swa_len, slot_ids, -1)
+            slot_ids = _remap_flashinfer_index(slot_ids, swa_block_size, swa_block_span)
             tl.store(
                 sparse_indices_ptr + token_idx * sparse_indices_stride + offset,
-                values,
+                slot_ids,
                 mask=mask,
             )
 
-        compressed_len = tl.zeros((), dtype=tl.int32)
         for i in range(0, PADDED_TOP_K, TOPK_BLOCK_SIZE):
             offset = i + tl.arange(0, TOPK_BLOCK_SIZE)
             mask = offset < PADDED_TOP_K
-            values = tl.load(
-                decode_compressed_indices_ptr
-                + token_idx * decode_compressed_stride
-                + offset,
-                mask=offset < DECODE_COMPRESSED_TOPK,
+            local_idx = tl.load(
+                prefill_topk_indices_ptr + prefill_idx * prefill_topk_stride + offset,
+                mask=(offset < PREFILL_TOPK_STRIDE) & (offset < topk_len),
                 other=-1,
             )
-            if DECODE_COMPRESSED_INDICES_ARE_LOCAL:
-                token_valid = tl.load(decode_is_valid_token_ptr + token_idx)
-                is_valid = values >= 0
-                req_idx = tl.load(token_to_req_indices_ptr + token_idx)
-                block_indices = values // compressed_block_size
-                block_numbers = tl.load(
-                    compressed_block_table_ptr
-                    + req_idx * compressed_block_table_stride
-                    + block_indices,
-                    mask=mask & is_valid,
-                    other=-1,
-                )
-                block_offsets = values % compressed_block_size
-                values = block_numbers * compressed_block_size + block_offsets
-                values = tl.where(is_valid, values, -1)
-                compressed_len += tl.sum((is_valid & token_valid).to(tl.int32), axis=0)
-            values = _remap_flashinfer_index(
-                values, compressed_block_size, compressed_block_span
+            is_valid = local_idx >= 0
+            block_indices = local_idx // compressed_block_size
+            block_numbers = tl.load(
+                compressed_block_table_ptr
+                + req_idx * compressed_block_table_stride
+                + block_indices,
+                mask=mask & is_valid,
+                other=-1,
+            )
+            block_offsets = local_idx % compressed_block_size
+            slot_ids = block_numbers * compressed_block_size + block_offsets
+            slot_ids = tl.where((offset < topk_len) & is_valid, slot_ids, -1)
+            slot_ids = _remap_flashinfer_index(
+                slot_ids, compressed_block_size, compressed_block_span
             )
             tl.store(
                 sparse_indices_ptr
                 + token_idx * sparse_indices_stride
                 + WINDOW_SIZE
                 + offset,
-                values,
+                slot_ids,
                 mask=mask,
             )
 
-        if DECODE_COMPRESSED_TOPK == 0:
-            compressed_len = tl.zeros((), dtype=tl.int32)
-        elif not DECODE_COMPRESSED_INDICES_ARE_LOCAL:
-            if HAS_DECODE_COMPRESSED_LENS:
-                compressed_len = tl.load(decode_compressed_topk_lens_ptr + token_idx)
-            else:
-                compressed_len = tl.full((), DECODE_COMPRESSED_TOPK, dtype=tl.int32)
+        tl.store(sparse_topk_lens_ptr + token_idx, WINDOW_SIZE + topk_len)
 
-        tl.store(sparse_topk_lens_ptr + token_idx, WINDOW_SIZE + compressed_len)
-        return
-
-    prefill_idx = token_idx - NUM_DECODE_TOKENS
-    req_idx = tl.load(token_to_req_indices_ptr + token_idx)
-    query_start = tl.load(query_start_loc_ptr + req_idx)
-    query_end = tl.load(query_start_loc_ptr + req_idx + 1)
-    query_len = query_end - query_start
-    seq_len = tl.load(seq_lens_ptr + req_idx)
-    start_pos = seq_len - query_len
-    token_idx_in_query = token_idx - query_start
-    pos = start_pos + token_idx_in_query
-    swa_len = tl.minimum(pos + 1, WINDOW_SIZE)
-    swa_start_pos = pos - swa_len + 1
-    topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
-
-    for i in range(0, WINDOW_SIZE, WINDOW_BLOCK_SIZE):
-        offset = i + tl.arange(0, WINDOW_BLOCK_SIZE)
-        mask = offset < WINDOW_SIZE
-        pos_offset = swa_start_pos + offset
-        block_indices = pos_offset // swa_block_size
-        block_numbers = tl.load(
-            swa_block_table_ptr + req_idx * swa_block_table_stride + block_indices,
-            mask=mask & (offset < swa_len),
-            other=-1,
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        window_size: int,
+        compress_ratio: int,
+        topk: int,
+        topk_width: int,
+        decode_compressed_topk: int,
+        decode_compressed_indices_are_local: bool,
+        has_decode_compressed_lens: bool,
+    ) -> CompileKey:
+        topk_storage_width = (
+            topk_width
+            if topk_width >= decode_compressed_topk
+            else decode_compressed_topk
         )
-        block_offsets = pos_offset % swa_block_size
-        slot_ids = block_numbers * swa_block_size + block_offsets
-        slot_ids = tl.where(offset < swa_len, slot_ids, -1)
-        slot_ids = _remap_flashinfer_index(slot_ids, swa_block_size, swa_block_span)
-        tl.store(
-            sparse_indices_ptr + token_idx * sparse_indices_stride + offset,
-            slot_ids,
-            mask=mask,
+        padded_topk = ((topk_storage_width + 3) // 4) * 4
+        window_size_for_block = window_size if window_size >= 1 else 1
+        padded_topk_for_block = padded_topk if padded_topk >= 1 else 1
+        window_block_size = next_power_of_2(window_size_for_block)
+        topk_block_size = next_power_of_2(padded_topk_for_block)
+        swa_block_size = 64
+        compressed_block_size = (
+            swa_block_size if compress_ratio == 1 else 256 // compress_ratio
+        )
+        return self.CompileKey(
+            WINDOW_SIZE=window_size,
+            COMPRESS_RATIO=compress_ratio,
+            TOP_K=topk,
+            PADDED_TOP_K=padded_topk,
+            DECODE_COMPRESSED_TOPK=decode_compressed_topk,
+            DECODE_COMPRESSED_INDICES_ARE_LOCAL=decode_compressed_indices_are_local,
+            HAS_DECODE_COMPRESSED_LENS=has_decode_compressed_lens,
+            SWA_BLOCK_SIZE=swa_block_size,
+            COMPRESSED_BLOCK_SIZE=compressed_block_size,
+            WINDOW_BLOCK_SIZE=window_block_size,
+            TOPK_BLOCK_SIZE=topk_block_size,
         )
 
-    for i in range(0, PADDED_TOP_K, TOPK_BLOCK_SIZE):
-        offset = i + tl.arange(0, TOPK_BLOCK_SIZE)
-        mask = offset < PADDED_TOP_K
-        local_idx = tl.load(
-            prefill_topk_indices_ptr + prefill_idx * prefill_topk_stride + offset,
-            mask=(offset < PREFILL_TOPK_STRIDE) & (offset < topk_len),
-            other=-1,
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        scheduler_config = getattr(vllm_config, "scheduler_config", None)
+        max_num_batched_tokens = int(
+            getattr(scheduler_config, "max_num_batched_tokens", 0) or 0
         )
-        is_valid = local_idx >= 0
-        block_indices = local_idx // compressed_block_size
-        block_numbers = tl.load(
-            compressed_block_table_ptr
-            + req_idx * compressed_block_table_stride
-            + block_indices,
-            mask=mask & is_valid,
-            other=-1,
-        )
-        block_offsets = local_idx % compressed_block_size
-        slot_ids = block_numbers * compressed_block_size + block_offsets
-        slot_ids = tl.where((offset < topk_len) & is_valid, slot_ids, -1)
-        slot_ids = _remap_flashinfer_index(
-            slot_ids, compressed_block_size, compressed_block_span
-        )
-        tl.store(
-            sparse_indices_ptr
-            + token_idx * sparse_indices_stride
-            + WINDOW_SIZE
-            + offset,
-            slot_ids,
-            mask=mask,
+        if max_num_batched_tokens <= 0:
+            return []
+
+        model_config = getattr(vllm_config, "model_config", None)
+        hf_config = getattr(model_config, "hf_config", None)
+        return self._trace_dispatch(self.dispatch)(
+            _DSV4_FLASHINFER_MIXED_SPARSE_WARMUP_INPUTS,
+            window_size=int(getattr(hf_config, "sliding_window", 128) or 128),
         )
 
-    tl.store(sparse_topk_lens_ptr + token_idx, WINDOW_SIZE + topk_len)
+    def compile(self, compile_key: CompileKey) -> None:
+        warmup = getattr(self.kernel, "warmup", None)
+        assert warmup is not None
+        int32_ptr = TritonWarmupTensor(torch.int32)
+        bool_ptr = TritonWarmupTensor(torch.bool)
+        max_block_size = max(
+            compile_key.WINDOW_BLOCK_SIZE,
+            compile_key.TOPK_BLOCK_SIZE,
+        )
+        num_warps = 4 if max_block_size >= 256 else 1
+        warmup(
+            int32_ptr,
+            1,  # do not specialize sparse_indices_stride
+            int32_ptr,
+            int32_ptr,
+            1,  # do not specialize decode_swa_stride
+            int32_ptr,
+            1,  # do not specialize decode_compressed_stride
+            int32_ptr,
+            (
+                bool_ptr
+                if compile_key.DECODE_COMPRESSED_INDICES_ARE_LOCAL
+                else int32_ptr
+            ),
+            int32_ptr,
+            1,  # do not specialize prefill_topk_stride
+            int32_ptr,
+            int32_ptr,
+            int32_ptr,
+            int32_ptr,
+            1,  # do not specialize swa_block_table_stride
+            compile_key.SWA_BLOCK_SIZE,
+            1,  # do not specialize swa_block_span
+            int32_ptr,
+            1,  # do not specialize compressed_block_table_stride
+            compile_key.COMPRESSED_BLOCK_SIZE,
+            1,  # do not specialize compressed_block_span
+            1,  # do not specialize NUM_DECODE_TOKENS
+            WINDOW_SIZE=compile_key.WINDOW_SIZE,
+            COMPRESS_RATIO=compile_key.COMPRESS_RATIO,
+            TOP_K=compile_key.TOP_K,
+            PADDED_TOP_K=compile_key.PADDED_TOP_K,
+            PREFILL_TOPK_STRIDE=1,
+            DECODE_COMPRESSED_TOPK=compile_key.DECODE_COMPRESSED_TOPK,
+            DECODE_COMPRESSED_INDICES_ARE_LOCAL=(
+                compile_key.DECODE_COMPRESSED_INDICES_ARE_LOCAL
+            ),
+            HAS_DECODE_COMPRESSED_LENS=compile_key.HAS_DECODE_COMPRESSED_LENS,
+            WINDOW_BLOCK_SIZE=compile_key.WINDOW_BLOCK_SIZE,
+            TOPK_BLOCK_SIZE=compile_key.TOPK_BLOCK_SIZE,
+            grid=(1,),
+            num_warps=num_warps,
+        )
+
+    def __call__(
+        self,
+        sparse_indices: torch.Tensor,
+        sparse_topk_lens: torch.Tensor,
+        decode_swa_indices: torch.Tensor,
+        decode_compressed_indices: torch.Tensor,
+        decode_compressed_topk_lens: torch.Tensor,
+        decode_is_valid_token: torch.Tensor,
+        prefill_topk_indices: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        token_to_req_indices: torch.Tensor,
+        swa_block_table: torch.Tensor,
+        swa_block_size: int,
+        swa_block_span: int,
+        compressed_block_table: torch.Tensor,
+        compressed_block_size: int,
+        compressed_block_span: int,
+        *,
+        num_decode_tokens: int,
+        window_size: int,
+        compress_ratio: int,
+        topk: int,
+        padded_topk: int,
+        prefill_topk_stride: int,
+        decode_compressed_topk: int,
+        decode_compressed_indices_are_local: bool,
+        has_decode_compressed_lens: bool,
+        window_block_size: int,
+        topk_block_size: int,
+        num_warps: int,
+    ) -> None:
+        num_tokens = sparse_indices.shape[0]
+        self.kernel[(num_tokens,)](
+            sparse_indices,
+            sparse_indices.stride(0),
+            sparse_topk_lens,
+            decode_swa_indices,
+            decode_swa_indices.stride(0),
+            decode_compressed_indices,
+            decode_compressed_indices.stride(0),
+            decode_compressed_topk_lens,
+            decode_is_valid_token,
+            prefill_topk_indices,
+            prefill_topk_stride,
+            query_start_loc,
+            seq_lens,
+            token_to_req_indices,
+            swa_block_table,
+            swa_block_table.stride(0),
+            swa_block_size,
+            swa_block_span,
+            compressed_block_table,
+            compressed_block_table.stride(0),
+            compressed_block_size,
+            compressed_block_span,
+            NUM_DECODE_TOKENS=num_decode_tokens,
+            WINDOW_SIZE=window_size,
+            COMPRESS_RATIO=compress_ratio,
+            TOP_K=topk,
+            PADDED_TOP_K=padded_topk,
+            PREFILL_TOPK_STRIDE=prefill_topk_stride,
+            DECODE_COMPRESSED_TOPK=decode_compressed_topk,
+            DECODE_COMPRESSED_INDICES_ARE_LOCAL=decode_compressed_indices_are_local,
+            HAS_DECODE_COMPRESSED_LENS=has_decode_compressed_lens,
+            WINDOW_BLOCK_SIZE=window_block_size,
+            TOPK_BLOCK_SIZE=topk_block_size,
+            num_warps=num_warps,
+        )
+
+
+_DEQUANTIZE_AND_GATHER_K_CACHE_KERNEL = DequantizeAndGatherKCacheKernel()
+_COMPUTE_GLOBAL_TOPK_INDICES_AND_LENS_KERNEL = (
+    ComputeGlobalTopkIndicesAndLensKernel()
+)
+_COMBINE_TOPK_SWA_INDICES_KERNEL = CombineTopkSwaIndicesKernel()
+_BUILD_FLASHINFER_MIXED_SPARSE_INDICES_KERNEL = (
+    BuildFlashinferMixedSparseIndicesKernel()
+)

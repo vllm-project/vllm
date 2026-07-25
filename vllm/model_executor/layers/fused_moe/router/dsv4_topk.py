@@ -1,10 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
+from typing import Any
+
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
+from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import next_power_of_2
 
 _TOPK = 6
 
@@ -35,10 +41,19 @@ def can_use_dsv4_topk(
     )
 
 
-if current_platform.is_cuda():
 
+class DSV4TopKKernel(VllmJitKernel["DSV4TopKKernel.CompileKey"]):
+    @dataclass(frozen=True)
+    class CompileKey:
+        NUM_EXPERTS: int
+        BLOCK_N: int
+        indices_dtype: torch.dtype
+        routed_scaling_factor: float
+        launch_pdl: bool
+
+    @staticmethod
     @triton.jit
-    def _dsv4_topk_kernel(
+    def kernel(
         gating_output_ptr,
         correction_bias_ptr,
         topk_weights_ptr,
@@ -63,7 +78,9 @@ if current_platform.is_cuda():
             mask=expert_mask,
             other=0.0,
         ).to(tl.float32)
-        weights = tl.sqrt(tl.where(logits > 20.0, logits, tl.log(1.0 + tl.exp(logits))))
+        weights = tl.sqrt(
+            tl.where(logits > 20.0, logits, tl.log(1.0 + tl.exp(logits)))
+        )
         current = tl.where(expert_mask, weights + bias, -float("inf"))
         current = tl.where(current == current, current, -1e30)
 
@@ -95,6 +112,105 @@ if current_platform.is_cuda():
         tl.store(topk_weights_ptr + output_offsets, selected_weights, mask=output_mask)
         tl.store(topk_ids_ptr + output_offsets, selected_ids, mask=output_mask)
 
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        num_experts: int,
+        indices_dtype: torch.dtype,
+        routed_scaling_factor: float,
+        launch_pdl: bool,
+    ) -> CompileKey:
+        return self.CompileKey(
+            NUM_EXPERTS=num_experts,
+            BLOCK_N=next_power_of_2(num_experts),
+            indices_dtype=indices_dtype,
+            routed_scaling_factor=routed_scaling_factor,
+            launch_pdl=launch_pdl,
+        )
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        model_config = getattr(vllm_config, "model_config", None)
+        hf_config = getattr(model_config, "hf_config", None)
+        if getattr(hf_config, "model_type", None) != "deepseek_v4":
+            return []
+
+        num_experts = int(getattr(hf_config, "n_routed_experts", 0) or 0)
+        topk = int(getattr(hf_config, "num_experts_per_tok", 0) or 0)
+        if (
+            num_experts not in (256, 384)
+            or topk != _TOPK
+            or not bool(getattr(hf_config, "norm_topk_prob", False))
+            or getattr(hf_config, "scoring_func", None) != "sqrtsoftplus"
+        ):
+            return []
+
+        kernel_config = getattr(vllm_config, "kernel_config", None)
+        use_mega_moe = (
+            getattr(kernel_config, "moe_backend", None) == "deep_gemm_mega_moe"
+        )
+        indices_dtype = torch.int64 if use_mega_moe else torch.int32
+        return self._trace_dispatch(self.dispatch)(
+            num_experts=num_experts,
+            indices_dtype=indices_dtype,
+            routed_scaling_factor=float(
+                getattr(hf_config, "routed_scaling_factor", 1.0)
+            ),
+            launch_pdl=current_platform.is_arch_support_pdl(),
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        warmup = getattr(self.kernel, "warmup", None)
+        assert warmup is not None
+        fp32_ptr = TritonWarmupTensor(torch.float32)
+        warmup(
+            fp32_ptr,
+            fp32_ptr,
+            fp32_ptr,
+            TritonWarmupTensor(compile_key.indices_dtype),
+            compile_key.routed_scaling_factor,
+            NUM_EXPERTS=compile_key.NUM_EXPERTS,
+            BLOCK_N=compile_key.BLOCK_N,
+            num_warps=1,
+            launch_pdl=compile_key.launch_pdl,
+            grid=(1,),
+        )
+
+    def __call__(
+        self,
+        gating_output: torch.Tensor,
+        correction_bias: torch.Tensor,
+        indices_dtype: torch.dtype,
+        routed_scaling_factor: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        num_tokens, num_experts = gating_output.shape
+        shape = (num_tokens, _TOPK)
+        topk_weights = gating_output.new_empty(shape, dtype=torch.float32)
+        topk_ids = gating_output.new_empty(shape, dtype=indices_dtype)
+        if num_tokens == 0:
+            return topk_weights, topk_ids
+
+        compile_key = self.dispatch(
+            num_experts=num_experts,
+            indices_dtype=indices_dtype,
+            routed_scaling_factor=routed_scaling_factor,
+            launch_pdl=current_platform.is_arch_support_pdl(),
+        )
+        self.kernel[(num_tokens,)](
+            gating_output,
+            correction_bias,
+            topk_weights,
+            topk_ids,
+            compile_key.routed_scaling_factor,
+            NUM_EXPERTS=compile_key.NUM_EXPERTS,
+            BLOCK_N=compile_key.BLOCK_N,
+            num_warps=1,
+            launch_pdl=compile_key.launch_pdl,
+        )
+        return topk_weights, topk_ids
+
+
+_DSV4_TOPK_KERNEL = DSV4TopKKernel()
+
 
 def dsv4_topk(
     gating_output: torch.Tensor,
@@ -102,20 +218,9 @@ def dsv4_topk(
     indices_dtype: torch.dtype,
     routed_scaling_factor: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    num_tokens, num_experts = gating_output.shape
-    shape = (num_tokens, _TOPK)
-    topk_weights = gating_output.new_empty(shape, dtype=torch.float32)
-    topk_ids = gating_output.new_empty(shape, dtype=indices_dtype)
-    if num_tokens > 0:
-        _dsv4_topk_kernel[(num_tokens,)](
-            gating_output,
-            correction_bias,
-            topk_weights,
-            topk_ids,
-            routed_scaling_factor,
-            NUM_EXPERTS=num_experts,
-            BLOCK_N=triton.next_power_of_2(num_experts),
-            num_warps=1,
-            launch_pdl=current_platform.is_arch_support_pdl(),
-        )
-    return topk_weights, topk_ids
+    return _DSV4_TOPK_KERNEL(
+        gating_output,
+        correction_bias,
+        indices_dtype,
+        routed_scaling_factor,
+    )

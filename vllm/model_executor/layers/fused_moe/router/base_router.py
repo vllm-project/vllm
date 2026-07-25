@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import abstractmethod
 from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
 import torch
 
@@ -9,88 +11,195 @@ from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 if current_platform.is_cuda_alike():
 
-    @triton.jit
-    def _eplb_map_and_record_i32_kernel(
-        topk_ids_ptr,
-        logical_replica_count_ptr,
-        logical_to_physical_ptr,
-        out_ids_ptr,
-        out_ptr,
-        record_enabled_ptr,
-        num_unpadded_tokens_ptr,
-        num_logical_experts,
-        map_slots,
-        out_size,
-        numel,
-        num_active_experts,
-        HAS_NUM_UNPADDED: tl.constexpr,
-        BLOCK_SIZE: tl.constexpr,
+    class EplbMapAndRecordKernel(
+        VllmJitKernel["EplbMapAndRecordKernel.CompileKey"]
     ):
-        pid = tl.program_id(0)
-        offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        mask = offs < numel
+        BLOCK_SIZE = 256
 
-        expert_id = tl.load(topk_ids_ptr + offs, mask=mask, other=0).to(tl.int64)
-        valid_expert = (expert_id >= 0) & (expert_id < num_logical_experts)
-        safe_expert_id = tl.where(valid_expert, expert_id, 0)
-
-        # 1. Convert the logical expert ids to physical expert ids
-        replica_count = tl.load(
-            logical_replica_count_ptr + safe_expert_id,
-            mask=mask & valid_expert,
-            other=1,
+        @staticmethod
+        @triton.jit(
+            do_not_specialize=[
+                "num_logical_experts",
+                "map_slots",
+                "out_size",
+                "numel",
+            ]
         )
-        # Avoid invalid modulo/div by forcing at least 1.
-        replica_count = tl.maximum(replica_count, 1)
-        # floor(2^32 / phi), classic Knuth multiplicative hash multiplier.
-        KNUTH_MULTIPLIER = 2654435769
-        token_idx = (offs // num_active_experts).to(tl.int64)
-        hashed = (token_idx * KNUTH_MULTIPLIER) & 0xFFFFFFFF
-        replica_idx = hashed % replica_count
-        map_index = safe_expert_id * map_slots + replica_idx
-        physical_id = tl.load(
-            logical_to_physical_ptr + map_index,
-            mask=mask & valid_expert,
-            other=-1,
-        )
-        tl.store(out_ids_ptr + offs, physical_id, mask=mask)
+        def kernel(
+            topk_ids_ptr,
+            logical_replica_count_ptr,
+            logical_to_physical_ptr,
+            out_ids_ptr,
+            out_ptr,
+            record_enabled_ptr,
+            num_unpadded_tokens_ptr,
+            num_logical_experts,
+            map_slots,
+            out_size,
+            numel,
+            num_active_experts,
+            HAS_NUM_UNPADDED: tl.constexpr,
+            BLOCK_SIZE: tl.constexpr,
+        ):
+            pid = tl.program_id(0)
+            offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+            mask = offs < numel
 
-        # 2. Record expert load metrics.
+            expert_id = tl.load(topk_ids_ptr + offs, mask=mask, other=0).to(tl.int64)
+            valid_expert = (expert_id >= 0) & (expert_id < num_logical_experts)
+            safe_expert_id = tl.where(valid_expert, expert_id, 0)
 
-        # TODO(bowen): When using `FusedMoEModularKernel`, this
-        # can be done in a more unified way, since
-        # `FusedMoEPrepareAndFinalize` will return the expert
-        # token count, in some cases directly from the kernel.
-        # However, now there are many code paths not using
-        # the modular kernel, e.g. calling `fused_experts`,
-        # so we decide to keep the logic here.
-        #
-        # If later refactor moved all the MoE kernel calls
-        # to the modular kernel, we can move this logic there
-        # to achieve better efficiency.
+            # 1. Convert the logical expert ids to physical expert ids
+            replica_count = tl.load(
+                logical_replica_count_ptr + safe_expert_id,
+                mask=mask & valid_expert,
+                other=1,
+            )
+            # Avoid invalid modulo/div by forcing at least 1.
+            replica_count = tl.maximum(replica_count, 1)
+            # floor(2^32 / phi), classic Knuth multiplicative hash multiplier.
+            KNUTH_MULTIPLIER = 2654435769
+            token_idx = (offs // num_active_experts).to(tl.int64)
+            hashed = (token_idx * KNUTH_MULTIPLIER) & 0xFFFFFFFF
+            replica_idx = hashed % replica_count
+            map_index = safe_expert_id * map_slots + replica_idx
+            physical_id = tl.load(
+                logical_to_physical_ptr + map_index,
+                mask=mask & valid_expert,
+                other=-1,
+            )
+            tl.store(out_ids_ptr + offs, physical_id, mask=mask)
 
-        record_enabled = tl.load(record_enabled_ptr) != 0
-        # Skip padded tokens when recording.
-        if HAS_NUM_UNPADDED:
-            num_unpadded_tokens = tl.load(num_unpadded_tokens_ptr)
-            is_unpadded = offs < num_unpadded_tokens * num_active_experts
-        else:
-            is_unpadded = True
-        valid = (
-            mask
-            & record_enabled
-            & is_unpadded
-            & (physical_id >= 0)
-            & (physical_id < out_size)
-        )
-        safe_physical_id = tl.where(physical_id >= 0, physical_id, 0)
-        tl.atomic_add(out_ptr + safe_physical_id, 1, mask=valid)
+            # 2. Record expert load metrics.
+
+            # TODO(bowen): When using `FusedMoEModularKernel`, this
+            # can be done in a more unified way, since
+            # `FusedMoEPrepareAndFinalize` will return the expert
+            # token count, in some cases directly from the kernel.
+            # However, now there are many code paths not using
+            # the modular kernel, e.g. calling `fused_experts`,
+            # so we decide to keep the logic here.
+            #
+            # If later refactor moved all the MoE kernel calls
+            # to the modular kernel, we can move this logic there
+            # to achieve better efficiency.
+
+            record_enabled = tl.load(record_enabled_ptr) != 0
+            # Skip padded tokens when recording.
+            if HAS_NUM_UNPADDED:
+                num_unpadded_tokens = tl.load(num_unpadded_tokens_ptr)
+                is_unpadded = offs < num_unpadded_tokens * num_active_experts
+            else:
+                is_unpadded = True
+            valid = (
+                mask
+                & record_enabled
+                & is_unpadded
+                & (physical_id >= 0)
+                & (physical_id < out_size)
+            )
+            safe_physical_id = tl.where(physical_id >= 0, physical_id, 0)
+            tl.atomic_add(out_ptr + safe_physical_id, 1, mask=valid)
+
+        @dataclass(frozen=True)
+        class CompileKey:
+            HAS_NUM_UNPADDED: bool
+            NUM_ACTIVE_EXPERTS: int
+            BLOCK_SIZE: int
+
+        def dispatch(  # type: ignore[override]
+            self,
+            *,
+            has_num_unpadded: bool,
+            num_active_experts: int,
+        ) -> CompileKey:
+            return self.CompileKey(
+                HAS_NUM_UNPADDED=has_num_unpadded,
+                NUM_ACTIVE_EXPERTS=num_active_experts,
+                BLOCK_SIZE=self.BLOCK_SIZE,
+            )
+
+        def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+            parallel_config = getattr(vllm_config, "parallel_config", None)
+            if not bool(getattr(parallel_config, "enable_eplb", False)):
+                return []
+            model_config = getattr(vllm_config, "model_config", None)
+            hf_config = getattr(model_config, "hf_config", None)
+            top_k = int(getattr(hf_config, "num_experts_per_tok", 0) or 0)
+            if top_k <= 0:
+                return []
+            return self._trace_dispatch(self.dispatch)(
+                has_num_unpadded=(False, True),
+                num_active_experts=top_k,
+            )
+
+        def compile(self, compile_key: CompileKey) -> None:
+            warmup = getattr(self.kernel, "warmup", None)
+            assert warmup is not None
+            int32_ptr = TritonWarmupTensor(torch.int32)
+            warmup(
+                int32_ptr,
+                int32_ptr,
+                int32_ptr,
+                int32_ptr,
+                int32_ptr,
+                TritonWarmupTensor(torch.bool),
+                int32_ptr if compile_key.HAS_NUM_UNPADDED else None,
+                1,
+                1,
+                1,
+                1,
+                compile_key.NUM_ACTIVE_EXPERTS,
+                HAS_NUM_UNPADDED=compile_key.HAS_NUM_UNPADDED,
+                BLOCK_SIZE=compile_key.BLOCK_SIZE,
+                grid=(1,),
+            )
+
+        def __call__(
+            self,
+            topk_ids: torch.Tensor,
+            logical_replica_count: torch.Tensor,
+            logical_to_physical_map: torch.Tensor,
+            out: torch.Tensor,
+            expert_load_view: torch.Tensor,
+            record_enabled: torch.Tensor,
+            num_unpadded_tokens: torch.Tensor | None,
+            num_logical_experts: int,
+            map_slots: int,
+            out_size: int,
+            numel: int,
+            num_active_experts: int,
+        ) -> None:
+            grid = (triton.cdiv(numel, self.BLOCK_SIZE),)
+            self.kernel[grid](
+                topk_ids,
+                logical_replica_count,
+                logical_to_physical_map,
+                out,
+                expert_load_view,
+                record_enabled,
+                num_unpadded_tokens,
+                num_logical_experts,
+                map_slots,
+                out_size,
+                numel,
+                num_active_experts,
+                HAS_NUM_UNPADDED=num_unpadded_tokens is not None,
+                BLOCK_SIZE=self.BLOCK_SIZE,
+            )
+
+
+    _EPLB_MAP_AND_RECORD_KERNEL = EplbMapAndRecordKernel()
 
     def _eplb_map_and_record_triton(
         topk_ids: torch.Tensor,
@@ -106,9 +215,8 @@ if current_platform.is_cuda_alike():
             return topk_ids
         num_active_experts = topk_ids_in.shape[-1]
         out_flat = torch.empty((numel,), device=topk_ids.device, dtype=topk_ids.dtype)
-        grid = lambda meta: (triton.cdiv(numel, meta["BLOCK_SIZE"]),)
         assert expert_load_view.is_contiguous()
-        _eplb_map_and_record_i32_kernel[grid](
+        _EPLB_MAP_AND_RECORD_KERNEL(
             topk_ids_in,
             logical_replica_count.contiguous(),
             logical_to_physical_map.contiguous(),
@@ -121,8 +229,6 @@ if current_platform.is_cuda_alike():
             expert_load_view.shape[0],
             numel,
             num_active_experts,
-            HAS_NUM_UNPADDED=num_unpadded_tokens is not None,
-            BLOCK_SIZE=256,
         )
         return out_flat.reshape(topk_ids.shape)
 

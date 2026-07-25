@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
 from functools import cache
+from typing import Any
 
 import cutlass
 import cutlass.cute as cute
@@ -12,6 +14,7 @@ from cutlass.cute.nvgpu import cpasync
 from quack.compile_utils import make_fake_tensor
 
 from vllm.cute_utils import _bf16x2_mul, cvt
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel, zip_inputs
 
 
 def dequantize_and_gather_k_cache_cutedsl(
@@ -23,7 +26,7 @@ def dequantize_and_gather_k_cache_cutedsl(
     block_size: int,
     offset: int,
 ) -> None:
-    DequantGatherKCacheKernel.compile(
+    _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL(
         block_size=block_size,
         has_gather_lens=gather_lens is not None,
     )(out, k_cache, seq_lens, gather_lens, block_table, offset)
@@ -329,3 +332,67 @@ class DequantGatherKCacheKernel:
             stream,
             options="--enable-tvm-ffi",
         )
+
+
+class DequantGatherKCacheCuteDSLKernel(
+    VllmJitKernel["DequantGatherKCacheCuteDSLKernel.CompileKey"]
+):
+    @dataclass(frozen=True)
+    class CompileKey:
+        block_size: int
+        has_gather_lens: bool
+
+    def __init__(self) -> None:
+        self._compiled_cache: dict[DequantGatherKCacheCuteDSLKernel.CompileKey, Any] = {}
+        super().__init__()
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        block_size: int,
+        has_gather_lens: bool,
+    ) -> CompileKey:
+        return self.CompileKey(
+            block_size=block_size,
+            has_gather_lens=has_gather_lens,
+        )
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        cache_config = getattr(vllm_config, "cache_config", None)
+        block_size = int(getattr(cache_config, "block_size", 64) or 64)
+        if block_size <= 0:
+            return []
+
+        return self._trace_dispatch(self.dispatch)(
+            zip_inputs(
+                dict(block_size=block_size, has_gather_lens=True),
+                dict(block_size=block_size, has_gather_lens=False),
+                dict(block_size=max(1, block_size // 4), has_gather_lens=True),
+                dict(block_size=max(1, block_size // 128), has_gather_lens=True),
+            )
+        )
+
+    @staticmethod
+    def kernel(*, block_size: int) -> Any:
+        return DequantGatherKCacheKernel(block_size=block_size)
+
+    def compile(self, compile_key: CompileKey) -> None:
+        if compile_key in self._compiled_cache:
+            return
+
+        self._compiled_cache[compile_key] = DequantGatherKCacheKernel.compile(
+            block_size=compile_key.block_size,
+            has_gather_lens=compile_key.has_gather_lens,
+        )
+
+    def __call__(self, *, block_size: int, has_gather_lens: bool) -> Any:
+        compile_key = self.dispatch(
+            block_size=block_size,
+            has_gather_lens=has_gather_lens,
+        )
+        if compile_key not in self._compiled_cache:
+            self.compile(compile_key)
+        return self._compiled_cache[compile_key]
+
+
+_DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL = DequantGatherKCacheCuteDSLKernel()

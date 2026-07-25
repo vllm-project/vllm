@@ -8,7 +8,8 @@ three BF16 residual terms inside the kernel, then accumulating the three BF16
 MMA results into FP32 TMEM output.
 """
 
-from functools import cache
+from dataclasses import dataclass
+from typing import Any
 
 import cutlass
 import torch
@@ -20,6 +21,11 @@ from cutlass.cutlass_dsl import T, dsl_user_op
 from quack.compile_utils import make_fake_tensor
 
 from vllm.cute_utils import _tcgen05, simple_tma_copy
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel, WarmupIntRange
+from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import compile_cutedsl
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+)
 from vllm.triton_utils import tl, triton
 from vllm.utils import math_utils
 
@@ -333,117 +339,228 @@ class Sm100BF16x3RouterGemm:
             if warp_id == 0:
                 _tcgen05.dealloc()
 
-    @cache
+
+class BF16x3RouterGemmKernel(
+    VllmJitKernel["BF16x3RouterGemmKernel.CompileKey"]
+):
+    @dataclass(frozen=True)
+    class CompileKey:
+        BN: int
+        K: int
+
+    def __init__(self) -> None:
+        self._compiled_cache: dict[BF16x3RouterGemmKernel.CompileKey, Any] = {}
+        super().__init__()
+
     @staticmethod
-    def compile(BN: int = 128, K: int = 6144):
+    def kernel(BN: int) -> Any:
+        return Sm100BF16x3RouterGemm(BN)
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        num_tokens: int,
+        K: int,
+    ) -> CompileKey:
+        raw_BN = triton.next_power_of_2(num_tokens)
+        BN = 8 if raw_BN < 8 else 128 if raw_BN > 128 else raw_BN
+        return self.CompileKey(BN=BN, K=K)
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        kernel_config = getattr(vllm_config, "kernel_config", None)
+        if not bool(getattr(kernel_config, "enable_bf16x3_router_gemm", False)):
+            return []
+        model_config = getattr(vllm_config, "model_config", None)
+        hf_config = getattr(model_config, "hf_config", None)
+        scheduler_config = getattr(vllm_config, "scheduler_config", None)
+        K = int(getattr(hf_config, "hidden_size", 0) or 0)
+        max_tokens = min(
+            int(getattr(scheduler_config, "max_num_batched_tokens", 0) or 0),
+            128,
+        )
+        if K <= 0 or max_tokens <= 0:
+            return []
+        return self._trace_dispatch(self.dispatch)(
+            num_tokens=WarmupIntRange(1, max_tokens + 1),
+            K=K,
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        if compile_key in self._compiled_cache:
+            return
+
         N = cute.sym_int()
         M = cute.sym_int()
         SPLIT_K = cute.sym_int()
-        X = make_fake_tensor(BFloat16, (N, K), divisibility=8)
-        W = make_fake_tensor(Float32, (M, K), divisibility=4)
+        X = make_fake_tensor(BFloat16, (N, compile_key.K), divisibility=8)
+        W = make_fake_tensor(Float32, (M, compile_key.K), divisibility=4)
         out = make_fake_tensor(Float32, (SPLIT_K, N, M), divisibility=1)
-        stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
-        kernel = Sm100BF16x3RouterGemm(BN)
-        return cute.compile(
-            kernel, X, W, out, Int32(1), stream, options="--enable-tvm-ffi"
+        self._compiled_cache[compile_key] = compile_cutedsl(
+            self.kernel(compile_key.BN),
+            X,
+            W,
+            out,
+            Int32(1),
         )
 
+    def __call__(self, X: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
+        N, K = X.shape
+        M, _ = W.shape
+        num_sms = torch.cuda.get_device_properties(X.device).multi_processor_count
+        compile_key = self.dispatch(num_tokens=N, K=K)
 
-@triton.jit
-def _splitk_reduce_kernel(
-    partials,
-    out,
-    N,
-    M: tl.constexpr,
-    split_stride,
-    k_splits,
-    BN: tl.constexpr,
-    BM: tl.constexpr,
-    BS: tl.constexpr,
-    USE_PDL: tl.constexpr,
+        BM = 128
+        BK = 64
+        k_tiles = math_utils.cdiv(K, BK)
+        grid_m = math_utils.cdiv(M, BM)
+        grid_n = math_utils.cdiv(N, compile_key.BN)
+        base_ctas = grid_m * grid_n
+        split_k = min(k_tiles, max(1, num_sms // base_ctas))
+
+        if compile_key not in self._compiled_cache:
+            self.compile(compile_key)
+        kernel = self._compiled_cache[compile_key]
+
+        partials = X.new_empty(split_k, N, M, dtype=torch.float32)
+        kernel(X, W, partials, split_k)
+        if split_k == 1:
+            return partials.squeeze(0)
+
+        out = X.new_empty(N, M, dtype=torch.float32)
+        _BF16X3_SPLITK_REDUCE_KERNEL(partials, out)
+        return out
+
+
+class BF16x3SplitKReduceKernel(
+    VllmJitKernel["BF16x3SplitKReduceKernel.CompileKey"]
 ):
-    pid_n = tl.program_id(0)
-    pid_m = tl.program_id(1)
-    offs_n = pid_n * BN + tl.arange(0, BN)
-    offs_m = pid_m * BM + tl.arange(0, BM)
-    offs_s = tl.arange(0, BS)
+    @dataclass(frozen=True)
+    class CompileKey:
+        M: int
+        BN: int
+        BM: int
+        BS: int
+        USE_PDL: bool
 
-    if USE_PDL:
-        tl.extra.cuda.gdc_wait()
-        tl.extra.cuda.gdc_launch_dependents()
-
-    vals = tl.load(
-        partials
-        + offs_s[:, None, None] * split_stride
-        + offs_n[None, :, None] * M
-        + offs_m[None, None, :],
-        mask=(
-            (offs_s[:, None, None] < k_splits)
-            & (offs_n[None, :, None] < N)
-            & (offs_m[None, None, :] < M)
-        ),
-        other=0.0,
-    )
-    acc = tl.sum(vals, axis=0)
-    tl.store(
-        out + offs_n[:, None] * M + offs_m[None, :],
-        acc,
-        mask=(offs_n[:, None] < N) & (offs_m[None, :] < M),
-    )
-
-
-def splitk_reduce_triton(partials: torch.Tensor, out: torch.Tensor):
-    split_k, N, M = partials.shape
-    block_s = 1 << (split_k - 1).bit_length()
-    split_stride = partials.stride(0)
-    if block_s >= 64:
-        BN, BM = 1, 32
-    elif block_s >= 8:
-        BN, BM = 1, 256
-    else:
-        BN, BM = min(16, 32 // block_s), 32
-    grid = (triton.cdiv(N, BN), triton.cdiv(M, BM))
-    _splitk_reduce_kernel[grid](
+    @staticmethod
+    @triton.jit
+    def kernel(
         partials,
         out,
         N,
-        M,
+        M: tl.constexpr,
         split_stride,
-        split_k,
-        BN=BN,
-        BM=BM,
-        BS=block_s,
-        USE_PDL=True,
-        num_warps=4,
-        launch_pdl=True,
-    )
+        k_splits,
+        BN: tl.constexpr,
+        BM: tl.constexpr,
+        BS: tl.constexpr,
+        USE_PDL: tl.constexpr,
+    ):
+        pid_n = tl.program_id(0)
+        pid_m = tl.program_id(1)
+        offs_n = pid_n * BN + tl.arange(0, BN)
+        offs_m = pid_m * BM + tl.arange(0, BM)
+        offs_s = tl.arange(0, BS)
+
+        if USE_PDL:
+            tl.extra.cuda.gdc_wait()
+            tl.extra.cuda.gdc_launch_dependents()
+
+        vals = tl.load(
+            partials
+            + offs_s[:, None, None] * split_stride
+            + offs_n[None, :, None] * M
+            + offs_m[None, None, :],
+            mask=(
+                (offs_s[:, None, None] < k_splits)
+                & (offs_n[None, :, None] < N)
+                & (offs_m[None, None, :] < M)
+            ),
+            other=0.0,
+        )
+        acc = tl.sum(vals, axis=0)
+        tl.store(
+            out + offs_n[:, None] * M + offs_m[None, :],
+            acc,
+            mask=(offs_n[:, None] < N) & (offs_m[None, :] < M),
+        )
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        M: int,
+        split_k: int,
+        USE_PDL: bool,
+    ) -> CompileKey:
+        BS = 1 << (split_k - 1).bit_length()
+        raw_BN = 32 // BS
+        BN = 1 if BS >= 8 else 16 if raw_BN > 16 else raw_BN
+        BM = 32 if BS >= 64 else 256 if BS >= 8 else 32
+        return self.CompileKey(M=M, BN=BN, BM=BM, BS=BS, USE_PDL=USE_PDL)
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        kernel_config = getattr(vllm_config, "kernel_config", None)
+        if not bool(getattr(kernel_config, "enable_bf16x3_router_gemm", False)):
+            return []
+        model_config = getattr(vllm_config, "model_config", None)
+        hf_config = getattr(model_config, "hf_config", None)
+        M = int(getattr(hf_config, "n_routed_experts", 0) or 0)
+        K = int(getattr(hf_config, "hidden_size", 0) or 0)
+        max_split_k = math_utils.cdiv(K, 64)
+        if M <= 0 or max_split_k <= 0:
+            return []
+        return self._trace_dispatch(self.dispatch)(
+            M=M,
+            split_k=WarmupIntRange(1, max_split_k + 1),
+            USE_PDL=True,
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        warmup = getattr(self.kernel, "warmup", None)
+        assert warmup is not None
+        fp32_ptr = TritonWarmupTensor(torch.float32)
+        warmup(
+            fp32_ptr,
+            fp32_ptr,
+            1,
+            compile_key.M,
+            1,
+            1,
+            BN=compile_key.BN,
+            BM=compile_key.BM,
+            BS=compile_key.BS,
+            USE_PDL=compile_key.USE_PDL,
+            grid=(1, 1),
+        )
+
+    def __call__(self, partials: torch.Tensor, out: torch.Tensor) -> None:
+        split_k, N, M = partials.shape
+        split_stride = partials.stride(0)
+        compile_key = self.dispatch(M=M, split_k=split_k, USE_PDL=True)
+        grid = (triton.cdiv(N, compile_key.BN), triton.cdiv(M, compile_key.BM))
+        self.kernel[grid](
+            partials,
+            out,
+            N,
+            M,
+            split_stride,
+            split_k,
+            BN=compile_key.BN,
+            BM=compile_key.BM,
+            BS=compile_key.BS,
+            USE_PDL=compile_key.USE_PDL,
+            num_warps=4,
+            launch_pdl=True,
+        )
+
+def splitk_reduce_triton(partials: torch.Tensor, out: torch.Tensor):
+    _BF16X3_SPLITK_REDUCE_KERNEL(partials, out)
 
 
 def bf16x3_router_gemm(X: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
     """Return ``X @ W.T`` using the SM100 BF16x3 router GEMM kernel."""
-    N, K = X.shape
-    M, _ = W.shape
-    num_sms = torch.cuda.get_device_properties(X.device).multi_processor_count
+    return _BF16X3_ROUTER_GEMM_KERNEL(X, W)
 
-    # next power of 2 within 8 and 128
-    BN = triton.next_power_of_2(N)
-    BN = min(max(BN, 8), 128)
 
-    BM = 128
-    BK = 64
-    k_tiles = math_utils.cdiv(K, BK)
-    grid_m = math_utils.cdiv(M, BM)
-    grid_n = math_utils.cdiv(N, BN)
-
-    base_ctas = grid_m * grid_n
-    split_k = min(k_tiles, max(1, num_sms // base_ctas))
-
-    partials = X.new_empty(split_k, N, M, dtype=torch.float32)
-    Sm100BF16x3RouterGemm.compile(BN, K)(X, W, partials, split_k)
-
-    if split_k == 1:
-        return partials.squeeze(0)
-
-    out = X.new_empty(N, M, dtype=torch.float32)
-    splitk_reduce_triton(partials, out)
-    return out
+_BF16X3_ROUTER_GEMM_KERNEL = BF16x3RouterGemmKernel()
+_BF16X3_SPLITK_REDUCE_KERNEL = BF16x3SplitKReduceKernel()

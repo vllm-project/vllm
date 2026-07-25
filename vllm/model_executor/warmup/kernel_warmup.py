@@ -6,6 +6,8 @@ This is useful specifically for JIT'ed kernels as we don't want JIT'ing to
 happen during model execution.
 """
 
+import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import torch
@@ -16,6 +18,9 @@ from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.deepseek_v4_mhc_warmup import (
     deepseek_v4_mhc_warmup,
+)
+from vllm.model_executor.warmup.deepseek_v4_triton_warmup import (
+    deepseek_v4_triton_warmup,
 )
 from vllm.model_executor.warmup.fa4_cutedsl_warmup import (
     fa4_cutedsl_warmup,
@@ -65,10 +70,41 @@ def _warmup_ll_bf16_router_gemm() -> None:
     if not is_ll_bf16_gemm_available():
         return
 
-    logger.info("Warming up ll_bf16 router GEMM kernels.")
     ll_bf16_gemm_kernel.warmup(
         shapes=_LL_BF16_WARMUP_MODEL_SHAPES,
         m_values=_LL_BF16_WARMUP_M_RANGE,
+    )
+
+
+_JitWarmupStep = tuple[str, Callable[[], None]]
+
+
+def _run_jit_warmup_step(
+    step: _JitWarmupStep,
+    *,
+    index: int,
+    total: int,
+) -> None:
+    name, fn = step
+    logger.info("JIT kernel warmup [%d/%d] starting: %s", index, total, name)
+    start = time.perf_counter()
+    try:
+        fn()
+    except Exception:
+        logger.exception(
+            "JIT kernel warmup [%d/%d] failed after %.2fs: %s",
+            index,
+            total,
+            time.perf_counter() - start,
+            name,
+        )
+        raise
+    logger.info(
+        "JIT kernel warmup [%d/%d] finished in %.2fs: %s",
+        index,
+        total,
+        time.perf_counter() - start,
+        name,
     )
 
 
@@ -84,17 +120,6 @@ def kernel_warmup(worker: "Worker"):
             worker.scheduler_config.max_num_batched_tokens,
         )
     qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
-
-    # DSv4 mHC TileLang kernels (hc_pre/hc_post/hc_head_op) run every decoder
-    # layer per token; warm them across token sizes first so the first real
-    # request doesn't pay JIT cost. No-op for non-DSv4 models (gated inside).
-    deepseek_v4_mhc_warmup(
-        worker.get_model(),
-        max_tokens=worker.scheduler_config.max_num_batched_tokens,
-        cudagraph_capture_sizes=(
-            worker.vllm_config.compilation_config.cudagraph_capture_sizes or []
-        ),
-    )
 
     # Run next so input-prep kernels JIT against pristine runner state.
     flashinfer_sparse_mla_decode_autotune_warmup(worker)
@@ -121,9 +146,6 @@ def kernel_warmup(worker: "Worker"):
         logger.info("Skipping FlashInfer autotune because it is disabled.")
     elif has_flashinfer() and current_platform.has_device_capability(90):
         flashinfer_autotune(worker.model_runner)
-
-    if current_platform.has_device_capability(90):
-        _warmup_ll_bf16_router_gemm()
 
     # FlashInfer attention warmup
     # Only warmup if the model has FlashInfer attention groups
@@ -164,8 +186,42 @@ def kernel_warmup(worker: "Worker"):
         cutedsl_warmup()
 
     if worker.vllm_config.kernel_config.enable_jit_warmup:
-        fa4_cutedsl_warmup(worker)
-        sparse_mla_triton_warmup(worker)
+        jit_warmup_steps: list[_JitWarmupStep] = [
+            (
+                "DeepSeek V4 mHC TileLang",
+                lambda: deepseek_v4_mhc_warmup(
+                    worker.get_model(),
+                    vllm_config=worker.vllm_config,
+                ),
+            ),
+        ]
+        if current_platform.has_device_capability(90):
+            jit_warmup_steps.append(
+                ("ll_bf16 router GEMM CuTeDSL", _warmup_ll_bf16_router_gemm)
+            )
+        jit_warmup_steps.extend(
+            [
+                ("FA4 CuTeDSL", lambda: fa4_cutedsl_warmup(worker)),
+                ("Sparse MLA Triton", lambda: sparse_mla_triton_warmup(worker)),
+                ("DeepSeek V4 Triton", lambda: deepseek_v4_triton_warmup(worker)),
+            ]
+        )
+
+        logger.info(
+            "JIT kernel warmup starting with %d step(s).",
+            len(jit_warmup_steps),
+        )
+        jit_warmup_start = time.perf_counter()
+        for index, step in enumerate(jit_warmup_steps, start=1):
+            _run_jit_warmup_step(
+                step,
+                index=index,
+                total=len(jit_warmup_steps),
+            )
+        logger.info(
+            "JIT kernel warmup finished in %.2fs.",
+            time.perf_counter() - jit_warmup_start,
+        )
 
 
 def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:

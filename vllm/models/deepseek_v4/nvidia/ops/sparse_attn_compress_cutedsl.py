@@ -7,6 +7,7 @@ The public wrappers provide the C4 fused and C128 split kernels.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import cache
 from typing import Any
 
@@ -18,6 +19,9 @@ from cutlass import BFloat16, Float32, Int32, Int64, Uint8, Uint16, Uint32, cons
 from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import T, dsl_user_op
 from quack.compile_utils import make_fake_tensor
+
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
+from vllm.utils.math_utils import round_up
 
 _TORCH_TO_CUTE = {
     torch.bfloat16: BFloat16,
@@ -2127,6 +2131,7 @@ def compress_norm_rope_store_cutedsl(
             store_full_fp8=store_full_fp8,
             fp8_scale=fp8_scale,
         )
+
     else:
         # For C128, the two-kernel version is faster than the single fused kernel.
         compressed_kv = torch.empty(
@@ -2162,3 +2167,162 @@ def compress_norm_rope_store_cutedsl(
             store_full_fp8=store_full_fp8,
             fp8_scale=fp8_scale,
         )
+
+class SparseAttnCompressorCuteDSLKernel(
+    VllmJitKernel["SparseAttnCompressorCuteDSLKernel.CompileKey"]
+):
+    @dataclass(frozen=True)
+    class CompileKey:
+        head_size: int
+        state_width: int
+        state_block_size: int
+        rope_head_dim: int
+        fp8_max: float
+        quant_block: int
+        token_stride: int
+        scale_dim: int
+        kv_cache_block_size: int
+        kv_block_stride: int
+        compress_ratio: int
+        overlap: bool
+        norm_weight_dtype: type[cutlass.Numeric]
+        store_full_kv: bool
+        store_full_fp8: bool
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        compress_ratio: int,
+        cache_block_size: int,
+        cache_alignment: int,
+        store_full_kv: bool,
+        store_full_fp8: bool,
+        norm_weight_dtype: type[cutlass.Numeric],
+        head_size: int,
+        rope_head_dim: int,
+    ) -> CompileKey:
+        overlap = compress_ratio == 4
+        state_width = head_size * (2 if overlap else 1)
+        state_block_size = 4 if overlap else 8
+        raw_kv_cache_block_size = cache_block_size // compress_ratio
+        kv_cache_block_size = (
+            raw_kv_cache_block_size if raw_kv_cache_block_size >= 1 else 1
+        )
+        token_stride = 576
+        scale_dim = 8
+        kv_block_stride = (
+            kv_cache_block_size * head_size
+            if store_full_kv
+            else round_up(
+                kv_cache_block_size * (token_stride + scale_dim),
+                cache_alignment,
+            )
+        )
+        return self.CompileKey(
+            head_size=head_size,
+            state_width=state_width,
+            state_block_size=state_block_size,
+            rope_head_dim=rope_head_dim,
+            fp8_max=448.0,
+            quant_block=64,
+            token_stride=token_stride,
+            scale_dim=scale_dim,
+            kv_cache_block_size=kv_cache_block_size,
+            kv_block_stride=kv_block_stride,
+            compress_ratio=compress_ratio,
+            overlap=overlap,
+            norm_weight_dtype=norm_weight_dtype,
+            store_full_kv=store_full_kv,
+            store_full_fp8=store_full_fp8,
+        )
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        model_config = getattr(vllm_config, "model_config", None)
+        hf_config = getattr(model_config, "hf_config", None)
+        cache_config = getattr(vllm_config, "cache_config", None)
+        if hf_config is None:
+            return []
+
+        compress_ratios = tuple(
+            sorted(
+                {
+                    int(compress_ratio)
+                    for compress_ratio in getattr(hf_config, "compress_ratios", ())
+                    if int(compress_ratio) > 1
+                }
+            )
+        )
+        cache_block_size = int(getattr(cache_config, "block_size", 0) or 0)
+        if not compress_ratios or cache_block_size <= 0:
+            return []
+
+        cache_dtype = getattr(cache_config, "cache_dtype", None)
+        store_full_kv = cache_dtype != "fp8_ds_mla"
+        store_full_fp8 = cache_dtype in ("fp8", "fp8_e4m3")
+        cache_alignment = 576 if cache_dtype == "fp8_ds_mla" else 512
+        model_dtype = getattr(model_config, "dtype", torch.bfloat16)
+        return self._trace_dispatch(self.dispatch)(
+            compress_ratio=compress_ratios,
+            cache_block_size=cache_block_size,
+            cache_alignment=cache_alignment,
+            store_full_kv=store_full_kv,
+            store_full_fp8=store_full_fp8,
+            norm_weight_dtype=_TORCH_TO_CUTE.get(model_dtype, BFloat16),
+            head_size=int(getattr(hf_config, "head_dim", 512) or 512),
+            rope_head_dim=int(getattr(hf_config, "qk_rope_head_dim", 64) or 64),
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        if compile_key.compress_ratio == 4:
+            if compile_key.store_full_kv:
+                SparseAttnCompressNormRopeStoreFullC4Kernel.compile(
+                    head_size=compile_key.head_size,
+                    state_width=compile_key.state_width,
+                    rope_head_dim=compile_key.rope_head_dim,
+                    fp8_max=compile_key.fp8_max,
+                    quant_block=compile_key.quant_block,
+                    token_stride=compile_key.token_stride,
+                    scale_dim=compile_key.scale_dim,
+                    kv_block_stride=compile_key.kv_block_stride,
+                    compress_ratio=compile_key.compress_ratio,
+                    overlap=compile_key.overlap,
+                    store_full_fp8=compile_key.store_full_fp8,
+                    norm_weight_dtype=compile_key.norm_weight_dtype,
+                )
+                return
+
+            SparseAttnCompressNormRopeStoreC4Kernel.compile(
+                head_size=compile_key.head_size,
+                state_width=compile_key.state_width,
+                rope_head_dim=compile_key.rope_head_dim,
+                fp8_max=compile_key.fp8_max,
+                quant_block=compile_key.quant_block,
+                token_stride=compile_key.token_stride,
+                scale_dim=compile_key.scale_dim,
+                kv_block_stride=compile_key.kv_block_stride,
+                compress_ratio=compile_key.compress_ratio,
+                overlap=compile_key.overlap,
+                norm_weight_dtype=compile_key.norm_weight_dtype,
+            )
+            return
+
+        compile_split_sparse_attn_cutedsl(
+            head_size=compile_key.head_size,
+            state_width=compile_key.state_width,
+            block_size=compile_key.state_block_size,
+            rope_head_dim=compile_key.rope_head_dim,
+            fp8_max=compile_key.fp8_max,
+            quant_block=compile_key.quant_block,
+            token_stride=compile_key.token_stride,
+            scale_dim=compile_key.scale_dim,
+            kv_cache_block_size=compile_key.kv_cache_block_size,
+            kv_block_stride=compile_key.kv_block_stride,
+            compress_ratio=compile_key.compress_ratio,
+            overlap=compile_key.overlap,
+            norm_weight_dtype=compile_key.norm_weight_dtype,
+            store_full_kv=compile_key.store_full_kv,
+            store_full_fp8=compile_key.store_full_fp8,
+        )
+
+
+_SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL = SparseAttnCompressorCuteDSLKernel()
