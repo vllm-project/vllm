@@ -242,12 +242,8 @@ class Scheduler(SchedulerInterface):
                     vllm_max_batch_size=self.scheduler_config.max_num_seqs,
                     vllm_num_speculative_tokens=self.num_spec_tokens,
                 )
-            if speculative_config.use_eagle():
-                self.use_eagle = True
-                self.num_lookahead_tokens = self.num_spec_tokens
-            if speculative_config.uses_draft_model():
-                self.num_lookahead_tokens = self.num_spec_tokens
-            if speculative_config.use_dflash() or speculative_config.use_dspark():
+            self.use_eagle = speculative_config.use_eagle()
+            if self.use_eagle or speculative_config.uses_draft_model():
                 self.num_lookahead_tokens = speculative_config.num_drafter_query_tokens
 
         # Create the KV cache manager.
