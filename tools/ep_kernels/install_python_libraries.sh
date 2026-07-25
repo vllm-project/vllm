@@ -170,7 +170,10 @@ do_build() {
         sed -i "s|f'{nvshmem_dir}/include']|f'{nvshmem_dir}/include', '${CUDA_HOME}/include/cccl']|" "setup.py"
     fi
 
-    # manylinux headers do not define these syscalls used by DeepEP.
+    # DeepEPv2 requires Linux 5.6+ at runtime for pidfd_getfd (pidfd_open was
+    # added in Linux 5.3), but manylinux headers predate both definitions.
+    # DeepEP is built as a separate wheel for the vLLM container image and is
+    # not included in the vLLM wheel, so this does not change its manylinux ABI.
     if [[ "$name" == "DeepEP" ]] && \
         ! grep -q "vLLM manylinux syscall compatibility" \
             csrc/kernels/backend/symmetric.hpp; then
