@@ -183,7 +183,6 @@ _TEXT_GENERATION_MODELS = {
     "OlmoeForCausalLM": ("olmoe", "OlmoeForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
     "OrionForCausalLM": ("orion", "OrionForCausalLM"),
-    "OuroForCausalLM": ("ouro", "OuroForCausalLM"),
     "PanguEmbeddedForCausalLM": ("openpangu", "PanguEmbeddedForCausalLM"),
     "PanguProMoEV2ForCausalLM": ("openpangu", "PanguProMoEV2ForCausalLM"),
     "PanguUltraMoEForCausalLM": ("openpangu", "PanguUltraMoEForCausalLM"),
@@ -760,6 +759,7 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "PersimmonForCausalLM": "0.25.0",
     "FuyuForCausalLM": "0.25.0",
     "Plamo2ForCausalLM": "0.26.0",
+    "OuroForCausalLM": "0.26.0",
 }
 
 _OOT_SUPPORTED_MODELS = {
