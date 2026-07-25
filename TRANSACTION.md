@@ -1,513 +1,372 @@
-# Designing Weight Updates as Transactions: A Unified Plan for #48312
+# Reload as a Transaction — the Top-Down Design for #48312
 
-Status: **partially implemented and still evolving**. This document combines the commit history on `feat/reload-arena` with the findings in `REPORT.md`, `DESIGN.md`, and `LOAD_MANIFEST_DESIGN.md`. It describes the transaction semantics required by weight reload and weight-transfer operations, and distinguishes implemented behavior from future work. Stable storage, first-load manifests, manifest-driven completion, structured `LoadReceipt`s, and event-key collision auditing are implemented. A unified `ReloadTransaction` coordinator, an all-rank commit barrier, rollback, and several cache/state checkers are not.
+Status: **partially implemented**. This document defines what a correct weight update must guarantee, which failure category each mechanism addresses, and where the remaining gaps are. It intentionally describes the correctness contract before the implementation. Detailed manifest and receipt internals belong in `LOAD_MANIFEST_DESIGN.md`.
 
-## 1. Why a weight update must be a transaction
+Status labels used below:
 
-An RL weight synchronization or checkpoint reload is not merely a sequence of `copy_` calls. It may pause request processing, receive weights, restore checkpoint layouts, invoke many kinds of `weight_loader`, rerun `process_weights_after_loading` (PWAL), rebuild quantization or MoE-derived state, wake the KV cache, and resume inference. If any stage is incomplete, the API may report success while the model contains a partial update or internally inconsistent state.
+- **Implemented**: code exists on `feat/reload-arena` and has test or model evidence.
+- **Partially implemented**: the mechanism exists, but coverage or commit enforcement is incomplete.
+- **To be implemented**: design only.
+- **TBD**: even the final API or ownership boundary has not been decided.
 
-Correctness therefore cannot mean “no function raised.” It must mean: **every declared source arrived; every source was routed to the correct rank-local target fragment; every required fragment was consumed; graph-visible storage remained stable after PWAL; every rank passed validation; and only then did the model resume serving.** This gives the following lifecycle:
+## 1. Why a transaction, not a collection of fixes
+
+The reload investigation found several independent classes of failure. Stable storage fixes one class, but it cannot prove that all weights arrived, that a loader wrote the correct shard, that non-checkpoint state survived, or that downstream caches were invalidated.
+
+| Category | The invariant is about | Typical failure | Primary mechanism | Status |
+|---|---|---|---|---|
+| 1. Storage identity | A captured address remains valid | CUDA Graph or kernel keeps an address that PWAL replaced | `ReloadArena` and storage verification | Implemented |
+| 2. Value refresh | Derived storage contains values from the new weights | Address is stable, but scratch/scale contents remain stale | Arena `put()` and backend refresh hooks | Partially implemented |
+| 3. Loader lifecycle | The loading process is complete and uses the correct layout | A loader finishes early, writes through a stale layout, or misses a fragment | Completion manifest, `LoadReceipt`, loader epoch | Manifest implemented; epoch pending |
+| 4. State preservation | State without a checkpoint key survives or is rebuilt | Non-persistent buffers, aliases, or config-dependent state are lost | Keyless-state and config-context checks | Partially implemented |
+| 5. Routing and sharding | An update reaches the correct rank, expert, and shard | A loader consumes a tensor but writes the wrong TP/EP destination | Receipt fragments and distributed sentinels | Receipt identity implemented; sentinels pending |
+| 6. Name and key mapping | Every expected source resolves exactly once | Prefix mapping, packed routing, or loader-specific renaming drops a key | Source/event manifests and collision audit | Implemented for covered loaders |
+| 7. Cache coherence | Consumers do not use state from an old weight generation | Prefix, LoRA, or multimodal cache survives an update | Generation-aware cache invalidation | To be implemented |
+
+These invariants do not share one mechanism. They share one **decision point**: immediately before the engine resumes inference. A weight update is correct only if every applicable invariant is proven at that point.
+
+The transaction model is therefore:
 
 ```text
-BEGIN
-  -> establish the update scope and baselines
-  -> APPLY: receive and load weights
-  -> FINALIZE: finish PWAL and layer restoration
-  -> VALIDATE: reconcile sources, event manifests, arena storage, and state
-  -> COMMIT: resume inference only after every check passes
-  -> ABORT: do not treat the update as successful if any check fails
+BEGIN -> APPLY -> FINALIZE -> VERIFY ALL -> COMMIT or ABORT
 ```
 
-“Transaction” here means atomic visibility, completeness validation, and a unified commit gate; it is not a database transaction. Only some checks currently fail closed. Initial-baseline collisions, incomplete first real updates after dummy initialization, and declared source-manifest mismatches raise immediately. Ordinary reload completion and arena violations are primarily exposed through `LoadManifestReport`, so callers must still enforce `report.ok`. The unified commit gate is therefore unfinished. The system also does not retain an old-weight snapshot: **ABORT currently means rejecting the update and refusing to continue serving, not automatically rolling back to the previous values.**
+The important inversion is that reload no longer “does some work and hopes.” It collects evidence and refuses to call the update successful when required evidence is missing.
 
-### 1.1 End-to-end transaction flow
-
-The first diagram retains the original service lifecycle and places the implemented manifest, receipt, and arena checks at their intended transaction boundary:
+## 2. End-to-end lifecycle
 
 ```mermaid
 flowchart LR
     A[Stop accepting new requests] --> B[Drain in-flight requests]
     B --> C[Sleep / release KV cache]
-    C --> D[BEGIN weight-update transaction]
-    D --> E[Declare transaction scope<br/>source manifest / rank / generation]
-    E --> F[APPLY receive and load weights]
+    C --> D[BEGIN update]
+    D --> E[Declare scope<br/>sources / rank / generation]
+    E --> F[APPLY weights]
     F --> G[FINALIZE<br/>layerwise processing + PWAL]
-    G --> H[VALIDATE]
-    H --> H1[Reconcile source manifest]
-    H --> H2[Reconcile required / received events]
-    H --> H3[Audit LoadReceipt collisions]
-    H --> H4[Verify ReloadArena storage]
+    G --> H[VERIFY ALL]
+    H --> H1[Storage identity]
+    H --> H2[Source and event completeness]
+    H --> H3[Receipt identity and collisions]
+    H --> H4[State, routing, and cache checks]
     H1 --> I{All local checks pass?}
     H2 --> I
     H3 --> I
     H4 --> I
-    I -- No --> X[ABORT<br/>report findings and do not resume]
-    I -- Yes --> J{Did every rank pass?}
+    I -- No --> X[ABORT<br/>do not resume]
+    I -- Yes --> J{All ranks pass?}
     J -- No or timeout --> X
-    J -- Yes --> K[COMMIT<br/>advance weight generation]
-    K --> L[Wake KV cache]
-    L --> M[Invalidate old-generation caches]
-    M --> N[Resume inference]
+    J -- Yes --> K[COMMIT generation]
+    K --> L[Wake and invalidate old caches]
+    L --> M[Resume inference]
 ```
 
-The internal loading path is:
+A transaction has four properties:
+
+1. **A baseline exists before mutation.** Address snapshots, required load events, source declarations, and state policies are established before they are verified.
+2. **Mutation is bounded.** Loading and PWAL happen in APPLY/FINALIZE; verification should inspect rather than silently repair state.
+3. **Commit is explicit.** API success, copied numel, and “no exception” are not correctness oracles.
+4. **Failure is fail closed.** A failed rank or unproven invariant must prevent every rank from resuming.
+
+Current limitation: updates modify the live model in place. ABORT means “reject the update and do not continue serving,” not automatic rollback. True rollback remains future work.
+
+## 3. The checks and the problems they solve
+
+### C1 — StorageIdentityChecker
+
+**Problem.** PWAL may rebuild a tensor that a CUDA Graph, quantized kernel, or MoE backend captured by address. The Python object appears valid, but replay still reads the old allocation. This failure class includes Marlin/Machete scratch tensors, CUTLASS layouts, W4A8 derived storage, and MLA-related state.
+
+**Invariant.** Every graph-visible slot that existed at BEGIN still exists after FINALIZE with the same storage identity and compatible layout.
+
+**Mechanism.** A layer-owned `ReloadArena` owns stable buffers. Backends refresh values with `put()` rather than rebinding tensors. Reload snapshots arena slots before restoring checkpoint layout and verifies them after PWAL.
+
+**Status: Implemented.** Arena integration, per-layer verification, module-level storage manifests, and registry/dataflow CI sweeps are present. Coverage still depends on discovering every graph-visible tensor.
+
+### C2 — DerivedValueRefreshChecker
+
+**Problem.** Stable storage alone is insufficient. A backend may keep the same address but fail to write newly derived scales, permutations, workspaces, or packed values after the base weights change.
+
+**Invariant.** Every derived slot declares its source generation and is refreshed from the committed weights before resume.
+
+**Mechanism.** Arena-backed tensors are updated in place. A future generalized checker should track a derived-value generation or refresh receipt rather than infer correctness from address stability.
+
+**Status: Partially implemented.** Arena `put()` covers migrated backends, but there is no general refresh-generation checker.
+
+### C3a — LoaderEpochChecker
+
+**Problem.** A `weight_loader` created for checkpoint layout can survive a layout conversion and later write checkpoint-format bytes into kernel-format storage. The call succeeds, but the destination interpretation is stale.
+
+**Invariant.** A loader executes only against the layout epoch for which it was created, or the reload pipeline restores the expected layout before invoking it.
+
+**Mechanism.** Layout conversions should advance an epoch; loaders should carry the epoch they expect. The transaction verifies that no stale loader executed. Wrapping `model.load_weights` is complementary because it routes external calls through the restore/load/PWAL lifecycle.
+
+**Status: To be implemented.** The current layerwise path reduces exposure, but there is no explicit epoch contract.
+
+### C3b/C6 — CompletionManifestChecker
+
+**Problem.** Numel counting cannot represent logical loading. A composed loader may execute two `copy_` calls for one source, Q/K/V may share one Parameter, MoE experts may be rank-local, and a missing source contributes zero calls. These cases can cause premature completion or silent omissions.
+
+**Invariant.** The exact logical events consumed by a correct first load are all consumed again during reload, in the same rank-local scope. A streamed transfer must also reconcile its declared source set.
+
+**Mechanism.** The first real load observes events of the form:
+
+```text
+source_key => target_parameter[logical_fragment]
+```
+
+Reload records `received_keys`; layer completion is driven by `required_keys <= received_keys`, not copied numel. Dummy initialization first establishes a provisional target baseline and promotes the first complete real update to an exact event baseline.
+
+**Status: Implemented for covered paths.** `load_numel/load_numel_total` have been removed as completion state. Checkpoint loaders, IPC/NCCL transfer hooks, and several external/direct loaders publish manifests. Sparse direct mutation still needs a standard hook.
+
+### C3c/C5/C6 — LoadReceiptIdentityChecker
+
+**Problem.** A manifest can still be wrong if its receipt identity is incomplete. For example, Q, K, and V can collapse to one packed target, or multiple MoE experts/shards can collapse to one event. If the first load and reload both make the same mistake, ordinary set equality passes.
+
+**Invariant.** Each loader returns a structured description of whether it consumed the source and which logical target fragment it wrote. Distinct semantic calls must not collapse to one event or target key.
+
+**Mechanism.** `LoadReceipt` carries `consumed`, a `LoadFragment`, and a collision policy. Current schemas include:
+
+| Loader | Logical fragment |
+|---|---|
+| `QKVParallelLinear` | `loaded_shard_id=q/k/v` |
+| `MergedColumnParallelLinear` | `loaded_shard_id=0/1/...` |
+| `RoutedExperts` | `shard_id + expert_id + weight_name` |
+| Composed loader | The underlying receipt, unchanged |
+
+`LoadEventAudit` independently derives a stable call witness from source, loader identity, scalar arguments, shape, and dtype. It detects:
+
+- `EVENT_KEY_COLLISION`;
+- `TARGET_ALIAS_COLLISION`;
+- `STATUS_CONFLICT` between accepted and skipped;
+- `SCHEMA_DRIFT`;
+- `RECEIPT_SCHEMA_MISMATCH`.
+
+**Status: Implemented.** QKV, merged-column, RoutedExperts, composed loaders, legacy adaptation, negative collision tests, and real Qwen MoE validation are present. New loaders still need deliberate schema review.
+
+### C4a — KeylessStateChecker
+
+**Problem.** Not every model state item has a checkpoint key. `persistent=False` buffers, parameter aliases, runtime bookkeeping, and backend caches can be overwritten, independently copied, or recreated with the wrong persistence policy during reload.
+
+**Invariant.** Each keyless state item declares one policy: PRESERVE, RECOMPUTE, or INVALIDATE. Aliases preserve their relationship and must not be treated as independent values.
+
+**Mechanism.** Snapshot values, persistence flags, and alias relationships at BEGIN; verify the declared policy after FINALIZE.
+
+**Status: To be implemented.** Existing metadata and arena logic cover individual cases, not a general policy checker.
+
+### C4b — ConfigContextChecker
+
+**Problem.** PWAL can depend on the active `VllmConfig`. Reloading outside the original config context can fail or rebuild a backend using a different configuration.
+
+**Invariant.** Every config-dependent rebuild runs under the same relevant configuration identity as model initialization.
+
+**Mechanism.** Bound APPLY/FINALIZE with `set_current_vllm_config` and verify that no PWAL-reachable config lookup escaped or used a mismatched config.
+
+**Status: Partially implemented.** The config boundary exists in the current reload path; generalized identity verification is pending.
+
+### C4c — IdempotencyChecker
+
+**Problem.** Reloading weights with values identical to the current model may still change buffers, layouts, addresses, or output. Such a change reveals an untracked side effect even when ordinary accuracy tests are unavailable.
+
+**Invariant.** An identity update preserves parameter/buffer values, required storage identities, and deterministic output.
+
+**Mechanism.** Run an admission test per model/backend using identical weights and compare state plus greedy output.
+
+**Status: To be implemented as a common checker.** Individual smoke tests provide partial evidence.
+
+### C5 — ShardRoutingChecker
+
+**Problem.** A loader may consume every expected key yet ignore `tp_rank`, map an expert to the wrong EP rank, or write a correct shard into the wrong destination. Completeness alone cannot prove placement.
+
+**Invariant.** Rank-distinct and shard-distinct values land in the expected rank-local target fragment.
+
+**Mechanism.** A distributed test lane injects sentinel values and verifies placement on every TP/EP rank. Runtime receipts provide the fragment identity but do not prove the tensor bytes landed there.
+
+**Status: To be implemented.** Rank-local receipt scopes and TP/EP model tests exist; generalized sentinel verification does not.
+
+### C7 — CacheGenerationChecker
+
+**Problem.** Prefix KV, LoRA, multimodal, or backend-specific caches can serve generation-N state after weights advance to generation N+1.
+
+**Invariant.** Every registered cache either includes weight generation in its key or is invalidated before COMMIT resumes inference.
+
+**Mechanism.** Advance `weight_generation` only at commit and require cache participants to acknowledge the new generation.
+
+**Status: To be implemented.** No unified cache-generation protocol exists.
+
+## 4. How the implemented load manifest works
+
+The implementation has three identities:
+
+1. **Source identity:** the original checkpoint or sender-side name.
+2. **Target-fragment identity:** parameter name plus QKV/MoE/merged logical fragment.
+3. **Full event identity:** `source => target[fragment]`.
+
+The high-level flow is:
 
 ```mermaid
 flowchart TD
-    A[BEGIN] --> B{Exact required_keys already available?}
-    B -- Yes --> C[Snapshot arena<br/>restore checkpoint/meta layout]
-    B -- No: dummy or first online quantization --> D[Create provisional required_target_keys]
-    C --> E[Install online weight_loader wrappers]
-    D --> E
-    E --> F[Read or receive a source tensor]
-    F --> G[Set current source key]
-    G --> H[Execute the real weight_loader]
-    H --> I[Obtain a structured LoadReceipt]
-    I --> J[Create source-to-target-fragment event]
-    J --> K[Record LoadCallWitness and run collision audit]
-    K --> L{Was the receipt consumed?}
-    L -- No: non-local or skipped --> M[Continue with the next source]
-    L -- Yes --> N[Add received_keys and received_target_keys]
-    N --> O{Exact manifest exists and layer events are complete?}
-    O -- Yes --> P[Run layer PWAL and verify arena]
-    O -- No --> M
-    P --> M
-    M --> Q{End of source stream?}
-    Q -- No --> F
-    Q -- Yes --> R[FINALIZE remaining layers]
-    R --> S[Final required / received / target reconciliation]
-    S --> T{First real update and all targets complete?}
-    T -- Yes --> U[Promote received_keys to permanent required_keys]
-    T -- No or baseline already exists --> V[Retain the original required_keys]
-    U --> W[Produce rank-local LoadManifestReport]
-    V --> W
+    A[First real load] --> B[Observe source context]
+    B --> C[Run weight_loader]
+    C --> D[Obtain LoadReceipt]
+    D --> E[Record required event and collision witness]
+    E --> F[Finalize collision-free baseline]
+    F --> G[Later reload]
+    G --> H[Record received events]
+    H --> I{Layer manifest complete?}
+    I -- Yes --> J[Run PWAL and verify arena]
+    I -- No --> K[Keep buffering]
+    J --> L[Final transaction reconciliation]
+    K --> L
 ```
 
-## 2. Transaction invariants
+For dummy or first online-quantization loads, no exact source baseline exists. The model records rank-local `required_target_keys`, buffers the first real update until the source stream ends, verifies that all targets were touched, and promotes that update's exact events to permanent `required_keys`. Chunked IPC/NCCL transfers also require an independently declared source manifest so a source that never arrived can be detected.
 
-| Area | Invariant | Current status |
-|---|---|---|
-| Storage identity | Addresses captured by CUDA Graphs, quantization kernels, or MoE workspaces remain stable across reload | Arena and per-layer verification implemented |
-| Source completeness | Declared source names equal the names actually received | Transfer source manifest implemented; required for the first streamed update after dummy init |
-| Loader completeness | Every logical event consumed during the correct first load occurs again during reload | Required/received manifest implemented |
-| Fragment uniqueness | Q/K/V and MoE expert/shard events do not collapse because of incomplete receipts | Structured receipts and collision audit implemented |
-| Completion timing | Layer completion depends on event sets, not internal `copy_` counts or numel estimates | Manifest-driven completion implemented; `load_numel` removed |
-| Rank isolation | Every TP/PP/DP/EP rank validates only its rank-local fragments | Rank-local reports implemented; unified global barrier pending |
-| Keyless state | Non-persistent buffers, aliases, and derived values are preserved or rebuilt according to policy | Partially covered; unified checker pending |
-| Routing correctness | A source reaches the correct rank, expert, and shard, not merely any loader | Receipt identity exists; distributed sentinel validation pending |
-| Cache coherence | Prefix, LoRA, and multimodal caches never serve state from an old weight generation | Unified generation checker pending |
+This implementation answers the category-3/6 completeness problem. It does not replace storage, state, routing, or cache checkers.
 
-These invariants require different mechanisms, but they share one commit point. A transaction report should aggregate them instead of allowing each update entry point to make an unrelated decision.
+## 5. Report and commit policy
 
-## 3. Implementation history
+The current rank-local report contains scope coordinates, required and received event counts, completion findings, and arena findings. `report.ok` is true only when both finding sets are empty. Receipt collision findings are currently included in completion findings.
 
-The branch evolved in stages: stabilize storage first, establish verifiable manifests next, then make the manifest authoritative for completion.
-
-| Commit | Purpose |
-|---|---|
-| `5532d3a69` | Introduced layer-owned `ReloadArena` storage for graph-visible temporary tensors |
-| `6f725f866`, `dead65972` | Moved Machete and RDNA3 WNA16 MoE derived scratch tensors into the arena |
-| `14a226b68` | Added capture-time module-level storage manifests beyond arena-owned tensors |
-| `91e05c188` through `ba8bd7a2f` | Added registry, first-forward, dataflow, and MoE-expert CI discovery |
-| `bdc1ee506` | Moved arena snapshot/verification into the per-layer reload pipeline |
-| `3a90010d3` | Observed required events during the first real load instead of predicting them from model structure |
-| `7645c60fb` | Added source, target, and fragment manifests across loader and weight-transfer paths |
-| `19969814d` | Removed `load_numel/load_numel_total` and made manifests drive completion |
-| `cd44e02e3` | Added structured `LoadReceipt`s for QKV, merged-column, RoutedExperts, and composed loaders |
-| `810280d52` | Added event-key collision auditing for missing fields, status conflicts, and schema drift |
-
-Older descriptions that label `CompletionManifestChecker` as design-only are now stale. Manifests, structured receipts, and collision auditing have code and model-level validation. What remains is a unified coordinator and a global all-rank commit decision.
-
-### 3.1 Status legend and summary
-
-The document uses four status labels:
-
-- **[Implemented]**: code exists on the branch and has unit-test or real-model evidence;
-- **[Partially implemented]**: lower-level state or checks exist, but the unified gate or some update paths are missing;
-- **[To be implemented]**: design only; no complete runtime implementation can be relied upon;
-- **[TBD]**: the interface shape has not been decided; example code expresses responsibilities only.
-
-#### Implemented
-
-- Stable ReloadArena storage, per-layer snapshot/verification, and module-level storage manifests;
-- first-checkpoint-load observation of `required_keys` and reload-time collection of `received_keys`;
-- source-to-target-fragment events and rank-local `LoadManifestScope`/`LoadManifestReport`;
-- provisional dummy baselines and promotion to exact event baselines after a complete first real update;
-- manifest completion in place of `load_numel/load_numel_total`;
-- `LoadReceipt`/`LoadFragment` support in QKV, MergedColumn, RoutedExperts, and composed loaders;
-- event-key/target collisions, status conflicts, schema drift, and declared-schema mismatch detection;
-- declared source-manifest validation in `WeightTransferEngine`;
-- Qwen3 MoE TP/EP, Qwen CUDA IPC, and synthetic negative tests.
-
-#### Partially implemented
-
-- Fail-closed behavior: first-load collisions, incomplete dummy-first-real updates, and declared source mismatches fail directly; normal completion/arena findings still depend on callers enforcing `report.ok`;
-- distributed commit: rank-local scopes/reports and multi-rank validation exist, but no universal all-rank commit barrier exists;
-- loader coverage: standard checkpoint, IPC/NCCL, and several external loaders are covered, while sparse/direct mutation needs a transaction hook;
-- draft/MTP: independent scopes are required by design, but no common model-role/generation protocol exists;
-- keyless and derived state: the arena covers some graph-visible tensors, but there is no general buffer/alias checker.
-
-#### To be implemented
-
-- A unified coordinator and its final public/internal API;
-- all-rank commit barrier, timeout, and all-or-none resume;
-- rollback through a shadow model/double buffer or undo log;
-- transaction ID, weight generation, late-chunk rejection, and concurrent-update isolation;
-- a standard source/dirty-generation protocol for sparse and direct updates;
-- `LoaderEpochChecker`, `KeylessStateChecker`, `ShardRoutingChecker`, `CacheGenerationChecker`, and `IdempotencyChecker`;
-- formal target/draft/MTP scope types and independent reconciliation;
-- generation-based invalidation for prefix, LoRA, multimodal, and related caches.
-
-## 4. [Implemented] Three layers of identity
-
-### 4.1 Source identity
-
-A source identity is the stable sender-side or checkpoint-side name, for example:
+The intended policy is per checker:
 
 ```text
-model.layers.0.self_attn.q_proj.weight
-model.layers.0.mlp.experts.7.gate_proj.weight
+strict  -> any violation aborts the update
+warn    -> record and resume while a new checker gathers field evidence
+off     -> checker is disabled explicitly
 ```
 
-Checkpoint loaders use `observe_weight_sources()` to preserve the original source key while the model performs name mapping, packed routing, or expert routing. Chunked IPC/NCCL transfers may independently declare `expected_source_names`, allowing final reconciliation:
+A new checker should normally land in warn mode, gather real-model evidence, then graduate to strict. One noisy checker must be downgradeable without disabling all other protections.
+
+Current enforcement is incomplete:
+
+- first-load receipt collisions fail immediately;
+- incomplete dummy-first-real updates fail immediately;
+- declared source-manifest mismatches fail immediately;
+- normal reload completion and arena findings are reported, but a universal resume gate does not yet enforce all reports.
+
+## 6. Multi-rank commit
+
+Reload is collective. Validation is rank-local, but the decision must be global:
 
 ```text
-missing = expected_source_names - received_source_names
-unexpected = received_source_names - expected_source_names
+each rank validates its own scope
+-> controller collects every report
+-> one failed or timed-out rank aborts the update
+-> all ranks cross one commit barrier
+-> all ranks resume together
 ```
 
-Dummy initialization has no checkpoint source stream and cannot learn a source baseline. For IPC/NCCL transfers where the caller chooses and chunks the source set, the first real transfer must carry an authoritative source manifest; otherwise a source that never arrived cannot be distinguished from a source that was not expected. When loading a complete checkpoint directly, the checkpoint index/iterator can define the source boundary, but the rank-local provisional target baseline must still be satisfied.
+Manifests must not be unioned before reconciliation because one rank's event could hide another rank's omission. Target, draft, and MTP models also require independent scopes containing at least model role, model instance, parallel coordinates, and weight generation.
 
-### 4.2 Target-fragment identity
+**Status: Partially implemented.** Rank-local TP/PP/DP/EP scopes and multi-rank validation exist. A universal all-rank commit barrier, timeout, and model-role scope protocol remain to be implemented.
 
-One Parameter does not necessarily represent one logical weight. QKV, merged MLP, MoE, and quantized weights often place multiple sources into one packed Parameter. The target identity must therefore be:
+## 7. Entry points and coverage boundaries
+
+Updates do not all pass through `reload_weights`:
 
 ```text
-parameter name + logical fragment
+checkpoint reload -> model.load_weights -> standard weight_loaders
+IPC/NCCL transfer -> receive weights -> standard or processed-tensor loading
+external loaders  -> direct state restoration or published tensors
+sparse transfer   -> direct index_copy_ into parameters
+framework RPC     -> may call model.load_weights directly
 ```
 
-Examples:
+A gate attached to one API method is therefore insufficient. The robust boundary is “before the model resumes after any weight mutation.” Standard loader paths publish receipts, processed-tensor paths publish external/direct manifest events, and sparse mutation paths must mark the model dirty and publish their own transaction evidence.
 
-```text
-weight[loaded_shard_id='q']
-w13_weight[shard_id='w1',expert_id=7,weight_name='...w13_weight']
-```
+Nested paths require a transaction-depth or reentrancy guard. Otherwise `reload_weights`, a transfer engine, and a wrapped `model.load_weights` can initialize/finalize the same reload more than once.
 
-### 4.3 Full load-event identity
+**Status: Partially implemented.** Standard checkpoint, IPC/NCCL, Modelexpress, RunAI, Tensorizer, and sharded paths have hooks or tests. Sparse/direct mutation and arbitrary framework RPC remain explicit gaps.
 
-The final manifest event is:
+## 8. [TBD] Unified transaction interface
 
-```text
-source key => target fragment
-```
-
-Examples:
-
-```text
-model.layers.0.self_attn.q_proj.weight=>weight[loaded_shard_id='q']
-model.layers.0.mlp.experts.7.gate_proj.weight=>w13_weight[shard_id='w1',expert_id=7,weight_name='model.layers.0.mlp.experts.w13_weight']
-```
-
-Transaction completion compares full event sets. Collision auditing additionally compares target fragments without source names, because different sources can incorrectly claim the same target if a receipt omits a discriminator.
-
-## 5. [Implemented] Structured LoadReceipt
-
-Every logical loader call returns a structured receipt:
-
-```python
-@dataclass(frozen=True)
-class LoadReceipt:
-    consumed: bool
-    fragment: LoadFragment
-    collision_policy: LoadCollisionPolicy
-```
-
-A normal successful load returns:
-
-```python
-return LoadReceipt.accepted(loaded_shard_id="q")
-```
-
-An expert not owned by the current rank returns:
-
-```python
-return LoadReceipt.skipped(
-    shard_id=shard_id,
-    expert_id=expert_id,
-    weight_name=weight_name,
-)
-```
-
-An existing loader with many branches and a historical `None`/`bool` result can migrate through a declarative adapter:
-
-```python
-@returns_load_receipt("shard_id", "expert_id", "weight_name")
-def weight_loader(..., return_success=False):
-    ...
-```
-
-`LoadReceipt.__bool__()` preserves conditional-loader truthiness, so existing `if success:` routing continues to work. Loaders not yet migrated use `_legacy_load_receipt(bound_args, result)`, which infers fragments from known argument names. That path is a migration fallback and should not be the default for new loaders.
-
-### 5.1 Fragment definitions in validated model paths
-
-| Loader | Receipt fragment | Reason |
-|---|---|---|
-| `QKVParallelLinear` | `loaded_shard_id=q/k/v` | Distinguishes Q, K, and V regions inside one packed Parameter |
-| `MergedColumnParallelLinear` | `loaded_shard_id=0/1/...` | Distinguishes gate/up or other merged shards |
-| `RoutedExperts` | `shard_id + expert_id + weight_name` | Distinguishes experts, w1/w2/w3, and quantized/special weight branches |
-| Ordinary one-to-one loader | Empty fragment | Source and parameter name already identify one target |
-| Composed loader | Propagates the underlying receipt unchanged | Post-load `copy_(fn(param))` is not a second source-consumption event |
-
-A receipt describes which logical fragment one loader invocation consumed. It does not count internal `copy_` calls. This is why the model can handle the #44814 failure class without numel-based completion.
-
-## 6. [Implemented] Event-key collision audit
-
-Comparing first-load and reload sets has a blind spot: if both phases return the same incomplete receipt, two distinct fragments can collapse on both sides and still satisfy `required == received`. Commit `810280d52` adds `LoadEventAudit`, an independent witness mechanism.
-
-For every loader call, the audit creates a `LoadCallWitness` containing the loader module/qualname, source key, target parameter name, stable serializable scalar arguments from `BoundArguments`, and loaded-tensor shape/dtype. It never records tensor contents, object addresses, or device pointers.
-
-| Finding | Meaning |
-|---|---|
-| `EVENT_KEY_COLLISION` | One full event key corresponds to two different call witnesses |
-| `TARGET_ALIAS_COLLISION` | Different sources or calls incorrectly claim the same target fragment |
-| `STATUS_CONFLICT` | One logical event is both accepted and skipped in one transaction |
-| `SCHEMA_DRIFT` | One loader returns different fragment schemas during one load |
-| `RECEIPT_SCHEMA_MISMATCH` | The decorator declaration and actual receipt fields disagree |
-
-If a QKV loader omits `loaded_shard_id`, its source keys are still different, but all targets collapse to `weight`. The audit reports:
-
-```text
-TARGET_ALIAS_COLLISION
-first_source=q_proj.weight
-second_source=k_proj.weight
-differing_arguments=('loaded_shard_id',)
-possible_missing_receipt_fields=('loaded_shard_id',)
-```
-
-Identical duplicate calls are not identity collisions. A loader that intentionally allows several sources to overwrite one target must explicitly use `collision_policy=LoadCollisionPolicy.OVERWRITE`; model-name allowlists are not used.
-
-`finalize_load_recording()` rejects collisions while establishing a checkpoint baseline. During reload, collision findings are added to `LoadManifestReport.completion_findings`, making the rank-local `report.ok` false.
-
-## 7. [Implemented] Manifest creation and replay
-
-### 7.1 Normal first checkpoint load
-
-```text
-model parameters exist
--> record_metadata_for_reloading(model)
--> record_load_consumption(model) wraps effective weight loaders
--> checkpoint iteration establishes a source context
--> loader returns or is adapted to LoadReceipt
--> source=>target[fragment] is added to required_keys
--> LoadEventAudit runs in parallel
--> finalize_load_recording(model)
--> original loaders are restored; the baseline becomes valid if no collision exists
-```
-
-`required_keys` is observed ground truth, not a prediction derived from `state_dict()`, parameter counts, or architecture names. EP-nonlocal experts, shared aliases, and runtime state without checkpoint sources are therefore absent from the rank-local required set by construction.
-
-### 7.2 Normal reload
-
-```text
-initialize_layerwise_reload(model)
--> snapshot arena storage
--> restore reloadable layers to checkpoint/meta layout
--> install online loader wrappers
--> add each consumed receipt to received_keys
--> when required_keys is a subset of received_keys, allow layer PWAL
--> after checkpoint exhaustion, perform final set reconciliation
--> verify arena snapshots
--> produce a rank-local LoadManifestReport
-```
-
-The event set determines completion. `copied_numel_diagnostic` may remain as a log-only metric, but it does not participate in completion, commit, or fallback decisions.
-
-### 7.3 First real update after dummy initialization
-
-A dummy load has no source stream and can establish only a provisional target baseline:
-
-```text
-required_target_keys = rank-local parameter targets that must be touched
-required_keys = empty, meaning no exact source/fragment baseline exists yet
-```
-
-The first real update must satisfy every provisional target. Chunked IPC/NCCL transfers must additionally prove that every source in the independently declared source manifest arrived. One target may contain many QKV or MoE fragments, so the first touch cannot trigger early PWAL; this phase remains buffered until transaction finalization. After successful validation, `received_keys` is promoted to permanent `required_keys`, and later reloads can finalize layers from exact events.
-
-### 7.4 Online quantization and external tensor loaders
-
-First-load online quantization may also lack an exact fragment baseline and follows the provisional-target path. Modelexpress, RunAI, Tensorizer, or processed-tensor transfers may bypass vLLM `weight_loader` functions entirely. They must publish source-to-target events through `record_external_tensor_manifest()` or `record_direct_load_consumption()` rather than fabricating receipts. Coverage must follow the actual dataflow; the mere presence of a loader file does not imply transaction coverage.
-
-## 8. [Implemented] Storage transaction: ReloadArena and PWAL
-
-The manifest proves that every logical weight was loaded. The arena proves that graph and kernel consumers still reference valid storage after PWAL. These are separate invariants and both are required.
-
-At reload start, each arena-backed layer snapshots slot identities. After PWAL rebuilds derived tensors, `arena.verify(snapshot)` checks for missing slots, moved addresses, or layout changes. The arena owns stable buffers, and PWAL uses `put()` to refresh values in existing storage instead of rebinding graph-visible tensors. Verification must happen before `LayerReloadingInfo.reset()` clears the snapshot.
-
-The current report is:
-
-```python
-LoadManifestReport(
-    scope=LoadManifestScope(...),
-    required_event_count=...,
-    received_event_count=...,
-    completion_findings=(...),
-    arena_findings=(...),
-)
-```
-
-`report.ok` is true only when completion and arena findings are both empty. Collision findings currently belong to `completion_findings`.
-
-## 9. [Partially implemented] Distributed scope and commit decision
-
-Manifests must remain per worker/rank; they cannot be unioned before reconciliation. TP, PP, and EP workers legitimately consume different fragments. A union could hide a missing rank-0 event behind an event received by rank 1. Each report therefore carries global rank/world size and TP, PP, DP, and EP coordinates.
-
-The intended global protocol is:
-
-```text
-each rank completes local APPLY and VALIDATE
--> controller collects every rank-local LoadManifestReport
--> if any report.ok is false, ABORT the entire update
--> if every report.ok is true, cross a barrier and COMMIT/RESUME together
-```
-
-Rank-local report generation and multi-rank model validation exist. A universal global commit barrier does not. Until it does, each entry point must check all worker reports rather than rank 0 alone, and a successful rank must not resume before failed ranks.
-
-MTP and speculative decoding require independent scopes. Target and draft models can have different parameter sets, parallel layouts, and update cadence. Events must not share an unqualified set. A future scope should contain at least:
-
-```text
-model_role = target | draft | mtp
-model_instance_id
-parallel coordinates
-weight generation
-```
-
-If only the target model is updated, the draft scope must explicitly be out of the transaction rather than appearing to have missing receipts.
-
-## 10. [Partially implemented] Entry-point coverage and transaction boundaries
-
-Weight updates have many entry points: checkpoint `reload_weights`, IPC, NCCL, sparse NCCL, Modelexpress, RunAI, Tensorizer, and framework RPC calls to `model.load_weights`. A gate attached to one API method cannot claim complete coverage.
-
-The paths fall into three groups:
-
-1. **Checkpoint-format paths using standard `weight_loader`s:** covered by source observation, LoadReceipt, layerwise manifests, and arena verification.
-2. **Processed-tensor or direct-state restoration paths:** publish external/direct manifest events and should not be forced into fragment-loader semantics.
-3. **Sparse patches using `index_copy_` or similar direct mutations:** do not invoke standard loaders and need an explicit source manifest, dirty-generation marker, and commit check.
-
-A future coordinator should sit at the resume boundary rather than at one named API. Every entry point must run `begin_update -> observe/apply -> finish_update -> validate -> commit`. Nested paths need transaction-depth or reentrancy guards so `reload_weights`, an NCCL engine, and `model.load_weights` do not run initialize/finalize repeatedly.
-
-## 11. [TBD] Candidate responsibilities and interface for a unified transaction
-
-> **Interface TBD:** It has not been decided whether coordination ultimately belongs in a `ReloadTransaction` class, the `WeightTransferEngine` lifecycle, or a worker/controller protocol. The following code expresses BEGIN/APPLY/FINALIZE/VALIDATE/COMMIT/ABORT responsibilities only. It is not an implemented API and does not prescribe the final class name, method signatures, or call hierarchy.
-
-One possible responsibility split is:
+The final ownership boundary is deliberately **TBD**. It may become a `ReloadTransaction` class, an extension of the `WeightTransferEngine` lifecycle, or a worker/controller protocol. The design requires these responsibilities, not these exact methods:
 
 ```python
 class ReloadTransaction:
-    def begin(self) -> None:
-        """Freeze scope, clear received state, and snapshot arenas/caches."""
-
-    def apply(self, update) -> None:
-        """The only phase allowed to mutate model state."""
-
-    def finalize(self) -> None:
-        """Finish layerwise processing, PWAL, and backend finalization."""
-
-    def validate(self) -> list[LoadManifestReport]:
-        """Read-only aggregation of source, receipt, collision, arena, and checks."""
-
-    def commit(self) -> None:
-        """Advance generation and resume only after every rank passes."""
-
-    def abort(self, findings) -> NoReturn:
-        """Refuse to resume; a future implementation may roll back here."""
+    def begin(self) -> None: ...      # freeze scope and snapshot baselines
+    def apply(self, update) -> None: ...
+    def finalize(self) -> None: ...   # PWAL and backend finalization
+    def validate(self) -> Report: ...
+    def commit(self) -> None: ...     # all-rank generation advance
+    def abort(self, findings) -> NoReturn: ...
 ```
 
-A common checker protocol could be:
+The final API must answer:
 
-```python
-class ReloadChecker(Protocol):
-    name: str
-    def snapshot(self, ctx: ReloadContext) -> None: ...
-    def verify(self, ctx: ReloadContext) -> list[Finding]: ...
-```
+- who owns nesting and reentrancy;
+- where rank-local reports are collected;
+- which component prevents resume;
+- how target/draft/MTP scopes are represented;
+- how non-loader mutations join a transaction;
+- how rollback or worker reconstruction is triggered.
 
-Existing data can support `CompletionManifestChecker` (required/received/source/collision) and `StorageIdentityChecker` (arena/module storage). Future checkers include:
+Until these questions are resolved, the example above is not an implementation contract.
 
-- `KeylessStateChecker` for `persistent=False` buffers, aliases, and state without checkpoint keys;
-- `LoaderEpochChecker` to prevent checkpoint-layout loaders from writing kernel-layout storage;
-- `ShardRoutingChecker` with rank-distinct sentinels for TP/EP routing;
-- `CacheGenerationChecker` for prefix, LoRA, and multimodal cache invalidation;
-- `IdempotencyChecker` to verify that an identity reload preserves parameters, buffers, storage, and output.
+## 9. Rollback and concurrency
 
-## 12. [Partially implemented / incomplete] Failure semantics, rollback, and concurrency
+APPLY currently mutates the live model. A production transaction needs either:
 
-The key contract is that an unvalidated update must not be reported as successful. Missing/unexpected source names, missing required events, untouched dummy targets, receipt collisions/schema errors, arena drift, or any failed rank must eventually reject the transaction.
+1. **Shadow/double-buffer update:** build and validate an invisible model or generation, then atomically switch; or
+2. **Undo log:** save modified state and restore it on failure, including aliases and PWAL-derived tensors.
 
-APPLY currently mutates the live model in place, so a failure may leave partially changed values. A production transaction needs one of:
+Until rollback exists, ABORT must prevent new requests and force worker reconstruction.
 
-1. **Shadow/double-buffer update:** load and validate an invisible model or arena generation, then atomically switch on commit. This provides true rollback at the cost of memory.
-2. **Undo log:** save parameters/buffers before modification and restore them on failure. Memory can be managed layer by layer, but PWAL-derived state and aliases make this more complex.
+Only one update may be active per model instance. A future protocol needs a monotonic transaction ID and weight generation, rejection of late chunks and duplicate finalize calls, and timeout-driven global abort.
 
-Until rollback exists, an aborted worker must not accept new requests. The controller should destroy and rebuild it rather than use a possibly partial model.
+**Status: To be implemented.**
 
-Only one transaction may be active for one model instance. Each update should receive a monotonically increasing `transaction_id` and `weight_generation`; late chunks, duplicate finalization, and old-generation RPCs must be rejected. A rank timeout should become an abort finding rather than an indefinite barrier wait.
-
-## 13. [Implemented] Validation matrix and evidence
+## 10. Implemented evidence
 
 | Scenario | Result |
 |---|---|
-| Synthetic composed/Mamba loader with two internal `copy_` calls | One logical receipt; no early completion from double numel counting |
-| Packed QKV loading | Three independent fragments; missing-field test triggers target collision |
-| RoutedExperts MoE | Expert, shard, and weight category are present in receipts |
-| EP-nonlocal expert | Returns skipped and is absent from rank-local required events |
-| Qwen3 MoE dummy -> real -> reload, TP=1 | Both real loads 789/789; tokens `[15616, 534]` |
+| Composed/Mamba-style loader with two internal `copy_` calls | One logical event; no numel-driven early completion |
+| Packed QKV | q/k/v are independent fragments; missing shard identity is detected |
+| RoutedExperts MoE | expert, shard, and weight category are recorded |
+| EP-nonlocal expert | skipped and excluded from rank-local required events |
+| Qwen3 MoE dummy -> real -> reload, TP=1 | 789/789 twice; stable tokens `[15616, 534]` |
 | Qwen3 MoE TP=2 | Exact manifests complete on both ranks |
-| Qwen3 MoE EP=2 | Rank-local expert reconciliation, 405/405 per rank |
-| Qwen3-0.6B packed CUDA IPC | 310/310; IPC output matches cold load |
-| Negative collision tests | Missing QKV/MoE fields, status conflict, and schema drift detected |
-| Explicit overwrite and identical duplicate calls | No false positive |
+| Qwen3 MoE EP=2 | 405/405 per rank |
+| Qwen3-0.6B packed CUDA IPC | 310/310; output matches cold load |
+| Collision negative tests | Missing QKV/MoE fields, status conflicts, and schema drift detected |
+| Identical duplicate and explicit overwrite | No false collision |
 
-Relevant logs are under:
+Relevant logs are in the reproduction workspace under `logs/loaders/`, including `load_receipt_moe_tp1.log`, `load_receipt_moe_ep2.log`, `load_receipt_rl_ipc.log`, and `collision_moe_tp1.log`.
 
-```text
-logs/loaders/load_receipt_moe_tp1.log
-logs/loaders/load_receipt_moe_ep2.log
-logs/loaders/load_receipt_rl_ipc.log
-logs/loaders/collision_moe_tp1.log
-logs/loaders/manifest_only_moe_tp2.log
-logs/loaders/manifest_only_deepseek_fp8.log
-```
+## 11. Implementation history and code map
 
-The latest collision-enabled Qwen3 MoE TP1 run completed the first real load and second reload at `789/789`, produced `completion_findings=[]`, and ended with `FLOW_OK=True`.
-
-## 14. [Implemented] Code map
-
-| Capability | Location |
+| Commit | Capability |
 |---|---|
-| `LoadReceipt`, `LoadFragment`, `LoadCollisionPolicy` | `vllm/model_executor/load_receipt.py` |
+| `5532d3a69` | Layer-owned stable `ReloadArena` |
+| `14a226b68` | Module-level storage manifest |
+| `91e05c188`–`ba8bd7a2f` | Registry, first-forward, dataflow, and MoE CI discovery |
+| `bdc1ee506` | Per-layer arena verification inside reload |
+| `3a90010d3` | First-load observation of required events |
+| `7645c60fb` | Source/target/fragment manifests and transfer coverage |
+| `19969814d` | Manifest-driven completion; removal of load numel state |
+| `cd44e02e3` | Structured LoadReceipt integration |
+| `810280d52` | Event-key collision audit |
+
+| Capability | Main code location |
+|---|---|
+| Structured receipts | `vllm/model_executor/load_receipt.py` |
 | Source context | `vllm/model_executor/model_loader/reload/source.py` |
-| Required/received sets, dummy baseline, layerwise finalization | `vllm/model_executor/model_loader/reload/layerwise.py` |
-| Collision witnesses and audit | `vllm/model_executor/model_loader/reload/audit.py` |
-| Manifest scope/report and per-layer state | `vllm/model_executor/model_loader/reload/types.py` |
+| Manifest lifecycle | `vllm/model_executor/model_loader/reload/layerwise.py` |
+| Collision audit | `vllm/model_executor/model_loader/reload/audit.py` |
+| Scope and report types | `vllm/model_executor/model_loader/reload/types.py` |
 | Transfer source manifest | `vllm/distributed/weight_transfer/base.py` |
-| Loader observation entry points | `default_loader.py`, `bitsandbytes_loader.py`, `tensorizer_loader.py`, `runai_streamer_loader.py`, etc. |
-| QKV and merged-column receipts | `vllm/model_executor/layers/linear.py` |
+| QKV/merged receipts | `vllm/model_executor/layers/linear.py` |
 | MoE receipts | `vllm/model_executor/layers/fused_moe/routed_experts.py` |
-| Composed receipt propagation | `vllm/model_executor/model_loader/weight_utils.py` |
-| Stable arena | `vllm/model_executor/reload_arena.py` and backend integration points |
+| Stable storage | `vllm/model_executor/reload_arena.py` |
 
-## 15. [To be implemented] Completion criteria and next steps
+## 12. Remaining work, in dependency order
 
-The weight-update transaction is complete only when all update entry points participate in a transaction scope; a first real load can establish a collision-free exact manifest; the first streamed update after dummy/online initialization has an independent source declaration; reload completion is entirely manifest-driven; every rank commits at one barrier; any violation prevents resume; target/draft/MTP scopes are isolated; caches invalidate by generation; and failures either roll back or force worker reconstruction.
+1. Define the unified report/finding model and wire existing completion, collision, and arena evidence into one gate without changing behavior.
+2. Add the all-rank commit barrier and timeout at the resume boundary.
+3. Add transaction hooks for sparse/direct updates and arbitrary framework entry points.
+4. Implement loader epoch and keyless-state checks.
+5. Define target, draft, and MTP scopes plus weight generation.
+6. Add cache-generation invalidation and distributed shard sentinels.
+7. Choose shadow-model or undo-log rollback.
+8. Graduate proven checks from warn to strict and keep them in a continuous model matrix.
 
-Recommended order:
-
-1. Extract a coordinator plus common `Finding`/`Report` types, initially wiring existing completion, collision, and arena checks without changing behavior.
-2. Add an all-rank commit barrier and timeout in the worker/controller path.
-3. Add source-manifest and dirty-generation hooks for sparse/direct updates.
-4. Implement keyless-state, loader-epoch, and cache-generation checkers.
-5. Define independent target, draft, and MTP scopes.
-6. Choose shadow-model or undo-log rollback.
-7. Graduate new checkers from observation to strict gating and add them to the continuous model matrix.
-
-The governing rule is: **the first load establishes collision-free, provable ground truth; every update replays and reconciles that ground truth; the arena proves storage stability; and a cross-rank gate decides whether the update commits. A path without evidence of completeness must never be considered successful merely because an HTTP or RPC call returned successfully.**
+The governing rule is: **each mechanism proves one invariant, while the transaction combines those proofs into one all-or-none decision. A successful RPC is never sufficient evidence that a weight update is correct.**
