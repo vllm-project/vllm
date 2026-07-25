@@ -395,3 +395,80 @@ def test_deepgemm_fp4_vs_triton(
             f"DeepGEMM FP4 path was not executed during the test. "
             f"Call counter: {call_counter['cnt']}"
         )
+
+
+@pytest.mark.skipif(not is_deep_gemm_supported(), reason="Requires deep_gemm kernels")
+def test_deepgemm_moe_permute_pads_scales_with_valid_ue8m0():
+    """Every row of the permuted FP32 scale buffer must be UE8M0-castable.
+
+    DeepGEMM converts FP32 scale factors to UE8M0 by keeping only the exponent
+    bits, and asserts that the sign and mantissa are zero. It runs that
+    conversion over the whole alignment-padded MN range, so the padding rows
+    ep_scatter never writes have to satisfy the precondition too.
+    """
+    from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
+        compute_aligned_M_and_alignment,
+        deepgemm_moe_permute,
+    )
+    from vllm.utils.deep_gemm import get_mk_alignment_for_contiguous_layout
+
+    device = "cuda"
+    num_tokens, topk, local_num_experts = 5, 2, 8
+    block_m, block_k = get_mk_alignment_for_contiguous_layout()
+    hidden = block_k * 2
+    sf_k = hidden // block_k
+
+    m_sum, _ = compute_aligned_M_and_alignment(
+        M=num_tokens,
+        num_topk=topk,
+        local_num_experts=local_num_experts,
+        alignment=block_m,
+        expert_tokens_meta=None,
+    )
+    # Only a handful of the m_sum rows carry a token; the rest are padding.
+    assert m_sum > num_tokens * topk
+
+    aq = torch.empty((num_tokens, hidden), device=device, dtype=torch.float8_e4m3fn)
+    aq_scale = torch.full((num_tokens, sf_k), 0.5, device=device)
+    topk_ids = torch.randint(
+        0, local_num_experts, (num_tokens, topk), device=device, dtype=torch.int32
+    )
+
+    def permute():
+        return deepgemm_moe_permute(
+            aq=aq,
+            aq_scale=aq_scale,
+            topk_ids=topk_ids,
+            local_num_experts=local_num_experts,
+            expert_map=None,
+            expert_tokens_meta=None,
+        )
+
+    # Poison the exact block the scale buffer lands in, then release the whole
+    # result set so the identical second call replays the same allocation
+    # sequence over dirty memory. Without this the buffer can come from a
+    # freshly mapped, already-zeroed segment and hide a missing initialization.
+    # The result is kept as a tuple and deleted whole on purpose: binding the
+    # other tensors to names would hold them past the poison and change the
+    # allocation sequence that the second call replays.
+    first = permute()
+    poisoned_ptr = first[1].data_ptr()
+    first[1].fill_(float("nan"))
+    del first
+
+    _, aq_scale_out, _, _, _ = permute()
+
+    # The poison only guards the assertion below if the allocator actually
+    # handed the same block back. Skip rather than pass vacuously when it does
+    # not, e.g. under PYTORCH_NO_CUDA_MEMORY_CACHING or expandable_segments.
+    if aq_scale_out.data_ptr() != poisoned_ptr:
+        pytest.skip("caching allocator did not reuse the poisoned scale block")
+
+    assert aq_scale_out.dtype == torch.float32
+    # Sign bit plus mantissa is zero for an exact positive power of two, and
+    # for 0.0, which packs to a valid UE8M0 code.
+    bad = (aq_scale_out.contiguous().view(torch.int32) & 0x807FFFFF) != 0
+    assert not bad.any(), (
+        f"{int(bad.sum())} of {bad.numel()} scale entries are not UE8M0-castable; "
+        "DeepGEMM's packing kernel asserts on these"
+    )

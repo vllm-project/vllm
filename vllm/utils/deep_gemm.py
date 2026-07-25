@@ -3,6 +3,15 @@
 """Compatibility wrapper for DeepGEMM API changes.
 
 Users of vLLM should always import **only** these wrappers.
+
+Scale-factor contract: the entry points below pass
+``disable_ue8m0_cast=not is_deep_gemm_e8m0_used()``. When that cast is enabled,
+DeepGEMM converts FP32 scale factors to UE8M0 by keeping only each value's
+exponent bits and asserts that the sign and mantissa are zero, so every FP32
+scale tensor handed to them must hold exact positive powers of two (or 0.0)
+across its whole extent. That includes alignment padding rows which a scatter
+or quantization kernel never writes, because the layout transform runs over
+the full padded range and cannot see which rows are live.
 """
 
 import contextlib
