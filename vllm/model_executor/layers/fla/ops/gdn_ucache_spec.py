@@ -9,21 +9,21 @@ per-request device-side routing runs the verify path for rows with
 checkpoint (and restarts the ring at slots ``[0, T)``) for rows at or past the
 threshold. One kernel per layer per step; CUDA-graph capturable.
 
-Ring page layout on this backend (allocated via ``ring_slots=16``):
+Ring page layout — IDENTICAL to the Triton backend (pow2 ring, 32 slots):
   page[1] = checkpoint  [blocks, HV, V, K] fp16 default (GDN_UCACHE_STATE_DTYPE)
-  page[2] = u_cache     [blocks, HV, 16, V] fp16 default (GDN_UCACHE_RING_DTYPE)
-  page[3] = k_cache     [blocks, HK, 16, K] fp16 default (GDN_UCACHE_RING_DTYPE)
-  page[4] = g_cache     [blocks, HV, 16]    f32   (abs cumulative log-decay)
+  page[2] = u_cache     [blocks, HV, 32, V] fp16 default (GDN_UCACHE_RING_DTYPE)
+  page[3] = k_cache     [blocks, HK, 32, K] fp16 default (GDN_UCACHE_RING_DTYPE)
+  page[4] = g_cache     [blocks, HV, 32]    f32   (abs cumulative log-decay)
 
-Cursor model: ONE block-keyed persistent ``hist_len`` buffer, committed
-eagerly in the metadata builder (outside any captured region) by
-``commit_gdn_ucache_hist`` with the previous step's acceptance:
-``new = (old >= flush_min ? 0 : old) + accepted`` — the ring restart of a
-flush step is folded into the commit, so ``hist_len`` is strictly read-only
-inside the captured forward (the kernel wrapper is called with
-``restart_hist_on_flush=False``; see the kernel-repo flag). The builder
-gathers the block-keyed values into fixed-address request-keyed buffers that
-the captured kernel reads.
+Cursor model — IDENTICAL to the Triton backend: block-keyed ``write_pos`` /
+``cache_base`` / ``is_flush``, committed eagerly in the metadata builder
+(outside any captured region) by ``commit_gdn_replayssm_spec`` with the
+previous step's acceptance. The live window is
+``[cache_base, cache_base + write_pos) mod 32``; the kernel appends at
+``(cache_base + write_pos + s) & 31`` — past the window, so a flush never
+overwrites rows a sibling CTA still reads. The builder gathers the
+block-keyed cursor values into fixed-address request-keyed buffers that the
+captured kernel reads (the CuTeDSL kernel wants request-keyed inputs).
 """
 
 import importlib.util
@@ -39,6 +39,9 @@ logger = init_logger(__name__)
 
 # The kernel's hardcoded ring depth; replayssm_buffer_len must equal this.
 UCACHE_W_RING = 16
+# Physical ring depth — must match the kernel's RING_SLOTS AND the Triton
+# backend's pow2 ring (next_pow2(replayssm_buffer_len + num_spec) = 32).
+UCACHE_RING_SLOTS = 32
 
 _KMOD: Any = None
 
@@ -101,6 +104,11 @@ def load_ucache_kernel_module(strided_qkv: bool = True):
     assert mod.W_RING == UCACHE_W_RING, (
         f"ucache kernel W_RING={mod.W_RING} != expected {UCACHE_W_RING}"
     )
+    assert getattr(mod, "RING_SLOTS", None) == UCACHE_RING_SLOTS, (
+        f"ucache kernel RING_SLOTS={getattr(mod, 'RING_SLOTS', None)} != "
+        f"expected {UCACHE_RING_SLOTS} (pre-ring kernel builds are "
+        "incompatible with this backend's Triton-ring cursor model)"
+    )
     logger.info_once(
         "GDN spec backend flashinfer_ucache: loaded kernel module from %s "
         "(strided_qkv=%s)",
@@ -151,6 +159,7 @@ def gdn_ucache_spec_verify(
     k_cache: torch.Tensor,  # [blocks, HK, 16, K] bf16
     g_cache: torch.Tensor,  # [blocks, HV, 16] f32
     hist_len: torch.Tensor,  # [B] int32, request-keyed (gathered by builder)
+    cache_base: torch.Tensor,  # [B] int32 ring window origin (gathered)
     state_indices: torch.Tensor,  # [B] int32 physical block per request
     num_spec_decodes: int,
     max_spec_len: int,
@@ -254,6 +263,13 @@ def gdn_ucache_spec_verify(
             hist_buf[:B].copy_(hist_len)
             hist_buf[B:].fill_(0)
             hist_len = hist_buf
+        if cache_base.shape[0] >= pad_to:
+            cache_base = cache_base[:pad_to]
+        else:
+            base_buf = _pad_scratch(("base", dev), (pad_to,), torch.int32, dev)
+            base_buf[:B].copy_(cache_base)
+            base_buf[B:].fill_(0)
+            cache_base = base_buf
         if state_indices.shape[0] >= pad_to:
             state_indices = state_indices[:pad_to]
         else:
@@ -306,12 +322,13 @@ def gdn_ucache_spec_verify(
         u_cache=u_cache,
         g_cache=g_cache,
         hist_len=hist_len,
+        cache_base=cache_base,
         scale=scale,
         use_qk_l2norm_in_kernel=True,
         # caller-destination alias when available, else zero-copy view
         output=_fused_out,
         flush_min=ucache_flush_min(T),
-        restart_hist_on_flush=False,  # builder-owned restart (see module doc)
+        restart_hist_on_flush=False,  # builder-owned cursor commit (module doc)
     )
     if out.dtype is not _out_dtype:
         out = out.to(_out_dtype)

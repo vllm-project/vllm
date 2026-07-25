@@ -434,10 +434,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 self.conv_kernel_size,
                 self.cache_config.replayssm_buffer_len,
                 self.num_spec,
-                # ucache kernel: fixed 16-slot linear ring (u/k/g), no pow2.
-                ring_slots=16
-                if self.gdn_spec_backend == "flashinfer_ucache"
-                else None,
+                # Both backends share the Triton ring layout:
+                # next_pow2(B + num_spec) = 32 slots (kernel RING_SLOTS).
             )
         elif self.cache_config.use_replayssm:
             return MambaStateShapeCalculator.gated_delta_net_replayssm_state_shape(
@@ -1584,9 +1582,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 k_cache=self_kv_cache[3],
                 g_cache=self_kv_cache[4],
                 # Bucket-length PRE-PADDED slices (builder fills pad rows:
-                # hist=0, idx=-1): the adapter skips its per-layer hist/idx
+                # hist=0, base=0, idx=-1): the adapter skips its per-layer
                 # staging copies+fills entirely.
                 hist_len=attn_metadata.spec_hist_len_d[:_slice_rows],
+                cache_base=attn_metadata.spec_ring_base_d[:_slice_rows],
                 state_indices=attn_metadata.spec_state_indices_col0_d[
                     :_slice_rows
                 ],

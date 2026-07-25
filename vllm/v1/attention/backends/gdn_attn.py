@@ -81,6 +81,7 @@ class GDNAttentionMetadata:
     # each build from the block-keyed master) + contiguous col-0 state indices
     # for the CuTeDSL verify+flush kernel. None on the triton backend.
     spec_hist_len_d: torch.Tensor | None = None  # shape: [batch,] int32
+    spec_ring_base_d: torch.Tensor | None = None  # shape: [batch,] int32
     spec_state_indices_col0_d: torch.Tensor | None = None  # shape: [batch,] int32
     # CUDA-graph padded row count of this step's bucket (None when eager).
     # The layer pads the ucache spec call to THIS (bucket-aware) instead of
@@ -225,20 +226,20 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             if self.use_cache_spec_kernel
             else "triton"
         )
-        self.spec_hist_len: torch.Tensor | None = None
         if self.gdn_spec_backend == "flashinfer_ucache":
             from vllm.model_executor.layers.fla.ops.gdn_ucache_spec import (
                 UCACHE_PAD_ROW_ID,
-                ucache_flush_min,
             )
 
-            self.ucache_flush_min = ucache_flush_min(self.max_spec_len)
             self.ucache_pad_row_id = UCACHE_PAD_ROW_ID
             max_reqs = max(
                 vllm_config.scheduler_config.max_num_seqs,
                 self.decode_cudagraph_max_bs,
             )
             self.spec_hist_len_gathered: torch.Tensor = torch.zeros(
+                (max_reqs,), dtype=torch.int32, device=device
+            )
+            self.spec_ring_base_gathered: torch.Tensor = torch.zeros(
                 (max_reqs,), dtype=torch.int32, device=device
             )
             self.spec_state_indices_col0: torch.Tensor = torch.full(
@@ -529,6 +530,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         spec_cache_base_d = None
         spec_is_flush_d = None
         spec_hist_len_d = None
+        spec_ring_base_d = None
         spec_state_indices_col0_d = None
         spec_padded_rows = None
         if self.use_cached_kernel and spec_sequence_masks is None and num_decodes > 0:
@@ -595,39 +597,69 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 first_decode_d = first_decode_full.index_select(0, spec_row_idx)
 
             if self.gdn_spec_backend == "flashinfer_ucache":
-                from vllm.model_executor.layers.fla.ops.gdn_ucache_spec import (
-                    commit_gdn_ucache_hist,
+                # RING cursors — identical block-keyed write_pos/cache_base
+                # model and commit kernel as the Triton backend (the CuTeDSL
+                # kernel consumes the same ring; its flush predicate
+                # P >= flush_min coincides with the commit's arming rule
+                # wp + 2T > L). The kernel wants REQUEST-keyed cursor values,
+                # so we additionally gather into fixed-address buffers the
+                # captured graph reads (padded rows filled below).
+                from vllm.model_executor.layers.fla.ops.gdn_replayssm_spec_decode import (
+                    commit_gdn_replayssm_spec,
+                    reset_gdn_replayssm_spec_cursors,
                 )
 
-                if self.spec_hist_len is None:
+                if self.spec_write_pos is None:
                     n_blocks = self.vllm_config.cache_config.num_gpu_blocks
                     assert n_blocks is not None and n_blocks > 0, (
                         "--use-replayssm-spec needs num_gpu_blocks at "
-                        "build time to size the block-keyed hist buffer"
+                        "build time to size the block-keyed cursor buffers"
                     )
-                    self.spec_hist_len = torch.zeros(
+                    self.spec_write_pos = torch.zeros(
                         n_blocks, dtype=torch.int32, device=self.cursor_device
                     )
-                # Commit-at-start with the previous step's acceptance; the
-                # flush-step ring restart is folded in (hist >= flush_min -> 0
-                # before adding accepted). Eager, outside any captured region.
-                commit_gdn_ucache_hist(
-                    self.spec_hist_len,
+                    self.spec_cache_base = torch.zeros(
+                        n_blocks, dtype=torch.int32, device=self.cursor_device
+                    )
+                    self.spec_is_flush = torch.zeros(
+                        n_blocks, dtype=torch.int8, device=self.cursor_device
+                    )
+                commit_gdn_replayssm_spec(
+                    self.spec_write_pos,
+                    self.spec_cache_base,
+                    self.spec_is_flush,
                     num_accepted_tokens.to(torch.int32),
                     sbi,
-                    first_decode_d,
-                    flush_min=self.ucache_flush_min,
+                    max_cache_len=self.spec_flush_threshold,
+                    max_spec_len=self.max_spec_len,
+                    cache_buf_len=self.spec_cache_buf_len,
                 )
-                # Gather block-keyed -> request-keyed fixed-address buffers
-                # (the captured kernel reads these; padded rows filled below).
+                if first_decode_d is not None:
+                    reset_gdn_replayssm_spec_cursors(
+                        self.spec_write_pos,
+                        self.spec_cache_base,
+                        self.spec_is_flush,
+                        first_decode_d,
+                        sbi,
+                        max_cache_len=self.spec_flush_threshold,
+                        max_spec_len=self.max_spec_len,
+                    )
+                sbi64 = sbi.to(torch.int64)
                 torch.index_select(
-                    self.spec_hist_len,
+                    self.spec_write_pos,
                     0,
-                    sbi.to(torch.int64),
+                    sbi64,
                     out=self.spec_hist_len_gathered[:num_spec_decodes],
+                )
+                torch.index_select(
+                    self.spec_cache_base,
+                    0,
+                    sbi64,
+                    out=self.spec_ring_base_gathered[:num_spec_decodes],
                 )
                 self.spec_state_indices_col0[:num_spec_decodes].copy_(sbi)
                 spec_hist_len_d = self.spec_hist_len_gathered
+                spec_ring_base_d = self.spec_ring_base_gathered
                 spec_state_indices_col0_d = self.spec_state_indices_col0
             else:
                 from vllm.model_executor.layers.fla.ops.gdn_replayssm_spec_decode import (
@@ -738,6 +770,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 # adapter's pad_to may exceed the current bucket. One eager
                 # fill over <=max_bs int32 per step — free.
                 self.spec_hist_len_gathered[num_spec_decodes:].fill_(0)
+                self.spec_ring_base_gathered[num_spec_decodes:].fill_(0)
                 self.spec_state_indices_col0[num_spec_decodes:].fill_(
                     self.ucache_pad_row_id
                 )
@@ -800,6 +833,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_cache_base_d=spec_cache_base_d,
             spec_is_flush_d=spec_is_flush_d,
             spec_hist_len_d=spec_hist_len_d,
+            spec_ring_base_d=spec_ring_base_d,
             spec_state_indices_col0_d=spec_state_indices_col0_d,
             spec_padded_rows=spec_padded_rows,
             nums_dict=nums_dict,
