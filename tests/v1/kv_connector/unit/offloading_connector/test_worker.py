@@ -125,8 +125,7 @@ def test_register_kv_caches(backend):
     own dedicated tensors.
 
     Uses the real GPUModelRunner.initialize_kv_cache_tensors to produce
-    kv_caches, which automatically applies
-    _update_hybrid_attention_mamba_layout for hybrid models.
+    the raw per-layer kv_caches registered by the connector.
 
     Verifies that the canonicalized CanonicalKVCaches has the correct
     block tensors, tensor_idx references, and page sizes across all groups.

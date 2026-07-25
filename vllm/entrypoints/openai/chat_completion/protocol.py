@@ -687,9 +687,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
-            output_kind=RequestOutputKind.DELTA
-            if self.stream
-            else RequestOutputKind.FINAL_ONLY,
+            output_kind=(
+                RequestOutputKind.DELTA if self.stream else RequestOutputKind.FINAL_ONLY
+            ),
             structured_outputs=self.extract_structured_outputs(),
             logit_bias=self.logit_bias,
             bad_words=self.bad_words,
@@ -849,9 +849,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
         # Reject empty tools array, matching OpenAI API behavior
         if data.get("tools") == []:
-            raise ValueError(
+            raise VLLMValidationError(
                 "`tools` must not be an empty array. "
-                "Either provide at least one tool or omit the field entirely."
+                "Either provide at least one tool or omit the field entirely.",
+                parameter="tools",
             )
 
         # if "tool_choice" is not specified but tools are provided,
@@ -1075,13 +1076,15 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
         if isinstance(data, BatchChatCompletionRequest):
             data = data.model_dump(exclude_unset=True)
         if data.get("use_beam_search"):
-            raise ValueError(
+            raise VLLMValidationError(
                 "Batch chat completions do not support beam search. "
-                "Please set `use_beam_search` to False."
+                "Please set `use_beam_search` to False.",
+                parameter="use_beam_search",
             )
         if data.get("logprob_token_ids") and not data.get("logprobs"):
-            raise ValueError(
-                "when using `logprob_token_ids`, `logprobs` must be set to true."
+            raise VLLMValidationError(
+                "when using `logprob_token_ids`, `logprobs` must be set to true.",
+                parameter="logprob_token_ids",
             )
         response_format = data.get("response_format")
         rf_type = (
@@ -1095,8 +1098,10 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
             validate_structured_outputs_structural_tag(structured_outputs)
         n = data.get("n", 1)
         if n is not None and n != 1:
-            raise ValueError(
-                "Batch chat completions do not support `n > 1`. Please set `n` to 1."
+            raise VLLMValidationError(
+                "Batch chat completions do not support `n > 1`. Please set `n` to 1.",
+                parameter="n",
+                value=n,
             )
         return data
 
