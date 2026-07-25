@@ -27,9 +27,9 @@ MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 @pytest.fixture(scope="module")
 def zephyr_lora_files():
     """Download zephyr LoRA files once per test session."""
-    from huggingface_hub import snapshot_download
+    from vllm.transformers_utils.repo_utils import hf_api
 
-    return snapshot_download(repo_id="typeof/zephyr-7b-beta-lora")
+    return hf_api().snapshot_download(repo_id="typeof/zephyr-7b-beta-lora")
 
 
 @pytest.fixture(scope="module")
