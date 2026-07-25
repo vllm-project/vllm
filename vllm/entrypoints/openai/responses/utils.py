@@ -31,8 +31,11 @@ from openai.types.responses.tool import Tool
 
 from vllm import envs
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionMessageParam
-from vllm.entrypoints.openai.engine.protocol import FunctionCall
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionMessageParam,
+    ChatCompletionToolsParam,
+)
+from vllm.entrypoints.openai.engine.protocol import FunctionCall, FunctionDefinition
 from vllm.entrypoints.openai.responses.protocol import ResponseInputOutputItem
 from vllm.logger import init_logger
 from vllm.tool_parsers.utils import (
@@ -363,27 +366,32 @@ def extract_tool_types(tools: list[Tool]) -> set[str]:
     return tool_types
 
 
-def convert_tool_responses_to_completions_format(tool: dict) -> dict:
+def convert_tool_responses_to_completions_format(
+    tool: dict,
+) -> ChatCompletionToolsParam:
     """
-    Convert a flat tool schema:
+    Convert a flat Responses tool schema:
         {"type": "function", "name": "...", "description": "...", "parameters": {...}}
-    into:
-        {"type": "function", "function": {...}}
+    into a Chat Completions tool param for chat-template rendering.
     """
-    return {
-        "type": "function",
-        "function": tool,
-    }
+    return ChatCompletionToolsParam(
+        type="function",
+        function=FunctionDefinition(
+            name=tool["name"],
+            description=tool.get("description"),
+            parameters=tool.get("parameters"),
+            strict=tool.get("strict"),
+            defer_loading=tool.get("defer_loading"),
+        ),
+    )
 
 
 def construct_tool_dicts(
     tools: list[Tool], tool_choice: ToolChoice
 ) -> list[dict[str, Any]] | None:
     if not tools or (tool_choice == "none"):
-        tool_dicts = None
-    else:
-        tool_dicts = [
-            convert_tool_responses_to_completions_format(tool)
-            for tool in iter_response_function_tool_dicts(tools)
-        ]
-    return tool_dicts
+        return None
+    return [
+        convert_tool_responses_to_completions_format(tool).model_dump()
+        for tool in iter_response_function_tool_dicts(tools)
+    ]
