@@ -10,6 +10,7 @@ pub use llama::Llama3JsonToolParser;
 pub use mistral::MistralToolParser;
 pub use phi4mini::Phi4MiniJsonToolParser;
 pub use qwen::Qwen3XmlToolParser;
+pub use xlam::XlamToolParser;
 
 mod granite4;
 mod hermes;
@@ -18,6 +19,7 @@ mod llama;
 mod mistral;
 mod phi4mini;
 mod qwen;
+mod xlam;
 
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, seq};
