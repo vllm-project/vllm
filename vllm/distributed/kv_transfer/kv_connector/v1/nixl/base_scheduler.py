@@ -135,6 +135,17 @@ class NixlBaseConnectorScheduler:
             for n_tokens, block_size in sw_sizes_tokens
         ]
 
+        # Per-group speculative state slots for SSM (mamba) groups, None for
+        # non-SSM groups. Mamba managers co-allocate `num_speculative_blocks`
+        # trailing scratch slots with a request's state blocks; they hold no
+        # transferable state.
+        self._ssm_spec_blocks = [
+            g.kv_cache_spec.num_speculative_blocks
+            if isinstance(g.kv_cache_spec, MambaSpec)
+            else None
+            for g in kv_cache_config.kv_cache_groups
+        ]
+
         # Threshold to decide whether to compute kv cache locally
         # or pull from a remote node: minimum number of remote
         # tokens to amortize the xfer latencies
@@ -218,13 +229,28 @@ class NixlBaseConnectorScheduler:
                     # Clean up empty engines so we don't leak a key when remote dies.
                     del self._heartbeat_by_engine[engine_id]
 
-    def get_sw_clipped_blocks(self, block_ids: BlockIds) -> BlockIds:
-        """
-        Clip the number of blocks to the sliding window size for each kv cache group
-        that employs SWA.
-        This is necessary because the KV Cache manager initially allocates blocks for
-        the entire sequence length, and successively cleans up blocks that are outside
-        the window prior to the `request_finished_all_groups` hook.
+    def get_exchange_clipped_blocks(
+        self, block_ids: BlockIds, clip_ssm: bool = True
+    ) -> BlockIds:
+        """Clip a request's block lists down to the transferable blocks.
+
+        Sliding-window groups keep only the in-window tail: the KV cache
+        manager initially allocates blocks for the entire sequence length and
+        only cleans up out-of-window blocks prior to the
+        `request_finished_all_groups` hook.
+
+        SSM groups are reduced to end at the state-bearing slot: mamba
+        managers co-allocate ``num_speculative_blocks`` trailing scratch
+        slots for speculative decoding, and with mamba prefix caching
+        ("align" mode) the block list may also contain null-block
+        placeholders for slots whose state has migrated forward. Neither
+        holds transferable state: strip both so the SSM lists exchanged by
+        P and D end at the state-bearing slot and can be paired tail-aligned
+        by the worker.
+
+        Use this at every block-id exchange point. Pass ``clip_ssm=False``
+        for per-step partial lists (host-buffer save), where the SSM
+        trailing-slot strip does not apply.
         """
         if len(block_ids) == 0 or not self._is_hma_required:
             # No blocks to clip eg Full prefix cache hit or not a hybrid model.
@@ -235,15 +261,22 @@ class NixlBaseConnectorScheduler:
         assert len(block_ids) == len(self.blocks_per_sw), (
             "Number of KV cache groups must match"
         )
-        # For non-SWA groups, blocks_per_sw is 0 so we return all block_ids unchanged
-        return tuple(
-            [
-                blocks[-self.blocks_per_sw[i] :]
-                if self.blocks_per_sw[i] > 0
-                else blocks
-                for i, blocks in enumerate(block_ids)
-            ]
-        )
+        clipped = []
+        for i, blocks in enumerate(block_ids):
+            if n_sw := self.blocks_per_sw[i]:
+                blocks = blocks[-n_sw:]
+            elif (
+                clip_ssm
+                and blocks
+                and (n_spec_blocks := self._ssm_spec_blocks[i]) is not None
+            ):
+                if n_spec := min(n_spec_blocks, len(blocks) - 1):
+                    blocks = blocks[:-n_spec]
+                # Drop null placeholders (block id 0), but keep at least one
+                # entry: an empty list means "full prefix hit" downstream.
+                blocks = [b for b in blocks if b != 0] or blocks[-1:]
+            clipped.append(blocks)
+        return tuple(clipped)
 
     def set_xfer_handshake_metadata(
         self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
@@ -380,7 +413,9 @@ class NixlBaseConnectorScheduler:
             req = req_to_save
 
             assert req.kv_transfer_params is not None
-            clipped_block_id_groups = self.get_sw_clipped_blocks(new_block_id_groups)
+            clipped_block_id_groups = self.get_exchange_clipped_blocks(
+                new_block_id_groups, clip_ssm=False
+            )
             meta.add_new_req_to_save(
                 request_id=req_id,
                 local_block_ids=clipped_block_id_groups,

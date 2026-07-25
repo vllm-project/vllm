@@ -365,6 +365,28 @@ def test_apply_prefix_caching_mamba_hybrid(
             [[6, 7, 8, 9], [99]],
             id="fa_prefix_hit_and_ssm_trim",
         ),
+        # Multi-slot SSM (align mode): a local prefix hit leaves fewer local
+        # slots; the earlier remote slots are covered locally → remote tail.
+        pytest.param(
+            10,
+            10,
+            [list(range(10)), [5, 6]],
+            [list(range(10)), [1, 2, 3]],
+            [list(range(10)), [5, 6]],
+            [list(range(10)), [2, 3]],
+            id="ssm_multi_block_local_hit_tail",
+        ),
+        # Multi-slot SSM: trailing local slots beyond the transferred tokens
+        # receive no remote state → local head-clip.
+        pytest.param(
+            10,
+            10,
+            [list(range(10)), [4, 5, 6]],
+            [list(range(10)), [8, 9]],
+            [list(range(10)), [4, 5]],
+            [list(range(10)), [8, 9]],
+            id="ssm_multi_block_local_extra_head_clip",
+        ),
     ],
 )
 def test_apply_prefix_caching_ssm_prefix_cache_hit(
@@ -1380,3 +1402,34 @@ def test_logical_to_kernel_block_ids_with_remote_ratio(
     assert list(result) == expected_kernel_block_ids, (
         f"Expected {expected_kernel_block_ids}, got {result}"
     )
+
+
+@pytest.mark.cpu_test
+def test_exchange_clipped_blocks_ssm():
+    """SSM group lists are reduced to end at the state-bearing slot:
+    trailing speculative scratch slots and null-block placeholders hold no
+    transferable state and must be stripped before P/D pairing. Attention
+    groups pass through untouched."""
+    sched = make_nixl_scheduler(has_mamba=True, is_hma_required=True)
+    sched.blocks_per_sw = [0, 0]
+    sched._ssm_spec_blocks = [None, 2]
+
+    # Align-mode list: null placeholders, state block, 2 speculative slots.
+    clipped = sched.get_exchange_clipped_blocks(([1, 2, 3], [0, 0, 7, 8, 9]))
+    assert clipped == ([1, 2, 3], [7])
+
+    # Default (mamba_block_size=max_model_len) list with speculative
+    # decoding: state block first, 2 trailing scratch slots.
+    assert sched.get_exchange_clipped_blocks(([1], [7, 8, 9]))[1] == [7]
+
+    # No placeholders and no speculative slots allocated: at most
+    # len - 1 trailing blocks are stripped.
+    assert sched.get_exchange_clipped_blocks(([1], [5]))[1] == [5]
+
+    # All placeholders: keep one entry — an empty SSM list would read as a
+    # full prefix hit downstream.
+    assert sched.get_exchange_clipped_blocks(([1], [0, 0, 0]))[1] == [0]
+
+    # Non-mamba models pass through unchanged.
+    fa_sched = make_nixl_scheduler(has_mamba=False)
+    assert fa_sched.get_exchange_clipped_blocks(([1, 2],)) == ([1, 2],)
