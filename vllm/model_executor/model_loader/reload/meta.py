@@ -22,6 +22,7 @@ __all__ = [
 
 SKIP_MODULES: set[str] = {"HadamardTransform"}
 
+# Tensors which are never moved to, or materialized from, the meta device
 SKIP_TENSORS: set[str] = {
     "_expert_map",
     "expert_mask",
@@ -29,10 +30,17 @@ SKIP_TENSORS: set[str] = {
     "expert_physical_to_global",
     "expert_local_to_global",
     "e_score_correction_bias",
-    # Built after create_weights(), so it is not tracked by the layerwise-reload
-    # trigger and would be re-materialized into uninitialized memory. Skip it.
+    # Built after create_weights(), so it is already loaded and on device by the
+    # time layerwise processing starts. Re-materializing it would replace the
+    # loaded values with uninitialized memory.
     "bias",
 }
+
+# Tensors which are never loaded by a weight loader, and so must not be counted
+# by the layerwise processing trigger. `bias` is loaded like any other weight,
+# so processing must wait for it (e.g. FP8 Marlin permutes the bias in
+# `process_weights_after_loading`, which a later bias load would corrupt).
+SKIP_LOAD_TENSORS: set[str] = SKIP_TENSORS - {"bias"}
 
 
 def to_meta_tensor(tensor: torch.Tensor) -> torch.Tensor:
