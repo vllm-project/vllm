@@ -272,20 +272,24 @@ class Gemma4MTPDecoderLayer(nn.Module):
 
         layer_idx = extract_layer_index(prefix)
         layer_type = config.layer_types[layer_idx]
-        is_full_attention = layer_type == "full_attention"
-        head_dim = (
-            getattr(config, "global_head_dim", config.head_dim)
-            if is_full_attention
-            else config.head_dim
-        )
 
-        use_k_eq_v = is_full_attention and getattr(config, "attention_k_eq_v", False)
-        if use_k_eq_v:
-            num_kv_heads = getattr(
-                config, "num_global_key_value_heads", config.num_key_value_heads
-            )
+        if hasattr(config, "is_heterogeneous"):
+            # Transformers >= 5.15.0
+            layer_config = config.per_layer_config[layer_idx]
+            head_dim = layer_config.head_dim
+            num_kv_heads = layer_config.num_key_value_heads
         else:
+            # Transformers < 5.15.0
+            # Determine if this full-attention layer uses k_eq_v
+            # (laptop variant: no v_proj, K reused as V on full attention layers)
+            head_dim = config.head_dim
             num_kv_heads = config.num_key_value_heads
+            if layer_type == "full_attention":
+                head_dim = getattr(config, "global_head_dim", head_dim)
+                if getattr(config, "attention_k_eq_v", False):
+                    num_kv_heads = getattr(
+                        config, "num_global_key_value_heads", num_kv_heads
+                    )
 
         self.self_attn = Gemma4MTPAttention(
             config=config,

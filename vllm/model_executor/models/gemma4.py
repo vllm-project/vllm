@@ -380,7 +380,6 @@ class Gemma4Attention(nn.Module):
         num_kv_heads: int,
         head_dim: int,
         max_position_embeddings: int,
-        use_k_eq_v: bool = False,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         attn_logits_soft_cap: float | None = None,
@@ -389,7 +388,6 @@ class Gemma4Attention(nn.Module):
         super().__init__()
         self.config = config
         self.hidden_size = hidden_size
-        self.use_k_eq_v = use_k_eq_v
 
         tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
@@ -571,26 +569,24 @@ class Gemma4DecoderLayer(nn.Module):
 
         # Gemma4 uses different head dimensions for sliding vs full attention
         layer_type = config.layer_types[layer_idx]
-        self.is_full_attention = layer_type == "full_attention"
-        if self.is_full_attention:
-            head_dim = getattr(config, "global_head_dim", config.head_dim)
+
+        if hasattr(config, "is_heterogeneous"):
+            # Transformers >= 5.15.0
+            layer_config = config.per_layer_config[layer_idx]
+            head_dim = layer_config.head_dim
+            num_kv_heads = layer_config.num_key_value_heads
         else:
+            # Transformers < 5.15.0
+            # Determine if this full-attention layer uses k_eq_v
+            # (laptop variant: no v_proj, K reused as V on full attention layers)
             head_dim = config.head_dim
-
-        # Determine if this full-attention layer uses k_eq_v
-        # (laptop variant: no v_proj, K reused as V on full attention layers)
-        use_k_eq_v = self.is_full_attention and getattr(
-            config, "attention_k_eq_v", False
-        )
-
-        # For k_eq_v full-attention layers, use num_global_key_value_heads
-        # as the KV head count when k_eq_v is enabled.
-        if use_k_eq_v:
-            num_kv_heads = getattr(
-                config, "num_global_key_value_heads", config.num_key_value_heads
-            )
-        else:
             num_kv_heads = config.num_key_value_heads
+            if layer_type == "full_attention":
+                head_dim = getattr(config, "global_head_dim", head_dim)
+                if getattr(config, "attention_k_eq_v", False):
+                    num_kv_heads = getattr(
+                        config, "num_global_key_value_heads", num_kv_heads
+                    )
 
         self.self_attn = Gemma4Attention(
             config=config,
@@ -599,7 +595,6 @@ class Gemma4DecoderLayer(nn.Module):
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
             max_position_embeddings=config.max_position_embeddings,
-            use_k_eq_v=use_k_eq_v,
             cache_config=cache_config,
             quant_config=quant_config,
             attn_logits_soft_cap=getattr(config, "attn_logit_softcapping", None),
