@@ -52,15 +52,34 @@ def _mamba2_output_only(dstate, L, is_blackwell):
     return 16, 1, _dstate_tile(dstate, 64), _dstate_tile(dstate, 128), 2
 
 
+def _mamba2_spec_verify(dstate, base_block, is_blackwell):
+    # (block_size_m, num_warps, dstate_tile, num_stages)
+    bsm = 64 if (is_blackwell or base_block <= 16) else 32
+    return bsm, 2, _dstate_tile(dstate, 64), 2
+
+
+def _mamba2_spec_flush(dstate, base_block, is_blackwell):
+    if base_block <= 16:
+        return 32, 2, _dstate_tile(dstate, 64), 2
+    if is_blackwell:
+        return 64, 2, _dstate_tile(dstate, 128), 2
+    return 32, 1, _dstate_tile(dstate, 128), 2
+
+
 def get_replayssm_config(kernel: str, **shape) -> tuple:
     """Return the launch config for ``kernel`` (override > tuned default).
 
-    kernel: "mamba2_output_only". ``shape`` carries the keying dims (dstate;
-    ``L`` for the buffer length, default 16); hardware is auto-detected.
+    kernel: "mamba2_output_only", "mamba2_spec_verify" or "mamba2_spec_flush".
+    ``shape`` carries the keying dims (dstate; ``L`` for the buffer length,
+    default 16; ``base_block`` for spec); hardware is auto-detected.
     """
     if kernel in _overrides:
         return _overrides[kernel]
     bw = _is_blackwell()
     if kernel == "mamba2_output_only":
         return _mamba2_output_only(shape["dstate"], shape.get("L", 16), bw)
+    if kernel == "mamba2_spec_verify":
+        return _mamba2_spec_verify(shape["dstate"], shape["base_block"], bw)
+    if kernel == "mamba2_spec_flush":
+        return _mamba2_spec_flush(shape["dstate"], shape["base_block"], bw)
     raise ValueError(f"unknown ReplaySSM kernel config key: {kernel}")
