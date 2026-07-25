@@ -13,6 +13,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
+from vllm.distributed.utils import tp_partition_offset, tp_partition_size
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp, PluggableLayer
@@ -195,18 +196,34 @@ def mamba_v2_sharded_weight_loader(
             #   rank. This is useful when there is replication of
             #   groups to accompany head shards.
 
-            # - size of the loaded shard
-            shard_size = full_dim // tp_size
+            # - size of the loaded shard. Ratio-aware only without
+            #   group duplication (a duplicated group is one full copy
+            #   per rank and must not be ratio-partitioned); the even
+            #   path keeps the historic unchecked floor division.
+            from vllm.distributed.utils import get_tp_partition_ratios
+
+            if get_tp_partition_ratios():
+                assert not duplicate_groups, (
+                    "--rank-tp-ratio does not support duplicated mamba "
+                    "groups (n_groups replication)"
+                )
+                shard_size = tp_partition_size(full_dim, tp_size, tp_rank)
+            else:
+                shard_size = full_dim // tp_size
 
             # - compute the rank into the loaded shard.
             # - if there is replication, different TP shards will
             #   take from the same rank.
             # NOTE: currently we only support duplication
             # in the case where num_groups == 1
-            rank = 0 if duplicate_groups else tp_rank
-
-            # - leftmost boundary index into loaded weight.
-            loaded_skip = rank * shard_size
+            # - leftmost boundary index into loaded weight
+            #   (prefix sum for uneven TP; rank*size for even TP).
+            if duplicate_groups:
+                loaded_skip = 0
+            elif get_tp_partition_ratios():
+                loaded_skip = tp_partition_offset(full_dim, tp_size, tp_rank)
+            else:
+                loaded_skip = tp_rank * shard_size
             loaded_start_idx = loaded_boundary + loaded_skip
 
             # - take these many dims from the loaded weight.
@@ -267,6 +284,13 @@ class MambaMixer2(MambaBase, PluggableLayer):
         prefix: str = "",
     ):
         super().__init__()
+        from vllm.distributed.utils import get_tp_partition_ratios
+
+        if get_tp_partition_ratios():
+            raise NotImplementedError(
+                "--rank-tp-ratio (uneven TP) is not supported for "
+                "MambaMixer2-based models yet (only Qwen3.5/3.6 GDN)."
+            )
 
         # For TP, the sharding plan is as follows:
         # - for the conv modules, since

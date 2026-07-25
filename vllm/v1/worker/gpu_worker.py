@@ -303,6 +303,19 @@ class Worker(WorkerBase):
 
     @instrument(span_name="Init device")
     def init_device(self):
+        # Uneven TP: install the ratio vector process-globally BEFORE any
+        # layer computes shard sizes - independent of device backend paths.
+        if self.vllm_config.parallel_config.rank_tp_ratio is not None:
+            from vllm.distributed.utils import set_tp_partition_ratios
+
+            set_tp_partition_ratios(self.vllm_config.parallel_config.rank_tp_ratio)
+            logger.info(
+                "Uneven TP active: rank %d owns ratio %d/%d of every "
+                "sharded dimension.",
+                self.rank,
+                self.vllm_config.parallel_config.rank_tp_ratio[self.rank],
+                sum(self.vllm_config.parallel_config.rank_tp_ratio),
+            )
         if self.device_config.device_type == "cuda":
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
@@ -362,6 +375,11 @@ class Worker(WorkerBase):
                 # fraction depending on which physical GPU this rank landed
                 # on (heterogeneous setups can mix different VRAM sizes).
                 rank_gpu_memory_mib = parallel_config.rank_gpu_memory_mib
+                if isinstance(rank_gpu_memory_mib, list):
+                    # Per-node list; with pure single-node TP (enforced)
+                    # local_rank == rank, kept consistent with
+                    # assigned_physical_gpu_ids indexing below.
+                    rank_gpu_memory_mib = rank_gpu_memory_mib[self.local_rank]
                 if rank_gpu_memory_mib is not None:
                     torch_cuda_idx = assigned_physical_gpu_ids[self.local_rank]
                     # Map torch.cuda index to NVML physical index for memory query

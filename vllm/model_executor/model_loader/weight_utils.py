@@ -1271,10 +1271,23 @@ def sharded_weight_loader(shard_axis: int) -> LoaderFunction:
     """Create a weight loader that shards the weights along the given axis"""
 
     def loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+        from vllm.distributed import get_tensor_model_parallel_world_size
+        from vllm.distributed.utils import (
+            get_tp_partition_ratios,
+            tp_partition_offset,
+        )
+
         tp_rank = get_tensor_model_parallel_rank()
 
         shard_size = param.data.shape[shard_axis]
-        start_idx = tp_rank * shard_size
+        if get_tp_partition_ratios():
+            start_idx = tp_partition_offset(
+                loaded_weight.shape[shard_axis],
+                get_tensor_model_parallel_world_size(),
+                tp_rank,
+            )
+        else:
+            start_idx = tp_rank * shard_size
         loaded_weight = loaded_weight.narrow(shard_axis, start_idx, shard_size)
 
         return default_weight_loader(param, loaded_weight)

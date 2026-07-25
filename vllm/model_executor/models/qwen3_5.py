@@ -384,6 +384,29 @@ class Qwen3_5ForCausalLMBase(
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_text_config
         tp_size = parallel_config.tensor_parallel_size
+        num_k_heads = hf_config.linear_num_key_heads
+        num_v_heads = hf_config.linear_num_value_heads
+        ratios = parallel_config.rank_tp_ratio
+        if ratios:
+            # Uneven TP: rank-aware in worker processes (matches the
+            # rank-aware get_num_kv_heads, so the derived block size
+            # mamba_page / attn_page is identical on every rank - the
+            # ratio factor cancels). Engine-level callers without an
+            # initialized TP group fall back to the smallest ratio,
+            # consistent with the same fallback in get_num_kv_heads.
+            denom = sum(ratios)
+            try:
+                from vllm.distributed.parallel_state import (
+                    get_tensor_model_parallel_rank,
+                )
+
+                rank = get_tensor_model_parallel_rank()
+            except (AssertionError, ValueError):
+                rank = None
+            unit = ratios[rank] if rank is not None else min(ratios)
+            num_k_heads = num_k_heads * unit // denom
+            num_v_heads = num_v_heads * unit // denom
+            tp_size = 1
         num_spec = (
             vllm_config.speculative_config.num_speculative_tokens
             if vllm_config.speculative_config
@@ -391,8 +414,8 @@ class Qwen3_5ForCausalLMBase(
         )
         return MambaStateShapeCalculator.gated_delta_net_state_shape(
             tp_size,
-            hf_config.linear_num_key_heads,
-            hf_config.linear_num_value_heads,
+            num_k_heads,
+            num_v_heads,
             hf_config.linear_key_head_dim,
             hf_config.linear_value_head_dim,
             hf_config.linear_conv_kernel_dim,
@@ -588,6 +611,29 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_text_config
         tp_size = parallel_config.tensor_parallel_size
+        num_k_heads = hf_config.linear_num_key_heads
+        num_v_heads = hf_config.linear_num_value_heads
+        ratios = parallel_config.rank_tp_ratio
+        if ratios:
+            # Uneven TP: rank-aware in worker processes (matches the
+            # rank-aware get_num_kv_heads, so the derived block size
+            # mamba_page / attn_page is identical on every rank - the
+            # ratio factor cancels). Engine-level callers without an
+            # initialized TP group fall back to the smallest ratio,
+            # consistent with the same fallback in get_num_kv_heads.
+            denom = sum(ratios)
+            try:
+                from vllm.distributed.parallel_state import (
+                    get_tensor_model_parallel_rank,
+                )
+
+                rank = get_tensor_model_parallel_rank()
+            except (AssertionError, ValueError):
+                rank = None
+            unit = ratios[rank] if rank is not None else min(ratios)
+            num_k_heads = num_k_heads * unit // denom
+            num_v_heads = num_v_heads * unit // denom
+            tp_size = 1
         num_spec = (
             vllm_config.speculative_config.num_speculative_tokens
             if vllm_config.speculative_config
@@ -595,8 +641,8 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         )
         return MambaStateShapeCalculator.gated_delta_net_state_shape(
             tp_size,
-            hf_config.linear_num_key_heads,
-            hf_config.linear_num_value_heads,
+            num_k_heads,
+            num_v_heads,
             hf_config.linear_key_head_dim,
             hf_config.linear_value_head_dim,
             hf_config.linear_conv_kernel_dim,

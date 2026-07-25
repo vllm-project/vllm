@@ -1312,7 +1312,18 @@ class ModelConfig:
     ) -> None:
         total_num_attention_heads = self.model_arch_config.total_num_attention_heads
         tensor_parallel_size = parallel_config.tensor_parallel_size
-        if total_num_attention_heads % tensor_parallel_size != 0:
+        ratios = parallel_config.rank_tp_ratio
+        if ratios:
+            # Uneven TP: heads are partitioned proportionally; every
+            # sharded head count must be divisible by sum(ratios).
+            denom = sum(ratios)
+            if total_num_attention_heads % denom != 0:
+                raise ValueError(
+                    f"Total number of attention heads "
+                    f"({total_num_attention_heads}) must be divisible by "
+                    f"sum(--rank-tp-ratio)={denom} for uneven TP."
+                )
+        elif total_num_attention_heads % tensor_parallel_size != 0:
             raise ValueError(
                 f"Total number of attention heads ({total_num_attention_heads})"
                 " must be divisible by tensor parallel size "
@@ -1423,14 +1434,39 @@ class ModelConfig:
             return 1
 
         total_num_kv_heads = self.get_total_num_kv_heads()
+        ratios = parallel_config.rank_tp_ratio
+        if ratios:
+            # Uneven TP: rank-aware in worker processes; engine-level
+            # callers (no TP group initialized) get the smallest-ratio
+            # rank as a conservative basis.
+            return self._uneven_tp_heads(total_num_kv_heads, ratios)
         # If tensor parallelism is used, we divide the number of KV heads by
         # the tensor parallel size. We will replicate the KV heads in the
         # case where the number of KV heads is smaller than the tensor
         # parallel size so each GPU has at least one KV head.
         return max(1, total_num_kv_heads // parallel_config.tensor_parallel_size)
 
+    @staticmethod
+    def _uneven_tp_heads(total: int, ratios: list[int]) -> int:
+        denom = sum(ratios)
+        try:
+            from vllm.distributed.parallel_state import (
+                get_tensor_model_parallel_rank,
+            )
+
+            rank = get_tensor_model_parallel_rank()
+        except (AssertionError, ValueError):
+            # TP group not initialized (engine-level caller): use the
+            # smallest ratio as conservative basis.
+            rank = None
+        r = ratios[rank] if rank is not None else min(ratios)
+        return max(1, total * r // denom)
+
     def get_num_attention_heads(self, parallel_config: ParallelConfig) -> int:
         num_heads = self.model_arch_config.total_num_attention_heads
+        ratios = parallel_config.rank_tp_ratio
+        if ratios:
+            return self._uneven_tp_heads(num_heads, ratios)
         return num_heads // parallel_config.tensor_parallel_size
 
     def get_num_experts(self) -> int:

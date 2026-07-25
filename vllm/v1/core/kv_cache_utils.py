@@ -2052,6 +2052,7 @@ def _auto_fit_max_model_len(
 def _project_kv_cache_groups_to_worker(
     global_kv_cache_groups: list[KVCacheGroupSpec],
     worker_spec: dict[str, KVCacheSpec],
+    use_worker_specs: bool = False,
 ) -> list[KVCacheGroupSpec]:
     """
     Projects global KV cache groups onto a single worker's assigned layers.
@@ -2074,13 +2075,17 @@ def _project_kv_cache_groups_to_worker(
         ]
         group_spec = group.kv_cache_spec
         if worker_layer_names and isinstance(group_spec, UniformTypeKVCacheSpecs):
+            source = worker_spec if use_worker_specs else group_spec.kv_cache_specs
             group_spec = UniformTypeKVCacheSpecs(
                 block_size=group_spec.block_size,
                 kv_cache_specs={
-                    layer_name: group_spec.kv_cache_specs[layer_name]
-                    for layer_name in worker_layer_names
+                    layer_name: source[layer_name] for layer_name in worker_layer_names
                 },
             )
+        elif worker_layer_names and use_worker_specs:
+            # Uneven TP: size this worker's config with its OWN spec
+            # (per-rank page size), not the canonical merged one.
+            group_spec = worker_spec[worker_layer_names[0]]
         projected_groups.append(
             KVCacheGroupSpec(
                 worker_layer_names,
@@ -2129,11 +2134,27 @@ def get_kv_cache_configs(
     # Merge the KV cache specs of all workers. Different PP stages may have
     # different layer names, and different TP ranks of the same PP stage should
     # have the same KV cache spec.
+    uneven_tp = bool(vllm_config.parallel_config.rank_tp_ratio)
     merged_kv_cache_specs: dict[str, KVCacheSpec] = {}
     for kv_cache_spec_one_worker in kv_cache_specs:
         for layer_name, layer_spec in kv_cache_spec_one_worker.items():
             if layer_name not in merged_kv_cache_specs:
                 merged_kv_cache_specs[layer_name] = layer_spec
+            elif uneven_tp:
+                # Uneven TP (--rank-tp-ratio): ranks legitimately hold
+                # differently sized shards of the same layer (different
+                # num_kv_heads / state shapes -> page_size_bytes). Require
+                # structural compatibility only; worker 0's spec stays the
+                # canonical structure for global grouping, per-worker page
+                # sizes are re-injected during projection below.
+                canonical = merged_kv_cache_specs[layer_name]
+                assert type(canonical) is type(layer_spec) and (
+                    canonical.block_size == layer_spec.block_size
+                ), (
+                    "Uneven TP: KV cache specs for the same layer are "
+                    "structurally incompatible across workers: "
+                    f"{canonical} vs {layer_spec}"
+                )
             else:
                 assert merged_kv_cache_specs[layer_name] == layer_spec, (
                     "The KV cache specs for the same layer are different "
@@ -2152,7 +2173,9 @@ def get_kv_cache_configs(
     # determine the maximum model length that fits in available GPU memory.
     # We use per-worker projected groups to account for PP sharding.
     projected_groups_per_worker = [
-        _project_kv_cache_groups_to_worker(global_kv_cache_groups, worker_spec)
+        _project_kv_cache_groups_to_worker(
+            global_kv_cache_groups, worker_spec, use_worker_specs=uneven_tp
+        )
         for worker_spec in kv_cache_specs
     ]
 

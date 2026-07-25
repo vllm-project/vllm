@@ -14,10 +14,12 @@ from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
+    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
 )
+from vllm.distributed.utils import get_tp_partition_ratios, tp_partition_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
@@ -240,20 +242,37 @@ class Qwen3NextAttention(nn.Module):
         self.config = config
         self.hidden_size = config.hidden_size
         tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
         self.total_num_heads = config.num_attention_heads
-        assert self.total_num_heads % tp_size == 0
-        self.num_heads = self.total_num_heads // tp_size
         self.total_num_kv_heads = config.num_key_value_heads
-        if self.total_num_kv_heads >= tp_size:
-            # Number of KV heads is greater than TP size, so we partition
-            # the KV heads across multiple tensor parallel GPUs.
-            assert self.total_num_kv_heads % tp_size == 0
+        if get_tp_partition_ratios():
+            # Uneven TP: partition q/kv heads by the ratio vector.
+            # KV-head replication is not supported with ratios (each rank
+            # must own at least one whole kv head); tp_partition_size
+            # raises with a clear message if a count is not partitionable.
+            self.num_heads = tp_partition_size(self.total_num_heads, tp_size, tp_rank)
+            self.num_kv_heads = tp_partition_size(
+                self.total_num_kv_heads, tp_size, tp_rank
+            )
         else:
-            # Number of KV heads is less than TP size, so we replicate
-            # the KV heads across multiple tensor parallel GPUs.
-            assert tp_size % self.total_num_kv_heads == 0
-        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        self.head_dim = config.head_dim or (self.hidden_size // self.num_heads)
+            assert self.total_num_heads % tp_size == 0
+            self.num_heads = self.total_num_heads // tp_size
+            if self.total_num_kv_heads >= tp_size:
+                # Number of KV heads is greater than TP size, so we partition
+                # the KV heads across multiple tensor parallel GPUs.
+                assert self.total_num_kv_heads % tp_size == 0
+            else:
+                # Number of KV heads is less than TP size, so we replicate
+                # the KV heads across multiple tensor parallel GPUs.
+                assert tp_size % self.total_num_kv_heads == 0
+            self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+        if get_tp_partition_ratios():
+            # Uneven TP: the fallback must not depend on per-rank heads.
+            self.head_dim = config.head_dim or (
+                self.hidden_size // self.total_num_heads
+            )
+        else:
+            self.head_dim = config.head_dim or (self.hidden_size // self.num_heads)
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5

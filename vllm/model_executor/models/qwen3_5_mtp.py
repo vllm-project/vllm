@@ -93,15 +93,33 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             if (quant_config and quant_config.get_name() == "modelopt_fp4")
             else quant_config
         )
-        self.fc = ColumnParallelLinear(
-            self.config.hidden_size * 2,
-            self.config.hidden_size,
-            gather_output=True,
-            bias=False,
-            return_bias=False,
-            quant_config=fc_quant,
-            prefix=f"{prefix}.fc",
-        )
+        from vllm.distributed.utils import get_tp_partition_ratios
+
+        if get_tp_partition_ratios():
+            # Uneven TP: gather_output=True would all-gather unevenly
+            # sized shards, which plain all_gather cannot do. This
+            # projection is small (2*hidden -> hidden, draft model only),
+            # so replicate it instead.
+            from vllm.model_executor.layers.linear import ReplicatedLinear
+
+            self.fc = ReplicatedLinear(
+                self.config.hidden_size * 2,
+                self.config.hidden_size,
+                bias=False,
+                return_bias=False,
+                quant_config=fc_quant,
+                prefix=f"{prefix}.fc",
+            )
+        else:
+            self.fc = ColumnParallelLinear(
+                self.config.hidden_size * 2,
+                self.config.hidden_size,
+                gather_output=True,
+                bias=False,
+                return_bias=False,
+                quant_config=fc_quant,
+                prefix=f"{prefix}.fc",
+            )
 
         # GPTQ: quantized checkpoints may exclude MTP from quantization via
         # quantization_config.dynamic with "-:pattern" entries. When detected,

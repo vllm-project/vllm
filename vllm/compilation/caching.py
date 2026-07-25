@@ -578,6 +578,16 @@ def aot_compile_hash_factors(vllm_config: VllmConfig) -> list[str]:
     if envs.VLLM_USE_MEGA_AOT_ARTIFACT:
         factors.extend(get_inductor_factors())
 
+    # 3. identity of the GPU this worker actually runs on. With
+    #    heterogeneous rank placement (--rank-gpu-id) different ranks of
+    #    the same job may sit on different architectures; sharing one AOT
+    #    artifact across them loads wrong-arch kernels (hard launch
+    #    failure on the older arch, silently mistuned PTX-JIT kernels on
+    #    the newer one). Homogeneous setups just gain a constant factor.
+    if torch.cuda.is_available():
+        factors.append(torch.cuda.get_device_name())
+        factors.append(str(torch.cuda.get_device_capability()))
+
     return factors
 
 

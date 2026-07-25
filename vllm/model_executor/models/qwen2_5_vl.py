@@ -363,8 +363,10 @@ class Qwen2_5_VisionAttention(nn.Module):
         self.hidden_size_per_attention_head = dist_utils.divide(
             projection_size, num_heads
         )
-        self.num_attention_heads_per_partition = dist_utils.divide(
-            num_heads, self.tp_size
+        self.num_attention_heads_per_partition = dist_utils.tp_partition_size(
+            num_heads,
+            self.tp_size,
+            0 if use_data_parallel else self.tp_rank,
         )
 
         self.qkv = QKVParallelLinear(

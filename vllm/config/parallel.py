@@ -314,13 +314,25 @@ class ParallelConfig:
     checks, and final CUDA device selection when needed. When None,
     logical IDs map to visible device IDs in order."""
 
-    rank_gpu_memory_mib: int | None = None
+    rank_gpu_memory_mib: int | list[int] | None = None
     """Absolute MiB memory budget per rank when using --rank-gpu-id.
 
-    This value applies uniformly to every rank. The value is converted
-    to a per-GPU fraction at runtime based on each physical GPU's
-    NVML-reported total memory, so the same MiB value represents a
-    DIFFERENT fraction on different physical GPUs."""
+    A single int applies uniformly to every rank (the natural fit for
+    even TP, where all shards are structurally equal). With
+    --rank-tp-ratio (uneven TP) a per-rank list may be given instead,
+    since ranks then carry differently sized shards. The value is
+    converted to a per-GPU fraction at runtime based on each physical
+    GPU's NVML-reported total memory."""
+
+    rank_tp_ratio: list[int] | None = None
+    """Uneven tensor-parallel shard ratios, one positive integer per rank.
+
+    Example: ``[2, 1, 1]`` with TP=3 gives rank 0 half of every sharded
+    dimension and ranks 1/2 a quarter each - e.g. one large GPU plus two
+    smaller ones, one rank per GPU, no co-location needed. Every sharded
+    dimension (attention heads, KV heads, GDN v/k heads, hidden and
+    intermediate sizes) must be divisible by sum(ratios). Vocab/LM-head
+    stay evenly split. Requires --rank-gpu-id; pure TP only."""
 
     distributed_timeout_seconds: int | None = None
     """Timeout in seconds for distributed operations (e.g., init_process_group).

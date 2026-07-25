@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -260,6 +261,12 @@ class VocabParallelEmbedding(PluggableLayer):
             self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = tp_rank
         self.num_embeddings = num_embeddings
+        # Vocab must split evenly across TP ranks. The default padding
+        # (64) only guarantees that for power-of-two TP sizes; with e.g.
+        # TP=3 (uneven-TP setups keep the vocab evenly split) pad to a
+        # multiple of lcm(padding, tp_size) instead.
+        if self.tp_size > 1:
+            padding_size = math.lcm(padding_size, self.tp_size)
         self.padding_size = padding_size
         self.org_vocab_size = org_num_embeddings or num_embeddings
         num_added_embeddings = num_embeddings - self.org_vocab_size

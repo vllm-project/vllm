@@ -82,6 +82,66 @@ def verify_group_size_divides_partition(
     )
 
 
+# --------------------------------------------------------------------------
+# Uneven tensor-parallel partitioning (--rank-tp-ratio).
+#
+# When a ratio vector like (2, 1, 1) is active, TP rank r owns
+# total * ratio[r] / sum(ratio) of every sharded dimension instead of
+# total / tp_size. Offsets become prefix sums (same pattern as
+# VLLM_PP_LAYER_PARTITION for pipeline parallel). The ratio vector is
+# process-global state set once per worker before the model is built;
+# when unset, all helpers reproduce the classic even split exactly.
+# --------------------------------------------------------------------------
+
+_TP_PARTITION_RATIOS: list[int] | None = None
+
+
+def set_tp_partition_ratios(ratios: list[int] | None) -> None:
+    """Install the uneven-TP ratio vector for this process (or None)."""
+    global _TP_PARTITION_RATIOS
+    _TP_PARTITION_RATIOS = list(ratios) if ratios else None
+
+
+def get_tp_partition_ratios() -> list[int] | None:
+    return _TP_PARTITION_RATIOS
+
+
+def tp_partition_sizes(total: int, tp_size: int) -> list[int]:
+    """Per-rank sizes of a dimension of `total` elements.
+
+    With ratios active, every sharded dimension must be divisible by
+    sum(ratios) so all per-rank sizes are exact integers; otherwise this
+    raises with the offending dimension size.
+    """
+    ratios = _TP_PARTITION_RATIOS
+    if not ratios or len(ratios) != tp_size:
+        # No ratios installed, or this layer runs with its own tp_size
+        # (disable_tp layers use tp_size=1): classic even split.
+        ensure_divisibility(total, tp_size)
+        return [total // tp_size] * tp_size
+    denom = sum(ratios)
+    if total % denom != 0:
+        raise ValueError(
+            f"Cannot partition dimension of size {total} with "
+            f"--rank-tp-ratio {ratios}: {total} is not divisible by "
+            f"sum(ratios)={denom}. Choose ratios whose sum divides every "
+            "sharded dimension (attention heads, kv heads, GDN heads, "
+            "hidden/intermediate sizes)."
+        )
+    unit = total // denom
+    return [unit * r for r in ratios]
+
+
+def tp_partition_size(total: int, tp_size: int, rank: int) -> int:
+    """This rank's size of a sharded dimension."""
+    return tp_partition_sizes(total, tp_size)[rank]
+
+
+def tp_partition_offset(total: int, tp_size: int, rank: int) -> int:
+    """This rank's start offset (prefix sum) in a sharded dimension."""
+    return sum(tp_partition_sizes(total, tp_size)[:rank])
+
+
 def is_weak_contiguous(inp: torch.Tensor) -> bool:
     """Check that *inp* occupies a single contiguous block of memory.
 

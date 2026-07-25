@@ -476,7 +476,8 @@ class EngineArgs:
     numa_bind_cpus: list[str] | None = ParallelConfig.numa_bind_cpus
     device_ids: list[int | str] | None = None
     rank_gpu_id: list[int] | None = None
-    rank_gpu_memory_mib: int | None = None
+    rank_gpu_memory_mib: int | list[int] | None = None
+    rank_tp_ratio: list[int] | None = None
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
@@ -1052,19 +1053,39 @@ class EngineArgs:
             "Requires --rank-gpu-memory-mib to be set. "
             "Mutually exclusive with --gpu-memory-utilization.",
         )
+
+        def _mib_scalar_or_list(value: str):
+            if "," in value:
+                return [int(v) for v in value.split(",")]
+            return int(value)
+
         parallel_group.add_argument(
             "--rank-gpu-memory-mib",
-            type=int,
+            type=_mib_scalar_or_list,
             default=None,
             help="Absolute memory budget in MiB per rank when using "
-            "--rank-gpu-id. This is a single scalar value (not a list) "
-            "that applies uniformly to every rank. "
-            "The value is converted to a per-GPU fraction at runtime based on "
-            "each physical GPU's NVML-reported total memory, so the same MiB "
-            "value represents a DIFFERENT fraction on different physical GPUs. "
+            "--rank-gpu-id. A single scalar applies uniformly to every rank "
+            "(even TP: all shards are structurally equal). With "
+            "--rank-tp-ratio a comma-separated per-rank list may be given "
+            "instead (e.g. 26000,17000,17000), since shards then differ in "
+            "size. Values are converted to per-GPU fractions at runtime via "
+            "each physical GPU's NVML-reported total memory. "
             "Required when --rank-gpu-id is set. "
             "Mutually exclusive with --gpu-memory-utilization "
             "(setting both is a hard error).",
+        )
+        parallel_group.add_argument(
+            "--rank-tp-ratio",
+            type=lambda s: [int(r) for r in s.split(",")],
+            default=None,
+            help="UNEVEN tensor parallelism: comma-separated positive integer "
+            "ratios, one per rank (length must equal tensor-parallel-size). "
+            "Example: 2,1,1 gives rank 0 half of every sharded dimension and "
+            "ranks 1/2 a quarter each - one large GPU plus two smaller ones, "
+            "one rank per GPU, no MPS/co-location required. Every sharded "
+            "dimension (attention heads, KV heads, GDN heads, hidden and "
+            "intermediate sizes) must be divisible by sum(ratios); vocab and "
+            "LM head stay evenly split. Requires --rank-gpu-id.",
         )
         parallel_group.add_argument(
             "--tensor-parallel-size", "-tp", **parallel_kwargs["tensor_parallel_size"]
@@ -2275,6 +2296,7 @@ class EngineArgs:
                 else self._resolve_device_ids()
             ),
             rank_gpu_memory_mib=self.rank_gpu_memory_mib,
+            rank_tp_ratio=self.rank_tp_ratio,
             enable_fault_tolerance=self.enable_fault_tolerance,
             fault_tolerance_config=self.fault_tolerance_config,
             numa_bind=self.numa_bind,
@@ -2546,6 +2568,9 @@ class EngineArgs:
         if self.rank_gpu_memory_mib is None and self.rank_gpu_id is not None:
             raise ValueError("--rank-gpu-id requires --rank-gpu-memory-mib to be set.")
 
+        if self.rank_tp_ratio is not None and self.rank_gpu_id is None:
+            raise ValueError("--rank-tp-ratio requires --rank-gpu-id to be set.")
+
         if self.rank_gpu_id is None:
             return
 
@@ -2554,6 +2579,39 @@ class EngineArgs:
             raise ValueError(
                 f"--rank-gpu-id length ({len(self.rank_gpu_id)}) must equal "
                 f"--tensor-parallel-size ({self.tensor_parallel_size})."
+            )
+
+        # Uneven-TP ratio checks
+        if self.rank_tp_ratio is not None:
+            if len(self.rank_tp_ratio) != self.tensor_parallel_size:
+                raise ValueError(
+                    f"--rank-tp-ratio length ({len(self.rank_tp_ratio)}) must "
+                    f"equal --tensor-parallel-size ({self.tensor_parallel_size})."
+                )
+            if any(r <= 0 for r in self.rank_tp_ratio):
+                raise ValueError("--rank-tp-ratio entries must be positive integers.")
+
+        # Per-rank MiB list checks
+        if isinstance(self.rank_gpu_memory_mib, list):
+            if self.rank_tp_ratio is None:
+                raise ValueError(
+                    "--rank-gpu-memory-mib as a list requires "
+                    "--rank-tp-ratio (with even TP all ranks are "
+                    "structurally equal - use a single scalar)."
+                )
+            if len(self.rank_gpu_memory_mib) != self.tensor_parallel_size:
+                raise ValueError(
+                    f"--rank-gpu-memory-mib list length "
+                    f"({len(self.rank_gpu_memory_mib)}) must equal "
+                    f"--tensor-parallel-size ({self.tensor_parallel_size})."
+                )
+            if any(m <= 0 for m in self.rank_gpu_memory_mib):
+                raise ValueError("--rank-gpu-memory-mib entries must be positive.")
+
+        if self.rank_tp_ratio is not None and self.enable_lora:
+            raise ValueError(
+                "--rank-tp-ratio is not compatible with LoRA "
+                "(LoRA layers assume evenly sized TP shards)."
             )
 
         # PP/DP/EP not supported
@@ -2613,14 +2671,24 @@ class EngineArgs:
                 nvml_total_bytes = pynvml.nvmlDeviceGetMemoryInfo(handle).total
                 nvml_total_mib = nvml_total_bytes // (1024 * 1024)
                 count_on_gpu = gpu_counts[gpu_id]
-                required_mib = count_on_gpu * self.rank_gpu_memory_mib
+                if isinstance(self.rank_gpu_memory_mib, list):
+                    required_mib = sum(
+                        mib
+                        for r, mib in enumerate(self.rank_gpu_memory_mib)
+                        if self.rank_gpu_id[r] == gpu_id
+                    )
+                    budget_desc = "per-rank budgets"
+                else:
+                    required_mib = count_on_gpu * self.rank_gpu_memory_mib
+                    budget_desc = (
+                        f"{count_on_gpu} ranks x {self.rank_gpu_memory_mib} MiB"
+                    )
 
                 if required_mib > nvml_total_mib:
                     raise ValueError(
                         f"Physical impossibility: torch.cuda:{gpu_id} "
                         f"(NVML:{nvml_idx}, {nvml_total_mib} MiB total) cannot fit "
-                        f"{count_on_gpu} ranks x {self.rank_gpu_memory_mib} MiB "
-                        f"= {required_mib} MiB requested. "
+                        f"{budget_desc} = {required_mib} MiB requested. "
                         f"Reduce --rank-gpu-memory-mib or use fewer ranks on this GPU."
                     )
         finally:
