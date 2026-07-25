@@ -277,6 +277,15 @@ class AsyncLLM(EngineClient):
 
         return self._supported_tasks
 
+    async def get_kv_cache_group_metadata(self) -> list[dict[str, Any]]:
+        if not hasattr(self, "_kv_cache_group_metadata"):
+            # Immutable for the server's lifetime, therefore cache the result.
+            self._kv_cache_group_metadata = (
+                await self.engine_core.get_kv_cache_group_metadata_async()
+            )
+
+        return self._kv_cache_group_metadata
+
     async def add_request(
         self,
         request_id: str,
