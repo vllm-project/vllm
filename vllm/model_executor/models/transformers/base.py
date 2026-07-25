@@ -556,6 +556,15 @@ class Base(
             ):
                 per_layer_sliding_window = self.config.sliding_window
 
+            if getattr(text_config, "is_heterogeneous", False):
+                layer_head_size = self.model_config.get_head_size(layer_idx=i)
+                layer_num_kv_heads = self.model_config.get_num_kv_heads(
+                    self.parallel_config, layer_idx=i
+                )
+            else:
+                layer_head_size = head_size
+                layer_num_kv_heads = num_kv_heads
+
             attn_cls = (
                 EncoderOnlyAttention
                 if attn_type == AttentionType.ENCODER_ONLY
@@ -563,11 +572,11 @@ class Base(
             )
             attention_instances[i] = attn_cls(
                 num_heads=num_heads,
-                head_size=head_size,
+                head_size=layer_head_size,
                 # NOTE: We use Llama scale as default, if it's set by
                 # Transformers, it's updated in vllm_attention_forward
-                scale=head_size**-0.5,
-                num_kv_heads=num_kv_heads,
+                scale=layer_head_size**-0.5,
+                num_kv_heads=layer_num_kv_heads,
                 cache_config=self.cache_config,
                 quant_config=self.quant_config,
                 logits_soft_cap=logits_soft_cap,
