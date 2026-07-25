@@ -227,12 +227,15 @@ class Scheduler(SchedulerInterface):
             mm_budget.encoder_compute_budget if mm_budget else 0
         )
         encoder_cache_size = mm_budget.encoder_cache_size if mm_budget else 0
-        self.encoder_cache_manager = (
-            EncoderDecoderCacheManager(cache_size=encoder_cache_size)
-            if self.is_encoder_decoder
-            else EncoderCacheManager(cache_size=encoder_cache_size)
-        )
-
+        manager_cls_obj = vllm_config.ec_manager_config.get_encoder_cache_manager_obj()
+        if manager_cls_obj is not None:
+            self.encoder_cache_manager = manager_cls_obj(cache_size=encoder_cache_size)
+        else:
+            self.encoder_cache_manager = (
+                EncoderDecoderCacheManager(cache_size=encoder_cache_size)
+                if self.is_encoder_decoder
+                else EncoderCacheManager(cache_size=encoder_cache_size)
+            )
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
@@ -1151,6 +1154,7 @@ class Scheduler(SchedulerInterface):
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             kv_cache_block_copies=pending_kv_cache_block_copies,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
+            ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -1716,7 +1720,9 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
 
-            if new_token_ids and self.structured_output_manager.should_advance(request):
+            if new_token_ids and self.structured_output_manager.should_advance(
+                request, new_token_ids=new_token_ids
+            ):
                 struct_output_request = request.structured_output_request
                 assert struct_output_request is not None
                 grammar = struct_output_request.grammar
