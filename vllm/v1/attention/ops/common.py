@@ -90,6 +90,7 @@ def _correct_attn_cp_out_kernel(
     factor = tl.exp(lse_finally) if IS_BASE_E else tl.exp2(lse_finally)
     output = tl.load(outputs_ptr + output_offsets)
     output = output * factor
+    output = tl.where(factor == 0.0, 0.0, output)
 
     tl.store(new_output_ptr + output_offsets, output)
 

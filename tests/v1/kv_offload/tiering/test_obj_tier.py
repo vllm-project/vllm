@@ -15,16 +15,26 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 import torch
 
 from vllm.v1.kv_offload.base import (
+    Locality,
     LookupResult,
+    OffloadingKVEventsConfig,
     OffloadKey,
     ReqContext,
     ScheduleEndContext,
     make_offload_key,
 )
+from vllm.v1.kv_offload.config import (
+    OffloadingCacheConfig,
+    OffloadingConfig,
+    OffloadingModelConfig,
+    OffloadingParallelConfig,
+)
 from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult
+from vllm.v1.kv_offload.tiering.obj.config import ObjStoreConfig
 from vllm.v1.kv_offload.tiering.obj.manager import ObjectStoreSecondaryTierManager
 
 # ---------------------------------------------------------------------------
@@ -32,24 +42,30 @@ from vllm.v1.kv_offload.tiering.obj.manager import ObjectStoreSecondaryTierManag
 # ---------------------------------------------------------------------------
 
 
-def _make_vllm_config():
-    return SimpleNamespace(
-        model_config=SimpleNamespace(model="test/model"),
-        cache_config=SimpleNamespace(block_size=16, cache_dtype="float16"),
-        parallel_config=SimpleNamespace(
-            tensor_parallel_size=1,
-            pipeline_parallel_size=1,
-            prefill_context_parallel_size=1,
-            decode_context_parallel_size=1,
+def _make_offloading_config(enable_kv_cache_events: bool) -> OffloadingConfig:
+    return OffloadingConfig(
+        groups=(),
+        worker_kv_bytes_per_block=0,
+        enable_kv_cache_events=enable_kv_cache_events,
+        extra_config={},
+        engine_id="test-engine",
+        model=OffloadingModelConfig(name="test/model", dtype="float16"),
+        cache=OffloadingCacheConfig(tokens_per_hash=16, blocks_per_chunk=1),
+        parallel=OffloadingParallelConfig(
             rank=0,
+            world_size=1,
+            tp_size=1,
+            pp_size=1,
+            pcp_size=1,
+            dcp_size=1,
+            data_parallel_index=0,
+            is_parallelism_agnostic=False,
         ),
-        use_v2_model_runner=False,
     )
 
 
 _OFFLOADING_SPEC = SimpleNamespace(
-    vllm_config=_make_vllm_config(),
-    kv_cache_config=SimpleNamespace(kv_cache_groups=[]),
+    config=_make_offloading_config(enable_kv_cache_events=False),
 )
 
 _STORE_CONFIG = {
@@ -178,8 +194,21 @@ class MockNixlAgent:
 # ---------------------------------------------------------------------------
 
 
+def _make_events_spec(enable_kv_cache_events: bool) -> SimpleNamespace:
+    """Offloading spec stub with an explicit global KV events flag."""
+    return SimpleNamespace(
+        config=_make_offloading_config(enable_kv_cache_events),
+        kv_events_config=OffloadingKVEventsConfig(
+            enable_kv_cache_events=enable_kv_cache_events,
+            self_describing_kv_events=False,
+        ),
+    )
+
+
 def _make_tier(
     num_blocks: int = 4,
+    offloading_spec: SimpleNamespace = _OFFLOADING_SPEC,
+    **tier_kwargs,
 ) -> tuple[ObjectStoreSecondaryTierManager, MockNixlAgent]:
     """Create a tier backed by a fresh MockNixlAgent."""
     mock_agent = MockNixlAgent()
@@ -193,11 +222,12 @@ def _make_tier(
         ),
     ):
         tier = ObjectStoreSecondaryTierManager(
-            offloading_spec=_OFFLOADING_SPEC,
+            offloading_spec=offloading_spec,
             primary_kv_view=view,
             tier_type="obj",
             store_config=_STORE_CONFIG,
             prefix=_RUN_PREFIX,
+            **tier_kwargs,
         )
     return tier, mock_agent
 
@@ -235,6 +265,12 @@ def lookup_and_wait(
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("locality", ["local", ""])
+def test_invalid_locality_raises_at_construction(locality):
+    with pytest.raises(ValueError, match="Locality"):
+        _make_tier(locality=locality)
 
 
 class TestMockObjTierBasic:
@@ -418,3 +454,166 @@ class TestMockObjTierShutdown:
         tier, _ = _make_tier(num_blocks=4)
         tier.shutdown()
         tier.shutdown()  # must not raise
+
+
+class TestObjTierKVEvents:
+    def setup_method(self):
+        self.tier, self.agent = _make_tier(
+            offloading_spec=_make_events_spec(enable_kv_cache_events=True),
+            enable_kv_events=True,
+            locality="REMOTE",
+        )
+
+    def test_successful_store_emits_stored_event(self):
+        """A completed store transfer emits one stored event with the job's keys."""
+        keys = [key(1), key(2)]
+        self.tier.submit_store(make_job(1, keys, [0, 1]))
+        assert all(r.success for r in drain(self.tier))
+
+        events = list(self.tier.take_events())
+        assert len(events) == 1
+        assert events[0].keys == keys
+        # Literal medium pins the wire contract, not just the constant choice.
+        assert events[0].medium == "OBJ"
+        assert events[0].locality is Locality.REMOTE
+        assert not events[0].removed
+        # take_events drains the buffer.
+        assert list(self.tier.take_events()) == []
+
+    @pytest.mark.parametrize(
+        ("locality", "expected"),
+        [(None, None), ("LOCAL", Locality.LOCAL)],
+    )
+    def test_store_event_uses_configured_locality(self, locality, expected):
+        locality_config = {} if locality is None else {"locality": locality}
+        tier, _ = _make_tier(
+            offloading_spec=_make_events_spec(enable_kv_cache_events=True),
+            enable_kv_events=True,
+            **locality_config,
+        )
+        try:
+            tier.submit_store(make_job(1, [key(1)], [0]))
+            assert all(r.success for r in drain(tier))
+
+            events = list(tier.take_events())
+            assert len(events) == 1
+            assert events[0].locality is expected
+        finally:
+            tier.shutdown()
+
+    def test_mixed_job_results_emit_event_only_for_successful_job(self):
+        """With a failed and a successful store job resolving in the same
+        poll, exactly one event is emitted and its keys belong to the
+        successful job."""
+        original = self.agent.check_xfer_state
+        self.agent.check_xfer_state = lambda h: "ERR" if h._id == 0 else original(h)
+        self.tier.submit_store(make_job(1, [key(1)], [0]))  # handle 0: fails
+        self.tier.submit_store(make_job(2, [key(2)], [1]))  # handle 1: succeeds
+        results = drain(self.tier)
+        by_id = {r.job_id: r for r in results}
+        assert not by_id[1].success
+        assert by_id[2].success
+
+        events = list(self.tier.take_events())
+        assert len(events) == 1
+        assert events[0].keys == [key(2)]
+        assert self.tier._store_job_keys == {}
+
+    def test_load_job_emits_no_event(self):
+        self.tier.submit_store(make_job(1, [key(1)], [0]))
+        results = drain(self.tier)
+        assert len(results) == 1
+        assert results[0].success
+        list(self.tier.take_events())
+
+        self.tier.submit_load(make_job(2, [key(1)], [0]))
+        results = drain(self.tier)
+        assert len(results) == 1
+        assert results[0].success
+        assert list(self.tier.take_events()) == []
+
+    def test_failed_transfer_emits_no_event(self):
+        self.agent.check_xfer_state = lambda h: "ERR"
+        self.tier.submit_store(make_job(1, [key(1)], [0]))
+        results = drain(self.tier)
+        assert not results[0].success
+        assert list(self.tier.take_events()) == []
+        assert self.tier._store_job_keys == {}
+
+    def test_submission_failure_emits_no_event(self):
+        self.agent.make_prepped_xfer = lambda *a, **k: None
+        self.tier.submit_store(make_job(1, [key(1)], [0]))
+        results = list(self.tier.get_finished_jobs())
+        assert not results[0].success
+        assert list(self.tier.take_events()) == []
+        assert self.tier._store_job_keys == {}
+
+    def test_events_disabled_by_default(self):
+        tier, _ = _make_tier()
+        tier.submit_store(make_job(1, [key(1)], [0]))
+        results = drain(tier)
+        assert len(results) == 1
+        assert results[0].success
+        assert tier.events is None
+        assert tier._store_job_keys == {}
+        assert list(tier.take_events()) == []
+
+    def test_events_require_global_kv_events_flag(self):
+        """Tier-level opt-in alone is not enough; the global flag gates events."""
+        tier, _ = _make_tier(
+            offloading_spec=_make_events_spec(enable_kv_cache_events=False),
+            enable_kv_events=True,
+        )
+        tier.submit_store(make_job(1, [key(1)], [0]))
+        results = drain(tier)
+        assert len(results) == 1
+        assert results[0].success
+        assert tier.events is None
+        assert tier._store_job_keys == {}
+        assert list(tier.take_events()) == []
+
+
+class TestObjStoreConfig:
+    def test_explicit_credentials_included(self):
+        cfg = ObjStoreConfig(
+            bucket="b",
+            endpoint_override="ep",
+            access_key="ak",
+            secret_key="sk",
+        )
+        params = cfg.to_nixl_params()
+        assert params["access_key"] == "ak"
+        assert params["secret_key"] == "sk"
+
+    def test_credentials_omitted_when_empty(self):
+        cfg = ObjStoreConfig(bucket="b", endpoint_override="ep")
+        params = cfg.to_nixl_params()
+        assert "access_key" not in params
+        assert "secret_key" not in params
+        assert "session_token" not in params
+        assert "region" not in params
+        assert params["bucket"] == "b"
+        assert params["endpoint_override"] == "ep"
+
+    def test_session_token_and_region_included(self):
+        cfg = ObjStoreConfig(
+            bucket="b",
+            endpoint_override="ep",
+            access_key="ak",
+            secret_key="sk",
+            session_token="tok",
+            region="us-east-1",
+        )
+        params = cfg.to_nixl_params()
+        assert params["session_token"] == "tok"
+        assert params["region"] == "us-east-1"
+
+    def test_ca_bundle_included_when_set(self):
+        cfg = ObjStoreConfig(
+            bucket="b",
+            endpoint_override="ep",
+            ca_bundle="/path/to/ca.pem",
+        )
+        params = cfg.to_nixl_params()
+        assert params["ca_bundle"] == "/path/to/ca.pem"
+        assert "access_key" not in params

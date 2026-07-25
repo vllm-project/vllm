@@ -120,7 +120,7 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
     signal.signal(signal.SIGTERM, _interrupt_init)
 
     # 1. Socket binding
-    listen_address, sock = setup_server(args)
+    listen_address, sock = setup_server(args, reuse_port=False)
 
     # 2. Build and serve the API server
     engine_args = AsyncEngineArgs.from_cli_args(args)

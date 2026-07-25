@@ -816,6 +816,44 @@ Full example: [examples/generate/multimodal/openai_chat_completion_client_for_mu
     export VLLM_VIDEO_FETCH_TIMEOUT=<timeout>
     ```
 
+#### Video Decoding Backend
+
+vLLM decodes video bytes into frames using a selectable decoding backend. Three
+backends are supported:
+
+- `opencv` (default): OpenCV-based decoder.
+- `pyav`: PyAV decoder.
+- `torchcodec`: TorchCodec (PyTorch-native) decoder.
+
+All three backends are ultimately backed by FFmpeg. `torchcodec` lets
+you choose which FFmpeg version is used while `opencv` and `pyav` rely on
+whichever FFmpeg build they were linked against.
+
+Select the backend by passing the `backend` parameter via `--media-io-kwargs`:
+
+```bash
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --media-io-kwargs '{"video": {"backend": "torchcodec"}}'
+```
+
+**TorchCodec-specific parameters:**
+
+The following parameters only apply to the `torchcodec` backend:
+
+- `num_ffmpeg_threads`: Number of FFmpeg decoding threads. `0` (default) relies
+  on the FFmpeg default, which is `min(cpu_count + 1, 16)`. This allows you to
+  control thread over-subscription.
+- `seek_mode`: Seek mode for the decoder. `"exact"` (default) guarantees
+  frame-accurate sampling by scanning the file when the decoder is created.
+  `"approximate"` skips that scan for faster decoder creation, at the cost of
+  relying on the file's metadata (which may yield less accurate seeking).
+
+```bash
+# Example: TorchCodec with approximate seek mode and 4 FFmpeg threads
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --media-io-kwargs '{"video": {"backend": "torchcodec", "seek_mode": "approximate", "num_ffmpeg_threads": 4}}'
+```
+
 #### Video Frame Recovery
 
 For improved robustness when processing potentially corrupted or truncated video files, vLLM supports optional frame recovery using a dynamic window forward-scan approach. When enabled, if a target frame fails to load during sequential reading, the next successfully grabbed frame (before the next target frame) will be used in its place.
@@ -840,6 +878,55 @@ vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
 4. This approach handles both mid-video corruption and end-of-video truncation
 
 Works with common video formats like MP4 when using OpenCV backends.
+
+#### GPU Video Decoding with DeepStream (NVDEC)
+
+By default vLLM decodes video on the CPU. On NVIDIA GPUs you can instead decode
+directly on the hardware video engine (NVDEC) with the DeepStream backend, which
+keeps decoding off the CPU and can significantly increase video throughput.
+
+Install the backend (Linux x86-64 only):
+
+```bash
+pip install vllm[deepstream]
+```
+
+The pip wheel bundles the DeepStream libraries but still relies on a few system
+packages that pip cannot install. On Ubuntu:
+
+```bash
+apt-get install -y \
+  gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+  gstreamer1.0-plugins-bad gstreamer1.0-libav \
+  python3-gi python3-gst-1.0 libv4l-0 cuda-libraries-13-0
+```
+
+Select the backend either with an environment variable:
+
+```bash
+export VLLM_VIDEO_LOADER_BACKEND=deepstream
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct
+```
+
+or per request via `--media-io-kwargs`:
+
+```bash
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --media-io-kwargs '{"video": {"backend": "deepstream"}}'
+```
+
+**Parameters:**
+
+- `pool_size`: Number of GPU decode workers in the process-wide decode pool
+  (clamped to `[1, 16]`). When unset it defaults to
+  `VLLM_MEDIA_LOADING_THREAD_COUNT` (default `8`). The pool is a singleton, so
+  the first request's value wins.
+
+```bash
+# Example: 12 decode workers
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --media-io-kwargs '{"video": {"backend": "deepstream", "pool_size": 12}}'
+```
 
 #### Pre-extracted Frame Sequences with `media_io_kwargs`
 
