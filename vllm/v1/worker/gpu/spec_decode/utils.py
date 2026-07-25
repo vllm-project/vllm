@@ -55,13 +55,19 @@ class DraftTokensHandler:
 def get_parallel_drafting_token_id(hf_config) -> int:
     """Resolve the mask token id used for parallel drafting slots.
 
-    Checks (in order): `dflash_config.mask_token_id`, top-level `mask_token_id`,
+    Checks (in order): `dflash_config.mask_token_id`,
+    `dflare_config.mask_token_id`, top-level `mask_token_id`,
     `dspark_noise_token_id`, `pard_token`, `ptd_token_id`. Raises ValueError if
     none are present.
     """
     dflash_config = getattr(hf_config, "dflash_config", None) or {}
     if "mask_token_id" in dflash_config:
         return int(dflash_config["mask_token_id"])
+    # DFlare (torchspec-exported) checkpoints use ``dflare_config`` for the
+    # same set of runtime fields as ``dflash_config``.
+    dflare_config = getattr(hf_config, "dflare_config", None) or {}
+    if "mask_token_id" in dflare_config:
+        return int(dflare_config["mask_token_id"])
     if getattr(hf_config, "mask_token_id", None) is not None:
         return int(hf_config.mask_token_id)
     if hasattr(hf_config, "dspark_noise_token_id"):
@@ -72,6 +78,7 @@ def get_parallel_drafting_token_id(hf_config) -> int:
         return int(hf_config.ptd_token_id)
     raise ValueError(
         "Model config must specify `dflash_config.mask_token_id`,"
+        " `dflare_config.mask_token_id`,"
         " `mask_token_id`, `dspark_noise_token_id`, `pard_token`, or"
         " `ptd_token_id` for parallel drafting."
     )

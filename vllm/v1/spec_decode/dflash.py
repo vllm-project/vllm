@@ -28,13 +28,26 @@ class DFlashProposer(SpecDecodeBaseProposer):
         runner=None,
     ):
         assert vllm_config.speculative_config is not None
-        assert vllm_config.speculative_config.method == "dflash"
+        # DSparkProposer subclasses DFlashProposer and reuses the same
+        # context-KV precompute + query-block forward machinery, so accept
+        # "dspark" here as well.
+        assert vllm_config.speculative_config.method in ("dflash", "dspark")
         super().__init__(
             vllm_config=vllm_config,
             device=device,
             pass_hidden_states_to_model=True,
             runner=runner,
         )
+
+        # Number of query tokens emitted per request. DFlash uses the anchor
+        # (bonus) token plus one mask token per speculative token, i.e.
+        # ``1 + num_speculative_tokens``. DSpark's anchor-as-first layout
+        # overrides this in its own __init__.
+        self.num_query_per_req = 1 + self.num_speculative_tokens
+        # Whether the anchor query position is itself a sampled prediction.
+        # DFlash default: the anchor is the bonus token (only mask tokens are
+        # sampled). DSpark sets this to True for its anchor-as-first layout.
+        self.sample_from_anchor = False
 
         # Only next_token_ids and mask tokens are query tokens, all other context is K/V
         self.max_query_tokens = self.max_batch_size * (1 + self.num_speculative_tokens)
@@ -80,6 +93,40 @@ class DFlashProposer(SpecDecodeBaseProposer):
             self.draft_model_config.hf_config
         )
 
+    def _get_dflare_num_target_layers(self) -> int | None:
+        """Return ``T`` (the number of target layers stacked in
+        ``combine_hidden_states``) when the drafter is DFlare, else ``None``.
+
+        DFlare's ``combine_hidden_states`` is a passthrough that returns
+        ``[N, T * hidden_size]`` instead of the classic ``[N, hidden_size]``.
+        ``self.hidden_states`` (the shared dummy-context buffer allocated by
+        the base proposer) is sized ``[N, hidden_size]``, so ``dummy_run`` has
+        to allocate a wider tensor for DFlare's profiling pass.
+
+        ``self.model`` is fully constructed before the first ``dummy_run``
+        call (spec-decode ``load_model`` runs before ``profile_run``), so we
+        read ``num_target_layers`` directly off the loaded draft model rather
+        than trying to parse the checkpoint config — the model's ``__init__``
+        already handled the multiple possible config field locations
+        (``dflash_config.target_layer_ids``, top-level ``target_layer_ids``,
+        or ``eagle_aux_hidden_state_layer_ids``).
+        """
+        # Prefer duck-typing against the loaded model. Only DFlare models
+        # expose ``num_target_layers``; classic DFlash does not.
+        model = getattr(self, "model", None)
+        if model is None:
+            return None
+        # Some execution paths wrap the drafter in a CUDA-graph wrapper;
+        # unwrap defensively.
+        inner = getattr(model, "model", model)
+        num_target_layers = getattr(inner, "num_target_layers", None)
+        if num_target_layers is None:
+            return None
+        try:
+            return int(num_target_layers)
+        except (TypeError, ValueError):
+            return None
+
     @override
     def _create_draft_vllm_config(self) -> VllmConfig:
         base = super()._create_draft_vllm_config()
@@ -116,7 +163,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
         # Q from query embeddings (bonus + mask tokens).
         batch_size = cad.batch_size()
         num_context = target_token_ids.shape[0]
-        num_query_per_req = 1 + self.num_speculative_tokens
+        num_query_per_req = self.num_query_per_req
         num_query_total = batch_size * num_query_per_req
 
         # Store for build_model_inputs_first_pass to use
@@ -168,6 +215,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
             total_input_tokens=num_context,
             BLOCK_SIZE=BLOCK_SIZE,
             HAS_NUM_REJECTED=has_num_rejected,
+            SAMPLE_FROM_ANCHOR=self.sample_from_anchor,
         )
 
         query_slot_mapping = self._slot_mapping_buffer[:num_query_total]
@@ -247,17 +295,35 @@ class DFlashProposer(SpecDecodeBaseProposer):
         # Context states will be passed directly to the precomputation without
         # going through the buffer, since no CUDA graph is used for the precomputation.
         # For the dummy run, we use the dummy buffer.
-        context_states = self.hidden_states[:num_tokens]
+        #
+        # DFlare's ``combine_hidden_states`` is a passthrough returning
+        # ``[N, T * hidden_size]`` (per-layer fusion happens inside
+        # ``precompute_and_store_context_kv``). The shared
+        # ``self.hidden_states`` buffer is sized ``[N, hidden_size]``, so for
+        # a DFlare drafter we allocate a temporary wider tensor for the dummy
+        # profiling pass. DFlash falls through to the shared buffer as before.
+        num_target_layers = self._get_dflare_num_target_layers()
+        if num_target_layers is not None:
+            context_states = torch.empty(
+                num_tokens,
+                num_target_layers * self.hidden_size,
+                dtype=self.dtype,
+                device=self.device,
+            )
+        else:
+            context_states = self.hidden_states[:num_tokens]
 
         # Run the KV projection (GEMM + norms + RoPE) for memory profiling,
         self.model.precompute_and_store_context_kv(context_states, context_positions)
-        with set_forward_context(
-            None,
-            self.vllm_config,
-            num_tokens=num_input_tokens,
-            num_tokens_across_dp=num_tokens_across_dp,
-            cudagraph_runtime_mode=cudagraph_runtime_mode,
-            slot_mapping=slot_mapping_dict,
+        with (
+            set_forward_context(
+                None,
+                self.vllm_config,
+                num_tokens=num_input_tokens,
+                num_tokens_across_dp=num_tokens_across_dp,
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
+                slot_mapping=slot_mapping_dict,
+            ),
         ):
             self.model(
                 input_ids=self.input_ids[:num_input_tokens],
@@ -314,4 +380,9 @@ class DFlashProposer(SpecDecodeBaseProposer):
 
     @property
     def dflash_config(self):
-        return getattr(self.draft_model_config.hf_config, "dflash_config", None) or {}
+        hf_config = self.draft_model_config.hf_config
+        return (
+            getattr(hf_config, "dflash_config", None)
+            or getattr(hf_config, "dflare_config", None)
+            or {}
+        )

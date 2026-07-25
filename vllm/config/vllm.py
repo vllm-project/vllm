@@ -553,6 +553,32 @@ class VllmConfig:
 
     @property
     def use_v2_model_runner(self) -> bool:
+        draft_model_config = (
+            getattr(self.speculative_config, "draft_model_config", None)
+            if self.speculative_config is not None
+            else None
+        )
+        draft_architectures = (
+            getattr(draft_model_config, "architectures", None) or []
+            if draft_model_config is not None
+            else []
+        )
+
+        # DFlareV2-family drafts rely on the legacy V1 proposer path
+        # (``vllm/v1/spec_decode``) for their DFlash/DSpark context-KV and
+        # sequential Markov plumbing. Keep them off the V2 runner's
+        # ``vllm/v1/worker/gpu/spec_decode`` speculator path. This is a
+        # compatibility requirement, so it takes precedence over an explicit
+        # VLLM_USE_V2_MODEL_RUNNER=1.
+        v1_proposer_draft_architectures = {
+            "DFlareV2DraftModel",
+            "DFlareV2NormDraftModel",
+            "DFlareV2AllNormDraftModel",
+            "Qwen3DSparkDFlareV2Model",
+        }
+        if set(draft_architectures) & v1_proposer_draft_architectures:
+            return False
+
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         if use_v2_model_runner is not None:
             return use_v2_model_runner
@@ -561,18 +587,27 @@ class VllmConfig:
         if self.parallel_config.prefill_context_parallel_size > 1:
             return True
 
-        # DSpark is implemented only by the V2 GPU model runner, and DeepSeek-V4
-        # is not otherwise a default-V2 architecture, so force V2 for it. If V2
-        # is unsupported for the rest of the config, _validate_v2_model_runner
-        # raises rather than silently falling back to V1 (which can't run dspark).
+        # DSpark drafting is supported by BOTH runners for the Qwen3
+        # DSpark / DSparkDFlareV2 / TreeDSparkDFlare draft architectures (V1 via
+        # ``vllm/v1/spec_decode/dspark.py``). The DeepSeek-V4 style DSpark
+        # (``DSparkDraftModel``) is still only implemented by the V2 runner and
+        # is not otherwise a default-V2 architecture, so keep forcing V2 for it.
+        # For the V1-capable architectures we fall through to the normal
+        # default-V2/V1 selection so DSpark can run on the V1 runner.
         if (
             self.speculative_config is not None
             and self.speculative_config.method == "dspark"
         ):
-            return True
+            v1_supported_dspark = {
+                "Qwen3DSparkModel",
+                "Qwen3DSparkDFlareV2Model",
+                "Qwen3TreeDSparkDFlareModel",
+            }
+            if not (set(draft_architectures) & v1_supported_dspark):
+                return True
 
         # Mixed sliding/full DFlash drafts need multiple KV groups (V2 only);
-        # force V2 as for dspark, since a hybrid target otherwise defaults to V1.
+        # force V2 since a hybrid target otherwise defaults to V1.
         if self._dflash_needs_multi_kv_group():
             return True
 
@@ -863,6 +898,25 @@ class VllmConfig:
         )
         speculative_config.num_speculative_tokens_per_batch_size = None
 
+    def _maybe_override_dcut_cudagraph_mode(self) -> None:
+        speculative_config = self.speculative_config
+        uses_dflash_dcut = getattr(speculative_config, "uses_dflash_dcut", None)
+        if (
+            speculative_config is None
+            or uses_dflash_dcut is None
+            or not uses_dflash_dcut()
+            or not self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+            or self.use_v2_model_runner
+        ):
+            return
+
+        logger.warning_once(
+            "D-Cut changes the target verification length at runtime. "
+            "Overriding cudagraph_mode from %s to PIECEWISE for reliability.",
+            self.compilation_config.cudagraph_mode.name,
+        )
+        self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+
     def _post_init_kv_transfer_config(self) -> None:
         """Update KVTransferConfig based on top-level configs in VllmConfig.
 
@@ -1033,6 +1087,14 @@ class VllmConfig:
             and self.parallel_config.enable_dbo
             and self.parallel_config.all2all_backend == "deepep_high_throughput"
         )
+        dcut_enabled = (
+            self.speculative_config is not None
+            and getattr(
+                self.speculative_config,
+                "uses_dflash_dcut",
+                lambda: False,
+            )()
+        )
 
         if self.scheduler_config.async_scheduling:
             # Async scheduling explicitly enabled, hard fail any incompatibilities.
@@ -1043,6 +1105,10 @@ class VllmConfig:
                     "Async scheduling is not compatible with ROCm DeepEP "
                     "high-throughput DBO. Please use --no-async-scheduling or "
                     "select a different all2all backend."
+                )
+            if dcut_enabled:
+                raise ValueError(
+                    "Async scheduling is currently not supported with D-Cut."
                 )
             if self.speculative_config is not None:
                 if (
@@ -1075,6 +1141,12 @@ class VllmConfig:
                 # impacts performance of pooling models, so we disable by default.
                 logger.debug(
                     "Disabling asynchronous scheduling by default for pooling model."
+                )
+                self.scheduler_config.async_scheduling = False
+            elif dcut_enabled:
+                logger.warning_once(
+                    "Async scheduling is currently not supported with D-Cut "
+                    "and will be disabled."
                 )
                 self.scheduler_config.async_scheduling = False
             elif (
@@ -1281,6 +1353,7 @@ class VllmConfig:
 
         self._maybe_disable_dynamic_sd_for_data_parallel()
         self._maybe_override_dynamic_sd_cudagraph_mode()
+        self._maybe_override_dcut_cudagraph_mode()
 
         if (
             self.compilation_config.cudagraph_mode.requires_piecewise_compilation()

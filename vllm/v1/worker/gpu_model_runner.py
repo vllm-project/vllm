@@ -194,6 +194,7 @@ from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.custom_class_proposer import create_custom_proposer
 from vllm.v1.spec_decode.dflash import DFlashProposer
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
+from vllm.v1.spec_decode.dspark import DSparkProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.extract_hidden_states import ExtractHiddenStatesProposer
 from vllm.v1.spec_decode.gemma4 import Gemma4Proposer
@@ -587,6 +588,7 @@ class GPUModelRunner(
                 | SuffixDecodingProposer
                 | EagleProposer
                 | DFlashProposer
+                | DSparkProposer
                 | DraftModelProposer
                 | MedusaProposer
                 | ExtractHiddenStatesProposer
@@ -630,6 +632,9 @@ class GPUModelRunner(
                 self.drafter = Step3p5MTPProposer(self.vllm_config, self.device, self)
             elif self.speculative_config.use_dflash():
                 self.drafter = DFlashProposer(self.vllm_config, self.device, self)
+                self.use_aux_hidden_state_outputs = True
+            elif self.speculative_config.use_dspark():
+                self.drafter = DSparkProposer(self.vllm_config, self.device, self)
                 self.use_aux_hidden_state_outputs = True
             elif self.speculative_config.method == "suffix":
                 self.drafter = SuffixDecodingProposer(self.vllm_config)
@@ -2579,6 +2584,7 @@ class GPUModelRunner(
                     (
                         EagleProposer,
                         DFlashProposer,
+                        DSparkProposer,
                         Gemma4Proposer,
                         ExtractHiddenStatesProposer,
                     ),
@@ -4539,9 +4545,17 @@ class GPUModelRunner(
         if common_attn_metadata is None:
             return False
         assert self.speculative_config is not None
-        # DFlash queries one extra token (the bonus token) beyond num_spec_tokens
+        # DFlash queries one extra token (the bonus token) beyond num_spec_tokens.
+        # DSpark's anchor-as-first layout uses exactly num_spec_tokens query
+        # tokens (and 1 + num_spec_tokens for the bonus-anchor variant); adding
+        # one here is a safe upper bound for both DSpark layouts.
         num_drafter_query_tokens = self.num_spec_tokens + (
-            1 if self.speculative_config.use_dflash() else 0
+            1
+            if (
+                self.speculative_config.use_dflash()
+                or self.speculative_config.use_dspark()
+            )
+            else 0
         )
         return (
             common_attn_metadata.max_seq_len + num_drafter_query_tokens
@@ -4642,12 +4656,14 @@ class GPUModelRunner(
                 and not spec_config.disable_padded_drafter_batch
             )
             if use_gpu_toks:
-                # EAGLE/DraftModel speculative decoding can use the GPU sampled tokens
-                # as inputs, and does not need to wait for bookkeeping to finish.
+                # EAGLE/DSpark/DraftModel speculative decoding can use the GPU
+                # sampled tokens as inputs, and does not need to wait for
+                # bookkeeping to finish.
                 assert isinstance(
                     self.drafter,
                     EagleProposer
                     | DFlashProposer
+                    | DSparkProposer
                     | DraftModelProposer
                     | ExtractHiddenStatesProposer
                     | Gemma4Proposer,
@@ -5152,11 +5168,16 @@ class GPUModelRunner(
         elif (
             spec_config.use_eagle()
             or spec_config.use_dflash()
+            or spec_config.use_dspark()
             or spec_config.uses_draft_model()
         ):
             assert isinstance(
                 self.drafter,
-                EagleProposer | DFlashProposer | DraftModelProposer | Gemma4Proposer,
+                EagleProposer
+                | DFlashProposer
+                | DSparkProposer
+                | DraftModelProposer
+                | Gemma4Proposer,
             )
 
             if spec_config.disable_padded_drafter_batch:
@@ -5519,6 +5540,23 @@ class GPUModelRunner(
         if not layer_ids:
             dflash_config = getattr(hf_config, "dflash_config", None)
             eagle_config = getattr(hf_config, "eagle_config", None)
+            # DFlare training-side checkpoints reuse ``DFlashConfig`` at the top
+            # level (rather than nesting it under ``dflash_config``), so the
+            # layer id list may live at ``hf_config.target_layer_ids`` or under
+            # a ``dflare_config`` sub-dict for some torchspec exports.
+            dflare_config = getattr(hf_config, "dflare_config", None)
+
+            # When ``hf_config`` is an ``EAGLEConfig`` wrapper (see
+            # ``vllm.config.speculative.SpeculativeConfig`` — DFlash/DFlare draft
+            # configs are wrapped so the arch prefix can be swapped), the raw
+            # checkpoint fields live on ``hf_config.model``. Fall back to that
+            # inner config if the wrapper didn't copy them across.
+            inner = getattr(hf_config, "model", None)
+            if inner is not None:
+                if dflash_config is None:
+                    dflash_config = getattr(inner, "dflash_config", None)
+                if dflare_config is None:
+                    dflare_config = getattr(inner, "dflare_config", None)
 
             if dflash_config and isinstance(dflash_config, dict):
                 # Add 1 to convert DFlash's aux layer id semantics
@@ -5526,7 +5564,22 @@ class GPUModelRunner(
                     i + 1 for i in (dflash_config.get("target_layer_ids") or [])
                 ]
 
-            if eagle_config and isinstance(eagle_config, dict):
+            if not layer_ids and dflare_config and isinstance(dflare_config, dict):
+                layer_ids = [
+                    i + 1 for i in (dflare_config.get("target_layer_ids") or [])
+                ]
+
+            if not layer_ids:
+                # DFlare's flat DFlashConfig export keeps ``target_layer_ids``
+                # at the top level with the same +1 semantics as DFlash's
+                # nested version.
+                top_level_ids = getattr(hf_config, "target_layer_ids", None)
+                if not top_level_ids and inner is not None:
+                    top_level_ids = getattr(inner, "target_layer_ids", None)
+                if top_level_ids:
+                    layer_ids = [i + 1 for i in top_level_ids]
+
+            if not layer_ids and eagle_config and isinstance(eagle_config, dict):
                 layer_ids = eagle_config.get("eagle_aux_hidden_state_layer_ids")
 
         if layer_ids and isinstance(layer_ids, (list, tuple)):
@@ -6166,6 +6219,7 @@ class GPUModelRunner(
                     self.drafter,
                     EagleProposer
                     | DFlashProposer
+                    | DSparkProposer
                     | DraftModelProposer
                     | ExtractHiddenStatesProposer
                     | Gemma4Proposer,
@@ -7141,7 +7195,11 @@ class GPUModelRunner(
         ):
             assert isinstance(
                 self.drafter,
-                EagleProposer | DFlashProposer | DraftModelProposer | Gemma4Proposer,
+                EagleProposer
+                | DFlashProposer
+                | DSparkProposer
+                | DraftModelProposer
+                | Gemma4Proposer,
             )
             self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
 
@@ -7199,6 +7257,7 @@ class GPUModelRunner(
                 EagleProposer
                 | DFlashProposer
                 | DraftModelProposer
+                | DSparkProposer
                 | ExtractHiddenStatesProposer
                 | Gemma4Proposer,
             )

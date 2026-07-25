@@ -300,7 +300,12 @@ class SpeculativeConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
+        factors: list[Any] = [
+            self.method,
+            self.num_speculative_tokens,
+            self.draft_sample_method,
+            str(self.attention_backend),
+        ]
         # Eagle3 and extract_hidden_states affect the computation graph because
         # they return intermediate hidden states in addition to the final hidden state.
         uses_aux_hidden_states = self.method in (
@@ -316,10 +321,19 @@ class SpeculativeConfig:
 
             # The specific layers used also affect the computation graph.
             layer_ids = getattr(
-                self.draft_model_config.hf_config,
+                hf_config,
                 "eagle_aux_hidden_state_layer_ids",
                 None,
             )
+            if layer_ids is None:
+                drafter_config = (
+                    getattr(hf_config, "dflash_config", None)
+                    or getattr(hf_config, "dflare_config", None)
+                    or {}
+                )
+                layer_ids = drafter_config.get(
+                    "target_layer_ids"
+                ) or getattr(hf_config, "target_layer_ids", None)
             if layer_ids is not None:
                 # Convert to tuple to make it hashable
                 factors.append(tuple(layer_ids))
@@ -547,7 +561,10 @@ class SpeculativeConfig:
         if initial_architecture == "MistralLarge3ForCausalLM":
             hf_config.update({"architectures": ["EagleMistralLarge3ForCausalLM"]})
 
-        if hf_config.model_type == "hy_v3":
+        if (
+            hf_config.model_type == "hy_v3"
+            and initial_architecture != "DFlashHYV3ForCausalLM"
+        ):
             hf_config.model_type = "hy_v3_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
@@ -880,8 +897,42 @@ class SpeculativeConfig:
                 elif "dflash" in self.draft_model_config.model.lower():
                     self.method = "dflash"
                 elif (
+                    "Qwen3DSparkDFlareV2Model"
+                    in self.draft_model_config.architectures
+                    or "Qwen3TreeDSparkDFlareModel"
+                    in self.draft_model_config.architectures
+                ):
+                    # Hybrid DFlare/DFlareV2 + DSpark Markov uses DSpark runtime.
+                    self.method = "dspark"
+                elif (
+                    "dflare" in self.draft_model_config.model.lower()
+                    or "DFlareDraftModel"
+                    in self.draft_model_config.architectures
+                    or "DFlareV2DraftModel"
+                    in self.draft_model_config.architectures
+                    or "DFlareV2NormDraftModel"
+                    in self.draft_model_config.architectures
+                    or "DFlareV2AllNormDraftModel"
+                    in self.draft_model_config.architectures
+                    or getattr(
+                        self.draft_model_config.hf_config,
+                        "model_arch",
+                        None,
+                    )
+                    in (
+                        "dflare",
+                        "dflarev2",
+                        "dflarev2norm",
+                        "dflarev2allnorm",
+                    )
+                ):
+                    # Plain DFlare / DFlareV2 (no Markov) share DFlash runtime.
+                    self.method = "dflash"
+                elif (
                     "dspark" in self.draft_model_config.model.lower()
                     or "Qwen3DSparkModel" in self.draft_model_config.architectures
+                    or "Qwen3TreeDSparkDFlareModel"
+                    in self.draft_model_config.architectures
                     or "Gemma4DSparkModel" in self.draft_model_config.architectures
                 ):
                     self.method = "dspark"
@@ -939,18 +990,48 @@ class SpeculativeConfig:
                         )
                         self.draft_model_config.hf_config = eagle_config
                         self.update_arch_()
-
-                if self.method == "dspark" and (
-                    "Qwen3DSparkModel" not in self.draft_model_config.architectures
-                    and "Gemma4DSparkModel" not in self.draft_model_config.architectures
+                
+                if self.method == "dspark" and not any(
+                    arch in self.draft_model_config.architectures
+                    for arch in (
+                        "Qwen3DSparkModel",
+                        "Qwen3DSparkDFlareV2Model",
+                        "Qwen3TreeDSparkDFlareModel",
+                        "Gemma4DSparkModel",
+                    )
                 ):
-                    # DeepSeek-V4 DSpark reuses the full DeepSeek-V4 config
-                    # and its weights ship in the target checkpoint.
-                    self.draft_model_config.hf_config.model_type = "deepseek_v4"
-                    self.draft_model_config.hf_config.architectures = [
-                        "DSparkDraftModel"
-                    ]
-                    self.update_arch_()
+                    hf_config = self.draft_model_config.hf_config
+                    architectures = self.draft_model_config.architectures
+                    model_arch = getattr(hf_config, "model_arch", None)
+                    drafter_config = (
+                        getattr(hf_config, "dflash_config", None)
+                        or getattr(hf_config, "dflare_config", None)
+                        or {}
+                    )
+                    model_arch = model_arch or drafter_config.get("model_arch")
+                    if (
+                        model_arch
+                        in ("dflarev2", "dflarev2norm", "dflarev2allnorm")
+                        or any(
+                            arch in architectures
+                            for arch in (
+                                "DFlareV2DraftModel",
+                                "DFlareV2NormDraftModel",
+                                "DFlareV2AllNormDraftModel",
+                            )
+                        )
+                    ):
+                        hf_config.architectures = ["Qwen3DSparkDFlareV2Model"]
+                        self.update_arch_()
+                    elif model_arch == "dflare" or "DFlareDraftModel" in architectures:
+                        hf_config.architectures = ["Qwen3TreeDSparkDFlareModel"]
+                        self.update_arch_()
+                    else:
+                        # DeepSeek-V4 DSpark reuses the full DeepSeek-V4 config
+                        # and its weights ship in the target checkpoint.
+                        hf_config.model_type = "deepseek_v4"
+                        hf_config.architectures = ["DSparkDraftModel"]
+                        self.update_arch_()
                 elif (
                     self.method == "dspark"
                     and "Gemma4DSparkModel" in self.draft_model_config.architectures
@@ -968,6 +1049,7 @@ class SpeculativeConfig:
                         and getattr(hf, "block_size", None) is not None
                     ):
                         hf.n_predict = hf.block_size
+
 
                 if self.method in ("dflash", "dspark"):
                     self.parallel_drafting = True
