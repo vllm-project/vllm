@@ -247,8 +247,9 @@ def get_type_hints(type_hint: TypeHint) -> set[TypeHint]:
     return type_hints
 
 
+IS_ARGPARSE = any("--help" in arg for arg in sys.argv)  # vllm SUBCOMMAND --help
 NEEDS_HELP = (
-    any("--help" in arg for arg in sys.argv)  # vllm SUBCOMMAND --help
+    IS_ARGPARSE
     or (argv0 := sys.argv[0]).endswith("mkdocs")  # mkdocs SUBCOMMAND
     or argv0.endswith("mkdocs/__main__.py")  # python -m mkdocs SUBCOMMAND
 )
@@ -315,8 +316,9 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
         # Get the help text for the field
         name = field.name
         help = cls_docs.get(name, "").strip()
-        # Escape % for argparse
-        help = help.replace("%", "%%")
+        # Escape % for argparse's %-formatting in _expand_help
+        if IS_ARGPARSE:
+            help = help.replace("%", "%%")
 
         # Initialise the kwargs dictionary for the field
         kwargs[name] = {"default": default, "help": help}
