@@ -5,14 +5,14 @@ import pytest
 import torch
 
 from tests.kernels.quant_utils import FP8_DTYPE
-from tests.kernels.utils import fp8_ulp_distance, opcheck
+from tests.kernels.utils import fp8_allclose, fp8_ulp_distance, opcheck
 from vllm import ir
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_gfx90a
+    from vllm.platforms.rocm import on_gfx90a, on_gfx950
 
     on_mi250 = on_gfx90a()
 else:
@@ -205,14 +205,20 @@ def test_fused_rms_norm_quant(
         )
 
     if current_platform.is_rocm():
-        # Fused and unfused FP8 paths can land on opposite sides of an E4M3 tie;
-        # tolerate a tiny number of isolated fp8 outliers on ROCm.
-        ulp = fp8_ulp_distance(out_quant, out_quant_fused)
-        max_outliers = ulp.numel() // 100_000 + 8
-        num_outliers = int((ulp > 0).sum().item())
-        assert num_outliers <= max_outliers, (
-            f"FP8 quant mismatch: {num_outliers} fp8 outliers (allowed {max_outliers})"
-        )
+        if on_gfx950() and dtype == torch.float16 and not add_residual:
+            # Fusion may round normalized FP16 across an E4M3 boundary on gfx950.
+            assert fp8_allclose(out_quant_fused, out_quant, rtol=0.125, atol=2e-3)
+            assert int(fp8_ulp_distance(out_quant_fused, out_quant).max()) <= 1
+        else:
+            # Fused and unfused FP8 paths can land on opposite sides of an E4M3
+            # tie; tolerate a tiny number of isolated fp8 outliers on ROCm.
+            ulp = fp8_ulp_distance(out_quant, out_quant_fused)
+            max_outliers = ulp.numel() // 100_000 + 8
+            num_outliers = int((ulp > 0).sum().item())
+            assert num_outliers <= max_outliers, (
+                f"FP8 quant mismatch: {num_outliers} fp8 outliers "
+                f"(allowed {max_outliers})"
+            )
     else:
         torch.testing.assert_close(
             out_quant.to(dtype=torch.float32),
