@@ -17,6 +17,7 @@ from vllm.compilation.breakable_cudagraph import (
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.distributed.parallel_state import (
     get_pp_group,
     graph_capture,
@@ -253,12 +254,12 @@ class CudaGraphManager:
 
             if mixed_mode:
                 # for PIECEWISE graphs there is no limit on requests when replaying
-                # i.e. no request padding is needed
-                # so we leave it as None
+                # i.e. no request padding is needed, so we leave it as None.
+                # For breakable PW graphs, break-point kernels read the real batch
+                # from the forward context; in-graph kernels handle the token padding
+                # themselves from the padded slot_mapping (rows with slot == -1).
                 num_reqs = None
-                if mixed_mode == CUDAGraphMode.FULL or (
-                    mixed_mode == CUDAGraphMode.PIECEWISE and self.use_breakable_cg
-                ):
+                if mixed_mode == CUDAGraphMode.FULL:
                     num_reqs = min(num_tokens, self.max_num_reqs)
                 desc = BatchExecutionDescriptor(
                     cg_mode=mixed_mode,
@@ -346,6 +347,10 @@ class CudaGraphManager:
                         # Sync offloader's copy stream before capture.
                         # Ensure any pre-capture prefetches from offloader are complete.
                         get_offloader().sync_prev_onload()
+                        if self.pool is not None:
+                            set_graph_pool_id(self.pool)
+                        else:
+                            set_graph_pool_id(current_platform.graph_pool_handle())
                         with torch.cuda.graph(graph, self.pool):
                             forward_fn(CUDAGraphMode.NONE)
                             # Join offloader's copy stream after forward to avoid
