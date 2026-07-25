@@ -3,6 +3,7 @@
 """Structured result of one logical weight-loader invocation."""
 
 import inspect
+from enum import Enum
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import wraps
@@ -10,6 +11,13 @@ from typing import TypeAlias
 
 FragmentScalar: TypeAlias = str | int | float | bool
 FragmentValue: TypeAlias = FragmentScalar | tuple[FragmentScalar, ...]
+
+
+class LoadCollisionPolicy(str, Enum):
+    """Whether more than one source may claim the same target fragment."""
+
+    UNIQUE = "unique"
+    OVERWRITE = "overwrite"
 
 
 @dataclass(frozen=True)
@@ -42,18 +50,37 @@ class LoadReceipt:
 
     consumed: bool = True
     fragment: LoadFragment = LoadFragment()
+    collision_policy: LoadCollisionPolicy = LoadCollisionPolicy.UNIQUE
 
     def __bool__(self) -> bool:
         """Preserve compatibility with conditional loaders returning bool."""
         return self.consumed
 
     @classmethod
-    def accepted(cls, **fragment: FragmentValue | None) -> "LoadReceipt":
-        return cls(consumed=True, fragment=LoadFragment.from_fields(**fragment))
+    def accepted(
+        cls,
+        *,
+        collision_policy: LoadCollisionPolicy = LoadCollisionPolicy.UNIQUE,
+        **fragment: FragmentValue | None,
+    ) -> "LoadReceipt":
+        return cls(
+            consumed=True,
+            fragment=LoadFragment.from_fields(**fragment),
+            collision_policy=collision_policy,
+        )
 
     @classmethod
-    def skipped(cls, **fragment: FragmentValue | None) -> "LoadReceipt":
-        return cls(consumed=False, fragment=LoadFragment.from_fields(**fragment))
+    def skipped(
+        cls,
+        *,
+        collision_policy: LoadCollisionPolicy = LoadCollisionPolicy.UNIQUE,
+        **fragment: FragmentValue | None,
+    ) -> "LoadReceipt":
+        return cls(
+            consumed=False,
+            fragment=LoadFragment.from_fields(**fragment),
+            collision_policy=collision_policy,
+        )
 
 
 def returns_load_receipt(*fragment_arguments: str):
@@ -97,6 +124,7 @@ def returns_load_receipt(*fragment_arguments: str):
 
 __all__ = [
     "FragmentValue",
+    "LoadCollisionPolicy",
     "LoadFragment",
     "LoadReceipt",
     "returns_load_receipt",

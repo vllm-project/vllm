@@ -14,7 +14,11 @@ Limitations:
    adapter. New loaders should return ``LoadReceipt`` with an explicit fragment.
 """
 
-from vllm.model_executor.load_receipt import LoadFragment, LoadReceipt
+from vllm.model_executor.load_receipt import (
+    LoadCollisionPolicy,
+    LoadFragment,
+    LoadReceipt,
+)
 
 __all__ = [
     "record_metadata_for_reloading",
@@ -27,6 +31,7 @@ __all__ = [
     "support_quantized_model_reload_from_hp_weights",
     "LoadFragment",
     "LoadReceipt",
+    "LoadCollisionPolicy",
 ]
 
 from .layerwise import (

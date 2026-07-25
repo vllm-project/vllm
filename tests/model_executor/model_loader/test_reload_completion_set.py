@@ -18,6 +18,7 @@ import torch
 from torch import nn
 
 from vllm.model_executor.load_receipt import (
+    LoadCollisionPolicy,
     LoadReceipt,
     returns_load_receipt,
 )
@@ -55,6 +56,248 @@ def _named_param_loader(model, name_value_pairs):
 
 
 class TestObservation:
+
+    def test_receipt_audit_rejects_missing_qkv_fragment(self):
+        class Layer(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.zeros(12))
+
+                def loader(param, loaded_weight, loaded_shard_id):
+                    offset = {"q": 0, "k": 4, "v": 8}[loaded_shard_id]
+                    param.data[offset:offset + 4].copy_(loaded_weight)
+                    # Deliberately incomplete: all three shards claim the
+                    # same packed target.
+                    return LoadReceipt.accepted()
+
+                self.weight.weight_loader = loader
+
+        layer = Layer()
+        model = nn.Sequential(layer)
+        record_load_consumption(model)
+        for source, shard in (("q.weight", "q"), ("k.weight", "k")):
+            for _, weight in observe_weight_sources(
+                [(source, torch.ones(4))]
+            ):
+                layer.weight.weight_loader(layer.weight, weight, shard)
+
+        with pytest.raises(
+            RuntimeError,
+            match=r"TARGET_ALIAS_COLLISION.*loaded_shard_id",
+        ):
+            finalize_load_recording(model)
+
+    def test_receipt_audit_accepts_complete_qkv_fragments(self):
+        class Layer(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.zeros(12))
+
+                def loader(param, loaded_weight, loaded_shard_id):
+                    return LoadReceipt.accepted(
+                        loaded_shard_id=loaded_shard_id
+                    )
+
+                self.weight.weight_loader = loader
+
+        layer = Layer()
+        model = nn.Sequential(layer)
+        record_load_consumption(model)
+        for source, shard in (
+            ("q.weight", "q"),
+            ("k.weight", "k"),
+            ("v.weight", "v"),
+        ):
+            for _, weight in observe_weight_sources(
+                [(source, torch.ones(4))]
+            ):
+                layer.weight.weight_loader(layer.weight, weight, shard)
+        finalize_load_recording(model)
+
+    @pytest.mark.parametrize(
+        ("omitted_field", "first", "second"),
+        [
+            (
+                "shard_id",
+                ("expert.0.gate.weight", "w1", 0),
+                ("expert.0.up.weight", "w3", 0),
+            ),
+            (
+                "expert_id",
+                ("expert.0.gate.weight", "w1", 0),
+                ("expert.1.gate.weight", "w1", 1),
+            ),
+        ],
+    )
+    def test_receipt_audit_rejects_missing_moe_fragment(
+        self,
+        omitted_field,
+        first,
+        second,
+    ):
+        class Layer(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.zeros(2, 2, 4))
+
+                def loader(param, loaded_weight, shard_id, expert_id):
+                    fragment = {
+                        "shard_id": shard_id,
+                        "expert_id": expert_id,
+                    }
+                    fragment.pop(omitted_field)
+                    return LoadReceipt.accepted(**fragment)
+
+                self.weight.weight_loader = loader
+
+        layer = Layer()
+        model = nn.Sequential(layer)
+        record_load_consumption(model)
+        for source, shard_id, expert_id in (first, second):
+            for _, weight in observe_weight_sources(
+                [(source, torch.ones(4))]
+            ):
+                layer.weight.weight_loader(
+                    layer.weight,
+                    weight,
+                    shard_id,
+                    expert_id,
+                )
+
+        with pytest.raises(
+            RuntimeError,
+            match=rf"TARGET_ALIAS_COLLISION.*{omitted_field}",
+        ):
+            finalize_load_recording(model)
+
+    def test_receipt_audit_allows_identical_duplicate_call(self):
+        class Layer(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.zeros(4))
+
+                def loader(param, loaded_weight, shard_id):
+                    return LoadReceipt.accepted(shard_id=shard_id)
+
+                self.weight.weight_loader = loader
+
+        layer = Layer()
+        model = nn.Sequential(layer)
+        record_load_consumption(model)
+        for _, weight in observe_weight_sources(
+            [
+                ("weight", torch.ones(4)),
+                ("weight", torch.ones(4)),
+            ]
+        ):
+            layer.weight.weight_loader(layer.weight, weight, "w1")
+        finalize_load_recording(model)
+
+    def test_receipt_audit_rejects_status_conflict(self):
+        class Layer(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.zeros(4))
+
+                def loader(param, loaded_weight, consume):
+                    receipt = (
+                        LoadReceipt.accepted
+                        if consume
+                        else LoadReceipt.skipped
+                    )
+                    return receipt(fragment=0)
+
+                self.weight.weight_loader = loader
+
+        layer = Layer()
+        model = nn.Sequential(layer)
+        record_load_consumption(model)
+        for consume in (True, False):
+            for _, weight in observe_weight_sources(
+                [("weight", torch.ones(4))]
+            ):
+                layer.weight.weight_loader(layer.weight, weight, consume)
+
+        with pytest.raises(RuntimeError, match="STATUS_CONFLICT"):
+            finalize_load_recording(model)
+
+    def test_receipt_audit_rejects_schema_drift(self):
+        class Layer(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.zeros(4))
+
+                def loader(param, loaded_weight, mode):
+                    if mode == "a":
+                        return LoadReceipt.accepted(first=0)
+                    return LoadReceipt.accepted(second=0)
+
+                self.weight.weight_loader = loader
+
+        layer = Layer()
+        model = nn.Sequential(layer)
+        record_load_consumption(model)
+        for mode in ("a", "b"):
+            for _, weight in observe_weight_sources(
+                [(f"{mode}.weight", torch.ones(4))]
+            ):
+                layer.weight.weight_loader(layer.weight, weight, mode)
+
+        with pytest.raises(RuntimeError, match="SCHEMA_DRIFT"):
+            finalize_load_recording(model)
+
+    def test_receipt_audit_checks_declared_schema(self):
+        class Layer(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.zeros(4))
+
+                @returns_load_receipt("shard_id")
+                def loader(param, loaded_weight, shard_id):
+                    return LoadReceipt.accepted()
+
+                self.weight.weight_loader = loader
+
+        layer = Layer()
+        model = nn.Sequential(layer)
+        record_load_consumption(model)
+        for _, weight in observe_weight_sources(
+            [("weight", torch.ones(4))]
+        ):
+            layer.weight.weight_loader(layer.weight, weight, "w1")
+
+        with pytest.raises(
+            RuntimeError,
+            match="RECEIPT_SCHEMA_MISMATCH",
+        ):
+            finalize_load_recording(model)
+
+    def test_receipt_audit_allows_explicit_overwrite(self):
+        class Layer(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.zeros(4))
+
+                def loader(param, loaded_weight, source_slot):
+                    return LoadReceipt.accepted(
+                        collision_policy=LoadCollisionPolicy.OVERWRITE
+                    )
+
+                self.weight.weight_loader = loader
+
+        layer = Layer()
+        model = nn.Sequential(layer)
+        record_load_consumption(model)
+        for source_slot in (0, 1):
+            for _, weight in observe_weight_sources(
+                [(f"source.{source_slot}", torch.ones(4))]
+            ):
+                layer.weight.weight_loader(
+                    layer.weight,
+                    weight,
+                    source_slot,
+                )
+        finalize_load_recording(model)
 
     def test_receipt_adapter_handles_conditional_loader(self):
         @returns_load_receipt("shard_id", "expert_id")
@@ -412,6 +655,51 @@ class _CountedModel(nn.Module):
 
 
 class TestDualRunCatchesDroppedKey:
+
+    def test_reload_reports_receipt_target_collision(self):
+        class Layer(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.zeros(8))
+                self.incomplete_receipt = False
+
+                def loader(param, loaded_weight, loaded_shard_id):
+                    offset = 0 if loaded_shard_id == "q" else 4
+                    param.data[offset:offset + 4].copy_(loaded_weight)
+                    if self.incomplete_receipt:
+                        return LoadReceipt.accepted()
+                    return LoadReceipt.accepted(
+                        loaded_shard_id=loaded_shard_id
+                    )
+
+                self.weight.weight_loader = loader
+
+        layer = Layer()
+        model = nn.Sequential(layer)
+        record_metadata_for_reloading(model)
+        record_load_consumption(model)
+        for source, shard in (("q.weight", "q"), ("k.weight", "k")):
+            for _, weight in observe_weight_sources(
+                [(source, torch.ones(4))]
+            ):
+                layer.weight.weight_loader(layer.weight, weight, shard)
+        finalize_load_recording(model)
+
+        layer.incomplete_receipt = True
+        initialize_layerwise_reload(model)
+        for source, shard in (("q.weight", "q"), ("k.weight", "k")):
+            for _, weight in observe_weight_sources(
+                [(source, torch.ones(4))]
+            ):
+                layer.weight.weight_loader(layer.weight, weight, shard)
+        finalize_layerwise_reload(model, _Cfg())
+
+        findings = get_layer_completion_findings()
+        assert any(
+            "TARGET_ALIAS_COLLISION" in finding
+            and "loaded_shard_id" in finding
+            for finding in findings
+        )
 
     def test_dummy_manifest_validates_first_real_transfer(self):
         """Dummy initialization must not leave the first RL transfer unchecked."""

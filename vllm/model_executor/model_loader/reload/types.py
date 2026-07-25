@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from inspect import BoundArguments
 import torch
 
+from .audit import LoadEventAudit
+
 __all__ = [
     "LayerTensors",
     "LayerRestoreMetadata",
@@ -104,6 +106,10 @@ class LayerReloadingInfo:
     required_target_keys: "set[str] | None" = None
     received_target_keys: set[str] = field(default_factory=set)
 
+    # Independent witnesses used to detect multiple semantic loader calls
+    # collapsing to the same LoadReceipt event/target identity.
+    load_event_audit: LoadEventAudit = field(default_factory=LoadEventAudit)
+
     def reset(self, *, preserve_received_keys: bool = False):
         # required_keys is the observed baseline and must survive across
         # reloads, like restore_metadata. A layer can finish its numel-driven
@@ -114,6 +120,11 @@ class LayerReloadingInfo:
         received_target_keys = (
             self.received_target_keys if preserve_received_keys else set()
         )
+        load_event_audit = (
+            self.load_event_audit
+            if preserve_received_keys
+            else LoadEventAudit()
+        )
         self.__init__(  # type: ignore[misc]
             restore_metadata=self.restore_metadata,
             restore_device=self.restore_device,
@@ -121,6 +132,7 @@ class LayerReloadingInfo:
             received_keys=received_keys,
             required_target_keys=self.required_target_keys,
             received_target_keys=received_target_keys,
+            load_event_audit=load_event_audit,
         )
 
     def can_load(self) -> bool:

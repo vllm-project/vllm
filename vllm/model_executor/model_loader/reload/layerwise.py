@@ -15,6 +15,7 @@ from vllm.model_executor.load_receipt import LoadFragment, LoadReceipt
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.reload_arena import peek_reload_arena
 
+from .audit import LoadEventAudit
 from .meta import (
     SKIP_TENSORS,
     capture_layer_to_meta,
@@ -178,6 +179,7 @@ def record_load_consumption(model: torch.nn.Module) -> None:
     """
     for layer in model.modules():
         info = get_layerwise_info(layer)
+        info.load_event_audit = LoadEventAudit()
         if info.required_keys is None:
             info.required_keys = set()
         for name, tensor in get_layer_tensors(layer).items():
@@ -314,6 +316,13 @@ def _make_recording_loader(info: LayerReloadingInfo, name: str,
         result = original(*args, **kwargs)
         assert info.required_keys is not None
         receipt = _get_load_receipt(bound_args, result)
+        _audit_load_receipt(
+            info,
+            name,
+            receipt,
+            bound_args,
+            original,
+        )
         if receipt.consumed:
             info.required_keys.add(_load_event_key(name, receipt))
         return result
@@ -383,14 +392,51 @@ def _load_event_key(param_name: str, receipt: LoadReceipt) -> str:
     return f"{source_key}=>{target}"
 
 
+def _audit_load_receipt(
+    info: LayerReloadingInfo,
+    param_name: str,
+    receipt: LoadReceipt,
+    args: inspect.BoundArguments,
+    loader: Callable,
+) -> None:
+    info.load_event_audit.observe(
+        param_name=param_name,
+        receipt=receipt,
+        args=args,
+        loader=loader,
+        source_key=get_current_source_key(),
+    )
+
+
 def finalize_load_recording(model: torch.nn.Module) -> None:
     """Remove the recording wrappers installed by record_load_consumption,
     restoring the original loaders so the reload path is unaffected."""
+    findings = []
     for layer in model.modules():
+        info = get_layerwise_info(layer)
         for name, tensor in get_layer_tensors(layer).items():
             loader = getattr(tensor, "weight_loader", None)
             if loader is not None and getattr(loader, "_vllm_recording", False):
                 tensor.weight_loader = loader._vllm_orig
+        findings.extend(
+            f"{layer.__class__.__name__}: {finding}"
+            for finding in info.load_event_audit.take_findings()
+        )
+    if findings:
+        raise RuntimeError(
+            "LoadReceipt collision audit failed during initial loading:\n  "
+            + "\n  ".join(findings)
+        )
+
+
+def _record_load_audit_findings(
+    layer: torch.nn.Module,
+    info: LayerReloadingInfo,
+) -> None:
+    _LAYER_COMPLETION_FINDINGS.extend(
+        f"{layer.__class__.__name__}: {finding}"
+        for finding in info.load_event_audit.take_findings()
+    )
 
 
 def _check_set_completion(layer: torch.nn.Module,
@@ -530,6 +576,7 @@ def initialize_online_processing(layer: torch.nn.Module):
     # Track loading progress to determine when to process/copy
     info.received_keys.clear()
     info.received_target_keys.clear()
+    info.load_event_audit = LoadEventAudit()
     info.is_loading = True
     info.copied_numel_diagnostic = 0
     info.layer_numel_diagnostic = get_layer_size(layer)
@@ -589,6 +636,13 @@ def _make_receipt_observer(info: LayerReloadingInfo, param_name: str,
         bound_args.apply_defaults()
         result = original_loader(*args, **kwargs)
         receipt = _get_load_receipt(bound_args, result)
+        _audit_load_receipt(
+            info,
+            param_name,
+            receipt,
+            bound_args,
+            original_loader,
+        )
         if receipt.consumed:
             info.received_keys.add(_load_event_key(param_name, receipt))
             info.received_target_keys.add(param_name)
@@ -633,6 +687,13 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         # share one packed destination parameter. Internal copy_ calls remain
         # invisible: the loader invocation, not a storage write, is the event.
         receipt = _get_load_receipt(bound_args, ret)
+        _audit_load_receipt(
+            info,
+            param_name,
+            receipt,
+            bound_args,
+            original_loader,
+        )
         if receipt.consumed:
             info.received_keys.add(_load_event_key(param_name, receipt))
             info.received_target_keys.add(param_name)
@@ -703,6 +764,7 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
         if not info.can_load():
             received_event_count += len(info.received_keys)
             _check_set_completion(layer, info)
+            _record_load_audit_findings(layer, info)
             _unwrap_receipt_observers(layer)
             info.reset()
             continue
@@ -736,6 +798,7 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
 
         received_event_count += len(info.received_keys)
         _check_set_completion(layer, info)
+        _record_load_audit_findings(layer, info)
         _unwrap_receipt_observers(layer)
         info.reset()
 
@@ -744,6 +807,7 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
         _finalize_attention_layer(layer, info, model_config)
         received_event_count += len(info.received_keys)
         _check_set_completion(layer, info)
+        _record_load_audit_findings(layer, info)
         _unwrap_receipt_observers(layer)
         info.reset()
 
