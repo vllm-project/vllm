@@ -12,6 +12,10 @@ from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
 
 
 class _SessionStats(TypedDict):
+    # `hits` is kept as float end-to-end: seeded from ghost scores at
+    # insert time (fractional) and incremented on touch (integer). The
+    # session-score math is float either way, so no truncation is
+    # needed.
     hits: float
     last_touch: int
     prefix_depth: int
@@ -47,12 +51,10 @@ class SAECachePolicy(CachePolicy):
             both of which are called by the manager around each
             prepare_store batch's insert loop.
         pending_merge_pointers: Per-request merge candidate,
-            ``req_id -> (session_id, hit_count)``. Set by
-            ``record_lookup`` on a resident-block hit and consumed by
-            ``open_session`` when the same request's store batch
-            arrives. ``hit_count`` counts hits seen for the request
-            since the entry was last consumed; it is diagnostic and
-            not read by the merge decision.
+            ``req_id -> session_id``. Set by ``record_lookup`` on a
+            resident-block hit (refreshed to the most recent hit's
+            session) and consumed by ``open_session`` when the same
+            request's store batch arrives.
         open_session_is_merged: Whether the currently-open session was
             entered via a merge (skips ghost-reseeding on further
             inserts into it) rather than freshly created.
@@ -64,10 +66,10 @@ class SAECachePolicy(CachePolicy):
            was scheduler-driven (not one of the manager's internal
            existence checks in prepare_store / prepare_load /
            complete_load / complete_store). ``record_lookup`` records
-           ``req_id -> (session_id, hit_count)`` on any lookup that
-           finds a resident block, so the same request's next store
-           can merge into that session. Only the last-hit session is
-           kept per request.
+           ``req_id -> session_id`` on any lookup that finds a
+           resident block, so the same request's next store can merge
+           into that session. Only the last-hit session is kept per
+           request.
 
         2. Cache insertion (open_session -> insert* -> close_session):
            The manager brackets each prepare_store batch's insert loop
@@ -78,8 +80,8 @@ class SAECachePolicy(CachePolicy):
            ``insert`` appends to the open session; for a
            freshly-opened session, ``hits`` is seeded from each key's
            ghost score (divided by ``ghost_norm``). ``close_session``
-           truncates the seeded float ``hits`` to int so subsequent
-           accounting stays integer.
+           just clears the open-session slot — no further bookkeeping
+           is needed.
 
         3. Cache touch (touch) — session-hit accounting, ghost
            scoring, and decay:
@@ -180,8 +182,9 @@ class SAECachePolicy(CachePolicy):
         # Decay.
         self.lookups_since_decay: int = 0
 
-        # Merge pointers, keyed per in-flight request.
-        self.pending_merge_pointers: dict[str, tuple[int, int]] = {}
+        # Merge pointers, keyed per in-flight request. Value is the
+        # session id of the request's most recent resident hit.
+        self.pending_merge_pointers: dict[str, int] = {}
 
     # --- basic block access ---
 
@@ -200,19 +203,18 @@ class SAECachePolicy(CachePolicy):
         # request would appear to "continue" whichever session owned
         # that prefix, collapsing many logical sessions into one.
         #
-        # We accept any resident block (including HIT_PENDING blocks
-        # whose store has not yet completed) so that hit_count aligns
-        # with the manager's "already stored?" filter used to derive
-        # `num_blocks_in_cache`.
+        # Any resident block counts (including HIT_PENDING blocks whose
+        # store has not yet completed): the manager's "already stored?"
+        # filter also considers them present, so a subsequent
+        # prepare_store from the same request will legitimately merge
+        # into this session.
         block = self.blocks.get(key)
         if block is None:
             return
         session_id = self.key_to_session.get(key)
         if session_id is None:
             return
-        req_id = req_context.req_id
-        _, hit_count = self.pending_merge_pointers.get(req_id, (session_id, 0))
-        self.pending_merge_pointers[req_id] = (session_id, hit_count + 1)
+        self.pending_merge_pointers[req_context.req_id] = session_id
 
     # --- session lifecycle ---
 
@@ -223,12 +225,12 @@ class SAECachePolicy(CachePolicy):
         # is still resident, continue that session; otherwise open a
         # fresh session tagged with the batch's prefix depth.
         assert self.open_session_id is None, "open_session called with unclosed session"
-        entry = self.pending_merge_pointers.pop(req_context.req_id, None)
-        merge_target: int | None = None
-        if entry is not None:
-            candidate_session, _ = entry
-            if candidate_session in self.session_stats:
-                merge_target = candidate_session
+        candidate = self.pending_merge_pointers.pop(req_context.req_id, None)
+        merge_target: int | None = (
+            candidate
+            if candidate is not None and candidate in self.session_stats
+            else None
+        )
 
         if merge_target is not None:
             self.open_session_id = merge_target
@@ -248,14 +250,6 @@ class SAECachePolicy(CachePolicy):
 
     @override
     def close_session(self) -> None:
-        # Truncate the seeded float `hits` to int so subsequent
-        # accounting (which does `hits += 1` on touch) stays integer.
-        if (
-            self.open_session_id is not None
-            and self.open_session_id in self.session_stats
-        ):
-            stats = self.session_stats[self.open_session_id]
-            stats["hits"] = int(stats["hits"])
         self.open_session_id = None
         self.open_session_is_merged = False
 
@@ -448,11 +442,8 @@ class SAECachePolicy(CachePolicy):
         # Non-consuming peek used by ``evict`` to decide whether a
         # store is a continuation. ``open_session`` pops the entry
         # when it actually consumes the merge.
-        entry = self.pending_merge_pointers.get(req_id)
-        if entry is None:
-            return None
-        session_id, _ = entry
-        if session_id not in self.session_stats:
+        session_id = self.pending_merge_pointers.get(req_id)
+        if session_id is None or session_id not in self.session_stats:
             return None
         return session_id
 
@@ -462,7 +453,7 @@ class SAECachePolicy(CachePolicy):
         # unbounded importance. Non-resident ghost entries that fall
         # below a small threshold are pruned to bound memory.
         for stats in self.session_stats.values():
-            stats["hits"] = int(stats["hits"] * self.decay_factor)
+            stats["hits"] = stats["hits"] * self.decay_factor
         for key in list(self.ghost_scores):
             decayed = self.ghost_scores[key] * self.decay_factor
             if key not in self.blocks and decayed < self._GHOST_PRUNE_THRESHOLD:
