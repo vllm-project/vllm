@@ -71,11 +71,14 @@ class MambaBase(AttentionLayerBase):
             page_size_padded=page_size_padded,
             mamba_type=self.mamba_type,
             mamba_cache_mode=vllm_config.cache_config.mamba_cache_mode,
-            # RecoverSSM verifies the whole window off one checkpoint, so it
-            # never writes the baseline's per-draft-token state slots.
+            # ReplaySSM/RecoverSSM verifies the whole window off one checkpoint,
+            # so it never writes the baseline's per-draft-token state slots.
             num_speculative_blocks=(
                 0
-                if vllm_config.cache_config.use_kda_recoverssm
+                if (
+                    vllm_config.cache_config.use_kda_recoverssm
+                    or vllm_config.cache_config.use_replayssm_spec
+                )
                 else vllm_config.num_speculative_tokens
             ),
         )

@@ -195,8 +195,12 @@ class CacheConfig:
       caching is enabled.
     """
     replayssm_buffer_len: int = Field(default=16, gt=0)
-    """ReplaySSM history buffer length B for standard Mamba2 decode. Kimi-K3
-    speculative decoding does not use B. Default 16."""
+    """ReplaySSM history buffer length B: with use_replayssm, standard decode
+    caches recent SSM inputs in a size-B ring buffer and flushes the checkpoint
+    state to HBM every B steps. With use_replayssm_spec, B is the maximum history
+    the ring carries into a verify step, so the flush rule is
+    history + 1 + num_speculative_tokens > B. Kimi-K3 speculative decoding does
+    not use B. Default 16."""
     use_replayssm: bool = False
     """Use the ReplaySSM Mamba2 decode kernel: cache recent SSM inputs and skip
     the per-step full-state store, writing the checkpoint back only on flush.
@@ -204,6 +208,13 @@ class CacheConfig:
     mamba backend; standard (non-speculative) decode only. In align mode flushes
     are most efficient when mamba_block_size is a multiple of replayssm_buffer_len,
     but this is not required."""
+    use_replayssm_spec: bool = False
+    """Use the ReplaySSM Mamba2 speculative-decode kernel: verify a whole draft
+    window against one checkpoint plus a circular input ring, so rollback is a
+    cursor move instead of a per-draft state snapshot. Requires speculative
+    decoding, mamba_cache_mode 'none' and the Triton mamba backend; mutually
+    exclusive with use_replayssm. replayssm_buffer_len must be at least
+    1 + num_speculative_tokens."""
     use_kda_recoverssm: bool = field(default=False, init=False)
     """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
 
