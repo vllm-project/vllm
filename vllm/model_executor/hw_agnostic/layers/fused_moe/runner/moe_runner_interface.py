@@ -1,0 +1,129 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from abc import ABC, abstractmethod
+from collections.abc import Iterable
+
+import torch
+
+from vllm.config.parallel import ExpertPlacementStrategy
+from vllm.model_executor.custom_op import PluggableLayer
+from vllm.model_executor.hw_agnostic.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.hw_agnostic.layers.fused_moe.fused_moe_method_base import (  # noqa: E501
+    FusedMoEMethodBase,
+)
+from vllm.model_executor.hw_agnostic.layers.fused_moe.runner.shared_experts import (  # noqa: E501
+    SharedExperts,
+)
+
+
+class MoERunnerInterface(PluggableLayer, ABC):
+    """ABC for MoE runner implementations.
+
+    Only one concrete subclass lives in this tree (`MoERunner`). The ABC is
+    retained because `vllm.utils.is_moe_layer` discovers MoE modules by
+    walking class bases and matching the name "MoERunnerInterface"; removing
+    it would hide hw-agnostic MoE layers from elastic-EP and device
+    communicators.
+    """
+
+    def __init__(self):
+        super().__init__()
+        # Sentinel for online-quant flows that re-trigger
+        # process_weights_after_loading; subclasses flip this False before
+        # the first weight-load if they need the hook to run.
+        self._already_called_process_weights_after_loading = True
+
+    @abstractmethod
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def shared_experts(self) -> SharedExperts | None:
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def is_internal_router(self) -> bool:
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def _quant_method(self) -> FusedMoEMethodBase:
+        raise NotImplementedError
+
+    @abstractmethod
+    def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
+        raise NotImplementedError
+
+    @abstractmethod
+    def maybe_init_modular_kernel(self) -> None:
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def layer_id(self):
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def activation(self) -> MoEActivation:
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def expert_placement_strategy(self) -> ExpertPlacementStrategy:
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def expert_global_to_physical(self) -> torch.Tensor | None:
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def expert_physical_to_global(self) -> torch.Tensor | None:
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def expert_local_to_global(self) -> torch.Tensor | None:
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def expert_map(self) -> torch.Tensor | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def _expert_routing_tables(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_expert_map(self):
+        raise NotImplementedError
+
+    @abstractmethod
+    def _map_global_expert_id_to_local_expert_id(self, expert_id: int) -> int:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_expert_weights(self) -> Iterable[torch.Tensor]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def set_eplb_state(
+        self,
+        moe_layer_idx: int,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ) -> None:
+        raise NotImplementedError
