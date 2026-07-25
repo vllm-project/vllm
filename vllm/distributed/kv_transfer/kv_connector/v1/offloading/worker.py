@@ -6,6 +6,9 @@ from dataclasses import replace
 import torch
 
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping import (
+    derive_canonical_mappings,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
@@ -31,7 +34,6 @@ from vllm.v1.kv_offload.base import (
     OffloadingSpec,
     OffloadingWorker,
 )
-from vllm.v1.kv_offload.sharding import derive_canonical_mappings
 
 logger = init_logger(__name__)
 

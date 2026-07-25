@@ -5,6 +5,13 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping import (
+    _layer_mapping,
+    _opaque_fallback_mapping,
+    _RankContext,
+    _verify_tiling,
+    derive_canonical_mappings,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -12,14 +19,7 @@ from vllm.v1.kv_cache_interface import (
     KVQuantMode,
     MLAAttentionSpec,
 )
-from vllm.v1.kv_offload.base import CanonicalPageMapping, MappedRun
-from vllm.v1.kv_offload.sharding import (
-    _layer_mapping,
-    _rank_private_mapping,
-    _RankContext,
-    _verify_mappings,
-    derive_canonical_mappings,
-)
+from vllm.v1.kv_offload.base import CanonicalPageMapping, CopyRun
 
 NUM_BLOCKS = 3
 
@@ -115,7 +115,7 @@ def _mapping(spec, kv_cache, ctx) -> CanonicalPageMapping:
     return mapping
 
 
-def _triples(runs: tuple[MappedRun, ...]) -> list[tuple[int, int, int]]:
+def _triples(runs: tuple[CopyRun, ...]) -> list[tuple[int, int, int]]:
     """Expand runs to explicit (local_offset, canonical_offset, size) copies."""
     out = []
     for run in runs:
@@ -139,22 +139,23 @@ def test_split_nhd_placement_rank2_of_4():
     spec = _full_spec()
     mapping = _mapping(spec, _split_nhd_cache(spec), _ctx(rank=2, tp=4))
     assert mapping.canonical_page_size_bytes == 4 * 1024
-    assert mapping.parallel_invariant
+    assert mapping.parallelism_agnostic
     k_dst = [256, 768, 1280, 1792]
-    assert _triples(mapping.store_runs) == [
+    assert _triples(mapping.runs) == [
         (local, canonical, 128)
         for local, canonical in zip(
             [0, 128, 256, 384, 512, 640, 768, 896],
             k_dst + [2048 + o for o in k_dst],
         )
     ]
-    assert mapping.store_runs == mapping.load_runs
+    # Heads are sharded, not replicated: this rank writes every block
+    assert mapping.num_writers == 1
 
 
 def test_packed_nhd_placement_rank2_of_4():
     spec = _full_spec()
     mapping = _mapping(spec, _packed_nhd_cache(spec), _ctx(rank=2, tp=4))
-    assert _triples(mapping.store_runs) == [
+    assert _triples(mapping.runs) == [
         (0, 512, 256),
         (256, 1536, 256),
         (512, 2560, 256),
@@ -166,7 +167,7 @@ def test_packed_hnd_placement_rank1_of_4():
     spec = _full_spec()
     mapping = _mapping(spec, _packed_hnd_cache(spec), _ctx(rank=1, tp=4))
     # Two heads, each a contiguous canonical head region of 4 tokens x 128B
-    assert _triples(mapping.store_runs) == [(0, 1024, 1024)]
+    assert _triples(mapping.runs) == [(0, 1024, 1024)]
 
 
 @pytest.mark.parametrize("form", sorted(CACHE_BUILDERS))
@@ -174,7 +175,7 @@ def test_single_rank_coalesces_to_one_run(form):
     spec = _full_spec()
     mapping = _mapping(spec, CACHE_BUILDERS[form](spec), _ctx(rank=0))
     assert mapping.canonical_page_size_bytes == 1024
-    assert _triples(mapping.store_runs) == [(0, 0, 1024)]
+    assert _triples(mapping.runs) == [(0, 0, 1024)]
 
 
 # ---------------------------------------------------------------------------
@@ -182,35 +183,38 @@ def test_single_rank_coalesces_to_one_run(form):
 # ---------------------------------------------------------------------------
 
 
-def test_gqa_replicated_heads_elect_single_writer():
+def test_gqa_replicated_heads_rotate_writer():
     # total 2 KV heads on tp=4: replication factor 2, head shard = rank // 2
     spec = _full_spec(num_kv_heads=1)
     cache = _split_nhd_cache(spec)
     ctx = lambda rank: _ctx(rank, tp=4, total=2)  # noqa: E731
-    writer = _mapping(spec, cache, ctx(2))
-    replica = _mapping(spec, cache, ctx(3))
-    assert writer.canonical_page_size_bytes == 2 * 512
+    rank2 = _mapping(spec, cache, ctx(2))
+    rank3 = _mapping(spec, cache, ctx(3))
+    assert rank2.canonical_page_size_bytes == 2 * 512
     # K region: head shard 1 at 64B offsets within 128B token rows
-    assert _triples(writer.store_runs)[:4] == [
+    assert _triples(rank2.runs)[:4] == [
         (0, 64, 64),
         (64, 192, 64),
         (128, 320, 64),
         (192, 448, 64),
     ]
-    assert replica.store_runs == ()
-    assert replica.load_runs == writer.load_runs
-    _verify_mappings("gqa", [_mapping(spec, cache, ctx(r)) for r in range(4)])
+    # Same head shard, so identical bytes: the two take alternate blocks
+    assert rank3.runs == rank2.runs
+    assert (rank2.is_writer(0), rank3.is_writer(0)) == (True, False)
+    assert (rank2.is_writer(1), rank3.is_writer(1)) == (False, True)
+    _verify_tiling("gqa", [_mapping(spec, cache, ctx(r)) for r in range(4)])
 
 
-def test_mla_single_writer_tp_only():
+def test_mla_replicas_rotate_writer():
     spec = _mla_spec()
-    writer = _mapping(spec, None, _ctx(rank=0, tp=2))
-    reader = _mapping(spec, None, _ctx(rank=1, tp=2))
-    # Latent pages are stored once, not once per rank
-    assert writer.canonical_page_size_bytes == 256
-    assert _triples(writer.store_runs) == [(0, 0, 256)]
-    assert reader.store_runs == ()
-    assert _triples(reader.load_runs) == [(0, 0, 256)]
+    rank0 = _mapping(spec, None, _ctx(rank=0, tp=2))
+    rank1 = _mapping(spec, None, _ctx(rank=1, tp=2))
+    # Latent pages are stored once per block, not once per rank
+    assert rank0.canonical_page_size_bytes == 256
+    assert _triples(rank0.runs) == [(0, 0, 256)]
+    assert rank1.runs == rank0.runs
+    assert (rank0.is_writer(0), rank1.is_writer(0)) == (True, False)
+    assert (rank0.is_writer(1), rank1.is_writer(1)) == (False, True)
 
 
 # ---------------------------------------------------------------------------
@@ -227,17 +231,17 @@ def test_dcp_interleaves_tokens_within_replicas():
     assert all(m is not None for m in per_rank)
     # 8 canonical tokens x 2 heads x 64B per region
     assert per_rank[0].canonical_page_size_bytes == 2048
-    assert not per_rank[0].parallel_invariant
+    assert not per_rank[0].parallelism_agnostic
     # rank 2 = head shard 1, cp rank 0: K tokens 0,2,4,6 at head offset 64
-    assert _triples(per_rank[2].store_runs)[:4] == [
+    assert _triples(per_rank[2].runs)[:4] == [
         (0, 64, 64),
         (64, 320, 64),
         (128, 576, 64),
         (192, 832, 64),
     ]
     # every rank contributes (dcp == replication: no residual replicas)
-    assert all(m.store_runs for m in per_rank)
-    _verify_mappings("dcp", per_rank)
+    assert all(m.num_writers == 1 for m in per_rank)
+    _verify_tiling("dcp", per_rank)
 
 
 def test_mla_dcp_shards_latent_tokens():
@@ -246,11 +250,9 @@ def test_mla_dcp_shards_latent_tokens():
     rank0 = _mapping(spec, None, ctx(0))
     rank1 = _mapping(spec, None, ctx(1))
     assert rank0.canonical_page_size_bytes == 512
-    assert _triples(rank0.store_runs) == [(o, 2 * o, 64) for o in (0, 64, 128, 192)]
-    assert _triples(rank1.store_runs) == [
-        (o, 2 * o + 64, 64) for o in (0, 64, 128, 192)
-    ]
-    _verify_mappings("mla-dcp", [rank0, rank1])
+    assert _triples(rank0.runs) == [(o, 2 * o, 64) for o in (0, 64, 128, 192)]
+    assert _triples(rank1.runs) == [(o, 2 * o + 64, 64) for o in (0, 64, 128, 192)]
+    _verify_tiling("mla-dcp", [rank0, rank1])
 
 
 def test_pcp_tokens_and_tp_heads_compose():
@@ -260,8 +262,8 @@ def test_pcp_tokens_and_tp_heads_compose():
     per_rank = [
         _mapping(spec, cache, _ctx(rank, tp=2, pcp=2, total=2)) for rank in range(4)
     ]
-    assert all(m is not None and m.store_runs for m in per_rank)
-    _verify_mappings("pcp", per_rank)
+    assert all(m is not None and m.runs for m in per_rank)
+    _verify_tiling("pcp", per_rank)
 
 
 def test_interleave_chunks_stay_contiguous():
@@ -269,8 +271,8 @@ def test_interleave_chunks_stay_contiguous():
     # coalesce into one contiguous fragment per chunk
     spec = _mla_spec()
     mapping = _mapping(spec, None, _ctx(rank=0, tp=2, dcp=2, interleave=2))
-    assert _triples(mapping.store_runs) == [(0, 0, 128), (128, 256, 128)]
-    _verify_mappings(
+    assert _triples(mapping.runs) == [(0, 0, 128), (128, 256, 128)]
+    _verify_tiling(
         "interleave",
         [
             _mapping(spec, None, _ctx(rank, tp=2, dcp=2, interleave=2))
@@ -286,7 +288,7 @@ def test_all_ranks_tile_canonical_page(form):
         _mapping(spec, CACHE_BUILDERS[form](spec), _ctx(rank, tp=4))
         for rank in range(4)
     ]
-    _verify_mappings("layer", per_rank)
+    _verify_tiling("layer", per_rank)
 
 
 # ---------------------------------------------------------------------------
@@ -294,17 +296,19 @@ def test_all_ranks_tile_canonical_page(form):
 # ---------------------------------------------------------------------------
 
 
-def _store_all(mappings, pages, size: int) -> bytes:
+def _store_all(mappings, pages, size: int, block_id: int = 0) -> bytes:
     buf = bytearray(size)
     for mapping, page in zip(mappings, pages):
-        for local, canonical, n in _triples(mapping.store_runs):
+        if not mapping.is_writer(block_id):
+            continue
+        for local, canonical, n in _triples(mapping.runs):
             buf[canonical : canonical + n] = page[local : local + n]
     return bytes(buf)
 
 
 def _load_one(mapping, canonical_bytes: bytes) -> bytes:
     page = bytearray(mapping.local_page_size_bytes)
-    for local, canonical, n in _triples(mapping.load_runs):
+    for local, canonical, n in _triples(mapping.runs):
         page[local : local + n] = canonical_bytes[canonical : canonical + n]
     return bytes(page)
 
@@ -340,6 +344,16 @@ def test_cp_round_trip():
     reference = bytes((3 + 17 * i) % 256 for i in range(2048))
     pages = [_load_one(m, reference) for m in mappings]
     assert _store_all(mappings, pages, 2048) == reference
+
+
+def test_replica_rotation_round_trip():
+    """Whichever replica a block elects reproduces the same canonical page."""
+    spec = _mla_spec()
+    mappings = [_mapping(spec, None, _ctx(rank, tp=2)) for rank in range(2)]
+    reference = bytes((5 + 11 * i) % 256 for i in range(256))
+    pages = [_load_one(m, reference) for m in mappings]
+    for block_id in (0, 1):
+        assert _store_all(mappings, pages, 256, block_id) == reference
 
 
 # ---------------------------------------------------------------------------
@@ -382,13 +396,13 @@ def test_fail_closed_cases():
     assert _try_mapping(KVCacheSpec(block_size=4), None, _ctx(0, tp=4, total=8)) is None
 
 
-def test_rank_private_places_page_whole():
-    mapping = _rank_private_mapping(1024, 4, 2)
+def test_opaque_fallback_places_page_whole():
+    mapping = _opaque_fallback_mapping(1024, 4, 2)
     assert mapping.canonical_page_size_bytes == 4096
-    assert not mapping.parallel_invariant
-    assert _triples(mapping.store_runs) == [(0, 2048, 1024)]
-    assert mapping.store_runs == mapping.load_runs
-    _verify_mappings("opaque", [_rank_private_mapping(1024, 4, r) for r in range(4)])
+    assert not mapping.parallelism_agnostic
+    assert _triples(mapping.runs) == [(0, 2048, 1024)]
+    assert mapping.num_writers == 1
+    _verify_tiling("opaque", [_opaque_fallback_mapping(1024, 4, r) for r in range(4)])
 
 
 # ---------------------------------------------------------------------------
@@ -436,10 +450,10 @@ def test_derive_mixed_model_with_dcp():
         _vllm_config(tp=4, dcp=2, total_kv_heads=2), kv_cache_config, kv_caches
     )
     assert set(mappings) == {"attn", "mla", "quant"}
-    assert not mappings["attn"].parallel_invariant
-    assert mappings["attn"].store_runs
-    # Uncertifiable layers degrade to rank-private, never disappear
-    assert not mappings["quant"].parallel_invariant
+    assert not mappings["attn"].parallelism_agnostic
+    assert mappings["attn"].runs
+    # Uncertifiable layers degrade to an opaque page, never disappear
+    assert not mappings["quant"].parallelism_agnostic
     assert (
         mappings["quant"].canonical_page_size_bytes
         == 4 * quant_spec.unpadded_page_size_bytes

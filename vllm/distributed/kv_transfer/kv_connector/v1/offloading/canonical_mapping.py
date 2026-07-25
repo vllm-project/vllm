@@ -6,7 +6,7 @@ The only place in the offloading stack that reasons about parallelism
 (TP/DCP/PCP); everything downstream consumes byte mappings. The canonical
 page of a layer is the full offloaded block without parallelism: all KV
 heads, all block_size * dcp * pcp tokens, in the worker's page encoding.
-Uncertifiable layers get a rank-private mapping (fail closed).
+Uncertifiable layers get an opaque fallback mapping (fail closed).
 """
 
 from dataclasses import dataclass, replace
@@ -22,7 +22,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.kv_offload.base import CanonicalPageMapping, MappedRun
+from vllm.v1.kv_offload.base import CanonicalPageMapping, CopyRun
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -65,11 +65,21 @@ class _RankContext:
         return pcp_rank * self.dcp_size + self.tp_rank % self.dcp_size
 
 
-def _coalesce_runs(runs: list[MappedRun]) -> tuple[MappedRun, ...]:
+@dataclass(frozen=True)
+class ByteRegion:
+    """A byte region within a page that repeats once per token."""
+
+    local_offset: int
+    canonical_offset: int
+    bytes_per_token: int
+    canonical_token_stride: int
+
+
+def _coalesce_runs(runs: list[CopyRun]) -> tuple[CopyRun, ...]:
     """Collapse contiguous fragments within and across runs to minimize the
     number of copy ops (e.g. a single-rank mapping becomes one whole-page run).
     """
-    out: list[MappedRun] = []
+    out: list[CopyRun] = []
     for run in runs:
         if (
             run.num_fragments > 1
@@ -77,7 +87,7 @@ def _coalesce_runs(runs: list[MappedRun]) -> tuple[MappedRun, ...]:
             and run.canonical_stride == run.fragment_size
         ):
             size = run.fragment_size * run.num_fragments
-            run = MappedRun(run.local_offset, run.canonical_offset, size, 1, size, size)
+            run = CopyRun(run.local_offset, run.canonical_offset, size, 1, size, size)
         prev = out[-1] if out else None
         if (
             prev is not None
@@ -87,7 +97,7 @@ def _coalesce_runs(runs: list[MappedRun]) -> tuple[MappedRun, ...]:
             and prev.canonical_offset + prev.fragment_size == run.canonical_offset
         ):
             size = prev.fragment_size + run.fragment_size
-            out[-1] = MappedRun(
+            out[-1] = CopyRun(
                 prev.local_offset, prev.canonical_offset, size, 1, size, size
             )
         else:
@@ -95,117 +105,159 @@ def _coalesce_runs(runs: list[MappedRun]) -> tuple[MappedRun, ...]:
     return tuple(out)
 
 
-def _chunk_runs(
-    channels: list[tuple[int, int, int, int]],
+def _local_to_canonical_token(local_idx: int, ctx: _RankContext) -> int:
+    """Canonical position of one of this rank's local token indices."""
+    chunk, pos_in_chunk = divmod(local_idx, ctx.interleave)
+    return (chunk * ctx.cp_size + ctx.total_cp_rank) * ctx.interleave + pos_in_chunk
+
+
+def _interleave_cp_tokens(
+    regions: list[ByteRegion],
     num_tokens: int,
     ctx: _RankContext,
-) -> tuple[MappedRun, ...]:
-    """Place each channel's num_tokens rows: local token l of CP rank c is
-    canonical token ((l // I) * cp + c) * I + l % I. A channel is
-    (local_base, canonical_base, local_row, canonical_row)."""
-    runs: list[MappedRun] = []
-    interleave, cp = ctx.interleave, ctx.cp_size
-    for local_base, canonical_base, local_row, canonical_row in channels:
-        if cp == 1:
+) -> tuple[CopyRun, ...]:
+    """Place each region's num_tokens rows at their canonical token positions,
+    one run per chunk of interleaved tokens."""
+    runs: list[CopyRun] = []
+    for region in regions:
+        if ctx.cp_size == 1:
             runs.append(
-                MappedRun(
-                    local_base,
-                    canonical_base,
-                    local_row,
+                CopyRun(
+                    region.local_offset,
+                    region.canonical_offset,
+                    region.bytes_per_token,
                     num_tokens,
-                    local_row,
-                    canonical_row,
+                    region.bytes_per_token,
+                    region.canonical_token_stride,
                 )
             )
             continue
-        for chunk in range(num_tokens // interleave):
-            canonical_token = (chunk * cp + ctx.total_cp_rank) * interleave
+        for chunk_start in range(0, num_tokens, ctx.interleave):
+            canonical_token = _local_to_canonical_token(chunk_start, ctx)
             runs.append(
-                MappedRun(
-                    local_base + chunk * interleave * local_row,
-                    canonical_base + canonical_token * canonical_row,
-                    local_row,
-                    interleave,
-                    local_row,
-                    canonical_row,
+                CopyRun(
+                    region.local_offset + chunk_start * region.bytes_per_token,
+                    region.canonical_offset
+                    + canonical_token * region.canonical_token_stride,
+                    region.bytes_per_token,
+                    ctx.interleave,
+                    region.bytes_per_token,
+                    region.canonical_token_stride,
                 )
             )
     return _coalesce_runs(runs)
 
 
-def _attention_channels(
+def _packed_kv_regions(
+    kv_cache: torch.Tensor,
+    spec: AttentionSpec,
+    head_shard: int,
+    num_head_shards: int,
+    cp_size: int,
+) -> list[ByteRegion] | None:
+    """K and V adjacent per (token, head), in NHD or HND stride order."""
+    bs, heads = spec.block_size, spec.num_kv_heads
+    elem = kv_cache.element_size()
+    head_elems = 2 * spec.head_size
+    if heads * bs * head_elems * elem != spec.real_page_size_bytes:
+        return None
+    _, head_stride, token_stride, inner_stride = kv_cache.stride()
+    if inner_stride != 1:
+        return None
+    head_bytes = head_elems * elem
+    token_row_bytes = heads * head_bytes
+
+    if head_stride == head_elems and token_stride == heads * head_elems:  # NHD
+        return [
+            ByteRegion(
+                local_offset=0,
+                canonical_offset=head_shard * token_row_bytes,
+                bytes_per_token=token_row_bytes,
+                canonical_token_stride=num_head_shards * token_row_bytes,
+            )
+        ]
+
+    if head_stride == bs * head_elems and token_stride == head_elems:  # HND
+        canonical_span = bs * cp_size  # canonical tokens per offloaded block
+        return [
+            ByteRegion(
+                local_offset=head * bs * head_bytes,
+                canonical_offset=(head_shard * heads + head)
+                * canonical_span
+                * head_bytes,
+                bytes_per_token=head_bytes,
+                canonical_token_stride=head_bytes,
+            )
+            for head in range(heads)
+        ]
+    return None
+
+
+def _split_kv_regions(
+    kv_cache: torch.Tensor,
+    spec: AttentionSpec,
+    head_shard: int,
+    num_head_shards: int,
+    cp_size: int,
+) -> list[ByteRegion] | None:
+    """K and V in separate page halves, in NHD or HND stride order."""
+    bs, heads, head_size = spec.block_size, spec.num_kv_heads, spec.head_size
+    elem = kv_cache.element_size()
+    if 2 * bs * heads * head_size * elem != spec.real_page_size_bytes:
+        return None
+    _, half_stride, token_stride, head_stride, inner_stride = kv_cache.stride()
+    if inner_stride != 1 or half_stride != bs * heads * head_size:
+        return None
+    head_bytes = head_size * elem
+    token_row_bytes = heads * head_bytes
+    canonical_span = bs * cp_size  # canonical tokens per offloaded block
+
+    if token_stride == heads * head_size and head_stride == head_size:  # NHD
+        canonical_half_bytes = canonical_span * num_head_shards * token_row_bytes
+        return [
+            ByteRegion(
+                local_offset=half * bs * token_row_bytes,
+                canonical_offset=half * canonical_half_bytes
+                + head_shard * token_row_bytes,
+                bytes_per_token=token_row_bytes,
+                canonical_token_stride=num_head_shards * token_row_bytes,
+            )
+            for half in range(2)  # K, then V
+        ]
+
+    if head_stride == bs * head_size and token_stride == head_size:  # HND
+        local_half_bytes = bs * heads * head_bytes
+        total_heads = num_head_shards * heads
+        return [
+            ByteRegion(
+                local_offset=half * local_half_bytes + head * bs * head_bytes,
+                canonical_offset=(half * total_heads + head_shard * heads + head)
+                * canonical_span
+                * head_bytes,
+                bytes_per_token=head_bytes,
+                canonical_token_stride=head_bytes,
+            )
+            for half in range(2)
+            for head in range(heads)
+        ]
+    return None
+
+
+def _attention_byte_regions(
     kv_cache: torch.Tensor,
     spec: AttentionSpec,
     num_blocks: int,
     head_shard: int,
     num_head_shards: int,
     cp_size: int,
-) -> list[tuple[int, int, int, int]] | None:
-    """Byte channels of an attention page, given this rank's head shard.
-
-    Recognizes packed KV (num_blocks, heads, block_size, 2 * head_size) and
-    split KV (num_blocks, 2, block_size, heads, head_size), in NHD or HND
-    stride order. None when the layout is ambiguous (fail closed)."""
+) -> list[ByteRegion] | None:
+    """Byte regions of an attention page, given this rank's head shard.
+    None when the physical layout is not recognized (fail closed)."""
     bs, heads, head_size = spec.block_size, spec.num_kv_heads, spec.head_size
-    elem = kv_cache.element_size()
-    page = spec.real_page_size_bytes
-    content = 2 * head_size
-    span = bs * cp_size  # canonical tokens per offloaded block
-
-    if tuple(kv_cache.shape) == (num_blocks, heads, bs, content):
-        if heads * bs * content * elem != page:
-            return None
-        s = kv_cache.stride()
-        if s[3] != 1:
-            return None
-        row = heads * content * elem
-        if s[1] == content and s[2] == heads * content:  # NHD: token-major
-            return [(0, head_shard * row, row, num_head_shards * row)]
-        if s[1] == bs * content and s[2] == content:  # HND: head-major
-            g = content * elem
-            return [
-                (
-                    j * bs * g,
-                    (head_shard * heads + j) * span * g,
-                    g,
-                    g,
-                )
-                for j in range(heads)
-            ]
-        return None
-
-    if tuple(kv_cache.shape) != (num_blocks, 2, bs, heads, head_size):
-        return None
-    if 2 * bs * heads * head_size * elem != page:
-        return None
-    s = kv_cache.stride()
-    if s[4] != 1 or s[1] != bs * heads * head_size:
-        return None
-    k_size = bs * heads * head_size * elem
-    if s[2] == heads * head_size and s[3] == head_size:  # NHD
-        row = heads * head_size * elem
-        return [
-            (
-                region * bs * row,
-                region * span * num_head_shards * row + head_shard * row,
-                row,
-                num_head_shards * row,
-            )
-            for region in range(2)  # K, then V
-        ]
-    if s[3] == bs * head_size and s[2] == head_size:  # HND
-        f = head_size * elem
-        total_heads = num_head_shards * heads
-        return [
-            (
-                region * k_size + j * bs * f,
-                (region * total_heads + head_shard * heads + j) * span * f,
-                f,
-                f,
-            )
-            for region in range(2)
-            for j in range(heads)
-        ]
+    if tuple(kv_cache.shape) == (num_blocks, heads, bs, 2 * head_size):
+        return _packed_kv_regions(kv_cache, spec, head_shard, num_head_shards, cp_size)
+    if tuple(kv_cache.shape) == (num_blocks, 2, bs, heads, head_size):
+        return _split_kv_regions(kv_cache, spec, head_shard, num_head_shards, cp_size)
     return None
 
 
@@ -224,21 +276,22 @@ def _layer_mapping(
         return None
 
     if isinstance(spec, MLAAttentionSpec):
-        # TP-replicated latent; CP shards its tokens; first DCP group writes
+        # TP-replicated latent; CP shards its tokens across the DCP groups
         if (
             spec.compress_ratio != 1
             or page % bs
+            or ctx.tp_size % ctx.dcp_size
             or spec.kv_quant_mode.is_per_token_head
         ):
             return None
         row = page // bs
-        runs = _chunk_runs([(0, 0, row, row)], bs, ctx)
         return CanonicalPageMapping(
             canonical_page_size_bytes=ctx.cp_size * page,
             local_page_size_bytes=page,
-            store_runs=runs if ctx.tp_rank < ctx.dcp_size else (),
-            load_runs=runs,
-            parallel_invariant=ctx.cp_size == 1,
+            runs=_interleave_cp_tokens([ByteRegion(0, 0, row, row)], bs, ctx),
+            num_writers=ctx.tp_size // ctx.dcp_size,
+            writer_index=ctx.tp_rank // ctx.dcp_size,
+            parallelism_agnostic=ctx.cp_size == 1,
         )
 
     if spec.kv_quant_mode.is_per_token_head or not isinstance(kv_cache, torch.Tensor):
@@ -259,42 +312,39 @@ def _layer_mapping(
         return None
 
     head_shard = ctx.tp_rank // replication
-    channels = _attention_channels(
+    regions = _attention_byte_regions(
         kv_cache, spec, num_blocks, head_shard, num_head_shards, ctx.cp_size
     )
-    if channels is None:
+    if regions is None:
         return None
-    runs = _chunk_runs(channels, bs, ctx)
-    # One writer among ranks holding identical bytes
-    contributor = (ctx.tp_rank % replication) // ctx.dcp_size == 0
     return CanonicalPageMapping(
         canonical_page_size_bytes=ctx.cp_size * num_head_shards * page,
         local_page_size_bytes=page,
-        store_runs=runs if contributor else (),
-        load_runs=runs,
-        parallel_invariant=ctx.cp_size == 1,
+        runs=_interleave_cp_tokens(regions, bs, ctx),
+        num_writers=replication // ctx.dcp_size,
+        writer_index=(ctx.tp_rank % replication) // ctx.dcp_size,
+        parallelism_agnostic=ctx.cp_size == 1,
     )
 
 
-def _rank_private_mapping(
+def _opaque_fallback_mapping(
     page_size_bytes: int, num_ranks: int, rank: int
 ) -> CanonicalPageMapping:
     """Fallback: place the worker's page whole at a worker-exclusive offset."""
-    run = MappedRun(
+    run = CopyRun(
         0, rank * page_size_bytes, page_size_bytes, 1, page_size_bytes, page_size_bytes
     )
     return CanonicalPageMapping(
         canonical_page_size_bytes=num_ranks * page_size_bytes,
         local_page_size_bytes=page_size_bytes,
-        store_runs=(run,),
-        load_runs=(run,),
-        parallel_invariant=False,
+        runs=(run,),
+        num_writers=1,
+        writer_index=0,
+        parallelism_agnostic=False,
     )
 
 
-def _run_intervals(
-    runs: tuple[MappedRun, ...], canonical: bool
-) -> list[tuple[int, int]]:
+def _run_intervals(runs: tuple[CopyRun, ...], canonical: bool) -> list[tuple[int, int]]:
     intervals = []
     for run in runs:
         offset = run.canonical_offset if canonical else run.local_offset
@@ -314,22 +364,28 @@ def _is_exact_partition(intervals: list[tuple[int, int]], size: int) -> bool:
     )
 
 
-def _verify_mappings(layer_name: str, per_rank: list[CanonicalPageMapping]) -> None:
-    """All ranks' store runs must tile the canonical page exactly once, and
-    each rank's load runs must cover exactly its local page."""
+def _verify_tiling(layer_name: str, per_rank: list[CanonicalPageMapping]) -> None:
+    """Whichever ranks a block elects as writers must tile the canonical page
+    exactly once, and each rank's runs must cover exactly its local page."""
     size = per_rank[0].canonical_page_size_bytes
-    store_intervals: list[tuple[int, int]] = []
+    num_writers = per_rank[0].num_writers
     for mapping in per_rank:
         assert mapping.canonical_page_size_bytes == size
-        store_intervals += _run_intervals(mapping.store_runs, canonical=True)
-        local = _run_intervals(mapping.load_runs, canonical=False)
+        assert mapping.num_writers == num_writers
+        local = _run_intervals(mapping.runs, canonical=False)
         assert _is_exact_partition(local, mapping.local_page_size_bytes), (
-            f"load runs do not cover the local page of layer {layer_name}"
+            f"runs do not cover the local page of layer {layer_name}"
         )
-    store_intervals.sort()
-    assert _is_exact_partition(store_intervals, size), (
-        f"store runs do not tile the canonical page of layer {layer_name}"
-    )
+    for block_id in range(num_writers):
+        stored: list[tuple[int, int]] = []
+        for mapping in per_rank:
+            if mapping.is_writer(block_id):
+                stored += _run_intervals(mapping.runs, canonical=True)
+        stored.sort()
+        assert _is_exact_partition(stored, size), (
+            f"writers of block {block_id} do not tile the canonical page "
+            f"of layer {layer_name}"
+        )
 
 
 def _unpadded_page_size(spec: KVCacheSpec) -> int | None:
@@ -392,9 +448,9 @@ def derive_canonical_mappings(
                 if page is None:
                     continue
                 per_rank = [
-                    _rank_private_mapping(page, group_size, rank)
+                    _opaque_fallback_mapping(page, group_size, rank)
                     for rank in range(group_size)
                 ]
-            _verify_mappings(layer_name, per_rank)
+            _verify_tiling(layer_name, per_rank)
             mappings[layer_name] = per_rank[my_rank]
     return mappings

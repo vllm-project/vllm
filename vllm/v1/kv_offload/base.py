@@ -412,7 +412,7 @@ class CanonicalKVCacheTensor:
 
 
 @dataclass(frozen=True)
-class MappedRun:
+class CopyRun:
     """A strided byte correspondence between this worker's physical page and
     a canonical page: for i in range(num_fragments), fragment i spans
     [local_offset + i * local_stride, +fragment_size) in the worker's page and
@@ -429,20 +429,28 @@ class MappedRun:
 @dataclass(frozen=True)
 class CanonicalPageMapping:
     """How this worker's page maps into a canonical (parallelism-free) page.
-    In-process only, never serialized. store_runs may be empty when another
-    worker contributes the same bytes; load_runs cover the full local page.
+    In-process only, never serialized. Runs cover the full local page in both
+    directions; ranks holding identical bytes take turns writing them.
     """
 
     # Size of the canonical page in bytes
     canonical_page_size_bytes: int
     # Size of this worker's (un-padded) page in bytes
     local_page_size_bytes: int
-    # Bytes this worker contributes when writing a canonical page
-    store_runs: tuple[MappedRun, ...]
-    # Bytes this worker reads back from a canonical page
-    load_runs: tuple[MappedRun, ...]
+    # Byte correspondences between this worker's page and a canonical page
+    runs: tuple[CopyRun, ...]
+    # Number of ranks holding these exact bytes
+    num_writers: int
+    # This worker's index among those ranks
+    writer_index: int
     # Canonical bytes identical under any parallel config with this block span
-    parallel_invariant: bool
+    parallelism_agnostic: bool
+
+    def is_writer(self, block_id: int) -> bool:
+        """Whether this worker stores the canonical page of the given block.
+        Rotating by block spreads writes across ranks holding identical bytes.
+        """
+        return block_id % self.num_writers == self.writer_index
 
 
 @dataclass
