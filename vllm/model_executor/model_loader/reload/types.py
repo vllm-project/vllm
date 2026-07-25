@@ -2,8 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
 from inspect import BoundArguments
+from typing import TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from vllm.model_executor.model_loader.load_session import WeightLoadSession
 
 __all__ = ["LayerTensors", "LayerReloadingInfo"]
 
@@ -33,9 +37,12 @@ class LayerReloadingInfo:
     # persistence survives `_non_persistent_buffers_set` being mutated during reload
     kernel_non_persistent_buffers: set[str] = field(default_factory=set)
 
+    load_session: "WeightLoadSession | None" = field(default=None, repr=False)
+
     def reset(self):
         self.__init__(  # type: ignore[misc]
-            restore_metadata=self.restore_metadata, restore_device=self.restore_device
+            restore_metadata=self.restore_metadata,
+            restore_device=self.restore_device,
         )
 
     def can_load(self) -> bool:

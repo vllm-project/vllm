@@ -4,8 +4,8 @@ import torch.nn as nn
 
 from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
-from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.load_session import _process_quant_method
 from vllm.model_executor.model_loader.reload.layerwise import (
     _get_original_loader,
     get_layerwise_info,
@@ -57,8 +57,9 @@ class DummyModelLoader(BaseModelLoader):
         for param in get_layer_tensors(layer).values():
             param.weight_loader = _get_original_loader(param)
 
-        quant_method = getattr(layer, "quant_method", None)
-        if isinstance(quant_method, QuantizeMethodBase):
-            quant_method.process_weights_after_loading(layer)
+        if info.load_session is None:
+            _process_quant_method(layer)
+        else:
+            info.load_session.process_quant(layer)
 
         info.reset()

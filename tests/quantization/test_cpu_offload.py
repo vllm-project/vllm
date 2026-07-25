@@ -26,6 +26,23 @@ def test_cpu_offload_fp8():
 
 
 @pytest.mark.skipif(
+    not is_quant_method_supported("fp8"),
+    reason="fp8 is not supported on this GPU type.",
+)
+def test_cpu_offload_online_fp8(monkeypatch):
+    monkeypatch.setenv("VLLM_TEST_FORCE_LOAD_FORMAT", "auto")
+    v2_env = {"VLLM_USE_V2_MODEL_RUNNER": "1"}
+    compare_two_settings(
+        "facebook/opt-125m",
+        ["--quantization", "fp8", "--enforce-eager"],
+        ["--quantization", "fp8", "--enforce-eager", "--cpu-offload-gb", "1"],
+        env1=v2_env,
+        env2=v2_env,
+        max_wait_seconds=480,
+    )
+
+
+@pytest.mark.skipif(
     not is_quant_method_supported("gptq_marlin"),
     reason="gptq_marlin is not supported on this GPU type.",
 )
