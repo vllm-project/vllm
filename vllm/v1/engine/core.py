@@ -117,6 +117,19 @@ class EngineCore:
         load_general_plugins()
 
         self.vllm_config = vllm_config
+        if vllm_config.parallel_config.rank_tp_ratio:
+            # Uneven TP/DCP: the scheduler process also needs the ratio
+            # vectors (virtual block sizing uses sum(token ratios) instead
+            # of dcp_world_size); workers install them in
+            # gpu_worker.init_device.
+            from vllm.distributed.utils import (
+                resolve_cp_token_ratios,
+                set_cp_token_ratios,
+                set_tp_partition_ratios,
+            )
+
+            set_tp_partition_ratios(vllm_config.parallel_config.rank_tp_ratio)
+            set_cp_token_ratios(resolve_cp_token_ratios(vllm_config))
         if not vllm_config.parallel_config.data_parallel_rank_local:
             logger.info(
                 "Initializing a V1 LLM engine (v%s) with config: %s",

@@ -2165,6 +2165,10 @@ def _grouping_config():
     return SimpleNamespace(
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         speculative_config=None,
+        parallel_config=SimpleNamespace(
+            rank_tp_ratio=None,
+            decode_context_parallel_size=1,
+        ),
     )
 
 

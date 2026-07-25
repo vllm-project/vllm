@@ -19,7 +19,11 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
 )
-from vllm.distributed.utils import get_tp_partition_ratios, tp_partition_size
+from vllm.distributed.utils import (
+    get_tp_partition_ratios,
+    tp_partition_size,
+    uneven_dcp_active,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
@@ -100,6 +104,17 @@ def _is_shared_expert_fse_compatible(quant_config) -> bool:
     return not any("shared_expert." in str(e) for e in exclude)
 
 
+def _mlp_tp_units(intermediate_size: int, quant_config) -> int | None:
+    """Master unit count of the MLP intermediate dimension: shard cuts
+    must land on quantization-group boundaries (v4 free partitioning)."""
+    if not get_tp_partition_ratios():
+        return None
+    granule = getattr(quant_config, "group_size", None) or 128
+    if granule <= 0 or intermediate_size % granule:
+        granule = 1
+    return intermediate_size // granule
+
+
 class Qwen3NextSparseMoeBlock(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -172,6 +187,9 @@ class Qwen3NextSparseMoeBlock(nn.Module):
                 reduce_results=False,
                 expert_gate=self.shared_expert_gate,
                 is_sequence_parallel=self.is_sequence_parallel,
+                tp_units=_mlp_tp_units(
+                    config.shared_expert_intermediate_size, quant_config
+                ),
                 prefix=f"{prefix}.shared_expert",
             )
 
@@ -245,7 +263,15 @@ class Qwen3NextAttention(nn.Module):
         tp_rank = get_tensor_model_parallel_rank()
         self.total_num_heads = config.num_attention_heads
         self.total_num_kv_heads = config.num_key_value_heads
-        if get_tp_partition_ratios():
+        if get_tp_partition_ratios() and uneven_dcp_active():
+            # Uneven DCP: q heads are ratio-partitioned (v4: freely, in
+            # whole heads), kv heads are fully replicated on every rank
+            # (the KV cache is split along the token axis instead).
+            self.num_heads = tp_partition_size(
+                self.total_num_heads, tp_size, tp_rank, self.total_num_heads
+            )
+            self.num_kv_heads = self.total_num_kv_heads
+        elif get_tp_partition_ratios():
             # Uneven TP: partition q/kv heads by the ratio vector.
             # KV-head replication is not supported with ratios (each rank
             # must own at least one whole kv head); tp_partition_size
@@ -289,6 +315,7 @@ class Qwen3NextAttention(nn.Module):
             bias=getattr(config, "qkv_bias", False),
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
+            tp_units=self.total_num_heads,
         )
 
         self.o_proj = RowParallelLinear(
@@ -298,6 +325,7 @@ class Qwen3NextAttention(nn.Module):
             reduce_results=reduce_results,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
+            tp_units=self.total_num_heads,
         )
 
         self.rotary_emb = get_rope(
@@ -479,6 +507,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
+                tp_units=_mlp_tp_units(config.intermediate_size, quant_config),
                 prefix=f"{prefix}.mlp",
             )
 

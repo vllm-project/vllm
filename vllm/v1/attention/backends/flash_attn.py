@@ -9,6 +9,7 @@ from typing import ClassVar
 import numpy as np
 import torch
 
+from vllm.distributed.utils import cp_rank_ratio_prefix
 from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
@@ -29,7 +30,7 @@ from vllm.v1.attention.backends.fa_utils import (
     is_flash_attn_varlen_func_available,
 )
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
-from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.common import cp_lse_ag_out_ar_uneven, cp_lse_ag_out_rs
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -381,6 +382,20 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         self.num_heads_q = self.model_config.get_num_attention_heads(
             self.parallel_config
         )
+        from vllm.distributed.utils import cp_q_head_counts as _cp_qhc
+
+        _counts = _cp_qhc(
+            self.model_config.hf_text_config.num_attention_heads,
+            self.dcp_world_size,
+        )
+        # Total q heads across the DCP group (v4: sum of the per-rank
+        # head partition, which need not be proportional to the token
+        # vector; even split: num_heads_q * dcp_world_size).
+        self.num_heads_q_across_dcp = (
+            sum(_counts)
+            if _counts is not None
+            else self.num_heads_q * self.dcp_world_size
+        )
         self.num_heads_kv = self.model_config.get_num_kv_heads(self.parallel_config)
         self.kv_cache_dtype = kv_cache_spec.dtype
         self.headdim = self.model_config.get_head_size()
@@ -398,6 +413,13 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
+        # Token-axis share of this rank: (ratio, prefix, split_sum) is
+        # (1, rank, world_size) for even DCP, ratio-derived under uneven DCP.
+        (
+            self.cp_rank_ratio,
+            self.cp_rank_prefix,
+            self.cp_split_factor,
+        ) = cp_rank_ratio_prefix(self.dcp_world_size, self.dcp_rank)
 
         self.cp_kv_cache_interleave_size = (
             self.parallel_config.cp_kv_cache_interleave_size
@@ -525,7 +547,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                     batch_size=batch_size,
                     max_seqlen_q=max_query_len,
                     max_seqlen_k=max_seq_len,
-                    num_heads_q=self.num_heads_q * self.dcp_world_size,
+                    num_heads_q=self.num_heads_q_across_dcp,
                     num_heads_kv=self.num_heads_kv,
                     headdim=self.headdim,
                     cache_seqlens=seqlens,
@@ -593,18 +615,21 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                     num_actual_tokens,
                 )
 
-            # After DCP distribution, the maximum number of tokens for any rank is
-            # ceil(L / (N * I)) * I, where L is max_seq_len, N is dcp_world_size,
-            # and I is cp_kv_cache_interleave_size.
-            # This eliminates GPU->CPU sync while minimizing workspace over-allocation.
+            # This eliminates GPU->CPU sync while minimizing workspace
+            # over-allocation.
             if skip_dcp_context_attention:
                 max_dcp_context_kv_len = 0
                 scheduler_metadata = None
             else:
-                num_partitions = self.dcp_world_size * self.cp_kv_cache_interleave_size
+                # After DCP distribution, the maximum number of tokens on
+                # this rank is ceil(L / (S * I)) * R * I, where L is
+                # max_seq_len, S is the token-split factor (dcp_world_size,
+                # or sum(ratios) under uneven DCP), R is this rank's ratio
+                # (1 when even), and I is cp_kv_cache_interleave_size.
+                num_partitions = self.cp_split_factor * self.cp_kv_cache_interleave_size
                 max_dcp_context_kv_len = (
                     (max_seq_len + num_partitions - 1) // num_partitions
-                ) * self.cp_kv_cache_interleave_size
+                ) * (self.cp_rank_ratio * self.cp_kv_cache_interleave_size)
 
                 scheduler_metadata = schedule(
                     batch_size=num_reqs,
@@ -825,7 +850,49 @@ class FlashAttentionImpl(AttentionImpl):
             and vllm_config.parallel_config.decode_context_parallel_size > 1
             and vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
-        self.dcp_combine = dcp_a2a_lse_reduce if dcp_a2a else cp_lse_ag_out_rs
+        if self.cp_uneven:
+            # Ratio-proportional head shards: reduce-scatter / all-to-all
+            # assume equal shards per rank, so combine via all-reduce +
+            # local head slice.
+            if dcp_a2a:
+                raise ValueError(
+                    "dcp_comm_backend='a2a' is not supported together with "
+                    "--rank-tp-ratio (uneven DCP); use the default backend."
+                )
+            from functools import partial
+
+            from vllm.distributed.utils import cp_q_head_counts
+
+            assert vllm_config is not None
+            total_q = vllm_config.model_config.hf_text_config.num_attention_heads
+            self.cp_head_counts = cp_q_head_counts(total_q, self.dcp_world_size)
+            assert self.cp_head_counts is not None
+            assert self.cp_head_counts[self.dcp_rank] == self.num_heads, (
+                self.cp_head_counts,
+                self.num_heads,
+            )
+            import os
+
+            from vllm.v1.attention.ops.dcp_alltoall import (
+                dcp_a2a_lse_reduce_uneven,
+            )
+
+            # Fused single-collective combine by default; AR fallback for
+            # A/B testing via VLLM_UNEVEN_DCP_COMBINE=ar.
+            if os.environ.get("VLLM_UNEVEN_DCP_COMBINE", "a2a") == "ar":
+                self.dcp_combine = partial(
+                    cp_lse_ag_out_ar_uneven, head_counts=self.cp_head_counts
+                )
+            else:
+                self.dcp_combine = partial(
+                    dcp_a2a_lse_reduce_uneven, head_counts=self.cp_head_counts
+                )
+            self.num_heads_across_dcp = sum(self.cp_head_counts)
+        else:
+            self.dcp_combine = dcp_a2a_lse_reduce if dcp_a2a else cp_lse_ag_out_rs
+            self.cp_head_counts = None
+            # Total q heads across the DCP group (even split).
+            self.num_heads_across_dcp = self.num_heads * self.dcp_world_size
 
         self._dcp_dtype: torch.dtype | None = None
         self._dcp_max_num_tokens: int = 0
@@ -1131,6 +1198,11 @@ class FlashAttentionImpl(AttentionImpl):
             layer._v_scale,
         )
 
+    def _all_gather_query_uneven(self, query: torch.Tensor) -> torch.Tensor:
+        from vllm.v1.attention.ops.common import cp_all_gather_heads_uneven
+
+        return cp_all_gather_heads_uneven(query, get_dcp_group(), self.cp_head_counts)
+
     def _forward_with_dcp(
         self,
         query: torch.Tensor,
@@ -1179,7 +1251,10 @@ class FlashAttentionImpl(AttentionImpl):
             )
             return output
 
-        query_across_dcp = get_dcp_group().all_gather(query, dim=1)
+        if self.cp_uneven:
+            query_across_dcp = self._all_gather_query_uneven(query)
+        else:
+            query_across_dcp = get_dcp_group().all_gather(query, dim=1)
         sliding_window_size = (
             list(self.sliding_window) if self.sliding_window is not None else None
         )
@@ -1200,7 +1275,7 @@ class FlashAttentionImpl(AttentionImpl):
         dcp_context_out_spec = (
             (
                 dcp_context_out_tokens,
-                self.num_heads * self.dcp_world_size,
+                self.num_heads_across_dcp,
                 self.head_size,
             ),
             self._dcp_dtype,
@@ -1276,11 +1351,30 @@ class FlashAttentionImpl(AttentionImpl):
         )
         context_lse_cor = context_lse_cor.transpose(0, 1).contiguous()
 
+        # Uneven DCP: this rank's local q head count need not be divisible
+        # by the (fully replicated) kv head count - e.g. 6 q heads over 4
+        # kv heads under ratios (2,1,1). Run the suffix attention on the
+        # already-gathered FULL q head set (where the GQA quotient is
+        # exact) and slice this rank's head range afterwards. The suffix
+        # only covers the new tokens, so the redundant compute is
+        # negligible. It cannot write into `output` (sized for the local
+        # heads), so it goes through a workspace buffer instead.
+        if self.cp_uneven:
+            suffix_query = query_across_dcp
+            (dcp_query_out,) = current_workspace_manager().get_simultaneous(
+                (
+                    (query.shape[0], self.num_heads_across_dcp, self.head_size),
+                    self._dcp_dtype,
+                ),
+            )
+        else:
+            suffix_query = query
+            dcp_query_out = output
         query_attn_out, query_lse = flash_attn_varlen_func(
-            q=query,
+            q=suffix_query,
             k=key,
             v=value,
-            out=output,
+            out=dcp_query_out,
             cu_seqlens_q=cu_seqlens_q,
             max_seqlen_q=max_seqlen_q,
             cu_seqlens_k=cu_seqlens_q,
@@ -1297,6 +1391,14 @@ class FlashAttentionImpl(AttentionImpl):
             v_descale=v_descale,
             num_splits=attn_metadata.max_num_splits,
         )
+        if self.cp_uneven:
+            # Slice this rank's head range out of the full-head suffix
+            # result (ratio shards are contiguous prefix-sum slices).
+            head_start = sum(self.cp_head_counts[: self.dcp_rank])
+            query_attn_out = query_attn_out[
+                :, head_start : head_start + self.num_heads
+            ].contiguous()
+            query_lse = query_lse[head_start : head_start + self.num_heads].contiguous()
         assert context_attn_out_cor.shape == query_attn_out.shape
         assert context_lse_cor.shape == query_lse.shape
         merge_attn_states(

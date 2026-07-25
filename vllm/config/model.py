@@ -1314,15 +1314,29 @@ class ModelConfig:
         tensor_parallel_size = parallel_config.tensor_parallel_size
         ratios = parallel_config.rank_tp_ratio
         if ratios:
-            # Uneven TP: heads are partitioned proportionally; every
-            # sharded head count must be divisible by sum(ratios).
-            denom = sum(ratios)
-            if total_num_attention_heads % denom != 0:
-                raise ValueError(
-                    f"Total number of attention heads "
-                    f"({total_num_attention_heads}) must be divisible by "
-                    f"sum(--rank-tp-ratio)={denom} for uneven TP."
-                )
+            if parallel_config.decode_context_parallel_size > 1:
+                # Uneven DCP (v4 free partitioning): heads are rounded to
+                # whole units per rank; only feasibility is required
+                # (at least one head per rank).
+                if total_num_attention_heads < tensor_parallel_size:
+                    raise ValueError(
+                        f"Total number of attention heads "
+                        f"({total_num_attention_heads}) must be >= "
+                        f"tensor parallel size ({tensor_parallel_size})."
+                    )
+            else:
+                # Uneven TP without DCP: heads are partitioned exactly
+                # proportionally; every sharded head count must be
+                # divisible by sum(ratios) (GQA group alignment).
+                denom = sum(ratios)
+                if total_num_attention_heads % denom != 0:
+                    raise ValueError(
+                        f"Total number of attention heads "
+                        f"({total_num_attention_heads}) must be divisible by "
+                        f"sum(--rank-tp-ratio)={denom} for uneven TP "
+                        "(add --decode-context-parallel-size == tp for free "
+                        "per-dimension partitioning)."
+                    )
         elif total_num_attention_heads % tensor_parallel_size != 0:
             raise ValueError(
                 f"Total number of attention heads ({total_num_attention_heads})"
@@ -1343,7 +1357,28 @@ class ModelConfig:
             )
 
         decode_context_parallel_size = parallel_config.decode_context_parallel_size
-        if decode_context_parallel_size > 1 and not self.use_mla:
+        if (
+            decode_context_parallel_size > 1
+            and not self.use_mla
+            and parallel_config.rank_tp_ratio
+        ):
+            # Uneven DCP: kv heads are fully replicated per rank and the
+            # KV cache is split along the token axis by --rank-tp-ratio,
+            # so the classic GQA gates (which require tp > num_kv_heads)
+            # do not apply. The DCP group must span the whole TP group.
+            if decode_context_parallel_size != tensor_parallel_size:
+                raise ValueError(
+                    "Uneven DCP (--rank-tp-ratio with "
+                    "decode_context_parallel_size > 1) requires "
+                    f"dcp_size == tp_size, got dcp="
+                    f"{decode_context_parallel_size}, tp={tensor_parallel_size}."
+                )
+            if parallel_config.prefill_context_parallel_size > 1:
+                raise ValueError(
+                    "Uneven DCP does not support prefill context "
+                    "parallelism (pcp_size > 1)."
+                )
+        elif decode_context_parallel_size > 1 and not self.use_mla:
             total_num_kv_heads = self.get_total_num_kv_heads()
             if tensor_parallel_size <= total_num_kv_heads:
                 raise ValueError(
@@ -1435,6 +1470,10 @@ class ModelConfig:
 
         total_num_kv_heads = self.get_total_num_kv_heads()
         ratios = parallel_config.rank_tp_ratio
+        if ratios and parallel_config.decode_context_parallel_size > 1:
+            # Uneven DCP: kv heads are fully replicated on every rank
+            # (the KV cache is split along the token axis instead).
+            return total_num_kv_heads
         if ratios:
             # Uneven TP: rank-aware in worker processes; engine-level
             # callers (no TP group initialized) get the smallest-ratio
@@ -1448,7 +1487,9 @@ class ModelConfig:
 
     @staticmethod
     def _uneven_tp_heads(total: int, ratios: list[int]) -> int:
-        denom = sum(ratios)
+        from vllm.distributed.utils import partition_units
+
+        part = partition_units(total, ratios)
         try:
             from vllm.distributed.parallel_state import (
                 get_tensor_model_parallel_rank,
@@ -1457,10 +1498,9 @@ class ModelConfig:
             rank = get_tensor_model_parallel_rank()
         except (AssertionError, ValueError):
             # TP group not initialized (engine-level caller): use the
-            # smallest ratio as conservative basis.
+            # smallest share as conservative basis.
             rank = None
-        r = ratios[rank] if rank is not None else min(ratios)
-        return max(1, total * r // denom)
+        return part[rank] if rank is not None else min(part)
 
     def get_num_attention_heads(self, parallel_config: ParallelConfig) -> int:
         num_heads = self.model_arch_config.total_num_attention_heads

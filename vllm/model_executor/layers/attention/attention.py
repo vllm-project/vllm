@@ -327,7 +327,15 @@ class Attention(nn.Module, AttentionLayerBase):
         self.calculate_kv_scales = calculate_kv_scales
         if num_kv_heads is None:
             num_kv_heads = num_heads
-        assert num_heads % num_kv_heads == 0, (
+        from vllm.distributed.utils import uneven_dcp_active
+
+        # Uneven DCP: num_heads is this rank's ratio share of the q heads
+        # while num_kv_heads is the FULL (replicated) count, so the local
+        # quotient need not divide. All attention kernels then run on the
+        # DCP-gathered full q head set (context and suffix), where the
+        # total quotient is exact; the local share only sizes this rank's
+        # output slice.
+        assert num_heads % num_kv_heads == 0 or uneven_dcp_active(), (
             f"num_heads ({num_heads}) is not divisible by num_kv_heads ({num_kv_heads})"
         )
         self.quant_config = quant_config

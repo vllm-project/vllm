@@ -18,7 +18,11 @@ from vllm.logger import init_logger
 
 
 def _tp_shard_start(
-    loaded_full: int, rank: int, shard_size: int, tp_size: int | None = None
+    loaded_full: int,
+    rank: int,
+    shard_size: int,
+    tp_size: int | None = None,
+    units: int | None = None,
 ) -> int:
     """Loader-side narrow offset: classic rank*shard_size for even TP,
     prefix sum of per-rank partition sizes for uneven TP. Pass the
@@ -29,7 +33,7 @@ def _tp_shard_start(
     ratios = get_tp_partition_ratios()
     if not ratios or len(ratios) != tp_size:
         return rank * shard_size
-    sizes = tp_partition_sizes(loaded_full, tp_size)
+    sizes = tp_partition_sizes(loaded_full, tp_size, units)
     assert sizes[rank] == shard_size, (
         f"uneven-TP shard mismatch: expected {sizes[rank]} for rank {rank} "
         f"of dim {loaded_full}, parameter has {shard_size}"
@@ -176,6 +180,7 @@ class _ColumnvLLMParameter(BasevLLMParameter):
                 self.tp_rank,
                 shard_size,
                 getattr(self, "tp_size", None),
+                getattr(self, "tp_units", None),
             ),
             shard_size,
         )
@@ -205,6 +210,7 @@ class _ColumnvLLMParameter(BasevLLMParameter):
                 self.tp_rank,
                 shard_size,
                 getattr(self, "tp_size", None),
+                getattr(self, "tp_units", None),
             ),
             shard_size,
         )
@@ -228,12 +234,19 @@ class _ColumnvLLMParameter(BasevLLMParameter):
 
         param_data = self.data
         if get_tp_partition_ratios():
-            start_idx = _tp_shard_start(
-                loaded_weight.shape[self.output_dim],
-                self.tp_rank,
-                shard_size,
-                getattr(self, "tp_size", None),
-            )
+            loaded_full = loaded_weight.shape[self.output_dim]
+            if shard_size == loaded_full:
+                # Fully replicated component (kv heads under uneven DCP):
+                # every rank loads the whole checkpoint dimension.
+                start_idx = 0
+            else:
+                start_idx = _tp_shard_start(
+                    loaded_full,
+                    self.tp_rank,
+                    shard_size,
+                    getattr(self, "tp_size", None),
+                    getattr(self, "tp_units", None),
+                )
         else:
             shard_id_int = (
                 self.tp_rank if shard_id == "q" else self.tp_rank // num_heads
@@ -271,6 +284,7 @@ class RowvLLMParameter(BasevLLMParameter):
                 self.tp_rank,
                 shard_size,
                 getattr(self, "tp_size", None),
+                getattr(self, "tp_units", None),
             ),
             shard_size,
         )

@@ -306,9 +306,16 @@ class Worker(WorkerBase):
         # Uneven TP: install the ratio vector process-globally BEFORE any
         # layer computes shard sizes - independent of device backend paths.
         if self.vllm_config.parallel_config.rank_tp_ratio is not None:
-            from vllm.distributed.utils import set_tp_partition_ratios
+            from vllm.distributed.utils import (
+                resolve_cp_token_ratios,
+                set_cp_token_ratios,
+                set_tp_partition_ratios,
+            )
 
             set_tp_partition_ratios(self.vllm_config.parallel_config.rank_tp_ratio)
+            # Uneven DCP: token-axis vector (v4: GDN k-head partition for
+            # hybrids, raw weights for dense models).
+            set_cp_token_ratios(resolve_cp_token_ratios(self.vllm_config))
             logger.info(
                 "Uneven TP active: rank %d owns ratio %d/%d of every "
                 "sharded dimension.",

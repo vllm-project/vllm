@@ -64,6 +64,27 @@ class MambaBase(AttentionLayerBase):
         mamba_block_size = vllm_config.cache_config.mamba_block_size
         assert mamba_block_size is not None
         page_size_padded = vllm_config.cache_config.mamba_page_size_padded
+        if page_size_padded is not None:
+            from vllm.distributed.utils import (
+                resolve_cp_token_ratios,
+                uneven_dcp_active,
+            )
+
+            if uneven_dcp_active():
+                # Uneven DCP: the config value is the padded page of ONE
+                # token-vector unit (solved engine-side in
+                # _align_hybrid_block_size); this rank's state and its
+                # attention allocation per virtual block both scale with
+                # its token share, so the padding target does too.
+                from vllm.distributed.parallel_state import (
+                    get_tensor_model_parallel_rank,
+                )
+
+                token_vector = resolve_cp_token_ratios(vllm_config)
+                assert token_vector is not None
+                page_size_padded = (
+                    page_size_padded * token_vector[get_tensor_model_parallel_rank()]
+                )
         return MambaSpec(
             shapes=tuple(self.get_state_shape()),
             dtypes=self.get_state_dtype(),

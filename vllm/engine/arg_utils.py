@@ -477,7 +477,8 @@ class EngineArgs:
     device_ids: list[int | str] | None = None
     rank_gpu_id: list[int] | None = None
     rank_gpu_memory_mib: int | list[int] | None = None
-    rank_tp_ratio: list[int] | None = None
+    rank_tp_ratio: list[int] | str | None = None
+    rank_auto_reserve_mib: str | int = 1024
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
@@ -1070,22 +1071,51 @@ class EngineArgs:
             "instead (e.g. 26000,17000,17000), since shards then differ in "
             "size. Values are converted to per-GPU fractions at runtime via "
             "each physical GPU's NVML-reported total memory. "
-            "Required when --rank-gpu-id is set. "
+            "Required when --rank-gpu-id is set, except with "
+            "--rank-tp-ratio auto, which derives the budgets from the "
+            "NVML totals (minus a small per-GPU reserve) to fill the "
+            "complete VRAM. "
             "Mutually exclusive with --gpu-memory-utilization "
             "(setting both is a hard error).",
         )
         parallel_group.add_argument(
             "--rank-tp-ratio",
-            type=lambda s: [int(r) for r in s.split(",")],
+            type=lambda s: s if s.strip() == "auto" else [int(r) for r in s.split(",")],
             default=None,
             help="UNEVEN tensor parallelism: comma-separated positive integer "
-            "ratios, one per rank (length must equal tensor-parallel-size). "
-            "Example: 2,1,1 gives rank 0 half of every sharded dimension and "
-            "ranks 1/2 a quarter each - one large GPU plus two smaller ones, "
-            "one rank per GPU, no MPS/co-location required. Every sharded "
-            "dimension (attention heads, KV heads, GDN heads, hidden and "
-            "intermediate sizes) must be divisible by sum(ratios); vocab and "
-            "LM head stay evenly split. Requires --rank-gpu-id.",
+            "weights, one per rank (length must equal tensor-parallel-size), "
+            "or 'auto'. Example: 2,1,1 gives rank 0 half of every sharded "
+            "dimension and ranks 1/2 a quarter each - one large GPU plus two "
+            "smaller ones, one rank per GPU, no MPS/co-location required. "
+            "With --decode-context-parallel-size == tp (free per-dimension "
+            "partitioning) any weights work: every dimension family is "
+            "rounded to its own granularity (whole attention/GDN heads, "
+            "quant-group-aligned MLP columns) and the KV cache follows the "
+            "token axis. Without it, sum(weights) must divide every sharded "
+            "dimension. 'auto' derives the weights from the "
+            "--rank-gpu-memory-mib list (capacity is maximized when each "
+            "rank's share is proportional to its memory budget) and enables "
+            "decode context parallelism automatically. Requires "
+            "--rank-gpu-id.",
+        )
+        parallel_group.add_argument(
+            "--rank-auto-reserve-mib",
+            type=str,
+            default="1024",
+            help="Headroom (MiB) subtracted from the NVML total when "
+            "--rank-tp-ratio auto derives the memory budgets itself. "
+            "Either a single value applied to every GPU, or a "
+            "comma-separated list with one value per rank (aligned with "
+            "--rank-gpu-id), e.g. '2048,2048,10240' to keep 10 GiB free "
+            "on the third rank's GPU only. When several ranks share one "
+            "physical GPU, the largest reserve among them applies to that "
+            "GPU. Covers CUDA context plus allocations that appear lazily "
+            "after the KV sizing (NCCL collective buffers for long "
+            "prefills, attention-backend split workspaces) - observed "
+            "~0.5-0.7 GiB on top of the budget after the first long "
+            "prefill. Raise this if nvidia-smi shows an uncomfortably "
+            "small margin; each additional MiB costs KV-cache capacity "
+            "1:1 per rank.",
         )
         parallel_group.add_argument(
             "--tensor-parallel-size", "-tp", **parallel_kwargs["tensor_parallel_size"]
@@ -2241,7 +2271,7 @@ class EngineArgs:
             logger.info("Skipping tokenizer initialization for tokens-only mode.")
 
         # Validate --rank-gpu-id and --rank-gpu-memory-mib
-        self._validate_rank_gpu_config(current_platform)
+        self._validate_rank_gpu_config(current_platform, model_config)
 
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
@@ -2548,7 +2578,138 @@ class EngineArgs:
 
         return config
 
-    def _validate_rank_gpu_config(self, current_platform) -> None:
+    #: NVML-total headroom (MiB) reserved per GPU when --rank-tp-ratio
+    #: auto derives the budgets itself (CUDA context, fragmentation).
+    AUTO_RANK_MEMORY_RESERVE_MIB = 1024
+
+    def _resolve_auto_rank_tp_ratio(self, model_config=None) -> None:
+        """--rank-tp-ratio auto: fill the complete VRAM as well as
+        possible. Budgets default to each assigned GPU's NVML total minus
+        a fixed reserve (shared between co-located ranks); the weights are
+        the gcd-reduced budgets - capacity is maximized when each rank's
+        share of every dimension is proportional to its memory budget
+        (weights, activations and, via the token vector, KV cache all
+        scale linearly with the share). Per-family unit rounding happens
+        downstream. Explicit integer weights keep working unchanged."""
+        import math
+
+        if self.rank_gpu_id is None:
+            raise ValueError("--rank-tp-ratio auto requires --rank-gpu-id.")
+
+        if self.rank_gpu_memory_mib is None:
+            from collections import Counter
+
+            from vllm.platforms.cuda import CudaPlatform
+            from vllm.utils.import_utils import import_pynvml
+
+            torch_to_nvml = CudaPlatform.get_torch_to_nvml_mapping()
+
+            # --rank-auto-reserve-mib: single value for every GPU, or one
+            # value per rank (aligned with --rank-gpu-id).
+            try:
+                reserve_per_rank = [
+                    int(part) for part in str(self.rank_auto_reserve_mib).split(",")
+                ]
+            except ValueError as e:
+                raise ValueError(
+                    "--rank-auto-reserve-mib must be an integer or a "
+                    "comma-separated list of integers, got "
+                    f"{self.rank_auto_reserve_mib!r}."
+                ) from e
+            if len(reserve_per_rank) == 1:
+                reserve_per_rank *= len(self.rank_gpu_id)
+            if len(reserve_per_rank) != len(self.rank_gpu_id):
+                raise ValueError(
+                    f"--rank-auto-reserve-mib has {len(reserve_per_rank)} "
+                    f"entries but --rank-gpu-id names "
+                    f"{len(self.rank_gpu_id)} ranks; pass one value or "
+                    "exactly one per rank."
+                )
+            if any(r < 0 for r in reserve_per_rank):
+                raise ValueError(
+                    "--rank-auto-reserve-mib values must be >= 0, got "
+                    f"{reserve_per_rank}."
+                )
+            # Reserve is a per-physical-GPU property: if co-located ranks
+            # disagree, the largest requested headroom wins for that GPU.
+            reserve_per_gpu: dict[int, int] = {}
+            for gpu_id, res in zip(self.rank_gpu_id, reserve_per_rank):
+                reserve_per_gpu[gpu_id] = max(reserve_per_gpu.get(gpu_id, 0), res)
+
+            pynvml = import_pynvml()
+            pynvml.nvmlInit()
+            try:
+                counts = Counter(self.rank_gpu_id)
+                budgets = []
+                for gpu_id in self.rank_gpu_id:
+                    handle = pynvml.nvmlDeviceGetHandleByIndex(
+                        torch_to_nvml.get(gpu_id, gpu_id)
+                    )
+                    mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                    total_mib = mem.total // 2**20
+                    free_mib = mem.free // 2**20
+                    # The budget can never exceed what is actually free
+                    # when the worker checks it - and the worker checks
+                    # AFTER creating its own CUDA context (~0.5-1.3 GiB),
+                    # so cap at "free now minus a context allowance".
+                    # Without the cap, small reserves derive a budget the
+                    # worker's free-memory check must reject. reserve=0
+                    # therefore means "use everything that is free now,
+                    # minus the worker's own context".
+                    budget = (
+                        min(
+                            total_mib - reserve_per_gpu[gpu_id],
+                            free_mib - 1024,
+                        )
+                        // counts[gpu_id]
+                    )
+                    if budget <= 0:
+                        raise ValueError(
+                            f"--rank-auto-reserve-mib "
+                            f"{reserve_per_gpu[gpu_id]} MiB leaves no "
+                            f"budget on GPU {gpu_id} "
+                            f"(NVML total {total_mib} MiB, "
+                            f"{counts[gpu_id]} rank(s))."
+                        )
+                    budgets.append(budget)
+            finally:
+                pynvml.nvmlShutdown()
+            self.rank_gpu_memory_mib = budgets
+            logger.info(
+                "--rank-tp-ratio auto: derived memory budgets %s MiB from "
+                "NVML totals (reserve per GPU: %s MiB).",
+                budgets,
+                {g: r for g, r in sorted(reserve_per_gpu.items())},
+            )
+        budgets = (
+            list(self.rank_gpu_memory_mib)
+            if isinstance(self.rank_gpu_memory_mib, list)
+            else [self.rank_gpu_memory_mib] * self.tensor_parallel_size
+        )
+        g = math.gcd(*budgets)
+        weights = [b // g for b in budgets]
+        if len(set(weights)) == 1:
+            logger.info(
+                "--rank-tp-ratio auto: budgets are uniform, using the "
+                "classic even split."
+            )
+            self.rank_tp_ratio = None
+            return
+        self.rank_tp_ratio = weights
+        if self.decode_context_parallel_size <= 1:
+            self.decode_context_parallel_size = self.tensor_parallel_size
+            logger.info(
+                "--rank-tp-ratio auto: enabling decode context parallelism "
+                "(dcp=%d) for free per-dimension partitioning.",
+                self.decode_context_parallel_size,
+            )
+        logger.info(
+            "--rank-tp-ratio auto: derived weights %s from memory budgets %s MiB.",
+            weights,
+            budgets,
+        )
+
+    def _validate_rank_gpu_config(self, current_platform, model_config=None) -> None:
         """
         Validate --rank-gpu-id and --rank-gpu-memory-mib consistency.
 
@@ -2561,6 +2722,16 @@ class EngineArgs:
         6. Physical impossibility: (rank_count on GPU) * MiB <= NVML total
         """
         from collections import Counter
+
+        # Autoconfig: derive missing budgets and/or weights BEFORE the
+        # mutual-exclusivity checks (auto may omit the memory list).
+        if self.rank_tp_ratio == "auto":
+            self._resolve_auto_rank_tp_ratio(model_config)
+        elif isinstance(self.rank_tp_ratio, str):
+            raise ValueError(
+                f"Invalid --rank-tp-ratio value {self.rank_tp_ratio!r}: "
+                "expected a comma-separated integer list or 'auto'."
+            )
 
         # Mutual exclusivity check
         if self.rank_gpu_id is None and self.rank_gpu_memory_mib is not None:
@@ -2590,6 +2761,28 @@ class EngineArgs:
                 )
             if any(r <= 0 for r in self.rank_tp_ratio):
                 raise ValueError("--rank-tp-ratio entries must be positive integers.")
+            if len(set(self.rank_tp_ratio)) == 1:
+                raise ValueError(
+                    "--rank-tp-ratio with identical entries is the even "
+                    "split - omit the flag instead."
+                )
+
+        # Uneven DCP checks (--rank-tp-ratio + decode context parallelism:
+        # kv heads fully replicated per rank, KV cache split along the
+        # token axis by the ratio vector)
+        if self.rank_tp_ratio is not None and self.decode_context_parallel_size > 1:
+            if self.decode_context_parallel_size != self.tensor_parallel_size:
+                raise ValueError(
+                    "Uneven DCP requires --decode-context-parallel-size == "
+                    f"--tensor-parallel-size, got "
+                    f"{self.decode_context_parallel_size} vs "
+                    f"{self.tensor_parallel_size}."
+                )
+            if self.prefill_context_parallel_size > 1:
+                raise ValueError(
+                    "Uneven DCP does not support prefill context "
+                    "parallelism (--prefill-context-parallel-size > 1)."
+                )
 
         # Per-rank MiB list checks
         if isinstance(self.rank_gpu_memory_mib, list):

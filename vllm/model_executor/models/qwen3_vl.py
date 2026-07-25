@@ -404,6 +404,7 @@ class Qwen3_VisionMLP(nn.Module):
             return_bias=False,
             prefix=f"{prefix}.linear_fc1",
             disable_tp=use_data_parallel,
+            tp_units=hidden_features,
         )
         self.linear_fc2 = RowParallelLinear(
             hidden_features,
@@ -413,6 +414,7 @@ class Qwen3_VisionMLP(nn.Module):
             return_bias=False,
             prefix=f"{prefix}.linear_fc2",
             disable_tp=use_data_parallel,
+            tp_units=hidden_features,
         )
         self.act_fn = act_fn
 
@@ -504,6 +506,7 @@ class Qwen3_VisionPatchMerger(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.linear_fc1",
             disable_tp=use_data_parallel,
+            tp_units=self.hidden_size,
         )
         self.act_fn = nn.GELU()
         self.linear_fc2 = RowParallelLinear(
@@ -513,6 +516,7 @@ class Qwen3_VisionPatchMerger(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.linear_fc2",
             disable_tp=use_data_parallel,
+            tp_units=self.hidden_size,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

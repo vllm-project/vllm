@@ -19,6 +19,7 @@ def _correct_attn_cp_out_kernel(
     lses_stride_B,
     lses_stride_H,
     lse_idx,
+    n_ranks,
     HEAD_DIM: tl.constexpr,
     N_ROUNDED: tl.constexpr,
     IS_BASE_E: tl.constexpr,
@@ -50,8 +51,11 @@ def _correct_attn_cp_out_kernel(
         + head_idx * lses_stride_H
     )
 
-    # calc final lse
-    lse = tl.load(lses_ptr + lse_offsets)
+    # calc final lse (mask the power-of-2 padding with -inf, which is
+    # neutral for both the max and the exp-sum)
+    lse = tl.load(
+        lses_ptr + lse_offsets, mask=num_n_offsets < n_ranks, other=-float("inf")
+    )
     lse = tl.where((lse != lse) | (lse == float("inf")), -float("inf"), lse)
     lse_max = tl.max(lse, axis=0)
     lse_max = tl.where(lse_max == -float("inf"), 0, lse_max)
@@ -173,8 +177,15 @@ def correct_attn_out(
         l_sB,
         l_sH,
         cp_rank,
+        N,
     )
-    const_args = {"HEAD_DIM": D, "N_ROUNDED": N, "IS_BASE_E": is_lse_base_on_e}
+    # tl.arange needs a power-of-2 extent; pad and mask (relevant for
+    # non-power-of-2 CP group sizes, e.g. dcp=3 under uneven DCP).
+    const_args = {
+        "HEAD_DIM": D,
+        "N_ROUNDED": triton.next_power_of_2(N),
+        "IS_BASE_E": is_lse_base_on_e,
+    }
     ctx.call_kernel(_correct_attn_cp_out_kernel, grid, *regular_args, **const_args)
     return out, lse
 
@@ -254,6 +265,78 @@ def cp_lse_ag_out_ar(
 
     if return_lse:
         return out, lse
+    return out
+
+
+def cp_all_gather_heads_uneven(
+    x: torch.Tensor, cp_group: GroupCoordinator, head_counts: list[int]
+) -> torch.Tensor:
+    """All-gather along the head dim (-2) when per-rank head counts
+    differ (--rank-tp-ratio): torch's all_gather needs equal shapes, so
+    pad each rank's heads to the maximum count, gather, and
+    re-concatenate the true head slices in rank order (which is the
+    global head order - head shards are contiguous prefix-sum slices).
+    head_counts is the per-rank q-head partition (cp_q_head_counts) -
+    under v4 free partitioning it need not be proportional to the token
+    vector. Shapes are static per rank, so this stays CUDA-graph
+    friendly; the padding garbage is sliced away before any compute.
+    """
+    counts = head_counts
+    local_heads = x.shape[-2]
+    assert counts[cp_group.rank_in_group] == local_heads, (counts, local_heads)
+    max_heads = max(counts)
+    pad_shape = list(x.shape)
+    pad_shape[-2] = max_heads
+    padded = x.new_empty(pad_shape)
+    padded[..., :local_heads, :].copy_(x)
+    gathered = cp_group.all_gather(padded, dim=-2)
+    parts = [
+        gathered[..., r * max_heads : r * max_heads + counts[r], :]
+        for r in range(cp_group.world_size)
+    ]
+    return torch.cat(parts, dim=-2)
+
+
+def cp_local_head_bounds(
+    cp_group: GroupCoordinator, head_counts: list[int]
+) -> tuple[int, int]:
+    """(start, stop) of this rank's head slice in the gathered full head
+    set under uneven DCP (head_counts = per-rank q-head partition)."""
+    rank = cp_group.rank_in_group
+    start = sum(head_counts[:rank])
+    return start, start + head_counts[rank]
+
+
+def cp_lse_ag_out_ar_uneven(
+    cp_attn_out: torch.Tensor,
+    cp_attn_lse: torch.Tensor,
+    cp_group: GroupCoordinator,
+    ctx: CPTritonContext | None = None,
+    return_lse: bool = False,
+    is_lse_base_on_e=True,
+    head_counts: list[int] | None = None,
+):
+    """Uneven-DCP combine: like cp_lse_ag_out_rs, but per-rank head
+    shards differ (--rank-tp-ratio), so the equal-shard reduce-scatter
+    cannot be used. All-reduce the corrected partial outputs and slice
+    this rank's head shard (from head_counts = per-rank q-head
+    partition) instead.
+
+    cp_attn_out: [ B, H_total, D ]  (H_total = sum of all ranks' q heads)
+    cp_attn_lse: [ B, H_total ]
+    """
+    out, lse = _cp_lse_common(
+        cp_attn_out, cp_attn_lse, cp_group, ctx=ctx, is_lse_base_on_e=is_lse_base_on_e
+    )
+    out = cp_group.all_reduce(out)
+
+    assert head_counts is not None, (
+        "cp_lse_ag_out_ar_uneven requires the per-rank head partition"
+    )
+    start, stop = cp_local_head_bounds(cp_group, head_counts)
+    out = out[:, start:stop].contiguous()
+    if return_lse:
+        return out, lse[:, start:stop].contiguous()
     return out
 
 

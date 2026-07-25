@@ -881,6 +881,19 @@ class AttentionImplBase(ABC, Generic[T]):
             self.pcp_world_size = 1
             self.pcp_rank = 0
         self.total_cp_world_size = self.dcp_world_size
+        # Token-axis share of this rank under uneven DCP; the identity
+        # values (1, dcp_rank, dcp_world_size) for the classic even split.
+        from vllm.distributed.utils import cp_rank_ratio_prefix
+
+        (
+            self.cp_rank_ratio,
+            self.cp_rank_prefix,
+            self.cp_split_factor,
+        ) = cp_rank_ratio_prefix(self.dcp_world_size, self.dcp_rank)
+        self.cp_uneven = (self.cp_rank_ratio, self.cp_split_factor) != (
+            1,
+            self.dcp_world_size,
+        )
         self.total_cp_rank = self.dcp_rank
 
         self.need_to_return_lse_for_decode = (

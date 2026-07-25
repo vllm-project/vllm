@@ -78,6 +78,7 @@ from .qwen3_next import (
     Qwen3NextSparseMoeBlock,
     QwenNextMixtureOfExperts,
     _is_shared_expert_fse_compatible,
+    _mlp_tp_units,
 )
 from .qwen3_vl import (
     Qwen3_VisionTransformer,
@@ -172,6 +173,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
+                tp_units=_mlp_tp_units(config.intermediate_size, quant_config),
                 prefix=f"{prefix}.mlp",
             )
         else:
@@ -388,13 +390,17 @@ class Qwen3_5ForCausalLMBase(
         num_v_heads = hf_config.linear_num_value_heads
         ratios = parallel_config.rank_tp_ratio
         if ratios:
-            # Uneven TP: rank-aware in worker processes (matches the
-            # rank-aware get_num_kv_heads, so the derived block size
-            # mamba_page / attn_page is identical on every rank - the
-            # ratio factor cancels). Engine-level callers without an
-            # initialized TP group fall back to the smallest ratio,
-            # consistent with the same fallback in get_num_kv_heads.
-            denom = sum(ratios)
+            # Free partitioning (v4): local head counts come from the GDN
+            # k-head partition (largest-remainder over the weights); the
+            # v-heads follow at their fixed v-per-k multiple so both stay
+            # consistent with the GDN layer's own shards. Engine-level
+            # callers without an initialized TP group fall back to the
+            # smallest share, matching the align solver's per-share
+            # normalization.
+            from vllm.distributed.utils import gdn_head_partition
+
+            k_part = gdn_head_partition(vllm_config, list(ratios))
+            v_per_k = num_v_heads // num_k_heads
             try:
                 from vllm.distributed.parallel_state import (
                     get_tensor_model_parallel_rank,
@@ -403,9 +409,9 @@ class Qwen3_5ForCausalLMBase(
                 rank = get_tensor_model_parallel_rank()
             except (AssertionError, ValueError):
                 rank = None
-            unit = ratios[rank] if rank is not None else min(ratios)
-            num_k_heads = num_k_heads * unit // denom
-            num_v_heads = num_v_heads * unit // denom
+            local_k = k_part[rank] if rank is not None else min(k_part)
+            num_k_heads = local_k
+            num_v_heads = local_k * v_per_k
             tp_size = 1
         num_spec = (
             vllm_config.speculative_config.num_speculative_tokens
@@ -615,13 +621,17 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         num_v_heads = hf_config.linear_num_value_heads
         ratios = parallel_config.rank_tp_ratio
         if ratios:
-            # Uneven TP: rank-aware in worker processes (matches the
-            # rank-aware get_num_kv_heads, so the derived block size
-            # mamba_page / attn_page is identical on every rank - the
-            # ratio factor cancels). Engine-level callers without an
-            # initialized TP group fall back to the smallest ratio,
-            # consistent with the same fallback in get_num_kv_heads.
-            denom = sum(ratios)
+            # Free partitioning (v4): local head counts come from the GDN
+            # k-head partition (largest-remainder over the weights); the
+            # v-heads follow at their fixed v-per-k multiple so both stay
+            # consistent with the GDN layer's own shards. Engine-level
+            # callers without an initialized TP group fall back to the
+            # smallest share, matching the align solver's per-share
+            # normalization.
+            from vllm.distributed.utils import gdn_head_partition
+
+            k_part = gdn_head_partition(vllm_config, list(ratios))
+            v_per_k = num_v_heads // num_k_heads
             try:
                 from vllm.distributed.parallel_state import (
                     get_tensor_model_parallel_rank,
@@ -630,9 +640,9 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
                 rank = get_tensor_model_parallel_rank()
             except (AssertionError, ValueError):
                 rank = None
-            unit = ratios[rank] if rank is not None else min(ratios)
-            num_k_heads = num_k_heads * unit // denom
-            num_v_heads = num_v_heads * unit // denom
+            local_k = k_part[rank] if rank is not None else min(k_part)
+            num_k_heads = local_k
+            num_v_heads = local_k * v_per_k
             tp_size = 1
         num_spec = (
             vllm_config.speculative_config.num_speculative_tokens

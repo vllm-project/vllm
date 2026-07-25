@@ -176,6 +176,7 @@ def mamba_v2_sharded_weight_loader(
     shard_spec: list[tuple[int, int, float]],
     tp_size: int,
     tp_rank: int,
+    tp_units: int | None = None,
 ) -> LoaderFunction:
     """Create a weight loader for mamba v2. This ensures that the projections
     are correctly sharded so that they can be split into x, B, C. It also
@@ -207,7 +208,7 @@ def mamba_v2_sharded_weight_loader(
                     "--rank-tp-ratio does not support duplicated mamba "
                     "groups (n_groups replication)"
                 )
-                shard_size = tp_partition_size(full_dim, tp_size, tp_rank)
+                shard_size = tp_partition_size(full_dim, tp_size, tp_rank, tp_units)
             else:
                 shard_size = full_dim // tp_size
 
@@ -221,7 +222,7 @@ def mamba_v2_sharded_weight_loader(
             if duplicate_groups:
                 loaded_skip = 0
             elif get_tp_partition_ratios():
-                loaded_skip = tp_partition_offset(full_dim, tp_size, tp_rank)
+                loaded_skip = tp_partition_offset(full_dim, tp_size, tp_rank, tp_units)
             else:
                 loaded_skip = tp_rank * shard_size
             loaded_start_idx = loaded_boundary + loaded_skip

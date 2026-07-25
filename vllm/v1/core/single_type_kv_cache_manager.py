@@ -6,6 +6,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from typing import ClassVar
 
+from vllm.distributed.utils import cp_token_split_factor, uneven_cp_ratios
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
@@ -76,7 +77,11 @@ class SingleTypeKVCacheManager(ABC):
         self.dcp_world_size = dcp_world_size
         self.pcp_world_size = pcp_world_size
         if dcp_world_size > 1:
-            self.block_size *= dcp_world_size
+            # Token-split groups use "virtual" scheduler blocks spanning
+            # cp_token_split_factor physical blocks (sum(--rank-tp-ratio)
+            # under uneven DCP, dcp otherwise). MambaManager undoes this
+            # scaling (full per-rank recurrent state, not token-split).
+            self.block_size *= cp_token_split_factor(dcp_world_size, 1)
         self.kv_cache_spec = kv_cache_spec
         self.block_pool = block_pool
         self.enable_caching = enable_caching
@@ -700,8 +705,9 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         block_size = kv_cache_spec.block_size
         if dcp_world_size > 1:
             # DCP shards each block's KV across ranks; hashes must be viewed at
-            # the sharded block size.
-            block_size *= dcp_world_size
+            # the sharded block size (sum(--rank-tp-ratio) shares per block
+            # under uneven DCP, dcp equal shares otherwise).
+            block_size *= cp_token_split_factor(dcp_world_size, 1)
         block_hashes = resolve_block_hashes(
             block_hashes,
             block_pool.hash_block_size,
@@ -1292,7 +1298,12 @@ class MambaManager(SingleTypeKVCacheManager):
         assert isinstance(kv_cache_spec, MambaSpec), (
             "MambaManager can only be used for mamba groups"
         )
-        assert dcp_world_size == 1, "DCP not support mamba now."
+        # Mamba state has no token axis: under uneven DCP the mamba groups
+        # simply stay outside the token split (full state per rank), so
+        # only classic even DCP/PCP remains unsupported.
+        assert dcp_world_size == 1 or uneven_cp_ratios(dcp_world_size) is not None, (
+            "DCP not support mamba now."
+        )
         assert pcp_world_size == 1, "PCP not support mamba now."
         block_hashes = resolve_block_hashes(
             block_hashes,
@@ -1437,6 +1448,23 @@ class MambaManager(SingleTypeKVCacheManager):
                 last_state_block_idx is not None
                 and last_state_block_idx
                 < cdiv(processed_computed_tokens, self.block_size) - 1
+                # Under uneven context parallelism (virtual scheduler
+                # blocks, scheduler_block_size > block_size) keep
+                # scheduler-aligned checkpoint blocks alive until the
+                # request finishes: freed checkpoints only survive as
+                # evictable cache entries, and the virtual-block factor
+                # shrinks the pool ID space so much that a single long
+                # prefill recycles (and evicts) its own checkpoints before
+                # any follow-up request can hit them. In the default path
+                # (scheduler_block_size == block_size) every block is
+                # "aligned", so this must not suppress the free.
+                and (
+                    self.scheduler_block_size == self.block_size
+                    or (last_state_block_idx + 1)
+                    * self.block_size
+                    % self.scheduler_block_size
+                    != 0
+                )
             ):
                 blocks = self.req_to_blocks[request_id]
                 if blocks[last_state_block_idx] != self._null_block:

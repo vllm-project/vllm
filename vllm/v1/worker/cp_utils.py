@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING, Any, cast
 import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.distributed import get_dcp_group
+from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.distributed.utils import cp_token_split_factor
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.utils import split_decodes_prefills_and_extends
@@ -288,3 +289,20 @@ def run_split_fa2_dcp_context_attention(
         context_lse[:, prefill_start:prefill_end] = prefill_context_lse
 
     return dcp_context_out, context_lse
+
+
+def get_cp_token_split_factor() -> int:
+    """Number of block_size units one virtual scheduler block spans.
+
+    Equals get_total_cp_world_size() for the classic even split and
+    sum(--rank-tp-ratio) under uneven DCP.
+    """
+    try:
+        pcp_world_size = get_pcp_group().world_size
+    except AssertionError:
+        pcp_world_size = 1
+    try:
+        dcp_world_size = get_dcp_group().world_size
+    except AssertionError:
+        dcp_world_size = 1
+    return cp_token_split_factor(dcp_world_size, pcp_world_size)

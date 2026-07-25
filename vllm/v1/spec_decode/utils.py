@@ -38,6 +38,10 @@ def eagle_step_slot_mapping_metadata_kernel(
     n_blocks_per_req: tl.constexpr,
     PAD_ID: tl.constexpr,
     batch_size,
+    CP_RANK_RATIO: tl.constexpr,
+    CP_RANK_PREFIX: tl.constexpr,
+    CP_SPLIT_FACTOR: tl.constexpr,
+    CP_INTERLEAVE: tl.constexpr,
 ):
     """
     Fused kernel for EAGLE autoregressive step: updates positions, slot mapping,
@@ -65,14 +69,30 @@ def eagle_step_slot_mapping_metadata_kernel(
     exceeds_max = new_position >= max_model_len
     clamped_position = tl.where(exceeds_max, 0, new_position)
 
-    # Block table lookup: block_number = position // block_size
+    # Token-axis CP ownership (see _compute_slot_mapping_kernel in
+    # block_table.py): within every round of CP_SPLIT_FACTOR * interleave
+    # tokens this rank owns [prefix, prefix + ratio) * interleave. The
+    # no-CP case (ratio=1, prefix=0, split=1) reduces exactly to the
+    # classic block_number = pos // block_size formula.
+    virtual_block_size = block_size * CP_SPLIT_FACTOR
+    virtual_block = clamped_position // virtual_block_size
+    virtual_offset = clamped_position - virtual_block * virtual_block_size
+    segment = (virtual_offset // CP_INTERLEAVE) % CP_SPLIT_FACTOR
+    is_local = (segment >= CP_RANK_PREFIX) & (segment < CP_RANK_PREFIX + CP_RANK_RATIO)
+    local_offset = (
+        (virtual_offset // (CP_SPLIT_FACTOR * CP_INTERLEAVE))
+        * (CP_RANK_RATIO * CP_INTERLEAVE)
+        + (segment - CP_RANK_PREFIX) * CP_INTERLEAVE
+        + (virtual_offset % CP_INTERLEAVE)
+    )
+    local_offset = tl.where(is_local, local_offset, 0)
+    block_number = virtual_block * CP_RANK_RATIO + local_offset // block_size
     # Clamp block_number to avoid OOB when position is at max
-    block_number = clamped_position // block_size
     block_number = tl.minimum(block_number, n_blocks_per_req - 1)
 
     block_id = tl.load(block_table_ptr + req_idx * block_table_stride + block_number)
-    slot_id = block_id * block_size + (clamped_position % block_size)
-    slot_id = tl.where(exceeds_max, PAD_ID, slot_id)
+    slot_id = block_id * block_size + (local_offset % block_size)
+    slot_id = tl.where(exceeds_max | (is_local == 0), PAD_ID, slot_id)
 
     # Update seq_lens: +1 normally, or 1 if exceeded
     seq_len = tl.load(seq_lens_ptr + req_idx)
@@ -83,6 +103,27 @@ def eagle_step_slot_mapping_metadata_kernel(
     tl.store(out_clamped_positions_ptr + req_idx, clamped_position)
     tl.store(out_slot_mapping_ptr + req_idx, slot_id)
     tl.store(seq_lens_ptr + req_idx, new_seq_len)
+
+
+def _draft_cp_params() -> tuple[int, int, int, int]:
+    """(ratio, prefix, split_factor, interleave) of this rank's token-axis
+    share for draft KV writes under decode context parallelism; the
+    identity (1, 0, 1, 1) without DCP reduces the slot formulas exactly to
+    the classic pos // block_size form. Interleave is fixed to 1: MTP with
+    cp_kv_cache_interleave_size > 1 is rejected at startup
+    (check_attention_cp_compatibility)."""
+    try:
+        from vllm.distributed.parallel_state import get_dcp_group
+
+        group = get_dcp_group()
+    except (AssertionError, ImportError):
+        return 1, 0, 1, 1
+    if group.world_size <= 1:
+        return 1, 0, 1, 1
+    from vllm.distributed.utils import cp_rank_ratio_prefix
+
+    ratio, prefix, split = cp_rank_ratio_prefix(group.world_size, group.rank_in_group)
+    return ratio, prefix, split, 1
 
 
 def eagle_step_update_slot_mapping_and_metadata(
@@ -118,6 +159,7 @@ def eagle_step_update_slot_mapping_and_metadata(
         input_batch_size = batch_size
 
     n_blocks_per_req = block_table_tensor.shape[1]
+    cp_ratio, cp_prefix, cp_split, cp_interleave = _draft_cp_params()
     eagle_step_slot_mapping_metadata_kernel[(input_batch_size,)](
         positions_1d,
         block_table_tensor,
@@ -130,6 +172,10 @@ def eagle_step_update_slot_mapping_and_metadata(
         n_blocks_per_req=n_blocks_per_req,
         PAD_ID=PADDING_SLOT_ID,
         batch_size=batch_size,
+        CP_RANK_RATIO=cp_ratio,
+        CP_RANK_PREFIX=cp_prefix,
+        CP_SPLIT_FACTOR=cp_split,
+        CP_INTERLEAVE=cp_interleave,
     )
 
 
@@ -256,12 +302,39 @@ def compute_new_slot_mapping(
     # Clamp the positions to prevent an out-of-bounds error when indexing
     # into block_table_tensor.
     clamped_positions = torch.clamp(new_positions, max=max_model_len - 1)
-    block_table_indices = (
-        req_indices * n_blocks_per_req + clamped_positions // block_size
-    )
-    block_nums = cad.block_table_tensor.view(-1)[block_table_indices]
-    block_offsets = clamped_positions % block_size
-    new_slot_mapping = block_nums * block_size + block_offsets
+    cp_ratio, cp_prefix, cp_split, cp_interleave = _draft_cp_params()
+    if cp_split > 1:
+        # Token-axis CP: this rank stores only its share of the tokens;
+        # block-table columns are its local pages (cp_ratio per virtual
+        # block). Mirrors _compute_slot_mapping_kernel in block_table.py.
+        virtual_block_size = block_size * cp_split
+        virtual_block = clamped_positions // virtual_block_size
+        virtual_offset = clamped_positions - virtual_block * virtual_block_size
+        segment = (virtual_offset // cp_interleave) % cp_split
+        is_local = (segment >= cp_prefix) & (segment < cp_prefix + cp_ratio)
+        local_offset = (
+            (virtual_offset // (cp_split * cp_interleave)) * (cp_ratio * cp_interleave)
+            + (segment - cp_prefix) * cp_interleave
+            + (virtual_offset % cp_interleave)
+        )
+        local_offset = torch.where(
+            is_local, local_offset, torch.zeros_like(local_offset)
+        )
+        block_table_indices = (
+            req_indices * n_blocks_per_req
+            + virtual_block * cp_ratio
+            + local_offset // block_size
+        )
+        block_nums = cad.block_table_tensor.view(-1)[block_table_indices]
+        new_slot_mapping = block_nums * block_size + local_offset % block_size
+        new_slot_mapping.masked_fill_(~is_local, PADDING_SLOT_ID)
+    else:
+        block_table_indices = (
+            req_indices * n_blocks_per_req + clamped_positions // block_size
+        )
+        block_nums = cad.block_table_tensor.view(-1)[block_table_indices]
+        block_offsets = clamped_positions % block_size
+        new_slot_mapping = block_nums * block_size + block_offsets
     # Mask out the position ids that exceed the max model length.
     exceeds_max_model_len = new_positions >= max_model_len
     new_slot_mapping.masked_fill_(exceeds_max_model_len, PADDING_SLOT_ID)

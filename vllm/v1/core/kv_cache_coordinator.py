@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from typing import NamedTuple
 
 from vllm import envs
+from vllm.distributed.utils import cp_token_split_factor
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
@@ -471,7 +472,10 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         self.dcp_world_size = dcp_world_size
         self.pcp_world_size = pcp_world_size
         if dcp_world_size > 1:
-            self.block_size *= dcp_world_size
+            # Virtual scheduler blocks span cp_token_split_factor physical
+            # blocks (dcp, or sum(--rank-tp-ratio) under uneven DCP); the
+            # single-type manager scales its block_size identically.
+            self.block_size *= cp_token_split_factor(dcp_world_size, 1)
         # For models using only Mamba, block_size is set to max_model_len when
         # prefix caching is disabled, and hash_block_size validation is skipped.
         assert not enable_caching or (hash_block_size == self.block_size), (

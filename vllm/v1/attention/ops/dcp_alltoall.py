@@ -459,3 +459,159 @@ def dcp_a2a_lse_reduce(
     return _dcp_a2a_unpack_combine(
         recv_buffer, D, lse_pack_dim, return_lse, is_lse_base_on_e
     )
+
+
+def dcp_a2a_lse_reduce_uneven(
+    cp_attn_out: torch.Tensor,
+    cp_attn_lse: torch.Tensor,
+    cp_group: GroupCoordinator,
+    ctx: CPTritonContext | None = None,
+    return_lse: bool = False,
+    is_lse_base_on_e: bool = True,
+    head_counts: list[int] | None = None,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    """Uneven-head variant of dcp_a2a_lse_reduce: ONE all_to_all_single
+    (native uneven splits) carries every rank's partial output plus the
+    bit-packed fp32 LSE for the destination's head slice; the receiver
+    combines the N partials locally with exact LSE weighting. Replaces
+    the LSE-all-gather + all-reduce + slice combine (3 collectives, 2x
+    volume) of cp_lse_ag_out_ar_uneven.
+
+    cp_attn_out: [B, H_total, D]; cp_attn_lse: [B, H_total] (fp32);
+    head_counts: per-rank q-head partition (sums to H_total).
+    Returns [B, h_r, D] (and [B, h_r] LSE if requested).
+    """
+    world_size = cp_group.world_size
+    if world_size == 1:
+        if return_lse:
+            return cp_attn_out, cp_attn_lse
+        return cp_attn_out
+    assert head_counts is not None and len(head_counts) == world_size
+    rank = cp_group.rank_in_group
+    B, H, D = cp_attn_out.shape
+    assert sum(head_counts) == H, (head_counts, H)
+    h_r = head_counts[rank]
+    lse_pack_dim = _dcp_a2a_lse_pack_dim(cp_attn_out.dtype)
+
+    # Plain torch.empty (not the shared workspace) for cudagraph safety -
+    # see _dcp_a2a_send_recv_buffers. Shapes differ: send carries all H
+    # heads, recv carries world_size chunks of this rank's h_r heads.
+    send_buffer = torch.empty(
+        (H, B, D + lse_pack_dim),
+        device=cp_attn_out.device,
+        dtype=cp_attn_out.dtype,
+    )
+    recv_buffer = torch.empty(
+        (world_size, h_r, B, D + lse_pack_dim),
+        device=cp_attn_out.device,
+        dtype=cp_attn_out.dtype,
+    )
+
+    _dcp_a2a_pack_send_uneven_kernel[(B, H, 1)](
+        cp_attn_out,
+        cp_attn_lse,
+        send_buffer,
+        cp_attn_out.stride(0),
+        cp_attn_out.stride(1),
+        cp_attn_out.stride(2),
+        cp_attn_lse.stride(0),
+        cp_attn_lse.stride(1),
+        send_buffer.stride(0),
+        send_buffer.stride(1),
+        send_buffer.stride(2),
+        HEAD_DIM=D,
+        LSE_PACK_DIM=lse_pack_dim,
+    )
+
+    work = dist.all_to_all_single(
+        recv_buffer.view(world_size * h_r, -1),
+        send_buffer.view(H, -1),
+        output_split_sizes=[h_r] * world_size,
+        input_split_sizes=list(head_counts),
+        group=cp_group.device_group,
+        async_op=True,
+    )
+    work.wait()
+
+    out = torch.empty((B, h_r, D), device=recv_buffer.device, dtype=recv_buffer.dtype)
+    out_lse = torch.empty(
+        (B, h_r) if return_lse else (1, 1),
+        device=recv_buffer.device,
+        dtype=torch.float32 if return_lse else recv_buffer.dtype,
+    )
+    # Reuse the even unpack/combine kernel: it is layout-agnostic via
+    # strides (our recv is [N, h, B, D+p] instead of [N, B, h, D+p]).
+    _dcp_a2a_unpack_combine_kernel[(B, h_r, 1)](
+        recv_buffer,
+        out,
+        out_lse,
+        recv_buffer.stride(0),
+        recv_buffer.stride(2),
+        recv_buffer.stride(1),
+        recv_buffer.stride(3),
+        out.stride(0),
+        out.stride(1),
+        out.stride(2),
+        out_lse.stride(0),
+        out_lse.stride(1),
+        N=world_size,
+        HEAD_DIM=D,
+        IS_BASE_E=is_lse_base_on_e,
+        RETURN_LSE=return_lse,
+        LSE_PACK_DIM=lse_pack_dim,
+    )
+    if return_lse:
+        return out, out_lse
+    return out
+
+
+@triton.jit
+def _dcp_a2a_pack_send_uneven_kernel(
+    out_ptr,
+    lse_ptr,
+    send_ptr,
+    out_stride_B,
+    out_stride_H,
+    out_stride_D,
+    lse_stride_B,
+    lse_stride_H,
+    send_stride_H,
+    send_stride_B,
+    send_stride_D,
+    HEAD_DIM: tl.constexpr,
+    LSE_PACK_DIM: tl.constexpr,
+):
+    """Head-major transpose-pack for the uneven a2a: heads are already
+    in global order, so destination chunks are contiguous prefix slices
+    of the send buffer - no per-destination logic needed."""
+    batch_idx = tl.program_id(0).to(tl.int64)
+    head_idx = tl.program_id(1).to(tl.int64)
+    d_offsets = tl.arange(0, HEAD_DIM)
+
+    send_base = head_idx * send_stride_H + batch_idx * send_stride_B
+    out_offsets = (
+        batch_idx * out_stride_B + head_idx * out_stride_H + d_offsets * out_stride_D
+    )
+    tl.store(
+        send_ptr + send_base + d_offsets * send_stride_D,
+        tl.load(out_ptr + out_offsets),
+    )
+
+    lse_val = tl.load(lse_ptr + batch_idx * lse_stride_B + head_idx * lse_stride_H)
+    if LSE_PACK_DIM == 1:
+        tl.store(
+            send_ptr + send_base + HEAD_DIM * send_stride_D,
+            lse_val.to(send_ptr.dtype.element_ty),
+        )
+    else:
+        lse_bits = lse_val.to(tl.uint32, bitcast=True)
+        lo = (lse_bits & 0xFFFF).to(tl.uint16)
+        hi = ((lse_bits >> 16) & 0xFFFF).to(tl.uint16)
+        tl.store(
+            send_ptr + send_base + HEAD_DIM * send_stride_D,
+            lo.to(send_ptr.dtype.element_ty, bitcast=True),
+        )
+        tl.store(
+            send_ptr + send_base + (HEAD_DIM + 1) * send_stride_D,
+            hi.to(send_ptr.dtype.element_ty, bitcast=True),
+        )

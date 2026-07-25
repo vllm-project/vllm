@@ -16,6 +16,7 @@ import torch
 from typing_extensions import runtime_checkable
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.distributed.utils import uneven_cp_ratios
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
@@ -893,7 +894,47 @@ def get_dcp_local_seq_lens(
     """While using dcp, kv_cache size stored on each rank may be different,
     use this function to calculate split decode seq_lens of each dcp rank.
     Only consider dcp now, we can extend the case of cp based on this.
+
+    Under uneven DCP (--rank-tp-ratio installed for this process), tokens
+    are distributed proportionally: within every round of
+    sum(ratios) * interleave tokens, rank r owns ratios[r] * interleave
+    tokens starting at prefix(r) * interleave. The even split below is the
+    special case ratios == (1, ..., 1).
     """
+    cp_ratios = uneven_cp_ratios(dcp_size)
+    if cp_ratios is not None:
+        split_sum = sum(cp_ratios)
+        prefixes = [sum(cp_ratios[:r]) for r in range(dcp_size)]
+        if dcp_rank is None:
+            ratio_t = torch.tensor(
+                cp_ratios, dtype=torch.int32, device=seq_lens.device
+            ).unsqueeze(0)
+            prefix_t = torch.tensor(
+                prefixes, dtype=torch.int32, device=seq_lens.device
+            ).unsqueeze(0)
+            num_cols = dcp_size
+        else:
+            ratio_t = torch.tensor(
+                [[cp_ratios[dcp_rank]]], dtype=torch.int32, device=seq_lens.device
+            )
+            prefix_t = torch.tensor(
+                [[prefixes[dcp_rank]]], dtype=torch.int32, device=seq_lens.device
+            )
+            num_cols = 1
+        seq_lens_tiled = seq_lens.to(torch.int32).unsqueeze(-1).repeat(1, num_cols)
+        round_size = split_sum * cp_kv_cache_interleave_size
+        full_rounds = seq_lens_tiled // round_size
+        remainder = seq_lens_tiled - full_rounds * round_size
+        local_remainder = torch.clip(
+            remainder - prefix_t * cp_kv_cache_interleave_size,
+            torch.zeros_like(ratio_t),
+            ratio_t * cp_kv_cache_interleave_size,
+        )
+        dcp_local_seq_lens = (
+            full_rounds * ratio_t * cp_kv_cache_interleave_size + local_remainder
+        )
+        return dcp_local_seq_lens.squeeze(1)
+
     seq_lens_i32 = seq_lens.to(torch.int32)
     if dcp_rank is None:
         rank_offsets = torch.arange(

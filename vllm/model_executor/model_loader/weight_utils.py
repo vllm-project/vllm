@@ -1267,8 +1267,13 @@ def row_parallel_weight_loader(
 LoaderFunction = Callable[[torch.Tensor, torch.Tensor], None]
 
 
-def sharded_weight_loader(shard_axis: int) -> LoaderFunction:
-    """Create a weight loader that shards the weights along the given axis"""
+def sharded_weight_loader(
+    shard_axis: int, tp_units: int | None = None
+) -> LoaderFunction:
+    """Create a weight loader that shards the weights along the given axis.
+
+    tp_units: master unit count of the dimension family (v4 free
+    partitioning); None keeps the v1 sum(ratios)-divisibility rule."""
 
     def loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
         from vllm.distributed import get_tensor_model_parallel_world_size
@@ -1285,6 +1290,7 @@ def sharded_weight_loader(shard_axis: int) -> LoaderFunction:
                 loaded_weight.shape[shard_axis],
                 get_tensor_model_parallel_world_size(),
                 tp_rank,
+                tp_units,
             )
         else:
             start_idx = tp_rank * shard_size

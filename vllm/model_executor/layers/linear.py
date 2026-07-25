@@ -24,6 +24,7 @@ from vllm.distributed.utils import (
     get_tp_partition_ratios,
     tp_partition_size,
     tp_partition_sizes,
+    uneven_dcp_active,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
@@ -78,19 +79,29 @@ def register_weight_loader_v2_supported_method(cls):
 
 
 def tp_loaded_shard_start(
-    loaded_full: int, tp_size: int, rank: int, shard_size: int
+    loaded_full: int,
+    tp_size: int,
+    rank: int,
+    shard_size: int,
+    units: int | None = None,
 ) -> int:
     """Start offset when narrowing a full checkpoint dimension to this
     rank's shard. Even TP: rank * shard_size (classic). Uneven TP
-    (--rank-tp-ratio): prefix sum of the per-rank partition sizes; the
-    given shard_size must match this rank's partition (consistency
-    check against mis-sized parameters)."""
+    (--rank-tp-ratio): prefix sum of the per-rank partition sizes (with
+    `units` = the dimension family's master unit count under v4 free
+    partitioning); the given shard_size must match this rank's partition
+    (consistency check against mis-sized parameters)."""
     if not get_tp_partition_ratios():
         return rank * shard_size
-    sizes = tp_partition_sizes(loaded_full, tp_size)
+    if shard_size == loaded_full:
+        # Fully replicated component (kv heads under uneven DCP): every
+        # rank loads the whole checkpoint dimension.
+        return 0
+    sizes = tp_partition_sizes(loaded_full, tp_size, units)
     assert sizes[rank] == shard_size, (
         f"uneven-TP shard mismatch: expected {sizes[rank]} for rank "
-        f"{rank} of dim {loaded_full}, parameter has {shard_size}"
+        f"{rank} of dim {loaded_full} (units={units}), parameter has "
+        f"{shard_size}"
     )
     return sum(sizes[:rank])
 
@@ -485,6 +496,7 @@ class ColumnParallelLinear(LinearBase):
         disable_tp: bool = False,
         tp_rank: int | None = None,
         tp_size: int | None = None,
+        tp_units: int | None = None,
     ):
         # Divide the weight matrix along the last dimension.
         if disable_tp:
@@ -499,16 +511,31 @@ class ColumnParallelLinear(LinearBase):
                 else get_tensor_model_parallel_world_size()
             )
         self.input_size_per_partition = input_size
-        self.output_size_per_partition = tp_partition_size(
-            output_size, self.tp_size, self.tp_rank
-        )
-        self.output_partition_sizes = [self.output_size_per_partition]
-        # If QKV or MergedColumn, use output size of each partition.
-        if hasattr(self, "output_sizes"):
-            self.output_partition_sizes = [
-                tp_partition_size(output_size, self.tp_size, self.tp_rank)
-                for output_size in self.output_sizes
-            ]
+        # v4 free partitioning: master unit count of this layer's output
+        # dimension family (e.g. attention heads, GDN k-heads,
+        # intermediate/quant_group). None keeps the v1 divisibility rule.
+        if not hasattr(self, "tp_units"):
+            self.tp_units = tp_units
+        custom_partition_sizes = getattr(self, "custom_output_partition_sizes", None)
+        if custom_partition_sizes is not None:
+            # Subclass supplied explicit per-rank partition sizes (QKV with
+            # replicated kv heads under uneven DCP): the per-rank output is
+            # not a plain ratio split of the fused total.
+            self.output_partition_sizes = list(custom_partition_sizes)
+            self.output_size_per_partition = sum(custom_partition_sizes)
+        else:
+            self.output_size_per_partition = tp_partition_size(
+                output_size, self.tp_size, self.tp_rank, self.tp_units
+            )
+            self.output_partition_sizes = [self.output_size_per_partition]
+            # If QKV or MergedColumn, use output size of each partition.
+            if hasattr(self, "output_sizes"):
+                self.output_partition_sizes = [
+                    tp_partition_size(
+                        output_size, self.tp_size, self.tp_rank, self.tp_units
+                    )
+                    for output_size in self.output_sizes
+                ]
 
         super().__init__(
             input_size,
@@ -523,7 +550,6 @@ class ColumnParallelLinear(LinearBase):
             tp_rank=self.tp_rank,
             tp_size=self.tp_size,
         )
-
         self._maybe_allow_fp8_block_shape_mismatch()
         self.gather_output = gather_output
 
@@ -540,6 +566,11 @@ class ColumnParallelLinear(LinearBase):
                 else self.weight_loader
             ),
         )
+        if self.tp_units is not None:
+            # Expose the family unit count to the v2 weight loaders -
+            # AFTER create_weights, which registers the parameters.
+            for p in self.parameters():
+                set_weight_attrs(p, {"tp_units": self.tp_units})
 
         if bias:
             self.bias = Parameter(
@@ -596,7 +627,11 @@ class ColumnParallelLinear(LinearBase):
         if output_dim is not None and not is_sharded_weight:
             shard_size = param_data.shape[output_dim]
             start_idx = tp_loaded_shard_start(
-                loaded_weight.shape[output_dim], self.tp_size, self.tp_rank, shard_size
+                loaded_weight.shape[output_dim],
+                self.tp_size,
+                self.tp_rank,
+                shard_size,
+                self.tp_units,
             )
             loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
 
@@ -725,14 +760,17 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        tp_units: int | None = None,
     ):
         self.output_sizes = output_sizes
         self.tp_size = get_tensor_model_parallel_world_size() if not disable_tp else 1
         self.tp_rank = get_tensor_model_parallel_rank() if not disable_tp else 0
+        self.tp_units = tp_units
 
         for output_size in output_sizes:
-            # Validates divisibility (even: % tp == 0, uneven: % sum(ratios))
-            tp_partition_sizes(output_size, self.tp_size)
+            # Validates divisibility (even: % tp == 0, uneven: % sum(ratios)
+            # or the family unit count under v4 free partitioning)
+            tp_partition_sizes(output_size, self.tp_size, tp_units)
         super().__init__(
             input_size=input_size,
             output_size=sum(output_sizes),
@@ -859,11 +897,14 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         assert loaded_shard_id < len(self.output_sizes)
         if output_dim is not None:
             shard_offset = sum(
-                tp_partition_size(sz, self.tp_size, self.tp_rank)
+                tp_partition_size(sz, self.tp_size, self.tp_rank, self.tp_units)
                 for sz in self.output_sizes[:loaded_shard_id]
             )
             shard_size = tp_partition_size(
-                self.output_sizes[loaded_shard_id], self.tp_size, self.tp_rank
+                self.output_sizes[loaded_shard_id],
+                self.tp_size,
+                self.tp_rank,
+                self.tp_units,
             )
 
             if isinstance(param, BlockQuantScaleParameter):
@@ -901,7 +942,11 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 )
             param_data = param_data.narrow(output_dim, shard_offset, shard_size)
             start_idx = tp_loaded_shard_start(
-                loaded_weight.shape[output_dim], self.tp_size, self.tp_rank, shard_size
+                loaded_weight.shape[output_dim],
+                self.tp_size,
+                self.tp_rank,
+                shard_size,
+                self.tp_units,
             )
             if not is_sharded_weight:
                 loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
@@ -1011,11 +1056,14 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         assert loaded_shard_id < len(self.output_sizes)
 
         shard_offset = sum(
-            tp_partition_size(sz, self.tp_size, self.tp_rank)
+            tp_partition_size(sz, self.tp_size, self.tp_rank, self.tp_units)
             for sz in self.output_sizes[:loaded_shard_id]
         )
         shard_size = tp_partition_size(
-            self.output_sizes[loaded_shard_id], self.tp_size, self.tp_rank
+            self.output_sizes[loaded_shard_id],
+            self.tp_size,
+            self.tp_rank,
+            self.tp_units,
         )
 
         if isinstance(param, BlockQuantScaleParameter):
@@ -1100,6 +1148,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         return_bias: bool = True,
         disable_tp: bool = False,
         v_head_size: int | None = None,
+        tp_units: int | None = None,
     ):
         self.hidden_size = hidden_size
         self.head_size = head_size
@@ -1111,7 +1160,60 @@ class QKVParallelLinear(ColumnParallelLinear):
         # Divide the weight matrix along the last dimension.
         tp_size = get_tensor_model_parallel_world_size() if not disable_tp else 1
         tp_rank = get_tensor_model_parallel_rank() if not disable_tp else 0
-        if get_tp_partition_ratios():
+        # v4 free partitioning: master q-head unit count (WITHOUT any
+        # fused gate doubling). Kept on a separate field - the base class
+        # must not partition the (differently ruled) kv columns by it.
+        self.tp_head_units = tp_units
+        self.tp_units = None
+        if (
+            get_tp_partition_ratios()
+            and not disable_tp
+            and uneven_dcp_active()
+            and self.total_num_kv_heads < self.total_num_heads
+        ):
+            # Uneven DCP: the KV cache is split along the token axis, so
+            # every rank computes and stores ALL kv heads (fully
+            # replicated k/v projections); only q heads are
+            # ratio-partitioned. Restricted to GQA layers (kv < q): MHA
+            # QKV layers (e.g. vision towers) have no paged KV cache and
+            # keep the plain ratio split.
+            self.num_heads = tp_partition_size(
+                self.total_num_heads, tp_size, tp_rank, self.tp_head_units
+            )
+            self.num_kv_heads = self.total_num_kv_heads
+            self.num_kv_head_replicas = 1
+            # Per-rank partition sizes are not a ratio split of the fused
+            # total (kv is full-width); hand them to the base class
+            # explicitly.
+            self.custom_output_partition_sizes = [
+                self.num_heads * self.head_size,
+                self.total_num_kv_heads * self.head_size,
+                self.total_num_kv_heads * self.v_head_size,
+            ]
+        elif (
+            get_tp_partition_ratios()
+            and self.tp_head_units is not None
+            and self.total_num_kv_heads == self.total_num_heads
+        ):
+            # MHA under free partitioning (v4): q and kv have identical
+            # unit counts, so both shards stay aligned per rank.
+            self.num_heads = tp_partition_size(
+                self.total_num_heads, tp_size, tp_rank, self.tp_head_units
+            )
+            self.num_kv_heads = tp_partition_size(
+                self.total_num_kv_heads, tp_size, tp_rank, self.tp_head_units
+            )
+            self.num_kv_head_replicas = 1
+            self.custom_output_partition_sizes = [
+                self.num_heads * self.head_size,
+                self.num_kv_heads * self.head_size,
+                self.num_kv_heads * self.v_head_size,
+            ]
+        elif get_tp_partition_ratios():
+            # Uneven TP without DCP: kv is split by the divisibility rule,
+            # not by unit rounding - head units must not be applied to
+            # the fused loader offsets (e.g. the kv component).
+            self.tp_head_units = None
             # Uneven TP: every rank must own at least one whole kv head;
             # the replicated-kv path is not supported with ratios.
             if self.total_num_kv_heads % sum(get_tp_partition_ratios()) != 0:
@@ -1119,7 +1221,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                     f"--rank-tp-ratio: total_num_kv_heads "
                     f"({self.total_num_kv_heads}) must be divisible by "
                     f"sum(ratios) ({sum(get_tp_partition_ratios())}); "
-                    "kv-head replication is not supported with uneven TP."
+                    "kv-head replication is not supported with uneven TP "
+                    "(use uneven DCP for tp < num_kv_heads)."
                 )
             self.num_heads = tp_partition_size(self.total_num_heads, tp_size, tp_rank)
             self.num_kv_heads = tp_partition_size(
@@ -1127,10 +1230,12 @@ class QKVParallelLinear(ColumnParallelLinear):
             )
             self.num_kv_head_replicas = 1
         elif tp_size >= self.total_num_kv_heads:
+            self.tp_head_units = None
             self.num_heads = divide(self.total_num_heads, tp_size)
             self.num_kv_heads = 1
             self.num_kv_head_replicas = divide(tp_size, self.total_num_kv_heads)
         else:
+            self.tp_head_units = None
             self.num_heads = divide(self.total_num_heads, tp_size)
             self.num_kv_heads = divide(self.total_num_kv_heads, tp_size)
             self.num_kv_head_replicas = 1
@@ -1174,6 +1279,11 @@ class QKVParallelLinear(ColumnParallelLinear):
             return_bias=return_bias,
             disable_tp=disable_tp,
         )
+        if self.tp_head_units is not None:
+            # v2 loaders compute the q-component prefix offset with this;
+            # replicated kv components short-circuit to offset 0 first.
+            for p in self.parameters():
+                set_weight_attrs(p, {"tp_units": self.tp_head_units})
 
     def validate_shard_id(self, shard_id: Any) -> TypeIs[str | None]:
         if shard_id in {"q", "k", "v"} or shard_id is None:
@@ -1449,13 +1559,19 @@ class QKVParallelLinear(ColumnParallelLinear):
 
             param_data = param_data.narrow(output_dim, shard_offset, shard_size)
             if get_tp_partition_ratios():
-                # Uneven TP (no kv replication): prefix-sum offset into the
-                # full q/k/v component of the checkpoint.
+                # Uneven TP: prefix-sum offset into the full q/k/v
+                # component of the checkpoint (q uses the head units;
+                # replicated kv resolves to offset 0 via the
+                # shard_size == full early-out).
+                # q and (MHA-partitioned) k/v share the head units; a
+                # replicated kv component short-circuits to offset 0 via
+                # the shard_size == full early-out before units apply.
                 start_idx = tp_loaded_shard_start(
                     loaded_weight.shape[output_dim],
                     self.tp_size,
                     self.tp_rank,
                     shard_size,
+                    self.tp_head_units,
                 )
             else:
                 if loaded_shard_id == "q":
@@ -1744,12 +1860,16 @@ class RowParallelLinear(LinearBase):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        tp_units: int | None = None,
     ):
         # Divide the weight matrix along the first dimension.
         self.tp_rank = get_tensor_model_parallel_rank() if not disable_tp else 0
         self.tp_size = get_tensor_model_parallel_world_size() if not disable_tp else 1
+        # Family unit count of the INPUT dimension (matches the paired
+        # column-parallel layer's tp_units under v4 free partitioning).
+        self.tp_units = tp_units
         self.input_size_per_partition = tp_partition_size(
-            input_size, self.tp_size, self.tp_rank
+            input_size, self.tp_size, self.tp_rank, tp_units
         )
         self.output_size_per_partition = output_size
         self.output_partition_sizes = [output_size]
@@ -1765,7 +1885,6 @@ class RowParallelLinear(LinearBase):
             return_bias=return_bias,
             disable_tp=disable_tp,
         )
-
         self.input_is_parallel = input_is_parallel
         self.reduce_results = reduce_results
 
@@ -1782,6 +1901,10 @@ class RowParallelLinear(LinearBase):
                 else self.weight_loader
             ),
         )
+        if tp_units is not None:
+            # AFTER create_weights, which registers the parameters.
+            for p in self.parameters():
+                set_weight_attrs(p, {"tp_units": tp_units})
         if not reduce_results and (bias and not skip_bias_add):
             raise ValueError(
                 "When not reduce the results, adding bias to the "
@@ -1813,7 +1936,11 @@ class RowParallelLinear(LinearBase):
         if input_dim is not None and not is_sharded_weight:
             shard_size = param_data.shape[input_dim]
             start_idx = tp_loaded_shard_start(
-                loaded_weight.shape[input_dim], self.tp_size, self.tp_rank, shard_size
+                loaded_weight.shape[input_dim],
+                self.tp_size,
+                self.tp_rank,
+                shard_size,
+                self.tp_units,
             )
             loaded_weight = loaded_weight.narrow(input_dim, start_idx, shard_size)
 

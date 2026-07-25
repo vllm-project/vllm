@@ -864,6 +864,57 @@ class Platform:
         if mamba_page_size == 0:
             return
 
+        # Uneven DCP (--rank-tp-ratio + dcp == tp): solve on a PER-RATIO-
+        # SHARE basis. The engine-side state shape above used the smallest
+        # ratio as fallback, so divide it down to one share; each rank's
+        # mamba page is share * its_ratio, and its attention allocation
+        # per virtual block is attn_page * its_ratio - the ratio cancels,
+        # so one global block size satisfies every rank. The per-rank
+        # padding is re-applied in MambaBase.get_kv_cache_spec.
+        ratios = parallel_config.rank_tp_ratio
+        uneven_dcp = (
+            bool(ratios)
+            and parallel_config.decode_context_parallel_size > 1
+            and len(set(ratios)) > 1
+        )
+        if uneven_dcp:
+            # The token vector follows the FREE memory per rank and
+            # is decoupled from the GDN head partition. The attention
+            # block size must therefore satisfy EVERY rank:
+            # attn_page_1_token * bs * t_r >= state_r = unit_state * g_r.
+            # Normalize the (rank-resolved) mamba page to one GDN k-head
+            # (unit_state), take the max over ranks of
+            # ceil(unit_state * g_r / t_r) as the per-token-unit page,
+            # and let the generic solve below derive bs from it. The
+            # per-rank padding target stays "padded_scalar * t_r"
+            # (mamba/abstract.py), which by construction covers state_r.
+            from math import ceil
+
+            from vllm.distributed.utils import (
+                gdn_head_partition,
+                resolve_cp_token_ratios,
+            )
+
+            token_vector = resolve_cp_token_ratios(vllm_config)
+            assert token_vector is not None
+            gdn_part = gdn_head_partition(vllm_config, list(ratios))
+            try:
+                from vllm.distributed.parallel_state import (
+                    get_tensor_model_parallel_rank,
+                )
+
+                g_res = gdn_part[get_tensor_model_parallel_rank()]
+            except (AssertionError, ValueError):
+                g_res = min(gdn_part)
+            assert mamba_page_size % g_res == 0, (
+                f"mamba page size {mamba_page_size} not divisible by "
+                f"resolved GDN share {g_res}"
+            )
+            unit_state = mamba_page_size // g_res
+            mamba_page_size = max(
+                ceil(unit_state * g / t) for g, t in zip(gdn_part, token_vector)
+            )
+
         # mamba_block_size here should either be user specified value or None
         mamba_block_size = (
             cache_config.mamba_block_size

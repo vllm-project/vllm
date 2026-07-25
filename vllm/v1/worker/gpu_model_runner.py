@@ -214,6 +214,7 @@ from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.block_table import SlotMappingMode
 from vllm.v1.worker.cp_utils import (
     check_attention_cp_compatibility,
+    get_cp_token_split_factor,
     get_dcp_dummy_context_len,
     prepare_dcp_dummy_context_metadata,
 )
@@ -7292,6 +7293,7 @@ class GPUModelRunner(
         block_sizes = []
         max_num_blocks = []
         slot_mapping_modes = []
+        cp_split_per_group = []
         max_model_len = max(self.max_model_len, self.max_encoder_len)
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             kv_cache_spec = kv_cache_group.kv_cache_spec
@@ -7304,9 +7306,26 @@ class GPUModelRunner(
                 slot_mapping_modes.append(SlotMappingMode.NONE)
             else:
                 slot_mapping_modes.append(SlotMappingMode.TOKEN_TO_KV_SLOT)
-            max_num_blocks_per_req = kv_cache_spec.max_num_blocks_per_req(
-                self.vllm_config, max_model_len
+            # Mamba/linear-attention groups keep their full per-sequence
+            # state on every rank - no token-axis split under CP.
+            cp_split = not isinstance(kv_cache_group.kv_cache_spec, MambaSpec)
+            cp_split_per_group.append(cp_split)
+            ratios = self.parallel_config.rank_tp_ratio
+            uneven_dcp = (
+                bool(ratios)
+                and self.parallel_config.decode_context_parallel_size > 1
+                and len(set(ratios)) > 1
             )
+            if cp_split and uneven_dcp:
+                # Virtual scheduler blocks span
+                # block_size * sum(--rank-tp-ratio) tokens.
+                max_num_blocks_per_req = cdiv(
+                    max_model_len, block_size * get_cp_token_split_factor()
+                )
+            else:
+                max_num_blocks_per_req = kv_cache_spec.max_num_blocks_per_req(
+                    self.vllm_config, max_model_len
+                )
             max_num_blocks.append(max_num_blocks_per_req)
 
         if (
@@ -7328,6 +7347,7 @@ class GPUModelRunner(
                 block_sizes=block_sizes,
                 kernel_block_sizes=kernel_block_sizes,
                 max_num_blocks_per_req=max_num_blocks,
+                cp_split_per_group=cp_split_per_group,
                 num_spec_tokens=self.num_spec_tokens,
                 logitsprocs=self.input_batch.logitsprocs,
                 logitsprocs_need_output_token_ids=self.input_batch.logitsprocs_need_output_token_ids,

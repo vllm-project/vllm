@@ -646,12 +646,22 @@ def resolve_kv_cache_block_sizes(
     dcp = vllm_config.parallel_config.decode_context_parallel_size
     groups = kv_cache_config.kv_cache_groups
 
+    ratios = vllm_config.parallel_config.rank_tp_ratio
+    uneven_dcp = bool(ratios) and dcp > 1 and len(set(ratios)) > 1
+    # Token-split factor of one scheduler block: dcp for the classic even
+    # split, sum(--rank-tp-ratio) under uneven DCP.
+    split_factor = sum(ratios) if uneven_dcp else dcp
+
     if len(groups) <= 1:
-        bs = cache_config.block_size * dcp
+        bs = cache_config.block_size * split_factor
         return bs, bs
 
+    # Effective per-group token span of one scheduler block: attention
+    # groups span block_size * split_factor tokens ("virtual" blocks under
+    # CP); mamba groups keep their full per-sequence state on every rank
+    # and span their raw block_size.
     group_block_sizes = [
-        g.kv_cache_spec.block_size * dcp
+        g.kv_cache_spec.block_size * split_factor
         if isinstance(g.kv_cache_spec, AttentionSpec)
         else g.kv_cache_spec.block_size
         for g in groups
@@ -1067,8 +1077,30 @@ def is_kv_cache_page_size_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool
     return len(page_sizes) == 1
 
 
+def _local_uneven_dcp_ratio(vllm_config: VllmConfig) -> int:
+    """This process's token-vector entry under uneven DCP, else 1 -
+    the number of physical pages this rank stores per virtual block.
+
+    Worker processes resolve their own TP rank; engine-side callers (no TP
+    group) get worker 0's share, matching the merged specs' provenance.
+    """
+    from vllm.distributed.utils import resolve_cp_token_ratios
+
+    token_vector = resolve_cp_token_ratios(vllm_config)
+    if token_vector is None:
+        return 1
+    try:
+        from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
+
+        rank = get_tensor_model_parallel_rank()
+    except (AssertionError, ValueError):
+        rank = 0
+    return token_vector[rank]
+
+
 def unify_kv_cache_spec_page_size(
     kv_cache_spec: dict[str, KVCacheSpec],
+    cp_rank_ratio: int = 1,
 ) -> dict[str, KVCacheSpec]:
     """
     Unify the page size of the given KVCacheSpec. If the page size of all layers
@@ -1088,7 +1120,20 @@ def unify_kv_cache_spec_page_size(
     Returns:
         The updated KVCacheSpec with the same page_size_bytes.
     """
-    page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
+
+    def effective_page_size(spec: KVCacheSpec) -> int:
+        # Uneven DCP: comparison must happen per scheduler block - a
+        # token-split (attention) group stores cp_rank_ratio physical
+        # pages per virtual block, a mamba group stores one full state
+        # page. The --rank-tp-ratio dependence cancels between the two
+        # (mamba pages scale with the ratio, attention effective pages
+        # pick it up via the factor), so the resulting unified block
+        # sizes are identical on every rank.
+        if cp_rank_ratio == 1 or isinstance(spec, MambaSpec):
+            return spec.page_size_bytes
+        return spec.page_size_bytes * cp_rank_ratio
+
+    page_sizes = {effective_page_size(layer) for layer in kv_cache_spec.values()}
     if len(page_sizes) <= 1:
         # All layers have the same page size, no need to unify.
         return kv_cache_spec
@@ -1096,7 +1141,7 @@ def unify_kv_cache_spec_page_size(
     max_page_size = max(page_sizes)
     new_kv_cache_spec = {}
     for layer_name, layer_spec in kv_cache_spec.items():
-        if layer_spec.page_size_bytes == max_page_size:
+        if effective_page_size(layer_spec) == max_page_size:
             new_kv_cache_spec[layer_name] = layer_spec
         elif isinstance(layer_spec, MambaSpec):
             # MambaSpec's page size is determined by its state shapes and does
@@ -1109,7 +1154,7 @@ def unify_kv_cache_spec_page_size(
             assert new_spec.page_size_bytes == max_page_size
             new_kv_cache_spec[layer_name] = new_spec
         else:
-            layer_page_size = layer_spec.page_size_bytes
+            layer_page_size = effective_page_size(layer_spec)
             if max_page_size % layer_page_size == 0:
                 ratio = max_page_size // layer_page_size
                 new_block_size = layer_spec.block_size * ratio
@@ -1117,6 +1162,7 @@ def unify_kv_cache_spec_page_size(
             elif (
                 isinstance(layer_spec, AttentionSpec)
                 and layer_spec.indexes_kv_by_block_stride
+                and cp_rank_ratio == 1
             ):
                 new_spec = replace(layer_spec, page_size_padded=max_page_size)
             else:
@@ -1125,9 +1171,19 @@ def unify_kv_cache_spec_page_size(
                     "maximum page size and cannot be padded. Padding is only "
                     "supported for attention layers whose backend indexes KV "
                     "pages by the block stride (indexes_kv_by_block_stride is "
-                    "True)."
+                    "True) and not under uneven DCP."
                 )
-            assert new_spec.page_size_bytes == max_page_size
+            if effective_page_size(new_spec) != max_page_size:
+                raise ValueError(
+                    f"Page-size unification failed for layer {layer_name} "
+                    f"({type(layer_spec).__name__}): effective page "
+                    f"{effective_page_size(new_spec)} != target "
+                    f"{max_page_size} (raw page {layer_spec.page_size_bytes}, "
+                    f"block_size {layer_spec.block_size}, "
+                    f"cp_rank_ratio {cp_rank_ratio}). Under uneven DCP this "
+                    "usually means the mamba page padding and the attention "
+                    "block size were solved inconsistently."
+                )
             new_kv_cache_spec[layer_name] = new_spec
     return new_kv_cache_spec
 
@@ -1362,6 +1418,7 @@ def get_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
+    cp_rank_ratio: int | None = None,
 ) -> KVCacheConfig:
     """
     Generate the KV cache configuration from the KV cache groups and spec
@@ -1371,9 +1428,20 @@ def get_kv_cache_config_from_groups(
         vllm_config: The global VllmConfig
         kv_cache_groups: The KV cache groups
         available_memory: Memory available for KV cache in bytes
+        cp_rank_ratio: Uneven DCP only - this worker's --rank-tp-ratio
+            entry. Token-split groups store cp_rank_ratio physical pages
+            per scheduler ("virtual") block, so num_blocks is counted in
+            virtual blocks and tensors are sized with the per-group
+            effective page size (page * ratio for token-split groups,
+            page * 1 for mamba groups, whose state is not token-split).
+            None (default) resolves this process's own ratio - correct
+            for worker-side callers; the engine passes it explicitly per
+            worker.
     Returns:
         The generated KVCacheConfig
     """
+    if cp_rank_ratio is None:
+        cp_rank_ratio = _local_uneven_dcp_ratio(vllm_config)
     if len(kv_cache_groups) == 0:
         # Attention free models do not have KV cache.
         # Return num_blocks=1 as BlockPool always needs a null_block.
@@ -1383,6 +1451,15 @@ def get_kv_cache_config_from_groups(
             kv_cache_groups=kv_cache_groups,
         )
 
+    def group_block_factor(spec: KVCacheSpec) -> int:
+        # Physical pages this rank stores per scheduler block: uneven DCP
+        # stores cp_rank_ratio pages per virtual block for token-split
+        # groups; mamba groups keep one full state page per block on
+        # every rank (their state has no token axis).
+        if cp_rank_ratio == 1 or isinstance(spec, MambaSpec):
+            return 1
+        return cp_rank_ratio
+
     # Determine how model runners should initialize the KV cache tensors.
     if len(kv_cache_groups) == 1 and isinstance(
         kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs
@@ -1390,14 +1467,17 @@ def get_kv_cache_config_from_groups(
         # Special case: all layers have the same type of KV cache but with
         # different hidden sizes. Allocate different amount of memory for each
         # layer based on its hidden size.
-        num_blocks = (
-            available_memory // kv_cache_groups[0].kv_cache_spec.page_size_bytes
+        uniform_factor = group_block_factor(kv_cache_groups[0].kv_cache_spec)
+        num_blocks = available_memory // (
+            kv_cache_groups[0].kv_cache_spec.page_size_bytes * uniform_factor
         )
         num_blocks = may_override_num_blocks(vllm_config, num_blocks)
         per_layer_specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
         kv_cache_tensors = [
             KVCacheTensor(
-                size=per_layer_specs[layer_name].page_size_bytes * num_blocks,
+                size=per_layer_specs[layer_name].page_size_bytes
+                * uniform_factor
+                * num_blocks,
                 shared_by=[layer_name],
             )
             for layer_name in kv_cache_groups[0].layer_names
@@ -1405,6 +1485,11 @@ def get_kv_cache_config_from_groups(
     elif _use_packed_kv_cache_config(vllm_config, kv_cache_groups):
         # DeepSeek V4 uses the packed layout by default. Other multi-group
         # layouts can opt in with --enable-cross-layers.
+        if cp_rank_ratio > 1:
+            raise NotImplementedError(
+                "Uneven DCP does not support the packed KV cache layout "
+                "(DeepSeek V4 / --enable-cross-layers)."
+            )
         num_blocks, kv_cache_tensors = _get_kv_cache_config_packed(
             vllm_config, kv_cache_groups, available_memory
         )
@@ -1419,9 +1504,31 @@ def get_kv_cache_config_from_groups(
         # full.1, sw.2: share another Tensor with size=available_memory//2
         group_size = max(len(group.layer_names) for group in kv_cache_groups)
 
-        page_size = get_uniform_page_size(
-            [group.kv_cache_spec for group in kv_cache_groups]
-        )
+        if cp_rank_ratio > 1:
+            # Uneven DCP: uniformity must hold for the EFFECTIVE page size
+            # (bytes per scheduler block on this rank). For hybrid models
+            # the --rank-tp-ratio dependence cancels between the two group
+            # types: attention pages are ratio-independent (full kv heads)
+            # but counted cp_rank_ratio times per virtual block, while
+            # mamba pages scale with the ratio directly and are counted
+            # once.
+            effective_pages = {
+                g.kv_cache_spec.page_size_bytes * group_block_factor(g.kv_cache_spec)
+                for g in kv_cache_groups
+            }
+            if len(effective_pages) != 1:
+                raise ValueError(
+                    "Uneven DCP requires a uniform effective page size per "
+                    "scheduler block across KV cache groups "
+                    f"(got {sorted(effective_pages)} bytes). For hybrid "
+                    "models use --mamba-cache-mode align so the attention "
+                    "block size matches the mamba state page."
+                )
+            page_size = effective_pages.pop()
+        else:
+            page_size = get_uniform_page_size(
+                [group.kv_cache_spec for group in kv_cache_groups]
+            )
         assert group_size > 0, "group_size must be greater than 0"
         num_blocks = get_num_blocks(
             vllm_config, group_size, available_memory, page_size
@@ -1831,8 +1938,16 @@ def get_kv_cache_groups(
 
     # Prefer preserving each layer's cache semantics. If physical pages cannot
     # be unified, try a supported allocation-only fallback before failing.
+    # Uneven DCP: page sizes in the specs are rank-specific (mamba states
+    # scale with the ratio), so unify with the ratio of the rank the specs
+    # came from - the local TP rank in worker processes, worker 0 for the
+    # merged engine-side specs. The resulting block sizes are
+    # rank-invariant (the ratio cancels between mamba pages and attention
+    # effective pages).
     try:
-        filtered_spec = unify_kv_cache_spec_page_size(filtered_spec)
+        filtered_spec = unify_kv_cache_spec_page_size(
+            filtered_spec, cp_rank_ratio=_local_uneven_dcp_ratio(vllm_config)
+        )
     except NotImplementedError:
         fallback_groups = _try_get_full_allocation_fallback_groups(kv_cache_spec)
         if fallback_groups is None:
@@ -1890,6 +2005,7 @@ def get_kv_cache_capacity(
 def _max_memory_usage_bytes_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
+    cp_rank_ratio: int | None = None,
 ) -> int:
     """
     Calculate maximum memory usage in bytes from KV cache groups.
@@ -1939,6 +2055,38 @@ def _max_memory_usage_bytes_from_groups(
     # General case: group_size pools, each shared by one layer per group
     # Memory = group_size * page_size * blocks_for_max_len
     group_size = max(len(group.layer_names) for group in kv_cache_groups)
+    if cp_rank_ratio is None:
+        cp_rank_ratio = _local_uneven_dcp_ratio(vllm_config)
+    from vllm.distributed.utils import resolve_cp_token_ratios as _resolve_tv
+
+    if cp_rank_ratio > 1 or _resolve_tv(vllm_config) is not None:
+        # Uneven DCP: count in scheduler ("virtual") blocks with the
+        # per-worker effective page size. Token-split groups span
+        # sum(ratios) physical blocks of full-sequence accounting per
+        # virtual block; mamba groups keep one state page per block.
+        from vllm.distributed.utils import resolve_cp_token_ratios as _rtr
+
+        _tv = _rtr(vllm_config)
+        token_split = sum(_tv) if _tv else 1
+
+        def pool_blocks(spec: KVCacheSpec) -> int:
+            per_block = spec.page_size_bytes * (
+                1 if isinstance(spec, MambaSpec) else token_split
+            )
+            return cdiv(spec.max_memory_usage_bytes(vllm_config), per_block)
+
+        effective_pages = {
+            g.kv_cache_spec.page_size_bytes
+            * (1 if isinstance(g.kv_cache_spec, MambaSpec) else cp_rank_ratio)
+            for g in kv_cache_groups
+        }
+        assert len(effective_pages) == 1, (
+            f"non-uniform effective pages {sorted(effective_pages)}"
+        )
+        page_size = effective_pages.pop()
+        blocks_needed = sum(pool_blocks(g.kv_cache_spec) for g in kv_cache_groups)
+        return group_size * page_size * blocks_needed
+
     page_size = get_uniform_page_size(
         [group.kv_cache_spec for group in kv_cache_groups]
     )
@@ -1954,6 +2102,7 @@ def _estimate_max_model_len_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
+    cp_rank_ratio: int | None = None,
 ) -> int:
     """
     Binary search for the maximum model length that fits in available memory.
@@ -1964,7 +2113,9 @@ def _estimate_max_model_len_from_groups(
     def fits(model_len: int) -> bool:
         vllm_config.model_config.max_model_len = model_len
         return (
-            _max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
+            _max_memory_usage_bytes_from_groups(
+                vllm_config, kv_cache_groups, cp_rank_ratio
+            )
             <= available_memory
         )
 
@@ -2014,12 +2165,25 @@ def _auto_fit_max_model_len(
         return
 
     # Find the max_model_len that fits across all workers.
+    # Uneven DCP: each worker's specs carry its own ratio-scaled pages;
+    # worker index == TP rank in the pure-TP topology this mode requires.
+    from vllm.distributed.utils import resolve_cp_token_ratios
+
+    token_vector = resolve_cp_token_ratios(vllm_config)
+    uneven_dcp = token_vector is not None
     auto_fit_max = original_max
     limiting_worker_mem = available_memory[0]
-    for groups, avail_mem in zip(projected_groups_per_worker, available_memory):
+    for worker_idx, (groups, avail_mem) in enumerate(
+        zip(projected_groups_per_worker, available_memory)
+    ):
         if not groups:
             continue
-        worker_max = _estimate_max_model_len_from_groups(vllm_config, groups, avail_mem)
+        worker_max = _estimate_max_model_len_from_groups(
+            vllm_config,
+            groups,
+            avail_mem,
+            cp_rank_ratio=token_vector[worker_idx] if uneven_dcp else None,
+        )
         if worker_max < auto_fit_max:
             auto_fit_max = worker_max
             limiting_worker_mem = avail_mem
@@ -2084,8 +2248,15 @@ def _project_kv_cache_groups_to_worker(
             )
         elif worker_layer_names and use_worker_specs:
             # Uneven TP: size this worker's config with its OWN spec
-            # (per-rank page size), not the canonical merged one.
+            # (per-rank page size), not the canonical merged one. Keep the
+            # group's unified block_size though - page-size unification
+            # (mamba-cache-mode align) may have raised the attention block
+            # size after the worker reported its spec.
             group_spec = worker_spec[worker_layer_names[0]]
+            if group_spec.block_size != group.kv_cache_spec.block_size:
+                group_spec = replace(
+                    group_spec, block_size=group.kv_cache_spec.block_size
+                )
         projected_groups.append(
             KVCacheGroupSpec(
                 worker_layer_names,
@@ -2207,26 +2378,58 @@ def get_kv_cache_configs(
         )
 
     # Check if the available memory is enough per worker.
-    for groups, avail_mem in zip(projected_groups_per_worker, available_memory):
+    # Uneven DCP: worker w stores ratios[w] physical pages per scheduler
+    # ("virtual") block for token-split groups, so its num_blocks must be
+    # counted in virtual blocks. Worker index == TP rank for the pure-TP
+    # single-node topology this mode is restricted to.
+    from vllm.distributed.utils import resolve_cp_token_ratios
+
+    token_vector = resolve_cp_token_ratios(vllm_config)
+    uneven_dcp = token_vector is not None
+
+    for worker_idx, (groups, avail_mem) in enumerate(
+        zip(projected_groups_per_worker, available_memory)
+    ):
         if not groups:
             continue
+        worker_ratio = token_vector[worker_idx] if uneven_dcp else None
         _check_enough_kv_cache_memory(
             avail_mem,
-            partial(_max_memory_usage_bytes_from_groups, vllm_config, groups),
+            partial(
+                _max_memory_usage_bytes_from_groups,
+                vllm_config,
+                groups,
+                worker_ratio,
+            ),
             vllm_config.model_config.max_model_len,
-            partial(_estimate_max_model_len_from_groups, vllm_config, groups),
+            partial(
+                _estimate_max_model_len_from_groups,
+                vllm_config,
+                groups,
+                cp_rank_ratio=worker_ratio,
+            ),
+        )
+    if uneven_dcp and len(kv_cache_specs) != len(token_vector):
+        raise ValueError(
+            f"Uneven DCP expects one worker per TP rank "
+            f"({len(token_vector)}), got {len(kv_cache_specs)} workers."
         )
 
     kv_cache_configs: list[KVCacheConfig] = []
-    for projected_groups, kv_cache_spec_one_worker, available_memory_one_worker in zip(
-        projected_groups_per_worker, kv_cache_specs, available_memory
-    ):
+    for worker_idx, (
+        projected_groups,
+        kv_cache_spec_one_worker,
+        available_memory_one_worker,
+    ) in enumerate(zip(projected_groups_per_worker, kv_cache_specs, available_memory)):
         assert sum(len(group.layer_names) for group in projected_groups) == len(
             kv_cache_spec_one_worker
         ), "Some layers are not assigned to any group."
         kv_cache_configs.append(
             get_kv_cache_config_from_groups(
-                vllm_config, projected_groups, available_memory_one_worker
+                vllm_config,
+                projected_groups,
+                available_memory_one_worker,
+                cp_rank_ratio=token_vector[worker_idx] if uneven_dcp else 1,
             )
         )
 
@@ -2236,6 +2439,36 @@ def get_kv_cache_configs(
     min_num_blocks = min(
         kv_cache_config.num_blocks for kv_cache_config in kv_cache_configs
     )
+    if uneven_dcp and len(kv_cache_configs) > 1:
+        # Re-tuning hint: the token vector was derived from an
+        # ESTIMATE of each rank's free-for-KV memory (checkpoint share +
+        # fixed overhead). The per-worker block counts now reflect the
+        # MEASURED free memory; if they diverge, the smallest rank pins
+        # the shared pool and the surplus on the other ranks is wasted.
+        # Suggest a vector proportional to measured blocks x current
+        # share, which equalizes block counts on the next start.
+        all_blocks = [c.num_blocks for c in kv_cache_configs]
+        if max(all_blocks) > min_num_blocks * 1.15:
+            from vllm.distributed.utils import _TOKEN_VECTOR_UNITS  # noqa
+            from vllm.distributed.utils import partition_units
+
+            measured = [b * token_vector[i] for i, b in enumerate(all_blocks)]
+            suggested = partition_units(_TOKEN_VECTOR_UNITS, measured)
+            import math as _math
+
+            g = _math.gcd(*suggested)
+            suggested = [s // g for s in suggested]
+            logger.warning(
+                "Uneven DCP: per-worker KV block capacities %s are "
+                "imbalanced (pool is pinned to %d); the token vector %s "
+                "over-allocates the smallest rank. Restart with "
+                "VLLM_UNEVEN_TOKEN_VECTOR=%s to redistribute the KV "
+                "cache to the measured free memory.",
+                all_blocks,
+                min_num_blocks,
+                token_vector,
+                ",".join(str(s) for s in suggested),
+            )
     for kv_cache_config in kv_cache_configs:
         num_blocks_old = kv_cache_config.num_blocks
         kv_cache_config.num_blocks = min_num_blocks

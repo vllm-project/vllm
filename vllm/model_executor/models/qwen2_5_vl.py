@@ -367,6 +367,7 @@ class Qwen2_5_VisionAttention(nn.Module):
             num_heads,
             self.tp_size,
             0 if use_data_parallel else self.tp_rank,
+            num_heads,
         )
 
         self.qkv = QKVParallelLinear(
@@ -378,9 +379,11 @@ class Qwen2_5_VisionAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.qkv",
             disable_tp=use_data_parallel,
+            tp_units=num_heads,
         )
 
         self.proj = RowParallelLinear(
+            tp_units=num_heads,
             input_size=projection_size,
             output_size=embed_dim,
             quant_config=quant_config,

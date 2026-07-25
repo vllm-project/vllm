@@ -105,6 +105,7 @@ class InputBatch:
         num_spec_tokens: int = 0,
         is_pooling_model: bool = False,
         cp_kv_cache_interleave_size: int = 1,
+        cp_split_per_group: list[bool] | None = None,
         reasoning_config: ReasoningConfig | None = None,
         use_replayssm: bool = False,
         slot_mapping_modes: list[SlotMappingMode] | None = None,
@@ -193,6 +194,7 @@ class InputBatch:
             max_num_blocks=max_num_blocks_per_req,
             cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
             slot_mapping_modes=slot_mapping_modes,
+            cp_split_per_group=cp_split_per_group,
         )
 
         # Sampling-related.

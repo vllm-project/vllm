@@ -71,8 +71,16 @@ from vllm.v1.attention.backends.utils import (
     infer_global_hyperparameters,
     split_decodes_and_prefills,
 )
-from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
-from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
+from vllm.v1.attention.ops.common import (
+    cp_all_gather_heads_uneven,
+    cp_local_head_bounds,
+    cp_lse_ag_out_ar_uneven,
+    cp_lse_ag_out_rs,
+)
+from vllm.v1.attention.ops.dcp_alltoall import (
+    dcp_a2a_lse_reduce,
+    dcp_a2a_lse_reduce_uneven,
+)
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -233,8 +241,39 @@ class BatchDCPPrefillWrapper:
         self,
         workspace_buffer: torch.Tensor | None = None,
         dcp_a2a: bool = False,
+        cp_uneven: bool = False,
+        cp_head_counts: list[int] | None = None,
     ):
-        if dcp_a2a:
+        self._cp_uneven = cp_uneven
+        self._cp_head_counts = cp_head_counts
+        if cp_uneven:
+            # Ratio-proportional head shards (--rank-tp-ratio):
+            # reduce-scatter/all-to-all assume equal shards, so combine
+            # via all-reduce + local head slice. The new-tokens (suffix)
+            # attention also runs on the gathered FULL head set, because
+            # a rank's local q head count need not divide the (fully
+            # replicated) kv head count.
+            if dcp_a2a:
+                raise ValueError(
+                    "dcp_comm_backend='a2a' is not supported with "
+                    "--rank-tp-ratio (uneven DCP)."
+                )
+            assert cp_head_counts is not None
+            import os
+
+            if os.environ.get("VLLM_UNEVEN_DCP_COMBINE", "a2a") == "ar":
+                self._dcp_combine = partial(
+                    cp_lse_ag_out_ar_uneven,
+                    is_lse_base_on_e=False,
+                    head_counts=cp_head_counts,
+                )
+            else:
+                self._dcp_combine = partial(
+                    dcp_a2a_lse_reduce_uneven,
+                    is_lse_base_on_e=False,
+                    head_counts=cp_head_counts,
+                )
+        elif dcp_a2a:
             self._dcp_combine = partial(dcp_a2a_lse_reduce, is_lse_base_on_e=False)
         else:
             self._dcp_combine = partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
@@ -261,14 +300,17 @@ class BatchDCPPrefillWrapper:
         kv_cache_dtype: torch.dtype,
         prefill_fixed_split_size: int,
         disable_split_kv: bool,
+        num_qo_heads_across_dcp: int | None = None,
     ):
         """Plan the prefill operation with given parameters."""
+        if num_qo_heads_across_dcp is None:
+            num_qo_heads_across_dcp = num_qo_heads * dcp_world_size
         self._context.plan(
             qo_indptr=qo_indptr_cpu,
             paged_kv_indptr=paged_kv_indptr_cpu,
             paged_kv_indices=paged_kv_indices,
             paged_kv_last_page_len=paged_kv_last_page_len_cpu,
-            num_qo_heads=num_qo_heads * dcp_world_size,
+            num_qo_heads=num_qo_heads_across_dcp,
             num_kv_heads=num_kv_heads,
             head_dim_qk=head_dim,
             page_size=page_size,
@@ -284,7 +326,9 @@ class BatchDCPPrefillWrapper:
         self._new_tokens.plan(
             qo_indptr=qo_indptr_cpu,
             kv_indptr=qo_indptr_cpu,
-            num_qo_heads=num_qo_heads,
+            # Uneven DCP: suffix attention runs on the gathered full head
+            # set (local q heads need not divide the replicated kv heads).
+            num_qo_heads=num_qo_heads_across_dcp if self._cp_uneven else num_qo_heads,
             num_kv_heads=num_kv_heads,
             head_dim_qk=head_dim,
             head_dim_vo=head_dim,
@@ -304,9 +348,14 @@ class BatchDCPPrefillWrapper:
         value: torch.Tensor,
         out: torch.Tensor,
     ):
-        prefill_query_across_dcp = get_dcp_group().all_gather(
-            prefill_query.contiguous(), dim=1
-        )
+        if self._cp_uneven:
+            prefill_query_across_dcp = cp_all_gather_heads_uneven(
+                prefill_query.contiguous(), get_dcp_group(), self._cp_head_counts
+            )
+        else:
+            prefill_query_across_dcp = get_dcp_group().all_gather(
+                prefill_query.contiguous(), dim=1
+            )
         output_context_tmp, lse_context_tmp = self._context.run(
             prefill_query_across_dcp,
             kv_cache_tuple,
@@ -323,11 +372,17 @@ class BatchDCPPrefillWrapper:
         lse_context = lse_context.transpose(0, 1).contiguous()
 
         output_query, lse_query = self._new_tokens.run(
-            prefill_query,
+            prefill_query_across_dcp if self._cp_uneven else prefill_query,
             key,
             value,
             return_lse=True,
         )
+        if self._cp_uneven:
+            # Slice this rank's head range out of the full-head suffix
+            # result (lse is [tokens, heads] before the transpose below).
+            start, stop = cp_local_head_bounds(get_dcp_group(), self._cp_head_counts)
+            output_query = output_query[:, start:stop].contiguous()
+            lse_query = lse_query[:, start:stop]
         lse_query = lse_query.transpose(0, 1).contiguous()
 
         merge_attn_states(
@@ -695,11 +750,37 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.dcp_a2a = (
             self.use_dcp and vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
+        # Token-axis share of this rank under uneven DCP; identity values
+        # (1, rank, world_size) for the classic even split.
+        from vllm.distributed.utils import cp_rank_ratio_prefix
+
+        (
+            self.cp_rank_ratio,
+            self.cp_rank_prefix,
+            self.cp_split_factor,
+        ) = cp_rank_ratio_prefix(self.dcp_world_size, self.dcp_rank)
+        self.cp_uneven = (self.cp_rank_ratio, self.cp_split_factor) != (
+            1,
+            self.dcp_world_size,
+        )
 
         # Compatible with models with non-uniform per-layer head counts.
         self.num_qo_heads = get_num_attention_heads_from_layers(
             vllm_config, layer_names
         ) or self.model_config.get_num_attention_heads(self.vllm_config.parallel_config)
+        from vllm.distributed.utils import cp_q_head_counts
+
+        # Per-rank q-head partition across the DCP group (v4: need not be
+        # proportional to the token vector); None for the even split.
+        self.cp_head_counts = cp_q_head_counts(
+            self.model_config.hf_text_config.num_attention_heads,
+            self.dcp_world_size,
+        )
+        self.num_qo_heads_across_dcp = (
+            sum(self.cp_head_counts)
+            if self.cp_head_counts is not None
+            else self.num_qo_heads * self.dcp_world_size
+        )
 
         self.num_kv_heads = self.kv_cache_spec.num_kv_heads
         self.head_dim = self.kv_cache_spec.head_size
@@ -841,6 +922,40 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )  # Extra buffer for mutable paged_kv_indptr.cpu in cuda graph mode
         self.paged_kv_indices = self._make_buffer(max_num_pages)
         self.paged_kv_last_page_len = self._make_buffer(max_num_reqs)
+        if self.cp_uneven:
+            # Uneven DCP runs with MTP drafting: this builder's build()
+            # executes several times per model step, and each build
+            # rewrites the pinned CPU buffers above while the previous
+            # build's non-blocking H2D copies may still be in flight
+            # (observed as illegal memory accesses from garbage indptr).
+            # Rotate through buffer slots and wait (via event) only if a
+            # slot's old copy is somehow still pending.
+            self._pkv_num_slots = 8
+            self._pkv_slots = [
+                (
+                    self._make_buffer(max_num_reqs + 1),
+                    torch.zeros_like(
+                        self.paged_kv_indptr.cpu, pin_memory=self.pin_memory
+                    ),
+                    self._make_buffer(max_num_reqs),
+                )
+                for _ in range(self._pkv_num_slots)
+            ]
+            self._pkv_events = [torch.cuda.Event() for _ in range(self._pkv_num_slots)]
+            self._pkv_slot_idx = 0
+
+    def _rotate_paged_kv_buffers(self) -> None:
+        """Uneven DCP: switch to the next pinned-buffer slot before this
+        build rewrites them (see comment at slot allocation)."""
+        s = self._pkv_slot_idx
+        self._pkv_slot_idx = (s + 1) % self._pkv_num_slots
+        self._pkv_events[s].synchronize()
+        (
+            self.paged_kv_indptr,
+            self.paged_kv_indptr_cpu_buffer,
+            self.paged_kv_last_page_len,
+        ) = self._pkv_slots[s]
+        self._pkv_pending_event = self._pkv_events[s]
 
     # Keep SM90 prefill/decode Q dtype selection in one place.
     def get_q_data_type(self, is_prefill: bool) -> torch.dtype:
@@ -997,6 +1112,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self._prefill_wrapper = BatchDCPPrefillWrapper(
                     workspace_buffer=self._get_workspace_buffer(),
                     dcp_a2a=self.dcp_a2a,
+                    cp_uneven=self.cp_uneven,
+                    cp_head_counts=self.cp_head_counts,
                 )
             else:
                 # NVFP4 KV cache requires the trtllm-gen backend inside
@@ -1120,6 +1237,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> FlashInferMetadata:
+        if self.cp_uneven:
+            self._rotate_paged_kv_buffers()
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         causal = common_attn_metadata.causal
@@ -1249,6 +1368,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 query_lens_prefill_cpu = (
                     qo_indptr_prefill_cpu[1:] - qo_indptr_prefill_cpu[:-1]
                 )
+                # NEVER modify common_attn_metadata.seq_lens_cpu in place:
+                # with multiple attention groups (hybrid models, MTP draft)
+                # this builder runs several times on the same metadata and
+                # the subtraction would compound, yielding negative lens.
+                seq_lens_cpu = seq_lens_cpu.clone()
                 seq_lens_cpu[num_decodes:] = (
                     seq_lens_cpu[num_decodes:] - query_lens_prefill_cpu
                 )
@@ -1259,6 +1383,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self.dcp_rank,
                 self.dcp_kv_cache_interleave_size,
             )
+            if self.cp_uneven:
+                # Uneven DCP: this rank's block-table columns are its
+                # LOCAL pages, dense in local-token order (cp_rank_ratio
+                # pages per virtual block). Page counts and last-page
+                # lengths must therefore come from the LOCAL sequence
+                # lengths, not the global ones computed above.
+                seq_lens_np = seq_lens_cpu.numpy()
+                num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
 
         # Adjust num_block_np for cascade attention
         if use_cascade:
@@ -1339,6 +1471,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 q_data_type=self.q_data_type_prefill,
                 kv_data_type=self.kv_cache_dtype,
             )
+            if self.cp_uneven:
+                self._pkv_pending_event.record()
             return attn_metadata
 
         # Step 3: Handle prefill and decode pathways case by case
@@ -1409,6 +1543,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         num_qo_heads=self.num_qo_heads,
                         dcp_world_size=self.dcp_world_size,
                         num_kv_heads=self.num_kv_heads,
+                        num_qo_heads_across_dcp=self.num_qo_heads_across_dcp,
                         head_dim=self.head_dim,
                         sm_scale=self.sm_scale,
                         window_left=self.window_left,
@@ -1499,7 +1634,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     last_page_len_cpu=self.paged_kv_last_page_len.cpu[
                         :num_input_tokens
                     ],
-                    num_qo_heads=self.num_qo_heads * self.dcp_world_size,
+                    num_qo_heads=self.num_qo_heads_across_dcp,
                     num_kv_heads=self.num_kv_heads,
                     head_dim=self.head_dim,
                     page_size=self.page_size,
@@ -1515,6 +1650,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     disable_split_kv=self.disable_split_kv,
                 )
                 attn_metadata.decode = FIDecode(wrapper=decode_wrapper)
+        if self.cp_uneven:
+            self._pkv_pending_event.record()
         return attn_metadata
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
@@ -1620,7 +1757,37 @@ class FlashInferImpl(AttentionImpl):
             and vllm_config.parallel_config.decode_context_parallel_size > 1
             and vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
-        if dcp_a2a:
+        if self.cp_uneven:
+            # Ratio-proportional head shards: all-reduce + local head
+            # slice instead of the equal-shard reduce-scatter/a2a.
+            if dcp_a2a:
+                raise ValueError(
+                    "dcp_comm_backend='a2a' is not supported with "
+                    "--rank-tp-ratio (uneven DCP)."
+                )
+            from vllm.distributed.utils import cp_q_head_counts
+
+            assert vllm_config is not None
+            self.cp_head_counts = cp_q_head_counts(
+                vllm_config.model_config.hf_text_config.num_attention_heads,
+                self.dcp_world_size,
+            )
+            assert self.cp_head_counts is not None
+            import os
+
+            if os.environ.get("VLLM_UNEVEN_DCP_COMBINE", "a2a") == "ar":
+                self.dcp_combine = partial(
+                    cp_lse_ag_out_ar_uneven,
+                    is_lse_base_on_e=False,
+                    head_counts=self.cp_head_counts,
+                )
+            else:
+                self.dcp_combine = partial(
+                    dcp_a2a_lse_reduce_uneven,
+                    is_lse_base_on_e=False,
+                    head_counts=self.cp_head_counts,
+                )
+        elif dcp_a2a:
             self.dcp_combine = partial(dcp_a2a_lse_reduce, is_lse_base_on_e=False)
         else:
             self.dcp_combine = partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
@@ -2081,9 +2248,16 @@ class FlashInferImpl(AttentionImpl):
                     out_decode = output[:num_decode_tokens]
 
                 if use_dcp:
-                    decode_query = get_dcp_group().all_gather(
-                        decode_query.contiguous(), dim=-2
-                    )
+                    if self.cp_uneven:
+                        decode_query = cp_all_gather_heads_uneven(
+                            decode_query.contiguous(),
+                            get_dcp_group(),
+                            self.cp_head_counts,
+                        )
+                    else:
+                        decode_query = get_dcp_group().all_gather(
+                            decode_query.contiguous(), dim=-2
+                        )
                     output_tmp = torch.empty_like(decode_query)
                     lse = torch.empty(
                         (decode_query.size(0), decode_query.size(1)),

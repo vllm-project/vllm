@@ -106,12 +106,53 @@ def get_tp_partition_ratios() -> list[int] | None:
     return _TP_PARTITION_RATIOS
 
 
-def tp_partition_sizes(total: int, tp_size: int) -> list[int]:
+def partition_units(units: int, weights: list[int]) -> list[int]:
+    """Split `units` indivisible units over ranks proportionally to
+    `weights` (largest-remainder rounding, every rank gets >= 1 unit).
+
+    Deterministic pure function of (units, weights) so every process
+    computes the identical partition. Ties in the fractional parts are
+    broken toward the lower rank index.
+    """
+    n = len(weights)
+    if units < n:
+        raise ValueError(
+            f"Cannot give each of {n} ranks at least one of {units} units."
+        )
+    total_w = sum(weights)
+    quotas = [units * w / total_w for w in weights]
+    sizes = [int(q) for q in quotas]
+    # Reserve a minimum of one unit per rank before distributing the rest.
+    sizes = [max(s, 1) for s in sizes]
+    remaining = units - sum(sizes)
+    if remaining < 0:
+        # Minimum-1 bumping overshot: take back from the largest shares.
+        for _ in range(-remaining):
+            i = max(range(n), key=lambda r: (sizes[r], -r))
+            sizes[i] -= 1
+        remaining = 0
+    order = sorted(
+        range(n), key=lambda r: (quotas[r] - int(quotas[r]), -r), reverse=True
+    )
+    for k in range(remaining):
+        sizes[order[k % n]] += 1
+    assert sum(sizes) == units and all(s >= 1 for s in sizes)
+    return sizes
+
+
+def tp_partition_sizes(total: int, tp_size: int, units: int | None = None) -> list[int]:
     """Per-rank sizes of a dimension of `total` elements.
 
-    With ratios active, every sharded dimension must be divisible by
-    sum(ratios) so all per-rank sizes are exact integers; otherwise this
-    raises with the offending dimension size.
+    `units` is the master unit count of the dimension FAMILY (v4 free
+    partitioning): e.g. attention q heads (24), GDN k heads (16),
+    intermediate/quant_group. All dimensions derived from the same family
+    pass the same `units`, so they round identically and stay mutually
+    consistent (qkv columns = 2 x q heads, GDN v dim = 3 x k heads, ...).
+    total must be a multiple of units.
+
+    Without `units` (un-migrated call sites), the v1 rule applies: every
+    sharded dimension must be divisible by sum(ratios) so per-rank sizes
+    are exact; otherwise this raises with the offending dimension size.
     """
     ratios = _TP_PARTITION_RATIOS
     if not ratios or len(ratios) != tp_size:
@@ -119,6 +160,14 @@ def tp_partition_sizes(total: int, tp_size: int) -> list[int]:
         # (disable_tp layers use tp_size=1): classic even split.
         ensure_divisibility(total, tp_size)
         return [total // tp_size] * tp_size
+    if units is not None:
+        if total % units != 0:
+            raise ValueError(
+                f"Dimension of size {total} is not a multiple of its "
+                f"family unit count {units}."
+            )
+        scale = total // units
+        return [s * scale for s in partition_units(units, ratios)]
     denom = sum(ratios)
     if total % denom != 0:
         raise ValueError(
@@ -126,20 +175,260 @@ def tp_partition_sizes(total: int, tp_size: int) -> list[int]:
             f"--rank-tp-ratio {ratios}: {total} is not divisible by "
             f"sum(ratios)={denom}. Choose ratios whose sum divides every "
             "sharded dimension (attention heads, kv heads, GDN heads, "
-            "hidden/intermediate sizes)."
+            "hidden/intermediate sizes), or migrate this call site to "
+            "unit-based partitioning (v4)."
         )
     unit = total // denom
     return [unit * r for r in ratios]
 
 
-def tp_partition_size(total: int, tp_size: int, rank: int) -> int:
+def tp_partition_size(
+    total: int, tp_size: int, rank: int, units: int | None = None
+) -> int:
     """This rank's size of a sharded dimension."""
-    return tp_partition_sizes(total, tp_size)[rank]
+    return tp_partition_sizes(total, tp_size, units)[rank]
 
 
-def tp_partition_offset(total: int, tp_size: int, rank: int) -> int:
+def tp_partition_offset(
+    total: int, tp_size: int, rank: int, units: int | None = None
+) -> int:
     """This rank's start offset (prefix sum) in a sharded dimension."""
-    return sum(tp_partition_sizes(total, tp_size)[:rank])
+    return sum(tp_partition_sizes(total, tp_size, units)[:rank])
+
+
+_CP_TOKEN_RATIOS: list[int] | None = None
+
+
+def set_cp_token_ratios(ratios: list[int] | None) -> None:
+    """Install the token-axis split vector for uneven DCP (v4: derived
+    from the GDN k-head partition so the align invariant holds; v3:
+    identical to the weight vector)."""
+    global _CP_TOKEN_RATIOS
+    _CP_TOKEN_RATIOS = list(ratios) if ratios else None
+
+
+def get_cp_token_ratios() -> list[int] | None:
+    return _CP_TOKEN_RATIOS
+
+
+def gdn_family_units(vllm_config) -> int | None:
+    """Master unit count of the GDN head family, respecting the
+    quantization block granularity: shard cuts of the GDN out_proj INPUT
+    (value dim) must land on quant-block boundaries. E.g. Qwen3.6 Q6_K:
+    one k-head spans 3*128=384 value elements but K-quant superblocks are
+    256 -> units of 2 k-heads (768 = 3*256), i.e. 8 family units instead
+    of 16. None for non-hybrid models."""
+    import math
+
+    hf_config = vllm_config.model_config.hf_config
+    text_config = getattr(hf_config, "text_config", hf_config) or hf_config
+    num_k_heads = getattr(text_config, "linear_num_key_heads", None)
+    if not num_k_heads:
+        return None
+    num_v_heads = getattr(text_config, "linear_num_value_heads", num_k_heads)
+    head_v_dim = getattr(text_config, "linear_value_head_dim", 128)
+    unit_v_elems = head_v_dim * (num_v_heads // num_k_heads)
+    group = getattr(vllm_config.quant_config, "group_size", None) or 1
+    if group > 1 and unit_v_elems % group:
+        k_per_unit = math.lcm(unit_v_elems, group) // unit_v_elems
+        if num_k_heads % k_per_unit:
+            raise ValueError(
+                f"GDN k heads ({num_k_heads}) cannot be partitioned in "
+                f"steps of {k_per_unit} (quant group {group} vs "
+                f"{unit_v_elems} value elements per k head)."
+            )
+        return num_k_heads // k_per_unit
+    return num_k_heads
+
+
+def gdn_head_partition(vllm_config, weights: list[int]) -> list[int]:
+    """Per-rank GDN k-head counts under the quant-aware family units
+    (whole units are partitioned, then scaled back to heads)."""
+    units = gdn_family_units(vllm_config)
+    assert units is not None
+    hf_config = vllm_config.model_config.hf_config
+    text_config = getattr(hf_config, "text_config", hf_config) or hf_config
+    num_k_heads = text_config.linear_num_key_heads
+    scale = num_k_heads // units
+    return [u * scale for u in partition_units(units, list(weights))]
+
+
+def resolve_cp_token_ratios(vllm_config) -> list[int] | None:
+    """Token-axis split vector for uneven DCP, derived from the config.
+
+    Hybrid models (GDN/linear attention): the GDN k-head partition - the
+    mamba state on rank r scales with its k-head share, and the align
+    invariant (mamba page == attention bytes per virtual block, per rank)
+    requires the token split to be proportional to exactly that. Dense
+    models: the raw --rank-tp-ratio weights.
+    """
+    parallel_config = vllm_config.parallel_config
+    weights = parallel_config.rank_tp_ratio
+    if (
+        not weights
+        or parallel_config.decode_context_parallel_size <= 1
+        or len(set(weights)) == 1
+    ):
+        return None
+    import math
+
+    import vllm.envs as envs
+
+    override = envs.VLLM_UNEVEN_TOKEN_VECTOR
+    if override:
+        # Manual override (see the imbalance warning in
+        # kv_cache_utils.get_kv_cache_configs): a token vector measured
+        # from a previous run's per-worker free memory. Must be set for
+        # ALL processes (inherited env), one entry per rank.
+        vector = [int(x) for x in override.split(",")]
+        if len(vector) != len(weights) or any(v <= 0 for v in vector):
+            raise ValueError(
+                f"VLLM_UNEVEN_TOKEN_VECTOR={override!r} must name "
+                f"{len(weights)} positive integers (one per rank)."
+            )
+        g = math.gcd(*vector)
+        return [v // g for v in vector]
+
+    budgets = parallel_config.rank_gpu_memory_mib
+    if isinstance(budgets, list) and len(budgets) == len(weights):
+        # Split the KV cache proportionally to each rank's FREE
+        # memory (budget minus its weight share minus a fixed overhead),
+        # so every card fills up. The mamba pages are padded per rank to
+        # the attention bytes-per-virtual-block (align solver), so the
+        # token vector no longer needs to be proportional to the GDN
+        # head partition. Integerized to 32 units (>= 1 per rank).
+        w_mib = _checkpoint_size_mib(vllm_config)
+        if w_mib > 0:
+            total_w = sum(weights)
+            avail = [
+                max(
+                    b - w_mib * w / total_w - _AUTO_TOKEN_OVERHEAD_MIB,
+                    1.0,
+                )
+                for b, w in zip(budgets, weights)
+            ]
+            token_vector = partition_units(
+                _TOKEN_VECTOR_UNITS, [max(int(a), 1) for a in avail]
+            )
+            g = math.gcd(*token_vector)
+            return [t // g for t in token_vector]
+
+    hf_config = vllm_config.model_config.hf_config
+    text_config = getattr(hf_config, "text_config", hf_config) or hf_config
+    gdn_k_heads = getattr(text_config, "linear_num_key_heads", None)
+    if gdn_k_heads:
+        part = gdn_head_partition(vllm_config, list(weights))
+        # Reduce by the gcd: smaller entries keep the virtual scheduler
+        # blocks (block_size * sum(token ratios)) as fine as possible.
+        # For divisible weights like (2,1,1) this reproduces the v3
+        # vector exactly ([8,4,4] -> [2,1,1]).
+        g = math.gcd(*part)
+        return [p // g for p in part]
+    return list(weights)
+
+
+#: Token-vector resolution (units) and assumed weight-independent
+#: per-rank overhead for the free-memory split.
+_TOKEN_VECTOR_UNITS = 64
+_AUTO_TOKEN_OVERHEAD_MIB = 1536
+
+
+def _checkpoint_size_mib(vllm_config) -> int:
+    """Total checkpoint size of the model on disk (MiB), 0 if unknown.
+    Deterministic in every process - the token vector derived from it
+    must be identical everywhere."""
+    import glob
+    import os
+
+    path = vllm_config.model_config.model
+    if os.path.isfile(path):
+        # Single-file checkpoints (e.g. GGUF).
+        return os.path.getsize(path) // 2**20
+    if not os.path.isdir(path):
+        return 0
+    total = sum(
+        os.path.getsize(f) for f in glob.glob(os.path.join(path, "*.safetensors"))
+    )
+    if total == 0:
+        total = sum(os.path.getsize(f) for f in glob.glob(os.path.join(path, "*.gguf")))
+    return total // 2**20
+
+
+def uneven_cp_ratios(cp_world_size: int) -> list[int] | None:
+    """Ratio vector for uneven (token-axis) context parallelism.
+
+    Uneven DCP splits the KV cache of the full-attention layers along
+    the TOKEN axis (dcp group == tp group, so len(ratios) ==
+    cp_world_size). The token vector is the installed CP token ratio
+    vector when set (v4: the GDN k-head partition, which keeps the
+    mamba/attention align invariant), else the --rank-tp-ratio weights
+    (v3). Returns None when the classic even split applies.
+    """
+    ratios = _CP_TOKEN_RATIOS or _TP_PARTITION_RATIOS
+    if not ratios or len(ratios) != cp_world_size or cp_world_size <= 1:
+        return None
+    if all(r == ratios[0] for r in ratios):
+        # Uniform ratios degenerate to the even split; keep default path.
+        return None
+    return ratios
+
+
+def cp_q_head_counts(total_q_heads: int, cp_world_size: int) -> list[int] | None:
+    """Per-rank q-head counts across the DCP group under uneven ratios
+    (v4: units-based partition, which need not be proportional to the
+    token vector). None when no ratios are installed for this group
+    size. Deterministic pure function - identical in every process."""
+    ratios = _TP_PARTITION_RATIOS
+    if not ratios or len(ratios) != cp_world_size or cp_world_size <= 1:
+        return None
+    return tp_partition_sizes(total_q_heads, cp_world_size, units=total_q_heads)
+
+
+def uneven_dcp_active() -> bool:
+    """True when uneven DCP runs in this process: non-uniform
+    --rank-tp-ratio weights are installed and the DCP group spans the
+    whole TP group. Attention KV heads are then fully replicated per
+    rank and the KV cache is split along the token axis (whose vector
+    may itself be uniform after budget balancing)."""
+    try:
+        from vllm.distributed.parallel_state import get_dcp_group
+
+        dcp_world_size = get_dcp_group().world_size
+    except (AssertionError, ImportError):
+        return False
+    weights = _TP_PARTITION_RATIOS
+    return (
+        dcp_world_size > 1
+        and bool(weights)
+        and len(weights) == dcp_world_size
+        and len(set(weights)) > 1
+    )
+
+
+def cp_token_split_factor(dcp_world_size: int, pcp_world_size: int = 1) -> int:
+    """Number of block_size-units one "virtual" scheduler block spans.
+
+    Even CP: dcp * pcp (each rank owns exactly one physical block per
+    virtual block). Uneven DCP: sum(ratios) - rank r owns a contiguous
+    "superblock" of ratios[r] physical blocks per virtual block, so the
+    scheduler stays CP-agnostic while ranks store token counts
+    proportional to their ratio.
+    """
+    ratios = uneven_cp_ratios(dcp_world_size)
+    if ratios is not None:
+        return sum(ratios) * pcp_world_size
+    return dcp_world_size * pcp_world_size
+
+
+def cp_rank_ratio_prefix(cp_world_size: int, cp_rank: int) -> tuple[int, int, int]:
+    """(ratio, prefix, sum) of this rank's token-axis share under uneven
+    DCP; (1, cp_rank, cp_world_size) for the classic even split (the
+    generalized slot-mapping formulas reduce exactly to the even ones
+    with these values)."""
+    ratios = uneven_cp_ratios(cp_world_size)
+    if ratios is None:
+        return 1, cp_rank, cp_world_size
+    return ratios[cp_rank], sum(ratios[:cp_rank]), sum(ratios)
 
 
 def is_weak_contiguous(inp: torch.Tensor) -> bool:
