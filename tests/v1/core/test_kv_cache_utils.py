@@ -2069,6 +2069,33 @@ def test_generate_scheduler_kv_cache_config():
     )
 
 
+def test_mixed_precision_kv_cache_with_uniform_type_specs():
+    fp8_spec = new_kv_cache_spec(dtype=torch.float8_e4m3fn)
+    bf16_spec = new_kv_cache_spec(dtype=torch.bfloat16)
+    worker_config = KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["fp8_layer"],
+                UniformTypeKVCacheSpecs(
+                    block_size=16, kv_cache_specs={"fp8_layer": fp8_spec}
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["bf16_layer"],
+                UniformTypeKVCacheSpecs(
+                    block_size=16, kv_cache_specs={"bf16_layer": bf16_spec}
+                ),
+            ),
+        ],
+    )
+    scheduler_config = generate_scheduler_kv_cache_config([worker_config])
+
+    assert worker_config.needs_kv_cache_zeroing
+    assert scheduler_config.needs_kv_cache_zeroing
+
+
 def new_mla_spec(cache_dtype_str=None, block_size=16):
     # head_size = kv_lora_rank(512) + qk_rope_head_dim(64) = 576
     return MLAAttentionSpec(
@@ -2156,7 +2183,7 @@ def test_mla_draft_prefers_standard_layout_when_pages_can_be_unified():
     )
 
 
-def test_mla_with_incompatible_swa_uses_one_full_allocation_group(caplog):
+def test_mla_with_incompatible_swa_uses_one_full_allocation_group(caplog_vllm):
     # Sparse MLA pages cannot be padded safely. Keeping the draft's attention
     # compute sliding-window while promoting only its allocation semantics lets
     # every layer share the target's block table and remain contiguous.
@@ -2179,7 +2206,7 @@ def test_mla_with_incompatible_swa_uses_one_full_allocation_group(caplog):
     assert promoted_draft.block_size == 64
     assert promoted_draft.sliding_window == draft.sliding_window
     assert specs["draft.0"] is draft
-    assert "attention compute is unchanged" in caplog.text
+    assert "attention compute is unchanged" in caplog_vllm.text
 
 
 def test_get_kv_cache_spec_kind_prefers_specific_attention_subclasses():
