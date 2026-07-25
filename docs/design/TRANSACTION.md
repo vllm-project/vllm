@@ -15,13 +15,10 @@ The reload investigation found several independent classes of failure. Stable st
 
 | Category | The invariant is about | Typical failure | Primary mechanism | Status |
 |---|---|---|---|---|
-| 1. Storage identity | A captured address remains valid | CUDA Graph or kernel keeps an address that PWAL replaced | `ReloadArena` and storage verification | Implemented |
+| 1. Storage identity | A captured address remains valid | CUDA Graph or kernel keeps an address that PWAL replaced | `ReloadArena` and storage verification | Partially implemented |
 | 2. Value refresh | Derived storage contains values from the new weights | Address is stable, but scratch/scale contents remain stale | Arena `put()` and backend refresh hooks | Partially implemented |
-| 3. Loader lifecycle | The loading process is complete and uses the correct layout | A loader finishes early, writes through a stale layout, or misses a fragment | Completion manifest, `LoadReceipt`, loader epoch | Manifest implemented; epoch pending |
-| 4. State preservation | State without a checkpoint key survives or is rebuilt | Non-persistent buffers, aliases, or config-dependent state are lost | Keyless-state and config-context checks | Partially implemented |
-| 5. Routing and sharding | An update reaches the correct rank, expert, and shard | A loader consumes a tensor but writes the wrong TP/EP destination | Receipt fragments and distributed sentinels | Receipt identity implemented; sentinels pending |
-| 6. Name and key mapping | Every expected source resolves exactly once | Prefix mapping, packed routing, or loader-specific renaming drops a key | Source/event manifests and collision audit | Implemented for covered loaders |
-| 7. Cache coherence | Consumers do not use state from an old weight generation | Prefix, LoRA, or multimodal cache survives an update | Generation-aware cache invalidation | To be implemented |
+| 3. Loader correctness | Every reload entry point runs the complete lifecycle, and loading is complete with the correct layout, key mapping, fragment, rank, expert, and shard | A caller invokes raw `model.load_weights`, a loader finishes early, uses a stale layout, drops a key, or writes the wrong destination | Transaction entry-point guard, completion/source manifests, `LoadReceipt`, collision audit, and distributed sentinels | Manifest and receipt checks implemented; universal entry-point guard and sentinels pending |
+| 4. State preservation | State without a checkpoint key survives or is rebuilt, and consumers do not retain an old weight generation | Non-persistent buffers, aliases, config-dependent state, or caches become stale | Keyless-state, config-context, idempotency, and cache-generation checks | Partially implemented |
 
 These invariants do not share one mechanism. They share one **decision point**: immediately before the engine resumes inference. A weight update is correct only if every applicable invariant is proven at that point.
 
@@ -39,7 +36,7 @@ The following table maps every numbered issue listed by RFC #48312 under categor
 | 1. Storage identity | [#48539](https://github.com/vllm-project/vllm/issues/48539) | Machete act-order permutation storage is recreated on every post-load pass | C1 `StorageIdentityChecker` |
 | 1. Storage identity | [RFC #48478](https://github.com/vllm-project/vllm/issues/48478) | Defines the production fail-closed graph-storage contract for category 1 | C1 production registration/verification boundary |
 | 2. Runtime value refresh | [#48251](https://github.com/vllm-project/vllm/issues/48251) | A BF16/FP16 checkpoint sink changes while its FP32 runtime copy remains stale | C2 `DerivedValueRefreshChecker` |
-| 3. Loader lifecycle | [#42821](https://github.com/vllm-project/vllm/issues/42821), fix [#42823](https://github.com/vllm-project/vllm/pull/42823) | A loader survives layout conversion and corrupts the second `model.load_weights` call | C3a `LoaderEpochChecker` and transaction entry-point wrapping |
+| 3. Loader lifecycle | [#42821](https://github.com/vllm-project/vllm/issues/42821), proposed fix [#42823](https://github.com/vllm-project/vllm/pull/42823) | A direct post-init `model.load_weights` call bypasses restore/load/PWAL/copy-back and writes checkpoint-format bytes into kernel-layout storage | C3a `ReloadEntryPointChecker` and the transaction protocol |
 | 3. Loader lifecycle | [#44814](https://github.com/vllm-project/vllm/pull/44814) | A composed loader double-counts copied elements and finalizes Mamba2 before `mixer.D` arrives | C3b `CompletionManifestChecker` |
 | 3. Loader lifecycle | [#37334](https://github.com/vllm-project/vllm/issues/37334), [#38746](https://github.com/vllm-project/vllm/issues/38746) | Skipped/shared tensors make numel completion finish too early or never finish | C3b `CompletionManifestChecker` |
 | 4. Reload state preservation | [#42481](https://github.com/vllm-project/vllm/issues/42481) | Parent/child parameter-buffer aliasing is not preserved during copy-back | C4a `KeylessStateChecker` |
@@ -48,7 +45,7 @@ The following table maps every numbered issue listed by RFC #48312 under categor
 | 4. Reload state preservation | [#45989](https://github.com/vllm-project/vllm/issues/45989) | Reload rebuilds MoE with a missing or incorrect active `VllmConfig` | C4b `ConfigContextChecker` |
 | 4. Reload state preservation | [#48284](https://github.com/vllm-project/vllm/issues/48284) | Identity reload changes unquantized hybrid/Mamba state and output | C4c `IdempotencyChecker` |
 | 4. Reload state preservation | [#40647](https://github.com/vllm-project/vllm/issues/40647) | Historical umbrella for config-context, alias, and unloaded-state failures | C4a plus C4b; tracked by the more specific issues above |
-| 4. Reload state preservation | [#45835](https://github.com/vllm-project/vllm/pull/45835) | Partial FP8 updates need an explicit preserve-or-reject policy for omitted scales | C4a state policy plus C3b/C6 exact key accounting |
+| 4. Reload state preservation | [#45835](https://github.com/vllm-project/vllm/pull/45835) | Partial FP8 updates need an explicit preserve-or-reject policy for omitted scales | C4a state policy plus C3b exact key accounting |
 
 The transaction model is therefore:
 
@@ -104,7 +101,18 @@ Current limitation: updates modify the live model in place. ABORT means “rejec
 
 **Mechanism.** A layer-owned `ReloadArena` owns stable buffers. Backends refresh values with `put()` rather than rebinding tensors. Reload snapshots arena slots before restoring checkpoint layout and verifies them after PWAL.
 
-**Status: Implemented.** Arena integration, per-layer verification, module-level storage manifests, and registry/dataflow CI sweeps are present. Coverage still depends on discovering every graph-visible tensor.
+**Status: Partially implemented.** Arena integration, per-layer verification, module-level storage manifests, and registry/dataflow CI sweeps are present. `StorageIdentityChecker` is not complete because the runtime gate only has authoritative coverage for registered storage, while the edge conditions below are not universally covered.
+
+#### Pointer-drift coverage boundaries — Remain to be done
+
+The existing runtime gate is strict for storage already registered in a `ReloadArena`, and the current CI sweeps compare pointers across repeated PWAL/rebuild passes for covered backends. This is not yet a universal first-load -> real reload pointer oracle. The following boundaries remain open and are part of C1:
+
+1. **Storage that bypasses the arena.** A backend can bind a fresh tensor to an ordinary layer/kernel attribute without modifying any registered arena slot. Runtime arena verification cannot see that rebind. CI currently discovers many such tensors by inspecting attributes, containers, partials, and closures, but discovery is heuristic. A new network structure or allocation pattern can remain invisible unless it is registered or the census is extended.
+2. **Lazy storage created on first forward.** Repeating `process_weights_after_loading` does not cover tensors allocated only when a kernel first executes. CI must run the relevant forward path before taking the baseline, perform reload, execute the path again, and compare every graph-visible address. The existing lazy-storage tests cover selected backends, not the complete backend/model matrix.
+3. **A precise definition of which pointers must remain stable.** Comparing every `named_parameter` and buffer is incorrect because checkpoint-format parameters may legitimately be restored, materialized, or copied back during reload. The universal oracle must distinguish replaceable checkpoint storage from CUDA-Graph-visible or long-lived runtime storage, otherwise it will either miss escaped tensors or report legitimate pointer changes.
+4. **End-to-end stale-read validation.** Pointer equality alone proves address stability, not that the stable allocation contains values derived from the new weights. CI still needs a generalized test lane that captures with weight generation A, reloads distinct values B, creates allocation pressure, replays the captured graph, and verifies B-derived output. Existing backend-specific reproductions are evidence, but they are not a universal CI gate.
+
+Completion criteria for this item are: automatic registration or sound discovery of graph-visible storage, coverage of first-forward allocation, an explicit pointer-stability policy, and a continuous real-model/backend reload matrix. Until then, adding a new architecture or backend requires an explicit storage-coverage review even if the generic CI sweeps pass.
 
 ### C2 — DerivedValueRefreshChecker
 
@@ -116,17 +124,43 @@ Current limitation: updates modify the live model in place. ABORT means “rejec
 
 **Status: Partially implemented.** Arena `put()` covers migrated backends, but there is no general refresh-generation checker.
 
-### C3a — LoaderEpochChecker
+### C3a — ReloadEntryPointChecker
 
-**Problem.** A `weight_loader` created for checkpoint layout can survive a layout conversion and later write checkpoint-format bytes into kernel-format storage. The call succeeds, but the destination interpretation is stale.
+**Problem.** After first load, PWAL may convert parameters from checkpoint layout to kernel layout while preserving their `weight_loader`. A caller that invokes `model.load_weights` directly bypasses the reload lifecycle and writes checkpoint-format bytes into kernel-layout storage. This is the root cause of #42821; it is not primarily a stale-loader-epoch problem.
 
-**Invariant.** A loader executes only against the layout epoch for which it was created, or the reload pipeline restores the expected layout before invoking it.
+**Invariant.** Every post-initialization weight mutation, including direct `model.load_weights`, executes inside exactly one reload transaction: restore checkpoint layout, load, run PWAL/finalization, copy results back into stable runtime storage, validate all applicable C1-C4 evidence, and only then commit/resume.
 
-**Mechanism.** Layout conversions should advance an epoch; loaders should carry the epoch they expect. The transaction verifies that no stale loader executed. Wrapping `model.load_weights` is complementary because it routes external calls through the restore/load/PWAL lifecycle.
+**Mechanism.** PR #42823 proposes wrapping `model.load_weights` after initial model loading so subsequent direct calls run `initialize_layerwise_reload -> original_load_weights -> finalize_layerwise_reload`. That closes the specific bypass and should be integrated as an adapter into `ReloadTransaction`, rather than making the two layerwise functions the public transaction protocol. A layout epoch may still be useful as defense in depth, but it does not establish completeness, storage validation, all-rank commit, cache invalidation, or abort semantics.
 
-**Status: To be implemented.** The current layerwise path reduces exposure, but there is no explicit epoch contract.
+**Status: To be implemented as a transaction entry-point contract.** The current worker and transfer paths call the layerwise functions explicitly, but raw post-init `model.load_weights` is not universally enrolled in a transaction. PR #42823 is the concrete proposed adapter for that entry point.
 
-### C3b/C6 — CompletionManifestChecker
+#### Why `initialize_layerwise_reload` and `finalize_layerwise_reload` are not the whole protocol
+
+Those functions should remain the **layer-format restore/finalize hooks** used by a transaction, not absorb every reload responsibility. Putting all logic into them would create several problems:
+
+- they do not own request draining, dirty-state tracking, transaction ID/generation, or model-role scope;
+- they cannot independently reconcile source manifests or collect all-rank results;
+- `finalize_layerwise_reload` runs PWAL and copy-back, but transaction validation and COMMIT must happen after it;
+- nested callers (`reload_weights` calling a wrapped `model.load_weights`) need one reentrant transaction owner, not two independently initialized lifecycles;
+- loader exceptions require ABORT cleanup and must not accidentally turn a partial load into a successful FINALIZE/COMMIT;
+- direct mutation paths that do not call `model.load_weights` still need to join the same protocol.
+
+The intended layering is therefore:
+
+```text
+public mutation entry point / model.load_weights adapter
+  -> ReloadTransaction.begin()              # scope, generation, baselines
+  -> initialize_layerwise_reload()          # restore loadable layer layout
+  -> APPLY callback                         # original load_weights/transfer
+  -> finalize_layerwise_reload()            # PWAL + stable copy-back
+  -> ReloadTransaction.validate()            # C1-C4, rank-local report
+  -> controller all-rank decision
+  -> commit() or abort()
+```
+
+The adapter around `model.load_weights` should enter this protocol only after first-load initialization, preserve the original return value, and use a transaction-depth guard. If it is already inside the same transaction, it should execute only the APPLY callback. On an exception it should run explicit layerwise cleanup/abort logic; using an unconditional `finally: finalize_layerwise_reload(...)` is acceptable only if finalization is defined as cleanup-safe and the transaction is irrevocably marked failed before any commit decision.
+
+### C3b — CompletionManifestChecker
 
 **Problem.** Numel counting cannot represent logical loading. A composed loader may execute two `copy_` calls for one source, Q/K/V may share one Parameter, MoE experts may be rank-local, and a missing source contributes zero calls. These cases can cause premature completion or silent omissions.
 
@@ -142,7 +176,7 @@ Reload records `received_keys`; layer completion is driven by `required_keys <= 
 
 **Status: Implemented for covered paths.** `load_numel/load_numel_total` have been removed as completion state. Checkpoint loaders, IPC/NCCL transfer hooks, and several external/direct loaders publish manifests. Sparse direct mutation still needs a standard hook.
 
-### C3c/C5/C6 — LoadReceiptIdentityChecker
+### C3c — LoadReceiptIdentityChecker
 
 **Problem.** A manifest can still be wrong if its receipt identity is incomplete. For example, Q, K, and V can collapse to one packed target, or multiple MoE experts/shards can collapse to one event. If the first load and reload both make the same mistake, ordinary set equality passes.
 
@@ -166,6 +200,16 @@ Reload records `received_keys`; layer completion is driven by `required_keys <= 
 - `RECEIPT_SCHEMA_MISMATCH`.
 
 **Status: Implemented.** QKV, merged-column, RoutedExperts, composed loaders, legacy adaptation, negative collision tests, and real Qwen MoE validation are present. New loaders still need deliberate schema review.
+
+### C3d — ShardRoutingChecker
+
+**Problem.** A loader may consume every expected key yet ignore `tp_rank`, map an expert to the wrong EP rank, or write a correct shard into the wrong destination. Completeness alone cannot prove placement.
+
+**Invariant.** Rank-distinct and shard-distinct values land in the expected rank-local target fragment.
+
+**Mechanism.** A distributed test lane injects sentinel values and verifies placement on every TP/EP rank. Runtime receipts provide the fragment identity but do not prove the tensor bytes landed there.
+
+**Status: To be implemented.** Rank-local receipt scopes and TP/EP model tests exist; generalized sentinel verification does not.
 
 ### C4a — KeylessStateChecker
 
@@ -197,17 +241,7 @@ Reload records `received_keys`; layer completion is driven by `required_keys <= 
 
 **Status: To be implemented as a common checker.** Individual smoke tests provide partial evidence.
 
-### C5 — ShardRoutingChecker
-
-**Problem.** A loader may consume every expected key yet ignore `tp_rank`, map an expert to the wrong EP rank, or write a correct shard into the wrong destination. Completeness alone cannot prove placement.
-
-**Invariant.** Rank-distinct and shard-distinct values land in the expected rank-local target fragment.
-
-**Mechanism.** A distributed test lane injects sentinel values and verifies placement on every TP/EP rank. Runtime receipts provide the fragment identity but do not prove the tensor bytes landed there.
-
-**Status: To be implemented.** Rank-local receipt scopes and TP/EP model tests exist; generalized sentinel verification does not.
-
-### C7 — CacheGenerationChecker
+### C4d — CacheGenerationChecker
 
 **Problem.** Prefix KV, LoRA, multimodal, or backend-specific caches can serve generation-N state after weights advance to generation N+1.
 
@@ -245,7 +279,7 @@ flowchart TD
 
 For dummy or first online-quantization loads, no exact source baseline exists. The model records rank-local `required_target_keys`, buffers the first real update until the source stream ends, verifies that all targets were touched, and promotes that update's exact events to permanent `required_keys`. Chunked IPC/NCCL transfers also require an independently declared source manifest so a source that never arrived can be detected.
 
-This implementation answers the category-3/6 completeness problem. It does not replace storage, state, routing, or cache checkers.
+This implementation answers the category-3 completeness problem. It does not replace storage, state, routing, or cache checkers.
 
 ## 5. Report and commit policy
 
@@ -388,7 +422,7 @@ Relevant logs are in the reproduction workspace under `logs/loaders/`, including
 1. Define the unified report/finding model and wire existing completion, collision, and arena evidence into one gate without changing behavior.
 2. Add the all-rank commit barrier and timeout at the resume boundary.
 3. Add transaction hooks for sparse/direct updates and arbitrary framework entry points.
-4. Implement loader epoch and keyless-state checks.
+4. Integrate the post-init `model.load_weights` adapter into the transaction protocol, define exception-safe layerwise abort cleanup, and implement keyless-state checks.
 5. Define target, draft, and MTP scopes plus weight generation.
 6. Add cache-generation invalidation and distributed shard sentinels.
 7. Choose shadow-model or undo-log rollback.
