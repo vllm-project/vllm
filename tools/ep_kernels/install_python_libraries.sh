@@ -170,6 +170,30 @@ do_build() {
         sed -i "s|f'{nvshmem_dir}/include']|f'{nvshmem_dir}/include', '${CUDA_HOME}/include/cccl']|" "setup.py"
     fi
 
+    # manylinux headers do not define these syscalls used by DeepEP.
+    if [[ "$name" == "DeepEP" ]] && \
+        ! grep -q "vLLM manylinux syscall compatibility" \
+            csrc/kernels/backend/symmetric.hpp; then
+        sed -i '1i\
+// vLLM manylinux syscall compatibility\
+#if defined(__x86_64__) || defined(__aarch64__)\
+#ifndef SYS_pidfd_open\
+#ifdef __NR_pidfd_open\
+#define SYS_pidfd_open __NR_pidfd_open\
+#else\
+#define SYS_pidfd_open 434\
+#endif\
+#endif\
+#ifndef SYS_pidfd_getfd\
+#ifdef __NR_pidfd_getfd\
+#define SYS_pidfd_getfd __NR_pidfd_getfd\
+#else\
+#define SYS_pidfd_getfd 438\
+#endif\
+#endif\
+#endif' csrc/kernels/backend/symmetric.hpp
+    fi
+
     if [ "$MODE" = "install" ]; then
         echo "Installing $name into environment"
         eval "$extra_env" uv pip install --no-build-isolation -vvv .
