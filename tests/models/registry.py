@@ -842,8 +842,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Emu3ForConditionalGeneration": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
     "Ernie4_5_VLMoeForConditionalGeneration": _HfExamplesInfo(
         "baidu/ERNIE-4.5-VL-28B-A3B-PT",
-        trust_remote_code=True,
-        revision="refs/pr/17",
+        revision="db17d8724f9bd48b288e1a15b33aa6af70416af8",
     ),
     "Exaone4_5_ForConditionalGeneration": _HfExamplesInfo(
         "LGAI-EXAONE/EXAONE-4.5-33B",

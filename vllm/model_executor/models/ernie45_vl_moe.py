@@ -63,6 +63,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import set_default_rope_theta
 
 from .ernie45_moe import Ernie4_5_MoeMLP
+from .ernie45_vl_config import get_ernie4_5_vl_config
 from .interfaces import SupportsPP
 from .utils import (
     PPMissingLayer,
@@ -213,24 +214,29 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 f"the number of experts {moe_num_experts}."
             )
 
-        moe_layer_start_index = config.moe_layer_start_index
-        text_moe_layer_start_index = moe_layer_start_index[0]
-        vision_moe_layer_start_index = moe_layer_start_index[1]
-        moe_layer_end_index = config.moe_layer_end_index
-        moe_layer_end_index = getattr(
-            config,
-            "moe_layer_end_index",
-            [config.num_hidden_layers - 1, config.num_hidden_layers - 1],
-        )
-        text_moe_layer_end_index = moe_layer_end_index[0]
-        vision_moe_layer_end_index = moe_layer_end_index[1]
+        mlp_layer_types = getattr(config, "mlp_layer_types", None)
+        if mlp_layer_types is not None:
+            text_uses_moe = vision_uses_moe = True
+        else:
+            moe_layer_start_index = config.moe_layer_start_index
+            moe_layer_end_index = getattr(
+                config,
+                "moe_layer_end_index",
+                [config.num_hidden_layers - 1, config.num_hidden_layers - 1],
+            )
+            assert moe_layer_start_index[0] <= moe_layer_end_index[0]
+            assert moe_layer_start_index[1] <= moe_layer_end_index[1]
+            text_uses_moe = (
+                moe_layer_start_index[0] <= layer_idx <= moe_layer_end_index[0]
+            )
+            vision_uses_moe = (
+                moe_layer_start_index[1] <= layer_idx <= moe_layer_end_index[1]
+            )
 
         assert config.moe_num_experts[0] == config.moe_num_experts[1]
         self.e_score_correction_bias = nn.Parameter(
             torch.empty(2, config.moe_num_experts[0], dtype=torch.float32)
         )
-
-        assert text_moe_layer_start_index <= text_moe_layer_end_index
 
         if self.has_shared_experts:
             intermediate_size = (
@@ -247,10 +253,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
         else:
             self.shared_experts = None
 
-        if (
-            layer_idx >= text_moe_layer_start_index
-            and layer_idx <= text_moe_layer_end_index
-        ):
+        if text_uses_moe:
             self.text_experts_gate = ReplicatedLinear(
                 config.hidden_size,
                 config.moe_num_experts[0],
@@ -283,11 +286,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 prefix=f"{prefix}.mlp",
             )
 
-        assert vision_moe_layer_start_index <= vision_moe_layer_end_index
-        if (
-            layer_idx >= vision_moe_layer_start_index
-            and layer_idx <= vision_moe_layer_end_index
-        ):
+        if vision_uses_moe:
             self.vision_experts_gate = ReplicatedLinear(
                 config.hidden_size,
                 config.moe_num_experts[1],
@@ -381,6 +380,32 @@ class Ernie4_5_VLMoeMoE(nn.Module):
         return final_hidden_states.view(orig_shape)
 
 
+def _is_moe_layer(config: PretrainedConfig, layer_idx: int) -> bool:
+    mlp_layer_types = getattr(config, "mlp_layer_types", None)
+    if mlp_layer_types is not None:
+        if layer_idx >= len(mlp_layer_types):
+            raise ValueError(
+                "ERNIE 4.5 VL config has fewer MLP layer types "
+                f"({len(mlp_layer_types)}) than decoder layers "
+                f"(requested layer {layer_idx})"
+            )
+        return mlp_layer_types[layer_idx] == "sparse"
+
+    start = min(config.moe_layer_start_index)
+    end = max(
+        getattr(
+            config,
+            "moe_layer_end_index",
+            [config.num_hidden_layers - 1, config.num_hidden_layers - 1],
+        )
+    )
+    return (
+        getattr(config, "use_moe", max(config.moe_num_experts) > 0)
+        and (layer_idx + 1) % getattr(config, "moe_layer_interval", 1) == 0
+        and start <= layer_idx <= end
+    )
+
+
 class Ernie4_5_VLMoeDecoderLayer(nn.Module):
     def __init__(
         self,
@@ -413,27 +438,7 @@ class Ernie4_5_VLMoeDecoderLayer(nn.Module):
         layer_idx = extract_layer_index(prefix)
         self.layer_idx = layer_idx
 
-        # MoE
-        moe_layer_start_index = config.moe_layer_start_index
-        min_moe_layer_start_index = min(moe_layer_start_index)
-        moe_layer_end_index = getattr(
-            config,
-            "moe_layer_end_index",
-            [config.num_hidden_layers - 1, config.num_hidden_layers - 1],
-        )
-        max_moe_layer_end_index = max(moe_layer_end_index)
-        assert min_moe_layer_start_index <= max_moe_layer_end_index
-        moe_num_experts = config.moe_num_experts
-        max_moe_num_experts = max(moe_num_experts)
-        moe_layer_interval = getattr(config, "moe_layer_interval", 1)
-        use_moe = getattr(config, "use_moe", max_moe_num_experts > 0)
-
-        if (
-            use_moe
-            and ((layer_idx + 1) % moe_layer_interval == 0)
-            and layer_idx >= min_moe_layer_start_index
-            and layer_idx <= max_moe_layer_end_index
-        ):
+        if _is_moe_layer(config, layer_idx):
             self.mlp = Ernie4_5_VLMoeMoE(
                 config=config, quant_config=quant_config, prefix=f"{prefix}.mlp"
             )
@@ -497,7 +502,7 @@ class Ernie4_5_VLMoeModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        config = vllm_config.model_config.hf_config
+        config = get_ernie4_5_vl_config(vllm_config.model_config.hf_config)
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
@@ -592,7 +597,7 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        config = get_ernie4_5_vl_config(vllm_config.model_config.hf_config)
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config

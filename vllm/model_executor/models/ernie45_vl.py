@@ -25,6 +25,7 @@
 
 import math
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from copy import deepcopy
 from functools import partial
 from typing import Annotated, Any, Literal
 
@@ -34,6 +35,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from transformers import BaseImageProcessor, BatchFeature
+from transformers.video_utils import VideoMetadata
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
@@ -74,6 +76,10 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+from .ernie45_vl_config import (
+    get_ernie4_5_vl_config,
+    get_ernie4_5_vl_vision_norm_eps,
+)
 from .ernie45_vl_moe import Ernie4_5_VLMoeForCausalLM
 from .interfaces import (
     MultiModalEmbeddings,
@@ -359,10 +365,12 @@ class Ernie4_5_VisionTransformer(nn.Module):
         spatial_merge_size = vision_config.spatial_merge_size
         in_channels = vision_config.in_channels
         hidden_size = vision_config.hidden_size
-        embed_dim = vision_config.embed_dim
+        embed_dim = getattr(vision_config, "embed_dim", hidden_size)
         depth = vision_config.depth
         num_heads = vision_config.num_heads
-        mlp_ratio = vision_config.mlp_ratio
+        mlp_ratio = getattr(vision_config, "mlp_ratio", None)
+        if mlp_ratio is None:
+            mlp_ratio = vision_config.intermediate_size / hidden_size
 
         self.spatial_merge_size = spatial_merge_size
         self.num_heads = num_heads
@@ -615,7 +623,7 @@ class VariableResolutionResamplerModel(nn.Module):
         self.config = config
         self.spatial_conv_size = spatial_conv_size
         self.temporal_conv_size = temporal_conv_size
-        self.use_temporal_conv = config.use_temporal_conv
+        self.use_temporal_conv = getattr(config, "use_temporal_conv", True)
 
         # compress 2d conv(picture) to 1d
         self.spatial_dim = self.in_dim * self.spatial_conv_size * self.spatial_conv_size
@@ -785,13 +793,38 @@ class VariableResolutionResamplerModel(nn.Module):
 
 class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
-        return self.ctx.model_config.hf_config
+        return get_ernie4_5_vl_config(self.ctx.model_config.hf_config)
+
+    def uses_native_hf_config(self) -> bool:
+        return getattr(self.ctx.model_config.hf_config, "text_config", None) is not None
 
     def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(use_fast=True, **kwargs)
 
     def get_image_processor(self, **kwargs: object):
         return self.get_hf_processor(**kwargs).image_processor
+
+    def get_video_processor(self, **kwargs: object):
+        hf_processor = self.get_hf_processor(**kwargs)
+        return getattr(hf_processor, "video_processor", hf_processor.image_processor)
+
+    def normalize_mm_kwargs(self, mm_kwargs: Mapping[str, object]) -> dict[str, object]:
+        normalized = dict(mm_kwargs)
+        if not self.uses_native_hf_config():
+            return normalized
+
+        size = dict(normalized.get("size", {}))  # type: ignore[arg-type]
+        for alias, native_key in (
+            ("min_pixels", "shortest_edge"),
+            ("max_pixels", "longest_edge"),
+        ):
+            if alias in normalized:
+                value = normalized.pop(alias)
+                if value is not None:
+                    size[native_key] = value
+        if size:
+            normalized["size"] = size
+        return normalized
 
     def get_data_parser(self):
         return MultiModalDataParser(
@@ -828,16 +861,16 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         spatial_conv_size = hf_config.spatial_conv_size
         temporal_conv_size = hf_config.temporal_conv_size
 
-        if self.ctx.model_config.trust_remote_code:
-            # Defined in HF Hub repo
-            min_pixels_key = "min_pixels"
-            max_pixels_key = "max_pixels"
-        else:
+        if self.uses_native_hf_config():
             # Defined in Transformers library (requires v5.0 or above)
             min_pixels_key = "shortest_edge"
             max_pixels_key = "longest_edge"
+        else:
+            # Defined in HF Hub repo
+            min_pixels_key = "min_pixels"
+            max_pixels_key = "max_pixels"
 
-        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
+        mm_kwargs = self.normalize_mm_kwargs(self.ctx.get_merged_mm_kwargs(mm_kwargs))
         size = image_processor.size
         if override_size := mm_kwargs.get("size"):
             size = size | override_size
@@ -901,16 +934,22 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         )
         return num_video_tokens
 
-    def get_image_size_with_most_features(self) -> ImageSize:
-        image_processor = self.get_image_processor()
-
-        max_image_size, _ = self._get_vision_info(
+    def _get_size_with_most_features(
+        self, image_processor: BaseImageProcessor
+    ) -> ImageSize:
+        max_size, _ = self._get_vision_info(
             image_width=9999999,
             image_height=9999999,
             image_processor=image_processor,
             mm_kwargs={},
         )
-        return max_image_size
+        return max_size
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        return self._get_size_with_most_features(self.get_image_processor())
+
+    def get_video_size_with_most_features(self) -> ImageSize:
+        return self._get_size_with_most_features(self.get_video_processor())
 
     def get_max_image_tokens(self) -> int:
         image_processor = self.get_image_processor()
@@ -925,8 +964,8 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         return num_image_tokens
 
     def _get_max_video_frames(self, max_tokens: int) -> int:
-        image_processor = self.get_image_processor()
-        target_width, target_height = self.get_image_size_with_most_features()
+        video_processor = self.get_video_processor()
+        target_width, target_height = self.get_video_size_with_most_features()
 
         num_frames = 0
 
@@ -936,7 +975,7 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
                 image_width=target_width,
                 image_height=target_height,
                 num_frames=next_num_frames,
-                image_processor=image_processor,
+                image_processor=video_processor,
                 mm_kwargs={},
             )
 
@@ -970,19 +1009,111 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> int:
-        image_processor = self.get_image_processor()
-        target_width, target_height = self.get_image_size_with_most_features()
+        video_processor = self.get_video_processor()
+        target_width, target_height = self.get_video_size_with_most_features()
 
         return self.get_num_video_tokens(
             image_width=target_width,
             image_height=target_height,
             num_frames=self.get_num_frames_with_most_features(seq_len, mm_counts),
-            image_processor=image_processor,
+            image_processor=video_processor,
             mm_kwargs={},
         )
 
 
 class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessingInfo]):
+    @staticmethod
+    def _clone_native_video_data(video: object) -> object:
+        """Copy mutable buffers before the native processor draws timestamps."""
+        if isinstance(video, np.ndarray):
+            return video.copy()
+        if isinstance(video, torch.Tensor):
+            return video.clone()
+        if isinstance(video, list):
+            return [
+                Ernie4_5VLMultiModalProcessor._clone_native_video_data(item)
+                for item in video
+            ]
+        if isinstance(video, tuple):
+            return tuple(
+                Ernie4_5VLMultiModalProcessor._clone_native_video_data(item)
+                for item in video
+            )
+        return video
+
+    def _prepare_native_video_inputs(
+        self,
+        hf_processor: Any,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        prepared_data = dict(mm_data)
+        prepared_kwargs = dict(mm_kwargs)
+        videos = prepared_data.get("videos")
+        if not isinstance(videos, list) or not videos:
+            return prepared_data, prepared_kwargs
+
+        effective_kwargs = self.info.ctx.get_merged_mm_kwargs(mm_kwargs)
+        global_policy = effective_kwargs.get("do_sample_frames")
+        has_global_policy = global_policy is not None
+        if not has_global_policy:
+            global_policy = getattr(
+                hf_processor.video_processor, "do_sample_frames", True
+            )
+        if not isinstance(global_policy, bool):
+            raise TypeError(
+                "ERNIE video do_sample_frames must be a bool, "
+                f"got {type(global_policy)}"
+            )
+
+        hf_videos = []
+        hf_video_metadata = []
+        sampling_policies = []
+        for item_idx, item in enumerate(videos):
+            if not isinstance(item, tuple) or len(item) != 2:
+                raise TypeError("ERNIE video input must include metadata")
+            video, metadata = item
+            if not isinstance(metadata, Mapping):
+                raise TypeError(
+                    "ERNIE video metadata must be a mapping, "
+                    f"got {type(metadata)} for item {item_idx}"
+                )
+
+            item_policy = global_policy
+            metadata_fields = deepcopy(dict(metadata))
+            metadata_policy = metadata_fields.pop("do_sample_frames", None)
+            if metadata_policy is not None:
+                if not isinstance(metadata_policy, bool):
+                    raise TypeError(
+                        "ERNIE video metadata do_sample_frames must be a bool, "
+                        f"got {type(metadata_policy)} for item {item_idx}"
+                    )
+                if has_global_policy and metadata_policy != global_policy:
+                    raise ValueError(
+                        "Conflicting ERNIE video sampling policies for item "
+                        f"{item_idx}: processor kwargs specify {global_policy} "
+                        f"but metadata specifies {metadata_policy}"
+                    )
+                item_policy = metadata_policy
+
+            hf_videos.append(
+                Ernie4_5VLMultiModalProcessor._clone_native_video_data(video)
+            )
+            sampling_policies.append(item_policy)
+            hf_video_metadata.append(VideoMetadata(**metadata_fields))
+
+        if len(set(sampling_policies)) != 1:
+            raise ValueError(
+                "All videos in one ERNIE request must use the same "
+                "do_sample_frames policy; got "
+                f"{sampling_policies}"
+            )
+
+        prepared_data["videos"] = hf_videos
+        prepared_data["video_metadata"] = hf_video_metadata
+        prepared_kwargs["do_sample_frames"] = sampling_policies[0]
+        return prepared_data, prepared_kwargs
+
     def _pixel_values_norm(
         self,
         pixel_values: torch.Tensor,
@@ -1027,6 +1158,14 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        hf_processor = self.info.get_hf_processor(
+            **self.info.normalize_mm_kwargs(mm_kwargs)
+        )
+        if self.info.uses_native_hf_config():
+            prompt = prompt.replace(
+                "<|image@placeholder|>", hf_processor.image_token
+            ).replace("<|video@placeholder|>", hf_processor.video_token)
+
         # when the prompt is not empty but the multimodal data is empty,
         # directly invoke the tokenizer.
         if "images" not in mm_data and "videos" not in mm_data and prompt != "":
@@ -1037,35 +1176,47 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
             )
             return tokenizer_output
 
-        if "images" not in mm_data:
-            mm_data["images"] = []
-        if "videos" not in mm_data:
-            mm_data["videos"] = []
+        processor_mm_data = dict(mm_data)
+        processor_mm_kwargs = dict(mm_kwargs)
 
-        # Check if HF processor supports video metadata
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
-        supports_video_metadata = getattr(
-            hf_processor, "supports_video_metadata", False
-        )
+        if not self.info.uses_native_hf_config():
+            # The remote processor requires both modality fields.
+            processor_mm_data.setdefault("images", [])
+            processor_mm_data.setdefault("videos", [])
 
-        if mm_data["videos"] and not supports_video_metadata:
-            # Old HF processor, unwrap tuple to pure frames
-            logger.warning_once(
-                "HF processor doesn't support video metadata. "
-                "Timestamps will NOT be rendered. Please upgrade the model."
+            supports_video_metadata = getattr(
+                hf_processor, "supports_video_metadata", False
             )
-            mm_data["videos"] = [
-                v[0] if isinstance(v, tuple) else v for v in mm_data["videos"]
-            ]
+            if processor_mm_data.get("videos") and not supports_video_metadata:
+                logger.warning_once(
+                    "HF processor doesn't support video metadata. "
+                    "Timestamps will NOT be rendered. Please upgrade the model."
+                )
+                processor_mm_data["videos"] = [
+                    video[0] if isinstance(video, tuple) else video
+                    for video in processor_mm_data["videos"]  # type: ignore[union-attr]
+                ]
+        else:
+            processor_mm_data, processor_mm_kwargs = self._prepare_native_video_inputs(
+                hf_processor,
+                processor_mm_data,
+                processor_mm_kwargs,
+            )
+
+        processor_callable = hf_processor
+        if self.info.uses_native_hf_config():
+
+            def processor_callable(**kwargs):
+                return hf_processor(**self.info.normalize_mm_kwargs(kwargs))
 
         processor_output = self.info.ctx.call_hf_processor(
-            hf_processor,
-            dict(text=[prompt], images=mm_data["images"], videos=mm_data["videos"]),
-            dict(**mm_kwargs, **tok_kwargs),
+            processor_callable,
+            dict(text=[prompt], **processor_mm_data),
+            dict(**processor_mm_kwargs, **tok_kwargs),
         )
 
-        # Divide the processor_output into two modalities: image and video.
-        if processor_output is not None:
+        # The remote processor combines image and video patches under ``images``.
+        if processor_output is not None and "images" in processor_output:
             pixel_values = processor_output["images"]
             if pixel_values is not None:
                 processor_output["images"] = self._pixel_values_norm(
@@ -1097,6 +1248,23 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
 
         return processor_output
 
+    def _apply_hf_processor_tokens_only(
+        self,
+        prompt_tokens: list[int],
+    ) -> list[int]:
+        if not self.info.uses_native_hf_config():
+            return prompt_tokens
+
+        tokenizer = self.info.get_tokenizer()
+        hf_processor = self.info.get_hf_processor()
+        prompt = tokenizer.decode(prompt_tokens)
+        normalized_prompt = prompt.replace(
+            "<|image@placeholder|>", hf_processor.image_token
+        ).replace("<|video@placeholder|>", hf_processor.video_token)
+        if normalized_prompt == prompt:
+            return prompt_tokens
+        return tokenizer.encode(normalized_prompt, add_special_tokens=False)
+
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
@@ -1104,6 +1272,7 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        hf_config = self.info.get_hf_config()
 
         before_placeholder = {
             "image": "<|image@placeholder|>",
@@ -1111,12 +1280,18 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
         }
 
         after_placeholder = {
-            # image and video have same placeholder
-            "image": "<|IMAGE_PLACEHOLDER|>",
-            "video": "<|IMAGE_PLACEHOLDER|>",
+            "image": getattr(hf_processor, "image_token", "<|IMAGE_PLACEHOLDER|>"),
+            # Only the native processor has a dedicated video patch token.
+            "video": getattr(hf_processor, "video_token", "<|IMAGE_PLACEHOLDER|>"),
         }
 
-        merge_length = hf_processor.spatial_conv_size**2
+        target_placeholders = (
+            after_placeholder
+            if self.info.uses_native_hf_config()
+            else before_placeholder
+        )
+
+        merge_length = hf_config.spatial_conv_size**2
 
         def get_replacement_ernie45vl(item_idx: int, modality: str):
             out_item = out_mm_kwargs[modality][item_idx]
@@ -1124,9 +1299,7 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
             assert isinstance(grid_thw, torch.Tensor)
             if modality == "video":
                 num_tokens = (
-                    int(grid_thw.prod())
-                    // hf_processor.temporal_conv_size
-                    // merge_length
+                    int(grid_thw.prod()) // hf_config.temporal_conv_size // merge_length
                 )
             else:
                 num_tokens = int(grid_thw.prod()) // merge_length
@@ -1135,7 +1308,7 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
         return [
             PromptReplacement(
                 modality=modality,
-                target=before_placeholder[modality],
+                target=target_placeholders[modality],
                 replacement=partial(get_replacement_ernie45vl, modality=modality),
             )
             for modality in ("image", "video")
@@ -1187,7 +1360,8 @@ class Ernie4_5_VLDummyInputsBuilder(BaseDummyInputsBuilder[Ernie4_5_VLProcessing
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
-        target_width, target_height = self.info.get_image_size_with_most_features()
+        image_width, image_height = self.info.get_image_size_with_most_features()
+        video_width, video_height = self.info.get_video_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts
         )
@@ -1197,14 +1371,14 @@ class Ernie4_5_VLDummyInputsBuilder(BaseDummyInputsBuilder[Ernie4_5_VLProcessing
 
         return {
             "image": self._get_dummy_images(
-                width=target_width,
-                height=target_height,
+                width=image_width,
+                height=image_height,
                 num_images=num_images,
                 overrides=image_overrides,
             ),
             "video": self._get_dummy_videos(
-                width=target_width,
-                height=target_height,
+                width=video_width,
+                height=video_height,
                 num_frames=target_num_frames,
                 num_videos=num_videos,
                 overrides=video_overrides,
@@ -1301,7 +1475,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        config = get_ernie4_5_vl_config(vllm_config.model_config.hf_config)
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
@@ -1311,12 +1485,12 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.vision_model = Ernie4_5_VisionTransformer(
                 config.vision_config,
-                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                norm_eps=get_ernie4_5_vl_vision_norm_eps(config),
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "vision_model"),
             )
             self.resampler_model = VariableResolutionResamplerModel(
-                self.config.pixel_hidden_size,
+                self.config.vision_config.hidden_size,
                 self.config.hidden_size,
                 self.config.spatial_conv_size,
                 self.config.temporal_conv_size,
@@ -1339,6 +1513,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
                 token_id
                 for token_id in [
                     self.config.im_patch_id,
+                    getattr(self.config, "video_token_id", None),
                     getattr(self.config, "image_start_token_id", None),
                     getattr(self.config, "image_end_token_id", None),
                     getattr(self.config, "video_start_token_id", None),
