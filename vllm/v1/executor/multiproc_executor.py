@@ -942,6 +942,11 @@ class WorkerProc:
             # Clean up once worker exits busy loop
             if worker is not None:
                 worker.shutdown()
+            else:
+                try:
+                    destroy_model_parallel()
+                finally:
+                    destroy_distributed_environment()
 
     class ResponseStatus(Enum):
         SUCCESS = auto()

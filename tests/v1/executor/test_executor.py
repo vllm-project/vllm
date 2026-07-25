@@ -5,6 +5,7 @@ import asyncio
 import os
 from collections.abc import Callable
 from concurrent.futures import Future
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -86,6 +87,54 @@ def test_multiproc_executor_worker_termination_timeout(
     proc = _FakeProcess(clock, exits_at=exits_at)
     executor._ensure_worker_termination([proc])
     assert proc.terminate_called is expected_terminate
+
+
+def test_worker_init_failure_cleans_distributed_environment(monkeypatch):
+    worker_main = multiproc_executor_module.WorkerProc.worker_main
+    cleanup_calls = []
+
+    class _ReadyPipe:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    def fail_worker_init(*args, **kwargs):
+        raise RuntimeError("worker initialization failed")
+
+    monkeypatch.setattr(multiproc_executor_module, "WorkerProc", fail_worker_init)
+    monkeypatch.setattr(multiproc_executor_module.signal, "signal", lambda *args: None)
+    monkeypatch.setattr(
+        multiproc_executor_module, "set_worker_net_device", lambda *args: None
+    )
+    monkeypatch.setattr(
+        multiproc_executor_module, "maybe_init_worker_tracer", lambda **kwargs: None
+    )
+    monkeypatch.setattr(
+        multiproc_executor_module,
+        "destroy_model_parallel",
+        lambda: cleanup_calls.append("model_parallel"),
+    )
+    monkeypatch.setattr(
+        multiproc_executor_module,
+        "destroy_distributed_environment",
+        lambda: cleanup_calls.append("distributed"),
+    )
+
+    ready_pipe = _ReadyPipe()
+    worker_main(
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(assigned_physical_gpu_ids=None)
+        ),
+        local_rank=0,
+        rank=0,
+        ready_pipe=ready_pipe,
+        death_pipe=None,
+        inherited_fds=[],
+    )
+
+    assert ready_pipe.closed
+    assert cleanup_calls == ["model_parallel", "distributed"]
 
 
 class CustomMultiprocExecutor(MultiprocExecutor):
