@@ -77,7 +77,7 @@ class Internlm2ToolParser(ToolParser):
             return None
 
         new_delta = current_text[last_pos:]
-        text, action = new_delta.split("<|action_start|><|plugin|>")
+        text, action = new_delta.split("<|action_start|><|plugin|>", 1)
 
         if len(text) > 0:
             self.position = self.position + len(text)
@@ -202,7 +202,7 @@ class Internlm2ToolParser(ToolParser):
         text = model_output
         tools = self.tools
         if "<|action_start|><|plugin|>" in text:
-            text, action = text.split("<|action_start|><|plugin|>")
+            text, action = text.split("<|action_start|><|plugin|>", 1)
             action = action.split("<|action_end|>".strip())[0]
             action = action[action.find("{") :]
             action_dict = json.loads(action)
