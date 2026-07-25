@@ -43,6 +43,15 @@ def test_language_model_only_affects_model_hash():
     assert base_hash != lm_only_hash
 
 
+@pytest.mark.parametrize("backend_arg", ["video_backend", "backend"])
+def test_use_gpu_video_backend_from_media_io_kwargs(backend_arg: str):
+    config = MultiModalConfig(
+        media_io_kwargs={"video": {backend_arg: "pynvvideocodec"}}
+    )
+
+    assert config.use_gpu_video_backend()
+
+
 def test_mm_encoder_fp8_scale_path_requires_fp8():
     with pytest.raises(ValueError, match="mm_encoder_attn_dtype"):
         MultiModalConfig(mm_encoder_fp8_scale_path="/tmp/scales.json")

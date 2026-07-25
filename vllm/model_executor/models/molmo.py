@@ -46,7 +46,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -76,7 +75,6 @@ from .interfaces import (
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
-    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -672,6 +670,14 @@ class MolmoDecoderNormAfterLayer(MolmoDecoderLayer):
 class MolmoVisionBackbone(nn.Module, SupportsQuant):
     packed_modules_mapping = {"merged_linear": ["gate_proj", "up_proj"]}
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            # image_projector gate_up merge
+            "gate_proj": ("merged_linear", 0),
+            "up_proj": ("merged_linear", 1),
+        }
+    )
+
     def __init__(
         self,
         config: PretrainedConfig,
@@ -800,38 +806,8 @@ class MolmoVisionBackbone(nn.Module, SupportsQuant):
         return image_features
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("merged_linear", "gate_proj", 0),
-            ("merged_linear", "up_proj", 1),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 @support_torch_compile
@@ -910,20 +886,7 @@ class MolmoModel(nn.Module, SupportsQuant):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            if name.endswith(".bias") and name not in params_dict:
-                continue
-            if is_pp_missing_parameter(name, self):
-                continue
-
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
-            weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        return AutoWeightsLoader(self).load_weights(weights)
 
 
 def _lowest_multiple(x: int, k: int) -> int:

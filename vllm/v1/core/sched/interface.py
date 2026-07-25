@@ -9,6 +9,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorBase
     from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.engine import EngineCoreOutputs
@@ -144,7 +145,7 @@ class SchedulerInterface(ABC):
         self,
         request_ids: str | Iterable[str] | None,
         finished_status: "RequestStatus",
-    ) -> list[tuple[str, int]]:
+    ) -> "list[Request]":
         """Finish the requests in the scheduler's internal queue. If the request
         is not in the queue, this method will do nothing for that request.
 
@@ -158,8 +159,8 @@ class SchedulerInterface(ABC):
             finished_status: The finished status of the given requests.
 
         Returns:
-            Tuple of (req_id, client_index) for requests that were aborted. Will not
-            include any that were already finished.
+            List of requests that were aborted. Will not include any that were
+            already finished.
         """
         raise NotImplementedError
 
@@ -247,4 +248,7 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     def get_kv_connector(self) -> "KVConnectorBase_V1 | None":
+        return None
+
+    def get_ec_connector(self) -> "ECConnectorBase | None":
         return None

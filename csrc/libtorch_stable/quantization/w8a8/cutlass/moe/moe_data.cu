@@ -212,6 +212,8 @@ void get_cutlass_moe_mm_problem_sizes_from_expert_offsets_caller(
                   "n and k must fit in int32");
 
   int const num_experts = static_cast<int>(num_experts64);
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      expert_first_token_offset.get_device_index());
   auto stream =
       get_current_cuda_stream(expert_first_token_offset.get_device_index());
 
@@ -241,6 +243,7 @@ void get_cutlass_moe_mm_data_caller(
     const std::optional<torch::stable::Tensor>& blockscale_offsets,
     const bool is_gated) {
   auto device = topk_ids.device();
+  const torch::stable::accelerator::DeviceGuard device_guard(device.index());
   auto stream = get_current_cuda_stream(device.index());
   torch::stable::Tensor atomic_buffer = torch::stable::new_zeros(
       topk_ids, {num_experts}, torch::headeronly::ScalarType::Int);
@@ -311,6 +314,8 @@ void get_cutlass_batched_moe_mm_data_caller(
     const torch::stable::Tensor& expert_num_tokens,
     const int64_t num_local_experts, const int64_t padded_m, const int64_t n,
     const int64_t k) {
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      expert_offsets.get_device_index());
   auto stream = get_current_cuda_stream(expert_offsets.get_device_index());
 
   if (num_local_experts * padded_m > SWAP_AB_THRESHOLD) {

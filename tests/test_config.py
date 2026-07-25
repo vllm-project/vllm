@@ -34,6 +34,7 @@ from vllm.config.vllm import (
     OptimizationLevel,
 )
 from vllm.platforms import current_platform
+from vllm.v1.attention.backend import AttentionCGSupport
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -65,6 +66,36 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
         monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", env_value)
 
     assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
+
+
+@pytest.mark.parametrize(
+    ("use_v2_model_runner", "expected_capture_sizes"),
+    [
+        (False, [4, 8, 12, 16]),
+        (True, list(range(1, 17))),
+    ],
+)
+def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
+    use_v2_model_runner,
+    expected_capture_sizes,
+):
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        cudagraph_capture_sizes=list(range(1, 17)),
+    )
+    compilation_config.max_cudagraph_capture_size = 16
+    compilation_config.post_init_cudagraph_sizes()
+
+    cudagraph_mode = compilation_config.resolve_cudagraph_mode_and_sizes(
+        AttentionCGSupport.ALWAYS,
+        "FakeAttentionBackend",
+        uniform_decode_query_len=4,
+        use_v2_model_runner=use_v2_model_runner,
+        tensor_parallel_size=1,
+    )
+
+    assert cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+    assert compilation_config.cudagraph_capture_sizes == expected_capture_sizes
 
 
 @pytest.mark.parametrize(
@@ -118,7 +149,17 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
                 is_moe=False,
                 is_quantized=False,
             ),
-            False,
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="google/gemma-2-2b",
+                architectures=["Gemma2ForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            True,
         ),
         (
             SimpleNamespace(
@@ -172,6 +213,26 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
         ),
         (
             SimpleNamespace(
+                model="thinkingmachines/Inkling",
+                architectures=["InklingForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="thinkingmachines/Inkling",
+                architectures=["InklingForConditionalGeneration"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
                 model="mistralai/Mixtral-8x7B-Instruct-v0.1",
                 architectures=["MixtralForCausalLM"],
                 runner_type="generate",
@@ -197,6 +258,18 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
                 runner_type="generate",
                 is_moe=False,
                 is_quantized=False,
+                is_hybrid=True,
+            ),
+            False,
+        ),
+        (
+            SimpleNamespace(
+                model="state-spaces/mamba-130m-hf",
+                architectures=["MambaForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+                is_attention_free=True,
             ),
             False,
         ),
@@ -333,26 +406,41 @@ class _TestNestedConfig:
     a: _TestConfigFields = field(default_factory=lambda: _TestConfigFields(a=0))
 
 
+@dataclass
+class _TestDerivedConfigFields(_TestConfigFields):
+    pass
+
+
 def test_update_config():
     # Simple update
     config1 = _TestConfigFields(a=0)
     new_config1 = update_config(config1, {"a": 42})
     assert new_config1.a == 42
     # Nonexistent field
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError, match=r"_TestConfigFields\.nonexistent"):
         new_config1 = update_config(config1, {"nonexistent": 1})
     # Nested update with dataclass
     config2 = _TestNestedConfig()
     new_inner_config = _TestConfigFields(a=1, c="new_value")
     new_config2 = update_config(config2, {"a": new_inner_config})
     assert new_config2.a == new_inner_config
+    # Declared field type, not the live value's subtype, defines valid overrides
+    config_with_derived = _TestNestedConfig(a=_TestDerivedConfigFields(a=0))
+    new_config2 = update_config(config_with_derived, {"a": new_inner_config})
+    assert new_config2.a is new_inner_config
+    # Nested update with unrelated dataclass
+    with pytest.raises(ValueError, match=r"_TestNestedConfig\.a"):
+        update_config(config2, {"a": _TestNestedConfig()})
     # Nested update with dict
     config3 = _TestNestedConfig()
     new_config3 = update_config(config3, {"a": {"c": "new_value"}})
     assert new_config3.a.c == "new_value"
     # Nested update with invalid type
-    with pytest.raises(AssertionError):
-        new_config3 = update_config(config3, {"a": "new_value"})
+    with pytest.raises(ValueError, match=r"_TestNestedConfig\.a"):
+        update_config(config3, {"a": "new_value"})
+    # Invalid nested field preserves its full path
+    with pytest.raises(ValueError, match=r"_TestNestedConfig\.a\.nonexistent"):
+        update_config(config3, {"a": {"nonexistent": 1}})
 
 
 @pytest.mark.parametrize(
@@ -594,6 +682,30 @@ def test_nested_hf_overrides():
     assert model_config.hf_config.text_config.hidden_size == 2048
     assert model_config.hf_config.text_config.num_attention_heads == 16
     assert model_config.hf_config.vision_config.hidden_size == 512
+
+
+def test_model_class_overrides_registers_target():
+    """`model_class_overrides` redirects an architecture to a custom class."""
+    from vllm.model_executor.models import ModelRegistry
+
+    arch = "_TestModelClassOverrideArch"
+    target = "vllm.model_executor.models.llama:LlamaForCausalLM"
+    assert arch not in ModelRegistry.models
+
+    model_config = ModelConfig(
+        "facebook/opt-125m",
+        model_class_overrides={arch: target},
+    )
+    try:
+        # Accessing `.registry` is the chokepoint that applies the overrides;
+        # it has already run during construction.
+        registered = model_config.registry.models[arch]
+        assert registered.module_name == "vllm.model_executor.models.llama"
+        assert registered.class_name == "LlamaForCausalLM"
+        # Idempotent: a second access does not re-register or error out.
+        assert model_config.registry.models[arch] is registered
+    finally:
+        ModelRegistry.models.pop(arch, None)
 
 
 @pytest.mark.skipif(
@@ -1044,14 +1156,14 @@ def test_is_chunked_prefill_supported(
         (
             "Qwen/Qwen3-Next-80B-A3B-Instruct",
             "hybrid",
-            False,
-            "Hybrid models do not support prefix caching since the feature is still experimental.",  # noqa: E501
+            True,
+            "Generative hybrid models support prefix caching.",  # noqa: E501
         ),
         (
             "ibm-granite/granite-4.0-h-small",
             "hybrid",
-            False,
-            "Hybrid models do not support prefix caching since the feature is still experimental.",  # noqa: E501
+            True,
+            "Generative hybrid models support prefix caching.",  # noqa: E501
         ),
         (
             "state-spaces/mamba-130m-hf",
@@ -1292,7 +1404,9 @@ def test_vllm_config_explicit_overrides():
         compilation_config=compilation_config,
     )
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
-    assert config.compilation_config.pass_config.enable_qk_norm_rope_fusion is True
+    assert config.compilation_config.pass_config.enable_qk_norm_rope_fusion is (
+        current_platform.is_cuda_alike() or current_platform.is_xpu()
+    )
     # Mode should still use default for O2
     assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
 

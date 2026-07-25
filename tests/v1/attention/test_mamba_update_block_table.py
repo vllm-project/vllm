@@ -42,6 +42,8 @@ def _make_vllm_config(
         cache_config=SimpleNamespace(
             block_size=block_size,
             mamba_cache_mode="all",
+            use_replayssm=False,
+            replayssm_buffer_len=16,
         ),
         compilation_config=SimpleNamespace(
             cudagraph_mode=CUDAGraphMode.FULL,

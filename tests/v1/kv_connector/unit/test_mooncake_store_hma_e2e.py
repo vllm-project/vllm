@@ -65,6 +65,7 @@ def _minimal_vllm_config(cache_block_size=16):
     cfg.cache_config.block_size = cache_block_size
     cfg.cache_config.num_gpu_blocks = 4
     cfg.cache_config.hash_block_size = None
+    cfg.cache_config.prefix_match_unit = None
     cfg.cache_config.enable_prefix_caching = True
     cfg.parallel_config.prefill_context_parallel_size = 1
     cfg.parallel_config.decode_context_parallel_size = 1
@@ -96,14 +97,16 @@ def _build_worker_with_dict_store(vllm_config, kv_cache_config, store):
     with (
         patch.dict(sys.modules, {"mooncake.store": fake_mooncake_store}),
         patch.object(mooncake_store_worker, "MooncakeStoreConfig") as MCfg,
+        patch.object(mooncake_store_worker, "LookupKeyServer"),
     ):
-        sc = MCfg.load_from_env.return_value
+        sc = MCfg.load_from_config.return_value
         sc.metadata_server = ""
         sc.global_segment_size = 1 << 20
         sc.local_buffer_size = 1 << 20
         sc.protocol = "tcp"
         sc.device_name = ""
         sc.master_server_address = ""
+        sc.mode = "embedded"
         sc.enable_offload = False
         with (
             patch(
@@ -170,7 +173,6 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
     worker = _build_worker_with_dict_store(vllm_config, cfg, store)
     worker.tp_size = 1
     worker.pp_size = 1
-    worker.put_step = 1
     worker.num_kv_head = 8
 
     # Register kv_caches using mocked thread classes so register_kv_caches
@@ -212,7 +214,7 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
         block_size=worker.block_size,
         coord=worker.coord,
         tp_rank=worker.tp_rank,
-        put_step=worker.put_step,
+        group_put_steps=worker._group_tp_replication_factors,
         kv_role=worker.kv_role,
         ready_event=ready,
         enable_kv_event=False,
@@ -237,7 +239,10 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
     worker.store = store
 
     # Both groups stored all 4 blocks -> full hit.
-    assert worker.lookup(token_len=64, block_hashes=hs) == 64
+    assert worker.lookup(num_tokens=65, block_hashes=hs) == 64
+    # Exact-multiple prompt: the full hit is re-derived one block lower,
+    # where both groups' stored blocks still cover the SWA window.
+    assert worker.lookup(num_tokens=64, block_hashes=hs) == 48
 
     # Evict SWA's first two blocks (outside its window of 32 tokens = 2 blocks).
     swa_keys_outside_window = [
@@ -250,7 +255,12 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
 
     # SWA window=32 -> only last 2 blocks must be present in SWA group.
     # Full has all 4. Coordinator should still return 64.
-    assert worker.lookup(token_len=64, block_hashes=hs) == 64
+    assert worker.lookup(num_tokens=65, block_hashes=hs) == 64
+    # Exact-multiple prompt after eviction: the boundary one block lower
+    # needs SWA block 1, which is gone — no usable stored boundary remains
+    # (the pre-fix arithmetic clamp would have returned 48 and livelocked
+    # on load failure -> recompute -> same lookup).
+    assert worker.lookup(num_tokens=64, block_hashes=hs) == 0
 
 
 def test_recv_skips_swa_blocks_before_window():
@@ -337,5 +347,5 @@ def test_chunked_token_database_hash_block_size_smaller_than_block_size():
     assert out[1][0] == 16 and out[1][1] == 32
     # Each chunk's hash is its last (4th) fine hash, which already chains the
     # prior three.
-    assert out[0][2].chunk_hash == fine_hashes[3].hex()
-    assert out[1][2].chunk_hash == fine_hashes[7].hex()
+    assert out[0][2].hex() == fine_hashes[3].hex()
+    assert out[1][2].hex() == fine_hashes[7].hex()

@@ -67,7 +67,6 @@ class MooncakeStoreScheduler:
         # Per-request state
         self.load_specs: dict[str, LoadSpec] = {}  # to be loaded
         self._request_trackers: dict[str, RequestTracker] = {}  # scheduled new requests
-        self._preempted_req_ids: set[str] = set()  # preempted requests
         self._unfinished_requests: dict[str, tuple[Request, tuple[list[int], ...]]] = {}
         self._unfinished_request_ids: set[str] = set()
 
@@ -81,28 +80,18 @@ class MooncakeStoreScheduler:
         Returns ``(None, False)`` when an async lookup is still in flight,
         signaling the scheduler to retry this request on a later step.
         """
-        # Look up against the full prefill range, not just the prompt.
-        token_len = request.num_tokens // self._block_size * self._block_size
-        if token_len < self._block_size:
+        if request.num_tokens < self._block_size:
             return 0, False
 
         num_external_hit_tokens = self.client.lookup(
             request.request_id,
-            token_len,
+            request.num_tokens,
             request.block_hashes,
             non_block=self.lookup_async,
         )
         if num_external_hit_tokens is None:
             # Lookup not ready yet; scheduler will retry on a later step.
             return None, False
-
-        if num_external_hit_tokens == request.num_tokens:
-            # Leave a sub-block tail uncomputed for sampling, on a block
-            # boundary so the recv-side load mask covers every yielded chunk.
-            num_external_hit_tokens = max(
-                0,
-                (request.num_tokens - 1) // self._block_size * self._block_size,
-            )
 
         if num_external_hit_tokens < num_computed_tokens:
             need_to_allocate = 0
@@ -175,10 +164,8 @@ class MooncakeStoreScheduler:
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
             self._unfinished_request_ids.discard(finished_req_id)
-            self._preempted_req_ids.discard(finished_req_id)
 
         preempted_ids = scheduler_output.preempted_req_ids or set()
-        self._preempted_req_ids.update(preempted_ids)
         for req_id in preempted_ids:
             self.load_specs.pop(req_id, None)
             if request_tracker := self._request_trackers.get(req_id):
@@ -243,13 +230,12 @@ class MooncakeStoreScheduler:
                     continue
 
                 req_meta = None
-                if req_id in self._preempted_req_ids:
+                if req_id in cached_reqs.resumed_req_ids:
                     # Resumed after preemption
                     if isinstance(new_block_ids, tuple):
                         new_block_ids = tuple(b.copy() for b in new_block_ids)
                     else:
                         new_block_ids = (new_block_ids.copy(),)
-                    self._preempted_req_ids.discard(req_id)
                     load_spec = self.load_specs.pop(req_id, None)
                     request_tuple = self._unfinished_requests.get(req_id)
                     request_real = request_tuple[0]  # type: ignore[index]

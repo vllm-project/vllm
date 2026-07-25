@@ -10,6 +10,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.v1.kv_cache_interface import KVQuantMode
 
 FP8_MIN, FP8_MAX = get_fp8_min_max()
 
@@ -276,6 +277,7 @@ def triton_reshape_and_cache_flash_per_token_head_quant(
     k_scale_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads] float32
     v_scale_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads] float32
     slot_mapping: torch.Tensor,  # [num_tokens]
+    kv_quant_mode: KVQuantMode,
 ):
     """Quantize key/value per (token, head) and write to paged cache.
 
@@ -283,9 +285,26 @@ def triton_reshape_and_cache_flash_per_token_head_quant(
     quantized data in key_cache/value_cache, and stores the float32
     scale in k_scale_cache/v_scale_cache.
 
-    The quantization range (QUANT_MAX, QUANT_MIN) is derived from the
-    cache tensor dtype so the same code path works for int8 and fp8.
+    INT4 needs sub-byte packing + a Hadamard rotation, so it is handled by
+    its own kernel; INT8 / FP8 share this kernel, with the quantization
+    range (QUANT_MAX, QUANT_MIN) derived from the cache tensor dtype.
     """
+    if kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+        from vllm.v1.attention.ops.int4_per_token_head import (
+            reshape_and_cache_int4,
+        )
+
+        reshape_and_cache_int4(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            k_scale_cache=k_scale_cache,
+            v_scale_cache=v_scale_cache,
+        )
+        return
+
     cache_dtype = key_cache.dtype
     quant_params = _PER_TOKEN_HEAD_QUANT_PARAMS.get(cache_dtype)
     if quant_params is None:
@@ -454,6 +473,7 @@ def reshape_and_cache_kernel_flash_diffkv(
     value_stride: tl.int64,
     block_stride: tl.int64,
     page_stride: tl.int64,
+    head_stride: tl.int64,
     num_heads: tl.constexpr,
     head_size_k: tl.constexpr,
     head_size_v: tl.constexpr,
@@ -479,9 +499,7 @@ def reshape_and_cache_kernel_flash_diffkv(
     src_value_idx = token_idx * value_stride + tile_i * head_size_v
 
     tgt_idx = (
-        block_idx * block_stride
-        + block_offset * page_stride
-        + tile_i * (head_size_k + head_size_v)
+        block_idx * block_stride + block_offset * page_stride + tile_i * head_stride
     )
 
     # [TILE_SIZE]
@@ -523,7 +541,7 @@ def reshape_and_cache_kernel_flash_diffkv(
 def triton_reshape_and_cache_flash_diffkv(
     key: torch.Tensor,  # [num_tokens, num_heads, head_size]
     value: torch.Tensor,  # [num_tokens, num_heads, head_size_v]
-    # [num_blocks, block_size, num_heads, head_size + head_size_v]
+    # Strided [num_blocks, block_size, num_heads, head_size + head_size_v].
     kv_cache: torch.Tensor,
     slot_mapping: torch.Tensor,  # [num_tokens]
     kv_cache_dtype: str,  # "auto", "fp8"
@@ -539,6 +557,7 @@ def triton_reshape_and_cache_flash_diffkv(
     v_stride = value.stride()[0]
     block_stride = kv_cache.stride()[0]
     page_stride = kv_cache.stride()[1]
+    head_stride = kv_cache.stride()[2]
 
     kv_cache_torch_dtype = (
         current_platform.fp8_dtype()
@@ -580,6 +599,7 @@ def triton_reshape_and_cache_flash_diffkv(
         value_stride=v_stride,
         block_stride=block_stride,
         page_stride=page_stride,
+        head_stride=head_stride,
         num_heads=num_heads,
         head_size_k=head_size_k,
         head_size_v=head_size_v,

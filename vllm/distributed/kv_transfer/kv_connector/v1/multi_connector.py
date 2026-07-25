@@ -403,14 +403,13 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
         chosen_connector = self._requests_to_connector.get(request.request_id, -1)
-        empty_blocks = blocks.new_empty()
         for i, c in enumerate(self._connectors):
             if i == chosen_connector:
                 # Forward call to the chosen connector (if any).
                 c.update_state_after_alloc(request, blocks, num_external_tokens)
             else:
-                # Call with empty blocks for other connectors.
-                c.update_state_after_alloc(request, empty_blocks, 0)
+                # Other connectors still receive the request's real blocks
+                c.update_state_after_alloc(request, blocks, 0)
 
     def on_new_request(self, request: "Request") -> None:
         for c in self._connectors:
@@ -492,12 +491,15 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 async_saves += 1
             if txfer_params is not None:
                 if kv_txfer_params is not None:
-                    # TODO we can probably change this to merge the dicts here,
-                    # checking for key clashes.
-                    raise RuntimeError(
-                        "Only one connector can produce KV transfer params"
-                    )
-                kv_txfer_params = txfer_params
+                    clashes = set(kv_txfer_params) & set(txfer_params)
+                    if clashes:
+                        raise RuntimeError(
+                            "Key clash in kv_transfer_params from multiple "
+                            f"connectors: {clashes}"
+                        )
+                    kv_txfer_params.update(txfer_params)
+                else:
+                    kv_txfer_params = txfer_params
         if async_saves > 1:
             self._extra_async_saves[request.request_id] = async_saves - 1
 

@@ -130,6 +130,47 @@ jobs:
                   },
                 ],
               },
+              quantization: {
+                keywords: [
+                  {
+                    term: "quantization",
+                    searchIn: "both"
+                  },
+                  {
+                    term: "quantized",
+                    searchIn: "both"
+                  },
+                ],
+              },
+              "intel-gpu": {
+                // Keyword search - matches whole words only (with word boundaries)
+                keywords: [
+                  {
+                    term: "B50",
+                    searchIn: "both"
+                  },
+                  {
+                    term: "B60",
+                    searchIn: "both"
+                  },
+                  {
+                    term: "B70",
+                    searchIn: "both"
+                  },
+                  {
+                    term: "intel gpu",
+                    searchIn: "both"
+                  },
+                  {
+                    term: "Arc GPU",
+                    searchIn: "both"
+                  },
+                  {
+                    term: "BMG",
+                    searchIn: "both"
+                  },
+                ],
+              },
               // Add more label configurations here as needed
               // example: {
               //   keywords: [...],
@@ -323,11 +364,11 @@ jobs:
             // {users} will be replaced with @mentions
             const ccConfig = {
               rocm: {
-                users: ['hongxiayang', 'tjtanaa', 'vllmellm'],
+                users: ['hongxiayang', 'tjtanaa', 'vllmellm', 'giuseppegrossi'],
                 message: 'CC {users} for ROCm-related issue',
               },
               mistral: {
-                users: ['patrickvonplaten', 'juliendenize', 'andylolu2'],
+                users: ['patrickvonplaten', 'juliendenize', 'andylolu2', 'NickLucche'],
                 message: 'CC {users} for Mistral-related issue',
               },
               // Add more label -> user mappings here
