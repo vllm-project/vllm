@@ -6,10 +6,11 @@ from functools import wraps
 from weakref import WeakKeyDictionary, WeakSet
 
 import torch
+from torch.nn.parameter import is_lazy
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import Attention, MLAAttention
+from vllm.model_executor.layers.attention import is_deferred_attention_layer
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
@@ -17,9 +18,12 @@ from .meta import (
     SKIP_TENSORS,
     capture_layer_to_meta,
     get_numel_loaded,
+    get_reloadable_layer_tensors,
     materialize_layer,
     restore_layer_on_meta,
+    to_meta_tensor,
 )
+from .sanitize import restore_layer_refs
 from .types import LayerReloadingInfo
 from .utils import (
     get_info_size,
@@ -100,6 +104,8 @@ def initialize_layerwise_reload(model: torch.nn.Module):
     model._original_do_torchao_reload = getattr(model, "_do_torchao_reload", False)
     model._do_torchao_reload = False
 
+    mapped_layers = 0
+    layerwise_layers = 0
     for layer in model.modules():
         info = get_layerwise_info(layer)
 
@@ -107,8 +113,16 @@ def initialize_layerwise_reload(model: torch.nn.Module):
         if info.can_load():
             continue
 
+        runtime_tensors = get_layer_params_buffers(layer)
+        mapping = _get_runtime_weight_reload_mapping(layer, info)
+        if mapping is not None and _bind_runtime_weight_reload_mapping(
+            layer, info, runtime_tensors, mapping
+        ):
+            mapped_layers += 1
+            continue
+
         # Save current tensors for later copying
-        info.kernel_tensors = get_layer_params_buffers(layer)
+        info.kernel_tensors = runtime_tensors
         # snapshot now: restore_layer_on_meta drops alias buffers from the live set
         info.kernel_non_persistent_buffers = set(layer._non_persistent_buffers_set)
 
@@ -117,6 +131,156 @@ def initialize_layerwise_reload(model: torch.nn.Module):
 
         # Wrap weight loaders to buffer loading
         initialize_online_processing(layer)
+        layerwise_layers += 1
+
+    logger.info_once(
+        "Weight reload uses %d mapped layers and %d layerwise layers",
+        mapped_layers,
+        layerwise_layers,
+    )
+
+
+def _get_runtime_weight_reload_mapping(
+    layer: torch.nn.Module,
+    info: LayerReloadingInfo,
+) -> dict[str, torch.nn.Parameter] | None:
+    restore_params, restore_buffers = info.restore_metadata
+    runtime_params, runtime_buffers = get_reloadable_layer_tensors(layer)
+    if not _matching_tensor_layouts(restore_buffers, runtime_buffers):
+        return None
+
+    quant_method = getattr(layer, "quant_method", None)
+    if not isinstance(quant_method, QuantizeMethodBase):
+        return (
+            runtime_params
+            if _matching_tensor_layouts(restore_params, runtime_params)
+            else None
+        )
+
+    checkpoint_params = {
+        name: restore_layer_refs(to_meta_tensor(param), layer)
+        for name, param in restore_params.items()
+    }
+    mapping = quant_method.get_runtime_weight_reload_mapping(
+        layer, checkpoint_params, runtime_params
+    )
+    if mapping is None or mapping.keys() != restore_params.keys():
+        return None
+    return dict(mapping)
+
+
+def _restore_loading_metadata(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
+    restore_params, restore_buffers = info.restore_metadata
+    runtime_params, runtime_buffers = get_layer_params_buffers(layer)
+    for checkpoint_tensors, runtime_tensors in (
+        (restore_params, runtime_params),
+        (restore_buffers, runtime_buffers),
+    ):
+        for name, checkpoint_tensor in checkpoint_tensors.items():
+            runtime_tensor = runtime_tensors[name]
+            checkpoint_tensor = restore_layer_refs(
+                to_meta_tensor(checkpoint_tensor), layer
+            )
+            runtime_tensor.__class__ = checkpoint_tensor.__class__
+            runtime_tensor.__dict__.update(checkpoint_tensor.__dict__)
+            if not hasattr(runtime_tensor, "weight_loader"):
+                runtime_tensor.weight_loader = default_weight_loader
+
+
+def _bind_runtime_weight_reload_mapping(
+    layer: torch.nn.Module,
+    info: LayerReloadingInfo,
+    runtime_tensors: tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]],
+    mapping: dict[str, torch.nn.Parameter],
+) -> bool:
+    restore_params, restore_buffers = info.restore_metadata
+    runtime_params, _ = runtime_tensors
+    reloadable_runtime_params, _ = get_reloadable_layer_tensors(layer)
+    is_identity = mapping.keys() == reloadable_runtime_params.keys() and all(
+        mapping[name] is reloadable_runtime_params[name] for name in mapping
+    )
+
+    if is_identity:
+        if not _matching_tensor_layouts(restore_params, reloadable_runtime_params):
+            return False
+    else:
+        if restore_buffers:
+            return False
+
+        for name, checkpoint_param in restore_params.items():
+            mapped_param = mapping[name]
+            runtime_param = runtime_params.get(name)
+            if (
+                runtime_param is None
+                or mapped_param.__class__ is not checkpoint_param.__class__
+                or not _covers_same_storage(mapped_param, runtime_param)
+            ):
+                return False
+
+    info.kernel_tensors = runtime_tensors
+    info.kernel_non_persistent_buffers = set(layer._non_persistent_buffers_set)
+    if is_identity:
+        _restore_loading_metadata(layer, info)
+    else:
+        for name, mapped_param in mapping.items():
+            setattr(layer, name, mapped_param)
+    info.runtime_bound = True
+    return True
+
+
+def _validate_runtime_binding(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
+    assert info.kernel_tensors is not None
+    runtime_params, runtime_buffers = info.kernel_tensors
+    for name, runtime_tensor in {**runtime_params, **runtime_buffers}.items():
+        bound_tensor = getattr(layer, name, None)
+        if bound_tensor is None or not _covers_same_storage(
+            bound_tensor, runtime_tensor
+        ):
+            raise RuntimeError(
+                f"{layer.__class__.__name__} changed runtime tensor storage "
+                "during weight reload"
+            )
+
+
+def _covers_same_storage(view: torch.Tensor, runtime_tensor: torch.Tensor) -> bool:
+    if view.device != runtime_tensor.device or view.is_meta:
+        return False
+    try:
+        view_storage = view.untyped_storage()
+        runtime_storage = runtime_tensor.untyped_storage()
+    except (RuntimeError, ValueError):
+        return False
+
+    return (
+        view_storage.data_ptr() == runtime_storage.data_ptr()
+        and view_storage.nbytes() == runtime_storage.nbytes()
+        and view.storage_offset() * view.element_size()
+        == runtime_tensor.storage_offset() * runtime_tensor.element_size()
+        and view.numel() * view.element_size()
+        == runtime_tensor.numel() * runtime_tensor.element_size()
+        and torch._debug_has_internal_overlap(view) == 0
+    )
+
+
+def _matching_tensor_layouts(
+    checkpoint_tensors: dict[str, torch.Tensor],
+    runtime_tensors: dict[str, torch.Tensor],
+) -> bool:
+    if checkpoint_tensors.keys() != runtime_tensors.keys():
+        return False
+    for name, checkpoint_tensor in checkpoint_tensors.items():
+        runtime_tensor = runtime_tensors.get(name)
+        if runtime_tensor is None:
+            return False
+        if is_lazy(checkpoint_tensor) or is_lazy(runtime_tensor):
+            return False
+        if (
+            checkpoint_tensor.shape != runtime_tensor.shape
+            or checkpoint_tensor.stride() != runtime_tensor.stride()
+            or checkpoint_tensor.dtype != runtime_tensor.dtype
+        ):
+            return False
+    return True
 
 
 def initialize_online_processing(layer: torch.nn.Module):
@@ -196,7 +360,7 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         )
 
         # Do not online process attention layers, must wait until finalize
-        if isinstance(layer, (Attention, MLAAttention)):
+        if is_deferred_attention_layer(layer):
             return ret
 
         # Log warnings allocating excessive buffers on device
@@ -245,13 +409,18 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
 
     for layer in model.modules():
         info = get_layerwise_info(layer)
-        if not info.can_load():
+        if is_deferred_attention_layer(layer) and (
+            info.runtime_bound or info.can_load()
+        ):
+            deferred_attn.append((layer, info))
+            continue
+        if info.runtime_bound:
+            _validate_runtime_binding(layer, info)
+            _place_kernel_tensors(layer, info)
             info.reset()
             continue
-
-        # Attention/MLA layers are processed after all other layers
-        if isinstance(layer, (Attention, MLAAttention)):
-            deferred_attn.append((layer, info))
+        if not info.can_load():
+            info.reset()
             continue
 
         # No weights were loaded
@@ -293,15 +462,16 @@ def finalize_layerwise_reload(*args, **kwargs):
 def _finalize_attention_layer(
     layer: torch.nn.Module, info: LayerReloadingInfo, model_config: ModelConfig
 ) -> None:
-    if info.load_numel > 0 and info.kernel_tensors is not None:
+    if info.runtime_bound:
+        _validate_runtime_binding(layer, info)
+        _place_kernel_tensors(layer, info)
+    elif info.kernel_tensors is None:
+        if info.load_numel > 0:
+            _layerwise_process(layer, info)
+    elif info.load_numel > 0:
         # Reload with new scale weights from checkpoint
         _place_kernel_tensors(layer, info)
         _reload_attention_scales(layer, info)
-    elif info.load_numel > 0 or info.kernel_tensors is None:
-        raise ValueError(
-            "Layerwise loading of attention layers is not supported. "
-            "Attention must always process after linears."
-        )
     else:
         _place_kernel_tensors(layer, info)
     layer.process_weights_after_loading(model_config.dtype)
@@ -315,19 +485,18 @@ def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -
     processing, since we use .data.copy_() to preserve kernel tensor
     references."""
     quant_method = getattr(layer, "quant_method", None)
-    if quant_method is None:
-        return
-
-    # Re-create scale Parameters with sentinel values so unloaded scales
-    # are correctly detected by process_weights_after_loading
-    quant_method.create_weights(layer)
+    if quant_method is not None:
+        # Re-create scale Parameters with sentinel values so unloaded scales
+        # are correctly detected by process_weights_after_loading
+        quant_method.create_weights(layer)
 
     for name, args in info.loaded_weights:
         param = getattr(layer, name)
         args.arguments["param"] = param
         _get_weight_loader(param)(*args.args, **args.kwargs)
 
-    quant_method.process_weights_after_loading(layer)
+    if quant_method is not None:
+        quant_method.process_weights_after_loading(layer)
 
     _copy_and_restore_kernel_tensors(layer, info)
 
@@ -400,13 +569,17 @@ def _copy_and_restore_kernel_tensors(layer: torch.nn.Module, info: LayerReloadin
     non_persistent = info.kernel_non_persistent_buffers
     loaded_tensor_names = {name for name, _ in info.loaded_weights}
     for name, param in parameters.items():
-        param.data.copy_(getattr(layer, name))
+        loaded_param = getattr(layer, name)
+        if param.data_ptr() != loaded_param.data_ptr():
+            param.data.copy_(loaded_param)
     for name, buffer in buffers.items():
         if name not in layer._buffers:
             continue
         if name in non_persistent and name not in loaded_tensor_names:
             continue
-        buffer.data.copy_(getattr(layer, name))
+        loaded_buffer = getattr(layer, name)
+        if buffer.data_ptr() != loaded_buffer.data_ptr():
+            buffer.data.copy_(loaded_buffer)
 
     _place_kernel_tensors(layer, info)
 

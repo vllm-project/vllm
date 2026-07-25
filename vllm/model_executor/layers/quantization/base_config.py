@@ -3,6 +3,7 @@
 
 import inspect
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 import regex as re
@@ -70,6 +71,20 @@ class QuantizeMethodBase(ABC):
         This can be used for example, to transpose weights for computation.
         """
         return
+
+    def get_runtime_weight_reload_mapping(
+        self,
+        layer: nn.Module,
+        checkpoint_params: Mapping[str, nn.Parameter],
+        runtime_params: Mapping[str, nn.Parameter],
+    ) -> Mapping[str, nn.Parameter] | None:
+        """Return loader-facing parameters backed by runtime storage.
+
+        Implementations must not mutate ``layer`` and must return every checkpoint
+        parameter as a view over its complete runtime storage, or return ``None``.
+        The reload framework validates the whole mapping before committing it.
+        """
+        return None
 
 
 def method_has_implemented_embedding(method_class: type[QuantizeMethodBase]) -> bool:

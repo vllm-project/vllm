@@ -33,6 +33,9 @@ class LayerReloadingInfo:
     # persistence survives `_non_persistent_buffers_set` being mutated during reload
     kernel_non_persistent_buffers: set[str] = field(default_factory=set)
 
+    # checkpoint-layout views are bound directly to kernel storage while reloading
+    runtime_bound: bool = False
+
     def reset(self):
         self.__init__(  # type: ignore[misc]
             restore_metadata=self.restore_metadata, restore_device=self.restore_device
