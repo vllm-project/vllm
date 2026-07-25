@@ -42,6 +42,7 @@ from transformers import (
 )
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
+from tests.hf_cache_utils import HfCacheVerifier
 from tests.models.utils import (
     TokensTextLogprobs,
     TokensTextLogprobsPromptLogprobs,
@@ -79,6 +80,12 @@ if TYPE_CHECKING:
 
 
 logger = init_logger(__name__)
+
+
+@pytest.fixture(scope="session")
+def verify_hf_cache_artifacts():
+    verifier = HfCacheVerifier()
+    return verifier.verify
 
 
 @pytest.fixture
