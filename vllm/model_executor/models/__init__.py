@@ -3,6 +3,7 @@
 
 from .interfaces import (
     HasInnerState,
+    SupportsSpeechSynthesis,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
@@ -13,6 +14,7 @@ from .interfaces import (
     supports_mrope,
     supports_multimodal,
     supports_pp,
+    supports_speech_synthesis,
     supports_transcription,
 )
 from .interfaces_base import (
@@ -39,6 +41,8 @@ __all__ = [
     "supports_mrope",
     "SupportsPP",
     "supports_pp",
+    "SupportsSpeechSynthesis",
+    "supports_speech_synthesis",
     "SupportsTranscription",
     "supports_transcription",
 ]

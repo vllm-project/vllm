@@ -39,6 +39,8 @@ if TYPE_CHECKING:
         ModelConfig,
         SpeechToTextConfig,
         SpeechToTextParams,
+        TextToSpeechConfig,
+        TextToSpeechParams,
         VllmConfig,
     )
     from vllm.inputs import PromptType, TokensPrompt
@@ -1298,6 +1300,84 @@ def supports_transcription(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsTranscription]] | TypeIs[SupportsTranscription]:
     return getattr(model, "supports_transcription", False)
+
+
+@runtime_checkable
+class SupportsSpeechSynthesis(Protocol):
+    """Interface required for all text-to-speech models."""
+
+    supports_speech_synthesis: ClassVar[Literal[True]] = True
+
+    supported_languages: ClassVar[Mapping[str, str]]
+    """
+    Mapping from ISO 639-1 language code to language name.
+    """
+
+    supports_voice_cloning: ClassVar[bool] = False
+    """
+    Set to ``True`` when the model can clone a voice from a reference
+    audio clip (e.g. XTTS-v2 zero-shot speaker conditioning).
+    """
+
+    @classmethod
+    def get_tts_config(
+        cls,
+        model_config: "ModelConfig",
+    ) -> "TextToSpeechConfig":
+        """Return server-level TTS configuration for this model."""
+        ...
+
+    @classmethod
+    def validate_language(cls, language: str | None) -> str | None:
+        """Validate and normalise the requested language code.
+
+        Returns the language code unchanged when valid.  Raises
+        ``ValueError`` for unrecognised codes.
+        """
+        if language is None or language in cls.supported_languages:
+            return language
+        raise ValueError(
+            f"Unsupported language: {language!r}. "
+            f"Must be one of {list(cls.supported_languages.keys())}."
+        )
+
+    def decode_audio(
+        self,
+        mel_token_ids: torch.Tensor,
+        tts_params: "TextToSpeechParams",
+    ) -> np.ndarray:
+        """Convert generated mel/audio tokens to a waveform.
+
+        This is invoked *after* the main autoregressive generation loop
+        so that the vocoder does not block the vLLM scheduler.
+
+        Args:
+            mel_token_ids: 1-D tensor of discrete audio tokens produced
+                by the GPT stage.
+            tts_params: Full TTS request parameters (speaker, speed …).
+
+        Returns:
+            Float32 audio waveform, shape ``(num_samples,)``.
+        """
+        ...
+
+
+@overload
+def supports_speech_synthesis(
+    model: type[object],
+) -> TypeIs[type[SupportsSpeechSynthesis]]: ...
+
+
+@overload
+def supports_speech_synthesis(
+    model: object,
+) -> TypeIs[SupportsSpeechSynthesis]: ...
+
+
+def supports_speech_synthesis(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsSpeechSynthesis]] | TypeIs[SupportsSpeechSynthesis]:
+    return getattr(model, "supports_speech_synthesis", False)
 
 
 @runtime_checkable

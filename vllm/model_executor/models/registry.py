@@ -56,6 +56,7 @@ from .interfaces import (
     supports_multimodal_raw_input_only,
     supports_pp,
     supports_replayssm,
+    supports_speech_synthesis,
     supports_transcription,
 )
 from .interfaces_base import (
@@ -594,6 +595,8 @@ _MULTIMODAL_MODELS = {
         "NemotronParseForConditionalGeneration",
     ),
     "WhisperForConditionalGeneration": ("whisper", "WhisperForConditionalGeneration"),
+    # [Text-to-speech]
+    "XttsV2ForConditionalGeneration": ("xtts_v2", "XttsV2ForConditionalGeneration"),
 }
 
 _SPECULATIVE_DECODING_MODELS = {
@@ -792,6 +795,7 @@ class _ModelInfo:
     supports_replayssm: bool
     supports_transcription: bool
     supports_transcription_only: bool
+    supports_speech_synthesis: bool
 
     @staticmethod
     def from_model_cls(model: type[nn.Module]) -> "_ModelInfo":
@@ -821,6 +825,7 @@ class _ModelInfo:
             supports_transcription_only=(
                 supports_transcription(model) and model.supports_transcription_only
             ),
+            supports_speech_synthesis=supports_speech_synthesis(model),
             has_noops=has_noops(model),
         )
 
