@@ -36,10 +36,12 @@ pub enum Error {
     #[error("`thinking_token_budget` must be a non-negative integer or -1 for unlimited.")]
     InvalidThinkingTokenBudget,
     #[error(
-        "`truncate_prompt_tokens` would split a multimodal placeholder in request \
-         `{request_id}`; truncate to a boundary that keeps whole media items"
+        "truncate_prompt_tokens={value} cannot be greater than max_model_len - \
+         max_tokens = {budget}. Please request a smaller truncation size."
     )]
-    PartialMultimodalTruncation { request_id: String },
+    TruncatePromptTokensExceedsBudget { value: i64, budget: u32 },
+    #[error("invalid truncate_prompt_tokens={value} in request `{request_id}`; must be >= -1")]
+    InvalidTruncatePromptTokens { request_id: String, value: i64 },
     #[error("invalid repetition detection params: {message}")]
     InvalidRepetitionDetection { message: String },
     #[error("text request stream `{request_id}` closed before terminal output")]
@@ -64,7 +66,8 @@ impl Error {
             | Self::SamplingParams(_)
             | Self::MinTokensExceedsMaxTokens { .. }
             | Self::InvalidThinkingTokenBudget
-            | Self::PartialMultimodalTruncation { .. }
+            | Self::TruncatePromptTokensExceedsBudget { .. }
+            | Self::InvalidTruncatePromptTokens { .. }
             | Self::InvalidRepetitionDetection { .. }
             // An empty tokenized prompt detected later, at request prepare
             // time, surfaces through the transparent Llm wrapper.
