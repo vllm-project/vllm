@@ -1976,6 +1976,37 @@ class NixlBaseConnectorWorker:
                 sub_block_tokens = cache.shape[1] // block_size_ratio
                 cache[last_block_id, covered_in_last * sub_block_tokens :].zero_()
 
+    def _zero_untransferred_hetero_ppl_tail(self, meta: ReqMeta, remote_info) -> None:
+        """Zero attention kernel blocks the hetero-ppl transfer clipped.
+
+        With equal kernel pages but differing logical block sizes (hybrid
+        heterogeneous TP), the transfer is front-trimmed to
+        min(local, remote) kernel blocks, leaving the tail of the last
+        local logical block unwritten. Those blocks were excluded from the
+        scheduler's alloc-time KV zeroing (it would race the RDMA write),
+        so stale bytes would otherwise surface as garbage once decode
+        grows into them.
+        """
+        assert meta.remote is not None
+        if (
+            not self._has_mamba
+            or remote_info.remote_physical_blocks_per_logical
+            == self._physical_blocks_per_logical_kv_block
+        ):
+            return
+        stale_ids: list[int] = []
+        for g, local_group in enumerate(meta.local_physical_block_ids):
+            if not local_group or _is_ssm_spec(self._group_spec_types[g]):
+                continue
+            covered = min(len(local_group), len(meta.remote.block_ids[g]))
+            stale_ids.extend(local_group[covered:])
+        if not stale_ids:
+            return
+        caches = self._attention_kv_caches
+        indices = torch.tensor(stale_ids, device=caches[0].device, dtype=torch.long)
+        for cache in caches:
+            cache.index_fill_(0, indices, 0)
+
     def post_process_device_kv_on_receive_heterogeneous_attn(
         self, block_ids: list[int]
     ):
@@ -2067,6 +2098,7 @@ class NixlBaseConnectorWorker:
                     block_ids_for_blocksize_post_process[block_size_ratio].append(
                         (local_group, covered_sub_blocks)
                     )
+            self._zero_untransferred_hetero_ppl_tail(meta, remote_info)
             # post processing for heterogeneous attention
             if self.enable_heterogeneous_attn_post_process:
                 block_ids_for_heterogeneous_attn_post_process.append(

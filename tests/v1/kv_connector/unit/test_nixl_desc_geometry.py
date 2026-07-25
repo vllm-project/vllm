@@ -76,7 +76,11 @@ class _RecordingNixl:
         return "DONE"
 
     def get_xfer_telemetry(self, handle):
-        return None
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            xferDuration=1.0, postDuration=1.0, totalBytes=1, descCount=1
+        )
 
     def release_xfer_handle(self, handle):
         pass
@@ -86,6 +90,9 @@ class _RecordingNixl:
 
     def send_notif(self, agent, notif_msg=None):
         pass
+
+    def get_new_notifs(self):
+        return {}
 
     def remove_remote_agent(self, agent):
         pass
@@ -168,8 +175,13 @@ def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blo
         worker = NixlConnectorWorker(vllm_config, "local-engine", kv_cache_config)
         worker.use_mla = True
 
+        # Attention caches are kernel-block granular on dim 0, as the
+        # receive post-process assumes.
+        ppl = local_block_size // kernel_block_size
         tensors = [
-            torch.zeros(num_logical_blocks * unified_page, dtype=torch.uint8)
+            torch.zeros(
+                num_logical_blocks * ppl, unified_page // ppl, dtype=torch.uint8
+            )
             for _ in range(2)
         ]
         worker.register_kv_caches(
@@ -182,8 +194,9 @@ def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blo
                 "kda_b.1": tensors[1],
             }
         )
-    # Keep tensors alive alongside the worker.
-    worker._test_tensors = tensors
+    # Keep tensors alive alongside the worker; flat views for byte checks.
+    worker._test_tensors = [t.view(-1) for t in tensors]
+    worker._test_tensors_2d = tensors
     worker._test_unified_page = unified_page
     return worker
 
@@ -338,7 +351,7 @@ def _resolve(
     raise AssertionError(f"desc {idx} addr {addr:#x} not in any region")
 
 
-def _run_hetero_case(local_block, kernel, remote_block, num_tokens):
+def _run_hetero_case(local_block, kernel, remote_block, num_tokens, tp_size=2):
     """Full pull-path run for one geometry; returns pairing records."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         NixlConnectorMetadata,
@@ -354,15 +367,17 @@ def _run_hetero_case(local_block, kernel, remote_block, num_tokens):
         kernel_block_size=kernel,
         num_logical_blocks=max(2 * n_local + 4, 8),
     )
+    # Local KDA state pages are (48, 64) bytes; the remote holds 1/tp_size
+    # shards of each.
     meta_r = _make_remote_meta(
         worker,
         remote_block_size=remote_block,
         remote_kernel_block_size=kernel,
         remote_num_logical=max(2 * n_remote + 4, 8),
-        remote_ssm_sizes=(24, 32),
+        remote_ssm_sizes=(48 // tp_size, 64 // tp_size),
     )
-    for rank in (0, 1):
-        worker.add_remote_agent(meta_r, remote_tp_rank=rank, remote_tp_size=2)
+    for rank in range(tp_size):
+        worker.add_remote_agent(meta_r, remote_tp_rank=rank, remote_tp_size=tp_size)
 
     # Sparse ids so neighbors exist between the request's blocks.
     local_attn = [2 * i + 1 for i in range(n_local)]
@@ -380,7 +395,7 @@ def _run_hetero_case(local_block, kernel, remote_block, num_tokens):
             "remote_request_id": "prefill-req-b",
             "remote_host": "localhost",
             "remote_port": 1234,
-            "tp_size": 2,
+            "tp_size": tp_size,
         },
     )
     meta = metadata.reqs_to_recv["req-b"]
@@ -388,6 +403,11 @@ def _run_hetero_case(local_block, kernel, remote_block, num_tokens):
         meta.local_block_ids, worker._physical_blocks_per_logical_kv_block
     )
     worker._recving_metadata["req-b"] = meta
+
+    # Sentinel-fill the local KV so untouched bytes are detectable.
+    for t in worker._test_tensors:
+        t.fill_(0xAA)
+
     worker._read_blocks_for_req("req-b", meta)
 
     # Invariant 1: all local writes within the request's own blocks.
@@ -451,6 +471,38 @@ def _run_hetero_case(local_block, kernel, remote_block, num_tokens):
         f"N={num_tokens}, matched={matched})"
     )
 
+    # Invariant 4: no stale bytes after receive completion. The scheduler
+    # excludes the blocks covering the matched tokens from alloc-time KV
+    # zeroing (the zeroing would race the RDMA write), so every byte of
+    # those blocks must be either written by the transfer or zeroed by the
+    # receive post-process. Stale bytes surface as mid-response garbage
+    # once decode grows into the untransferred tail.
+    for op, lh, lids, rh, rids in nixl.xfers:
+        larr = nixl.dlists[lh]
+        for li in lids:
+            addr, length, _ = (int(x) for x in larr[int(li)])
+            for t in worker._test_tensors:
+                off = addr - t.data_ptr()
+                if 0 <= off < t.numel():
+                    t[off : off + length] = 0  # simulate the RDMA write
+                    break
+    done_sending, done_recving = worker.get_finished()
+    assert "req-b" in done_recving
+    n_excluded = -(-matched // local_block)
+    stale = []
+    for b in local_attn[:n_excluded]:
+        for region, t in enumerate(worker._test_tensors):
+            page = t[b * local_unified : (b + 1) * local_unified]
+            n_stale = int((page == 0xAA).sum())
+            if n_stale:
+                stale.append((region, b, n_stale))
+    assert not stale, (
+        f"stale (unzeroed, untransferred) bytes in matched-range attention "
+        f"blocks (region, block, bytes): {stale} "
+        f"(geometry local_block={local_block}, remote_block={remote_block}, "
+        f"N={num_tokens}, matched={matched})"
+    )
+
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
@@ -469,4 +521,53 @@ def test_hetero_ppl_token_alignment_sweep(local_block, remote_block, num_tokens)
     coverage of every transferred kernel block."""
     _run_hetero_case(
         local_block, kernel=4, remote_block=remote_block, num_tokens=num_tokens
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "num_tokens",
+    # Residues around every geometric boundary: kernel block (64), remote
+    # logical block (768), local logical block (5760), plus odd offsets.
+    [
+        2,
+        63,
+        64,
+        65,
+        127,
+        128,
+        300,
+        640,
+        767,
+        768,
+        769,
+        831,
+        832,
+        1000,
+        1535,
+        1536,
+        1537,
+        2303,
+        2304,
+        2305,
+        3001,
+        5759,
+        5760,
+        5761,
+        5824,
+        6528,
+        6529,
+    ],
+)
+def test_mla_hybrid_large_ppl_geometry(num_tokens):
+    """KimiLinear-scale MLA-hybrid geometry (TP8 prefill -> TP1 decode):
+    decode (local) logical block 5760 / kernel 64 (ppl=90), prefill
+    (remote) logical block 768 (ppl=12), tp_ratio=-8 multi-read with
+    replicated MLA and 8-way TP-sharded KDA state."""
+    _run_hetero_case(
+        local_block=5760,
+        kernel=64,
+        remote_block=768,
+        num_tokens=num_tokens,
+        tp_size=8,
     )
