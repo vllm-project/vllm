@@ -2399,13 +2399,18 @@ class NixlBaseConnectorWorker:
                     remote_block_ids[i] = remote_group[-num_local_blocks:]
                 else:
                     # TODO Handle prefix caching with different block_sizes
-                    max_padding = max(
-                        self._physical_blocks_per_logical_kv_block,
-                        remote_physical_per_logical,
+                    # Allocation rounding legitimately leaves up to
+                    # ppl - 1 trailing dead kernel blocks per side (plus one
+                    # extra local block for the recomputed final token), so
+                    # the counts may differ by up to the sum of the two
+                    # ratios; anything larger indicates mismatched lists.
+                    max_padding = (
+                        self._physical_blocks_per_logical_kv_block
+                        + remote_physical_per_logical
                     )
-                    assert abs(num_local_blocks - num_remote_blocks) < max_padding, (
+                    assert abs(num_local_blocks - num_remote_blocks) <= max_padding, (
                         f"Group {i}: |{num_local_blocks} - "
-                        f"{num_remote_blocks}| >= {max_padding}"
+                        f"{num_remote_blocks}| > {max_padding}"
                     )
                     num_blocks = min(num_local_blocks, num_remote_blocks)
                     local_block_ids[i] = local_block_ids[i][:num_blocks]
