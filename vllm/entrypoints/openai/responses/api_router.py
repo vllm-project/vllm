@@ -10,6 +10,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.responses.protocol import (
+    ResponsesCountTokensRequest,
+    ResponsesCountTokensResponse,
     ResponsesRequest,
     ResponsesResponse,
     StreamingResponsesResponse,
@@ -123,6 +125,33 @@ async def cancel_responses(response_id: str, raw_request: Request):
         )
     return JSONResponse(content=response.model_dump(mode="json", by_alias=True))
 
+@router.post(
+    "/v1/responses/input_tokens",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.OK.value: {"model": ResponsesCountTokensResponse},
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
+@load_aware_call
+async def count_responses_input_tokens(
+    request: ResponsesCountTokensRequest, raw_request: Request
+):
+    handler = responses(raw_request)
+    if handler is None:
+        raise NotImplementedError("The model does not support Responses API")
+
+    response = await handler.count_tokens(request, raw_request)
+
+    if isinstance(response, ErrorResponse):
+        return JSONResponse(
+            content=response.model_dump(mode="json", by_alias=True),
+            status_code=response.error.code,
+        )
+
+    return JSONResponse(content=response.model_dump(mode="json", by_alias=True))
 
 def attach_router(app: FastAPI):
     app.include_router(router)
