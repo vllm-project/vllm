@@ -22,36 +22,42 @@ if TYPE_CHECKING:
 DeepseekV4MegaMoEExpertsFI: type | None = None
 
 
+# Every mega kernel is Blackwell-only, so the arch is a property of the family
+# rather than of a particular backend: validate it against the live device
+# instead of encoding it in the backend name.
+FI_MOE_EP_MIN_CAPABILITY = (10, 0)
+
+# First flashinfer release whose ``moe_ep`` runtime this integration targets.
+# Set FI_MOE_EP_SKIP_VERSION_CHECK=1 to run against a pre-release build.
+FI_MOE_EP_MIN_FLASHINFER = (0, 6, 17)
+
+
 @dataclass(frozen=True)
 class FiMoeEpBackendSpec:
     """Static properties of one ``flashinfer_moe_ep_*`` backend string.
 
-    The backend string names the megakernel, so everything the integration
-    needs to know about a selection is a table lookup: which flashinfer
-    megakernel to build, whether that kernel needs NVSHMEM in the runtime
-    requirement set, and the compute capability its code was generated for.
+    The backend names the kernel *family*; the arch comes from the device and
+    the weight handling from the checkpoint, so this only has to carry which
+    megakernel to build and whether it needs NVSHMEM in the runtime set.
     """
 
     megakernel: str
     needs_nvshmem: bool
-    min_capability: tuple[int, int]
 
 
 FI_MOE_EP_BACKENDS: dict[str, FiMoeEpBackendSpec] = {
-    "flashinfer_moe_ep_mega_deep_gemm_sm100": FiMoeEpBackendSpec(
+    # Consumes an MXFP4 checkpoint verbatim (e2m1 weights + E8M0 per-32
+    # scales) -- the same recipe the native deep_gemm mega path uses.
+    "flashinfer_moe_ep_mega_deep_gemm": FiMoeEpBackendSpec(
         megakernel="deep_gemm_mega",
         needs_nvshmem=False,
-        min_capability=(10, 0),
     ),
-    "flashinfer_moe_ep_mega_cutedsl_sm100_nvfp4": FiMoeEpBackendSpec(
+    # The checkpoint picks the weight path, not the kernel: an NVFP4
+    # checkpoint is consumed prequantized (no round trip), while MXFP4 weights
+    # are dequantized to bf16 and requantized. See ckpt_uses_nvfp4_experts.
+    "flashinfer_moe_ep_mega_cutedsl": FiMoeEpBackendSpec(
         megakernel="nvfp4_cutedsl",
         needs_nvshmem=True,
-        min_capability=(10, 0),
-    ),
-    "flashinfer_moe_ep_mega_cutedsl_sm100_mxfp8": FiMoeEpBackendSpec(
-        megakernel="mxfp8_cutedsl",
-        needs_nvshmem=True,
-        min_capability=(10, 0),
     ),
 }
 
@@ -119,6 +125,45 @@ def fi_megakernel(vllm_config: "VllmConfig") -> str:
     return fi_moe_ep_backend_spec(vllm_config.kernel_config.moe_backend).megakernel
 
 
+def _flashinfer_version() -> tuple[int, ...] | None:
+    """Installed flashinfer as a comparable tuple, or None if undeterminable."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        raw = version("flashinfer-python")
+    except PackageNotFoundError:
+        return None
+    parts: list[int] = []
+    for chunk in raw.split(".")[:3]:
+        digits = "".join(c for c in chunk if c.isdigit())
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts) or None
+
+
+def check_flashinfer_version() -> None:
+    """Reject flashinfer builds older than the moe_ep runtime we target.
+
+    Skipped when the version cannot be determined (source checkouts and
+    editable installs do not always carry usable metadata) rather than
+    blocking a build that may well be new enough.
+    """
+    if os.environ.get("FI_MOE_EP_SKIP_VERSION_CHECK") == "1":
+        return
+    found = _flashinfer_version()
+    if found is None or found >= FI_MOE_EP_MIN_FLASHINFER:
+        return
+    want = ".".join(map(str, FI_MOE_EP_MIN_FLASHINFER))
+    have = ".".join(map(str, found))
+    raise ValueError(
+        f"The flashinfer moe_ep backends require flashinfer-python >= {want}, "
+        f"found {have}. Upgrade flashinfer, use "
+        "moe_backend=deep_gemm_mega_moe for the native mega path, or set "
+        "FI_MOE_EP_SKIP_VERSION_CHECK=1 to run against a pre-release build."
+    )
+
+
 def fi_spec_for_megakernel(megakernel: str) -> FiMoeEpBackendSpec:
     """Spec for a megakernel named directly rather than via a backend string."""
     for spec in FI_MOE_EP_BACKENDS.values():
@@ -143,18 +188,20 @@ def validate_fi_moe_ep_config(vllm_config: "VllmConfig") -> None:
     if not is_fi_moe_ep_backend(moe_backend):
         return
 
-    spec = fi_moe_ep_backend_spec(moe_backend)
+    check_flashinfer_version()
+
     # flashinfer validates the arch too, but not until the layer constructor
     # runs during weight load; check here so the error names the flag the user
     # actually typed.
     capability = current_platform.get_device_capability()
     if capability is not None:
         cc = (capability.major, capability.minor)
-        if cc < spec.min_capability:
+        if cc < FI_MOE_EP_MIN_CAPABILITY:
+            want = FI_MOE_EP_MIN_CAPABILITY
             raise ValueError(
                 f"moe_backend={moe_backend!r} requires compute capability "
-                f"{spec.min_capability[0]}.{spec.min_capability[1]}+, but this "
-                f"device is {cc[0]}.{cc[1]}."
+                f"{want[0]}.{want[1]}+ (the mega kernels are Blackwell-only), "
+                f"but this device is {cc[0]}.{cc[1]}."
             )
 
     if vllm_config.parallel_config.enable_eplb:
@@ -423,7 +470,6 @@ def build_fi_mega_config(
     from flashinfer.moe_ep import (
         DeepGemmMegaMoeConfig,
         MegaConfig,
-        Mxfp8CutedslMegaMoeConfig,
         Nvfp4CutedslMegaMoeConfig,
     )
 
@@ -466,15 +512,6 @@ def build_fi_mega_config(
             fast_math=fast_math,
             in_kernel_fc2_reduce=ikr,
             combine_dtype=combine,
-            knobs=knobs,
-        )
-    elif megakernel == "mxfp8_cutedsl":
-        mk = Mxfp8CutedslMegaMoeConfig(
-            intermediate_size=intermediate_size,
-            top_k=top_k,
-            activation_clamp=activation_clamp,
-            fast_math=fast_math,
-            in_kernel_fc2_reduce=ikr,
             knobs=knobs,
         )
     else:
@@ -696,9 +733,9 @@ def make_fi_mega_moe_experts_cls(mega_moe_experts_cls: type[nn.Module]) -> type[
                 if megakernel != "nvfp4_cutedsl":
                     raise ValueError(
                         "NVFP4-quantized expert checkpoint requires "
-                        "moe_backend=flashinfer_moe_ep_mega_cutedsl_sm100_nvfp4"
-                        f", got a backend using megakernel {megakernel!r} "
-                        "(deep_gemm consumes the mx-format checkpoint instead)."
+                        "moe_backend=flashinfer_moe_ep_mega_cutedsl, got a "
+                        f"backend using megakernel {megakernel!r} "
+                        "(deep_gemm consumes the MXFP4 checkpoint instead)."
                     )
                 self._realloc_nvfp4_params()
 
