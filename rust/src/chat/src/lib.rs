@@ -210,6 +210,9 @@ impl ChatRequestProcessor {
     /// Prepare one chat request for tokenization without constructing an output processor.
     pub async fn prepare_for_tokenization(&self, request: ChatRequest) -> Result<TextRequest> {
         request.validate()?;
+        if request.has_multimodal() && request.truncate_prompt_tokens.is_some() {
+            return Err(Error::TruncateUnsupportedWithMultimodal);
+        }
         self.prepare_text_request(request).await
     }
 
@@ -219,6 +222,9 @@ impl ChatRequestProcessor {
         mut request: ChatRequest,
     ) -> Result<(TextRequest, DynChatOutputProcessor)> {
         request.validate()?;
+        if request.has_multimodal() && request.truncate_prompt_tokens.is_some() {
+            return Err(Error::TruncateUnsupportedWithMultimodal);
+        }
         let output_processor = self.backend.new_chat_output_processor(
             &mut request,
             NewChatOutputProcessorOptions {

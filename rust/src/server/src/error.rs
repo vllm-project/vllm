@@ -225,6 +225,44 @@ mod tests {
     }
 
     #[test]
+    fn truncate_exceeds_budget_maps_to_invalid_request() {
+        let error = vllm_text::Error::TruncatePromptTokensExceedsBudget {
+            value: 8000,
+            budget: 4000,
+        };
+        let api_error = text_submit_error("failed to submit completion request", error);
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert!(response.error.message.contains("truncate_prompt_tokens=8000"));
+        assert!(response.error.message.contains("max_tokens = 4000"));
+    }
+
+    #[test]
+    fn invalid_truncate_prompt_tokens_maps_to_invalid_request() {
+        let error = vllm_text::Error::InvalidTruncatePromptTokens {
+            request_id: "req-1".to_string(),
+            value: -2,
+        };
+        let api_error = text_submit_error("failed to submit completion request", error);
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert!(response.error.message.contains("-2"));
+        assert!(response.error.message.contains("must be >= -1"));
+    }
+
+    #[test]
+    fn truncate_unsupported_with_multimodal_maps_to_invalid_request() {
+        let error = vllm_chat::Error::TruncateUnsupportedWithMultimodal;
+        let api_error = chat_submit_error("failed to submit chat request", error);
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert!(response.error.message.contains("truncate_prompt_tokens is not supported"));
+    }
+
+    #[test]
     fn other_submit_errors_stay_internal() {
         let error = vllm_text::Error::Tokenizer("backend exploded".to_string());
         let api_error = text_submit_error("failed to submit completion request", error);

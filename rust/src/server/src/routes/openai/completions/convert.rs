@@ -150,7 +150,7 @@ pub(super) fn prepare_completion_request(
         },
         intermediate: request.stream,
         truncate_prompt_tokens: request.truncate_prompt_tokens,
-        truncation_side: request.truncation_side.clone(),
+        truncation_side: request.truncation_side,
         priority: ctx.priority.or(request.priority).unwrap_or(0),
         cache_salt: request.cache_salt,
         add_special_tokens: request.add_special_tokens,

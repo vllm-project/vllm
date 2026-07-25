@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 pub use vllm_parser::tool::Tool as ChatTool;
-pub use vllm_text::SamplingParams;
 use vllm_text::TextDecodeOptions;
+pub use vllm_text::{SamplingParams, TruncationSide};
 
 use crate::AssistantMessageExt;
 use crate::error::{Error, Result};
@@ -484,7 +484,7 @@ pub struct ChatRequest {
     /// - `< 0` (e.g. -1) maps to `max_model_len - max_tokens`.
     pub truncate_prompt_tokens: Option<i64>,
     /// Which side to truncate from when `truncate_prompt_tokens` is active.
-    pub truncation_side: Option<String>,
+    pub truncation_side: Option<TruncationSide>,
     /// Request scheduling priority (lower means earlier handling; default 0).
     pub priority: i32,
     /// Documents for RAG (retrieval-augmented generation), passed to the chat
@@ -545,6 +545,14 @@ impl ChatRequest {
             }
             (GenerationPromptMode::NoGenerationPrompt, _)
             | (GenerationPromptMode::StartNewAssistant, _) => {}
+        }
+        if let Some(n) = self.truncate_prompt_tokens
+            && n < -1
+        {
+            return Err(Error::Text(vllm_text::Error::InvalidTruncatePromptTokens {
+                request_id: self.request_id.clone(),
+                value: n,
+            }));
         }
         Ok(())
     }
