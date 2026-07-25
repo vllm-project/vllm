@@ -380,17 +380,10 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         num_image_patches = kwargs.pop("num_image_patches")
 
         if pixel_values is not None:
-            # ROCm: Force math SDP backend for vision encoder to avoid accuracy issues
-            # with flash_sdp and mem_efficient_sdp
             if current_platform.is_rocm():
-                # TODO: [ROCm] Fix accuracy issues with flash backend
-                logger.debug(
-                    "ROCm platform detected. Forcing math SDP backend "
-                    "for vision encoder. Currently ROCm platform has "
-                    "accuracy issues with `flash_sdp` and"
-                    "`mem_efficient_sdp` backends. See issue: "
-                    "https://github.com/vllm-project/vllm/issues/30167"
-                )
+                # flash_sdp and mem_efficient_sdp produce inaccurate vision
+                # embeddings on ROCm; force MATH backend for correctness.
+                # See https://github.com/vllm-project/vllm/issues/30167
                 with torch.nn.attention.sdpa_kernel(
                     backends=[torch.nn.attention.SDPBackend.MATH]
                 ):
