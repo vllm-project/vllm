@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import glob
+import shutil
 import tempfile
 
-import huggingface_hub.constants
 import pytest
 import torch
 
@@ -21,12 +21,13 @@ from vllm.platforms import current_platform
     reason="InstantTensor requires NVIDIA GPUs",
 )
 def test_instanttensor_model_loader():
+    model_dir = download_weights_from_hf(
+        "openai-community/gpt2", cache_dir=None, allow_patterns=["*.safetensors"]
+    )
     with tempfile.TemporaryDirectory() as tmpdir:
-        huggingface_hub.constants.HF_HUB_OFFLINE = False
-        download_weights_from_hf(
-            "openai-community/gpt2", allow_patterns=["*.safetensors"], cache_dir=tmpdir
-        )
-        safetensors = glob.glob(f"{tmpdir}/**/*.safetensors", recursive=True)
+        for cached in glob.glob(f"{model_dir}/**/*.safetensors", recursive=True):
+            shutil.copy(cached, tmpdir)
+        safetensors = glob.glob(f"{tmpdir}/*.safetensors")
         assert len(safetensors) > 0
 
         instanttensor_tensors = {}
