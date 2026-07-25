@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::ops::Deref;
@@ -18,9 +21,8 @@ use crate::error::{Error, Result, bail_unexpected_handshake_message};
 use crate::protocol::handshake::{
     EngineCoreReadyResponse, HandshakeAddresses, HandshakeInitMessage, ReadyMessage,
 };
-use crate::protocol::{
-    EngineCoreOutputs, decode_engine_core_outputs, decode_msgpack, encode_msgpack,
-};
+use crate::protocol::output::{EngineCoreOutputs, decode_engine_core_outputs};
+use crate::protocol::{decode_msgpack, encode_msgpack};
 
 /// Dedicated single-frame sentinel emitted by Python `EngineCoreProc` when the
 /// engine dies.

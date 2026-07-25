@@ -23,13 +23,13 @@ def test_cumem_is_the_default_registered_backend():
 
 
 def test_cumem_capability_flags():
-    # cumem leaves NCCL untouched but does not preserve compiled artifacts,
-    # graphs, or durable state - these flags are what the executor and /health
-    # introspect to decide reinit / persistence behavior.
+    # cumem leaves communicators untouched but does not preserve compiled
+    # artifacts, graphs, or durable state - these flags are what the executor and
+    # /health introspect to decide reinit / persistence behavior.
     assert CuMemBackend.is_supported() is True
-    assert CuMemBackend.preserves_nccl() is True
+    assert CuMemBackend.preserves_communicators() is True
     assert CuMemBackend.preserves_compiled_artifacts() is False
-    assert CuMemBackend.preserves_graphs_with_nccl() is False
+    assert CuMemBackend.preserves_graphs_with_communicators() is False
     assert CuMemBackend.supports_durable_storage() is False
 
 

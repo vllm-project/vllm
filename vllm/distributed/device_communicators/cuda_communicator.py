@@ -6,6 +6,7 @@ import torch
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.device_communicators.all_reduce_utils import (
     NCCL_SYMM_MEM_ALL_REDUCE_CONFIG,
     should_nccl_symm_mem_ag_rs,
@@ -19,6 +20,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 from ..utils import StatelessProcessGroup
+from .aiter_custom_all_reduce import AiterCustomAllreduce
 from .base_device_communicator import DeviceCommunicatorBase
 
 logger = init_logger(__name__)
@@ -48,16 +50,21 @@ class CudaCommunicator(DeviceCommunicatorBase):
             use_custom_allreduce = False
             use_torch_symm_mem = False
             use_flashinfer_allreduce = False
+            use_aiter_allreduce = False
         else:
             from vllm.distributed.parallel_state import _ENABLE_CUSTOM_ALL_REDUCE
 
             use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
             use_torch_symm_mem = envs.VLLM_ALLREDUCE_USE_SYMM_MEM
             use_flashinfer_allreduce = envs.VLLM_ALLREDUCE_USE_FLASHINFER
+            use_aiter_allreduce = use_custom_allreduce and bool(
+                rocm_aiter_ops.is_custom_all_reduce_enabled()
+            )
 
         self.use_custom_allreduce = use_custom_allreduce
         self.use_torch_symm_mem = use_torch_symm_mem
         self.use_flashinfer_allreduce = use_flashinfer_allreduce
+        self.use_aiter_allreduce = use_aiter_allreduce
 
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
@@ -85,6 +92,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.qr_comm: QuickAllReduce | None = None
         self.symm_mem_comm: SymmMemCommunicator | None = None
         self.fi_ar_comm: FlashInferAllReduce | None = None
+        self.aiter_ar_comm: AiterCustomAllreduce | None = None
 
         if use_torch_symm_mem and current_platform.is_cuda():
             self.symm_mem_comm = SymmMemCommunicator(
@@ -98,7 +106,13 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 device=self.device,
             )
 
-        if use_custom_allreduce and self.world_size > 1:
+        if self.use_aiter_allreduce and self.world_size > 1:
+            self.aiter_ar_comm = AiterCustomAllreduce(
+                group=self.cpu_group,
+                device=self.device,
+            )
+
+        if use_custom_allreduce and self.aiter_ar_comm is None and self.world_size > 1:
             # Initialize a custom fast all-reduce implementation.
             self.ca_comm = CustomAllreduce(
                 group=self.cpu_group,
@@ -108,13 +122,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 ),
             )
 
-            if current_platform.is_rocm():
-                # Initialize a custom quick all-reduce implementation for AMD.
-                # Quick reduce is designed as a complement to custom allreduce.
-                # Based on quickreduce (https://github.com/mk1-project/quickreduce).
-                # If it's a rocm, 'use_custom_allreduce==True' means it must
-                # currently be an MI300 series.
-                self.qr_comm = QuickAllReduce(group=self.cpu_group, device=self.device)
+        if use_custom_allreduce and self.world_size > 1 and current_platform.is_rocm():
+            # Initialize a custom quick all-reduce implementation for AMD.
+            # Quick reduce is designed as a complement to custom allreduce
+            # (vLLM's or AITER's), so it is initialized for either backend.
+            # Based on quickreduce (https://github.com/mk1-project/quickreduce).
+            # On ROCm, 'use_custom_allreduce==True' means it must currently be
+            # an MI300 series.
+            self.qr_comm = QuickAllReduce(group=self.cpu_group, device=self.device)
 
         if self.world_size > 1:
             self._log_all_reduce_backend_selection()
@@ -203,6 +218,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             "NCCL_SYMM_MEM",
             "QUICK_REDUCE",
             "FLASHINFER",
+            "AITER_CUSTOM",
             "CUSTOM",
             "SYMM_MEM",
             "PYNCCL",
@@ -236,6 +252,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             enabled_ar_backends.append("QUICK_REDUCE")
         if self.fi_ar_comm is not None and not self.fi_ar_comm.disabled:
             enabled_ar_backends.append("FLASHINFER")
+        if self.aiter_ar_comm is not None and not self.aiter_ar_comm.disabled:
+            enabled_ar_backends.append("AITER_CUSTOM")
         if self.ca_comm is not None and not self.ca_comm.disabled:
             enabled_ar_backends.append("CUSTOM")
         if self.symm_mem_comm is not None and not self.symm_mem_comm.disabled:
@@ -261,8 +279,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             out = torch.ops.vllm.all_reduce_symmetric_with_copy(input_)
             if out is not None:
                 return out
-        # always try quick reduce first, then flashinfer, then custom allreduce,
-        # and then pynccl. (quick reduce just for ROCM MI3*)
+        # always try quick reduce first, then flashinfer, then the AITER or vLLM
+        # custom allreduce, and then pynccl. (quick reduce just for ROCM MI3*)
         qr_comm = self.qr_comm
         if (
             qr_comm is not None
@@ -279,6 +297,15 @@ class CudaCommunicator(DeviceCommunicatorBase):
             and fi_ar_comm.should_use_fi_ar(input_)
         ):
             out = fi_ar_comm.all_reduce(input_)
+            assert out is not None
+            return out
+        aiter_ar_comm = self.aiter_ar_comm
+        if (
+            aiter_ar_comm is not None
+            and not aiter_ar_comm.disabled
+            and aiter_ar_comm.should_custom_ar(input_)
+        ):
+            out = aiter_ar_comm.custom_all_reduce(input_)
             assert out is not None
             return out
         ca_comm = self.ca_comm
@@ -314,13 +341,38 @@ class CudaCommunicator(DeviceCommunicatorBase):
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         # Route uniform dim-0 all-gathers through NVLS symmetric memory when
         # enabled (mirrors reduce_scatter); otherwise fall back to the
-        # base-class ring all-gather. Sequence parallelism's gather-before-GEMM
-        # uses dim=0 with tp-aligned (uniform) shards.
+        # PyNccl/base-class all-gather. Sequence parallelism's
+        # gather-before-GEMM uses dim=0 with tp-aligned (uniform) shards.
         if dim < 0:
             dim += input_.dim()
         if dim == 0 and should_nccl_symm_mem_ag_rs():
             return self._all_gather_symm_mem(input_.contiguous())
-        return super().all_gather(input_, dim)
+
+        pynccl_comm = self.pynccl_comm
+        if pynccl_comm is None or pynccl_comm.disabled:
+            return super().all_gather(input_, dim)
+
+        # On ROCm, the base-class all_gather (all_gather_into_tensor) is faster
+        # than the manual pynccl + torch.empty + movedim + reshape path below,
+        # which adds a per-call output allocation and (for dim != 0) an extra
+        # copy on every step. This is on the hot path for TP forward passes, so
+        # keep ROCm on the base-class collective to avoid a decode regression.
+        if current_platform.is_rocm():
+            return super().all_gather(input_, dim)
+
+        input_size = input_.size()
+        output_size = (input_size[0] * self.world_size,) + input_size[1:]
+        output_tensor = torch.empty(
+            output_size, dtype=input_.dtype, device=input_.device
+        )
+        pynccl_comm.all_gather(output_tensor, input_.contiguous())
+        output_tensor = output_tensor.reshape((self.world_size,) + input_size)
+        output_tensor = output_tensor.movedim(0, dim)
+        return output_tensor.reshape(
+            input_size[:dim]
+            + (self.world_size * input_size[dim],)
+            + input_size[dim + 1 :]
+        )
 
     def reduce_scatter(self, input_: torch.Tensor, dim: int = -1):
         world_size = self.world_size
@@ -509,6 +561,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.pynccl_comm = None
         if self.ca_comm is not None:
             self.ca_comm = None
+        if self.aiter_ar_comm is not None:
+            self.aiter_ar_comm.close()
+            self.aiter_ar_comm = None
         if self.fi_ar_comm is not None:
             self.fi_ar_comm.destroy()
             self.fi_ar_comm = None

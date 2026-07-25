@@ -87,6 +87,12 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
                 "split_k": 1,
             }
             opt_flags.update_opt_flags_constraints(constraints)
+            # Patches #47303: pad K (num scale groups) to 0 mod 4
+            # TODO: Remove once we upgrade to Triton 3.8.0+ kernels
+            if scale.numel() > 0:
+                K = scale.shape[-1]
+                pad_k = -K % 4
+                scale = torch.nn.functional.pad(scale, (0, pad_k))
         elif current_platform.is_device_capability_family(100):
             constraints = {
                 "is_persistent": True,

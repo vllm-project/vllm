@@ -435,15 +435,23 @@ def convert_linear_layer_to_humming_standard(
         setattr(layer, name, param)
 
 
-def prepare_humming_layer(layer: LinearBase, quant_config: dict):
+def prepare_humming_layer(
+    layer: LinearBase,
+    quant_config: dict,
+    input_quant_config: dict | None = None,
+):
     from vllm.utils.humming import (
+        BaseInputSchema,
         BaseWeightSchema,
         HummingInputSchema,
         HummingMethod,
     )
 
     weight_schema = BaseWeightSchema.from_config(quant_config)
-    input_schema = HummingInputSchema()
+    if input_quant_config is not None:
+        input_schema = BaseInputSchema.from_config(input_quant_config)
+    else:
+        input_schema = HummingInputSchema()
 
     # ReplicatedLinear has no TP partitioning and so does not set
     # input_size_per_partition; for it that is just input_size. Use hasattr
@@ -456,9 +464,15 @@ def prepare_humming_layer(layer: LinearBase, quant_config: dict):
     shape_k_stacks = [input_size_per_partition]
     shape_n_stacks = layer.output_partition_sizes
 
-    # Step 1: convert weight to humming standard format
+    # Step 1: convert weight and input schemas to humming standard format
     weight_schema, tensors = weight_schema.convert_humming(
         tensors=dict(layer.named_parameters()),
+        shape_n_stacks=shape_n_stacks,
+        shape_k_stacks=shape_k_stacks,
+        param_dtype=layer.params_dtype,
+    )
+    input_schema, _ = input_schema.convert_humming(
+        tensors={},
         shape_n_stacks=shape_n_stacks,
         shape_k_stacks=shape_k_stacks,
         param_dtype=layer.params_dtype,
@@ -764,7 +778,7 @@ def _convert_sublayer_to_humming(
     Returns:
         Tuple of (converted_weight_schema, converted_input_schema)
     """
-    from humming.schema import HummingWeightSchema
+    from vllm.utils.humming import HummingWeightSchema
 
     if isinstance(weight_schema, HummingWeightSchema):
         # Already in Humming format
@@ -814,7 +828,7 @@ def _prepare_and_transform_sublayer(
 
     This calls Humming's prepare_layer_meta and transform_humming_layer.
     """
-    from humming.layer import HummingMethod
+    from vllm.utils.humming import HummingMethod
 
     HummingMethod.prepare_layer_meta(
         layer=layer,
@@ -866,7 +880,7 @@ def _process_single_sublayer(
     Returns:
         Tuple of (final_weight_schema, final_input_schema)
     """
-    from humming.schema import HummingWeightSchema
+    from vllm.utils.humming import HummingWeightSchema
 
     # Step 1: Convert from checkpoint format to humming format if needed
     current_weight_schema, current_input_schema = _convert_sublayer_to_humming(
@@ -958,12 +972,10 @@ def convert_to_humming_moe_kernel_format(
                 "Must provide either weight_schema/input_schema or quant_config"
             )
 
-        from humming.layer import HummingInputSchema
-        from humming.schema import BaseWeightSchema
-
         from vllm.model_executor.layers.quantization.utils.humming_utils import (
             humming_is_layer_skipped,
         )
+        from vllm.utils.humming import BaseWeightSchema, HummingInputSchema
 
         if weight_schema is None:
             weight_schema = BaseWeightSchema.from_config(quant_config)

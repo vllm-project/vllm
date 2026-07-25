@@ -328,7 +328,7 @@ struct GmemLoaderB {
 
   __device__ void issue_mainloop() {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
-    asm volatile("griddepcontrol.wait;");
+    cudaGridDependencySynchronize();
   #pragma unroll 1
     for (int loop_idx = 0; loop_idx < k_iter_cnt; loop_idx++) {
       if (need_wait) {
@@ -643,7 +643,7 @@ __global__ __launch_bounds__(256, 1) void fused_a_gemm_kernel(
     mma_computer.issue_mainloop();
     mma_computer.epi();
   }
-  asm volatile("griddepcontrol.launch_dependents;");
+  cudaTriggerProgrammaticLaunchCompletion();
 #endif
 }
 
@@ -733,6 +733,8 @@ void dsv3_fused_a_gemm(torch::stable::Tensor& output,
       output.scalar_type() == torch::headeronly::ScalarType::BFloat16,
       "Only BFloat16 output dtype is supported");
 
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      mat_a.get_device_index());
   STD_TORCH_CHECK(getSMVersion() >= 90, "required CUDA ARCH >= SM_90");
 
   auto stream = get_current_cuda_stream(mat_a.get_device_index());

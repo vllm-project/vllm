@@ -11,7 +11,7 @@ The NCCL weight transfer engine uses [NCCL](https://developer.nvidia.com/nccl) b
 ## How It Works
 
 1. The trainer and all inference workers join a shared NCCL process group using `StatelessProcessGroup` (vLLM's torch.distributed-independent group abstraction).
-2. The trainer broadcasts weights to all workers simultaneously. Each worker receives and loads weights incrementally.
+2. The trainer broadcasts weights to all workers simultaneously. Each worker receives and loads the weights.
 3. Optionally, **packed tensor broadcasting** batches multiple small tensors into larger buffers with double/triple buffering and CUDA stream overlap for higher throughput. This implementation is based on [NeMo-RL's packed tensor](https://github.com/NVIDIA-NeMo/RL/blob/main/nemo_rl/utils/packed_tensor.py).
 
 ## Initialization
@@ -93,7 +93,7 @@ remaining three steps are:
 from vllm.distributed.weight_transfer.base import WeightTransferUpdateRequest
 
 # 1. Start the weight update
-llm.start_weight_update(is_checkpoint_format=True)
+llm.start_weight_update()
 
 # 2. Receive weights (can be called multiple times for chunked transfers)
 llm.update_weights(
@@ -116,19 +116,22 @@ must match the order in which the trainer iterates over its parameters.
 
 `start_weight_update` must be called before `update_weights`, and
 `finish_weight_update` must be called after all weight chunks have been
-transferred. The `is_checkpoint_format` flag controls whether layerwise reload
-processing is applied (`True` for checkpoint-format weights, `False` for
-pre-processed kernel-format weights).
+transferred. The NCCL engine receives checkpoint-format weights and applies
+layerwise reload processing automatically inside `start_weight_update` /
+`finish_weight_update`.
 
-Sparse NCCL patches still use `update_kind="sparse_flat"` inside
-`update_info`, but they should be wrapped in
-`start_weight_update(is_checkpoint_format=False)` because sparse patches apply
-directly to runtime/kernel-format parameters. The current sparse MVP requires
-`TP=1` and `PP=1`.
+## Sparse NCCL
+
+Sparse, flat-index weight patches use a separate backend,
+`WeightTransferConfig(backend="sparse_nccl")`, implemented by
+`SparseNCCLWeightTransferEngine`. It shares only NCCL process-group
+initialization with the dense engine; patches are applied directly in place to
+existing parameters (no layerwise reload). The current sparse MVP requires
+`TP=1` and `PP=1`. See the example below.
 
 ## Examples
 
 - [RLHF with NCCL weight syncing (offline, Ray)](../../../examples/rl/rlhf_nccl.py) - Trainer on one GPU, 2x tensor-parallel vLLM engine on two others, with packed NCCL weight broadcast
-- [RLHF with sparse NCCL weight syncing (offline, Ray)](../../../examples/rl/rlhf_sparse_nccl.py) - Dense-vs-sparse equivalence demo with a real model on a 2-GPU trainer/inference setup; sparse patches use `start_weight_update(is_checkpoint_format=False)` and currently require `TP=1` and `PP=1`
+- [RLHF with sparse NCCL weight syncing (offline, Ray)](../../../examples/rl/rlhf_sparse_nccl.py) - Dense-vs-sparse equivalence demo with a real model on a 2-GPU trainer/inference setup; sparse patches use `backend="sparse_nccl"` and currently require `TP=1` and `PP=1`
 - [RLHF with async weight syncing (offline, Ray)](../../../examples/rl/rlhf_async_new_apis.py) - Async generation with mid-flight pause, weight sync, resume, and validation against a fresh model
 - [RLHF with NCCL weight syncing (online serving, HTTP)](../../../examples/rl/rlhf_http_nccl.py) - Weight transfer with a running vLLM HTTP server using HTTP control plane and NCCL data plane

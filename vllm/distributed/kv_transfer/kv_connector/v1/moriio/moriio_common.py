@@ -56,7 +56,7 @@ class WriteTask:
     local_block_ids: list[int]
     remote_block_ids_hint: list[int] | None
     layer_name: str
-    event: torch.Event
+    event: torch.cuda.Event
     remote_notify_port: int
     remote_ip: str
     enqueue_time: float = field(default_factory=time.perf_counter)

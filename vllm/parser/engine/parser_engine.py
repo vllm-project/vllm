@@ -108,7 +108,13 @@ class ParserEngine(Parser):
             parser_engine_config, tokenizer, vocab=self.vocab
         )
 
-        self._reasoning_ended: bool = False
+        self._has_reasoning = (
+            "THINK_END" in parser_engine_config.token_id_terminals
+            or "THINK_START" in parser_engine_config.terminals
+            or "THINK_END" in parser_engine_config.terminals
+            or parser_engine_config.initial_state == ParserState.REASONING
+        )
+        self._reasoning_ended: bool = not self._has_reasoning
         self._streaming_initialized: bool = False
         self._prompt_streaming_prepared: bool = False
 
@@ -188,7 +194,7 @@ class ParserEngine(Parser):
 
     def _reset(self, initial_state: ParserState | None = None) -> None:
         self._engine.reset(initial_state=initial_state)
-        self._reasoning_ended = False
+        self._reasoning_ended = not self._has_reasoning
         self._tool_slots.clear()
         self._deferred_content = ""
         self._deferred_reasoning = ""
@@ -255,7 +261,7 @@ class ParserEngine(Parser):
         types = extract_types_from_schema(schema)
         as_str = json.dumps(value, ensure_ascii=False)
         coerced = coerce_to_schema_type(as_str, types)
-        if coerced != value:
+        if type(coerced) is not type(value) or coerced != value:
             return coerced, True
         return value, False
 
@@ -439,7 +445,15 @@ class ParserEngine(Parser):
         if finished:
             events.extend(self._engine.finish())
         result = self._events_to_delta(events, finished=finished)
-        return self._strip_trailing_reasoning(result)
+        result = self._strip_trailing_reasoning(result)
+
+        # Suppress reasoning deltas if not requested
+        if result and not request.include_reasoning:
+            result.reasoning = None
+            if not result.content and not result.tool_calls:
+                result = None
+
+        return result
 
     def _strip_trailing_reasoning(
         self,
