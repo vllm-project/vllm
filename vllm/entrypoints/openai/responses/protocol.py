@@ -354,6 +354,31 @@ class ResponsesRequest(OpenAIBaseModel):
         "top_k": 0,
     }
 
+    def extract_structured_outputs(self) -> StructuredOutputsParams | None:
+        """Normalize request constraints into ``StructuredOutputsParams``."""
+        if self.text is None or self.text.format is None:
+            return self.structured_outputs
+
+        if self.structured_outputs is not None:
+            raise VLLMValidationError(
+                "Cannot specify both structured_outputs and text.format",
+                parameter="structured_outputs",
+            )
+
+        response_format = self.text.format
+        if response_format.type == "json_object":
+            return StructuredOutputsParams(json_object=True)
+        if (
+            response_format.type == "json_schema"
+            and response_format.schema_ is not None
+        ):
+            return StructuredOutputsParams(
+                json=response_format.schema_  # type: ignore[call-arg]
+                # --follow-imports skip hides the class definition but also hides
+                # multiple third party conflicts, so best of both evils
+            )
+        return None
+
     def to_sampling_params(
         self,
         default_max_tokens: int,
@@ -387,27 +412,6 @@ class ResponsesRequest(OpenAIBaseModel):
         if (frequency_penalty := self.frequency_penalty) is None:
             frequency_penalty = default_sampling_params.get("frequency_penalty", 0.0)
 
-        # Structured output
-        structured_outputs = self.structured_outputs
-
-        # Also check text.format for OpenAI-style json_schema
-        if self.text is not None and self.text.format is not None:
-            if structured_outputs is not None:
-                raise VLLMValidationError(
-                    "Cannot specify both structured_outputs and text.format",
-                    parameter="structured_outputs",
-                )
-            response_format = self.text.format
-            if (
-                response_format.type == "json_schema"
-                and response_format.schema_ is not None
-            ):
-                structured_outputs = StructuredOutputsParams(
-                    json=response_format.schema_  # type: ignore[call-arg]
-                    # --follow-imports skip hides the class definition but also hides
-                    # multiple third party conflicts, so best of both evils
-                )
-
         stop = self.stop if self.stop else []
         if isinstance(stop, str):
             stop = [stop]
@@ -433,7 +437,7 @@ class ResponsesRequest(OpenAIBaseModel):
             output_kind=(
                 RequestOutputKind.DELTA if self.stream else RequestOutputKind.FINAL_ONLY
             ),
-            structured_outputs=structured_outputs,
+            structured_outputs=self.extract_structured_outputs(),
             logit_bias=self.logit_bias,
             extra_args=extra_args,
             skip_clone=True,  # Created fresh per request, safe to skip clone
