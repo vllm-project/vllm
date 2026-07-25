@@ -56,6 +56,8 @@ class PromptLogprobsWorker:
         prompt_lens: np.ndarray,
     ) -> bool:
         """Whether this step needs dense, globally ordered prompt rows."""
+        if not self.in_progress_prompt_logprobs:
+            return False
         return bool(np.any(self._needs_prompt_logprobs_mask(input_batch, prompt_lens)))
 
     def compute_prompt_logprobs(
@@ -70,6 +72,8 @@ class PromptLogprobsWorker:
         # [max_num_reqs]
         prompt_lens: np.ndarray,
     ) -> dict[str, LogprobsTensors]:
+        if not self.in_progress_prompt_logprobs:
+            return {}
         idx_mapping_np = input_batch.idx_mapping_np
         needs_prompt_logprobs = self._needs_prompt_logprobs_mask(
             input_batch, prompt_lens

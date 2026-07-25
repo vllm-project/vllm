@@ -60,6 +60,7 @@ class PCPManager:
         dcp_rank: int = 0,
         cp_interleave: int = 1,
         hidden_state_restorer: PCPMulticastHiddenStateRestorer | None = None,
+        max_concurrent_batches: int = 1,
     ) -> None:
         self.pcp_world_size = pcp_world_size
         self.pcp_rank = pcp_rank
@@ -73,9 +74,39 @@ class PCPManager:
         self._req_states = req_states
         self._block_tables = block_tables
         self._hidden_restore_idx: torch.Tensor | None = None
+        self._hidden_restore_idx_cpu: np.ndarray | None = None
+        self._segments_by_rank: list[list[RankSegment]] | None = None
+        self._padded_num_tokens = 0
         self._hidden_states_are_replicated = False
+        self._sample_rows_are_identity = False
         self._sample_local_row_idx: torch.Tensor | None = None
         self._sample_restore_idx: torch.Tensor | None = None
+        self._sample_index_cpu: tuple[torch.Tensor, ...] = ()
+        self._sample_index_cpu_np: tuple[np.ndarray, ...] = ()
+        self._sample_index_buffers: tuple[torch.Tensor, ...] = ()
+        self._next_sample_index_buffer = 0
+        if max_num_reqs is not None:
+            num_sample_index_buffers = max(2, max_concurrent_batches)
+            self._sample_index_cpu = tuple(
+                torch.empty(
+                    2 * max_num_reqs,
+                    dtype=torch.int64,
+                    device="cpu",
+                    pin_memory=device.type == "cuda",
+                )
+                for _ in range(num_sample_index_buffers)
+            )
+            self._sample_index_cpu_np = tuple(
+                buffer.numpy() for buffer in self._sample_index_cpu
+            )
+            self._sample_index_buffers = tuple(
+                torch.empty(
+                    2 * max_num_reqs,
+                    dtype=torch.int64,
+                    device=device,
+                )
+                for _ in range(num_sample_index_buffers)
+            )
         self._padded_gather_idx: torch.Tensor | None = None
         self._gathered_kv_write_mask: torch.Tensor | None = None
         self._pad_slot_id = torch.tensor(PAD_SLOT_ID, dtype=torch.int64, device=device)
@@ -286,16 +317,27 @@ class PCPManager:
         #   global batch:       [A B C D E F G]
         #   rank 0 / rank 1:    [A B G] / [C D E F]
         #   padded gathered:    [A B G _ | C D E F]
-        #   hidden_restore_idx: [0, 1, 4, 5, 6, 7, 2]
         #   padded_gather_idx:  [0, 1, 6, 0, 2, 3, 4, 5]
-        # Therefore global = gathered[hidden_restore_idx] and
-        # padded_gathered = global[padded_gather_idx].
-        num_global_tokens = int(query_start_loc_np[-1])
-        hidden_restore_idx = np.empty(num_global_tokens, dtype=np.int64)
+        # Therefore padded_gathered = global[padded_gather_idx]. The inverse
+        # dense map is materialized only if prompt logprobs need every row.
+        query_lens = np.diff(query_start_loc_np)
+        if np.any(query_lens <= 0):
+            raise RuntimeError("PCP sampling requires one or more rows per request.")
+        self._sample_rows_are_identity = bool(np.all(query_lens == 1))
         padded_num_tokens = max(per_rank_num_tokens)
         num_expanded_tokens = padded_num_tokens * self.pcp_world_size
         padded_gather_idx = np.zeros(num_expanded_tokens, dtype=np.int64)
         gathered_kv_write_mask = np.zeros(num_expanded_tokens, dtype=np.bool_)
+        sample_owner = (
+            None
+            if self._hidden_states_are_replicated
+            else np.full(query_lens.shape[0], -1, dtype=np.int64)
+        )
+        sample_local_row = (
+            None
+            if self._hidden_states_are_replicated
+            else np.empty(query_lens.shape[0], dtype=np.int64)
+        )
         for rank, segments in enumerate(segments_by_rank):
             expanded_rank_offset = rank * padded_num_tokens
             for segment in segments:
@@ -312,55 +354,78 @@ class PCPManager:
                 if not bool(is_prefilling[segment.global_batch_req_idx]) and rank != 0:
                     continue
                 gathered_kv_write_mask[padded_gathered_slice] = True
-                hidden_restore_idx[segment.global_batch_slice] = np.arange(
-                    padded_gathered_slice.start,
-                    padded_gathered_slice.stop,
-                    dtype=np.int64,
+                req_idx = segment.global_batch_req_idx
+                if (
+                    sample_owner is not None
+                    and sample_local_row is not None
+                    and segment.global_batch_slice.stop
+                    == query_start_loc_np[req_idx + 1]
+                ):
+                    sample_owner[req_idx] = rank
+                    sample_local_row[req_idx] = segment.rank_local_batch_slice.stop - 1
+
+        self._hidden_restore_idx = None
+        self._hidden_restore_idx_cpu = None
+        self._segments_by_rank = segments_by_rank
+        self._padded_num_tokens = padded_num_tokens
+        self._sample_local_row_idx = None
+        self._sample_restore_idx = None
+        if not self._hidden_states_are_replicated:
+            assert sample_owner is not None
+            assert sample_local_row is not None
+            if np.any(sample_owner < 0) or np.any(sample_owner >= self.pcp_world_size):
+                raise RuntimeError("PCP sampled-row ownership is out of range.")
+
+            owner_counts = np.bincount(
+                sample_owner, minlength=self.pcp_world_size
+            ).astype(np.int64, copy=False)
+            padded_sample_rows = int(owner_counts.max())
+            sample_local_rows = np.zeros(
+                (self.pcp_world_size, padded_sample_rows),
+                dtype=np.int64,
+            )
+            sample_restore_idx = np.empty(sample_owner.shape[0], dtype=np.int64)
+            owner_offsets = np.zeros(self.pcp_world_size, dtype=np.int64)
+            for output_row, (owner, local_row) in enumerate(
+                zip(sample_owner, sample_local_row, strict=True)
+            ):
+                owner_slot = owner_offsets[owner]
+                sample_local_rows[owner, owner_slot] = local_row
+                sample_restore_idx[output_row] = owner * padded_sample_rows + owner_slot
+                owner_offsets[owner] += 1
+
+            num_sample_indices = padded_sample_rows + sample_restore_idx.shape[0]
+            if not self._sample_index_cpu_np:
+                sample_index_cpu_np = np.empty(num_sample_indices, dtype=np.int64)
+                sample_index_cpu = None
+                sample_index_buffer = None
+            else:
+                buffer_index = self._next_sample_index_buffer
+                sample_index_cpu = self._sample_index_cpu[buffer_index]
+                sample_index_buffer = self._sample_index_buffers[buffer_index]
+                self._next_sample_index_buffer = (buffer_index + 1) % len(
+                    self._sample_index_buffers
                 )
+                if num_sample_indices > sample_index_cpu.shape[0]:
+                    raise RuntimeError("PCP sampled-row metadata exceeds capacity.")
+                sample_index_cpu_np = self._sample_index_cpu_np[buffer_index][
+                    :num_sample_indices
+                ]
+            sample_index_cpu_np[:padded_sample_rows] = sample_local_rows[self.pcp_rank]
+            sample_index_cpu_np[padded_sample_rows:] = sample_restore_idx
+            if sample_index_buffer is None or sample_index_cpu is None:
+                sample_index = async_copy_to_gpu(
+                    sample_index_cpu_np,
+                    device=self.device,
+                )
+            else:
+                sample_index = sample_index_buffer[:num_sample_indices].copy_(
+                    sample_index_cpu[:num_sample_indices],
+                    non_blocking=True,
+                )
+            self._sample_local_row_idx = sample_index[:padded_sample_rows]
+            self._sample_restore_idx = sample_index[padded_sample_rows:]
 
-        query_lens = np.diff(query_start_loc_np)
-        if np.any(query_lens <= 0):
-            raise RuntimeError("PCP sampling requires one or more rows per request.")
-        sample_global_rows = query_start_loc_np[1:] - 1
-        sample_gathered_rows = hidden_restore_idx[sample_global_rows]
-        sample_owner = sample_gathered_rows // padded_num_tokens
-        sample_local_row = sample_gathered_rows % padded_num_tokens
-        if np.any(sample_owner < 0) or np.any(sample_owner >= self.pcp_world_size):
-            raise RuntimeError("PCP sampled-row ownership is out of range.")
-
-        owner_counts = np.bincount(sample_owner, minlength=self.pcp_world_size).astype(
-            np.int64, copy=False
-        )
-        padded_sample_rows = int(owner_counts.max())
-        sample_local_rows = np.zeros(
-            (self.pcp_world_size, padded_sample_rows),
-            dtype=np.int64,
-        )
-        sample_restore_idx = np.empty(sample_global_rows.shape[0], dtype=np.int64)
-        owner_offsets = np.zeros(self.pcp_world_size, dtype=np.int64)
-        for output_row, (owner, local_row) in enumerate(
-            zip(sample_owner, sample_local_row, strict=True)
-        ):
-            owner_slot = owner_offsets[owner]
-            sample_local_rows[owner, owner_slot] = local_row
-            sample_restore_idx[output_row] = owner * padded_sample_rows + owner_slot
-            owner_offsets[owner] += 1
-        if not np.array_equal(owner_offsets, owner_counts):
-            raise RuntimeError("PCP sampled-row ownership counts are inconsistent.")
-        if np.unique(sample_restore_idx).shape[0] != sample_restore_idx.shape[0]:
-            raise RuntimeError("PCP sampled rows must have unique compact outputs.")
-        self._sample_local_row_idx = async_copy_to_gpu(
-            sample_local_rows[self.pcp_rank],
-            device=self.device,
-        )
-        self._sample_restore_idx = async_copy_to_gpu(
-            sample_restore_idx,
-            device=self.device,
-        )
-
-        self._hidden_restore_idx = async_copy_to_gpu(
-            hidden_restore_idx, device=self.device
-        )
         self._padded_gather_idx = async_copy_to_gpu(
             padded_gather_idx, device=self.device
         )
@@ -663,6 +728,11 @@ class PCPManager:
     ) -> torch.Tensor:
         assert self._global_batch is not None
         if self._hidden_states_are_replicated:
+            # PCP rejects speculative decode, so a pure-decode batch contains
+            # globally ordered rows. The common one-row case is already the
+            # exact sampling view; resumed decode may contain a token backlog.
+            if self._sample_rows_are_identity:
+                return hidden_states[: self._global_batch.num_reqs]
             return hidden_states[self._global_batch.logits_indices]
         if self._sample_local_row_idx is None or self._sample_restore_idx is None:
             raise RuntimeError("PCP sampled-row restore map is not initialized.")
@@ -689,8 +759,38 @@ class PCPManager:
 
     def restore_full_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Restore dense global rows for prompt-logprob computation."""
-        if self._hidden_restore_idx is None or self._hidden_states_are_replicated:
+        if self._hidden_states_are_replicated:
             return hidden_states
+        if self._hidden_restore_idx is None:
+            if self._hidden_restore_idx_cpu is None:
+                if self._segments_by_rank is None or self._global_batch is None:
+                    raise RuntimeError("PCP dense restore layout is not initialized.")
+                hidden_restore_idx = np.empty(
+                    self._global_batch.num_tokens,
+                    dtype=np.int64,
+                )
+                for rank, segments in enumerate(self._segments_by_rank):
+                    expanded_rank_offset = rank * self._padded_num_tokens
+                    for segment in segments:
+                        req_idx = segment.global_batch_req_idx
+                        if (
+                            not bool(self._global_batch.is_prefilling_np[req_idx])
+                            and rank != 0
+                        ):
+                            continue
+                        padded_start = (
+                            expanded_rank_offset + segment.rank_local_batch_slice.start
+                        )
+                        hidden_restore_idx[segment.global_batch_slice] = np.arange(
+                            padded_start,
+                            padded_start + segment.num_tokens,
+                            dtype=np.int64,
+                        )
+                self._hidden_restore_idx_cpu = hidden_restore_idx
+            self._hidden_restore_idx = async_copy_to_gpu(
+                self._hidden_restore_idx_cpu,
+                device=self.device,
+            )
         gathered = get_pcp_group().all_gather(hidden_states, dim=0)
         return gathered[self._hidden_restore_idx]
 
@@ -827,4 +927,5 @@ def maybe_build_pcp_manager(
         dcp_rank=dcp_rank,
         cp_interleave=parallel_config.cp_kv_cache_interleave_size,
         hidden_state_restorer=hidden_state_restorer,
+        max_concurrent_batches=vllm_config.max_concurrent_batches,
     )

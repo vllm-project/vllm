@@ -1456,15 +1456,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Last rank: restore only the final rows consumed by sampling. Dense
         # prompt rows are restored only when prompt-logprob work needs them.
         assert self.prompt_logprobs_worker is not None
-        sampling_input_batch = pcp.maybe_get_pcp_global_batch(
-            self.pcp_manager, input_batch
-        )
-        needs_prompt_hidden_states = (
-            self.prompt_logprobs_worker.needs_prompt_hidden_states(
-                sampling_input_batch,
-                self.req_states.prompt_len.np,
+        needs_prompt_hidden_states = False
+        if self.pcp_manager is not None:
+            sampling_input_batch = pcp.maybe_get_pcp_global_batch(
+                self.pcp_manager, input_batch
             )
-        )
+            needs_prompt_hidden_states = (
+                self.prompt_logprobs_worker.needs_prompt_hidden_states(
+                    sampling_input_batch,
+                    self.req_states.prompt_len.np,
+                )
+            )
         hidden_states, sample_hidden_states, input_batch = (
             pcp.maybe_restore_pcp_for_sampling(
                 self.pcp_manager,

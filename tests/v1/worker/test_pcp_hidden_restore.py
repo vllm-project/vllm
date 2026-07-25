@@ -42,14 +42,52 @@ def test_manager_uses_local_rows_for_pure_decode_sampling(
         is_prefilling=np.array([False, False, False]),
         query_start_loc_np=np.array([0, 1, 2, 3], dtype=np.int32),
     )
-    manager._global_batch = SimpleNamespace(logits_indices=torch.tensor([0, 2]))
+    manager._global_batch = SimpleNamespace(
+        num_reqs=3,
+        logits_indices=torch.tensor([0, 1, 2]),
+    )
     hidden_states = torch.tensor(
         [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]],
     )
 
     output = manager.restore_sample_hidden_states(hidden_states)
 
-    torch.testing.assert_close(output, hidden_states[[0, 2]])
+    torch.testing.assert_close(output, hidden_states)
+    assert output.data_ptr() == hidden_states.data_ptr()
+    assert manager._sample_local_row_idx is None
+    assert manager._sample_restore_idx is None
+    assert manager._hidden_restore_idx is None
+    assert manager._hidden_restore_idx_cpu is None
+
+
+def test_manager_indexes_resumed_decode_backlog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        pcp_manager,
+        "async_copy_to_gpu",
+        lambda array, *, device: torch.from_numpy(array.copy()).to(device),
+    )
+    manager = PCPManager(
+        pcp_world_size=2,
+        pcp_rank=1,
+        device=torch.device("cpu"),
+    )
+    manager._build_batch_layout(
+        num_scheduled_tokens=np.array([2, 1], dtype=np.int32),
+        num_computed_tokens=np.array([8, 16], dtype=np.int32),
+        is_prefilling=np.array([False, False]),
+        query_start_loc_np=np.array([0, 2, 3], dtype=np.int32),
+    )
+    manager._global_batch = SimpleNamespace(
+        num_reqs=2,
+        logits_indices=torch.tensor([1, 2]),
+    )
+    hidden_states = torch.tensor([[10.0], [11.0], [20.0]])
+
+    output = manager.restore_sample_hidden_states(hidden_states)
+
+    torch.testing.assert_close(output, torch.tensor([[11.0], [20.0]]))
 
 
 def test_manager_uses_dense_restore_only_when_prompt_rows_are_needed(
@@ -91,6 +129,52 @@ def test_manager_uses_dense_restore_only_when_prompt_rows_are_needed(
         torch.tensor([[1.0, 2.0], [11.0, 12.0], [3.0, 4.0]]),
     )
     torch.testing.assert_close(sampled, restored[[1]])
+
+
+def test_manager_materializes_dense_restore_map_only_on_demand(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        pcp_manager,
+        "async_copy_to_gpu",
+        lambda array, *, device: torch.from_numpy(array.copy()).to(device),
+    )
+
+    class FakeGroup:
+        def all_gather(self, hidden_states: torch.Tensor, dim: int) -> torch.Tensor:
+            assert dim == 0
+            torch.testing.assert_close(
+                hidden_states, torch.tensor([[3.0], [0.0], [4.0]])
+            )
+            return torch.tensor([[3.0], [0.0], [4.0], [1.0], [2.0], [5.0]])
+
+    monkeypatch.setattr(pcp_manager, "get_pcp_group", FakeGroup)
+    manager = PCPManager(
+        pcp_world_size=2,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+    )
+    manager._build_batch_layout(
+        num_scheduled_tokens=np.array([4, 2], dtype=np.int32),
+        num_computed_tokens=np.array([0, 0], dtype=np.int32),
+        is_prefilling=np.array([True, True]),
+        query_start_loc_np=np.array([0, 4, 6], dtype=np.int32),
+    )
+    manager._global_batch = SimpleNamespace(
+        num_tokens=6,
+        is_prefilling_np=np.array([True, True]),
+    )
+
+    assert manager._hidden_restore_idx is None
+    assert manager._hidden_restore_idx_cpu is None
+    restored = manager.restore_full_hidden_states(torch.tensor([[3.0], [0.0], [4.0]]))
+
+    torch.testing.assert_close(restored, torch.arange(6, dtype=torch.float32)[:, None])
+    assert manager._hidden_restore_idx_cpu is not None
+    torch.testing.assert_close(
+        manager._hidden_restore_idx,
+        torch.tensor([1, 3, 4, 0, 2, 5]),
+    )
 
 
 def test_manager_compacts_only_sampled_rows_for_multicast(
@@ -289,6 +373,34 @@ def test_pcp4_mixed_batch_compact_collective_uses_generated_layout(
     } == {0, 2, 3}
 
 
+def test_manager_reuses_preallocated_sample_index_buffer() -> None:
+    manager = PCPManager(
+        pcp_world_size=4,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        max_num_reqs=8,
+    )
+    layout = {
+        "num_scheduled_tokens": np.array([9, 5], dtype=np.int32),
+        "num_computed_tokens": np.array([0, 0], dtype=np.int32),
+        "is_prefilling": np.array([True, True]),
+        "query_start_loc_np": np.array([0, 9, 14], dtype=np.int32),
+    }
+
+    manager._build_batch_layout(**layout)
+    assert manager._sample_index_buffers
+    first_buffer_ptr = manager._sample_index_buffers[0].data_ptr()
+    first_local_ptr = manager._sample_local_row_idx.data_ptr()
+
+    manager._build_batch_layout(**layout)
+    second_local_ptr = manager._sample_local_row_idx.data_ptr()
+    manager._build_batch_layout(**layout)
+
+    assert manager._sample_index_buffers[0].data_ptr() == first_buffer_ptr
+    assert second_local_ptr != first_local_ptr
+    assert manager._sample_local_row_idx.data_ptr() == first_local_ptr
+
+
 def test_multicast_allocation_failure_is_coordinated_before_rendezvous(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -466,6 +578,8 @@ def test_compact_restorer_falls_back_when_multicast_is_unavailable(
 def test_prompt_logprob_worker_exposes_dense_hidden_requirement() -> None:
     worker = PromptLogprobsWorker(max_num_reqs=4)
     worker.uses_prompt_logprobs[:2] = True
+    worker.in_progress_prompt_logprobs["req0"] = []
+    worker.in_progress_prompt_logprobs["req1"] = []
     input_batch = SimpleNamespace(
         idx_mapping_np=np.array([0, 1], dtype=np.int32),
         num_computed_prefill_tokens_np=np.array([0, 8], dtype=np.int32),
@@ -483,3 +597,12 @@ def test_prompt_logprob_worker_exposes_dense_hidden_requirement() -> None:
     prompt_lens[0] = 4
     worker.uses_prompt_logprobs[1] = False
     assert not worker.needs_prompt_hidden_states(input_batch, prompt_lens)
+
+
+def test_prompt_logprob_worker_skips_mask_without_active_requests() -> None:
+    worker = PromptLogprobsWorker(max_num_reqs=4)
+
+    assert not worker.needs_prompt_hidden_states(
+        SimpleNamespace(),
+        np.empty(0, dtype=np.int32),
+    )
