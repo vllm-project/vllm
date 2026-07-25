@@ -5,17 +5,21 @@ import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
+from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
 class StructuredOutputsWorker:
     def __init__(self, max_num_logits: int, vocab_size: int, device: torch.device):
-        self.logits_indices = torch.zeros(
+        # Persistent host staging buffers paired with their device tensors.
+        # Both copies below run on every decode step of every batch that
+        # contains structured-output requests, so the staging memory is
+        # allocated once here rather than per step.
+        self.logits_indices = CpuGpuBuffer(
             max_num_logits, dtype=torch.int32, device=device
         )
-        self.grammar_bitmask = torch.zeros(
-            (max_num_logits, cdiv(vocab_size, 32)), dtype=torch.int32, device=device
+        self.grammar_bitmask = CpuGpuBuffer(
+            max_num_logits, cdiv(vocab_size, 32), dtype=torch.int32, device=device
         )
         self.device = device
         self.copy_stream = torch.cuda.Stream()
@@ -30,11 +34,11 @@ class StructuredOutputsWorker:
         if not grammar_req_ids:
             return
 
-        # Asynchronously copy the bitmask to GPU.
+        # Stage the bitmask into pinned memory, then copy it asynchronously.
+        num_masks = grammar_bitmask.shape[0]
+        self.grammar_bitmask.np[:num_masks] = grammar_bitmask
         with torch.cuda.stream(self.copy_stream):
-            bitmask = async_copy_to_gpu(
-                grammar_bitmask, out=self.grammar_bitmask[: grammar_bitmask.shape[0]]
-            )
+            bitmask = self.grammar_bitmask.copy_to_gpu(num_masks)
 
         # Construct bitmask -> logits mapping
         mapping: list[int] = []
@@ -47,21 +51,17 @@ class StructuredOutputsWorker:
             logits_end_idx = cu_num_logits[req_idx + 1]
             mapping.extend(range(logits_start_idx, logits_end_idx))
 
-        # Asynchronously copy the mapping to GPU.
+        # Stage the mapping into pinned memory, then copy it asynchronously.
+        num_logits = len(mapping)
+        self.logits_indices.np[:num_logits] = mapping
         with torch.cuda.stream(self.copy_stream):
-            logits_indices = torch.tensor(
-                mapping, dtype=torch.int32, device="cpu", pin_memory=True
-            )
-            logits_indices = self.logits_indices[: len(mapping)].copy_(
-                logits_indices, non_blocking=True
-            )
+            logits_indices = self.logits_indices.copy_to_gpu(num_logits)
 
         # Ensure all async copies are complete before launching the kernel.
         current_stream = torch.cuda.current_stream()
         current_stream.wait_stream(self.copy_stream)
 
-        num_masks = bitmask.shape[0]
-        assert num_masks == len(mapping)
+        assert num_masks == num_logits
         vocab_size = logits.shape[-1]
         BLOCK_SIZE = 8192
         grid = (num_masks, triton.cdiv(vocab_size, BLOCK_SIZE))
