@@ -28,6 +28,12 @@ def test_register_model_loader():
     assert isinstance(get_model_loader(load_config), CustomModelLoader)
 
 
+def test_custom_loader_without_manifest_adapter_fails_closed():
+    loader = CustomModelLoader(LoadConfig(load_format="custom_load_format"))
+    with pytest.raises(RuntimeError, match="without producing any load-manifest"):
+        loader._ensure_manifest_observed(nn.Linear(2, 2))
+
+
 def test_invalid_model_loader():
     with pytest.raises(ValueError):
 

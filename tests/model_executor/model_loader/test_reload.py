@@ -118,6 +118,76 @@ def test_reload_lifecycle():
         assert tensor.__dict__ == materialized_tensor.__dict__
 
 
+@pytest.mark.parametrize("restored_kind", ["parameter", "buffer"])
+@pytest.mark.parametrize("current_kind", ["parameter", "buffer", "attribute", "none"])
+def test_restore_layer_handles_tensor_slot_kind_changes(
+    restored_kind: str, current_kind: str
+):
+    """Quantization may change a weight's Module registration after loading."""
+    layer = torch.nn.Module()
+    original = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+    if restored_kind == "parameter":
+        layer.register_parameter(
+            "weight", torch.nn.Parameter(original, requires_grad=False)
+        )
+    else:
+        layer.register_buffer("weight", original, persistent=False)
+
+    info = LayerReloadingInfo(
+        restore_metadata=capture_layer_to_meta(layer),
+        restore_device=torch.device("cpu"),
+    )
+
+    # Simulate the different shapes left by quantization/kernel setup.
+    delattr(layer, "weight")
+    replacement = torch.ones(1)
+    if current_kind == "parameter":
+        layer.register_parameter(
+            "weight", torch.nn.Parameter(replacement, requires_grad=False)
+        )
+    elif current_kind == "buffer":
+        layer.register_buffer("weight", replacement, persistent=False)
+    elif current_kind == "attribute":
+        layer.weight = replacement
+    else:
+        layer.register_parameter("weight", None)
+
+    restore_layer_on_meta(layer, info)
+
+    assert layer.weight.is_meta
+    assert layer.weight.shape == original.shape
+    if restored_kind == "parameter":
+        assert "weight" in layer._parameters
+        assert "weight" not in layer._buffers
+    else:
+        assert "weight" not in layer._parameters
+        assert "weight" in layer._buffers
+        # capture/restore currently restores buffers as persistent.
+        assert "weight" not in layer._non_persistent_buffers_set
+
+
+def test_restore_layer_preserves_registered_none_slots():
+    """Structural optional tensor slots must survive a reload round trip.
+
+    Linear layers created with ``bias=False`` register ``bias`` as a None
+    parameter. Dropping that registration makes forward fail after reload
+    because ``self.bias`` no longer exists.
+    """
+    layer = torch.nn.Linear(3, 2, bias=False)
+    layer.register_buffer("optional_buffer", None, persistent=False)
+    info = LayerReloadingInfo(
+        restore_metadata=capture_layer_to_meta(layer),
+        restore_device=torch.device("cpu"),
+    )
+
+    restore_layer_on_meta(layer, info)
+
+    assert "bias" in layer._parameters
+    assert layer.bias is None
+    assert "optional_buffer" in layer._buffers
+    assert layer.optional_buffer is None
+
+
 def test_materialize_layer_preserves_non_meta_tensors():
     """Ensure that materialize_layer does not overwrite non meta tensors."""
     layer = torch.nn.Linear(2, 3, bias=True)

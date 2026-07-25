@@ -5,6 +5,7 @@ import sys
 from types import ModuleType, SimpleNamespace
 
 import pytest
+import torch
 from torch import nn
 
 from vllm.config import VllmConfig
@@ -13,11 +14,13 @@ from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.modelexpress_loader import (
     ModelExpressModelLoader,
 )
+from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
 
 
 class FakeModelexpressLoader:
     calls: list[tuple[str, tuple, dict]] = []
     loaded_model: nn.Module
+    tensors: dict[str, torch.Tensor]
 
     def __init__(self, load_config: LoadConfig):
         self.load_config = load_config
@@ -36,6 +39,7 @@ class FakeModelexpressLoader:
 def _install_fake_modelexpress(monkeypatch):
     FakeModelexpressLoader.calls = []
     FakeModelexpressLoader.loaded_model = nn.Module()
+    FakeModelexpressLoader.tensors = {}
 
     for name in [
         "modelexpress",
@@ -88,6 +92,24 @@ def test_modelexpress_loader_delegates_to_modelexpress(monkeypatch):
             },
         ),
     ]
+
+
+def test_modelexpress_records_published_processed_tensors(monkeypatch):
+    _install_fake_modelexpress(monkeypatch)
+    model = nn.Linear(4, 4, bias=False)
+    FakeModelexpressLoader.loaded_model = model
+    FakeModelexpressLoader.tensors = {"model.weight": model.weight}
+
+    loader = ModelExpressModelLoader(LoadConfig(load_format="modelexpress"))
+    result = loader.load_model(
+        vllm_config=SimpleNamespace(),
+        model_config=SimpleNamespace(),
+    )
+
+    assert result is model
+    assert get_layerwise_info(model).required_keys == {
+        "modelexpress://model.weight=>weight"
+    }
 
 
 def test_modelexpress_loader_missing_modelexpress_error(monkeypatch):

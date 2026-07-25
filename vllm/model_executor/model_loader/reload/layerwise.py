@@ -20,7 +20,13 @@ from .meta import (
     materialize_layer,
     restore_layer_on_meta,
 )
-from .types import LayerReloadingInfo
+from .source import get_current_source_key
+from .types import (
+    LayerReloadingInfo,
+    LoadManifestGroupScope,
+    LoadManifestReport,
+    LoadManifestScope,
+)
 from .utils import (
     get_info_size,
     get_layer_params_buffers,
@@ -40,6 +46,11 @@ __all__ = [
     "record_load_consumption",
     "finalize_load_recording",
     "get_layer_completion_findings",
+    "get_load_manifest_report",
+    "record_dummy_load_manifest",
+    "record_direct_load_consumption",
+    "record_external_tensor_manifest",
+    "has_dummy_load_manifest",
 ]
 
 
@@ -60,12 +71,86 @@ LOADING_LAYERS: WeakSet[torch.nn.Module] = WeakSet()
 # reload start, read after finalize. Dual-run signal only -- numel stays
 # authoritative until the set criterion has a release of agreement.
 _LAYER_COMPLETION_FINDINGS: list[str] = []
+_DUMMY_BASELINE_FAILURES: list[str] = []
+# The per-layer receipt sets are transient and are cleared at finalize. Keep
+# one aggregate per model so a controller can inspect it afterwards without
+# mixing staged/replaced models that temporarily share a worker process.
+_LAST_RELOAD_RECEIVED_EVENT_COUNTS: WeakKeyDictionary[torch.nn.Module, int] = (
+    WeakKeyDictionary()
+)
 
 
 def get_layer_completion_findings() -> list[str]:
     """Where the numel and observed-key-set completion criteria disagreed
     during the last reload."""
     return list(_LAYER_COMPLETION_FINDINGS)
+
+
+def _get_load_manifest_scope() -> LoadManifestScope:
+    """Best-effort distributed coordinates without requiring distributed init."""
+    try:
+        from vllm.distributed.parallel_state import (
+            get_dp_group,
+            get_ep_group,
+            get_pp_group,
+            get_tp_group,
+            get_world_group,
+        )
+
+        world = get_world_group()
+
+        def group_scope(get_group: Callable) -> LoadManifestGroupScope | None:
+            try:
+                group = get_group()
+            except (AssertionError, RuntimeError):
+                return None
+            return LoadManifestGroupScope(
+                rank=group.rank_in_group,
+                world_size=group.world_size,
+            )
+
+        return LoadManifestScope(
+            global_rank=world.rank,
+            global_world_size=world.world_size,
+            tp=group_scope(get_tp_group),
+            pp=group_scope(get_pp_group),
+            dp=group_scope(get_dp_group),
+            ep=group_scope(get_ep_group),
+        )
+    except (AssertionError, RuntimeError):
+        return LoadManifestScope()
+
+
+def get_load_manifest_report(
+    model: torch.nn.Module | None = None,
+) -> LoadManifestReport:
+    """Return this worker's rank-local manifest/reconciliation result.
+
+    The event sets stay process-local by design. Combining them before
+    reconciliation would hide a missing TP/PP/EP shard on one rank behind an
+    event received by another rank. Executors/controllers should collect one
+    report per worker and require every report to be ``ok``.
+    """
+    # Supplying the model avoids mixing manifests if a process temporarily
+    # retains more than one model (tests and staged model replacement can do
+    # this). Worker RPC callers should always provide their active model.
+    infos = (
+        [get_layerwise_info(module) for module in model.modules()]
+        if model is not None
+        else list(LAYERWISE_INFO.values())
+    )
+    return LoadManifestReport(
+        scope=_get_load_manifest_scope(),
+        required_event_count=sum(
+            len(info.required_keys or ()) for info in infos
+        ),
+        received_event_count=(
+            _LAST_RELOAD_RECEIVED_EVENT_COUNTS.get(model, 0)
+            if model is not None
+            else sum(_LAST_RELOAD_RECEIVED_EVENT_COUNTS.values())
+        ),
+        completion_findings=tuple(_LAYER_COMPLETION_FINDINGS),
+    )
 
 
 def record_load_consumption(model: torch.nn.Module) -> None:
@@ -107,13 +192,128 @@ def record_load_consumption(model: torch.nn.Module) -> None:
                 info, name, _get_weight_loader(tensor))
 
 
+def record_dummy_load_manifest(model: torch.nn.Module) -> None:
+    """Establish a rank-local target baseline after dummy initialization.
+
+    Dummy weights have no checkpoint source keys, so inventing source events
+    would make the first real RL transfer impossible to reconcile. Instead,
+    require every unique local parameter target to be consumed. A successful
+    first real load promotes its exact observed source/fragment receipts to the
+    normal manifest used by subsequent reloads.
+    """
+    for layer in model.modules():
+        info = get_layerwise_info(layer)
+        # Restore metadata is the authoritative pre-PWAL shape that the
+        # layerwise transfer will materialize. Current parameters may already
+        # have been packed/replaced by quantization.
+        required = {
+            name
+            for name, param in info.restore_metadata[0].items()
+            if param is not None and name not in SKIP_TENSORS
+        }
+        if required:
+            info.required_target_keys = required
+            # Empty means "not established from a real source stream yet".
+            info.required_keys = set()
+
+
+def has_dummy_load_manifest(model: torch.nn.Module) -> bool:
+    """Whether this model still awaits its first real source-bearing load."""
+    return any(
+        get_layerwise_info(layer).required_target_keys is not None
+        for layer in model.modules()
+    )
+
+
+def record_direct_load_consumption(
+    model: torch.nn.Module,
+    target_name: str,
+    source_key: str,
+) -> None:
+    """Record a source-to-target event for loaders that write state_dict directly."""
+    if "." in target_name:
+        module_name, param_name = target_name.rsplit(".", 1)
+        layer = model.get_submodule(module_name)
+    else:
+        layer, param_name = model, target_name
+    info = get_layerwise_info(layer)
+    event = f"{source_key}=>{param_name}"
+    if info.can_load():
+        info.received_keys.add(event)
+        info.received_target_keys.add(param_name)
+    else:
+        if info.required_keys is None:
+            info.required_keys = set()
+        info.required_keys.add(event)
+
+
+def record_external_tensor_manifest(
+    model: torch.nn.Module,
+    tensors: dict[str, torch.Tensor],
+    *,
+    source_scheme: str,
+) -> None:
+    """Record a post-PWAL tensor manifest supplied by an external loader.
+
+    Some loaders transfer fully processed tensors and never invoke vLLM
+    ``weight_loader`` functions. Match their published tensors back to the
+    owning module by identity and retain one canonical event per tensor.
+    """
+    recorded_names: set[str] = set()
+    for source_name in tensors:
+        target_name = source_name.removesuffix(".__storage")
+        if "." in target_name:
+            module_name, local_name = target_name.rsplit(".", 1)
+            try:
+                layer = model.get_submodule(module_name)
+            except AttributeError:
+                continue
+        else:
+            layer, local_name = model, target_name
+        info = get_layerwise_info(layer)
+        if info.required_keys is None:
+            info.required_keys = set()
+        info.required_keys.add(
+            f"{source_scheme}://{source_name}=>{local_name}"
+        )
+        recorded_names.add(source_name)
+
+    # External registries may use aliases that are not resolvable as module
+    # paths. Match those by storage as a fallback.
+    names_by_storage = {
+        tensor.untyped_storage().data_ptr(): name
+        for name, tensor in tensors.items()
+        if name not in recorded_names
+    }
+    seen: set[int] = set()
+    for layer in model.modules():
+        info = get_layerwise_info(layer)
+        for local_name, tensor in get_layer_tensors(layer).items():
+            storage_ptr = tensor.untyped_storage().data_ptr()
+            if storage_ptr in seen or storage_ptr not in names_by_storage:
+                continue
+            seen.add(storage_ptr)
+            if info.required_keys is None:
+                info.required_keys = set()
+            source_name = names_by_storage[storage_ptr]
+            info.required_keys.add(
+                f"{source_scheme}://{source_name}=>{local_name}"
+            )
+
+
 def _make_recording_loader(info: LayerReloadingInfo, name: str,
                            original: Callable) -> Callable:
+    loader_signature = inspect.signature(original)
+
     @wraps(original, assigned=("__doc__", "__annotations__"))
     def recording_loader(*args, **kwargs):
+        bound_args = loader_signature.bind(*args, **kwargs)
+        bound_args.apply_defaults()
+        result = original(*args, **kwargs)
         assert info.required_keys is not None
-        info.required_keys.add(name)
-        return original(*args, **kwargs)
+        if _load_call_consumed(bound_args, result):
+            info.required_keys.add(_load_event_key(name, bound_args))
+        return result
 
     # A distinct __name__ so _get_original_loader (which unwraps only
     # "online_process_loader") does not strip it; finalize_load_recording
@@ -122,6 +322,45 @@ def _make_recording_loader(info: LayerReloadingInfo, name: str,
     recording_loader._vllm_recording = True  # type: ignore[attr-defined]
     recording_loader._vllm_orig = original  # type: ignore[attr-defined]
     return recording_loader
+
+
+_LOAD_FRAGMENT_ARGUMENTS = (
+    "loaded_shard_id",
+    "loaded_weight_shard_id",
+    "shard_id",
+    "expert_id",
+    "weight_name",
+)
+
+
+def _load_event_key(param_name: str,
+                    args: inspect.BoundArguments) -> str:
+    """Return the logical target fragment consumed by one loader call.
+
+    A loader invocation is one event regardless of how many internal writes
+    it performs. Packed, merged and expert loaders are distinguished by the
+    routing arguments already present in their public loader signature.
+    Keeping the no-fragment representation equal to ``param_name`` preserves
+    compatibility for ordinary parameters and existing diagnostics.
+    """
+    fragments = []
+    for name in _LOAD_FRAGMENT_ARGUMENTS:
+        value = args.arguments.get(name)
+        if value is not None:
+            fragments.append(f"{name}={value!r}")
+    target = (param_name if not fragments else
+              f"{param_name}[{','.join(fragments)}]")
+    source_key = get_current_source_key()
+    if source_key is None:
+        return target
+    return f"{source_key}=>{target}"
+
+
+def _load_call_consumed(args: inspect.BoundArguments, result: object) -> bool:
+    """Whether a conditional loader reports that it consumed this fragment."""
+    if args.arguments.get("return_success") is True:
+        return result is True
+    return True
 
 
 def finalize_load_recording(model: torch.nn.Module) -> None:
@@ -136,19 +375,37 @@ def finalize_load_recording(model: torch.nn.Module) -> None:
 
 def _check_set_completion(layer: torch.nn.Module,
                           info: LayerReloadingInfo) -> None:
-    """Dual-run: at the moment the numel criterion fires completion, record
-    whether the observed-key-set criterion agrees. A disagreement where numel
-    says complete but keys are still missing is the #44814 shape (a dropped
-    parameter masked by an over-count). Numel stays authoritative; this only
-    records the discrepancy."""
+    """At end of reload, record whether all first-load events were received.
+
+    Reconciliation deliberately happens only after the checkpoint iterator is
+    exhausted. Numel-driven processing may finish earlier, while a
+    checkpoint-backed tensor excluded from meta restoration can legitimately
+    arrive later. Numel stays authoritative; this only records discrepancies.
+    """
     if info.required_keys is None:
         return  # no observed baseline (first-load recording did not run)
+    missing_targets = (
+        (info.required_target_keys or set()) - info.received_target_keys
+    )
+    if missing_targets:
+        finding = (
+            f"{layer.__class__.__name__}: reload finalized but "
+            f"{len(missing_targets)} dummy-baseline target(s) not received: "
+            f"{sorted(missing_targets)[:8]}"
+        )
+        _LAYER_COMPLETION_FINDINGS.append(finding)
+        _DUMMY_BASELINE_FAILURES.append(finding)
     missing = info.required_keys - info.received_keys
     if missing:
         _LAYER_COMPLETION_FINDINGS.append(
-            f"{layer.__class__.__name__}: numel completion fired but "
+            f"{layer.__class__.__name__}: reload finalized but "
             f"{len(missing)} observed key(s) not yet received: "
             f"{sorted(missing)[:8]}")
+    if info.required_target_keys is not None and not missing_targets:
+        # The first complete real transfer turns the provisional dummy target
+        # baseline into the exact source/fragment manifest.
+        info.required_keys = set(info.received_keys)
+        info.required_target_keys = None
 
 
 def get_layerwise_info(layer: torch.nn.Module) -> LayerReloadingInfo:
@@ -200,6 +457,8 @@ def initialize_layerwise_reload(model: torch.nn.Module):
 
     if not any(get_layerwise_info(m).can_load() for m in model.modules()):
         _LAYER_COMPLETION_FINDINGS.clear()
+        _DUMMY_BASELINE_FAILURES.clear()
+        _LAST_RELOAD_RECEIVED_EVENT_COUNTS[model] = 0
 
     for layer in model.modules():
         info = get_layerwise_info(layer)
@@ -230,6 +489,8 @@ def initialize_online_processing(layer: torch.nn.Module):
     info = get_layerwise_info(layer)
 
     # Track loading progress to determine when to process/copy
+    info.received_keys.clear()
+    info.received_target_keys.clear()
     info.load_numel = 0
     info.load_numel_total = get_layer_size(layer)
     _wrap_parameters_weight_loader(layer)
@@ -237,12 +498,43 @@ def initialize_online_processing(layer: torch.nn.Module):
 
 def _wrap_parameters_weight_loader(layer: torch.nn.Module) -> None:
     """Wrap each parameter's weight loader."""
+    info = get_layerwise_info(layer)
     # Note that nested wrapping will occur for shared tensors
     for name, tensor in get_layer_tensors(layer).items():
         if name in SKIP_TENSORS:
+            # Some skipped tensors are nevertheless checkpoint-backed. They
+            # stay on device because they are aliases or runtime bookkeeping,
+            # but their real loader invocation must still produce a receipt.
+            # Keep this lightweight observer installed until the *whole*
+            # checkpoint iterator is exhausted: such a tensor may arrive
+            # after the other tensors made this layer reach numel completion.
+            loader = _get_weight_loader(tensor)
+            if not getattr(loader, "_vllm_receipt_observer", False):
+                tensor.weight_loader = _make_receipt_observer(
+                    info, name, _get_original_loader(tensor))
             continue
         if _get_weight_loader(tensor).__name__ != "online_process_loader":
             tensor.weight_loader = make_online_process_loader(layer, name)
+
+
+def _make_receipt_observer(info: LayerReloadingInfo, param_name: str,
+                           original_loader: Callable) -> Callable:
+    """Observe a checkpoint load without deferring or counting the tensor."""
+    loader_signature = inspect.signature(original_loader)
+
+    @wraps(original_loader, assigned=("__doc__", "__annotations__"))
+    def receipt_observer(*args, **kwargs):
+        bound_args = loader_signature.bind(*args, **kwargs)
+        bound_args.apply_defaults()
+        result = original_loader(*args, **kwargs)
+        if _load_call_consumed(bound_args, result):
+            info.received_keys.add(_load_event_key(param_name, bound_args))
+            info.received_target_keys.add(param_name)
+        return result
+
+    receipt_observer.__name__ = "reload_receipt_observer"
+    receipt_observer._vllm_receipt_observer = True  # type: ignore[attr-defined]
+    return receipt_observer
 
 
 def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Callable:
@@ -287,12 +579,13 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         num_loaded, ret = get_numel_loaded(original_loader, bound_args)
         info.load_numel += num_loaded
 
-        # Observed-key-set accounting, dual-run alongside numel. A set dedups
-        # naturally, so a key loaded more than once (some qconfigs load
-        # weight_shape per qkv partition -- see "Excessive loading" above) is
-        # idempotent here rather than an error; strict duplicate rejection is
-        # a later, separate policy.
-        info.received_keys.add(param_name)
+        # Observe the same logical target fragment as the first-load wrapper.
+        # This distinguishes Q/K/V shards and MoE expert/shard calls that
+        # share one packed destination parameter. Internal copy_ calls remain
+        # invisible: the loader invocation, not a storage write, is the event.
+        if _load_call_consumed(bound_args, ret):
+            info.received_keys.add(_load_event_key(param_name, bound_args))
+            info.received_target_keys.add(param_name)
 
         logger.debug(
             "%s: %d / %d",
@@ -347,11 +640,15 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
     if hasattr(model, "_original_do_torchao_reload"):
         model._do_torchao_reload = model._original_do_torchao_reload
 
+    received_event_count = 0
     deferred_attn: list[tuple[torch.nn.Module, LayerReloadingInfo]] = []
 
     for layer in model.modules():
         info = get_layerwise_info(layer)
         if not info.can_load():
+            received_event_count += len(info.received_keys)
+            _check_set_completion(layer, info)
+            _unwrap_receipt_observers(layer)
             info.reset()
             continue
 
@@ -380,14 +677,26 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
             logger.debug("%s: Delayed processing", layer.__class__.__name__)
             _layerwise_process(layer, info)
 
+        received_event_count += len(info.received_keys)
+        _check_set_completion(layer, info)
+        _unwrap_receipt_observers(layer)
         info.reset()
 
     # Process attention layers after all other layers are done
     for layer, info in deferred_attn:
         _finalize_attention_layer(layer, info, model_config)
+        received_event_count += len(info.received_keys)
+        _check_set_completion(layer, info)
+        _unwrap_receipt_observers(layer)
         info.reset()
 
     LOADING_LAYERS.clear()
+    _LAST_RELOAD_RECEIVED_EVENT_COUNTS[model] = received_event_count
+    if _DUMMY_BASELINE_FAILURES:
+        raise RuntimeError(
+            "First real weight load after dummy initialization was incomplete:\n  "
+            + "\n  ".join(_DUMMY_BASELINE_FAILURES[:20])
+        )
 
 
 def finalize_layerwise_reload(*args, **kwargs):
@@ -409,6 +718,7 @@ def _finalize_attention_layer(
     else:
         _place_kernel_tensors(layer, info)
     layer.process_weights_after_loading(model_config.dtype)
+
 
 def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
     """Load and process attention scale weights (k_scale, v_scale, etc.)
@@ -454,7 +764,11 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
         delattr(layer, "_already_called_process_weights_after_loading")
 
     # Unwrap layerwise loading wrappers
-    for param in get_layer_tensors(layer).values():
+    for name, param in get_layer_tensors(layer).items():
+        if (name in SKIP_TENSORS
+                and getattr(_get_weight_loader(param),
+                            "_vllm_receipt_observer", False)):
+            continue
         param.weight_loader = _get_original_loader(param)
 
     # Load all buffered weights into materialized layer (using original loaders)
@@ -473,23 +787,28 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     if info.kernel_tensors is not None:
         _copy_and_restore_kernel_tensors(layer, info)
 
-    # Dual-run: does the observed key set agree the layer is complete? Runs
-    # here (covering online-completed AND delayed layers) because received_keys
-    # is still alive before reset(); required_keys survives reset, received
-    # does not, so this cannot be deferred to the finalize reset loop.
-    _check_set_completion(layer, info)
-
-    info.reset()
+    # The checkpoint iterator may still contain checkpoint-backed SKIP_TENSORS
+    # (for example DeepSeek's gate.e_score_correction_bias). Keep all receipts
+    # until finalize_layerwise_processing can reconcile the complete stream.
+    info.reset(preserve_received_keys=True)
     logger.debug("%s: Processed", layer.__class__.__name__)
 
 
 def _get_original_loader(tensor: torch.Tensor) -> Callable:
     """Return the weight loader with any layerwise wrappers removed"""
     loader = _get_weight_loader(tensor)
-    while loader.__name__ == "online_process_loader":
+    while loader.__name__ in ("online_process_loader",
+                              "reload_receipt_observer"):
         loader = loader.__wrapped__  # type: ignore[union-attr]
 
     return loader
+
+
+def _unwrap_receipt_observers(layer: torch.nn.Module) -> None:
+    for tensor in get_layer_tensors(layer).values():
+        loader = _get_weight_loader(tensor)
+        if getattr(loader, "_vllm_receipt_observer", False):
+            tensor.weight_loader = _get_original_loader(tensor)
 
 
 def _get_weight_loader(tensor: torch.Tensor):

@@ -9,6 +9,7 @@ from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.reload.layerwise import (
     _get_original_loader,
     get_layerwise_info,
+    record_dummy_load_manifest,
 )
 from vllm.model_executor.model_loader.reload.meta import materialize_layer
 from vllm.model_executor.model_loader.reload.types import LayerReloadingInfo
@@ -42,6 +43,9 @@ class DummyModelLoader(BaseModelLoader):
                 # NOTE(woosuk): For accurate performance evaluation, we assign
                 # random values to the weights.
                 initialize_dummy_weights(layer, model_config)
+
+    def finalize_load_manifest(self, model: nn.Module) -> None:
+        record_dummy_load_manifest(model)
 
     def _process_online_quant_layer(
         self,

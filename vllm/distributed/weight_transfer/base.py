@@ -95,6 +95,71 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         self.model_config = vllm_config.model_config
         self.device = device
         self.model = model
+        self._expected_source_names: set[str] | None = None
+        self._received_source_names: set[str] = set()
+        self._requires_declared_source_manifest = False
+
+    def start_source_manifest_validation(self) -> None:
+        """Start transport-level source reconciliation for one transaction.
+
+        A model created with ``load_format=dummy`` has no checkpoint source
+        stream from which an exact baseline can be learned.  Its first real
+        transfer must therefore carry an independently declared source
+        manifest.  Later transfers are also checked when a declaration is
+        supplied, but retain compatibility with existing callers.
+        """
+        from vllm.model_executor.model_loader.reload.layerwise import (
+            has_dummy_load_manifest,
+        )
+
+        self._expected_source_names = None
+        self._received_source_names.clear()
+        self._requires_declared_source_manifest = has_dummy_load_manifest(self.model)
+
+    def observe_source_manifest(
+        self,
+        names: list[str],
+        expected_names: list[str] | None,
+    ) -> None:
+        """Record one received chunk and its transaction declaration."""
+        if expected_names is not None:
+            declared = set(expected_names)
+            if len(declared) != len(expected_names):
+                raise ValueError(
+                    "The declared weight-transfer source manifest contains "
+                    "duplicate names"
+                )
+            if (
+                self._expected_source_names is not None
+                and self._expected_source_names != declared
+            ):
+                raise ValueError(
+                    "Conflicting expected source manifests were supplied for "
+                    "the same weight-update transaction"
+                )
+            self._expected_source_names = declared
+        self._received_source_names.update(names)
+
+    def finish_source_manifest_validation(self) -> None:
+        """Fail closed before commit if the declared source stream is incomplete."""
+        if (
+            self._requires_declared_source_manifest
+            and self._expected_source_names is None
+        ):
+            raise RuntimeError(
+                "The first real weight transfer after dummy initialization "
+                "requires an authoritative expected source manifest"
+            )
+        if self._expected_source_names is None:
+            return
+        missing = self._expected_source_names - self._received_source_names
+        unexpected = self._received_source_names - self._expected_source_names
+        if missing or unexpected:
+            raise RuntimeError(
+                "Weight-transfer source manifest mismatch: "
+                f"missing={sorted(missing)[:20]}, "
+                f"unexpected={sorted(unexpected)[:20]}"
+            )
 
     def parse_init_info(self, init_dict: dict[str, Any]) -> TInitInfo:
         """

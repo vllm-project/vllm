@@ -46,6 +46,13 @@ class IPCTrainerSendWeightsArgs:
     """Whether to use packed tensor transfer for bounded-memory chunking."""
     packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
     """Size in bytes for each packed tensor buffer when packed=True."""
+    expected_names: list[str] | None = None
+    """Authoritative names expected in the complete transaction.
+
+    This must be derived independently from the iterator being sent (for
+    example from the trainer model state schema).  It is required by a vLLM
+    model's first real transfer after ``load_format=dummy``.
+    """
 
     def __post_init__(self):
         """Validate that required arguments are provided for the selected mode."""
@@ -87,6 +94,8 @@ class IPCWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     Required when packed=True, unused otherwise."""
     packed: bool = False
     """Whether this update uses packed tensor format."""
+    expected_names: list[str] | None = None
+    """Authoritative source manifest for the complete transaction."""
 
     def __post_init__(self):
         if self.ipc_handles_pickled is not None:
@@ -212,6 +221,7 @@ class IPCWeightTransferEngine(
             initialize_layerwise_reload,
         )
 
+        self.start_source_manifest_validation()
         initialize_layerwise_reload(self.model)
 
     def finish_weight_update(self) -> None:
@@ -220,6 +230,7 @@ class IPCWeightTransferEngine(
             finalize_layerwise_reload,
         )
 
+        self.finish_source_manifest_validation()
         finalize_layerwise_reload(self.model, self.model_config)
 
     def receive_weights(self, update_info: IPCWeightTransferUpdateInfo) -> None:
@@ -231,6 +242,8 @@ class IPCWeightTransferEngine(
                         and IPC handles. Each IPC handle is a mapping between physical
                         GPU UUID and the rebuild_cuda_tensor args tuple.
         """
+        self.observe_source_manifest(update_info.names, update_info.expected_names)
+
         # Use the worker's assigned device rather than the ambient current
         # device: the receive path is no longer wrapped in
         # `with torch.device(self.device)` by the caller, so the current device
@@ -274,7 +287,11 @@ class IPCWeightTransferEngine(
                 weight = rebuild_cuda_tensor(*list_args)
                 weights.append((name, weight))
 
-        self.model.load_weights(weights)
+        from vllm.model_executor.model_loader.reload.source import (
+            observe_weight_sources,
+        )
+
+        self.model.load_weights(observe_weight_sources(weights))
 
     def shutdown(self) -> None:
         pass
@@ -410,6 +427,7 @@ class IPCWeightTransferEngine(
                 dtype_names=dtype_names,
                 shapes=shapes,
                 ipc_handles=ipc_handles,
+                expected_names=args.expected_names,
             )
 
         IPCWeightTransferEngine._post_send_sync()
@@ -423,6 +441,7 @@ class IPCWeightTransferEngine(
         """Send weights in bounded-memory chunks (packed mode)."""
         post_iter_func: Callable = lambda item: item[1]
 
+        first_chunk = True
         for chunk in packed_ipc_producer(
             iterator=iterator,
             gpu_uuid=gpu_uuid,
@@ -442,9 +461,11 @@ class IPCWeightTransferEngine(
                     ipc_handles=ipc_handle,
                     tensor_sizes=chunk.tensor_sizes,
                     packed=True,
+                    expected_names=args.expected_names if first_chunk else None,
                 )
 
             IPCWeightTransferEngine._post_send_sync()
+            first_chunk = False
 
     @staticmethod
     def _do_send(
@@ -455,6 +476,7 @@ class IPCWeightTransferEngine(
         ipc_handles: list[dict[str, tuple]] | dict[str, tuple],
         tensor_sizes: list[int] | None = None,
         packed: bool = False,
+        expected_names: list[str] | None = None,
     ) -> None:
         """Send a single update payload via the configured transport."""
         update_fields: dict[str, Any] = {
@@ -462,6 +484,7 @@ class IPCWeightTransferEngine(
             "dtype_names": dtype_names,
             "shapes": shapes,
             "packed": packed,
+            "expected_names": expected_names,
         }
         if tensor_sizes is not None:
             update_fields["tensor_sizes"] = tensor_sizes

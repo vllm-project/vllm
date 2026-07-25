@@ -7,6 +7,7 @@ Integration tests for NCCL and IPC weight transfer between processes using Ray.
 """
 
 import pickle
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pybase64 as base64
@@ -18,6 +19,7 @@ from torch.multiprocessing.reductions import reduce_tensor
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer import WeightTransferEngineFactory
+from vllm.distributed.weight_transfer.base import WeightTransferEngine
 from vllm.distributed.weight_transfer.ipc_engine import (
     IPCWeightTransferEngine,
     IPCWeightTransferInitInfo,
@@ -89,6 +91,50 @@ def create_mock_vllm_config(
     vllm_config.parallel_config = create_mock_parallel_config(rank, world_size, dp_rank)
     vllm_config.model_config = MagicMock()
     return vllm_config
+
+
+class TestDeclaredSourceManifest:
+    def _state(self, *, required: bool = True):
+        return SimpleNamespace(
+            _requires_declared_source_manifest=required,
+            _expected_source_names=None,
+            _received_source_names=set(),
+        )
+
+    def test_complete_chunked_manifest(self):
+        state = self._state()
+        WeightTransferEngine.observe_source_manifest(
+            state, ["q_proj.weight"], ["q_proj.weight", "k_proj.weight"]
+        )
+        WeightTransferEngine.observe_source_manifest(
+            state, ["k_proj.weight"], None
+        )
+        WeightTransferEngine.finish_source_manifest_validation(state)
+
+    def test_missing_packed_fragment_fails(self):
+        state = self._state()
+        WeightTransferEngine.observe_source_manifest(
+            state,
+            ["q_proj.weight", "v_proj.weight"],
+            ["q_proj.weight", "k_proj.weight", "v_proj.weight"],
+        )
+        with pytest.raises(RuntimeError, match=r"k_proj\.weight"):
+            WeightTransferEngine.finish_source_manifest_validation(state)
+
+    def test_dummy_first_transfer_requires_declaration(self):
+        state = self._state()
+        WeightTransferEngine.observe_source_manifest(
+            state, ["q_proj.weight"], None
+        )
+        with pytest.raises(RuntimeError, match="authoritative expected"):
+            WeightTransferEngine.finish_source_manifest_validation(state)
+
+    def test_later_transfer_keeps_backward_compatibility(self):
+        state = self._state(required=False)
+        WeightTransferEngine.observe_source_manifest(
+            state, ["q_proj.weight"], None
+        )
+        WeightTransferEngine.finish_source_manifest_validation(state)
 
 
 # --- Unit Tests: NCCLWeightTransferUpdateInfo Validation ---

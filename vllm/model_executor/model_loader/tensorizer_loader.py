@@ -11,6 +11,7 @@ from vllm.config import ModelConfig, ParallelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.reload.source import observe_weight_sources
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig,
     deserialize_tensorizer_model,
@@ -83,7 +84,8 @@ class TensorizerLoader(BaseModelLoader):
             with torch.device(device_config.device):
                 model = initialize_model(vllm_config=vllm_config, prefix=prefix)
 
-            model.load_weights(self._get_weights_iterator())
+            model.load_weights(
+                observe_weight_sources(self._get_weights_iterator()))
         return model.eval()
 
     def download_model(self, model_config: ModelConfig) -> None:
@@ -110,7 +112,8 @@ class TensorizerLoader(BaseModelLoader):
             tensorizer_config = self._patch_tensorizer_config(model_config)
             deserialize_tensorizer_model(model, tensorizer_config)
         else:
-            model.load_weights(self._get_weights_iterator())
+            model.load_weights(
+                observe_weight_sources(self._get_weights_iterator()))
 
     def load_model(
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""

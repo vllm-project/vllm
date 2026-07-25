@@ -14,6 +14,7 @@ from vllm.model_executor.model_loader.reload import (
     finalize_load_recording,
     record_load_consumption,
 )
+from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
     process_weights_after_loading,
@@ -90,8 +91,30 @@ class BaseModelLoader(ABC):
                 finalize_layerwise_processing(model, model_config)
 
             process_weights_after_loading(model, model_config, target_device)
+            self.finalize_load_manifest(model)
+            self._ensure_manifest_observed(model)
 
         return model.eval()
+
+    def finalize_load_manifest(self, model: nn.Module) -> None:
+        """Allow source-less loaders to establish a post-processing baseline."""
+
+    def _ensure_manifest_observed(self, model: nn.Module) -> None:
+        """Fail closed when a loader bypasses every supported observer."""
+        if not any(True for _ in model.parameters()):
+            return
+        observed = 0
+        for module in model.modules():
+            info = get_layerwise_info(module)
+            observed += len(info.required_keys or ())
+            observed += len(info.required_target_keys or ())
+        if observed == 0:
+            raise RuntimeError(
+                f"{self.__class__.__name__} loaded a parameterized model "
+                "without producing any load-manifest event. The loader likely "
+                "uses an uninstrumented direct-write path; add a source/target "
+                "adapter before using it for reload or RL weight transfer."
+            )
 
 
 def log_model_inspection(model: nn.Module) -> None:

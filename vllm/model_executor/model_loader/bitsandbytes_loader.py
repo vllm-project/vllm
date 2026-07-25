@@ -31,6 +31,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.reload.source import observe_weight_sources
 from vllm.model_executor.model_loader.utils import ParamMapping
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf,
@@ -808,7 +809,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             model_config.revision,
         )
         weights_to_load = {name for name, _ in model.named_parameters()}
-        loaded_weights = model.load_weights(qweight_iterator)
+        loaded_weights = model.load_weights(
+            observe_weight_sources(qweight_iterator))
         # Some models may have weights loading tracker unimplemented.
         if loaded_weights is not None:
             weights_not_loaded = weights_to_load - loaded_weights

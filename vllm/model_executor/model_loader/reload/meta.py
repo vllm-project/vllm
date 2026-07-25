@@ -8,8 +8,8 @@ from torch.nn.parameter import UninitializedParameter
 from torch.utils._python_dispatch import TorchDispatchMode
 
 from .sanitize import restore_layer_refs, sanitize_layer_refs
-from .types import LayerReloadingInfo, LayerTensors
-from .utils import get_layer_params_buffers, get_layer_tensors
+from .types import LayerReloadingInfo, LayerRestoreMetadata
+from .utils import get_layer_tensors
 
 __all__ = [
     "to_meta_tensor",
@@ -89,27 +89,60 @@ def _parameter_storage_ptrs(layer: torch.nn.Module) -> set[int]:
     }
 
 
-def capture_layer_to_meta(layer: torch.nn.Module) -> LayerTensors:
+def capture_layer_to_meta(layer: torch.nn.Module) -> LayerRestoreMetadata:
     if layer.__class__.__name__ in SKIP_MODULES:
         return ({}, {})
 
-    params, buffers = get_layer_params_buffers(layer)
+    params = layer._parameters
+    buffers = layer._buffers
     parameter_storage_ptrs = _parameter_storage_ptrs(layer)
     return (
         {
-            name: sanitize_layer_refs(to_meta_tensor(param), layer)
+            name: (
+                None
+                if param is None
+                else sanitize_layer_refs(to_meta_tensor(param), layer)
+            )
             for name, param in params.items()
             if name not in SKIP_TENSORS
         },
         {
-            name: sanitize_layer_refs(to_meta_tensor(buffer), layer)
+            name: (
+                None
+                if buffer is None
+                else sanitize_layer_refs(to_meta_tensor(buffer), layer)
+            )
             for name, buffer in buffers.items()
             if name not in SKIP_TENSORS
-            and not _is_non_persistent_parameter_alias_buffer(
-                layer, name, buffer, parameter_storage_ptrs
+            and (
+                buffer is None
+                or not _is_non_persistent_parameter_alias_buffer(
+                    layer, name, buffer, parameter_storage_ptrs
+                )
             )
         },
     )
+
+
+def _remove_tensor_slot(layer: torch.nn.Module, name: str) -> None:
+    """Remove any instance-level value occupying a tensor slot.
+
+    Quantization post-processing is allowed to change a load-time parameter
+    into a buffer or an ordinary tensor attribute (and vice versa).  Removing
+    only the tensors returned by ``get_layer_tensors`` misses the latter:
+    ``Module.register_parameter`` then rejects the restore because ``hasattr``
+    still finds the ordinary attribute.
+
+    Update the three instance-level namespaces directly so this also handles
+    ``None`` entries and does not depend on the current value's tensor type.
+    The metadata being restored proves that the name was originally a valid
+    parameter/buffer name, so an instance attribute with the same name is
+    kernel-format state and must not survive the restore.
+    """
+    layer._parameters.pop(name, None)
+    layer._buffers.pop(name, None)
+    layer._non_persistent_buffers_set.discard(name)
+    layer.__dict__.pop(name, None)
 
 
 def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
@@ -117,19 +150,28 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
     if layer.__class__.__name__ in SKIP_MODULES:
         return
 
-    for name in get_layer_tensors(layer):
-        if name not in SKIP_TENSORS:
-            delattr(layer, name)
-
     restore_params, restore_buffers = info.restore_metadata
+
+    # Clear both the current registered tensors and every destination slot.
+    # The destination union is important when post-processing replaced an
+    # original parameter/buffer with an ordinary attribute, which is invisible
+    # to get_layer_tensors().
+    current_names = set(layer._parameters) | set(layer._buffers)
+    restore_names = set(restore_params) | set(restore_buffers)
+    for name in current_names | restore_names:
+        if name not in SKIP_TENSORS:
+            _remove_tensor_slot(layer, name)
+
     for name, param in restore_params.items():
         if name not in SKIP_TENSORS:
-            param = restore_layer_refs(param, layer)
+            if param is not None:
+                param = restore_layer_refs(param, layer)
             layer.register_parameter(name, param)
 
     for name, buffer in restore_buffers.items():
         if name not in SKIP_TENSORS:
-            buffer = restore_layer_refs(buffer, layer)
+            if buffer is not None:
+                buffer = restore_layer_refs(buffer, layer)
             layer.register_buffer(name, buffer)
 
 

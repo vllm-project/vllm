@@ -80,6 +80,8 @@ class NCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS
     """Number of buffers for double/triple buffering during packed transfer.
     Both producer and consumer must use the same value."""
+    expected_names: list[str] | None = None
+    """Authoritative source manifest for the complete transaction."""
 
     def __post_init__(self):
         """Validate that all lists have the same length."""
@@ -140,6 +142,7 @@ class NCCLWeightTransferEngine(
             initialize_layerwise_reload,
         )
 
+        self.start_source_manifest_validation()
         initialize_layerwise_reload(self.model)
 
     def finish_weight_update(self) -> None:
@@ -148,6 +151,7 @@ class NCCLWeightTransferEngine(
             finalize_layerwise_reload,
         )
 
+        self.finish_source_manifest_validation()
         finalize_layerwise_reload(self.model, self.model_config)
 
     def receive_weights(self, update_info: NCCLWeightTransferUpdateInfo) -> None:
@@ -162,6 +166,7 @@ class NCCLWeightTransferEngine(
             update_info: NCCL update info containing parameter names, dtypes, shapes,
                         and packed flag
         """
+        self.observe_source_manifest(update_info.names, update_info.expected_names)
         if self.model_update_group is None:
             raise RuntimeError(
                 "NCCL weight transfer not initialized. "
@@ -169,6 +174,10 @@ class NCCLWeightTransferEngine(
             )
 
         if update_info.packed:
+            from vllm.model_executor.model_loader.reload.source import (
+                observe_weight_sources,
+            )
+
             # Build iterator of (name, (shape, dtype)) from update_info
             def state_dict_info_iterator():
                 for name, dtype_name, shape in zip(
@@ -181,12 +190,18 @@ class NCCLWeightTransferEngine(
                 iterator=state_dict_info_iterator(),
                 group=self.model_update_group,
                 src=0,
-                post_unpack_func=self.model.load_weights,
+                post_unpack_func=lambda weights: self.model.load_weights(
+                    observe_weight_sources(weights)
+                ),
                 buffer_size_bytes=update_info.packed_buffer_size_bytes,
                 num_buffers=update_info.packed_num_buffers,
                 device=self.device,
             )
         else:
+            from vllm.model_executor.model_loader.reload.source import (
+                observe_weight_sources,
+            )
+
             # Use simple one-by-one broadcasting
             for name, dtype_name, shape in zip(
                 update_info.names, update_info.dtype_names, update_info.shapes
@@ -196,7 +211,9 @@ class NCCLWeightTransferEngine(
                 self.model_update_group.broadcast(
                     weight, src=0, stream=torch.cuda.current_stream()
                 )
-                self.model.load_weights([(name, weight)])
+                self.model.load_weights(
+                    observe_weight_sources([(name, weight)])
+                )
                 del weight
 
     def shutdown(self) -> None:

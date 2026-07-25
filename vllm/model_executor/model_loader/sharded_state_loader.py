@@ -16,6 +16,10 @@ from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.reload.layerwise import (
+    record_direct_load_consumption,
+)
+from vllm.model_executor.model_loader.reload.source import observe_weight_sources
 from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf,
     runai_safetensors_weights_iterator,
@@ -135,7 +139,9 @@ class ShardedStateLoader(BaseModelLoader):
             )
         state_dict = self._filter_subtensors(model.state_dict())
         counter_before_loading_weights = time.perf_counter()
-        for key, tensor in self.iterate_over_files(filepaths):
+        for key, tensor in observe_weight_sources(
+            self.iterate_over_files(filepaths)
+        ):
             # If loading with LoRA enabled, additional padding may
             # be added to certain parameters. We only load into a
             # narrowed view of the parameter data.
@@ -152,6 +158,7 @@ class ShardedStateLoader(BaseModelLoader):
                     param_shape,
                 )
             param_data.copy_(tensor)
+            record_direct_load_consumption(model, key, key)
             state_dict.pop(key)
         counter_after_loading_weights = time.perf_counter()
         logger.info_once(
