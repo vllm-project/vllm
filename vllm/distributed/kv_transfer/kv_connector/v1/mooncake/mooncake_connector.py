@@ -651,6 +651,10 @@ class MooncakeConnectorScheduler:
         # remote prefill or aborted.
         self._reqs_not_processed: set[TransferId] = set()
 
+        # Guard against transfer_id reuse: track IDs currently owned by an
+        # active producer request to prevent metadata-overwrite resource leaks.
+        self._active_transfer_ids: dict[TransferId, ReqId] = {}
+
         # Compute sliding window block counts per KV cache group.
         sw_sizes_tokens: list[tuple[int, int]] = [
             (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
@@ -800,8 +804,20 @@ class MooncakeConnectorScheduler:
             if not params.get("transfer_id"):
                 logger.warning("Missing transfer_id in kv_transfer_params from router!")
             else:
-                # Add an empty list to worker to create event.
-                self._reqs_need_send[request.request_id] = (request, [])
+                transfer_id: TransferId = params["transfer_id"]
+                existing_req = self._active_transfer_ids.get(transfer_id)
+                if existing_req is not None:
+                    logger.warning(
+                        "Rejected request %s: transfer_id %s is already "
+                        "active for request %s. Possible duplicate ID.",
+                        request.request_id,
+                        transfer_id,
+                        existing_req,
+                    )
+                    params["do_remote_decode"] = False
+                else:
+                    self._active_transfer_ids[transfer_id] = request.request_id
+                    self._reqs_need_send[request.request_id] = (request, [])
 
     def build_connector_meta(
         self,
@@ -829,7 +845,13 @@ class MooncakeConnectorScheduler:
                     kv_transfer_params=req.kv_transfer_params,
                     load_remote_cache=False,
                 )
+                if block_ids:
+                    tid = req.kv_transfer_params.get("transfer_id")
+                    if tid:
+                        self._active_transfer_ids.pop(tid, None)
             self._reqs_need_send.clear()
+            for tid in self._reqs_not_processed:
+                self._active_transfer_ids.pop(tid, None)
             meta.reqs_not_processed = self._reqs_not_processed
             self._reqs_not_processed = set()
 
@@ -2001,7 +2023,30 @@ class MooncakeConnectorWorker:
         for p_req_id, (transfer_id, block_ids) in metadata.reqs_to_send.items():
             if block_ids:
                 # Already gone through request_finished()
-                send_meta = self.reqs_need_send[transfer_id]
+                send_meta = self.reqs_need_send.get(transfer_id)
+                if send_meta is None:
+                    logger.warning(
+                        "transfer_id %s not found in reqs_need_send for "
+                        "request %s; skipping.",
+                        transfer_id,
+                        p_req_id,
+                    )
+                    self.finished_sending_reqs.add(p_req_id)
+                    continue
+                if (
+                    send_meta.p_req_id
+                    and send_meta.p_req_id != p_req_id
+                    and send_meta.local_block_ids
+                ):
+                    logger.warning(
+                        "Transfer ID %s collision: request %s is "
+                        "overwriting request %s. Freeing overwritten "
+                        "blocks.",
+                        transfer_id,
+                        p_req_id,
+                        send_meta.p_req_id,
+                    )
+                    self.finished_sending_reqs.add(send_meta.p_req_id)
                 send_meta.p_req_id = p_req_id
                 send_meta.local_block_ids = block_ids
                 send_meta.expire_time = (
