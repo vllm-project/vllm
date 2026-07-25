@@ -461,7 +461,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "OrionForCausalLM": _HfExamplesInfo(
         "OrionStarAI/Orion-14B-Chat", trust_remote_code=True
     ),
-    "OuroForCausalLM": _HfExamplesInfo("ByteDance/Ouro-1.4B", trust_remote_code=True),
     "PanguEmbeddedForCausalLM": _HfExamplesInfo(
         "FreedomIntelligence/openPangu-Embedded-7B-V1.1", trust_remote_code=True
     ),
@@ -483,10 +482,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Phi3ForCausalLM": _HfExamplesInfo("microsoft/Phi-3-mini-4k-instruct"),
     "PhiMoEForCausalLM": _HfExamplesInfo(
         "microsoft/Phi-3.5-MoE-instruct", trust_remote_code=True
-    ),
-    "Plamo2ForCausalLM": _HfExamplesInfo(
-        "pfnet/plamo-2-1b",
-        trust_remote_code=True,
     ),
     "Plamo3ForCausalLM": _HfExamplesInfo(
         "pfnet/plamo-3-nict-2b-base",
@@ -1398,6 +1393,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "fixie-ai/ultravox-v0_5-llama-3_2-1b",
         trust_remote_code=True,
     ),
+    "VibeVoiceAsrForConditionalGeneration": _HfExamplesInfo(
+        "microsoft/VibeVoice-ASR-HF",
+        min_transformers_version="5.13.0",
+    ),
     "VoxtralForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Voxtral-Mini-3B-2507",
         tokenizer_mode="mistral",
@@ -1603,10 +1602,6 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "luccafong/deepseek_mtp_main_random",
         speculative_model="luccafong/deepseek_mtp_draft_random",
         trust_remote_code=True,
-    ),
-    "DeepseekV32MTPModel": _HfExamplesInfo(
-        "deepseek-ai/DeepSeek-V3.2-Exp",
-        speculative_model="deepseek-ai/DeepSeek-V3.2-Exp",
     ),
     "DeepSeekV4MTPModel": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-V4-Flash",
