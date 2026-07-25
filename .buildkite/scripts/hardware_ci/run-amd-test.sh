@@ -60,6 +60,7 @@ export PYTHONFAULTHANDLER
 # tests set this to /vllm-workspace below so spawned Python processes do not
 # depend on their current working directory.
 export PYTHONPATH="${PYTHONPATH:-..}"
+export VLLM_CI_ENSURE_LATEST_HF_REVISION="${VLLM_CI_ENSURE_LATEST_HF_REVISION:-1}"
 
 ###############################################################################
 # Helper Functions
@@ -927,6 +928,7 @@ else
     --rm \
     $coredump_flags \
     -e HF_TOKEN \
+    -e VLLM_CI_ENSURE_LATEST_HF_REVISION \
     -e "HF_HUB_DOWNLOAD_TIMEOUT=${HF_HUB_DOWNLOAD_TIMEOUT}" \
     -e "HF_HUB_ETAG_TIMEOUT=${HF_HUB_ETAG_TIMEOUT}" \
     -e AWS_ACCESS_KEY_ID \

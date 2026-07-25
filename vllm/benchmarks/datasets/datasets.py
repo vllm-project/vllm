@@ -46,7 +46,10 @@ from vllm.multimodal.audio import get_audio_duration
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.utils import encode_image_url, fetch_image
 from vllm.tokenizers import TokenizerLike
-from vllm.transformers_utils.repo_utils import hf_api
+from vllm.transformers_utils.repo_utils import (
+    hf_api,
+    maybe_resolve_latest_hf_revision,
+)
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.mistral import is_mistral_tokenizer
@@ -3270,6 +3273,7 @@ class HuggingFaceDataset(BenchmarkDataset):
     """Base class for datasets hosted on HuggingFace."""
 
     SUPPORTED_DATASET_PATHS: set[str] | dict[str, Callable] = set()
+    ENSURE_LATEST_REVISION = False
 
     def __init__(
         self,
@@ -3292,13 +3296,28 @@ class HuggingFaceDataset(BenchmarkDataset):
 
     def load_data(self) -> None:
         """Load data from HuggingFace datasets."""
-        self.data = load_dataset(
-            self.dataset_path,
-            name=self.dataset_subset,
-            split=self.dataset_split,
-            streaming=self.load_stream,
-            trust_remote_code=self.trust_remote_code,
+        load_kwargs: dict[str, Any] = {
+            "path": self.dataset_path,
+            "name": self.dataset_subset,
+            "split": self.dataset_split,
+            "streaming": self.load_stream,
+            "trust_remote_code": self.trust_remote_code,
+        }
+
+        latest_revision = (
+            maybe_resolve_latest_hf_revision(
+                self.dataset_path,
+                None,
+                repo_type="dataset",
+                ensure_latest=self.ENSURE_LATEST_REVISION,
+            )
+            if self.dataset_path is not None
+            else None
         )
+        if latest_revision is not None:
+            load_kwargs["revision"] = latest_revision
+
+        self.data = load_dataset(**load_kwargs)
         if not getattr(self, "disable_shuffle", False):
             self.data = self.data.shuffle(seed=self.random_seed)
 
@@ -3654,6 +3673,7 @@ class MTBenchDataset(HuggingFaceDataset):
     """  # noqa: E501
 
     DEFAULT_OUTPUT_LEN = 256  # avg len used in SD bench in vLLM
+    ENSURE_LATEST_REVISION = True
     SUPPORTED_DATASET_PATHS = {
         "philschmid/mt-bench",
     }

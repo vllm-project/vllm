@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     VLLM_ENGINE_READY_TIMEOUT_S: int = 600
     VLLM_API_KEY: str | None = None
     VLLM_DEBUG_LOG_API_SERVER_RESPONSE: bool = False
+    VLLM_CI_ENSURE_LATEST_HF_REVISION: bool = False
     S3_ACCESS_KEY_ID: str | None = None
     S3_SECRET_ACCESS_KEY: str | None = None
     S3_ENDPOINT_URL: str | None = None
@@ -1425,6 +1426,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RAY_EXTRA_ENV_VARS_TO_COPY": lambda: os.getenv(
         "VLLM_RAY_EXTRA_ENV_VARS_TO_COPY", ""
     ),
+    # Resolve floating Hugging Face model/dataset revisions to immutable commits.
+    "VLLM_CI_ENSURE_LATEST_HF_REVISION": lambda: (
+        os.environ.get("VLLM_CI_ENSURE_LATEST_HF_REVISION", "0") == "1"
+    ),
     # Use model_redirect to redirect the model name to a local folder.
     # `model_redirect` can be a json file mapping the model between
     # repo_id and local folder:
@@ -2127,6 +2132,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_DP_MASTER_PORT",
         "VLLM_NIXL_SIDE_CHANNEL_HOST",
         "VLLM_RANDOMIZE_DP_DUMMY_INPUTS",
+        "VLLM_CI_ENSURE_LATEST_HF_REVISION",
         "VLLM_MODEL_REDIRECT_PATH",
         "VLLM_HOST_IP",
         "VLLM_FORCE_AOT_LOAD",

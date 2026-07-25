@@ -5,12 +5,13 @@ import logging
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pydantic
 import pytest
 from pydantic import ValidationError
 
+import vllm.config.model as model_config_module
 import vllm.config.vllm as vllm_config_module
 import vllm.envs as envs
 from vllm.compilation.backends import VllmBackend
@@ -37,6 +38,33 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionCGSupport
 
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_separate_tokenizer_resolves_its_own_revision(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    resolve_revision = MagicMock(return_value="tokenizer-sha")
+    monkeypatch.setattr(
+        model_config_module,
+        "maybe_resolve_latest_hf_revision",
+        resolve_revision,
+    )
+
+    assert (
+        model_config_module._resolve_tokenizer_revision(
+            "org/tokenizer",
+            None,
+            "model-sha",
+            tokenizer_uses_model=False,
+            token="hf-token",
+        )
+        == "tokenizer-sha"
+    )
+    resolve_revision.assert_called_once_with(
+        "org/tokenizer",
+        None,
+        token="hf-token",
+    )
 
 
 def test_compile_config_repr_succeeds():

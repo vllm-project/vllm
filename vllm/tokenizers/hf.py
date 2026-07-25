@@ -9,6 +9,10 @@ from typing import TypeAlias, TypeVar
 from transformers import AutoTokenizer, PythonBackend, TokenizersBackend
 
 from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
+from vllm.transformers_utils.repo_utils import (
+    is_transient_hf_error,
+    retry_with_kwargs,
+)
 
 from .protocol import TokenizerLike
 
@@ -207,7 +211,12 @@ class CachedHfTokenizer(TokenizerLike):
         **kwargs,
     ) -> HfTokenizer:
         try:
-            tokenizer = AutoTokenizer.from_pretrained(
+            from_pretrained = retry_with_kwargs(
+                AutoTokenizer.from_pretrained,
+                retry_on_exception=is_transient_hf_error,
+                local_files_only=True,
+            )
+            tokenizer = from_pretrained(
                 path_or_repo_id,
                 *args,
                 trust_remote_code=trust_remote_code,
