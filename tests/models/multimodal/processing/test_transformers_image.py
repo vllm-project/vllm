@@ -54,3 +54,26 @@ def test_multimodal_processor(model_id):
         str_processed_inputs["prompt_token_ids"]
         == ids_processed_inputs["prompt_token_ids"]
     )
+
+
+def test_image_multiple_inputs():
+    """Multiple images per prompt are each detected as a separate placeholder
+    and multi-modal item by the Transformers backend."""
+    model_id = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
+    model_config = ModelConfig(model=model_id, model_impl="transformers")
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+
+    image = ImageAsset("cherry_blossom").pil_image
+    prompt = (
+        "<|im_start|>user <image>\n and <image>\n"
+        "What do these images show?<|im_end|><|im_start|>assistant\n"
+    )
+
+    result = mm_processor(
+        prompt=prompt,
+        mm_items=mm_processor.info.parse_mm_data({"image": [image, image]}),
+        hf_processor_mm_kwargs={},
+    )
+
+    assert len(result["mm_placeholders"]["image"]) == 2
+    assert len(result["mm_kwargs"]["image"]) == 2
