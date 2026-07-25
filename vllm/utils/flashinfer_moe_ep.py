@@ -32,6 +32,10 @@ FI_MOE_EP_MIN_CAPABILITY = (10, 0)
 FI_MOE_EP_MIN_FLASHINFER = (0, 6, 17)
 
 
+# CuteDSL megakernels, one per expert-weight format they are built around.
+CUTEDSL_MEGAKERNELS = frozenset({"nvfp4_cutedsl", "mxfp8_cutedsl"})
+
+
 @dataclass(frozen=True)
 class FiMoeEpBackendSpec:
     """Static properties of one ``flashinfer_moe_ep_*`` backend string.
@@ -43,6 +47,7 @@ class FiMoeEpBackendSpec:
 
     megakernel: str
     needs_nvshmem: bool
+    is_cutedsl: bool = False
 
 
 FI_MOE_EP_BACKENDS: dict[str, FiMoeEpBackendSpec] = {
@@ -58,6 +63,7 @@ FI_MOE_EP_BACKENDS: dict[str, FiMoeEpBackendSpec] = {
     "flashinfer_moe_ep_mega_cutedsl": FiMoeEpBackendSpec(
         megakernel="nvfp4_cutedsl",
         needs_nvshmem=True,
+        is_cutedsl=True,
     ),
 }
 
@@ -121,8 +127,31 @@ def fi_moe_ep_backend_spec(moe_backend: str) -> FiMoeEpBackendSpec:
 
 
 def fi_megakernel(vllm_config: "VllmConfig") -> str:
-    """The flashinfer megakernel named by the configured backend."""
-    return fi_moe_ep_backend_spec(vllm_config.kernel_config.moe_backend).megakernel
+    """The flashinfer megakernel for the configured backend and checkpoint.
+
+    Only the CuteDSL family has a choice to make. NVFP4 experts are consumed
+    prequantized and MXFP4 experts are requantized to NVFP4 -- the faster
+    kernel at every geometry measured so far -- so both checkpoints in
+    circulation resolve to ``nvfp4_cutedsl``.
+
+    ``mxfp8_cutedsl`` is kept for a checkpoint whose experts are already E4M3
+    with E8M0-per-32 scales. None exists yet to derive from or validate
+    against, so rather than ship a detector written blind it is reachable by
+    explicit request via ``FI_MOE_EP_CUTEDSL_KERNEL``; fold it into the
+    derivation here once there is such a checkpoint to test.
+    """
+    spec = fi_moe_ep_backend_spec(vllm_config.kernel_config.moe_backend)
+    if not spec.is_cutedsl:
+        return spec.megakernel
+    override = os.environ.get("FI_MOE_EP_CUTEDSL_KERNEL")
+    if override:
+        if override not in CUTEDSL_MEGAKERNELS:
+            raise ValueError(
+                f"FI_MOE_EP_CUTEDSL_KERNEL={override!r} is not a CuteDSL "
+                f"megakernel; expected one of {sorted(CUTEDSL_MEGAKERNELS)}"
+            )
+        return override
+    return spec.megakernel
 
 
 def _flashinfer_version() -> tuple[int, ...] | None:
@@ -162,15 +191,6 @@ def check_flashinfer_version() -> None:
         "moe_backend=deep_gemm_mega_moe for the native mega path, or set "
         "FI_MOE_EP_SKIP_VERSION_CHECK=1 to run against a pre-release build."
     )
-
-
-def fi_spec_for_megakernel(megakernel: str) -> FiMoeEpBackendSpec:
-    """Spec for a megakernel named directly rather than via a backend string."""
-    for spec in FI_MOE_EP_BACKENDS.values():
-        if spec.megakernel == megakernel:
-            return spec
-    known = sorted({s.megakernel for s in FI_MOE_EP_BACKENDS.values()})
-    raise ValueError(f"Unknown megakernel {megakernel!r}; expected one of {known}")
 
 
 def validate_fi_moe_ep_config(vllm_config: "VllmConfig") -> None:
@@ -234,14 +254,8 @@ def megakernel_runtime_requirements(spec: FiMoeEpBackendSpec) -> frozenset[str]:
     return frozenset({TORCH_DIST})
 
 
-def ensure_fi_moe_ep_runtime(
-    vllm_config: "VllmConfig", *, megakernel: str | None = None
-) -> None:
-    """Acquire the process-wide flashinfer moe_ep runtime once per worker.
-
-    ``megakernel`` names the kernel directly for callers that pick it outside
-    KernelConfig; by default it comes from the configured backend string.
-    """
+def ensure_fi_moe_ep_runtime(vllm_config: "VllmConfig") -> None:
+    """Acquire the process-wide flashinfer moe_ep runtime once per worker."""
     global _FI_RUNTIME_HANDLE
     if _FI_RUNTIME_HANDLE is not None:
         return
@@ -255,11 +269,8 @@ def ensure_fi_moe_ep_runtime(
         )
 
     bootstrap = make_fi_moe_ep_bootstrap()
-    spec = (
-        fi_spec_for_megakernel(megakernel)
-        if megakernel is not None
-        else fi_moe_ep_backend_spec(vllm_config.kernel_config.moe_backend)
-    )
+    spec = fi_moe_ep_backend_spec(vllm_config.kernel_config.moe_backend)
+    megakernel = fi_megakernel(vllm_config)
     # flashinfer's runtime/layer constructors bind the process to
     # cuda:LOCAL_RANK (falling back to bootstrap.rank). vLLM has already bound
     # this worker to its (possibly remapped) visible device, and a mismatched
@@ -271,7 +282,7 @@ def ensure_fi_moe_ep_runtime(
     print(
         f"[fi_moe_ep] ep_rank={bootstrap.rank} world={bootstrap.world_size} "
         f"cuda.current_device={torch.cuda.current_device()} "
-        f"megakernel={spec.megakernel}",
+        f"megakernel={megakernel}",
         flush=True,
     )
     _FI_RUNTIME_HANDLE = bootstrap_moe_ep_runtime(
@@ -470,6 +481,7 @@ def build_fi_mega_config(
     from flashinfer.moe_ep import (
         DeepGemmMegaMoeConfig,
         MegaConfig,
+        Mxfp8CutedslMegaMoeConfig,
         Nvfp4CutedslMegaMoeConfig,
     )
 
@@ -514,6 +526,15 @@ def build_fi_mega_config(
             combine_dtype=combine,
             knobs=knobs,
         )
+    elif megakernel == "mxfp8_cutedsl":
+        mk = Mxfp8CutedslMegaMoeConfig(
+            intermediate_size=intermediate_size,
+            top_k=top_k,
+            activation_clamp=activation_clamp,
+            fast_math=fast_math,
+            in_kernel_fc2_reduce=ikr,
+            knobs=knobs,
+        )
     else:
         raise ValueError(f"Unsupported fi_moe_ep megakernel {megakernel!r}")
 
@@ -541,12 +562,10 @@ def build_fi_mega_layer(
     activation_clamp: float | None,
     weights,
     fast_math: bool = True,
-    megakernel: str | None = None,
 ) -> "MoEEpMegaLayer":
     from flashinfer.moe_ep import FleetParams, MoEEpLayer
 
-    if megakernel is None:
-        megakernel = fi_megakernel(vllm_config)
+    megakernel = fi_megakernel(vllm_config)
     mega_config = build_fi_mega_config(
         intermediate_size=intermediate_size,
         top_k=top_k,
@@ -1001,6 +1020,7 @@ def make_fi_mega_moe_experts_cls(mega_moe_experts_cls: type[nn.Module]) -> type[
 
 __all__ = [
     "DeepseekV4MegaMoEExpertsFI",
+    "CUTEDSL_MEGAKERNELS",
     "FI_MOE_EP_BACKENDS",
     "FiMoeEpBackendSpec",
     "MEGA_MOE_BACKENDS",
@@ -1012,7 +1032,6 @@ __all__ = [
     "ensure_fi_moe_ep_runtime",
     "fi_megakernel",
     "fi_moe_ep_backend_spec",
-    "fi_spec_for_megakernel",
     "finalize_fi_moe_ep_runtime",
     "is_fi_moe_ep_backend",
     "is_mega_moe_backend",
