@@ -2118,10 +2118,10 @@ CONFIGS = {(2048, 64, 1): {'block_sizes': [2048, 32],
 PROVENANCE = {'config_path': 'vllm/kernels/helion/configs/rms_norm_per_block_quant/nvidia_h100.json',
  'config_sha256': '0979229db77cc98271eebd847d0872b3aef932edd488b45201febdfecca2aaef',
  'generator': 'scripts/generate_helion_kernels.py',
- 'helion_version': '1.0.1.dev395+g1631eb1c7',
+ 'helion_version': '1.1.0',
  'kernel': 'rms_norm_per_block_quant',
  'platform': 'nvidia_h100',
  'source_path': 'vllm/kernels/helion/ops/rms_norm_per_block_quant.py',
  'source_sha256': 'eb302afbef2148c576438161683a35ac2846ade2cf750c2c1e45eb771e519972',
- 'torch_version': '2.14.0a0+git7e63a83',
- 'triton_version': '3.7.0'}
+ 'torch_version': '2.11.0+cu130',
+ 'triton_version': '3.6.0'}

@@ -86,6 +86,9 @@ def kernel_warmup(worker: "Worker"):
         from vllm.kernels.helion_generated.dispatcher import (
             warmup_per_token_group_fp8_quant,
         )
+        from vllm.kernels.helion_generated.fusion_dispatcher import (
+            warmup_generated_fusion_kernels,
+        )
 
         compilation_config = worker.vllm_config.compilation_config
         warmup_sizes = [
@@ -96,6 +99,10 @@ def kernel_warmup(worker: "Worker"):
         warmup_sizes.extend(compilation_config.cudagraph_capture_sizes or [])
         warmup_sizes.append(worker.scheduler_config.max_num_batched_tokens)
         warmup_per_token_group_fp8_quant(
+            warmup_sizes,
+            getattr(worker.model_runner, "device", torch.device("cuda")),
+        )
+        warmup_generated_fusion_kernels(
             warmup_sizes,
             getattr(worker.model_runner, "device", torch.device("cuda")),
         )

@@ -865,10 +865,10 @@ CONFIGS = {(6144, 128, 1): {'atomic_indexing': [],
 PROVENANCE = {'config_path': 'vllm/kernels/helion/configs/silu_and_mul_per_block_quant/nvidia_h100.json',
  'config_sha256': '41ee998c474b68c4667717c7ddeae420fc6036aca565e454eb885f84cd5a3980',
  'generator': 'scripts/generate_helion_kernels.py',
- 'helion_version': '1.0.1.dev395+g1631eb1c7',
+ 'helion_version': '1.1.0',
  'kernel': 'silu_and_mul_per_block_quant',
  'platform': 'nvidia_h100',
  'source_path': 'vllm/kernels/helion/ops/silu_and_mul_per_block_quant.py',
  'source_sha256': 'ef5d3430e275e8e32f3eafc1322392198f958a36585a9ad935bec949076c52eb',
- 'torch_version': '2.14.0a0+git7e63a83',
- 'triton_version': '3.7.0'}
+ 'torch_version': '2.11.0+cu130',
+ 'triton_version': '3.6.0'}

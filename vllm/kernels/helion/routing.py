@@ -4,12 +4,14 @@
 
 from __future__ import annotations
 
+import importlib
 from collections.abc import Callable
 from typing import Any
 
 import torch
 
 import vllm.envs as envs
+from vllm.utils.import_utils import has_helion
 
 # Fusion-only Helion ops and the native op each one replaces. Keys are Helion
 # kernel names (torch.ops.vllm_helion.<key>); values are the native op emitted
@@ -51,23 +53,25 @@ def _make_routed_impl(
     return impl
 
 
-def build_compiled_helion_op_map() -> dict[
-    torch._ops.OpOverload, torch._ops.OpOverload
-]:
-    """Return native-to-routed mappings for compatible fusion-only ops."""
-    from vllm.kernels.helion.ops import import_all_kernels
+def _build_source_helion_op_map(
+    excluded_native_ops: set[torch._ops.OpOverload] | None = None,
+) -> dict[torch._ops.OpOverload, torch._ops.OpOverload]:
+    """Return native-to-source-Helion mappings for fusion-only ops."""
     from vllm.kernels.helion.register import _HOP_AVAILABLE, vllm_helion_lib
 
     if _HOP_AVAILABLE:
         return {}
 
-    import_all_kernels()
+    excluded_native_ops = excluded_native_ops or set()
     routed: dict[torch._ops.OpOverload, torch._ops.OpOverload] = {}
 
     for helion_name, native_name in _HELION_TO_NATIVE_OP.items():
         native_packet = getattr(torch.ops._C, native_name, None)
+        if native_packet is None or native_packet.default in excluded_native_ops:
+            continue
+        importlib.import_module(f"vllm.kernels.helion.ops.{helion_name}")
         helion_packet = getattr(torch.ops.vllm_helion, helion_name, None)
-        if native_packet is None or helion_packet is None:
+        if helion_packet is None:
             continue
 
         native_op = native_packet.default
@@ -88,18 +92,32 @@ def build_compiled_helion_op_map() -> dict[
     return routed
 
 
+def build_compiled_helion_op_map() -> dict[
+    torch._ops.OpOverload, torch._ops.OpOverload
+]:
+    """Prefer checked-in kernels, then add remaining source-Helion routes."""
+    from vllm.kernels.helion_generated.fusion_dispatcher import (
+        build_compiled_generated_op_map,
+    )
+
+    routed = build_compiled_generated_op_map()
+    if has_helion():
+        for native_op, source_helion_op in _build_source_helion_op_map(
+            set(routed)
+        ).items():
+            routed.setdefault(native_op, source_helion_op)
+    return routed
+
+
 def register_compiled_routed_helion_ops() -> None:
     """Eagerly define the routed Helion ops (idempotent).
 
-    Assumes helion is installed when ``VLLM_USE_HELION_KERNELS`` is set;
-    ``VllmConfig.__post_init__`` fails fast otherwise.
-
-    ``build_compiled_helion_op_map`` defines the ``vllm_helion.routed_*`` ops as
-    a side effect, but it is only reached when ``HelionFusionRoutingPass`` runs
-    at compile time. On an AOT compile-cache hit the pass never runs, yet the
-    loaded graph still references the routed ops, so they must already exist in
-    the process. Called from the AOT-artifact load path (see decorators.py) to
-    keep cached graphs resolvable.
+    ``build_compiled_helion_op_map`` defines the routed checked-in and source
+    Helion ops as a side effect, but it is only reached when
+    ``HelionFusionRoutingPass`` runs at compile time. On an AOT compile-cache hit
+    the pass never runs, yet the loaded graph still references the routed ops,
+    so they must already exist in the process. Called from the AOT-artifact load
+    path (see decorators.py) to keep cached graphs resolvable.
     """
     if not envs.VLLM_USE_HELION_KERNELS:
         return

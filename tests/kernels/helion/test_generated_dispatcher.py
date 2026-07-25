@@ -10,8 +10,10 @@ from pathlib import Path
 import pytest
 import torch
 
-from vllm.kernels.helion_generated import dispatcher
-from vllm.kernels.helion_generated.manifests import MANIFESTS
+from vllm.kernels.helion_generated import dispatcher, fusion_dispatcher
+from vllm.kernels.helion_generated.manifests import (
+    GENERATED_KERNEL_MANIFESTS,
+)
 
 
 def test_generator_registry_covers_source_kernels():
@@ -39,6 +41,22 @@ def test_exact_matching_and_token_bucketing():
     assert dispatcher._select_module("nvidia_h100", 2049, 128, 1) is None
     assert dispatcher._select_module("nvidia_h100", 2048, 64, 1) is None
     assert dispatcher._select_module("nvidia_h200", 2048, 128, 1) is None
+
+
+def test_fusion_kernel_token_bucketing():
+    dispatcher._select_bucketed_module.cache_clear()
+    assert dispatcher._select_bucketed_module(
+        "rms_norm_per_block_quant", "nvidia_h100", (2048, 128), 3
+    ).endswith("_t4")
+    assert dispatcher._select_bucketed_module(
+        "silu_and_mul_per_block_quant", "nvidia_h100", (6144, 128), 20000
+    ).endswith("_t16384")
+    assert (
+        dispatcher._select_bucketed_module(
+            "fused_qk_norm_rope", "nvidia_b200", (16, 8), 1
+        )
+        is None
+    )
 
 
 def test_launcher_import_is_cached(monkeypatch):
@@ -90,6 +108,61 @@ def test_layout_matching(monkeypatch):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+def test_fusion_kernel_exact_matching(monkeypatch):
+    monkeypatch.setattr(dispatcher, "_runtime_platform", lambda: "nvidia_h100")
+    monkeypatch.setattr(fusion_dispatcher, "_runtime_platform", lambda: "nvidia_h100")
+    device = "cuda"
+
+    input = torch.empty((5, 2048), device=device, dtype=torch.bfloat16)
+    result = torch.empty_like(input, dtype=torch.float8_e4m3fn)
+    weight = torch.empty(2048, device=device, dtype=input.dtype)
+    scale = torch.empty((16, 5), device=device, dtype=torch.float32).t()
+    residual = torch.empty_like(input)
+    assert fusion_dispatcher._eligible_rms_norm_per_block_quant(
+        result, input, weight, scale, None, None, 128, True
+    )
+    assert (
+        fusion_dispatcher._eligible_rms_norm_per_block_quant(
+            result, input, weight, scale, None, residual, 128, True
+        )
+        is None
+    )
+
+    silu_input = torch.empty((5, 12288), device=device, dtype=torch.bfloat16)
+    silu_out = torch.empty((5, 6144), device=device, dtype=torch.float8_e4m3fn)
+    silu_scales = torch.empty((48, 5), device=device, dtype=torch.float32).t()
+    assert fusion_dispatcher._eligible_silu_and_mul_per_block_quant(
+        silu_out, silu_input, silu_scales, 128, None, True
+    )
+    assert (
+        fusion_dispatcher._eligible_silu_and_mul_per_block_quant(
+            silu_out,
+            silu_input,
+            torch.empty_like(silu_scales.contiguous()),
+            128,
+            None,
+            False,
+        )
+        is None
+    )
+
+    qkv = torch.empty((5, 4096), device=device, dtype=torch.bfloat16)
+    q_weight = torch.empty(128, device=device, dtype=qkv.dtype)
+    k_weight = torch.empty_like(q_weight)
+    cache = torch.empty((40960, 128), device=device, dtype=qkv.dtype)
+    positions = torch.arange(5, device=device, dtype=torch.int64)
+    assert fusion_dispatcher._eligible_fused_qk_norm_rope(
+        qkv, 16, 8, 8, 128, q_weight, k_weight, cache, True, positions, -1
+    )
+    assert (
+        fusion_dispatcher._eligible_fused_qk_norm_rope(
+            qkv, 16, 8, 8, 128, q_weight, k_weight, cache, False, positions, -1
+        )
+        is None
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
 @pytest.mark.parametrize("platform,hidden_size", [(None, 2048), ("nvidia_h100", 1024)])
 def test_unsupported_case_uses_native_fallback(
     monkeypatch, platform: str | None, hidden_size: int
@@ -132,37 +205,107 @@ def test_generated_execution_does_not_import_helion(monkeypatch):
 
 def test_generated_artifacts_have_stable_runtime_contract():
     root = Path(__file__).parents[3]
-    expected_args = [
-        "input",
-        "output_q",
-        "output_s",
-        "group_size",
-        "eps",
-        "fp8_min",
-        "fp8_max",
-        "scale_ue8m0",
-        "dummy_is_scale_transposed",
-        "dummy_is_tma_aligned",
-    ]
-    module_paths = {path for kernels in MANIFESTS.values() for path in kernels.values()}
-    assert len(module_paths) == 84
+    expected_args = {
+        "fused_qk_norm_rope": [
+            "qkv",
+            "num_heads_q",
+            "num_heads_k",
+            "num_heads_v",
+            "head_dim",
+            "eps",
+            "q_weight",
+            "k_weight",
+            "cos_sin_cache",
+            "is_neox",
+            "position_ids",
+            "forced_token_heads_per_warp",
+        ],
+        "per_token_group_fp8_quant": [
+            "input",
+            "output_q",
+            "output_s",
+            "group_size",
+            "eps",
+            "fp8_min",
+            "fp8_max",
+            "scale_ue8m0",
+            "dummy_is_scale_transposed",
+            "dummy_is_tma_aligned",
+        ],
+        "rms_norm_per_block_quant": [
+            "result",
+            "input",
+            "weight",
+            "scale",
+            "epsilon",
+            "scale_ub",
+            "residual",
+            "group_size",
+            "is_scale_transposed",
+        ],
+        "silu_and_mul_per_block_quant": [
+            "out",
+            "input",
+            "scales",
+            "group_size",
+            "scale_ub",
+            "is_scale_transposed",
+        ],
+    }
+    modules_by_kernel = {
+        kernel_name: {
+            path for kernels in platform_manifests.values() for path in kernels.values()
+        }
+        for kernel_name, platform_manifests in GENERATED_KERNEL_MANIFESTS.items()
+    }
+    assert sum(map(len, modules_by_kernel.values())) == 270
+    module_paths = {path for paths in modules_by_kernel.values() for path in paths}
     assert all(
-        ".kernels.per_token_group_fp8_quant.nvidia_" in path for path in module_paths
+        any(f".kernels.{kernel_name}.nvidia_" in path for kernel_name in expected_args)
+        for path in module_paths
     )
 
-    for module_path in module_paths:
-        path = root / (module_path.replace(".", "/") + ".py")
-        tree = ast.parse(path.read_text())
-        imported_roots: set[str] = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                imported_roots.update(name.name.split(".", 1)[0] for name in node.names)
-            elif isinstance(node, ast.ImportFrom):
-                imported_roots.add((node.module or "").split(".", 1)[0])
-        assert imported_roots <= {"__future__", "torch", "triton"}
-        call = next(
-            node
-            for node in tree.body
-            if isinstance(node, ast.FunctionDef) and node.name == "call"
+    for kernel_name, module_paths in modules_by_kernel.items():
+        for module_path in module_paths:
+            path = root / (module_path.replace(".", "/") + ".py")
+            tree = ast.parse(path.read_text())
+            imported_roots: set[str] = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imported_roots.update(
+                        name.name.split(".", 1)[0] for name in node.names
+                    )
+                elif isinstance(node, ast.ImportFrom):
+                    imported_roots.add((node.module or "").split(".", 1)[0])
+            assert imported_roots <= {"__future__", "torch", "triton"}
+            call = next(
+                node
+                for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name == "call"
+            )
+            assert [arg.arg for arg in call.args.args] == expected_args[kernel_name]
+
+
+def test_generated_fusion_op_map_preserves_mutations():
+    op_map = fusion_dispatcher.build_compiled_generated_op_map()
+    assert len(op_map) == 3
+    for native_op, routed_op in op_map.items():
+        native_mutations = tuple(
+            (arg.name, bool(arg.alias_info and arg.alias_info.is_write))
+            for arg in native_op._schema.arguments
         )
-        assert [arg.arg for arg in call.args.args] == expected_args
+        routed_mutations = tuple(
+            (arg.name, bool(arg.alias_info and arg.alias_info.is_write))
+            for arg in routed_op._schema.arguments
+        )
+        assert routed_mutations == native_mutations
+
+
+def test_generated_fusion_warmup_case_selection(monkeypatch):
+    monkeypatch.setattr(fusion_dispatcher, "_runtime_platform", lambda: "nvidia_h100")
+    cases = fusion_dispatcher._selected_fusion_cases(
+        "silu_and_mul_per_block_quant", [3, 20000]
+    )
+    assert (6144, 128, 4) in cases
+    assert (6144, 128, 16384) in cases
+    assert len(cases) == 6

@@ -1477,7 +1477,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TPU_USING_PATHWAYS": lambda: bool(
         "proxy" in os.getenv("JAX_PLATFORMS", "").lower()
     ),
-    # Use compatible Helion kernels in CUDA graphs when Helion is installed.
+    # Use compatible checked-in or source Helion kernels in CUDA graphs.
     "VLLM_USE_HELION_KERNELS": lambda: bool(
         int(os.getenv("VLLM_USE_HELION_KERNELS", "1"))
     ),

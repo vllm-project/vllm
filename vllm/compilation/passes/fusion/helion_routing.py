@@ -50,6 +50,9 @@ class HelionFusionRoutingPass(VllmInductorPass):
         return InductorPass.hash_dict(
             {
                 "pass": type(self).__name__,
-                "ops": sorted(str(op) for op in self.op_map),
+                "ops": sorted(
+                    (str(native_op), str(routed_op))
+                    for native_op, routed_op in self.op_map.items()
+                ),
             }
         )

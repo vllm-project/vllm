@@ -46,6 +46,7 @@ class KernelSpec:
     name: str
     case_fields: tuple[tuple[str, str], ...]
     input_factory: Callable[[CaseKey], tuple[Any, ...]]
+    always_use_factory: bool = False
 
 
 def _fp8_empty(*shape: int) -> torch.Tensor:
@@ -129,20 +130,19 @@ def _rms_norm_per_block_quant_inputs(case: CaseKey) -> tuple[Any, ...]:
     group_size = case["group_size"]
     shape = (num_tokens, hidden_size)
     input = torch.empty(shape, device="cuda", dtype=torch.bfloat16)
+    groups_per_row = hidden_size // group_size
     return (
         _fp8_empty(*shape),
         input,
         torch.empty(hidden_size, device="cuda", dtype=input.dtype),
         torch.empty(
-            (num_tokens, hidden_size // group_size),
-            device="cuda",
-            dtype=torch.float32,
-        ),
+            (groups_per_row, num_tokens), device="cuda", dtype=torch.float32
+        ).t(),
         1e-6,
-        torch.ones((), device="cuda", dtype=torch.float32),
-        torch.empty_like(input),
+        None,
+        None,
         group_size,
-        False,
+        True,
     )
 
 
@@ -150,6 +150,7 @@ def _silu_and_mul_per_block_quant_inputs(case: CaseKey) -> tuple[Any, ...]:
     num_tokens = case["num_tokens"]
     intermediate_size = case["intermediate_size"]
     group_size = case["group_size"]
+    groups_per_row = intermediate_size // group_size
     return (
         _fp8_empty(num_tokens, intermediate_size),
         torch.empty(
@@ -158,13 +159,11 @@ def _silu_and_mul_per_block_quant_inputs(case: CaseKey) -> tuple[Any, ...]:
             dtype=torch.bfloat16,
         ),
         torch.empty(
-            (num_tokens, intermediate_size // group_size),
-            device="cuda",
-            dtype=torch.float32,
-        ),
+            (groups_per_row, num_tokens), device="cuda", dtype=torch.float32
+        ).t(),
         group_size,
-        torch.ones((), device="cuda", dtype=torch.float32),
-        False,
+        None,
+        True,
     )
 
 
@@ -206,6 +205,7 @@ KERNEL_REGISTRY = {
             "rms_norm_per_block_quant",
             (("hidden_size", "h"), ("group_size", "g"), ("num_tokens", "t")),
             _rms_norm_per_block_quant_inputs,
+            always_use_factory=True,
         ),
         KernelSpec(
             "silu_and_mul_per_block_quant",
@@ -215,6 +215,7 @@ KERNEL_REGISTRY = {
                 ("num_tokens", "t"),
             ),
             _silu_and_mul_per_block_quant_inputs,
+            always_use_factory=True,
         ),
         KernelSpec(
             "silu_mul_fp8",
@@ -533,7 +534,7 @@ def generate(kernel_name: str, platform: str, check: bool) -> None:
     for case in progress:
         filename = f"{_module_name(spec, case)}.py"
         expected.add(filename)
-        args = inputs.get(case)
+        args = None if spec.always_use_factory else inputs.get(case)
         if args is None:
             args = spec.input_factory(case)
         with _suppress_helion_output():

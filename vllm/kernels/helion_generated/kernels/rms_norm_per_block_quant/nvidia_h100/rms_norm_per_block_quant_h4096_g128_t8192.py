@@ -60,7 +60,7 @@ _BLOCK_SIZE_3 = tl.constexpr(128)
 _BLOCK_SIZE_2 = tl.constexpr(32)
 
 @triton.jit
-def _triton_rms_norm_per_block_quant(input_1, residual, weight, scale_ub, scale, result, input_1_stride_0, input_1_stride_1, residual_stride_0, residual_stride_1, result_stride_0, result_stride_1, scale_stride_0, scale_stride_1, weight_stride_0, epsilon):
+def _triton_rms_norm_per_block_quant(input_1, weight, scale, result, input_1_stride_0, input_1_stride_1, result_stride_0, result_stride_1, scale_stride_0, scale_stride_1, weight_stride_0, epsilon):
     pid_0 = tl.program_id(0)
     offset_0 = pid_0
     indices_0 = offset_0 + tl.zeros([1], tl.int32)
@@ -72,69 +72,59 @@ def _triton_rms_norm_per_block_quant(input_1, residual, weight, scale_ub, scale,
         rms_copy_0 = rms_copy
         load = tl.load(input_1 + (indices_0[:, None] * input_1_stride_0 + indices_1[None, :] * input_1_stride_1), mask_1[None, :], other=0)
         v_0 = tl.cast(load, tl.float32)
-        load_1 = tl.load(residual + (indices_0[:, None] * residual_stride_0 + indices_1[None, :] * residual_stride_1), mask_1[None, :], other=0)
-        v_1 = tl.cast(load_1, tl.float32)
-        v_2 = v_0 + v_1
-        v_3 = v_2 * v_2
-        sum_1 = tl.cast(tl.sum(v_3, 1), tl.float32)
+        v_1 = v_0 * v_0
+        sum_1 = tl.cast(tl.sum(v_1, 1), tl.float32)
         rms = rms_copy_0 + sum_1
-    v_5 = tl.full([], 0.000244140625, tl.float32)
-    v_6 = rms * v_5
-    v_7 = v_6 + epsilon
-    v_8 = tl.rsqrt(v_7)
+    v_3 = tl.full([], 0.000244140625, tl.float32)
+    v_4 = rms * v_3
+    v_5 = v_4 + epsilon
+    v_6 = tl.rsqrt(v_5)
     iota = tl.arange(0, _BLOCK_SIZE_0)
-    v_9 = tl.cast(offset_0, tl.int32)
-    v_10 = iota + v_9
-    m_blk = v_10[:, None, None]
+    v_7 = tl.cast(offset_0, tl.int32)
+    v_8 = iota + v_7
+    m_blk = v_8[:, None, None]
     tl.debug_barrier()
     for offset_2 in tl.range(0, 32, _BLOCK_SIZE_2, flatten=False):
         indices_2 = offset_2 + tl.arange(0, _BLOCK_SIZE_2).to(tl.int32)
         for offset_3 in tl.range(0, 128, _BLOCK_SIZE_3):
             indices_3 = offset_3 + tl.arange(0, _BLOCK_SIZE_3).to(tl.int32)
             m_blk_copy = m_blk
-            v_8_copy = v_8
+            v_6_copy = v_6
             m_blk_copy_0 = m_blk_copy
-            v_8_copy_0 = v_8_copy
+            v_6_copy_0 = v_6_copy
             subscript = indices_2[:, None]
-            v_11 = tl.full([], 128, tl.int32)
-            v_12 = tl.cast(subscript * v_11, tl.int32)
+            v_9 = tl.full([], 128, tl.int32)
+            v_10 = tl.cast(subscript * v_9, tl.int32)
             subscript_1 = indices_3[None, :]
-            v_13 = v_12 + subscript_1
-            n_blk = v_13[None, :, :]
-            v_14 = tl.full([], 32, tl.int32)
-            v_15 = indices_2 < v_14
-            mask = v_15[None, :, None]
-            load_2 = tl.load(input_1 + (m_blk_copy_0 * input_1_stride_0 + n_blk * input_1_stride_1), mask, other=0, eviction_policy='evict_first')
-            v_16 = tl.cast(load_2, tl.float32)
-            r_blk = tl.load(residual + (m_blk_copy_0 * residual_stride_0 + n_blk * residual_stride_1), mask, other=0, eviction_policy='evict_last')
-            v_17 = tl.cast(r_blk, tl.float32)
-            v_18 = v_16 + v_17
-            w_blk = tl.load(weight + n_blk * weight_stride_0, mask, other=0, eviction_policy='evict_last')
-            subscript_4 = v_8_copy_0[:, None, None]
-            v_19 = v_18 * subscript_4
-            v_20 = tl.cast(v_19, tl.bfloat16)
-            v_21 = v_20 * w_blk
-            v_22 = tl.abs(v_21)
-            amax = tl.cast(tl.max(v_22, 2), tl.bfloat16)
-            v_23 = tl.cast(amax, tl.float32)
-            scale_ub_s = tl.load(scale_ub + tl.zeros([], tl.int32), None)
-            v_24 = tl.minimum(v_23, scale_ub_s, tl.PropagateNan.ALL)
-            v_25 = tl.full([], 0.002232142857142857, tl.float32)
-            v_26 = v_24 * v_25
-            v_27 = tl.full([], 4.359654017857143e-06, tl.float32)
-            v_28 = tl.maximum(v_26, v_27, tl.PropagateNan.ALL)
-            tl.store(scale + (indices_0[:, None] * scale_stride_0 + indices_2[None, :] * scale_stride_1), v_28, None)
-            subscript_5 = v_28[:, :, None]
-            v_29 = tl.cast(v_21, tl.float32)
-            v_30 = v_29 / subscript_5
-            v_31 = tl.full([], -448.0, tl.float32)
-            v_32 = tl.maximum(v_30, v_31, tl.PropagateNan.ALL)
-            v_33 = tl.full([], 448.0, tl.float32)
-            v_34 = tl.minimum(v_32, v_33, tl.PropagateNan.ALL)
-            v_35 = tl.cast(v_34, tl.float8e4nv)
-            tl.store(result + (m_blk_copy_0 * result_stride_0 + n_blk * result_stride_1), v_35, mask)
-            v_36 = tl.cast(v_18, tl.bfloat16)
-            tl.store(residual + (m_blk_copy_0 * residual_stride_0 + n_blk * residual_stride_1), v_36, mask)
+            v_11 = v_10 + subscript_1
+            n_blk = v_11[None, :, :]
+            v_12 = tl.full([], 32, tl.int32)
+            v_13 = indices_2 < v_12
+            mask = v_13[None, :, None]
+            load_1 = tl.load(input_1 + (m_blk_copy_0 * input_1_stride_0 + n_blk * input_1_stride_1), mask, other=0)
+            v_14 = tl.cast(load_1, tl.float32)
+            w_blk = tl.load(weight + n_blk * weight_stride_0, mask, other=0, eviction_policy='evict_first')
+            subscript_4 = v_6_copy_0[:, None, None]
+            v_15 = v_14 * subscript_4
+            v_16 = tl.cast(v_15, tl.bfloat16)
+            v_17 = v_16 * w_blk
+            v_18 = tl.abs(v_17)
+            amax = tl.cast(tl.max(v_18, 2), tl.bfloat16)
+            v_19 = tl.cast(amax, tl.float32)
+            v_20 = tl.full([], 0.002232142857142857, tl.float32)
+            v_21 = v_19 * v_20
+            v_22 = tl.full([], 4.359654017857143e-06, tl.float32)
+            v_23 = tl.maximum(v_21, v_22, tl.PropagateNan.ALL)
+            tl.store(scale + (indices_0[:, None] * scale_stride_0 + indices_2[None, :] * scale_stride_1), v_23, None)
+            subscript_5 = v_23[:, :, None]
+            v_24 = tl.cast(v_17, tl.float32)
+            v_25 = v_24 / subscript_5
+            v_26 = tl.full([], -448.0, tl.float32)
+            v_27 = tl.maximum(v_25, v_26, tl.PropagateNan.ALL)
+            v_28 = tl.full([], 448.0, tl.float32)
+            v_29 = tl.minimum(v_27, v_28, tl.PropagateNan.ALL)
+            v_30 = tl.cast(v_29, tl.float8e4nv)
+            tl.store(result + (m_blk_copy_0 * result_stride_0 + n_blk * result_stride_1), v_30, mask)
 
 def call(result: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor, epsilon: float, scale_ub: torch.Tensor | None, residual: torch.Tensor | None, group_size: int, is_scale_transposed: bool, *, _launcher=_default_launcher):
     assert input.ndim == 2
@@ -165,4 +155,4 @@ def call(result: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, scale:
         qtype_traits_min, qtype_traits_max = _get_fp8_min_max()
         min_scaling_factor = 1.0 / (qtype_traits_max * 512.0)
     qtype_max = float(qtype_traits_max)
-    _launcher(_triton_rms_norm_per_block_quant, (num_tokens,), input, residual, weight, scale_ub, scale, result, input.stride(0), input.stride(1), residual.stride(0), residual.stride(1), result.stride(0), result.stride(1), scale.stride(0), scale.stride(1), weight.stride(0), epsilon, num_warps=16, num_stages=2)
+    _launcher(_triton_rms_norm_per_block_quant, (num_tokens,), input, weight, scale, result, input.stride(0), input.stride(1), result.stride(0), result.stride(1), scale.stride(0), scale.stride(1), weight.stride(0), epsilon, num_warps=16, num_stages=2)

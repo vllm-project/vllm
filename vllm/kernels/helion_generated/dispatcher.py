@@ -11,7 +11,10 @@ from functools import cache
 import torch
 from torch.library import Library
 
-from vllm.kernels.helion_generated.manifests import MANIFESTS
+from vllm.kernels.helion_generated.manifests import (
+    GENERATED_KERNEL_MANIFESTS,
+    MANIFESTS,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -39,26 +42,41 @@ def _runtime_platform() -> str | None:
 
 
 @cache
+def _select_bucketed_module(
+    kernel_name: str,
+    platform: str | None,
+    static_key: tuple[int, ...],
+    num_tokens: int,
+) -> str | None:
+    if platform is None or num_tokens < 1:
+        return None
+    kernels = GENERATED_KERNEL_MANIFESTS.get(kernel_name, {}).get(platform)
+    if kernels is None:
+        return None
+    buckets = sorted(case[-1] for case in kernels if case[:-1] == static_key)
+    if not buckets:
+        return None
+    token_bucket = next((size for size in buckets if size >= num_tokens), buckets[-1])
+    selected_case = (*static_key, token_bucket)
+    return next(
+        (module_path for case, module_path in kernels.items() if case == selected_case),
+        None,
+    )
+
+
+@cache
 def _select_module(
     platform: str | None,
     hidden_size: int,
     group_size: int,
     num_tokens: int,
 ) -> str | None:
-    if platform is None or num_tokens < 1:
-        return None
-    kernels = MANIFESTS.get(platform)
-    if kernels is None:
-        return None
-    buckets = sorted(
-        token_bucket
-        for case_hidden, case_group, token_bucket in kernels
-        if case_hidden == hidden_size and case_group == group_size
+    return _select_bucketed_module(
+        "per_token_group_fp8_quant",
+        platform,
+        (hidden_size, group_size),
+        num_tokens,
     )
-    if not buckets:
-        return None
-    token_bucket = next((size for size in buckets if size >= num_tokens), buckets[-1])
-    return kernels[(hidden_size, group_size, token_bucket)]
 
 
 @cache

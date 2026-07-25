@@ -58,7 +58,7 @@ _BLOCK_SIZE_2 = tl.constexpr(128)
 _BLOCK_SIZE_1 = tl.constexpr(4)
 
 @triton.jit
-def _triton_silu_and_mul_per_block_quant(input_1, scale_ub, scales, out, input_1_stride_0, input_1_stride_1, input_1_stride_2, out_stride_0, out_stride_1, out_stride_2, scales_stride_0, scales_stride_1):
+def _triton_silu_and_mul_per_block_quant(input_1, scales, out, input_1_stride_0, input_1_stride_1, input_1_stride_2, out_stride_0, out_stride_1, out_stride_2, scales_stride_0, scales_stride_1):
     num_blocks_0 = tl.cdiv(128, _BLOCK_SIZE_2)
     num_blocks_1 = tl.cdiv(200, _BLOCK_SIZE_1)
     num_pid_m = tl.cdiv(128, _BLOCK_SIZE_2)
@@ -95,21 +95,19 @@ def _triton_silu_and_mul_per_block_quant(input_1, scale_ub, scales, out, input_1
     v_11 = v_10 * v_7
     v_12 = tl.abs(v_11)
     s_blk = tl.cast(tl.max(v_12, 2), tl.float32)
-    scale_ub_s = tl.load(scale_ub + tl.zeros([], tl.int32), None, eviction_policy='evict_last')
-    v_13 = tl.minimum(s_blk, scale_ub_s, tl.PropagateNan.ALL)
-    v_14 = tl.full([], 0.002232142857142857, tl.float32)
-    v_15 = v_13 * v_14
-    v_16 = tl.full([], 4.359654017857143e-06, tl.float32)
-    v_17 = tl.maximum(v_15, v_16, tl.PropagateNan.ALL)
-    tl.store(scales + (indices_0[:, None] * scales_stride_0 + indices_1[None, :] * scales_stride_1), v_17, None)
-    subscript_1 = v_17[:, :, None]
-    v_18 = v_11 / subscript_1
-    v_19 = tl.full([], -448.0, tl.float32)
-    v_20 = tl.maximum(v_18, v_19, tl.PropagateNan.ALL)
-    v_21 = tl.full([], 448.0, tl.float32)
-    v_22 = tl.minimum(v_20, v_21, tl.PropagateNan.ALL)
-    v_23 = tl.cast(v_22, tl.float8e4nv)
-    tl.store(out + (indices_0[:, None, None] * out_stride_0 + indices_1[None, :, None] * out_stride_1 + indices_2[None, None, :] * out_stride_2), v_23, None)
+    v_13 = tl.full([], 0.002232142857142857, tl.float32)
+    v_14 = s_blk * v_13
+    v_15 = tl.full([], 4.359654017857143e-06, tl.float32)
+    v_16 = tl.maximum(v_14, v_15, tl.PropagateNan.ALL)
+    tl.store(scales + (indices_0[:, None] * scales_stride_0 + indices_1[None, :] * scales_stride_1), v_16, None)
+    subscript_1 = v_16[:, :, None]
+    v_17 = v_11 / subscript_1
+    v_18 = tl.full([], -448.0, tl.float32)
+    v_19 = tl.maximum(v_17, v_18, tl.PropagateNan.ALL)
+    v_20 = tl.full([], 448.0, tl.float32)
+    v_21 = tl.minimum(v_19, v_20, tl.PropagateNan.ALL)
+    v_22 = tl.cast(v_21, tl.float8e4nv)
+    tl.store(out + (indices_0[:, None, None] * out_stride_0 + indices_1[None, :, None] * out_stride_1 + indices_2[None, None, :] * out_stride_2), v_22, None)
 
 def call(out: torch.Tensor, input: torch.Tensor, scales: torch.Tensor, group_size: int, scale_ub: torch.Tensor | None=None, is_scale_transposed: bool=False, *, _launcher=_default_launcher):
     assert input.ndim == 2
@@ -144,4 +142,4 @@ def call(out: torch.Tensor, input: torch.Tensor, scales: torch.Tensor, group_siz
     out = out.view(num_tokens, -1, group_size)
     _BLOCK_SIZE_2 = 128
     _BLOCK_SIZE_1 = 4
-    _launcher(_triton_silu_and_mul_per_block_quant, ((128 + _BLOCK_SIZE_2 - 1) // _BLOCK_SIZE_2 * ((200 + _BLOCK_SIZE_1 - 1) // _BLOCK_SIZE_1) * num_tokens,), input, scale_ub, scales, out, input.stride(0), input.stride(1), input.stride(2), out.stride(0), out.stride(1), out.stride(2), scales.stride(0), scales.stride(1), num_warps=4, num_stages=3)
+    _launcher(_triton_silu_and_mul_per_block_quant, ((128 + _BLOCK_SIZE_2 - 1) // _BLOCK_SIZE_2 * ((200 + _BLOCK_SIZE_1 - 1) // _BLOCK_SIZE_1) * num_tokens,), input, scales, out, input.stride(0), input.stride(1), input.stride(2), out.stride(0), out.stride(1), out.stride(2), scales.stride(0), scales.stride(1), num_warps=4, num_stages=3)
