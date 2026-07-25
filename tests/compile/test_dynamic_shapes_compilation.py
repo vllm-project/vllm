@@ -101,6 +101,10 @@ def test_dynamic_shapes_compilation(
         assert len(output.text.strip()) > 0, "Compiled model produced empty output"
         compiled_outputs.append((output.token_ids, output.text, output.logprobs))
 
+    # Shut the EngineCore down explicitly. `del` only drops one reference, so
+    # if anything else still holds the LLM the finalizer never runs and the
+    # compiled engine keeps its KV cache while the eager engine starts.
+    model.llm_engine.engine_core.shutdown()
     del model
     gc.collect()
     torch.accelerator.empty_cache()
@@ -113,6 +117,7 @@ def test_dynamic_shapes_compilation(
         output = eager_model.generate(p, sampling_params)[0].outputs[0]
         assert len(output.text.strip()) > 0, "Eager model produced empty output"
         eager_outputs.append((output.token_ids, output.text, output.logprobs))
+    eager_model.llm_engine.engine_core.shutdown()
     del eager_model
     gc.collect()
     torch.accelerator.empty_cache()
@@ -278,6 +283,7 @@ def test_piecewise_backend_empty_sym_shape_indices():
     result = output[0].outputs[0].text
     assert len(result) > 0, "Should generate non-empty output on second run"
 
+    llm.llm_engine.engine_core.shutdown()
     del llm
     gc.collect()
     torch.accelerator.empty_cache()
