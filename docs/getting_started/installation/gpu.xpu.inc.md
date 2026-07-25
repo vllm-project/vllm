@@ -12,6 +12,28 @@ vLLM initially supports basic model inference and serving on Intel GPU platform.
 !!! warning
     The provided vllm-xpu-kernels whl is Python3.12 specific so this version is a MUST.
 
+!!! note "XPU kernels runtime notes"
+    Install `vllm_xpu_kernels` from `requirements/xpu.txt` (release wheel by
+    default). Rebuild or reinstall that package when you change kernel configs.
+
+    Runtime notes (enforced by the kernels package):
+
+    - **Attention fail-closed (default):** missing FA2 / paged-decode AOT
+      shapes raise instead of silently falling back to a slow PyTorch
+      reference path. For eager debug only:
+      `export VLLM_XPU_ATTN_ALLOW_FALLBACK=1` (ignored under XPUGraph
+      capture). Softcap and ALiBi are not implemented on XPU FA2 and raise
+      when requested.
+    - **Page size 128:** default decode presets may include pagesize=128
+      shapes. Serve with `--block-size 128` to use them; otherwise keep the
+      usual page-64 path.
+    - **Native MXFP8 / block-FP8 MoE (Xe2):** fused MoE uses the native
+      grouped-GEMM path by default. Escape hatches:
+      `VLLM_XPU_FUSED_MOE_NATIVE_MXFP8=0`,
+      `VLLM_XPU_FUSED_MOE_NATIVE_BLOCK_FP8=0`, or
+      `VLLM_XPU_FUSED_MOE_USE_REF=1` (force the Python reference expert
+      loop for A/B).
+
 --8<-- [end:requirements]
 --8<-- [start:set-up-using-python]
 

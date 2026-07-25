@@ -976,6 +976,8 @@ class xpu_ops:
             assert len(window_size) == 2
             real_window_size = (window_size[0], window_size[1])  # noqa: F841
 
+        # Forward softcap/alibi so the kernels package can fail closed when
+        # those features are requested but not implemented on XPU.
         return flash_attn_varlen_func(
             out=out,
             q=q,
@@ -991,8 +993,8 @@ class xpu_ops:
             block_table=block_table,
             s_aux=s_aux,
             window_size=real_window_size,
-            # alibi_slopes = alibi_slopes,
-            # softcap=softcap,
+            alibi_slopes=alibi_slopes,
+            softcap=softcap if softcap is not None else 0.0,
             return_softmax_lse=return_softmax_lse,
             q_descale=q_descale,
             k_descale=k_descale,
