@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Unified listener wrapper for the Rust frontend.
 //!
 //! This module hides the difference between TCP and Unix-domain listeners so
@@ -152,8 +155,8 @@ impl axum::serve::Listener for Listener {
 
 /// Allow the unified listener to be adaptable to `tls_listener`.
 impl AsyncAccept for Listener {
-    type Connection = ListenerIo;
     type Address = ListenerAddr;
+    type Connection = ListenerIo;
     type Error = std::io::Error;
 
     fn poll_accept(

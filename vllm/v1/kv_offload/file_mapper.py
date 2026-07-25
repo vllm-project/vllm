@@ -4,7 +4,6 @@
 import hashlib
 import json
 
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
 from vllm.v1.kv_offload.base import (
     OffloadingSpec,
     OffloadKey,
@@ -25,8 +24,8 @@ class FileMapper:
         self,
         root_dir: str,
         model_name: str,
-        hash_block_size: int,
-        gpu_blocks_per_file: int,
+        tokens_per_hash: int,
+        blocks_per_file: int,
         tp_size: int,
         pp_size: int,
         pcp_size: int,
@@ -49,8 +48,8 @@ class FileMapper:
         self.rank: int = rank
         self.fields: dict = {
             "model_name": model_name,
-            "hash_block_size": hash_block_size,
-            "gpu_blocks_per_file": gpu_blocks_per_file,
+            "tokens_per_hash": tokens_per_hash,
+            "blocks_per_file": blocks_per_file,
             "tp_size": tp_size,
             "pp_size": pp_size,
             "pcp_size": pcp_size,
@@ -66,47 +65,32 @@ class FileMapper:
         cls,
         root_dir: str,
         offloading_spec: OffloadingSpec,
-        gpu_blocks_per_file: int = 1,
+        blocks_per_file: int = 1,
         parallel_agnostic: bool = False,
     ) -> "FileMapper":
         """Build a FileMapper from an OffloadingSpec."""
-        vllm_config = offloading_spec.vllm_config
-        kv_cache_config = offloading_spec.kv_cache_config
-
-        parallel_config = vllm_config.parallel_config
-        dtype = str(vllm_config.cache_config.cache_dtype).replace("torch.", "")
+        config = offloading_spec.config
         kv_cache_groups = [
             {
-                "block_size": group.kv_cache_spec.block_size,
+                "tokens_per_block": group.tokens_per_block,
                 "layer_names": list(group.layer_names),
             }
-            for group in kv_cache_config.kv_cache_groups
+            for group in config.groups
         ]
-        # Only a single full-attention group is parallelism-invariant. MLA is
-        # excluded: its latent KV is replicated per rank, never head-sharded.
-        # The V2 model runner is excluded: its KV layout is not known to be
-        # parallelism-invariant.
-        groups = kv_cache_config.kv_cache_groups
-        spec = groups[0].kv_cache_spec if len(groups) == 1 else None
-        parallel_agnostic = (
-            parallel_agnostic
-            and not vllm_config.use_v2_model_runner
-            and isinstance(spec, FullAttentionSpec)
-            and not isinstance(spec, MLAAttentionSpec)
-        )
+        parallel = config.parallel
         return cls(
             root_dir=root_dir,
-            model_name=vllm_config.model_config.model,
-            hash_block_size=vllm_config.cache_config.block_size,
-            gpu_blocks_per_file=gpu_blocks_per_file,
-            tp_size=parallel_config.tensor_parallel_size,
-            pp_size=parallel_config.pipeline_parallel_size,
-            pcp_size=parallel_config.prefill_context_parallel_size,
-            dcp_size=parallel_config.decode_context_parallel_size,
-            rank=parallel_config.rank,
-            dtype=dtype,
+            model_name=config.model.name,
+            tokens_per_hash=config.cache.tokens_per_hash,
+            blocks_per_file=blocks_per_file,
+            tp_size=parallel.tp_size,
+            pp_size=parallel.pp_size,
+            pcp_size=parallel.pcp_size,
+            dcp_size=parallel.dcp_size,
+            rank=parallel.rank,
+            dtype=config.model.dtype,
             kv_cache_groups=kv_cache_groups,
-            parallel_agnostic=parallel_agnostic,
+            parallel_agnostic=(parallel_agnostic and parallel.is_parallelism_agnostic),
         )
 
     def get_file_name(self, key: OffloadKey) -> str:

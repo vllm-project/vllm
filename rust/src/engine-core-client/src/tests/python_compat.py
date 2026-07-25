@@ -91,6 +91,7 @@ class EngineCoreOutput(
     stop_reason: int | str | None = None
     events: object | None = None
     kv_transfer_params: object | None = None
+    ec_transfer_params: object | None = None
     trace_headers: object | None = None
     prefill_stats: object | None = None
     routed_experts: object | None = None

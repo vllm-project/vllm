@@ -11,22 +11,22 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _on_gfx950() -> bool:
+def _on_split_decode_arch() -> bool:
     if not current_platform.is_rocm():
         return False
     try:
-        from vllm.platforms.rocm import _ON_GFX950
+        from vllm.platforms.rocm import _ON_GFX942, _ON_GFX950
 
-        return bool(_ON_GFX950)
+        return bool(_ON_GFX942 or _ON_GFX950)
     except Exception:
         return False
 
 
-# The flash-decode split-K decode path is only tuned for AMD gfx950; other
+# The flash-decode split-K decode path is only tuned for AMD gfx942/gfx950; other
 # architectures take the fallback decode kernel, so its tests are skipped there.
-requires_gfx950 = pytest.mark.skipif(
-    not _on_gfx950(),
-    reason="split-K decode kernel is only tuned for AMD gfx950",
+requires_split_decode_arch = pytest.mark.skipif(
+    not _on_split_decode_arch(),
+    reason="split-K decode kernel is only tuned for AMD gfx942/gfx950",
 )
 
 NOPE_HEAD_DIM = 448
@@ -91,9 +91,13 @@ def _ref_sparse_prefill_ragged(
 
 
 def _pack_fp8_ds_mla_cache(
-    kv: torch.Tensor, block_size: int, is_extra: bool = False
+    kv: torch.Tensor, block_size: int, use_fnuz: bool
 ) -> torch.Tensor:
     assert kv.shape[-1] == HEAD_DIM
+    from vllm.models.deepseek_v4.common.ops.cache_utils import (
+        quantize_and_insert_k_cache,
+    )
+
     num_tokens = kv.shape[0]
     num_blocks = (num_tokens + block_size - 1) // block_size
     cache = torch.zeros(
@@ -101,41 +105,34 @@ def _pack_fp8_ds_mla_cache(
         dtype=torch.uint8,
         device=kv.device,
     )
-    cache_flat = cache.view(torch.uint8).flatten()
-    kv_nope_fp8 = (
-        kv[:, :NOPE_HEAD_DIM]
-        .to(torch.float8_e4m3fn if is_extra else current_platform.fp8_dtype())
-        .view(torch.uint8)
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=kv.device)
+    quantize_and_insert_k_cache(
+        kv,
+        cache,
+        slot_mapping,
+        block_size=block_size,
+        use_fnuz=use_fnuz,
     )
-    kv_rope_u8 = kv[:, NOPE_HEAD_DIM:].contiguous().view(torch.uint8)
-
-    for slot in range(num_tokens):
-        block_idx = slot // block_size
-        pos = slot % block_size
-        block_base = block_idx * cache.stride(0)
-        token_base = block_base + pos * 576
-        scale_base = block_base + block_size * 576 + pos * 8
-        cache_flat[token_base : token_base + NOPE_HEAD_DIM].copy_(kv_nope_fp8[slot])
-        cache_flat[
-            token_base + NOPE_HEAD_DIM : token_base + NOPE_HEAD_DIM + ROPE_HEAD_DIM * 2
-        ].copy_(kv_rope_u8[slot])
-        cache_flat[scale_base : scale_base + 7].fill_(127)
     return cache
 
 
 def _read_fp8_ds_mla_cache(
-    cache: torch.Tensor, slot: int, block_size: int, is_extra: bool = False
+    cache: torch.Tensor, slot: int, block_size: int, use_fnuz: bool
 ) -> torch.Tensor:
     cache_flat = cache.view(torch.uint8).flatten()
     block_idx = slot // block_size
     pos = slot % block_size
     block_base = block_idx * cache.stride(0)
     token_base = block_base + pos * 576
+    scale_base = block_base + block_size * 576 + pos * 8
 
+    fp8_dtype = torch.float8_e4m3fnuz if use_fnuz else torch.float8_e4m3fn
     nope_u8 = cache_flat[token_base : token_base + NOPE_HEAD_DIM]
-    nope = nope_u8.view(
-        torch.float8_e4m3fn if is_extra else current_platform.fp8_dtype()
-    ).to(torch.float32)
+    nope = nope_u8.view(fp8_dtype).to(torch.float32)
+    scales = torch.exp2(
+        cache_flat[scale_base : scale_base + 7].to(torch.float32) - 127.0
+    )
+    nope = nope * scales.repeat_interleave(64)
     rope_u8 = cache_flat[
         token_base + NOPE_HEAD_DIM : token_base + NOPE_HEAD_DIM + ROPE_HEAD_DIM * 2
     ]
@@ -152,19 +149,21 @@ def _ref_sparse_decode_ragged(
     block_size: int,
     extra_cache: torch.Tensor | None = None,
     extra_rows: list[list[int]] | None = None,
+    main_use_fnuz: bool = False,
+    extra_use_fnuz: bool = False,
 ) -> torch.Tensor:
     q_f32 = q.float()
     out = torch.empty_like(q_f32)
 
     for query_idx in range(q.shape[0]):
         row_kv = [
-            _read_fp8_ds_mla_cache(main_cache, int(slot), block_size)
+            _read_fp8_ds_mla_cache(main_cache, int(slot), block_size, main_use_fnuz)
             for slot in main_rows[query_idx]
         ]
         if extra_cache is not None and extra_rows is not None:
             row_kv.extend(
                 _read_fp8_ds_mla_cache(
-                    extra_cache, int(slot), block_size, is_extra=True
+                    extra_cache, int(slot), block_size, extra_use_fnuz
                 )
                 for slot in extra_rows[query_idx]
             )
@@ -195,46 +194,6 @@ def _ragged_from_rows(
         torch.tensor(flat, dtype=torch.int32, device=device),
         torch.tensor(indptr, dtype=torch.int32, device=device),
     )
-
-
-def _ref_combine_topk_swa_ragged(
-    device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    expected_ragged = torch.tensor(
-        [
-            100,
-            101,
-            7,
-            8,
-            9,
-            110,
-            111,
-            8,
-            9,
-            10,
-            120,
-            121,
-            122,
-            9,
-            10,
-            11,
-            150,
-            27,
-            28,
-            29,
-            160,
-            161,
-            28,
-            29,
-            30,
-        ],
-        dtype=torch.int32,
-        device=device,
-    )
-    expected_lens = torch.tensor([5, 5, 6, 4, 5], dtype=torch.int32, device=device)
-    expected_indptr = torch.zeros(6, dtype=torch.int32, device=device)
-    torch.cumsum(expected_lens, dim=0, out=expected_indptr[1:])
-    return expected_ragged, expected_indptr, expected_lens
 
 
 @torch.inference_mode()
@@ -330,11 +289,12 @@ def test_sparse_attn_decode_ragged_kernel() -> None:
     device = torch.device("cuda")
     torch.manual_seed(1)
     block_size = 4
+    main_use_fnuz = current_platform.is_fp8_fnuz()
     q = torch.randn(2, 3, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
     main_kv = torch.randn(6, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
     extra_kv = torch.randn(5, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
-    main_cache = _pack_fp8_ds_mla_cache(main_kv, block_size)
-    extra_cache = _pack_fp8_ds_mla_cache(extra_kv, block_size, is_extra=True)
+    main_cache = _pack_fp8_ds_mla_cache(main_kv, block_size, use_fnuz=main_use_fnuz)
+    extra_cache = _pack_fp8_ds_mla_cache(extra_kv, block_size, use_fnuz=False)
     main_indices = torch.tensor([0, 2, 4, 1], dtype=torch.int32, device=device)
     main_indptr = torch.tensor([0, 2, 4], dtype=torch.int32, device=device)
     extra_indices = torch.tensor([1, 3, 0], dtype=torch.int32, device=device)
@@ -364,61 +324,13 @@ def test_sparse_attn_decode_ragged_kernel() -> None:
         block_size=block_size,
         extra_cache=extra_cache,
         extra_rows=[[1], [3, 0]],
+        main_use_fnuz=main_use_fnuz,
     )
 
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
 
-@torch.inference_mode()
-def test_combine_topk_swa_indices_ragged() -> None:
-    from vllm.models.deepseek_v4.amd.rocm import (
-        combine_topk_swa_indices_ragged,
-    )
-
-    device = torch.device("cuda")
-    topk_indices = torch.tensor(
-        [
-            [100, 101, 102, 103],
-            [110, 111, 112, 113],
-            [120, 121, 122, 123],
-            [130, 131, 132, 133],
-            [140, 141, 142, 143],
-        ],
-        dtype=torch.int32,
-        device=device,
-    )
-    query_start_loc = torch.tensor([0, 3, 5], dtype=torch.int32, device=device)
-    seq_lens = torch.tensor([6, 4], dtype=torch.int32, device=device)
-    gather_lens = torch.tensor([4, 3], dtype=torch.int32, device=device)
-    window_size = 3
-    compress_ratio = 2
-    topk = 4
-    M = 20
-    N = 8
-
-    actual_ragged, actual_indptr, actual_lens = combine_topk_swa_indices_ragged(
-        topk_indices,
-        query_start_loc,
-        seq_lens,
-        gather_lens,
-        window_size,
-        compress_ratio,
-        topk,
-        M,
-        N,
-    )
-    expected_ragged, expected_indptr, expected_lens = _ref_combine_topk_swa_ragged(
-        device
-    )
-
-    torch.testing.assert_close(
-        actual_ragged[: expected_ragged.numel()], expected_ragged
-    )
-    torch.testing.assert_close(actual_indptr, expected_indptr)
-    torch.testing.assert_close(actual_lens, expected_lens)
-
-
-@requires_gfx950
+@requires_split_decode_arch
 @torch.inference_mode()
 def test_decode_num_splits_heuristic(monkeypatch) -> None:
     """Split-count heuristic added with the flash-decode split-K decode path."""
@@ -442,7 +354,7 @@ def test_decode_num_splits_heuristic(monkeypatch) -> None:
     assert mod._decode_num_splits(2, 1, avg_main_len=0.0, avg_extra_len=0.0) >= 1
 
 
-@requires_gfx950
+@requires_split_decode_arch
 @pytest.mark.parametrize("num_splits", [1, 2, 3, 4, 8])
 @pytest.mark.parametrize("with_extra", [True, False])
 @pytest.mark.parametrize("with_sink", [True, False])
@@ -452,8 +364,8 @@ def test_sparse_attn_decode_split_k_kernel(
 ) -> None:
     """Flash-decode split-K decode path (partial + reduce kernels).
 
-    This path is the gfx950 production path (``_ON_GFX950``), so the test only
-    runs on gfx950. The split count is pinned so the partial/reduce kernels are
+    This path is the gfx942/gfx950 production path, so the test only runs on
+    those architectures. The split count is pinned so the partial/reduce kernels are
     exercised across split counts. ``num_splits=8`` drives splits past the
     shortest segment length, covering the empty-split edge case handled by the
     reduce kernel.
@@ -464,6 +376,7 @@ def test_sparse_attn_decode_split_k_kernel(
     torch.manual_seed(7)
     block_size = 4
     num_heads = 3
+    main_use_fnuz = current_platform.is_fp8_fnuz()
 
     main_rows = [[0, 2, 4, 6, 1, 3, 7, 5], [4, 1, 6, 0, 2]]
     num_queries = len(main_rows)
@@ -474,7 +387,7 @@ def test_sparse_attn_decode_split_k_kernel(
         * 0.125
     )
     main_kv = torch.randn(8, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
-    main_cache = _pack_fp8_ds_mla_cache(main_kv, block_size)
+    main_cache = _pack_fp8_ds_mla_cache(main_kv, block_size, use_fnuz=main_use_fnuz)
     main_indices, main_indptr = _ragged_from_rows(main_rows, device)
 
     extra_rows: list[list[int]] | None = None
@@ -485,7 +398,7 @@ def test_sparse_attn_decode_split_k_kernel(
         rows = [[1, 3, 0, 5, 2, 4], [3, 0, 6]]
         extra_kv = torch.randn(7, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
         extra_rows = rows
-        extra_cache = _pack_fp8_ds_mla_cache(extra_kv, block_size, is_extra=True)
+        extra_cache = _pack_fp8_ds_mla_cache(extra_kv, block_size, use_fnuz=False)
         extra_indices, extra_indptr = _ragged_from_rows(rows, device)
 
     attn_sink = (
@@ -520,6 +433,7 @@ def test_sparse_attn_decode_split_k_kernel(
         block_size=block_size,
         extra_cache=extra_cache,
         extra_rows=extra_rows,
+        main_use_fnuz=main_use_fnuz,
     )
 
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)

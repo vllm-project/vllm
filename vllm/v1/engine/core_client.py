@@ -1434,6 +1434,12 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             # Increment local waiting count for better balancing between stats
             # updates from the coordinator (which happen every 100ms).
             current_counts[eng_index][0] += self.client_count
+            # Rotate the scan start so that ties (equal scores, e.g. right
+            # after a coordinator stats reset when engines look equally loaded)
+            # don't systematically favor the same engine. This removes the
+            # fixed tie-break bias without affecting load-aware decisions when
+            # scores actually differ.
+            self.eng_start_index = (self.eng_start_index + 1) % num_engines
 
         chosen_engine = self.core_engines[eng_index]
         # Record which engine is chosen for this request, to handle aborts.

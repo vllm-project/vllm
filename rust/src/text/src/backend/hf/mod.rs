@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 mod config;
 mod model_files;
 
@@ -5,7 +8,9 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use tracing::info;
-use vllm_tokenizer::{DynTokenizer, HuggingFaceTokenizer, TekkenTokenizer, TiktokenTokenizer};
+use vllm_tokenizer::{
+    DynTokenizer, HuggingFaceTokenizer, TekkenTokenizer, TiktokenTokenizer, Tokenizer,
+};
 
 use self::config::{GenerationConfig, load_generation_config};
 pub use self::config::{
@@ -53,23 +58,15 @@ impl HfTextBackend {
     pub fn from_resolved_model_files(files: ResolvedModelFiles, model_id: String) -> Result<Self> {
         let tokenizer_config = load_tokenizer_config(files.tokenizer_config_path.as_deref())?;
         let tokenizer = load_tokenizer(&files.tokenizer)?;
-        let primary_eos_token_id = tokenizer_config
-            .special_tokens
-            .eos_token
-            .as_ref()
-            .and_then(|token| tokenizer.token_to_id(token.as_str()));
-
         let model_config = load_model_config(files.config_path.as_deref())?;
         let model_vocab_size = model_config.vocab_size()? as usize;
         let generation_config = load_generation_config(files.generation_config_path.as_deref())?;
-        let mut extra_eos_token_ids = generation_config
-            .eos_token_id
-            .clone()
-            .map(|value| value.into_set())
-            .unwrap_or_default();
-        if let Some(primary_eos_token_id) = primary_eos_token_id {
-            extra_eos_token_ids.remove(&primary_eos_token_id);
-        }
+        let (primary_eos_token_id, extra_eos_token_ids) = resolve_eos_token_ids(
+            &tokenizer_config,
+            &model_config,
+            &generation_config,
+            tokenizer.as_ref(),
+        );
 
         info!(
             model_id,
@@ -93,6 +90,42 @@ impl HfTextBackend {
     pub fn resolved_model_files(&self) -> &ResolvedModelFiles {
         &self.files
     }
+}
+
+/// Resolve EOS hints from tokenizer, model, and generation configs.
+///
+/// Resolution rules:
+/// 1. Use the tokenizer-side EOS token as the primary EOS when it resolves to a
+///    token id.
+/// 2. Fall back to the first model-config EOS id when the tokenizer config does
+///    not provide a primary EOS.
+/// 3. Keep any remaining model/generation EOS ids as extra stop-token ids so
+///    they still participate in stopping and min-token handling.
+fn resolve_eos_token_ids(
+    tokenizer_config: &HfTokenizerConfig,
+    model_config: &ModelConfig,
+    generation_config: &GenerationConfig,
+    tokenizer: &dyn Tokenizer,
+) -> (Option<u32>, BTreeSet<u32>) {
+    let model_config_eos_token_ids = model_config.eos_token_ids();
+    let primary_eos_token_id = tokenizer_config
+        .special_tokens
+        .eos_token
+        .as_ref()
+        .and_then(|token| tokenizer.token_to_id(token.as_str()))
+        .or_else(|| model_config_eos_token_ids.first().copied());
+
+    let mut extra_eos_token_ids = generation_config
+        .eos_token_id
+        .clone()
+        .map(|value| value.into_set())
+        .unwrap_or_default();
+    extra_eos_token_ids.extend(model_config_eos_token_ids.iter().copied());
+    if let Some(primary_eos_token_id) = primary_eos_token_id {
+        extra_eos_token_ids.remove(&primary_eos_token_id);
+    }
+
+    (primary_eos_token_id, extra_eos_token_ids)
 }
 
 impl TextBackend for HfTextBackend {
@@ -123,5 +156,79 @@ impl TextBackend for HfTextBackend {
             default_repetition_penalty: self.generation_config.repetition_penalty,
             default_max_tokens: self.generation_config.max_new_tokens,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::{GenerationConfig, HfTokenizerConfig, ModelConfig, resolve_eos_token_ids};
+    use vllm_tokenizer::Tokenizer;
+
+    struct FakeTokenizer;
+
+    impl Tokenizer for FakeTokenizer {
+        fn encode(
+            &self,
+            _text: &str,
+            _add_special_tokens: bool,
+        ) -> vllm_tokenizer::Result<Vec<u32>> {
+            Ok(vec![])
+        }
+
+        fn decode(
+            &self,
+            _token_ids: &[u32],
+            _skip_special_tokens: bool,
+        ) -> vllm_tokenizer::Result<String> {
+            Ok(String::new())
+        }
+
+        fn token_to_id(&self, token: &str) -> Option<u32> {
+            (token == "</s>").then_some(2)
+        }
+
+        fn id_to_token(&self, id: u32) -> Option<String> {
+            (id == 2).then(|| "</s>".to_string())
+        }
+    }
+
+    #[test]
+    fn eos_resolution_uses_model_config_when_tokenizer_has_no_eos() {
+        let tokenizer_config: HfTokenizerConfig = serde_json::from_str("{}").unwrap();
+        let model_config: ModelConfig =
+            serde_json::from_str(r#"{"eos_token_id":[200006,200010]}"#).unwrap();
+        let generation_config: GenerationConfig = serde_json::from_str("{}").unwrap();
+
+        let (primary, extra) = resolve_eos_token_ids(
+            &tokenizer_config,
+            &model_config,
+            &generation_config,
+            &FakeTokenizer,
+        );
+
+        assert_eq!(primary, Some(200006));
+        assert_eq!(extra, BTreeSet::from([200010]));
+    }
+
+    #[test]
+    fn eos_resolution_keeps_tokenizer_eos_primary() {
+        let tokenizer_config: HfTokenizerConfig =
+            serde_json::from_str(r#"{"eos_token":"</s>"}"#).unwrap();
+        let model_config: ModelConfig =
+            serde_json::from_str(r#"{"eos_token_id":[2,200006]}"#).unwrap();
+        let generation_config: GenerationConfig =
+            serde_json::from_str(r#"{"eos_token_id":[2,200010]}"#).unwrap();
+
+        let (primary, extra) = resolve_eos_token_ids(
+            &tokenizer_config,
+            &model_config,
+            &generation_config,
+            &FakeTokenizer,
+        );
+
+        assert_eq!(primary, Some(2));
+        assert_eq!(extra, BTreeSet::from([200006, 200010]));
     }
 }

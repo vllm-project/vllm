@@ -340,10 +340,12 @@ def _combine_sampled_and_draft_tokens_kernel(
         # Handling prefill tokens. No sampled or draft tokens.
         return
 
-    if NUM_NEW_SAMPLED_TOKENS > 0:
+    # Keep prompt-tail slots intact; only rewrite generated-token slots.
+    first_logit_seq_pos = seq_len - num_logits
+    if NUM_NEW_SAMPLED_TOKENS > 0 and first_logit_seq_pos >= prefill_len:
         # Write the last sampled token ID to input_ids.
         last_token_id = tl.load(last_sampled_tokens_ptr + req_state_idx)
-        tl.store(input_ids_ptr + query_end - num_logits, last_token_id)
+        tl.store(input_ids_ptr + logits_start, last_token_id)
 
     # Write the draft tokens (if any) to input_ids.
     if num_draft_tokens > 0:

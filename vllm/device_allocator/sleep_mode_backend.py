@@ -81,9 +81,9 @@ class SleepModeBackend(ABC):
         return True
 
     @classmethod
-    def preserves_nccl(cls) -> bool:
-        """If False, NCCL communicators are destroyed by ``suspend`` and the
-        executor must re-initialize them on ``resume``."""
+    def preserves_communicators(cls) -> bool:
+        """If False, collective communicators (e.g. NCCL) are destroyed by
+        ``suspend`` and the executor must re-initialize them on ``resume``."""
         return False
 
     @classmethod
@@ -93,9 +93,10 @@ class SleepModeBackend(ABC):
         return False
 
     @classmethod
-    def preserves_graphs_with_nccl(cls) -> bool:
-        """If True, CUDA graphs containing NCCL collectives stay valid after
-        resume. False when NCCL is rebuilt (embedded comm handles go stale)."""
+    def preserves_graphs_with_communicators(cls) -> bool:
+        """If True, CUDA graphs containing collective communicators (e.g. NCCL)
+        stay valid after resume. False when communicators are rebuilt (embedded
+        comm handles go stale)."""
         return False
 
     @classmethod
@@ -132,9 +133,9 @@ class CuMemBackend(SleepModeBackend):
         self._state = "RUNNING"
 
     @classmethod
-    def preserves_nccl(cls) -> bool:
-        # NCCL buffers live outside CuMemAllocator's pool, so an allocator-level
-        # sleep leaves the communicators intact (no reinit needed on resume).
+    def preserves_communicators(cls) -> bool:
+        # Communicator buffers (e.g. NCCL) live outside CuMemAllocator's pool, so
+        # an allocator-level sleep leaves them intact (no reinit needed on resume).
         return True
 
 

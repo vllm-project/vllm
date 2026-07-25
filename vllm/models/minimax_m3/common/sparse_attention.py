@@ -20,6 +20,7 @@ from typing import ClassVar
 
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
@@ -56,6 +57,21 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.kv_cache_interface import AttentionSpec, is_quantized_kv_cache
 
 logger = init_logger(__name__)
+
+
+def _minimax_m3_aiter_sparse_pa_requested() -> bool:
+    return rocm_aiter_ops.is_enabled() and rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+
+
+def minimax_m3_use_aiter_sparse_pa(num_kv_heads: int) -> bool:
+    """Whether to use the ROCm AITER page-16 sparse PA prototype."""
+    requested = _minimax_m3_aiter_sparse_pa_requested()
+    if requested and num_kv_heads != 1:
+        raise ValueError(
+            "MiniMax M3 AITER sparse paged attention requires "
+            f"num_kv_heads == 1 per tensor-parallel rank, got {num_kv_heads}."
+        )
+    return requested
 
 
 class MiniMaxM3SparseBackend(AttentionBackend):
@@ -104,20 +120,36 @@ class MiniMaxM3SparseBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        return (num_blocks, 2, block_size, num_kv_heads, head_size)
+        if minimax_m3_use_aiter_sparse_pa(num_kv_heads):
+            # AITER's assembly paged-attention kernels require independently
+            # contiguous K and V storage. Keep that specialized layout behind
+            # the shuffle flag while every other implementation uses the
+            # packed-content contract introduced by #44455.
+            return (num_blocks, 2, block_size, num_kv_heads, head_size)
+        # K and V are packed into the content dim: logical (B, H, N, 2*hs).
+        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
 
     @staticmethod
     def get_kv_cache_stride_order(
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
-        # Permutation from get_kv_cache_shape to the actual memory layout.
+        # `stride_order` indicates the permutation that gets us from
+        # `get_kv_cache_shape` (logical (B, H, N, 2*hs)) to the actual memory
+        # layout we want.
         if include_num_layers_dimension:
             raise NotImplementedError  # no cross-layer KV blocks in M3
+        if _minimax_m3_aiter_sparse_pa_requested():
+            # The AITER page-16 sparse PA path reinterprets the K and V slices
+            # as separate SHUFFLE caches. Keep K/V physically separated so
+            # kv_cache[:, 0] and kv_cache[:, 1] are contiguous byte ranges.
+            return (1, 0, 2, 3, 4)
         cache_layout = get_kv_cache_layout()
         if cache_layout == "NHD":
-            stride_order = (0, 1, 2, 3, 4)
+            # (num_blocks, block_size, num_kv_heads, 2*head_size)
+            stride_order = (0, 2, 1, 3)
         elif cache_layout == "HND":
-            stride_order = (0, 1, 3, 2, 4)
+            # (num_blocks, num_kv_heads, block_size, 2*head_size)
+            stride_order = (0, 1, 2, 3)
         else:
             raise ValueError(f"Unknown cache layout format {cache_layout}.")
         return stride_order
@@ -360,6 +392,8 @@ class MiniMaxM3SparseTritonImpl(MiniMaxM3SparseImpl):
         kv_cache = (
             kv_cache.view(self.kv_cache_fp8_dtype) if self.use_fp8_kv else kv_cache
         )
+        k_scale = getattr(layer, "_k_scale", None) if self.use_fp8_kv else None
+        v_scale = getattr(layer, "_v_scale", None) if self.use_fp8_kv else None
 
         # Decode [:nd]: split-K over the selected blocks (request-major chunks).
         if main_md.num_decodes > 0:
@@ -375,6 +409,8 @@ class MiniMaxM3SparseTritonImpl(MiniMaxM3SparseImpl):
                 self.scale,
                 out[:nd],
                 d.decode_query_len,
+                k_scale=k_scale,
+                v_scale=v_scale,
             )
 
         # Prefill [nd:]: cu_seqlens_q already rebased to 0.
@@ -393,6 +429,8 @@ class MiniMaxM3SparseTritonImpl(MiniMaxM3SparseImpl):
                 self.num_kv_heads,
                 self.scale,
                 out[nd:],
+                k_scale=k_scale,
+                v_scale=v_scale,
             )
         return output
 
@@ -401,27 +439,38 @@ def select_main_impl_cls(
     *,
     topk_blocks: int,
     kv_cache_dtype: str,
+    num_kv_heads: int,
 ) -> type[MiniMaxM3SparseImpl]:
     """Pick the main attend impl off the main KV-cache dtype.
 
     Blackwell (SM100) uses the MSA attend for supported top-k block counts
-    when the KV cache is BF16 or FP8 E4M3; non-Blackwell and FP8 E5M2 fall
-    back to Triton. The MSA module is imported lazily so AMD/non-SM100 never
-    import fmha_sm100.
+    when the KV cache is BF16 or FP8 E4M3; MI355 uses AITER sparse PA
+    with shuffle KV cache layout; Other platforms and FP8 E5M2 fall
+    back to Triton. The MSA modules are imported lazily avoid import errors
+    on unsupported platforms.
     """
+    use_aiter_sparse_pa = minimax_m3_use_aiter_sparse_pa(num_kv_heads)
     use_msa = (
         current_platform.is_cuda()
         and current_platform.is_device_capability_family(100)
         and topk_blocks in (4, 8, 16, 32)
         and kv_cache_dtype != "fp8_e5m2"
     )
-    selected = "MSA" if use_msa else "Triton"
+    selected = (
+        "AITER_SPARSE_PA" if use_aiter_sparse_pa else ("MSA" if use_msa else "Triton")
+    )
     logger.info_once(
         "MiniMax M3 sparse attention selected %s (kv_cache_dtype=%s, topk_blocks=%s)",
         selected,
         kv_cache_dtype,
         topk_blocks,
     )
+    if use_aiter_sparse_pa:
+        from vllm.models.minimax_m3.amd.sparse_attention_msa import (
+            MiniMaxM3SparseAiterPAImpl,
+        )
+
+        return MiniMaxM3SparseAiterPAImpl
     if use_msa:
         from vllm.models.minimax_m3.nvidia.sparse_attention_msa import (
             MiniMaxM3SparseMSAImpl,
