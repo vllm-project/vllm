@@ -98,7 +98,7 @@ GIT_ROOT="${GIT_ROOT:-$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)}"
 SMI_BIN=$(which nvidia-smi || which rocm-smi || echo "")
 
 # Trap the SIGINT signal (triggered by Ctrl+C)
-trap 'kill $(jobs -pr)' SIGINT SIGTERM EXIT
+trap 'kill $(jobs -pr) 2>/dev/null || true' SIGINT SIGTERM EXIT
 
 # Waits for vLLM to start.
 wait_for_server() {
@@ -111,7 +111,9 @@ wait_for_server() {
 
 # Function to clean up previous instances
 wait_for_gpu_memory_release() {
-  PYTHONPATH="${GIT_ROOT}" python3 -c "from tests.utils import wait_for_rocm_memory_to_settle; wait_for_rocm_memory_to_settle()"
+  if [[ "$SMI_BIN" == *"rocm"* ]]; then
+    PYTHONPATH="${GIT_ROOT}" python3 -c "from tests.utils import wait_for_rocm_memory_to_settle; wait_for_rocm_memory_to_settle()"
+  fi
 }
 
 cleanup_instances() {
