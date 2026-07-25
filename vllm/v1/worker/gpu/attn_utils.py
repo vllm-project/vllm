@@ -325,7 +325,17 @@ def _reshape_kv_cache(
 
                 # FIXME(woosuk): Add kv_cache_stride_order to all attention backends.
                 try:
-                    kv_cache_stride_order = group.backend.get_kv_cache_stride_order()
+                    try:
+                        kv_cache_stride_order = (
+                            group.backend.get_kv_cache_stride_order(
+                                cache_dtype_str=layer_cache_dtype
+                            )
+                        )
+                    except TypeError:
+                        # backend predates the cache_dtype_str kwarg
+                        kv_cache_stride_order = (
+                            group.backend.get_kv_cache_stride_order()
+                        )
                     assert len(kv_cache_stride_order) == len(kv_cache_shape)
                 except (AttributeError, NotImplementedError):
                     kv_cache_stride_order = tuple(range(len(kv_cache_shape)))

@@ -403,6 +403,16 @@ class FlashInferBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         if cache_dtype_str == "nvfp4":
             full_dim = nvfp4_kv_cache_full_dim(head_size)
+            if current_platform.is_device_capability_family(120):
+                # SM120 reads paged NVFP4 KV with fa2 prefill / XQA decode, which
+                # need the per-head split layout. #44455 folded K/V into the
+                # content dim for trtllm-gen (SM100); for NVFP4 the last dim is
+                # [data | scale], so a 2*num_kv_heads head-group slice no longer
+                # yields the contiguous [data-block | scale-block] region that
+                # nvfp4_split_data_scale() reconstructs its views from, and
+                # attention dequantises against wrong scales (argmax collapses to
+                # token id 0). Keep SM120 on the pre-#44455 5-D layout.
+                return (num_blocks, 2, block_size, num_kv_heads, full_dim)
             return (num_blocks, 2 * num_kv_heads, block_size, full_dim)
         # Pack K and V in the content dim (B, H, N, 2*hs).
         return (num_blocks, num_kv_heads, block_size, 2 * head_size)
@@ -410,11 +420,29 @@ class FlashInferBackend(AttentionBackend):
     @staticmethod
     def get_kv_cache_stride_order(
         include_num_layers_dimension: bool = False,
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         # `stride_order` indicates the permutation that gets us from
         # `get_kv_cache_shape` (logical (B, H, N, 2*hs)) to the actual memory
         # layout we want.
         cache_layout = get_kv_cache_layout()
+        if cache_dtype_str == "nvfp4" and current_platform.is_device_capability_family(
+            120
+        ):
+            # Matches the 5-D SM120 NVFP4 shape returned above.
+            if cache_layout == "NHD":
+                return (
+                    (1, 0, 2, 3, 4, 5)
+                    if include_num_layers_dimension
+                    else (0, 1, 2, 3, 4)
+                )
+            if cache_layout == "HND":
+                return (
+                    (1, 2, 4, 0, 3, 5)
+                    if include_num_layers_dimension
+                    else (0, 1, 3, 2, 4)
+                )
+            raise ValueError(f"Unknown cache layout format {cache_layout}.")
         if cache_layout == "NHD" and include_num_layers_dimension:
             # (num_blocks, num_layers, block_size, num_kv_heads, 2*head_size)
             return (1, 0, 3, 2, 4)
@@ -1823,10 +1851,13 @@ class FlashInferImpl(AttentionImpl):
             assert attn_metadata.cascade_wrapper is not None
             stride_order = FlashInferBackend.get_kv_cache_stride_order()
             if self.is_kvcache_nvfp4:
-                kv_cache_views = tuple(
-                    cache.permute(*stride_order)
-                    for cache in kv_cache.split(self.num_kv_heads, dim=1)
-                )
+                if current_platform.is_device_capability_family(120):
+                    kv_cache_views = (kv_cache[:, 0], kv_cache[:, 1])
+                else:
+                    kv_cache_views = tuple(
+                        cache.permute(*stride_order)
+                        for cache in kv_cache.split(self.num_kv_heads, dim=1)
+                    )
             else:
                 kv_perm = kv_cache.permute(*stride_order)
                 kv_cache_views = kv_perm.split(self.head_size, dim=-1)
@@ -1841,8 +1872,17 @@ class FlashInferImpl(AttentionImpl):
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_prefill_tokens = attn_metadata.num_prefill_tokens
 
-        stride_order = FlashInferBackend.get_kv_cache_stride_order()
-        kv_cache_permute = kv_cache.permute(*stride_order)  # HND and contiguous
+        stride_order = FlashInferBackend.get_kv_cache_stride_order(
+            cache_dtype_str=self.kv_cache_dtype
+        )
+        nvfp4_sm120 = self.is_kvcache_nvfp4 and current_platform.is_device_capability_family(
+            120
+        )
+        if nvfp4_sm120:
+            # 5-D (B, 2, N, H, full_dim): K/V are taken on the leading axis.
+            kv_cache_permute = kv_cache
+        else:
+            kv_cache_permute = kv_cache.permute(*stride_order)  # HND and contiguous
         # Fix degenerate strides on any size-1 dimension (e.g. num_kv_heads=1
         # with TP=8).  PyTorch permits non-canonical strides on size-1 dims;
         # CUDA TMA requires ≥16-byte alignment on all non-outermost strides.
@@ -1865,11 +1905,17 @@ class FlashInferImpl(AttentionImpl):
         nvfp4_kv_data = None
         nvfp4_kv_block_scales = None
         if self.is_kvcache_nvfp4:
-            k_cache, v_cache = kv_cache.split(self.num_kv_heads, dim=1)
-            kv_cache_tuple = (
-                canonicalize_singleton_dim_strides(k_cache.permute(*stride_order)),
-                canonicalize_singleton_dim_strides(v_cache.permute(*stride_order)),
-            )
+            if nvfp4_sm120:
+                kv_cache_tuple = (
+                    canonicalize_singleton_dim_strides(kv_cache[:, 0]),
+                    canonicalize_singleton_dim_strides(kv_cache[:, 1]),
+                )
+            else:
+                k_cache, v_cache = kv_cache.split(self.num_kv_heads, dim=1)
+                kv_cache_tuple = (
+                    canonicalize_singleton_dim_strides(k_cache.permute(*stride_order)),
+                    canonicalize_singleton_dim_strides(v_cache.permute(*stride_order)),
+                )
             k_data, k_sf = nvfp4_split_data_scale(kv_cache_tuple[0])
             v_data, v_sf = nvfp4_split_data_scale(kv_cache_tuple[1])
             nvfp4_kv_data = (k_data, v_data)
@@ -2305,7 +2351,13 @@ class FlashInferImpl(AttentionImpl):
             # and value[:num_actual_tokens] because the reshape_and_cache_flash
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
-            if self.is_kvcache_nvfp4:
+            if self.is_kvcache_nvfp4 and current_platform.is_device_capability_family(
+                120
+            ):
+                # SM120 5-D (B, 2, N, H, full_dim): K/V on the leading axis.
+                k_cache = kv_cache[:, 0]
+                v_cache = kv_cache[:, 1]
+            elif self.is_kvcache_nvfp4:
                 # (B, 2*H, N, full_dim) -> ((B, N, H, full_dim),
                 #                            (B, N, H, full_dim));
                 # K heads first, then V heads.
