@@ -6307,6 +6307,9 @@ class GPUModelRunner(
                     self.drafter, DFlashProposer
                 ):
                     drafter_extra["num_query_tokens"] = drafter_dummy_num_tokens
+                    # Time the draft sampling path too, so the D-Cut cost table
+                    # includes the LM head and keep-length selection.
+                    drafter_extra["profile_num_reqs"] = dcut_profile_num_reqs
                 self.drafter.dummy_run(
                     num_tokens,
                     use_cudagraphs=use_cudagraphs,

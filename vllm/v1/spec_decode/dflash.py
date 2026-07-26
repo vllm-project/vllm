@@ -12,6 +12,7 @@ from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.spec_decode.utils import (
@@ -159,8 +160,10 @@ class DFlashProposer(SpecDecodeBaseProposer):
                     _DCUT_FALLBACK_RATIO,
                 )
                 dcut = _DCUT_FALLBACK_RATIO
+            # Budget is over target verification slots (1 + num_spec), not the
+            # drafter's query width, which differs for anchor-as-first DSpark.
             num_keep_draft_tokens = self._get_dcut_keep_count(
-                bs, self.num_query_per_req, float(dcut)
+                bs, 1 + self.num_speculative_tokens, float(dcut)
             )
             _, top_indices = torch.topk(cumlogprobs, k=num_keep_draft_tokens)
             updates = torch.ones_like(top_indices, dtype=torch.int32)
@@ -182,13 +185,13 @@ class DFlashProposer(SpecDecodeBaseProposer):
         return keep_lens
 
     @staticmethod
-    def _get_dcut_keep_count(bs: int, num_query_per_req: int, ratio: float) -> int:
-        """Draft-token budget for a keep ratio over target-forward query slots.
+    def _get_dcut_keep_count(bs: int, num_verify_per_req: int, ratio: float) -> int:
+        """Draft-token budget for a keep ratio over target verification slots.
 
-        One query slot per request (the anchor) is always retained, so the
-        budget is the ratio applied to all query slots minus those anchors.
+        One slot per request (the anchor) is always retained, so the budget is
+        the ratio applied to all verification slots minus those anchors.
         """
-        return max(0, math.ceil(bs * num_query_per_req * ratio) - bs)
+        return max(0, math.ceil(bs * num_verify_per_req * ratio) - bs)
 
     def take_dcut_keep_lens(self) -> torch.Tensor | None:
         return self._dcut_keep_lens_cache
@@ -203,13 +206,14 @@ class DFlashProposer(SpecDecodeBaseProposer):
             _DCUT_RATIO_NUMS, device=self.device, dtype=torch.long
         )
         keep_counts = torch.div(
-            bs_range * self.num_query_per_req * ratio_nums + 3,
+            bs_range * (1 + self.num_speculative_tokens) * ratio_nums + 3,
             4,
             rounding_mode="floor",
         )
         self._dcut_keep_counts = torch.clamp(keep_counts - bs_range, min=0)
         for bs in self._get_dcut_profile_batch_sizes():
             entries: list[tuple[int, float]] = []
+            # Drafting always runs at full width; only verification is pruned.
             full_draft_tokens = bs * self.num_query_per_req
             self._dcut_costs_by_bs[bs] = torch.ones(
                 len(_DCUT_RATIO_NUMS), dtype=torch.float32, device=self.device
@@ -229,14 +233,72 @@ class DFlashProposer(SpecDecodeBaseProposer):
         if costs_by_bs:
             logger.info("D-Cut warmup full-cost table: %s", costs_by_bs)
 
+    def _dummy_sample_run(self, hidden_states: torch.Tensor, num_reqs: int) -> None:
+        """Run the draft sampling path on dummy hidden states, for cost profiling.
+
+        Dispatches through ``_finish_parallel_proposal`` so each runtime is timed
+        on its own path: DFlash samples all positions in one pass, while DSpark
+        walks the block sequentially through its correction and Markov heads.
+        Both then run the D-Cut keep-length selection.
+        """
+        num_sample_tokens = num_reqs * self.num_speculative_tokens
+        if hidden_states.shape[0] < num_sample_tokens:
+            return
+        # Dummy hidden states may hold inf/nan, which would break sampling.
+        sample_hidden_states = torch.rand_like(hidden_states[:num_sample_tokens])
+        self._finish_parallel_proposal(
+            sample_hidden_states,
+            self._make_dummy_sampling_metadata(num_reqs),
+        )
+
+    def _make_dummy_sampling_metadata(self, num_reqs: int) -> SamplingMetadata:
+        """Minimal metadata that keeps draft sampling on its production branch.
+
+        Draft sampling reads only ``all_greedy`` and ``temperature`` (top-p/top-k
+        are deliberately not applied to drafts), so the rest is inert. The
+        temperature is size-1 to broadcast over both layouts this is used for:
+        DFlash scores ``[num_reqs * num_spec, vocab]`` in one pass while DSpark
+        scores ``[num_reqs, vocab]`` once per speculative token.
+        """
+        dummy_tensors = lambda v: torch.full((num_reqs,), v, device=self.device)  # noqa: E731
+        return SamplingMetadata(
+            temperature=torch.full((1,), 0.5, device=self.device),
+            all_greedy=not self._enable_probabilistic_draft_probs,
+            all_random=False,
+            top_p=None,
+            top_k=None,
+            generators={},
+            max_num_logprobs=None,
+            logprob_token_ids=None,
+            no_penalties=True,
+            prompt_token_ids=None,
+            frequency_penalties=dummy_tensors(0.0),
+            presence_penalties=dummy_tensors(0.0),
+            repetition_penalties=dummy_tensors(1.0),
+            output_token_ids=[[] for _ in range(num_reqs)],
+            spec_token_ids=[[] for _ in range(num_reqs)],
+            allowed_token_ids_mask=None,
+            bad_words_token_ids={},
+            logitsprocs=LogitsProcessors(),
+        )
+
     def _get_dcut_profile_batch_sizes(self) -> tuple[int, ...]:
-        max_bs = min(self.max_batch_size, self._runner.max_num_reqs)
+        # A full-ratio probe schedules bs * (1 + num_spec) target tokens, so cap
+        # the batch size to keep _dummy_run within max_num_batched_tokens.
+        verify_per_req = 1 + self.num_speculative_tokens
+        max_bs = min(
+            self.max_batch_size,
+            self._runner.max_num_reqs,
+            self._runner.max_num_tokens // verify_per_req,
+        )
+        if max_bs <= 0:
+            return ()
         capture_sizes = self.compilation_config.cudagraph_capture_sizes or []
         sizes = [
-            capture_size // self.num_query_per_req
+            capture_size // verify_per_req
             for capture_size in capture_sizes
-            if capture_size % self.num_query_per_req == 0
-            and 0 < capture_size // self.num_query_per_req <= max_bs
+            if capture_size % verify_per_req == 0
+            and 0 < capture_size // verify_per_req <= max_bs
         ]
         sizes.append(max_bs)
         return tuple(sorted(set(sizes)))
@@ -438,6 +500,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
         is_graph_capturing: bool = False,
         slot_mappings: dict[str, torch.Tensor] | None = None,
         num_query_tokens: int | None = None,
+        profile_num_reqs: int | None = None,
     ) -> None:
         """
         Key differences to default dummy_run:
@@ -446,6 +509,12 @@ class DFlashProposer(SpecDecodeBaseProposer):
         use the unpadded num_tokens instead of num_input_tokens
         - max_query_tokens is quite small, DFlash only sees spec tokens as queries
         - Multimodal inputs are not currently supported
+
+        When ``profile_num_reqs`` is set, the draft sampling path is run too so
+        that D-Cut cost profiling sees the LM head (once for DFlash, once per
+        speculative token for DSpark's sequential loop) and the keep-length
+        selection. Backbone-only timing would understate the fixed per-step
+        cost that the selector divides its acceptance score by.
         """
         num_query_tokens = min(num_query_tokens or num_tokens, self.max_query_tokens)
         cudagraph_runtime_mode, num_input_tokens, num_tokens_across_dp = (
@@ -501,11 +570,13 @@ class DFlashProposer(SpecDecodeBaseProposer):
                 slot_mapping=slot_mapping_dict,
             ),
         ):
-            self.model(
+            hidden_states = self.model(
                 input_ids=self.input_ids[:num_input_tokens],
                 positions=self._get_positions(num_input_tokens),
                 inputs_embeds=None,
             )
+        if profile_num_reqs is not None:
+            self._dummy_sample_run(hidden_states, profile_num_reqs)
 
     @override
     def build_model_inputs_first_pass(

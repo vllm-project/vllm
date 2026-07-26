@@ -25,18 +25,17 @@ from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingStats
 # ---------------------------------------------------------------------------
 # Keep-count formula
 # ---------------------------------------------------------------------------
-# D-Cut interprets the ratio as the fraction of target-forward query tokens
-# kept. One query slot per request (the anchor) is always retained, so the
-# draft budget is ceil(bs * num_query_per_req * ratio) - bs. For DFlash and
-# bonus-anchor DSpark num_query_per_req is 1 + K; for anchor-as-first DSpark
-# it is K.
+# D-Cut prunes target verification width, which is always 1 + K per request
+# (one anchor slot plus one slot per draft) regardless of how the drafter lays
+# out its own queries. The anchor is always retained, so the draft budget is
+# ceil(bs * (K + 1) * ratio) - bs.
 def test_dcut_keep_count_full_ratio_keeps_all_drafts():
     # ratio=1.0 keeps every draft token: bs*(K+1) - bs == bs*K.
     assert DFlashProposer._get_dcut_keep_count(8, 4, 1.0) == 8 * 3
 
 
 def test_dcut_keep_count_reserves_anchor_slot():
-    # 4 reqs, 4 query slots each -> 16 slots; half is 8, minus 4 anchors = 4.
+    # 4 reqs, 4 verify slots each -> 16 slots; half is 8, minus 4 anchors = 4.
     assert DFlashProposer._get_dcut_keep_count(4, 4, 0.5) == 4
 
 
@@ -61,11 +60,14 @@ def test_dcut_keep_count_anchor_boundary():
     assert DFlashProposer._get_dcut_keep_count(1, 4, 0.26) == 1
 
 
-def test_dcut_keep_count_anchor_as_first_layout():
-    # Anchor-as-first DSpark emits K query slots (not K+1), so the same ratio
-    # yields a smaller budget than the bonus-anchor layout above.
-    assert DFlashProposer._get_dcut_keep_count(4, 3, 0.5) == 2
-    assert DFlashProposer._get_dcut_keep_count(4, 4, 0.5) == 4
+def test_dcut_keep_count_uses_verify_width_not_drafter_layout():
+    # Regression: the budget must key off target verify width (K+1), not the
+    # drafter's query width. DSpark's anchor-as-first block emits only K query
+    # tokens, but target still verifies K+1 slots, so ratio=1.0 has to keep all
+    # K drafts. Feeding the drafter width here would cap it at K-1.
+    num_spec = 3
+    verify_width = num_spec + 1
+    assert DFlashProposer._get_dcut_keep_count(4, verify_width, 1.0) == 4 * num_spec
 
 
 # ---------------------------------------------------------------------------
