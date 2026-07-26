@@ -34,8 +34,11 @@ def marlin_permute_weights(
     q_w, size_k, size_n, perm, tile=GPTQ_MARLIN_TILE, is_a_8bit=False
 ):
     assert q_w.shape == (size_k, size_n)
-    assert size_k % tile == 0, f"size_k = {size_k}, tile = {tile}"
-    assert size_n % tile == 0, f"size_k = {size_n}, tile = {tile}"
+    target_tile_k_size = tile * (2 if is_a_8bit else 1)
+    assert size_k % target_tile_k_size == 0, (
+        f"size_k = {size_k}, tile_k_size = {target_tile_k_size}"
+    )
+    assert size_n % tile == 0, f"size_n = {size_n}, tile = {tile}"
 
     if is_a_8bit:
         # Permute weights to 32x32 marlin tiles
