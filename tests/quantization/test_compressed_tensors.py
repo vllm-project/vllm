@@ -22,6 +22,10 @@ from vllm.model_executor.kernels.linear import (
     Fp8BlockScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.fused_moe import UnquantizedFusedMoEMethod
+from vllm.model_executor.layers.linear import (
+    RowParallelLinear,
+    UnquantizedLinearMethod,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsConfig,
     CompressedTensorsLinearMethod,
@@ -653,6 +657,47 @@ def test_get_quant_method_returns_none_for_unmatched_parallel_lm_head():
     assert method is None, (
         f"Expected None for unmatched ParallelLMHead, got {type(method).__name__}"
     )
+
+
+def _make_draft_linear() -> Mock:
+    mock_layer = Mock(spec=RowParallelLinear)
+    mock_layer.__class__ = RowParallelLinear
+    return mock_layer
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["model.layers.0.mlp.down_proj", r"re:model\.layers\.\d+\.mlp\.down_proj"],
+)
+def test_get_quant_method_matches_targets_under_model_root_prefix(target):
+    """Layer-name targets must match when the model loads under a root prefix.
+
+    Speculative drafters load under a synthetic `draft_model` root, but their
+    checkpoint's targets are relative to the checkpoint. Without stripping the
+    root, only `Linear`-style class-name targets match, so mixed-precision
+    `config_groups` checkpoints load unquantized and fail on `weight_packed`.
+    """
+    config = _make_ct_config(target=target)
+    config.model_root_prefix = "draft_model"
+
+    method = config.get_quant_method(
+        _make_draft_linear(), prefix="draft_model.model.layers.0.mlp.down_proj"
+    )
+
+    assert isinstance(method, CompressedTensorsLinearMethod)
+
+
+def test_get_quant_method_honors_ignore_under_model_root_prefix():
+    """The ignore list is checkpoint-relative too, so it must survive the root."""
+    config = _make_ct_config(target="Linear")
+    config.ignore = ["model.layers.0.mlp.down_proj"]
+    config.model_root_prefix = "draft_model"
+
+    method = config.get_quant_method(
+        _make_draft_linear(), prefix="draft_model.model.layers.0.mlp.down_proj"
+    )
+
+    assert isinstance(method, UnquantizedLinearMethod)
 
 
 def test_find_matched_target_returns_none_on_no_match():
