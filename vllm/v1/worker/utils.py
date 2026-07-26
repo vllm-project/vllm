@@ -299,6 +299,17 @@ class AttentionGroup:
         assert len(self.metadata_builders) > ubatch_id
         return self.metadata_builders[ubatch_id]
 
+    @property
+    def supports_fused_decode_graph(self) -> bool:
+        return self.get_metadata_builder().supports_fused_decode_graph
+
+    def refresh_meta_for_draft_decodes(
+        self,
+        attn_metadata: Mapping[str, Any],
+    ) -> None:
+        metadata = attn_metadata[self.layer_names[0]]
+        self.get_metadata_builder().refresh_meta_for_draft_decodes(metadata)
+
 
 def select_common_block_size(
     kv_manager_block_size: int,
