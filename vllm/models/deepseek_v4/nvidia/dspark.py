@@ -60,6 +60,7 @@ from .dspark_triton import (
     dspark_triton_attention,
 )
 from .model import (
+    DeepseekV4Model,
     DeepseekV4MoE,
     _select_dsv4_attn_cls,
     make_deepseek_v4_expert_params_mapping,
@@ -1089,10 +1090,6 @@ class DeepSeekV4DSpark(nn.Module):
                     params_dict[name][:n].copy_(narrow_weight)
                     loaded_params.add(name)
                     continue
-                if ".shared_experts.w2" in name:
-                    name = name.replace(
-                        ".shared_experts.w2", ".shared_experts.down_proj"
-                    )
                 if name.endswith(".ffn.gate.bias"):
                     name = name.replace(
                         ".ffn.gate.bias",

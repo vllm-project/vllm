@@ -67,6 +67,7 @@ def deep_gemm_fp8_o_proj(
     )
     # MarlinFP8.process_weights_after_loading renames block-FP8 scales to
     # weight_scale_inv. Non-Marlin kernels keep the on-disk weight_scale name.
+    # CompressedTensors non-block schemes only expose weight_scale.
     wo_a_scale = getattr(wo_a, "weight_scale_inv", None)
     if wo_a_scale is None:
         wo_a_scale = wo_a.weight_scale

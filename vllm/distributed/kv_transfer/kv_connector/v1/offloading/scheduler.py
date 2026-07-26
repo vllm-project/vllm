@@ -50,7 +50,7 @@ from vllm.v1.kv_offload.base import (
     make_offload_key,
 )
 from vllm.v1.outputs import KVConnectorOutput
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
 
@@ -94,12 +94,6 @@ class GroupOffloadConfig(NamedTuple):
     # of these groups is volatile and lacks a stable hash, so it must
     # be excluded from store and load scheduling.
     is_eagle_group: bool = False
-    # Upper bound on the GPU blocks this group's pending (to-load) span can
-    # touch, used as a sanity check in update_state_after_alloc. None for
-    # full-attention groups (unbounded). For sliding-window groups this counts
-    # an unaligned window start (vLLM #48959); for Mamba it is the single-state
-    # footprint.
-    max_pending_gpu_blocks: int | None = None
 
 
 def get_sliding_window_size_in_chunks(
@@ -113,41 +107,6 @@ def get_sliding_window_size_in_chunks(
         # Mamba depends on a single state
         return 1
 
-    assert isinstance(kv_cache_spec, FullAttentionSpec)
-    return None
-
-
-def max_pending_gpu_blocks_for_group(
-    kv_cache_spec: KVCacheSpec,
-    tokens_per_block: int,
-    blocks_per_chunk: int,
-) -> int | None:
-    """Upper bound on the GPU blocks a group's pending (to-load) span can touch.
-
-    A sliding-window group's live span is ``sliding_window - 1`` tokens starting
-    at an arbitrary offset, so it can intersect
-    ``cdiv(sliding_window + tokens_per_block - 1, tokens_per_block)`` physical GPU
-    blocks -- one more than ``cdiv(sliding_window, tokens_per_block)`` whenever the
-    span is not GPU-block-aligned. Bounding instead by the chunk-rounded window
-    (``sliding_window_size_in_chunks * blocks_per_chunk``) drops that extra block
-    when the window is a chunk multiple, which fatally trips the
-    ``update_state_after_alloc`` sanity assertion (vLLM #48959).
-
-    Args:
-        kv_cache_spec: The group's KV cache spec.
-        tokens_per_block: GPU block size in tokens.
-        blocks_per_chunk: GPU blocks per offloaded chunk.
-
-    Returns:
-        The bound, or None for full-attention groups (no pending-span limit).
-    """
-    if isinstance(kv_cache_spec, SlidingWindowSpec):
-        return cdiv(
-            kv_cache_spec.sliding_window + tokens_per_block - 1, tokens_per_block
-        )
-    if isinstance(kv_cache_spec, MambaSpec):
-        # Mamba depends on a single state (one chunk's worth of GPU blocks).
-        return blocks_per_chunk
     assert isinstance(kv_cache_spec, FullAttentionSpec)
     return None
 
@@ -283,11 +242,6 @@ class SchedulerOffloadConfig(NamedTuple):
                         kv_cache_config.kv_cache_groups[idx]
                     ),
                     is_eagle_group=idx in eagle_groups,
-                    max_pending_gpu_blocks=max_pending_gpu_blocks_for_group(
-                        kv_cache_config.kv_cache_groups[idx].kv_cache_spec,
-                        tokens_per_block,
-                        spec.blocks_per_chunk,
-                    ),
                 )
                 for idx, tokens_per_block in enumerate(spec.tokens_per_block)
             ),
@@ -324,6 +278,8 @@ class RequestOffloadState:
     # time.monotonic() of this request's first deferred offload lookup;
     # None once consumed (observed) or while no lookup is pending.
     deferred_lookup_start_time: float | None = None
+    # True once on_request_finished has been signaled to the manager.
+    finished_signaled: bool = False
 
     def __post_init__(self) -> None:
         self.group_states = tuple(
@@ -372,9 +328,12 @@ class RequestOffloadState:
             group_state.block_ids.extend(new_blocks)
 
     def storable_chunks(
-        self, group_config: "GroupOffloadConfig", num_offloadable_tokens: int
+        self,
+        group_config: "GroupOffloadConfig",
+        group_state: RequestGroupState,
+        num_offloadable_tokens: int,
     ) -> int:
-        """Number of leading offloaded chunks eligible for store.
+        """Number of allocated leading offloaded chunks eligible for store.
 
         For eagle/MTP groups the volatile trailing chunk of the offloadable
         range is excluded while decoding: the draft-layer KV of the last
@@ -391,7 +350,10 @@ class RequestOffloadState:
         is_decoding = num_offloadable_tokens > self.req.num_prompt_tokens
         if group_config.is_eagle_group and is_decoding:
             num_chunks = max(0, num_chunks - 1)
-        return num_chunks
+        num_allocated_chunks = (
+            len(group_state.block_ids) // self.config.blocks_per_chunk
+        )
+        return min(num_chunks, num_allocated_chunks)
 
     def advance_stored_idx(self, num_offloadable_tokens: int) -> None:
         # max(): at the prefill->decode transition of a chunk-aligned prompt,
@@ -402,7 +364,7 @@ class RequestOffloadState:
         ):
             group_state.next_stored_chunk_idx = max(
                 group_state.next_stored_chunk_idx,
-                self.storable_chunks(group_config, num_offloadable_tokens),
+                self.storable_chunks(group_config, group_state, num_offloadable_tokens),
             )
 
     def update_num_hit_chunks(self, num_cached_tokens: int) -> None:
@@ -520,13 +482,6 @@ class OffloadingConnectorScheduler:
         if self.config.offload_prompt_only:
             num = min(num, req_status.req.num_prompt_tokens)
         return num
-
-    def _maybe_cleanup_finished_req(
-        self, req_id: str, req_status: RequestOffloadState
-    ) -> None:
-        """Clean up req_status if finished and no in-flight jobs."""
-        if req_status.req.is_finished() and not req_status.transfer_jobs:
-            del self._req_status[req_id]
 
     def _maximal_prefix_lookup(
         self,
@@ -900,9 +855,12 @@ class OffloadingConnectorScheduler:
             )
             num_pending_gpu_blocks = num_gpu_blocks - num_locally_computed_gpu_blocks
 
-            if group_config.max_pending_gpu_blocks is not None:
+            if group_config.sliding_window_size_in_chunks is not None:
                 assert (
-                    num_pending_gpu_blocks <= group_config.max_pending_gpu_blocks
+                    num_pending_gpu_blocks
+                    <= group_config.sliding_window_size_in_chunks
+                    * self.config.blocks_per_chunk
+                    + 1
                 )
 
             num_chunks = cdiv(num_cached_tokens, tokens_per_chunk)
@@ -1018,7 +976,9 @@ class OffloadingConnectorScheduler:
                 continue
             req = req_status.req
 
-            if req.is_finished():
+            if req.status is RequestStatus.FINISHED_ABORTED:
+                num_tokens_after_batch = req.num_computed_tokens
+            elif req.is_finished():
                 num_tokens_after_batch = req.num_tokens
             else:
                 num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
@@ -1035,7 +995,7 @@ class OffloadingConnectorScheduler:
                 self.config.kv_group_configs, req_status.group_states
             ):
                 num_chunks = req_status.storable_chunks(
-                    group_config, num_offloadable_tokens
+                    group_config, group_state, num_offloadable_tokens
                 )
 
                 start_chunk_idx = group_state.next_stored_chunk_idx
@@ -1077,7 +1037,6 @@ class OffloadingConnectorScheduler:
 
             if not new_offload_keys:
                 req_status.advance_stored_idx(num_offloadable_tokens)
-                self._maybe_cleanup_finished_req(req_id, req_status)
                 continue
 
             store_output = self.manager.prepare_store(
@@ -1088,12 +1047,10 @@ class OffloadingConnectorScheduler:
                     _ConnectorMetricName.ALLOCATION_FAILURE
                 )
                 logger.warning("Request %s: cannot store chunks", req_id)
-                self._maybe_cleanup_finished_req(req_id, req_status)
                 continue
 
             if not store_output.keys_to_store:
                 req_status.advance_stored_idx(num_offloadable_tokens)
-                self._maybe_cleanup_finished_req(req_id, req_status)
                 continue
 
             self._touch(req_status)
@@ -1112,7 +1069,7 @@ class OffloadingConnectorScheduler:
                     group_config.sliding_window_size_in_chunks is not None
                 )
                 num_chunks = req_status.storable_chunks(
-                    group_config, num_offloadable_tokens
+                    group_config, group_state, num_offloadable_tokens
                 )
                 start_chunk_idx = group_state.next_stored_chunk_idx
                 block_ids = group_state.block_ids
@@ -1237,6 +1194,17 @@ class OffloadingConnectorScheduler:
             store_jobs=self._build_store_jobs(scheduler_output),
             jobs_to_flush=self._current_batch_jobs_to_flush,
         )
+
+        # All prepare_store calls for finished requests have been issued.
+        # Signal on_request_finished and clean up state where possible.
+        for req_id in scheduler_output.finished_req_ids or ():
+            req_status = self._req_status.get(req_id)
+            if req_status is None:
+                continue
+            req_status.finished_signaled = True
+            self.manager.on_request_finished(req_status.req_context)
+            if not req_status.transfer_jobs:
+                del self._req_status[req_id]
         self._current_batch_load_jobs = {}
         self._current_batch_jobs_to_flush = set()
         self._current_batch_allocated_block_ids = set()
@@ -1327,7 +1295,7 @@ class OffloadingConnectorScheduler:
 
             del self._jobs[job_id]
             req_status.transfer_jobs.remove(job_id)
-            if not req_status.transfer_jobs and req_status.req.is_finished():
+            if req_status.finished_signaled and not req_status.transfer_jobs:
                 del self._req_status[job_status.req_id]
 
     def get_stats(self) -> OffloadingConnectorStats | None:
@@ -1369,7 +1337,6 @@ class OffloadingConnectorScheduler:
             self.manager.on_request_finished(req_context)
             return False, None
 
-        self.manager.on_request_finished(req_status.req_context)
         self._maybe_observe_lookup_async_delay(req_status)
 
         # Update offload keys with final block hash so _build_store_jobs can
@@ -1413,6 +1380,8 @@ class OffloadingConnectorScheduler:
 
         for req_id, status in list(self._req_status.items()):
             if status.req.is_finished():
+                if not status.finished_signaled:
+                    self.manager.on_request_finished(status.req_context)
                 del self._req_status[req_id]
 
         # Reset offloading manager cache

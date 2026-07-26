@@ -37,18 +37,24 @@ class DSparkSpeculator(DFlashSpeculator):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # DSpark only stores the combined main_x hidden state, not the
-        # HC-multiplexed aux hidden state used by DFlash.
+        # HC-multiplexed aux hidden state used by DFlash. Size the base
+        # class's buffer directly instead of re-allocating it after super().
         assert vllm_config.speculative_config is not None
         draft_hidden = (
             vllm_config.speculative_config.draft_model_config.get_hidden_size()
         )
         super().__init__(vllm_config, device, hidden_states_size=draft_hidden)
 
-        # Anchor-first: N query tokens per request (anchor + N-1 noise), not 1+N.
-        self.num_query_per_req = self.num_speculative_steps
-
-        # The anchor query position is itself a prediction (see module docstring).
-        self.sample_from_anchor = True
+        # Whether to sample from the anchor position. When True, uses anchor-as-first
+        # (N slots, each position predicts the next token). When False, uses 1+N
+        # fill-in block (anchor is a bonus token).
+        self.sample_from_anchor = getattr(
+            self.draft_model_config.hf_config, "sample_from_anchor", True
+        )
+        if self.sample_from_anchor:
+            self.num_query_per_req = self.num_speculative_steps
+        else:
+            self.num_query_per_req = 1 + self.num_speculative_steps
 
         self._step_cols = torch.arange(
             self.num_speculative_steps, dtype=torch.int32, device=device

@@ -31,6 +31,7 @@ _COMPACT_PAGE_SIZE = 64 * 1024
 
 class CPUOffloadingSpec(OffloadingSpec):
     BLOCK_SIZE_ALIGNMENT = 1
+    SUPPORTS_REPLICATED_LAYOUT = False
 
     @classmethod
     def build_metric_definitions(
@@ -92,12 +93,16 @@ class CPUOffloadingSpec(OffloadingSpec):
         self.num_blocks = 0
         self.kv_bytes_per_chunk = 0
         self.cpu_page_size_per_worker = 0
+        self.replicated_layout = (
+            config.replicated_layout and self.SUPPORTS_REPLICATED_LAYOUT
+        )
         if config.worker_kv_bytes_per_block > 0 and world_size > 0:
-            kv_bytes_per_block = config.worker_kv_bytes_per_block * world_size
+            num_copies = 1 if self.replicated_layout else world_size
+            kv_bytes_per_block = config.worker_kv_bytes_per_block * num_copies
             kv_bytes_per_chunk = kv_bytes_per_block * self.blocks_per_chunk
 
             # calculate cpu_page_size_per_worker
-            self.cpu_page_size_per_worker = kv_bytes_per_chunk // world_size
+            self.cpu_page_size_per_worker = kv_bytes_per_chunk // num_copies
 
             # calculate num_blocks
             aligned_kv_bytes_per_chunk = round_up(
@@ -109,6 +114,7 @@ class CPUOffloadingSpec(OffloadingSpec):
             # kv_bytes_per_chunk. Note that this might contain
             # some padding. i.e. each offloaded block is of the form,
             # |--- W0-B0---|---- W1-B0---| ... |---- Wn-B0---| *** maybe-pad *** |
+            # or |--- B0 (single copy) ---| *** maybe-pad *** |
             self.kv_bytes_per_chunk = aligned_kv_bytes_per_chunk
 
         # scheduler-side
