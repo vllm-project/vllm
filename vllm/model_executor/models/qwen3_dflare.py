@@ -338,9 +338,7 @@ class DFlareQwen3Model(DFlashQwen3Model):
     # combine_hidden_states override
     # ------------------------------------------------------------------
 
-    def combine_hidden_states(
-        self, aux_hidden_states: torch.Tensor
-    ) -> torch.Tensor:
+    def combine_hidden_states(self, aux_hidden_states: torch.Tensor) -> torch.Tensor:
         """DFlare skips the DFlash ``fc`` collapse and returns the raw
         ``[num_tokens, T*D]`` concatenation. Per-layer fusion happens later,
         inside ``precompute_and_store_context_kv``.

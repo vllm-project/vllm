@@ -96,9 +96,7 @@ class Qwen3TreeDSparkDFlareModel(DFlareQwen3Model):
             getattr(config, "enable_hidden_correction", False)
         )
         if self.enable_hidden_correction:
-            intermediate = getattr(
-                config, "hidden_correction_intermediate_size", None
-            )
+            intermediate = getattr(config, "hidden_correction_intermediate_size", None)
             if intermediate is None:
                 # Training-side default when the field is None: match hidden_size.
                 intermediate = int(config.hidden_size)
@@ -294,9 +292,7 @@ class Qwen3TreeDSparkDFlareForCausalLM(Qwen3DSparkForCausalLM):
             if name.startswith("fc.") or ".fc." in name:
                 # DFlash's collapse layer; unused by DFlare.
                 continue
-            if not has_markov_head and (
-                "markov_head" in name or "markov_w" in name
-            ):
+            if not has_markov_head and ("markov_head" in name or "markov_w" in name):
                 # Markov head disabled at model-build time (markov_rank<=0);
                 # drop any Markov weights that happen to live in the checkpoint.
                 continue
@@ -368,9 +364,7 @@ class Qwen3TreeDSparkDFlareForCausalLM(Qwen3DSparkForCausalLM):
                 if name not in params_dict:
                     continue
                 param = params_dict[name]
-                weight_loader = getattr(
-                    param, "weight_loader", default_weight_loader
-                )
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
                 loaded_param_names.add(name)
                 continue
@@ -402,9 +396,7 @@ class Qwen3TreeDSparkDFlareForCausalLM(Qwen3DSparkForCausalLM):
             # Everything else goes through the generic per-parameter loader.
             if name in params_dict:
                 param = params_dict[name]
-                weight_loader = getattr(
-                    param, "weight_loader", default_weight_loader
-                )
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
                 loaded_param_names.add(name)
             else:

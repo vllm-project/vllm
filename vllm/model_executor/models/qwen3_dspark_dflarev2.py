@@ -39,8 +39,8 @@ from vllm.triton_utils import tl, triton
 from .qwen3_dflarev2 import DFlareV2Qwen3Model
 from .qwen3_dspark import (
     DSparkMarkovHead,
-    HpcHiddenCorrectionMixin,
     HiddenStatesCorrection,
+    HpcHiddenCorrectionMixin,
     Qwen3DSparkForCausalLM,
 )
 from .utils import AutoWeightsLoader, maybe_prefix, process_eagle_weight
@@ -67,24 +67,16 @@ def _fused_dual_rmsnorm_concat_kernel(
     mask = offsets < hidden_size
     hidden_offset = row * hidden_row_stride + offsets
     embed_offset = row * embed_row_stride + offsets
-    hidden = tl.load(
-        hidden_ptr + hidden_offset, mask=mask, other=0.0
-    ).to(tl.float32)
-    embed = tl.load(
-        embed_ptr + embed_offset, mask=mask, other=0.0
-    ).to(tl.float32)
-    hidden_scale = tl.rsqrt(
-        tl.sum(hidden * hidden, axis=0) / hidden_size + eps
+    hidden = tl.load(hidden_ptr + hidden_offset, mask=mask, other=0.0).to(tl.float32)
+    embed = tl.load(embed_ptr + embed_offset, mask=mask, other=0.0).to(tl.float32)
+    hidden_scale = tl.rsqrt(tl.sum(hidden * hidden, axis=0) / hidden_size + eps)
+    embed_scale = tl.rsqrt(tl.sum(embed * embed, axis=0) / hidden_size + eps)
+    hidden_weight = tl.load(hidden_weight_ptr + offsets, mask=mask, other=0.0).to(
+        tl.float32
     )
-    embed_scale = tl.rsqrt(
-        tl.sum(embed * embed, axis=0) / hidden_size + eps
+    embed_weight = tl.load(embed_weight_ptr + offsets, mask=mask, other=0.0).to(
+        tl.float32
     )
-    hidden_weight = tl.load(
-        hidden_weight_ptr + offsets, mask=mask, other=0.0
-    ).to(tl.float32)
-    embed_weight = tl.load(
-        embed_weight_ptr + offsets, mask=mask, other=0.0
-    ).to(tl.float32)
     output_offset = row * (2 * hidden_size) + offsets
     tl.store(
         output_ptr + output_offset,
@@ -131,9 +123,7 @@ class LowRankHiddenStatesCorrection(HpcHiddenCorrectionMixin, nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
-        self.use_fused_kernel = os.getenv(
-            "VLLM_DSPARK_FUSED_CORRECTION", "1"
-        ) != "0"
+        self.use_fused_kernel = os.getenv("VLLM_DSPARK_FUSED_CORRECTION", "1") != "0"
         self.hidden_norm = RMSNorm(hidden_size, eps=rms_norm_eps)
         self.embed_norm = RMSNorm(hidden_size, eps=rms_norm_eps)
         self.down_proj = ColumnParallelLinear(
@@ -241,9 +231,7 @@ class Qwen3DSparkDFlareV2Model(DFlareV2Qwen3Model):
         )
         self.hidden_correction = None
         if self.enable_hidden_correction:
-            correction_type = getattr(
-                config, "hidden_correction_type", "swiglu"
-            )
+            correction_type = getattr(config, "hidden_correction_type", "swiglu")
             intermediate_config = getattr(
                 config, "hidden_correction_intermediate_size", None
             )
@@ -402,9 +390,7 @@ class Qwen3DSparkDFlareV2ForCausalLM(Qwen3DSparkForCausalLM):
 
             if name in params_dict:
                 param = params_dict[name]
-                weight_loader = getattr(
-                    param, "weight_loader", default_weight_loader
-                )
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
                 loaded_param_names.add(name)
             else:

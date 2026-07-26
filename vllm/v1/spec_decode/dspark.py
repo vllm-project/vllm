@@ -152,8 +152,7 @@ class DSparkProposer(DFlashProposer):
         num_reqs = total // n_spec
 
         probabilistic = (
-            self._enable_probabilistic_draft_probs
-            and not sampling_metadata.all_greedy
+            self._enable_probabilistic_draft_probs and not sampling_metadata.all_greedy
         )
 
         use_hidden_correction = bool(
@@ -174,15 +173,11 @@ class DSparkProposer(DFlashProposer):
         draft_tokens = torch.empty(
             (num_reqs, n_spec), dtype=torch.int64, device=self.device
         )
-        draft_probs_list: list[torch.Tensor] | None = (
-            [] if probabilistic else None
-        )
+        draft_probs_list: list[torch.Tensor] | None = [] if probabilistic else None
 
         for i in range(n_spec):
             if use_hidden_correction:
-                corrected = model.apply_hidden_correction(
-                    hidden_per_step[:, i], prev
-                )
+                corrected = model.apply_hidden_correction(hidden_per_step[:, i], prev)
                 logits_i = model.compute_draft_logits(corrected)
             else:
                 logits_i = base_logits[:, i]
@@ -211,7 +206,5 @@ class DSparkProposer(DFlashProposer):
                 draft_probs_list.append(probs_i)
 
         if draft_probs_list is not None:
-            self._last_draft_probs = torch.stack(
-                draft_probs_list, dim=1
-            ).contiguous()
+            self._last_draft_probs = torch.stack(draft_probs_list, dim=1).contiguous()
         return draft_tokens

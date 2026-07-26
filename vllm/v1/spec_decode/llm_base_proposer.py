@@ -598,8 +598,7 @@ class SpecDecodeBaseProposer:
             # them and allow an integer-multiple hidden dim for DFlare only.
             last_dim = target_hidden_states.shape[-1]
             assert last_dim == self.hidden_size or (
-                last_dim % self.hidden_size == 0
-                and last_dim // self.hidden_size > 1
+                last_dim % self.hidden_size == 0 and last_dim // self.hidden_size > 1
             ), (
                 f"combine_hidden_states returned last-dim={last_dim}, expected "
                 f"{self.hidden_size} or an integer multiple of it (DFlare "

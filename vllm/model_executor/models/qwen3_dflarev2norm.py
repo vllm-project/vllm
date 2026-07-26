@@ -40,23 +40,18 @@ def _fused_layer_context_independent_rmsnorm_kernel(
     offsets = tl.arange(0, BLOCK_SIZE)
     mask = offsets < hidden_size
 
-    values = tl.load(
-        base_ptr + ctx * hidden_size + offsets, mask=mask, other=0.0
-    ).to(tl.float32)
+    values = tl.load(base_ptr + ctx * hidden_size + offsets, mask=mask, other=0.0).to(
+        tl.float32
+    )
     stacked_row = ctx * num_target_layers * hidden_size
     fusion_row = layer * num_target_layers
     for target_idx in range(num_target_layers):
         target = tl.load(
-            stacked_ptr
-            + stacked_row
-            + target_idx * hidden_size
-            + offsets,
+            stacked_ptr + stacked_row + target_idx * hidden_size + offsets,
             mask=mask,
             other=0.0,
         ).to(tl.float32)
-        coefficient = tl.load(fusion_ptr + fusion_row + target_idx).to(
-            tl.float32
-        )
+        coefficient = tl.load(fusion_ptr + fusion_row + target_idx).to(tl.float32)
         values += coefficient * target
 
     variance = tl.sum(values * values, axis=0) / hidden_size
@@ -148,9 +143,7 @@ class DFlareV2NormQwen3Model(DFlareV2Qwen3Model):
                 BLOCK_SIZE=triton.next_power_of_2(D),
             )
         else:
-            residual_context = torch.einsum(
-                "lt,ntd->lnd", fusion_probs, stacked
-            )
+            residual_context = torch.einsum("lt,ntd->lnd", fusion_probs, stacked)
             layer_context = residual_context + base_context.unsqueeze(0)
             variance = layer_context.float().pow(2).mean(dim=-1, keepdim=True)
             normed = (
@@ -160,9 +153,7 @@ class DFlareV2NormQwen3Model(DFlareV2Qwen3Model):
             ).to(dtype=layer_context.dtype)
 
         kv_size_per_partition = 2 * num_kv_heads * head_dim
-        w_stacked = self._fused_kv_weight.view(
-            L, kv_size_per_partition, D
-        )
+        w_stacked = self._fused_kv_weight.view(L, kv_size_per_partition, D)
         all_kv_flat = torch.bmm(normed, w_stacked.transpose(1, 2))
         if self._fused_kv_bias is not None:
             all_kv_flat = all_kv_flat + self._fused_kv_bias.view(
@@ -182,14 +173,10 @@ class DFlareV2NormQwen3ForCausalLM(DFlareV2Qwen3ForCausalLM):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
-        self.draft_model_config = (
-            vllm_config.speculative_config.draft_model_config
-        )
+        self.draft_model_config = vllm_config.speculative_config.draft_model_config
         self.config = self.draft_model_config.hf_config
         if getattr(self.config, "draft_vocab_size", None) is None:
-            self.config.draft_vocab_size = getattr(
-                self.config, "vocab_size", None
-            )
+            self.config.draft_vocab_size = getattr(self.config, "vocab_size", None)
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config
         )

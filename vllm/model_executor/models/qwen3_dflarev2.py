@@ -36,30 +36,25 @@ def _fused_layer_context_rmsnorm_kernel(
     offsets = tl.arange(0, BLOCK_SIZE)
     mask = offsets < hidden_size
 
-    values = tl.load(
-        base_ptr + ctx * hidden_size + offsets, mask=mask, other=0.0
-    ).to(tl.float32)
+    values = tl.load(base_ptr + ctx * hidden_size + offsets, mask=mask, other=0.0).to(
+        tl.float32
+    )
     stacked_row = ctx * num_target_layers * hidden_size
     fusion_row = layer * num_target_layers
     for target_idx in range(num_target_layers):
         target = tl.load(
-            stacked_ptr
-            + stacked_row
-            + target_idx * hidden_size
-            + offsets,
+            stacked_ptr + stacked_row + target_idx * hidden_size + offsets,
             mask=mask,
             other=0.0,
         ).to(tl.float32)
-        coefficient = tl.load(fusion_ptr + fusion_row + target_idx).to(
-            tl.float32
-        )
+        coefficient = tl.load(fusion_ptr + fusion_row + target_idx).to(tl.float32)
         values += coefficient * target
 
     variance = tl.sum(values * values, axis=0) / hidden_size
     values *= tl.rsqrt(variance + eps)
-    norm_weight = tl.load(
-        norm_weight_ptr + offsets, mask=mask, other=0.0
-    ).to(tl.float32)
+    norm_weight = tl.load(norm_weight_ptr + offsets, mask=mask, other=0.0).to(
+        tl.float32
+    )
     tl.store(output_ptr + row * hidden_size + offsets, values * norm_weight, mask=mask)
 
 
@@ -94,13 +89,9 @@ class DFlareV2Qwen3Model(DFlashQwen3Model):
         target_layer_ids = (
             drafter_config.get("target_layer_ids")
             or getattr(self.config, "target_layer_ids", None)
-            or getattr(
-                self.config, "eagle_aux_hidden_state_layer_ids", None
-            )
+            or getattr(self.config, "eagle_aux_hidden_state_layer_ids", None)
         )
-        configured_num_target_layers = getattr(
-            self.config, "num_target_layers", None
-        )
+        configured_num_target_layers = getattr(self.config, "num_target_layers", None)
         if target_layer_ids:
             num_target_layers = len(target_layer_ids)
             if (
@@ -115,9 +106,7 @@ class DFlareV2Qwen3Model(DFlashQwen3Model):
         elif configured_num_target_layers is not None:
             num_target_layers = int(configured_num_target_layers)
         else:
-            raise ValueError(
-                "DFlareV2 requires num_target_layers or target_layer_ids."
-            )
+            raise ValueError("DFlareV2 requires num_target_layers or target_layer_ids.")
 
         expected_fc_input = num_target_layers * target_hidden_size
         if self.fc.input_size != expected_fc_input:
@@ -153,9 +142,7 @@ class DFlareV2Qwen3Model(DFlashQwen3Model):
             )
         )
 
-    def combine_hidden_states(
-        self, aux_hidden_states: torch.Tensor
-    ) -> torch.Tensor:
+    def combine_hidden_states(self, aux_hidden_states: torch.Tensor) -> torch.Tensor:
         expected_width = self.num_target_layers * self.config.hidden_size
         actual_width = aux_hidden_states.shape[-1]
         if actual_width < expected_width:
@@ -176,9 +163,7 @@ class DFlareV2Qwen3Model(DFlashQwen3Model):
         L, T = self.num_draft_layers, self.num_target_layers
         D = self.config.hidden_size
         if num_layers != L:
-            raise ValueError(
-                f"DFlareV2 expected {L} draft layers, got {num_layers}."
-            )
+            raise ValueError(f"DFlareV2 expected {L} draft layers, got {num_layers}.")
         if context_states.shape[-1] != T * D:
             raise ValueError(
                 "DFlareV2 context width mismatch: "
@@ -207,9 +192,7 @@ class DFlareV2Qwen3Model(DFlashQwen3Model):
                 BLOCK_SIZE=triton.next_power_of_2(D),
             )
         else:
-            residual_context = torch.einsum(
-                "lt,ntd->lnd", fusion_probs, stacked
-            )
+            residual_context = torch.einsum("lt,ntd->lnd", fusion_probs, stacked)
             layer_context = residual_context + base_context.unsqueeze(0)
             layer_context_flat = layer_context.reshape(L * num_ctx, D)
             normed_flat = torch.empty_like(layer_context_flat)
@@ -222,9 +205,7 @@ class DFlareV2Qwen3Model(DFlashQwen3Model):
             normed = normed_flat.view(L, num_ctx, D)
 
         kv_size_per_partition = 2 * num_kv_heads * head_dim
-        w_stacked = self._fused_kv_weight.view(
-            L, kv_size_per_partition, D
-        )
+        w_stacked = self._fused_kv_weight.view(L, kv_size_per_partition, D)
         all_kv_flat = torch.bmm(normed, w_stacked.transpose(1, 2))
         if self._fused_kv_bias is not None:
             all_kv_flat = all_kv_flat + self._fused_kv_bias.view(
@@ -232,9 +213,7 @@ class DFlareV2Qwen3Model(DFlashQwen3Model):
             )
 
         all_kv = (
-            all_kv_flat.view(
-                L, num_ctx, 2, num_kv_heads, head_dim
-            )
+            all_kv_flat.view(L, num_ctx, 2, num_kv_heads, head_dim)
             .permute(2, 0, 1, 3, 4)
             .contiguous()
         )
@@ -246,14 +225,10 @@ class DFlareV2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
-        self.draft_model_config = (
-            vllm_config.speculative_config.draft_model_config
-        )
+        self.draft_model_config = vllm_config.speculative_config.draft_model_config
         self.config = self.draft_model_config.hf_config
         if getattr(self.config, "draft_vocab_size", None) is None:
-            self.config.draft_vocab_size = getattr(
-                self.config, "vocab_size", None
-            )
+            self.config.draft_vocab_size = getattr(self.config, "vocab_size", None)
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config
         )
@@ -275,17 +250,13 @@ class DFlareV2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
         target_vocab_size = vllm_config.model_config.get_vocab_size()
         if self.config.draft_vocab_size != target_vocab_size:
             self.draft_id_to_target_id = nn.Parameter(
-                torch.zeros(
-                    self.config.draft_vocab_size, dtype=torch.long
-                ),
+                torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
                 requires_grad=False,
             )
         else:
             self.draft_id_to_target_id = None
 
-    def combine_hidden_states(
-        self, hidden_states: torch.Tensor
-    ) -> torch.Tensor:
+    def combine_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.model.combine_hidden_states(hidden_states)
 
 

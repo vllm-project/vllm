@@ -26,8 +26,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
-    MergedColumnParallelLinear,
     ColumnParallelLinear,
+    MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
 )
@@ -41,6 +41,132 @@ from .qwen3_dflash import DFlashQwen3ForCausalLM, DFlashQwen3Model
 from .utils import AutoWeightsLoader, maybe_prefix, process_eagle_weight
 
 logger = init_logger(__name__)
+
+
+@functools.cache
+def _get_hpc_module():
+    """Import hpc-ops lazily so model discovery does not initialize CUDA."""
+    try:
+        import hpc
+    except (ImportError, OSError) as error:
+        logger.warning_once("[dspark] hpc module is unavailable: %s", error)
+        return None
+    required_ops = ("fused_rmsnorm_blockwise_quant", "add")
+    if not all(hasattr(hpc, name) for name in required_ops):
+        logger.warning_once(
+            "[dspark] hpc module does not provide all required correction ops."
+        )
+        return None
+    return hpc
+
+
+class HpcHiddenCorrectionMixin:
+    """HPC RMSNorm/add helpers shared by hidden-correction variants."""
+
+    def _init_hpc_correction(self, *, default_enabled: bool = True) -> None:
+        self._use_hpc_correction = (
+            os.getenv("VLLM_DSPARK_HPC_CORRECTION", "1" if default_enabled else "0")
+            != "0"
+        )
+        self._hpc_norm_disabled = False
+        self._hpc_add_disabled = False
+
+    def _norm_with_hpc(self, norm: RMSNorm, x: torch.Tensor) -> torch.Tensor:
+        if not self._use_hpc_correction or self._hpc_norm_disabled:
+            return norm(x)
+        if not x.is_cuda or x.dtype != torch.bfloat16 or norm.weight.dtype != x.dtype:
+            return norm(x)
+
+        hpc = _get_hpc_module()
+        if hpc is None:
+            self._hpc_norm_disabled = True
+            return norm(x)
+        try:
+            # hpc-ops 5.2.0 assumes dense row-major input but does not reject
+            # strided views such as hidden_per_step[:, i]. Materialize those
+            # views to avoid silently normalizing values from adjacent steps.
+            hpc_input = x if x.is_contiguous() else x.contiguous()
+            return hpc.fused_rmsnorm_blockwise_quant(
+                hpc_input,
+                norm.weight.data,
+                norm.variance_epsilon,
+                False,
+            )
+        except (RuntimeError, TypeError) as error:
+            self._hpc_norm_disabled = True
+            logger.warning_once(
+                "[dspark] hpc RMSNorm failed; falling back to vLLM RMSNorm: %s",
+                error,
+            )
+            return norm(x)
+
+    def _residual_add_with_hpc(
+        self,
+        hidden_states: torch.Tensor,
+        delta: torch.Tensor,
+    ) -> torch.Tensor:
+        delta = delta.to(hidden_states.dtype)
+        if (
+            not self._use_hpc_correction
+            or self._hpc_add_disabled
+            or not hidden_states.is_cuda
+        ):
+            return hidden_states + delta
+
+        # hpc-ops 5.2.0 exposes add for FP32 only. Hidden correction normally
+        # runs in BF16, so avoid a known failing dispatch and retain torch.add.
+        if hidden_states.dtype != torch.float32:
+            return hidden_states + delta
+
+        hpc = _get_hpc_module()
+        if hpc is None:
+            self._hpc_add_disabled = True
+            return hidden_states + delta
+        try:
+            return hpc.add(hidden_states, delta)
+        except (RuntimeError, TypeError) as error:
+            self._hpc_add_disabled = True
+            logger.warning_once(
+                "[dspark] hpc add failed; falling back to torch add: %s", error
+            )
+            return hidden_states + delta
+
+
+class PositionAdaptiveAlpha(nn.Module):
+    """Per-in-block-position Markov / correction strength ``alpha_i``.
+
+    Implements ``alpha_i = alpha_max * sigmoid(w_i)`` with a learnable logit
+    vector of length ``block_size``. Used at inference as
+    ``logits_i += alpha_i * markov_bias_i``.
+    """
+
+    def __init__(
+        self,
+        *,
+        block_size: int,
+        alpha_max: float = 1.0,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        if block_size <= 0:
+            raise ValueError(
+                f"PositionAdaptiveAlpha requires block_size > 0, got {block_size}."
+            )
+        self.block_size = int(block_size)
+        self.alpha_max = float(alpha_max)
+        self.alpha_logit = nn.Parameter(
+            torch.empty(self.block_size), requires_grad=False
+        )
+
+    def alpha(self) -> torch.Tensor:
+        return self.alpha_max * torch.sigmoid(self.alpha_logit)
+
+    def alpha_at(self, step: int) -> torch.Tensor:
+        if step < 0 or step >= self.block_size:
+            raise IndexError(
+                f"Markov pos-alpha step {step} out of range [0, {self.block_size})."
+            )
+        return self.alpha()[step]
 
 
 class DSparkMarkovHead(nn.Module):
@@ -337,9 +463,7 @@ class Qwen3DSparkModel(DFlashQwen3Model):
             getattr(config, "enable_hidden_correction", False)
         )
         if self.enable_hidden_correction:
-            intermediate = getattr(
-                config, "hidden_correction_intermediate_size", None
-            )
+            intermediate = getattr(config, "hidden_correction_intermediate_size", None)
             if intermediate is None:
                 # Training-side default when the field is None: match hidden_size.
                 intermediate = int(config.hidden_size)
@@ -490,9 +614,7 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
             # t2d is training-only; the draft remaps via d2t at sampling time.
             if "t2d" in name:
                 continue
-            if not has_markov_head and (
-                "markov_head" in name or "markov_w" in name
-            ):
+            if not has_markov_head and ("markov_head" in name or "markov_w" in name):
                 # Markov head disabled at model-build time (markov_rank<=0);
                 # drop any Markov weights the checkpoint might still ship.
                 continue
@@ -529,9 +651,7 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
                     continue
                 w = model_weights.pop(lr_name)
                 param = params_dict[lr_name]
-                weight_loader = getattr(
-                    param, "weight_loader", default_weight_loader
-                )
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, w)
             logger.info(
                 "[dspark-load] low-rank hidden_correction detected; "

@@ -48,22 +48,17 @@ class DFlashHYV3DecoderLayer(nn.Module):
             rope_parameters=config.rope_parameters,
             prefix=f"{prefix}.self_attn",
         )
-        self.input_layernorm = RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
 
         dflash_config = getattr(config, "dflash_config", None) or {}
-        target_layer_ids = (
-            dflash_config.get("target_layer_ids")
-            or getattr(config, "target_layer_ids", None)
+        target_layer_ids = dflash_config.get("target_layer_ids") or getattr(
+            config, "target_layer_ids", None
         )
         if not target_layer_ids or len(target_layer_ids) != config.num_hidden_layers:
-            raise ValueError(
-                "DFlashHYV3 requires one target_layer_id per draft layer."
-            )
+            raise ValueError("DFlashHYV3 requires one target_layer_id per draft layer.")
         target_layer_id = int(target_layer_ids[layer_idx])
         first_dense = int(getattr(config, "first_k_dense_replace", 1))
         if target_layer_id < first_dense:
@@ -93,16 +88,12 @@ class DFlashHYV3DecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual
-            )
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
         with record_function("dflash_hyv3_attention"):
             hidden_states = self.self_attn(
                 positions=positions, hidden_states=hidden_states
             )
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual
-        )
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         with record_function("dflash_hyv3_ffn"):
             hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
@@ -127,9 +118,7 @@ class DFlashHYV3ForCausalLM(DFlashQwen3ForCausalLM):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
-        self.draft_model_config = (
-            vllm_config.speculative_config.draft_model_config
-        )
+        self.draft_model_config = vllm_config.speculative_config.draft_model_config
         self.config = self.draft_model_config.hf_config
         if getattr(self.config, "draft_vocab_size", None) is None:
             self.config.draft_vocab_size = self.config.vocab_size
@@ -154,9 +143,7 @@ class DFlashHYV3ForCausalLM(DFlashQwen3ForCausalLM):
         target_vocab_size = vllm_config.model_config.get_vocab_size()
         if self.config.draft_vocab_size != target_vocab_size:
             self.draft_id_to_target_id = nn.Parameter(
-                torch.zeros(
-                    self.config.draft_vocab_size, dtype=torch.long
-                ),
+                torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
                 requires_grad=False,
             )
         else:

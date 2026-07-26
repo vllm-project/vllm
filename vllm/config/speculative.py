@@ -331,9 +331,9 @@ class SpeculativeConfig:
                     or getattr(hf_config, "dflare_config", None)
                     or {}
                 )
-                layer_ids = drafter_config.get(
-                    "target_layer_ids"
-                ) or getattr(hf_config, "target_layer_ids", None)
+                layer_ids = drafter_config.get("target_layer_ids") or getattr(
+                    hf_config, "target_layer_ids", None
+                )
             if layer_ids is not None:
                 # Convert to tuple to make it hashable
                 factors.append(tuple(layer_ids))
@@ -897,8 +897,7 @@ class SpeculativeConfig:
                 elif "dflash" in self.draft_model_config.model.lower():
                     self.method = "dflash"
                 elif (
-                    "Qwen3DSparkDFlareV2Model"
-                    in self.draft_model_config.architectures
+                    "Qwen3DSparkDFlareV2Model" in self.draft_model_config.architectures
                     or "Qwen3TreeDSparkDFlareModel"
                     in self.draft_model_config.architectures
                 ):
@@ -906,12 +905,9 @@ class SpeculativeConfig:
                     self.method = "dspark"
                 elif (
                     "dflare" in self.draft_model_config.model.lower()
-                    or "DFlareDraftModel"
-                    in self.draft_model_config.architectures
-                    or "DFlareV2DraftModel"
-                    in self.draft_model_config.architectures
-                    or "DFlareV2NormDraftModel"
-                    in self.draft_model_config.architectures
+                    or "DFlareDraftModel" in self.draft_model_config.architectures
+                    or "DFlareV2DraftModel" in self.draft_model_config.architectures
+                    or "DFlareV2NormDraftModel" in self.draft_model_config.architectures
                     or "DFlareV2AllNormDraftModel"
                     in self.draft_model_config.architectures
                     or getattr(
@@ -1009,16 +1005,16 @@ class SpeculativeConfig:
                         or {}
                     )
                     model_arch = model_arch or drafter_config.get("model_arch")
-                    if (
-                        model_arch
-                        in ("dflarev2", "dflarev2norm", "dflarev2allnorm")
-                        or any(
-                            arch in architectures
-                            for arch in (
-                                "DFlareV2DraftModel",
-                                "DFlareV2NormDraftModel",
-                                "DFlareV2AllNormDraftModel",
-                            )
+                    if model_arch in (
+                        "dflarev2",
+                        "dflarev2norm",
+                        "dflarev2allnorm",
+                    ) or any(
+                        arch in architectures
+                        for arch in (
+                            "DFlareV2DraftModel",
+                            "DFlareV2NormDraftModel",
+                            "DFlareV2AllNormDraftModel",
                         )
                     ):
                         hf_config.architectures = ["Qwen3DSparkDFlareV2Model"]

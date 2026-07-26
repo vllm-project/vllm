@@ -43,14 +43,14 @@ def _fused_layer_context_allnorm_kernel(
     offsets = tl.arange(0, BLOCK_SIZE)
     mask = offsets < hidden_size
 
-    base = tl.load(
-        base_ptr + ctx * hidden_size + offsets, mask=mask, other=0.0
-    ).to(tl.float32)
+    base = tl.load(base_ptr + ctx * hidden_size + offsets, mask=mask, other=0.0).to(
+        tl.float32
+    )
     base_variance = tl.sum(base * base, axis=0) / hidden_size
     base *= tl.rsqrt(base_variance + eps)
-    base_weight = tl.load(
-        base_norm_weight_ptr + offsets, mask=mask, other=0.0
-    ).to(tl.float32)
+    base_weight = tl.load(base_norm_weight_ptr + offsets, mask=mask, other=0.0).to(
+        tl.float32
+    )
     base *= base_weight
 
     fusion = tl.zeros((BLOCK_SIZE,), dtype=tl.float32)
@@ -58,23 +58,18 @@ def _fused_layer_context_allnorm_kernel(
     fusion_row = layer * num_target_layers
     for target_idx in range(num_target_layers):
         target = tl.load(
-            stacked_ptr
-            + stacked_row
-            + target_idx * hidden_size
-            + offsets,
+            stacked_ptr + stacked_row + target_idx * hidden_size + offsets,
             mask=mask,
             other=0.0,
         ).to(tl.float32)
-        coefficient = tl.load(fusion_ptr + fusion_row + target_idx).to(
-            tl.float32
-        )
+        coefficient = tl.load(fusion_ptr + fusion_row + target_idx).to(tl.float32)
         fusion += coefficient * target
 
     fusion_variance = tl.sum(fusion * fusion, axis=0) / hidden_size
     fusion *= tl.rsqrt(fusion_variance + eps)
-    fusion_weight = tl.load(
-        fusion_norm_weight_ptr + offsets, mask=mask, other=0.0
-    ).to(tl.float32)
+    fusion_weight = tl.load(fusion_norm_weight_ptr + offsets, mask=mask, other=0.0).to(
+        tl.float32
+    )
     values = base + fusion * fusion_weight
 
     variance = tl.sum(values * values, axis=0) / hidden_size
@@ -172,8 +167,7 @@ class DFlareV2AllNormQwen3Model(DFlareV2Qwen3Model):
                 self.config.rms_norm_eps,
             )
             combined_flat = (
-                fusion_normed_flat.view(L, num_ctx, D)
-                + base_flat.unsqueeze(0)
+                fusion_normed_flat.view(L, num_ctx, D) + base_flat.unsqueeze(0)
             ).reshape(L * num_ctx, D)
             normed_flat = torch.empty_like(combined_flat)
             ops.rms_norm(
@@ -185,9 +179,7 @@ class DFlareV2AllNormQwen3Model(DFlareV2Qwen3Model):
             normed = normed_flat.view(L, num_ctx, D)
 
         kv_size_per_partition = 2 * num_kv_heads * head_dim
-        w_stacked = self._fused_kv_weight.view(
-            L, kv_size_per_partition, D
-        )
+        w_stacked = self._fused_kv_weight.view(L, kv_size_per_partition, D)
         all_kv_flat = torch.bmm(normed, w_stacked.transpose(1, 2))
         if self._fused_kv_bias is not None:
             all_kv_flat = all_kv_flat + self._fused_kv_bias.view(
@@ -207,14 +199,10 @@ class DFlareV2AllNormQwen3ForCausalLM(DFlareV2Qwen3ForCausalLM):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
-        self.draft_model_config = (
-            vllm_config.speculative_config.draft_model_config
-        )
+        self.draft_model_config = vllm_config.speculative_config.draft_model_config
         self.config = self.draft_model_config.hf_config
         if getattr(self.config, "draft_vocab_size", None) is None:
-            self.config.draft_vocab_size = getattr(
-                self.config, "vocab_size", None
-            )
+            self.config.draft_vocab_size = getattr(self.config, "vocab_size", None)
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config
         )
