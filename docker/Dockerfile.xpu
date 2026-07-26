@@ -227,6 +227,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     test -n "${SYCL_HOME}" && test -x "${SYCL_HOME}/bin/icpx" && \
     uv pip install grpcio-tools protobuf nanobind && \
     uv pip install torch==2.13.0 torchvision==0.28.0 torchaudio==2.11.0 && \
+    uv pip install setuptools setuptools-scm setuptools-rust wheel cmake ninja packaging && \
     uv pip install --no-build-isolation -r /workspace/vllm/requirements/xpu.txt && \
     uv pip install --no-build-isolation -r /workspace/vllm/requirements/test/xpu.txt && \
     uv pip uninstall triton triton-xpu && \
