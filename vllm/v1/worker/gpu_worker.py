@@ -479,6 +479,18 @@ class Worker(WorkerBase):
             logger.info(msg)
             return self._reserve_mm_ipc_gpu_memory(kv_cache_memory_bytes)
 
+        # Warmup: run a forward pass before the profiling window so that
+        # JIT-compiled kernel code (e.g. FlashInfer, custom ops) is produced
+        # outside the measurement.  On the first launch those kernels don't
+        # yet exist; their code lives in GPU memory permanently (CUDA driver
+        # level, not freed by torch.empty_cache).  If the compilation happens
+        # inside the memory_profiling context it inflates non_torch_increase
+        # and shrinks the KV-cache budget, even though at steady state the
+        # kernels are already cached.  A second run (restart) doesn't suffer
+        # because the cache is warm.  Running profile_run() once before the
+        # context makes the first-launch measurement match steady state.
+        self.model_runner.profile_run()
+
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         with memory_profiling(
