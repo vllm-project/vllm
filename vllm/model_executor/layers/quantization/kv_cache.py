@@ -130,7 +130,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                     "Only support per-tensor scaling factor for fp8 KV cache"
                 )
 
-            if layer.q_scale < 0.0:
+            if layer.q_scale < 0.0 and layer.kv_cache_dtype != "nvfp4":
                 logger.warning_once(
                     "Checkpoint does not provide a q scaling factor. "
                     "Setting it to k_scale. This only matters for "
@@ -147,7 +147,12 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             # Sync host (cpu) scale copies read by AITER fused kernels.
             layer._k_scale_cpu.fill_(k_scale)
             layer._v_scale_cpu.fill_(v_scale)
-            if k_scale == 1.0 and v_scale == 1.0 and "e5m2" not in layer.kv_cache_dtype:
+            if (
+                k_scale == 1.0
+                and v_scale == 1.0
+                and "e5m2" not in layer.kv_cache_dtype
+                and layer.kv_cache_dtype != "nvfp4"
+            ):
                 logger.warning_once(
                     "Using KV cache scaling factor 1.0 for fp8_e4m3. "
                     "If this is unintended, verify that k/v_scale "
