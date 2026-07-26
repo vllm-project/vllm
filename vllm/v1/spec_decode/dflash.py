@@ -18,6 +18,7 @@ from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.spec_decode.utils import (
     copy_and_expand_dflash_inputs_kernel,
     next_power_of_2,
+    token_logprobs_from_logits,
 )
 
 logger = init_logger(__name__)
@@ -27,25 +28,6 @@ _DCUT_RATIO_NUMS = (1, 2, 3, 4)
 _DCUT_PROFILE_SEQ_LEN = 2048
 _DCUT_PROFILE_WARMUPS = 3
 _DCUT_PROFILE_STEPS = 10
-
-
-def _token_logprobs_from_logits(
-    logits: torch.Tensor, token_ids: torch.Tensor
-) -> torch.Tensor:
-    """Log-probability of ``token_ids`` under ``logits``, in FP32.
-
-    ``torch.logsumexp`` returns the input dtype, so on BF16 logits the
-    denominator lands on the logit ULP (0.125 at these magnitudes) and
-    subtracting two similarly-sized rounded values quantizes the result onto
-    that same grid -- every token above roughly 0.94 probability collapses to
-    exactly 0.0. Shifting by the row max and accumulating the reduction in FP32
-    keeps full resolution near 1 without materializing an FP32 copy of the
-    whole vocabulary.
-    """
-    shifted = logits - logits.max(dim=-1, keepdim=True).values
-    log_denom = shifted.exp().sum(dim=-1, dtype=torch.float32).log()
-    selected = shifted.gather(1, token_ids.unsqueeze(1)).squeeze(1).float()
-    return selected - log_denom
 
 
 class DFlashProposer(SpecDecodeBaseProposer):
@@ -145,7 +127,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
             logits, sampling_metadata
         )
         token_logprobs = (
-            _token_logprobs_from_logits(logits, draft_token_ids)
+            token_logprobs_from_logits(logits, draft_token_ids)
             if draft_probs is None
             else torch.log(
                 draft_probs.gather(1, draft_token_ids.unsqueeze(1)).squeeze(1)

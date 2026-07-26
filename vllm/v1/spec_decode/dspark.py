@@ -32,8 +32,9 @@ from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.spec_decode.dflash import DFlashProposer, _token_logprobs_from_logits
+from vllm.v1.spec_decode.dflash import DFlashProposer
 from vllm.v1.spec_decode.llm_base_proposer import compute_probs_and_sample_next_token
+from vllm.v1.spec_decode.utils import token_logprobs_from_logits
 
 logger = init_logger(__name__)
 
@@ -211,7 +212,7 @@ class DSparkProposer(DFlashProposer):
                 if logprobs_list is not None:
                     # Score in draft-vocab space, where the argmax was taken.
                     logprobs_list.append(
-                        _token_logprobs_from_logits(logits_i, draft_argmax)
+                        token_logprobs_from_logits(logits_i, draft_argmax)
                     )
 
             draft_tokens[:, i] = sampled_i
