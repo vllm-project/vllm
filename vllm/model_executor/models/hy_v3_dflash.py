@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DFlash draft model whose decoder FFNs match corresponding HY3 layers."""
 
 import torch
