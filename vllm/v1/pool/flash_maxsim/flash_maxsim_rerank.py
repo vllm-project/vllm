@@ -63,8 +63,11 @@ def _maxsim_rerank_kernel(
     if pid >= B:
         return
 
-    # Each doc has its own offset and length in the batch tensor
-    d_start = tl.load(doc_offsets_ptr + pid).to(tl.int32)
+    # Each doc has its own offset and length in the batch tensor.
+    # int64: (d_start + d_off) * stride overflows int32 past ~16.7M batch
+    # tokens (same widen-on-load as the pairs kernel below; the host-side
+    # offsets tensor stays int32, which indexes any realistic batch).
+    d_start = tl.load(doc_offsets_ptr + pid).to(tl.int64)
     d_len = tl.load(doc_lengths_ptr + pid).to(tl.int32)
 
     k_off = tl.arange(0, d_pad)
