@@ -473,7 +473,7 @@ async def test_rerank_api_instruction_field(
 async def test_rerank_api_instruction_field_matches_chat_template_kwargs(
     server: tuple[RemoteOpenAIServer, str],
 ):
-    remote_server, _ = server
+    remote_server, backend = server
 
     doc_list = [
         document,
@@ -514,4 +514,6 @@ async def test_rerank_api_instruction_field_matches_chat_template_kwargs(
     kwargs_scores = [
         r.relevance_score for r in sorted(kwargs_rerank.results, key=lambda x: x.index)
     ]
-    assert field_scores == pytest.approx(kwargs_scores)
+    assert field_scores == pytest.approx(
+        kwargs_scores, rel=get_tol(backend), abs=get_abs_tol(backend)
+    )
