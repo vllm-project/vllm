@@ -25,8 +25,8 @@ from vllm.model_executor.models.transformers.fx_utils import (
     trace,
 )
 from vllm.model_executor.models.transformers.layer_registry import (
-    get_gemma_rms_norm_cls,
-    get_rms_norm_cls,
+    GemmaRMSNorm,
+    RMSNorm,
 )
 
 if TYPE_CHECKING:
@@ -213,10 +213,10 @@ class RMSNormFuser(BaseFuser):
             dtype = weight.dtype if weight is not None else model_config.dtype
             eps = torch.finfo(dtype).eps
         if self.zero_centered:
-            cls = _tp_aware_norm_cls(get_gemma_rms_norm_cls())
+            cls = _tp_aware_norm_cls(GemmaRMSNorm)
             return cls(hidden_size=hidden_size, eps=eps)
         has_weight = weight is not None
-        cls = _tp_aware_norm_cls(get_rms_norm_cls())
+        cls = _tp_aware_norm_cls(RMSNorm)
         return cls(
             hidden_size=hidden_size,
             eps=eps,

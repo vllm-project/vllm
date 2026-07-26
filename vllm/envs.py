@@ -121,7 +121,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
-    VLLM_HW_AGNOSTIC_LAYERS: bool = False
+    VLLM_USE_HW_AGNOSTIC: bool = False
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
     VLLM_DISABLE_PYNCCL: bool = False
     VLLM_USE_OINK_OPS: bool = False
@@ -1163,8 +1163,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
         else os.environ["VLLM_DISABLED_KERNELS"].split(",")
     ),
     # Selects hw-agnostic layers for HF transformer backend
-    "VLLM_HW_AGNOSTIC_LAYERS": lambda: (
-        os.getenv("VLLM_HW_AGNOSTIC_LAYERS", "False").lower() in ("true", "1")
+    "VLLM_USE_HW_AGNOSTIC": lambda: (
+        os.getenv("VLLM_USE_HW_AGNOSTIC", "False").lower() in ("true", "1")
     ),
     "VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE": lambda: bool(
         int(os.getenv("VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE", "1"))
