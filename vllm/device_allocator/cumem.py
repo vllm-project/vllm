@@ -291,6 +291,9 @@ class CuMemAllocator:
                 back to GPU memory. If None, all memory allocation will be loaded
                 back to GPU memory.
         """
+        gc.collect()
+        torch.accelerator.empty_cache()
+
         for ptr, data in self.pointer_to_data.items():
             if tags is None or data.tag in tags:
                 handle = data.handle
