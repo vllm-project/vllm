@@ -66,7 +66,7 @@ class ToolParser:
         super().__init_subclass__(**kwargs)
         if (
             cls.structural_tag_model is not None
-            and envs.VLLM_ENFORCE_STRICT_TOOL_CALLING
+            and envs.VLLM_ENFORCE_STRICT_TOOL_CALLING is not False
         ):
             cls.supports_required_and_named = False
 
@@ -173,7 +173,8 @@ class ToolParser:
     ):
         if self.structural_tag_model is None:
             return None
-        if not envs.VLLM_ENFORCE_STRICT_TOOL_CALLING:
+        enforce_strict = envs.VLLM_ENFORCE_STRICT_TOOL_CALLING
+        if enforce_strict is False:
             return None
         from vllm.tool_parsers.structural_tag_registry import get_model_structural_tag
 
@@ -182,6 +183,7 @@ class ToolParser:
             tools=request.tools,
             tool_choice=request.tool_choice,
             reasoning=reasoning,
+            force_strict=enforce_strict is True,
         )
 
     def extract_tool_calls(

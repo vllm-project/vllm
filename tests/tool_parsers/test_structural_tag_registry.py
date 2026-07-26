@@ -5,7 +5,9 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from openai.types.responses import FunctionTool
 from xgrammar import Grammar, StructuralTag
+from xgrammar.structural_tag import TagsWithSeparatorFormat, TriggeredTagsFormat
 from xgrammar.testing import _is_grammar_accept_string
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -679,3 +681,165 @@ def test_kimi_k3_forced_tool_choice_builds_single_mandatory_call():
     response_only = _k3_response("no call here")
     assert _is_grammar_accept_string(grammar, ok)
     assert not _is_grammar_accept_string(grammar, response_only)
+
+
+class TestEnforceStrictToolCalling:
+    """Server override behavior for structural-tag based tool calling."""
+
+    @pytest.fixture
+    def dumped_tools(self, monkeypatch: pytest.MonkeyPatch):
+        """Capture the tool dicts handed to xgrammar."""
+        captured: list[list[dict]] = []
+
+        def fake_get_xgrammar_model_structural_tag(*, tools: list[dict], **kwargs):
+            captured.append(tools)
+            return MagicMock(spec=StructuralTag)
+
+        monkeypatch.setattr(
+            "vllm.tool_parsers.structural_tag_registry."
+            "get_xgrammar_model_structural_tag",
+            fake_get_xgrammar_model_structural_tag,
+        )
+        return captured
+
+    @pytest.mark.parametrize(
+        ("value", "request_strict", "expect_tag"),
+        [
+            (None, False, False),
+            (None, True, True),
+            ("true", False, True),
+            ("false", True, False),
+        ],
+    )
+    def test_auto_follows_explicit_server_override(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        sample_tools: list[ChatCompletionToolsParam],
+        sample_tools_strict: list[ChatCompletionToolsParam],
+        value: str | None,
+        request_strict: bool,
+        expect_tag: bool,
+    ):
+        if value is None:
+            monkeypatch.delenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", raising=False)
+        else:
+            monkeypatch.setenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", value)
+        tools = sample_tools_strict if request_strict else sample_tools
+        request = ChatCompletionRequest(
+            messages=[], model="test-model", tools=tools, tool_choice="auto"
+        )
+        parser = Qwen3EngineToolParser(MagicMock(), tools=tools)
+
+        tag = parser.get_structural_tag(request)
+
+        assert (tag is not None) is expect_tag
+
+    def test_force_strict_overrides_tools_without_mutating_request(
+        self,
+        dumped_tools: list[list[dict]],
+        sample_tools: list[ChatCompletionToolsParam],
+    ):
+        explicitly_relaxed = ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_time",
+                "strict": False,
+                "parameters": {"type": "object", "properties": {}},
+            },
+        )
+        responses_tool = FunctionTool(
+            type="function",
+            name="get_location",
+            strict=False,
+            parameters={"type": "object", "properties": {}},
+        )
+        tools = [*sample_tools, explicitly_relaxed, responses_tool]
+
+        get_model_structural_tag(
+            model="llama",
+            tools=tools,
+            tool_choice="auto",
+            reasoning=False,
+            force_strict=True,
+        )
+
+        assert dumped_tools[0][0]["function"]["strict"] is True
+        assert dumped_tools[0][1]["function"]["strict"] is True
+        assert dumped_tools[0][2]["function"]["strict"] is True
+        assert sample_tools[0].function.strict is None
+        assert explicitly_relaxed.function.strict is False
+        assert responses_tool.strict is False
+
+    @pytest.mark.parametrize(
+        ("value", "expected_support"),
+        [(None, False), ("true", False), ("false", True)],
+    )
+    def test_parser_routing_follows_explicit_server_override(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        value: str | None,
+        expected_support: bool,
+    ):
+        if value is None:
+            monkeypatch.delenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", raising=False)
+        else:
+            monkeypatch.setenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", value)
+
+        class TestParser(ToolParser):
+            structural_tag_model = "llama"
+
+        assert TestParser.supports_required_and_named is expected_support
+
+    def test_force_strict_keeps_text_response_allowed_under_auto(
+        self,
+        sample_tools: list[ChatCompletionToolsParam],
+    ):
+        auto_tag = get_model_structural_tag(
+            model="hermes",
+            tools=sample_tools,
+            tool_choice="auto",
+            reasoning=False,
+            force_strict=True,
+        )
+        required_tag = get_model_structural_tag(
+            model="hermes",
+            tools=sample_tools,
+            tool_choice="required",
+            reasoning=False,
+            force_strict=True,
+        )
+
+        assert auto_tag is not None
+        assert required_tag is not None
+        assert isinstance(auto_tag.format, TriggeredTagsFormat)
+        assert isinstance(required_tag.format, TagsWithSeparatorFormat)
+
+    def test_force_strict_supports_parallel_tool_calls(
+        self,
+        sample_tools: list[ChatCompletionToolsParam],
+    ):
+        tools = sample_tools + [
+            ChatCompletionToolsParam(
+                type="function",
+                function={
+                    "name": "get_time",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"tz": {"type": "string"}},
+                    },
+                },
+            )
+        ]
+
+        tag = get_model_structural_tag(
+            model="hermes",
+            tools=tools,
+            tool_choice="auto",
+            reasoning=False,
+            force_strict=True,
+        )
+
+        assert isinstance(tag, StructuralTag)
+        rendered = str(tag)
+        assert "get_weather" in rendered
+        assert "get_time" in rendered
