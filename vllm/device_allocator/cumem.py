@@ -304,8 +304,6 @@ class CuMemAllocator:
                 handle = data.handle
                 create_and_map(handle)
                 data.is_asleep = False
-                if data.tag == "kv_cache" and data.cpu_backup_tensor is None:
-                    libcudart.cudaMemset(ptr, 0, handle[1])
                 if data.cpu_backup_tensor is not None:
                     cpu_backup_tensor = data.cpu_backup_tensor
                     if cpu_backup_tensor is not None:
