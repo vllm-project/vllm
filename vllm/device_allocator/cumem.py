@@ -291,13 +291,8 @@ class CuMemAllocator:
                 back to GPU memory. If None, all memory allocation will be loaded
                 back to GPU memory.
         """
-        # KV-cache allocations without a CPU backup contain undefined data after
-        # their physical pages are recreated.  Release PyTorch's transient
-        # cached blocks before remapping them, including for an unfiltered wake.
-        is_kv_cache_wake = tags is None or "kv_cache" in tags
-        if is_kv_cache_wake:
-            gc.collect()
-            torch.accelerator.empty_cache()
+        gc.collect()
+        torch.accelerator.empty_cache()
 
         for ptr, data in self.pointer_to_data.items():
             if tags is None or data.tag in tags:
