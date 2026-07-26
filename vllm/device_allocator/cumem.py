@@ -297,7 +297,7 @@ class CuMemAllocator:
         is_kv_cache_wake = tags is None or "kv_cache" in tags
         if is_kv_cache_wake:
             gc.collect()
-            torch.cuda.empty_cache()
+            torch.accelerator.empty_cache()
 
         for ptr, data in self.pointer_to_data.items():
             if tags is None or data.tag in tags:
