@@ -139,6 +139,17 @@ def _write_consumer_scheduler_for_finished_request(tp_size: int = 2):
     return scheduler
 
 
+def _read_consumer_scheduler_for_alloc():
+    scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
+    scheduler.is_producer = False
+    scheduler.mode = MoRIIOMode.READ
+    scheduler.transfer_id_to_request_id = {}
+    scheduler.request_id_to_transfer_id = {}
+    scheduler._reqs_need_save = {}
+    scheduler._reqs_need_recv = {}
+    return scheduler
+
+
 class FakeMoRIIOWrapper:
     # A fake MoRIIOWrapper for testing purposes
     def __init__(self, *args, **kwargs):
@@ -457,6 +468,79 @@ def test_read_mode_loads_remote_block_ids():
         ],
     ):
         assert block_id == block.block_id, f"{block_id} != {block.block_id}"
+
+
+def test_read_mode_prefix_cache_slices_remote_suffix_blocks():
+    scheduler = _read_consumer_scheduler_for_alloc()
+    request = create_request(request_id=7, do_remote_prefill=True)
+    request.kv_transfer_params.update(
+        {
+            "transfer_id": "xfer-partial",
+            "remote_engine_id": "prefill-engine",
+            "remote_block_ids": [10, 11, 12, 13],
+        }
+    )
+    blocks = MagicMock()
+    blocks.get_block_ids.return_value = [[101, 102]]
+
+    scheduler.update_state_after_alloc(request, blocks, num_external_tokens=32)
+
+    recv_request, local_block_ids = scheduler._reqs_need_recv[request.request_id]
+    assert recv_request is request
+    assert local_block_ids == [101, 102]
+    assert request.kv_transfer_params["remote_block_ids"] == [12, 13]
+    assert request.kv_transfer_params["do_remote_prefill"] is False
+
+
+def test_read_mode_full_prefix_hit_queues_release_only_metadata():
+    scheduler = _read_consumer_scheduler_for_alloc()
+    request = create_request(request_id=7, do_remote_prefill=True)
+    request.kv_transfer_params.update(
+        {
+            "transfer_id": "xfer-full",
+            "remote_engine_id": "prefill-engine",
+            "remote_block_ids": [10, 11, 12, 13],
+        }
+    )
+    blocks = MagicMock()
+    blocks.get_block_ids.return_value = [[]]
+
+    scheduler.update_state_after_alloc(request, blocks, num_external_tokens=0)
+
+    recv_request, local_block_ids = scheduler._reqs_need_recv[request.request_id]
+    assert recv_request is request
+    assert local_block_ids == []
+    assert request.kv_transfer_params["remote_block_ids"] == []
+    assert request.kv_transfer_params["do_remote_prefill"] is False
+
+
+def test_read_mode_full_prefix_hit_releases_without_read():
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker.mode = MoRIIOMode.READ
+    worker.world_size = 1
+    worker.tp_rank = 0
+    worker.moriio_wrapper = MagicMock()
+    worker._get_built_session = MagicMock()
+
+    worker._read_blocks(
+        local_block_ids=[],
+        remote_block_ids=[],
+        dst_engine_id="prefill-engine",
+        request_id="req-full-hit",
+        transfer_id="xfer-full-hit",
+        remote_host="127.0.0.1",
+        remote_notify_port=7000,
+        remote_tp_size=1,
+    )
+
+    worker._get_built_session.assert_not_called()
+    worker.moriio_wrapper.send_notify.assert_called_once_with(
+        "xfer-full-hit",
+        "127.0.0.1",
+        "7000",
+        message_type="release",
+        message_fields={"consumer_tp_size": 1},
+    )
 
 
 @pytest.mark.parametrize(
