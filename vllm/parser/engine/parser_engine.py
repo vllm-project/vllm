@@ -215,9 +215,6 @@ class ParserEngine(Parser):
     def _reset_checkpoint_tracking(self, initial_state: ParserState) -> None:
         self._checkpoint_state = initial_state
         self._checkpoint_reasoning_end: int | None = None
-        self._checkpoint_body_end = 0
-        self._checkpoint_body_end_exact = True
-        self._checkpoint_has_reasoning_body = False
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -646,42 +643,10 @@ class ParserEngine(Parser):
                 reasoning_ended = (
                     was_reasoning and EventType.REASONING_END in transition.events
                 )
-                if (
-                    reasoning_ended
-                    and self._checkpoint_body_end_exact
-                    and self._checkpoint_has_reasoning_body
-                ):
-                    self._checkpoint_reasoning_end = self._checkpoint_body_end
-                if (
-                    terminal == "THINK_START"
-                    and transition.next_state == ParserState.REASONING
-                ):
-                    self._checkpoint_body_end = index + 1
-                    self._checkpoint_body_end_exact = True
-                    self._checkpoint_has_reasoning_body = False
                 self._checkpoint_state = transition.next_state
                 if reasoning_ended:
+                    self._checkpoint_reasoning_end = index
                     return self._checkpoint_reasoning_end
-                continue
-
-            if self._checkpoint_state != ParserState.REASONING:
-                continue
-
-            token_text = self.model_tokenizer.decode(
-                [token_id], skip_special_tokens=False
-            )
-            if not token_text:
-                self._checkpoint_body_end_exact = False
-                continue
-            if token_text.isspace():
-                continue
-
-            self._checkpoint_has_reasoning_body = True
-            if token_text.rstrip() != token_text:
-                self._checkpoint_body_end_exact = False
-            else:
-                self._checkpoint_body_end = index + 1
-                self._checkpoint_body_end_exact = True
         return None
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:

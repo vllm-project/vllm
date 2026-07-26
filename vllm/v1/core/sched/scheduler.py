@@ -379,7 +379,8 @@ class Scheduler(SchedulerInterface):
         In "align" cache mode the SSM state is only materialized at chunk
         ends, so chunk ends are steered onto cacheable positions: block
         boundaries by default, plus mandatory early stops (the prompt's
-        partial-tail hash boundary and a detected shared-prefix junction).
+        partial-tail hash boundary, a selected input checkpoint, and a detected
+        shared-prefix junction).
         """
         start = (
             request.num_computed_tokens
@@ -412,7 +413,7 @@ class Scheduler(SchedulerInterface):
             if self.mamba_partial_cache_hit
             else 0
         )
-        stops = (
+        stops = [
             # Resumed mid-block (fine-grained partial hash hit): re-align to
             # the block grid before running on, so the crossed boundary's
             # state is materialized (unless it is past the cacheable range).
@@ -432,7 +433,18 @@ class Scheduler(SchedulerInterface):
             start + (request.shared_prefix_boundary - start) // block_size * block_size
             if start < request.shared_prefix_boundary < end
             else 0,
-        )
+        ]
+        if getattr(self, "retain_input_end", False) and (
+            request.cache_checkpoint_input_end is not None
+        ):
+            # A materialized input boundary is already at or behind `start`.
+            input_end_boundary = (
+                request.cache_checkpoint_input_end
+                // self.hash_block_size
+                * self.hash_block_size
+            )
+            if start < input_end_boundary < end and input_end_boundary not in stops:
+                stops.append(input_end_boundary)
         # Stop at the earliest mandatory position strictly inside the chunk.
         end = min((s for s in stops if start < s < end), default=end)
         return max(end - start, 0)

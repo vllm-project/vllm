@@ -154,10 +154,10 @@ class ReasoningParser:
     ) -> int | None:
         """Consume committed output tokens and return an exact body boundary.
 
-        The boundary must precede the reasoning terminator and any trailing
-        whitespace. Implementations must process ``delta_token_ids``
-        incrementally and return ``None`` when no exact token boundary is
-        available.
+        The boundary must immediately precede the reasoning terminator, including
+        any trailing whitespace in the reasoning body. Implementations must
+        process ``delta_token_ids`` incrementally and return ``None`` when no
+        exact token boundary is available.
         """
         return None
 

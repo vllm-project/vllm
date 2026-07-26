@@ -69,9 +69,6 @@ class BaseThinkingReasoningParser(ReasoningParser):
         self.start_token_id: int = start_token_id
         self.end_token_id: int = end_token_id
         self._checkpoint_reasoning_end: int | None = None
-        self._checkpoint_body_end = 0
-        self._checkpoint_body_end_exact = True
-        self._checkpoint_has_reasoning_body = False
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         start_token_id = self.start_token_id
@@ -100,33 +97,8 @@ class BaseThinkingReasoningParser(ReasoningParser):
 
         for index, token_id in enumerate(delta_token_ids, start_offset):
             if token_id == self.end_token_id:
-                if (
-                    self._checkpoint_body_end_exact
-                    and self._checkpoint_has_reasoning_body
-                ):
-                    self._checkpoint_reasoning_end = self._checkpoint_body_end
+                self._checkpoint_reasoning_end = index
                 return self._checkpoint_reasoning_end
-            if token_id == self.start_token_id:
-                self._checkpoint_body_end = index + 1
-                self._checkpoint_body_end_exact = True
-                self._checkpoint_has_reasoning_body = False
-                continue
-
-            token_text = self.model_tokenizer.decode(
-                [token_id], skip_special_tokens=False
-            )
-            if not token_text:
-                self._checkpoint_body_end_exact = False
-                continue
-            if token_text.isspace():
-                continue
-
-            self._checkpoint_has_reasoning_body = True
-            if token_text.rstrip() != token_text:
-                self._checkpoint_body_end_exact = False
-            else:
-                self._checkpoint_body_end = index + 1
-                self._checkpoint_body_end_exact = True
 
         return None
 
