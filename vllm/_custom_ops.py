@@ -2460,8 +2460,8 @@ def topk_hash_softplus_sqrt(
             input_tokens,
             hash_indices_table,
         )
+        return
 
-    return
     torch.ops._moe_C.topk_softplus_sqrt(
         topk_weights,
         topk_indices,
