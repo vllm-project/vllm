@@ -470,7 +470,11 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         lora_request = self._maybe_get_adapters(request)
 
-        engine_inputs, chunk_offsets, duration_s = await self._preprocess_speech_to_text(
+        (
+            engine_inputs,
+            chunk_offsets,
+            duration_s,
+        ) = await self._preprocess_speech_to_text(
             request=request,
             audio_data=audio_data,
             request_id=request_id,
