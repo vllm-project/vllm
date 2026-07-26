@@ -20,6 +20,7 @@ use crate::output::{
 use crate::renderer::hf::{HfChatRenderer, MultimodalRenderInfo};
 use crate::renderer::{
     DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer, HarmonyChatRenderer,
+    InklingChatRenderer,
 };
 use crate::request::ChatRequest;
 use crate::{DynChatOutputProcessor, RendererSelection};
@@ -71,6 +72,7 @@ impl HfChatBackend {
             RendererSelection::DeepSeekV32 => Arc::new(DeepSeekV32ChatRenderer::new()),
             RendererSelection::DeepSeekV4 => Arc::new(DeepSeekV4ChatRenderer::new()),
             RendererSelection::Harmony => Arc::new(HarmonyChatRenderer::new()?),
+            RendererSelection::Inkling => Arc::new(InklingChatRenderer::new(tokenizer.clone())?),
         };
 
         info!(
@@ -151,6 +153,7 @@ fn resolve_multimodal_render_info(
     info.map(|info| MultimodalRenderInfo {
         image_token: info.placeholder_token(Modality::Image).map(str::to_string),
         video_token: info.placeholder_token(Modality::Video).map(str::to_string),
+        audio_token: info.placeholder_token(Modality::Audio).map(str::to_string),
     })
 }
 

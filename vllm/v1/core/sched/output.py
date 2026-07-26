@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING
 
+from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
+
 if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
@@ -180,6 +182,14 @@ class CachedRequestData:
 
 
 @dataclass
+class ScheduledEncoderInputStats:
+    """Stats for encoder inputs scheduled in one iteration."""
+
+    num_inputs: int = 0
+    output_tokens: int = 0
+
+
+@dataclass
 class SchedulerOutput:
     # list of the requests that are scheduled for the first time.
     # We cache the request's data in each worker process, so that we don't
@@ -216,6 +226,8 @@ class SchedulerOutput:
     # freed from the encoder cache.
     free_encoder_mm_hashes: list[str]
 
+    scheduled_encoder_input_stats: ScheduledEncoderInputStats | None = None
+
     # Request IDs that are preempted in this step.
     # Only used for v2 model runner.
     preempted_req_ids: set[str] | None = None
@@ -236,7 +248,8 @@ class SchedulerOutput:
 
     # EC Cache Connector metadata
     ec_connector_metadata: ECConnectorMetadata | None = None
-
+    # EC Cache Manager metadata
+    ec_manager_metadata: EncoderCacheManagerMetadata | None = None
     # Block IDs freshly allocated from the pool during this scheduling step.
     # The worker zeros the corresponding GPU memory before the blocks are used,
     # preventing stale NaN/data from corrupting attention or SSM computation.

@@ -131,6 +131,23 @@ def test_head_size_falls_back_when_head_dim_is_zero():
     assert convertor.get_head_size() == 128
 
 
+def test_legacy_modelopt_config_without_producer_is_normalized():
+    quantization_config = {
+        "quantization": {
+            "quant_algo": "NVFP4",
+            "group_size": 16,
+            "kv_cache_quant_algo": None,
+            "exclude_modules": [],
+            "modelopt_quant_config": {"quant_cfg": {}},
+        }
+    }
+    hf_config = PretrainedConfig(quantization_config=quantization_config)
+
+    convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
+
+    assert convertor.get_quantization_config()["quant_method"] == "modelopt_fp4"
+
+
 @pytest.mark.parametrize("model", BASE_MODELS_TO_TEST)
 def test_base_model_arch_config(model: str):
     """Test model architecture config for base models."""
