@@ -10,7 +10,7 @@ pub use vllm_parser::tool::{
     Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser, HermesToolParser, HyV3ToolParser,
     Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser, MinimaxM2ToolParser,
     MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser, Qwen3CoderToolParser,
-    Qwen3XmlToolParser, SeedOssToolParser, ToolParser, ToolParserError,
+    Qwen3XmlToolParser, SeedOssToolParser, Step3ToolParser, ToolParser, ToolParserError,
 };
 
 use crate::parser::ParserFactory;
@@ -43,6 +43,7 @@ pub mod names {
     pub const QWEN3_CODER: &str = "qwen3_coder";
     pub const QWEN3_XML: &str = "qwen3_xml";
     pub const SEED_OSS: &str = "seed_oss";
+    pub const STEP3: &str = "step3";
 }
 
 /// Constructor signature for one registered tool parser implementation.
@@ -88,7 +89,8 @@ impl ToolParserFactory {
             .register_parser::<Phi4MiniJsonToolParser>(names::PHI4_MINI_JSON)
             .register_parser::<Qwen3XmlToolParser>(names::QWEN3_XML)
             .register_parser::<Qwen3CoderToolParser>(names::QWEN3_CODER)
-            .register_parser::<SeedOssToolParser>(names::SEED_OSS);
+            .register_parser::<SeedOssToolParser>(names::SEED_OSS)
+            .register_parser::<Step3ToolParser>(names::STEP3);
 
         factory
             .register_pattern("mistral-", names::MISTRAL)
