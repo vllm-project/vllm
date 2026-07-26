@@ -27,7 +27,11 @@ following `quantization.quant_algo` values:
     and logs a warning; this may reduce throughput for compute-heavy
     workloads. Use `--linear-backend` to override the automatic selection
     (this replaces the deprecated `VLLM_NVFP4_GEMM_BACKEND` environment
-    variable).
+    variable). Values relevant to NVFP4 include `cutlass`,
+    `flashinfer_cutlass`, `flashinfer_trtllm`, `flashinfer_cudnn`, and
+    `marlin`; the full list is documented under `KernelConfig` on the
+    [Engine Arguments](../../configuration/engine_args.md) page and shown by
+    `vllm serve --help=KernelConfig`.
 
 ## Quantizing HuggingFace Models with PTQ
 
