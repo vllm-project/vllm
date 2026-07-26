@@ -106,7 +106,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         # e.g. "language_model", this root is not part of the checkpoint.
         if draft_vllm_config.quant_config is not None:
             draft_vllm_config.quant_config.model_root_prefix = DRAFT_MODEL_PREFIX
-        with set_model_tag("draft_model"):
+        with set_model_tag(DRAFT_MODEL_PREFIX):
             model = get_model(
                 vllm_config=draft_vllm_config,
                 prefix=DRAFT_MODEL_PREFIX,
