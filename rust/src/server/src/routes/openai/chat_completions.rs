@@ -35,7 +35,7 @@ use crate::routes::openai::chat_completions::types::{
     ChatMessageDelta,
 };
 use crate::routes::openai::utils::logprobs::{
-    decoded_logprobs_to_openai_chat, decoded_prompt_logprobs_to_maps,
+    decoded_logprobs_to_openai_chat, prompt_logprobs_to_maps,
 };
 use crate::routes::openai::utils::types::{
     ChatLogProbs, FunctionCallDelta, FunctionCallResponse, ToolCall, ToolCallDelta, Usage,
@@ -181,14 +181,11 @@ async fn collect_chat_completion(
         None
     };
     let prompt_logprobs = if include_prompt_logprobs {
-        Some(decoded_prompt_logprobs_to_maps(
-            prompt_logprobs.as_ref().ok_or_else(|| {
-                server_error!(
-                    "chat response requested prompt_logprobs but generation returned none"
-                )
-            })?,
+        Some(prompt_logprobs_to_maps(
+            prompt_logprobs.as_ref(),
+            &prompt_token_ids,
             return_tokens_as_token_ids,
-        ))
+        )?)
     } else {
         None
     };

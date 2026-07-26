@@ -66,6 +66,12 @@ def _make_router(eplb_state: EplbLayerState | None = None) -> DummyRouter:
     )
 
 
+def _make_modular_routed_experts():
+    return types.SimpleNamespace(
+        quant_method=types.SimpleNamespace(is_monolithic=False),
+    )
+
+
 def test_base_router_capture_pre_eplb_mapping():
     router = _make_router()
     captured = []
@@ -122,6 +128,8 @@ def test_gpu_model_runner_binds_router_capture(monkeypatch):
         def __init__(self):
             self.layer_id = 7
             self.router = _make_router()
+            self.routed_experts = _make_modular_routed_experts()
+            self._quant_method = self.routed_experts.quant_method
 
     class DummyCapturer:
         def __init__(self):
@@ -160,6 +168,8 @@ def test_gpu_model_runner_binding_stage(monkeypatch):
         def __init__(self):
             self.layer_id = 11
             self.router = _make_router()
+            self.routed_experts = _make_modular_routed_experts()
+            self._quant_method = self.routed_experts.quant_method
 
     class DummyCapturer:
         def __init__(self):
@@ -197,6 +207,8 @@ def test_gpu_model_runner_does_not_bind_draft_router_capture(monkeypatch):
         def __init__(self, layer_id):
             self.layer_id = layer_id
             self.router = _make_router()
+            self.routed_experts = _make_modular_routed_experts()
+            self._quant_method = self.routed_experts.quant_method
 
     target_module = DummyFusedMoE(layer_id=7)
     draft_module = DummyFusedMoE(layer_id=0)
@@ -220,6 +232,49 @@ def test_gpu_model_runner_does_not_bind_draft_router_capture(monkeypatch):
 
     assert target_module.router.capture_fn is not None
     assert draft_module.router.capture_fn is None
+
+
+def test_gpu_model_runner_rejects_monolithic_without_replay_support(monkeypatch):
+    from vllm.v1.worker import gpu_model_runner as gmr
+
+    class DummyFusedMoE:
+        def __init__(self):
+            self.layer_id = 3
+            self.router = _make_router()
+            # Use a concrete monolithic expert and override its capability
+            # instead of instantiating the abstract base class directly.
+            from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+                CPUExpertsFp8,
+            )
+
+            fused_experts = CPUExpertsFp8.__new__(CPUExpertsFp8)
+            self.routed_experts = types.SimpleNamespace(
+                quant_method=types.SimpleNamespace(
+                    is_monolithic=True,
+                    moe_kernel=types.SimpleNamespace(
+                        impl=types.SimpleNamespace(fused_experts=fused_experts)
+                    ),
+                )
+            )
+            self._quant_method = self.routed_experts.quant_method
+            self._quant_method.moe_kernel.impl.fused_experts = fused_experts
+            fused_experts.supports_routing_replay_capture = lambda: False
+
+    class DummyCapturer:
+        def capture(self, layer_id, topk_ids):
+            pass
+
+    dummy_module = DummyFusedMoE()
+    import vllm.model_executor.layers.fused_moe.layer as fused_moe_layer
+
+    monkeypatch.setattr(fused_moe_layer, "MoERunner", DummyFusedMoE)
+
+    dummy_self = types.SimpleNamespace(
+        model=types.SimpleNamespace(modules=lambda: [dummy_module])
+    )
+
+    with pytest.raises(ValueError, match="monolithic MoE kernel"):
+        gmr.GPUModelRunner._bind_routed_experts_capturer(dummy_self, DummyCapturer())
 
 
 def test_routed_experts_capturer_single_dp_no_metadata():
