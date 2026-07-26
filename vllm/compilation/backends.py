@@ -489,6 +489,11 @@ def _decompose_size_nodes(graph: fx.GraphModule) -> None:
     size_nodes = list(graph.graph.find_nodes(op="call_method", target="size"))
 
     for node in size_nodes:
+        # Only x.size() (no dim) returns a torch.Size tuple that can't cross
+        # split boundaries. x.size(dim) already returns a scalar SymInt/int,
+        # which crosses fine, so leave it untouched.
+        if len(node.args) > 1 or "dim" in node.kwargs:
+            continue
         tensor_node = node.args[0]
         ev = tensor_node.meta.get("example_value")
         assert ev is not None, (

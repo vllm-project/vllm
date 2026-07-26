@@ -435,15 +435,23 @@ def convert_linear_layer_to_humming_standard(
         setattr(layer, name, param)
 
 
-def prepare_humming_layer(layer: LinearBase, quant_config: dict):
+def prepare_humming_layer(
+    layer: LinearBase,
+    quant_config: dict,
+    input_quant_config: dict | None = None,
+):
     from vllm.utils.humming import (
+        BaseInputSchema,
         BaseWeightSchema,
         HummingInputSchema,
         HummingMethod,
     )
 
     weight_schema = BaseWeightSchema.from_config(quant_config)
-    input_schema = HummingInputSchema()
+    if input_quant_config is not None:
+        input_schema = BaseInputSchema.from_config(input_quant_config)
+    else:
+        input_schema = HummingInputSchema()
 
     # ReplicatedLinear has no TP partitioning and so does not set
     # input_size_per_partition; for it that is just input_size. Use hasattr
@@ -456,9 +464,15 @@ def prepare_humming_layer(layer: LinearBase, quant_config: dict):
     shape_k_stacks = [input_size_per_partition]
     shape_n_stacks = layer.output_partition_sizes
 
-    # Step 1: convert weight to humming standard format
+    # Step 1: convert weight and input schemas to humming standard format
     weight_schema, tensors = weight_schema.convert_humming(
         tensors=dict(layer.named_parameters()),
+        shape_n_stacks=shape_n_stacks,
+        shape_k_stacks=shape_k_stacks,
+        param_dtype=layer.params_dtype,
+    )
+    input_schema, _ = input_schema.convert_humming(
+        tensors={},
         shape_n_stacks=shape_n_stacks,
         shape_k_stacks=shape_k_stacks,
         param_dtype=layer.params_dtype,

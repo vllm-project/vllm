@@ -14,14 +14,10 @@ def test_block_ids_are_not_overwritten_while_copy_is_in_flight():
     page_size_el = 4
     storage = torch.ones((num_blocks, page_size_el), dtype=torch.int32, device=device)
 
-    # Build the minimal zeroer state directly so the test can focus on ID-buffer
-    # lifetime without constructing model attention groups.
+    # Build the minimal zeroer state directly so the test can focus on the
+    # in-flight copy behavior without constructing model attention groups.
     zeroer = KVBlockZeroer.__new__(KVBlockZeroer)
     zeroer.device = device
-    zeroer.pin_memory = True
-    zeroer.max_concurrency = 2
-    zeroer._id_cap = 8
-    zeroer._allocate_id_buffers()
     zeroer._meta = (
         torch.tensor([storage.data_ptr()], dtype=torch.uint64, device=device),
         page_size_el,
@@ -32,7 +28,8 @@ def test_block_ids_are_not_overwritten_while_copy_is_in_flight():
     stream = torch.cuda.Stream()
     with torch.cuda.stream(stream):
         # Keep the first nonblocking H2D copy pending while the host submits the
-        # second call. A single shared pinned source would be overwritten here.
+        # second call. Each call must stage from its own pinned source so the
+        # first copy is not corrupted before it runs.
         torch.cuda._sleep(10_000_000)
         zeroer.zero_block_ids([1])
         zeroer.zero_block_ids([2])

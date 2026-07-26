@@ -57,6 +57,13 @@ class MLAPrefillBackend(ABC):
         return dtype in cls.supported_dtypes
 
     @classmethod
+    def supports_mla_dimensions(cls, mla_dimensions: MLADimensions) -> bool:
+        return (
+            not cls.supported_mla_dimensions
+            or mla_dimensions in cls.supported_mla_dimensions
+        )
+
+    @classmethod
     def is_available(cls) -> bool:
         return True
 
@@ -86,15 +93,20 @@ class MLAPrefillBackend(ABC):
         if not cls.is_available():
             invalid_reasons.append("required dependencies not available")
 
-        if (
-            cls.supported_mla_dimensions
-            and selector_config.mla_dimensions not in cls.supported_mla_dimensions
-        ):
-            supported = ", ".join(str(dims) for dims in cls.supported_mla_dimensions)
-            invalid_reasons.append(
-                "Model does not have supported MLA dimensions "
-                f"(got {selector_config.mla_dimensions}; supported: {supported})"
+        mla_dimensions = selector_config.mla_dimensions
+        if not cls.supports_mla_dimensions(mla_dimensions):
+            reason = (
+                f"Model does not have supported MLA dimensions (got {mla_dimensions}"
             )
+            if (
+                cls.supported_mla_dimensions
+                and mla_dimensions not in cls.supported_mla_dimensions
+            ):
+                supported = ", ".join(
+                    str(dims) for dims in cls.supported_mla_dimensions
+                )
+                reason += f"; supported: {supported}"
+            invalid_reasons.append(reason + ")")
 
         return invalid_reasons
 

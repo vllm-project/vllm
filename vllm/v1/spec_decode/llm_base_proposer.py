@@ -1009,8 +1009,9 @@ class SpecDecodeBaseProposer:
             # DeepSeek-family MTP (deepseek_mtp.py) recycles the post-final-
             # norm hidden, so its forward returns (logit_hidden,
             # recycle_hidden). Other MTP families return a single tensor.
-            return "DeepSeekMTPModel" in (
-                self.draft_model_config.hf_config.architectures or []
+            return bool(
+                {"DeepSeekMTPModel", "DeepseekV32MTPModel"}
+                & set(self.draft_model_config.hf_config.architectures or [])
             )
         return self.method not in ("mtp", "draft_model", "dflash")
 
@@ -1300,6 +1301,15 @@ class SpecDecodeBaseProposer:
             ),
         )
 
+        if spec_cfg.kv_cache_dtype is not None:
+            base = replace(
+                base,
+                cache_config=replace(
+                    base.cache_config,
+                    cache_dtype=spec_cfg.kv_cache_dtype,
+                ),
+            )
+
         return base
 
     def _get_model(self) -> nn.Module:
@@ -1468,9 +1478,13 @@ class SpecDecodeBaseProposer:
                     "Sharing target model embedding weights with the draft model."
                 )
 
-            if share_embeddings:
+            if share_embeddings and hasattr(self.model, "has_own_embed_tokens"):
+                # EAGLE drafts consume input embeddings at their own hidden
+                # size, so only share when the widths match. MTP drafts
+                # project target-width embeddings (e.g. Gemma4 MTP's
+                # pre_projection takes 2 * backbone_hidden_size), so the
+                # width check does not apply to them.
                 draft_embed = self.model.model.embed_tokens
-                # Only share when both models use the same embedding width.
                 # Guard with isinstance so non-Tensor weights (e.g. in tests)
                 # are not affected — mirrors the weight-equality check above.
                 if isinstance(target_embed_tokens.weight, torch.Tensor) and isinstance(

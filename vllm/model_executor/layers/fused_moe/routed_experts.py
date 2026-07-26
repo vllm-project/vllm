@@ -114,6 +114,7 @@ class RoutedExperts(PluggableLayer):
         self.e_score_correction_bias = e_score_correction_bias
         self.apply_router_weight_on_input = apply_router_weight_on_input
         # End random parameters
+        self._loaded_expert_biases: set[str] = set()
 
         self.quant_method = self._get_quant_method(
             self.layer_name,
@@ -690,6 +691,25 @@ class RoutedExperts(PluggableLayer):
             shard_dim += 1
 
         expert_data = param.data if full_load else param.data[expert_id]
+
+        if "bias" in weight_name:
+            self._loaded_expert_biases.add(weight_name.rsplit(".", 1)[-1])
+            if shard_id == "w2":
+                expert_data = self._narrow_expert_data_for_padding(
+                    expert_data,
+                    loaded_weight,
+                    hidden_dim=0,
+                )
+                expert_data.copy_(loaded_weight)
+            else:
+                self._load_w13(
+                    shard_id=shard_id,
+                    shard_dim=0,
+                    loaded_weight=loaded_weight,
+                    expert_data=expert_data,
+                    tp_rank=self.moe_config.tp_rank,
+                )
+            return True if return_success else None
 
         # Case input scale: input_scale loading is only supported for fp8
         if "input_scale" in weight_name:

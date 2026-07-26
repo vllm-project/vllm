@@ -29,6 +29,9 @@ SKIP_TENSORS: set[str] = {
     "expert_physical_to_global",
     "expert_local_to_global",
     "e_score_correction_bias",
+    # Built after create_weights(), so it is not tracked by the layerwise-reload
+    # trigger and would be re-materialized into uninitialized memory. Skip it.
+    "bias",
 }
 
 
@@ -117,6 +120,7 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
     if layer.__class__.__name__ in SKIP_MODULES:
         return
 
+    non_persistent = set(layer._non_persistent_buffers_set)
     for name in get_layer_tensors(layer):
         if name not in SKIP_TENSORS:
             delattr(layer, name)
@@ -130,7 +134,7 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
     for name, buffer in restore_buffers.items():
         if name not in SKIP_TENSORS:
             buffer = restore_layer_refs(buffer, layer)
-            layer.register_buffer(name, buffer)
+            layer.register_buffer(name, buffer, persistent=name not in non_persistent)
 
 
 def materialize_layer(layer: torch.nn.Module, info: LayerReloadingInfo):

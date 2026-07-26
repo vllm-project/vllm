@@ -132,6 +132,21 @@ class TestResponsesRequestSamplingParams:
         assert sampling_params.structured_outputs is not None
         assert sampling_params.structured_outputs.grammar == "root ::= 'hello'"
 
+    def test_text_format_json_object_enables_structured_outputs(self):
+        """text.format json_object enables structured outputs for sampling."""
+        request = ResponsesRequest(
+            model="test-model",
+            input="test input",
+            text=ResponseTextConfig.model_validate({"format": {"type": "json_object"}}),
+        )
+
+        sampling_params = request.to_sampling_params(default_max_tokens=1000)
+
+        assert sampling_params.structured_outputs is not None
+        assert sampling_params.structured_outputs.json_object is True
+        assert sampling_params.structured_outputs.json is None
+        assert request.structured_outputs is None
+
     def test_structured_outputs_and_json_schema_conflict(self):
         """Test that specifying both structured_outputs and json_schema raises."""
         structured_outputs = StructuredOutputsParams(grammar="root ::= 'hello'")
