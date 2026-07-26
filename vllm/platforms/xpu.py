@@ -292,6 +292,24 @@ class XPUPlatform(Platform):
                 "potentially causing OOM errors or leaving less memory "
                 "for the KV cache and reducing performance."
             )
+            # Default-on safety: FA2 SYCL kernels that use
+            # sycl_ext_oneapi_work_group_scratch_memory crash when captured
+            # into a FULL XPU Graph. Clamp to PIECEWISE unless the operator
+            # opts out (e.g. TRITON_ATTN FULL experiments).
+            if (
+                envs.VLLM_XPU_GRAPH_FORCE_PIECEWISE
+                and compilation_config.cudagraph_mode is not None
+                and compilation_config.cudagraph_mode.has_full_cudagraphs()
+            ):
+                logger.warning_once(
+                    "VLLM_XPU_GRAPH_FORCE_PIECEWISE=1: overriding "
+                    "cudagraph_mode from %s to PIECEWISE so FlashAttention "
+                    "stays outside the XPU Graph. Set "
+                    "VLLM_XPU_GRAPH_FORCE_PIECEWISE=0 to keep full graph "
+                    "modes (use TRITON_ATTN).",
+                    compilation_config.cudagraph_mode.name,
+                )
+                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
         # Disable fusion passes not yet supported on XPU.
         from vllm.config.compilation import CompilationMode

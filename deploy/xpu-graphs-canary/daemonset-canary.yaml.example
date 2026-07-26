@@ -1,0 +1,63 @@
+# EXAMPLE ONLY — not applied by default. Distinct from Ornith production DS.
+# Replace IMAGE / MODEL / PVC paths for your cluster before `kubectl apply`.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: vllm-xpu-graphs-canary
+  labels:
+    app: vllm-xpu-graphs-canary
+    vllm.graphs.canary: "true"
+spec:
+  selector:
+    matchLabels:
+      app: vllm-xpu-graphs-canary
+  template:
+    metadata:
+      labels:
+        app: vllm-xpu-graphs-canary
+        vllm.graphs.canary: "true"
+    spec:
+      # Pin to the Arc node(s) used for canary; do not schedule on Ornith-only nodes
+      # unless you intentionally shadow-load.
+      nodeSelector: {}
+      containers:
+        - name: vllm
+          image: hal/vllm-xpu:kris-fork-577e1a932
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: VLLM_XPU_ENABLE_XPU_GRAPH
+              value: "1"
+            - name: VLLM_XPU_GRAPH_FORCE_PIECEWISE
+              value: "1"
+            - name: ZE_AFFINITY_MASK
+              value: "0"
+            - name: HF_HOME
+              value: /models
+          # No --enforce-eager. Triton + PIECEWISE canary.
+          args:
+            - serve
+            - Qwen/Qwen2.5-1.5B-Instruct
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "8000"
+            - --attention-backend
+            - TRITON_ATTN
+            - -cc.cudagraph_mode=PIECEWISE
+            - --max-model-len
+            - "4096"
+            - --gpu-memory-utilization
+            - "0.85"
+          ports:
+            - containerPort: 8000
+              name: http
+          resources:
+            limits:
+              gpu.intel.com/i915: "1"
+          volumeMounts:
+            - name: models
+              mountPath: /models
+      volumes:
+        - name: models
+          emptyDir: {}
+      # Host paths / device plugins: match your existing Ornith DS patterns.

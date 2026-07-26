@@ -2,7 +2,7 @@
 
 **Branch:** `xpu-graphs-triton-piecewise-canary`  
 **Base:** `krisclarkdev/vllm` @ `577e1a932` (fork tip / `hal/vllm-xpu:kris-fork-577e1a932`)  
-**Status:** plan only — no production cutover, no DaemonSet default change, no push until requested.
+**Status:** implemented on feature branch (canary stubs + force-PIECEWISE guard). No production cutover; no push until requested. HAL ladder T1/T4 still to run.
 
 ## Summary
 
@@ -101,12 +101,12 @@ Automatic / ops:
 
 ## Tasks (ordered)
 
-- [ ] **T0** Keep all work on `xpu-graphs-triton-piecewise-canary`; never merge to `main` without explicit ask; never push unless asked.
+- [x] **T0** Keep all work on `xpu-graphs-triton-piecewise-canary`; never merge to `main` without explicit ask; never push unless asked.
 - [ ] **T1** Confirm runtime torch on `hal/vllm-xpu:kris-fork-577e1a932` reports `supports_xpu_graph()==True` (torch ≥ 2.11.dev).
-- [ ] **T2** Add `deploy/xpu-graphs-canary/` on this branch: `README.md`, `env-canary.env.example`, optional `daemonset-canary.yaml.example` (not applied by default) with TRITON_ATTN + PIECEWISE + graphs=1, distinct from Ornith.
-- [ ] **T3** (Optional defensive) In `XPUPlatform.check_and_update_config`, when graphs enabled and `cudagraph_mode` still has full graphs, log loudly and optionally clamp to `PIECEWISE` behind a flag e.g. `VLLM_XPU_GRAPH_FORCE_PIECEWISE=1` (default on for safety). Smallest useful guard without surprising FULL Triton experiments.
+- [x] **T2** Add `deploy/xpu-graphs-canary/` on this branch: `README.md`, `env-canary.env.example`, optional `daemonset-canary.yaml.example` (not applied by default) with TRITON_ATTN + PIECEWISE + graphs=1, distinct from Ornith.
+- [x] **T3** (Optional defensive) In `XPUPlatform.check_and_update_config`, when graphs enabled and `cudagraph_mode` still has full graphs, log loudly and optionally clamp to `PIECEWISE` behind a flag e.g. `VLLM_XPU_GRAPH_FORCE_PIECEWISE=1` (default on for safety). Smallest useful guard without surprising FULL Triton experiments.
 - [ ] **T4** Run validation ladder (below) on HAL Arc; collect logs + smoke transcripts on this branch under `deploy/xpu-graphs-canary/results/` (gitignored if large).
-- [ ] **T5** Document success/fail + rollback in canary README; explicitly “Ornith stays eager”.
+- [x] **T5** Document success/fail + rollback in canary README; explicitly “Ornith stays eager”.
 - [ ] **T6** Only after ladder green: optional Ornith **shadow** canary (non-default DS), then stop — no production cutover in this effort.
 
 ---
@@ -215,9 +215,8 @@ VLLM_XPU_ENABLE_XPU_GRAPH=0
 --enforce-eager
 ```
 
-Primary code touchpoints if implementing guards later:
+Implemented code touchpoints:
 
-- `vllm/platforms/xpu.py` — `XPUPlatform.check_and_update_config`, `get_attn_backend_cls`
-- `vllm/envs.py` — `VLLM_XPU_ENABLE_XPU_GRAPH` (+ optional force-PIECEWISE)
-- `vllm/v1/worker/xpu_model_runner.py` — CUDA→XPU graph aliases
-- `vllm/v1/attention/backends/triton_attn.py` / `flash_attn.py` — cudagraph support enums
+- `vllm/platforms/xpu.py` — `VLLM_XPU_GRAPH_FORCE_PIECEWISE` clamps full modes → `PIECEWISE`
+- `vllm/envs.py` — `VLLM_XPU_ENABLE_XPU_GRAPH` + `VLLM_XPU_GRAPH_FORCE_PIECEWISE` (default `1`)
+- `deploy/xpu-graphs-canary/` — README, env example, DS example, `smoke_canary.sh`

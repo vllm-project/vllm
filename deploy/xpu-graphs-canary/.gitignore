@@ -1,0 +1,3 @@
+# Large / host-local smoke artifacts
+results/
+*.log
