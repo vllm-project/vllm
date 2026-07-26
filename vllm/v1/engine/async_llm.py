@@ -1083,11 +1083,11 @@ class AsyncLLM(EngineClient):
 
     async def start_weight_update(self) -> None:
         """Start a new weight update."""
-        await self.collective_rpc("start_weight_update")
+        await self.engine_core.start_weight_update_async()
 
     async def start_draft_weight_update(self) -> None:
         """Start a new weight update targeting the speculative draft model."""
-        await self.collective_rpc("start_draft_weight_update")
+        await self.engine_core.start_draft_weight_update_async()
 
     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
         """
@@ -1102,8 +1102,8 @@ class AsyncLLM(EngineClient):
 
     async def finish_weight_update(self) -> None:
         """Finish the current weight update."""
-        await self.collective_rpc("finish_weight_update")
+        await self.engine_core.finish_weight_update_async()
 
     async def get_weight_version(self) -> int:
-        """Return the latest committed target-policy weight generation."""
+        """Return the latest committed version of the target model's weights."""
         return await self.engine_core.get_weight_version_async()

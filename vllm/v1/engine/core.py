@@ -10,7 +10,7 @@ from collections import defaultdict, deque
 from collections.abc import Callable, Generator
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
-from enum import IntEnum
+from enum import Enum, IntEnum, auto
 from functools import partial
 from inspect import isclass, signature
 from logging import DEBUG
@@ -103,6 +103,10 @@ _R = TypeVar("_R")  # Return type for collective_rpc
 class EngineCore:
     """Inner loop of vLLM's Engine."""
 
+    class WeightUpdateType(Enum):
+        TARGET = auto()
+        DRAFT = auto()
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -126,9 +130,9 @@ class EngineCore:
 
         self.log_stats = log_stats
 
-        # Monotonically increasing generation of the target policy weights.
+        # Monotonically increasing version of the target model's weights.
         self._weight_version = 0
-        self._weight_update_is_draft: bool | None = None
+        self._active_weight_update_type: EngineCore.WeightUpdateType | None = None
 
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
@@ -958,21 +962,25 @@ class EngineCore:
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
-        result = self.model_executor.collective_rpc(method, timeout, args, kwargs)
-        # Target and draft updates share finish_weight_update.
-        if method == "start_weight_update":
-            self._weight_update_is_draft = False
-        elif method == "start_draft_weight_update":
-            self._weight_update_is_draft = True
-        elif method == "finish_weight_update":
-            # Only a successfully finished target update advances the version.
-            if self._weight_update_is_draft is False:
-                self._weight_version += 1
-            self._weight_update_is_draft = None
-        return result
+        return self.model_executor.collective_rpc(method, timeout, args, kwargs)
+
+    def start_weight_update(self) -> None:
+        self.collective_rpc("start_weight_update")
+        self._active_weight_update_type = self.WeightUpdateType.TARGET
+
+    def start_draft_weight_update(self) -> None:
+        self.collective_rpc("start_draft_weight_update")
+        self._active_weight_update_type = self.WeightUpdateType.DRAFT
+
+    def finish_weight_update(self) -> None:
+        self.collective_rpc("finish_weight_update")
+        # Advance the target model's weight version only after a successful finish.
+        if self._active_weight_update_type is self.WeightUpdateType.TARGET:
+            self._weight_version += 1
+        self._active_weight_update_type = None
 
     def get_weight_version(self) -> int:
-        """Return the latest committed target-policy weight generation."""
+        """Return the latest committed version of the target model's weights."""
         return self._weight_version
 
     def preprocess_add_request(self, request: EngineCoreRequest) -> tuple[Request, int]:

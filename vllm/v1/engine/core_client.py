@@ -176,10 +176,28 @@ class EngineCoreClient(ABC):
     def execute_dummy_batch(self) -> None:
         raise NotImplementedError
 
+    def start_weight_update(self) -> None:
+        raise NotImplementedError
+
+    def start_draft_weight_update(self) -> None:
+        raise NotImplementedError
+
+    def finish_weight_update(self) -> None:
+        raise NotImplementedError
+
     def get_weight_version(self) -> int:
         raise NotImplementedError
 
     async def execute_dummy_batch_async(self) -> None:
+        raise NotImplementedError
+
+    async def start_weight_update_async(self) -> None:
+        raise NotImplementedError
+
+    async def start_draft_weight_update_async(self) -> None:
+        raise NotImplementedError
+
+    async def finish_weight_update_async(self) -> None:
         raise NotImplementedError
 
     async def get_weight_version_async(self) -> int:
@@ -356,6 +374,15 @@ class InprocClient(EngineCoreClient):
 
     def execute_dummy_batch(self) -> None:
         self.engine_core.execute_dummy_batch()
+
+    def start_weight_update(self) -> None:
+        self.engine_core.start_weight_update()
+
+    def start_draft_weight_update(self) -> None:
+        self.engine_core.start_draft_weight_update()
+
+    def finish_weight_update(self) -> None:
+        self.engine_core.finish_weight_update()
 
     def get_weight_version(self) -> int:
         return self.engine_core.get_weight_version()
@@ -956,6 +983,15 @@ class SyncMPClient(MPClient):
     def execute_dummy_batch(self) -> None:
         self.call_utility("execute_dummy_batch")
 
+    def start_weight_update(self) -> None:
+        self.call_utility("start_weight_update")
+
+    def start_draft_weight_update(self) -> None:
+        self.call_utility("start_draft_weight_update")
+
+    def finish_weight_update(self) -> None:
+        self.call_utility("finish_weight_update")
+
     def get_weight_version(self) -> int:
         return self.call_utility("get_weight_version")
 
@@ -1210,6 +1246,15 @@ class AsyncMPClient(MPClient):
 
     async def execute_dummy_batch_async(self) -> None:
         await self.call_utility_async("execute_dummy_batch")
+
+    async def start_weight_update_async(self) -> None:
+        await self.call_utility_async("start_weight_update")
+
+    async def start_draft_weight_update_async(self) -> None:
+        await self.call_utility_async("start_draft_weight_update")
+
+    async def finish_weight_update_async(self) -> None:
+        await self.call_utility_async("finish_weight_update")
 
     async def get_weight_version_async(self) -> int:
         return await self.call_utility_async("get_weight_version")

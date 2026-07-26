@@ -864,11 +864,11 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
 
     def start_weight_update(self) -> None:
         """Start a new weight update."""
-        self.llm_engine.collective_rpc("start_weight_update")
+        self.llm_engine.start_weight_update()
 
     def start_draft_weight_update(self) -> None:
         """Start a new weight update targeting the speculative draft model."""
-        self.llm_engine.collective_rpc("start_draft_weight_update")
+        self.llm_engine.start_draft_weight_update()
 
     def update_weights(self, request: WeightTransferUpdateRequest | dict) -> None:
         """
@@ -887,10 +887,10 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
 
     def finish_weight_update(self) -> None:
         """Finish the current weight update."""
-        self.llm_engine.collective_rpc("finish_weight_update")
+        self.llm_engine.finish_weight_update()
 
     def get_weight_version(self) -> int:
-        """Return the latest committed target-policy weight generation."""
+        """Return the latest committed version of the target model's weights."""
         return self.llm_engine.get_weight_version()
 
     def __repr__(self) -> str:

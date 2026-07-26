@@ -272,5 +272,5 @@ class EngineClient(ABC):
         raise NotImplementedError
 
     async def get_weight_version(self) -> int:
-        """Return the latest committed target-policy weight generation."""
+        """Return the latest committed version of the target model's weights."""
         raise NotImplementedError
