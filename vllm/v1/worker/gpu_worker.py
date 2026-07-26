@@ -150,7 +150,6 @@ class Worker(WorkerBase):
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
         self._sleep_saved_draft_buffers: dict[str, torch.Tensor] = {}
-        self._sleep_rebuild_draft_metadata_buffers = False
 
         # Weight transfer engine is created in `load_model` once the model
         # is available, since the engine needs a reference to the model.
@@ -198,17 +197,8 @@ class Worker(WorkerBase):
             draft = self.get_draft_model()
             if draft is not None:
                 self._sleep_saved_draft_buffers = {
-                    name: buffer.cpu().clone()
-                    for name, buffer in draft.named_buffers()
+                    name: buffer.cpu().clone() for name, buffer in draft.named_buffers()
                 }
-                logger.info(
-                    "Saved %d unique draft buffers before level-2 sleep.",
-                    len(self._sleep_saved_draft_buffers),
-                )
-            inner = getattr(draft, "model", None) if draft is not None else None
-            self._sleep_rebuild_draft_metadata_buffers = inner is not None and hasattr(
-                inner, "_build_fused_kv_buffers"
-            )
 
         self._get_sleep_mode_backend().suspend(level)
 
@@ -241,27 +231,14 @@ class Worker(WorkerBase):
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
 
-        if wake_weights and (
-            self._sleep_saved_draft_buffers
-            or self._sleep_rebuild_draft_metadata_buffers
-        ):
+        if wake_weights and len(self._sleep_saved_draft_buffers):
             draft = self.get_draft_model()
             if draft is not None:
                 for name, buffer in draft.named_buffers():
                     saved = self._sleep_saved_draft_buffers.get(name)
                     if saved is not None:
                         buffer.data.copy_(saved.data)
-
-                inner = getattr(draft, "model", None)
-                if (
-                    self._sleep_rebuild_draft_metadata_buffers
-                    and inner is not None
-                    and hasattr(inner, "_build_fused_kv_buffers")
-                ):
-                    inner._build_fused_kv_buffers()
-
             self._sleep_saved_draft_buffers = {}
-            self._sleep_rebuild_draft_metadata_buffers = False
 
         if tags is None or "kv_cache" in tags:
             self.model_runner.post_kv_cache_wake_up()
