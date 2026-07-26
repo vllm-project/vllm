@@ -417,8 +417,23 @@ def get_mamba_groups(kv_cache_config: KVCacheConfig) -> tuple[list[int], MambaSp
             mamba_group_ids.append(i)
             mamba_specs.append(kv_cache_spec)
     assert len(mamba_group_ids) > 0, "no mamba layers in the model"
-    assert all(mamba_specs[0] == spec for spec in mamba_specs)
-    return mamba_group_ids, mamba_specs[0]
+    # A hybrid draft model adds mamba group(s) whose per-layer state shapes
+    # differ from the target's. Only the scalar fields consumed downstream
+    # (block_size, num_speculative_blocks) must match across groups; the actual
+    # state copies are driven per-layer from the real cache tensors (see
+    # collect_mamba_copy_meta / MambaSpecDecodeGPUContext), not from this spec.
+    # Requiring full spec equality here needlessly rejects a hybrid draft.
+    ref = mamba_specs[0]
+    for spec in mamba_specs:
+        assert (
+            spec.block_size == ref.block_size
+            and spec.num_speculative_blocks == ref.num_speculative_blocks
+        ), (
+            "Mamba groups must share block_size and num_speculative_blocks; got "
+            f"{(spec.block_size, spec.num_speculative_blocks)} vs "
+            f"{(ref.block_size, ref.num_speculative_blocks)}"
+        )
+    return mamba_group_ids, ref
 
 
 @dataclasses.dataclass
