@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
+import gc
 import os
 import traceback
 from collections.abc import Callable
@@ -22,6 +23,27 @@ from vllm.utils.network_utils import get_open_port
 ## Parallel Processes Utils
 
 P = ParamSpec("P")
+
+
+# NOTE: this is a workaround pending a FlashInfer improvement to provide
+# a clean up API.
+def _cleanup_flashinfer_mnnvl_workspaces():
+    try:
+        from flashinfer.comm.trtllm_alltoall import MnnvlMoe
+
+        MnnvlMoe.moe_workspace = None
+        MnnvlMoe.moe_workspace_tensor = None
+        MnnvlMoe.moe_prepare_workspace = None
+        MnnvlMoe.moe_prepare_workspace_tensor = None
+    except ImportError:
+        pass
+    try:
+        from flashinfer.comm.trtllm_moe_alltoall import MoeAlltoAll
+
+        MoeAlltoAll._WORKSPACE_CACHE.clear()
+    except ImportError:
+        pass
+    gc.collect()
 
 
 @dataclasses.dataclass
@@ -134,6 +156,7 @@ def _worker_parallel_launch(
         raise
     finally:
         torch.accelerator.synchronize()
+        _cleanup_flashinfer_mnnvl_workspaces()
         if vllm_config is not None:
             cleanup_dist_env_and_memory()
         else:

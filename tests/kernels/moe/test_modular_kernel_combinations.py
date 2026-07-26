@@ -12,6 +12,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed import get_ep_group
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 from vllm.utils.import_utils import has_deep_ep, has_deep_gemm
@@ -134,6 +135,13 @@ def rank_worker(
             if config.quant_dtype == "nvfp4":
                 atol = 1e-1 if config.K < 4096 else 2e-1
                 rtol = 1e-1 if config.K < 4096 else 2e-1
+                # The TRTLLM kernel is slightly noisier.
+                if (
+                    getattr(config.fused_experts_type, "__name__", "")
+                    == "TrtLlmNvFp4ExpertsModular"
+                ):
+                    atol += 1e-1
+                    rtol += 1e-1
             else:
                 atol = 3e-2
                 rtol = 3e-2
@@ -184,6 +192,15 @@ def rank_worker(
         except Exception as ex:
             format_result(verbose, config.describe(), ex)
             exceptions.append(ex)
+        finally:
+            # Tear down to avoid crash when trying to destroy some CUDA resources
+            # after the context is gone.
+            torch.accelerator.synchronize()
+            torch.distributed.barrier()
+            communicator = get_ep_group().device_communicator
+            manager = communicator.all2all_manager if communicator is not None else None
+            if manager is not None:
+                manager.destroy()
 
     if len(exceptions) > 0:
         raise RuntimeError(

@@ -103,10 +103,10 @@ def compute_aligned_M(
 
 
 @triton.jit
-def apply_expert_map(expert_id, expert_map):
-    if expert_id != -1:
-        expert_id = tl.load(expert_map + expert_id).to(expert_id.dtype)
-    return expert_id
+def apply_expert_map(expert_id, expert_map, expert_map_size):
+    valid = (expert_id >= 0) & (expert_id < expert_map_size)
+    mapped = tl.load(expert_map + tl.where(valid, expert_id, 0))
+    return tl.where(valid, mapped, -1).to(expert_id.dtype)
 
 
 @triton.jit
@@ -179,6 +179,7 @@ def _fwd_kernel_ep_scatter_2(
     output_index_stride1,
     topk_num: tl.constexpr,
     expert_map,
+    expert_map_size,
     HAS_EXPERT_MAP: tl.constexpr,
     HIDDEN_SIZE: tl.constexpr,
     HIDDEN_SIZE_PAD: tl.constexpr,
@@ -240,7 +241,7 @@ def _fwd_kernel_ep_scatter_2(
             expert_id = tl.load(recv_topk + token_id * recv_topk_stride0 + topk_index)
 
             if HAS_EXPERT_MAP:
-                expert_id = apply_expert_map(expert_id, expert_map)
+                expert_id = apply_expert_map(expert_id, expert_map, expert_map_size)
 
             if expert_id >= 0:
                 dest_token_index = tl.atomic_add(expert_start_loc + expert_id, 1)
@@ -337,6 +338,7 @@ def ep_scatter(
         output_index.stride(1),
         topk_num=recv_topk.shape[1],
         expert_map=expert_map,
+        expert_map_size=expert_map.numel() if expert_map is not None else 0,
         HAS_EXPERT_MAP=expert_map is not None,
         num_warps=num_warps,
         HIDDEN_SIZE=hidden_size,
@@ -370,6 +372,7 @@ def _fwd_kernel_ep_gather(
     output_tensor_stride1,
     topk_num: tl.constexpr,
     expert_map,
+    expert_map_size,
     HAS_EXPERT_MAP: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
@@ -386,7 +389,7 @@ def _fwd_kernel_ep_gather(
             )
 
             if HAS_EXPERT_MAP:
-                expert_id = apply_expert_map(expert_id, expert_map)
+                expert_id = apply_expert_map(expert_id, expert_map, expert_map_size)
 
             if expert_id >= 0:
                 source_token_index = tl.load(
@@ -447,6 +450,7 @@ def ep_gather(
         output_tensor.stride(1),
         topk_num=recv_topk_ids.shape[1],
         expert_map=expert_map,
+        expert_map_size=expert_map.numel() if expert_map is not None else 0,
         HAS_EXPERT_MAP=expert_map is not None,
         num_warps=num_warps,
         BLOCK_D=BLOCK_D,
@@ -465,7 +469,9 @@ def deepgemm_moe_permute(
     block_size: int | None = None,
 ):
     assert aq.ndim == 2
-    assert topk_ids.dtype.is_signed, "The kernel uses -1 to represent invalid topk_ids"
+    assert topk_ids.dtype.is_signed, (
+        "The kernel detects invalid topk_ids with signed comparisons"
+    )
     H = aq.size(1)
     device = aq.device
 
