@@ -102,10 +102,12 @@ Automatic / ops:
 ## Tasks (ordered)
 
 - [x] **T0** Keep all work on `xpu-graphs-triton-piecewise-canary`; never merge to `main` without explicit ask; never push unless asked.
-- [ ] **T1** Confirm runtime torch on `hal/vllm-xpu:kris-fork-577e1a932` reports `supports_xpu_graph()==True` (torch ≥ 2.11.dev).
+- [x] **T1** Confirm runtime torch on `hal/vllm-xpu:kris-fork-577e1a932` reports `supports_xpu_graph()==True` (torch ≥ 2.11.dev).
+  - Verified inside live Ornith pod `vllm-xpu-q9hv6`: `torch 2.12.0+xpu`, `supports_xpu_graph True`.
 - [x] **T2** Add `deploy/xpu-graphs-canary/` on this branch: `README.md`, `env-canary.env.example`, optional `daemonset-canary.yaml.example` (not applied by default) with TRITON_ATTN + PIECEWISE + graphs=1, distinct from Ornith.
 - [x] **T3** (Optional defensive) In `XPUPlatform.check_and_update_config`, when graphs enabled and `cudagraph_mode` still has full graphs, log loudly and optionally clamp to `PIECEWISE` behind a flag e.g. `VLLM_XPU_GRAPH_FORCE_PIECEWISE=1` (default on for safety). Smallest useful guard without surprising FULL Triton experiments.
 - [ ] **T4** Run validation ladder (below) on HAL Arc; collect logs + smoke transcripts on this branch under `deploy/xpu-graphs-canary/results/` (gitignored if large).
+  - **Blocked while Ornith holds the sole `gpu.intel.com/xe` device.** Do not steal the production GPU. Run `smoke_canary.sh` after a maintenance window or on a second Arc, with an image built from this branch.
 - [x] **T5** Document success/fail + rollback in canary README; explicitly “Ornith stays eager”.
 - [ ] **T6** Only after ladder green: optional Ornith **shadow** canary (non-default DS), then stop — no production cutover in this effort.
 
