@@ -276,7 +276,13 @@ class Cosmos3EdgeProcessingInfo(Qwen3VLProcessingInfo):
 
 
 class Cosmos3EdgeMultiModalProcessor(Qwen3VLMultiModalProcessor):
-    pass
+    @staticmethod
+    def _expands_only_video_token(_hf_processor: ProcessorMixin) -> bool:
+        # Cosmos renders each video as a full
+        # <|vision_start|><|video_pad|><|vision_end|> placeholder, and its
+        # reference processor replaces that entire triplet with timestamped,
+        # per-frame vision sequences.
+        return False
 
 
 class Cosmos3EdgeDummyInputsBuilder(Qwen3VLDummyInputsBuilder):
@@ -517,6 +523,7 @@ class Cosmos3EdgeForConditionalGeneration(
         },
         orig_to_new_substr={
             "_moe_gen": None,
+            "k_norm_und_for_gen": None,
             ".add_q_proj.": None,
             ".add_k_proj.": None,
             ".add_v_proj.": None,
