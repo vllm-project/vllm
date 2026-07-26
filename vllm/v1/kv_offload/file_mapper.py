@@ -61,6 +61,8 @@ class FileMapper:
         }
         if not parallel_agnostic:
             self.fields["parallel_agnostic"] = False
+        # Only written when True so existing deployments' hashed fields are
+        # unchanged (False is the historical default and must not appear).
         if replicated_layout:
             self.fields["replicated_layout"] = True
         self.base_path: str = self._compute_base_path(root_dir, self.fields)

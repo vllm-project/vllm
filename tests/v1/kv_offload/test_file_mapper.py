@@ -248,6 +248,15 @@ def test_replicated_layout_requires_caller_opt_in():
     assert fm.fields["tp_size"] == 2
     assert fm.rank == 1
     assert fm.fields["parallel_agnostic"] is False
+    assert "replicated_layout" not in fm.fields
+    baseline = make_mapper_from_offloading_spec(
+        tp_size=2,
+        world_size=2,
+        rank=1,
+        replicated_layout=False,
+        parallel_agnostic=False,
+    )
+    assert fm.base_path == baseline.base_path
 
 
 def test_non_replicated_keeps_parallel_identity():
