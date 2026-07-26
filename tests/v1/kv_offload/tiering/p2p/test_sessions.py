@@ -316,9 +316,15 @@ def _activate(
 
 
 def _srv_outbound(session: P2PSession, kv_request_id: str):
-    """Outbound serve state for a kv_request_id, or None (idle / GC'd)."""
+    """Serve-side round for a kv_request_id, or None (idle / GC'd).
+
+    Surfaces the demanded round when a fetch has bound one, else the
+    parked supply round (pre-fetch stores / lookup pins).
+    """
     st = session._server._requests.get(kv_request_id)
-    return st.outbound if st is not None else None
+    if st is None:
+        return None
+    return st.outbound if st.outbound is not None else st.supply
 
 
 def _srv_lookups(session: P2PSession) -> list:

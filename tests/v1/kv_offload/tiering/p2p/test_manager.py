@@ -492,7 +492,9 @@ class TestOnRequestFinished:
         mgr._sessions[peer_id] = session
         ctx = _req_context(kv_params=_remote_kv_source_kv_params(kv_request_id="req-1"))
         mgr.on_request_finished(ctx)
-        assert session.finishes == ["req-1"]
+        # Symmetric wire ids are scoped per engine request (req_id suffix)
+        # so concurrent requests sharing a router id cannot collide.
+        assert session.finishes == ["req-1#test"]
 
     def test_prefiller_bound_id_routes_via_kv_to_session(self):
         """Prefiller-side finish for an id whose session is already bound
@@ -1612,16 +1614,17 @@ class TestBindHostPortDefaults:
         monkeypatch.setattr(
             manager_module,
             "NixlTransport",
-            lambda agent_name, *a, **k: calls.update(nixl_name=agent_name)
-            or SimpleNamespace(),
+            lambda agent_name, *a, **k: (
+                calls.update(nixl_name=agent_name) or SimpleNamespace()
+            ),
         )
         monkeypatch.setattr(
             manager_module,
             "ZmqTransport",
-            lambda local_id, host, port, *a, **k: calls.update(
-                zmq_id=local_id, zmq_host=host, zmq_port=port
-            )
-            or SimpleNamespace(),
+            lambda local_id, host, port, *a, **k: (
+                calls.update(zmq_id=local_id, zmq_host=host, zmq_port=port)
+                or SimpleNamespace()
+            ),
         )
         spec = SimpleNamespace(
             blocks_per_chunk=1,
