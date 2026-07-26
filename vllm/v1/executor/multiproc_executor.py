@@ -23,7 +23,6 @@ from threading import Thread
 from typing import Any, cast
 
 import cloudpickle
-import torch
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -58,6 +57,7 @@ from vllm.utils.system_utils import (
     get_mp_context,
     set_process_title,
 )
+from vllm.utils.torch_utils import set_torch_threads_for_runtime
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.executor.vllm_net_devices import set_worker_net_device
@@ -1066,24 +1066,10 @@ def set_multiprocessing_worker_envs():
     _maybe_force_spawn()
 
     if not current_platform.is_cpu():
-        # Configure thread parallelism if OMP_NUM_THREADS isn't set
-        #
-        # Helps to avoid CPU contention. The default of spawning a thread per
-        # core combined with multiprocessing for each GPU can have a negative
-        # impact on performance. The contention is amplified when running in a
-        # container where CPU limits can cause throttling.
-        default_omp_num_threads = 1
-        if (
-            "OMP_NUM_THREADS" not in os.environ
-            and (current_parallelism := torch.get_num_threads())
-            > default_omp_num_threads
-        ):
-            logger.warning_once(
-                "Reducing Torch parallelism from %d threads to %d to avoid "
-                "unnecessary CPU contention. Set OMP_NUM_THREADS in the "
-                "external environment to tune this value as needed.",
-                current_parallelism,
-                default_omp_num_threads,
-            )
-            os.environ["OMP_NUM_THREADS"] = str(default_omp_num_threads)
-            torch.set_num_threads(default_omp_num_threads)
+        # Torch thread management for the workers themselves happens in
+        # Worker.init_device() / compile_or_warm_up_model() (clamped for
+        # startup, then 1 for serving). Here we only cap this parent
+        # (engine-core) process: the scheduler gets no benefit from torch
+        # intra-op parallelism, only CPU contention with the workers.
+        # OMP_NUM_THREADS is deliberately not exported to the workers.
+        set_torch_threads_for_runtime()

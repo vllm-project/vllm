@@ -4,9 +4,12 @@ import pytest
 import torch
 
 from vllm.utils.torch_utils import (
+    available_cpu_count,
+    cap_torch_threads_for_startup,
     common_broadcastable_dtype,
     current_stream,
     is_lossless_cast,
+    set_torch_threads_for_runtime,
 )
 
 
@@ -114,3 +117,47 @@ def test_current_stream_multithread():
     )
 
     _test_stream_thread(main_dedicated_stream)
+
+
+@pytest.fixture
+def restore_torch_threads(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
+    original = torch.get_num_threads()
+    yield
+    torch.set_num_threads(original)
+
+
+def test_cap_torch_threads_for_startup_never_raises(restore_torch_threads):
+    """Raising the thread count can newly enter an OpenMP parallel region,
+    which deadlocks/segfaults in a process forked from one that already
+    started torch's OpenMP pool (libgomp is not fork-safe)."""
+    torch.set_num_threads(1)
+    cap_torch_threads_for_startup()
+    assert torch.get_num_threads() == 1
+
+
+def test_cap_torch_threads_for_startup_divides_between_local_workers(
+    restore_torch_threads,
+):
+    available = available_cpu_count()
+    if available < 4:
+        pytest.skip("needs at least 4 usable CPUs")
+    torch.set_num_threads(available)
+    cap_torch_threads_for_startup(num_local_procs=2)
+    assert torch.get_num_threads() == available // 2
+
+
+def test_set_torch_threads_for_runtime(restore_torch_threads):
+    torch.set_num_threads(max(2, available_cpu_count()))
+    set_torch_threads_for_runtime()
+    assert torch.get_num_threads() == 1
+
+
+def test_torch_threads_respect_omp_num_threads(
+    restore_torch_threads, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("OMP_NUM_THREADS", "3")
+    torch.set_num_threads(3)
+    cap_torch_threads_for_startup()
+    set_torch_threads_for_runtime()
+    assert torch.get_num_threads() == 3
