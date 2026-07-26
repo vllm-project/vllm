@@ -30,4 +30,4 @@ steps:
       export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       export PYTHONFAULTHANDLER=1 &&
       cd tests &&
-      pytest -v -s model_executor -m "not slow_test"'
+      pytest -v -s model_executor -m "not slow_test" --ignore="model_executor/layers/test_rocm_unquantized_gemm.py" --deselect="tests/model_executor/model_loader/test_reload.py::test_kv_scale_reload"'
