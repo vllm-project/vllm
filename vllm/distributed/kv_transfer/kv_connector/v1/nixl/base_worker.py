@@ -1109,7 +1109,10 @@ class NixlBaseConnectorWorker:
         # to better exploit the memory layout (ie num_blocks is the first dim).
         tensor_size_bytes = None
 
-        for layer_name, cache in xfer_buffers.items():
+        # P and D may allocate equivalent transferable layers in different
+        # cache-group orders. Keep the NIXL region lists name-aligned.
+        for layer_name in sorted(xfer_buffers):
+            cache = xfer_buffers[layer_name]
             # NOTE (NickLucche) Hybrid SSM models assume a layout that is similar to
             # that of FI, with block laid out as in `get_backend_aware_kv_block_len`.
             # However, physical page_size may differ when kernel requires a specific

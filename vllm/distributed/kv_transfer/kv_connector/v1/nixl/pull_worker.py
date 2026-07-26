@@ -302,9 +302,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             return True
 
         assert (
-            len(remote_block_ids)
-            == len(local_block_ids)
-            == len(self.kv_cache_config.kv_cache_groups)
+            len(remote_block_ids) == len(local_block_ids) == len(self._transfer_groups)
         )
         remote_physical_per_logical = remote_info.remote_physical_blocks_per_logical
         local_block_ids, remote_block_ids = self._apply_prefix_caching(
