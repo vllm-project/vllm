@@ -496,6 +496,7 @@ class OffloadingSpec(ABC):
         )
         self.config = config
         self.extra_config = config.extra_config
+        self.replicated_layout: bool = False
         self.kv_events_config = OffloadingKVEventsConfig(
             enable_kv_cache_events=config.enable_kv_cache_events,
             self_describing_kv_events=bool(

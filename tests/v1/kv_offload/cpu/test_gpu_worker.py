@@ -41,7 +41,10 @@ NUM_MAPPINGS_PER_GROUP = [2]
 @pytest.mark.parametrize("num_tensors", NUM_TENSORS)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
-@pytest.mark.parametrize("use_shared_memory", [False, True])
+@pytest.mark.parametrize(
+    ("use_shared_memory", "replicated_layout"),
+    [(False, False), (True, False), (True, True)],
+)
 @torch.inference_mode()
 def test_transfer(
     default_vllm_config,
@@ -55,6 +58,7 @@ def test_transfer(
     seed: int,
     device: str,
     use_shared_memory: bool,
+    replicated_layout: bool,
 ) -> None:
     set_random_seed(seed)
 
@@ -95,11 +99,15 @@ def test_transfer(
             gpu_page_size_bytes * num_tensors * blocks_per_chunk,
             SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT,
         )
+        simulated_world_size = 2
+        kv_bytes_per_block = (
+            cpu_page_size if replicated_layout else cpu_page_size * simulated_world_size
+        )
         mmap_region = SharedOffloadRegion(
             engine_id=str(uuid.uuid4()),
             num_blocks=num_cpu_blocks,
             rank=0,
-            kv_bytes_per_block=cpu_page_size,
+            kv_bytes_per_block=kv_bytes_per_block,
             cpu_page_size=cpu_page_size,
         )
 

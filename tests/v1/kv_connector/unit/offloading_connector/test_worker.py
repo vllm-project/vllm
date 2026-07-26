@@ -6,6 +6,10 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+    OffloadingConnectorMetadata,
+    TransferJob,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -22,7 +26,17 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
     CanonicalKVCaches,
+    GPULoadStoreSpec,
+    LoadStoreSpec,
+    OffloadingManager,
     OffloadingSpec,
+    OffloadingWorker,
+)
+from vllm.v1.kv_offload.config import (
+    OffloadingCacheConfig,
+    OffloadingConfig,
+    OffloadingModelConfig,
+    OffloadingParallelConfig,
 )
 
 NUM_BLOCKS = 10
@@ -87,7 +101,11 @@ def _allocate_and_reshape_kv_caches(
         set_kv_cache_layout(None)
 
 
-def _make_worker(kv_cache_config: KVCacheConfig):
+def _make_worker(
+    kv_cache_config: KVCacheConfig,
+    replicated_layout: bool = False,
+    rank: int = 0,
+):
     """
     Create an OffloadingConnectorWorker with mocked dependencies.
     """
@@ -96,6 +114,9 @@ def _make_worker(kv_cache_config: KVCacheConfig):
     )
 
     spec = MagicMock(spec=OffloadingSpec)
+    spec.replicated_layout = replicated_layout
+    spec.config = MagicMock()
+    spec.config.parallel.rank = rank
     spec.get_worker.return_value = MagicMock()
 
     worker = OffloadingConnectorWorker(
@@ -107,9 +128,171 @@ def _make_worker(kv_cache_config: KVCacheConfig):
     return worker, spec
 
 
+def _store_metadata(job_id: int) -> OffloadingConnectorMetadata:
+    return OffloadingConnectorMetadata(
+        load_jobs={},
+        store_jobs={
+            job_id: TransferJob(
+                req_id="req",
+                src_spec=GPULoadStoreSpec([0], group_sizes=(1,), block_indices=(0,)),
+                dst_spec=LoadStoreSpec(),
+            )
+        },
+    )
+
+
+def _load_metadata(job_id: int) -> OffloadingConnectorMetadata:
+    return OffloadingConnectorMetadata(
+        load_jobs={
+            job_id: TransferJob(
+                req_id="req",
+                src_spec=LoadStoreSpec(),
+                dst_spec=GPULoadStoreSpec([0], group_sizes=(1,), block_indices=(0,)),
+            )
+        },
+        store_jobs={},
+    )
+
+
+def _empty_metadata() -> OffloadingConnectorMetadata:
+    return OffloadingConnectorMetadata(load_jobs={}, store_jobs={})
+
+
+def _offloading_config(rank: int = 0) -> OffloadingConfig:
+    return OffloadingConfig(
+        groups=(),
+        worker_kv_bytes_per_block=0,
+        enable_kv_cache_events=False,
+        extra_config={},
+        engine_id="test-engine",
+        model=OffloadingModelConfig(name="test-model", dtype="float16"),
+        cache=OffloadingCacheConfig(tokens_per_hash=16, blocks_per_chunk=1),
+        parallel=OffloadingParallelConfig(
+            rank=rank,
+            world_size=2,
+            tp_size=2,
+            pp_size=1,
+            pcp_size=1,
+            dcp_size=1,
+            data_parallel_index=0,
+            is_parallelism_agnostic=False,
+        ),
+    )
+
+
+class BareExternalOffloadingSpec(OffloadingSpec):
+    def get_manager(self) -> OffloadingManager:
+        raise NotImplementedError
+
+    def get_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
+        raise NotImplementedError
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+def test_prepare_store_kv_non_writer_marks_completed_without_submit():
+    worker, _ = _make_worker(
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
+        replicated_layout=True,
+        rank=1,
+    )
+
+    worker.prepare_store_kv(_store_metadata(7))
+    worker.start_kv_transfers(_empty_metadata())
+
+    assert worker._unsubmitted_store_jobs == []
+    assert worker.worker is not None
+    worker.worker.submit_store.assert_not_called()
+    meta = worker.build_connector_worker_meta()
+    assert meta is not None
+    assert meta.completed_jobs == {7: 1}
+
+
+def test_prepare_store_kv_writer_submits_store():
+    worker, _ = _make_worker(
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
+        replicated_layout=True,
+        rank=0,
+    )
+
+    worker.prepare_store_kv(_store_metadata(8))
+    assert worker.build_connector_worker_meta() is None
+    worker.start_kv_transfers(_empty_metadata())
+
+    assert worker.worker is not None
+    worker.worker.submit_store.assert_called_once()
+
+
+def test_prepare_store_kv_non_replicated_rank_gt_zero_queues_store():
+    worker, _ = _make_worker(
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
+        replicated_layout=False,
+        rank=1,
+    )
+
+    worker.prepare_store_kv(_store_metadata(9))
+    assert worker.build_connector_worker_meta() is None
+    assert len(worker._unsubmitted_store_jobs) == 1
+
+    worker.start_kv_transfers(_empty_metadata())
+
+    assert worker.worker is not None
+    worker.worker.submit_store.assert_called_once()
+    assert worker._unsubmitted_store_jobs == []
+
+
+def test_handle_preemptions_non_writer_acks_flushed_store():
+    worker, _ = _make_worker(
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
+        replicated_layout=True,
+        rank=1,
+    )
+    metadata = _store_metadata(10)
+    metadata.jobs_to_flush = {10}
+
+    worker.handle_preemptions(metadata)
+
+    assert worker.worker is not None
+    worker.worker.submit_store.assert_not_called()
+    worker.worker.wait.assert_called_once_with({10})
+    assert metadata.store_jobs == {}
+    meta = worker.build_connector_worker_meta()
+    assert meta is not None
+    assert meta.completed_jobs == {10: 1}
+
+
+def test_start_kv_transfers_non_writer_still_submits_load():
+    worker, _ = _make_worker(
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
+        replicated_layout=True,
+        rank=1,
+    )
+
+    worker.start_kv_transfers(_load_metadata(10))
+
+    assert worker.worker is not None
+    worker.worker.submit_load.assert_called_once()
+    assert worker.build_connector_worker_meta() is None
+
+
+def test_offloading_connector_worker_accepts_plugin_spec_default_layout():
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
+        OffloadingConnectorWorker,
+    )
+
+    spec = BareExternalOffloadingSpec(_offloading_config(rank=1))
+
+    OffloadingConnectorWorker(
+        spec=spec,
+        kv_cache_config=KVCacheConfig(
+            num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]
+        ),
+    )
+
+    assert spec.replicated_layout is False
 
 
 @pytest.mark.parametrize("backend", ATTN_BACKENDS)
