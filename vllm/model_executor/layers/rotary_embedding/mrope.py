@@ -29,6 +29,7 @@ def _triton_mrope_forward(
     mrope_section_h: tl.constexpr,
     mrope_section_w: tl.constexpr,
     is_interleaved: tl.constexpr,
+    is_neox_style: tl.constexpr,
 ):
     # Adapted from
     # https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/qwen2vl_mrope.py
@@ -79,55 +80,60 @@ def _triton_mrope_forward(
     sin_row = t_sin_row + h_sin_row + w_sin_row
 
     # ####################################################################
-    # Load the left and right half of q and k for the current
-    # program instance (i.e. for the current token) separately
+    # Load the two values in each rotary pair for the current token.
+    # NeoX pairs the first and second halves, while GPT-J pairs
+    # adjacent values.
     # ####################################################################
-    # left half of the head
-    first_half_q_offsets = (
-        tl.arange(0, pad_n_qh)[:, None] * hd + tl.arange(0, pad_hd // 2)[None, :]
-    )
-    first_half_k_offsets = (
-        tl.arange(0, pad_n_kh)[:, None] * hd + tl.arange(0, pad_hd // 2)[None, :]
-    )
+    rotary_offsets = tl.arange(0, pad_hd // 2)
+    if is_neox_style:
+        first_q_offsets = tl.arange(0, pad_n_qh)[:, None] * hd + rotary_offsets[None, :]
+        first_k_offsets = tl.arange(0, pad_n_kh)[:, None] * hd + rotary_offsets[None, :]
+        second_q_offsets = first_q_offsets + (rd // 2)
+        second_k_offsets = first_k_offsets + (rd // 2)
+    else:
+        first_q_offsets = (
+            tl.arange(0, pad_n_qh)[:, None] * hd + 2 * rotary_offsets[None, :]
+        )
+        first_k_offsets = (
+            tl.arange(0, pad_n_kh)[:, None] * hd + 2 * rotary_offsets[None, :]
+        )
+        second_q_offsets = first_q_offsets + 1
+        second_k_offsets = first_k_offsets + 1
+
     first_q_mask = (tl.arange(0, pad_n_qh)[:, None] < n_qh) & (
-        tl.arange(0, pad_hd // 2)[None, :] < rd // 2
+        rotary_offsets[None, :] < rd // 2
     )
     first_k_mask = (tl.arange(0, pad_n_kh)[:, None] < n_kh) & (
-        tl.arange(0, pad_hd // 2)[None, :] < rd // 2
+        rotary_offsets[None, :] < rd // 2
     )
 
-    q_tile_1 = tl.load(q_ptr + first_half_q_offsets, mask=first_q_mask, other=0).to(
+    q_tile_1 = tl.load(q_ptr + first_q_offsets, mask=first_q_mask, other=0).to(
         sin_row.dtype
     )
-    k_tile_1 = tl.load(k_ptr + first_half_k_offsets, mask=first_k_mask, other=0).to(
+    k_tile_1 = tl.load(k_ptr + first_k_offsets, mask=first_k_mask, other=0).to(
         sin_row.dtype
     )
 
-    # right half of the head
-    second_half_q_offsets = first_half_q_offsets + (rd // 2)
-    second_half_k_offsets = first_half_k_offsets + (rd // 2)
     second_q_mask = first_q_mask
     second_k_mask = first_k_mask
 
-    q_tile_2 = tl.load(q_ptr + second_half_q_offsets, mask=second_q_mask, other=0).to(
+    q_tile_2 = tl.load(q_ptr + second_q_offsets, mask=second_q_mask, other=0).to(
         sin_row.dtype
     )
-    k_tile_2 = tl.load(k_ptr + second_half_k_offsets, mask=second_k_mask, other=0).to(
+    k_tile_2 = tl.load(k_ptr + second_k_offsets, mask=second_k_mask, other=0).to(
         sin_row.dtype
     )
 
-    # y = [x1, x2] * [cos, cos] + [-x2, x1] * [sin, sin]
-    # Since cos and sin are now half-size,
-    # we use the same cos_row and sin_row for both halves
+    # Apply the same rotation to either split-half or adjacent pairs.
     new_q_tile_1 = q_tile_1 * cos_row - q_tile_2 * sin_row
-    tl.store(q_ptr + first_half_q_offsets, new_q_tile_1, mask=first_q_mask)
+    tl.store(q_ptr + first_q_offsets, new_q_tile_1, mask=first_q_mask)
     new_q_tile_2 = q_tile_2 * cos_row + q_tile_1 * sin_row
-    tl.store(q_ptr + second_half_q_offsets, new_q_tile_2, mask=second_q_mask)
+    tl.store(q_ptr + second_q_offsets, new_q_tile_2, mask=second_q_mask)
 
     new_k_tile_1 = k_tile_1 * cos_row - k_tile_2 * sin_row
-    tl.store(k_ptr + first_half_k_offsets, new_k_tile_1, mask=first_k_mask)
+    tl.store(k_ptr + first_k_offsets, new_k_tile_1, mask=first_k_mask)
     new_k_tile_2 = k_tile_2 * cos_row + k_tile_1 * sin_row
-    tl.store(k_ptr + second_half_k_offsets, new_k_tile_2, mask=second_k_mask)
+    tl.store(k_ptr + second_k_offsets, new_k_tile_2, mask=second_k_mask)
 
 
 def triton_mrope(
@@ -139,6 +145,7 @@ def triton_mrope(
     head_size: int,
     rotary_dim: int,
     mrope_interleaved: bool,
+    is_neox_style: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Qwen2VL mrope kernel.
 
@@ -151,6 +158,8 @@ def triton_mrope(
             (T/H/W positions with multimodal inputs)
         mrope_section: [t, h, w]
         head_size: int
+        is_neox_style: Whether rotary pairs use split-half (NeoX) or
+            adjacent (GPT-J) layout.
     """
     n_row, n_q_head_head_dim = q.shape
     n_q_head = n_q_head_head_dim // head_size
@@ -183,6 +192,7 @@ def triton_mrope(
         mrope_section[1],
         mrope_section[2],
         mrope_interleaved,
+        is_neox_style,
     )
     return q, k
 
@@ -349,6 +359,7 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
                 self.head_size,
                 self.rotary_dim,
                 self.mrope_interleaved,
+                self.is_neox_style,
             )
 
             return q.reshape(query_shape), k.reshape(key_shape)
