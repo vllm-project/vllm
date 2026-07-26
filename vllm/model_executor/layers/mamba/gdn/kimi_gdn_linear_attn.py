@@ -15,16 +15,16 @@ from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
-from vllm.utils.torch_utils import direct_register_custom_op
-from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-
-from ...fla.ops.kda import (
+from vllm.third_party.flash_linear_attention.ops.kda import (
     FusedRMSNormGated,
     chunk_kda_with_fused_gate,
     fused_kda_gate,
     fused_recurrent_kda,
 )
+from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+
 from ...linear import (
     ColumnParallelLinear,
     ReplicatedLinear,

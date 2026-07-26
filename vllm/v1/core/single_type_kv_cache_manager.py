@@ -75,8 +75,8 @@ class SingleTypeKVCacheManager(ABC):
         self.block_size = kv_cache_spec.block_size
         self.dcp_world_size = dcp_world_size
         self.pcp_world_size = pcp_world_size
-        if dcp_world_size * pcp_world_size > 1:
-            self.block_size *= dcp_world_size * pcp_world_size
+        if dcp_world_size > 1:
+            self.block_size *= dcp_world_size
         self.kv_cache_spec = kv_cache_spec
         self.block_pool = block_pool
         self.enable_caching = enable_caching
@@ -359,6 +359,11 @@ class SingleTypeKVCacheManager(ABC):
                 self.new_block_ids.extend(b.block_id for b in new_blocks)
             return cow_blocks + new_blocks
 
+    @property
+    def records_new_block_ids(self) -> bool:
+        """Whether this manager's new blocks are zeroed by the worker."""
+        return self._record_new_block_ids
+
     def take_new_block_ids(self) -> list[int]:
         """Drain and return block IDs allocated since the last call."""
         ids = self.new_block_ids
@@ -419,6 +424,13 @@ class SingleTypeKVCacheManager(ABC):
         if num_cached_blocks >= num_full_blocks:
             return
 
+        # Token boundaries whose reachable tail must be retained under sparse
+        # retention: the replay boundary (``num_prompt - 1``, capped by
+        # ``get_computed_blocks``) and any detected shared-prefix junction.
+        reachable_boundaries = [request.num_prompt_tokens - 1]
+        if request.shared_prefix_boundary:
+            reachable_boundaries.append(request.shared_prefix_boundary)
+
         block_mask = self.reachable_block_mask(
             start_block=num_cached_blocks,
             end_block=num_full_blocks,
@@ -426,7 +438,7 @@ class SingleTypeKVCacheManager(ABC):
             kv_cache_spec=self.kv_cache_spec,
             use_eagle=self.use_eagle,
             retention_interval=retention_interval,
-            num_prompt_tokens=request.num_prompt_tokens,
+            reachable_boundaries=reachable_boundaries,
         )
         self.block_pool.cache_full_blocks(
             request=request,
@@ -449,14 +461,15 @@ class SingleTypeKVCacheManager(ABC):
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
         retention_interval: int | None = None,
-        num_prompt_tokens: int | None = None,
+        reachable_boundaries: Sequence[int] = (),
     ) -> list[bool] | None:
         """Per-block mask for ``cache_full_blocks``. ``None`` means cache
         every (non-null) block — the default for full attention.
 
-        Subclasses with sparse hit semantics (SWA) override this to skip
-        blocks that can never serve a hit at any alignment-aligned prefix
-        length.
+        Subclasses with sparse hit semantics (SWA / Mamba) override this to skip
+        blocks that can never serve a hit at any alignment-aligned prefix length.
+        ``reachable_boundaries`` are token positions whose reachable tail must be
+        retained; the base (dense) policy ignores them.
         """
         return None
 
@@ -661,10 +674,10 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             "and chunked local attention groups"
         )
         block_size = kv_cache_spec.block_size
-        if dcp_world_size * pcp_world_size > 1:
-            # DCP/PCP shard each block's KV across ranks; hashes must be
-            # viewed at the sharded (scaled) block size.
-            block_size *= dcp_world_size * pcp_world_size
+        if dcp_world_size > 1:
+            # DCP shards each block's KV across ranks; hashes must be viewed at
+            # the sharded block size.
+            block_size *= dcp_world_size
         block_hashes = resolve_block_hashes(
             block_hashes,
             block_pool.hash_block_size,
@@ -962,7 +975,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
         retention_interval: int | None = None,
-        num_prompt_tokens: int | None = None,
+        reachable_boundaries: Sequence[int] = (),
     ) -> list[bool] | None:
         assert isinstance(kv_cache_spec, SlidingWindowSpec)
         if alignment_tokens is None:
@@ -1002,18 +1015,16 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                 if i >= shift and (i - shift) % per_segment >= per_segment - need:
                     mask[i - start_block] = True
 
-        # (2) Replay-boundary tail. ``get_computed_blocks`` caps hits at
-        # ``num_prompt - 1`` (to recompute the last token's logits), so an exact
-        # prompt replay can only land on the latest *fine*-aligned boundary.
-        # Sparse retention would otherwise skip it, so keep its tail explicitly.
-        if retention_interval is not None and num_prompt_tokens is not None:
-            latest = (num_prompt_tokens - 1) // alignment_tokens * alignment_tokens
-            prompt_end_block = latest // block_size + shift
-            for i in range(
-                max(start_block, prompt_end_block - need),
-                min(end_block, prompt_end_block),
-            ):
-                mask[i - start_block] = True
+        # (2) Reachable-boundary tails: the replay boundary (``num_prompt - 1``,
+        # capped by ``get_computed_blocks``) and any shared-prefix junction. Both
+        # land before segments would cover them under sparse retention, so keep
+        # the ``need``-block tail ending on each boundary explicitly.
+        if retention_interval is not None:
+            for boundary_tokens in reachable_boundaries:
+                aligned = boundary_tokens // alignment_tokens * alignment_tokens
+                end = aligned // block_size + shift
+                for j in range(max(start_block, end - need), min(end_block, end)):
+                    mask[j - start_block] = True
 
         return mask
 
@@ -1321,15 +1332,19 @@ class MambaManager(SingleTypeKVCacheManager):
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
         retention_interval: int | None = None,
-        num_prompt_tokens: int | None = None,
+        reachable_boundaries: Sequence[int] = (),
     ) -> list[bool] | None:
         """Sparse Mamba state-snapshot retention.
 
         ``retention_interval``:
 
           ``None`` -> dense (cache every block; default, unchanged behavior)
-          ``0``    -> keep only the latest replay boundary
+          ``0``    -> keep only the ``reachable_boundaries`` states
           ``> 0``  -> keep one state per ``retention_interval``-sized segment
+
+        ``reachable_boundaries`` are proven reuse points (the replay boundary and
+        any cross-request shared-prefix junction, Marconi-style APC); their
+        boundary state is always kept so sparse retention does not defeat reuse.
         """
         if retention_interval is None or alignment_tokens is None:
             # Dense caching (default) or no alignment constraint imposed.
@@ -1354,13 +1369,13 @@ class MambaManager(SingleTypeKVCacheManager):
             for i in range(first_boundary - start_block, len(mask), per_segment):
                 mask[i] = True
 
-        # (2) Replay boundary. ``get_computed_blocks`` caps hits at
-        # ``num_prompt - 1``, so an exact prompt replay lands on the latest
-        # fine-aligned boundary. Sparse retention would otherwise skip its
-        # state, so keep it explicitly.
-        if num_prompt_tokens is not None:
-            latest = (num_prompt_tokens - 1) // alignment_tokens * alignment_tokens
-            boundary_block = latest // block_size - 1
+        # (2) Reachable-boundary states: the replay boundary (``num_prompt - 1``,
+        # capped by ``get_computed_blocks``) and any shared-prefix junction, both
+        # of which segments would otherwise skip under sparse retention. A Mamba
+        # hit needs exactly the single state block ending on the boundary.
+        for boundary_tokens in reachable_boundaries:
+            aligned = boundary_tokens // alignment_tokens * alignment_tokens
+            boundary_block = aligned // block_size - 1
             if start_block <= boundary_block < end_block:
                 mask[boundary_block - start_block] = True
 

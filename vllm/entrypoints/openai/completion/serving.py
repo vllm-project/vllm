@@ -386,6 +386,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             top_logprobs=out_logprobs,
                             num_output_top_logprobs=request.logprobs,
                             tokenizer=tokenizer,
+                            logprob_token_ids=request.logprob_token_ids,
                             initial_text_offset=previous_text_lens[i],
                             return_as_token_id=request.return_tokens_as_token_ids,
                         )
@@ -560,6 +561,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         top_logprobs=out_logprobs,
                         tokenizer=tokenizer,
                         num_output_top_logprobs=request.logprobs,
+                        logprob_token_ids=request.logprob_token_ids,
                         return_as_token_id=request.return_tokens_as_token_ids,
                     )
                 else:
@@ -653,6 +655,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
         top_logprobs: GenericSequence[dict[int, Logprob] | None],
         num_output_top_logprobs: int,
         tokenizer: TokenizerLike | None,
+        logprob_token_ids: list[int] | None = None,
         initial_text_offset: int = 0,
         return_as_token_id: bool | None = None,
     ) -> CompletionLogProbs:
@@ -717,7 +720,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             return_as_token_id=should_return_as_token_id,
                         ): max(top_lp[1].logprob, -9999.0)
                         for i, top_lp in enumerate(step_top_logprobs.items())
-                        if num_output_top_logprobs >= i
+                        if logprob_token_ids or num_output_top_logprobs >= i
                     }
                 )
 

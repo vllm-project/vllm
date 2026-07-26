@@ -225,3 +225,11 @@ def mamba_chunk_scan_combined_varlen(
     )
 
     return varlen_states
+
+
+from vllm.platforms import current_platform  # noqa: E402
+
+if current_platform.is_cpu():
+    import vllm.model_executor.layers.mamba.ops.cpu.mamba_ssm as cpu_mamba_ssm
+
+    _mamba_chunk_scan_combined_fwd = cpu_mamba_ssm._mamba_chunk_scan_combined_fwd_cpu  # type: ignore

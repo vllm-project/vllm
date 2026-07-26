@@ -213,6 +213,32 @@ void compute_slot_mapping_kernel_impl(const torch::Tensor query_start_loc,
                                       torch::Tensor slot_mapping,
                                       const int64_t block_size);
 
+at::Tensor causal_conv1d_update_cpu_impl(
+    at::Tensor& x, at::Tensor& conv_state, const at::Tensor& weight,
+    const c10::optional<at::Tensor>& bias,
+    const c10::optional<std::string>& activation,
+    const c10::optional<at::Tensor>& conv_state_indices,
+    const c10::optional<at::Tensor>& query_start_loc, int64_t pad_slot_id);
+
+void selective_state_update_cpu_impl(
+    at::Tensor& state, const at::Tensor& x, const at::Tensor& dt,
+    const at::Tensor& A, const at::Tensor& B, const at::Tensor& C,
+    const c10::optional<at::Tensor>& D, const c10::optional<at::Tensor>& z,
+    const c10::optional<at::Tensor>& dt_bias, bool dt_softplus,
+    const c10::optional<at::Tensor>& state_batch_indices,
+    const c10::optional<at::Tensor>& dst_state_batch_indices,
+    int64_t null_block_id, at::Tensor& out,
+    const c10::optional<at::Tensor>& num_accepted_tokens,
+    const c10::optional<at::Tensor>& cu_seqlens);
+
+void mamba_chunk_scan_fwd_cpu_impl(at::Tensor& out, at::Tensor& final_states,
+                                   const at::Tensor& x, const at::Tensor& dt,
+                                   const at::Tensor& A, const at::Tensor& B,
+                                   const at::Tensor& C,
+                                   const c10::optional<at::Tensor>& D,
+                                   const c10::optional<at::Tensor>& z,
+                                   const at::Tensor& cu_seqlens);
+
 void init_cpu_memory_env(std::vector<int64_t> node_ids);
 
 namespace cpu_utils {
@@ -570,7 +596,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 #endif
 
   // fused moe
-#if defined(__AVX512F__) || (defined(ARM_BF16_SUPPORT))
+#if defined(__AVX512F__) || \
+    (defined(__aarch64__) && !defined(__APPLE__) && defined(ARM_BF16_SUPPORT))
   ops.def(
       "prepack_moe_weight(Tensor weight, Tensor(a1!) packed_weight, str isa) "
       "-> ()");
@@ -581,7 +608,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "bool skip_weighted, "
       "str act, str isa) -> ()");
   ops.impl("cpu_fused_moe", torch::kCPU, &cpu_fused_moe);
-#endif  // #if defined(__AVX512F__) || (defined(ARM_BF16_SUPPORT))
+#endif
   ops.def(
       "mla_decode_kvcache("
       "   Tensor! out, Tensor query, Tensor kv_cache,"
@@ -593,6 +620,30 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "positions, Tensor block_table, Tensor(a3!) slot_mapping, SymInt "
       "block_size) -> ()",
       &compute_slot_mapping_kernel_impl);
+
+  // Mamba CPU kernels
+  ops.def(
+      "causal_conv1d_update_cpu_vec("
+      "Tensor(a0!) x, Tensor(a1!) conv_state, Tensor weight, "
+      "Tensor? bias, str? activation, Tensor? conv_state_indices, "
+      "Tensor? query_start_loc, SymInt pad_slot_id) -> Tensor",
+      &causal_conv1d_update_cpu_impl);
+
+  ops.def(
+      "selective_state_update_cpu("
+      "Tensor(a0!) state, Tensor x, Tensor dt, Tensor A, Tensor B, Tensor C, "
+      "Tensor? D, Tensor? z, Tensor? dt_bias, bool dt_softplus, "
+      "Tensor? state_batch_indices, Tensor? dst_state_batch_indices, "
+      "SymInt null_block_id, Tensor(a13!) out, "
+      "Tensor? num_accepted_tokens, Tensor? cu_seqlens) -> ()",
+      &selective_state_update_cpu_impl);
+
+  ops.def(
+      "mamba_chunk_scan_fwd_cpu("
+      "Tensor(a0!) out, Tensor(a1!) final_states, "
+      "Tensor x, Tensor dt, Tensor A, Tensor B, Tensor C, "
+      "Tensor? D, Tensor? z, Tensor cu_seqlens) -> ()",
+      &mamba_chunk_scan_fwd_cpu_impl);
 
   ops.def("init_cpu_memory_env(SymInt[] node_ids) -> ()", &init_cpu_memory_env);
 

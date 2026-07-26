@@ -1624,19 +1624,41 @@ class TestDropSpecialTokens:
         assert delta is not None
         assert "<bos>" in delta.reasoning
 
-    def test_drops_suppressed_with_skip_tool_parsing(self):
-        """When skip_tool_parsing is active, drop tokens are preserved
-        as content so a later tool-call pass can see them."""
+    def test_drops_applied_with_skip_tool_parsing(self):
+        """Drop tokens are always dropped, even with skip_tool_parsing.
+        DROP_TERMINALs have no transitions by construction, so no parser
+        pass can use them."""
+        for initial_state in (ParserState.REASONING, ParserState.CONTENT):
+            engine = _make_engine(
+                vocab=_DROP_VOCAB,
+                special_tokens=list(_DROP_VOCAB.keys()),
+            )
+            engine._engine.skip_tool_parsing = True
+            engine._engine.reset(initial_state=initial_state)
+            events = engine._engine.feed("hello<bos>world", [72, 204, 73])
+            delta = engine._events_to_delta(events)
+            assert delta is not None
+            output = (delta.reasoning or "") + (delta.content or "")
+            assert "<bos>" not in output, f"<bos> leaked in state {initial_state}"
+
+    def test_transitions_unaffected_by_drop_in_reasoning_with_skip_tool_parsing(self):
+        """With skip_tool_parsing in REASONING state, drop tokens are
+        removed but configured terminals still fire their transitions."""
         engine = _make_engine(
             vocab=_DROP_VOCAB,
             special_tokens=list(_DROP_VOCAB.keys()),
         )
         engine._engine.skip_tool_parsing = True
         engine._engine.reset()
-        events = engine._engine.feed("hello<bos>world", [72, 204, 73])
-        delta = engine._events_to_delta(events)
-        assert delta is not None
-        assert "<bos>" in delta.reasoning
+        events = engine._engine.feed("thought<bos></think>answer", [72, 204, 201, 73])
+        types = [e.type for e in events]
+        assert EventType.REASONING_CHUNK in types
+        assert EventType.REASONING_END in types
+        assert EventType.TEXT_CHUNK in types
+        reasoning_text = "".join(
+            e.value for e in events if e.type == EventType.REASONING_CHUNK
+        )
+        assert "<bos>" not in reasoning_text
 
     def test_drops_in_tool_args_state(self):
         """Drop tokens in TOOL_ARGS state are silently discarded."""
