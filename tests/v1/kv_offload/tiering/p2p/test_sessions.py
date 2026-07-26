@@ -315,16 +315,26 @@ def _activate(
 # either a missing entry or a None field. These helpers paper over that.
 
 
+def _client_load(session: P2PSession, kv_request_id: str):
+    """The single in-flight load of a kv_request_id (loads are per-round)."""
+    loads = session._client._requests[kv_request_id].loads
+    assert len(loads) == 1
+    return next(iter(loads.values()))
+
+
 def _srv_outbound(session: P2PSession, kv_request_id: str):
     """Serve-side round for a kv_request_id, or None (idle / GC'd).
 
-    Surfaces the demanded round when a fetch has bound one, else the
-    parked supply round (pre-fetch stores / lookup pins).
+    Rounds are keyed by wire round_seq; surfaces the demanded round when
+    a fetch has bound one, else any parked supply round.
     """
     st = session._server._requests.get(kv_request_id)
-    if st is None:
+    if st is None or not st.outbound:
         return None
-    return st.outbound if st.outbound is not None else st.supply
+    for rnd in st.outbound.values():
+        if rnd.demand_received:
+            return rnd
+    return next(iter(st.outbound.values()))
 
 
 def _srv_lookups(session: P2PSession) -> list:
@@ -336,8 +346,10 @@ def _srv_lookups(session: P2PSession) -> list:
 
 def _srv_abort_started(session: P2PSession, kv_request_id: str) -> float | None:
     """Pending-abort start time for a kv_request_id, or None."""
-    st = session._server._requests.get(kv_request_id)
-    return st.abort_started_at if st is not None else None
+    for (kv, _), started in session._server._pending_aborts.items():
+        if kv == kv_request_id:
+            return started
+    return None
 
 
 def _srv_inflight_count(session: P2PSession, kv_request_id: str) -> int:
@@ -558,7 +570,7 @@ class TestClientFlows:
         session.request_blocks(
             job_id=1, kv_request_id="req-1", keys=[b"k"], block_ids=[0]
         )
-        session._client._requests["req-1"].load.submitted_at = time.monotonic() - 60.0
+        _client_load(session, "req-1").submitted_at = time.monotonic() - 60.0
         session.poll()
         abort = conn._sent[-1]
         assert abort[TYPE_KEY] == AbortFetchMsg.TYPE
@@ -575,7 +587,7 @@ class TestClientFlows:
             job_id=7, kv_request_id="req-7", keys=[b"k"], block_ids=[0]
         )
         # 1) Trip the load timeout to send AbortFetch and stamp aborted_at.
-        session._client._requests["req-7"].load.submitted_at = (
+        _client_load(session, "req-7").submitted_at = (
             time.monotonic() - _LOAD_TIMEOUT_S - 1.0
         )
         loads = session.poll().loads
@@ -585,11 +597,11 @@ class TestClientFlows:
             and m[AbortFetchMsg.KV_REQUEST_ID] == "req-7"
             for m in conn._sent
         )
-        assert session._client._requests["req-7"].load.aborted_at is not None
+        assert _client_load(session, "req-7").aborted_at is not None
 
         # 2) Now backdate aborted_at past the abort-ack timeout. No ack ever
         # arrived from the peer.
-        session._client._requests["req-7"].load.aborted_at = (
+        _client_load(session, "req-7").aborted_at = (
             time.monotonic() - _ABORT_ACK_TIMEOUT_S - 1.0
         )
         loads = session.poll().loads
@@ -605,12 +617,12 @@ class TestClientFlows:
         session.request_blocks(
             job_id=8, kv_request_id="req-8", keys=[b"k"], block_ids=[0]
         )
-        session._client._requests["req-8"].load.submitted_at = (
+        _client_load(session, "req-8").submitted_at = (
             time.monotonic() - _LOAD_TIMEOUT_S - 1.0
         )
         # First poll: AbortFetch goes out.
         session.poll()
-        assert session._client._requests["req-8"].load.aborted_at is not None
+        assert _client_load(session, "req-8").aborted_at is not None
 
         # Peer acks the abort.
         conn.enqueue(
@@ -1428,7 +1440,7 @@ class TestServerFlows:
         session.poll()
         assert _srv_abort_started(session, "req-1") is not None
         # Backdate past the drain deadline.
-        session._server._requests["req-1"].abort_started_at = (
+        session._server._pending_aborts[("req-1", None)] = (
             time.monotonic() - _CANCEL_DRAIN_TIMEOUT_S - 1.0
         )
         # Even if the transport still claims it can't cancel, the

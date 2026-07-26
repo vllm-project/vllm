@@ -1,19 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Repro for issue #49820: a later lookup round's pinned supply is destroyed
-when an earlier fetch round for the same kv_request_id finalizes.
+"""Regression tests for issue #49820: a later lookup round's pinned supply
+was destroyed when an earlier fetch round for the same kv_request_id
+finalized. Rounds are now isolated by the wire ``round_seq``.
 
-Sequence (wire-ordered, all one kv_request_id):
-    Fetch A -> transfer A in flight -> Lookup B resolves (pins, merged into
-    A's outbound) -> transfer A completes (finalize wipes outbound, settles
-    B's pin job) -> Fetch B (matches nothing, no transfer, no terminal).
+Core sequence (all one kv_request_id):
+    Fetch A (round 0) -> transfer A in flight -> Lookup B (round 1)
+    resolves and pins -> transfer A completes and finalizes -> Fetch B
+    (round 1) must be served from round 1's supply.
 """
 
 from tests.v1.kv_offload.tiering.p2p.test_sessions import (
     FakeParent,
     _activate,
     _make_session,
-    _send_lookup,
     _serve,
     _srv_outbound,
 )
@@ -21,6 +21,7 @@ from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
     TYPE_KEY,
     AbortFetchMsg,
     FetchMsg,
+    LookupMsg,
     LookupRespMsg,
     TransferDoneMsg,
 )
@@ -28,111 +29,95 @@ from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
 KV = "req-1"
 
 
-def _fetch(conn, keys, idxs):
+def _send_lookup(conn, keys, round_seq):
     conn.enqueue(
         {
-            TYPE_KEY: FetchMsg.TYPE,
-            FetchMsg.KV_REQUEST_ID: KV,
-            FetchMsg.KEYS: keys,
-            FetchMsg.BLOCK_INDEXES: idxs,
+            TYPE_KEY: LookupMsg.TYPE,
+            LookupMsg.KV_REQUEST_ID: KV,
+            LookupMsg.KEYS: keys,
+            LookupMsg.ROUND_SEQ: round_seq,
         }
     )
 
 
-def _drive_round_a_then_lookup_b(cb, session, conn, transport):
-    """Round A fetch with transfer in flight, then round B lookup resolves."""
-    _send_lookup(conn, KV, [b"hA"])
+def _fetch(conn, keys, idxs, round_seq):
+    msg = {
+        TYPE_KEY: FetchMsg.TYPE,
+        FetchMsg.KV_REQUEST_ID: KV,
+        FetchMsg.KEYS: keys,
+        FetchMsg.BLOCK_INDEXES: idxs,
+    }
+    if round_seq is not None:
+        msg[FetchMsg.ROUND_SEQ] = round_seq
+    conn.enqueue(msg)
+
+
+def _drive_round_0_then_lookup_1(cb, session, conn, transport):
+    """Round 0 fetch with transfer in flight, then round 1 lookup resolves."""
+    _send_lookup(conn, [b"hA"], 0)
     session.poll()
-    _serve(session, cb)  # pins hA (job 1000)
-    _fetch(conn, [b"hA"], [20])
+    _serve(session, cb)  # pins hA (job 1000) under round 0
+    _fetch(conn, [b"hA"], [20], 0)
     session.poll()
     assert len(transport._transfers) == 1  # transfer A (tid 0) in flight
 
     cb.stored[b"hB"] = 8
-    _send_lookup(conn, KV, [b"hB"])
+    _send_lookup(conn, [b"hB"], 1)
     session.poll()
-    _serve(session, cb)  # pins hB (job 1001), merged into A's outbound
+    _serve(session, cb)  # pins hB (job 1001) under round 1
     resp = [m for m in conn._sent if m[TYPE_KEY] == LookupRespMsg.TYPE][-1]
     assert resp[LookupRespMsg.HITS] == [True]  # promised hB to the consumer
 
 
-def test_completing_round_a_must_not_destroy_round_b_supply():
-    """Round A's completion must neither settle round B's pin job nor drop
-    round B's available supply before round B's FetchMsg arrives."""
+def test_completing_round_0_must_not_destroy_round_1_supply():
+    """Round 0's completion must neither settle round 1's pin job nor drop
+    round 1's available supply before round 1's FetchMsg arrives."""
     cb = FakeParent(stored={b"hA": 7})
     session, conn, transport = _make_session()
     _activate(session, conn)
-    _drive_round_a_then_lookup_b(cb, session, conn, transport)
+    _drive_round_0_then_lookup_1(cb, session, conn, transport)
 
     transport._poll_done.append(0)  # transfer A completes
     stores = list(session.poll().stores)
     stores += list(session.poll().stores)  # deferred finalize results
 
-    assert any(s.job_id == 1000 and s.success for s in stores)  # A's own job
-    # Round B's pin job (1001) must not be settled by round A's completion.
+    assert any(s.job_id == 1000 and s.success for s in stores)  # round 0's job
     assert all(s.job_id != 1001 for s in stores), (
-        f"round B pin job settled by round A finalize: {stores}"
+        f"round 1 pin job settled by round 0 finalize: {stores}"
     )
-    # Round B's supply must still await round B's fetch.
     out = _srv_outbound(session, KV)
     assert out is not None and b"hB" in out.available, (
-        "round B supply discarded by round A finalize"
+        "round 1 supply destroyed by round 0 finalize"
     )
 
 
-def test_round_b_fetch_is_served_or_promptly_terminal():
-    """After round A finalizes, round B's fetch for its confirmed hit must
-    either submit a transfer or reach a prompt terminal failure. Today it
-    does neither and the consumer waits out _LOAD_TIMEOUT_S (30s)."""
+def test_round_1_fetch_served_after_round_0_finalizes():
+    """Full two-round resolution: round 1's fetch transfers its own pinned
+    block, and each round gets its own TransferDone carrying its round."""
     cb = FakeParent(stored={b"hA": 7})
     session, conn, transport = _make_session()
     _activate(session, conn)
-    _drive_round_a_then_lookup_b(cb, session, conn, transport)
-
-    transport._poll_done.append(0)
-    session.poll()
-    session.poll()
-    sent_before = len(conn._sent)
-
-    _fetch(conn, [b"hB"], [21])  # round B fetches its confirmed hit
-    session.poll()
-
-    transferred = len(transport._transfers) == 2
-    terminal = [
-        m for m in conn._sent[sent_before:] if m[TYPE_KEY] == TransferDoneMsg.TYPE
-    ]
-    assert transferred or terminal, (
-        "round B fetch neither served nor terminally failed: "
-        "consumer stalls for _LOAD_TIMEOUT_S"
-    )
-
-
-def test_cross_round_fetch_b_served_after_a_finalizes():
-    """Full two-round resolution: round B's fetch transfers its own pinned
-    blocks after round A completed, and each round gets its own success
-    TransferDone and StoreResult."""
-    cb = FakeParent(stored={b"hA": 7})
-    session, conn, transport = _make_session()
-    _activate(session, conn)
-    _drive_round_a_then_lookup_b(cb, session, conn, transport)
+    _drive_round_0_then_lookup_1(cb, session, conn, transport)
 
     transport._poll_done.append(0)
     stores = list(session.poll().stores)
     stores += list(session.poll().stores)
     assert [s.job_id for s in stores] == [1000]
 
-    _fetch(conn, [b"hB"], [21])
+    _fetch(conn, [b"hB"], [21], 1)
     session.poll()
     assert len(transport._transfers) == 2
     _, (_, local, remote) = sorted(transport._transfers.items())[-1]
-    assert local == [8] and remote == [21]  # round B's pinned block
+    assert local == [8] and remote == [21]  # round 1's pinned block
 
     transport._poll_done.append(1)
     stores = list(session.poll().stores)
     stores += list(session.poll().stores)
     assert [(s.job_id, s.success) for s in stores] == [(1001, True)]
     dones = [m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE]
-    assert [d[TransferDoneMsg.SUCCESS] for d in dones] == [True, True]
+    assert [
+        (d[TransferDoneMsg.SUCCESS], d.get(TransferDoneMsg.ROUND_SEQ)) for d in dones
+    ] == [(True, 0), (True, 1)]
 
 
 def test_terminal_empty_fetch_leaves_no_zombie_round():
@@ -143,11 +128,11 @@ def test_terminal_empty_fetch_leaves_no_zombie_round():
     session, conn, transport = _make_session()
     _activate(session, conn)
 
-    _send_lookup(conn, KV, [b"hA"])
+    _send_lookup(conn, [b"hA"], 0)
     session.poll()
-    _serve(session, cb)  # all-miss round; client will close with empty fetch
+    _serve(session, cb)  # all-miss round; client closes with empty fetch
     sent_before = len(conn._sent)
-    _fetch(conn, [], [])
+    _fetch(conn, [], [], 0)
     session.poll()
     assert not [
         m for m in conn._sent[sent_before:] if m[TYPE_KEY] == TransferDoneMsg.TYPE
@@ -157,27 +142,27 @@ def test_terminal_empty_fetch_leaves_no_zombie_round():
     # Next round: producer now has the block; fetch must be served, not
     # rejected as a duplicate.
     cb.stored[b"hA"] = 7
-    _send_lookup(conn, KV, [b"hA"])
+    _send_lookup(conn, [b"hA"], 1)
     session.poll()
     _serve(session, cb)
-    _fetch(conn, [b"hA"], [20])
+    _fetch(conn, [b"hA"], [20], 1)
     session.poll()
     assert len(transport._transfers) == 1
 
 
 def test_unmatched_symmetric_fetch_fails_fast():
-    """A fetch demanding keys its closed lookup phase never pinned is
+    """A round-tagged fetch demanding keys its lookup round never pinned is
     unservable: the server must fail it immediately (TransferDone
     success=False) and settle the round's pins, not park the demand."""
     cb = FakeParent(stored={b"hA": 7})
     session, conn, transport = _make_session()
     _activate(session, conn)
 
-    _send_lookup(conn, KV, [b"hA"])
+    _send_lookup(conn, [b"hA"], 0)
     session.poll()
     _serve(session, cb)  # pins hA (job 1000)
     sent_before = len(conn._sent)
-    _fetch(conn, [b"hA", b"hX"], [20, 21])  # hX was never pinned
+    _fetch(conn, [b"hA", b"hX"], [20, 21], 0)  # hX was never pinned
     stores = list(session.poll().stores)
     stores += list(session.poll().stores)
 
@@ -188,90 +173,119 @@ def test_unmatched_symmetric_fetch_fails_fast():
     assert session._server._requests.get(KV) is None
 
 
-def test_abort_of_round_a_preserves_round_b_supply():
-    """AbortFetchMsg for the in-flight round settles that round's jobs
-    promptly and leaves the next round's parked supply intact."""
+def test_pd_fetch_without_round_still_parks_demand():
+    """A round-less fetch (PD) keeps the fetch-before-store flow: demand
+    parks and a later store fulfills it."""
+    session, conn, transport = _make_session()
+    _activate(session, conn)
+    _fetch(conn, [b"k1"], [5], None)
+    session.poll()
+    assert len(transport._transfers) == 0  # parked, not failed
+    session.add_stored_blocks(KV, [b"k1"], [3], job_id=1)
+    assert len(transport._transfers) == 1
+
+
+def test_abort_of_round_0_preserves_round_1_supply():
+    """AbortFetchMsg for one round settles that round's jobs promptly and
+    leaves the next round's parked supply intact."""
     cb = FakeParent(stored={b"hA": 7})
     session, conn, transport = _make_session()
     _activate(session, conn)
-    _drive_round_a_then_lookup_b(cb, session, conn, transport)
+    _drive_round_0_then_lookup_1(cb, session, conn, transport)
 
-    conn.enqueue({TYPE_KEY: AbortFetchMsg.TYPE, AbortFetchMsg.KV_REQUEST_ID: KV})
+    conn.enqueue(
+        {
+            TYPE_KEY: AbortFetchMsg.TYPE,
+            AbortFetchMsg.KV_REQUEST_ID: KV,
+            AbortFetchMsg.ROUND_SEQ: 0,
+        }
+    )
     stores = list(session.poll().stores)
     stores += list(session.poll().stores)
-    # Round A's job fails promptly (no 30s store-timeout leak)...
+    # Round 0's job fails promptly (no 30s store-timeout leak)...
     assert [(s.job_id, s.success) for s in stores] == [(1000, False)]
-    # ...and round B's supply survives the abort.
-    st = session._server._requests.get(KV)
-    assert st is not None and st.supply is not None
-    assert b"hB" in st.supply.available
+    # ...and round 1's supply survives the abort.
+    out = _srv_outbound(session, KV)
+    assert out is not None and b"hB" in out.available
 
-    _fetch(conn, [b"hB"], [21])
+    _fetch(conn, [b"hB"], [21], 1)
     session.poll()
-    # Round B served with its own pinned block (round A's cancelled
+    # Round 1 served with its own pinned block (round 0's cancelled
     # transfer was removed from the fake transport by the abort drain).
     assert [local for _, local, _ in transport._transfers.values()] == [[8]]
 
 
-def test_overlapping_loads_serialize_fetches():
-    """A second load submitted while one is in flight must not put a
-    second FetchMsg on the wire; it goes out when the first load
-    completes, and each TransferDone completes its own job."""
+def test_concurrent_loads_complete_by_round():
+    """Several loads can be in flight per id (the scheduler submits loads
+    incrementally); fetches carry their round and each TransferDone
+    completes its own job."""
     session, conn, _ = _make_session()
     _activate(session, conn)
+    client = session._client
 
-    session.request_blocks(1, KV, [b"k1"], [10])
-    session.request_blocks(2, KV, [b"k2"], [11])
+    # Round 0: probe hA, resolve, fetch.
+    client.register_lookup(KV, b"hA")
+    client.flush_pending_lookups()
+    client.on_lookup_resp(KV, [b"hA"], [True])
+    session.request_blocks(1, KV, [b"hA"], [10])
+    # Round 1 starts while round 0's load is still in flight.
+    client.register_lookup(KV, b"hB")
+    client.flush_pending_lookups()
+    client.on_lookup_resp(KV, [b"hB"], [True])
+    session.request_blocks(2, KV, [b"hB"], [11])
+
     fetches = [m for m in conn._sent if m[TYPE_KEY] == FetchMsg.TYPE]
-    assert len(fetches) == 1 and fetches[0][FetchMsg.KEYS] == [b"k1"]
+    assert [f[FetchMsg.ROUND_SEQ] for f in fetches] == [0, 1]
+    lookups = [m for m in conn._sent if m[TYPE_KEY] == LookupMsg.TYPE]
+    assert [lu[LookupMsg.ROUND_SEQ] for lu in lookups] == [0, 1]
 
+    # Completions arrive out of order and match by round.
     conn.enqueue(
         {
             TYPE_KEY: TransferDoneMsg.TYPE,
             TransferDoneMsg.KV_REQUEST_ID: KV,
             TransferDoneMsg.SUCCESS: True,
-        }
-    )
-    result = session.poll()
-    assert [(r.job_id, r.success) for r in result.loads] == [(1, True)]
-    fetches = [m for m in conn._sent if m[TYPE_KEY] == FetchMsg.TYPE]
-    assert len(fetches) == 2 and fetches[1][FetchMsg.KEYS] == [b"k2"]
-
-    conn.enqueue(
-        {
-            TYPE_KEY: TransferDoneMsg.TYPE,
-            TransferDoneMsg.KV_REQUEST_ID: KV,
-            TransferDoneMsg.SUCCESS: True,
+            TransferDoneMsg.ROUND_SEQ: 1,
         }
     )
     result = session.poll()
     assert [(r.job_id, r.success) for r in result.loads] == [(2, True)]
+    conn.enqueue(
+        {
+            TYPE_KEY: TransferDoneMsg.TYPE,
+            TransferDoneMsg.KV_REQUEST_ID: KV,
+            TransferDoneMsg.SUCCESS: True,
+            TransferDoneMsg.ROUND_SEQ: 0,
+        }
+    )
+    result = session.poll()
+    assert [(r.job_id, r.success) for r in result.loads] == [(1, True)]
 
 
-def test_lookahead_supply_survives_intermediate_fetch():
-    """One lookup round can pin supply for several upcoming fetches. A
-    fetch consuming a subset must not settle or drop the remainder: the
-    next fetch is served from the moved-back supply."""
+def test_unfetched_keys_repinned_next_round():
+    """Keys probed but not fetched in a round are re-probed under the next
+    round (probes clear at fetch) and served from a fresh pin."""
     cb = FakeParent(stored={b"hA": 7, b"hB": 8})
     session, conn, transport = _make_session()
     _activate(session, conn)
 
-    _send_lookup(conn, KV, [b"hA", b"hB"])
+    _send_lookup(conn, [b"hA", b"hB"], 0)
     session.poll()
     _serve(session, cb)  # one pin job (1000) supplies both keys
-
-    _fetch(conn, [b"hA"], [20])  # first fetch consumes only hA
+    _fetch(conn, [b"hA"], [20], 0)  # round 0 fetches only hA
     session.poll()
     transport._poll_done.append(0)
-    stores = list(session.poll().stores)
-    stores += list(session.poll().stores)
-    # Job 1000 still has hB parked, so it must not settle yet.
-    assert stores == []
+    session.poll()
+    session.poll()
 
-    _fetch(conn, [b"hB"], [21])
+    # hB re-probed under round 1 pins fresh (job 1001) and is served.
+    _send_lookup(conn, [b"hB"], 1)
+    session.poll()
+    _serve(session, cb)
+    _fetch(conn, [b"hB"], [21], 1)
     session.poll()
     assert len(transport._transfers) == 2
     transport._poll_done.append(1)
     stores = list(session.poll().stores)
     stores += list(session.poll().stores)
-    assert [(s.job_id, s.success) for s in stores] == [(1000, True)]
+    assert (1001, True) in [(s.job_id, s.success) for s in stores]
