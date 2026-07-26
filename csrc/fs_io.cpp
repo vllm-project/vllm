@@ -38,7 +38,7 @@ inline int ensure_parent_dirs(const std::string& path) {
 // before any subsequent cleanup call can overwrite it. On failure, the temp
 // file is removed.
 inline int _store_block(const char* tmp_path, const char* dest_path,
-                        const char* src, size_t size) {
+                        const char* src, size_t size, bool use_o_direct) {
   if (access(dest_path, F_OK) == 0) {
     return 0;  // Already present.
   }
@@ -47,8 +47,9 @@ inline int _store_block(const char* tmp_path, const char* dest_path,
     return err;
   }
 
+  const int o_direct_flag = use_o_direct ? kODirectFlag : 0;
   const int fd = open(
-      tmp_path, O_CREAT | O_EXCL | O_WRONLY | O_TRUNC | kODirectFlag, 0644);
+      tmp_path, O_CREAT | O_EXCL | O_WRONLY | O_TRUNC | o_direct_flag, 0644);
   if (fd < 0) {
     return errno;
   }
@@ -77,10 +78,12 @@ inline int _store_block(const char* tmp_path, const char* dest_path,
 }
 
 // Core single-block load: dst/size are raw pointer + byte count. Returns 0
-// on success, or the errno of the failing step on failure. On failure, the
-// source file is removed since a partially-read block should not be reused.
-inline int _load_block(const char* source_path, char* dst, size_t size) {
-  const int fd = open(source_path, O_RDONLY | kODirectFlag, 0);
+// on success, or the errno of the failing step on failure. On failure,
+// the source file is removed since a partially-read block should not be reused.
+inline int _load_block(const char* source_path, char* dst, size_t size,
+                       bool use_o_direct) {
+  const int o_direct_flag = use_o_direct ? kODirectFlag : 0;
+  const int fd = open(source_path, O_RDONLY | o_direct_flag, 0);
   if (fd < 0) {
     const int err = errno;
     unlink(source_path);
@@ -185,18 +188,22 @@ static PyObject* batch_lookup(PyObject* /*self*/, PyObject* args) {
 }
 
 /// @brief Store a batch of blocks, each from its own buffer, to disk.
-/// @param tmp_paths  list[str] – one temp path per block.
-/// @param dest_paths list[str] – one destination path per block.
-/// @param buffers    list[bytes-like] – one source buffer per block.
+/// @param tmp_paths    list[str] – one temp path per block.
+/// @param dest_paths   list[str] – one destination path per block.
+/// @param buffers      list[bytes-like] – one source buffer per block.
+/// @param use_o_direct bool – whether to open files with O_DIRECT
+///                     (default True). Ignored where O_DIRECT is unsupported
+///                     by the platform.
 /// @note Releases the GIL for the entire batch. Raises on first error.
 static PyObject* batch_store_block(PyObject* /*self*/, PyObject* args) {
   PyObject* tmp_paths_obj = nullptr;
   PyObject* dest_paths_obj = nullptr;
   PyObject* buffers_obj = nullptr;
+  int use_o_direct = 1;
 
-  if (!PyArg_ParseTuple(args, "O!O!O!", &PyList_Type, &tmp_paths_obj,
+  if (!PyArg_ParseTuple(args, "O!O!O!|p", &PyList_Type, &tmp_paths_obj,
                         &PyList_Type, &dest_paths_obj, &PyList_Type,
-                        &buffers_obj)) {
+                        &buffers_obj, &use_o_direct)) {
     return nullptr;
   }
 
@@ -225,8 +232,9 @@ static PyObject* batch_store_block(PyObject* /*self*/, PyObject* args) {
   {
     Py_BEGIN_ALLOW_THREADS for (Py_ssize_t i = 0; i < n; i++) {
       const char* buf = static_cast<const char*>(buffers[i].buf);
-      const int err = _store_block(tmp_paths[i], dest_paths[i], buf,
-                                   static_cast<size_t>(buffers[i].len));
+      const int err =
+          _store_block(tmp_paths[i], dest_paths[i], buf,
+                       static_cast<size_t>(buffers[i].len), use_o_direct);
       if (err != 0) {
         failed_index = i;
         failure_errno = err;
@@ -252,13 +260,17 @@ static PyObject* batch_store_block(PyObject* /*self*/, PyObject* args) {
 /// @param source_paths list[str] – one source path per block.
 /// @param buffers      list[writable bytes-like] – one destination buffer
 ///                     per block.
+/// @param use_o_direct bool – whether to open files with O_DIRECT
+///                     (default True). Ignored where O_DIRECT is unsupported
+///                     by the platform.
 /// @note Releases the GIL for the entire batch. Raises on first error.
 static PyObject* batch_load_block(PyObject* /*self*/, PyObject* args) {
   PyObject* source_paths_obj = nullptr;
   PyObject* buffers_obj = nullptr;
+  int use_o_direct = 1;
 
-  if (!PyArg_ParseTuple(args, "O!O!", &PyList_Type, &source_paths_obj,
-                        &PyList_Type, &buffers_obj)) {
+  if (!PyArg_ParseTuple(args, "O!O!|p", &PyList_Type, &source_paths_obj,
+                        &PyList_Type, &buffers_obj, &use_o_direct)) {
     return nullptr;
   }
 
@@ -283,8 +295,9 @@ static PyObject* batch_load_block(PyObject* /*self*/, PyObject* args) {
   {
     Py_BEGIN_ALLOW_THREADS for (Py_ssize_t i = 0; i < n; i++) {
       char* buf = static_cast<char*>(buffers[i].buf);
-      const int err = _load_block(source_paths[i], buf,
-                                  static_cast<size_t>(buffers[i].len));
+      const int err =
+          _load_block(source_paths[i], buf, static_cast<size_t>(buffers[i].len),
+                      use_o_direct);
       if (err != 0) {
         failed_index = i;
         failure_errno = err;
@@ -313,13 +326,15 @@ static PyMethodDef fs_io_C_methods[] = {
      "Check file existence for a batch of paths."},
     {"batch_store_block", batch_store_block, METH_VARARGS,
      "batch_store_block(tmp_paths: list[str], dest_paths: list[str],\n"
-     "                  buffers: list[bytes-like]) -> None\n"
+     "                  buffers: list[bytes-like],\n"
+     "                  use_o_direct: bool = True) -> None\n"
      "\n"
      "Store a batch of blocks, each from its own buffer, to disk. Raises on "
      "first error."},
     {"batch_load_block", batch_load_block, METH_VARARGS,
      "batch_load_block(source_paths: list[str],\n"
-     "                 buffers: list[writable bytes-like]) -> None\n"
+     "                 buffers: list[writable bytes-like],\n"
+     "                 use_o_direct: bool = True) -> None\n"
      "\n"
      "Load a batch of blocks from disk into corresponding buffers. "
      "Raises on first error."},

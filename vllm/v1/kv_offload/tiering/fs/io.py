@@ -169,6 +169,7 @@ def batch_store_block(
     view: memoryview,
     offsets: list[int],
     block_size: int,
+    use_o_direct: bool = True,
 ) -> None:
     """
     Store a batch of KV blocks from a shared buffer to disk in one call.
@@ -182,10 +183,10 @@ def batch_store_block(
         view_B = view.cast("B")
         view_slices = [view_B[x : x + block_size] for x in offsets]
         tmp_paths = [p + _get_tmp_suffix() for p in paths]
-        return batch_store_block_C(tmp_paths, paths, view_slices)
+        return batch_store_block_C(tmp_paths, paths, view_slices, use_o_direct)
     else:
         for path, offset in zip(paths, offsets):
-            _store_block(path, view, offset, block_size)
+            _store_block(path, view, offset, block_size, use_o_direct)
 
 
 def batch_load_block(
@@ -193,6 +194,7 @@ def batch_load_block(
     view: memoryview,
     offsets: list[int],
     block_size: int,
+    use_o_direct: bool = True,
 ) -> None:
     """
     Load a batch of KV blocks from disk into a shared buffer in one call.
@@ -205,7 +207,7 @@ def batch_load_block(
     if _HAS_FSIO_C:
         view_B = view.cast("B")
         view_slices = [view_B[x : x + block_size] for x in offsets]
-        return batch_load_block_C(paths, view_slices)
+        return batch_load_block_C(paths, view_slices, use_o_direct)
     else:
         for path, offset in zip(paths, offsets):
-            _load_block(path, view, offset, block_size)
+            _load_block(path, view, offset, block_size, use_o_direct)
