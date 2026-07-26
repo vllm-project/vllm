@@ -63,19 +63,21 @@ RUN apt-get update -y && \
     python3-pip && \
     rm -rf /var/lib/apt/lists/*
 
-# Add oneAPI repo, pin oneAPI to 2025.3, then install pinned packages in one layer.
+# Add oneAPI repo, pin oneAPI to 2026.0 (SYCL Graph + work_group_scratch_memory),
+# then install pinned packages in one layer. Matches torch 2.13.0+xpu (intel-sycl-rt 2026.0).
+ARG ONEAPI_VERSION=2026.0
 RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null && \
     echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list && \
     printf '%s\n' \
     'Package: intel-oneapi-* intel-deep-learning-essentials* intel-pti*' \
-    'Pin: version 2025.3*' \
+    "Pin: version ${ONEAPI_VERSION}*" \
     'Pin-Priority: 1001' \
-    > /etc/apt/preferences.d/oneapi-2025.3.pref && \
+    > /etc/apt/preferences.d/oneapi-${ONEAPI_VERSION}.pref && \
     apt-get update -y && \
     apt-get install -y --no-install-recommends \
-    intel-oneapi-compiler-dpcpp-cpp-2025.3 \
-    intel-oneapi-mkl-devel-2025.3 \
-    intel-oneapi-dnnl-devel-2025.3 && \
+    intel-oneapi-compiler-dpcpp-cpp-${ONEAPI_VERSION} \
+    intel-oneapi-mkl-devel-${ONEAPI_VERSION} \
+    intel-oneapi-dnnl-devel-${ONEAPI_VERSION} && \
     rm -rf /var/lib/apt/lists/*
 
 # Install UMD
@@ -100,7 +102,8 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
     && uv venv --python ${PYTHON_VERSION} --seed ${VIRTUAL_ENV}
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
-# This oneccl contains the BMG support which is not the case for default version of oneapi 2025.3.
+# Offline oneCCL 2021.15 for BMG; torch 2.13+xpu also pulls oneccl==2022.0.0 via pip,
+# which we uninstall later so TP keeps using this BMG-capable install.
 ARG ONECCL_INSTALLER="intel-oneccl-2021.15.9.14_offline.sh"
 RUN wget "https://github.com/uxlfoundation/oneCCL/releases/download/2021.15.9/${ONECCL_INSTALLER}" && \
     bash "${ONECCL_INSTALLER}" -a --silent --eula accept && \
@@ -112,7 +115,7 @@ RUN wget "https://github.com/uxlfoundation/oneCCL/releases/download/2021.15.9/${
     printf '%s\n' \
     '/opt/intel/oneapi/ccl/2021.15/lib' \
     '/opt/intel/oneapi/mpi/2021.15/lib' \
-    '/opt/intel/oneapi/compiler/2025.3/lib' \
+    "/opt/intel/oneapi/compiler/${ONEAPI_VERSION}/lib" \
     > /etc/ld.so.conf.d/oneapi-ccl.conf && \
     ldconfig
 
@@ -136,7 +139,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 
 
-ENV LD_LIBRARY_PATH=/opt/intel/oneapi/ccl/2021.15/lib:/opt/intel/oneapi/mpi/2021.15/lib:/opt/intel/oneapi/compiler/2025.3/lib:/usr/local/lib
+ENV LD_LIBRARY_PATH=/opt/intel/oneapi/ccl/2021.15/lib:/opt/intel/oneapi/mpi/2021.15/lib:/opt/intel/oneapi/compiler/${ONEAPI_VERSION}/lib:/usr/local/lib
 CMD ["/bin/bash"]
 
 ######################### UCX + NIXL BUILD STAGE #########################
@@ -216,7 +219,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r /workspace/vllm/requirements/xpu.txt && \
     uv pip install --no-build-isolation -r /workspace/vllm/requirements/test/xpu.txt && \
     uv pip uninstall triton triton-xpu && \
-    uv pip install triton-xpu==3.7.1 && \
+    uv pip install triton-xpu==3.7.2 && \
     uv pip uninstall oneccl oneccl-devel
 
 # Keep source-dependent layers near the end so frequent code-only changes
