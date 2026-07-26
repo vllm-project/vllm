@@ -55,6 +55,7 @@ class OpenAIServingTranslation(SpeechToTextBaseServing):
     ) -> (
         TranslationResponse
         | TranslationResponseVerbose
+        | str
         | AsyncGenerator[str, None]
         | ErrorResponse
     ):
