@@ -22,116 +22,95 @@ class _SessionStats(TypedDict):
 
 
 class SAECachePolicy(CachePolicy):
-    """
-    SAE (Session-Aware Eviction) cache policy.
+    """SAE (Session-Aware Eviction) cache policy.
 
-    Groups newly-stored blocks into per-request sessions and biases
-    eviction toward sessions with weaker recent access patterns.
-    Per-key "ghost" scores persist across evictions so that a returning
-    block still contributes its long-term popularity to whichever new
-    session it enters.
+    A conversation's KV blocks are only useful as a whole chain —
+    evicting one block in the middle forces recomputation of everything
+    after it. SAE groups blocks stored by the same request into a
+    *session* and evicts session-worst-first, tail-first, so shared
+    prefixes outlive their suffixes.
 
     Data Structures:
-        blocks: The resident block table (key -> BlockStatus).
+        blocks: Resident block table, key -> BlockStatus.
         session_keys: Keys owned by each session, in insertion order.
-        key_to_session: Reverse index for O(1) session lookup on touch.
-        session_stats: Per-session {hits, last_touch, prefix_depth}.
-            ``prefix_depth`` is the batch's prefix depth at session
-            open time (number of already-cached blocks preceding the
-            first newly stored key). Both ``hits`` and ``last_touch``
-            grow with subsequent touches.
-        ghost_scores: Per-key float score, decayed periodically. Persists
-            after a key is evicted so a returning key still carries its
-            popularity into the next session it joins.
-        evictable_blocks: OrderedDict of keys with ref_cnt == 0,
-            maintained by mark_evictable / mark_non_evictable for fast
-            candidate scans during eviction.
-        open_session_id: The session currently accepting inserts, or None.
-            Opened by ``open_session`` and sealed by ``close_session``,
-            both of which are called by the manager around each
-            prepare_store batch's insert loop.
-        pending_merge_pointers: Per-request merge candidate,
-            ``req_id -> session_id``. Set by ``record_lookup`` on a
-            resident-block hit (refreshed to the most recent hit's
-            session) and consumed by ``open_session`` when the same
-            request's store batch arrives.
-        open_session_is_merged: Whether the currently-open session was
-            entered via a merge (skips ghost-reseeding on further
-            inserts into it) rather than freshly created.
+            Eviction reads the tail (``reversed(session_keys[sid])``).
+        key_to_session: Reverse index, key -> session_id, for O(1)
+            session lookup during touch.
+        session_stats: Per-session ``{hits, last_touch, prefix_depth}``.
+            Fields drive the session score — see Session Score.
+        ghost_scores: Per-key float score. Persists after a key is
+            evicted so a returning key carries its popularity into
+            whichever new session it joins.
+        pending_merge_pointers: ``req_id -> session_id``. Set by
+            ``record_lookup`` on a resident hit, consumed by
+            ``open_session``, dropped by ``on_request_finished``.
+        logical_time: Monotonic tick, +1 per ``touch``. Drives the
+            recency term.
 
-    Algorithm Flow:
-        1. Cache lookup (get / record_lookup):
-           ``get`` is a pure existence check with no side effects.
-           A separate hook, ``record_lookup``, signals that a lookup
-           was scheduler-driven (not one of the manager's internal
-           existence checks in prepare_store / prepare_load /
-           complete_load / complete_store). ``record_lookup`` records
-           ``req_id -> session_id`` on any lookup that finds a
-           resident block, so the same request's next store can merge
-           into that session. Only the last-hit session is kept per
-           request.
+    Session Score (see ``_session_score``):
+        last_touch + hits * TOUCH_WEIGHT + prefix_depth_bonus(depth)
 
-        2. Cache insertion (open_session -> insert* -> close_session):
-           The manager brackets each prepare_store batch's insert loop
-           with ``open_session(req_context, num_blocks_in_cache)`` and
-           ``close_session()``. ``open_session`` either merges into a
-           session recorded by a recent same-request lookup or opens a
-           fresh session tagged with the batch's prefix depth.
-           ``insert`` appends to the open session; for a
-           freshly-opened session, ``hits`` is seeded from each key's
-           ghost score (divided by ``ghost_norm``). ``close_session``
-           just clears the open-session slot — no further bookkeeping
-           is needed.
+        Lower is worse. Three terms, one per ``session_stats`` field:
+            ``last_touch``: ``logical_time`` at the most recent touch.
+                The recency term — higher = more recent.
+            ``hits``: cumulative touch count (+1 per ``touch`` call
+                that hit at least one of the session's keys). The
+                frequency term — higher = more frequent.
+            ``prefix_depth``: count of the batch's keys already
+                resident at session open time (fixed for the session's
+                lifetime). The prefix-bonus term — shallower = larger
+                bonus.
 
-        3. Cache touch (touch) — session-hit accounting, ghost
-           scoring, and decay:
-           Increments the logical clock, then walks the touched keys
-           once: each key's residency (resident + ready = hit,
-           otherwise miss) drives a ``ghost_hit_weight`` /
-           ``ghost_miss_weight`` bump to its ghost score, weighted by
-           the key's position within the touch batch. Separately,
-           collects the set of unique sessions touched and bumps each
-           one's ``hits`` and ``last_touch`` by one. Every
-           ``decay_interval``-th call, session ``hits`` and ghost
-           scores are scaled by ``decay_factor`` and non-resident
-           ghost entries below a small threshold are pruned.
+        Coefficients live on the class as ``_TOUCH_WEIGHT``,
+        ``_PREFIX_DEPTH_BONUS_SCALE``, ``_PREFIX_DEPTH_HALF_LIFE``.
 
-        4. Block eviction (evict) — admission gate + worst-first walk:
-           If the current prepare_store batch continues an existing
-           session (same request has a live merge pointer), the
-           admission gate is skipped and eviction proceeds. Otherwise
-           the gate compares the would-be new session's baseline
-           (``logical_time + prefix_depth_bonus``) to the worst
-           incumbent session's full score; if the baseline is lower,
-           ``evict`` returns None to decline the store. Otherwise
-           walks sessions in worst-first order, yielding idle
-           (ref_cnt == 0, not ``protected``) keys from each session's
-           tail until ``n`` are collected. If fewer than ``n`` are
-           collectable, returns None without state changes.
+    Algorithm Flow (four manager hooks bracket each request):
+        1. Cache lookup (``record_lookup``):
+           Remembers per request the last-lookup-hit session (in
+           ``pending_merge_pointers``), so step 2 can merge into it.
+           On a miss, does nothing — no pointer set, so step 2 opens
+           a fresh session.
 
-    Session Score:
-        session_score(s) = last_touch
-                         + hits * TOUCH_WEIGHT
-                         + PREFIX_DEPTH_BONUS_SCALE
-                             / (1 + prefix_depth / PREFIX_DEPTH_HALF_LIFE)
+        2. Cache insertion (``open_session`` -> ``insert*`` ->
+           ``close_session``):
+           The manager brackets each prepare_store batch's insert
+           loop. If ``pending_merge_pointers[req_id]`` still points at
+           a live session, ``open_session`` continues it; otherwise it
+           opens a fresh one. ``close_session`` ends the batch.
+           Fresh sessions made of previously-popular blocks are seeded
+           from their ghost scores, avoiding a cold-start penalty.
 
-        Lower score = worse. The admission gate compares the would-be
-        new session's baseline
-        (``logical_time + prefix_depth_bonus``) to the worst
-        incumbent's full score. Ghost scores are deliberately excluded
-        from the gate — they only seed a new session's initial hits.
+        3. Cache touch (``touch``):
+             - Bump each touched key's ghost score (weighted by
+               position and whether the key was a hit or miss).
+             - For each unique session touched, ``hits += 1`` and
+               ``last_touch = logical_time`` — **one touch call = one
+               hit per session**, regardless of how many of its keys
+               were in the batch.
+             - Every ``decay_interval`` calls: apply decay to session
+               hits and ghost scores, and prune tiny non-resident
+               ghost entries.
+
+        4. Block eviction (``evict``):
+             - **Admission gate**: a fresh session must score at
+               least as high as the worst incumbent; a merge session
+               bypasses the gate. Gate failure → return ``None`` and
+               decline the store.
+             - **Worst-first walk**: pull idle tail keys, worst-scoring
+               session first, until ``n`` are collected. If fewer than
+               ``n`` can be collected, return ``None`` and decline the
+               store.
 
     Tunables (constructor kwargs, forwarded from the manager):
-        decay_interval: Number of ``touch`` calls between decay ticks
-            (roughly one ``touch`` per request).
-        decay_factor: Scale factor applied to session hits and ghost
-            scores at each decay tick.
-        ghost_hit_weight: Ghost score bump on resident+ready hits during
-            touch.
-        ghost_miss_weight: Ghost score bump on misses (block absent or
-            not ready) during touch.
-        ghost_norm: Divisor when seeding a new session's initial hits
-            from its keys' ghost scores.
+        decay_interval: ``touch`` calls per decay tick (~one ``touch``
+            per request).
+        decay_factor: Scale applied to session hits and ghost scores
+            each tick.
+        ghost_hit_weight: Ghost bump when the key is resident and has
+            finished storing.
+        ghost_miss_weight: Ghost bump when the key is missing or still
+            storing.
+        ghost_norm: Divisor when seeding a fresh session from ghosts.
     """
 
     # Session score coefficients. See _session_score.
