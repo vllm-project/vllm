@@ -115,8 +115,8 @@ class SingleTypeKVCacheManager(ABC):
         # managers (full attention, mamba "align"); harmlessly empty elsewhere.
         self._partial_hit_reqs: dict[str, tuple[int, KVCacheBlock]] = {}
         self._pending_cow_copies: list[tuple[KVCacheBlock, KVCacheBlock]] = []
-        self._decode_checkpoint_blocks: dict[
-            str, tuple[int, dict[int, BlockHashWithGroupId]]
+        self._semantic_checkpoint_blocks: dict[
+            str, dict[int, tuple[int, BlockHashWithGroupId]]
         ] = {}
 
     @classmethod
@@ -408,6 +408,9 @@ class SingleTypeKVCacheManager(ABC):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
+        retain_input_end: bool = False,
+        retain_reasoning_end: bool = False,
+        retain_response_end: bool = False,
     ) -> None:
         """
         Cache the blocks for the request.
@@ -419,129 +422,247 @@ class SingleTypeKVCacheManager(ABC):
             retention_interval: Sparse local-checkpoint granularity. ``None``
                 keeps dense checkpointing; ``0`` keeps only the latest replay
                 boundary; a positive multiple of ``scheduler_block_size`` keeps
-                a tail once per that-sized segment. Only SWA acts on it.
+                a tail once per that-sized segment.
+            retain_input_end: Retain the materialized prompt boundary.
+            retain_reasoning_end: Retain the exact parsed reasoning boundary.
+            retain_response_end: Retain the final committed response boundary.
         """
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         num_full_blocks = num_tokens // self.block_size
 
-        if num_cached_blocks >= num_full_blocks:
-            return
+        semantic_checkpointing = any(
+            (retain_input_end, retain_reasoning_end, retain_response_end)
+        )
+        checkpoint_boundaries, using_fallback = self._get_checkpoint_boundaries(
+            request=request,
+            num_tokens=num_tokens,
+            retain_input_end=retain_input_end,
+            retain_reasoning_end=retain_reasoning_end,
+            retain_response_end=retain_response_end,
+        )
+        reachable_boundaries = self._with_shared_prefix_boundary(
+            request, checkpoint_boundaries, num_tokens
+        )
 
-        persistent_boundaries = [
-            request.num_prompt_tokens - 1,
-            *request.cache_checkpoint_boundaries,
-        ]
-        if request.shared_prefix_boundary:
-            persistent_boundaries.append(request.shared_prefix_boundary)
-
-        decode_boundary = 0
-        if retention_interval == 0 and request.cache_checkpoint_decode_end:
-            decode_boundary = (
-                min(num_tokens, request.num_tokens)
-                // self.scheduler_block_size
-                * self.scheduler_block_size
+        if num_cached_blocks < num_full_blocks:
+            block_mask = self.reachable_block_mask(
+                start_block=num_cached_blocks,
+                end_block=num_full_blocks,
+                alignment_tokens=self.scheduler_block_size,
+                kv_cache_spec=self.kv_cache_spec,
+                use_eagle=self.use_eagle,
+                retention_interval=retention_interval,
+                reachable_boundaries=reachable_boundaries,
             )
-            if decode_boundary < request.num_prompt_tokens:
-                decode_boundary = 0
+            self.block_pool.cache_full_blocks(
+                request=request,
+                blocks=self.req_to_blocks[request.request_id],
+                num_cached_blocks=num_cached_blocks,
+                num_full_blocks=num_full_blocks,
+                block_size=self.block_size,
+                kv_cache_group_id=self.kv_cache_group_id,
+                block_mask=block_mask,
+            )
+            self.num_cached_block[request.request_id] = num_full_blocks
 
-        reachable_boundaries = persistent_boundaries.copy()
-        if decode_boundary:
-            reachable_boundaries.append(decode_boundary)
+        if retention_interval is not None and semantic_checkpointing:
+            self._reconcile_semantic_checkpoints(
+                request,
+                num_full_blocks,
+                checkpoint_boundaries,
+                using_fallback,
+                retention_interval,
+            )
 
+    def _get_checkpoint_boundaries(
+        self,
+        request: Request,
+        num_tokens: int,
+        retain_input_end: bool,
+        retain_reasoning_end: bool,
+        retain_response_end: bool,
+    ) -> tuple[tuple[int, ...], bool]:
+        semantic_boundaries: list[int] = []
+        if retain_input_end:
+            semantic_boundaries.append(request.num_prompt_tokens)
+        if retain_reasoning_end and request.cache_checkpoint_reasoning_end is not None:
+            semantic_boundaries.append(request.cache_checkpoint_reasoning_end)
+        if retain_response_end and request.cache_checkpoint_response_end is not None:
+            semantic_boundaries.append(request.cache_checkpoint_response_end)
+
+        alignment = self.scheduler_block_size
+        aligned_boundaries = {
+            aligned
+            for boundary in semantic_boundaries
+            if 0 < (aligned := boundary // alignment * alignment) <= num_tokens
+        }
+        semantic_checkpointing = any(
+            (retain_input_end, retain_reasoning_end, retain_response_end)
+        )
+        using_fallback = not semantic_checkpointing or not aligned_boundaries
+        if using_fallback:
+            fallback = (request.num_prompt_tokens - 1) // alignment * alignment
+            if 0 < fallback <= num_tokens:
+                aligned_boundaries.add(fallback)
+
+        return tuple(sorted(aligned_boundaries)), using_fallback
+
+    def _with_shared_prefix_boundary(
+        self,
+        request: Request,
+        checkpoint_boundaries: Sequence[int],
+        num_tokens: int,
+    ) -> tuple[int, ...]:
+        boundaries = set(checkpoint_boundaries)
+        if request.shared_prefix_boundary:
+            alignment = self.scheduler_block_size
+            shared_boundary = request.shared_prefix_boundary // alignment * alignment
+            if 0 < shared_boundary <= num_tokens:
+                boundaries.add(shared_boundary)
+        return tuple(sorted(boundaries))
+
+    def _reconcile_semantic_checkpoints(
+        self,
+        request: Request,
+        num_full_blocks: int,
+        checkpoint_boundaries: Sequence[int],
+        using_fallback: bool,
+        retention_interval: int,
+    ) -> None:
+        blocks = self.req_to_blocks[request.request_id]
+        previous_blocks = self._semantic_checkpoint_blocks.get(request.request_id, {})
+
+        if not using_fallback:
+            checkpoint_boundaries = tuple(
+                boundary
+                for boundary in checkpoint_boundaries
+                if self._checkpoint_is_materializable(
+                    boundary, blocks, num_full_blocks, previous_blocks
+                )
+            )
+            if not checkpoint_boundaries:
+                fallback, _ = self._get_checkpoint_boundaries(
+                    request=request,
+                    num_tokens=num_full_blocks * self.block_size,
+                    retain_input_end=False,
+                    retain_reasoning_end=False,
+                    retain_response_end=False,
+                )
+                checkpoint_boundaries = fallback
+
+        reachable_boundaries = self._with_shared_prefix_boundary(
+            request,
+            checkpoint_boundaries,
+            num_full_blocks * self.block_size,
+        )
         block_mask = self.reachable_block_mask(
-            start_block=num_cached_blocks,
+            start_block=0,
             end_block=num_full_blocks,
             alignment_tokens=self.scheduler_block_size,
             kv_cache_spec=self.kv_cache_spec,
             use_eagle=self.use_eagle,
-            retention_interval=retention_interval,
+            retention_interval=0,
             reachable_boundaries=reachable_boundaries,
         )
-        self.block_pool.cache_full_blocks(
-            request=request,
-            blocks=self.req_to_blocks[request.request_id],
-            num_cached_blocks=num_cached_blocks,
-            num_full_blocks=num_full_blocks,
-            block_size=self.block_size,
-            kv_cache_group_id=self.kv_cache_group_id,
-            block_mask=block_mask,
-        )
+        if block_mask is None:
+            return
 
-        self.num_cached_block[request.request_id] = num_full_blocks
-        if decode_boundary:
-            self._update_decode_checkpoint(
-                request, decode_boundary, persistent_boundaries
+        checkpoint_indices = [index for index, keep in enumerate(block_mask) if keep]
+        for index in checkpoint_indices:
+            block = blocks[index]
+            if not block.is_null and block.block_hash is None:
+                self.block_pool.cache_full_blocks(
+                    request=request,
+                    blocks=blocks,
+                    num_cached_blocks=index,
+                    num_full_blocks=index + 1,
+                    block_size=self.block_size,
+                    kv_cache_group_id=self.kv_cache_group_id,
+                    block_mask=[True],
+                )
+
+        current_blocks: dict[int, tuple[int, BlockHashWithGroupId]] = {}
+        for index in checkpoint_indices:
+            block = blocks[index]
+            if not block.is_null and block.block_hash is not None:
+                current_blocks[index] = (block.block_id, block.block_hash)
+                continue
+            if previous := previous_blocks.get(index):
+                block_id, expected_hash = previous
+                if self.block_pool.blocks[block_id].block_hash == expected_hash:
+                    current_blocks[index] = previous
+
+        if previous_blocks:
+            protected_mask = self.reachable_block_mask(
+                start_block=0,
+                end_block=num_full_blocks,
+                alignment_tokens=self.scheduler_block_size,
+                kv_cache_spec=self.kv_cache_spec,
+                use_eagle=self.use_eagle,
+                retention_interval=retention_interval,
+                reachable_boundaries=(),
             )
+            protected_indices = (
+                set(range(num_full_blocks))
+                if protected_mask is None
+                else {
+                    index for index, protected in enumerate(protected_mask) if protected
+                }
+            )
+            current_block_ids = {block_id for block_id, _ in current_blocks.values()}
+            request_block_ids = {
+                block.block_id for block in blocks if not block.is_null
+            }
+            blocks_to_evict = set()
+            for index, (block_id, expected_hash) in previous_blocks.items():
+                if index in protected_indices:
+                    continue
+                if block_id in current_block_ids:
+                    continue
+                block = self.block_pool.blocks[block_id]
+                if block.block_hash != expected_hash:
+                    continue
+                if block.ref_cnt == 0 or (
+                    block_id in request_block_ids and block.ref_cnt == 1
+                ):
+                    blocks_to_evict.add(block_id)
+            self.block_pool.evict_blocks(blocks_to_evict)
 
-    def _update_decode_checkpoint(
+        self._semantic_checkpoint_blocks[request.request_id] = current_blocks
+
+    def _checkpoint_is_materializable(
         self,
-        request: Request,
         boundary: int,
-        persistent_boundaries: Sequence[int],
-    ) -> None:
-        blocks = self.req_to_blocks[request.request_id]
-        decode_mask = self.reachable_block_mask(
+        blocks: Sequence[KVCacheBlock],
+        num_full_blocks: int,
+        previous_blocks: dict[int, tuple[int, BlockHashWithGroupId]],
+    ) -> bool:
+        block_mask = self.reachable_block_mask(
             start_block=0,
-            end_block=len(blocks),
+            end_block=num_full_blocks,
             alignment_tokens=self.scheduler_block_size,
             kv_cache_spec=self.kv_cache_spec,
             use_eagle=self.use_eagle,
             retention_interval=0,
             reachable_boundaries=(boundary,),
         )
-        if decode_mask is None:
-            return
+        if block_mask is None:
+            return True
 
-        current_blocks: dict[int, BlockHashWithGroupId] = {}
-        for block, keep in zip(blocks, decode_mask):
-            if keep and not block.is_null and block.block_hash is not None:
-                current_blocks[block.block_id] = block.block_hash
-        if not current_blocks:
-            return
+        checkpoint_indices = [index for index, keep in enumerate(block_mask) if keep]
+        if not checkpoint_indices:
+            return False
 
-        previous = self._decode_checkpoint_blocks.get(request.request_id)
-        if previous is not None:
-            previous_boundary, previous_blocks = previous
-            if boundary <= previous_boundary:
-                return
-
-            persistent_mask = self.reachable_block_mask(
-                start_block=0,
-                end_block=len(blocks),
-                alignment_tokens=self.scheduler_block_size,
-                kv_cache_spec=self.kv_cache_spec,
-                use_eagle=self.use_eagle,
-                retention_interval=0,
-                reachable_boundaries=persistent_boundaries,
-            )
-            assert persistent_mask is not None
-            persistent_block_ids = {
-                block.block_id
-                for block, keep in zip(blocks, persistent_mask)
-                if keep and not block.is_null
-            }
-            current_block_ids = current_blocks.keys()
-            request_block_ids = {
-                block.block_id for block in blocks if not block.is_null
-            }
-            # Withdraw the old admission only while the physical block is
-            # still private to this request. Once released or shared, leave it
-            # to the normal LRU policy instead of invalidating another replay.
-            blocks_to_evict = {
-                block_id
-                for block_id, expected_hash in previous_blocks.items()
-                if block_id not in persistent_block_ids
-                and block_id not in current_block_ids
-                and block_id in request_block_ids
-                and self.block_pool.blocks[block_id].block_hash == expected_hash
-                and self.block_pool.blocks[block_id].ref_cnt == 1
-            }
-            self.block_pool.evict_blocks(blocks_to_evict)
-
-        self._decode_checkpoint_blocks[request.request_id] = (
-            boundary,
-            current_blocks,
-        )
+        for index in checkpoint_indices:
+            if not blocks[index].is_null:
+                continue
+            previous = previous_blocks.get(index)
+            if previous is None:
+                return False
+            block_id, expected_hash = previous
+            if self.block_pool.blocks[block_id].block_hash != expected_hash:
+                return False
+        return True
 
     @classmethod
     def reachable_block_mask(
@@ -581,7 +702,7 @@ class SingleTypeKVCacheManager(ABC):
         req_blocks = self.req_to_blocks.pop(request_id, [])
         self.num_cached_block.pop(request_id, None)
         self._partial_hit_reqs.pop(request_id, None)
-        self._decode_checkpoint_blocks.pop(request_id, None)
+        self._semantic_checkpoint_blocks.pop(request_id, None)
         return req_blocks
 
     def free(self, request_id: str) -> None:
@@ -847,8 +968,18 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
+        retain_input_end: bool = False,
+        retain_reasoning_end: bool = False,
+        retain_response_end: bool = False,
     ) -> None:
-        super().cache_blocks(request, num_tokens, retention_interval=retention_interval)
+        super().cache_blocks(
+            request,
+            num_tokens,
+            retention_interval=retention_interval,
+            retain_input_end=retain_input_end,
+            retain_reasoning_end=retain_reasoning_end,
+            retain_response_end=retain_response_end,
+        )
         hash_block_size = self.block_pool.hash_block_size
         if self.block_size == hash_block_size:
             return
@@ -1716,9 +1847,19 @@ class MambaManager(SingleTypeKVCacheManager):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
+        retain_input_end: bool = False,
+        retain_reasoning_end: bool = False,
+        retain_response_end: bool = False,
     ) -> None:
         num_cached_blocks_before = self.num_cached_block.get(request.request_id, 0)
-        super().cache_blocks(request, num_tokens, retention_interval=retention_interval)
+        super().cache_blocks(
+            request,
+            num_tokens,
+            retention_interval=retention_interval,
+            retain_input_end=retain_input_end,
+            retain_reasoning_end=retain_reasoning_end,
+            retain_response_end=retain_response_end,
+        )
         num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
         if self.mamba_cache_mode == "align":
             partial_hash = self._cache_partial_tail_block(request, num_tokens)
@@ -1806,6 +1947,9 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
+        retain_input_end: bool = False,
+        retain_reasoning_end: bool = False,
+        retain_response_end: bool = False,
     ) -> None:
         # We do not cache blocks for cross-attention to be shared between
         # requests, so this method is not relevant.

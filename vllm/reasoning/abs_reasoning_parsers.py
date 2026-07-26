@@ -112,6 +112,15 @@ class ReasoningParser:
         """
         return self.is_reasoning_end(input_ids)
 
+    def find_reasoning_end_token_boundary(self, token_ids: Sequence[int]) -> int | None:
+        """Return the exact token-prefix length of the reasoning body.
+
+        The boundary must precede the reasoning terminator and any trailing
+        whitespace. Parsers that cannot prove such a token boundary should
+        return ``None``.
+        """
+        return None
+
     @abstractmethod
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """

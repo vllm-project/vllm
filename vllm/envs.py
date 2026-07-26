@@ -296,6 +296,9 @@ if TYPE_CHECKING:
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
     VLLM_PREFIX_CACHE_RETENTION_INTERVAL: int | None = None
+    VLLM_PREFIX_CACHE_RETAIN_INPUT_END: bool = False
+    VLLM_PREFIX_CACHE_RETAIN_REASONING_END: bool = False
+    VLLM_PREFIX_CACHE_RETAIN_RESPONSE_END: bool = False
 
 
 def get_default_cache_root():
@@ -1116,6 +1119,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.environ["VLLM_PREFIX_CACHE_RETENTION_INTERVAL"])
         if "VLLM_PREFIX_CACHE_RETENTION_INTERVAL" in os.environ
         else None
+    ),
+    "VLLM_PREFIX_CACHE_RETAIN_INPUT_END": lambda: bool(
+        int(os.getenv("VLLM_PREFIX_CACHE_RETAIN_INPUT_END", "0"))
+    ),
+    "VLLM_PREFIX_CACHE_RETAIN_REASONING_END": lambda: bool(
+        int(os.getenv("VLLM_PREFIX_CACHE_RETAIN_REASONING_END", "0"))
+    ),
+    "VLLM_PREFIX_CACHE_RETAIN_RESPONSE_END": lambda: bool(
+        int(os.getenv("VLLM_PREFIX_CACHE_RETAIN_RESPONSE_END", "0"))
     ),
     # a local directory to look in for unrecognized LoRA adapters.
     # only works if plugins are enabled and

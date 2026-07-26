@@ -606,6 +606,44 @@ class ParserEngine(Parser):
             return False
         return self._reasoning_ended
 
+    def find_reasoning_end_token_boundary(self, token_ids: Sequence[int]) -> int | None:
+        state = self.parser_engine_config.initial_state
+        if state != ParserState.REASONING:
+            return None
+
+        terminal_ids = {
+            token_id: terminal
+            for terminal, text in self.parser_engine_config.token_id_terminals.items()
+            if (token_id := self.vocab.get(text)) is not None
+        }
+        for index, token_id in enumerate(token_ids):
+            terminal = terminal_ids.get(token_id)
+            if terminal is None:
+                continue
+            transition = self.parser_engine_config.transitions.get((state, terminal))
+            if transition is None:
+                continue
+            if (
+                state == ParserState.REASONING
+                and EventType.REASONING_END in transition.events
+            ):
+                boundary = index
+                while boundary > 0:
+                    token_text = self.model_tokenizer.decode(
+                        [token_ids[boundary - 1]], skip_special_tokens=False
+                    )
+                    if not token_text:
+                        return None
+                    if token_text.isspace():
+                        boundary -= 1
+                        continue
+                    if token_text.rstrip() != token_text:
+                        return None
+                    break
+                return boundary
+            state = transition.next_state
+        return None
+
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         end_id = self._reasoning_end_token_id
         if end_id is not None:

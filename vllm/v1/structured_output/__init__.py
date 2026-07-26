@@ -99,18 +99,29 @@ class StructuredOutputManager:
 
     def _get_reasoner(self, request: "Request") -> "ReasoningParser | None":
         structured_req = request.structured_output_request
-        if structured_req is None or self.reasoner_cls is None:
+        if self.reasoner_cls is None:
             return None
 
-        if structured_req.reasoner is None:
-            # Lazily build the request-local parser so the structured-output
-            # gate observes the same template kwargs used by the frontend.
-            parser_kwargs = structured_req.reasoning_parser_kwargs or {}
-            structured_req.reasoner = self.reasoner_cls(
+        if request.reasoner is None:
+            parser_kwargs = request.reasoning_parser_kwargs or {}
+            request.reasoner = self.reasoner_cls(
                 tokenizer=self.tokenizer,
                 **parser_kwargs,
             )
-        return structured_req.reasoner
+        if structured_req is not None:
+            structured_req.reasoner = request.reasoner
+        return request.reasoner
+
+    def find_reasoning_end_token_boundary(self, request: "Request") -> int | None:
+        """Return an exact output-token boundary from the configured parser."""
+        reasoner = self._get_reasoner(request)
+        if reasoner is None:
+            return None
+
+        boundary = reasoner.find_reasoning_end_token_boundary(request.output_token_ids)
+        if boundary is None or not 0 <= boundary <= request.num_output_tokens:
+            return None
+        return boundary
 
     def grammar_init(self, request: "Request") -> None:
         if request.structured_output_request is None:

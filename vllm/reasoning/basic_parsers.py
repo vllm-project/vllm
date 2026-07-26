@@ -86,6 +86,26 @@ class BaseThinkingReasoningParser(ReasoningParser):
         end_token_id = self.end_token_id
         return end_token_id in delta_ids
 
+    def find_reasoning_end_token_boundary(self, token_ids: Sequence[int]) -> int | None:
+        try:
+            boundary = token_ids.index(self.end_token_id)
+        except ValueError:
+            return None
+
+        while boundary > 0:
+            token_text = self.model_tokenizer.decode(
+                [token_ids[boundary - 1]], skip_special_tokens=False
+            )
+            if not token_text:
+                return None
+            if token_text.isspace():
+                boundary -= 1
+                continue
+            if token_text.rstrip() != token_text:
+                return None
+            break
+        return boundary
+
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """
         Extract the content after the end tokens
