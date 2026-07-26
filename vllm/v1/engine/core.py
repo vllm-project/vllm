@@ -78,16 +78,22 @@ from vllm.v1.engine.utils import (
     get_physical_gpu_ids_for_local_dp_rank,
 )
 from vllm.v1.executor import Executor
+from vllm.v1.fault_tolerance.engine_core_sentinel import (
+    FT_UTILITY_METHOD,
+    EngineCoreSentinel,
+    fault_tolerant_wrapper,
+)
 from vllm.v1.kv_cache_interface import KVCacheConfig, get_kv_cache_spec_kind
-from vllm.v1.metrics.stats import SchedulerStats
+from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.utils import IterationDetails, compute_iteration_details
+from vllm.v1.utils import compute_iteration_details
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
+
 
 HANDSHAKE_TIMEOUT_MINS = 5
 
@@ -498,45 +504,74 @@ class EngineCore:
             raise err
 
     @contextmanager
-    def log_iteration_details(self, scheduler_output: SchedulerOutput | None):
-        if not self.vllm_config.observability_config.enable_logging_iteration_details:
-            yield
+    def capture_iteration_details(
+        self, scheduler_output: SchedulerOutput | None
+    ) -> Generator[SchedulerIterationDetails | None, None, None]:
+        enable_details = (
+            self.vllm_config.observability_config.enable_logging_iteration_details
+        )
+        if not self.log_stats or not enable_details:
+            yield None
             return
         # 0-token step: let the dummy_batch wrapper log it (avoids double-log).
-        if scheduler_output and scheduler_output.total_num_scheduled_tokens == 0:
-            yield
+        if (
+            scheduler_output is not None
+            and scheduler_output.total_num_scheduled_tokens == 0
+        ):
+            yield None
             return
-        self._iteration_index = getattr(self, "_iteration_index", 0)
+
+        iteration_index = getattr(self, "_iteration_index", 0)
         # scheduler_output=None marks a DP dummy iteration.
         if scheduler_output is None:
-            iteration_details = IterationDetails(0, 0, 0, 0)
-            is_dummy = True
-        else:
-            iteration_details = compute_iteration_details(scheduler_output)
-            is_dummy = False
-        before = time.monotonic()
-        yield
-        logger.info(
-            "".join(
-                [
-                    "Iteration(",
-                    str(self._iteration_index),
-                    "): ",
-                    str(iteration_details.num_ctx_requests),
-                    " context requests, ",
-                    str(iteration_details.num_ctx_tokens),
-                    " context tokens, ",
-                    str(iteration_details.num_generation_requests),
-                    " generation requests, ",
-                    str(iteration_details.num_generation_tokens),
-                    " generation tokens, iteration elapsed time: ",
-                    format((time.monotonic() - before) * 1000, ".2f"),
-                    " ms",
-                    " (dummy)" if is_dummy else "",
-                ]
+            iteration_details = SchedulerIterationDetails(
+                iteration_index=iteration_index,
+                num_ctx_requests=0,
+                num_ctx_tokens=0,
+                num_generation_requests=0,
+                num_generation_tokens=0,
+                elapsed_ms=0.0,
+                is_dummy=True,
             )
-        )
-        self._iteration_index += 1
+        else:
+            details = compute_iteration_details(scheduler_output)
+            iteration_details = SchedulerIterationDetails(
+                iteration_index=iteration_index,
+                num_ctx_requests=details.num_ctx_requests,
+                num_ctx_tokens=details.num_ctx_tokens,
+                num_generation_requests=details.num_generation_requests,
+                num_generation_tokens=details.num_generation_tokens,
+                elapsed_ms=0.0,
+                num_encoder_inputs=details.num_encoder_inputs,
+                num_encoder_output_tokens=details.num_encoder_output_tokens,
+            )
+
+        start_time = time.monotonic()
+        yield iteration_details
+        iteration_details.elapsed_ms = (time.monotonic() - start_time) * 1000
+        self._iteration_index = iteration_index + 1
+
+    def _make_iteration_details_stats(
+        self, iteration_details: SchedulerIterationDetails
+    ) -> SchedulerStats:
+        stats = self.scheduler.make_stats() or SchedulerStats()
+        stats.iteration_details = iteration_details
+        return stats
+
+    def _attach_iteration_details(
+        self,
+        outputs: dict[int, EngineCoreOutputs],
+        iteration_details: SchedulerIterationDetails | None,
+    ) -> None:
+        if iteration_details is None:
+            return
+
+        if (eco := next(iter(outputs.values()), None)) is None:
+            outputs[0] = eco = EngineCoreOutputs()
+        if eco.scheduler_stats is None:
+            eco.scheduler_stats = self._make_iteration_details_stats(iteration_details)
+        else:
+            eco.scheduler_stats.iteration_details = iteration_details
 
     def _should_throttle_prefills(self) -> bool:
         """Whether to defer new prefills this step (DP prefill balancing).
@@ -558,8 +593,8 @@ class EngineCore:
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
+            self.capture_iteration_details(scheduler_output) as iteration_details,
             self.log_error_detail(scheduler_output),
-            self.log_iteration_details(scheduler_output),
         ):
             model_output = future.result()
             if model_output is None:
@@ -571,6 +606,7 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+        self._attach_iteration_details(engine_core_outputs, iteration_details)
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
@@ -656,8 +692,8 @@ class EngineCore:
         # Block until the next result is available.
         future, scheduler_output, exec_model_fut = batch_queue.pop()
         with (
+            self.capture_iteration_details(scheduler_output) as iteration_details,
             self.log_error_detail(scheduler_output),
-            self.log_iteration_details(scheduler_output),
         ):
             model_output = future.result()
             if model_output is None:
@@ -672,6 +708,7 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+        self._attach_iteration_details(engine_core_outputs, iteration_details)
 
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
@@ -1038,6 +1075,16 @@ class EngineCoreProc(EngineCore):
                 internal_dp_balancing,
             )
 
+            # Initialize fault tolerance settings.
+            self.enable_fault_tolerance = (
+                vllm_config.parallel_config.enable_fault_tolerance
+            )
+            if self.enable_fault_tolerance:
+                self.ft_sentinel = EngineCoreSentinel(
+                    engine=self,
+                    parallel_config=vllm_config.parallel_config,
+                )
+
             # Background Threads and Queues for IO. These enable us to
             # overlap ZMQ socket IO with GPU since they release the GIL,
             # and to overlap some serialization/deserialization with the
@@ -1323,6 +1370,7 @@ class EngineCoreProc(EngineCore):
         """Returns true if shutdown has not been requested."""
         return self.shutdown_state == EngineShutdownState.RUNNING
 
+    @fault_tolerant_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
         while self._handle_shutdown():
@@ -1640,6 +1688,14 @@ class EngineCoreProc(EngineCore):
                         except Exception:
                             self._handle_request_preproc_error(req)
                             continue
+                    elif request_type == EngineCoreRequestType.UTILITY:
+                        request = generic_decoder.decode(data_frames)
+                        client_idx, call_id, method, args = request
+                        if method == FT_UTILITY_METHOD:
+                            self.ft_sentinel.handle_command(
+                                client_idx, call_id, args[0]
+                            )
+                            continue
                     else:
                         request = generic_decoder.decode(data_frames)
 
@@ -1798,13 +1854,13 @@ class EngineCoreProc(EngineCore):
     ) -> None:
         self._send_finish_outputs_to_client(req_ids, client_index, FinishReason.ERROR)
 
-    def _send_abort_outputs(self, aborted_reqs: list[tuple[str, int]]) -> None:
+    def _send_abort_outputs(self, aborted_reqs: list[Request]) -> None:
         # TODO(nick) this will be moved inside the scheduler
         if aborted_reqs:
             # Map client_index to list of request_ids that belong to that client.
             by_client = defaultdict[int, set[str]](set)
-            for req_id, client_index in aborted_reqs:
-                by_client[client_index].add(req_id)
+            for request in aborted_reqs:
+                by_client[request.client_index].add(request.request_id)
             for client_index, req_ids in by_client.items():
                 self._send_abort_outputs_to_client(list(req_ids), client_index)
 
@@ -1989,6 +2045,7 @@ class DPEngineCoreProc(EngineCoreProc):
             and self.step_counter % self.prefill_schedule_interval != 0
         )
 
+    @fault_tolerant_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
 
@@ -2019,8 +2076,13 @@ class DPEngineCoreProc(EngineCoreProc):
                 # Execute a dummy pass when no ready requests ran, unless the
                 # engine is sleeping.
                 elif not self.model_executor.is_sleeping:
-                    with self.log_iteration_details(None):
+                    with self.capture_iteration_details(None) as iteration_details:
                         self.execute_dummy_batch()
+                    if iteration_details is not None and not self.has_coordinator:
+                        stats = self._make_iteration_details_stats(iteration_details)
+                        self.output_queue.put_nowait(
+                            (0, EngineCoreOutputs(scheduler_stats=stats))
+                        )
 
             # 3) All-reduce operation to determine global unfinished reqs.
             self.engines_running = self._has_global_unfinished_reqs(

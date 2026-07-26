@@ -391,7 +391,7 @@ inflect==7.5.0
     # via datamodel-code-generator
 iniconfig==2.3.0
     # via pytest
-instanttensor==0.1.6
+instanttensor==0.1.9
     # via -r requirements/test/rocm.in
 interegular==0.3.3
     # via lm-format-enforcer
@@ -1214,7 +1214,7 @@ tqdm==4.67.3
     #   sentence-transformers
     #   tilelang
     #   transformers
-transformers==5.13.1
+transformers==5.14.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt

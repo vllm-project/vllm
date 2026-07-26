@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from transformers import PretrainedConfig
     from transformers.conversion_mapping import WeightRenaming
 
+    from vllm.config.model import ModelConfig
     from vllm.model_executor.layers.quantization import QuantizationConfig
 
 logger = init_logger(__name__)
@@ -422,6 +423,116 @@ class AutoWeightsLoader:
 
         autoloaded_weights = set(self._load_module("", self.module, weights))
         return autoloaded_weights
+
+
+def maybe_fuse_shared_experts(
+    weights: Iterable[tuple[str, torch.Tensor]],
+    *,
+    n_routed_experts: int,
+    n_shared_experts: int,
+    ckpt_prefix: str = "mlp.shared_experts",
+    enabled: bool | None = None,
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Route AITER fused-shared-expert checkpoint weights into fused slots.
+
+    When AITER fused-shared-experts is active, shared experts are packed into
+    the routed expert tensor. The checkpoint stores them under `ckpt_prefix`
+    as a single (possibly widened) tensor; this splits it into
+    `n_shared_experts` chunks named `mlp.experts.{n_routed_experts + j}` so
+    the `RoutedExperts` loader treats them as extra experts. Yields the input
+    unchanged when the fusion is inactive, so callers can wrap unconditionally.
+
+    Args:
+        weights: Iterable of `(name, tensor)` checkpoint pairs.
+        n_routed_experts: Number of routed experts; offsets the fused slots.
+        n_shared_experts: Number of shared experts packed into the tensor.
+        ckpt_prefix: Checkpoint module name of the shared experts.
+        enabled: Whether AITER fused-shared-experts is active. Defaults to
+            `rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()`; pass an
+            explicit value only when the model gates on something more (e.g.
+            quant-spec compatibility) and it must match its construction-time
+            decision.
+
+    Yields:
+        `(name, tensor)` pairs with shared experts routed to fused slots.
+    """
+    if enabled is None:
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        enabled = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+    if not enabled:
+        yield from weights
+        return
+
+    # Match on the dotted boundary so e.g. "mlp.shared_expert." does not also
+    # catch a sibling "mlp.shared_expert_gate".
+    prefix = f"{ckpt_prefix}."
+    for name, loaded_weight in weights:
+        if prefix not in name:
+            yield name, loaded_weight
+            continue
+        # gate/up split on the output dim; down_proj on the input dim.
+        split_dim = 1 if ("down_proj.weight" in name and loaded_weight.ndim > 1) else 0
+        total = loaded_weight.shape[split_dim]
+        if total % n_shared_experts != 0:
+            raise ValueError(
+                f"FSE shared-expert weight {name!r} has size {total} along axis "
+                f"{split_dim}, not divisible by n_shared_experts={n_shared_experts}."
+            )
+        chunk = total // n_shared_experts
+        for j in range(n_shared_experts):
+            sl = slice(j * chunk, (j + 1) * chunk)
+            if loaded_weight.ndim == 1:
+                chunk_weight = loaded_weight[sl]
+            elif split_dim == 0:
+                chunk_weight = loaded_weight[sl, :]
+            else:
+                chunk_weight = loaded_weight[:, sl]
+            yield (
+                name.replace(prefix, f"mlp.experts.{n_routed_experts + j}."),
+                chunk_weight,
+            )
+
+
+def get_spec_layer_idx_from_weight_name(
+    config: "ModelConfig", weight_name: str
+) -> int | None:
+    """Return the MTP layer index a weight belongs to, or None.
+
+    Args:
+        config: The model config; must expose `num_hidden_layers` and,  for MTP
+            checkpoints, `num_nextn_predict_layers`.
+        weight_name: Checkpoint weight name to classify.
+
+    Returns:
+        The absolute layer index for an MTP-layer weight, else None.
+    """
+    if not (n := getattr(config, "num_nextn_predict_layers", 0)):
+        return None
+    base = config.num_hidden_layers
+    for i in range(n):
+        if weight_name.startswith((f"model.layers.{base + i}.", f"layers.{base + i}.")):
+            return base + i
+    return None
+
+
+def skip_spec_layers(
+    weights: Iterable[tuple[str, torch.Tensor]], config: "ModelConfig"
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Drop MTP spec-layer weights (loaded by the MTP head, not the base model).
+
+    Args:
+        weights: Iterable of `(name, tensor)` checkpoint pairs.
+        config: The model config, passed to `get_spec_layer_idx_from_weight_name`.
+
+    Yields:
+        `(name, tensor)` pairs whose weight is not an MTP-layer weight.
+    """
+    return (
+        (name, w)
+        for name, w in weights
+        if get_spec_layer_idx_from_weight_name(config, name) is None
+    )
 
 
 def init_vllm_registered_model(

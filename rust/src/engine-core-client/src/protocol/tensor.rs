@@ -55,52 +55,57 @@ pub struct WireNdArray {
 
 impl WireNdArray {
     /// Build a float32 tensor/ndarray backed by native-endian raw-view bytes.
-    pub fn from_f32(shape: Vec<usize>, data: Vec<f32>) -> Result<Self, String> {
+    pub fn from_f32(shape: Vec<usize>, data: impl AsRef<[f32]>) -> Result<Self, String> {
+        let data = data.as_ref();
         validate_element_count(&shape, data.len())?;
         Ok(Self {
             dtype: "float32".to_string(),
             shape,
-            data: WireArrayData::RawView(pod_collect_to_vec::<f32, u8>(&data)),
+            data: WireArrayData::RawView(pod_collect_to_vec::<f32, u8>(data)),
         })
     }
 
     /// Build a float16 tensor/ndarray backed by native-endian raw-view bytes.
-    pub fn from_f16(shape: Vec<usize>, data: Vec<f16>) -> Result<Self, String> {
+    pub fn from_f16(shape: Vec<usize>, data: impl AsRef<[f16]>) -> Result<Self, String> {
+        let data = data.as_ref();
         validate_element_count(&shape, data.len())?;
         Ok(Self {
             dtype: "float16".to_string(),
             shape,
-            data: WireArrayData::RawView(pod_collect_to_vec::<f16, u8>(&data)),
+            data: WireArrayData::RawView(pod_collect_to_vec::<f16, u8>(data)),
         })
     }
 
     /// Build a bfloat16 tensor/ndarray backed by native-endian raw-view bytes.
-    pub fn from_bf16(shape: Vec<usize>, data: Vec<bf16>) -> Result<Self, String> {
+    pub fn from_bf16(shape: Vec<usize>, data: impl AsRef<[bf16]>) -> Result<Self, String> {
+        let data = data.as_ref();
         validate_element_count(&shape, data.len())?;
         Ok(Self {
             dtype: "bfloat16".to_string(),
             shape,
-            data: WireArrayData::RawView(pod_collect_to_vec::<bf16, u8>(&data)),
+            data: WireArrayData::RawView(pod_collect_to_vec::<bf16, u8>(data)),
         })
     }
 
     /// Build an int64 tensor/ndarray backed by native-endian raw-view bytes.
-    pub fn from_i64(shape: Vec<usize>, data: Vec<i64>) -> Result<Self, String> {
+    pub fn from_i64(shape: Vec<usize>, data: impl AsRef<[i64]>) -> Result<Self, String> {
+        let data = data.as_ref();
         validate_element_count(&shape, data.len())?;
         Ok(Self {
             dtype: "int64".to_string(),
             shape,
-            data: WireArrayData::RawView(pod_collect_to_vec::<i64, u8>(&data)),
+            data: WireArrayData::RawView(pod_collect_to_vec::<i64, u8>(data)),
         })
     }
 
     /// Build a uint32 tensor/ndarray backed by native-endian raw-view bytes.
-    pub fn from_u32(shape: Vec<usize>, data: Vec<u32>) -> Result<Self, String> {
+    pub fn from_u32(shape: Vec<usize>, data: impl AsRef<[u32]>) -> Result<Self, String> {
+        let data = data.as_ref();
         validate_element_count(&shape, data.len())?;
         Ok(Self {
             dtype: "uint32".to_string(),
             shape,
-            data: WireArrayData::RawView(pod_collect_to_vec::<u32, u8>(&data)),
+            data: WireArrayData::RawView(pod_collect_to_vec::<u32, u8>(data)),
         })
     }
 
