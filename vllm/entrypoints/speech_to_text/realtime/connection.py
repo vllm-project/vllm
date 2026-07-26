@@ -65,7 +65,18 @@ class RealtimeConnection:
 
         try:
             while True:
-                message = await self.websocket.receive_text()
+                message = await self._receive_text_frame()
+                if message is None:
+                    # A non-text frame (e.g. raw binary audio) was received.
+                    # Realtime events must be JSON text frames, so report the
+                    # error and keep the session open instead of letting the
+                    # missing "text" key crash the connection.
+                    await self.send_error(
+                        "Expected a text frame containing a JSON event; "
+                        "binary frames are not supported.",
+                        "invalid_frame",
+                    )
+                    continue
                 try:
                     event = json.loads(message)
                     await self.handle_event(event)
@@ -81,6 +92,19 @@ class RealtimeConnection:
             logger.exception("Unexpected error in connection: %s", e)
         finally:
             await self.cleanup()
+
+    async def _receive_text_frame(self) -> str | None:
+        """Receive one frame, returning its text payload.
+
+        Unlike ``WebSocket.receive_text``, which raises ``KeyError`` on a
+        binary frame, this returns ``None`` so the caller can reject it
+        gracefully. Disconnects are surfaced as ``WebSocketDisconnect`` to
+        match the existing handling.
+        """
+        message = await self.websocket.receive()
+        if message["type"] == "websocket.disconnect":
+            raise WebSocketDisconnect(message.get("code", 1000))
+        return message.get("text")
 
     def _check_model(self, model: str | None) -> None | ErrorResponse:
         if self.serving._is_model_supported(model):
