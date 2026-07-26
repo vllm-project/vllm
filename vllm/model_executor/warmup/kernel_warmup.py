@@ -77,12 +77,16 @@ def kernel_warmup(worker: "Worker"):
         minimax_m3_msa_warmup,
     )
 
-    # Pooling models do not use the generation slot-mapping path.
-    if not worker.use_v2_model_runner and not worker.model_runner.is_pooling_model:
-        warm_v1_block_table_kernels(
-            getattr(worker.model_runner, "device", torch.device("cuda")),
-            worker.scheduler_config.max_num_batched_tokens,
-        )
+    if not worker.use_v2_model_runner:
+        # Pooling models do not use the generation slot-mapping path.
+        if not worker.model_runner.is_pooling_model:
+            warm_v1_block_table_kernels(worker.model_runner)
+        # The KV-block zeroing kernel is driven by the scheduler's
+        # `new_block_ids_to_zero`, so no dummy run ever reaches it.
+        zeroer = getattr(worker.model_runner, "_kv_block_zeroer", None)
+        if zeroer is not None:
+            zeroer.warmup(worker.model_runner.kv_cache_config.num_blocks)
+
     qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
 
     # DSv4 mHC TileLang kernels (hc_pre/hc_post/hc_head_op) run every decoder
