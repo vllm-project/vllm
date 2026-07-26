@@ -75,3 +75,33 @@ def test_project_batch_no_projector():
     out = head.project_batch(hidden_states)
     assert out.shape == hidden_states.shape
     assert out.dtype == torch.float32
+
+
+@pytest.mark.parametrize("input_dtype", [torch.float16, torch.bfloat16])
+def test_project_batch_chunked_matches_full(monkeypatch, input_dtype):
+    """The chunked upcast path (PR #40337 review: peak-memory) must match
+    projecting the full batch in one pass. The projector and activation act
+    row-wise, so chunking preserves the upcast-then-project semantics
+    exactly; the only permitted deviation is BLAS kernel selection varying
+    with the row count, which can reorder a dot product's reduction by at
+    most ~1 ulp of fp32 (measured <= 3e-7 after L2 normalisation).
+    """
+    hidden_dim, embed_dim = 32, 8
+    linear = nn.Linear(hidden_dim, embed_dim)
+    head = TokenEmbeddingPoolerHead(
+        head_dtype=torch.float32, projector=linear, activation=_l2_normalize
+    )
+
+    n_tokens = 50  # not a multiple of the chunk size below
+    hidden_states = torch.randn(n_tokens, hidden_dim, dtype=input_dtype)
+
+    ref = head.project_batch(hidden_states)  # single-pass (n <= chunk)
+
+    monkeypatch.setattr(
+        TokenEmbeddingPoolerHead, "_PROJECT_BATCH_CHUNK", 7, raising=True
+    )
+    out = head.project_batch(hidden_states)  # 8 chunks incl. ragged tail
+
+    assert out.shape == (n_tokens, embed_dim)
+    assert out.dtype == torch.float32
+    torch.testing.assert_close(out, ref, atol=1e-6, rtol=0.0)

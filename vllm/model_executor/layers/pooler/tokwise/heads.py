@@ -71,27 +71,14 @@ class TokenEmbeddingPoolerHead(TokenPoolerHead):
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"token_embed"}
 
-    def project_batch(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Project entire batch tensor at once for zero-copy scoring.
+    # Rows processed per chunk in project_batch when a head_dtype upcast is
+    # needed. Bounds the [chunk, hidden_dim] head_dtype transient (e.g.
+    # 16384 x 2048 fp32 = 128 MiB) instead of materialising the full
+    # [N, hidden_dim] batch at head_dtype — see PR #40337 review.
+    _PROJECT_BATCH_CHUNK = 16384
 
-        Applies projector and activation (same pipeline as forward_chunk
-        but without per-request matryoshka truncation).
-        Returns [total_tokens, embed_dim].
-
-        The dtype cast is deferred until after projection so that the
-        large [N, hidden_dim] tensor stays in its native dtype.  Only
-        the smaller [N, embed_dim] output is cast — avoids a temporary
-        allocation that can be 4-8x larger than the final result.
-        """
-        # Cast BEFORE projection, exactly like forward_chunk, so queries
-        # (forward_chunk path) and documents (this path) are projected at
-        # identical precision. An earlier revision projected in the input
-        # dtype with downcast weights to avoid materialising [N, hidden]
-        # in head_dtype; that made Q/D projection precision diverge for
-        # models whose head_dtype differs from the activation dtype
-        # (e.g. BF16 ColPali/ColQwen with an fp32 head) — see the
-        # PR #40337 review. Exact parity wins over the transient
-        # allocation.
+    def _project_rows(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Upcast + project + activate, exactly like forward_chunk."""
         if self.head_dtype is not None and hidden_states.dtype != self.head_dtype:
             hidden_states = hidden_states.to(self.head_dtype)
         if self.projector is not None:
@@ -99,6 +86,42 @@ class TokenEmbeddingPoolerHead(TokenPoolerHead):
         if self.activation is not None:
             hidden_states = self.activation(hidden_states)
         return hidden_states
+
+    def project_batch(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Project entire batch tensor for zero-copy scoring.
+
+        Applies upcast, projector and activation — the same pipeline as
+        forward_chunk (without per-request matryoshka truncation), so
+        queries and documents are projected at identical precision.
+        Returns [total_tokens, embed_dim].
+
+        The head_dtype upcast is applied in row chunks: the projector and
+        activation act row-wise, so chunking preserves the upcast-then-
+        project semantics (any deviation is BLAS kernel selection vs row
+        count, <= ~1 ulp of fp32) while the head_dtype transient stays
+        bounded at [_PROJECT_BATCH_CHUNK, hidden_dim] instead of the full
+        [N, hidden_dim] batch (which peaked at GiB scale for ColPali-sized
+        batches with an fp32 head).
+        """
+        n = hidden_states.shape[0]
+        needs_cast = (
+            self.head_dtype is not None and hidden_states.dtype != self.head_dtype
+        )
+        if not needs_cast or n <= self._PROJECT_BATCH_CHUNK:
+            return self._project_rows(hidden_states)
+
+        out: torch.Tensor | None = None
+        for start in range(0, n, self._PROJECT_BATCH_CHUNK):
+            chunk = self._project_rows(
+                hidden_states[start : start + self._PROJECT_BATCH_CHUNK]
+            )
+            if out is None:
+                out = torch.empty(
+                    (n, *chunk.shape[1:]), dtype=chunk.dtype, device=chunk.device
+                )
+            out[start : start + chunk.shape[0]] = chunk
+        assert out is not None
+        return out
 
     def forward_chunk(
         self,

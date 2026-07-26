@@ -6,8 +6,12 @@ Originally from https://github.com/roipony/flash-maxsim (Apache 2.0).
 Forward-pass only; backward/training kernels are not included.
 """
 
-from vllm.v1.pool.flash_maxsim.flash_maxsim_rerank import flash_maxsim_rerank_direct
+from vllm.v1.pool.flash_maxsim.flash_maxsim_rerank import (
+    flash_maxsim_rerank_direct,
+    flash_maxsim_rerank_pairs,
+)
 
 __all__ = [
     "flash_maxsim_rerank_direct",
+    "flash_maxsim_rerank_pairs",
 ]
