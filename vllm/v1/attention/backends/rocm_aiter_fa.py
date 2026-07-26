@@ -737,6 +737,10 @@ class AiterFlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        from vllm.platforms.rocm import on_gfx90a
+
+        if on_gfx90a():
+            return [16, 32, 2048]
         return [16, 32]
 
     @classmethod
@@ -776,12 +780,12 @@ class AiterFlashAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        from vllm.platforms.rocm import on_mi3xx
+        from vllm.platforms.rocm import on_gfx90a, on_mi3xx
 
         # DeviceCapability is currently created using torch.cuda.get_device_capability()
-        # which is known to be buggy on rocm systems. on_mi3xx uses amd-smi which is
-        # more reliable.
-        return on_mi3xx()
+        # which is known to be buggy on ROCm systems. Use the detected target
+        # architecture instead.
+        return on_gfx90a() or on_mi3xx()
 
     @classmethod
     def supports_non_causal(cls) -> bool:
@@ -928,6 +932,27 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 v_scale,
             )
             return
+        if self._can_use_paged_batch_prefill(
+            attn_metadata,
+            query,
+            key_cache,
+            value_cache,
+            output,
+            cu_seqlens_q,
+            block_table,
+        ):
+            self._paged_batch_prefill(
+                attn_metadata,
+                query,
+                key_cache,
+                value_cache,
+                output,
+                cu_seqlens_q,
+                max_seqlen_q,
+                max_seqlen_k,
+                block_table,
+            )
+            return
         out, lse = rocm_aiter_ops.flash_attn_varlen_func(
             q=query,
             k=key,
@@ -1016,6 +1041,91 @@ class AiterFlashAttentionImpl(AttentionImpl):
             prefix_lse=chunked_lse,
             suffix_output=out,
             suffix_lse=lse,
+        )
+
+    def _can_use_paged_batch_prefill(
+        self,
+        attn_metadata: AiterFlashAttentionMetadata,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        output: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        block_table: torch.Tensor,
+    ) -> bool:
+        from vllm.platforms.rocm import on_gfx90a
+
+        return (
+            on_gfx90a()
+            and rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+            and self.kv_cache_dtype in ("auto", "float16", "bfloat16")
+            and self.alibi_slopes is None
+            and self.logits_soft_cap == 0.0
+            and self.sinks is None
+            and attn_metadata.causal
+            and query.dtype in (torch.float16, torch.bfloat16)
+            and output.dtype == query.dtype
+            and key_cache.dtype == query.dtype
+            and value_cache.dtype == query.dtype
+            and query.ndim == 3
+            and output.shape == query.shape
+            and key_cache.ndim == 4
+            and value_cache.shape == key_cache.shape
+            and key_cache.shape[1] == 2048
+            and key_cache.shape[2] == self.num_kv_heads
+            and key_cache.shape[3] == self.head_size
+            and cu_seqlens_q.dtype == torch.int32
+            and cu_seqlens_q.ndim == 1
+            and block_table.dtype == torch.int32
+            and block_table.ndim == 2
+            and block_table.stride(-1) == 1
+        )
+
+    def _paged_batch_prefill(
+        self,
+        attn_metadata: AiterFlashAttentionMetadata,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        output: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+        block_table: torch.Tensor,
+    ) -> None:
+        vector_size = 16 // key_cache.element_size()
+        num_blocks, block_size, num_kv_heads, head_size = key_cache.shape
+        vector_key_cache = key_cache.reshape(
+            num_blocks,
+            num_kv_heads,
+            head_size // vector_size,
+            block_size,
+            vector_size,
+        )
+        vector_value_cache = value_cache.reshape(
+            num_blocks,
+            num_kv_heads,
+            block_size // vector_size,
+            head_size,
+            vector_size,
+        )
+        start = attn_metadata.num_decodes
+        stop = start + attn_metadata.num_extends
+        seq_lens = attn_metadata.seq_lens[start:stop]
+        rocm_aiter_ops.mha_batch_prefill_func(
+            q=query,
+            k=vector_key_cache,
+            v=vector_value_cache,
+            cu_seqlens_q=cu_seqlens_q,
+            kv_indptr=cu_seqlens_q,
+            kv_page_indices=block_table,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            softmax_scale=self.scale,
+            causal=True,
+            out=output,
+            block_table=block_table,
+            seqlen_k=seq_lens,
         )
 
     def forward(
