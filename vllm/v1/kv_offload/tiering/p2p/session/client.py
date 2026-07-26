@@ -87,6 +87,11 @@ class _ClientRequestState:
     phase: ClientPhase = ClientPhase.REGISTERED
     # Set while a fetch is in flight; cleared on completion/abort/timeout.
     load: _InboundLoadState | None = None
+    # Loads awaiting their turn on the wire: TransferDoneMsg carries only
+    # the kv_request_id, so fetches are strictly serialized per id.
+    queued_fetches: list[tuple[int, list[OffloadKey], list[int]]] = field(
+        default_factory=list
+    )
 
 
 class LoadResult(NamedTuple):
@@ -153,6 +158,16 @@ class ClientRole:
             self._requests[kv_request_id] = st
         return st
 
+    def _reopen_lookup_phase(self, st: _ClientRequestState) -> None:
+        """Regress phase to PROBING when a load ends with probes pending.
+
+        Their LookupMsgs re-opened the peer's lookup phase; without the
+        regression ``finish`` would skip the terminal empty FetchMsg and
+        leave that supply parked on the peer until its store timeout.
+        """
+        if st.probes and st.phase is ClientPhase.FETCH_SENT:
+            st.phase = ClientPhase.PROBING
+
     def _maybe_prune(self, kv_request_id: str) -> None:
         """Drop the entry once it holds no live load or lookup state.
 
@@ -164,7 +179,13 @@ class ClientRole:
         still in use.
         """
         st = self._requests.get(kv_request_id)
-        if st is not None and st.load is None and not st.probes and not st.unsent:
+        if (
+            st is not None
+            and st.load is None
+            and not st.queued_fetches
+            and not st.probes
+            and not st.unsent
+        ):
             del self._requests[kv_request_id]
 
     @property
@@ -184,7 +205,13 @@ class ClientRole:
         block_ids: Sequence[int],
         send_ready: bool,
     ) -> None:
-        """Register a load request and send the FetchMsg."""
+        """Register a load request; send the FetchMsg or queue it.
+
+        The scheduler may submit several loads per kv_request_id
+        (incremental onboarding); a second FetchMsg while one is
+        outstanding would be ambiguous on the wire, so loads queue and
+        are sent as each predecessor reaches a terminal.
+        """
         logger.debug(
             "P2PSession %s: request_blocks job_id=%d kv_request_id=%s "
             "blocks=%d ready=%s",
@@ -195,6 +222,21 @@ class ClientRole:
             send_ready,
         )
         st = self._get_or_create_request(kv_request_id)
+        block_idxs = [int(idx) for idx in block_ids]
+        if st.load is not None:
+            st.queued_fetches.append((job_id, list(keys), block_idxs))
+            return
+        self._send_fetch(kv_request_id, st, job_id, list(keys), block_idxs)
+
+    def _send_fetch(
+        self,
+        kv_request_id: str,
+        st: _ClientRequestState,
+        job_id: int,
+        keys: list[OffloadKey],
+        block_idxs: list[int],
+    ) -> None:
+        """Put one FetchMsg on the wire and arm its load state."""
         st.load = _InboundLoadState(
             job_id=job_id,
             submitted_at=time.monotonic(),
@@ -205,22 +247,27 @@ class ClientRole:
             {
                 TYPE_KEY: FetchMsg.TYPE,
                 FetchMsg.KV_REQUEST_ID: kv_request_id,
-                FetchMsg.KEYS: list(keys),
-                FetchMsg.BLOCK_INDEXES: [int(idx) for idx in block_ids],
+                FetchMsg.KEYS: keys,
+                FetchMsg.BLOCK_INDEXES: block_idxs,
             }
         )
-        # Issuing the fetch ends this request's lookup phase, so drop all
-        # probe state. Once the peer serves this fetch both sides unpin, so
-        # the producer may evict the block; a stale cached True would
-        # otherwise let a re-scheduled lookup() return HIT without
-        # re-probing, pointing at a block the producer no longer holds.
-        # Clearing forces a fresh LookupMsg on re-schedule so the producer
-        # answers from current state. For a symmetric-P2P request (probes
-        # populated) every fetched block was a confirmed HIT; a PD-only load
-        # never probes, so probes is empty and the clear is a no-op.
+        # Drop the fetched keys' probes: once served both sides unpin, so
+        # a stale cached True could point at an evicted block. Later
+        # rounds' probes keep their confirmations. PD loads never probe.
         if st.probes:
             assert all(st.probes.get(key) is True for key in keys)
-        st.probes.clear()
+            for key in keys:
+                st.probes.pop(key, None)
+
+    def _on_load_terminal(self, kv_request_id: str, st: _ClientRequestState) -> None:
+        """After a load ends: send the next queued fetch or wind down."""
+        if st.queued_fetches:
+            job_id, keys, block_idxs = st.queued_fetches.pop(0)
+            self._send_fetch(kv_request_id, st, job_id, keys, block_idxs)
+            return
+        self._active_loads.discard(kv_request_id)
+        self._reopen_lookup_phase(st)
+        self._maybe_prune(kv_request_id)
 
     def finish(self, kv_request_id: str) -> None:
         """Finish a request: abort any in-flight load and release lookup state.
@@ -248,6 +295,12 @@ class ClientRole:
         st = self._requests.get(kv_request_id)
         if st is None:
             return
+        for job_id, _, _ in st.queued_fetches:
+            # Never reached the wire; fail so the engine releases the job.
+            self._completed_loads.append(
+                LoadResult(job_id=job_id, kv_request_id=kv_request_id, success=False)
+            )
+        st.queued_fetches.clear()
         if st.load is not None:
             if st.load.aborted_at is None:
                 self._send(
@@ -285,8 +338,7 @@ class ClientRole:
                 )
             )
             st.load = None
-            self._active_loads.discard(kv_request_id)
-            self._maybe_prune(kv_request_id)
+            self._on_load_terminal(kv_request_id, st)
         else:
             # No matching in-flight load: either a duplicate
             # transfer_done from the peer (protocol violation) or a
@@ -320,8 +372,7 @@ class ClientRole:
                 )
             )
             st.load = None
-            self._active_loads.discard(kv_request_id)
-            self._maybe_prune(kv_request_id)
+            self._on_load_terminal(kv_request_id, st)
         else:
             # See on_transfer_done: same ambiguity (duplicate ack
             # vs. raced with local cancel/timeout that already popped).
@@ -494,9 +545,9 @@ class ClientRole:
                         req_id,
                     )
         for req_id in to_remove:
-            self._requests[req_id].load = None
-            self._active_loads.discard(req_id)
-            self._maybe_prune(req_id)
+            st = self._requests[req_id]
+            st.load = None
+            self._on_load_terminal(req_id, st)
 
         results = self._completed_loads
         self._completed_loads = []
@@ -512,10 +563,17 @@ class ClientRole:
         failed_jobs = [
             st.load.job_id for st in self._requests.values() if st.load is not None
         ]
+        failed_jobs.extend(
+            job_id
+            for st in self._requests.values()
+            for job_id, _, _ in st.queued_fetches
+        )
         failed_req_ids = [
             req_id
             for req_id, st in self._requests.items()
-            if st.load is not None or any(hit is None for hit in st.probes.values())
+            if st.load is not None
+            or st.queued_fetches
+            or any(hit is None for hit in st.probes.values())
         ]
         self._requests.clear()
         self._flush_pending.clear()
