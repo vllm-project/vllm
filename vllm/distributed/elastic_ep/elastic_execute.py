@@ -362,7 +362,7 @@ class ElasticEPScalingExecutor:
         self._release_cuda_graphs()
         _replace_active_groups(world=None, dp=None, ep=None, eplb=None, node_count=None)
 
-    def switch_and_prepare(self) -> None:
+    def switch_and_prepare(self, defer_cudagraph_capture: bool = False) -> None:
         old_dp_size = get_dp_group().world_size
         old_ep_size = get_ep_group().world_size
 
@@ -511,6 +511,12 @@ class ElasticEPScalingExecutor:
             compilation_counter.stock_torch_compile_count += 1
             self.worker.model_runner.model.compile(fullgraph=True, backend=backend)
 
+        if defer_cudagraph_capture:
+            # rewarm_workspace() will recapture after the EPLB reshuffle
+            # with the properly-sized MoE workspace.
+            if new_dp_size < old_dp_size:
+                self._set_eplb_suppressed(False)
+            return
     def _perform_eplb_reshuffle(
         self, rank_mapping: dict[int, int] | None = None
     ) -> None:
