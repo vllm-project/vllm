@@ -28,7 +28,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe import (
     TrtLlmBf16ExpertsModular,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+from vllm.model_executor.layers.quantization.utils.flashinfer_moe import (
     convert_moe_weights_to_flashinfer_trtllm_block_layout,
 )
 from vllm.platforms import current_platform
