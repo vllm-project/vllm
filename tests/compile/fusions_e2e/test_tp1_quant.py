@@ -32,6 +32,7 @@ from .models import (
     llama4_scout_fp4,
     llama4_scout_fp8,
     qwen3_a3b_fp8,
+    qwen3_vl_2b,
 )
 
 
@@ -198,4 +199,52 @@ def test_tp1_fp4_fusions(
         attn_backend,
         compilation_config,
         matches_check,
+    )
+
+
+@pytest.mark.parametrize(
+    "model_name, matches_fn, model_kwargs, hf_overrides",
+    [qwen3_vl_2b],
+)
+@pytest.mark.parametrize("attn_backend", [TRITON_ATTN])
+@pytest.mark.parametrize("n_layers", [2])
+@pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="QK Norm + mRoPE fusion requires CUDA/ROCm",
+)
+def test_tp1_norm_mrope_fusion(
+    model_name: str,
+    matches_fn: Callable[[int], Matches],
+    model_kwargs: dict,
+    hf_overrides: Callable[[int], dict],
+    attn_backend: AttentionBackendCase,
+    n_layers: int,
+    inductor_graph_partition: bool,
+    run_e2e_fusion_test,
+    monkeypatch,
+):
+    """QK-RMSNorm + interleaved mRoPE fusion on a Qwen3-VL-class model (bf16)."""
+    matches = matches_fn(n_layers)
+
+    model_kwargs = dict(model_kwargs)
+    model_kwargs["hf_overrides"] = hf_overrides(n_layers)
+    model_kwargs["load_format"] = "dummy"
+    model_kwargs["max_model_len"] = 1024
+    model_kwargs["kernel_config"] = {"enable_flashinfer_autotune": False}
+
+    compilation_config = dict(
+        use_inductor_graph_partition=inductor_graph_partition,
+        # mRoPE fusion matches the rms_norm + rotary_embedding custom ops.
+        custom_ops=["+rms_norm", "+rotary_embedding"],
+        pass_config=PassConfig(enable_qk_norm_rope_fusion=True),
+    )
+
+    run_e2e_fusion_test(
+        model_name,
+        matches,
+        model_kwargs,
+        attn_backend,
+        compilation_config,
+        matches_check=["norm_mrope_fusion"],
     )

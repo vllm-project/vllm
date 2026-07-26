@@ -17,6 +17,7 @@ class Matches(NamedTuple):
     rms_quant_fusion: int = 0
     act_quant_fusion: int = 0
     norm_rope_fusion: int = 0
+    norm_mrope_fusion: int = 0
     attn_quant_fusion: int = 0
     # distributed
     ar_rms_fusion: int = 0
@@ -91,6 +92,9 @@ FUSION_LOG_PATTERNS: dict[str, re.Pattern] = {
     "act_quant_fusion": re.compile(r"act_quant_fusion.py:\d+] Replaced (\d+) patterns"),
     "norm_rope_fusion": re.compile(
         r"qk_norm_rope_fusion.py:\d+] Fused QK Norm\+RoPE on (\d+) sites"
+    ),
+    "norm_mrope_fusion": re.compile(
+        r"qk_norm_rope_fusion.py:\d+] Fused QK Norm\+mRoPE on (\d+) sites"
     ),
     "attn_quant_fusion": re.compile(
         r"attn_quant_fusion.py:\d+] Fused quant onto (\d+) attention nodes"

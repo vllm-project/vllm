@@ -306,6 +306,47 @@ def fused_qk_norm_rope(
     )
 
 
+def fused_qk_norm_mrope(
+    qkv: torch.Tensor,
+    num_heads_q: int,
+    num_heads_k: int,
+    num_heads_v: int,
+    head_dim: int,
+    eps: float,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+    position_ids: torch.Tensor,
+    mrope_section_t: int,
+    mrope_section_h: int,
+    mrope_interleaved: bool,
+) -> None:
+    """Fused per-head QK RMSNorm + multimodal RoPE (mRoPE), in-place on qkv.
+
+    position_ids is [3, num_tokens] (time/height/width streams); mrope_section_t
+    and mrope_section_h are the section sizes in half-dims (width is implied).
+    mrope_interleaved selects the [T H W T H W ...] section layout (Qwen3-VL)
+    vs. the contiguous [T..T H..H W..W] layout.
+    """
+    torch.ops._C.fused_qk_norm_mrope(
+        qkv,
+        num_heads_q,
+        num_heads_k,
+        num_heads_v,
+        head_dim,
+        eps,
+        q_weight,
+        k_weight,
+        cos_sin_cache,
+        is_neox,
+        position_ids,
+        mrope_section_t,
+        mrope_section_h,
+        mrope_interleaved,
+    )
+
+
 def apply_repetition_penalties_torch(
     logits: torch.Tensor,
     prompt_mask: torch.Tensor,
