@@ -42,6 +42,7 @@ from vllm.config import (
     DiffusionConfig,
     ECTransferConfig,
     EPLBConfig,
+    FaultToleranceConfig,
     KernelConfig,
     KVEventsConfig,
     KVTransferConfig,
@@ -101,10 +102,7 @@ from vllm.logger import init_logger, suppress_logging
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
-from vllm.transformers_utils.config import (
-    is_interleaved,
-    maybe_override_with_speculators,
-)
+from vllm.transformers_utils.config import maybe_override_with_speculators
 from vllm.transformers_utils.repo_utils import get_model_path
 from vllm.transformers_utils.utils import is_cloud_storage
 from vllm.utils.argparse_utils import (
@@ -249,17 +247,19 @@ def get_type_hints(type_hint: TypeHint) -> set[TypeHint]:
 
 NEEDS_HELP = (
     any("--help" in arg for arg in sys.argv)  # vllm SUBCOMMAND --help
-    or (argv0 := sys.argv[0]).endswith("mkdocs")  # mkdocs SUBCOMMAND
-    or argv0.endswith("mkdocs/__main__.py")  # python -m mkdocs SUBCOMMAND
+    or "mkdocs" in sys.modules  # mkdocs SUBCOMMAND
 )
 
 
 def _maybe_add_docs_url(cls: Any) -> str:
     """Generate API docs URL for a vllm config class."""
-    if not cls.__module__.startswith("vllm.config"):
+    import vllm.config
+
+    name = cls.__name__
+    if getattr(vllm.config, name, None) is not cls:
         return ""
     version = f"v{VLLM_VERSION}" if "dev" not in VLLM_VERSION else "latest"
-    return f"\n\nAPI docs: https://docs.vllm.ai/en/{version}/api/vllm/config/#vllm.config.{cls.__name__}"
+    return f"\n\nAPI docs: https://docs.vllm.ai/en/{version}/api/vllm/config/#vllm.config.{name}"
 
 
 def _expand_json_human_readable_numbers(val: str) -> str:
@@ -695,6 +695,8 @@ class EngineArgs:
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     prefix_match_unit: int | None = get_field(CacheConfig, "prefix_match_unit")
     mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
+    replayssm_buffer_len: int = CacheConfig.replayssm_buffer_len
+    use_replayssm: bool = CacheConfig.use_replayssm
 
     mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON
     enable_mamba_cache_stochastic_rounding: bool = (
@@ -719,6 +721,11 @@ class EngineArgs:
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
     optimization_level: OptimizationLevel = VllmConfig.optimization_level
     performance_mode: PerformanceMode = VllmConfig.performance_mode
+
+    fault_tolerance_config: FaultToleranceConfig = get_field(
+        ParallelConfig, "fault_tolerance_config"
+    )
+    enable_fault_tolerance: bool = ParallelConfig.enable_fault_tolerance
 
     kv_offloading_size: float | None = CacheConfig.kv_offloading_size
     kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
@@ -751,6 +758,16 @@ class EngineArgs:
         if isinstance(self.weight_transfer_config, dict):
             self.weight_transfer_config = WeightTransferConfig(
                 **self.weight_transfer_config
+            )
+        if isinstance(self.fault_tolerance_config, dict):
+            if not self.enable_fault_tolerance:
+                logger.warning(
+                    "--fault-tolerance-config was passed. Fault tolerance is being "
+                    "automatically enabled."
+                )
+                self.enable_fault_tolerance = True
+            self.fault_tolerance_config = FaultToleranceConfig(
+                **self.fault_tolerance_config
             )
         if isinstance(self.ir_op_priority, dict):
             self.ir_op_priority = IrOpPriorityConfig(**self.ir_op_priority)
@@ -1149,6 +1166,12 @@ class EngineArgs:
         parallel_group.add_argument(
             "--worker-extension-cls", **parallel_kwargs["worker_extension_cls"]
         )
+        parallel_group.add_argument(
+            "--enable-fault-tolerance", **parallel_kwargs["enable_fault_tolerance"]
+        )
+        parallel_group.add_argument(
+            "--fault-tolerance-config", **parallel_kwargs["fault_tolerance_config"]
+        )
 
         # KV cache arguments
         cache_kwargs = get_kwargs(CacheConfig)
@@ -1201,6 +1224,10 @@ class EngineArgs:
         cache_group.add_argument(
             "--mamba-cache-mode", **cache_kwargs["mamba_cache_mode"]
         )
+        cache_group.add_argument(
+            "--replayssm-buffer-len", **cache_kwargs["replayssm_buffer_len"]
+        )
+        cache_group.add_argument("--use-replayssm", **cache_kwargs["use_replayssm"])
         cache_group.add_argument(
             "--kv-offloading-size", **cache_kwargs["kv_offloading_size"]
         )
@@ -1611,6 +1638,7 @@ class EngineArgs:
     def from_cli_args(cls, args: argparse.Namespace):
         # Get the list of attributes of this dataclass.
         attrs = [attr.name for attr in dataclasses.fields(cls)]
+
         # Set the attributes from the parsed arguments.
         engine_args = cls(
             **{attr: getattr(args, attr) for attr in attrs if hasattr(args, attr)}
@@ -1877,7 +1905,8 @@ class EngineArgs:
         self._set_default_chunked_prefill_and_prefix_caching_args(model_config)
         self._set_default_reasoning_config_args()
         sliding_window: int | None = None
-        if not is_interleaved(model_config.hf_text_config):
+        layer_types = getattr(model_config.hf_text_config, "layer_types", None)
+        if layer_types is None or all(lt == "sliding_attention" for lt in layer_types):
             # Only set CacheConfig.sliding_window if the model is all sliding
             # window. Otherwise CacheConfig.sliding_window will override the
             # global layers in interleaved sliding window models.
@@ -1910,6 +1939,8 @@ class EngineArgs:
             mamba_block_size=self.mamba_block_size,
             prefix_match_unit=self.prefix_match_unit,
             mamba_cache_mode=self.mamba_cache_mode,
+            replayssm_buffer_len=self.replayssm_buffer_len,
+            use_replayssm=self.use_replayssm,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
         )
@@ -1955,12 +1986,21 @@ class EngineArgs:
         assert not headless or not self.data_parallel_hybrid_lb, (
             "data_parallel_hybrid_lb is not applicable in headless mode"
         )
-        assert not (self.data_parallel_hybrid_lb and self.data_parallel_external_lb), (
-            "data_parallel_hybrid_lb and data_parallel_external_lb cannot both be True."
-        )
-        assert self.data_parallel_backend == "mp" or self.nnodes == 1, (
-            "nnodes > 1 is only supported with data_parallel_backend=mp"
-        )
+        if self.data_parallel_hybrid_lb and self.data_parallel_external_lb:
+            raise ValueError(
+                "Invalid data-parallel launch options: "
+                "`--data-parallel-hybrid-lb` and "
+                "`--data-parallel-external-lb` cannot be enabled together. "
+                "Enable only one load-balancing mode."
+            )
+        if self.nnodes > 1 and self.data_parallel_backend != "mp":
+            raise ValueError(
+                "Invalid data-parallel launch options: "
+                f"`--nnodes {self.nnodes}` requires "
+                "`--data-parallel-backend mp`; got "
+                f"`--data-parallel-backend {self.data_parallel_backend}`. "
+                "Use the MP backend or set `--nnodes 1`."
+            )
         inferred_data_parallel_rank = 0
         if self.nnodes > 1:
             world_size = (
@@ -1971,13 +2011,22 @@ class EngineArgs:
             world_size_within_dp = (
                 self.pipeline_parallel_size * self.tensor_parallel_size
             )
+            if world_size % self.nnodes != 0:
+                raise ValueError(
+                    "Invalid data-parallel launch options: "
+                    f"`--nnodes {self.nnodes}` must evenly divide the total "
+                    f"world size ({world_size}). Adjust `--nnodes`, "
+                    "`--data-parallel-size`, `--pipeline-parallel-size`, or "
+                    "`--tensor-parallel-size`."
+                )
+            if not 0 <= self.node_rank < self.nnodes:
+                raise ValueError(
+                    "Invalid data-parallel launch options: `--node-rank` must "
+                    f"be between 0 and {self.nnodes - 1}; got "
+                    f"`--node-rank {self.node_rank}`. Set it to this node's "
+                    "zero-based index."
+                )
             local_world_size = world_size // self.nnodes
-            assert world_size % self.nnodes == 0, (
-                f"world_size={world_size} must be divisible by nnodes={self.nnodes}."
-            )
-            assert self.node_rank < self.nnodes, (
-                f"node_rank={self.node_rank} must be less than nnodes={self.nnodes}."
-            )
             inferred_data_parallel_rank = (
                 self.node_rank * local_world_size
             ) // world_size_within_dp
@@ -1996,6 +2045,12 @@ class EngineArgs:
         data_parallel_external_lb = (
             self.data_parallel_external_lb or self.data_parallel_rank is not None
         )
+        if self.enable_fault_tolerance and not data_parallel_external_lb:
+            raise ValueError(
+                "Fault tolerance requires external load balancer mode "
+                "(--data-parallel-external-lb or --data-parallel-rank). "
+                "Internal LB mode is not supported."
+            )
         if (
             self.data_parallel_size > 1
             and data_parallel_external_lb
@@ -2008,14 +2063,21 @@ class EngineArgs:
             )
         # Local DP rank = 1, use pure-external LB.
         if data_parallel_external_lb:
-            assert self.data_parallel_rank is not None, (
-                "data_parallel_rank or node_rank must be specified if "
-                "data_parallel_external_lb is enable."
-            )
-            assert self.data_parallel_size_local in (1, None), (
-                "data_parallel_size_local must be 1 or None when data_parallel_rank "
-                "is set"
-            )
+            if self.data_parallel_rank is None:
+                raise ValueError(
+                    "Invalid data-parallel launch options: "
+                    "`--data-parallel-external-lb` requires a data-parallel "
+                    "rank. Set `--data-parallel-rank`, or set "
+                    "`--data-parallel-size` greater than 1 and use `--nnodes` "
+                    "with `--node-rank` so the rank can be inferred."
+                )
+            if self.data_parallel_size_local not in (1, None):
+                raise ValueError(
+                    "Invalid data-parallel launch options: an external "
+                    "data-parallel rank requires `--data-parallel-size-local "
+                    f"1`; got {self.data_parallel_size_local}. Set it to 1 or "
+                    "omit it."
+                )
             data_parallel_size_local = 1
             # Use full external lb if we have local_size of 1.
             self.data_parallel_hybrid_lb = False
@@ -2050,9 +2112,13 @@ class EngineArgs:
                     self.node_rank,
                 )
         else:
-            assert not self.data_parallel_hybrid_lb, (
-                "data_parallel_size_local must be set to use data_parallel_hybrid_lb."
-            )
+            if self.data_parallel_hybrid_lb:
+                raise ValueError(
+                    "Invalid data-parallel launch options: "
+                    "`--data-parallel-hybrid-lb` requires "
+                    "`--data-parallel-size-local`. Set it to the number of "
+                    "data-parallel ranks on this node."
+                )
 
             if self.data_parallel_backend == "ray" and (
                 envs.VLLM_RAY_DP_PACK_STRATEGY == "span"
@@ -2142,6 +2208,8 @@ class EngineArgs:
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
             assigned_physical_gpu_ids=self._resolve_device_ids(),
+            enable_fault_tolerance=self.enable_fault_tolerance,
+            fault_tolerance_config=self.fault_tolerance_config,
             numa_bind=self.numa_bind,
             numa_bind_nodes=self.numa_bind_nodes,
             numa_bind_cpus=self.numa_bind_cpus,
