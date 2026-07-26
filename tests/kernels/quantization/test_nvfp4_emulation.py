@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import cast
 
-import huggingface_hub
 import pytest
 import torch
 from safetensors import safe_open
@@ -33,6 +32,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.repo_utils import hf_api
 from vllm.triton_utils import triton
 
 if current_platform.is_rocm():
@@ -56,7 +56,7 @@ MOE_MODEL_CONFIGS = {
 @pytest.fixture(scope="module")
 def loaded_model_files():
     return {
-        model_id: huggingface_hub.snapshot_download(
+        model_id: hf_api().snapshot_download(
             repo_id=model_id, allow_patterns=config["shards"]
         )
         for model_id, config in MOE_MODEL_CONFIGS.items()
