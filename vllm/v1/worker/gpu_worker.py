@@ -233,27 +233,34 @@ class Worker(WorkerBase):
         self._get_sleep_mode_backend().resume(tags)
 
         # Restore the buffers after level 2 sleep
-        if len(self._sleep_saved_buffers):
+        wake_weights = tags is None or "weights" in tags
+        if wake_weights and len(self._sleep_saved_buffers):
             model = self.model_runner.model
             for name, buffer in model.named_buffers():
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
 
-        if len(self._sleep_saved_draft_buffers):
+        if wake_weights and (
+            self._sleep_saved_draft_buffers
+            or self._sleep_rebuild_draft_metadata_buffers
+        ):
             draft = self.get_draft_model()
             if draft is not None:
                 for name, buffer in draft.named_buffers():
-                    if name in self._sleep_saved_draft_buffers:
-                        buffer.data.copy_(self._sleep_saved_draft_buffers[name].data)
-            self._sleep_saved_draft_buffers = {}
+                    saved = self._sleep_saved_draft_buffers.get(name)
+                    if saved is not None:
+                        buffer.data.copy_(saved.data)
 
-        if self._sleep_rebuild_draft_metadata_buffers:
-            draft = self.get_draft_model()
-            if draft is not None:
                 inner = getattr(draft, "model", None)
-                if inner is not None and hasattr(inner, "_build_fused_kv_buffers"):
+                if (
+                    self._sleep_rebuild_draft_metadata_buffers
+                    and inner is not None
+                    and hasattr(inner, "_build_fused_kv_buffers")
+                ):
                     inner._build_fused_kv_buffers()
+
+            self._sleep_saved_draft_buffers = {}
             self._sleep_rebuild_draft_metadata_buffers = False
 
         if tags is None or "kv_cache" in tags:
