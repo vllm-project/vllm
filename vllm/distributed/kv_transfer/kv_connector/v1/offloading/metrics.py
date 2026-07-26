@@ -36,6 +36,7 @@ class _ConnectorMetricName:
     LOOKUP_SYNC_DELAY = "vllm:kv_offload_lookup_sync_delay_seconds"
     LOOKUP_ASYNC_DELAY = "vllm:kv_offload_lookup_async_delay_seconds"
     ALLOCATION_FAILURE = "vllm:kv_offload_allocation_failure"
+    HIT_PENDING_DEADLINE_EXPIRED = "vllm:kv_offload_hit_pending_deadline_expired"
 
 
 class _TransferType:
@@ -124,6 +125,13 @@ def get_connector_metric_definitions() -> dict[str, OffloadingMetricMetadata]:
         _ConnectorMetricName.ALLOCATION_FAILURE: OffloadingCounterMetadata(
             documentation=(
                 "Number of KV offload store allocation attempts that failed."
+            ),
+        ),
+        _ConnectorMetricName.HIT_PENDING_DEADLINE_EXPIRED: OffloadingCounterMetadata(
+            documentation=(
+                "Number of requests whose HIT_PENDING deadline expired, causing "
+                "pending blocks to be treated as misses for the rest of the "
+                "request. A non-zero value means offload writes are leaking."
             ),
         ),
     }

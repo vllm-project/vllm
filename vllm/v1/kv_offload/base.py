@@ -25,6 +25,11 @@ from vllm.v1.kv_offload.config import OffloadingConfig
 # Use the helper functions below to construct / decompose keys.
 OffloadKey = NewType("OffloadKey", bytes)
 
+# Default for the `hit_pending_deadline_s` tunable; see OffloadingSpec.__init__
+# for how the value is derived. Shared with SchedulerOffloadConfig so the
+# default is stated in exactly one place.
+DEFAULT_HIT_PENDING_DEADLINE_S = 60.0
+
 
 def make_offload_key(block_hash: bytes, group_idx: int) -> OffloadKey:
     """Pack a block hash and group index into an `OffloadKey`."""
@@ -553,6 +558,41 @@ class OffloadingSpec(ABC):
         self.offload_prompt_only: bool = bool(
             self.extra_config.get("offload_prompt_only", True)
         )
+
+        # Maximum time, in seconds, that a request may stay deferred because a
+        # candidate block keeps looking up as HIT_PENDING (present in the
+        # primary tier, but with a write still in flight). Past this, the block
+        # is treated as a miss for the remainder of the request and the
+        # candidate prefix is truncated there, so the request recomputes
+        # locally instead of deferring until the client times out.
+        #
+        # The check cannot distinguish two cases:
+        #  - The request is waiting on a promotion it initiated itself. That
+        #    wait tracks a live transfer, bounded by the P2P session's
+        #    _LOAD_TIMEOUT_S (30s) + _ABORT_ACK_TIMEOUT_S (10s) = 40s, after
+        #    which the finished-job poll resolves the block either way. This is
+        #    the only case a too-short deadline can harm, by discarding a hit
+        #    that was about to land.
+        #  - The request touched a key left write-pending by an earlier,
+        #    unrelated request whose write leaked. No live transfer exists and
+        #    nothing bounds the wait. This is the case that hangs, and it is
+        #    resolved at any deadline value.
+        # The default clears the first case's 40s ceiling with margin, since
+        # the second is insensitive to the value. Set 0 to disable the deadline
+        # and defer indefinitely on HIT_PENDING.
+        self.hit_pending_deadline_s: float = float(
+            self.extra_config.get(
+                "hit_pending_deadline_s", DEFAULT_HIT_PENDING_DEADLINE_S
+            )
+        )
+        # Negated comparison so NaN is rejected too: `nan < 0` is False, which
+        # would let NaN through and make every deadline comparison downstream
+        # False, expiring the request on its second deferred pass.
+        if not (self.hit_pending_deadline_s >= 0):
+            raise ValueError(
+                "'hit_pending_deadline_s' must be non-negative, got "
+                f"{self.hit_pending_deadline_s}"
+            )
 
         self.tokens_per_block = tuple(group.tokens_per_block for group in config.groups)
         self.tokens_per_hash = config.cache.tokens_per_hash

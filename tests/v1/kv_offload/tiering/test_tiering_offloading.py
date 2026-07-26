@@ -639,6 +639,38 @@ class TestTieringOffloadingManager:
         assert list(job_metadata.keys) == [shared_block]
         assert job_metadata.req_context is ctx_a
 
+    def test_hit_pending_is_stable_and_skips_secondary_tiers(self, manager_setup):
+        """A primary-pending key stays HIT_PENDING and never re-enters promotion.
+
+        The HIT_PENDING deadline for issue #49829 lives in the connector
+        scheduler, above this manager, so that one fix covers every spec.
+        This pins the two manager-side properties that design relies on:
+        repeated lookups keep reporting HIT_PENDING (the manager has no
+        deadline of its own to trip over), and a pending key short-circuits
+        before the secondary tiers, so downgrading it upstream can never
+        collide with the in-flight write by starting a second promotion.
+        """
+        shared_block = to_keys([0])[0]
+        self.secondary_tier1.blocks[shared_block] = True
+
+        ctx_a = ReqContext(req_id="req_a")
+        ctx_b = ReqContext(req_id="req_b")
+
+        # req_a initiates the promotion, leaving the primary slot write-pending.
+        assert self.manager.lookup(shared_block, ctx_a) is LookupResult.RETRY
+
+        self.secondary_tier1.lookup = MagicMock(wraps=self.secondary_tier1.lookup)
+        self.secondary_tier2.lookup = MagicMock(wraps=self.secondary_tier2.lookup)
+
+        # req_b hot-loops on the same key while that write is in flight, as
+        # the scheduler's per-step scan does.
+        results = {self.manager.lookup(shared_block, ctx_b) for _ in range(100)}
+        assert results == {LookupResult.HIT_PENDING}
+
+        # The primary short-circuit means no secondary tier is ever consulted.
+        self.secondary_tier1.lookup.assert_not_called()
+        self.secondary_tier2.lookup.assert_not_called()
+
     def test_complete_store_forwards_req_context_to_submit_store(self, manager_setup):
         """complete_store cascades to secondary tiers with the correct req_context."""
         blocks = to_keys(range(2))

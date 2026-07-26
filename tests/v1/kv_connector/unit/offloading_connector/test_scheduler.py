@@ -12,6 +12,9 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
 )
 from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading import (
+    scheduler as sched_module,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
@@ -21,8 +24,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     _ConnectorMetricName,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+    GroupOffloadConfig,
     OffloadingConnectorScheduler,
     RequestOffloadState,
+    SchedulerOffloadConfig,
+    _LookupScan,
     is_store_reachable_swa_chunk,
 )
 from vllm.v1.core.kv_cache_utils import BlockHash
@@ -57,6 +63,11 @@ def _reduce_kv_connector_stats(runner):
         for key, value in stats.reduce().items():
             reduced[key] = reduced.get(key, 0) + value
     return reduced
+
+
+def _stub_prefix_scan(num_hit_chunks: int):
+    """Stub `_maximal_prefix_lookup` with a fixed hit count, no HIT_PENDING."""
+    return lambda keys, ctx, *_: _LookupScan(num_hit_chunks, False)
 
 
 def test_scheduler_reports_allocation_failure(request_runner):
@@ -487,7 +498,7 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output([])
     )
-    runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 1
+    runner.connector_scheduler._maximal_prefix_lookup = _stub_prefix_scan(1)
     runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_loaded=(0, 1, 2))
 
     # single block lookup with a hit in a middle block
@@ -495,7 +506,7 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output([])
     )
-    runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 1
+    runner.connector_scheduler._maximal_prefix_lookup = _stub_prefix_scan(1)
     runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_loaded=(3, 4, 5))
 
 
@@ -553,7 +564,7 @@ def test_request_preemption(request_runner, async_scheduling: bool):
 
     # request should now return from preemption
     # re-load [0, ..., 8] from the CPU and store [9, 10, 11]
-    runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 3
+    runner.connector_scheduler._maximal_prefix_lookup = _stub_prefix_scan(3)
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
@@ -712,7 +723,7 @@ def test_concurrent_lookups_of_the_same_prefix(request_runner, async_scheduling:
     # start a request to load the first block, but don't complete
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[0] * tokens_per_chunk)
-    runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 1
+    runner.connector_scheduler._maximal_prefix_lookup = _stub_prefix_scan(1)
     runner.run(
         decoded_tokens=[],
         complete_transfers=False,
@@ -724,7 +735,7 @@ def test_concurrent_lookups_of_the_same_prefix(request_runner, async_scheduling:
 
     # start a new request to load the same first block
     runner.new_request(token_ids=[0] * tokens_per_chunk)
-    runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 1
+    runner.connector_scheduler._maximal_prefix_lookup = _stub_prefix_scan(1)
     runner.run(
         decoded_tokens=[],
         complete_transfers=False,
@@ -776,7 +787,7 @@ def test_abort_loading_requests(request_runner, async_scheduling: bool):
     # start a request to load the first block, but don't complete
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[0] * tokens_per_chunk)
-    runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 1
+    runner.connector_scheduler._maximal_prefix_lookup = _stub_prefix_scan(1)
     runner.run(
         decoded_tokens=[],
         complete_transfers=False,
@@ -1083,14 +1094,37 @@ _LOOKUP_REQ.request_id = "req"
 _LOOKUP_GROUP_CONFIG = MagicMock()
 
 
-def _maximal_lookup(sched, keys, start_chunk_idx: int = 0):
+def _maximal_scan(
+    sched, keys, start_chunk_idx: int = 0, downgrade_hit_pending: bool = False
+):
+    """Run a prefix scan and return the full _LookupScan."""
     return sched._maximal_prefix_lookup(
         keys,
         _EMPTY_REQ_CTX,
         _LOOKUP_REQ,
         _LOOKUP_GROUP_CONFIG,
         start_chunk_idx,
+        downgrade_hit_pending,
     )
+
+
+def _maximal_lookup(
+    sched, keys, start_chunk_idx: int = 0, downgrade_hit_pending: bool = False
+):
+    return _maximal_scan(
+        sched, keys, start_chunk_idx, downgrade_hit_pending
+    ).num_hit_chunks
+
+
+def _sliding_scan(sched, keys, window: int, downgrade_hit_pending: bool = False):
+    """Run a sliding-window scan and return the full _LookupScan."""
+    return sched._sliding_window_lookup(
+        keys, window, _EMPTY_REQ_CTX, downgrade_hit_pending
+    )
+
+
+def _sliding_lookup(sched, keys, window: int, downgrade_hit_pending: bool = False):
+    return _sliding_scan(sched, keys, window, downgrade_hit_pending).num_hit_chunks
 
 
 class TestMaximalPrefixLookup:
@@ -1212,43 +1246,396 @@ class TestMaximalPrefixLookup:
         assert sched.manager.lookup.call_count == 2
         sched._events_tracker.record_lookup.assert_not_called()
 
+    def test_hit_pending_downgrade_truncates_prefix(self):
+        """Once downgraded, the prefix is cut at the first HIT_PENDING.
+
+        The pending chunk must not be counted: prepare_load asserts
+        block.is_ready, so including it would turn the hang into a crash.
+        """
+        sched = _make_scheduler_with_lookup(
+            {
+                1: LookupResult.HIT,
+                2: LookupResult.HIT_PENDING,
+                3: LookupResult.HIT,
+            }
+        )
+        # Resolves to 1 — not None (no longer deferred), and not 2 or 3.
+        assert (
+            _maximal_lookup(sched, to_keys([1, 2, 3]), downgrade_hit_pending=True) == 1
+        )
+        # Scanning stops at the pending key, so key 3 is never looked up.
+        assert sched.manager.lookup.call_count == 2
+
+    def test_hit_pending_downgrade_leaves_pure_hits_alone(self):
+        """Downgrading changes nothing when no block is pending."""
+        sched = _make_scheduler_with_lookup({1: LookupResult.HIT, 2: LookupResult.HIT})
+        assert _maximal_lookup(sched, to_keys([1, 2]), downgrade_hit_pending=True) == 2
+
+    def test_hit_pending_downgrade_does_not_rescue_retry(self):
+        """RETRY still defers after a downgrade — only HIT_PENDING is bounded."""
+        sched = _make_scheduler_with_lookup({1: LookupResult.RETRY})
+        scan = _maximal_scan(sched, to_keys([1]), downgrade_hit_pending=True)
+        assert scan.num_hit_chunks is None
+        assert scan.saw_hit_pending is False
+
+
+class TestLookupScanSignal:
+    """The scan reports why it deferred, so only HIT_PENDING arms the deadline."""
+
+    def test_prefix_scan_reports_hit_pending(self):
+        sched = _make_scheduler_with_lookup({1: LookupResult.HIT_PENDING})
+        assert _maximal_scan(sched, to_keys([1])).saw_hit_pending is True
+
+    def test_prefix_scan_does_not_report_retry(self):
+        sched = _make_scheduler_with_lookup({1: LookupResult.RETRY})
+        assert _maximal_scan(sched, to_keys([1])).saw_hit_pending is False
+
+    def test_prefix_scan_reports_nothing_when_resolved(self):
+        sched = _make_scheduler_with_lookup({1: LookupResult.HIT})
+        assert _maximal_scan(sched, to_keys([1])).saw_hit_pending is False
+
+    def test_sliding_scan_reports_hit_pending(self):
+        sched = _make_scheduler_with_lookup({1: LookupResult.HIT_PENDING})
+        assert _sliding_scan(sched, to_keys([1]), 1).saw_hit_pending is True
+
+    def test_sliding_scan_does_not_report_retry(self):
+        sched = _make_scheduler_with_lookup({1: LookupResult.RETRY})
+        assert _sliding_scan(sched, to_keys([1]), 1).saw_hit_pending is False
+
+    def test_downgraded_hit_pending_is_not_reported(self):
+        """A downgraded pending block is a miss, so it must not re-arm."""
+        sched = _make_scheduler_with_lookup({1: LookupResult.HIT_PENDING})
+        scan = _maximal_scan(sched, to_keys([1]), downgrade_hit_pending=True)
+        assert scan.saw_hit_pending is False
+        assert scan.num_hit_chunks == 0
+
+
+# The shipped default for hit_pending_deadline_s, hardcoded rather than
+# imported so this module still imports against a tree without the fix — the
+# regression test below has to fail on behavior, not on a missing symbol.
+# tests/v1/kv_offload/test_spec_config.py pins the real default to this value.
+_SHIPPED_DEADLINE_S = 60.0
+
+
+class _FakeClock:
+    """Monotonic clock the test advances by hand.
+
+    Lets a deferral span the deadline without sleeping, and keeps the tests
+    honest: they never set the deadline knob, so the scheduler runs on the
+    shipped default. That is what makes them fail on an unfixed tree by
+    behavior rather than by a missing keyword argument.
+    """
+
+    def __init__(self, start: float = 10_000.0):
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _install_fake_clock(monkeypatch, sched_module) -> _FakeClock:
+    """Swap the scheduler module's `time` for one the test drives."""
+    clock = _FakeClock()
+    monkeypatch.setattr(sched_module, "time", SimpleNamespace(monotonic=clock))
+    return clock
+
+
+def _make_deadline_scheduler(lookup_results, **config_overrides):
+    """Build a real scheduler wired for get_num_new_matched_tokens().
+
+    Only the attributes that code path actually touches are constructed, so
+    this needs no engine, no KV cache and no accelerator. `lookup_results` is
+    the same live dict `_make_scheduler_with_lookup` reads, so a test can
+    change what the manager reports between scheduling steps by mutating it.
+
+    The deadline is deliberately left unset so it takes the shipped default.
+    """
+    sched = _make_scheduler_with_lookup(lookup_results)
+    sched.config = SchedulerOffloadConfig(
+        kv_group_configs=(
+            GroupOffloadConfig(
+                group_idx=0,
+                tokens_per_block=4,
+                tokens_per_chunk=4,
+                hashes_per_chunk=1,
+                kv_event_group_spec=MagicMock(),
+                sliding_window_size_in_chunks=None,
+            ),
+        ),
+        blocks_per_chunk=1,
+        num_workers=1,
+        offload_prompt_only=False,
+        **config_overrides,
+    )
+    sched._lookup_groups = (0,)
+    sched._sliding_window_groups = ()
+    sched._mamba_align_size = None
+    sched._chunks_being_loaded = {}
+    sched._connector_stats = OffloadingConnectorStats()
+    sched._req_status = {}
+    return sched
+
+
+def _make_deadline_request(req_id: str = "req-hit-pending"):
+    """A 3-chunk request whose block hashes decode to keys 1, 2 and 3."""
+    return SimpleNamespace(
+        request_id=req_id,
+        block_hashes=[b"1", b"2", b"3"],
+        num_tokens=12,
+        num_prompt_tokens=12,
+        kv_transfer_params=None,
+        skip_reading_prefix_cache=False,
+        is_finished=lambda: False,
+    )
+
+
+def _expiry_count(sched) -> int:
+    return sched._connector_stats.reduce().get(
+        _ConnectorMetricName.HIT_PENDING_DEADLINE_EXPIRED, 0
+    )
+
+
+class TestHitPendingDeadline:
+    """Request-level behavior of the HIT_PENDING deadline (issue #49829)."""
+
+    def test_deadline_releases_wedged_request(self, monkeypatch):
+        """A permanently-HIT_PENDING key must not defer a request forever.
+
+        A leaked primary-tier write leaves a key HIT_PENDING, and every
+        request whose candidate prefix reaches it is deferred on every
+        scheduling step until the client gives up.
+
+        This is the regression guard for #49829, and it deliberately touches
+        no API added by the fix: it only advances the clock and reads the
+        return value of get_num_new_matched_tokens(). On an unfixed tree every
+        step keeps returning (None, False) and the last assertion fails.
+        """
+        clock = _install_fake_clock(monkeypatch, sched_module)
+        sched = _make_deadline_scheduler(
+            {
+                1: LookupResult.HIT_PENDING,
+                2: LookupResult.HIT_PENDING,
+                3: LookupResult.HIT_PENDING,
+            }
+        )
+        request = _make_deadline_request()
+        sched.on_new_request(request)
+
+        # The request defers, as it does today.
+        assert sched.get_num_new_matched_tokens(request, 0) == (None, False)
+
+        # Still inside the deadline: the scheduler keeps re-polling and the
+        # request keeps deferring, burning a lookup per candidate key per step.
+        clock.advance(_SHIPPED_DEADLINE_S / 2)
+        assert sched.get_num_new_matched_tokens(request, 0) == (None, False)
+
+        # Past the deadline. One more step observes the expiry...
+        clock.advance(_SHIPPED_DEADLINE_S)
+        assert sched.get_num_new_matched_tokens(request, 0) == (None, False)
+
+        # ...and the request is released: 0 external tokens, so it recomputes
+        # locally instead of waiting on a write that is not coming.
+        assert sched.get_num_new_matched_tokens(request, 0) == (0, False)
+
+        # It stays released no matter how long the key remains pending.
+        for _ in range(100):
+            assert sched.get_num_new_matched_tokens(request, 0) == (0, False)
+
+    def test_partial_prefix_survives_expiry(self, monkeypatch):
+        """Ready chunks before the pending one are still served after expiry.
+
+        Behavioral like the test above: no fix-added API is referenced.
+        """
+        clock = _install_fake_clock(monkeypatch, sched_module)
+        sched = _make_deadline_scheduler(
+            {
+                1: LookupResult.HIT,
+                2: LookupResult.HIT,
+                3: LookupResult.HIT_PENDING,
+            }
+        )
+        request = _make_deadline_request()
+        sched.on_new_request(request)
+
+        assert sched.get_num_new_matched_tokens(request, 0) == (None, False)
+        clock.advance(_SHIPPED_DEADLINE_S + 1.0)
+        sched.get_num_new_matched_tokens(request, 0)
+
+        # Two ready chunks of 4 tokens each are loaded; the pending third is
+        # dropped rather than counted, so it never reaches prepare_load.
+        assert sched.get_num_new_matched_tokens(request, 0) == (8, True)
+
+    def test_expiry_is_recorded_once_per_request(self, monkeypatch):
+        """The expiry is sticky, so the counter must not tick every step."""
+        clock = _install_fake_clock(monkeypatch, sched_module)
+        sched = _make_deadline_scheduler({1: LookupResult.HIT_PENDING})
+        request = _make_deadline_request()
+        sched.on_new_request(request)
+        req_status = sched._req_status[request.request_id]
+
+        sched.get_num_new_matched_tokens(request, 0)
+        clock.advance(_SHIPPED_DEADLINE_S + 1.0)
+        for _ in range(5):
+            sched.get_num_new_matched_tokens(request, 0)
+
+        assert req_status.hit_pending_expired is True
+        assert req_status.hit_pending_start_time is None
+        assert _expiry_count(sched) == 1
+
+    def test_disarms_on_retry_only_pass(self, monkeypatch):
+        """A pass that deferred without HIT_PENDING must clear the timer.
+
+        Otherwise a request that saw one transient HIT_PENDING and then
+        deferred for unrelated reasons would carry a stale armed timer and
+        eventually expire without any stalled write.
+        """
+        _install_fake_clock(monkeypatch, sched_module)
+        results = {1: LookupResult.HIT_PENDING}
+        sched = _make_deadline_scheduler(results)
+        request = _make_deadline_request()
+        sched.on_new_request(request)
+        req_status = sched._req_status[request.request_id]
+
+        sched.get_num_new_matched_tokens(request, 0)
+        assert req_status.hit_pending_start_time is not None
+
+        # The pending write landed elsewhere; now the backend only asks for a
+        # retry. Nothing is pending any more, so the timer must be dropped.
+        results[1] = LookupResult.RETRY
+        assert sched.get_num_new_matched_tokens(request, 0) == (None, False)
+        assert req_status.hit_pending_start_time is None
+        assert req_status.hit_pending_expired is False
+
+    def test_retry_deferral_never_expires(self, monkeypatch):
+        """RETRY is out of scope: even a long-armed timer cannot fire on it.
+
+        The RETRY/backoff path is owned separately; this deadline must leave
+        it exactly as it was.
+        """
+        clock = _install_fake_clock(monkeypatch, sched_module)
+        sched = _make_deadline_scheduler({1: LookupResult.RETRY})
+        request = _make_deadline_request()
+        sched.on_new_request(request)
+        req_status = sched._req_status[request.request_id]
+
+        # Pre-arm the timer, then let far more than the deadline elapse on
+        # RETRY-only passes.
+        req_status.hit_pending_start_time = clock()
+        for _ in range(5):
+            clock.advance(_SHIPPED_DEADLINE_S)
+            assert sched.get_num_new_matched_tokens(request, 0) == (None, False)
+
+        assert req_status.hit_pending_expired is False
+        assert _expiry_count(sched) == 0
+
+    def test_resolved_lookup_disarms(self, monkeypatch):
+        """A lookup that resolves clears the timer, so runs must be unbroken."""
+        _install_fake_clock(monkeypatch, sched_module)
+        results = {1: LookupResult.HIT_PENDING}
+        sched = _make_deadline_scheduler(results)
+        request = _make_deadline_request()
+        sched.on_new_request(request)
+        req_status = sched._req_status[request.request_id]
+
+        sched.get_num_new_matched_tokens(request, 0)
+        assert req_status.hit_pending_start_time is not None
+
+        results[1] = LookupResult.MISS
+        assert sched.get_num_new_matched_tokens(request, 0) == (0, False)
+        assert req_status.hit_pending_start_time is None
+
+    def test_in_flight_transfers_do_not_accrue_deadline(self, monkeypatch):
+        """Waiting on this request's own transfers is not HIT_PENDING waiting."""
+        _install_fake_clock(monkeypatch, sched_module)
+        sched = _make_deadline_scheduler({1: LookupResult.HIT_PENDING})
+        request = _make_deadline_request()
+        sched.on_new_request(request)
+        req_status = sched._req_status[request.request_id]
+
+        sched.get_num_new_matched_tokens(request, 0)
+        assert req_status.hit_pending_start_time is not None
+
+        req_status.transfer_jobs.add(1)
+        assert sched.get_num_new_matched_tokens(request, 0) == (None, False)
+        assert req_status.hit_pending_start_time is None
+
+    def test_zero_deadline_disables(self, monkeypatch):
+        """0 restores the pre-fix behavior: defer on HIT_PENDING forever."""
+        clock = _install_fake_clock(monkeypatch, sched_module)
+        sched = _make_deadline_scheduler(
+            {1: LookupResult.HIT_PENDING}, hit_pending_deadline_s=0.0
+        )
+        request = _make_deadline_request()
+        sched.on_new_request(request)
+        req_status = sched._req_status[request.request_id]
+
+        for _ in range(5):
+            clock.advance(_SHIPPED_DEADLINE_S)
+            assert sched.get_num_new_matched_tokens(request, 0) == (None, False)
+
+        assert req_status.hit_pending_start_time is None
+        assert req_status.hit_pending_expired is False
+        assert _expiry_count(sched) == 0
+
+    def test_reset_cache_clears_expiry(self, monkeypatch):
+        """A cache wipe removes the pending writes, so the expiry must go too."""
+        clock = _install_fake_clock(monkeypatch, sched_module)
+        sched = _make_deadline_scheduler({1: LookupResult.HIT_PENDING})
+        request = _make_deadline_request()
+        sched.on_new_request(request)
+        req_status = sched._req_status[request.request_id]
+
+        sched.get_num_new_matched_tokens(request, 0)
+        clock.advance(_SHIPPED_DEADLINE_S + 1.0)
+        sched.get_num_new_matched_tokens(request, 0)
+        assert req_status.hit_pending_expired is True
+
+        sched._current_batch_load_jobs = []
+        sched._current_batch_jobs_to_flush = set()
+        sched._current_batch_allocated_block_ids = set()
+        sched._job_counter = 0
+        sched._jobs = {}
+        sched._block_id_to_pending_jobs = {}
+        sched.reset_cache()
+
+        assert req_status.hit_pending_expired is False
+        assert req_status.hit_pending_start_time is None
+
 
 class TestSlidingWindowLookup:
     def test_all_hit_exact_window(self):
         sched = _make_scheduler_with_lookup({1: LookupResult.HIT, 2: LookupResult.HIT})
-        assert sched._sliding_window_lookup(to_keys([1, 2]), 2, _EMPTY_REQ_CTX) == 2
+        assert _sliding_lookup(sched, to_keys([1, 2]), 2) == 2
 
     def test_all_miss(self):
         sched = _make_scheduler_with_lookup({})
-        assert sched._sliding_window_lookup(to_keys([1, 2, 3]), 1, _EMPTY_REQ_CTX) == 0
+        assert _sliding_lookup(sched, to_keys([1, 2, 3]), 1) == 0
 
     def test_window_at_end(self):
         sched = _make_scheduler_with_lookup({2: LookupResult.HIT, 3: LookupResult.HIT})
-        assert sched._sliding_window_lookup(to_keys([1, 2, 3]), 2, _EMPTY_REQ_CTX) == 3
+        assert _sliding_lookup(sched, to_keys([1, 2, 3]), 2) == 3
 
     def test_window_in_middle(self):
         sched = _make_scheduler_with_lookup({2: LookupResult.HIT, 3: LookupResult.HIT})
-        assert (
-            sched._sliding_window_lookup(to_keys([1, 2, 3, 4]), 2, _EMPTY_REQ_CTX) == 3
-        )
+        assert _sliding_lookup(sched, to_keys([1, 2, 3, 4]), 2) == 3
 
     def test_no_full_window_falls_back_to_prefix(self):
         sched = _make_scheduler_with_lookup({1: LookupResult.HIT, 2: LookupResult.HIT})
-        assert sched._sliding_window_lookup(to_keys([1, 2, 3]), 3, _EMPTY_REQ_CTX) == 2
+        assert _sliding_lookup(sched, to_keys([1, 2, 3]), 3) == 2
 
     def test_single_block_window(self):
         sched = _make_scheduler_with_lookup({2: LookupResult.HIT, 3: LookupResult.HIT})
-        assert sched._sliding_window_lookup(to_keys([1, 2, 3]), 1, _EMPTY_REQ_CTX) == 3
+        assert _sliding_lookup(sched, to_keys([1, 2, 3]), 1) == 3
 
     def test_gap_resets_consecutive(self):
         sched = _make_scheduler_with_lookup(
             {2: LookupResult.HIT, 3: LookupResult.HIT, 4: LookupResult.HIT}
         )
         # [1, 2, 3, 0, 4] — gap at 0 resets, window of 2 found at [2,3]
-        assert (
-            sched._sliding_window_lookup(to_keys([1, 2, 3, 0, 4]), 2, _EMPTY_REQ_CTX)
-            == 3
-        )
+        assert _sliding_lookup(sched, to_keys([1, 2, 3, 0, 4]), 2) == 3
 
     def test_window_prefers_rightmost(self):
         sched = _make_scheduler_with_lookup(
@@ -1261,10 +1648,7 @@ class TestSlidingWindowLookup:
         )
         # two valid windows: [1,2] at positions 0-1 and [4,5] at positions 3-4
         # scans right-to-left, finds [4,5] first
-        assert (
-            sched._sliding_window_lookup(to_keys([1, 2, 3, 4, 5]), 2, _EMPTY_REQ_CTX)
-            == 5
-        )
+        assert _sliding_lookup(sched, to_keys([1, 2, 3, 4, 5]), 2) == 5
 
     def test_prefix_fallback_with_gap(self):
         sched = _make_scheduler_with_lookup(
@@ -1276,20 +1660,17 @@ class TestSlidingWindowLookup:
             }
         )
         # window of 4 not found contiguously (gap at 1)
-        assert (
-            sched._sliding_window_lookup(to_keys([2, 1, 3, 4, 5]), 4, _EMPTY_REQ_CTX)
-            == 1
-        )
+        assert _sliding_lookup(sched, to_keys([2, 1, 3, 4, 5]), 4) == 1
 
     def test_empty(self):
         sched = _make_scheduler_with_lookup({})
-        assert sched._sliding_window_lookup([], 1, _EMPTY_REQ_CTX) == 0
+        assert _sliding_lookup(sched, [], 1) == 0
 
     def test_retry_defers(self):
         sched = _make_scheduler_with_lookup(
             {1: LookupResult.HIT, 2: LookupResult.RETRY}
         )
-        assert sched._sliding_window_lookup(to_keys([1, 2]), 2, _EMPTY_REQ_CTX) is None
+        assert _sliding_lookup(sched, to_keys([1, 2]), 2) is None
 
     def test_retry_with_full_window_still_defers(self):
         """Even if a real window is found after a RETRY, result is deferred."""
@@ -1303,10 +1684,7 @@ class TestSlidingWindowLookup:
                 4: LookupResult.HIT,
             }
         )
-        assert (
-            sched._sliding_window_lookup(to_keys([1, 2, 3, 4]), 2, _EMPTY_REQ_CTX)
-            is None
-        )
+        assert _sliding_lookup(sched, to_keys([1, 2, 3, 4]), 2) is None
 
     def test_hit_pending_counts_as_hit(self):
         """HIT_PENDING counts toward the consecutive-hit streak."""
@@ -1314,7 +1692,7 @@ class TestSlidingWindowLookup:
             {1: LookupResult.HIT, 2: LookupResult.HIT_PENDING}
         )
         # window=2: both count as hits, but defer_lookup is set
-        assert sched._sliding_window_lookup(to_keys([1, 2]), 2, _EMPTY_REQ_CTX) is None
+        assert _sliding_lookup(sched, to_keys([1, 2]), 2) is None
 
     def test_hit_pending_does_not_break_streak(self):
         """HIT_PENDING in the middle of a window doesn't reset the streak."""
@@ -1322,9 +1700,32 @@ class TestSlidingWindowLookup:
             {1: LookupResult.HIT, 2: LookupResult.HIT_PENDING, 3: LookupResult.HIT}
         )
         # window=3: right-to-left finds 3(HIT),2(HIT_PENDING),1(HIT) = 3 consecutive
-        assert (
-            sched._sliding_window_lookup(to_keys([1, 2, 3]), 3, _EMPTY_REQ_CTX) is None
+        assert _sliding_lookup(sched, to_keys([1, 2, 3]), 3) is None
+
+    def test_hit_pending_downgrade_resets_streak(self):
+        """Once downgraded, HIT_PENDING behaves exactly like MISS.
+
+        The returned window must never span the pending block — prepare_load
+        asserts block.is_ready, so counting it would trade the hang for a crash.
+        """
+        sched = _make_scheduler_with_lookup(
+            {1: LookupResult.HIT, 2: LookupResult.HIT_PENDING, 3: LookupResult.HIT}
         )
+        # window=2: right-to-left 3(HIT), 2(downgraded to miss) resets the
+        # streak, 1(HIT) — no window of 2 exists, so this resolves to 1
+        # instead of deferring.
+        assert _sliding_lookup(sched, to_keys([1, 2, 3]), 2, True) == 1
+
+    def test_hit_pending_downgrade_allows_window_clear_of_pending(self):
+        """A window entirely past the pending block still resolves."""
+        sched = _make_scheduler_with_lookup(
+            {
+                1: LookupResult.HIT_PENDING,
+                2: LookupResult.HIT,
+                3: LookupResult.HIT,
+            }
+        )
+        assert _sliding_lookup(sched, to_keys([1, 2, 3]), 2, True) == 3
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
@@ -1362,7 +1763,7 @@ def test_request_level_policy_stores_all_blocks(request_runner, async_scheduling
 
     # New request with 2 offloaded chunks; first matches what's in CPU.
     runner.new_request(token_ids=[0] * tokens_per_chunk * 2)
-    runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 1
+    runner.connector_scheduler._maximal_prefix_lookup = _stub_prefix_scan(1)
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
@@ -1393,7 +1794,7 @@ def test_loads_do_not_populate_fence_index(request_runner):
         async_scheduling=False,
     )
     runner.new_request(token_ids=[0] * 12)
-    runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 1
+    runner.connector_scheduler._maximal_prefix_lookup = _stub_prefix_scan(1)
     runner.run(decoded_tokens=[], complete_transfers=False)
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
 
@@ -1439,7 +1840,7 @@ def test_fence_at_update_state_after_alloc(request_runner):
 
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[0] * 4)
-    runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 1
+    runner.connector_scheduler._maximal_prefix_lookup = _stub_prefix_scan(1)
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output([])
     )
@@ -1490,7 +1891,7 @@ def test_fence_at_build_store_jobs(request_runner):
 
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[1] * 4)
-    runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 0
+    runner.connector_scheduler._maximal_prefix_lookup = _stub_prefix_scan(0)
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output([])
     )
@@ -1761,7 +2162,7 @@ def test_reset_cache(request_runner, async_scheduling: bool):
     # Leave the load in-flight so that reset_cache must flush it.
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[0] * tokens_per_chunk)
-    runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 1
+    runner.connector_scheduler._maximal_prefix_lookup = _stub_prefix_scan(1)
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output([])
     )
@@ -1948,7 +2349,9 @@ def test_async_preempt_readmit_before_transfer_output_is_deferred(request_runner
     # preemption batch's ModelRunnerOutput is consumed by update_from_output().
     free_block_queue.num_free_blocks = num_free_blocks_empty
     assert runner.scheduler.reset_prefix_cache()
-    runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: len(keys)
+    runner.connector_scheduler._maximal_prefix_lookup = lambda keys, *_: _LookupScan(
+        len(keys), False
+    )
 
     readmit_output = runner.scheduler.schedule()
 
@@ -2062,7 +2465,7 @@ def test_swa_alignment_skip(request_runner, async_scheduling: bool):
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[0] * num_tokens + [1])
     runner.manager.lookup.return_value = LookupResult.HIT
-    runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 2
+    runner.connector_scheduler._maximal_prefix_lookup = _stub_prefix_scan(2)
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
         # Group 0: full prefix lookup hits 2 offloaded chunks
@@ -2399,12 +2802,12 @@ class TestEagle:
         captured_keys: list = []
         orig_sw_lookup = type(sched)._sliding_window_lookup
 
-        def capturing_sw_lookup(self_arg, keys, window, req_context):
+        def capturing_sw_lookup(self_arg, keys, window, req_context, *rest):
             captured_keys.append(list(keys))
-            return orig_sw_lookup(self_arg, keys, window, req_context)
+            return orig_sw_lookup(self_arg, keys, window, req_context, *rest)
 
-        sched._sliding_window_lookup = lambda keys, window, req_ctx: (
-            capturing_sw_lookup(sched, keys, window, req_ctx)
+        sched._sliding_window_lookup = lambda keys, window, req_ctx, *rest: (
+            capturing_sw_lookup(sched, keys, window, req_ctx, *rest)
         )
 
         req_status = self._make_req_status(

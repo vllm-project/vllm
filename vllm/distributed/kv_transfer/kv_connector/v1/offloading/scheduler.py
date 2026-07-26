@@ -38,6 +38,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.kv_offload.base import (
+    DEFAULT_HIT_PENDING_DEADLINE_S,
     GPULoadStoreSpec,
     Locality,
     LookupResult,
@@ -164,6 +165,10 @@ class SchedulerOffloadConfig(NamedTuple):
     blocks_per_chunk: int
     num_workers: int
     offload_prompt_only: bool
+    # Seconds a request may stay deferred on HIT_PENDING before pending blocks
+    # are treated as misses for the rest of that request. 0 disables the
+    # deadline. See OffloadingSpec.__init__ for how the default is derived.
+    hit_pending_deadline_s: float = DEFAULT_HIT_PENDING_DEADLINE_S
 
     @classmethod
     def from_spec(
@@ -255,7 +260,20 @@ class SchedulerOffloadConfig(NamedTuple):
             ),
             blocks_per_chunk=spec.blocks_per_chunk,
             offload_prompt_only=spec.offload_prompt_only,
+            hit_pending_deadline_s=spec.hit_pending_deadline_s,
         )
+
+
+class _LookupScan(NamedTuple):
+    """Result of scanning one KV group's keys through the offloading manager."""
+
+    # Number of hit chunks (prefix scan) or the window end index (sliding
+    # window scan); None if the backend deferred this scan.
+    num_hit_chunks: int | None
+    # True if any key in this scan returned HIT_PENDING and was not downgraded.
+    # Reported out of the scan itself so the deadline can be armed without a
+    # second manager.lookup() sweep over the same keys.
+    saw_hit_pending: bool
 
 
 @dataclass
@@ -288,6 +306,18 @@ class RequestOffloadState:
     deferred_lookup_start_time: float | None = None
     # True once on_request_finished has been signaled to the manager.
     finished_signaled: bool = False
+    # time.monotonic() at the start of the current unbroken run of lookups
+    # deferred *because of* HIT_PENDING; None while not armed. Distinct from
+    # deferred_lookup_start_time, which is armed by any deferral (including
+    # RETRY) and only feeds the LOOKUP_ASYNC_DELAY histogram.
+    hit_pending_start_time: float | None = None
+    # Set once the deadline fires, and sticky for the rest of the request:
+    # subsequent lookups downgrade HIT_PENDING to a miss rather than
+    # re-arming the timer.
+    hit_pending_expired: bool = False
+    # Written by _lookup(): True if the pass just performed observed a live
+    # (non-downgraded) HIT_PENDING. Drives arming and disarming.
+    saw_hit_pending: bool = False
 
     def __post_init__(self) -> None:
         self.group_states = tuple(
@@ -519,6 +549,54 @@ class OffloadingConnectorScheduler:
             time.monotonic() - start_time,
         )
 
+    def _update_hit_pending_deadline(
+        self, req_status: RequestOffloadState, now: float
+    ) -> None:
+        """Arm, disarm, or expire the HIT_PENDING deadline of a deferred request.
+
+        Only deferrals caused by HIT_PENDING are bounded. The timer disarms on
+        a pass where *no* group observed a live HIT_PENDING; if any group did,
+        it stays armed even when another group deferred for an unrelated
+        reason (RETRY, or hit chunks already being loaded), since the stalled
+        write that group is waiting on is still the thing being bounded.
+        Without the disarm, a request that saw one transient HIT_PENDING and
+        then deferred only for unrelated reasons would keep a stale armed
+        timer and expire with no stalled write anywhere.
+        """
+        if not req_status.saw_hit_pending:
+            req_status.hit_pending_start_time = None
+            return
+
+        deadline = self.config.hit_pending_deadline_s
+        if deadline <= 0 or req_status.hit_pending_expired:
+            return
+
+        start_time = req_status.hit_pending_start_time
+        if start_time is None:
+            req_status.hit_pending_start_time = now
+            return
+
+        if now - start_time < deadline:
+            return
+
+        # The write backing this block is not landing. Stop counting pending
+        # blocks as hits for this request so it recomputes locally instead of
+        # deferring until the client gives up. Sticky: later lookups must not
+        # re-arm the timer.
+        req_status.hit_pending_expired = True
+        req_status.hit_pending_start_time = None
+        self._connector_stats.increase_counter(
+            _ConnectorMetricName.HIT_PENDING_DEADLINE_EXPIRED
+        )
+        logger.warning(
+            "Request %s was deferred on HIT_PENDING for %.1fs (deadline %.1fs); "
+            "treating pending blocks as misses for the rest of this request. "
+            "An offload write is likely stalled or leaked.",
+            req_status.req.request_id,
+            now - start_time,
+            deadline,
+        )
+
     def _generate_job_id(self) -> int:
         job_id = self._job_counter
         self._job_counter += 1
@@ -549,11 +627,18 @@ class OffloadingConnectorScheduler:
         req: Request,
         group_config: GroupOffloadConfig,
         start_chunk_idx: int,
-    ) -> int | None:
+        downgrade_hit_pending: bool = False,
+    ) -> _LookupScan:
         """Return the number of consecutive offloaded chunks from the start,
-        or None if the backend deferred a lookup."""
+        or None if the backend deferred a lookup.
+
+        When `downgrade_hit_pending` is set, the request's HIT_PENDING deadline
+        has expired: pending blocks are treated as misses so the scan can
+        resolve instead of deferring again.
+        """
         hit_count = 0
         defer_lookup = False
+        saw_hit_pending = False
         for local_idx, key in enumerate(keys):
             result = self.manager.lookup(key, req_context)
             match result:
@@ -566,6 +651,13 @@ class OffloadingConnectorScheduler:
                     )
                     hit_count += 1
                 case LookupResult.HIT_PENDING:
+                    if downgrade_hit_pending:
+                        # Deadline expired: treat as a miss and truncate the
+                        # prefix here. Must break *before* incrementing —
+                        # counting a pending block would later hand it to
+                        # prepare_load, which asserts block.is_ready.
+                        break
+                    saw_hit_pending = True
                     defer_lookup = True
                     hit_count += 1
                 case LookupResult.RETRY:
@@ -574,29 +666,46 @@ class OffloadingConnectorScheduler:
                     defer_lookup = True
                 case LookupResult.MISS:
                     break
-        return hit_count if not defer_lookup else None
+        return _LookupScan(
+            hit_count if not defer_lookup else None,
+            saw_hit_pending,
+        )
 
     def _sliding_window_lookup(
         self,
         keys: Sequence[OffloadKey],
         sliding_window_size: int,
         req_context: ReqContext,
-    ) -> int | None:
+        downgrade_hit_pending: bool = False,
+    ) -> _LookupScan:
         """Return the end index (in `keys`) of the last run of
         `sliding_window_size` consecutive hits, scanning from the end.
-        Returns 0 on miss, None if the backend deferred a lookup."""
+        Returns 0 on miss, None if the backend deferred a lookup.
+
+        When `downgrade_hit_pending` is set, the request's HIT_PENDING deadline
+        has expired: pending blocks are treated as misses so the scan can
+        resolve instead of deferring again.
+        """
         defer_lookup = False
+        saw_hit_pending = False
         consecutive_hits = 0
         for idx in range(len(keys) - 1, -1, -1):
             match self.manager.lookup(keys[idx], req_context):
                 case LookupResult.HIT:
                     consecutive_hits += 1
                 case LookupResult.HIT_PENDING:
-                    # Block is in cache, just not readable yet — counts
-                    # as hit for the consecutive streak. Don't break:
-                    # keep scanning to let manager kick off async lookups.
-                    defer_lookup = True
-                    consecutive_hits += 1
+                    if downgrade_hit_pending:
+                        # Deadline expired: treat exactly as a miss, so no
+                        # returned window can span a block that prepare_load
+                        # would reject for not being ready.
+                        consecutive_hits = 0
+                    else:
+                        # Block is in cache, just not readable yet — counts
+                        # as hit for the consecutive streak. Don't break:
+                        # keep scanning to let manager kick off async lookups.
+                        defer_lookup = True
+                        saw_hit_pending = True
+                        consecutive_hits += 1
                 case LookupResult.RETRY:
                     # Block location uncertain — does not count as hit.
                     # Don't break: keep scanning to let manager kick off
@@ -606,8 +715,14 @@ class OffloadingConnectorScheduler:
                 case LookupResult.MISS:
                     consecutive_hits = 0
             if consecutive_hits == sliding_window_size:
-                return idx + sliding_window_size if not defer_lookup else None
-        return consecutive_hits if not defer_lookup else None
+                return _LookupScan(
+                    idx + sliding_window_size if not defer_lookup else None,
+                    saw_hit_pending,
+                )
+        return _LookupScan(
+            consecutive_hits if not defer_lookup else None,
+            saw_hit_pending,
+        )
 
     def _touch(self, req_status: RequestOffloadState):
         for group_config, group_state in zip(
@@ -653,6 +768,11 @@ class OffloadingConnectorScheduler:
         num_hit_tokens: int = 0
         defer_lookup = False
         lookup_groups = self._lookup_groups
+
+        # Re-observed from scratch on every pass; the caller uses it to arm or
+        # disarm the HIT_PENDING deadline.
+        req_status.saw_hit_pending = False
+        downgrade_hit_pending = req_status.hit_pending_expired
 
         # Tracks which eagle groups have already popped their volatile trailing chunk
         # in the current convergence iteration. Reset when a non-eagle group
@@ -707,22 +827,27 @@ class OffloadingConnectorScheduler:
                 # have backend-confirmed hits
                 num_hit_chunks: int | None
                 if sliding_window_size_in_chunks is None:
-                    num_hit_chunks = self._maximal_prefix_lookup(
+                    scan = self._maximal_prefix_lookup(
                         offload_keys,
                         req_status.req_context,
                         req_status.req,
                         group_config,
                         start_chunk_idx,
+                        downgrade_hit_pending,
                     )
                 else:
                     required_window = sliding_window_size_in_chunks
                     if is_eagle_unverified:
                         required_window += 1
-                    num_hit_chunks = self._sliding_window_lookup(
+                    scan = self._sliding_window_lookup(
                         offload_keys,
                         required_window,
                         req_status.req_context,
+                        downgrade_hit_pending,
                     )
+                num_hit_chunks = scan.num_hit_chunks
+                if scan.saw_hit_pending:
+                    req_status.saw_hit_pending = True
                 if num_hit_chunks == 0:
                     return 0
 
@@ -844,6 +969,9 @@ class OffloadingConnectorScheduler:
                 "Delaying request %s since it still has in-flight transfers",
                 request.request_id,
             )
+            # No lookup runs on this path, so no HIT_PENDING is observed and
+            # the deadline must not keep accruing.
+            req_status.hit_pending_start_time = None
             return None, False
 
         req_status.update_offload_keys()
@@ -852,6 +980,9 @@ class OffloadingConnectorScheduler:
         num_hit_tokens: int | None
         if request.skip_reading_prefix_cache:
             num_hit_tokens = 0
+            # The prefix cache is not consulted at all, so nothing can be
+            # observed as HIT_PENDING on this path.
+            req_status.hit_pending_start_time = None
         else:
             lookup_start = time.monotonic()
             num_hit_tokens = self._lookup(req_status)
@@ -862,8 +993,10 @@ class OffloadingConnectorScheduler:
             if num_hit_tokens is None:
                 if req_status.deferred_lookup_start_time is None:
                     req_status.deferred_lookup_start_time = lookup_start
+                self._update_hit_pending_deadline(req_status, lookup_start)
             else:
                 self._maybe_observe_lookup_async_delay(req_status)
+                req_status.hit_pending_start_time = None
         req_status.update_num_hit_chunks(num_computed_tokens + (num_hit_tokens or 0))
 
         self._touch(req_status)
@@ -1451,6 +1584,11 @@ class OffloadingConnectorScheduler:
             for group_state in status.group_states:
                 group_state.next_stored_chunk_idx = 0
             status.transfer_jobs.clear()
+            # The cache is gone, so the writes that were pending no longer
+            # exist. Carrying an expiry over would suppress hits that are now
+            # legitimately re-fetchable.
+            status.hit_pending_start_time = None
+            status.hit_pending_expired = False
 
         # Discard jobs and save job_counter to be able to discard worker responses
         self._stale_job_threshold = self._job_counter
