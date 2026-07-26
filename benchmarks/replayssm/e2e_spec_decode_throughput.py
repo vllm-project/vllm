@@ -17,9 +17,11 @@ The FlashInfer FP4-MoE autotuner is disabled by default (it is unstable under
 CUDA-graph capture on the pre-release Blackwell FP4 path); pass
 --no-disable-flashinfer-autotune for non-FP4 models.
 
-Example (B300):
+Examples (B300):
     python e2e_spec_decode_throughput.py --batch-size 512 \
         --model-id nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+    python e2e_spec_decode_throughput.py --batch-size 512 \
+        --model-id nvidia/Qwen3.5-122B-A10B-NVFP4 --moe-backend triton
 """
 
 import argparse
@@ -141,6 +143,9 @@ def run_worker(args):
         disable_log_stats=False,
         gpu_memory_utilization=args.gpu_memory_utilization,
         seed=0,
+        # FlashInfer's GDN prefill kernel JIT-compiles on first use and stalls
+        # on Blackwell; the Triton prefill leaves decode speed unchanged.
+        additional_config={"gdn_prefill_backend": "triton"},
         # Ladder of spec_window multiples: covers the baseline spec path's
         # <= max_concurrency sub-batches when bs > cap, and fixes the
         # bs=1,T=6 "cudagraph size must be a multiple of T" abort.
