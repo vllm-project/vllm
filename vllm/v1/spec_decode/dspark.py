@@ -145,6 +145,7 @@ class DSparkProposer(DFlashProposer):
         feeding the previously sampled token into the Markov head (and the
         optional hidden-state correction) at each step.
         """
+        self._dcut_keep_lens_cache = None
         model = self._draft_model()
         n_spec = self.num_speculative_tokens
 
@@ -174,6 +175,10 @@ class DSparkProposer(DFlashProposer):
             (num_reqs, n_spec), dtype=torch.int64, device=self.device
         )
         draft_probs_list: list[torch.Tensor] | None = [] if probabilistic else None
+        # D-Cut scores the drafts after the block is complete, so collect the
+        # sampled-token logprob of every step and hand the stacked
+        # ``[num_reqs, n_spec]`` matrix to the shared selector below.
+        logprobs_list: list[torch.Tensor] | None = [] if self.dcut_enabled else None
 
         for i in range(n_spec):
             if use_hidden_correction:
@@ -195,9 +200,20 @@ class DSparkProposer(DFlashProposer):
                 sampled_i, probs_i = compute_probs_and_sample_next_token(
                     target_logits, sampling_metadata, self.use_fp64_gumbel
                 )
+                if logprobs_list is not None:
+                    logprobs_list.append(
+                        torch.log(probs_i.gather(1, sampled_i.unsqueeze(1)).squeeze(1))
+                    )
             else:
-                sampled_i = model.map_draft_to_target(logits_i.argmax(dim=-1))
+                draft_argmax = logits_i.argmax(dim=-1)
+                sampled_i = model.map_draft_to_target(draft_argmax)
                 probs_i = None
+                if logprobs_list is not None:
+                    # Score in draft-vocab space, where the argmax was taken.
+                    logprobs_list.append(
+                        logits_i.gather(1, draft_argmax.unsqueeze(1)).squeeze(1).float()
+                        - torch.logsumexp(logits_i, dim=-1).float()
+                    )
 
             draft_tokens[:, i] = sampled_i
             prev = sampled_i
@@ -207,4 +223,6 @@ class DSparkProposer(DFlashProposer):
 
         if draft_probs_list is not None:
             self._last_draft_probs = torch.stack(draft_probs_list, dim=1).contiguous()
+        if logprobs_list is not None:
+            self.select_dcut_keep_lens(torch.stack(logprobs_list, dim=1))
         return draft_tokens
