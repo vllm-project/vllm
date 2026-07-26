@@ -61,9 +61,9 @@ def get_offloading_event_group_spec(
 
 @dataclass(slots=True)
 class _OffloadEventMetadata:
-    """BlockStored payload snapshot for one OffloadKey, captured at store
-    time and kept until the matching eviction event. ``medium`` is forwarded
-    from the OffloadingEvent."""
+    """BlockStored payload snapshot for one OffloadKey, captured while the
+    Request is available and kept until the matching eviction event. ``medium``
+    is forwarded from the OffloadingEvent."""
 
     # The chunk's constituent block hashes; the last one is the OffloadKey.
     block_hashes: tuple[BlockHash, ...]
@@ -81,10 +81,11 @@ class _OffloadEventMetadata:
 class OffloadingEventsTracker:
     """Tracks offloaded chunks' KV event payloads from store to eviction.
 
-    The scheduler calls :meth:`record_store` from ``_build_store_jobs``
-    while the ``Request`` is available, and routes the manager's raw
-    :class:`OffloadingEvent` stream through :meth:`take_events`. All state
-    is bounded by the CPU pool capacity and cleared by :meth:`reset`.
+    The scheduler calls :meth:`record_store` from ``_build_store_jobs`` and
+    :meth:`record_lookup` for ready primary-tier hits while the ``Request`` is
+    available. Deferred and missing lookups add no state. Under the connector's
+    supported success-only transfer model, entries follow primary allocations
+    until CPU removal translation or :meth:`reset`.
     """
 
     def __init__(self, config: OffloadingKVEventsConfig):
@@ -93,8 +94,7 @@ class OffloadingEventsTracker:
             config.enable_kv_cache_events and config.self_describing_kv_events
         )
 
-        # OffloadKey -> payload snapshot, kept until the eviction event so
-        # BlockRemoved can fan out. Bounded: one entry per offloaded chunk.
+        # OffloadKey -> payload snapshot, kept until CPU removal or reset.
         self._pending_event_metadata: dict[OffloadKey, _OffloadEventMetadata] = {}
 
     def record_store(
@@ -115,6 +115,23 @@ class OffloadingEventsTracker:
             return
         meta = self._build_event_metadata(req, group_config, chunk_idx)
         self._pending_event_metadata[offload_key] = meta
+
+    def record_lookup(
+        self,
+        req: Request,
+        group_config: "GroupOffloadConfig",
+        chunk_idx: int,
+        offload_key: OffloadKey,
+    ) -> None:
+        """Snapshot metadata for a ready primary-tier lookup hit."""
+        if not self.self_describing_enabled:
+            return
+        if group_config.sliding_window_size_in_chunks is not None:
+            return
+        if offload_key not in self._pending_event_metadata:
+            self._pending_event_metadata[offload_key] = self._build_event_metadata(
+                req, group_config, chunk_idx
+            )
 
     def take_events(self, events: Iterable[OffloadingEvent]) -> Iterable[KVCacheEvent]:
         """Translate raw OffloadingEvents into self-describing KV events.
@@ -165,7 +182,7 @@ class OffloadingEventsTracker:
         assert len(chunk_hashes) == hbf
 
         if group_config.sliding_window_size_in_chunks is not None:
-            # record_store filters these out before calling this helper.
+            # The recording methods filter these out before calling this helper.
             raise AssertionError("self-describing events only support full attention")
 
         parent_block_hash: BlockHash | None
@@ -232,7 +249,8 @@ class OffloadingEventsTracker:
                         "OffloadingEventsTracker: no event metadata for "
                         "offload key during BlockStored emission; emitting a "
                         "placeholder payload. Expected for non-full-attention "
-                        "groups; otherwise indicates a missing populate path."
+                        "groups and promotions not observed as a primary-tier "
+                        "hit before translation."
                     )
                 yield self._placeholder_stored(key, event.medium, locality)
                 continue

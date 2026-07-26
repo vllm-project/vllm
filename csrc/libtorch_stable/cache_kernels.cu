@@ -1025,6 +1025,9 @@ __global__ void gather_and_maybe_dequant_cache(
     batch_offset += offset;
     int32_t block_table_id = batch_offset / block_size;
     int32_t slot_id = batch_offset % block_size;
+    // seq_starts may push the block index past the end of the batch's block
+    // table row.
+    if (block_table_id >= block_table_stride) continue;
     int32_t block_table_offset = batch_id * block_table_stride + block_table_id;
     int32_t block_id = block_table[block_table_offset];
     int64_t cache_offset =

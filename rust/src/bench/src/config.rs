@@ -288,10 +288,18 @@ impl BenchConfig {
                     }
                     Some(other) => {
                         // extra_body was not an object — just use sampling params
-                        eprintln!(
-                            "Warning: --extra-body is not a JSON object, sampling params may be lost"
+                        let value_type = match &other {
+                            serde_json::Value::Null => "null",
+                            serde_json::Value::Bool(_) => "boolean",
+                            serde_json::Value::Number(_) => "number",
+                            serde_json::Value::String(_) => "string",
+                            serde_json::Value::Array(_) => "array",
+                            serde_json::Value::Object(_) => unreachable!(),
+                        };
+                        tracing::warn!(
+                            value_type,
+                            "sampling parameters may be lost because --extra-body is not a JSON object"
                         );
-                        let _ = other;
                         sampling_params
                     }
                     None => sampling_params,
@@ -489,9 +497,9 @@ impl BenchConfig {
                 _ => {}
             }
             if !args.skip_chat_template {
-                eprintln!(
-                    "NOTE: client-side chat template rendering is not supported; custom \
-                     dataset prompts are sent raw (equivalent to --skip-chat-template)."
+                tracing::warn!(
+                    dataset = "custom",
+                    "client-side chat template rendering is unsupported; sending prompts raw"
                 );
             }
         }
@@ -570,9 +578,10 @@ impl BenchConfig {
             }
 
             if ignore_eos {
-                eprintln!(
-                    "WARNING: --ignore-eos is set with --multi-turn. The server may not \
-                     respect output length limits, causing unbounded context growth."
+                tracing::warn!(
+                    ignore_eos,
+                    multi_turn = true,
+                    "output length limits may be ignored, causing unbounded context growth"
                 );
             }
 
