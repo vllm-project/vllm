@@ -659,8 +659,13 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "Olmo2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "SmolLM3ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Starcoder2ForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "VaultGemmaForCausalLM": ("transformers", "TransformersForCausalLM"),
     # Multimodal models
     "Emu3ForConditionalGeneration": (
+        "transformers",
+        "TransformersMultiModalForCausalLM",
+    ),
+    "VibeVoiceAsrForConditionalGeneration": (
         "transformers",
         "TransformersMultiModalForCausalLM",
     ),
