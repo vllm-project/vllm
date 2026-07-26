@@ -225,7 +225,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     export PATH="${SYCL_HOME}/bin:${PATH}" && \
     test -n "${SYCL_HOME}" && test -x "${SYCL_HOME}/bin/icpx" && \
     uv pip install grpcio-tools protobuf nanobind && \
-    uv pip install -r /workspace/vllm/requirements/xpu.txt --no-build-isolation-package vllm-xpu-kernels && \
+    uv pip install --no-build-isolation -r /workspace/vllm/requirements/xpu.txt && \
     uv pip install --no-build-isolation -r /workspace/vllm/requirements/test/xpu.txt && \
     uv pip uninstall triton triton-xpu && \
     uv pip install triton-xpu==3.7.2 && \
