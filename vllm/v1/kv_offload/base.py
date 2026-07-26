@@ -6,9 +6,9 @@ Core abstractions for KV cache offloading in vLLM v1.
 
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Any, NamedTuple, NewType
+from typing import TYPE_CHECKING, Any, NamedTuple, NewType, TypeVar
 
 import numpy as np
 import torch
@@ -45,10 +45,23 @@ def get_offload_group_idx(key: OffloadKey) -> int:
     return int.from_bytes(key[-4:], "big", signed=False)
 
 
+_T = TypeVar("_T")
+
+
 @dataclass
 class ReqContext:
     req_id: str
     kv_transfer_params: dict[str, Any] | None = None
+    # Per-request scratch space keyed by value type, so a tier can parse
+    # kv_transfer_params once (in on_new_request) and read the result back
+    # on later calls for the same request.
+    _state: dict[type, Any] = field(default_factory=dict, repr=False, init=False)
+
+    def set_state(self, val: Any) -> None:
+        self._state[type(val)] = val
+
+    def get_state(self, cls: type[_T]) -> _T | None:
+        return self._state.get(cls)
 
 
 class LookupResult(Enum):
