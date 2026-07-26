@@ -26,7 +26,26 @@ _DCUT_FALLBACK_RATIO = 3 / 4
 _DCUT_RATIO_NUMS = (1, 2, 3, 4)
 _DCUT_PROFILE_SEQ_LEN = 2048
 _DCUT_PROFILE_WARMUPS = 3
-_DCUT_PROFILE_STEPS = 5
+_DCUT_PROFILE_STEPS = 10
+
+
+def _token_logprobs_from_logits(
+    logits: torch.Tensor, token_ids: torch.Tensor
+) -> torch.Tensor:
+    """Log-probability of ``token_ids`` under ``logits``, in FP32.
+
+    ``torch.logsumexp`` returns the input dtype, so on BF16 logits the
+    denominator lands on the logit ULP (0.125 at these magnitudes) and
+    subtracting two similarly-sized rounded values quantizes the result onto
+    that same grid -- every token above roughly 0.94 probability collapses to
+    exactly 0.0. Shifting by the row max and accumulating the reduction in FP32
+    keeps full resolution near 1 without materializing an FP32 copy of the
+    whole vocabulary.
+    """
+    shifted = logits - logits.max(dim=-1, keepdim=True).values
+    log_denom = shifted.exp().sum(dim=-1, dtype=torch.float32).log()
+    selected = shifted.gather(1, token_ids.unsqueeze(1)).squeeze(1).float()
+    return selected - log_denom
 
 
 class DFlashProposer(SpecDecodeBaseProposer):
@@ -126,8 +145,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
             logits, sampling_metadata
         )
         token_logprobs = (
-            logits.gather(1, draft_token_ids.unsqueeze(1)).squeeze(1).float()
-            - torch.logsumexp(logits, dim=-1).float()
+            _token_logprobs_from_logits(logits, draft_token_ids)
             if draft_probs is None
             else torch.log(
                 draft_probs.gather(1, draft_token_ids.unsqueeze(1)).squeeze(1)
@@ -175,6 +193,12 @@ class DFlashProposer(SpecDecodeBaseProposer):
             candidate_scores = torch.zeros_like(costs)
             valid = keep_counts > 0
             candidate_scores[valid] = prefix_scores[keep_counts[valid] - 1]
+            # Every request emits one token per step regardless of how many of
+            # its drafts survive, so the throughput objective is total tokens
+            # per millisecond. Dropping that constant from the numerator
+            # overstates the relative value of extra draft tokens and biases
+            # the argmax toward the widest candidate.
+            candidate_scores += bs
             num_keep_draft_tokens = keep_counts[torch.argmax(candidate_scores / costs)]
             updates = (
                 torch.arange(bs * num_draft_tokens, device=self.device)
@@ -226,10 +250,16 @@ class DFlashProposer(SpecDecodeBaseProposer):
                     draft_tokens=full_draft_tokens,
                 )
                 entries.append((keep_count, cost))
-            costs_by_bs[bs] = entries
-            self._dcut_costs_by_bs[bs] = torch.tensor(
+            # Verifying more tokens cannot be cheaper. Timing noise that
+            # inverts neighbouring candidates would otherwise let a narrow one
+            # look strictly better on both terms and win the argmax outright,
+            # so clamp the profile to be non-decreasing in the keep count.
+            profiled = torch.tensor(
                 [x[1] for x in entries], dtype=torch.float32, device=self.device
             )
+            costs = profiled.cummax(dim=0).values
+            self._dcut_costs_by_bs[bs] = costs
+            costs_by_bs[bs] = list(zip([x[0] for x in entries], costs.tolist()))
         if costs_by_bs:
             logger.info("D-Cut warmup full-cost table: %s", costs_by_bs)
 
