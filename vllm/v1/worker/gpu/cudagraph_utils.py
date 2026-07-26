@@ -254,12 +254,12 @@ class CudaGraphManager:
 
             if mixed_mode:
                 # for PIECEWISE graphs there is no limit on requests when replaying
-                # i.e. no request padding is needed
-                # so we leave it as None
+                # i.e. no request padding is needed, so we leave it as None.
+                # For breakable PW graphs, break-point kernels read the real batch
+                # from the forward context; in-graph kernels handle the token padding
+                # themselves from the padded slot_mapping (rows with slot == -1).
                 num_reqs = None
-                if mixed_mode == CUDAGraphMode.FULL or (
-                    mixed_mode == CUDAGraphMode.PIECEWISE and self.use_breakable_cg
-                ):
+                if mixed_mode == CUDAGraphMode.FULL:
                     num_reqs = min(num_tokens, self.max_num_reqs)
                 desc = BatchExecutionDescriptor(
                     cg_mode=mixed_mode,
