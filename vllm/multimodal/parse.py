@@ -372,6 +372,14 @@ class VideoProcessorItems(ProcessorBatchItems[HfVideoItem | None]):
             return super()._unwrap(frames), metadata
         return super()._unwrap(item)
 
+    def get_item_for_hash(self, index: int) -> Any:
+        item = self.data[index]
+        if isinstance(item, MediaWithBytes) and isinstance(self.metadata, list):
+            metadata = self.metadata[index]
+            if metadata is not None:
+                return item, metadata
+        return item
+
     def get_num_frames(self, item_idx: int) -> int:
         video = self.get(item_idx)
         if video is None:
@@ -673,12 +681,9 @@ class MultiModalDataParser:
                         "Please check your video input in `multi_modal_data`"
                     )
                 new_videos.append((video, metadata))
-                metadata_lst.append(metadata)
             else:
                 new_videos.append(video)
-
-        if not self.video_needs_metadata:
-            metadata = None
+            metadata_lst.append(metadata)
 
         return VideoProcessorItems(new_videos, metadata=metadata_lst)
 
