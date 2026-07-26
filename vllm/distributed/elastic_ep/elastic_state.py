@@ -278,7 +278,9 @@ class ElasticEPScalingState:
             return True
 
         elif state == ScaleUpExistingEngineState.SWITCH_AND_PREPARE:
-            self._switch_and_prepare()
+            # rewarm_workspace() recaptures with the correct workspace
+            # size after the EPLB reshuffle; capture here would be wasted.
+            self._switch_and_prepare(defer_cudagraph_capture=True)
             self.state = ScaleUpExistingEngineState.EPLB_RESHUFFLE
             assert self.new_dp_store is not None
             self.new_dp_store.add("eep_barrier_engine_count", 1)
@@ -502,9 +504,13 @@ class ElasticEPScalingState:
         if self.old_dp_group.rank() == 0:
             logger.info("[Elastic EP] Synced KV cache memory size to new workers")
 
-    def _switch_and_prepare(self):
+    def _switch_and_prepare(self, defer_cudagraph_capture: bool = False):
         self.model_executor.collective_rpc(
-            "elastic_ep_execute", args=("switch_and_prepare",)
+            "elastic_ep_execute",
+            args=(
+                "switch_and_prepare",
+                defer_cudagraph_capture,
+            ),
         )
         old_dp_group = self.old_dp_group
         stateless_destroy_torch_distributed_process_group(old_dp_group)
