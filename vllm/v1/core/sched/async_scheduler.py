@@ -56,6 +56,16 @@ class AsyncScheduler(Scheduler):
             # stale in-flight async output frame per call until the counter
             # is drained.
             request.async_tokens_to_discard -= 1
+            if request.async_tokens_to_discard == 0:
+                # All stale frames have been drained. Reset the output
+                # placeholder count to zero: the frames that inflated it
+                # during the discard period (via _update_after_schedule)
+                # were never consumed, so keeping them would artificially
+                # inflate num_output_placeholders and cause the scheduling
+                # guard (num_computed_tokens + 2 - num_output_placeholders
+                # >= max_tokens) to fire conservatively, delaying the
+                # request's final stop by 1-2 steps.
+                request.num_output_placeholders = 0
             return [], False
 
         status_before_update = request.status
