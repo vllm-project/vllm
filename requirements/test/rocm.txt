@@ -1173,7 +1173,7 @@ tenacity==9.1.4
     #   gpt-oss
     #   lm-eval
     #   schemathesis
-tensorizer==2.10.1
+tensorizer>=2.12.0
     # via
     #   -c requirements/rocm.txt
     #   -r requirements/test/rocm.in
