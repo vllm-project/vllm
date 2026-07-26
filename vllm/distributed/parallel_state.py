@@ -127,6 +127,28 @@ def _register_group(group: "GroupCoordinator") -> None:
     _groups[group.unique_name] = weakref.ref(group)
 
 
+def _apply_to_device_comms(
+    action: Callable[[DeviceCommunicatorBase], None],
+) -> None:
+    """Apply ``action`` to every group's device communicator.
+
+    Walks the registered parallel groups and skips those without a device
+    communicator (absent at ``world_size == 1``).
+    """
+    comms = []
+    for group_ref in _groups.values():
+        group = group_ref()
+        if group is None:
+            continue
+        dc = group.device_communicator
+        if dc is None:
+            continue
+        comms.append(dc)
+
+    for dc in comms:
+        action(dc)
+
+
 def all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
     assert group_name in _groups, f"Group {group_name} is not found."
     group = _groups[group_name]()
@@ -2026,6 +2048,20 @@ def prepare_communication_buffer_for_model(model: torch.nn.Module):
         _EP.prepare_communication_buffer_for_model(model)
     if _EPLB is not None:
         _EPLB.prepare_communication_buffer_for_model(model)
+
+
+def checkpoint_prepare_distributed_state() -> None:
+    """Prepare every device communicator for a process checkpoint."""
+    torch.accelerator.synchronize()
+    _apply_to_device_comms(lambda comm: comm.checkpoint_prepare())
+    torch.accelerator.synchronize()
+
+
+def checkpoint_restore_distributed_state() -> None:
+    """Restore every device communicator after a process checkpoint."""
+    torch.accelerator.synchronize()
+    _apply_to_device_comms(lambda comm: comm.checkpoint_restore())
+    torch.accelerator.synchronize()
 
 
 def model_parallel_is_initialized():

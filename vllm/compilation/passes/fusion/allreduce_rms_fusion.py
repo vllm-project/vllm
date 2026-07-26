@@ -225,7 +225,7 @@ if flashinfer_comm is not None:
             max_token_num=max_token_num,
             hidden_dim=hidden_size,
             dtype=allreduce_in.dtype,
-            group=get_tp_group().device_group,
+            group=get_tp_group().cpu_group,
         )
         assert workspace is not None, (
             "Flashinfer allreduce workspace must be initialized when using flashinfer"
@@ -996,7 +996,7 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
             )
             return
         self.hidden_dim = config.model_config.get_hidden_size()
-        self.group = get_tp_group().device_group
+        self.group = get_tp_group().cpu_group
         rank = get_tensor_model_parallel_rank()
         if flashinfer_comm is None:
             logger.warning(

@@ -571,6 +571,22 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.all2all_manager.destroy()
             self.all2all_manager = None  # type: ignore[assignment]
 
+    def checkpoint_prepare(self) -> None:
+        # Only FlashInfer all-reduce and FlashInfer all2all are supported for now.
+        from .flashinfer_all_reduce import checkpoint_prepare_fi_ar_workspaces
+
+        checkpoint_prepare_fi_ar_workspaces(self.cpu_group)
+        if self.all2all_manager is not None:
+            self.all2all_manager.checkpoint_prepare()
+
+    def checkpoint_restore(self) -> None:
+        # Only FlashInfer all-reduce and FlashInfer all2all are supported for now.
+        from .flashinfer_all_reduce import checkpoint_restore_fi_ar_workspaces
+
+        checkpoint_restore_fi_ar_workspaces(self.cpu_group)
+        if self.all2all_manager is not None:
+            self.all2all_manager.checkpoint_restore()
+
     def all_gatherv(
         self,
         input_: torch.Tensor | list[torch.Tensor],

@@ -7,6 +7,7 @@ Run `pytest tests/distributed/test_comm_ops.py`.
 
 from collections.abc import Callable
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 import ray
@@ -19,6 +20,8 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
     tensor_model_parallel_reduce_scatter,
 )
+from vllm.distributed.device_communicators import flashinfer_all_reduce
+from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
 from vllm.distributed.parallel_state import GroupCoordinator, TensorMetadata
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 
@@ -276,6 +279,43 @@ def test_irecv_tensor_dict_send_allgather_postprocess_binds_keys(
     assert td["b"].shape == torch.Size([4])
     torch.testing.assert_close(td["a"], torch.ones(4, dtype=torch.int32))
     torch.testing.assert_close(td["b"], torch.ones(4, dtype=torch.int32))
+
+
+@pytest.mark.parametrize("aliased", [False, True])
+def test_cuda_communicator_checkpoints_flashinfer_workspaces(
+    monkeypatch: pytest.MonkeyPatch,
+    aliased: bool,
+) -> None:
+    group = object()
+    normal_workspace = Mock()
+    quant_workspace = normal_workspace if aliased else Mock()
+    unique_workspaces = (
+        [normal_workspace] if aliased else [normal_workspace, quant_workspace]
+    )
+
+    monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_workspace", normal_workspace)
+    monkeypatch.setattr(
+        flashinfer_all_reduce, "_fi_ar_quant_workspace", quant_workspace
+    )
+    monkeypatch.setattr(
+        flashinfer_all_reduce,
+        "_fi_ar_workspace_groups",
+        {id(workspace): group for workspace in unique_workspaces},
+    )
+    monkeypatch.setattr(
+        flashinfer_all_reduce, "TorchDistBackend", lambda group: group, raising=False
+    )
+
+    communicator = CudaCommunicator.__new__(CudaCommunicator)
+    communicator.cpu_group = group
+    communicator.fi_ar_comm = None
+    communicator.all2all_manager = None
+    communicator.checkpoint_prepare()
+    communicator.checkpoint_restore()
+
+    for workspace in unique_workspaces:
+        workspace.checkpoint_prepare.assert_called_once_with()
+        workspace.checkpoint_restore.assert_called_once_with(group)
 
 
 def test_async_intermediate_tensors_lazy_wait() -> None:
