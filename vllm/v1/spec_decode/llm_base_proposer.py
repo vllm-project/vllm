@@ -993,6 +993,23 @@ class SpecDecodeBaseProposer:
     def build_per_group_and_layer_attn_metadata(
         self, common_attn_metadata: CommonAttentionMetadata, draft_index: int = 0
     ) -> tuple[list[object], dict[str, object]]:
+        # A hybrid draft's short_conv (Mamba) metadata builder needs fields the
+        # drafter's common_attn_metadata leaves unset (EAGLE drafters don't need
+        # them): is_prefilling and seq_lens_cpu_upper_bound. Populate them for
+        # decode-phase drafting; attention draft groups ignore them. Draft-side
+        # state errors cannot corrupt output (the target verifies every token),
+        # so this affects acceptance, not correctness.
+        mamba_field_defaults: dict[str, torch.Tensor] = {}
+        if common_attn_metadata.is_prefilling is None:
+            mamba_field_defaults["is_prefilling"] = torch.zeros(
+                common_attn_metadata.num_reqs, dtype=torch.bool
+            )
+        if common_attn_metadata.seq_lens_cpu_upper_bound is None:
+            mamba_field_defaults["seq_lens_cpu_upper_bound"] = (
+                common_attn_metadata.seq_lens_cpu
+            )
+        if mamba_field_defaults:
+            common_attn_metadata = common_attn_metadata.replace(**mamba_field_defaults)
         per_group_attn_metadata: list[object] = []
         per_layer_attn_metadata: dict[str, object] = {}
         for attn_group in self.draft_attn_groups:
