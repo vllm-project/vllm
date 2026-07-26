@@ -576,7 +576,7 @@ def _support_torch_compile(
         if self.compiled:
             assert (
                 not envs.VLLM_USE_AOT_COMPILE
-                or self.vllm_config.compilation_config.backend == "eager"
+                or self.vllm_config.compilation_config.backend in ("eager", "aot_eager")
             )
             return TorchCompileWithNoGuardsWrapper.__call__(self, *args, **kwargs)  # type: ignore[arg-type]
 
@@ -650,8 +650,11 @@ def _support_torch_compile(
             torch._inductor.config.patch(**inductor_config_patches),
         ):
             use_aot_compile = envs.VLLM_USE_AOT_COMPILE
-            if self.vllm_config.compilation_config.backend == "eager":
-                logger.warning("Detected eager backend, disabling AOT compile.")
+            if self.vllm_config.compilation_config.backend in ("eager", "aot_eager"):
+                logger.warning(
+                    "Detected %s backend, disabling AOT compile.",
+                    self.vllm_config.compilation_config.backend,
+                )
                 use_aot_compile = False
             if use_aot_compile:
                 # store the path for saving after warmup
