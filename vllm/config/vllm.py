@@ -2251,6 +2251,10 @@ class VllmConfig:
             ):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 
+            uses_dflash_dcut = getattr(speculative_config, "uses_dflash_dcut", None)
+            if uses_dflash_dcut is not None and uses_dflash_dcut():
+                unsupported.append("D-Cut draft pruning")
+
             # V2 EagleSpeculator does not support parallel_drafting (for P-Eagle).
             # DFlash and DSpark use parallel drafting natively in V2 via their
             # own speculators.
