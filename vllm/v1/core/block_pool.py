@@ -426,11 +426,12 @@ class BlockPool:
     def emit_cached_block_events(
         self,
         request: Request,
-        num_cached_blocks: int,
+        num_cached_tokens: int,
         block_size: int,
         kv_cache_group_id: int,
+        cached_blocks: Sequence[KVCacheBlock] | None = None,
     ) -> None:
-        """Generate BlockStored events for blocks reused from prefix cache.
+        """Generate BlockStored events for a prefix reused from cache.
 
         Unlike cache_full_blocks(), this does NOT modify block state —
         the blocks are already cached. It only generates events so that
@@ -438,24 +439,49 @@ class BlockPool:
 
         Args:
             request: The request whose prefix cache blocks were reused.
-            num_cached_blocks: Number of blocks that were cache hits.
+            num_cached_tokens: Number of prefix tokens that were cache hits.
             block_size: Number of tokens per block.
             kv_cache_group_id: The KV cache group ID.
+            cached_blocks: Optional hit-block list. Null placeholders are not
+                reported as stored blocks.
         """
-        if not self.enable_kv_cache_events or num_cached_blocks == 0:
+        if not self.enable_kv_cache_events or num_cached_tokens == 0:
             return
 
+        assert num_cached_tokens % self.hash_block_size == 0
+        num_cached_blocks = num_cached_tokens // block_size
         block_hashes = resolve_block_hashes(
             request.block_hashes, self.hash_block_size, block_size
         )
-        self._emit_cached_block_run(
-            request,
-            block_hashes,
-            0,
-            num_cached_blocks,
-            block_size,
-            kv_cache_group_id,
-        )
+
+        def block_is_present(block_idx: int) -> bool:
+            return cached_blocks is None or (
+                block_idx < len(cached_blocks) and not cached_blocks[block_idx].is_null
+            )
+
+        run_start: int | None = None
+        for block_idx in range(num_cached_blocks + 1):
+            present = block_idx < num_cached_blocks and block_is_present(block_idx)
+            if present and run_start is None:
+                run_start = block_idx
+            if run_start is None or present:
+                continue
+            self._emit_cached_block_run(
+                request,
+                block_hashes,
+                run_start,
+                block_idx,
+                block_size,
+                kv_cache_group_id,
+            )
+            run_start = None
+
+        if num_cached_tokens % block_size and block_is_present(num_cached_blocks):
+            self._emit_partial_block_stored_event(
+                request,
+                num_cached_tokens,
+                kv_cache_group_id,
+            )
 
     def _emit_partial_block_stored_event(
         self,
@@ -470,9 +496,8 @@ class BlockPool:
         parent_block_hash = (
             maybe_convert_block_hash(parent_hash) if parent_hash is not None else None
         )
-        curr_mm_idx = -1 if block_start > 0 else 0
         extra_keys, _ = generate_block_hash_extra_keys(
-            request, block_start, num_tokens, curr_mm_idx
+            request, block_start, num_tokens, 0
         )
         self.kv_event_queue.append(
             self._build_block_stored_event(
