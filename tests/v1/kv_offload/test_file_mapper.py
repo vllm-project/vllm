@@ -85,7 +85,7 @@ def test_get_file_name_full_structure():
     path = fm.get_file_name(key)
 
     expected_path = (
-        "/tmp/cache/test-model_42b94bdc9933_r3/000/10_g2/0001020304050607.bin"
+        "/tmp/cache/test-model_de3bba26cf36_r3/000/10_g2/0001020304050607.bin"
     )
     assert path == expected_path
 
@@ -119,6 +119,7 @@ def test_get_run_config_fields():
             }
         ],
         "inference_engine": "vllm",
+        "parallel_agnostic": False,
     }
 
 
@@ -164,6 +165,7 @@ def test_parallel_agnostic_collapses_namespace_when_config_allows():
     assert fm.fields["pcp_size"] == 1
     assert fm.fields["dcp_size"] == 1
     assert fm.rank == 0
+    assert "parallel_agnostic" not in fm.fields
 
 
 def test_parallel_agnostic_ignored_when_config_disallows():
@@ -175,6 +177,7 @@ def test_parallel_agnostic_ignored_when_config_disallows():
     )
     assert fm.fields["tp_size"] == 2
     assert fm.rank == 1
+    assert fm.fields["parallel_agnostic"] is False
 
 
 def test_namespace_kept_without_parallel_agnostic_opt_in():
@@ -186,3 +189,19 @@ def test_namespace_kept_without_parallel_agnostic_opt_in():
     )
     assert fm.fields["tp_size"] == 2
     assert fm.rank == 1
+    assert fm.fields["parallel_agnostic"] is False
+
+
+def test_parallel_agnostic_separates_persistent_layouts():
+    agnostic = make_mapper_from_offloading_spec(
+        is_parallelism_agnostic=True,
+        parallel_agnostic=True,
+    )
+    specific = make_mapper_from_offloading_spec(
+        is_parallelism_agnostic=False,
+        parallel_agnostic=True,
+    )
+
+    assert agnostic.base_path != specific.base_path
+    assert "parallel_agnostic" not in agnostic.fields
+    assert specific.fields["parallel_agnostic"] is False
