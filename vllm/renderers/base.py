@@ -79,16 +79,15 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self.tokenizer = tokenizer
 
-        # Shared thread pool executor for blocking tokenizer and
-        # multimodal preprocessing operations.  The multimodal processor
-        # receives a deep-copied tokenizer (see #36557) so it is safe to
-        # run tokenization and MM preprocessing concurrently.
+        # Thread pool executor for blocking tokenizer operations.  The
+        # multimodal processor receives a deep-copied tokenizer (see #36557)
+        # so it is safe to run tokenization and MM preprocessing concurrently.
         pool_workers = config.model_config.renderer_num_workers
         self._executor = ThreadPoolExecutor(max_workers=pool_workers)
 
-        # Multimodal preprocessing is always offloaded to the thread pool
-        # to keep the asyncio event loop responsive under concurrent load.
-        self._mm_executor: Executor = self._executor
+        # Separate single-worker executor so tokenization never queues behind
+        # MM preprocessing; must stay single-worker per #38418 (P0/P1 order).
+        self._mm_executor: Executor = ThreadPoolExecutor(max_workers=1)
 
         # Offload tokenization to the thread pool. The sync
         # ``_tokenize_prompt`` already encapsulates the unified ``__call__``
@@ -103,7 +102,7 @@ class BaseRenderer(ABC, Generic[_T]):
         self._readonly_mm_processor: BaseMultiModalProcessor | None = None
         self._mm_cache_stats: MultiModalCacheStats | None = None
         self._clear_mm_cache_async = make_async(
-            self.clear_mm_cache, executor=self._executor
+            self.clear_mm_cache, executor=self._mm_executor
         )
         self._process_multimodal_async = make_async(
             self._process_multimodal, executor=self._mm_executor
@@ -282,7 +281,7 @@ class BaseRenderer(ABC, Generic[_T]):
                 self._clear_processor_cache(self._readonly_mm_processor)
 
     async def clear_mm_cache_async(self) -> None:
-        """Serialize clear_mm_cache through the shared executor to avoid
+        """Serialize clear_mm_cache through the multimodal executor to avoid
         races with concurrent process_inputs on the mm_processor_cache."""
         await self._clear_mm_cache_async()
 
