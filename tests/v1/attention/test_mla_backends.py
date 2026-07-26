@@ -151,6 +151,7 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
 
 # Validate parameter combinations during collection, before GPU fixtures run.
 PREFILL_BACKENDS_TO_TEST = [
+    MLAPrefillBackendEnum.ROCM_AITER_FA,
     MLAPrefillBackendEnum.FLASH_ATTN,
     MLAPrefillBackendEnum.FLASHINFER,
     MLAPrefillBackendEnum.TRTLLM_RAGGED,
