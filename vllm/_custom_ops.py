@@ -467,10 +467,8 @@ def silu_and_mul_dynamic_per_token_quant(
     num_tokens = input.numel() // input.shape[-1]
     d = input.shape[-1] // 2
     out = torch.empty((num_tokens, d), device=input.device, dtype=quant_dtype)
-    scales = torch.empty((num_tokens,), device=input.device,
-                         dtype=torch.float32)
-    torch.ops._C.silu_and_mul_dynamic_per_token_quant(
-        out, scales, input, scale_ub)
+    scales = torch.empty((num_tokens,), device=input.device, dtype=torch.float32)
+    torch.ops._C.silu_and_mul_dynamic_per_token_quant(out, scales, input, scale_ub)
     return out, scales
 
 

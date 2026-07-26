@@ -628,7 +628,7 @@ __global__ void silu_and_mul_dynamic_per_token_quant_kernel(
   const int block_size = blockDim.x;
 
   const scalar_t* x_ptr = input + token_idx * 2 * d;  // gate half
-  const scalar_t* y_ptr = x_ptr + d;                   // up half
+  const scalar_t* y_ptr = x_ptr + d;                  // up half
   fp8_type* out_ptr = out + token_idx * d;
 
   // ---- Phase 1: per-token absmax ----
@@ -657,8 +657,7 @@ __global__ void silu_and_mul_dynamic_per_token_quant_kernel(
     float val = (lane_id < num_warps) ? smem[lane_id] : 0.0f;
     val = warp_max(val);
     if (lane_id == 0) {
-      const float fp8_max =
-          static_cast<float>(quant_type_max_v<fp8_type>);
+      const float fp8_max = static_cast<float>(quant_type_max_v<fp8_type>);
       // Guard against zero activations (e.g. all-zero padding tokens)
       float scale = fmaxf(val, 1e-12f) / fp8_max;
       if (scale_ub != nullptr) {
@@ -675,20 +674,18 @@ __global__ void silu_and_mul_dynamic_per_token_quant_kernel(
   for (int i = tid; i < d; i += block_size) {
     const float x = static_cast<float>(VLLM_LDG(&x_ptr[i]));
     const float y = static_cast<float>(VLLM_LDG(&y_ptr[i]));
-    out_ptr[i] =
-        scaled_fp8_conversion<true, fp8_type>(silu(x) * y, inv_scale);
+    out_ptr[i] = scaled_fp8_conversion<true, fp8_type>(silu(x) * y, inv_scale);
   }
 }
 
 void silu_and_mul_dynamic_per_token_quant(
-    torch::stable::Tensor& out,    // [num_tokens, d] FP8
+    torch::stable::Tensor& out,     // [num_tokens, d] FP8
     torch::stable::Tensor& scales,  // [num_tokens] float32
-    torch::stable::Tensor& input,  // [num_tokens, 2*d] BF16/FP16
+    torch::stable::Tensor& input,   // [num_tokens, 2*d] BF16/FP16
     std::optional<torch::stable::Tensor> const& scale_ub) {
   STD_TORCH_CHECK(
       out.scalar_type() == torch::headeronly::ScalarType::Float8_e4m3fn ||
-          out.scalar_type() ==
-              torch::headeronly::ScalarType::Float8_e4m3fnuz,
+          out.scalar_type() == torch::headeronly::ScalarType::Float8_e4m3fnuz,
       "Output must be FP8 (Float8_e4m3fn or Float8_e4m3fnuz)");
   STD_TORCH_CHECK(
       input.scalar_type() == torch::headeronly::ScalarType::Half ||
@@ -709,21 +706,18 @@ void silu_and_mul_dynamic_per_token_quant(
 
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
-  const cudaStream_t stream =
-      get_current_cuda_stream(input.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream(input.get_device_index());
 
   VLLM_STABLE_DISPATCH_FLOATING_TYPES(
-      input.scalar_type(),
-      "silu_and_mul_dynamic_per_token_quant_kernel", [&] {
+      input.scalar_type(), "silu_and_mul_dynamic_per_token_quant_kernel", [&] {
         VLLM_STABLE_DISPATCH_FP8_TYPES(
             out.scalar_type(),
             "silu_and_mul_dynamic_per_token_quant_kernel_fp8", [&] {
-              vllm::silu_and_mul_dynamic_per_token_quant_kernel<scalar_t,
-                                                                fp8_t>
-                  <<<grid, block, 0, stream>>>(
-                      out.mutable_data_ptr<fp8_t>(),
-                      scales.mutable_data_ptr<float>(),
-                      input.const_data_ptr<scalar_t>(), scale_ub_ptr, d);
+              vllm::silu_and_mul_dynamic_per_token_quant_kernel<scalar_t, fp8_t>
+                  <<<grid, block, 0, stream>>>(out.mutable_data_ptr<fp8_t>(),
+                                               scales.mutable_data_ptr<float>(),
+                                               input.const_data_ptr<scalar_t>(),
+                                               scale_ub_ptr, d);
             });
       });
 }

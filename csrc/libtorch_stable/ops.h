@@ -400,8 +400,7 @@ void silu_and_mul_quant(torch::stable::Tensor& out,
 // Computes silu(gate)*up per token, derives the quantization scale from
 // each token's own absmax, and writes FP8 output + float32 scales.
 void silu_and_mul_dynamic_per_token_quant(
-    torch::stable::Tensor& out,
-    torch::stable::Tensor& scales,
+    torch::stable::Tensor& out, torch::stable::Tensor& scales,
     torch::stable::Tensor& input,
     std::optional<torch::stable::Tensor> const& scale_ub);
 #endif  // !USE_ROCM

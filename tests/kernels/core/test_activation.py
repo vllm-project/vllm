@@ -291,6 +291,7 @@ def test_silu_and_mul_dynamic_per_token_quant(
 
     # ---- kernel under test ----
     from vllm._custom_ops import silu_and_mul_dynamic_per_token_quant
+
     fp8_out, scales = silu_and_mul_dynamic_per_token_quant(x, fp8_dtype)
 
     assert fp8_out.shape == (num_tokens, d), (
@@ -303,15 +304,11 @@ def test_silu_and_mul_dynamic_per_token_quant(
     assert scales.dtype == torch.float32
 
     # ---- scale correctness ----
-    torch.testing.assert_close(
-        scales, ref_scales.to(device), rtol=1e-4, atol=1e-6
-    )
+    torch.testing.assert_close(scales, ref_scales.to(device), rtol=1e-4, atol=1e-6)
 
     # ---- dequantized output vs float32 reference ----
     # Tolerance: FP8 e4m3fn has ~3 mantissa bits → max relative error ≈ 1/8
     # of the ULP for the quantised range.  In practice the error is bounded by
     # 1 FP8 ULP = fp8_max / 2^(mantissa_bits) / scale.
     dequant = fp8_out.to(torch.float32) * scales.unsqueeze(1)
-    torch.testing.assert_close(
-        dequant, ref.to(device), rtol=0.125, atol=1e-3
-    )
+    torch.testing.assert_close(dequant, ref.to(device), rtol=0.125, atol=1e-3)
