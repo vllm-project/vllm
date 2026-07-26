@@ -77,6 +77,7 @@ class Request:
         resumable: bool = False,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
+        cache_checkpoint_input_end: int | None = None,
         abort_immediately: bool = False,
     ) -> None:
         self.request_id = request_id
@@ -143,8 +144,12 @@ class Request:
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
             prompt_token_ids, prompt_embeds
         )
+        self.cache_checkpoint_input_end = cache_checkpoint_input_end
         self.cache_checkpoint_reasoning_end: int | None = None
         self.cache_checkpoint_response_end: int | None = None
+        self.semantic_cache_checkpoints_finalized = False
+        self.cache_checkpoint_hit_boundary: int | None = None
+        self.cache_checkpoint_hit_kinds: frozenset[str] = frozenset()
         self._output_token_ids: list[int] = []
         self._all_token_ids: list[int] = (
             self.prompt_token_ids.copy()
@@ -243,6 +248,7 @@ class Request:
             resumable=request.resumable,
             reasoning_ended=request.reasoning_ended,
             reasoning_parser_kwargs=request.reasoning_parser_kwargs,
+            cache_checkpoint_input_end=request.cache_checkpoint_input_end,
             abort_immediately=request.abort_immediately,
         )
 

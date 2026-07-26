@@ -68,6 +68,9 @@ class BaseThinkingReasoningParser(ReasoningParser):
             )
         self.start_token_id: int = start_token_id
         self.end_token_id: int = end_token_id
+        self._checkpoint_reasoning_end: int | None = None
+        self._checkpoint_body_end = 0
+        self._checkpoint_body_end_exact = True
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         start_token_id = self.start_token_id
@@ -86,25 +89,34 @@ class BaseThinkingReasoningParser(ReasoningParser):
         end_token_id = self.end_token_id
         return end_token_id in delta_ids
 
-    def find_reasoning_end_token_boundary(self, token_ids: Sequence[int]) -> int | None:
-        try:
-            boundary = token_ids.index(self.end_token_id)
-        except ValueError:
-            return None
+    def update_reasoning_end_token_boundary(
+        self,
+        delta_token_ids: Sequence[int],
+        start_offset: int,
+    ) -> int | None:
+        if self._checkpoint_reasoning_end is not None:
+            return self._checkpoint_reasoning_end
 
-        while boundary > 0:
-            token_text = self.model_tokenizer.decode(
-                [token_ids[boundary - 1]], skip_special_tokens=False
-            )
-            if not token_text:
-                return None
-            if token_text.isspace():
-                boundary -= 1
+        for index, token_id in enumerate(delta_token_ids, start_offset):
+            if token_id == self.end_token_id:
+                if self._checkpoint_body_end_exact:
+                    self._checkpoint_reasoning_end = self._checkpoint_body_end
+                return self._checkpoint_reasoning_end
+            if token_id == self.start_token_id:
+                self._checkpoint_body_end = index + 1
+                self._checkpoint_body_end_exact = True
                 continue
-            if token_text.rstrip() != token_text:
-                return None
-            break
-        return boundary
+
+            token_text = self.model_tokenizer.decode(
+                [token_id], skip_special_tokens=False
+            )
+            if not token_text or token_text.rstrip() != token_text:
+                self._checkpoint_body_end_exact = False
+            elif not token_text.isspace():
+                self._checkpoint_body_end = index + 1
+                self._checkpoint_body_end_exact = True
+
+        return None
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """

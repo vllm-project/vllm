@@ -20,6 +20,7 @@ import jinja2.sandbox
 import torch
 from typing_extensions import override
 
+import vllm.envs as envs
 from vllm.entrypoints.chat_utils import (
     PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
     ChatTemplateResolutionError,
@@ -43,6 +44,7 @@ from vllm.multimodal.processing.processor import (
     apply_token_matches,
     find_mm_placeholders,
 )
+from vllm.reasoning import ReasoningParserManager
 from vllm.tokenizers.hf import HfTokenizer, maybe_make_thread_pool
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.transformers_utils.processor import cached_get_processor
@@ -68,6 +70,7 @@ if TYPE_CHECKING:
         MultiModalPromptUpdates,
         ResolvedPromptUpdate,
     )
+    from vllm.reasoning import ReasoningParser
 
     from .inputs import DictPrompt
     from .params import ChatParams
@@ -926,6 +929,19 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         # expose offset_mapping.
         return self.tokenizer is not None and self.tokenizer.is_fast
 
+    def _make_input_end_reasoner(self, params: ChatParams) -> ReasoningParser | None:
+        if not envs.VLLM_PREFIX_CACHE_RETAIN_INPUT_END:
+            return None
+        parser_name = self.config.structured_outputs_config.reasoning_parser
+        if not parser_name:
+            return None
+        reasoner_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+        return reasoner_cls(
+            tokenizer=self.get_tokenizer(),
+            chat_template_kwargs=params.chat_template_kwargs,
+            model_config=self.model_config,
+        )
+
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
@@ -1016,6 +1032,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
 
         if assistant_tokens_mask is not None:
             cast(dict, prompt)["_assistant_tokens_mask"] = assistant_tokens_mask
+        if reasoner := self._make_input_end_reasoner(params):
+            cast(dict, prompt)["_cache_checkpoint_input_end_reasoner"] = reasoner
 
         # When `prompt_embeds` is mixed with other modality data,
         # `_process_tokens` runs `_process_multimodal` first (expanding
@@ -1139,6 +1157,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
 
         if assistant_tokens_mask is not None:
             cast(dict, prompt)["_assistant_tokens_mask"] = assistant_tokens_mask
+        if reasoner := self._make_input_end_reasoner(params):
+            cast(dict, prompt)["_cache_checkpoint_input_end_reasoner"] = reasoner
 
         # See `render_messages` for the rationale.
         if prompt_embeds_tensors and mm_data:
@@ -1182,6 +1202,9 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         coordinate space, no offset shifting needed afterwards.
         """
         assistant_tokens_mask = cast(dict, prompt).pop("_assistant_tokens_mask", None)
+        input_end_reasoner = cast(dict, prompt).pop(
+            "_cache_checkpoint_input_end_reasoner", None
+        )
         prompt_embeds_info = cast(dict, prompt).pop("_prompt_embeds", None)
         if prompt_embeds_info is not None:
             tensors, placeholder_token_id = prompt_embeds_info
@@ -1199,6 +1222,12 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             )
         if assistant_tokens_mask is not None:
             engine_input["assistant_tokens_mask"] = assistant_tokens_mask
+        if input_end_reasoner is not None:
+            boundary = input_end_reasoner.find_input_end_token_boundary(
+                engine_input["prompt_token_ids"]
+            )
+            if boundary is not None:
+                engine_input["cache_checkpoint_input_end"] = boundary
         return engine_input
 
     @override
@@ -1210,6 +1239,9 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
     ) -> TokensInput | MultiModalInput:
         """Async equivalent of `_process_tokens`."""
         assistant_tokens_mask = cast(dict, prompt).pop("_assistant_tokens_mask", None)
+        input_end_reasoner = cast(dict, prompt).pop(
+            "_cache_checkpoint_input_end_reasoner", None
+        )
         prompt_embeds_info = cast(dict, prompt).pop("_prompt_embeds", None)
         if prompt_embeds_info is not None:
             tensors, placeholder_token_id = prompt_embeds_info
@@ -1229,6 +1261,12 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             )
         if assistant_tokens_mask is not None:
             engine_input["assistant_tokens_mask"] = assistant_tokens_mask
+        if input_end_reasoner is not None:
+            boundary = input_end_reasoner.find_input_end_token_boundary(
+                engine_input["prompt_token_ids"]
+            )
+            if boundary is not None:
+                engine_input["cache_checkpoint_input_end"] = boundary
         return engine_input
 
     @staticmethod

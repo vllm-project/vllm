@@ -116,7 +116,8 @@ class SingleTypeKVCacheManager(ABC):
         self._partial_hit_reqs: dict[str, tuple[int, KVCacheBlock]] = {}
         self._pending_cow_copies: list[tuple[KVCacheBlock, KVCacheBlock]] = []
         self._semantic_checkpoint_blocks: dict[
-            str, dict[int, tuple[int, BlockHashWithGroupId]]
+            str,
+            dict[int, tuple[int, BlockHashWithGroupId, frozenset[str], bool]],
         ] = {}
 
     @classmethod
@@ -423,7 +424,7 @@ class SingleTypeKVCacheManager(ABC):
                 keeps dense checkpointing; ``0`` keeps only the latest replay
                 boundary; a positive multiple of ``scheduler_block_size`` keeps
                 a tail once per that-sized segment.
-            retain_input_end: Retain the materialized prompt boundary.
+            retain_input_end: Retain the stable input boundary from the renderer.
             retain_reasoning_end: Retain the exact parsed reasoning boundary.
             retain_response_end: Retain the final committed response boundary.
         """
@@ -433,7 +434,7 @@ class SingleTypeKVCacheManager(ABC):
         semantic_checkpointing = any(
             (retain_input_end, retain_reasoning_end, retain_response_end)
         )
-        checkpoint_boundaries, using_fallback = self._get_checkpoint_boundaries(
+        checkpoint_kinds, using_fallback = self._get_checkpoint_boundaries(
             request=request,
             num_tokens=num_tokens,
             retain_input_end=retain_input_end,
@@ -441,7 +442,7 @@ class SingleTypeKVCacheManager(ABC):
             retain_response_end=retain_response_end,
         )
         reachable_boundaries = self._with_shared_prefix_boundary(
-            request, checkpoint_boundaries, num_tokens
+            request, tuple(checkpoint_kinds), num_tokens
         )
 
         if num_cached_blocks < num_full_blocks:
@@ -469,7 +470,7 @@ class SingleTypeKVCacheManager(ABC):
             self._reconcile_semantic_checkpoints(
                 request,
                 num_full_blocks,
-                checkpoint_boundaries,
+                checkpoint_kinds,
                 using_fallback,
                 retention_interval,
             )
@@ -481,31 +482,40 @@ class SingleTypeKVCacheManager(ABC):
         retain_input_end: bool,
         retain_reasoning_end: bool,
         retain_response_end: bool,
-    ) -> tuple[tuple[int, ...], bool]:
-        semantic_boundaries: list[int] = []
-        if retain_input_end:
-            semantic_boundaries.append(request.num_prompt_tokens)
+    ) -> tuple[dict[int, frozenset[str]], bool]:
+        semantic_boundaries: list[tuple[int, str]] = []
+        if retain_input_end and request.cache_checkpoint_input_end is not None:
+            semantic_boundaries.append(
+                (request.cache_checkpoint_input_end, "input_end")
+            )
         if retain_reasoning_end and request.cache_checkpoint_reasoning_end is not None:
-            semantic_boundaries.append(request.cache_checkpoint_reasoning_end)
+            semantic_boundaries.append(
+                (request.cache_checkpoint_reasoning_end, "reasoning_end")
+            )
         if retain_response_end and request.cache_checkpoint_response_end is not None:
-            semantic_boundaries.append(request.cache_checkpoint_response_end)
+            semantic_boundaries.append(
+                (request.cache_checkpoint_response_end, "response_end")
+            )
 
         alignment = self.scheduler_block_size
-        aligned_boundaries = {
-            aligned
-            for boundary in semantic_boundaries
-            if 0 < (aligned := boundary // alignment * alignment) <= num_tokens
-        }
+        aligned_kinds: dict[int, set[str]] = defaultdict(set)
+        for boundary, kind in semantic_boundaries:
+            aligned = boundary // alignment * alignment
+            if 0 < aligned <= num_tokens:
+                aligned_kinds[aligned].add(kind)
         semantic_checkpointing = any(
             (retain_input_end, retain_reasoning_end, retain_response_end)
         )
-        using_fallback = not semantic_checkpointing or not aligned_boundaries
+        using_fallback = not semantic_checkpointing or not aligned_kinds
         if using_fallback:
             fallback = (request.num_prompt_tokens - 1) // alignment * alignment
             if 0 < fallback <= num_tokens:
-                aligned_boundaries.add(fallback)
+                aligned_kinds.setdefault(fallback, set())
 
-        return tuple(sorted(aligned_boundaries)), using_fallback
+        return {
+            boundary: frozenset(aligned_kinds[boundary])
+            for boundary in sorted(aligned_kinds)
+        }, using_fallback
 
     def _with_shared_prefix_boundary(
         self,
@@ -525,7 +535,7 @@ class SingleTypeKVCacheManager(ABC):
         self,
         request: Request,
         num_full_blocks: int,
-        checkpoint_boundaries: Sequence[int],
+        checkpoint_kinds: dict[int, frozenset[str]],
         using_fallback: bool,
         retention_interval: int,
     ) -> None:
@@ -533,26 +543,27 @@ class SingleTypeKVCacheManager(ABC):
         previous_blocks = self._semantic_checkpoint_blocks.get(request.request_id, {})
 
         if not using_fallback:
-            checkpoint_boundaries = tuple(
-                boundary
-                for boundary in checkpoint_boundaries
+            checkpoint_kinds = {
+                boundary: kinds
+                for boundary, kinds in checkpoint_kinds.items()
                 if self._checkpoint_is_materializable(
                     boundary, blocks, num_full_blocks, previous_blocks
                 )
-            )
-            if not checkpoint_boundaries:
-                fallback, _ = self._get_checkpoint_boundaries(
+            }
+            if not checkpoint_kinds and request.semantic_cache_checkpoints_finalized:
+                checkpoint_kinds, using_fallback = self._get_checkpoint_boundaries(
                     request=request,
                     num_tokens=num_full_blocks * self.block_size,
                     retain_input_end=False,
                     retain_reasoning_end=False,
                     retain_response_end=False,
                 )
-                checkpoint_boundaries = fallback
+            elif not checkpoint_kinds:
+                return
 
         reachable_boundaries = self._with_shared_prefix_boundary(
             request,
-            checkpoint_boundaries,
+            tuple(checkpoint_kinds),
             num_full_blocks * self.block_size,
         )
         block_mask = self.reachable_block_mask(
@@ -568,6 +579,21 @@ class SingleTypeKVCacheManager(ABC):
             return
 
         checkpoint_indices = [index for index, keep in enumerate(block_mask) if keep]
+        fallback_indices: set[int] = set()
+        if using_fallback:
+            fallback_mask = self.reachable_block_mask(
+                start_block=0,
+                end_block=num_full_blocks,
+                alignment_tokens=self.scheduler_block_size,
+                kv_cache_spec=self.kv_cache_spec,
+                use_eagle=self.use_eagle,
+                retention_interval=0,
+                reachable_boundaries=tuple(checkpoint_kinds),
+            )
+            assert fallback_mask is not None
+            fallback_indices = {
+                index for index, keep in enumerate(fallback_mask) if keep
+            }
         for index in checkpoint_indices:
             block = blocks[index]
             if not block.is_null and block.block_hash is None:
@@ -581,52 +607,43 @@ class SingleTypeKVCacheManager(ABC):
                     block_mask=[True],
                 )
 
-        current_blocks: dict[int, tuple[int, BlockHashWithGroupId]] = {}
+        current_blocks: dict[
+            int, tuple[int, BlockHashWithGroupId, frozenset[str], bool]
+        ] = {}
+        checkpoint_kinds_by_index: dict[int, set[str]] = defaultdict(set)
+        for boundary, kinds in checkpoint_kinds.items():
+            checkpoint_kinds_by_index[boundary // self.block_size - 1].update(kinds)
         for index in checkpoint_indices:
             block = blocks[index]
             if not block.is_null and block.block_hash is not None:
-                current_blocks[index] = (block.block_id, block.block_hash)
+                kinds = frozenset(checkpoint_kinds_by_index.get(index, ()))
+                current_blocks[index] = (
+                    block.block_id,
+                    block.block_hash,
+                    kinds,
+                    index in fallback_indices,
+                )
+                if kinds:
+                    self.block_pool.record_semantic_checkpoint(
+                        block, block.block_hash, kinds
+                    )
                 continue
             if previous := previous_blocks.get(index):
-                block_id, expected_hash = previous
+                block_id, expected_hash, _, _ = previous
                 if self.block_pool.blocks[block_id].block_hash == expected_hash:
                     current_blocks[index] = previous
 
-        if previous_blocks:
-            protected_mask = self.reachable_block_mask(
-                start_block=0,
-                end_block=num_full_blocks,
-                alignment_tokens=self.scheduler_block_size,
-                kv_cache_spec=self.kv_cache_spec,
-                use_eagle=self.use_eagle,
-                retention_interval=retention_interval,
-                reachable_boundaries=(),
-            )
-            protected_indices = (
-                set(range(num_full_blocks))
-                if protected_mask is None
-                else {
-                    index for index, protected in enumerate(protected_mask) if protected
-                }
-            )
-            current_block_ids = {block_id for block_id, _ in current_blocks.values()}
-            request_block_ids = {
-                block.block_id for block in blocks if not block.is_null
-            }
-            blocks_to_evict = set()
-            for index, (block_id, expected_hash) in previous_blocks.items():
-                if index in protected_indices:
-                    continue
-                if block_id in current_block_ids:
-                    continue
-                block = self.block_pool.blocks[block_id]
-                if block.block_hash != expected_hash:
-                    continue
-                if block.ref_cnt == 0 or (
-                    block_id in request_block_ids and block.ref_cnt == 1
-                ):
-                    blocks_to_evict.add(block_id)
-            self.block_pool.evict_blocks(blocks_to_evict)
+        if retention_interval == 0 and not using_fallback:
+            for index, (
+                block_id,
+                expected_hash,
+                _,
+                was_fallback,
+            ) in previous_blocks.items():
+                if was_fallback and index not in current_blocks:
+                    self.block_pool.remove_private_cached_block_hash(
+                        block_id, expected_hash
+                    )
 
         self._semantic_checkpoint_blocks[request.request_id] = current_blocks
 
@@ -635,7 +652,9 @@ class SingleTypeKVCacheManager(ABC):
         boundary: int,
         blocks: Sequence[KVCacheBlock],
         num_full_blocks: int,
-        previous_blocks: dict[int, tuple[int, BlockHashWithGroupId]],
+        previous_blocks: dict[
+            int, tuple[int, BlockHashWithGroupId, frozenset[str], bool]
+        ],
     ) -> bool:
         block_mask = self.reachable_block_mask(
             start_block=0,
@@ -659,7 +678,7 @@ class SingleTypeKVCacheManager(ABC):
             previous = previous_blocks.get(index)
             if previous is None:
                 return False
-            block_id, expected_hash = previous
+            block_id, expected_hash, _, _ = previous
             if self.block_pool.blocks[block_id].block_hash != expected_hash:
                 return False
         return True

@@ -3,7 +3,7 @@
 import itertools
 import time
 from collections import defaultdict, deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from typing import Any
 
@@ -1328,8 +1328,12 @@ class Scheduler(SchedulerInterface):
         # Update block hashes for the new tokens.
         session.update_block_hashes()
         session.num_prompt_tokens = len(session.prompt_token_ids)
+        session.cache_checkpoint_input_end = None
         session.cache_checkpoint_reasoning_end = None
         session.cache_checkpoint_response_end = None
+        session.semantic_cache_checkpoints_finalized = False
+        session.cache_checkpoint_hit_boundary = None
+        session.cache_checkpoint_hit_kinds = frozenset()
         session.reasoner = None
         session.arrival_time = update.arrival_time
         session.sampling_params = update.sampling_params
@@ -1741,7 +1745,7 @@ class Scheduler(SchedulerInterface):
                 if (
                     self.retain_reasoning_end
                     and request.cache_checkpoint_reasoning_end is None
-                    and self._set_reasoning_checkpoint(request)
+                    and self._set_reasoning_checkpoint(request, new_token_ids)
                 ):
                     self.kv_cache_manager.cache_blocks(
                         request, self._get_num_materialized_tokens(request)
@@ -2046,7 +2050,7 @@ class Scheduler(SchedulerInterface):
         num_materialized_tokens = self._get_num_materialized_tokens(request)
 
         if self.retain_reasoning_end and request.cache_checkpoint_reasoning_end is None:
-            self._set_reasoning_checkpoint(request)
+            self._set_reasoning_checkpoint(request, ())
 
         if (
             self.retain_response_end
@@ -2054,6 +2058,7 @@ class Scheduler(SchedulerInterface):
         ):
             request.cache_checkpoint_response_end = num_materialized_tokens
 
+        request.semantic_cache_checkpoints_finalized = True
         self.kv_cache_manager.cache_blocks(request, num_materialized_tokens)
 
     @staticmethod
@@ -2066,9 +2071,15 @@ class Scheduler(SchedulerInterface):
             request.num_tokens,
         )
 
-    def _set_reasoning_checkpoint(self, request: Request) -> bool:
+    def _set_reasoning_checkpoint(
+        self,
+        request: Request,
+        delta_token_ids: Sequence[int],
+    ) -> bool:
         output_boundary = (
-            self.structured_output_manager.find_reasoning_end_token_boundary(request)
+            self.structured_output_manager.update_reasoning_end_token_boundary(
+                request, delta_token_ids
+            )
         )
         if output_boundary is None:
             return False

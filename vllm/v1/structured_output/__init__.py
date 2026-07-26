@@ -112,13 +112,22 @@ class StructuredOutputManager:
             structured_req.reasoner = request.reasoner
         return request.reasoner
 
-    def find_reasoning_end_token_boundary(self, request: "Request") -> int | None:
-        """Return an exact output-token boundary from the configured parser."""
+    def update_reasoning_end_token_boundary(
+        self,
+        request: "Request",
+        delta_token_ids: Sequence[int],
+    ) -> int | None:
+        """Consume committed output tokens and return an exact boundary."""
         reasoner = self._get_reasoner(request)
         if reasoner is None:
             return None
 
-        boundary = reasoner.find_reasoning_end_token_boundary(request.output_token_ids)
+        start_offset = request.num_output_tokens - len(delta_token_ids)
+        if start_offset < 0:
+            return None
+        boundary = reasoner.update_reasoning_end_token_boundary(
+            delta_token_ids, start_offset
+        )
         if boundary is None or not 0 <= boundary <= request.num_output_tokens:
             return None
         return boundary

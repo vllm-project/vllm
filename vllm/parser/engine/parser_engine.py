@@ -147,6 +147,15 @@ class ParserEngine(Parser):
             self._reasoning_start_token_id = vocab.get(start_text)
         if end_text:
             self._reasoning_end_token_id = vocab.get(end_text)
+        self._checkpoint_state = parser_engine_config.initial_state
+        self._checkpoint_reasoning_end: int | None = None
+        self._checkpoint_body_end = 0
+        self._checkpoint_body_end_exact = True
+        self._checkpoint_terminal_ids = {
+            token_id: terminal
+            for terminal, text in parser_engine_config.token_id_terminals.items()
+            if (token_id := vocab.get(text)) is not None
+        }
 
     @property
     def reasoning_start_str(self) -> str | None:
@@ -606,42 +615,45 @@ class ParserEngine(Parser):
             return False
         return self._reasoning_ended
 
-    def find_reasoning_end_token_boundary(self, token_ids: Sequence[int]) -> int | None:
-        state = self.parser_engine_config.initial_state
-        if state != ParserState.REASONING:
+    def update_reasoning_end_token_boundary(
+        self,
+        delta_token_ids: Sequence[int],
+        start_offset: int,
+    ) -> int | None:
+        if self._checkpoint_reasoning_end is not None:
+            return self._checkpoint_reasoning_end
+        if self._checkpoint_state != ParserState.REASONING:
             return None
 
-        terminal_ids = {
-            token_id: terminal
-            for terminal, text in self.parser_engine_config.token_id_terminals.items()
-            if (token_id := self.vocab.get(text)) is not None
-        }
-        for index, token_id in enumerate(token_ids):
-            terminal = terminal_ids.get(token_id)
-            if terminal is None:
+        for index, token_id in enumerate(delta_token_ids, start_offset):
+            terminal = self._checkpoint_terminal_ids.get(token_id)
+            transition = (
+                self.parser_engine_config.transitions.get(
+                    (self._checkpoint_state, terminal)
+                )
+                if terminal is not None
+                else None
+            )
+            if transition is not None:
+                if EventType.REASONING_END in transition.events:
+                    if self._checkpoint_body_end_exact:
+                        self._checkpoint_reasoning_end = self._checkpoint_body_end
+                    self._checkpoint_state = transition.next_state
+                    return self._checkpoint_reasoning_end
+                if terminal == "THINK_START":
+                    self._checkpoint_body_end = index + 1
+                    self._checkpoint_body_end_exact = True
+                self._checkpoint_state = transition.next_state
                 continue
-            transition = self.parser_engine_config.transitions.get((state, terminal))
-            if transition is None:
-                continue
-            if (
-                state == ParserState.REASONING
-                and EventType.REASONING_END in transition.events
-            ):
-                boundary = index
-                while boundary > 0:
-                    token_text = self.model_tokenizer.decode(
-                        [token_ids[boundary - 1]], skip_special_tokens=False
-                    )
-                    if not token_text:
-                        return None
-                    if token_text.isspace():
-                        boundary -= 1
-                        continue
-                    if token_text.rstrip() != token_text:
-                        return None
-                    break
-                return boundary
-            state = transition.next_state
+
+            token_text = self.model_tokenizer.decode(
+                [token_id], skip_special_tokens=False
+            )
+            if not token_text or token_text.rstrip() != token_text:
+                self._checkpoint_body_end_exact = False
+            elif not token_text.isspace():
+                self._checkpoint_body_end = index + 1
+                self._checkpoint_body_end_exact = True
         return None
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:

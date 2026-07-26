@@ -112,12 +112,52 @@ class ReasoningParser:
         """
         return self.is_reasoning_end(input_ids)
 
-    def find_reasoning_end_token_boundary(self, token_ids: Sequence[int]) -> int | None:
-        """Return the exact token-prefix length of the reasoning body.
+    def find_input_end_token_boundary(
+        self, prompt_token_ids: Sequence[int]
+    ) -> int | None:
+        """Return the stable prompt prefix before a reasoning-control suffix.
+
+        Only single-token reasoning markers can prove this boundary. The
+        suffix after the final start marker must contain only whitespace and
+        an optional end marker, as produced by thinking-enabled/disabled chat
+        templates.
+        """
+        start_str = self.reasoning_start_str
+        if start_str is None or (start_id := self.vocab.get(start_str)) is None:
+            return None
+
+        end_str = self.reasoning_end_str
+        end_id = self.vocab.get(end_str) if end_str is not None else None
+        try:
+            boundary = (
+                len(prompt_token_ids)
+                - 1
+                - list(reversed(prompt_token_ids)).index(start_id)
+            )
+        except ValueError:
+            return None
+
+        for token_id in prompt_token_ids[boundary + 1 :]:
+            if end_id is not None and token_id == end_id:
+                continue
+            token_text = self.model_tokenizer.decode(
+                [token_id], skip_special_tokens=False
+            )
+            if not token_text or not token_text.isspace():
+                return None
+        return boundary
+
+    def update_reasoning_end_token_boundary(
+        self,
+        delta_token_ids: Sequence[int],
+        start_offset: int,
+    ) -> int | None:
+        """Consume committed output tokens and return an exact body boundary.
 
         The boundary must precede the reasoning terminator and any trailing
-        whitespace. Parsers that cannot prove such a token boundary should
-        return ``None``.
+        whitespace. Implementations must process ``delta_token_ids``
+        incrementally and return ``None`` when no exact token boundary is
+        available.
         """
         return None
 

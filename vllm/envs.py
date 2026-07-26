@@ -327,6 +327,13 @@ def maybe_convert_bool(value: str | None) -> bool | None:
     return bool(int(value))
 
 
+def _strict_binary_env(name: str) -> bool:
+    value = os.getenv(name, "0")
+    if value not in ("0", "1"):
+        raise ValueError(f"{name} must be 0 or 1, got {value!r}")
+    return value == "1"
+
+
 def maybe_convert_json_str_or_file(value: str | None) -> dict[str, Any] | None:
     if value is None:
         return None
@@ -1120,14 +1127,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
         if "VLLM_PREFIX_CACHE_RETENTION_INTERVAL" in os.environ
         else None
     ),
-    "VLLM_PREFIX_CACHE_RETAIN_INPUT_END": lambda: bool(
-        int(os.getenv("VLLM_PREFIX_CACHE_RETAIN_INPUT_END", "0"))
+    "VLLM_PREFIX_CACHE_RETAIN_INPUT_END": lambda: _strict_binary_env(
+        "VLLM_PREFIX_CACHE_RETAIN_INPUT_END"
     ),
-    "VLLM_PREFIX_CACHE_RETAIN_REASONING_END": lambda: bool(
-        int(os.getenv("VLLM_PREFIX_CACHE_RETAIN_REASONING_END", "0"))
+    "VLLM_PREFIX_CACHE_RETAIN_REASONING_END": lambda: _strict_binary_env(
+        "VLLM_PREFIX_CACHE_RETAIN_REASONING_END"
     ),
-    "VLLM_PREFIX_CACHE_RETAIN_RESPONSE_END": lambda: bool(
-        int(os.getenv("VLLM_PREFIX_CACHE_RETAIN_RESPONSE_END", "0"))
+    "VLLM_PREFIX_CACHE_RETAIN_RESPONSE_END": lambda: _strict_binary_env(
+        "VLLM_PREFIX_CACHE_RETAIN_RESPONSE_END"
     ),
     # a local directory to look in for unrecognized LoRA adapters.
     # only works if plugins are enabled and
