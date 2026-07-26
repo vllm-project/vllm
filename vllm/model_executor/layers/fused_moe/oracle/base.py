@@ -12,12 +12,8 @@ that follow an informal convention.
 This module declares the abstract contract; concrete oracles inherit from
 `MoEKernelOracle` and provide the platform-specific behaviour.
 
-This is the first PR in the series suggested by @robertgshaw2-redhat in
-PR #37776 (see issue #37753). It intentionally only introduces the ABC;
-follow-up PRs migrate each oracle to inherit from it. The single concrete
-subclass shipped here (`UnquantizedMoEKernelOracle`) delegates to the
-existing module-level functions to keep behaviour bit-identical with
-pre-class code.
+Part of the series of issue #37753.
+Follow-up PRs are planned.
 """
 
 from abc import ABC, abstractmethod
@@ -28,6 +24,10 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config.kernel import MoEBackend
+from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -36,20 +36,25 @@ from vllm.model_executor.layers.fused_moe.config import (
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
+logger = init_logger(__name__)
+
 BackendT = TypeVar("BackendT", bound=Enum)
 
 
 class MoEKernelOracle(ABC, Generic[BackendT]):
     """Abstract base for MoE kernel-selection oracles.
 
-    Concrete oracles MUST implement: `backend_enum_cls`,
-    `get_priority_backends`, `backend_to_kernel_cls`, `map_backend`,
-    `select_backend`, `make_kernel`.
+    Concrete oracles MUST implement methods:
+    `backend_enum_cls`, `get_priority_backends`,
+    `backend_to_kernel_cls`, `map_backend`.
 
-    Concrete oracles MAY override: `convert_to_kernel_format`,
-    `make_quant_config`. The base class provides default implementations
-    that are appropriate for oracles which do not need them
-    (e.g. `make_quant_config` raises on the unquantized oracle).
+    The base class provides generic implementations of `select_backend`
+    and `make_kernel` that use the above methods to pick a backend and
+    construct the kernel. Oracles with quirks
+    (env-var gates, platform-specific reordering, LoRA forced routing,
+    monolithic-only constraints, etc.) override these.
+
+    MAY override `convert_to_kernel_format` and `make_quant_config`
     """
 
     @abstractmethod
@@ -66,45 +71,149 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
     def backend_to_kernel_cls(
         self, backend: BackendT
     ) -> list[type[mk.FusedMoEExperts]]:
-        """Map a backend enum value to its concrete `FusedMoEExperts`
-        subclasses, in selection priority order."""
+        """Map a backend enum value to its candidate `FusedMoEExperts`
+        subclasses, ordered by preference. Returning a list of
+        multiple experts variants (e.g. Fp8 TrtLlm has both monolithic
+        and modular flavours); callers iterate until one's
+        `is_supported_config` returns True. Backends with only a
+        single variant return a 1-element list.
+        """
 
     @abstractmethod
     def map_backend(self, runner_backend: MoEBackend) -> BackendT:
         """Map a user-facing `MoEBackend` (from the runner config) to
         this oracle's enum."""
 
-    @abstractmethod
     def select_backend(
         self,
         moe_config: FusedMoEConfig,
         weight_key: "QuantKey | None" = None,
         activation_key: "QuantKey | None" = None,
     ) -> tuple[BackendT, type[mk.FusedMoEExperts] | None]:
-        """Primary entry point: choose the best supported backend for
-        the given `moe_config`.
-
-        `weight_key` / `activation_key` carry the quantization scheme of
-        the weights and activations and are consumed by quantized oracles
-        (fp8, nvfp4, int8, ...) to disambiguate backends. The unquantized
-        oracle ignores them. Subclasses with additional selection inputs
-        (e.g. int_wna16 needs `weight_bits`, fp8 needs
-        `allow_vllm_cutlass`) widen the signature in their override; a
-        per-oracle config object is the longer-term target tracked in
-        the #37753 follow-up PRs.
+        """Generic backend selection — try user-explicit override first,
+        then iterate the subclass-provided priority list and ask each
+        candidate kernel class via ``is_supported_config`` until one
+        accepts. Oracles with quirks (env-var gates, platform-specific
+        reordering, LoRA forced routing, etc.) override this entirely.
         """
+        available = self.get_priority_backends(moe_config)
 
-    @abstractmethod
+        activation_format = (
+            mk.FusedMoEActivationFormat.BatchedExperts
+            if moe_config.moe_parallel_config.use_batched_activation_format
+            else mk.FusedMoEActivationFormat.Standard
+        )
+
+        oracle_name = type(self).__name__
+
+        def _make_log_backend(backend: BackendT) -> str:
+            available_strs = [b.value for b in available]
+            return (
+                f"Using {backend.value} {oracle_name} backend out "
+                f"of potential backends: {available_strs}."
+            )
+
+        def _make_log_unsupported(backend: BackendT, reason: str | None) -> str:
+            if reason:
+                return (
+                    f"{oracle_name} backend {backend.value!r} does not support "
+                    f"the deployment configuration since {reason}."
+                )
+            return (
+                f"{oracle_name} backend {backend.value!r} does not support "
+                "the deployment configuration."
+            )
+
+        def _return_or_raise(
+            backend: BackendT,
+        ) -> tuple[BackendT, type[mk.FusedMoEExperts]]:
+            reason: str | None = None
+            for k_cls in self.backend_to_kernel_cls(backend):
+                supported, reason = k_cls.is_supported_config(
+                    k_cls,
+                    moe_config,
+                    weight_key,
+                    activation_key,
+                    activation_format,
+                )
+                if supported:
+                    logger.info_once(_make_log_backend(backend))
+                    return backend, k_cls
+            raise ValueError(_make_log_unsupported(backend, reason))
+
+        # Handle explicit moe_backend from user.
+        runner_backend = moe_config.moe_backend
+        if runner_backend != "auto":
+            requested_backend = self.map_backend(runner_backend)
+            return _return_or_raise(requested_backend)
+
+        # Iterate priorities, return first supported.
+        last_reason: str | None = None
+        for backend in available:
+            for k_cls in self.backend_to_kernel_cls(backend):
+                supported, reason = k_cls.is_supported_config(
+                    k_cls,
+                    moe_config,
+                    weight_key,
+                    activation_key,
+                    activation_format,
+                )
+                last_reason = reason
+                if supported:
+                    logger.info_once(_make_log_backend(backend))
+                    return backend, k_cls
+                logger.debug_once(_make_log_unsupported(backend, reason))
+
+        raise NotImplementedError(
+            f"No {oracle_name} backend supports the deployment configuration"
+            + (f": {last_reason}." if last_reason else ".")
+        )
+
     def make_kernel(
         self,
         quant_config: FusedMoEQuantConfig,
         moe_config: FusedMoEConfig,
-        backend: BackendT,
         experts_cls: type[mk.FusedMoEExperts],
+        backend: BackendT,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEKernel:
-        """Construct the `FusedMoEKernel` (Prepare/Finalize + Experts
-        combinator) for the chosen backend."""
+        """Generic kernel construction — build the Prepare/Finalize
+        stage, instantiate ``experts_cls``, and combine them into a
+        ``FusedMoEKernel``. Subclasses with extra construction
+        arguments (e.g. ``w4a8`` needs ``b_strides``) or extra
+        constraints (e.g. monolithic experts support-only) override this.
+        """
+        is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
+        prepare_finalize = maybe_make_prepare_finalize(
+            moe=moe_config,
+            quant_config=quant_config,
+            routing_tables=routing_tables,
+            allow_new_interface=True,
+            use_monolithic=is_monolithic,
+        )
+        assert prepare_finalize is not None
+
+        logger.info_once("Using %s", prepare_finalize.__class__.__name__)
+
+        if (
+            prepare_finalize.activation_format
+            == mk.FusedMoEActivationFormat.BatchedExperts
+        ):
+            max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
+            assert max_num_tokens is not None
+            experts = experts_cls(
+                moe_config=moe_config,
+                quant_config=quant_config,
+                max_num_tokens=max_num_tokens,
+                num_dispatchers=prepare_finalize.num_dispatchers(),
+            )
+        else:
+            experts = experts_cls(
+                moe_config=moe_config,
+                quant_config=quant_config,
+            )
+
+        return mk.FusedMoEKernel(prepare_finalize, experts)
 
     def convert_to_kernel_format(
         self,
