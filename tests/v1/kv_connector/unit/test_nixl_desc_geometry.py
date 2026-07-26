@@ -214,8 +214,10 @@ def _make_remote_meta(
 
     remote_ppl = remote_block_size // remote_kernel_block_size
     # Kernel-granularity pages are TP-independent for MLA hybrids and must
-    # match the local ones for the handshake to pass.
-    kernel_page = worker.block_len_per_layer[0]
+    # match the local ones for the handshake to pass, scaled down by the
+    # block-size ratio when the remote's kernel block is smaller.
+    block_size_ratio = worker.block_size // remote_kernel_block_size
+    kernel_page = worker.block_len_per_layer[0] // block_size_ratio
     return NixlAgentMetadata(
         engine_id="remote-engine",
         agent_metadata=b"remote-agent-meta",
@@ -327,37 +329,49 @@ def test_hetero_ppl_multi_read_writes_stay_within_request_blocks():
 
 
 def _resolve(
-    desc_arr, idx, bases, region_size, unified_page, kernel_page, logical_ids_attn
+    desc_arr,
+    idx,
+    bases,
+    region_size,
+    unified_page,
+    desc_page,
+    logical_ids_attn,
+    block_tokens,
 ):
     """Resolve a desc id to (region, kind, token_start) where kind is 'attn'
-    (kernel-page sized, block-aligned, in the request's attention blocks) or
-    'mamba'. token_start is the request-relative kernel-block index."""
+    (desc-page sized, sub-block-aligned, in the request's attention blocks)
+    or 'mamba'. token_start is the request-relative token offset, so local
+    and remote are comparable even when their kernel blocks differ in size."""
     addr, length, _ = (int(x) for x in desc_arr[int(idx)])
     for region, base in enumerate(bases):
         off = addr - base
         if 0 <= off < region_size:
             b = off // unified_page
             rem = off % unified_page
-            if (
-                length == kernel_page
-                and rem % kernel_page == 0
-                and (b in logical_ids_attn)
-            ):
+            if length == desc_page and rem % desc_page == 0 and b in logical_ids_attn:
                 pos = logical_ids_attn.index(b)
-                tokens_per_block = unified_page // kernel_page
-                sub = rem // kernel_page
-                return (region, "attn", (pos * tokens_per_block + sub))
+                tokens_per_desc = block_tokens * desc_page // unified_page
+                sub = rem // desc_page
+                return (region, "attn", pos * block_tokens + sub * tokens_per_desc)
             return (region, "mamba", None)
     raise AssertionError(f"desc {idx} addr {addr:#x} not in any region")
 
 
-def _run_hetero_case(local_block, kernel, remote_block, num_tokens, tp_size=2):
-    """Full pull-path run for one geometry; returns pairing records."""
+def _run_hetero_case(
+    local_block, kernel, remote_block, num_tokens, tp_size=2, remote_kernel=None
+):
+    """Full pull-path run for one geometry; returns pairing records.
+
+    ``remote_kernel`` defaults to the local kernel block size; a smaller
+    value additionally exercises block_size_ratio > 1.
+    """
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         NixlConnectorMetadata,
     )
 
-    remote_ppl = remote_block // kernel
+    remote_kernel = remote_kernel or kernel
+    block_size_ratio = kernel // remote_kernel
+    remote_ppl = remote_block // remote_kernel
     matched = num_tokens - 1  # mamba N-1 rule
     n_local = -(-num_tokens // local_block)
     n_remote = -(-matched // remote_block)
@@ -372,7 +386,7 @@ def _run_hetero_case(local_block, kernel, remote_block, num_tokens, tp_size=2):
     meta_r = _make_remote_meta(
         worker,
         remote_block_size=remote_block,
-        remote_kernel_block_size=kernel,
+        remote_kernel_block_size=remote_kernel,
         remote_num_logical=max(2 * n_remote + 4, 8),
         remote_ssm_sizes=(48 // tp_size, 64 // tp_size),
     )
@@ -420,7 +434,9 @@ def _run_hetero_case(local_block, kernel, remote_block, num_tokens, tp_size=2):
     remote_bases = [0x10_000_000, 0x20_000_000]
     local_unified = worker._test_unified_page
     remote_unified = (local_unified // local_block) * remote_block
-    kernel_page = worker.block_len_per_layer[0]
+    # With block_size_ratio > 1 the local page is split into ratio sub-descs,
+    # each the size of a whole remote kernel page.
+    desc_page = worker.block_len_per_layer[0] // block_size_ratio
     meta_r_num_blocks_bytes = (meta_r.num_blocks // remote_ppl) * remote_unified
     covered_tokens = set()
     for op, lh, lids, rh, rids in nixl.xfers:
@@ -432,8 +448,9 @@ def _run_hetero_case(local_block, kernel, remote_block, num_tokens, tp_size=2):
                 local_bases,
                 len(worker._test_tensors[0]),
                 local_unified,
-                kernel_page,
+                desc_page,
                 local_attn,
+                local_block,
             )
             rreg, rkind, rtok = _resolve(
                 rarr,
@@ -441,8 +458,9 @@ def _run_hetero_case(local_block, kernel, remote_block, num_tokens, tp_size=2):
                 remote_bases,
                 meta_r_num_blocks_bytes,
                 remote_unified,
-                kernel_page,
+                desc_page,
                 remote_attn,
+                remote_block,
             )
             assert lkind == rkind, (
                 f"pair kind mismatch: local {lkind} vs remote {rkind} "
@@ -454,16 +472,16 @@ def _run_hetero_case(local_block, kernel, remote_block, num_tokens, tp_size=2):
             )
             if lkind == "attn":
                 assert ltok == rtok, (
-                    f"TOKEN MISALIGNMENT: local kernel block holds tokens "
-                    f"[{ltok * kernel}..) but receives remote tokens "
-                    f"[{rtok * kernel}..) "
+                    f"TOKEN MISALIGNMENT: local sub-block holds tokens "
+                    f"[{ltok}..) but receives remote tokens [{rtok}..) "
                     f"(geometry local_block={local_block}, "
                     f"remote_block={remote_block}, N={num_tokens})"
                 )
-                covered_tokens.add(ltok * kernel)
+                covered_tokens.add(ltok)
 
-    # Invariant 3: full coverage of the matched tokens.
-    needed = {t for t in range(0, matched - matched % kernel, kernel)}
+    # Invariant 3: full coverage of the matched tokens, at the finest
+    # transfer granularity (the remote kernel block).
+    needed = {t for t in range(0, matched - matched % remote_kernel, remote_kernel)}
     missing = needed - covered_tokens
     assert not missing, (
         f"tokens never transferred: {sorted(missing)[:8]} "
@@ -521,6 +539,29 @@ def test_hetero_ppl_token_alignment_sweep(local_block, remote_block, num_tokens)
     coverage of every transferred kernel block."""
     _run_hetero_case(
         local_block, kernel=4, remote_block=remote_block, num_tokens=num_tokens
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "num_tokens",
+    # Residues around the remote kernel block (4), the local kernel block
+    # (8), the remote logical block (8) and the local logical block (24).
+    [2, 5, 8, 9, 13, 16, 17, 21, 24, 25, 29, 32, 33, 41, 48, 49],
+)
+def test_hetero_ppl_with_block_size_ratio(num_tokens):
+    """Both hetero regimes at once: kernel blocks differ (local 8 / remote
+    4, block_size_ratio=2) *and* physical_blocks_per_logical differs (3 vs
+    2). The transfer is clipped at remote sub-block granularity by the
+    pairing and front-trimmed by _apply_prefix_caching, so the
+    untransferred tail can span both a partial block and whole blocks —
+    the case each of the two former zeroing paths handled only half of."""
+    _run_hetero_case(
+        local_block=24,
+        kernel=8,
+        remote_block=8,
+        remote_kernel=4,
+        num_tokens=num_tokens,
     )
 
 
