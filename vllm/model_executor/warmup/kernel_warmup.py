@@ -701,6 +701,211 @@ def _deepseek_v4_indexed_d512_split_prefill_warmup(runner: "GPUModelRunner") -> 
         )
 
 
+def _deepseek_v4_paged_mqa_rowwise_decode_warmup(runner: "GPUModelRunner") -> None:
+    """Force-compile ``_fp8_paged_mqa_logits_rowwise_kernel`` (SM12x decode).
+
+    The decode dummy runs set ``seq_lens = max_query_len`` (3 for MTP2,
+    gpu_model_runner.py:6044), so ``DeepseekV4Indexer.forward`` short-circuits
+    on ``max_seq_len // compress_ratio <= topk_tokens`` (attention.py:912) and
+    this kernel is never launched during warmup; it JITs inside the first
+    request whose context exceeds ``compress_ratio * index_topk``.
+
+    Compile-variant accounting (verified against the kernel signature at
+    sm12x_mqa.py:296-331 and the launch at :464-500): every stride argument is
+    a ``tl.constexpr`` except ``stride_lm``, and all constexprs are pinned by
+    the config, so the only free axes are the four runtime ints, which Triton
+    specializes on ``== 1`` and ``% 16 == 0``:
+
+      * ``token_start`` is always 0 in the reachable path
+        (``_fp8_paged_mqa_logits_sm12x`` calls the wrapper with defaults).
+        The chunked direct-topk path (sm12x_deep_gemm_fallbacks.py:638) needs
+        ``num_padded_tokens * logits_width * 4 > 256 MB``; the budget here tops
+        out at 192 * 12288 * 4 = 9.4 MB, and even if it were hit its
+        token_starts are 8192-multiples, i.e. the same specialization. 1 value.
+      * ``num_rows = batch * next_n``: three classes (== 1, % 16 == 0, neither),
+        all reachable. Covered by iterating BATCH counts (1, 3, 16) rather than
+        row counts, so the classes stay covered for next_n > 1 as well, where
+        ``num_rows`` is always a multiple of next_n.
+      * ``logits_width`` (== ``token_count``) and ``stride_lm``
+        (== ``logits.stride(0)`` == ``token_count``) always move together, so
+        they contribute one factor of two: 16-aligned (e.g. the 12288 ceiling)
+        vs not (``logits_width`` floors at topk_tokens=512 but otherwise tracks
+        the batch's ``max_seq_len``, an arbitrary integer). Never == 1.
+
+    6 launches per reachable indexer-KV geometry. On DSv4-Flash at
+    max_model_len=49152 only the compress_ratio=4 geometry is reachable
+    (49152 // 128 = 384 <= index_topk 512 makes every C128A layer take the
+    short-context short-circuit), so 6 compiles total.
+
+    Fidelity notes: ``stride_btb`` is a constexpr, so the block-table row width
+    is taken from the live ``DeepseekV32IndexerMetadataBuilder`` buffer rather
+    than recomputed (the builder's width carries ``get_kv_cache_shard_count()``
+    under DCP; a formula that drops it would bake a stride production never
+    uses and silently warm the wrong cubin). The KV strides likewise come from
+    the bound cache tensor, which is a PADDED strided view (page stride 8640,
+    not 64*132 = 8448), so a synthetic contiguous cache would miss.
+    """
+    try:
+        from vllm.model_executor.layers.sparse_attn_indexer import (
+            kv_cache_as_quant_view,
+        )
+        from vllm.models.deepseek_v4.attention import DeepseekV4Indexer
+        from vllm.models.deepseek_v4.nvidia.ops.sm12x_mqa import (
+            fp8_paged_mqa_logits_triton,
+        )
+        from vllm.utils.math_utils import cdiv
+        from vllm.v1.attention.backends.mla.indexer import (
+            DeepseekV32IndexerMetadataBuilder,
+        )
+        from vllm.v1.worker.cp_utils import get_kv_cache_shard_count
+    except ImportError as exc:
+        # A failed import here is a renamed symbol, not a benign "kernels
+        # unavailable" case; surface it so a rename cannot silently no-op the
+        # warmup (see _deepseek_v4_indexed_d512_split_prefill_warmup).
+        logger.warning(
+            "Skipping SM12x paged-MQA rowwise decode warmup: a required symbol "
+            "failed to import (%s); the first long-context decode will JIT it "
+            "mid-inference.",
+            exc,
+        )
+        return
+
+    # Only SM12x routes paged-MQA logits onto the Triton fallback
+    # (vllm/utils/deep_gemm.py: fp8_fp4_paged_mqa_logits).
+    if not (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability_family(120)
+    ):
+        return
+
+    try:
+        num_spec = int(getattr(runner, "num_spec_tokens", 0) or 0)
+        next_n_decode = 1 + num_spec
+        # DeepseekV32IndexerMetadataBuilder.use_flattening (indexer.py:537):
+        # outside the SM100 family every next_n not in (1, 2) is flattened to
+        # one row per decode token, so the kernel only ever sees next_n == 1
+        # (MTP2 included). For next_n in (1, 2) the native layout survives and
+        # next_n is the batch's max_decode_len, which can be 1 or 2.
+        if next_n_decode in (1, 2):
+            next_n_values = tuple(sorted({1, next_n_decode}))
+        else:
+            next_n_values = (1,)
+
+        # stride_btb is a constexpr. Prefer the live builder buffer (exact
+        # production stride and alignment); keep the shard-aware formula as a
+        # fallback, and warm both if they ever disagree.
+        bt_widths: set[int] = set()
+        for group_list in getattr(runner, "attn_groups", []):
+            for group in group_list:
+                for builder in getattr(group, "metadata_builders", []):
+                    if isinstance(builder, DeepseekV32IndexerMetadataBuilder):
+                        bt_widths.add(
+                            int(builder.expanded_block_table_buffer.stride(0))
+                        )
+        bt_widths.add(
+            cdiv(
+                runner.max_model_len,
+                runner.cache_config.block_size * get_kv_cache_shard_count(),
+            )
+        )
+        bt_widths = {w for w in bt_widths if w > 0}
+        if not bt_widths:
+            return
+
+        fp8_dtype = current_platform.fp8_dtype()
+        seen: set[tuple[int, int, int, int]] = set()
+        warmed = False
+
+        for module in runner.get_model().modules():
+            if not isinstance(module, DeepseekV4Indexer) or module.use_fp4_kv:
+                continue
+            # module.max_model_len is already max_model_len // compress_ratio.
+            # When it cannot exceed index_topk the layer always takes the
+            # short-context path and never reaches paged MQA (DSv4-Flash C128A:
+            # 49152 // 128 = 384 <= 512).
+            if module.max_model_len <= module.topk_tokens:
+                continue
+            kv_cache = getattr(module.k_cache, "kv_cache", None)
+            if kv_cache is None or kv_cache.numel() == 0:
+                continue
+
+            num_heads = int(module.n_head)
+            head_dim = int(module.head_dim)
+            key = (
+                int(kv_cache.shape[1]),
+                int(kv_cache.stride(0)),
+                num_heads,
+                head_dim,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+
+            device = kv_cache.device
+            # Exactly what sparse_attn_indexer feeds the kernel.
+            kv_view = kv_cache_as_quant_view(kv_cache, head_dim, False)
+
+            logger.info(
+                "Warming up SM12x paged-MQA rowwise decode logits "
+                "(heads=%d, head_dim=%d, kv_block=%d, page_stride=%d, "
+                "block_table_widths=%s).",
+                num_heads,
+                head_dim,
+                key[0],
+                key[1],
+                sorted(bt_widths),
+            )
+
+            for bt_width in sorted(bt_widths):
+                for next_n in next_n_values:
+                    # num_rows = batch * next_n. Batches (1, 3, 16) give the
+                    # == 1 / non-16-aligned / 16-aligned classes at next_n == 1
+                    # and the non-16-aligned / 16-aligned classes at next_n == 2
+                    # (num_rows == 1 is unreachable there).
+                    for batch in (1, 3, 16):
+                        num_rows = batch * next_n
+                        q = torch.zeros(
+                            (batch, next_n, num_heads, head_dim),
+                            dtype=fp8_dtype,
+                            device=device,
+                        )
+                        weights = torch.zeros(
+                            (num_rows, num_heads),
+                            dtype=torch.float32,
+                            device=device,
+                        )
+                        block_tables = torch.zeros(
+                            (batch, bt_width), dtype=torch.int32, device=device
+                        )
+                        # logits_width classes: 16-aligned / not. The value only
+                        # sizes the grid; the cubin depends on the class alone.
+                        for width in (512, 513):
+                            context_lens = torch.full(
+                                (batch, next_n),
+                                width,
+                                dtype=torch.int32,
+                                device=device,
+                            )
+                            fp8_paged_mqa_logits_triton(
+                                q,
+                                kv_view,
+                                weights,
+                                context_lens,
+                                block_tables,
+                                width,  # max_model_len == logits_width
+                            )  # token_start=0, token_count=None
+                            warmed = True
+
+        if warmed:
+            torch.accelerator.synchronize()
+    except Exception as exc:  # noqa: BLE001 - warmup must never break startup
+        logger.warning(
+            "SM12x paged-MQA rowwise decode warmup skipped after error "
+            "(first long-context decode may JIT in-inference): %s",
+            exc,
+        )
+
+
 def _deepseek_v4_sparse_mla_attention_warmup(worker: "Worker") -> None:
     if not envs.VLLM_ENABLE_DEEPSEEK_V4_SPARSE_MLA_WARMUP:
         return
@@ -769,6 +974,11 @@ def _deepseek_v4_sparse_mla_attention_warmup(worker: "Worker") -> None:
     # D512-split prefill kernels stay uncompiled until the first long request
     # (PR #41834 wedge). Compile them directly with synthetic inputs.
     _deepseek_v4_indexed_d512_split_prefill_warmup(runner)
+
+    # Same class of gap on the decode side: the decode dummies below run with
+    # seq_lens == max_query_len, so the indexer short-circuits and never
+    # reaches the paged-MQA logits kernel.
+    _deepseek_v4_paged_mqa_rowwise_decode_warmup(runner)
 
     query_len = getattr(runner, "uniform_decode_query_len", 0)
     for num_reqs in uniform_decode_reqs:
