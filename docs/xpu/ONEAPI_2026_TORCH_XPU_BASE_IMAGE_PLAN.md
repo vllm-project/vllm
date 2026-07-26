@@ -2,8 +2,8 @@
 
 **Branch:** `oneapi-2026-torch-xpu-base-image`  
 **Base commit:** `krisclarkdev/vllm` @ `577e1a932` (production image `hal/vllm-xpu:kris-fork-577e1a932`)  
-**Proposed new tag:** `hal/vllm-xpu:oneapi-2026.0-torch2.13-<shortsha>`  
-**Status:** implemented on feature branch (Dockerfile + requirements). Build/smoke on `hal` still required. No push; no Ornith / DaemonSet cutover.
+**Proposed new tag:** `hal/vllm-xpu:oneapi-2026.0-torch2.13-3e8eb5ccc` (or rebuild shortsha after further commits)  
+**Status:** implemented on feature branch (Dockerfile + requirements) @ `3e8eb5ccc`. Build/smoke on `hal` still required. No push; no Ornith / DaemonSet cutover.
 
 ---
 
