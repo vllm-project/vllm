@@ -41,8 +41,11 @@ def set_active_mm_loras(
 
         # iterate through visual tokens
         for mm_input_id in encoder_input_ids:
-            pos_info = mm_features[mm_input_id].mm_position
-            num_tokens = model.get_num_mm_encoder_tokens(pos_info.get_num_embeds())
+            mm_feature = mm_features[mm_input_id]
+            pos_info = mm_feature.mm_position
+            num_tokens = model.get_num_mm_encoder_tokens(
+                pos_info.get_num_embeds(), mm_data=mm_feature.data
+            )
             prompt_lora_mapping.append(lora_id)
             token_lora_mapping.extend([lora_id] * num_tokens)
             encoder_token_counts.append(num_tokens)

@@ -15,7 +15,7 @@ from transformers.models.llava_next.modeling_llava_next import (
 
 from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFieldConfig
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItem
 from vllm.multimodal.parse import ImageSize
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -43,7 +43,7 @@ from .utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
-from .vision import get_num_selected_vision_tokens
+from .vision import get_num_selected_vision_tokens, get_vision_encoder_info
 
 
 class LlavaNextImagePixelInputs(TensorSchema):
@@ -614,16 +614,36 @@ model_executor.models.llava_next.LlavaNextProcessingInfo.get_num_image_tokens].
     def get_num_mm_encoder_tokens(
         self,
         num_image_tokens: int,
+        mm_data: MultiModalKwargsItem | None = None,
     ) -> int:
-        # LLaVA-NeXT's vision encoder outputs one token per patch
-        # without spatial merging or pixel shuffle
+        # LLaVA-NeXT's anyres/unpad tiling makes the final LLM-side
+        # placeholder count (`num_image_tokens`) non-invertible back to the
+        # raw vision-tower token count: unpad crops rows/cols based on the
+        # image's aspect ratio and appends newline tokens, so two different
+        # tile grids (e.g. 3x1 vs 2x2) can yield the same placeholder count
+        # while the tower processed a different number of tokens.
+        #
+        # Instead, compute the tower token count forward from the actual
+        # pixel_values tile count for this item (tiles x patches-per-tile),
+        # which is already known and unambiguous before unpad is applied.
+        if mm_data is not None and "pixel_values" in mm_data:
+            pixel_values = mm_data["pixel_values"].data
+            num_tiles = pixel_values.shape[0]
+            vision_encoder_info = get_vision_encoder_info(self.config)
+            patch_grid_length = vision_encoder_info.get_patch_grid_length()
+            return num_tiles * patch_grid_length**2
+
+        # Fallback when the real tile count isn't available (e.g. in unit
+        # tests that only exercise the invertible, single-tile case).
         return num_image_tokens
 
     def get_num_mm_connector_tokens(
         self,
         num_vision_tokens: int,
+        mm_data: MultiModalKwargsItem | None = None,
     ) -> int:
         # LLaVA-NeXT's MLP projector outputs the same number of tokens
         # as it receives from the vision encoder (1:1 mapping); the
-        # spatial unpad/newline merge happens after the connector
+        # spatial unpad/newline merge happens after the connector, so this
+        # identity mapping is correct regardless of tiling.
         return num_vision_tokens
