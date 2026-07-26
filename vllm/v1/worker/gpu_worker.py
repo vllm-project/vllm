@@ -238,7 +238,8 @@ class Worker(WorkerBase):
             draft = self.get_draft_model()
             if draft is not None:
                 for name, buffer in draft.named_buffers():
-                    buffer.data.copy_(self._sleep_saved_draft_buffers[name].data)
+                    if name in self._sleep_saved_draft_buffers:
+                        buffer.data.copy_(self._sleep_saved_draft_buffers[name].data)
             self._sleep_saved_draft_buffers = {}
 
         if tags is None or "kv_cache" in tags:
