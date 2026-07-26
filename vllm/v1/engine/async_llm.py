@@ -44,6 +44,7 @@ from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.executor import Executor
+from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
 from vllm.v1.metrics.loggers import (
     StatLoggerFactory,
     StatLoggerManager,
@@ -942,6 +943,12 @@ class AsyncLLM(EngineClient):
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(0, 0)
 
+    async def checkpoint_prepare(self) -> None:
+        await self.collective_rpc("checkpoint_prepare")
+
+    async def checkpoint_restore(self) -> None:
+        await self.collective_rpc("checkpoint_restore")
+
     async def is_sleeping(self) -> bool:
         return await self.engine_core.is_sleeping_async()
 
@@ -1040,6 +1047,15 @@ class AsyncLLM(EngineClient):
             self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
         finally:
             set_scaling_elastic_ep(False)
+
+    async def handle_fault(
+        self, fault_tolerance_request: FaultToleranceRequest
+    ) -> FaultToleranceResult:
+        """send fault tolerance instruction to the engine"""
+        return await self.engine_core.handle_fault(fault_tolerance_request)
+
+    async def get_status(self):
+        return await self.engine_core.get_status()
 
     @property
     def is_running(self) -> bool:
