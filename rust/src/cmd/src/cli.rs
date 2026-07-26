@@ -213,6 +213,11 @@ pub struct SharedRuntimeArgs {
     #[arg(long)]
     #[serde(default)]
     pub language_model_only: bool,
+    /// If set, only media URLs that belong to these domains can be used for
+    /// multi-modal inputs.
+    #[arg(long, num_args = 1..)]
+    #[serde(default)]
+    pub allowed_media_domains: Option<Vec<String>>,
     /// Maximum number of log probabilities to return when `logprobs` is
     /// specified in sampling parameters. `-1` means no cap.
     #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
@@ -487,6 +492,7 @@ impl SharedRuntimeArgs {
             reasoning_parser: self.reasoning_parser,
             renderer: self.renderer,
             language_model_only: self.language_model_only,
+            allowed_media_domains: self.allowed_media_domains,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
@@ -541,6 +547,7 @@ impl SharedRuntimeArgs {
             reasoning_parser: self.reasoning_parser,
             renderer: self.renderer,
             language_model_only: self.language_model_only,
+            allowed_media_domains: self.allowed_media_domains,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
             limit_mm_per_prompt: self.limit_mm_per_prompt,

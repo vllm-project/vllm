@@ -265,6 +265,7 @@ fn multimodal_backend() -> Arc<dyn ChatTextBackend> {
         },
         Arc::new(TestTokenizer::new().with_regular_token("<|image_pad|>", QWEN_IMAGE_TOKEN_ID)),
         Default::default(),
+        Default::default(),
     )
     .expect("load multimodal info")
     .expect("qwen multimodal info is registered");

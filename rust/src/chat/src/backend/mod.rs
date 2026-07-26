@@ -8,7 +8,7 @@ use serde_json::Value;
 use vllm_text::{DynTextBackend, TextBackend};
 
 use crate::error::Result;
-use crate::multimodal::{MmLimitPerPrompt, MultimodalModelInfo};
+use crate::multimodal::{MediaAccessOptions, MmLimitPerPrompt, MultimodalModelInfo};
 use crate::output::DynChatOutputProcessor;
 use crate::renderer::DynChatRenderer;
 use crate::request::ChatRequest;
@@ -77,6 +77,8 @@ pub struct LoadModelBackendsOptions {
     /// Maximum number of input items allowed per prompt for each modality.
     /// Unspecified modalities are unlimited.
     pub limit_mm_per_prompt: MmLimitPerPrompt,
+    /// Restrictions on where multimodal inputs may be loaded from.
+    pub media_access: MediaAccessOptions,
 }
 
 /// Shared backends loaded from a model id.

@@ -342,6 +342,13 @@ struct PreparedItem {
     uuid: Option<String>,
 }
 
+/// Server-level restrictions on where media inputs may be loaded from.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MediaAccessOptions {
+    /// Hosts that remote media URLs must belong to. `None` allows any host.
+    pub allowed_media_domains: Option<Vec<String>>,
+}
+
 impl MultimodalModelInfo {
     /// Load and resolve multimodal support from model files.
     ///
@@ -354,6 +361,7 @@ impl MultimodalModelInfo {
         files: MultimodalConfigFiles<'_>,
         tokenizer: DynTokenizer,
         limit_mm_per_prompt: MmLimitPerPrompt,
+        media_access: MediaAccessOptions,
     ) -> Result<Option<Self>> {
         let config = match files.config {
             Some(path) => {
@@ -391,6 +399,7 @@ impl MultimodalModelInfo {
             preprocessor_config,
             video_preprocessor_config,
             limit_mm_per_prompt,
+            media_access,
         )
     }
 
@@ -401,6 +410,7 @@ impl MultimodalModelInfo {
         preprocessor_config: PreProcessorConfig,
         video_preprocessor_config: PreProcessorConfig,
         limit_mm_per_prompt: MmLimitPerPrompt,
+        media_access: MediaAccessOptions,
     ) -> Result<Option<Self>> {
         let (image, video) = Self::resolve_vision_lanes(
             &context,
@@ -420,7 +430,10 @@ impl MultimodalModelInfo {
 
         let media_connector = Arc::new(MediaConnector::new(
             reqwest_0_13::Client::new(),
-            MediaConnectorConfig::default(),
+            MediaConnectorConfig {
+                allowed_domains: media_access.allowed_media_domains,
+                ..Default::default()
+            },
         )?);
 
         Ok(Some(Self {
@@ -892,6 +905,7 @@ mod tests {
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
             limit_mm_per_prompt,
+            MediaAccessOptions::default(),
         )
         .unwrap()
         .unwrap_or_else(|| panic!("{model_type} multimodal support should resolve"))

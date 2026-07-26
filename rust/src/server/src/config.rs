@@ -182,6 +182,11 @@ pub struct Config {
     /// Disable frontend-side multimodal preprocessing and render the model as
     /// language-only.
     pub language_model_only: bool,
+    // TODO: add `allowed_local_media_path` once `llm-multimodal` routes `file:`
+    // URLs to `MediaSource::File`; today the guarded local-file path is
+    // unreachable, so the option would be silently inert.
+    /// Hosts that remote media URLs must belong to. `None` allows any host.
+    pub allowed_media_domains: Option<Vec<String>>,
     /// Server-default chat template override, as a file path or inline
     /// template.
     pub chat_template: Option<String>,

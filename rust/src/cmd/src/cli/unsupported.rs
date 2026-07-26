@@ -194,11 +194,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub allowed_local_media_path: Option<Unsupported>,
 
-    /// If set, only media URLs that belong to this domain can be used for
-    /// multi-modal inputs.
-    #[arg(long)]
-    pub allowed_media_domains: Option<Unsupported>,
-
     /// The specific revision to use for the tokenizer on the Hugging Face Hub.
     /// It can be a branch name, a tag name, or a commit id. If unspecified,
     /// will use the default version.
