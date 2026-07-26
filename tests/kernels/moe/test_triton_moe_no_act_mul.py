@@ -11,12 +11,21 @@ import pytest
 import torch
 
 from tests.kernels.moe.utils import make_dummy_moe_config
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.activation import (
+    MoEActivation,
+    apply_moe_activation,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.platforms import current_platform
+
+_ON_GFX90A = False
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx90a
+
+    _ON_GFX90A = on_gfx90a()
 
 # Test parameters
 M_SIZES = [1, 16, 64]
@@ -209,3 +218,37 @@ def test_adjust_n_for_activation():
     assert experts.adjust_N_for_activation(N, MoEActivation.SILU_NO_MUL) == N
     assert experts.adjust_N_for_activation(N, MoEActivation.GELU_NO_MUL) == N
     assert experts.adjust_N_for_activation(N, MoEActivation.RELU2_NO_MUL) == N
+
+
+@pytest.mark.skipif(not _ON_GFX90A, reason="Requires AMD gfx90a")
+@torch.inference_mode()
+def test_gfx90a_fused_relu2() -> None:
+    # Exercise the production dispatch with Nemotron-3's intermediate width.
+    # This size is above the measured crossover in can_use_fused_relu2.
+    input = torch.randn(11264, 2688, dtype=torch.bfloat16, device="cuda")
+    expected_input = torch.relu(input)
+    expected_output = torch.square(expected_input)
+    output = torch.empty_like(input)
+
+    apply_moe_activation(MoEActivation.RELU2_NO_MUL, output, input)
+
+    torch.testing.assert_close(input, expected_input, rtol=0, atol=0)
+    torch.testing.assert_close(output, expected_output, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not _ON_GFX90A, reason="Requires AMD gfx90a")
+@torch.inference_mode()
+def test_gfx90a_fused_relu2_supports_only_measured_layout() -> None:
+    from vllm.model_executor.layers.fused_moe.rocm_gfx90a_activation import (
+        _MIN_RELU2_ELEMENTS,
+        can_use_fused_relu2,
+    )
+
+    input = torch.empty(_MIN_RELU2_ELEMENTS, dtype=torch.bfloat16, device="cuda")
+    output = torch.empty_like(input)
+
+    assert can_use_fused_relu2(output, input)
+    assert not can_use_fused_relu2(input, input)
+    assert not can_use_fused_relu2(output, input.float())
+    assert not can_use_fused_relu2(output, input[::2])
+    assert not can_use_fused_relu2(output, input[: _MIN_RELU2_ELEMENTS - 1])
