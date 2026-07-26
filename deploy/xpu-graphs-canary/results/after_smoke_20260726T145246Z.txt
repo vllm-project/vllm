@@ -1,0 +1,4 @@
+short1 '4'
+short2 '4'
+long "Rivers flow through valleys and across landscapes, carrying water from the mountains to the sea. They are essential for supporting diverse ecosystems and providing resources for human activities such as irrigation, transportation, and recreation. Rivers also play a crucial role in shaping the Earth's surface over time through erosion and sediment deposition."
+SMOKE_OK

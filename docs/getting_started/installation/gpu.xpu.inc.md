@@ -34,6 +34,14 @@ vLLM initially supports basic model inference and serving on Intel GPU platform.
       `VLLM_XPU_FUSED_MOE_NATIVE_BLOCK_FP8=0`, or
       `VLLM_XPU_FUSED_MOE_USE_REF=1` (force the Python reference expert
       loop for A/B).
+    - **XPU Graph canary:** set `VLLM_XPU_ENABLE_XPU_GRAPH=1`, omit
+      `--enforce-eager`, use `--attention-backend TRITON_ATTN` and
+      `-cc.cudagraph_mode=PIECEWISE`. By default
+      `VLLM_XPU_GRAPH_FORCE_PIECEWISE=1` clamps full graph modes to
+      PIECEWISE so FlashAttention stays outside the SYCL graph (FA + FULL
+      crashes with `work_group_scratch_memory`). Set
+      `VLLM_XPU_GRAPH_FORCE_PIECEWISE=0` only for intentional FULL /
+      TRITON experiments.
 
 --8<-- [end:requirements]
 --8<-- [start:set-up-using-python]

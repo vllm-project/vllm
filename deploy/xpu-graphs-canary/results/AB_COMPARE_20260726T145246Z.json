@@ -1,0 +1,25 @@
+{
+  "stamp": "20260726T145246Z",
+  "model": "Qwen/Qwen2.5-Coder-7B-Instruct",
+  "before_median_tok_s": 142.55,
+  "after_median_tok_s": 143.4,
+  "delta_pct": 0.596,
+  "before_runs": [
+    142.83,
+    142.27,
+    142.55
+  ],
+  "after_runs": [
+    143.4,
+    143.46,
+    143.36
+  ],
+  "before_smoke_ok": true,
+  "after_smoke_ok": true,
+  "before_failed_requests": 0,
+  "after_failed_requests": 0,
+  "note": "before=eager+TRITON graphs=0; after=graphs=1+TRITON+PIECEWISE; hostPath overlay of feature branch on kris-fork-577e1a932",
+  "image_base": "docker.io/hal/vllm-xpu:kris-fork-577e1a932",
+  "src_overlay": "/home/kclark/src/vllm-graphs-canary",
+  "build": "thin overlay (not full Dockerfile.xpu rebuild)"
+}
