@@ -692,36 +692,67 @@ class MambaStateCopyFuncCalculator:
 
 
 def _ucache_kernel_available() -> tuple[bool, str]:
-    """Init-time check that the ucache CuTeDSL kernel module is loadable.
+    """Init-time check that the ucache CuTeDSL kernel module is loadable
+    AND is a ring build (RING_SLOTS == 32).
 
     Mirrors load_ucache_kernel_module's resolution order without importing
     (and JIT-compiling) the module: an explicit VLLM_GDN_UCACHE_MODULE path
-    must exist, else flashinfer.gdn_kernels must provide the module.
-    """
-    path = os.environ.get("VLLM_GDN_UCACHE_MODULE")
-    if path:
-        return (
-            os.path.isfile(path),
-            f"VLLM_GDN_UCACHE_MODULE points to a missing file: {path!r}",
-        )
+    must exist, else flashinfer.gdn_kernels must provide the module. The
+    ring check scans the module SOURCE for the RING_SLOTS constant so that
+    a pre-ring kernel fails here, at engine init, rather than at the first
+    speculative-decode step mid-serving (load_ucache_kernel_module re-checks
+    the imported module authoritatively on first use)."""
     import importlib.util
 
-    try:
-        found = (
-            importlib.util.find_spec(
+    path = os.environ.get("VLLM_GDN_UCACHE_MODULE")
+    if path:
+        if not os.path.isfile(path):
+            return (
+                False,
+                f"VLLM_GDN_UCACHE_MODULE points to a missing file: {path!r}",
+            )
+        src_path = path
+    else:
+        try:
+            spec = importlib.util.find_spec(
                 "flashinfer.gdn_kernels.gdn_decode_bf16_wy_ucache_flush"
             )
-            is not None
-        )
-    except ModuleNotFoundError:
-        found = False
-    return (
-        found,
-        "ucache CuTeDSL kernel module not found: set VLLM_GDN_UCACHE_MODULE="
-        "/abs/path/to/gdn_decode_bf16_wy_ucache_flush.py or install a "
-        "FlashInfer build that provides "
-        "flashinfer.gdn_kernels.gdn_decode_bf16_wy_ucache_flush",
-    )
+        except ModuleNotFoundError:
+            spec = None
+        if spec is None:
+            return (
+                False,
+                "ucache CuTeDSL kernel module not found: set "
+                "VLLM_GDN_UCACHE_MODULE=/abs/path/to/"
+                "gdn_decode_bf16_wy_ucache_flush.py or install a FlashInfer "
+                "build that provides "
+                "flashinfer.gdn_kernels.gdn_decode_bf16_wy_ucache_flush",
+            )
+        src_path = spec.origin or ""
+
+    if src_path and os.path.isfile(src_path):
+        import re
+
+        try:
+            with open(src_path, encoding="utf-8", errors="replace") as f:
+                src = f.read()
+        except OSError:
+            src = ""
+        if src:
+            m = re.search(
+                r"^RING_SLOTS(?:\s*:\s*\w+)?\s*=\s*(\d+)", src, re.MULTILINE
+            )
+            ring_slots = int(m.group(1)) if m else None
+            if ring_slots != 32:
+                return (
+                    False,
+                    f"kernel module at {src_path!r} is not a ring build "
+                    f"(RING_SLOTS={ring_slots}, need 32): pre-ring ucache "
+                    "kernels are incompatible with this backend's "
+                    "Triton-ring cursor model — update the FlashInfer "
+                    "ucache kernel",
+                )
+    return (True, "")
 
 
 def resolve_gdn_spec_backend(vllm_config) -> str:

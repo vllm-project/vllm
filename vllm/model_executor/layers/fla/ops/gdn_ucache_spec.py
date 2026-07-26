@@ -33,7 +33,6 @@ from typing import Any
 import torch
 
 from vllm.logger import init_logger
-from vllm.triton_utils import tl, triton
 
 logger = init_logger(__name__)
 
@@ -44,9 +43,6 @@ UCACHE_W_RING = 16
 UCACHE_RING_SLOTS = 32
 
 _KMOD: Any = None
-
-# Reserved null page id (mirrors vllm/v1/attention/backends/utils.py).
-NULL_BLOCK_ID = 0
 
 # Padded-row sentinel: the kernel retires the whole CTA at entry for rows
 # with state index < 0 (pad-skip), so padded rows cost ~nothing instead of a
@@ -101,14 +97,21 @@ def load_ucache_kernel_module(strided_qkv: bool = True):
         from flashinfer.gdn_kernels import (  # type: ignore[import-not-found]
             gdn_decode_bf16_wy_ucache_flush as mod,
         )
-    assert mod.W_RING == UCACHE_W_RING, (
-        f"ucache kernel W_RING={mod.W_RING} != expected {UCACHE_W_RING}"
-    )
-    assert getattr(mod, "RING_SLOTS", None) == UCACHE_RING_SLOTS, (
-        f"ucache kernel RING_SLOTS={getattr(mod, 'RING_SLOTS', None)} != "
-        f"expected {UCACHE_RING_SLOTS} (pre-ring kernel builds are "
-        "incompatible with this backend's Triton-ring cursor model)"
-    )
+    # RuntimeError (not assert): stripped asserts under `python -O` would
+    # let a pre-ring flat-layout kernel run against ring cursors and
+    # silently corrupt state. resolve_gdn_spec_backend pre-screens this at
+    # engine init by scanning the module source; this is the authoritative
+    # post-import check.
+    if mod.W_RING != UCACHE_W_RING or (
+        getattr(mod, "RING_SLOTS", None) != UCACHE_RING_SLOTS
+    ):
+        raise RuntimeError(
+            f"ucache kernel module incompatible: W_RING={mod.W_RING} "
+            f"(expected {UCACHE_W_RING}), "
+            f"RING_SLOTS={getattr(mod, 'RING_SLOTS', None)} "
+            f"(expected {UCACHE_RING_SLOTS}). Pre-ring kernel builds are "
+            "incompatible with this backend's Triton-ring cursor model."
+        )
     logger.info_once(
         "GDN spec backend flashinfer_ucache: loaded kernel module from %s "
         "(strided_qkv=%s)",
@@ -335,63 +338,7 @@ def gdn_ucache_spec_verify(
     return out.reshape(B * T, HV, V)[:real_total]
 
 
-@triton.jit
-def _commit_gdn_ucache_hist_kernel(
-    hist_ptr,  # [num_gpu_blocks] int32, block-keyed
-    num_accepted_ptr,  # [n_rows] int32 (previous step's acceptance)
-    sbi_ptr,  # base ptr of spec_state_indices_tensor[:, 0]
-    first_decode_ptr,  # [n_rows] int8 (dummy when HAS_RESET == False)
-    n_rows,
-    sbi_stride,
-    FLUSH_MIN: tl.constexpr,
-    HAS_RESET: tl.constexpr,
-    NULL_BLOCK: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    offs = tl.arange(0, BLOCK)
-    m = offs < n_rows
-    blk = tl.load(sbi_ptr + offs * sbi_stride, mask=m, other=NULL_BLOCK).to(
-        tl.int64
-    )
-    valid = m & (blk > NULL_BLOCK)
-    old = tl.load(hist_ptr + blk, mask=valid, other=0).to(tl.int32)
-    acc = tl.load(num_accepted_ptr + offs, mask=valid, other=0).to(tl.int32)
-    # A row whose previous verify launched with hist >= FLUSH_MIN flushed
-    # in-kernel (every layer): its ring restarted at [0, T), so committed
-    # history restarts at 0 before adding the accepted count.
-    new = tl.where(old >= FLUSH_MIN, 0, old) + acc
-    if HAS_RESET:
-        fd = tl.load(first_decode_ptr + offs, mask=valid, other=0).to(tl.int32)
-        new = tl.where(fd != 0, 0, new)  # prefill->decode / block-recycle
-    tl.store(hist_ptr + blk, new, mask=valid)
-
-
-def commit_gdn_ucache_hist(
-    hist_len: torch.Tensor,  # [num_gpu_blocks] int32, block-keyed
-    num_accepted_tokens: torch.Tensor,  # [n_rows] int32
-    state_indices: torch.Tensor,  # [n_rows] view of block ids (may be strided)
-    first_decode: torch.Tensor | None,  # [n_rows] int8 or None
-    *,
-    flush_min: int,
-) -> None:
-    """Eager (outside-capture) hist commit; mirrors commit_gdn_replayssm_spec.
-
-    Invariant afterwards: hist <= (flush_min - 1) + T == W_RING, the kernel's
-    legal [0, W_RING] range.
-    """
-    n_rows = state_indices.shape[0]
-    if n_rows == 0:
-        return
-    BLOCK = max(triton.next_power_of_2(n_rows), 16)
-    _commit_gdn_ucache_hist_kernel[(1,)](
-        hist_len,
-        num_accepted_tokens,
-        state_indices,
-        first_decode if first_decode is not None else hist_len,
-        n_rows,
-        state_indices.stride(0),
-        FLUSH_MIN=flush_min,
-        HAS_RESET=first_decode is not None,
-        NULL_BLOCK=NULL_BLOCK_ID,
-        BLOCK=BLOCK,
-    )
+# (The legacy block-keyed hist-only commit, commit_gdn_ucache_hist, was
+# removed: the backend shares the Triton backend's cursor machinery —
+# commit_gdn_replayssm_spec / reset_gdn_replayssm_spec_cursors — which
+# commits write_pos AND cache_base together.)

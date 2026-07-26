@@ -3,20 +3,26 @@
 """Integration tests for the flashinfer_ucache GDN spec-decode backend.
 
 Covers what is NEW in the vLLM integration (the kernel's own numerics are
-anchored by the kernel repo's fp32-reference gates: _ucache_check.py,
-_ucache_flush_check.py, _ucache_g3_ring.py):
+anchored by the kernel repo's fp32-reference suite, tests/gdn/):
 
-1. commit_gdn_ucache_hist semantics (flush restart folded into commit,
-   first-decode reset, null-block masking).
-2. Intra-step shared hist_len: with restart_hist_on_flush=False, N "layers"
-   sharing one hist tensor within a step all see the same P (the bug the
-   flag exists to prevent).
-3. Protocol equivalence: the vLLM bookkeeping (builder-owned commit,
-   restart_hist_on_flush=False) must produce bit-identical outputs and
-   checkpoints to the kernel-repo protocol (hist += accepted each step,
-   wrapper masked_fill_ restart) over many steps crossing several flushes.
+1. Shared Triton cursor semantics (commit_gdn_replayssm_spec /
+   reset_gdn_replayssm_spec_cursors driving the ucache kernel): flush rows
+   slide cache_base past the folded window mod RING_SLOTS, first-decode
+   reset clears BOTH cursors, null-block rows are never touched.
+2. Intra-step shared cursors: N "layers" reading one gathered
+   (hist_len, cache_base) pair within a step all see the same window (the
+   kernel treats cursors as read-only).
+3. Protocol equivalence: the vLLM bookkeeping (block-keyed cursors +
+   commit_gdn_replayssm_spec + gather, restart_hist_on_flush=False) must
+   produce bit-identical outputs, checkpoints, and window origins to the
+   kernel-repo standalone protocol (request-keyed cursors, wrapper commit
+   via restart_hist_on_flush=True) over many steps crossing several
+   flushes and ring wrap-arounds.
 4. Strided packed-qkv slices (production layout) match dense inputs.
 5. Null-page rows only scribble the reserved page 0.
+6. Block-strided (vLLM paged) pools match dense pools, incl. past 2^31
+   elements (64-bit addressing).
+7. Padded rows (negative sentinel) retire their CTAs at kernel entry.
 
 Run inside the vLLM container with:
   VLLM_GDN_UCACHE_MODULE=<abs path to gdn_decode_bf16_wy_ucache_flush.py>
@@ -27,15 +33,26 @@ import os
 import pytest
 import torch
 
+# This suite allocates bf16 checkpoint/ring pools; pin the kernel module's
+# env-selected dtypes to match BEFORE it loads (the adapter defaults both to
+# fp16 for serving). Must run before the first load_ucache_kernel_module().
+os.environ["GDN_UCACHE_STATE_DTYPE"] = "bf16"
+os.environ["GDN_UCACHE_RING_DTYPE"] = "bf16"
+
+from vllm.model_executor.layers.fla.ops.gdn_replayssm_spec_decode import (
+    commit_gdn_replayssm_spec,
+    reset_gdn_replayssm_spec_cursors,
+)
 from vllm.model_executor.layers.fla.ops.gdn_ucache_spec import (
+    UCACHE_RING_SLOTS,
     UCACHE_W_RING,
-    commit_gdn_ucache_hist,
     load_ucache_kernel_module,
     ucache_flush_min,
 )
 
 DEV = "cuda"
 HK, HV, K, V = 16, 64, 128, 128  # qwen122b geometry
+RING = UCACHE_RING_SLOTS  # 32
 
 
 def _kmod():
@@ -80,20 +97,37 @@ def _pools(num_blocks, seed=11):
         )
         * 0.05
     ).to(torch.bfloat16)
-    k_cache = torch.zeros(
-        num_blocks, HK, UCACHE_W_RING, K, device=DEV, dtype=torch.bfloat16
-    )
-    u_cache = torch.zeros(
-        num_blocks, HV, UCACHE_W_RING, V, device=DEV, dtype=torch.bfloat16
-    )
-    g_cache = torch.zeros(
-        num_blocks, HV, UCACHE_W_RING, device=DEV, dtype=torch.float32
-    )
+    k_cache = torch.zeros(num_blocks, HK, RING, K, device=DEV, dtype=torch.bfloat16)
+    u_cache = torch.zeros(num_blocks, HV, RING, V, device=DEV, dtype=torch.bfloat16)
+    g_cache = torch.zeros(num_blocks, HV, RING, device=DEV, dtype=torch.float32)
     return ckpt, k_cache, u_cache, g_cache
 
 
+def _cursors(n_blocks):
+    """Block-keyed cursor triple, exactly as the metadata builder allocates."""
+    wp = torch.zeros(n_blocks, dtype=torch.int32, device=DEV)
+    cb = torch.zeros(n_blocks, dtype=torch.int32, device=DEV)
+    fl = torch.zeros(n_blocks, dtype=torch.int8, device=DEV)
+    return wp, cb, fl
+
+
+def _commit(wp, cb, fl, acc, sbi, T):
+    """The builder's per-step commit with its exact parameters
+    (L = buffer_len + T = W_RING + T, physical ring = next_pow2(L) = 32)."""
+    commit_gdn_replayssm_spec(
+        wp, cb, fl, acc, sbi,
+        max_cache_len=UCACHE_W_RING + T,
+        max_spec_len=T,
+        cache_buf_len=RING,
+    )
+
+
+def _gather(t, sbi):
+    return t.index_select(0, sbi.to(torch.int64)).contiguous()
+
+
 def _call(mod, A_log, dt_bias, q, k, v, a, b, ckpt, sbi, kc, uc, gc, hist,
-          T, restart):
+          base, T, restart):
     return mod.gated_delta_rule_mtp_ucache_flush(
         A_log=A_log,
         a=a,
@@ -108,6 +142,7 @@ def _call(mod, A_log, dt_bias, q, k, v, a, b, ckpt, sbi, kc, uc, gc, hist,
         u_cache=uc,
         g_cache=gc,
         hist_len=hist,
+        cache_base=base,
         scale=K**-0.5,
         use_qk_l2norm_in_kernel=True,
         output=None,
@@ -116,68 +151,82 @@ def _call(mod, A_log, dt_bias, q, k, v, a, b, ckpt, sbi, kc, uc, gc, hist,
     )
 
 
-def test_commit_kernel_semantics():
+def test_shared_cursor_commit_semantics():
+    """The shared Triton commit drives the ucache backend: flushed rows
+    (is_flush armed == the kernel just folded, wp >= flush_min) slide
+    cache_base past the folded window mod 32 and restart wp at the accepted
+    count; verify rows just grow wp; first-decode reset clears BOTH cursors;
+    the null block is never touched."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
+    T = 4
     n_blocks = 32
-    flush_min = ucache_flush_min(4)  # 13
-    hist = torch.zeros(n_blocks, dtype=torch.int32, device=DEV)
-    # rows -> blocks 3, 5, 7, 9 (block 0 = NULL among indices)
-    sbi = torch.tensor([3, 5, 7, 0, 9], dtype=torch.int32, device=DEV)
-    hist[3] = 6            # below threshold: 6 + acc
-    hist[5] = 13           # at threshold: flushed last step -> acc
-    hist[7] = 16           # max legal: flushed -> acc
-    hist[9] = 2            # first-decode row: reset to 0 regardless
-    hist[0] = 99           # null block must never be touched
+    wp, cb, fl = _cursors(n_blocks)
+    # rows -> blocks 3, 5, 7, 9 (+ a null row on block 0)
+    sbi = torch.tensor([3, 5, 7, 9, 0], dtype=torch.int32, device=DEV)
+    wp[3], fl[3] = 6, 0            # verify row: 6 + acc
+    wp[5], fl[5] = 13, 1           # flushed at threshold: base += 13, wp = acc
+    wp[7], cb[7], fl[7] = 16, 20, 1  # flushed at max, wrapping base: (20+16)&31
+    wp[9], fl[9] = 12, 0           # verify row landing ON the arm point
+    wp[0] = 99                     # null block must never be touched
     acc = torch.tensor([3, 2, 4, 1, 4], dtype=torch.int32, device=DEV)
-    first_decode = torch.tensor([0, 0, 0, 0, 1], dtype=torch.int8, device=DEV)
-    commit_gdn_ucache_hist(hist, acc, sbi, first_decode, flush_min=flush_min)
+    _commit(wp, cb, fl, acc, sbi, T)
     torch.cuda.synchronize()
-    assert hist[3].item() == 9      # 6 + 3
-    assert hist[5].item() == 2      # flush restart + 2
-    assert hist[7].item() == 4      # flush restart + 4
-    assert hist[9].item() == 0      # first-decode reset
-    assert hist[0].item() == 99     # null untouched
-    assert (hist[1:] <= UCACHE_W_RING).all()  # non-null blocks only
+    assert wp[3].item() == 9 and cb[3].item() == 0 and fl[3].item() == 0
+    assert wp[5].item() == 2 and cb[5].item() == 13 and fl[5].item() == 0
+    assert wp[7].item() == 4 and cb[7].item() == (20 + 16) % RING  # == 4
+    assert fl[7].item() == 0
+    # wp 12+1=13 == flush_min(4): is_flush arms for the NEXT step
+    assert wp[9].item() == 13 and fl[9].item() == 1
+    assert wp[0].item() == 99 and cb[0].item() == 0  # null untouched
+    assert (wp[1:] <= UCACHE_W_RING).all()
+    assert (cb >= 0).all() and (cb < RING).all()
+
+    # first-decode reset (prefill->decode handoff) clears BOTH cursors
+    do_reset = torch.tensor([0, 0, 0, 1, 0], dtype=torch.int8, device=DEV)
+    reset_gdn_replayssm_spec_cursors(
+        wp, cb, fl, do_reset, sbi,
+        max_cache_len=UCACHE_W_RING + T, max_spec_len=T,
+    )
+    torch.cuda.synchronize()
+    assert wp[9].item() == 0 and cb[9].item() == 0 and fl[9].item() == 0
+    assert wp[5].item() == 2 and cb[5].item() == 13  # others untouched
 
 
 @pytest.mark.parametrize("T", [4, 8])
-def test_intra_step_shared_hist_and_flag(T):
-    """Two 'layers' share one hist tensor in a step; with restart=False the
-    second layer must see the same P and produce the same fold as the first
-    (independent pools). With restart=True the second layer would see P=0."""
+def test_intra_step_shared_cursors(T):
+    """Two 'layers' share one gathered (hist, base) pair in a step; the
+    kernel treats cursors as read-only, so both layers must see the same
+    window and produce identical outputs and folds (independent pools)."""
     mod = _kmod()
     A_log, dt_bias = _gating_params()
     B, n_blocks = 3, 8
-    flush_min = ucache_flush_min(T)
+    fm = ucache_flush_min(T)
     q, k, v, a, b = _rand_inputs(B, T, seed=23)
     sbi = torch.tensor([1, 4, 6], dtype=torch.int32, device=DEV)
 
-    hist_master = torch.tensor(
-        [flush_min, 5, flush_min + 1], dtype=torch.int32, device=DEV
-    )
-    # Two independent "layers" with identical pools and inputs.
-    outs, ckpts, hists = [], [], []
+    hist_master = torch.tensor([fm, 5, fm + 1], dtype=torch.int32, device=DEV)
+    base_master = torch.tensor([0, 28, 5], dtype=torch.int32, device=DEV)
     hist = hist_master.clone()
-    # Pre-fill rings identically for both layers so P>0 rows have history.
-    for layer in range(2):
+    base = base_master.clone()
+    outs, ckpts = [], []
+    for _layer in range(2):
         ckpt, kc, uc, gc = _pools(n_blocks, seed=31)
-        # Prime the ring: run one step from P=0 (appends T entries), then
-        # set hist to the master values for the step under test.
+        # Prime the ring (appends T entries from P=0), then run the step
+        # under test with the SHARED master cursors.
         hist0 = torch.zeros(B, dtype=torch.int32, device=DEV)
+        base0 = torch.zeros(B, dtype=torch.int32, device=DEV)
         _call(mod, A_log, dt_bias, q, k, v, a, b, ckpt, sbi, kc, uc, gc,
-              hist0, T, restart=False)
-        hist_layer = hist if layer == 0 else hist  # SHARED tensor
+              hist0, base0, T, restart=False)
         out = _call(mod, A_log, dt_bias, q, k, v, a, b, ckpt, sbi, kc, uc,
-                    gc, hist_layer, T, restart=False)
+                    gc, hist, base, T, restart=False)
         torch.cuda.synchronize()
         outs.append(out.clone())
         ckpts.append(ckpt.clone())
-        hists.append(hist_layer.clone())
-    # hist untouched by both calls
-    assert torch.equal(hists[0], hist_master)
-    assert torch.equal(hists[1], hist_master)
-    # both layers saw identical P -> identical outputs and identical folds
+    # cursors untouched by both calls (restart=False -> kernel read-only)
+    assert torch.equal(hist, hist_master)
+    assert torch.equal(base, base_master)
+    # both layers saw identical windows -> identical outputs and folds
     assert torch.equal(outs[0], outs[1])
     assert torch.equal(ckpts[0], ckpts[1])
 
@@ -185,50 +234,56 @@ def test_intra_step_shared_hist_and_flag(T):
 @pytest.mark.parametrize("T", [4])
 @pytest.mark.parametrize("nreq", [1, 3, 8])
 def test_protocol_equivalence_multi_step(T, nreq):
-    """vLLM bookkeeping (commit kernel + restart=False) vs kernel-repo
-    bookkeeping (hist += accepted + wrapper restart) over 24 steps crossing
-    several flush cycles: outputs and checkpoints must match bit-for-bit."""
+    """vLLM bookkeeping (block-keyed cursors + shared Triton commit +
+    gather, restart=False) vs kernel-repo standalone bookkeeping
+    (request-keyed cursors, wrapper commit via restart=True) over 24 steps
+    crossing several flush cycles and ring wraps: outputs, checkpoints, and
+    window origins must match bit-for-bit."""
     mod = _kmod()
     A_log, dt_bias = _gating_params()
     n_blocks = 16
-    flush_min = ucache_flush_min(T)
     # permuted, non-trivial block assignment (block 0 reserved)
-    perm = torch.randperm(n_blocks - 1)[:nreq] + 1
-    sbi = perm.to(torch.int32).to(DEV)
+    perm = torch.randperm(n_blocks - 1, generator=torch.Generator().manual_seed(13))
+    sbi = (perm[:nreq] + 1).to(torch.int32).to(DEV)
 
     ckpt_a, kc_a, uc_a, gc_a = _pools(n_blocks, seed=41)
     ckpt_b, kc_b, uc_b, gc_b = _pools(n_blocks, seed=41)
 
-    # Protocol A (vLLM): block-keyed master + commit kernel.
-    hist_blocks = torch.zeros(n_blocks, dtype=torch.int32, device=DEV)
-    # Protocol B (kernel repo): request-keyed hist, wrapper restart.
+    # Protocol A (vLLM): block-keyed cursors + shared Triton commit.
+    wp, cb, fl = _cursors(n_blocks)
+    # Protocol B (kernel repo): request-keyed cursors, wrapper commit.
     hist_req = torch.zeros(nreq, dtype=torch.int32, device=DEV)
+    base_req = torch.zeros(nreq, dtype=torch.int32, device=DEV)
 
     gen = torch.Generator().manual_seed(97)
     prev_acc = torch.zeros(nreq, dtype=torch.int32, device=DEV)
-    first = torch.zeros(nreq, dtype=torch.int8, device=DEV)
     for step in range(24):
         q, k, v, a, b = _rand_inputs(nreq, T, seed=1000 + step)
-        # A: commit (prev step's acceptance), gather, call with restart=False
-        commit_gdn_ucache_hist(
-            hist_blocks, prev_acc, sbi, first if step == 0 else None,
-            flush_min=flush_min,
-        )
-        gathered = hist_blocks.index_select(0, sbi.to(torch.int64)).contiguous()
+        # A: commit the previous step's acceptance, gather, run restart=False
+        _commit(wp, cb, fl, prev_acc, sbi, T)
+        hd = _gather(wp, sbi)
+        bd = _gather(cb, sbi)
         out_a = _call(mod, A_log, dt_bias, q, k, v, a, b, ckpt_a, sbi,
-                      kc_a, uc_a, gc_a, gathered, T, restart=False)
-        # B: kernel-repo protocol on request-keyed hist
+                      kc_a, uc_a, gc_a, hd, bd, T, restart=False)
+        # B: kernel-repo protocol; the wrapper commits flushed rows itself
+        # DURING the call (A's builder slides at the NEXT step's commit), so
+        # the phase-aligned comparison point is B's PRE-call cursors.
+        hist_b_pre = hist_req.clone()
+        base_b_pre = base_req.clone()
         out_b = _call(mod, A_log, dt_bias, q, k, v, a, b, ckpt_b, sbi,
-                      kc_b, uc_b, gc_b, hist_req, T, restart=True)
+                      kc_b, uc_b, gc_b, hist_req, base_req, T, restart=True)
         torch.cuda.synchronize()
         assert torch.equal(out_a, out_b), f"outputs diverged at step {step}"
         assert torch.equal(ckpt_a, ckpt_b), f"checkpoints diverged at step {step}"
-        assert (gathered <= UCACHE_W_RING).all()
+        assert torch.equal(hd, hist_b_pre), f"windows diverged at step {step}"
+        assert torch.equal(bd, base_b_pre), f"window origins diverged at step {step}"
+        assert (hd <= UCACHE_W_RING).all()
+        assert (bd >= 0).all() and (bd < RING).all()
         acc = torch.randint(1, T + 1, (nreq,), generator=gen).to(
             torch.int32
         ).to(DEV)
         prev_acc = acc
-        hist_req += acc  # protocol B commit (wrapper already restarted)
+        hist_req += acc  # protocol B commit (wrapper already slid the base)
 
 
 def test_strided_packed_qkv_matches_dense():
@@ -250,8 +305,9 @@ def test_strided_packed_qkv_matches_dense():
     for (qq, kk, vv) in [(q, k, v), (qs, ks, vs)]:
         ckpt, kc, uc, gc = _pools(n_blocks, seed=61)
         hist = torch.zeros(B, dtype=torch.int32, device=DEV)
+        base = torch.zeros(B, dtype=torch.int32, device=DEV)
         out = _call(mod, A_log, dt_bias, qq, kk, vv, a, b, ckpt, sbi,
-                    kc, uc, gc, hist, T, restart=False)
+                    kc, uc, gc, hist, base, T, restart=False)
         torch.cuda.synchronize()
         outs.append(out.clone())
     assert torch.equal(outs[0], outs[1])
@@ -267,13 +323,15 @@ def test_null_page_rows_only_touch_page_zero():
     ckpt, kc, uc, gc = _pools(n_blocks, seed=79)
     snap = ckpt.clone()
     hist = torch.tensor([13, 0, 13], dtype=torch.int32, device=DEV)
+    base = torch.zeros(B, dtype=torch.int32, device=DEV)
     # prime rows 0/2 rings so their flush folds something
     hist0 = torch.zeros(B, dtype=torch.int32, device=DEV)
+    base0 = torch.zeros(B, dtype=torch.int32, device=DEV)
     _call(mod, A_log, dt_bias, q, k, v, a, b, ckpt, sbi, kc, uc, gc, hist0,
-          T, restart=False)
+          base0, T, restart=False)
     snap_after_prime = ckpt.clone()
     _call(mod, A_log, dt_bias, q, k, v, a, b, ckpt, sbi, kc, uc, gc, hist,
-          T, restart=False)
+          base, T, restart=False)
     torch.cuda.synchronize()
     # pages not referenced by any row are byte-stable
     untouched = [i for i in range(n_blocks) if i not in (0, 2, 5)]
@@ -288,8 +346,7 @@ def _vllm_style_strided_pools(num_blocks, seed=11):
     """Carve (ckpt, k, u, g) as block-strided views of one page-major backing,
     exactly like vLLM's _reshape_kv_cache_tensors (inner dims dense, dim-0
     stride = whole page)."""
-    shapes = [(HV, V, K), (HK, UCACHE_W_RING, K), (HV, UCACHE_W_RING, V),
-              (HV, UCACHE_W_RING)]
+    shapes = [(HV, V, K), (HK, RING, K), (HV, RING, V), (HV, RING)]
     dtypes = [torch.bfloat16, torch.bfloat16, torch.bfloat16, torch.float32]
     page_bytes = sum(
         int(torch.empty(s, device="meta").numel()) * t.itemsize
@@ -329,13 +386,10 @@ def test_block_strided_pools_match_dense():
     ckpt_s.copy_(ckpt_d)
     assert not ckpt_s.is_contiguous() and not kc_s.is_contiguous()
 
-    hist_d = torch.zeros(B, dtype=torch.int32, device=DEV)
-    hist_s = torch.zeros(B, dtype=torch.int32, device=DEV)
+    wp_d, cb_d, fl_d = _cursors(n_blocks)
+    wp_s, cb_s, fl_s = _cursors(n_blocks)
     gen = torch.Generator().manual_seed(3)
-    prev_acc_d = torch.zeros(B, dtype=torch.int32, device=DEV)
-    hist_blocks_d = torch.zeros(n_blocks, dtype=torch.int32, device=DEV)
-    hist_blocks_s = torch.zeros(n_blocks, dtype=torch.int32, device=DEV)
-    fm = ucache_flush_min(T)
+    prev_acc = torch.zeros(B, dtype=torch.int32, device=DEV)
     for step in range(12):  # crosses >= 2 flush cycles
         qd, kd, vd, a, b = _rand_inputs(B, T, seed=500 + step)
         # packed strided q/k/v (production layout) so the wrapper's
@@ -346,19 +400,19 @@ def test_block_strided_pools_match_dense():
         q = packed[..., : HK * K].unflatten(-1, (HK, K))
         k = packed[..., HK * K : 2 * HK * K].unflatten(-1, (HK, K))
         v = packed[..., 2 * HK * K :].unflatten(-1, (HV, V))
-        commit_gdn_ucache_hist(hist_blocks_d, prev_acc_d, sbi, None, flush_min=fm)
-        commit_gdn_ucache_hist(hist_blocks_s, prev_acc_d, sbi, None, flush_min=fm)
-        hd = hist_blocks_d.index_select(0, sbi.to(torch.int64)).contiguous()
-        hs = hist_blocks_s.index_select(0, sbi.to(torch.int64)).contiguous()
+        _commit(wp_d, cb_d, fl_d, prev_acc, sbi, T)
+        _commit(wp_s, cb_s, fl_s, prev_acc, sbi, T)
+        hd, bd = _gather(wp_d, sbi), _gather(cb_d, sbi)
+        hs, bs = _gather(wp_s, sbi), _gather(cb_s, sbi)
         out_d = _call(mod, A_log, dt_bias, q, k, v, a, b, ckpt_d, sbi,
-                      kc_d, uc_d, gc_d, hd, T, restart=False)
+                      kc_d, uc_d, gc_d, hd, bd, T, restart=False)
         out_s = _call(mod, A_log, dt_bias, q, k, v, a, b, ckpt_s, sbi,
-                      kc_s, uc_s, gc_s, hs, T, restart=False)
+                      kc_s, uc_s, gc_s, hs, bs, T, restart=False)
         torch.cuda.synchronize()
         assert torch.equal(out_d, out_s), f"outputs diverged at step {step}"
         assert torch.equal(ckpt_d[1:], ckpt_s[1:]), f"ckpt diverged at step {step}"
         assert torch.equal(kc_d[1:], kc_s[1:]) and torch.equal(uc_d[1:], uc_s[1:])
-        prev_acc_d = torch.randint(1, T + 1, (B,), generator=gen).to(
+        prev_acc = torch.randint(1, T + 1, (B,), generator=gen).to(
             torch.int32
         ).to(DEV)
 
@@ -381,11 +435,10 @@ def test_block_strided_pools_past_2gb():
     assert 1999 * ckpt_s.stride(0) > 2**31, (
         f"test page too small to cross 2^31: stride0={ckpt_s.stride(0)}")
 
-    hist_blocks = torch.zeros(n_blocks, dtype=torch.int32, device=DEV)
+    wp_d, cb_d, fl_d = _cursors(n_blocks)
+    wp_s, cb_s, fl_s = _cursors(n_blocks)
     prev_acc = torch.zeros(B, dtype=torch.int32, device=DEV)
-    fm = ucache_flush_min(T)
     gen = torch.Generator().manual_seed(5)
-    hist_blocks_d = hist_blocks.clone()
     for step in range(8):  # crosses a flush cycle
         qd, kd, vd, a, b = _rand_inputs(B, T, seed=800 + step)
         packed = torch.cat(
@@ -394,17 +447,18 @@ def test_block_strided_pools_past_2gb():
         q = packed[..., : HK * K].unflatten(-1, (HK, K))
         k = packed[..., HK * K : 2 * HK * K].unflatten(-1, (HK, K))
         v = packed[..., 2 * HK * K :].unflatten(-1, (HV, V))
-        commit_gdn_ucache_hist(hist_blocks, prev_acc, sbi, None, flush_min=fm)
-        commit_gdn_ucache_hist(hist_blocks_d, prev_acc, sbi, None, flush_min=fm)
-        hs = hist_blocks.index_select(0, sbi.to(torch.int64)).contiguous()
-        hd = hist_blocks_d.index_select(0, sbi.to(torch.int64)).contiguous()
+        _commit(wp_d, cb_d, fl_d, prev_acc, sbi, T)
+        _commit(wp_s, cb_s, fl_s, prev_acc, sbi, T)
+        hd, bd = _gather(wp_d, sbi), _gather(cb_d, sbi)
+        hs, bs = _gather(wp_s, sbi), _gather(cb_s, sbi)
         out_s = _call(mod, A_log, dt_bias, q, k, v, a, b, ckpt_s, sbi,
-                      kc_s, uc_s, gc_s, hs, T, restart=False)
+                      kc_s, uc_s, gc_s, hs, bs, T, restart=False)
         out_d = _call(mod, A_log, dt_bias, q, k, v, a, b, ckpt_d, sbi,
-                      kc_d, uc_d, gc_d, hd, T, restart=False)
+                      kc_d, uc_d, gc_d, hd, bd, T, restart=False)
         torch.cuda.synchronize()
         assert torch.equal(out_s, out_d), f"outputs diverged at step {step}"
-        assert torch.equal(ckpt_s[1900:], ckpt_d[1900:]), f"high-block ckpt diverged at {step}"
+        assert torch.equal(ckpt_s[1900:], ckpt_d[1900:]), (
+            f"high-block ckpt diverged at {step}")
         prev_acc = torch.randint(1, T + 1, (B,), generator=gen).to(
             torch.int32
         ).to(DEV)
@@ -427,6 +481,7 @@ def test_pad_skip_negative_rows_exit_early():
     sbi_neg = torch.tensor([2, 5, 7, -1, -1, -1], dtype=torch.int32, device=DEV)
     sbi_nul = torch.tensor([2, 5, 7, 0, 0, 0], dtype=torch.int32, device=DEV)
     hist = torch.tensor([13, 7, 0, 0, 0, 0], dtype=torch.int32, device=DEV)
+    base = torch.zeros(B, dtype=torch.int32, device=DEV)
 
     ckpt1, kc1, uc1, gc1 = _pools(n_blocks, seed=103)
     ckpt2, kc2, uc2, gc2 = _pools(n_blocks, seed=103)
@@ -434,9 +489,9 @@ def test_pad_skip_negative_rows_exit_early():
                   gc1[0].clone())
 
     out1 = _call(mod, A_log, dt_bias, q, k, v, a, b, ckpt1, sbi_neg,
-                 kc1, uc1, gc1, hist.clone(), T, restart=False)
+                 kc1, uc1, gc1, hist.clone(), base.clone(), T, restart=False)
     out2 = _call(mod, A_log, dt_bias, q, k, v, a, b, ckpt2, sbi_nul,
-                 kc2, uc2, gc2, hist.clone(), T, restart=False)
+                 kc2, uc2, gc2, hist.clone(), base.clone(), T, restart=False)
     torch.cuda.synchronize()
 
     # (a) real rows bit-identical across the two pad conventions. The wrapper

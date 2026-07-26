@@ -658,6 +658,21 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     out=self.spec_ring_base_gathered[:num_spec_decodes],
                 )
                 self.spec_state_indices_col0[:num_spec_decodes].copy_(sbi)
+                # Fill the pad tail of all three fixed buffers EVERY spec
+                # step, not only in the full-CG pure-spec branch below: the
+                # layer hands the adapter bucket-length PRE-PADDED slices on
+                # eager mixed (prefill+spec) steps too, so a stale tail row
+                # from an earlier step would reach the kernel carrying a
+                # possibly-reallocated block id plus old ring cursors (ghost
+                # CTAs appending to a live request's block). idx uses the
+                # negative sentinel -> the kernel retires the CTA at entry
+                # (pad-skip; kernels with _exit_cta_if_neg, 455b0f6+). One
+                # eager fill over <=max_bs int32 per step - free.
+                self.spec_hist_len_gathered[num_spec_decodes:].fill_(0)
+                self.spec_ring_base_gathered[num_spec_decodes:].fill_(0)
+                self.spec_state_indices_col0[num_spec_decodes:].fill_(
+                    self.ucache_pad_row_id
+                )
                 spec_hist_len_d = self.spec_hist_len_gathered
                 spec_ring_base_d = self.spec_ring_base_gathered
                 spec_state_indices_col0_d = self.spec_state_indices_col0
@@ -759,21 +774,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
 
             if self.gdn_spec_backend == "flashinfer_ucache":
                 spec_padded_rows = batch_size
-                # Padded rows: negative sentinel -> the kernel retires the
-                # whole CTA at entry (pad-skip), so under-bucket batches cost
-                # ~nothing instead of a full T-step verify per padded row.
-                # Requires kernel commit with _exit_cta_if_neg (455b0f6+);
-                # on older kernels use 0 (P=0 verify against null page 0).
-                # Fill to the END of the fixed buffers (not just the graph
-                # bucket): the layer passes bucket-length PRE-PADDED slices
-                # to the adapter (skipping its per-layer re-staging), and the
-                # adapter's pad_to may exceed the current bucket. One eager
-                # fill over <=max_bs int32 per step — free.
-                self.spec_hist_len_gathered[num_spec_decodes:].fill_(0)
-                self.spec_ring_base_gathered[num_spec_decodes:].fill_(0)
-                self.spec_state_indices_col0[num_spec_decodes:].fill_(
-                    self.ucache_pad_row_id
-                )
+                # Pad rows (hist=0, base=0, idx=negative sentinel) were
+                # already filled at gather time above — done every spec
+                # step, including eager mixed ones, so nothing to do here.
 
         if (
             self.use_full_cuda_graph
