@@ -15,11 +15,13 @@ from openai.types.responses.response_reasoning_item import (
     ResponseReasoningItem,
     Summary,
 )
+from openai.types.responses.tool import CustomTool, FunctionTool
 
 from vllm.entrypoints.openai.responses.utils import (
     _construct_message_from_response_item,
     construct_chat_messages_with_tool_call,
     construct_input_messages,
+    construct_tool_dicts,
     convert_tool_responses_to_completions_format,
     should_continue_final_message,
 )
@@ -137,6 +139,31 @@ class TestResponsesUtils:
         result = convert_tool_responses_to_completions_format(input_tool)
 
         assert result == {"type": "function", "function": input_tool}
+
+    def test_construct_tool_dicts_skips_custom_tools(self):
+        """A custom tool must not be coerced into a function tool dict."""
+        tools = [
+            FunctionTool(
+                type="function",
+                name="get_weather",
+                parameters={},
+                strict=None,
+            ),
+            CustomTool(
+                type="custom",
+                name="apply_patch",
+                description="Apply a patch",
+            ),
+        ]
+
+        result = construct_tool_dicts(tools, "auto")
+
+        assert result == [
+            {
+                "type": "function",
+                "function": tools[0].model_dump(),
+            }
+        ]
 
     def test_construct_chat_messages_with_tool_call(self):
         """Test construction of chat messages with tool calls."""

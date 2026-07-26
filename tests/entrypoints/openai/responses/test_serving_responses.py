@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import AsyncExitStack
+from http import HTTPStatus
 from unittest.mock import MagicMock
 
 import pytest
@@ -291,6 +292,69 @@ class TestInitializeToolSessions:
         error = serving_responses_instance._validate_create_responses_input(request)
         assert error is not None
         assert error.error.type == "invalid_request_error"
+
+    @pytest.mark.parametrize(
+        ("use_harmony", "tool_choice", "expect_error"),
+        [
+            (False, "auto", True),
+            (False, "none", False),
+            (True, "auto", False),
+        ],
+    )
+    def test_validates_custom_tools_for_non_harmony(
+        self,
+        serving_responses_instance,
+        use_harmony,
+        tool_choice,
+        expect_error,
+    ):
+        """Custom tools must be rejected on non-Harmony routes instead of
+        being silently coerced into function tools."""
+        serving_responses_instance.use_harmony = use_harmony
+        request = ResponsesRequest(
+            input="please apply a patch",
+            tools=[
+                {
+                    "type": "custom",
+                    "name": "apply_patch",
+                    "description": "Apply a patch",
+                    "format": {
+                        "type": "grammar",
+                        "syntax": "lark",
+                        "definition": "start: /[\\s\\S]+/",
+                    },
+                }
+            ],
+            tool_choice=tool_choice,
+        )
+
+        error = serving_responses_instance._validate_create_responses_input(request)
+
+        if expect_error:
+            assert error is not None
+            assert error.error.type == "invalid_request_error"
+            assert error.error.param == "tools"
+            assert error.error.code == HTTPStatus.BAD_REQUEST
+        else:
+            assert error is None
+
+    def test_validates_function_tools_for_non_harmony(self, serving_responses_instance):
+        """Ordinary function tools remain accepted on non-Harmony routes."""
+        request = ResponsesRequest(
+            input="What is the weather?",
+            tools=[
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "parameters": {},
+                }
+            ],
+            tool_choice="auto",
+        )
+
+        error = serving_responses_instance._validate_create_responses_input(request)
+
+        assert error is None
 
 
 class TestValidateGeneratorInput:

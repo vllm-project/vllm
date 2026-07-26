@@ -295,6 +295,21 @@ class OpenAIServingResponses(GenerateBaseServing):
     def _validate_create_responses_input(
         self, request: ResponsesRequest
     ) -> ErrorResponse | None:
+        if (
+            not self.use_harmony
+            and request.tool_choice != "none"
+            and any(tool.type == "custom" for tool in request.tools)
+        ):
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message=(
+                    "Custom tools are not supported by this model's tool "
+                    "parser. Use a function tool instead, or set "
+                    "`tool_choice='none'`."
+                ),
+                status_code=HTTPStatus.BAD_REQUEST,
+                param="tools",
+            )
         if self.use_harmony and request.is_include_output_logprobs():
             return self.create_error_response(
                 err_type="invalid_request_error",
