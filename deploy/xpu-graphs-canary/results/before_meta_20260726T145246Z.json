@@ -1,0 +1,11 @@
+{
+  "label": "before",
+  "model": "Qwen/Qwen2.5-Coder-7B-Instruct",
+  "ts": "20260726T145246Z",
+  "tok_s_runs": [
+    142.83,
+    142.27,
+    142.55
+  ],
+  "tok_s_median": 142.55
+}

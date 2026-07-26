@@ -1,0 +1,4 @@
+short1 '4'
+short2 '4'
+long 'Rivers flow through landscapes, carving valleys and shaping coastlines over thousands of years. They are vital sources of water for drinking, irrigation, and hydroelectric power. Many species of plants and animals depend on rivers for their survival.'
+SMOKE_OK
