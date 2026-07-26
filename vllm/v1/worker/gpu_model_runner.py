@@ -7364,7 +7364,9 @@ class GPUModelRunner(
                         cache_dtype_str=layer_cache_dtype_str,
                     )
                     try:
-                        kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
+                        kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
+                            cache_dtype_str=layer_cache_dtype_str,
+                        )
                         assert len(kv_cache_stride_order) == len(kv_cache_shape)
                     except (AttributeError, NotImplementedError):
                         kv_cache_stride_order = tuple(range(len(kv_cache_shape)))

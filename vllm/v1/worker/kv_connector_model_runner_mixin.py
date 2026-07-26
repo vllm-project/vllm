@@ -219,7 +219,8 @@ class KVConnectorModelRunnerMixin:
 
         try:
             kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
-                include_num_layers_dimension=True
+                include_num_layers_dimension=True,
+                cache_dtype_str=cache_dtype,
             )
             assert len(kv_cache_stride_order) == len(kv_cache_shape)
         except (AttributeError, NotImplementedError):
