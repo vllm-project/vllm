@@ -42,6 +42,7 @@ use tonic::transport::Server as TonicServer;
 use tonic_health::server::health_reporter;
 use tower::ServiceExt as _;
 use tracing::{info, trace, warn};
+use vllm_chat::multimodal::MediaAccessOptions;
 use vllm_chat::{ChatLlm, LoadModelBackendsOptions, load_model_backends};
 pub use vllm_chat::{ChatTemplateContentFormatOption, ParserSelection, RendererSelection};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
@@ -101,6 +102,10 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
                 .default_chat_template_kwargs
                 .clone()
                 .unwrap_or_default(),
+            media_access: MediaAccessOptions {
+                allowed_local_media_path: config.allowed_local_media_path.clone(),
+                allowed_media_domains: config.allowed_media_domains.clone(),
+            },
         },
     )
     .await

@@ -13,7 +13,7 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
 use itertools::izip;
@@ -276,6 +276,16 @@ struct PreparedItem {
     uuid: Option<String>,
 }
 
+/// Server-level restrictions on where media inputs may be loaded from.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MediaAccessOptions {
+    /// Local directory that file media inputs must live under. `None` rejects
+    /// local files entirely.
+    pub allowed_local_media_path: Option<PathBuf>,
+    /// Hosts that remote media URLs must belong to. `None` allows any host.
+    pub allowed_media_domains: Option<Vec<String>>,
+}
+
 impl MultimodalModelInfo {
     /// Load and resolve multimodal support from model files.
     ///
@@ -287,6 +297,7 @@ impl MultimodalModelInfo {
         model_type: Option<String>,
         files: MultimodalConfigFiles<'_>,
         tokenizer: DynTokenizer,
+        media_access: MediaAccessOptions,
     ) -> Result<Option<Self>> {
         let config = match files.config {
             Some(path) => {
@@ -319,7 +330,12 @@ impl MultimodalModelInfo {
             tokenizer: TokenizerResolver(tokenizer),
         };
 
-        Self::from_loaded(context, preprocessor_config, video_preprocessor_config)
+        Self::from_loaded(
+            context,
+            preprocessor_config,
+            video_preprocessor_config,
+            media_access,
+        )
     }
 
     /// Resolve multimodal support from an assembled context and parsed
@@ -328,6 +344,7 @@ impl MultimodalModelInfo {
         context: MultimodalModelContext,
         preprocessor_config: PreProcessorConfig,
         video_preprocessor_config: PreProcessorConfig,
+        media_access: MediaAccessOptions,
     ) -> Result<Option<Self>> {
         let (image, video) = Self::resolve_vision_lanes(
             &context,
@@ -347,7 +364,11 @@ impl MultimodalModelInfo {
 
         let media_connector = Arc::new(MediaConnector::new(
             reqwest_0_13::Client::new(),
-            MediaConnectorConfig::default(),
+            MediaConnectorConfig {
+                allowed_domains: media_access.allowed_media_domains,
+                allowed_local_media_path: media_access.allowed_local_media_path,
+                ..Default::default()
+            },
         )?);
 
         Ok(Some(Self {
@@ -769,6 +790,7 @@ mod tests {
             context,
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
+            MediaAccessOptions::default(),
         )
         .unwrap()
         .unwrap_or_else(|| panic!("{model_type} multimodal support should resolve"))

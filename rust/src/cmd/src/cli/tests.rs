@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::path::PathBuf;
+
 use expect_test::expect;
 use vllm_engine_core_client::TransportMode;
 use vllm_server::{Config, HttpListenerMode, ParserSelection, RendererSelection};
@@ -58,6 +60,8 @@ fn serve_args_forward_python_flags_with_separator() {
                         reasoning_parser: Auto,
                         renderer: Auto,
                         language_model_only: false,
+                        allowed_local_media_path: None,
+                        allowed_media_domains: None,
                         max_logprobs: None,
                         grpc_port: None,
                         shutdown_timeout: 0,
@@ -428,6 +432,106 @@ fn serve_passes_enable_prompt_tokens_details_into_config() {
 }
 
 #[test]
+fn serve_passes_media_access_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen2-VL-2B-Instruct",
+        "--allowed-local-media-path",
+        "/srv/media",
+        "--allowed-media-domains",
+        "images.example.com",
+        "cdn.example.com",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert_eq!(
+        config.allowed_local_media_path,
+        Some(PathBuf::from("/srv/media"))
+    );
+    assert_eq!(
+        config.allowed_media_domains.as_deref(),
+        Some(
+            [
+                "images.example.com".to_string(),
+                "cdn.example.com".to_string()
+            ]
+            .as_slice()
+        )
+    );
+}
+
+#[test]
+fn serve_without_media_flags_restricts_local_media_only() {
+    let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen2-VL-2B-Instruct"]).unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert_eq!(config.allowed_local_media_path, None);
+    assert_eq!(config.allowed_media_domains, None);
+}
+
+/// Python defaults `--allowed-local-media-path` to an empty string, which the
+/// supervisor may forward as-is.
+#[test]
+fn frontend_args_json_empty_allowed_local_media_path_stays_unset() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-address",
+        "ipc:///tmp/input.sock",
+        "--output-address",
+        "ipc:///tmp/output.sock",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen2-VL-2B-Instruct","allowed_local_media_path":""}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    assert_eq!(args.into_config().allowed_local_media_path, None);
+}
+
+#[test]
+fn frontend_args_json_passes_media_access_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-address",
+        "ipc:///tmp/input.sock",
+        "--output-address",
+        "ipc:///tmp/output.sock",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen2-VL-2B-Instruct","allowed_local_media_path":"/srv/media","allowed_media_domains":["images.example.com"]}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    let config = args.into_config();
+    assert_eq!(
+        config.allowed_local_media_path,
+        Some(PathBuf::from("/srv/media"))
+    );
+    assert_eq!(
+        config.allowed_media_domains.as_deref(),
+        Some(["images.example.com".to_string()].as_slice())
+    );
+}
+
+#[test]
 fn serve_passes_tls_into_config() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
@@ -756,6 +860,8 @@ fn frontend_args_accept_json() {
                         reasoning_parser: None,
                         renderer: Auto,
                         language_model_only: false,
+                        allowed_local_media_path: None,
+                        allowed_media_domains: None,
                         max_logprobs: None,
                         grpc_port: None,
                         shutdown_timeout: 0,
@@ -1325,6 +1431,8 @@ fn serve_args_accept_handshake_aliases() {
                         reasoning_parser: Auto,
                         renderer: Auto,
                         language_model_only: false,
+                        allowed_local_media_path: None,
+                        allowed_media_domains: None,
                         max_logprobs: None,
                         grpc_port: None,
                         shutdown_timeout: 0,
@@ -1472,6 +1580,8 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             reasoning_parser: Auto,
             renderer: Auto,
             language_model_only: false,
+            allowed_local_media_path: None,
+            allowed_media_domains: None,
             chat_template: None,
             default_chat_template_kwargs: None,
             chat_template_content_format: Auto,
@@ -1556,6 +1666,8 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             reasoning_parser: Auto,
             renderer: Auto,
             language_model_only: false,
+            allowed_local_media_path: None,
+            allowed_media_domains: None,
             chat_template: None,
             default_chat_template_kwargs: None,
             chat_template_content_format: Auto,
@@ -1658,6 +1770,8 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             reasoning_parser: None,
             renderer: Auto,
             language_model_only: false,
+            allowed_local_media_path: None,
+            allowed_media_domains: None,
             chat_template: None,
             default_chat_template_kwargs: None,
             chat_template_content_format: Auto,

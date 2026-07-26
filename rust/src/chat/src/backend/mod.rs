@@ -8,7 +8,7 @@ use serde_json::Value;
 use vllm_text::{DynTextBackend, TextBackend};
 
 use crate::error::Result;
-use crate::multimodal::MultimodalModelInfo;
+use crate::multimodal::{MediaAccessOptions, MultimodalModelInfo};
 use crate::output::DynChatOutputProcessor;
 use crate::renderer::DynChatRenderer;
 use crate::request::ChatRequest;
@@ -74,6 +74,8 @@ pub struct LoadModelBackendsOptions {
     /// Optional server-default keyword arguments merged into every
     /// chat-template render before request-level `chat_template_kwargs`.
     pub default_chat_template_kwargs: HashMap<String, Value>,
+    /// Restrictions on where multimodal inputs may be loaded from.
+    pub media_access: MediaAccessOptions,
 }
 
 /// Shared backends loaded from a model id.
