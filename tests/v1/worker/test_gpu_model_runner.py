@@ -382,6 +382,16 @@ def test_preferred_block_size_single_backend_keeps_default():
     assert Platform._preferred_block_size_for_backends([backend], 16) == 16
 
 
+def test_kernel_block_granularity_lcm():
+    from vllm.platforms.interface import Platform
+
+    backend_a = _make_backend_cls_for_kernel_block_size([MultipleOf(16)])
+    backend_b = _make_backend_cls_for_kernel_block_size([64])
+
+    assert Platform._kernel_block_granularity([backend_a, backend_b]) == 64
+    assert Platform._kernel_block_granularity([backend_a]) == 16
+
+
 def test_preferred_block_size_extends_to_common_multiple():
     from vllm.platforms.interface import Platform
 
