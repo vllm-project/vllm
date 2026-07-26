@@ -17,7 +17,7 @@ steps:
     amd:
       dind: false
       device: mi300_4
-      timeout_in_minutes: 85
+      timeout_in_minutes: 60
       depends_on:
         - image-build-amd
       source_file_dependencies:
@@ -68,7 +68,7 @@ steps:
     amd:
       dind: false
       device: mi300_4
-      timeout_in_minutes: 60
+      timeout_in_minutes: 40
       depends_on:
         - image-build-amd
       source_file_dependencies:
@@ -94,7 +94,7 @@ steps:
     amd:
       dind: false
       device: mi300_4
-      timeout_in_minutes: 85
+      timeout_in_minutes: 60
       depends_on:
         - image-build-amd
       source_file_dependencies:
@@ -120,7 +120,7 @@ steps:
     amd:
       dind: false
       device: mi300_4
-      timeout_in_minutes: 80
+      timeout_in_minutes: 55
       depends_on:
         - image-build-amd
       source_file_dependencies:
@@ -177,7 +177,7 @@ steps:
     amd:
       dind: false
       device: mi300_2
-      timeout_in_minutes: 70
+      timeout_in_minutes: 45
       depends_on:
         - image-build-amd
       source_file_dependencies:
@@ -203,3 +203,25 @@ steps:
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/nixl_integration/run_multi_connector_edge_case_test.sh
+
+# P TP 4 - D DPEP 4 test case for DSv4-Flash
+- label: DSv4-Flash Disaggregated DP EP
+  key: dsv4-flash-disaggregated
+  timeout_in_minutes: 60
+  device: h200
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 8
+  env:
+    ENABLE_HMA_FLAG: "1"
+    DP_EP: "1"
+    GPU_MEMORY_UTILIZATION: "0.85"
+    PREFILLER_TP_SIZE: "4"
+    DECODER_TP_SIZE: "4"
+    PREFILL_BLOCK_SIZE: "256"
+    DECODE_BLOCK_SIZE: "256"
+    MODEL_NAMES: "deepseek-ai/DeepSeek-V4-Flash"
+    VLLM_SERVE_EXTRA_ARGS: "--trust-remote-code,--kv-cache-dtype,fp8"
+  commands:
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - bash v1/kv_connector/nixl_integration/run_accuracy_test.sh

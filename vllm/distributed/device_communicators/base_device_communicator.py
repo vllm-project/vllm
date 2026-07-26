@@ -105,10 +105,30 @@ class All2AllManagerBase:
         raise NotImplementedError
 
     def query_active_mask(self) -> torch.Tensor:
+        """Return the all2all liveness mask for the EP ranks.
+
+        Returns:
+            An int32 device tensor where 0 marks a live rank and 1 marks a
+            masked (dead/unreachable) rank.
+        """
         raise NotImplementedError
 
     def query_fault(self) -> torch.Tensor:
-        """Returns has_fault scalar."""
+        """Return a scalar bool tensor, True if a new fault appeared.
+
+        Compares the current mask against the baseline recorded at the last
+        recovery point.
+        """
+        raise NotImplementedError
+
+    def clean_buffers(self) -> None:
+        """Reset this rank's RDMA buffers and all2all mask state (rank-local).
+
+        Post-fault cleanup: a dispatch/combine that hit a dead peer or timed
+        out can leave partially-written or stale tokens in the RDMA receive
+        buffer, so it is zeroed to stop the next forward from reading that
+        contaminated data.
+        """
         raise NotImplementedError
 
     def set_num_sms(self, num_sms: int):
@@ -176,11 +196,16 @@ class DeviceCommunicatorBase:
         config = get_current_vllm_config_or_none()
         if config is not None:
             # initialize the all2all manager for DP or sequence-parallel EP.
+            parallel_config = config.parallel_config
             use_ep = (
-                config.parallel_config.data_parallel_size > 1
-                or config.parallel_config.use_sequence_parallel_moe
+                parallel_config.data_parallel_size > 1
+                or parallel_config.use_sequence_parallel_moe
+                or (
+                    parallel_config.enable_expert_parallel
+                    and parallel_config.prefill_context_parallel_size > 1
+                )
             )
-            all2all_backend = config.parallel_config.all2all_backend
+            all2all_backend = parallel_config.all2all_backend
 
         self.is_ep_communicator = unique_name.split(":")[0] == "ep"
         self.use_all2all = self.is_ep_communicator and use_ep
