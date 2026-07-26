@@ -158,3 +158,64 @@ def test_invalid_query_uses_raises():
             req_ids=["query-req"],
             finished_mask=[True],
         )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_score_zerocopy_pairs_matches_reference():
+    """N:N scoring (multiple distinct queries) must match a per-pair fp64
+    MaxSim oracle and the shared-query kernel path (PR #40337 review:
+    single-launch pairwise kernel replaces per-unique-query launches).
+    """
+    torch.manual_seed(0)
+    device = "cuda"
+    d = 128
+
+    # Ragged docs scattered in one projected batch tensor.
+    doc_lengths = [180, 37, 512, 1, 300, 64, 1030, 256]
+    doc_offsets = []
+    total = 0
+    for ld in doc_lengths:
+        doc_offsets.append(total)
+        total += ld
+    batch = torch.randn(total, d, device=device, dtype=torch.float16)
+
+    # Distinct query per pair except two pairs sharing one query (mixed N:N).
+    q_lens = [32, 32, 1030, 16, 96, 5, 512, 32]
+    queries = [torch.randn(lq, d, device=device, dtype=torch.float16) for lq in q_lens]
+    queries[1] = queries[0]  # shared query across pairs 0 and 1
+
+    scores = LateInteractionRunner._score_zerocopy(
+        queries, batch, doc_offsets, doc_lengths
+    )
+
+    for i, (q, off, ld) in enumerate(zip(queries, doc_offsets, doc_lengths)):
+        doc = batch[off : off + ld]
+        ref = (q.double() @ doc.double().T).max(dim=1).values.sum().float()
+        assert torch.isfinite(scores[i]), f"pair {i} score not finite"
+        torch.testing.assert_close(
+            scores[i].to(torch.float32), ref, atol=5e-2, rtol=1e-3
+        )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_score_zerocopy_single_query_path_unchanged():
+    """1:N (one distinct query) must still route through the shared-query
+    kernel and agree with the fp64 oracle."""
+    torch.manual_seed(1)
+    device = "cuda"
+    d = 128
+    doc_lengths = [64, 200, 7, 128]
+    doc_offsets = [0, 64, 264, 271]
+    batch = torch.randn(sum(doc_lengths), d, device=device, dtype=torch.float16)
+    q = torch.randn(32, d, device=device, dtype=torch.float16)
+    queries = [q, q, q, q]
+
+    scores = LateInteractionRunner._score_zerocopy(
+        queries, batch, doc_offsets, doc_lengths
+    )
+    for i, (off, ld) in enumerate(zip(doc_offsets, doc_lengths)):
+        doc = batch[off : off + ld]
+        ref = (q.double() @ doc.double().T).max(dim=1).values.sum().float()
+        torch.testing.assert_close(
+            scores[i].to(torch.float32), ref, atol=5e-2, rtol=1e-3
+        )

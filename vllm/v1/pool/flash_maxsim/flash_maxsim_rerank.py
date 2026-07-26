@@ -204,3 +204,182 @@ def flash_maxsim_rerank_direct(
     assert Q.shape[1] == batch_tensor.shape[1]
 
     return _run_rerank_kernel(Q, batch_tensor, doc_offsets, doc_lengths, max_seqlen_d)
+
+
+# ---------------------------------------------------------------------------
+# Pairwise kernel: per-pair (query, doc), BOTH addressed by (offset, length).
+#
+# Scores every (query_i, doc_i) pair in ONE launch, so an N:N batch (each
+# document paired with a distinct query) costs one kernel instead of one
+# launch per unique query. Grid is 2-D (pair, q-block): long queries
+# (ColPali, Lq~1030) are split across programs so a low-pair-count batch
+# still fills the GPU. Loop bounds are the RUNTIME lengths — masked lanes
+# on tensor cores still execute, so bucket-bound loops would burn up to
+# ~75% of the FLOPs at Lq=Ld~1030 (bucketed to 2048).
+#
+# Determinism: each (pair, q-block) program writes its partial sum to a
+# [n_pairs, NUM_QB] buffer combined by a host-side torch.sum — no atomics,
+# scores are bitwise reproducible run-to-run.
+#
+# Offsets are loaded as int64 before pointer arithmetic: (start + off) *
+# stride overflows int32 past ~16.7M tokens in the batch tensor.
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _maxsim_rerank_kernel_pairs(
+    Q_ptr,
+    D_ptr,
+    q_offsets_ptr,
+    q_lengths_ptr,
+    doc_offsets_ptr,
+    doc_lengths_ptr,
+    partials_ptr,
+    n_pairs,
+    NUM_QB,
+    d: tl.constexpr,
+    d_pad: tl.constexpr,
+    stride_q_t,
+    stride_q_d,
+    stride_d_t,
+    stride_d_d,
+    BLOCK_Q: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    qb = tl.program_id(1)
+    if pid >= n_pairs:
+        return
+
+    q_start = tl.load(q_offsets_ptr + pid).to(tl.int64)
+    q_len = tl.load(q_lengths_ptr + pid).to(tl.int32)
+
+    # This q-block is beyond this pair's query: contribute an explicit 0
+    # (the partials buffer is uninitialized).
+    if qb * BLOCK_Q >= q_len:
+        tl.store(partials_ptr + pid * NUM_QB + qb, 0.0)
+        return
+
+    d_start = tl.load(doc_offsets_ptr + pid).to(tl.int64)
+    d_len = tl.load(doc_lengths_ptr + pid).to(tl.int32)
+
+    k_off = tl.arange(0, d_pad)
+    k_mask = k_off < d
+
+    q_off = qb * BLOCK_Q + tl.arange(0, BLOCK_Q)
+    q_valid = q_off < q_len
+    Q_block = tl.load(
+        Q_ptr + (q_start + q_off[:, None]) * stride_q_t + k_off[None, :] * stride_q_d,
+        mask=q_valid[:, None] & k_mask[None, :],
+        other=0.0,
+    ).to(tl.float16)
+
+    m = tl.full([BLOCK_Q], float("-inf"), dtype=tl.float32)
+    for d_blk in range(0, d_len, BLOCK_D):
+        d_off = d_blk + tl.arange(0, BLOCK_D)
+        d_valid = d_off < d_len
+        D_block = tl.load(
+            D_ptr
+            + (d_start + d_off[:, None]) * stride_d_t
+            + k_off[None, :] * stride_d_d,
+            mask=d_valid[:, None] & k_mask[None, :],
+            other=0.0,
+        ).to(tl.float16)
+        S = tl.dot(Q_block, tl.trans(D_block))
+        S = tl.where(d_valid[None, :], S, float("-inf"))
+        m = tl.maximum(m, tl.max(S, axis=1))
+
+    m = tl.where(q_valid, m, 0.0)
+    tl.store(partials_ptr + pid * NUM_QB + qb, tl.sum(m))
+
+
+def flash_maxsim_rerank_pairs(
+    Q_packed: torch.Tensor,
+    q_offsets: torch.Tensor,
+    q_lengths: torch.Tensor,
+    batch_tensor: torch.Tensor,
+    doc_offsets: torch.Tensor,
+    doc_lengths: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_d: int,
+) -> torch.Tensor:
+    """Score (query_i, doc_i) pairs in a single launch.
+
+    Documents are read zero-copy from batch_tensor exactly as in
+    flash_maxsim_rerank_direct. Queries are read from Q_packed (the step's
+    unique queries concatenated once — a small copy compared to launching
+    the shared-query kernel once per unique query).
+
+    Args:
+        Q_packed: [total_q_tokens, d] — unique query embeddings, packed.
+        q_offsets/q_lengths: [n_pairs] — per-pair query slice in Q_packed.
+        batch_tensor: [total_tokens, d] — the model's projected output.
+        doc_offsets/doc_lengths: [n_pairs] — per-pair doc slice.
+        max_seqlen_q / max_seqlen_d: max query / doc token counts.
+
+    Returns:
+        scores: [n_pairs] float32.
+    """
+    assert Q_packed.dim() == 2 and batch_tensor.dim() == 2
+    assert Q_packed.shape[1] == batch_tensor.shape[1]
+    n_pairs = doc_offsets.shape[0]
+    d = Q_packed.shape[1]
+    d_pad = _next_pow2(max(d, 16))
+    device = batch_tensor.device
+
+    scores = torch.empty(n_pairs, device=device, dtype=torch.float32)
+    if n_pairs == 0:
+        return scores
+
+    Q_packed = Q_packed.contiguous()
+    if Q_packed.dtype != torch.float16:
+        Q_packed = Q_packed.half()
+    if d < d_pad:
+        Q_pad = torch.zeros(
+            Q_packed.shape[0], d_pad, device=device, dtype=Q_packed.dtype
+        )
+        Q_pad[:, :d] = Q_packed
+    else:
+        Q_pad = Q_packed
+    if not batch_tensor.is_contiguous():
+        batch_tensor = batch_tensor.contiguous()
+    if batch_tensor.dtype != torch.float16:
+        batch_tensor = batch_tensor.half()
+
+    q_offsets = q_offsets.to(device=device, dtype=torch.int32).contiguous()
+    q_lengths = q_lengths.to(device=device, dtype=torch.int32).contiguous()
+    doc_offsets = doc_offsets.to(device=device, dtype=torch.int32).contiguous()
+    doc_lengths = doc_lengths.to(device=device, dtype=torch.int32).contiguous()
+
+    # Fixed launch heuristic (mirrors the upstream library): no autotune —
+    # the 2-D grid + tight loops dominate config choice at these shapes.
+    block_q = 128 if max_seqlen_q >= 128 else _next_pow2(max(max_seqlen_q, 16))
+    if max_seqlen_d >= 256:
+        block_d, warps = 128, 8
+    else:
+        block_d, warps = 64, 4
+    num_qb = triton.cdiv(max_seqlen_q, block_q)
+
+    partials = torch.empty(n_pairs, num_qb, device=device, dtype=torch.float32)
+    _maxsim_rerank_kernel_pairs[(n_pairs, num_qb)](
+        Q_pad,
+        batch_tensor,
+        q_offsets,
+        q_lengths,
+        doc_offsets,
+        doc_lengths,
+        partials,
+        n_pairs,
+        num_qb,
+        d,
+        d_pad,
+        Q_pad.stride(0),
+        Q_pad.stride(1),
+        batch_tensor.stride(0),
+        batch_tensor.stride(1),
+        BLOCK_Q=block_q,
+        BLOCK_D=block_d,
+        num_warps=warps,
+    )
+    torch.sum(partials, dim=1, out=scores)
+    return scores

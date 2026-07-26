@@ -266,48 +266,69 @@ class LateInteractionRunner:
         doc_offsets: list[int],
         doc_lengths: list[int],
     ) -> list[torch.Tensor]:
-        """Score queries against docs using flash_maxsim_rerank_direct.
+        """Score queries against docs with a single kernel launch.
 
         Reads doc embeddings directly from projected_batch — zero copy.
+        One distinct query (the common rerank pattern): shared-query kernel,
+        exactly as before. Multiple distinct queries (N:N scoring): the
+        pairwise kernel scores every (query_i, doc_i) pair in one launch —
+        previously this looped one launch per unique query, which is where
+        the N:N regression vs the vanilla scorer came from.
         """
-        from vllm.v1.pool.flash_maxsim import flash_maxsim_rerank_direct
+        from vllm.v1.pool.flash_maxsim import (
+            flash_maxsim_rerank_direct,
+            flash_maxsim_rerank_pairs,
+        )
 
         device = projected_batch.device
 
         # fp16 models: the kernel reads projected_batch in place — true
         # zero-copy. Other dtypes (e.g. BF16 heads): cast ONCE here for the
-        # whole step; without this hoist the per-query-group kernel wrapper
-        # would re-cast the full batch tensor once per unique query.
+        # whole step.
         if projected_batch.dtype != torch.float16:
             projected_batch = projected_batch.half()
         if not projected_batch.is_contiguous():
             projected_batch = projected_batch.contiguous()
 
-        # Group by query identity (same cached tensor = same data_ptr)
-        groups: dict[int, tuple[torch.Tensor, list[int], list[int], list[int]]] = {}
-        for i, q in enumerate(queries):
+        # Identify unique queries (same cached tensor = same data_ptr).
+        unique: dict[int, tuple[torch.Tensor, int]] = {}
+        for q in queries:
             key = q.data_ptr()
-            if key not in groups:
-                groups[key] = (q, [], [], [])
-            groups[key][1].append(doc_offsets[i])
-            groups[key][2].append(doc_lengths[i])
-            groups[key][3].append(i)
+            if key not in unique:
+                unique[key] = (q, len(unique))
 
-        results: list[torch.Tensor | None] = [None] * len(queries)
-
-        for _, (query, offsets, lengths, result_indices) in groups.items():
-            off_t = torch.tensor(offsets, device=device, dtype=torch.int32)
-            len_t = torch.tensor(lengths, device=device, dtype=torch.int32)
-            max_ld = max(lengths)
-
+        if len(unique) == 1:
+            off_t = torch.tensor(doc_offsets, device=device, dtype=torch.int32)
+            len_t = torch.tensor(doc_lengths, device=device, dtype=torch.int32)
             scores = flash_maxsim_rerank_direct(
-                query, projected_batch, off_t, len_t, max_ld
+                queries[0], projected_batch, off_t, len_t, max(doc_lengths)
             )
+            return list(scores)
 
-            for j, idx in enumerate(result_indices):
-                results[idx] = scores[j]
+        # Pack the unique queries once (small copy: queries are short-lived
+        # cache entries); docs stay zero-copy in projected_batch.
+        uniq_tensors = [t for t, _ in unique.values()]
+        q_starts: list[int] = []
+        start = 0
+        for t in uniq_tensors:
+            q_starts.append(start)
+            start += t.shape[0]
+        q_packed = torch.cat(uniq_tensors, dim=0)
 
-        return results  # type: ignore[return-value]
+        pair_q_offsets = [q_starts[unique[q.data_ptr()][1]] for q in queries]
+        pair_q_lengths = [q.shape[0] for q in queries]
+
+        scores = flash_maxsim_rerank_pairs(
+            q_packed,
+            torch.tensor(pair_q_offsets, device=device, dtype=torch.int32),
+            torch.tensor(pair_q_lengths, device=device, dtype=torch.int32),
+            projected_batch,
+            torch.tensor(doc_offsets, device=device, dtype=torch.int32),
+            torch.tensor(doc_lengths, device=device, dtype=torch.int32),
+            max(pair_q_lengths),
+            max(doc_lengths),
+        )
+        return list(scores)
 
     def _release_query_use(self, query_key: str) -> None:
         remaining = self._query_uses.get(query_key, 1) - 1
