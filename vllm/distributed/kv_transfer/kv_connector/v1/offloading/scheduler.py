@@ -301,16 +301,37 @@ class RequestOffloadState:
                 "max_offload_tokens must be a non-negative int, got %r; ignoring", raw
             )
 
-    def update_offload_keys(self) -> None:
+    def update_offload_keys(self, limit_by_block_ids: bool = False) -> None:
         for group_config, group_state in zip(
             self.config.kv_group_configs, self.group_states
         ):
-            for req_block_hash in islice(
-                self.req.block_hashes,
+            if limit_by_block_ids:
+                # Only add offload keys for chunks whose block IDs are already
+                # known. request.block_hashes may contain entries for
+                # pre-allocated blocks that have not been computed yet (e.g.
+                # when a request is aborted mid-transfer), and those blocks
+                # have no corresponding block_ids to store against.
+                blocks_per_chunk = (
+                    group_config.tokens_per_chunk
+                    // group_config.tokens_per_block
+                )
+                max_chunks = len(group_state.block_ids) // blocks_per_chunk
+                end_hash_idx = max_chunks * group_config.hashes_per_chunk
+            else:
+                end_hash_idx = None
+
+            start_hash_idx = (
                 group_config.hashes_per_chunk * len(group_state.offload_keys)
                 + group_config.hashes_per_chunk
-                - 1,
-                None,
+                - 1
+            )
+            if end_hash_idx is not None and start_hash_idx >= end_hash_idx:
+                continue
+
+            for req_block_hash in islice(
+                self.req.block_hashes,
+                start_hash_idx,
+                end_hash_idx,
                 group_config.hashes_per_chunk,
             ):
                 group_state.offload_keys.append(
@@ -922,7 +943,7 @@ class OffloadingConnectorScheduler:
 
         for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
             req_status = self._req_status[req_id]
-            req_status.update_offload_keys()
+            req_status.update_offload_keys(limit_by_block_ids=True)
 
             if preempted:
                 for group_state in req_status.group_states:
@@ -976,13 +997,19 @@ class OffloadingConnectorScheduler:
                 continue
             req = req_status.req
 
-            if req.status is RequestStatus.FINISHED_ABORTED:
-                num_tokens_after_batch = req.num_computed_tokens
-            elif req.is_finished():
-                num_tokens_after_batch = req.num_tokens
-            else:
-                num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
-                num_tokens_after_batch = req.num_computed_tokens + num_scheduled_tokens
+            if req.is_finished():
+                # Finished (aborted) request: no point offloading KV cache
+                # to CPU since the request will never resume and its blocks
+                # are about to be freed. Just clean up connector state.
+                num_offloadable = self._calc_num_offloadable_tokens(
+                    req_status, req.num_tokens
+                )
+                req_status.advance_stored_idx(num_offloadable)
+                self._maybe_cleanup_finished_req(req_id, req_status)
+                continue
+
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            num_tokens_after_batch = req.num_computed_tokens + num_scheduled_tokens
 
             num_offloadable_tokens = self._calc_num_offloadable_tokens(
                 req_status, num_tokens_after_batch
@@ -1012,7 +1039,36 @@ class OffloadingConnectorScheduler:
                     + blocks_per_chunk
                     - 1 : num_chunks * blocks_per_chunk : blocks_per_chunk
                 ]
-                assert len(offload_keys) == len(offload_block_ids)
+                if len(offload_keys) != len(offload_block_ids):
+                    log_msg = (
+                        "offload_keys/block_ids mismatch for req %s: "
+                        "len(offload_keys)=%d, len(offload_block_ids)=%d, "
+                        "num_chunks=%d, start_chunk_idx=%d, "
+                        "blocks_per_chunk=%d, len(block_ids)=%d, "
+                        "len(offload_keys_total)=%d, "
+                        "num_offloadable_tokens=%d, "
+                        "req.is_finished()=%s"
+                    )
+                    log_args = (
+                        req_id,
+                        len(offload_keys),
+                        len(offload_block_ids),
+                        num_chunks,
+                        start_chunk_idx,
+                        blocks_per_chunk,
+                        len(group_state.block_ids),
+                        len(group_state.offload_keys),
+                        num_offloadable_tokens,
+                        req.is_finished(),
+                    )
+                    if req.is_finished():
+                        logger.debug(log_msg, *log_args)
+                    else:
+                        logger.warning(log_msg, *log_args)
+                    # Clamp to the shorter length to avoid crash.
+                    min_len = min(len(offload_keys), len(offload_block_ids))
+                    offload_keys = offload_keys[:min_len]
+                    offload_block_ids = offload_block_ids[:min_len]
 
                 for key_idx, (offload_key, block_id) in enumerate(
                     zip(offload_keys, offload_block_ids)
@@ -1316,9 +1372,16 @@ class OffloadingConnectorScheduler:
     def request_finished(
         self,
         request: Request,
+        final_block_ids: tuple[list[int], ...] | None = None,
     ) -> tuple[bool, dict[str, Any] | None]:
         """
         Called when a request has finished, before its blocks are freed.
+
+        Args:
+            request: The finished request.
+            final_block_ids: Per-group block IDs from the KV cache manager.
+                Used to sync group_state.block_ids so that it covers all
+                chunks that update_offload_keys() may add.
 
         Returns:
             True if the request is being saved/sent asynchronously and blocks
@@ -1339,9 +1402,24 @@ class OffloadingConnectorScheduler:
 
         self._maybe_observe_lookup_async_delay(req_status)
 
+        # Sync group_state.block_ids with the final block IDs from the
+        # KV cache manager. Block hashes may have become available since
+        # the last _update_req_states call (e.g. the final decode step's
+        # hash is only known after model execution), so update_offload_keys
+        # below may add new entries. The corresponding block IDs must be
+        # present so _build_store_jobs sees matching lengths.
+        if final_block_ids is not None:
+            for group_state, group_block_ids in zip(
+                req_status.group_states, final_block_ids
+            ):
+                if len(group_state.block_ids) < len(group_block_ids):
+                    group_state.block_ids.extend(
+                        group_block_ids[len(group_state.block_ids):]
+                    )
+
         # Update offload keys with final block hash so _build_store_jobs can
         # create store jobs for the last block(s) on the next schedule step.
-        req_status.update_offload_keys()
+        req_status.update_offload_keys(limit_by_block_ids=True)
 
         # Keep req_status alive: _build_store_jobs will process finished_req_ids
         # on the next step and handle cleanup after creating store jobs.
