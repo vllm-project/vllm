@@ -2439,7 +2439,11 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let outputs_bytes = hex::decode(outputs_hex).unwrap();
 
     let decoded_request: EngineCoreRequest = rmp_serde::from_slice(&request_bytes).unwrap();
-    let expected_request = sample_request();
+    let expected_request = EngineCoreRequest {
+        cache_checkpoint_input_end: Some(2),
+        abort_immediately: true,
+        ..sample_request()
+    };
     assert_eq!(decoded_request, expected_request);
 
     // All-default sampling params -> empty map; must decode to Python defaults.

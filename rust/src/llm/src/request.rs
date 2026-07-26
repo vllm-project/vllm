@@ -110,6 +110,7 @@ impl GenerateRequest {
                 // reasoning logic in engine-sided structured output manager handle it.
                 reasoning_ended: None,
                 reasoning_parser_kwargs,
+                cache_checkpoint_input_end: None,
                 abort_immediately: false,
             },
         })

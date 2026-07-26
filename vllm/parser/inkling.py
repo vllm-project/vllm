@@ -323,14 +323,17 @@ class InklingParser(ParserEngine):
         for token_id in reversed(prompt_token_ids):
             if token_id == thinking_id:
                 self._engine.reset(initial_state=ParserState.REASONING)
+                self._reset_checkpoint_tracking(ParserState.REASONING)
                 self._streaming_initialized = True
                 return
             if token_id == text_id:
                 self._engine.reset(initial_state=ParserState.CONTENT)
+                self._reset_checkpoint_tracking(ParserState.CONTENT)
                 self._streaming_initialized = True
                 return
             if token_id == model_id:
                 self._engine.reset(initial_state=ParserState.MESSAGE_HEADER)
+                self._reset_checkpoint_tracking(ParserState.MESSAGE_HEADER)
                 self._streaming_initialized = True
                 return
             if token_id in special_ids:

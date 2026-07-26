@@ -147,15 +147,12 @@ class ParserEngine(Parser):
             self._reasoning_start_token_id = vocab.get(start_text)
         if end_text:
             self._reasoning_end_token_id = vocab.get(end_text)
-        self._checkpoint_state = parser_engine_config.initial_state
-        self._checkpoint_reasoning_end: int | None = None
-        self._checkpoint_body_end = 0
-        self._checkpoint_body_end_exact = True
         self._checkpoint_terminal_ids = {
             token_id: terminal
             for terminal, text in parser_engine_config.token_id_terminals.items()
             if (token_id := vocab.get(text)) is not None
         }
+        self._reset_checkpoint_tracking(parser_engine_config.initial_state)
 
     @property
     def reasoning_start_str(self) -> str | None:
@@ -203,12 +200,24 @@ class ParserEngine(Parser):
 
     def _reset(self, initial_state: ParserState | None = None) -> None:
         self._engine.reset(initial_state=initial_state)
+        self._reset_checkpoint_tracking(
+            initial_state
+            if initial_state is not None
+            else self.parser_engine_config.initial_state
+        )
         self._reasoning_ended = not self._has_reasoning
         self._tool_slots.clear()
         self._deferred_content = ""
         self._deferred_reasoning = ""
         self._content_has_nonws = False
         self._prompt_streaming_prepared = False
+
+    def _reset_checkpoint_tracking(self, initial_state: ParserState) -> None:
+        self._checkpoint_state = initial_state
+        self._checkpoint_reasoning_end: int | None = None
+        self._checkpoint_body_end = 0
+        self._checkpoint_body_end_exact = True
+        self._checkpoint_has_reasoning_body = False
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -622,10 +631,9 @@ class ParserEngine(Parser):
     ) -> int | None:
         if self._checkpoint_reasoning_end is not None:
             return self._checkpoint_reasoning_end
-        if self._checkpoint_state != ParserState.REASONING:
-            return None
 
         for index, token_id in enumerate(delta_token_ids, start_offset):
+            was_reasoning = self._checkpoint_state == ParserState.REASONING
             terminal = self._checkpoint_terminal_ids.get(token_id)
             transition = (
                 self.parser_engine_config.transitions.get(
@@ -635,23 +643,43 @@ class ParserEngine(Parser):
                 else None
             )
             if transition is not None:
-                if EventType.REASONING_END in transition.events:
-                    if self._checkpoint_body_end_exact:
-                        self._checkpoint_reasoning_end = self._checkpoint_body_end
-                    self._checkpoint_state = transition.next_state
-                    return self._checkpoint_reasoning_end
-                if terminal == "THINK_START":
+                reasoning_ended = (
+                    was_reasoning and EventType.REASONING_END in transition.events
+                )
+                if (
+                    reasoning_ended
+                    and self._checkpoint_body_end_exact
+                    and self._checkpoint_has_reasoning_body
+                ):
+                    self._checkpoint_reasoning_end = self._checkpoint_body_end
+                if (
+                    terminal == "THINK_START"
+                    and transition.next_state == ParserState.REASONING
+                ):
                     self._checkpoint_body_end = index + 1
                     self._checkpoint_body_end_exact = True
+                    self._checkpoint_has_reasoning_body = False
                 self._checkpoint_state = transition.next_state
+                if reasoning_ended:
+                    return self._checkpoint_reasoning_end
+                continue
+
+            if self._checkpoint_state != ParserState.REASONING:
                 continue
 
             token_text = self.model_tokenizer.decode(
                 [token_id], skip_special_tokens=False
             )
-            if not token_text or token_text.rstrip() != token_text:
+            if not token_text:
                 self._checkpoint_body_end_exact = False
-            elif not token_text.isspace():
+                continue
+            if token_text.isspace():
+                continue
+
+            self._checkpoint_has_reasoning_body = True
+            if token_text.rstrip() != token_text:
+                self._checkpoint_body_end_exact = False
+            else:
                 self._checkpoint_body_end = index + 1
                 self._checkpoint_body_end_exact = True
         return None

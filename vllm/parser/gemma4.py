@@ -522,6 +522,7 @@ class Gemma4Parser(ParserEngine):
         if not self._prompt_ends_in_open_reasoning(prompt_token_ids):
             return
         self._engine.reset(initial_state=ParserState.REASONING)
+        self._reset_checkpoint_tracking(ParserState.REASONING)
         # Prevent a later default ``initialize_streaming()`` (e.g. from
         # ``ParserEngineReasoningAdapter.extract_reasoning_streaming``) from
         # clobbering this with ``CONTENT``.

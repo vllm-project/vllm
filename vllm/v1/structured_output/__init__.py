@@ -108,6 +108,9 @@ class StructuredOutputManager:
                 tokenizer=self.tokenizer,
                 **parser_kwargs,
             )
+            request.reasoner.adjust_initial_state_from_prompt(
+                request.prompt_token_ids or ()
+            )
         if structured_req is not None:
             structured_req.reasoner = request.reasoner
         return request.reasoner

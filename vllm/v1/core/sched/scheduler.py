@@ -67,6 +67,14 @@ from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
 
+_VALID_SEMANTIC_CHECKPOINT_TERMINATION_STATUSES = frozenset(
+    {
+        RequestStatus.FINISHED_STOPPED,
+        RequestStatus.FINISHED_LENGTH_CAPPED,
+        RequestStatus.FINISHED_REPETITION,
+    }
+)
+
 
 class Scheduler(SchedulerInterface):
     def __init__(
@@ -2047,6 +2055,9 @@ class Scheduler(SchedulerInterface):
         return new_token_ids, stopped
 
     def _finalize_semantic_cache_checkpoints(self, request: Request) -> None:
+        if request.status not in _VALID_SEMANTIC_CHECKPOINT_TERMINATION_STATUSES:
+            return
+
         num_materialized_tokens = self._get_num_materialized_tokens(request)
 
         if self.retain_reasoning_end and request.cache_checkpoint_reasoning_end is None:
@@ -2054,12 +2065,33 @@ class Scheduler(SchedulerInterface):
 
         if (
             self.retain_response_end
-            and num_materialized_tokens > request.num_prompt_tokens
+            and request.status == RequestStatus.FINISHED_STOPPED
         ):
-            request.cache_checkpoint_response_end = num_materialized_tokens
+            response_end = self._get_response_checkpoint_boundary(
+                request, num_materialized_tokens
+            )
+            if response_end > request.num_prompt_tokens:
+                request.cache_checkpoint_response_end = response_end
 
         request.semantic_cache_checkpoints_finalized = True
         self.kv_cache_manager.cache_blocks(request, num_materialized_tokens)
+
+    @staticmethod
+    def _get_response_checkpoint_boundary(
+        request: Request,
+        num_materialized_tokens: int,
+    ) -> int:
+        if not request.output_token_ids:
+            return num_materialized_tokens
+
+        sampling_params = request.sampling_params
+        assert sampling_params is not None
+        last_token_id = request.output_token_ids[-1]
+        if last_token_id == sampling_params.eos_token_id or last_token_id in (
+            sampling_params.stop_token_ids or ()
+        ):
+            return min(num_materialized_tokens, max(0, request.num_tokens - 1))
+        return num_materialized_tokens
 
     @staticmethod
     def _get_num_materialized_tokens(request: Request) -> int:

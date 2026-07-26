@@ -74,6 +74,7 @@ class EngineCoreRequest(
     external_req_id: str | None = None
     reasoning_ended: bool | None = None
     reasoning_parser_kwargs: dict[str, object] | None = None
+    cache_checkpoint_input_end: int | None = None
     abort_immediately: bool = False
 
 
@@ -137,6 +138,8 @@ request = EngineCoreRequest(
     pooling_params=None,
     arrival_time=42.5,
     client_index=0,
+    cache_checkpoint_input_end=2,
+    abort_immediately=True,
 )
 
 # All defaults -> empty map. Regression guard for the sparse-map decode.
