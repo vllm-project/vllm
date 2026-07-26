@@ -155,6 +155,8 @@ class CompressedTensorsConfig(QuantizationConfig):
         layer: torch.nn.Module,
         prefix: str,
     ) -> "QuantizeMethodBase | None":
+        prefix = self.strip_model_root_prefix(prefix)
+
         if isinstance(layer, LinearBase):
             # collect schemes
             quant_scheme = self.get_scheme(layer=layer, layer_name=prefix)
