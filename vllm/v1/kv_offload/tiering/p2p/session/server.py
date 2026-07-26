@@ -58,22 +58,19 @@ class _MatchResult(NamedTuple):
 
     local_idxs: list[int]
     remote_idxs: list[int]
-    # job_id → blocks of that job in this match (jobs can span fetches)
-    job_counts: dict[int, int]
+    # The set of store job IDs that contributed blocks
+    job_ids: set[int]
 
 
 @dataclass
 class _OutboundRequestState:
     """Server-role state for a single fetch round of a peer request.
 
-    A kv_request_id may run several lookup→fetch rounds: the demanded
-    round lives in ``_ServerRequestState.outbound``, supply for the next
-    fetch parks in ``.supply``, and terminals touch only their own round.
+    A kv_request_id may run several lookup→fetch rounds; rounds live in
+    ``_ServerRequestState.outbound`` keyed by the wire ``round_seq``
+    (``None`` for PD peers), so terminals touch only their own round.
     """
 
-    # Supply pinned via inbound lookups (symmetric P2P): no late
-    # submit_store can arrive, so unmatched fetch demand fails fast.
-    lookup_supplied: bool = False
     demand_received: bool = False
     available: dict[OffloadKey, tuple[int, int]] = field(
         default_factory=dict
@@ -110,7 +107,7 @@ class _OutboundRequestState:
         return _MatchResult(
             local_idxs=local_idxs,
             remote_idxs=remote_idxs,
-            job_counts={job_id: len(local_idxs)} if local_idxs else {},
+            job_ids={job_id} if local_idxs else set(),
         )
 
     def add_fetch_demand(
@@ -124,20 +121,20 @@ class _OutboundRequestState:
 
         local_idxs: list[int] = []
         remote_idxs: list[int] = []
-        job_counts: dict[int, int] = {}
+        job_ids: set[int] = set()
         for key, remote_idx in zip(keys, block_indexes):
             stored_entry = self.available.pop(key, None)
             if stored_entry is not None:
                 stored_job_id, local_idx = stored_entry
                 local_idxs.append(local_idx)
                 remote_idxs.append(remote_idx)
-                job_counts[stored_job_id] = job_counts.get(stored_job_id, 0) + 1
+                job_ids.add(stored_job_id)
             else:
                 self.demanded[key] = remote_idx
         return _MatchResult(
             local_idxs=local_idxs,
             remote_idxs=remote_idxs,
-            job_counts=job_counts,
+            job_ids=job_ids,
         )
 
 
@@ -149,12 +146,11 @@ class _InflightXfer:
     block_count: int
     # The set of store job IDs that contributed blocks to this transfer.
     job_ids: set[int]
-    # Round this transfer serves; remaining/finalize apply only while it
-    # is still the demanded round. Dummy default for test-seeded entries.
+    # Round this transfer serves and its key in ``st.outbound``;
+    # remaining/finalize apply only while the round is still registered.
+    # Dummy default for test-seeded entries.
     round: _OutboundRequestState = field(default_factory=_OutboundRequestState)
-    # job_id → blocks in this transfer; empty for test-seeded entries
-    # (their jobs settle wholesale on completion).
-    job_counts: dict[int, int] = field(default_factory=dict)
+    round_key: int | None = None
 
 
 @dataclass
@@ -171,6 +167,8 @@ class _ActiveLookup:
     lookup_id: int
     kv_request_id: str
     ctx: ReqContext
+    # Wire round these probes belong to; pins park under it.
+    round_seq: int | None = None
     # Keys from the inbound LookupMsg, preserved in wire order so
     # the aggregated response goes back in the same order.
     keys: list[OffloadKey] = field(default_factory=list)
@@ -197,6 +195,7 @@ class _PendingLookup(NamedTuple):
 
     keys: list[OffloadKey]
     enqueued_at: float
+    round_seq: int | None = None
 
 
 @dataclass
@@ -210,20 +209,15 @@ class _ServerRequestState:
     is idle — see ``ServerRole._maybe_prune``.
     """
 
-    # Round holding the current fetch demand. Set only by on_fetch;
-    # reset to None at its terminal (finalize / failure / abort).
-    outbound: _OutboundRequestState | None = None
-    # Supply awaiting demand (lookup pins, pre-fetch PD stores); bound by
-    # the next on_fetch and untouched by other rounds' terminals.
-    supply: _OutboundRequestState | None = None
+    # Fetch rounds keyed by wire round_seq (None for PD). A round is
+    # created by its first supply or its fetch and removed at its
+    # terminal (finalize / failure / abort).
+    outbound: dict[int | None, _OutboundRequestState] = field(default_factory=dict)
     # Raw inbound LookupMsgs not yet processed against the ParentManager.
     pending_lookups: list[_PendingLookup] = field(default_factory=list)
     # Per-LookupMsg state parked with HIT_PENDING / RETRY keys, keyed by
     # the (globally unique) lookup_id and re-polled each serve.
     lookups: dict[int, _ActiveLookup] = field(default_factory=dict)
-    # Start time of a pending abort drain (``time.monotonic``); None when
-    # no abort is in progress.
-    abort_started_at: float | None = None
     # Transfer ids in ``ServerRole._inflight`` for this id. Kept in sync
     # via _inflight_add / _inflight_pop so a non-empty set is an exact
     # "has any inflight transfer" predicate and the abort drain can
@@ -261,11 +255,6 @@ class ServerRole:
         # so the per-request inflight_tids stays in sync.
         self._inflight: dict[int, _InflightXfer] = {}
         self._store_jobs: dict[int, float] = {}  # job_id → submitted_at
-        # job_id → blocks not yet at a terminal; a job spanning several
-        # fetches settles only when this reaches zero.
-        self._job_outstanding: dict[int, int] = {}
-        # Jobs with a failed partial terminal; settle as failed.
-        self._job_failed: set[int] = set()
         # StoreResults queued by _finalize_outbound for the next poll
         # tick to surface. Mirrors the deferred-result pattern used for
         # load timeouts.
@@ -276,9 +265,9 @@ class ServerRole:
         # ``parent.on_request_finished`` in ``serve_external_requests``.
         self._finished_lookup_ctxs: list[ReqContext] = []
         self._lookup_id_counter: int = 0
-        # kv_request_ids with a parked abort awaiting drain — work-list so
-        # drain_pending_aborts doesn't scan every request each poll tick.
-        self._parked_aborts: set[str] = set()
+        # Parked aborts awaiting drain, keyed by (kv_request_id, round)
+        # with the abort start time; round None aborts the whole id.
+        self._pending_aborts: dict[tuple[str, int | None], float] = {}
 
     # ------------------------------------------------------------------
     # State helpers
@@ -297,12 +286,11 @@ class ServerRole:
         st = self._requests.get(kv_request_id)
         if (
             st is not None
-            and st.outbound is None
-            and st.supply is None
+            and not st.outbound
             and not st.inflight_tids
             and not st.lookups
             and not st.pending_lookups
-            and st.abort_started_at is None
+            and not any(kv == kv_request_id for kv, _ in self._pending_aborts)
         ):
             del self._requests[kv_request_id]
 
@@ -316,101 +304,101 @@ class ServerRole:
         keys: Sequence[OffloadKey],
         block_ids: Sequence[int],
         job_id: JobId,
-        *,
-        from_lookup: bool = False,
+        round_seq: int | None = None,
     ) -> None:
-        """New blocks stored locally — route to a fetch round.
+        """New blocks stored locally — match within their fetch round.
 
-        A batch joins the demanded round only when it can serve it (PD
-        single-round mode, or keys matching its demand); otherwise it is
-        supply for the next fetch and parks in ``st.supply``.
+        Lookup pins carry the round they were probed under; PD
+        submit_store batches are round-less and share the single
+        ``None`` round with PD fetches.
         """
         self._store_jobs[job_id] = time.monotonic()
-        self._job_outstanding[job_id] = len(keys)
         st = self._get_or_create_request(kv_request_id)
-        demanded_round = st.outbound
-        if demanded_round is not None and (
-            not demanded_round.lookup_supplied
-            or any(k in demanded_round.demanded for k in keys)
-        ):
-            rnd = demanded_round
-        else:
-            if st.supply is None:
-                st.supply = _OutboundRequestState()
-            rnd = st.supply
-        if from_lookup:
-            rnd.lookup_supplied = True
+        rnd = st.outbound.get(round_seq)
+        if rnd is None:
+            rnd = st.outbound[round_seq] = _OutboundRequestState()
         result = rnd.add_stored_blocks(keys, block_ids, job_id)
         if result.local_idxs and rnd.demand_received:
-            self._submit_transfer(kv_request_id, result, rnd)
+            self._submit_transfer(kv_request_id, result, rnd, round_seq)
 
     def on_fetch(
         self,
         kv_request_id: str,
         keys: Sequence[OffloadKey],
         block_indexes: Sequence[int],
+        round_seq: int | None = None,
     ) -> None:
         """Handle a FetchMsg from the peer.
 
-        A non-empty fetch binds the round whose supply was parked for it,
-        leaving lookup state alone (the next round's LookupMsg may
-        already be in flight). The terminal empty fetch (keys=[]) closes
-        the id: parked lookups are popped and remaining supply drained.
-        The client serializes fetches per id, so an existing demanded
-        round raises ValueError (protocol-error disconnect).
+        A non-empty fetch binds and closes its round, leaving lookup
+        state alone (the next round's LookupMsg may already be in
+        flight). The terminal empty fetch closes the id: parked lookups
+        are popped and every remaining round drained. A second fetch for
+        a round already holding demand raises ValueError
+        (protocol-error disconnect).
         """
         logger.debug(
-            "P2PSession %s: fetch RECEIVED kv_request_id=%s blocks=%d",
+            "P2PSession %s: fetch RECEIVED kv_request_id=%s round=%s blocks=%d",
             self._peer_id,
             kv_request_id,
+            round_seq,
             len(keys),
         )
         st = self._requests.get(kv_request_id)
-        if st is not None and st.outbound is not None:
-            raise ValueError(f"duplicate fetch for kv_request_id={kv_request_id}")
+        existing = st.outbound.get(round_seq) if st is not None else None
+        if existing is not None and existing.demand_received:
+            raise ValueError(
+                f"duplicate fetch for kv_request_id={kv_request_id} round={round_seq}"
+            )
         st = self._get_or_create_request(kv_request_id)
-        req = st.supply if st.supply is not None else _OutboundRequestState()
-        st.supply = None
-        st.outbound = req
+        req = st.outbound.get(round_seq)
+        if req is None:
+            req = st.outbound[round_seq] = _OutboundRequestState()
         result = req.add_fetch_demand(keys, block_indexes)
         if not keys:
-            # Terminal empty fetch: close the lookup phase, drain parked
-            # supply, finalize with no TransferDoneMsg (nothing waits on
-            # it). A parked round would make the next fetch a duplicate.
+            # Terminal empty fetch: close the lookup phase and drain
+            # every round with no TransferDoneMsg (nothing waits on it).
             self._finish_inbound_lookups(kv_request_id)
-            self._finalize_outbound(kv_request_id, send_done=False, drain=True)
+            for key in list(st.outbound):
+                self._finalize_outbound(kv_request_id, key, send_done=False)
             return
-        if req.lookup_supplied and req.demanded:
-            # Symmetric supply always precedes its fetch, so unmatched
-            # demand is unservable — fail now, not at the load timeout.
+        if round_seq is not None and req.demanded:
+            # A symmetric round's supply always precedes its fetch, so
+            # unmatched demand is unservable — fail now, not at the load
+            # timeout. PD fetches (no round) keep parking demand for
+            # stores that arrive later.
             logger.warning(
-                "P2PSession %s: fetch kv_request_id=%s demanded %d "
-                "lookup-confirmed blocks but %d have no pinned supply; "
-                "failing fetch immediately",
+                "P2PSession %s: fetch kv_request_id=%s round=%s demanded %d "
+                "blocks but %d have no pinned supply; failing fetch "
+                "immediately",
                 self._peer_id,
                 kv_request_id,
+                round_seq,
                 len(keys),
                 len(req.demanded),
             )
-            self._finalize_outbound(kv_request_id, success=False)
+            self._finalize_outbound(kv_request_id, round_seq, success=False)
             return
         if result.local_idxs:
-            self._submit_transfer(kv_request_id, result, req)
+            self._submit_transfer(kv_request_id, result, req, round_seq)
         # Prefiller-first mode: finish_request may have run before
         # fetch arrived. If so, finalize once we know what was
         # demanded — fully satisfied → success, else early-fail.
         if req.finishing and req.inflight == 0:
-            self._finalize_outbound(kv_request_id)
+            self._finalize_outbound(kv_request_id, round_seq)
 
-    def on_abort_fetch(self, kv_request_id: str) -> None:
-        """Handle an AbortFetchMsg from the peer."""
+    def on_abort_fetch(self, kv_request_id: str, round_seq: int | None = None) -> None:
+        """Handle an AbortFetchMsg from the peer.
+
+        ``round_seq`` cancels that fetch round; None cancels every round
+        of the id (PD / legacy peers).
+        """
         # Abort for an unknown id may be a benign race/duplicate or a
         # real protocol violation; we don't track completed ids, so warn.
         st = self._requests.get(kv_request_id)
-        has_outbound = st is not None and (
-            st.outbound is not None or st.supply is not None
-        )
-        if not has_outbound and not self._has_inflight_for(kv_request_id):
+        if (st is None or not st.outbound) and not self._has_inflight_for(
+            kv_request_id
+        ):
             logger.warning(
                 "P2PSession %s: abort_fetch for unknown kv_request_id=%s "
                 "(no outbound or inflight state); benign race or stale",
@@ -420,16 +408,15 @@ class ServerRole:
         # Idempotent: receiving AbortFetchMsg again before we've sent the
         # ack just triggers another drain attempt without resetting the
         # deadline.
-        st = self._get_or_create_request(kv_request_id)
-        if st.abort_started_at is None:
-            st.abort_started_at = time.monotonic()
-            self._parked_aborts.add(kv_request_id)
-        self._drain_abort(kv_request_id)
+        self._get_or_create_request(kv_request_id)
+        self._pending_aborts.setdefault((kv_request_id, round_seq), time.monotonic())
+        self._drain_abort(kv_request_id, round_seq)
 
     def on_lookup(
         self,
         kv_request_id: str,
         keys: Sequence[OffloadKey],
+        round_seq: int | None = None,
     ) -> None:
         """Enqueue a LookupMsg from a symmetric-P2P consumer.
 
@@ -441,13 +428,18 @@ class ServerRole:
         parent calls are valid.
         """
         logger.debug(
-            "P2P LOOKUP server %s: RECV LookupMsg kv_request_id=%s keys=%d",
+            "P2P LOOKUP server %s: RECV LookupMsg kv_request_id=%s round=%s keys=%d",
             self._peer_id,
             kv_request_id,
+            round_seq,
             len(keys),
         )
         self._get_or_create_request(kv_request_id).pending_lookups.append(
-            _PendingLookup(keys=list(keys), enqueued_at=time.monotonic())
+            _PendingLookup(
+                keys=list(keys),
+                enqueued_at=time.monotonic(),
+                round_seq=round_seq,
+            )
         )
         self._serve_pending.add(kv_request_id)
 
@@ -469,7 +461,7 @@ class ServerRole:
                 st.pending_lookups = []
                 for pl in pending:
                     self._process_inbound_lookup(
-                        kv_request_id, pl.keys, pl.enqueued_at, parent
+                        kv_request_id, pl.keys, pl.enqueued_at, pl.round_seq, parent
                     )
             self._resolve_pending_lookups(kv_request_id, parent)
             st = self._requests.get(kv_request_id)
@@ -516,9 +508,7 @@ class ServerRole:
             else:
                 lookup.pending.add(h)
         if new_hits:
-            self._pin_and_register_hits(
-                lookup.kv_request_id, new_hits, lookup.ctx, parent
-            )
+            self._pin_and_register_hits(lookup, new_hits, parent)
         return new_hits
 
     def _process_inbound_lookup(
@@ -526,6 +516,7 @@ class ServerRole:
         kv_request_id: str,
         keys: list[OffloadKey],
         enqueued_at: float,
+        round_seq: int | None,
         parent: ParentManager,
     ) -> None:
         """Resolve one enqueued LookupMsg against ``parent``.
@@ -550,6 +541,7 @@ class ServerRole:
             lookup_id=lookup_id,
             kv_request_id=kv_request_id,
             ctx=ctx,
+            round_seq=round_seq,
             keys=list(keys),
             deadline=enqueued_at + _LOOKUP_PENDING_TIMEOUT_S,
         )
@@ -582,26 +574,25 @@ class ServerRole:
 
     def _pin_and_register_hits(
         self,
-        kv_request_id: str,
+        lookup: _ActiveLookup,
         keys: list[OffloadKey],
-        ctx: ReqContext,
         parent: ParentManager,
     ) -> None:
-        """Pin primary slots for HIT keys and feed them into the
-        existing ``add_stored_blocks`` matching path.
+        """Pin primary slots for HIT keys and park them as the lookup's
+        round supply via ``add_stored_blocks``.
 
         Caller has already confirmed every key is HIT (single-threaded
         scheduler ⇒ no eviction race), so the JobMetadata returned by
         ``parent.create_store_job`` carries parallel ``keys``/``block_ids``
         of length ``len(keys)``.
         """
-        meta = parent.create_store_job(keys, ctx)
+        meta = parent.create_store_job(keys, lookup.ctx)
         self.add_stored_blocks(
-            kv_request_id,
+            lookup.kv_request_id,
             list(meta.keys),
             list(meta.block_ids),
             meta.job_id,
-            from_lookup=True,
+            round_seq=lookup.round_seq,
         )
 
     def _resolve_pending_lookups(
@@ -686,9 +677,8 @@ class ServerRole:
 
         Called on the two events that mean "no more lookup traffic for
         ``kv_request_id`` is expected on this session": the terminal
-        FetchMsg from the peer (client contract: exactly one FetchMsg
-        per lookup-touched request, even if empty), and a local
-        ``finish``. Whichever fires second is a no-op.
+        empty FetchMsg from the peer and a local ``finish``. Whichever
+        fires second is a no-op.
         """
         st = self._requests.get(kv_request_id)
         if st is None:
@@ -726,22 +716,13 @@ class ServerRole:
         st = self._requests.get(kv_request_id)
         if st is None:
             return
-        req = st.outbound
-        if st.supply is not None:
-            st.supply.finishing = True
-        if req is None:
-            # PD prefiller-first: on_fetch binds the parked supply and
-            # finalizes via `finishing`.
-            return
-        req.finishing = True
-        if req.inflight:
-            return
-        # Remaining > 0 here: if it had hit 0, the poll-done success
-        # branch would have already cleared outbound and we'd have
-        # returned at `req is None` above. Helper derives success from
-        # remaining and emits StoreResult(success=False) for any
-        # leftover pending jobs.
-        self._finalize_outbound(kv_request_id)
+        for key, req in list(st.outbound.items()):
+            req.finishing = True
+            if not req.demand_received or req.inflight:
+                # No demand yet (prefiller-first): on_fetch finalizes via
+                # `finishing`. Inflight: the last completion finalizes.
+                continue
+            self._finalize_outbound(kv_request_id, key)
 
     def collect_results(self) -> list[StoreResult]:
         """Drain timeouts, deferred results, and transport completions.
@@ -783,15 +764,19 @@ class ServerRole:
             results.extend(self._settle_xfer_jobs(xfer, success=True))
             rnd = xfer.round
             st = self._requests.get(xfer.kv_request_id)
-            if st is not None and st.outbound is rnd:
+            if st is not None and st.outbound.get(xfer.round_key) is rnd:
                 rnd.remaining -= xfer.block_count
                 assert rnd.remaining >= 0, (
                     f"remaining went negative for kv_request_id={xfer.kv_request_id}"
                 )
                 if rnd.remaining == 0:
-                    self._finalize_outbound(xfer.kv_request_id, success=True)
+                    self._finalize_outbound(
+                        xfer.kv_request_id, xfer.round_key, success=True
+                    )
                 elif rnd.finishing and rnd.inflight == 0:
-                    self._finalize_outbound(xfer.kv_request_id, success=False)
+                    self._finalize_outbound(
+                        xfer.kv_request_id, xfer.round_key, success=False
+                    )
             self._maybe_prune(xfer.kv_request_id)
 
         failed_rounds: list[tuple[str, _OutboundRequestState]] | None = None
@@ -810,18 +795,19 @@ class ServerRole:
             results.extend(self._settle_xfer_jobs(xfer, success=False))
             rnd = xfer.round
             st = self._requests.get(xfer.kv_request_id)
-            if st is not None and st.outbound is rnd:
-                st.outbound = None
+            if st is not None and st.outbound.get(xfer.round_key) is rnd:
+                del st.outbound[xfer.round_key]
                 if failed_rounds is None:
                     failed_rounds = []
                 failed_rounds.append((xfer.kv_request_id, rnd))
-                self._send(
-                    {
-                        TYPE_KEY: TransferDoneMsg.TYPE,
-                        TransferDoneMsg.KV_REQUEST_ID: xfer.kv_request_id,
-                        TransferDoneMsg.SUCCESS: False,
-                    }
-                )
+                msg: dict = {
+                    TYPE_KEY: TransferDoneMsg.TYPE,
+                    TransferDoneMsg.KV_REQUEST_ID: xfer.kv_request_id,
+                    TransferDoneMsg.SUCCESS: False,
+                }
+                if xfer.round_key is not None:
+                    msg[TransferDoneMsg.ROUND_SEQ] = xfer.round_key
+                self._send(msg)
             self._maybe_prune(xfer.kv_request_id)
 
         # Cancel each failed round's other inflight and fail its
@@ -851,8 +837,8 @@ class ServerRole:
 
     def drain_pending_aborts(self) -> None:
         """Re-attempt every parked abort once per poll tick."""
-        for kv_request_id in list(self._parked_aborts):
-            self._drain_abort(kv_request_id)
+        for kv_request_id, round_seq in list(self._pending_aborts):
+            self._drain_abort(kv_request_id, round_seq)
 
     def close(self) -> tuple[list[int], list[ReqContext]]:
         """Tear down. Cancels inflight.
@@ -865,8 +851,6 @@ class ServerRole:
         """
         failed_stores = list(self._store_jobs.keys())
         self._store_jobs.clear()
-        self._job_outstanding.clear()
-        self._job_failed.clear()
         if self._inflight:
             self._transport.cancel(list(self._inflight.keys()))
         self._inflight.clear()
@@ -881,7 +865,7 @@ class ServerRole:
         failed_serves.extend(self._finished_lookup_ctxs)
         self._requests.clear()
         self._serve_pending.clear()
-        self._parked_aborts.clear()
+        self._pending_aborts.clear()
         self._finished_lookup_ctxs.clear()
         return failed_stores, failed_serves
 
@@ -918,37 +902,22 @@ class ServerRole:
             st.inflight_tids.discard(tid)
         return xfer
 
-    def _settle_job(self, job_id: int, success: bool) -> StoreResult | None:
-        """Settle one store job, once; None if already settled."""
-        self._job_outstanding.pop(job_id, None)
-        failed_earlier = job_id in self._job_failed
-        self._job_failed.discard(job_id)
-        if self._store_jobs.pop(job_id, None) is None:
-            return None
-        return StoreResult(job_id=job_id, success=success and not failed_earlier)
-
     def _settle_xfer_jobs(
         self, xfer: _InflightXfer, success: bool
     ) -> list[StoreResult]:
         """Emit StoreResults for a completed transfer's store jobs.
 
-        Block-granular: a job settles when its last block reaches a
-        terminal (its blocks may span several fetches). Jobs without
-        block accounting settle wholesale.
+        Pops each attached job from ``_store_jobs`` and clears it from
+        its round's pending set. A job already popped (via timeout,
+        cancel, etc.) is skipped so we never double-emit a contradictory
+        result.
         """
         results: list[StoreResult] = []
         for job_id in xfer.job_ids:
-            n = xfer.job_counts.get(job_id)
-            outstanding = self._job_outstanding.get(job_id)
-            if n is not None and outstanding is not None and outstanding > n:
-                self._job_outstanding[job_id] = outstanding - n
-                if not success:
-                    self._job_failed.add(job_id)
+            if self._store_jobs.pop(job_id, None) is None:
                 continue
-            result = self._settle_job(job_id, success)
-            if result is not None:
-                results.append(result)
-                xfer.round.pending_job_ids.discard(job_id)
+            results.append(StoreResult(job_id=job_id, success=success))
+            xfer.round.pending_job_ids.discard(job_id)
         return results
 
     # ------------------------------------------------------------------
@@ -959,102 +928,93 @@ class ServerRole:
         """Fail a terminated round's still-pending store jobs (idempotent)."""
         results: list[StoreResult] = []
         for job_id in rnd.pending_job_ids:
-            result = self._settle_job(job_id, success=False)
-            if result is not None:
-                results.append(result)
+            if self._store_jobs.pop(job_id, None) is None:
+                continue
+            results.append(StoreResult(job_id=job_id, success=False))
         rnd.pending_job_ids.clear()
         return results
 
     def _finalize_outbound(
         self,
         kv_request_id: str,
+        round_key: int | None,
         success: bool | None = None,
         send_done: bool = True,
-        drain: bool = False,
     ) -> None:
-        """Pop the demanded round and emit its terminal results.
+        """Pop one round and emit its terminal results.
 
         If ``success`` is None, derive it from ``req.remaining == 0``.
         ``send_done=False`` skips the TransferDoneMsg (terminal empty
-        fetch); ``drain=True`` also releases the parked supply.
+        fetch). Other rounds of the id are untouched.
         """
         st = self._requests[kv_request_id]
-        assert st.outbound is not None
-        req = st.outbound
-        st.outbound = None
+        req = st.outbound.pop(round_key)
         if success is None:
-            success = req.remaining == 0
-        if drain and st.supply is not None:
-            self._pending_store_results.extend(self._fail_round_jobs(st.supply))
-            st.supply = None
-        if not drain and req.lookup_supplied and req.available:
-            # Unconsumed supply belongs to later fetches: move entries
-            # whose pin job is still live back to the supply slot;
-            # entries of settled jobs are stale (already unpinned).
-            live = {
-                key: entry
-                for key, entry in req.available.items()
-                if entry[0] in req.pending_job_ids
-            }
-            if live:
-                sup = st.supply
-                if sup is None:
-                    sup = st.supply = _OutboundRequestState(lookup_supplied=True)
-                for key, entry in live.items():
-                    sup.available.setdefault(key, entry)
-                    sup.pending_job_ids.add(entry[0])
-                req.pending_job_ids -= sup.pending_job_ids
-        settled = 0
-        for job_id in req.pending_job_ids:
-            result = self._settle_job(job_id, success)
-            if result is not None:
-                settled += 1
-                self._pending_store_results.append(result)
+            success = req.demand_received and req.remaining == 0
+        settled = self._fail_round_jobs(req) if not success else None
+        if settled is not None:
+            self._pending_store_results.extend(settled)
+        else:
+            for job_id in req.pending_job_ids:
+                if self._store_jobs.pop(job_id, None) is None:
+                    continue
+                self._pending_store_results.append(
+                    StoreResult(job_id=job_id, success=True)
+                )
+            req.pending_job_ids.clear()
         logger.debug(
-            "P2PSession %s: finalize kv_request_id=%s success=%s remaining=%d "
-            "settled_jobs=%d leftover_available=%d send_done=%s",
+            "P2PSession %s: finalize kv_request_id=%s round=%s success=%s "
+            "remaining=%d leftover_available=%d send_done=%s",
             self._peer_id,
             kv_request_id,
+            round_key,
             success,
             req.remaining,
-            settled,
             len(req.available),
             send_done,
         )
-        if send_done:
-            self._send(
-                {
-                    TYPE_KEY: TransferDoneMsg.TYPE,
-                    TransferDoneMsg.KV_REQUEST_ID: kv_request_id,
-                    TransferDoneMsg.SUCCESS: success,
-                }
-            )
+        if send_done and req.demand_received:
+            msg: dict = {
+                TYPE_KEY: TransferDoneMsg.TYPE,
+                TransferDoneMsg.KV_REQUEST_ID: kv_request_id,
+                TransferDoneMsg.SUCCESS: success,
+            }
+            if round_key is not None:
+                msg[TransferDoneMsg.ROUND_SEQ] = round_key
+            self._send(msg)
         self._maybe_prune(kv_request_id)
 
-    def _drain_abort(self, kv_request_id: str) -> None:
+    def _drain_abort(self, kv_request_id: str, round_seq: int | None) -> None:
         """One drain attempt for a pending abort.
 
-        Stops accepting more blocks for ``kv_request_id``, then asks the
-        transport to cancel any matching inflight transfers in
+        Detaches the aborted round(s) (``round_seq`` None: all of them),
+        then asks the transport to cancel their inflight transfers in
         ``mode="wait"``. Sends ``AbortAckMsg`` once nothing remains
         inflight, or after ``_CANCEL_DRAIN_TIMEOUT_S`` falls back to
         ``mode="immediate"`` and acks anyway.
         """
         st = self._requests[kv_request_id]
-        rnd = st.outbound
-        st.outbound = None
-        if rnd is not None:
-            # Its transfers are being cancelled; fail its jobs now
-            # instead of leaking them to the store timeout.
-            self._pending_store_results.extend(self._fail_round_jobs(rnd))
-        ids = list(st.inflight_tids)
+        keys = list(st.outbound) if round_seq is None else [round_seq]
+        for key in keys:
+            rnd = st.outbound.pop(key, None)
+            if rnd is not None:
+                # Its transfers are being cancelled; fail its jobs now
+                # instead of leaking them to the store timeout.
+                self._pending_store_results.extend(self._fail_round_jobs(rnd))
+        if round_seq is None:
+            ids = list(st.inflight_tids)
+        else:
+            ids = [
+                tid
+                for tid, x in self._inflight.items()
+                if x.kv_request_id == kv_request_id and x.round_key == round_seq
+            ]
         if not ids:
-            self._finalize_abort(kv_request_id)
+            self._finalize_abort(kv_request_id, round_seq)
             return
 
-        assert st.abort_started_at is not None
-        expired = time.monotonic() - st.abort_started_at >= _CANCEL_DRAIN_TIMEOUT_S
-        if expired:
+        started_at = self._pending_aborts[(kv_request_id, round_seq)]
+        if time.monotonic() - started_at >= _CANCEL_DRAIN_TIMEOUT_S:
             for tid in ids:
                 self._inflight_pop(tid)
             self._transport.cancel(ids, mode="immediate")
@@ -1065,7 +1025,7 @@ class ServerRole:
                 kv_request_id,
                 len(ids),
             )
-            self._finalize_abort(kv_request_id)
+            self._finalize_abort(kv_request_id, round_seq)
             return
 
         still = self._transport.cancel(ids, mode="wait")
@@ -1078,18 +1038,17 @@ class ServerRole:
             if tid not in still_set:
                 self._inflight_pop(tid)
         if not still:
-            self._finalize_abort(kv_request_id)
+            self._finalize_abort(kv_request_id, round_seq)
 
-    def _finalize_abort(self, kv_request_id: str) -> None:
-        st = self._requests[kv_request_id]
-        st.abort_started_at = None
-        self._parked_aborts.discard(kv_request_id)
-        self._send(
-            {
-                TYPE_KEY: AbortAckMsg.TYPE,
-                AbortAckMsg.KV_REQUEST_ID: kv_request_id,
-            }
-        )
+    def _finalize_abort(self, kv_request_id: str, round_seq: int | None) -> None:
+        self._pending_aborts.pop((kv_request_id, round_seq), None)
+        msg: dict = {
+            TYPE_KEY: AbortAckMsg.TYPE,
+            AbortAckMsg.KV_REQUEST_ID: kv_request_id,
+        }
+        if round_seq is not None:
+            msg[AbortAckMsg.ROUND_SEQ] = round_seq
+        self._send(msg)
         self._maybe_prune(kv_request_id)
 
     # ------------------------------------------------------------------
@@ -1101,6 +1060,7 @@ class ServerRole:
         kv_request_id: str,
         result: _MatchResult,
         rnd: _OutboundRequestState,
+        round_key: int | None,
     ) -> None:
         logger.debug(
             "P2PSession %s: NIXL write_blocks CALL kv_request_id=%s "
@@ -1128,9 +1088,9 @@ class ServerRole:
                 _InflightXfer(
                     kv_request_id=kv_request_id,
                     block_count=len(result.local_idxs),
-                    job_ids=set(result.job_counts),
+                    job_ids=result.job_ids,
                     round=rnd,
-                    job_counts=dict(result.job_counts),
+                    round_key=round_key,
                 ),
             )
         else:
@@ -1152,8 +1112,12 @@ class ServerRole:
             # _LOAD_TIMEOUT_S.
             rnd.finishing = True
             st = self._requests.get(kv_request_id)
-            if st is not None and st.outbound is rnd and rnd.inflight == 0:
-                self._finalize_outbound(kv_request_id, success=False)
+            if (
+                st is not None
+                and st.outbound.get(round_key) is rnd
+                and rnd.inflight == 0
+            ):
+                self._finalize_outbound(kv_request_id, round_key, success=False)
 
     def _timeout_pending_store_jobs(self) -> list[StoreResult]:
         if not self._store_jobs:
@@ -1170,8 +1134,6 @@ class ServerRole:
         results: list[StoreResult] = []
         for jid in timed_out:
             del self._store_jobs[jid]
-            self._job_outstanding.pop(jid, None)
-            self._job_failed.discard(jid)
             results.append(StoreResult(job_id=jid, success=False))
             logger.warning("P2PSession %s: store job %d timed out", self._peer_id, jid)
         return results
