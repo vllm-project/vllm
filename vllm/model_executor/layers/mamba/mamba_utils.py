@@ -106,6 +106,23 @@ class MambaStateDtypeCalculator:
         return (*base_dtypes, activation_dtype, torch.float32)
 
     @classmethod
+    def append_gated_delta_net_replayssm_spec_ring(
+        cls,
+        base_dtypes: tuple[torch.dtype, ...],
+        model_dtype: ModelDType | torch.dtype,
+    ) -> tuple[torch.dtype, ...]:
+        """Append the GDN ReplaySSM spec ring dtypes to a base ``(conv, ssm)``
+        tuple: ``(d_cache, k_cache, g_cache)``. The d/k caches use fp16 for bf16
+        activations, which reconstructs the state more accurately at the same
+        width; ``g`` drives the cumulative decay replay and stays fp32.
+        """
+        activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
+        ring_dtype = (
+            torch.float16 if activation_dtype == torch.bfloat16 else activation_dtype
+        )
+        return (*base_dtypes, ring_dtype, ring_dtype, torch.float32)
+
+    @classmethod
     def _mamba_state_dtype(
         cls,
         model_dtype: ModelDType | torch.dtype,
@@ -316,6 +333,32 @@ class MambaStateShapeCalculator:
             head_k_dim,
         )
         return conv_state_shape, temporal_state_shape
+
+    @classmethod
+    def append_gated_delta_net_replayssm_spec_ring(
+        cls,
+        base_shapes: tuple[tuple[int, ...], ...],
+        num_k_heads: int,
+        num_v_heads: int,
+        head_k_dim: int,
+        head_v_dim: int,
+        tp_world_size: int,
+        replayssm_buffer_len: int,
+        num_spec: int,
+    ) -> tuple[tuple[int, ...], ...]:
+        """Append the GDN ReplaySSM spec ring shapes (d_cache, k_cache, g_cache)
+        to a base ``(conv, ssm)`` tuple. ``base_shapes`` must already carry the
+        spec conv window (``gated_delta_net_state_shape(..., num_spec)``).
+        """
+        ring_len = cls.replayssm_spec_ring_len(replayssm_buffer_len, num_spec)
+        local_v_heads = divide(num_v_heads, tp_world_size)
+        local_k_heads = divide(num_k_heads, tp_world_size)
+        return (
+            *base_shapes,
+            (local_v_heads, ring_len, head_v_dim),
+            (local_k_heads, ring_len, head_k_dim),
+            (local_v_heads, ring_len),
+        )
 
     @classmethod
     def kda_state_shape(

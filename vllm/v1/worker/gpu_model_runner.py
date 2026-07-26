@@ -2499,7 +2499,10 @@ class GPUModelRunner(
             needs_replayssm_spec_args = (
                 self.cache_config.use_replayssm_spec
                 and self.speculative_config is not None
-                and isinstance(builder, Mamba2AttentionMetadataBuilder)
+                and isinstance(
+                    builder,
+                    (Mamba2AttentionMetadataBuilder, GDNAttentionMetadataBuilder),
+                )
             )
             if (use_spec_decode or needs_replayssm_spec_args) and isinstance(
                 builder,

@@ -2350,7 +2350,8 @@ class VllmConfig:
             )
         if self.model_config is not None and not self.model_config.supports_replayssm:
             raise ValueError(
-                "--use-replayssm-spec is only supported for Nemotron-H models "
+                "--use-replayssm-spec is only supported for models that declare "
+                "ReplaySSM support via the SupportsReplaySSM interface "
                 f"(got architecture {self.model_config.architecture!r})"
             )
         # Inverted against --use-replayssm, which forbids speculative decoding.
