@@ -455,7 +455,7 @@ class NixlBaseConnectorWorker:
         self.src_xfer_handles_by_block_size: dict[int, int] = {}
         # Local descriptor arrays per remote block size (block_size_ratio>1),
         # kept for building per-tp-ratio splits at the same granularity.
-        self._src_blocks_data_by_block_size: dict[int, np.ndarray] = {}
+        self.src_blocks_data_by_block_size: dict[int, np.ndarray] = {}
         # Populated dynamically during handshake based on remote configuration.
         # Per-source split handles, keyed by (tp_ratio, remote_block_size).
         self.src_xfer_handles_by_tp_ratio: dict[tuple[int, int], list[int]] = {}
@@ -1614,8 +1614,8 @@ class NixlBaseConnectorWorker:
                     remote_block_size
                 )
                 self.src_xfer_handles_by_block_size[remote_block_size] = handle
-                self._src_blocks_data_by_block_size[remote_block_size] = blocks_data
-            src_blocks_data = self._src_blocks_data_by_block_size[remote_block_size]
+                self.src_blocks_data_by_block_size[remote_block_size] = blocks_data
+            src_blocks_data = self.src_blocks_data_by_block_size[remote_block_size]
 
         ### (Optional) Register local agent memory regions. MLA is not split.
         split_key = (tp_ratio, remote_block_size)
