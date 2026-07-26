@@ -633,6 +633,10 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     supports_update_block_table: bool = False
     # Whether the builder constructor requires the block-table width.
     requires_block_table_width: ClassVar[bool] = False
+    # Does this backend support capture mutiple draft decode steps into one
+    # CUDA Graph (default: no), which requires no step-dependent metadata
+    # or can refresh metadata over steps.
+    supports_fused_decode_graph: bool = False
 
     @abstractmethod
     def __init__(
@@ -756,6 +760,9 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
             common_attn_metadata=common_attn_metadata,
             fast_build=True,
         )
+
+    def refresh_meta_for_draft_decodes(self, metadata: M) -> None:
+        pass
 
     def use_cascade_attention(
         self,
