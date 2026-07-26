@@ -5,6 +5,7 @@ from fractions import Fraction
 from typing import TYPE_CHECKING, Any
 
 import torch
+from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
@@ -19,7 +20,9 @@ from vllm.model_executor.layers.quantization import (
     QuantizationConfig,
     QuantizationMethods,
 )
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config, Fp8LinearMethod
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.transformers_utils.config import get_safetensors_params_metadata
 
 from .config_parser import INCConfigParser
 
@@ -94,6 +97,11 @@ class INCConfig(QuantizationConfig):
         self.pack_factor = Fraction(32, weight_bits)
         self.config_parser = INCConfigParser(self)
 
+        # Hybrid INT4+FP8: populated by maybe_update_config when the checkpoint
+        # contains FP8 layers alongside INT4-quantized layers.
+        self.fp8_config: Fp8Config | None = None
+        self.fp8_layers: set[str] = set()
+
     def __repr__(self) -> str:
         return (
             f"INCConfig(weight_bits={self.weight_bits}, "
@@ -143,6 +151,80 @@ class INCConfig(QuantizationConfig):
             )
         if self.extra_config is not None:
             self.extra_config = hf_to_vllm_mapper.apply_dict(self.extra_config)
+        if self.fp8_layers:
+            self.fp8_layers = set(
+                hf_to_vllm_mapper.apply_list(list(self.fp8_layers))
+            )
+
+    def maybe_update_config(self, model_name: str, hf_config=None, revision: str | None = None):
+        """Detect FP8 layers in hybrid INT4+FP8 AutoRound checkpoints.
+
+        Some AutoRound checkpoints quantize expert FFN layers to INT4 while
+        leaving attention and shared-expert layers in FP8 with per-block
+        ``weight_scale_inv`` scales.  The base ``INCConfig`` has no way to
+        know this from ``quantization_config.json`` alone, so we scan the
+        safetensors metadata here and configure an ``Fp8Config`` for those
+        layers so that ``Fp8LinearMethod`` is used instead of
+        ``UnquantizedLinearMethod``.
+        """
+        metadata = get_safetensors_params_metadata(model_name, revision=revision)
+        fp8_weights: dict[str, dict[str, Any]] = {}
+        for param_name, info in metadata.items():
+            dtype_str = info.get("dtype", None)
+            if dtype_str is None:
+                continue
+            torch_dtype = _SAFETENSORS_TO_TORCH_DTYPE.get(dtype_str)
+            if torch_dtype == torch.float8_e4m3fn and param_name.endswith(".weight"):
+                scale_name = param_name.replace(".weight", ".weight_scale_inv")
+                if scale_name in metadata:
+                    fp8_weights[param_name] = info
+
+        if not fp8_weights:
+            return
+
+        block_size = None
+        for param_name, info in fp8_weights.items():
+            scale_name = param_name.replace(".weight", ".weight_scale_inv")
+            scale_info = metadata[scale_name]
+            w_shape = info.get("shape", [])
+            s_shape = scale_info.get("shape", [])
+            if len(w_shape) == 2 and len(s_shape) == 2:
+                block_size = [w_shape[0] // s_shape[0], w_shape[1] // s_shape[1]]
+                break
+
+        if block_size is None:
+            return
+
+        self.fp8_config = Fp8Config(
+            is_checkpoint_fp8_serialized=True,
+            activation_scheme="dynamic",
+            weight_block_size=block_size,
+        )
+        self.fp8_layers = {name.rsplit(".weight", 1)[0] for name in fp8_weights}
+        logger.info(
+            "INC hybrid checkpoint: detected %d FP8 layers (block_size=%s)",
+            len(self.fp8_layers),
+            block_size,
+        )
+
+    def _is_layer_fp8(self, prefix: str) -> bool:
+        """Check if a layer prefix belongs to the FP8 set in a hybrid checkpoint."""
+        if not self.fp8_layers:
+            return False
+        if prefix in self.fp8_layers:
+            return True
+        fused_mapping = getattr(self, "packed_modules_mapping", {})
+        proj_name = prefix.split(".")[-1]
+        if proj_name in fused_mapping:
+            shard_prefixes = [
+                prefix.replace(proj_name, shard)
+                for shard in fused_mapping[proj_name]
+            ]
+            return all(
+                any(fp8_layer in sp for fp8_layer in self.fp8_layers)
+                for sp in shard_prefixes
+            )
+        return any(fp8_layer in prefix for fp8_layer in self.fp8_layers)
 
     def get_quant_method(self, layer: torch.nn.Module, prefix: str):
         from .schemes.factory import resolve_scheme
@@ -159,6 +241,10 @@ class INCConfig(QuantizationConfig):
 
         layer_config = self.config_parser.resolve(layer, prefix)
         if not layer_config.quantized:
+            # Hybrid checkpoint: dispatch Fp8LinearMethod for layers detected
+            # as FP8 by maybe_update_config.
+            if self.fp8_config and self._is_layer_fp8(prefix):
+                return Fp8LinearMethod(self.fp8_config)
             if isinstance(layer, (LinearBase, ParallelLMHead)):
                 return UnquantizedLinearMethod()
             if isinstance(layer, RoutedExperts):
