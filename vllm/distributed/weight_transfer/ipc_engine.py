@@ -61,12 +61,7 @@ class IPCTrainerInitInfo(TrainerInitInfo):
 
 @dataclass
 class IPCWeightTransferUpdateInfo(WeightTransferUpdateInfo):
-    """Per-round update info for the IPC weight transfer backend.
-
-    Whether the transfer is packed is a must-agree wire param carried on the
-    init info (`IPCTrainerInitInfo` / `IPCWeightTransferInitInfo`), not here;
-    this carries only per-round metadata and the IPC handles.
-    """
+    """Per-round update info for the IPC weight transfer backend."""
 
     names: list[str]
     dtype_names: list[str]
