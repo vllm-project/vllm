@@ -248,12 +248,12 @@ class ChannelWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
 class BlockWiseTorchFP8ScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
     """FP8 block-scaled linear kernel using ``torch._scaled_mm``.
 
-    Implements the block-scaled path of ``torch._scaled_mm``, which dispatches on the shapes of the scale tensors. For
-    ``A = [M, K]`` and ``B = [K, N]`` (both fp8) the op's block path
-    requires, with float32 scales:
+    Implements the block-scaled path of ``torch._scaled_mm``, which
+    dispatches on the shapes of the scale tensors. For ``A = [M, K]`` and
+    ``B = [K, N]`` (both fp8) the op's block path requires, with float32
+    scales:
       * 1x128 activation: ``scale_a = [M, ceil(K / 128)]``
       * 128x128 weight:   ``scale_b = [ceil(K / 128), ceil(N / 128)]``
-
     """
 
     def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
@@ -273,6 +273,19 @@ class BlockWiseTorchFP8ScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
     ) -> tuple[bool, str | None]:
         if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
             return False, "requires CUDA, ROCm or XPU."
+        # torch._scaled_mm DeepSeek-style (1x128, 128x128) block scaling is
+        # only implemented for SM90 (Hopper) on NVIDIA CUDA. See PyTorch's
+        # _check_deepseek_support():
+        # https://github.com/pytorch/pytorch/blob/33812ece06e2b0d597f73fbe41de03a83f9109f9/aten/src/ATen/native/cuda/ScaledBlas.cpp#L804-L820 # noqa: E501
+        if current_platform.is_cuda():
+            if compute_capability is None:
+                compute_capability = current_platform.get_device_capability().to_int()
+            if compute_capability != 90:
+                return (
+                    False,
+                    "DeepSeek-style (1x128, 128x128) block scaling on CUDA "
+                    "requires compute capability 90 (Hopper).",
+                )
         return True, None
 
     @classmethod
