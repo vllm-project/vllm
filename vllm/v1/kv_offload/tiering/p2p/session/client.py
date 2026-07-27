@@ -11,7 +11,6 @@ callback injected by the coordinator (which gates on ConnectAck).
 
 from __future__ import annotations
 
-import enum
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -33,20 +32,6 @@ logger = init_logger(__name__)
 
 _LOAD_TIMEOUT_S = 30.0
 _ABORT_ACK_TIMEOUT_S = 10.0
-
-
-class ClientPhase(enum.Enum):
-    """Lifecycle of a request's client-side lookup/fetch signalling.
-
-    Advances monotonically. Only ``finish`` reads it, to decide
-    whether a terminal empty FetchMsg is owed to release the peer's
-    lookup state (owed only from ``PROBING``: a LookupMsg went out but no
-    FetchMsg has since closed the peer's lookup phase).
-    """
-
-    REGISTERED = enum.auto()  # keys in probes/unsent, nothing sent yet
-    PROBING = enum.auto()  # LookupMsg flushed, awaiting responses
-    FETCH_SENT = enum.auto()  # FetchMsg sent (real or terminal empty)
 
 
 @dataclass
@@ -91,8 +76,10 @@ class _ClientRequestState:
     # loads never probe.
     probed: bool = False
 
-    # Monotonic lookup/fetch signalling phase; see ``ClientPhase``.
-    phase: ClientPhase = ClientPhase.REGISTERED
+    # The peer holds lookup state no FetchMsg has closed: a LookupMsg
+    # was flushed since the last fetch. finish owes a terminal empty
+    # FetchMsg while set, so the peer releases parked supply.
+    peer_lookup_open: bool = False
     # In-flight loads keyed by the round their fetch carried. The
     # scheduler submits loads incrementally as chunks resolve, so several
     # can be in flight at once; TransferDone/AbortAck match by round.
@@ -162,25 +149,12 @@ class ClientRole:
             self._requests[kv_request_id] = st
         return st
 
-    def _reopen_lookup_phase(self, st: _ClientRequestState) -> None:
-        """Regress phase to PROBING when a load ends with probes pending.
-
-        Their LookupMsgs re-opened the peer's lookup phase; without the
-        regression ``finish`` would skip the terminal empty FetchMsg and
-        leave that supply parked on the peer until its store timeout.
-        """
-        if st.probes and st.phase is ClientPhase.FETCH_SENT:
-            st.phase = ClientPhase.PROBING
-
     def _maybe_prune(self, kv_request_id: str) -> None:
         """Drop the entry once it holds no live load or lookup state.
 
-        The sticky ``phase`` is only read by ``finish``. A probe
-        clears when a fetch is issued (``request_blocks``) or when the
-        request finishes (``finish``/``close``); in the former case
-        a load is in flight and keeps the entry alive, in the latter the
-        phase is no longer needed — so dropping on emptiness never loses
-        a phase still in use.
+        ``peer_lookup_open`` is only read by ``finish``, and every path
+        that clears the last probe (fetch / finish / close) also settles
+        it, so dropping on emptiness never loses a flag still in use.
         """
         st = self._requests.get(kv_request_id)
         if st is not None and not st.loads and not st.probes and not st.unsent:
@@ -191,7 +165,6 @@ class ClientRole:
         if st.loads:
             return
         self._active_loads.discard(kv_request_id)
-        self._reopen_lookup_phase(st)
         self._maybe_prune(kv_request_id)
 
     @property
@@ -234,7 +207,7 @@ class ClientRole:
             submitted_at=time.monotonic(),
         )
         self._active_loads.add(kv_request_id)
-        st.phase = ClientPhase.FETCH_SENT
+        st.peer_lookup_open = False
         self._send(
             {
                 TYPE_KEY: FetchMsg.TYPE,
@@ -259,17 +232,14 @@ class ClientRole:
     def finish(self, kv_request_id: str) -> None:
         """Finish a request: abort in-flight loads and release lookup state.
 
-        Called from the session's ``finish_request``.
-
-        - Loads in flight: send an AbortFetchMsg per load not already
-          aborting, then drop them.
-        - Outstanding lookups (``PROBING``): a LookupMsg was flushed but no
-          FetchMsg has since closed the round. The terminal empty FetchMsg
-          is the server's "request finished" signal (it releases lookup
-          state, drains parked supply, and fires ``cb.finish_request``),
-          so emit one purely to trigger those semantics. In ``REGISTERED``
-          the peer never received a LookupMsg and in ``FETCH_SENT`` a
-          FetchMsg already closed the phase, so neither owes one.
+        Called from the session's ``finish_request``. Sends an
+        AbortFetchMsg per load not already aborting, and — independently —
+        the terminal empty FetchMsg when the peer still holds lookup
+        state no fetch has closed (its "request finished" signal: it
+        releases lookup state, drains parked supply, and fires
+        ``cb.finish_request``). A later round's supply can be parked
+        while an earlier round's load is still in flight, so both can be
+        owed at once.
 
         Then drop all probe/lookup state and prune the entry.
         """
@@ -289,8 +259,8 @@ class ClientRole:
                 )
             st.loads.clear()
             self._active_loads.discard(kv_request_id)
-        elif st.phase is ClientPhase.PROBING:
-            st.phase = ClientPhase.FETCH_SENT
+        if st.peer_lookup_open:
+            st.peer_lookup_open = False
             self._send(
                 {
                     TYPE_KEY: FetchMsg.TYPE,
@@ -429,13 +399,9 @@ class ClientRole:
             st = self._requests.get(req_id)
             if st is None or not st.unsent:
                 continue
-            # Record that the peer now holds lookup state for this id so
-            # finish knows a terminal empty FetchMsg may be owed.
-            # Only promote from REGISTERED: once a fetch has gone out
-            # (FETCH_SENT) a later LookupMsg must not regress the phase, as
-            # no terminal FetchMsg is owed for an already-fetched request.
-            if st.phase is ClientPhase.REGISTERED:
-                st.phase = ClientPhase.PROBING
+            # The peer now holds lookup state for this id; finish owes a
+            # terminal empty FetchMsg until a fetch closes it.
+            st.peer_lookup_open = True
             logger.debug(
                 "P2P LOOKUP client %s: SEND LookupMsg kv_request_id=%s keys=%d",
                 self._peer_id,

@@ -289,3 +289,27 @@ def test_unfetched_keys_repinned_next_round():
     stores = list(session.poll().stores)
     stores += list(session.poll().stores)
     assert (1001, True) in [(s.job_id, s.success) for s in stores]
+
+
+def test_finish_with_inflight_load_still_closes_lookup_state():
+    """finish() with a load in flight must still send the terminal empty
+    FetchMsg when a later round's LookupMsg re-opened the peer's lookup
+    state — otherwise its pinned supply leaks until the store timeout."""
+    session, conn, _ = _make_session()
+    _activate(session, conn)
+    client = session._client
+
+    client.register_lookup(KV, b"hA")
+    client.flush_pending_lookups()
+    client.on_lookup_resp(KV, [b"hA"], [True])
+    session.request_blocks(1, KV, [b"hA"], [10])  # round 0 load in flight
+    client.register_lookup(KV, b"hB")
+    client.flush_pending_lookups()  # round 1 lookup re-opens peer state
+
+    session.finish_request(KV)
+    aborts = [m for m in conn._sent if m[TYPE_KEY] == AbortFetchMsg.TYPE]
+    assert [a[AbortFetchMsg.ROUND_SEQ] for a in aborts] == [0]
+    terminal = [
+        m for m in conn._sent if m[TYPE_KEY] == FetchMsg.TYPE and not m[FetchMsg.KEYS]
+    ]
+    assert len(terminal) == 1 and terminal[0][FetchMsg.ROUND_SEQ] == 1
