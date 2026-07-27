@@ -211,10 +211,10 @@ def resample_audio_pyav(
     # libswresample requires a minimum number of input samples to produce
     # output frames; pad short inputs with zeros so we always get output,
     # then trim to the expected output length.
-    _MIN_SAMPLES = 1024
+    _min_samples = 1024
     audio_f32 = np.asarray(audio, dtype=np.float32)
-    if len(audio_f32) < _MIN_SAMPLES:
-        audio_f32 = np.pad(audio_f32, (0, _MIN_SAMPLES - len(audio_f32)))
+    if len(audio_f32) < _min_samples:
+        audio_f32 = np.pad(audio_f32, (0, _min_samples - len(audio_f32)))
     audio_f32 = audio_f32.reshape(1, -1)
 
     resampler = av.AudioResampler(format="fltp", layout="mono", rate=target_sr_int)

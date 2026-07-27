@@ -367,7 +367,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         Note: No_speech_prob field is not supported
         in this implementation and will be None. See docs for details.
         """
-        BASE_OFFSET = 0.02
+        base_offset = 0.02
         init_token = self.tokenizer.encode("<|0.00|>", add_special_tokens=False)[0]
         if tokens[-1] == self.tokenizer.eos_token_id:
             tokens = tokens[:-1]
@@ -395,8 +395,8 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     segment_class(
                         id=len(segments),
                         seek=start_time,
-                        start=start_time + BASE_OFFSET * start_timestamp,
-                        end=start_time + BASE_OFFSET * end_timestamp,
+                        start=start_time + base_offset * start_timestamp,
+                        end=start_time + base_offset * end_timestamp,
                         temperature=request.temperature,
                         text=text,
                         # The compression ratio measures
