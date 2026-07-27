@@ -146,7 +146,7 @@ def test_mla(vllm_runner: type[VllmRunner], example_prompts: list[str]) -> None:
     """
     model = get_model("DeepseekV2ForCausalLM")  # DeepSeek-V2-Lite, MLA + MoE
     args = (example_prompts, 32, 5)
-    kwargs = {"max_model_len": 2048, "enforce_eager": True}
+    kwargs: dict[str, Any] = {"max_model_len": 2048, "enforce_eager": True}
 
     # `trust_remote_code=False` so the built-in Transformers `deepseek_v2`
     # modeling (which supports the "vllm" attention interface) is used instead
