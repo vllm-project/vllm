@@ -1009,9 +1009,8 @@ class SpecDecodeBaseProposer:
             # DeepSeek-family MTP (deepseek_mtp.py) recycles the post-final-
             # norm hidden, so its forward returns (logit_hidden,
             # recycle_hidden). Other MTP families return a single tensor.
-            return bool(
-                {"DeepSeekMTPModel", "DeepseekV32MTPModel"}
-                & set(self.draft_model_config.hf_config.architectures or [])
+            return "DeepSeekMTPModel" in (
+                self.draft_model_config.hf_config.architectures or []
             )
         return self.method not in ("mtp", "draft_model", "dflash")
 

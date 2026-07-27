@@ -282,6 +282,16 @@ class XPUPlatform(Platform):
                 "XPU Graph is disabled by environment variable, "
                 "please set VLLM_XPU_ENABLE_XPU_GRAPH=1 to enable it."
             )
+        else:
+            logger.warning_once(
+                "XPU Graph support is experimental and has known limitations: "
+                "(1) only single-GPU execution is supported; "
+                "(2) FLASH_ATTN supports PIECEWISE mode only; use TRITON_ATTN "
+                "for FULL mode; "
+                "(3) XPU Graph may increase device memory usage, "
+                "potentially causing OOM errors or leaving less memory "
+                "for the KV cache and reducing performance."
+            )
 
         # Disable fusion passes not yet supported on XPU.
         from vllm.config.compilation import CompilationMode
@@ -294,7 +304,6 @@ class XPUPlatform(Platform):
             "fuse_act_padding": "Activation + padding fusion",
             "fuse_rope_kvcache": "RoPE + KV cache fusion",
             "fuse_rope_kvcache_cat_mla": "RoPE + KV cache + MLA fusion",
-            "enable_qk_norm_rope_fusion": "QK Norm + RoPE fusion",
         }
         if compilation_config.mode != CompilationMode.NONE:
             for flag, feature_name in fusion_passes_to_disable.items():
