@@ -41,6 +41,9 @@ def _make_vllm_config(
     config.cache_config.prefix_match_unit = None
     config.cache_config.cache_dtype = torch.float16
     config.model_config.model = "test-model"
+    config.model_config.hf_config_path = None
+    config.model_config.revision = None
+    config.model_config.hf_config._commit_hash = None
     config.model_config.use_mla = False
     world_size = (
         tensor_parallel_size * pipeline_parallel_size * prefill_context_parallel_size
@@ -274,6 +277,36 @@ def test_preserves_data_parallel_index():
     offloading_config = build_offloading_config(config, _make_kv_cache_config())
 
     assert offloading_config.parallel.data_parallel_index == 2
+
+
+@pytest.mark.parametrize(
+    ("hf_config_path", "requested_revision", "resolved_revision", "expected"),
+    [
+        (None, "requested-branch", "resolved-commit", "resolved-commit"),
+        (None, "requested-commit", None, "requested-commit"),
+        (
+            "org/separate-config",
+            "weights-revision",
+            "config-commit",
+            "weights-revision",
+        ),
+        ("org/separate-config", None, "config-commit", None),
+    ],
+)
+def test_model_revision_uses_weights_source(
+    hf_config_path: str | None,
+    requested_revision: str | None,
+    resolved_revision: str | None,
+    expected: str | None,
+):
+    config = _make_vllm_config()
+    config.model_config.hf_config_path = hf_config_path
+    config.model_config.revision = requested_revision
+    config.model_config.hf_config._commit_hash = resolved_revision
+
+    offloading_config = build_offloading_config(config, _make_kv_cache_config())
+
+    assert offloading_config.model.revision == expected
 
 
 def test_resolves_heterogeneous_hybrid_block_sizes():

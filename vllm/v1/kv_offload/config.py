@@ -22,6 +22,8 @@ class OffloadingModelConfig:
     name: str
     # KV cache data type (e.g. "float16").
     dtype: str
+    # Resolved model revision when available.
+    revision: str | None = None
 
 
 @dataclass(frozen=True)

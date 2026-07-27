@@ -36,6 +36,7 @@ def make_mapper_from_offloading_spec(**kwargs) -> FileMapper:
         model=OffloadingModelConfig(
             name=kwargs.get("model_name", "test-model"),
             dtype=kwargs.get("dtype", "float16"),
+            revision=kwargs.get("model_revision"),
         ),
         cache=OffloadingCacheConfig(
             tokens_per_hash=kwargs.get("tokens_per_hash", 16),
@@ -127,6 +128,18 @@ def test_get_config_file_path():
     fm = make_mapper_from_offloading_spec()
     config_path = fm.get_config_file_path()
     assert config_path == f"{fm.base_path}/config.json"
+
+
+def test_model_revision_separates_persistent_namespaces():
+    revision_a = make_mapper_from_offloading_spec(model_revision="commit-a")
+    revision_b = make_mapper_from_offloading_spec(model_revision="commit-b")
+    same_revision = make_mapper_from_offloading_spec(model_revision="commit-a")
+    unavailable = make_mapper_from_offloading_spec()
+
+    assert revision_a.base_path != revision_b.base_path
+    assert revision_a.base_path == same_revision.base_path
+    assert revision_a.fields["model_revision"] == "commit-a"
+    assert "model_revision" not in unavailable.fields
 
 
 def test_hybrid_file_identity_uses_resolved_tokens_per_hash():

@@ -35,6 +35,7 @@ class FileMapper:
         kv_cache_groups: list[dict] | None = None,
         inference_engine: str = "vllm",
         parallel_agnostic: bool = False,
+        model_revision: str | None = None,
     ):
         """
         Initialize the file mapper. Each worker constructs its own, but
@@ -60,6 +61,8 @@ class FileMapper:
         }
         if not parallel_agnostic:
             self.fields["parallel_agnostic"] = False
+        if model_revision is not None:
+            self.fields["model_revision"] = model_revision
         self.base_path: str = self._compute_base_path(root_dir, self.fields)
 
     @classmethod
@@ -93,6 +96,7 @@ class FileMapper:
             dtype=config.model.dtype,
             kv_cache_groups=kv_cache_groups,
             parallel_agnostic=(parallel_agnostic and parallel.is_parallelism_agnostic),
+            model_revision=config.model.revision,
         )
 
     def get_file_name(self, key: OffloadKey) -> str:
