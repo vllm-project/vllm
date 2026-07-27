@@ -411,17 +411,20 @@ class TestBuildRenderConfig:
     def _conv(self):
         return [{"role": "user", "content": "hi"}]
 
-    def test_default_format_is_cmd3(self):
+    def test_default_format_is_cmd4(self):
+        # Bare kwargs -> cmd4 (the current Command A+ prompt format).
+        # Mirrors ``_DEFAULT_FORMAT`` in ``vllm/renderers/cohere.py`` and
+        # the ``--cohere-format`` CLI default.
         fmt, cfg = _build_render_config(self._conv(), {})  # type: ignore[arg-type]
-        assert fmt == "cmd3"
+        assert fmt == "cmd4"
         assert cfg["use_jinja"] is True
         assert isinstance(cfg["messages"], list)
         # No additional_template_fields when no extra kwargs are set.
         assert "additional_template_fields" not in cfg
 
-    def test_explicit_cmd4(self):
-        fmt, cfg = _build_render_config(self._conv(), {"cohere_format": "cmd4"})  # type: ignore[arg-type]
-        assert fmt == "cmd4"
+    def test_explicit_cmd3(self):
+        fmt, cfg = _build_render_config(self._conv(), {"cohere_format": "cmd3"})  # type: ignore[arg-type]
+        assert fmt == "cmd3"
 
     def test_invalid_format_raises(self):
         with pytest.raises(ValueError, match="Invalid cohere_format"):
@@ -525,28 +528,39 @@ class TestBuildRenderConfig:
         assert cfg["json_mode"] is True
 
     def test_cmd3_safety_mode_lowercased(self):
-        _, cfg = _build_render_config(self._conv(), {"safety_mode": "CONTEXTUAL"})  # type: ignore[arg-type]
+        _, cfg = _build_render_config(
+            self._conv(),
+            {"cohere_format": "cmd3", "safety_mode": "CONTEXTUAL"},
+        )  # type: ignore[arg-type]
         assert cfg["safety_mode"] == "contextual"
 
     def test_cmd3_citation_quality_direct(self):
-        _, cfg = _build_render_config(self._conv(), {"citation_quality": "ACCURATE"})  # type: ignore[arg-type]
+        _, cfg = _build_render_config(
+            self._conv(),
+            {"cohere_format": "cmd3", "citation_quality": "ACCURATE"},
+        )  # type: ignore[arg-type]
         assert cfg["citation_quality"] == "accurate"
 
     def test_cmd3_citation_quality_derived_from_citation_options(self):
         # When ``citation_quality`` is unset, ``citation_options.mode`` is
         # collapsed to on/off so cmd3's binary toggle has a value.
         _, cfg = _build_render_config(
-            self._conv(), {"citation_options": {"mode": "accurate"}}
+            self._conv(),
+            {"cohere_format": "cmd3", "citation_options": {"mode": "accurate"}},
         )  # type: ignore[arg-type]
         assert cfg["citation_quality"] == "on"
 
         _, cfg = _build_render_config(
-            self._conv(), {"citation_options": {"mode": "off"}}
+            self._conv(),
+            {"cohere_format": "cmd3", "citation_options": {"mode": "off"}},
         )  # type: ignore[arg-type]
         assert cfg["citation_quality"] == "off"
 
     def test_cmd3_skip_preamble_forwarded(self):
-        _, cfg = _build_render_config(self._conv(), {"skip_preamble": True})  # type: ignore[arg-type]
+        _, cfg = _build_render_config(
+            self._conv(),
+            {"cohere_format": "cmd3", "skip_preamble": True},
+        )  # type: ignore[arg-type]
         assert cfg["skip_preamble"] is True
 
     def test_cmd3_no_grounding_field(self):

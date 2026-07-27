@@ -76,7 +76,7 @@ from .params import ChatParams
 logger = init_logger(__name__)
 
 
-_DEFAULT_FORMAT = "cmd3"
+_DEFAULT_FORMAT = "cmd4"
 _VALID_FORMATS = ("cmd3", "cmd4")
 
 
