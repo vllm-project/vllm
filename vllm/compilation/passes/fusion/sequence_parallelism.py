@@ -495,6 +495,118 @@ class MiddleAllReduceRMSNormStaticNVFP4Pattern(_SequenceParallelPatternHelper):
         )
 
 
+class FirstAllReduceRMSNormXPUMxFP4Pattern(_SequenceParallelPatternHelper):
+    def get_inputs(self) -> list[torch.Tensor]:
+        # Input width must be >= 32 (MXFP4 block size) so the scale tensor
+        # [tokens, width//32] is non-degenerate during pattern tracing.
+        return [self.empty([8, 32]), self.empty([32])]
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            all_reduce = self._all_reduce(input)
+            rms = vllm.ir.ops.rms_norm(all_reduce, weight, self.epsilon)
+            quant = torch.ops.vllm.xpu_mxfp4_quantize(rms)
+            # `rms` (a plain bf16/fp16 tensor) is returned first so torch's
+            # PatternMatcherPass anchors this MultiOutputPattern on the
+            # rms_norm node, for the same reason documented in
+            # FirstAllReduceRMSNormXPUMxFP8Pattern above: anchoring on the
+            # getitem unpacking xpu_mxfp4_quantize's tuple output would make
+            # PatternMatcherPass.apply() skip this pattern entirely, since
+            # the scale output is torch.float8_e8m0fnu and operator.getitem
+            # is never in the small OpOverload whitelist that bypasses that
+            # check.
+            return rms, all_reduce, quant[0], quant[1]
+
+        def replacement(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            reduce_scatter = self._reduce_scatter(input)
+            rms = vllm.ir.ops.rms_norm(reduce_scatter, weight, self.epsilon)
+            quant = torch.ops.vllm.xpu_mxfp4_quantize(rms)
+            # XCCL supports neither float4_e2m1fn_x2 nor float8_e8m0fnu. Reinterpret
+            # both as uint8 (they share the same 8-bit width) during collectives,
+            # then convert back to the original dtypes after gathering.
+            all_gather_fp4 = self._all_gather(quant[0].view(torch.uint8)).view(
+                torch.float4_e2m1fn_x2
+            )
+            all_gather_scales = self._all_gather(quant[1].view(torch.uint8)).view(
+                torch.float8_e8m0fnu
+            )
+            return (
+                rms,
+                reduce_scatter,
+                all_gather_fp4,
+                all_gather_scales,
+            )
+
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+        )
+
+
+class MiddleAllReduceRMSNormXPUMxFP4Pattern(_SequenceParallelPatternHelper):
+    def get_inputs(self) -> list[torch.Tensor]:
+        mm_1 = torch.empty([8, 32])
+        residual = torch.empty([8, 32])
+        rms_norm_weights = torch.empty([32])
+        return [residual, mm_1, rms_norm_weights]
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            residual: torch.Tensor,
+            mm_1: torch.Tensor,
+            rms_norm_weights: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            all_reduce = self._all_reduce(mm_1)
+            rms, residual_out = vllm.ir.ops.fused_add_rms_norm(
+                all_reduce, residual, rms_norm_weights, self.epsilon
+            )
+            quant = torch.ops.vllm.xpu_mxfp4_quantize(rms)
+            # Same reasoning as in FirstAllReduceRMSNormXPUMxFP4Pattern
+            # above: `rms`/`residual_out` must come first in the returned
+            # tuple so the pattern is anchored on the fused_add_rms_norm
+            # node (bf16/fp16 output) rather than on the getitem unpacking
+            # fp4/scale from xpu_mxfp4_quantize.
+            return rms, residual_out, quant[0], quant[1]
+
+        def replacement(
+            residual: torch.Tensor,
+            mm_1: torch.Tensor,
+            rms_norm_weights: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            # Keep this slice in sync with the non-quantized SP replacement:
+            # once the previous SP pattern fires, it becomes a no-op.
+            reduce_scatter = self._reduce_scatter(mm_1)
+            residual = residual[0 : reduce_scatter.size(0), ...]
+            rms, residual_out = vllm.ir.ops.fused_add_rms_norm(
+                reduce_scatter, residual, rms_norm_weights, self.epsilon
+            )
+            quant = torch.ops.vllm.xpu_mxfp4_quantize(rms)
+            # XCCL supports neither float4_e2m1fn_x2 nor float8_e8m0fnu. Reinterpret
+            # both as uint8 (they share the same 8-bit width) during collectives,
+            # then convert back to the original dtypes after gathering.
+            all_gather_fp4 = self._all_gather(quant[0].view(torch.uint8)).view(
+                torch.float4_e2m1fn_x2
+            )
+            all_gather_scales = self._all_gather(quant[1].view(torch.uint8)).view(
+                torch.float8_e8m0fnu
+            )
+            return (
+                rms,
+                residual_out,
+                all_gather_fp4,
+                all_gather_scales,
+            )
+
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+        )
+
+
 class SequenceParallelismPass(VllmPatternMatcherPass):
     """
     This pass enables sequence parallelism for models.
@@ -575,6 +687,14 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
                     epsilon, self.model_dtype, self.device
                 ).register(self.patterns)
                 MiddleAllReduceRMSNormStaticNVFP4Pattern(
+                    epsilon, self.model_dtype, self.device
+                ).register(self.patterns)
+
+            if hasattr(torch.ops.vllm, "xpu_mxfp4_quantize"):
+                FirstAllReduceRMSNormXPUMxFP4Pattern(
+                    epsilon, self.model_dtype, self.device
+                ).register(self.patterns)
+                MiddleAllReduceRMSNormXPUMxFP4Pattern(
                     epsilon, self.model_dtype, self.device
                 ).register(self.patterns)
 
