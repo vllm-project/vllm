@@ -1,6 +1,7 @@
 // A CUDAPluggableAllocator based on cumem* APIs.
 // Important: allocation size, CUdeviceptr and CUmemGenericAllocationHandle*
 // need to be unsigned long long
+#include <cstdlib>
 #include <iostream>
 
 #include "cumem_allocator_compat.h"
@@ -8,7 +9,6 @@
 #ifndef USE_ROCM
 static const char* PYARGS_PARSE = "KKKK";
 #else
-  #include <cstdlib>
   #include <cstdint>
   #include <cerrno>
   #include <climits>
@@ -146,6 +146,15 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
   if (fab_result == CUDA_SUCCESS &&
       fab_flag) {  // support fabric handle if possible
     prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
+  } else {
+    const char* shareable_handle =
+        std::getenv("VLLM_CUMEM_ENABLE_SHAREABLE_HANDLE");
+    if (shareable_handle != nullptr && shareable_handle[0] == '1' &&
+        shareable_handle[1] == '\0') {
+      // Temporary opt-in for cross-process consumers such as FlexKV. A VMM
+      // allocation's shareable handle type cannot be added after cuMemCreate.
+      prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+    }
   }
 #endif
 
