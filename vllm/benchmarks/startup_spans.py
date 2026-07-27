@@ -26,6 +26,9 @@ class StartupPhaseSpan:
     end_ns: int
     duration_s: float
     missing: bool = False
+    # How many emitted spans matched this phase name (1 in the common case; >1
+    # at tp>1 where "Worker init" nests twice per worker, or under re-emission).
+    match_count: int = 1
 
 
 try:
@@ -104,15 +107,53 @@ class InMemorySpanSink(TraceServiceServicer if _OTEL_PROTO_AVAILABLE else object
         return False
 
 
-def _phase_span_from_dict(name, span: dict[str, Any] | None) -> StartupPhaseSpan:
+def _phase_span_from_dict(name, span: dict[str, Any] | None, *,
+                          match_count: int = 1) -> StartupPhaseSpan:
     if span is None:
         return StartupPhaseSpan(
-            name=name, start_ns=0, end_ns=0, duration_s=0.0, missing=True)
+            name=name, start_ns=0, end_ns=0, duration_s=0.0,
+            missing=True, match_count=0)
     start_ns = int(span["start_time_unix_nano"])
     end_ns = int(span["end_time_unix_nano"])
     return StartupPhaseSpan(
         name=name, start_ns=start_ns, end_ns=end_ns,
-        duration_s=max(0.0, (end_ns - start_ns) / 1e9))
+        duration_s=max(0.0, (end_ns - start_ns) / 1e9),
+        match_count=match_count)
+
+
+def _is_nested(inner: dict[str, Any], outer: dict[str, Any]) -> bool:
+    """True if span ``inner`` is fully contained within span ``outer``."""
+    i_start = int(inner["start_time_unix_nano"])
+    i_end = int(inner["end_time_unix_nano"])
+    o_start = int(outer["start_time_unix_nano"])
+    o_end = int(outer["end_time_unix_nano"])
+    return o_start <= i_start and i_end <= o_end
+
+
+def _pick_phase_span(name, matches):
+    """Pick the representative span for a phase from its matches.
+
+    At tp > 1 ``"Worker init"`` is emitted twice per worker: the outer
+    ``WorkerProc.__init__`` span wraps ``init_device()`` and ``load_model()``
+    (i.e. the ``"Init device"`` and ``"Loading (GPU)"`` phases), and the inner
+    ``init_worker`` span is nested inside it. Picking the outer span by earliest
+    start would make ``total_phase_time_s`` double-count the sibling phases it
+    wraps. When matches nest, pick the innermost (the span no other match nests
+    inside) so the chosen span does not subsume a sibling phase; for disjoint
+    duplicate spans (no nesting), keep the earliest-start choice.
+    """
+    if len(matches) == 1:
+        return matches[0]
+    logger.warning(
+        "phase %r has %d matching spans (v=%d); collapsing to one",
+        name, len(matches), PHASE_LIST_VERSION)
+    nested = [s for s in matches
+              if any(_is_nested(s, o) for o in matches if o is not s)]
+    if nested:
+        innermost = [s for s in nested
+                     if not any(_is_nested(o, s) for o in matches if o is not s)]
+        return innermost[0] if innermost else nested[0]
+    return min(matches, key=lambda s: int(s["start_time_unix_nano"]))
 
 
 def select_phase_spans(
@@ -124,8 +165,9 @@ def select_phase_spans(
         if not matches:
             out.append(_phase_span_from_dict(name, None))
             continue
-        chosen = min(matches, key=lambda s: int(s["start_time_unix_nano"]))
-        out.append(_phase_span_from_dict(name, chosen))
+        chosen = _pick_phase_span(name, matches)
+        out.append(
+            _phase_span_from_dict(name, chosen, match_count=len(matches)))
     known = set(phase_names)
     extras = {s["name"] for s in all_spans if s["name"] not in known}
     if extras:
@@ -144,7 +186,8 @@ def build_phase_report(spans, *, wall_clock_startup_s=None) -> dict[str, Any]:
         "phase_list_version": PHASE_LIST_VERSION,
         "phases": [
             {"name": s.name, "duration_s": s.duration_s,
-             "start_ns": s.start_ns, "end_ns": s.end_ns, "missing": s.missing}
+             "start_ns": s.start_ns, "end_ns": s.end_ns, "missing": s.missing,
+             "match_count": s.match_count}
             for s in spans],
         "total_phase_time_s": sum(s.duration_s for s in spans),
         "wall_clock_startup_s": wall_clock_startup_s,

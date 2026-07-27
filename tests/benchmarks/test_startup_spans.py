@@ -212,6 +212,70 @@ def test_select_phase_spans_picks_earliest():
     assert all(s.duration_s >= 0.0 for s in result)
 
 
+def test_select_phase_spans_picks_innermost_for_nested_worker_init():
+    """At tp>1, "Worker init" nests twice per worker: the outer
+    ``WorkerProc.__init__`` span wraps ``init_device()`` and ``load_model()``
+    (the ``"Init device"`` and ``"Loading (GPU)"`` phases), and the inner
+    ``init_worker`` span is nested inside it. Picking the outer span by earliest
+    start would make ``total_phase_time_s`` double-count the sibling phases it
+    wraps; the consumer picks the innermost so the chosen span does not subsume
+    them. A warning fires because the phase has more than one matching span.
+    No GPU.
+    """
+    import logging
+
+    # Outer "Worker init" (1.0 s) subsumes "Init device" + "Loading (GPU)";
+    # inner "Worker init" (0.2 s) is nested inside the outer.
+    spans = [
+        {"name": "Worker init", "start_time_unix_nano": 0,
+         "end_time_unix_nano": 1_000_000_000},        # outer
+        {"name": "Worker init", "start_time_unix_nano": 200_000_000,
+         "end_time_unix_nano": 400_000_000},          # inner (nested)
+        {"name": "Init device", "start_time_unix_nano": 50_000_000,
+         "end_time_unix_nano": 150_000_000},          # 0.1 s, within outer
+        {"name": "Loading (GPU)", "start_time_unix_nano": 160_000_000,
+         "end_time_unix_nano": 180_000_000},          # 0.02 s, within outer
+        {"name": "Capture model", "start_time_unix_nano": 410_000_000,
+         "end_time_unix_nano": 460_000_000},          # 0.05 s
+        {"name": "Allocate KV cache", "start_time_unix_nano": 470_000_000,
+         "end_time_unix_nano": 540_000_000},          # 0.07 s
+        {"name": "Warmup (GPU)", "start_time_unix_nano": 550_000_000,
+         "end_time_unix_nano": 700_000_000},          # 0.15 s
+    ]
+    # vLLM's logger tree does not propagate to the root handler pytest's caplog
+    # taps, so attach a handler directly to the consumer's own logger.
+    consumer_log = logging.getLogger("vllm.benchmarks.startup_spans")
+    records: list[logging.LogRecord] = []
+    handler = logging.Handler()
+    handler.emit = records.append
+    prev_level = consumer_log.level
+    consumer_log.addHandler(handler)
+    consumer_log.setLevel(logging.WARNING)
+    try:
+        result = select_phase_spans(spans, COLD_START_PHASES)
+    finally:
+        consumer_log.removeHandler(handler)
+        consumer_log.setLevel(prev_level)
+
+    assert len(result) == len(COLD_START_PHASES) == 6
+    worker = result[0]
+    assert worker.name == "Worker init"
+    # (a) the inner span is picked, not the outer that subsumes siblings.
+    assert worker.start_ns == 200_000_000
+    assert worker.duration_s == 0.2
+    assert worker.match_count == 2
+    # (b) total_phase_time_s does NOT double-count: inner WI (0.2) + ID (0.1)
+    # + LG (0.02) + CM (0.05) + AK (0.07) + WU (0.15) = 0.59 s. Picking the
+    # outer (1.0 s, which subsumes ID+LG) would have summed to 1.39 s.
+    report = build_phase_report(result)
+    assert report["total_phase_time_s"] == pytest.approx(0.59, abs=1e-9)
+    assert report["phases"][0]["match_count"] == 2
+    # (c) a warning fires when a phase has more than one matching span.
+    messages = [r.getMessage() for r in records]
+    assert any("Worker init" in m and "matching spans" in m for m in messages), \
+        messages
+
+
 def test_build_phase_report_shape():
     """build_phase_report returns the frozen version, 6 phase rows, the summed
     total, and echoes wall_clock_startup_s. No GPU.
