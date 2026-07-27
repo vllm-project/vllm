@@ -38,6 +38,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
@@ -175,6 +176,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Data parallelism.
         self.dp_size = self.parallel_config.data_parallel_size
         self.dp_rank = self.parallel_config.data_parallel_rank
+
+        # Detect EP all2all peer faults to prevent emitting corrupted output.
+        # Only meaningful for MoE + DP with an FT-capable all2all backend.
+        self.check_ep_fault = False
+        if self.dp_size > 1 and self.model_config.is_moe:
+            self.check_ep_fault = get_ep_all2all_manager().support_fault_tolerance
 
         # Decode context parallelism.
         self.dcp_size = self.parallel_config.decode_context_parallel_size
@@ -459,6 +466,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.attn_groups, attn_cg_support, self.kernel_block_sizes = init_attn_backend(
             self.kv_cache_config, self.vllm_config, self.device
         )
+        attn_cg_support = attn_cg_support.narrow(
+            *self.model_state.get_additional_cg_support()
+        )
         self.block_tables = BlockTables(
             block_sizes=block_sizes,
             max_num_reqs=self.max_num_reqs,
@@ -561,8 +571,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_tokens = max(num_tokens, self.decode_query_len)
             num_reqs = num_tokens // self.decode_query_len
             assert num_tokens % self.decode_query_len == 0
-        num_tokens_per_request = [num_tokens // num_reqs] * num_reqs
-        num_tokens_per_request[-1] += num_tokens % num_reqs
+        # Distribute the remainder evenly so no dummy request exceeds
+        # ceil(num_tokens / num_reqs) <= max_model_len tokens.
+        num_tokens_per_request = [
+            num_tokens // num_reqs + (i >= num_reqs - num_tokens % num_reqs)
+            for i in range(num_reqs)
+        ]
 
         assert sum(num_tokens_per_request) == num_tokens
         num_scheduled_tokens = {
@@ -1499,6 +1513,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_sampled_tokens=num_sampled,
             main_stream=self.main_stream,
             copy_stream=self.output_copy_stream,
+            check_ep_fault=self.check_ep_fault,
             word_align_fn=self.word_align.make_readout_fn(),
         )
 
