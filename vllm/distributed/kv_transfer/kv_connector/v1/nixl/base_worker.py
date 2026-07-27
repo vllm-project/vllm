@@ -1963,11 +1963,9 @@ class NixlBaseConnectorWorker:
             )
             first_stale = covered_blocks + (1 if sub_blocks_in_last else 0)
             has_stale = first_stale < len(block_ids)
-            indices = (
+            indices = None
+            if convert or has_stale:
                 async_tensor_h2d(block_ids, device, torch.long)
-                if convert or has_stale
-                else None
-            )
 
             if convert:
                 for cache in attn_caches:
@@ -1987,9 +1985,8 @@ class NixlBaseConnectorWorker:
                 for cache in attn_caches:
                     # Both post-processed layouts leave tokens on dim 1.
                     sub_block_tokens = cache.shape[1] // block_size_ratio
-                    cache[
-                        last_block_id, sub_blocks_in_last * sub_block_tokens :
-                    ].zero_()
+                    zero_from = sub_blocks_in_last * sub_block_tokens
+                    cache[last_block_id, zero_from:].zero_()
             if has_stale:
                 assert indices is not None
                 stale_ids = indices[first_stale:]
