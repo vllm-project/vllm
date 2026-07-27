@@ -1,0 +1,352 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""
+Unit tests for back-pressure detection in TieringOffloadingManager.
+
+These tests use a DelayedSecondaryTierManager that holds completed jobs
+until explicitly released, allowing precise control over when the manager
+observes store completions and their apparent latency.
+"""
+
+import time
+from collections.abc import Iterable
+from unittest.mock import MagicMock
+
+import pytest
+import torch
+
+from vllm.v1.kv_offload.base import (
+    LookupResult,
+    OffloadKey,
+    OffloadPolicy,
+    ReqContext,
+    RequestOffloadingContext,
+    ScheduleEndContext,
+    make_offload_key,
+)
+from vllm.v1.kv_offload.tiering.base import (
+    JobMetadata,
+    JobResult,
+    SecondaryTierManager,
+    TieringOffloadingMetrics,
+)
+from vllm.v1.kv_offload.tiering.manager import (
+    _BP_EMA_ALPHA,
+    _BP_HIGH_WATER_S,
+    _BP_LOW_WATER_S,
+    CPUPrimaryTierOffloadingManager,
+    TieringOffloadingManager,
+)
+
+_CTX = ReqContext(req_id="test")
+_MOCK_OFFLOADING_SPEC = MagicMock()
+
+
+def _mock_mmap_region(num_blocks: int, row_bytes: int = 16):
+    mock = MagicMock()
+    view = memoryview(torch.zeros((num_blocks, row_bytes), dtype=torch.int8).numpy())
+    mock.create_kv_memoryview.return_value = view
+    return mock
+
+
+def to_keys(int_ids: Iterable[int]) -> list[OffloadKey]:
+    return [make_offload_key(str(i).encode(), 0) for i in int_ids]
+
+
+class DelayedSecondaryTierManager(SecondaryTierManager):
+    """Secondary tier that holds completed store jobs until released.
+
+    Jobs are stored immediately but their completion is not reported
+    by get_finished_jobs() until release_jobs() is called. This lets
+    tests control the apparent latency of store operations by adjusting
+    submit_time on the JobMetadata before triggering the completion poll.
+    """
+
+    def __init__(self, offloading_spec, primary_kv_view, tier_type):
+        super().__init__(offloading_spec, primary_kv_view, tier_type)
+        self.blocks: dict[OffloadKey, bool] = {}
+        self._held_jobs: list[JobResult] = []
+        self._released_jobs: list[JobResult] = []
+
+    def lookup(self, key, req_context):
+        return LookupResult.HIT if key in self.blocks else LookupResult.MISS
+
+    def submit_store(self, job_metadata: JobMetadata) -> None:
+        for key in job_metadata.keys:
+            self.blocks[key] = True
+        self._held_jobs.append(
+            JobResult(job_id=job_metadata.job_id, success=True)
+        )
+
+    def submit_load(self, job_metadata: JobMetadata) -> None:
+        self._released_jobs.append(
+            JobResult(job_id=job_metadata.job_id, success=True)
+        )
+
+    def get_finished_jobs(self) -> Iterable[JobResult]:
+        result = self._released_jobs
+        self._released_jobs = []
+        return result
+
+    def release_jobs(self):
+        self._released_jobs.extend(self._held_jobs)
+        self._held_jobs.clear()
+
+    def on_new_request(self, req_context):
+        return RequestOffloadingContext()
+
+    def drain_jobs(self):
+        self.release_jobs()
+
+    def has_pending_work(self):
+        return bool(self._held_jobs)
+
+    def get_num_blocks(self):
+        return len(self.blocks)
+
+
+class TestBackpressure:
+
+    @pytest.fixture
+    def setup(self):
+        mock_region = _mock_mmap_region(20)
+        self.primary = CPUPrimaryTierOffloadingManager(
+            num_blocks=20, mmap_region=mock_region
+        )
+        mock_view = mock_region.create_kv_memoryview()
+        self.tier = DelayedSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=mock_view,
+            tier_type="delayed",
+        )
+        self.manager = TieringOffloadingManager(
+            primary_tier=self.primary,
+            secondary_tiers=[self.tier],
+        )
+
+    def _start_request(self, ctx=_CTX):
+        if ctx.req_id not in self.manager._req_state:
+            self.manager.on_new_request(ctx)
+
+    def _store_blocks(self, keys, ctx=_CTX):
+        self._start_request(ctx)
+        result = self.manager.prepare_store(keys, ctx)
+        assert result is not None
+        self.manager.complete_store(keys, ctx, success=True)
+
+    def _simulate_on_schedule_end(self):
+        ctx = ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
+        self.manager.on_schedule_end(ctx)
+
+    def _backdate_held_jobs(self, age_s: float):
+        """Set submit_time on all in-flight store jobs so they appear
+        to have taken ``age_s`` seconds when completed."""
+        now = time.monotonic()
+        for job_id, meta in self.manager._transfer_jobs.items():
+            if not meta.is_promotion and meta.submit_time > 0:
+                meta.submit_time = now - age_s
+
+    def test_ema_updates_on_store_completion(self, setup):
+        keys = to_keys(range(2))
+        self._store_blocks(keys)
+
+        # Jobs are held — no completion yet.
+        self._simulate_on_schedule_end()
+        bp = self.manager._backpressure[self.tier]
+        assert bp.store_latency_ema == 0.0
+
+        # Backdate and release: simulate a fast store.
+        fast_latency = 0.01
+        self._backdate_held_jobs(fast_latency)
+        self.tier.release_jobs()
+        self._simulate_on_schedule_end()
+
+        assert bp.store_latency_ema == pytest.approx(
+            _BP_EMA_ALPHA * fast_latency, abs=0.01
+        )
+
+    def test_pressure_activates_above_high_water(self, setup):
+        keys = to_keys(range(2))
+        self._store_blocks(keys)
+        bp = self.manager._backpressure[self.tier]
+
+        slow_latency = _BP_HIGH_WATER_S * 5
+        self._backdate_held_jobs(slow_latency)
+        self.tier.release_jobs()
+        self._simulate_on_schedule_end()
+
+        assert bp.store_latency_ema > _BP_HIGH_WATER_S
+        assert bp.is_under_pressure is True
+
+    def test_pressure_clears_below_low_water(self, setup):
+        bp = self.manager._backpressure[self.tier]
+        bp.store_latency_ema = _BP_HIGH_WATER_S * 2
+        bp.is_under_pressure = True
+
+        # Drive several fast completions to bring EMA below low water.
+        block_id = 100
+        while bp.store_latency_ema >= _BP_LOW_WATER_S:
+            keys = to_keys([block_id])
+            block_id += 1
+            self._store_blocks(keys)
+            # Pressure is on, so the cascade was skipped. Force-submit
+            # a store job manually to get a completion to feed the EMA.
+            job_meta = self.manager.create_store_job(keys, _CTX)
+            job_meta.submit_time = time.monotonic() - 0.001
+            self.tier.submit_store(job_meta)
+            self.tier.release_jobs()
+            self._simulate_on_schedule_end()
+
+        assert bp.is_under_pressure is False
+
+    def test_hysteresis_prevents_oscillation(self, setup):
+        bp = self.manager._backpressure[self.tier]
+
+        # Set EMA between low and high water marks.
+        mid = (_BP_LOW_WATER_S + _BP_HIGH_WATER_S) / 2
+        bp.store_latency_ema = mid
+
+        # When not under pressure, mid-range EMA should not activate.
+        bp.is_under_pressure = False
+        keys = to_keys(range(2))
+        self._store_blocks(keys)
+        self._backdate_held_jobs(mid)
+        self.tier.release_jobs()
+        self._simulate_on_schedule_end()
+        assert bp.is_under_pressure is False
+
+        # When under pressure, mid-range EMA should not deactivate.
+        bp.is_under_pressure = True
+        keys2 = to_keys(range(10, 12))
+        # Force-submit since pressure is on (cascade would skip).
+        for k in keys2:
+            self.primary.prepare_store([k], _CTX)
+            self.primary.complete_store([k], _CTX)
+        job_meta = self.manager.create_store_job(keys2, _CTX)
+        job_meta.submit_time = time.monotonic() - mid
+        self.tier.submit_store(job_meta)
+        self.tier.release_jobs()
+        self._simulate_on_schedule_end()
+        assert bp.is_under_pressure is True
+
+    def test_stores_skipped_under_pressure(self, setup):
+        bp = self.manager._backpressure[self.tier]
+        bp.is_under_pressure = True
+        initial_blocks = self.tier.get_num_blocks()
+
+        keys = to_keys(range(50, 53))
+        self._store_blocks(keys)
+
+        # Blocks should be in primary but NOT in secondary.
+        for k in keys:
+            assert self.primary.lookup(k, _CTX) is LookupResult.HIT
+        assert self.tier.get_num_blocks() == initial_blocks
+
+    def test_stores_resume_after_pressure_clears(self, setup):
+        bp = self.manager._backpressure[self.tier]
+
+        # Start under pressure — stores skipped.
+        bp.is_under_pressure = True
+        keys1 = to_keys(range(60, 62))
+        self._store_blocks(keys1)
+        assert all(k not in self.tier.blocks for k in keys1)
+
+        # Clear pressure — next store should cascade.
+        bp.is_under_pressure = False
+        keys2 = to_keys(range(70, 72))
+        self._store_blocks(keys2)
+        assert all(k in self.tier.blocks for k in keys2)
+
+    def test_dropped_store_count_tracked(self, setup):
+        bp = self.manager._backpressure[self.tier]
+        bp.is_under_pressure = True
+        assert bp.stores_dropped == 0
+
+        self._store_blocks(to_keys([80]))
+        assert bp.stores_dropped == 1
+
+        self._store_blocks(to_keys([81]))
+        assert bp.stores_dropped == 2
+
+    def test_metrics_reported_via_get_stats(self, setup):
+        bp = self.manager._backpressure[self.tier]
+        bp.is_under_pressure = True
+        bp.stores_dropped = 5
+
+        stats = self.manager.get_stats()
+        assert stats is not None
+        reduced = stats.reduce()
+
+        gauge_key = TieringOffloadingMetrics.BACKPRESSURE_ACTIVE
+        counter_key = TieringOffloadingMetrics.BACKPRESSURE_STORES_DROPPED
+        assert reduced[f"{gauge_key}:('delayed',)"] == 1
+        assert reduced[f"{counter_key}:('delayed',)"] == 5
+
+        # Dropped count resets after get_stats.
+        assert bp.stores_dropped == 0
+
+    def test_metrics_gauge_zero_when_no_pressure(self, setup):
+        bp = self.manager._backpressure[self.tier]
+        bp.is_under_pressure = False
+
+        stats = self.manager.get_stats()
+        assert stats is not None
+        reduced = stats.reduce()
+
+        gauge_key = TieringOffloadingMetrics.BACKPRESSURE_ACTIVE
+        assert reduced[f"{gauge_key}:('delayed',)"] == 0
+
+    def test_reset_cache_clears_backpressure(self, setup):
+        bp = self.manager._backpressure[self.tier]
+        bp.store_latency_ema = 5.0
+        bp.is_under_pressure = True
+
+        self.manager.reset_cache()
+
+        assert bp.store_latency_ema == 0.0
+        assert bp.is_under_pressure is False
+
+    def test_request_level_tier_respects_backpressure(self, setup):
+        """Request-level cascade also skips pressured tiers."""
+        # Store blocks in primary first.
+        existing = to_keys(range(3))
+        self._store_blocks(existing)
+        self.tier.release_jobs()
+        self._simulate_on_schedule_end()
+        self._simulate_on_schedule_end()
+
+        # Make tier request-level for a new request.
+        self.tier.on_new_request = lambda ctx: RequestOffloadingContext(
+            policy=OffloadPolicy.REQUEST_LEVEL
+        )
+        ctx = ReqContext(req_id="req_rl_bp")
+        self.manager.on_new_request(ctx)
+
+        # Activate pressure.
+        bp = self.manager._backpressure[self.tier]
+        bp.is_under_pressure = True
+        initial_blocks = self.tier.get_num_blocks()
+
+        # prepare_store with existing + new blocks.
+        new = to_keys(range(10, 12))
+        all_keys = existing + new
+        result = self.manager.prepare_store(all_keys, ctx)
+        assert result is not None
+
+        # Existing blocks would normally cascade to request-level tier,
+        # but should be skipped under pressure.
+        assert self.tier.get_num_blocks() == initial_blocks
+
+    def test_loads_continue_under_pressure(self, setup):
+        """Loads from a pressured tier still work."""
+        blocks = to_keys(range(3))
+        for b in blocks:
+            self.tier.blocks[b] = True
+
+        bp = self.manager._backpressure[self.tier]
+        bp.is_under_pressure = True
+
+        # Lookups should still initiate promotion.
+        for b in blocks:
+            result = self.manager.lookup(b, _CTX)
+            assert result is LookupResult.RETRY
