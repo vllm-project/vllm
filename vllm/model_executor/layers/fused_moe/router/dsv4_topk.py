@@ -79,9 +79,7 @@ class DSV4TopKKernel(VllmJitKernel["DSV4TopKKernel.CompileKey"]):
             mask=expert_mask,
             other=0.0,
         ).to(tl.float32)
-        weights = tl.sqrt(
-            tl.where(logits > 20.0, logits, tl.log(1.0 + tl.exp(logits)))
-        )
+        weights = tl.sqrt(tl.where(logits > 20.0, logits, tl.log(1.0 + tl.exp(logits))))
         current = tl.where(expert_mask, weights + bias, -float("inf"))
         current = tl.where(current == current, current, -1e30)
 

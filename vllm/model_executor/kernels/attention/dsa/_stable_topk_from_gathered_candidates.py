@@ -219,12 +219,12 @@ class StableTopKFromGatheredCandidatesImpl:
     @cute.jit
     def __call__(
         self,
-        input: cute.Tensor,
+        gathered: cute.Tensor,
         out: cute.Tensor,
         stream: CUstream,
     ):
-        grid = (input.shape[0], 1, 1)
-        self.kernel(input, out).launch(
+        grid = (gathered.shape[0], 1, 1)
+        self.kernel(gathered, out).launch(
             grid=grid,
             block=(self.tb_size, 1, 1),
             stream=stream,

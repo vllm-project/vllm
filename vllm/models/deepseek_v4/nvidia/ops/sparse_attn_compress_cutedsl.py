@@ -2077,7 +2077,7 @@ def fused_kv_compress_norm_rope_insert_sparse_attn_cutedsl(
     )
 
 
-def compress_norm_rope_store_cutedsl(
+def _compress_norm_rope_store_cutedsl(
     state_cache: torch.Tensor,
     num_actual: int,
     token_to_req_indices: torch.Tensor,
@@ -2170,6 +2170,7 @@ def compress_norm_rope_store_cutedsl(
             fp8_scale=fp8_scale,
         )
 
+
 class SparseAttnCompressorCuteDSLKernel(
     VllmJitKernel["SparseAttnCompressorCuteDSLKernel.CompileKey"]
 ):
@@ -2190,6 +2191,62 @@ class SparseAttnCompressorCuteDSLKernel(
         norm_weight_dtype: type[cutlass.Numeric]
         store_full_kv: bool
         store_full_fp8: bool
+
+    @staticmethod
+    def kernel(
+        state_cache: torch.Tensor,
+        num_actual: int,
+        token_to_req_indices: torch.Tensor,
+        positions: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        block_table: torch.Tensor,
+        block_size: int,
+        state_width: int,
+        cos_sin_cache: torch.Tensor,
+        kv_cache: torch.Tensor,
+        k_cache_metadata: Any,
+        pdl_kwargs: dict,
+        head_dim: int,
+        rope_head_dim: int,
+        compress_ratio: int,
+        overlap: bool,
+        use_fp4_cache: bool,
+        rms_norm_weight: torch.Tensor,
+        rms_norm_eps: float,
+        quant_block: int,
+        token_stride: int,
+        scale_dim: int,
+        store_full_kv: bool = False,
+        store_full_fp8: bool = False,
+        fp8_scale: torch.Tensor | None = None,
+    ) -> None:
+        _compress_norm_rope_store_cutedsl(
+            state_cache,
+            num_actual,
+            token_to_req_indices,
+            positions,
+            slot_mapping,
+            block_table,
+            block_size,
+            state_width,
+            cos_sin_cache,
+            kv_cache,
+            k_cache_metadata,
+            pdl_kwargs,
+            head_dim,
+            rope_head_dim,
+            compress_ratio,
+            overlap,
+            use_fp4_cache,
+            rms_norm_weight,
+            rms_norm_eps,
+            quant_block,
+            token_stride,
+            scale_dim,
+            store_full_kv=store_full_kv,
+            store_full_fp8=store_full_fp8,
+            fp8_scale=fp8_scale,
+        )
 
     def dispatch(  # type: ignore[override]
         self,
@@ -2322,6 +2379,62 @@ class SparseAttnCompressorCuteDSLKernel(
             norm_weight_dtype=compile_key.norm_weight_dtype,
             store_full_kv=compile_key.store_full_kv,
             store_full_fp8=compile_key.store_full_fp8,
+        )
+
+    def __call__(
+        self,
+        state_cache: torch.Tensor,
+        num_actual: int,
+        token_to_req_indices: torch.Tensor,
+        positions: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        block_table: torch.Tensor,
+        block_size: int,
+        state_width: int,
+        cos_sin_cache: torch.Tensor,
+        kv_cache: torch.Tensor,
+        k_cache_metadata: Any,
+        pdl_kwargs: dict,
+        head_dim: int,
+        rope_head_dim: int,
+        compress_ratio: int,
+        overlap: bool,
+        use_fp4_cache: bool,
+        rms_norm_weight: torch.Tensor,
+        rms_norm_eps: float,
+        quant_block: int,
+        token_stride: int,
+        scale_dim: int,
+        store_full_kv: bool = False,
+        store_full_fp8: bool = False,
+        fp8_scale: torch.Tensor | None = None,
+    ) -> None:
+        self.kernel(
+            state_cache,
+            num_actual,
+            token_to_req_indices,
+            positions,
+            slot_mapping,
+            block_table,
+            block_size,
+            state_width,
+            cos_sin_cache,
+            kv_cache,
+            k_cache_metadata,
+            pdl_kwargs,
+            head_dim,
+            rope_head_dim,
+            compress_ratio,
+            overlap,
+            use_fp4_cache,
+            rms_norm_weight,
+            rms_norm_eps,
+            quant_block,
+            token_stride,
+            scale_dim,
+            store_full_kv=store_full_kv,
+            store_full_fp8=store_full_fp8,
+            fp8_scale=fp8_scale,
         )
 
 
