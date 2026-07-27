@@ -25,6 +25,9 @@ class _InputOptions(TypedDict):
     cache_salt: NotRequired[str]
     """Optional cache salt to be used for prefix caching."""
 
+    cache_checkpoint_input_end: NotRequired[int]
+    """Internal stable-chat-prefix boundary produced by the renderer."""
+
 
 class TokensInput(_InputOptions):
     """Represents token-based input to the engine."""

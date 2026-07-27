@@ -382,6 +382,7 @@ class InputProcessor:
             data_parallel_rank=data_parallel_rank,
             trace_headers=trace_headers,
             resumable=resumable,
+            cache_checkpoint_input_end=decoder_inputs.get("cache_checkpoint_input_end"),
         )
 
     def _validate_prompt_len(

@@ -75,6 +75,135 @@ def test_mamba_align_split_partial_tail_schedule():
     assert split(self=mock, request=req2, num_new_tokens=1000) == 512
 
 
+def test_mamba_align_split_stops_at_selected_input_end():
+    block_size = 16
+    hash_block_size = 1
+    mock = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=block_size),
+        use_eagle=False,
+        hash_block_size=hash_block_size,
+        mamba_partial_cache_hit=True,
+        retain_input_end=True,
+    )
+    req = make_request("0", [0] * 30, hash_block_size, sha256)
+    req.cache_checkpoint_input_end = 7
+
+    split = Scheduler._mamba_block_aligned_split
+    assert split(self=mock, request=req, num_new_tokens=20) == 7
+
+    req.num_computed_tokens = 7
+    assert split(self=mock, request=req, num_new_tokens=13) == 9
+
+
+def _make_semantic_checkpoint_manager(
+    monkeypatch, *, retain_input=False, hash_block_size=1
+):
+    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "0")
+    monkeypatch.setenv(
+        "VLLM_PREFIX_CACHE_RETAIN_INPUT_END", "1" if retain_input else "0"
+    )
+    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETAIN_REASONING_END", "1")
+    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETAIN_RESPONSE_END", "0")
+    block_size = 4
+    kv_cache_config = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    return make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+
+
+def test_semantic_checkpoint_partial_hash_can_be_hit(monkeypatch):
+    manager = _make_semantic_checkpoint_manager(monkeypatch, retain_input=True)
+    token_ids = [0, 0, 1, 1, 2, 2, 3, 3]
+    request = make_request("0", token_ids, 1, sha256)
+    request.cache_checkpoint_input_end = 7
+
+    computed, num_computed, _ = manager.get_computed_blocks(request)
+    assert num_computed == 0
+    assert manager.allocate_slots(request, 7, num_computed, computed) is not None
+    manager.free(request)
+    manager.new_step_starts()
+
+    expected_hash = request.block_hashes[6]
+    assert manager.block_pool.get_cached_block(expected_hash, [0]) is not None
+    assert manager.block_pool.get_cached_block(expected_hash, [1]) is not None
+
+    replay = make_request("1", token_ids, 1, sha256)
+    _, num_computed, _ = manager.get_computed_blocks(replay)
+    assert num_computed == 7
+    assert replay.cache_checkpoint_hit_boundary == 7
+    assert replay.cache_checkpoint_hit_kinds == frozenset({"input_end"})
+
+
+def test_semantic_checkpoint_rejects_later_mamba_state(monkeypatch):
+    manager = _make_semantic_checkpoint_manager(
+        monkeypatch, retain_input=True, hash_block_size=2
+    )
+    token_ids = [0, 0, 1, 1, 2, 2, 3, 3]
+    request = make_request("0", token_ids, 2, sha256)
+    request.cache_checkpoint_input_end = 7
+
+    computed, num_computed, _ = manager.get_computed_blocks(request)
+    assert manager.allocate_slots(request, 8, num_computed, computed) is not None
+
+    selected_hash = request.block_hashes[2]
+    assert manager.block_pool.get_cached_block(selected_hash, [0]) is not None
+    assert manager.block_pool.get_cached_block(selected_hash, [1]) is None
+
+
+def test_unchanged_decode_skips_semantic_reconciliation(monkeypatch):
+    manager = _make_semantic_checkpoint_manager(monkeypatch)
+    mamba_manager = manager.coordinator.single_type_managers[1]
+    original_reconcile = mamba_manager._reconcile_semantic_checkpoints
+    reconcile_calls = 0
+
+    def count_reconcile(*args, **kwargs):
+        nonlocal reconcile_calls
+        reconcile_calls += 1
+        return original_reconcile(*args, **kwargs)
+
+    monkeypatch.setattr(
+        mamba_manager, "_reconcile_semantic_checkpoints", count_reconcile
+    )
+
+    request = make_request("0", [0] * 8, 1, sha256)
+    computed, num_computed, _ = manager.get_computed_blocks(request)
+    assert manager.allocate_slots(request, 4, num_computed, computed) is not None
+    assert reconcile_calls == 1
+
+    request.num_computed_tokens = 4
+    assert manager.allocate_slots(request, 4) is not None
+    request.num_computed_tokens = 8
+    request.append_output_token_ids([1])
+    assert manager.allocate_slots(request, 1) is not None
+    assert reconcile_calls == 1
+
+
 def test_hybrid_mamba_align_partial_hash_hit():
     hash_block_size = 2
     mamba_block_size = 2 * hash_block_size

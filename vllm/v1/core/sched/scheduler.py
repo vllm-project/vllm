@@ -3,10 +3,11 @@
 import itertools
 import time
 from collections import defaultdict, deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from typing import Any
 
+from vllm import envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -65,6 +66,14 @@ from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
 
+_VALID_SEMANTIC_CHECKPOINT_TERMINATION_STATUSES = frozenset(
+    {
+        RequestStatus.FINISHED_STOPPED,
+        RequestStatus.FINISHED_LENGTH_CAPPED,
+        RequestStatus.FINISHED_REPETITION,
+    }
+)
+
 
 class Scheduler(SchedulerInterface):
     def __init__(
@@ -93,6 +102,16 @@ class Scheduler(SchedulerInterface):
                 self.observability_config.kv_cache_metrics_sample,
             )
         self.structured_output_manager = structured_output_manager
+        self.retain_input_end = envs.VLLM_PREFIX_CACHE_RETAIN_INPUT_END
+        self.retain_reasoning_end = envs.VLLM_PREFIX_CACHE_RETAIN_REASONING_END
+        self.retain_response_end = envs.VLLM_PREFIX_CACHE_RETAIN_RESPONSE_END
+        self.retain_semantic_cache_checkpoints = any(
+            (
+                self.retain_input_end,
+                self.retain_reasoning_end,
+                self.retain_response_end,
+            )
+        )
         self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
 
         # include_finished_set controls whether a separate set of finished
@@ -366,7 +385,8 @@ class Scheduler(SchedulerInterface):
         In "align" cache mode the SSM state is only materialized at chunk
         ends, so chunk ends are steered onto cacheable positions: block
         boundaries by default, plus mandatory early stops (the prompt's
-        partial-tail hash boundary, a detected shared-prefix junction).
+        partial-tail hash boundary, a selected input checkpoint, and a detected
+        shared-prefix junction).
         """
         start = (
             request.num_computed_tokens
@@ -399,7 +419,7 @@ class Scheduler(SchedulerInterface):
             if self.mamba_partial_cache_hit
             else 0
         )
-        stops = (
+        stops = [
             # Resumed mid-block (fine-grained partial hash hit): re-align to
             # the block grid before running on, so the crossed boundary's
             # state is materialized (unless it is past the cacheable range).
@@ -419,7 +439,18 @@ class Scheduler(SchedulerInterface):
             start + (request.shared_prefix_boundary - start) // block_size * block_size
             if start < request.shared_prefix_boundary < end
             else 0,
-        )
+        ]
+        if getattr(self, "retain_input_end", False) and (
+            request.cache_checkpoint_input_end is not None
+        ):
+            # A materialized input boundary is already at or behind `start`.
+            input_end_boundary = (
+                request.cache_checkpoint_input_end
+                // self.hash_block_size
+                * self.hash_block_size
+            )
+            if start < input_end_boundary < end and input_end_boundary not in stops:
+                stops.append(input_end_boundary)
         # Stop at the earliest mandatory position strictly inside the chunk.
         end = min((s for s in stops if start < s < end), default=end)
         return max(end - start, 0)
@@ -1308,6 +1339,13 @@ class Scheduler(SchedulerInterface):
         # Update block hashes for the new tokens.
         session.update_block_hashes()
         session.num_prompt_tokens = len(session.prompt_token_ids)
+        session.cache_checkpoint_input_end = None
+        session.cache_checkpoint_reasoning_end = None
+        session.cache_checkpoint_response_end = None
+        session.semantic_cache_checkpoints_finalized = False
+        session.cache_checkpoint_hit_boundary = None
+        session.cache_checkpoint_hit_kinds = frozenset()
+        session.reasoner = None
         session.arrival_time = update.arrival_time
         session.sampling_params = update.sampling_params
         if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
@@ -1715,6 +1753,14 @@ class Scheduler(SchedulerInterface):
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids
                 )
+                if (
+                    self.retain_reasoning_end
+                    and request.cache_checkpoint_reasoning_end is None
+                    and self._set_reasoning_checkpoint(request, new_token_ids)
+                ):
+                    self.kv_cache_manager.cache_blocks(
+                        request, self._get_num_materialized_tokens(request)
+                    )
             elif request.pooling_params and pooler_output is not None:
                 # Pooling stops as soon as there is output.
                 request.status = RequestStatus.FINISHED_STOPPED
@@ -1800,6 +1846,11 @@ class Scheduler(SchedulerInterface):
 
             finish_reason = None
             if stopped:
+                if (
+                    self.retain_semantic_cache_checkpoints
+                    and request.sampling_params is not None
+                ):
+                    self._finalize_semantic_cache_checkpoints(request)
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
                 # reset the status to WAITING for streaming requests that continue.
                 finish_reason = request.get_finished_reason()
@@ -2013,6 +2064,74 @@ class Scheduler(SchedulerInterface):
                 del new_token_ids[num_new:]  # Trim new tokens if needed.
                 break
         return new_token_ids, stopped
+
+    def _finalize_semantic_cache_checkpoints(self, request: Request) -> None:
+        if request.status not in _VALID_SEMANTIC_CHECKPOINT_TERMINATION_STATUSES:
+            return
+
+        num_materialized_tokens = self._get_num_materialized_tokens(request)
+
+        if self.retain_reasoning_end and request.cache_checkpoint_reasoning_end is None:
+            self._set_reasoning_checkpoint(request, ())
+
+        if (
+            self.retain_response_end
+            and request.status == RequestStatus.FINISHED_STOPPED
+        ):
+            response_end = self._get_response_checkpoint_boundary(
+                request, num_materialized_tokens
+            )
+            if response_end > request.num_prompt_tokens:
+                request.cache_checkpoint_response_end = response_end
+
+        request.semantic_cache_checkpoints_finalized = True
+        self.kv_cache_manager.cache_blocks(request, num_materialized_tokens)
+
+    @staticmethod
+    def _get_response_checkpoint_boundary(
+        request: Request,
+        num_materialized_tokens: int,
+    ) -> int:
+        if not request.output_token_ids:
+            return num_materialized_tokens
+
+        sampling_params = request.sampling_params
+        assert sampling_params is not None
+        last_token_id = request.output_token_ids[-1]
+        if last_token_id == sampling_params.eos_token_id or last_token_id in (
+            sampling_params.stop_token_ids or ()
+        ):
+            return min(num_materialized_tokens, max(0, request.num_tokens - 1))
+        return num_materialized_tokens
+
+    @staticmethod
+    def _get_num_materialized_tokens(request: Request) -> int:
+        return min(
+            max(
+                0,
+                request.num_computed_tokens - request.num_output_placeholders,
+            ),
+            request.num_tokens,
+        )
+
+    def _set_reasoning_checkpoint(
+        self,
+        request: Request,
+        delta_token_ids: Sequence[int],
+    ) -> bool:
+        output_boundary = (
+            self.structured_output_manager.update_reasoning_end_token_boundary(
+                request, delta_token_ids
+            )
+        )
+        if output_boundary is None:
+            return False
+
+        reasoning_end = request.num_prompt_tokens + output_boundary
+        if reasoning_end > self._get_num_materialized_tokens(request):
+            return False
+        request.cache_checkpoint_reasoning_end = reasoning_end
+        return True
 
     def _free_encoder_inputs(self, request: Request) -> None:
         cached_encoder_input_ids = self.encoder_cache_manager.get_cached_input_ids(

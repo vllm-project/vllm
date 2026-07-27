@@ -147,6 +147,12 @@ class ParserEngine(Parser):
             self._reasoning_start_token_id = vocab.get(start_text)
         if end_text:
             self._reasoning_end_token_id = vocab.get(end_text)
+        self._checkpoint_terminal_ids = {
+            token_id: terminal
+            for terminal, text in parser_engine_config.token_id_terminals.items()
+            if (token_id := vocab.get(text)) is not None
+        }
+        self._reset_checkpoint_tracking(parser_engine_config.initial_state)
 
     @property
     def reasoning_start_str(self) -> str | None:
@@ -194,12 +200,21 @@ class ParserEngine(Parser):
 
     def _reset(self, initial_state: ParserState | None = None) -> None:
         self._engine.reset(initial_state=initial_state)
+        self._reset_checkpoint_tracking(
+            initial_state
+            if initial_state is not None
+            else self.parser_engine_config.initial_state
+        )
         self._reasoning_ended = not self._has_reasoning
         self._tool_slots.clear()
         self._deferred_content = ""
         self._deferred_reasoning = ""
         self._content_has_nonws = False
         self._prompt_streaming_prepared = False
+
+    def _reset_checkpoint_tracking(self, initial_state: ParserState) -> None:
+        self._checkpoint_state = initial_state
+        self._checkpoint_reasoning_end: int | None = None
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -605,6 +620,34 @@ class ParserEngine(Parser):
                     return False
             return False
         return self._reasoning_ended
+
+    def update_reasoning_end_token_boundary(
+        self,
+        delta_token_ids: Sequence[int],
+        start_offset: int,
+    ) -> int | None:
+        if self._checkpoint_reasoning_end is not None:
+            return self._checkpoint_reasoning_end
+
+        for index, token_id in enumerate(delta_token_ids, start_offset):
+            was_reasoning = self._checkpoint_state == ParserState.REASONING
+            terminal = self._checkpoint_terminal_ids.get(token_id)
+            transition = (
+                self.parser_engine_config.transitions.get(
+                    (self._checkpoint_state, terminal)
+                )
+                if terminal is not None
+                else None
+            )
+            if transition is not None:
+                reasoning_ended = (
+                    was_reasoning and EventType.REASONING_END in transition.events
+                )
+                self._checkpoint_state = transition.next_state
+                if reasoning_ended:
+                    self._checkpoint_reasoning_end = index
+                    return self._checkpoint_reasoning_end
+        return None
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         end_id = self._reasoning_end_token_id

@@ -119,6 +119,9 @@ pub struct EngineCoreRequest {
     /// structured-output backend.
     #[serde(default)]
     pub reasoning_parser_kwargs: Option<ReasoningParserKwargs>,
+    /// Stable input-history boundary produced by the Python renderer.
+    #[serde(default)]
+    pub cache_checkpoint_input_end: Option<u32>,
     /// If `true`, the request should be added to the scheduler's waiting queue
     /// and immediately aborted, so connector-side cleanup runs via the
     /// standard `request_finished` hook.
@@ -158,6 +161,8 @@ mod tests {
             }),
             arrival_time: 1234.5,
             client_index: 7,
+            cache_checkpoint_input_end: Some(3),
+            abort_immediately: true,
             ..EngineCoreRequest::default()
         };
 
@@ -168,11 +173,13 @@ mod tests {
             other => panic!("expected array, got {other:?}"),
         };
 
-        assert_eq!(array.len(), 20);
+        assert_eq!(array.len(), 21);
         assert_eq!(array[0], Value::from("req-1"));
         assert_eq!(array[2], Value::Nil);
         assert_eq!(array[4], Value::Nil);
         assert_eq!(array[10], Value::Nil);
         assert_eq!(array[11], Value::from(7));
+        assert_eq!(array[19], Value::from(3));
+        assert_eq!(array[20], Value::from(true));
     }
 }

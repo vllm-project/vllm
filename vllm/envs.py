@@ -296,6 +296,9 @@ if TYPE_CHECKING:
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
     VLLM_PREFIX_CACHE_RETENTION_INTERVAL: int | None = None
+    VLLM_PREFIX_CACHE_RETAIN_INPUT_END: bool = False
+    VLLM_PREFIX_CACHE_RETAIN_REASONING_END: bool = False
+    VLLM_PREFIX_CACHE_RETAIN_RESPONSE_END: bool = False
 
 
 def get_default_cache_root():
@@ -322,6 +325,13 @@ def maybe_convert_bool(value: str | None) -> bool | None:
     if value is None:
         return None
     return bool(int(value))
+
+
+def _strict_binary_env(name: str) -> bool:
+    value = os.getenv(name, "0")
+    if value not in ("0", "1"):
+        raise ValueError(f"{name} must be 0 or 1, got {value!r}")
+    return value == "1"
 
 
 def maybe_convert_json_str_or_file(value: str | None) -> dict[str, Any] | None:
@@ -1116,6 +1126,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.environ["VLLM_PREFIX_CACHE_RETENTION_INTERVAL"])
         if "VLLM_PREFIX_CACHE_RETENTION_INTERVAL" in os.environ
         else None
+    ),
+    "VLLM_PREFIX_CACHE_RETAIN_INPUT_END": lambda: _strict_binary_env(
+        "VLLM_PREFIX_CACHE_RETAIN_INPUT_END"
+    ),
+    "VLLM_PREFIX_CACHE_RETAIN_REASONING_END": lambda: _strict_binary_env(
+        "VLLM_PREFIX_CACHE_RETAIN_REASONING_END"
+    ),
+    "VLLM_PREFIX_CACHE_RETAIN_RESPONSE_END": lambda: _strict_binary_env(
+        "VLLM_PREFIX_CACHE_RETAIN_RESPONSE_END"
     ),
     # a local directory to look in for unrecognized LoRA adapters.
     # only works if plugins are enabled and

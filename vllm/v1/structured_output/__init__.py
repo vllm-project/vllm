@@ -98,18 +98,41 @@ class StructuredOutputManager:
 
     def _get_reasoner(self, request: "Request") -> "ReasoningParser | None":
         structured_req = request.structured_output_request
-        if structured_req is None or self.reasoner_cls is None:
+        if self.reasoner_cls is None:
             return None
 
-        if structured_req.reasoner is None:
-            # Lazily build the request-local parser so the structured-output
-            # gate observes the same template kwargs used by the frontend.
-            parser_kwargs = structured_req.reasoning_parser_kwargs or {}
-            structured_req.reasoner = self.reasoner_cls(
+        if request.reasoner is None:
+            parser_kwargs = request.reasoning_parser_kwargs or {}
+            request.reasoner = self.reasoner_cls(
                 tokenizer=self.tokenizer,
                 **parser_kwargs,
             )
-        return structured_req.reasoner
+            request.reasoner.adjust_initial_state_from_prompt(
+                request.prompt_token_ids or ()
+            )
+        if structured_req is not None:
+            structured_req.reasoner = request.reasoner
+        return request.reasoner
+
+    def update_reasoning_end_token_boundary(
+        self,
+        request: "Request",
+        delta_token_ids: Sequence[int],
+    ) -> int | None:
+        """Consume committed output tokens and return an exact boundary."""
+        reasoner = self._get_reasoner(request)
+        if reasoner is None:
+            return None
+
+        start_offset = request.num_output_tokens - len(delta_token_ids)
+        if start_offset < 0:
+            return None
+        boundary = reasoner.update_reasoning_end_token_boundary(
+            delta_token_ids, start_offset
+        )
+        if boundary is None or not 0 <= boundary <= request.num_output_tokens:
+            return None
+        return boundary
 
     def grammar_init(self, request: "Request") -> None:
         if request.structured_output_request is None:

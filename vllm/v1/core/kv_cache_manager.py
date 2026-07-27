@@ -14,7 +14,11 @@ from vllm.v1.core.kv_cache_coordinator import (
     get_kv_cache_coordinator,
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy
+from vllm.v1.core.kv_cache_utils import (
+    KVCacheBlock,
+    KVCacheBlockCopy,
+    make_block_hash_with_group_id,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
@@ -258,6 +262,30 @@ class KVCacheManager:
                 request.block_hashes, max_cache_hit_length
             )
         )
+        request.cache_checkpoint_hit_boundary = None
+        request.cache_checkpoint_hit_kinds = frozenset()
+        if (
+            num_new_computed_tokens > 0
+            and num_new_computed_tokens % self.block_pool.hash_block_size == 0
+        ):
+            hash_index = num_new_computed_tokens // self.block_pool.hash_block_size - 1
+            if hash_index < len(request.block_hashes):
+                prefix_hash = request.block_hashes[hash_index]
+                hit_kinds: set[str] = set()
+                for group_id, group_blocks in enumerate(computed_blocks):
+                    expected_hash = make_block_hash_with_group_id(prefix_hash, group_id)
+                    for block in reversed(group_blocks):
+                        if block.is_null:
+                            continue
+                        hit_kinds.update(
+                            self.block_pool.get_semantic_checkpoint_kinds(
+                                block, expected_hash
+                            )
+                        )
+                        break
+                if hit_kinds:
+                    request.cache_checkpoint_hit_boundary = num_new_computed_tokens
+                    request.cache_checkpoint_hit_kinds = frozenset(hit_kinds)
 
         # When kv_cache_report_mode is "full", emit BlockStored events
         # for the reused prefix cache blocks so that external consumers

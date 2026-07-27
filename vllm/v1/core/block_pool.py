@@ -183,6 +183,9 @@ class BlockPool:
         # Cache for block lookup
         self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap()
         self.cached_block_hashes_by_block: dict[int, set[BlockHashWithGroupId]] = {}
+        self.semantic_checkpoint_kinds_by_block: dict[
+            int, dict[BlockHashWithGroupId, frozenset[str]]
+        ] = {}
 
         # To represent a placeholder block with block_id=0.
         # The ref_cnt of null_block is not maintained, needs special care to
@@ -449,6 +452,7 @@ class BlockPool:
         num_tokens: int,
         kv_cache_group_id: int,
         block_size: int,
+        replace_existing: bool = True,
     ) -> BlockHashWithGroupId | None:
         """Register a partial prefix-cache entry for an existing block.
 
@@ -476,6 +480,9 @@ class BlockPool:
                 entry hash itself is always the prefix-chain hash at
                 ``num_tokens``; ``block_size`` is used to assert that the
                 entry is partial within the owning cache block.
+            replace_existing: Remove an earlier partial entry owned by the
+                same block. Semantic checkpoints disable this because every
+                retained boundary is independently selected.
 
         Returns:
             The hash key with group ID if a partial entry can be registered;
@@ -499,6 +506,7 @@ class BlockPool:
         )
         if (
             not already_cached
+            and replace_existing
             and block.block_hash is not None
             and block.block_hash_num_tokens is not None
             and block.block_hash_num_tokens < num_hash_blocks * self.hash_block_size
@@ -579,6 +587,7 @@ class BlockPool:
         if not block_hashes:
             return []
 
+        self.semantic_checkpoint_kinds_by_block.pop(block.block_id, None)
         removed_hashes: list[BlockHashWithGroupId] = []
         for block_hash in block_hashes:
             if (
@@ -588,6 +597,46 @@ class BlockPool:
                 removed_hashes.append(block_hash)
         block.reset_hash()
         return removed_hashes
+
+    def record_semantic_checkpoint(
+        self,
+        block: KVCacheBlock,
+        block_hash: BlockHashWithGroupId,
+        kinds: frozenset[str],
+    ) -> None:
+        if not kinds:
+            return
+        by_hash = self.semantic_checkpoint_kinds_by_block.setdefault(block.block_id, {})
+        by_hash[block_hash] = by_hash.get(block_hash, frozenset()) | kinds
+
+    def get_semantic_checkpoint_kinds(
+        self,
+        block: KVCacheBlock,
+        block_hash: BlockHashWithGroupId,
+    ) -> frozenset[str]:
+        return self.semantic_checkpoint_kinds_by_block.get(block.block_id, {}).get(
+            block_hash, frozenset()
+        )
+
+    def remove_private_cached_block_hash(
+        self,
+        block_id: int,
+        expected_hash: BlockHashWithGroupId,
+    ) -> bool:
+        """Remove one request-private primary hash without touching aliases."""
+        block = self.blocks[block_id]
+        if (
+            block.ref_cnt != 1
+            or block.block_hash != expected_hash
+            or self.cached_block_hashes_by_block.get(block_id)
+        ):
+            return False
+        if self.cached_block_hash_to_block.pop(expected_hash, block_id) is None:
+            return False
+        self.semantic_checkpoint_kinds_by_block.pop(block_id, None)
+        block.reset_hash()
+        self._emit_block_removed_events([expected_hash])
+        return True
 
     def _emit_block_removed_events(
         self,
@@ -640,9 +689,14 @@ class BlockPool:
         assert dst_block.block_hash is None
         assert dst_block.block_id not in self.cached_block_hashes_by_block
         num_tokens = src_block.block_hash_num_tokens
+        semantic_kinds = dict(
+            self.semantic_checkpoint_kinds_by_block.get(src_block.block_id, {})
+        )
         for block_hash in self._remove_cached_block_hashes(src_block):
             # `num_tokens` only applies to the first (primary) insertion.
             self._insert_block_hash(block_hash, dst_block, num_tokens=num_tokens)
+            if kinds := semantic_kinds.get(block_hash):
+                self.record_semantic_checkpoint(dst_block, block_hash, kinds)
 
     def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
@@ -781,6 +835,7 @@ class BlockPool:
         # Remove all hashes so that no new blocks will hit.
         self.cached_block_hash_to_block = BlockHashToBlockMap()
         self.cached_block_hashes_by_block.clear()
+        self.semantic_checkpoint_kinds_by_block.clear()
 
         # Remove all hashes from all blocks.
         for block in self.blocks:

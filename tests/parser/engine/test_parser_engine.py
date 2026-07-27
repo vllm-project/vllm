@@ -131,6 +131,13 @@ def _make_engine(
     )
 
 
+def test_reasoning_checkpoint_immediately_precedes_end_marker():
+    engine = _make_engine()
+
+    assert engine.update_reasoning_end_token_boundary([65, 32, 10], 0) is None
+    assert engine.update_reasoning_end_token_boundary([201], 3) == 3
+
+
 # ── TestEventsToDelta ────────────────────────────────────────────────
 
 

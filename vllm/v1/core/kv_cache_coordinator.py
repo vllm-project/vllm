@@ -123,6 +123,9 @@ class KVCacheCoordinator(ABC):
         # (``scheduler_block_size``) to land on real cache-hit boundaries.
         # 0 = keep only the latest replay boundary; None = dense;
         self.retention_interval = envs.VLLM_PREFIX_CACHE_RETENTION_INTERVAL
+        self.retain_input_end = envs.VLLM_PREFIX_CACHE_RETAIN_INPUT_END
+        self.retain_reasoning_end = envs.VLLM_PREFIX_CACHE_RETAIN_REASONING_END
+        self.retain_response_end = envs.VLLM_PREFIX_CACHE_RETAIN_RESPONSE_END
         _validate_prefix_cache_retention_interval(
             self.retention_interval, self.scheduler_block_size, kv_cache_config
         )
@@ -285,6 +288,9 @@ class KVCacheCoordinator(ABC):
                 request,
                 num_computed_tokens,
                 retention_interval=self.retention_interval,
+                retain_input_end=self.retain_input_end,
+                retain_reasoning_end=self.retain_reasoning_end,
+                retain_response_end=self.retain_response_end,
             )
 
     def free(self, request_id: str) -> None:
@@ -680,6 +686,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 request,
                 num_tokens_to_cache,
                 retention_interval=self.retention_interval,
+                retain_input_end=self.retain_input_end,
+                retain_reasoning_end=self.retain_reasoning_end,
+                retain_response_end=self.retain_response_end,
             )
 
     def find_longest_cache_hit(

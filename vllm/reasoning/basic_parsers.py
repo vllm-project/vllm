@@ -68,6 +68,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
             )
         self.start_token_id: int = start_token_id
         self.end_token_id: int = end_token_id
+        self._checkpoint_reasoning_end: int | None = None
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         start_token_id = self.start_token_id
@@ -85,6 +86,21 @@ class BaseThinkingReasoningParser(ReasoningParser):
     ) -> bool:
         end_token_id = self.end_token_id
         return end_token_id in delta_ids
+
+    def update_reasoning_end_token_boundary(
+        self,
+        delta_token_ids: Sequence[int],
+        start_offset: int,
+    ) -> int | None:
+        if self._checkpoint_reasoning_end is not None:
+            return self._checkpoint_reasoning_end
+
+        for index, token_id in enumerate(delta_token_ids, start_offset):
+            if token_id == self.end_token_id:
+                self._checkpoint_reasoning_end = index
+                return self._checkpoint_reasoning_end
+
+        return None
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """

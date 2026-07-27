@@ -34,6 +34,15 @@ class TestThinkingReasoningParserAlt(BaseThinkingReasoningParser):
         return "<alt:end>"
 
 
+class _CheckpointTokenizer:
+    def get_vocab(self):
+        return {"<test:think>": 1, "</test:think>": 2}
+
+    def encode(self, text, add_special_tokens=False):
+        assert text.endswith(" \n\n")
+        return [3, 4, 5]
+
+
 # Use a test model
 REASONING_MODEL_NAME = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 
@@ -165,6 +174,27 @@ class TestBaseThinkingReasoningParserMethods:
                 [1, start_token_id, 2, end_token_id, 2, 2], [2]
             )
             is False
+        )
+
+    def test_checkpoint_boundary_immediately_precedes_end_marker(self):
+        tokenizer = _CheckpointTokenizer()
+        parser = TestThinkingReasoningParser(tokenizer)
+        start = parser.start_token_id
+        end = parser.end_token_id
+        reasoning_body = tokenizer.encode("reasoning body \n\n")
+        delta = [start, *reasoning_body]
+
+        assert (
+            parser.update_reasoning_end_token_boundary(
+                delta,
+                start_offset=4,
+            )
+            is None
+        )
+        boundary = 4 + len(delta)
+        assert (
+            parser.update_reasoning_end_token_boundary([end], start_offset=boundary)
+            == boundary
         )
 
     def test_count_reasoning_tokens(self, test_tokenizer):

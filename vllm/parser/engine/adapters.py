@@ -60,6 +60,15 @@ class ParserEngineReasoningAdapter(ReasoningParser):
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         return self._parser_engine.is_reasoning_end(list(input_ids))
 
+    def update_reasoning_end_token_boundary(
+        self,
+        delta_token_ids: Sequence[int],
+        start_offset: int,
+    ) -> int | None:
+        return self._parser_engine.update_reasoning_end_token_boundary(
+            delta_token_ids, start_offset
+        )
+
     def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
         self._parser_engine.adjust_initial_state_from_prompt(prompt_token_ids)
 
