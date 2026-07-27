@@ -247,6 +247,9 @@ steps:
   - tests/kernels/mamba/test_gdn_prefill_cutedsl.py
   - tests/kernels/test_bf16x3_router_gemm_cutedsl.py
   - tests/kernels/test_ll_bf16_gemm.py
+  - vllm/model_executor/kernels/linear/cute_dsl/ll_fp32w.py
+  - vllm/model_executor/kernels/linear/cute_dsl/_ll_fp32w_dotprod.py
+  - tests/kernels/test_ll_fp32w_gemm.py
   - tests/kernels/test_top_k_per_row.py
   commands:
     - nvidia-smi
@@ -278,6 +281,7 @@ steps:
     - pytest -v -s tests/kernels/mamba/test_gdn_prefill_cutedsl.py
     - pytest -v -s tests/kernels/test_bf16x3_router_gemm_cutedsl.py
     - pytest -v -s tests/kernels/test_ll_bf16_gemm.py
+    - pytest -v -s tests/kernels/test_ll_fp32w_gemm.py
     # e2e
     - pytest -v -s tests/models/quantization/test_nvfp4.py
 
