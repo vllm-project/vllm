@@ -5,7 +5,7 @@
 import json
 import threading
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 
@@ -25,7 +25,7 @@ from vllm.v1.request import RequestStatus
 from vllm.v1.serial_utils import UtilityResult, run_method
 
 if TYPE_CHECKING:
-    from vllm.v1.engine.core import EngineCoreProc
+    from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc
 
 logger = init_logger(__name__)
 
@@ -35,7 +35,7 @@ FT_UTILITY_METHOD = "handle_fault_tolerance"
 class EngineCoreSentinel:
     """Manages fault tolerance state for a single engine core."""
 
-    def __init__(self, engine: "EngineCoreProc", parallel_config):
+    def __init__(self, engine: "DPEngineCoreProc", parallel_config):
         self.engine = engine
         self.engine_index = engine.engine_index
         self.parallel_config = parallel_config
@@ -110,6 +110,10 @@ class EngineCoreSentinel:
         payload = {"id": self.engine_index, "status": self.status_type.name.lower()}
         if self.status_type == EngineStatusType.UNHEALTHY:
             payload["fault_info"] = self.fault_info
+            try:
+                payload["mask"] = self._query_mask()
+            except Exception:
+                logger.warning("[FT] Failed to query mask for status push")
         outputs = EngineCoreOutputs(
             utility_output=UtilityOutput(
                 call_id=FT_STATUS_CALL_ID,
@@ -118,6 +122,14 @@ class EngineCoreSentinel:
         )
         outputs.engine_index = self.engine_index
         self.engine.output_queue.put_nowait((0, outputs))
+
+    def _query_mask(self) -> list[int]:
+        """Query the first worker for the current all2all mask."""
+        ft_request = FaultToleranceRequest(instruction="query_mask", params={})
+        results = self.engine.model_executor.collective_rpc(
+            "handle_ft_command", args=(ft_request,)
+        )
+        return results[0]["mask"]
 
     def retry(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
         engine = self.engine
@@ -136,6 +148,96 @@ class EngineCoreSentinel:
         self._push_status()
         return FaultToleranceResult(request_id=ft_request.request_id, success=True)
 
+    def scale_down(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
+        engine = self.engine
+        parallel_config = engine.vllm_config.parallel_config
+
+        if not (
+            parallel_config.enable_eplb
+            and parallel_config.eplb_config.num_redundant_experts > 0
+        ):
+            raise ValueError(
+                "scale_down requires --enable-eplb with num_redundant_experts > 0"
+            )
+
+        removed_dp_ranks = ft_request.params["removed_dp_ranks"]
+
+        old_dp_size = parallel_config.data_parallel_size
+        old_dp_rank = parallel_config.data_parallel_rank
+        new_dp_size = old_dp_size - len(removed_dp_ranks)
+        removed_set = set(removed_dp_ranks)
+
+        # Densify: map old sparse ranks to new contiguous ranks.
+        surviving = [r for r in range(old_dp_size) if r not in removed_set]
+        new_dp_rank = surviving.index(old_dp_rank)
+
+        parallel_config.data_parallel_size = new_dp_size
+        parallel_config.data_parallel_rank = new_dp_rank
+        engine.dp_rank = new_dp_rank
+        engine.dp_size = new_dp_size
+        self.engine_index = new_dp_rank
+
+        # Rank 0 hosts the TCPStore master; rebuild if it was removed.
+        if 0 in removed_set:
+            dp_store_port = ft_request.params.get("dp_store_port")
+            new_master_ip = ft_request.params.get("dp_master_ip")
+            if dp_store_port is None or new_master_ip is None:
+                raise ValueError(
+                    "dp_store_port and dp_master_ip required when rank 0 is removed"
+                )
+            parallel_config.data_parallel_master_ip = new_master_ip
+            self._rebuild_dp_store(
+                new_master_ip, dp_store_port, new_dp_rank, new_dp_size
+            )
+
+        with set_current_vllm_config(engine.vllm_config):
+            ft_request.params.update(self._reinit_dp_group())
+        if hasattr(engine, "step_counter"):
+            engine.step_counter = 0
+
+        ft_request.params.update(
+            {
+                "new_dp_size": new_dp_size,
+                "new_dp_rank": new_dp_rank,
+            }
+        )
+        engine.model_executor.collective_rpc("handle_ft_command", args=(ft_request,))
+
+        self.status_type = EngineStatusType.HEALTHY
+        logger.info(
+            "[FT] Engine %d scale_down complete: dp_size %d->%d, "
+            "dp_rank %d->%d, removed %s",
+            self.engine_index,
+            old_dp_size,
+            new_dp_size,
+            old_dp_rank,
+            new_dp_rank,
+            removed_dp_ranks,
+        )
+        self.resumed.set()
+        self._push_status()
+        return FaultToleranceResult(request_id=ft_request.request_id, success=True)
+
+    def _rebuild_dp_store(
+        self,
+        host: str,
+        port: int,
+        dp_rank: int,
+        dp_size: int,
+    ) -> None:
+        """Rebuild dp_store when the old master (rank 0) was removed."""
+        from datetime import timedelta
+
+        from torch.distributed import TCPStore
+
+        self.engine.dp_store = TCPStore(
+            host,
+            port,
+            dp_size,
+            is_master=(dp_rank == 0),
+            timeout=timedelta(seconds=self.engine_recovery_timeout_sec),
+        )
+
     def _reinit_dp_group(self) -> dict:
         """Reinit DP process group if in DP mode. Returns worker params."""
         engine = self.engine
@@ -145,7 +247,7 @@ class EngineCoreSentinel:
         parallel_config = engine.vllm_config.parallel_config
         worker_key = f"ft_worker_dp_ports_{self._dp_reinit_epoch}"
         engine_key = f"ft_engine_dp_port_{self._dp_reinit_epoch}"
-        self._dp_reinit_epoch += 1
+        enable_eplb = parallel_config.enable_eplb
 
         if parallel_config.data_parallel_rank == 0:
             worker_ports = [get_open_port() for _ in range(parallel_config.world_size)]
@@ -155,6 +257,12 @@ class EngineCoreSentinel:
         else:
             worker_ports = json.loads(engine.dp_store.get(worker_key).decode())
             engine_port = int(engine.dp_store.get(engine_key).decode())
+
+        result: dict[str, Any] = {"new_stateless_dp_group_ports": worker_ports}
+        if enable_eplb:
+            result["new_ep_group_port"] = self._coordinate_port("ft_worker_ep_port")
+            result["new_eplb_group_port"] = self._coordinate_port("ft_worker_eplb_port")
+        self._dp_reinit_epoch += 1
 
         stateless_destroy_torch_distributed_process_group(engine.dp_group)
         engine.dp_group, engine.dp_store = (
@@ -167,7 +275,19 @@ class EngineCoreSentinel:
                 return_store=True,
             )
         )
-        return {"new_stateless_dp_group_ports": worker_ports}
+        return result
+
+    def _coordinate_port(self, key_prefix: str) -> int:
+        """Rank 0 picks a fresh port and publishes it via dp_store;
+        other ranks block-read it."""
+        key = f"{key_prefix}_{self._dp_reinit_epoch}"
+        engine = self.engine
+        if engine.vllm_config.parallel_config.data_parallel_rank == 0:
+            port = get_open_port()
+            engine.dp_store.set(key, str(port).encode())
+        else:
+            port = int(engine.dp_store.get(key).decode())
+        return port
 
 
 def fault_tolerant_wrapper(busy_loop_func: Callable):
