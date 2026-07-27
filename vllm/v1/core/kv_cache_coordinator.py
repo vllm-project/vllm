@@ -155,56 +155,18 @@ class KVCacheCoordinator(ABC):
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
     ) -> int:
-        """
-        Get the number of blocks needed to be allocated for the request.
-
-        Args:
-            request_id: The request ID.
-            num_tokens: The total number of tokens that need a slot (including
-                tokens that are already allocated).
-            new_computed_blocks: The new computed blocks just hitting the
-                prefix caching.
-            num_encoder_tokens: The number of encoder tokens for allocating
-                blocks for cross-attention.
-            total_computed_tokens: Include both local and external tokens.
-            num_local_computed_tokens: The number of local prefix-cache computed
-                tokens.
-            num_tokens_main_model: The number of tokens for the main model (aka target
-                model in spec decode). w/o spec decode, it is num_tokens;
-                with spec decode, it is num_tokens - num_lookahead_tokens.
-            apply_admission_cap: If True, apply the recycling-aware
-                per-request admission cap (SWA / chunked-local). Set only by
-                the full-sequence admission gate; per-step allocation must
-                leave it False so the predictor matches `allocate_new_blocks`.
-
-        Returns:
-            The number of blocks to allocate.
-        """
-        num_blocks_to_allocate = 0
-        for i, manager in enumerate(self.single_type_managers):
-            if isinstance(manager, CrossAttentionManager):
-                # For cross-attention, we issue a single static allocation
-                # of blocks based on the number of encoder input tokens.
-                num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
-                    request_id,
-                    num_encoder_tokens,
-                    [],
-                    0,
-                    0,
-                    num_encoder_tokens,
-                    apply_admission_cap=apply_admission_cap,
-                )
-            else:
-                num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
-                    request_id,
-                    num_tokens,
-                    new_computed_blocks[i],
-                    total_computed_tokens,
-                    num_local_computed_tokens,
-                    num_tokens_main_model,
-                    apply_admission_cap=apply_admission_cap,
-                )
-        return num_blocks_to_allocate
+        return sum(
+            self.get_num_blocks_to_allocate_by_pool(
+                request_id,
+                num_tokens,
+                new_computed_blocks,
+                num_encoder_tokens,
+                total_computed_tokens,
+                num_local_computed_tokens,
+                num_tokens_main_model,
+                apply_admission_cap=apply_admission_cap,
+            )
+        )
 
     def get_num_blocks_to_allocate_by_pool(
         self,
