@@ -1,13 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
 import vllm.v1.attention.backends.mla.indexer as indexer_module
 from tests.v1.attention.utils import create_vllm_config
 from vllm.v1.attention.backend import CommonAttentionMetadata
-from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadataBuilder
+from vllm.v1.attention.backends.mla.indexer import (
+    BuildPrefillChunkMetadataKernel,
+    DeepseekV32IndexerMetadataBuilder,
+)
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 
@@ -70,6 +75,23 @@ def test_indexer_builder_keeps_short_prefill_continuations_as_prefills(
         captured["treat_short_extends_as_decodes"]
         is expected_treat_short_extends_as_decodes
     )
+
+
+def test_indexer_warmup_normalizes_zero_compress_ratios():
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(compress_ratios=[0, 0, 4, 128, 0])
+        ),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+            cp_kv_cache_interleave_size=1,
+        ),
+    )
+
+    keys = BuildPrefillChunkMetadataKernel().get_warmup_keys(config)
+
+    assert {key.COMPRESS_RATIO for key in keys} == {1, 4, 128}
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
