@@ -513,7 +513,6 @@ def test_contexted_kv_attention_cached_kv_block_table_boundary(device: str) -> N
     num_blocks = 4
     seq_len = num_blocks * block_size  # 128 == exact multiple of block_size
     query_len = 99  # < seq_len and not a multiple of the kernel tile
-    ctx_len = seq_len - query_len
 
     query = torch.empty(query_len, num_heads, head_size, dtype=dtype)
     query.uniform_(-1e-3, 1e-3)
@@ -523,12 +522,8 @@ def test_contexted_kv_attention_cached_kv_block_table_boundary(device: str) -> N
     kv.uniform_(-1e-3, 1e-3)
     key, value = kv.unbind(dim=1)
 
-    k_cache = torch.zeros(
-        num_blocks, block_size, num_kv_heads, head_size, dtype=dtype
-    )
-    v_cache = torch.zeros(
-        num_blocks, block_size, num_kv_heads, head_size, dtype=dtype
-    )
+    k_cache = torch.zeros(num_blocks, block_size, num_kv_heads, head_size, dtype=dtype)
+    v_cache = torch.zeros(num_blocks, block_size, num_kv_heads, head_size, dtype=dtype)
     # Exact-sized block table: row length == num_blocks (identity mapping).
     block_table = torch.arange(num_blocks, dtype=torch.int32).view(1, num_blocks)
     b_seq_len = torch.tensor([seq_len], dtype=torch.int32)
@@ -591,7 +586,9 @@ def test_contexted_kv_attention_cached_kv_block_table_boundary(device: str) -> N
     value_sdpa = value[:, :, None, :].expand(
         seq_len, num_kv_heads, num_queries_per_kv, head_size
     )
-    value_sdpa = value_sdpa.permute(1, 2, 0, 3).reshape(1, num_heads, seq_len, head_size)
+    value_sdpa = value_sdpa.permute(1, 2, 0, 3).reshape(
+        1, num_heads, seq_len, head_size
+    )
 
     attn_mask = create_causal_attention_mask_for_sdpa(
         [query_len], [seq_len], 0, device=device, dtype=dtype

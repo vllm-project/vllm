@@ -832,13 +832,6 @@ def context_attention_fwd(
             FP8 KV Cache prefill kernel"
         )
 
-    # When the current-chunk K/V are not provided (`k`/`v` is None), the layer
-    # is re-attending an already-cached sequence with query only. In that case
-    # derive the head dim / KV head count from the paged cache and use `q` as a
-    # (never-dereferenced) placeholder for the dense K/V pointer arguments.
-    # k and v must be provided together: both None selects the cached-K/V path,
-    # both tensors the dense path. A partial input (only one None) is a caller
-    # bug and must not silently switch both sides to the cache.
     assert (k is None) == (v is None), (
         "k and v must both be None (cached-K/V path) or both be tensors"
     )
@@ -852,6 +845,7 @@ def context_attention_fwd(
         # k_cache: [num_blocks, num_kv_heads, head_size // x, block_size, x]
         num_kv_heads = k_cache.shape[1]
         Lq = Lk = Lv = q.shape[-1]
+        # q is a never-dereferenced placeholder for the dense K/V pointer args.
         k = q
         v = q
     else:
