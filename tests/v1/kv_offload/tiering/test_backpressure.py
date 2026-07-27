@@ -67,6 +67,7 @@ class DelayedSecondaryTierManager(SecondaryTierManager):
         self.blocks: dict[OffloadKey, bool] = {}
         self._held_jobs: list[JobResult] = []
         self._released_jobs: list[JobResult] = []
+        self._request_policy: OffloadPolicy | None = None
 
     def lookup(self, key, req_context):
         return LookupResult.HIT if key in self.blocks else LookupResult.MISS
@@ -74,14 +75,10 @@ class DelayedSecondaryTierManager(SecondaryTierManager):
     def submit_store(self, job_metadata: JobMetadata) -> None:
         for key in job_metadata.keys:
             self.blocks[key] = True
-        self._held_jobs.append(
-            JobResult(job_id=job_metadata.job_id, success=True)
-        )
+        self._held_jobs.append(JobResult(job_id=job_metadata.job_id, success=True))
 
     def submit_load(self, job_metadata: JobMetadata) -> None:
-        self._released_jobs.append(
-            JobResult(job_id=job_metadata.job_id, success=True)
-        )
+        self._released_jobs.append(JobResult(job_id=job_metadata.job_id, success=True))
 
     def get_finished_jobs(self) -> Iterable[JobResult]:
         result = self._released_jobs
@@ -93,6 +90,8 @@ class DelayedSecondaryTierManager(SecondaryTierManager):
         self._held_jobs.clear()
 
     def on_new_request(self, req_context):
+        if self._request_policy is not None:
+            return RequestOffloadingContext(policy=self._request_policy)
         return RequestOffloadingContext()
 
     def drain_jobs(self):
@@ -106,7 +105,6 @@ class DelayedSecondaryTierManager(SecondaryTierManager):
 
 
 class TestBackpressure:
-
     @pytest.fixture
     def setup(self):
         mock_region = _mock_mmap_region(20)
@@ -169,6 +167,9 @@ class TestBackpressure:
         keys = to_keys(range(2))
         self._store_blocks(keys)
         bp = self.manager._backpressure[self.tier]
+
+        # Reset the per-step gate so the next on_schedule_end processes jobs.
+        self._simulate_on_schedule_end()
 
         slow_latency = _BP_HIGH_WATER_S * 5
         self._backdate_held_jobs(slow_latency)
@@ -316,9 +317,7 @@ class TestBackpressure:
         self._simulate_on_schedule_end()
 
         # Make tier request-level for a new request.
-        self.tier.on_new_request = lambda ctx: RequestOffloadingContext(
-            policy=OffloadPolicy.REQUEST_LEVEL
-        )
+        self.tier._request_policy = OffloadPolicy.REQUEST_LEVEL
         ctx = ReqContext(req_id="req_rl_bp")
         self.manager.on_new_request(ctx)
 
