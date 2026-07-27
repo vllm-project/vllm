@@ -30,11 +30,11 @@ except ImportError:
 
 from typing_extensions import override
 
-from vllm.distributed.kv_events import MEDIUM_FS
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
     Locality,
     LookupResult,
+    Medium,
     OffloadingEvent,
     OffloadKey,
     ReqContext,
@@ -100,7 +100,7 @@ class FileSystemTierManager(SecondaryTierManager):
         content.
     """
 
-    medium: ClassVar[str] = MEDIUM_FS
+    medium: ClassVar[Medium] = Medium.STORAGE
 
     def __init__(
         self,
