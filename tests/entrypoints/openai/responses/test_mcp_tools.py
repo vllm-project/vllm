@@ -5,12 +5,14 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
 from openai import OpenAI
 from openai_harmony import Message, ToolDescription, ToolNamespaceConfig
 
+import vllm.entrypoints.mcp.tool_server as tool_server_module
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.mcp.tool_server import MCPToolServer, init_tool_server
 
@@ -43,6 +45,18 @@ async def test_init_tool_server_without_configuration():
     args = SimpleNamespace(tool_server=None)
 
     assert await init_tool_server(args) is None
+
+
+@pytest.mark.asyncio
+async def test_init_tool_server_with_mcp_url(monkeypatch: pytest.MonkeyPatch):
+    server = MagicMock()
+    server.add_tool_server = AsyncMock()
+    monkeypatch.setattr(tool_server_module, "MCPToolServer", lambda: server)
+
+    result = await init_tool_server(SimpleNamespace(tool_server="http://mcp.test"))
+
+    assert result is server
+    server.add_tool_server.assert_awaited_once_with("http://mcp.test")
 
 
 class TestMCPToolServerUnit:

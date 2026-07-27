@@ -26,6 +26,7 @@ from vllm.entrypoints.openai.completion.protocol import (
 )
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.parser.harmony_utils import (
+    BUILTIN_TOOL_TO_MCP_SERVER_LABEL,
     build_harmony_preamble,
     extract_instructions_from_messages,
     get_user_message,
@@ -417,11 +418,7 @@ class OnlineRenderer:
     ) -> dict[str, ToolNamespaceConfig | None]:
         allowed_tools = _extract_allowed_tools_from_mcp_requests(tools)
         descriptions: dict[str, ToolNamespaceConfig | None] = {}
-        for request_name, server_name in (
-            ("web_search_preview", "browser"),
-            ("code_interpreter", "python"),
-            ("container", "container"),
-        ):
+        for server_name, request_name in BUILTIN_TOOL_TO_MCP_SERVER_LABEL.items():
             description = (
                 tool_server.get_tool_description(
                     server_name,
