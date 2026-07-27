@@ -1268,14 +1268,18 @@ def create_snapshot(force: bool = False, dry_run: bool = False) -> None:
     key_obj = lookup_key(create_env)  # raises SnapshotKeyError on editable/RECORD-less
     key = key_from(key_obj)
     root = _snapshot_root()
-    if root.exists():
-        unsafe = _trust_miss(root)
+    directory = root / key
+    # Refuse rather than re-prime: the stale path below would rmtree a
+    # directory this process does not own.
+    for path in (root, directory):
+        if not path.exists():
+            continue
+        unsafe = _trust_miss(path)
         if unsafe:
             raise RuntimeError(
                 f"refusing to write a snapshot under a directory that another "
-                f"user could replace ({unsafe}): {root}"
+                f"user could replace ({unsafe}): {path}"
             )
-    directory = root / key
     if dry_run:
         _print_dry_run(key, directory)
         return
@@ -1667,7 +1671,16 @@ def _restore_serve() -> None:
         manifest = read_manifest(directory)
         miss = _validate_layer2(manifest, directory, live_env)
         if miss:
-            logger.info("snapshot restore miss (%s)", miss)
+            # A trust refusal is an operator problem, not a cache miss.
+            if miss.startswith("trust."):
+                logger.warning(
+                    "snapshot restore refused, %s is writable by another user "
+                    "or not owned by this one (%s)",
+                    directory,
+                    miss,
+                )
+            else:
+                logger.info("snapshot restore miss (%s)", miss)
             return
         _run_criu_restore(directory, manifest, live_env, lock)
     finally:

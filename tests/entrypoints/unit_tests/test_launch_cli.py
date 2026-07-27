@@ -259,6 +259,9 @@ def _prime_snapshot_dir(root, key, shared_objects=()):
     # manifest whose env record matches the live creation env and whose work
     # assets exist.
     directory = root / key
+    # The trust check stats the root too, and pytest creates tmp_path at
+    # 0777 & ~umask, which is group-writable under a umask of 0002.
+    root.chmod(0o700)
     (directory / "work").mkdir(parents=True)
     (directory / "work" / "stdin.null").touch()
     manifest = {
@@ -306,20 +309,27 @@ def test_snapshot_create_falls_through_on_stale_manifest(monkeypatch, tmp_path):
     assert maybe_restore_serve() is None
 
 
-def test_snapshot_group_writable_dir_is_not_restored(monkeypatch, tmp_path):
+def test_restore_refuses_group_writable_snapshot_dir(monkeypatch, caplog, tmp_path):
     # criu restore executes the images, so a snapshot directory another user
-    # could write must not be trusted. An otherwise-valid exact-key snapshot
-    # whose mode was loosened after creation must miss instead of early-exiting
-    # 3, which is what the same snapshot does at 0700.
+    # could write must not be trusted. The same fixture restores at 0700, so
+    # the loosened mode is the only variable: it must refuse, and say so at
+    # warning level rather than as an ordinary miss.
     import vllm.entrypoints.snapshot as snapshot_module
 
     monkeypatch.setattr(snapshot_module, "_entry_state", {})
-    monkeypatch.setattr(sys, "argv", ["vllm", "snapshot", "create"])
-    monkeypatch.delenv("VLLM_SNAPSHOT", raising=False)
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(sys, "argv", ["vllm", "serve", "some-model"])
+    monkeypatch.setenv("VLLM_SNAPSHOT", "1")
+    monkeypatch.delenv("VLLM_SNAPSHOT_RESTORED", raising=False)
+    monkeypatch.delenv("PYTHONHASHSEED", raising=False)
     monkeypatch.setenv("VLLM_SNAPSHOT_ROOT", str(tmp_path))
     monkeypatch.setattr(snapshot_module, "lookup_key", lambda env: {"stub": 1})
     _prime_snapshot_dir(tmp_path, key_from({"stub": 1})).chmod(0o770)
-    assert maybe_restore_serve() is None
+    with caplog.at_level("WARNING", logger="vllm.entrypoints.snapshot"):
+        assert maybe_restore_serve() is None
+    refusals = [r for r in caplog.records if "restore refused" in r.getMessage()]
+    assert len(refusals) == 1
+    assert "trust.mode" in refusals[0].getMessage()
 
 
 def test_snapshot_create_flags_skip_early_exit(monkeypatch, tmp_path):

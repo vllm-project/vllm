@@ -97,16 +97,23 @@ Fleets pinned to one image can bake the snapshot instead by running
 the runtime kernel and CPU (compatibility, not same-host identity). Set
 `VLLM_SNAPSHOT=0` to opt out.
 
-Treat `VLLM_SNAPSHOT_ROOT` as trusted input, on the same footing as the model
-directory and the compiled-kernel cache. A restore executes the process images
-it finds there, so anyone who can write to that path can run code in the next
-server that reads it. vLLM refuses to create or restore a snapshot when its
-directory or the root above it is group-writable, world-writable, or owned by
-another user, and falls back to a cold start. That check cannot help against a
-writer running as the same user, so do not share one snapshot volume across
-containers that do not already trust each other. A poisoned volume outlives the
-container that wrote it, which is the property container replacement normally
-removes.
+Treat `VLLM_SNAPSHOT_ROOT` as trusted input, on the same footing as the
+compiled-kernel cache. A restore executes the process images it finds there, so
+anyone who can write to that path can run code in the next server that reads
+it.
+
+Do not share one snapshot volume across containers that do not already trust
+each other. Containers in the default image run as the same user, so a
+compromised container that mounts the volume can replace the images that every
+later container restores, and that survives the container replacement which
+would otherwise clear it. Give each trust domain its own volume, or mount the
+volume read-only in the containers that only restore.
+
+vLLM refuses to create or restore a snapshot when its directory or the root
+above it is owned by another user or is group- or world-writable, and falls
+back to a cold start. That check covers a loosened or foreign-owned directory.
+It cannot cover a writer running as the same user, which is why the separation
+above matters.
 
 ## Build image from source
 
