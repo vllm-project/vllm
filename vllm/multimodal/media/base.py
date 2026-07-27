@@ -23,7 +23,8 @@ class MediaWithBytes(Generic[_T]):
     The wrapper delegates attribute access to the underlying media object,
     making it behave transparently like the wrapped type (e.g., PIL.Image).
 
-    NOTE: Currently, this wrapper is used only for the image modality.
+    NOTE: Currently, this wrapper is used only for the image and video
+    modalities.
     """
 
     media: _T
@@ -36,6 +37,10 @@ class MediaWithBytes(Generic[_T]):
     def __iter__(self) -> Iterator[Any]:
         """Allow unpacking obj to unpack obj.media (e.g. video tuples)."""
         return iter(cast(Iterable[Any], self.media))
+
+    def __getitem__(self, index: Any) -> Any:
+        """Allow obj[i] to index obj.media (e.g. video tuples)."""
+        return cast(Any, self.media)[index]
 
     def __getstate__(self):
         return self.__dict__.copy()
