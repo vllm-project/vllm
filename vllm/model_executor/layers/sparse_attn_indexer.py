@@ -40,6 +40,9 @@ from vllm.v1.worker.workspace import current_workspace_manager
 logger = init_logger(__name__)
 
 RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
+DCP_TOPK_VMM_MIN_DECODE_ROWS = 16
+DCP_TOPK_VMM_MAX_DECODE_ROWS = 128
+_logged_dcp_topk_vmm_rows: set[int] = set()
 
 # MXFP4 layout: 2 values packed per byte, ue8m0 (1-byte) scale per block of 32.
 MXFP4_BLOCK_SIZE = 32
@@ -104,6 +107,46 @@ def _merge_dcp_topk_global(
         stable_topk_from_gathered_candidates_cutedsl,
     )
 
+    rows = topk_indices.shape[0]
+    use_vmm = (
+        envs.VLLM_DCP_TOPK_VMM
+        and row_starts is None
+        and DCP_TOPK_VMM_MIN_DECODE_ROWS <= rows <= DCP_TOPK_VMM_MAX_DECODE_ROWS
+    )
+    if use_vmm:
+        from vllm.model_executor.kernels.attention.dsa.dcp_topk_vmm import (
+            get_dcp_topk_vmm_workspace,
+        )
+
+        workspace = get_dcp_topk_vmm_workspace(
+            DCP_TOPK_VMM_MAX_DECODE_ROWS,
+            topk_indices.shape[1],
+            dcp_world_size,
+        )
+        if workspace is None:
+            raise RuntimeError(
+                "DCP top-k VMM dispatch selected without a VMM workspace."
+            )
+        if rows not in _logged_dcp_topk_vmm_rows:
+            _logged_dcp_topk_vmm_rows.add(rows)
+            logger.info(
+                "Executing owner-local CUDA VMM DCP top-k merge for decode rows=%d.",
+                rows,
+            )
+        workspace.merge(
+            logits,
+            topk_indices,
+            topk_tokens,
+            dcp_rank,
+            dcp_world_size,
+            cp_interleave,
+            row_starts,
+        )
+        return
+
+    # Flag-off, prefill, and decode shapes outside the bounded VMM policy use
+    # the original explicit candidate exchange. This is deliberate routing,
+    # never error recovery from a selected VMM path.
     packed = torch.empty(
         (*topk_indices.shape, 2),
         dtype=torch.float32,
@@ -752,6 +795,24 @@ class SparseAttnIndexer(CustomOp):
                 "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
                 "the current vLLM environment."
             )
+        if envs.VLLM_DCP_TOPK_VMM and self.dcp_world_size > 1:
+            if not current_platform.is_cuda():
+                raise NotImplementedError(
+                    "DCP top-k VMM is only supported on CUDA platforms."
+                )
+            from vllm.model_executor.kernels.attention.dsa.dcp_topk_vmm import (
+                get_dcp_topk_vmm_workspace,
+            )
+
+            workspace = get_dcp_topk_vmm_workspace(
+                DCP_TOPK_VMM_MAX_DECODE_ROWS,
+                self.topk_tokens,
+                self.dcp_world_size,
+            )
+            if workspace is None:
+                raise RuntimeError(
+                    "DCP top-k VMM was enabled without a usable DCP workspace."
+                )
 
     def forward_native(
         self,
