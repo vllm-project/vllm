@@ -126,6 +126,25 @@ async def test_render_responses_rejects_untrusted_request_template():
     serving.online_renderer.render_responses.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_render_responses_rejects_empty_token_ids():
+    serving = _build_responses_serving_render()
+    serving.online_renderer.render_responses = AsyncMock(
+        return_value=MagicMock(
+            messages=[],
+            engine_input={"prompt_token_ids": []},
+        )
+    )
+
+    response = await serving.render_responses_request(
+        ResponsesRequest(model=MODEL_NAME, input="Test prompt")
+    )
+
+    assert isinstance(response, ErrorResponse)
+    assert response.error.message == "No token_ids rendered"
+
+
 @pytest.fixture(scope="module")
 def server():
     args: list[str] = ["--trust-request-chat-template"]

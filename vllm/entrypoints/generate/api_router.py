@@ -108,9 +108,9 @@ async def init_generate_state(
     if getattr(args, "cohere_format", None):
         default_chat_template_kwargs.setdefault("cohere_format", args.cohere_format)
 
-    # Render endpoints are always backed by OnlineRenderer so that
-    # /v1/chat/completions/render and /v1/completions/render work on both
-    # generate-mode and render-only servers. Created in init_app_state.
+    # Render endpoints are always backed by OnlineRenderer so that chat,
+    # completion, and Responses rendering work on both generate-mode and
+    # render-only servers. Created in init_app_state.
 
     state.openai_serving_responses = (
         OpenAIServingResponses(
