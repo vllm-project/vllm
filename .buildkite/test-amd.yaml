@@ -81,10 +81,8 @@
 #                                                     the above test.) Also run if model initialization test file is modified.      #
 #   * [Language Models Tests (Extra Standard) %N]: Shard slow subset of standard language models tests. Only run when model         #
 #                                                  source is modified, or when specified test files are modified.                   #
-#   * [Language Models Tests (Hybrid) %N]: Install fast path packages for testing against transformers (mamba, conv1d) and to       #
-#                                          run plamo2 model in vLLM.                                                                #
-#   * [Language Models Test (Extended Generation)]: Install fast path packages for testing against transformers (mamba, conv1d)     #
-#                                                   and to run plamo2 model in vLLM.                                                #
+#   * [Language Models Tests (Hybrid) %N]: Install fast path packages for testing against transformers (mamba, conv1d).             #
+#   * [Language Models Test (Extended Generation)]: Install fast path packages for testing against transformers (mamba, conv1d).    #
 #   * [Multi-Modal Models (Standard) 1-4]:                                                                                          #
 #     - Do NOT remove `VLLM_WORKER_MULTIPROC_METHOD=spawn` setting as ROCm requires this for certain models to function.            #
 #   * [Transformers Nightly Models]: Whisper needs `VLLM_WORKER_MULTIPROC_METHOD=spawn` to avoid deadlock.                          #
@@ -365,22 +363,6 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s v1/e2e/spec_decode -k "speculators or mtp_correctness"
-
-- label: V1 attention (H100-MI250) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/config/attention.py
-  - vllm/model_executor/layers/attention
-  - vllm/v1/attention
-  - tests/v1/attention
-  - vllm/_aiter_ops.py
-  - vllm/envs.py
-  - vllm/platforms/rocm.py
-  commands:
-  - pytest -v -s v1/attention
 
 - label: V1 others (CPU) # TBD
   timeout_in_minutes: 180
@@ -1579,11 +1561,12 @@ steps:
   commands:
   - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
-- label: Kernels Core Operation Test # TBD
+- label: Kernels Core Operation Test %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
+  parallelism: 3
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - csrc/
@@ -1594,7 +1577,7 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py  kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py
+  - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: Kernels KDA Test # TBD
   timeout_in_minutes: 180
@@ -2163,7 +2146,7 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
-  parallelism: 4
+  parallelism: 8
   optional: true
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
@@ -2696,11 +2679,12 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s v1/kv_connector/extract_hidden_states_integration
 
-- label: V1 attention (H100-MI300) # TBD
+- label: V1 attention (H100-MI300) %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
+  parallelism: 2
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -2712,7 +2696,7 @@ steps:
   - vllm/envs.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s v1/attention
+  - pytest -v -s v1/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: V1 Core + KV + Metrics # TBD
   timeout_in_minutes: 180
@@ -3678,11 +3662,12 @@ steps:
 
 #------------------------------------------------------------  mi355 · v1  -------------------------------------------------------------#
 
-- label: V1 attention (B200-MI355) # TBD
+- label: V1 attention (B200-MI355) %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
+  parallelism: 2
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/config/attention.py
@@ -3693,7 +3678,7 @@ steps:
   - vllm/envs.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s v1/attention
+  - pytest -v -s v1/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: V1 Core + KV + Metrics # TBD
   timeout_in_minutes: 180
