@@ -25,10 +25,6 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-_LEAF_CALL_LENGTHS: dict[Callable, int] = {}
-"""Callables traced as leaf calls (see `_as_leaf_call`), mapped to the number of
-values each returns."""
-
 _UNKNOWN = object()
 """Sentinel meta value for proxies whose concrete value could not be inferred.
 Distinct from `None`, which is a valid concrete value (e.g. `attn_weights`)."""
@@ -40,11 +36,7 @@ _MODULE_CALL = nn.Module.__call__
 
 def is_leaf_call(node: object) -> bool:
     """Is node a call recorded by `_as_leaf_call` (e.g. an attention interface)."""
-    return (
-        isinstance(node, fx.Node)
-        and node.op == "call_function"
-        and node.target in _LEAF_CALL_LENGTHS
-    )
+    return isinstance(node, fx.Node) and node.meta.get("leaf_call", False)
 
 
 def _reference_weight(module: nn.Module) -> torch.Tensor | None:
@@ -130,9 +122,6 @@ class _AllLeafTracer(fx.Tracer):
                     1, 8, weight.shape[-1], dtype=weight.dtype, device="meta"
                 )
             return _UNKNOWN
-        # Leaf calls don't execute; fabricate a value of the declared length.
-        if kind == "call_function" and target in _LEAF_CALL_LENGTHS:
-            return (_UNKNOWN,) * _LEAF_CALL_LENGTHS[target]
         if kind == "get_attr":
             value = operator.attrgetter(str(target))(self.root)
             if isinstance(value, torch.Tensor):
@@ -208,9 +197,12 @@ def _as_leaf_call(fn: Callable, length: int | None = None) -> Callable:
         proxies = tuple(arg for arg in args if isinstance(arg, fx.Proxy))
         if not proxies:
             return fn(*args, **kwargs)
+        proxy = proxies[0].tracer.create_proxy("call_function", fn, proxies, {})
+        proxy.node.meta["leaf_call"] = True
         if length is not None:
-            _LEAF_CALL_LENGTHS[fn] = length
-        return proxies[0].tracer.create_proxy("call_function", fn, proxies, {})
+            # The body never executes, so fabricate a value of the declared length.
+            proxy.meta = (_UNKNOWN,) * length
+        return proxy
 
     return leaf
 
