@@ -112,7 +112,8 @@ alternative.
 
 vLLM refuses to create or restore a snapshot under a world-writable directory
 and falls back to a cold start. That catches a volume mounted or pre-created
-at 0777. It is not a general integrity check, and it deliberately allows
+at 0777, including a world-writable parent directory; sticky-bit parents like
+/tmp are allowed. It is not a general integrity check, and it deliberately allows
 group-writable and root-owned directories, because arbitrary-UID pods need
 those. Anyone inside the trust domain of the volume can still replace the
 images, which is why the separation above is the real control.

@@ -286,7 +286,10 @@ def test_snapshot_create_early_exit_when_snapshot_current(monkeypatch, tmp_path)
     monkeypatch.delenv("VLLM_SNAPSHOT", raising=False)
     monkeypatch.setenv("VLLM_SNAPSHOT_ROOT", str(tmp_path))
     monkeypatch.setattr(snapshot_module, "lookup_key", lambda env: {"stub": 1})
-    _prime_snapshot_dir(tmp_path, key_from({"stub": 1}))
+    # 0770: group-writable must stay trusted (arbitrary-UID pods need it), so
+    # re-adding a group-write refusal fails this test. The owner half of that
+    # narrowing is uncoverable without a second uid.
+    _prime_snapshot_dir(tmp_path, key_from({"stub": 1})).chmod(0o770)
     with pytest.raises(SystemExit) as excinfo:
         maybe_restore_serve()
     assert excinfo.value.code == 3
@@ -333,6 +336,189 @@ def test_restore_refuses_world_writable_snapshot_dir(
     refusals = [r for r in caplog_vllm.records if "restore refused" in r.getMessage()]
     assert len(refusals) == 1
     assert "trust.mode" in refusals[0].getMessage()
+
+
+def _serve_restore_env(monkeypatch, root):
+    # The shared restore-hook harness: enabled, linux-pinned, stubbed key.
+    import vllm.entrypoints.snapshot as snapshot_module
+
+    monkeypatch.setattr(snapshot_module, "_entry_state", {})
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(sys, "argv", ["vllm", "serve", "some-model"])
+    monkeypatch.setenv("VLLM_SNAPSHOT", "1")
+    monkeypatch.delenv("VLLM_SNAPSHOT_RESTORED", raising=False)
+    monkeypatch.delenv("PYTHONHASHSEED", raising=False)
+    monkeypatch.setenv("VLLM_SNAPSHOT_ROOT", str(root))
+    monkeypatch.setattr(snapshot_module, "lookup_key", lambda env: {"stub": 1})
+    return snapshot_module
+
+
+def test_snapshot_create_refuses_instead_of_repriming_untrusted_dir(
+    monkeypatch, tmp_path
+):
+    # A world-writable key dir must refuse creation, never re-prime: the
+    # surviving manifest is the discriminating assertion (a re-priming path
+    # rmtrees the directory before the refusal could fire).
+    import vllm.entrypoints.snapshot as snapshot_module
+
+    monkeypatch.setattr(snapshot_module, "_entry_state", {})
+    monkeypatch.setenv("VLLM_SNAPSHOT_ROOT", str(tmp_path))
+    monkeypatch.setattr(snapshot_module, "lookup_key", lambda env: {"stub": 1})
+    monkeypatch.setattr(snapshot_module, "require_dump_host", lambda: None)
+    directory = _prime_snapshot_dir(tmp_path, key_from({"stub": 1}))
+    directory.chmod(0o707)
+    with pytest.raises(RuntimeError, match="trust.mode"):
+        snapshot_module.create_snapshot()
+    assert (directory / "MANIFEST.json").exists()
+
+
+def test_restore_trust_gate_runs_before_lock(monkeypatch, caplog_vllm, tmp_path):
+    # A world-writable ROOT must be refused before _acquire_lock creates a
+    # lock file inside it; the absent lock file pins the order, not just the
+    # refusal.
+    _serve_restore_env(monkeypatch, tmp_path)
+    key = key_from({"stub": 1})
+    _prime_snapshot_dir(tmp_path, key)
+    tmp_path.chmod(0o777)
+    with caplog_vllm.at_level("WARNING", logger="vllm.entrypoints.snapshot"):
+        assert maybe_restore_serve() is None
+    assert any("restore refused" in r.getMessage() for r in caplog_vllm.records)
+    assert not (tmp_path / f"{key}.lock").exists()
+
+
+def test_restore_refuses_symlinked_key_dir_before_reading_it(
+    monkeypatch, caplog_vllm, tmp_path
+):
+    # root/<key> is created by us at 0700 and is never legitimately a
+    # symlink, so a planted one is refused on the LINK. The malformed
+    # manifest behind it discriminates check-before-read: a parse-first path
+    # would report an unreadable-manifest miss instead.
+    root = tmp_path / "root"
+    _serve_restore_env(monkeypatch, root)
+    key = key_from({"stub": 1})
+    root.mkdir()
+    root.chmod(0o700)
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    target.chmod(0o700)
+    (target / "MANIFEST.json").write_text("not json{")
+    (root / key).symlink_to(target)
+    with caplog_vllm.at_level("INFO", logger="vllm.entrypoints.snapshot"):
+        assert maybe_restore_serve() is None
+    refusals = [r for r in caplog_vllm.records if "restore refused" in r.getMessage()]
+    assert len(refusals) == 1
+    assert "trust.link" in refusals[0].getMessage()
+    assert not any("restore miss" in r.getMessage() for r in caplog_vllm.records)
+
+
+@pytest.mark.parametrize(("parent_mode", "refused"), [(0o777, True), (0o1777, False)])
+def test_restore_judges_world_writable_ancestors(
+    monkeypatch, caplog_vllm, tmp_path, parent_mode, refused
+):
+    # A 0777 parent of the root grants the image-swap primitive and must be
+    # refused by name; the same layout with a sticky, euid-owned parent and
+    # an euid-owned child is a legitimate /tmp-style layout and is not. The
+    # malformed manifest stops the trusted case at a parse miss, after the
+    # gate, without invoking criu.
+    parent = tmp_path / "parent"
+    root = parent / "root"
+    _serve_restore_env(monkeypatch, root)
+    directory = _prime_snapshot_dir(root, key_from({"stub": 1}))
+    (directory / "MANIFEST.json").write_text("not json{")
+    parent.chmod(parent_mode)
+    with caplog_vllm.at_level("INFO", logger="vllm.entrypoints.snapshot"):
+        assert maybe_restore_serve() is None
+    refusals = [r for r in caplog_vllm.records if "restore refused" in r.getMessage()]
+    if refused:
+        assert len(refusals) == 1
+        assert "trust.mode.parent" in refusals[0].getMessage()
+    else:
+        assert not refusals
+        assert any("restore miss" in r.getMessage() for r in caplog_vllm.records)
+
+
+def test_restore_lock_symlink_does_not_truncate_target(monkeypatch, tmp_path):
+    # A planted symlink at the lock name must fail the open (cold-start
+    # miss), not truncate its target as root; the surviving content is the
+    # discriminating assertion.
+    _serve_restore_env(monkeypatch, tmp_path)
+    key = key_from({"stub": 1})
+    _prime_snapshot_dir(tmp_path, key)
+    victim = tmp_path / "victim"
+    victim.write_text("precious")
+    (tmp_path / f"{key}.lock").symlink_to(victim)
+    assert maybe_restore_serve() is None
+    assert victim.read_text() == "precious"
+
+
+def test_snapshot_create_refuses_hostile_parent_before_creating_root(
+    monkeypatch, tmp_path
+):
+    # First create under a 0777 non-sticky parent: the missing root must not
+    # exempt the check, and nothing may be created beneath the parent.
+    import vllm.entrypoints.snapshot as snapshot_module
+
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    parent.chmod(0o777)
+    root = parent / "root"
+    monkeypatch.setattr(snapshot_module, "_entry_state", {})
+    monkeypatch.setenv("VLLM_SNAPSHOT_ROOT", str(root))
+    monkeypatch.setattr(snapshot_module, "lookup_key", lambda env: {"stub": 1})
+    monkeypatch.setattr(snapshot_module, "require_dump_host", lambda: None)
+    with pytest.raises(RuntimeError, match="trust.mode"):
+        snapshot_module.create_snapshot()
+    assert list(parent.iterdir()) == []
+
+
+def test_snapshot_create_fast_path_distrusts_world_writable_dir(monkeypatch, tmp_path):
+    # A world-writable key dir holding a VALID manifest: the bare-create fast
+    # path must neither exit 3 nor crash (None, not False, from the
+    # validity probe); the slow path refuses loudly.
+    import vllm.entrypoints.snapshot as snapshot_module
+
+    monkeypatch.setattr(snapshot_module, "_entry_state", {})
+    monkeypatch.setattr(sys, "argv", ["vllm", "snapshot", "create"])
+    monkeypatch.delenv("VLLM_SNAPSHOT", raising=False)
+    monkeypatch.setenv("VLLM_SNAPSHOT_ROOT", str(tmp_path))
+    monkeypatch.setattr(snapshot_module, "lookup_key", lambda env: {"stub": 1})
+    _prime_snapshot_dir(tmp_path, key_from({"stub": 1})).chmod(0o707)
+    assert maybe_restore_serve() is None
+    monkeypatch.setattr(snapshot_module, "require_dump_host", lambda: None)
+    with pytest.raises(RuntimeError, match="trust.mode"):
+        snapshot_module.create_snapshot()
+
+
+def test_restore_accepts_trusted_symlinked_root(monkeypatch, tmp_path):
+    # A root that IS a symlink (cache moved to a bigger disk) is a legitimate
+    # layout: the lock file appearing on the target side proves the restore
+    # got through the trust gate to _acquire_lock; the malformed manifest
+    # then stops it before criu.
+    real = tmp_path / "real"
+    link = tmp_path / "link"
+    _serve_restore_env(monkeypatch, link)
+    key = key_from({"stub": 1})
+    directory = _prime_snapshot_dir(real, key)
+    (directory / "MANIFEST.json").write_text("not json{")
+    link.symlink_to(real)
+    assert maybe_restore_serve() is None
+    assert (real / f"{key}.lock").exists()
+
+
+def test_restore_cold_boot_under_sticky_parent_is_quiet_miss(
+    monkeypatch, caplog_vllm, tmp_path
+):
+    # First boot with no root yet under a sticky /tmp-style parent: an
+    # ordinary INFO miss, never a trust warning. The unclaimed-missing rule
+    # (a missing component under a sticky parent is untrusted for unlocked
+    # readers) must not make legitimate cold starts noisy.
+    tmp_path.chmod(0o1777)
+    root = tmp_path / "root"
+    _serve_restore_env(monkeypatch, root)
+    with caplog_vllm.at_level("INFO", logger="vllm.entrypoints.snapshot"):
+        assert maybe_restore_serve() is None
+    assert not any("restore refused" in r.getMessage() for r in caplog_vllm.records)
+    assert any("restore miss" in r.getMessage() for r in caplog_vllm.records)
 
 
 def test_snapshot_create_flags_skip_early_exit(monkeypatch, tmp_path):

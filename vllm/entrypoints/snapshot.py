@@ -786,8 +786,10 @@ def require_dump_host() -> None:
 def _snapshot_root() -> Path:
     from vllm import envs
 
-    # resolved: criu requires absolute paths for its own arguments
-    return Path(envs.VLLM_SNAPSHOT_ROOT).expanduser().resolve()
+    # Absolute (criu requires absolute paths for its own arguments) but NOT
+    # resolved: resolving discards the lexical chain the operator configured,
+    # and _trust_miss judges both that chain and the resolved one.
+    return Path(os.path.abspath(Path(envs.VLLM_SNAPSHOT_ROOT).expanduser()))
 
 
 def _acquire_lock(root: Path, key: str) -> _KeyLock:
@@ -795,8 +797,39 @@ def _acquire_lock(root: Path, key: str) -> _KeyLock:
     # --force rmtree cannot invalidate what a restorer is reading.
     import fcntl
 
-    root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    handle = (root / f"{key}.lock").open("w")
+    # mkdir(parents=True) creates missing ancestors at umask-default modes,
+    # so create each missing component explicitly at 0700. A component that
+    # appears between the walk and the mkdir (a racing writer in a sticky
+    # parent) must be a real directory we could have created ourselves.
+    missing = []
+    node = root
+    while not node.exists():
+        missing.append(node)
+        node = node.parent
+    euid = os.geteuid()
+    for component in reversed(missing):
+        try:
+            component.mkdir(mode=0o700)
+        except FileExistsError:
+            info = component.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid not in (euid, 0):
+                raise RuntimeError(
+                    f"refusing snapshot directory ({component.name} was "
+                    f"created by another writer): {component}"
+                ) from None
+    # Revalidate once after creation so the state that greets the lock open
+    # is the state that was validated.
+    unsafe = _trust_miss(root, deny_symlink=False, claim_missing=True)
+    if unsafe:
+        raise RuntimeError(f"refusing snapshot directory ({unsafe}): {root}")
+    # O_NOFOLLOW: a planted symlink at the lock name must fail, not truncate
+    # its target.
+    fd = os.open(
+        str(root / f"{key}.lock"),
+        os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW,
+        0o600,
+    )
+    handle = os.fdopen(fd, "w")
     fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
     return _KeyLock(handle)
 
@@ -1270,16 +1303,13 @@ def create_snapshot(force: bool = False, dry_run: bool = False) -> None:
     root = _snapshot_root()
     directory = root / key
     # Refuse rather than re-prime: the stale path below would rmtree a
-    # directory this process does not own.
-    for path in (root, directory):
-        if not path.exists():
-            continue
-        unsafe = _trust_miss(path)
+    # world-writable directory any local user can swap. Unconditional, not
+    # exists()-gated: Path.exists() swallows OSError, and a missing leaf
+    # still has ancestors to judge.
+    for path, deny in ((root, False), (directory, True)):
+        unsafe = _trust_miss(path, deny_symlink=deny, claim_missing=True)
         if unsafe:
-            raise RuntimeError(
-                f"refusing to write a snapshot under a world-writable "
-                f"directory ({unsafe}): {path}"
-            )
+            raise RuntimeError(f"refusing to write a snapshot ({unsafe}): {path}")
     if dry_run:
         _print_dry_run(key, directory)
         return
@@ -1347,37 +1377,96 @@ def _diagnose_miss(
     return f"no snapshot (nearest differs at {field})" if field else "no snapshot"
 
 
-def _trust_miss(directory: Path) -> str | None:
+def _trust_miss(
+    directory: Path, *, deny_symlink: bool = True, claim_missing: bool = False
+) -> str | None:
     """Reason to distrust a snapshot directory, or None.
 
     criu restore executes the images, so the snapshot directory is trusted
     input. World-writable is the one unambiguous signal: it is never a
     deliberate layout, and it means any local user can swap the images.
+    A world-writable ANCESTOR grants the same swap (rename the tree aside,
+    substitute a clean-looking one), so every parent of both the configured
+    lexical path and its resolved target is judged too; sticky parents like
+    /tmp are exempt only when the sticky directory and the next component
+    toward the leaf both belong to us.
 
-    Group ownership deliberately is not checked. The image chmods its caches
-    g+rwX so that an arbitrary-UID OpenShift pod can use them, and the
-    OpenShift example in the deployment docs runs with fsGroup 0, so
+    deny_symlink applies to the leaf itself: key directories are OURS
+    (created 0700, never legitimately a symlink), so a symlink there is
+    refused on the link. The ROOT being a symlink is a legitimate operator
+    layout (cache symlinked to a bigger disk), so root call sites pass False
+    and the parent walk covers the swap risk.
+
+    Group WRITABILITY deliberately is not checked. The image chmods its
+    caches g+rwX so that an arbitrary-UID OpenShift pod can use them, and
+    the OpenShift example in the deployment docs runs with fsGroup 0, so
     group-writable is a supported layout here rather than evidence of
-    tampering. For the same reason a foreign owner is not checked: those pods
-    run as an arbitrary UID against a root-owned volume.
+    tampering. For the same reason ownership is not checked: those pods run
+    as an arbitrary UID against a root-owned volume.
 
     That leaves every same-trust-domain writer in scope, and no check local to
     the volume can cover them, because the reference value would live where
     they can edit it. The deployment docs carry that boundary.
     """
+    if deny_symlink and directory.is_symlink():
+        return f"trust.link.{directory.name}"
     try:
         info = directory.stat()
+    except FileNotFoundError:
+        pass  # nothing at the leaf to judge yet; ancestors still are
     except OSError:
         return f"trust.stat.{directory.name}"
-    if info.st_mode & stat.S_IWOTH:
-        return f"trust.mode.{directory.name}"
+    else:
+        if info.st_mode & stat.S_IWOTH:
+            return f"trust.mode.{directory.name}"
+    euid = os.geteuid()
+
+    def walk(path: Path) -> Any:
+        child = path
+        for parent in path.parents:
+            yield parent, child
+            child = parent
+
+    for parent, child in (
+        *walk(directory),
+        *walk(directory.resolve()),
+    ):
+        try:
+            info = parent.stat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return f"trust.stat.{parent.name}"
+        if not info.st_mode & stat.S_IWOTH:
+            continue
+        if info.st_mode & stat.S_ISVTX and info.st_uid in (euid, 0):
+            # Sticky exemption needs the next component to be ours too,
+            # via lstat so a foreign-owned symlink cannot inherit its
+            # target's trusted uid. A missing next component is exempt only
+            # for callers that immediately claim it (create's gate and
+            # _acquire_lock, via exist_ok=False plus revalidation); unlocked
+            # readers must treat it as untrusted, because it can be
+            # race-created by a foreign writer after this check.
+            try:
+                child_info = child.lstat()
+            except FileNotFoundError:
+                if claim_missing:
+                    continue
+                return f"trust.mode.{parent.name}"
+            except OSError:
+                return f"trust.stat.{parent.name}"
+            if child_info.st_uid in (euid, 0):
+                continue
+        return f"trust.mode.{parent.name}"
     return None
 
 
 def _validate_layer2(
     manifest: dict[str, Any], directory: Path, live_env: dict[str, str]
 ) -> str | None:
-    trust = _trust_miss(directory) or _trust_miss(directory.parent)
+    trust = _trust_miss(directory, deny_symlink=True) or _trust_miss(
+        directory.parent, deny_symlink=False
+    )
     if trust:
         return trust
     for record in manifest.get("shared_objects", []):
@@ -1406,6 +1495,12 @@ def _existing_snapshot_valid() -> Path | None:
     env = creation_env(_entry_env())
     key = key_from(lookup_key(env))  # SnapshotKeyError propagates to callers
     directory = _snapshot_root() / key
+    if _trust_miss(directory.parent, deny_symlink=False) or _trust_miss(
+        directory, deny_symlink=True
+    ):
+        # None, never False: both callers test `is not None`. The fast path
+        # falls through and create's slow-path gate refuses loudly.
+        return None
     if not (directory / "MANIFEST.json").is_file():
         return None
     try:
@@ -1664,19 +1759,27 @@ def _restore_serve() -> None:
     key = key_from(key_obj)
     root = _snapshot_root()
     directory = root / key
+    # A root that does not exist holds nothing to restore and nothing to
+    # judge; returning here keeps legit first boots under sticky parents
+    # (/tmp) an ordinary quiet miss rather than a trust warning.
+    if not os.path.lexists(root):
+        logger.info("snapshot restore miss (no snapshot)")
+        return
+    # Before ANY read beneath root: directory iteration, the manifest probe,
+    # and the manifest parse are all reads of untrusted content, and
+    # _acquire_lock opens a lock file inside root. No claim_missing here or
+    # in _existing_snapshot_valid: both read without holding the lock, so a
+    # missing component under a sticky parent stays untrusted.
+    unsafe = _trust_miss(root, deny_symlink=False) or _trust_miss(
+        directory, deny_symlink=True
+    )
+    if unsafe:
+        logger.warning("snapshot restore refused (%s): %s", unsafe, directory)
+        return
     if not (directory / "MANIFEST.json").is_file():
         logger.info(
             "snapshot restore miss (%s)",
             _diagnose_miss(root, key_obj, key, live_env),
-        )
-        return
-    # Before _acquire_lock, which opens a lock file inside root: on a
-    # world-writable root that name can be a planted symlink, and this
-    # process is root in the default image.
-    unsafe = _trust_miss(root)
-    if unsafe:
-        logger.warning(
-            "snapshot restore refused, %s is world-writable (%s)", root, unsafe
         )
         return
     lock = _acquire_lock(root, key)
@@ -1686,11 +1789,7 @@ def _restore_serve() -> None:
         if miss:
             # A trust refusal is an operator problem, not a cache miss.
             if miss.startswith("trust."):
-                logger.warning(
-                    "snapshot restore refused, %s is world-writable (%s)",
-                    directory,
-                    miss,
-                )
+                logger.warning("snapshot restore refused (%s): %s", miss, directory)
             else:
                 logger.info("snapshot restore miss (%s)", miss)
             return
