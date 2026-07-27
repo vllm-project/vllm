@@ -139,6 +139,9 @@ kNvfp4DynamicGroupScale = ScaleDesc(FP8_DTYPE, False, GroupShape(1, 16))
 kNvfp4Dynamic = QuantKey(
     FP4_DTYPE, scale=kNvfp4DynamicGroupScale, scale2=kStaticTensorScale
 )
+kNvfp4DynamicToken = QuantKey(
+    FP4_DTYPE, scale=kNvfp4DynamicGroupScale, scale2=kDynamicTokenScale
+)
 
 kNvfp4StaticGroupScale = ScaleDesc(FP8_DTYPE, True, GroupShape(1, 16))
 kNvfp4Static = QuantKey(

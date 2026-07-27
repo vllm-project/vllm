@@ -334,6 +334,7 @@ def convert_to_nvfp4_moe_kernel_format(
             w2_scale=w2_scale,
             w2_scale_2=w2_scale_2,
             a2_scale=a2_scale,
+            gated=is_act_and_mul,
         )
     elif (
         nvfp4_backend in FLASHINFER_NVFP4_MOE_BACKENDS
@@ -547,7 +548,14 @@ def make_nvfp4_moe_kernel(
     if backend == NvFp4MoeBackend.HUMMING:
         assert layer is not None
         extra_kwargs = {"layer": layer}
-    if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM and per_token_activation:
+    if (
+        backend
+        in (
+            NvFp4MoeBackend.FLASHINFER_TRTLLM,
+            NvFp4MoeBackend.FLASHINFER_CUTEDSL,
+        )
+        and per_token_activation
+    ):
         extra_kwargs["per_token_activation"] = True
 
     # Create Experts.

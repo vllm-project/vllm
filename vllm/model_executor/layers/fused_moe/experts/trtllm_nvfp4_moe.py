@@ -22,20 +22,18 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
+    quantize_nvfp4_per_token_input,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Dynamic,
+    kNvfp4DynamicToken,
     kNvfp4Static,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 logger = init_logger(__name__)
-
-# Base scale for per-token NVFP4 activation quant; the kernel folds the
-# per-token global scale (from the activation amax) on top of it.
-_PER_TOKEN_BASE_GLOBAL_SCALE = 1.0 / (448.0 * 6.0)
 
 
 class TrtLlmNvFp4ExpertsBase:
@@ -192,8 +190,33 @@ class TrtLlmNvFp4ExpertsBase:
         """Supports Nvfp4 quantization."""
         SUPPORTED_W_A = [
             (kNvfp4Static, kNvfp4Dynamic),
+            (kNvfp4Static, kNvfp4DynamicToken),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
+
+    @staticmethod
+    def is_supported_config(
+        cls: type[mk.FusedMoEExperts],
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        if (weight_key, activation_key) == (
+            kNvfp4Static,
+            kNvfp4DynamicToken,
+        ) and not moe_config.is_act_and_mul:
+            return False, (
+                "kernel does not support per-token NVFP4 activation scaling "
+                "for non-gated MoE"
+            )
+        return mk.FusedMoEExperts.is_supported_config(
+            cls,
+            moe_config,
+            weight_key,
+            activation_key,
+            activation_format,
+        )
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
@@ -222,23 +245,6 @@ class TrtLlmNvFp4ExpertsBase:
     @property
     def expects_unquantized_inputs(self) -> bool:
         return self.per_token_activation
-
-    def _quantize_per_token_input(
-        self, hidden_states: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """NVFP4-quantize activations with a per-token global scale.
-
-        Returns ``(packed_fp4, block_scale, per_token_scale)``.
-        """
-        from flashinfer import SfLayout, nvfp4_quantize
-
-        hs_fp4, hs_block_scale, per_token_scale = nvfp4_quantize(
-            hidden_states,
-            _PER_TOKEN_BASE_GLOBAL_SCALE,
-            sfLayout=SfLayout.layout_linear,
-            per_token_activation=True,
-        )
-        return hs_fp4, hs_block_scale, per_token_scale
 
     def _get_chunk_size(self) -> int:
         MAX_GRID_Y = 65535
@@ -284,22 +290,15 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        if self.per_token_activation:
-            # Deferred input quant leaves K unpacked here, breaking the
-            # workspace assumptions below. Per-token NVFP4 is only supported on
-            # the monolithic (non-EP) path for now.
-            raise NotImplementedError(
-                "NVFP4 per-token activation is only supported on the monolithic "
-                "(non-EP) FlashInfer TRTLLM MoE path."
-            )
-
         # The workspaces for this implementation are managed by flashinfer.
         workspace1 = (0,)
         workspace2 = (0,)
 
-        # Hidden states are Nvfp4, packed into int8 dtype, so we
-        # need to multiply K by 2 to get the output shape right.
-        assert self.hidden_dim == K * 2
+        # Static-global inputs arrive packed as uint8 (two FP4 values per
+        # byte). Per-token inputs remain BF16 until _invoke_kernel computes the
+        # row scale and quantizes them, so K is already the logical hidden dim.
+        expected_hidden_dim = K if self.per_token_activation else K * 2
+        assert self.hidden_dim == expected_hidden_dim
         output = (M, self.hidden_dim)
 
         return (workspace1, workspace2, output)
@@ -317,7 +316,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         topk_ids: torch.Tensor,
         activation: MoEActivation,
         global_num_experts: int,
-        a1q_scale: torch.Tensor,
+        a1q_scale: torch.Tensor | None,
     ):
         import flashinfer
 
@@ -328,7 +327,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         # already quantized in prepare() with the static global scale.
         if self.per_token_activation:
             hidden_states, block_scale, per_token_scale = (
-                self._quantize_per_token_input(hidden_states)
+                quantize_nvfp4_per_token_input(hidden_states)
             )
         else:
             block_scale, per_token_scale = a1q_scale, None
@@ -505,7 +504,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
         # Per-token: input is unquantized, quantize it here (see modular apply).
         if self.per_token_activation:
             hidden_states, block_scale, per_token_scale = (
-                self._quantize_per_token_input(hidden_states)
+                quantize_nvfp4_per_token_input(hidden_states)
             )
         else:
             block_scale, per_token_scale = a1q_scale, None

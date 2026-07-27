@@ -90,6 +90,7 @@ def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
     w2_scale: torch.Tensor,
     w2_scale_2: torch.Tensor,
     a2_scale: torch.Tensor,
+    gated: bool,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -102,8 +103,9 @@ def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
 ]:
     """Prepare weights for the CuteDSL wrapper-based NvFP4 MoE backend.
 
-    Converts weight scale factors to MMA layout expected by CuteDslMoEWrapper,
-    and interleaves w13 gate/linear rows.
+    Pads the runtime expert tensors to the kernel's GEMM alignment, converts
+    weight scale factors to the MMA layout expected by CuteDslMoEWrapper, and
+    interleaves w13 gate/linear rows for gated activations.
     """
     from flashinfer.cute_dsl.utils import convert_sf_to_mma_layout
 
@@ -112,13 +114,27 @@ def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
     a13_scale = a13_scale.max().to(torch.float32).repeat(num_experts)
     a2_scale = a2_scale.max().to(torch.float32).repeat(num_experts)
 
-    half = w13.shape[1] // 2
-    w13 = torch.cat([w13[:, half:], w13[:, :half]], dim=1)
-    w13_scale = torch.cat([w13_scale[:, half:], w13_scale[:, :half]], dim=1)
+    # CuTe DSL requires GEMM1's output dimension to be a multiple of 128.
+    # Keep the checkpoint tensors unchanged and pad only the kernel's runtime
+    # representation. Zero rows also make the padded GEMM2 contraction a no-op.
+    w13, w13_scale, w2, w2_scale, padded_intermediate = align_fp4_moe_weights_for_fi(
+        w13,
+        w13_scale,
+        w2,
+        w2_scale,
+        is_act_and_mul=gated,
+        min_alignment=128,
+    )
+    layer.moe_config.intermediate_size_per_partition = padded_intermediate
 
-    # Interleave up/gate rows for w13 weights and scales.
-    w13 = interleave_linear_and_gate(w13, group_size=64, dim=1)
-    w13_scale = interleave_linear_and_gate(w13_scale, group_size=64, dim=1)
+    if gated:
+        half = w13.shape[1] // 2
+        w13 = torch.cat([w13[:, half:], w13[:, :half]], dim=1)
+        w13_scale = torch.cat([w13_scale[:, half:], w13_scale[:, :half]], dim=1)
+
+        # Interleave up/gate rows for the fused gated activation.
+        w13 = interleave_linear_and_gate(w13, group_size=64, dim=1)
+        w13_scale = interleave_linear_and_gate(w13_scale, group_size=64, dim=1)
 
     # Convert w13 scale factors: linear → swizzled → MMA layout.
     w13_scale = swizzle_blockscale(w13_scale)
