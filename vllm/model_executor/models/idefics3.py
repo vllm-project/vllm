@@ -138,30 +138,6 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
 
         return height, width
 
-    def _get_resize_output_image_size(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-        resolution_max_side: int,
-    ) -> tuple[int, int]:
-        hf_processor = self.get_hf_processor()
-        image_processor: Idefics3ImageProcessor = hf_processor.image_processor
-        max_image_size = image_processor.size["longest_edge"]
-        if resolution_max_side > max_image_size:
-            raise ValueError(
-                "`resolution_max_side` cannot be larger than `max_image_size`"
-            )
-
-        height, width = image_height, image_width
-
-        # Find the output size, when rescaling the longest edge to max_len and
-        # preserving the aspect ratio
-        height, width = self._resize_output_size(
-            height=height, width=width, max_len=resolution_max_side
-        )
-        return height, width
-
     def _get_image_feature_grid_size(
         self,
         *,

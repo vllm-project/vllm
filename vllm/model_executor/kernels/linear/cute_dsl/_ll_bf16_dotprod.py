@@ -307,7 +307,3 @@ class LLBf16Dotprod:
                 )
         if const_expr(self.use_pdl):
             cute.arch.griddepcontrol_launch_dependents()
-
-
-def make_host_bf16(k_val: int, bs: int = 128):
-    return LLBf16Dotprod(k=k_val, bs=bs)

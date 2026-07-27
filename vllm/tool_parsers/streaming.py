@@ -47,12 +47,6 @@ def _bracket_level_state(
     return level, in_string, escaped
 
 
-def _bracket_level(s: str, opening: str = "{", closing: str = "}") -> int:
-    """Calculate the current level of nested brackets in a string."""
-    level, _, _ = _bracket_level_state(s, opening, closing)
-    return level
-
-
 def filter_delta_text(
     delta_text: str,
     previous_text: str,

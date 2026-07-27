@@ -45,20 +45,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def _pop_unallowed_keys_and_warn(
-    dictionary: dict[str, Any], allowed_keys: set[str], err_dict_name: str
-):
-    keys = list(dictionary.keys())
-    for key in keys:
-        if key not in allowed_keys:
-            dictionary.pop(key)
-            logger.warning_once(
-                f"'{key=}' is not supported by mistral-common "
-                f"for {err_dict_name}. It has been popped from the "
-                "object."
-            )
-
-
 def maybe_serialize_tool_calls(request: "MistralChatCompletionRequest"):
     # SEE: https://github.com/vllm-project/vllm/pull/9951
     # Credits go to: @gcalmettes
