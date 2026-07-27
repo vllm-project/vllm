@@ -4,6 +4,7 @@
 import random
 import threading
 import time
+from types import SimpleNamespace
 from unittest import mock
 
 import multiprocess as mp
@@ -11,7 +12,12 @@ import numpy as np
 import pytest
 import torch.distributed as dist
 
-from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
+from vllm.distributed.device_communicators import shm_broadcast
+from vllm.distributed.device_communicators.shm_broadcast import (
+    MessageQueue,
+    ShmRingBuffer,
+    check_shm_free_space,
+)
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
@@ -522,3 +528,39 @@ def test_warning_logs(caplog_vllm):
         # Clean up when done
         writer.shutdown()
         reader.shutdown()
+
+
+def _fake_disk_usage(free_bytes: int):
+    return SimpleNamespace(total=free_bytes, used=0, free=free_bytes)
+
+
+def test_check_shm_free_space_raises_when_insufficient(tmp_path):
+    with (
+        mock.patch.object(
+            shm_broadcast.shutil, "disk_usage", return_value=_fake_disk_usage(32 << 20)
+        ),
+        pytest.raises(RuntimeError, match="Insufficient space"),
+    ):
+        check_shm_free_space(240 << 20, shm_path=str(tmp_path))
+
+
+def test_check_shm_free_space_passes_when_sufficient(tmp_path):
+    with mock.patch.object(
+        shm_broadcast.shutil, "disk_usage", return_value=_fake_disk_usage(512 << 20)
+    ):
+        check_shm_free_space(240 << 20, shm_path=str(tmp_path))
+
+
+def test_check_shm_free_space_skipped_when_path_missing(tmp_path):
+    check_shm_free_space(1 << 60, shm_path=str(tmp_path / "does-not-exist"))
+
+
+def test_shm_ring_buffer_creation_checks_free_space():
+    with (
+        mock.patch.object(
+            shm_broadcast.shutil, "disk_usage", return_value=_fake_disk_usage(1 << 20)
+        ),
+        mock.patch.object(shm_broadcast.os.path, "isdir", return_value=True),
+        pytest.raises(RuntimeError, match="Insufficient space"),
+    ):
+        ShmRingBuffer(n_reader=1, max_chunk_bytes=24 * 1024 * 1024, max_chunks=10)
