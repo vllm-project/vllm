@@ -439,7 +439,7 @@ def rocm_fp8_paged_mqa_logits(
                 block_tables,
                 max_model_len,
                 ChunkK=256,
-                Preshuffle=block_size > 1,
+                Preshuffle=True,
                 KVBlockSize=block_size,
                 WavePerEU=2,
             )
