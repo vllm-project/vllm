@@ -19,7 +19,7 @@ DEFAULT_CI_BASE_CONTENT_FILES="requirements/common.txt requirements/rocm.txt req
 # Local builds hash these inputs directly instead of their checkout coordinates.
 DEFAULT_CI_BASE_CONTENT_ARG_EXCLUDES="REMOTE_VLLM VLLM_REPO VLLM_BRANCH"
 DEFAULT_CI_BASE_DOCKERFILE="docker/Dockerfile.rocm"
-DEFAULT_CI_BASE_DOCKERFILE_STAGES="base rust_toolchain_input_0 rust_toolchain_input_1 rust-toolchain-input rust-toolchain build_nixl build_rocshmem build_deepep mori_base ci_comm_runtime ci_base"
+DEFAULT_CI_BASE_DOCKERFILE_STAGES="base rust_toolchain_input_0 rust_toolchain_input_1 rust-toolchain-input rust-toolchain build_nixl build_rocshmem build_deepep mori_base ci_base"
 DEFAULT_CI_BASE_METADATA_VERSION="2"
 IMAGE_EXISTED_BEFORE_BUILD=0
 BASE_IMAGE_DIGEST_CACHE_REF=""
@@ -153,6 +153,8 @@ hash_string_short() {
 
 hash_content_file() {
     local file="$1"
+    local mode="644"
+    local raw_mode=""
 
     if [[ -L "${file}" ]]; then
         printf 'symlink:%s\n' "${file}"
@@ -160,8 +162,12 @@ hash_content_file() {
         return 0
     fi
 
+    raw_mode=$(stat -c '%a' "${file}")
+    if (((8#${raw_mode} & 0111) != 0)); then
+        mode="755"
+    fi
     printf 'file:%s\n' "${file}"
-    printf 'mode:%s\n' "$(stat -c '%a' "${file}")"
+    printf 'mode:%s\n' "${mode}"
     sha256sum "${file}"
 }
 
@@ -226,10 +232,7 @@ hash_dockerfile_stages() {
             }
             emit = 1
         }
-        {
-            sub(/\r$/, "")
-        }
-        tolower($1) == "from" {
+        $1 == "FROM" {
             stage = ""
             for (idx = 1; idx <= NF; idx++) {
                 if (tolower($idx) == "as" && idx < NF) {
@@ -267,9 +270,8 @@ discover_dockerfile_stage_args() {
             emit = 1
         }
         {
-            sub(/\r$/, "")
             line = $0
-            if (tolower($1) == "from") {
+            if ($1 == "FROM") {
                 stage = ""
                 for (idx = 1; idx <= NF; idx++) {
                     if (tolower($idx) == "as" && idx < NF) {
@@ -1162,12 +1164,8 @@ setup_builder() {
 prepare_git_cache_metadata() {
     local cache_branch_name=""
     local cache_base_branch="${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-main}"
-    local target_repo_slug=""
     local target_repo_url=""
-    local origin_repo_url=""
-    local origin_repo_slug=""
     local merge_base_ref=""
-    local local_base_ref=""
 
     if is_ci_base_target; then
         echo "Skipping commit-cache ancestry lookup for content-addressed ci_base"
@@ -1228,26 +1226,10 @@ prepare_git_cache_metadata() {
 
     if [[ -z "${VLLM_MERGE_BASE_COMMIT:-}" ]]; then
         target_repo_url=$(get_buildkite_target_repo_url)
-        target_repo_slug=$(get_buildkite_target_repo_slug)
         merge_base_ref="refs/remotes/vllm-cache-upstream/${cache_base_branch}"
-        local_base_ref="refs/remotes/origin/${cache_base_branch}"
-        origin_repo_url=$(git remote get-url origin 2>/dev/null || true)
-        if [[ -n "${origin_repo_url}" ]]; then
-            origin_repo_slug=$(parse_repo_slug "${origin_repo_url}")
-        fi
-        if [[ -n "${origin_repo_slug}" && "${origin_repo_slug}" == "${target_repo_slug}" ]]; then
-            VLLM_MERGE_BASE_COMMIT=$(git merge-base HEAD "${local_base_ref}" 2>/dev/null || echo "")
-        else
-            VLLM_MERGE_BASE_COMMIT=""
-            echo "Skipping local ${local_base_ref}: origin does not match ${target_repo_slug}"
-        fi
-        if [[ -n "${VLLM_MERGE_BASE_COMMIT}" ]]; then
-            echo "Using local ${local_base_ref} for cache merge base"
-        else
-            git_fetch_for_cache --no-tags --depth=200 "${target_repo_url}" \
-                "+refs/heads/${cache_base_branch}:${merge_base_ref}" 2>/dev/null || true
-            VLLM_MERGE_BASE_COMMIT=$(git merge-base HEAD "${merge_base_ref}" 2>/dev/null || echo "")
-        fi
+        git_fetch_for_cache --no-tags --depth=200 "${target_repo_url}" \
+            "+refs/heads/${cache_base_branch}:${merge_base_ref}" 2>/dev/null || true
+        VLLM_MERGE_BASE_COMMIT=$(git merge-base HEAD "${merge_base_ref}" 2>/dev/null || echo "")
         if [[ -z "${VLLM_MERGE_BASE_COMMIT}" ]]; then
             git_fetch_for_cache --no-tags --deepen=1000 "${target_repo_url}" \
                 "+refs/heads/${cache_base_branch}:${merge_base_ref}" 2>/dev/null || true

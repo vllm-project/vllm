@@ -51,7 +51,6 @@ def build_args(args: list[str]) -> dict[str, str]:
 
 
 def run_ci_bake_shell(
-    tmp_path: Path,
     command: str,
     *,
     env: Mapping[str, str | None] | None = None,
@@ -81,14 +80,12 @@ def run_ci_bake_shell(
 
 
 def compute_ci_base_hash(
-    tmp_path: Path,
     dockerfile: Path,
     content_file: Path,
     *,
     env: dict[str, str],
 ) -> str:
     return run_ci_bake_shell(
-        tmp_path,
         "compute_ci_base_content_hash_once",
         env={
             "CI_BASE_CONTENT_FILES": str(content_file),
@@ -267,11 +264,13 @@ def test_rocm_hash_walkers_force_c_locale() -> None:
     for script in (CI_BAKE, ROCM_BASE_REFRESH):
         contents = script.read_text()
         assert "| LC_ALL=C sort -z" in contents
-        assert "-name __pycache__" in contents
-        assert "! -name '*.py[cod]'" in contents
+
+    ci_bake = CI_BAKE.read_text()
+    assert "-name __pycache__" in ci_bake
+    assert "! -name '*.py[cod]'" in ci_bake
 
 
-def test_rocm_content_hash_matches_docker_visible_inputs(tmp_path: Path) -> None:
+def test_rocm_content_hash_tracks_relevant_inputs(tmp_path: Path) -> None:
     content_dir = tmp_path / "content"
     cache_dir = content_dir / "__pycache__"
     content_dir.mkdir()
@@ -280,7 +279,6 @@ def test_rocm_content_hash_matches_docker_visible_inputs(tmp_path: Path) -> None
     source.write_text("VALUE = 1\n")
 
     first_hash = run_ci_bake_shell(
-        tmp_path,
         f'compute_content_hash "{content_dir}"',
     ).strip()
     (cache_dir / "input.cpython-312.pyc").write_bytes(b"generated")
@@ -289,30 +287,36 @@ def test_rocm_content_hash_matches_docker_visible_inputs(tmp_path: Path) -> None
     dist_dir.mkdir()
     (dist_dir / "generated.whl").write_bytes(b"generated")
     cached_hash = run_ci_bake_shell(
-        tmp_path,
+        f'compute_content_hash "{content_dir}"',
+    ).strip()
+    source.chmod(0o664)
+    group_writable_hash = run_ci_bake_shell(
         f'compute_content_hash "{content_dir}"',
     ).strip()
     source.chmod(0o755)
     executable_hash = run_ci_bake_shell(
-        tmp_path,
+        f'compute_content_hash "{content_dir}"',
+    ).strip()
+    source.chmod(0o775)
+    group_writable_executable_hash = run_ci_bake_shell(
         f'compute_content_hash "{content_dir}"',
     ).strip()
     source.chmod(0o644)
     symlink = content_dir / "input-link.py"
     symlink.symlink_to("input.py")
     symlink_hash = run_ci_bake_shell(
-        tmp_path,
         f'compute_content_hash "{content_dir}"',
     ).strip()
     symlink.unlink()
     source.write_text("VALUE = 2\n")
     changed_hash = run_ci_bake_shell(
-        tmp_path,
         f'compute_content_hash "{content_dir}"',
     ).strip()
 
     assert cached_hash == first_hash
+    assert group_writable_hash == first_hash
     assert executable_hash != first_hash
+    assert group_writable_executable_hash == executable_hash
     assert symlink_hash != first_hash
     assert changed_hash != first_hash
 
@@ -331,13 +335,11 @@ def test_rocm_ci_base_local_hash_ignores_checkout_coordinates(
         "NIXL_BRANCH": "nixl-main",
     }
     first_hash = compute_ci_base_hash(
-        tmp_path,
         dockerfile,
         content_file,
         env=inputs,
     )
     relocated_hash = compute_ci_base_hash(
-        tmp_path,
         dockerfile,
         content_file,
         env=inputs
@@ -347,20 +349,17 @@ def test_rocm_ci_base_local_hash_ignores_checkout_coordinates(
         },
     )
     remote_hash = compute_ci_base_hash(
-        tmp_path,
         dockerfile,
         content_file,
         env=inputs | {"REMOTE_VLLM": "1"},
     )
     changed_arg_hash = compute_ci_base_hash(
-        tmp_path,
         dockerfile,
         content_file,
         env=inputs | {"NIXL_BRANCH": "nixl-next"},
     )
     content_file.write_text('channel = "1.91.0"\n')
     changed_file_hash = compute_ci_base_hash(
-        tmp_path,
         dockerfile,
         content_file,
         env=inputs,
@@ -370,32 +369,6 @@ def test_rocm_ci_base_local_hash_ignores_checkout_coordinates(
     assert remote_hash != first_hash
     assert changed_arg_hash != first_hash
     assert changed_file_hash != first_hash
-
-
-def test_rocm_stage_parser_accepts_lowercase_from_and_crlf(tmp_path: Path) -> None:
-    dockerfile = tmp_path / "Dockerfile"
-    dockerfile.write_bytes(
-        b"from scratch AS wanted\r\n"
-        b"ARG INPUT\r\n"
-        b"RUN echo $INPUT\r\n"
-        b"FROM scratch AS ignored\r\n"
-        b"RUN echo ignored\r\n"
-    )
-
-    output = run_ci_bake_shell(
-        tmp_path,
-        (
-            f'hash_dockerfile_stages "{dockerfile}" "wanted"\n'
-            'printf "args:\\n"\n'
-            f'discover_dockerfile_stage_args "{dockerfile}" "wanted"'
-        ),
-    )
-
-    assert "\r" not in output
-    assert "from scratch AS wanted" in output
-    assert "RUN echo $INPUT" in output
-    assert "ignored" not in output
-    assert output.endswith("args:\nINPUT\n")
 
 
 def test_rocm_build_arg_override_keeps_checkout_coordinates(
@@ -410,7 +383,6 @@ def test_rocm_build_arg_override_keeps_checkout_coordinates(
         "NIXL_BRANCH": "nixl-main",
     }
     output = run_ci_bake_shell(
-        tmp_path,
         (
             f'VLLM_BAKE_FILE="{bake_file}"\n'
             f'ROCM_ARG_OVERRIDE_PATH="{override_file}"\n'
@@ -440,7 +412,6 @@ def test_rocm_build_uses_the_base_image_digest_that_was_hashed(
     digest = "sha256:" + "a" * 64
 
     output = run_ci_bake_shell(
-        tmp_path,
         (
             f'CI_BASE_DOCKERFILE="{dockerfile}"\n'
             f'VLLM_BAKE_FILE="{bake_file}"\n'
@@ -489,12 +460,10 @@ def test_rocm_base_refresh_builds_from_its_resolved_digest() -> None:
     ],
 )
 def test_rocm_ci_base_reads_stable_cache_without_unauthorized_push(
-    tmp_path: Path,
     environment: dict[str, str | None],
     expected_push_ref: str,
 ) -> None:
     output = run_ci_bake_shell(
-        tmp_path,
         (
             'TARGET="ci-base-rocm-ci"\n'
             "configure_ci_base_image_refs >/dev/null\n"
@@ -521,9 +490,8 @@ def test_rocm_ci_base_reads_stable_cache_without_unauthorized_push(
     )
 
 
-def test_rocm_ci_base_rejects_an_empty_content_hash(tmp_path: Path) -> None:
+def test_rocm_ci_base_rejects_an_empty_content_hash() -> None:
     output = run_ci_bake_shell(
-        tmp_path,
         (
             'TARGET="ci-base-rocm-ci"\n'
             'CI_BASE_CONTENT_HASH=""\n'
@@ -562,11 +530,8 @@ def test_rocm_ci_base_stable_cache_is_read_only_in_bake() -> None:
     assert "CI_BASE_STABLE_CACHE_REF" not in tags_line
 
 
-def test_rocm_ci_base_finds_an_exact_stable_image_after_a_stale_primary(
-    tmp_path: Path,
-) -> None:
+def test_rocm_ci_base_finds_an_exact_stable_image_after_a_stale_primary() -> None:
     output = run_ci_bake_shell(
-        tmp_path,
         (
             'CI_BASE_CONTENT_HASH="expected"\n'
             'CI_BASE_METADATA_VERSION="2"\n'
@@ -592,11 +557,8 @@ def test_rocm_ci_base_finds_an_exact_stable_image_after_a_stale_primary(
     assert output.strip() == "rocm/example:stable"
 
 
-def test_rocm_ci_base_refresh_never_writes_its_stable_cache_source(
-    tmp_path: Path,
-) -> None:
+def test_rocm_ci_base_refresh_never_writes_its_stable_cache_source() -> None:
     output = run_ci_bake_shell(
-        tmp_path,
         (
             'CI_BASE_CONTENT_HASH="expected"\n'
             'IMAGE_TAG="rocm/example:commit"\n'
@@ -613,40 +575,6 @@ def test_rocm_ci_base_refresh_never_writes_its_stable_cache_source(
     assert "create -t rocm/example:commit rocm/example:stable" in output
     assert "create -t rocm/example:content rocm/example:stable" in output
     assert "create -t rocm/example:stable" not in output
-
-
-def test_rocm_merge_base_does_not_trust_a_fork_origin(tmp_path: Path) -> None:
-    output = run_ci_bake_shell(
-        tmp_path,
-        (
-            "git() {\n"
-            '  case "$*" in\n'
-            '    "rev-parse --is-shallow-repository") printf "false\\n" ;;\n'
-            '    "remote get-url origin") '
-            'printf "https://github.com/example-fork/vllm.git\\n" ;;\n'
-            '    "merge-base HEAD refs/remotes/origin/main") '
-            'printf "wrong-local-base\\n" ;;\n'
-            '    "merge-base HEAD refs/remotes/vllm-cache-upstream/main") '
-            'printf "correct-upstream-base\\n" ;;\n'
-            "    *) return 1 ;;\n"
-            "  esac\n"
-            "}\n"
-            "git_fetch_for_cache() { return 0; }\n"
-            'TARGET="test-rocm-ci"\n'
-            'PARENT_COMMIT="parent"\n'
-            'ROCM_CACHE_BRANCH_TAG="branch"\n'
-            'ROCM_CACHE_UPSTREAM_BRANCH_TAG="upstream"\n'
-            "prepare_git_cache_metadata >/dev/null\n"
-            'printf "%s\\n" "$VLLM_MERGE_BASE_COMMIT"'
-        ),
-        env={
-            "BUILDKITE_PULL_REQUEST": "48646",
-            "BUILDKITE_PULL_REQUEST_BASE_BRANCH": "main",
-            "BUILDKITE_REPO": "https://github.com/vllm-project/vllm.git",
-        },
-    )
-
-    assert output.strip() == "correct-upstream-base"
 
 
 def test_rocm_ci_base_uses_local_sparse_inputs() -> None:

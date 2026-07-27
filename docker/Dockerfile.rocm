@@ -653,46 +653,10 @@ COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/rust-toolchain.toml 
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
 
 # -----------------------
-# ROCm communication runtime used by the long-lived CI base image.
-# Keep this separate from release final so CI dependencies can evolve and
-# cache independently without changing release-image contents.
-FROM mori_base AS ci_comm_runtime
-ARG DEEPEP_NIC="cx7"
-
-ENV ROCSHMEM_DIR=/opt/rocshmem
-ENV LD_LIBRARY_PATH=${ROCSHMEM_DIR}/lib:${LD_LIBRARY_PATH}
-
-# RDMA userspace libraries needed by UCX/NIXL and DeepEP.
-RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
-    librdmacm1 \
-    libibverbs1 \
-    ibverbs-providers \
-    ibverbs-utils \
-    util-linux \
-    && rm -rf /var/lib/apt/lists/*
-
-# Update rdma-core to support latest rocshmem.
-RUN if [ "${DEEPEP_NIC}" = "cx7" ] || [ "${DEEPEP_NIC}" = "io" ]; then \
-    git clone --branch v62.0 --depth 1 https://github.com/linux-rdma/rdma-core.git /tmp/rdma-core && \
-    cd /tmp/rdma-core && \
-    mkdir -p build && cd build && \
-    cmake -GNinja -DCMAKE_INSTALL_PREFIX=/usr -DNO_MAN_PAGES=1 .. && \
-    ninja && ninja install && ldconfig && rm -rf /tmp/rdma-core; \
-fi
-
-COPY --from=build_rocshmem /opt/rocshmem /opt/rocshmem
-
-# Install the repaired NIXL wheel and the ROCm DeepEP wheel.
-RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \
-    --mount=type=bind,from=build_deepep,src=/app/deep_install,target=/deep_install \
-    --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system /nixl_install/*.whl /deep_install/*.whl
-
-# -----------------------
 # CI base image (Tier 1) - stable, rarely changing CI dependencies.
 # Per-PR test builds pull this as CI_BASE_IMAGE so the test stage only layers
 # in the vLLM artifacts for the current commit.
-FROM ci_comm_runtime AS ci_base
+FROM mori_base AS ci_base
 ARG COMMON_WORKDIR
 
 # FFmpeg dev libs needed by torchcodec.
@@ -758,6 +722,37 @@ COPY tests/vllm_test_utils /tmp/vllm_test_utils
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system /tmp/vllm_test_utils \
     && rm -rf /tmp/vllm_test_utils
+
+# Install communication dependencies after the shared Python environment.
+# Changes to NIXL, ROCShmem, or DeepEP can then reuse the expensive Python
+# dependency layers.
+ARG DEEPEP_NIC="cx7"
+ENV ROCSHMEM_DIR=/opt/rocshmem
+ENV LD_LIBRARY_PATH=${ROCSHMEM_DIR}/lib:${LD_LIBRARY_PATH}
+
+RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
+    librdmacm1 \
+    libibverbs1 \
+    ibverbs-providers \
+    ibverbs-utils \
+    util-linux \
+    && rm -rf /var/lib/apt/lists/*
+
+# Update rdma-core to support latest rocshmem.
+RUN if [ "${DEEPEP_NIC}" = "cx7" ] || [ "${DEEPEP_NIC}" = "io" ]; then \
+    git clone --branch v62.0 --depth 1 https://github.com/linux-rdma/rdma-core.git /tmp/rdma-core && \
+    cd /tmp/rdma-core && \
+    mkdir -p build && cd build && \
+    cmake -GNinja -DCMAKE_INSTALL_PREFIX=/usr -DNO_MAN_PAGES=1 .. && \
+    ninja && ninja install && ldconfig && rm -rf /tmp/rdma-core; \
+fi
+
+COPY --from=build_rocshmem /opt/rocshmem /opt/rocshmem
+
+RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \
+    --mount=type=bind,from=build_deepep,src=/app/deep_install,target=/deep_install \
+    --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system /nixl_install/*.whl /deep_install/*.whl
 
 # Join the independently built Rust/protoc toolchain only after Python and
 # runtime dependencies are installed. Linked COPY layers remain reusable when

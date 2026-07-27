@@ -27,6 +27,8 @@ metadata_set() {
 
 hash_content_file() {
     local file="$1"
+    local mode="644"
+    local raw_mode=""
 
     if [[ -L "${file}" ]]; then
         printf 'symlink:%s\n' "${file}"
@@ -34,8 +36,12 @@ hash_content_file() {
         return 0
     fi
 
+    raw_mode=$(stat -c '%a' "${file}")
+    if (((8#${raw_mode} & 0111) != 0)); then
+        mode="755"
+    fi
     printf 'file:%s\n' "${file}"
-    printf 'mode:%s\n' "$(stat -c '%a' "${file}")"
+    printf 'mode:%s\n' "${mode}"
     sha256sum "${file}"
 }
 
@@ -50,23 +56,7 @@ compute_content_hash() {
             while IFS= read -r -d '' file; do
                 hash_content_file "${file}"
             done < <(
-                find "${path}" \
-                    -type d \( \
-                        -name __pycache__ -o -name .mypy_cache -o \
-                        -name .venv -o -name build -o -name dist -o \
-                        -name 'cmake-build-*' -o -name develop-eggs -o \
-                        -name downloads -o -name eggs -o -name .eggs -o \
-                        -name lib -o -name lib64 -o -name parts -o \
-                        -name sdist -o -name var -o -name wheels -o \
-                        -name python-wheels -o -name '*.egg-info' \
-                        -o -path '*/rust/target' \
-                    \) -prune -o \
-                    \( -type f -o -type l \) \
-                    ! -name '*.py[cod]' ! -name '*$py.class' \
-                    ! -name .Python ! -name .installed.cfg \
-                    ! -name '*.egg' ! -name MANIFEST \
-                    ! -name CMakeUserPresets.json \
-                    ! -path '*/vllm/*.so' ! -path '*/vllm/vllm-rs' -print0 \
+                find "${path}" \( -type f -o -type l \) -print0 \
                     | LC_ALL=C sort -z
             )
         elif [[ -f "${path}" ]]; then
