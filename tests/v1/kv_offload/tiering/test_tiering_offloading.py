@@ -396,6 +396,41 @@ class TestTieringOffloadingManager:
         # Next lookup should succeed
         assert count_hits(self.manager, blocks) == 3
 
+    def test_speculative_promotions_do_not_starve_running_stores(self, manager_setup):
+        """Promotions for queued requests must leave room for running stores.
+
+        Regression test for issue #49902. The scheduler calls ``lookup()`` for
+        every request in the waiting queue, well before ``allocate_slots()``
+        decides which of them is admitted this step, so a deep queue can
+        reserve the whole primary pool for requests that never run. A running
+        request's offload store then fails to allocate, because the primary
+        tier's ``prepare_write`` *is* ``prepare_store``: promotions and real
+        offloads contend for the same blocks. Promotions must leave headroom
+        instead of consuming the pool speculatively.
+        """
+        # The primary pool holds 5 blocks (see manager_setup).
+        queued_keys = to_keys(range(100, 105))
+        for key in queued_keys:
+            self.secondary_tier1.blocks[key] = True
+
+        # Drain the waiting queue exactly as schedule() does: one lookup per
+        # queued request, each initiating a promotion into the primary tier.
+        for i, key in enumerate(queued_keys):
+            ctx = ReqContext(req_id=f"queued-{i}")
+            self._start_request(ctx)
+            self.manager.lookup(key, ctx)
+
+        # In the same step, a running request offloads a freshly computed block.
+        running_ctx = ReqContext(req_id="running")
+        self._start_request(running_ctx)
+        result = self.manager.prepare_store(to_keys([200]), running_ctx)
+
+        assert result is not None, (
+            "running request's offload store was starved by speculative "
+            "promotions for queued requests that were never scheduled "
+            "(issue #49902)"
+        )
+
     def test_lookup_reports_sync_delay_for_resolved_lookups(self, manager_setup):
         """Resolved lookups report one sync delay sample on allocation."""
         self._start_request()
