@@ -8,9 +8,8 @@ use vllm_tokenizer::{DecodedText, DynTokenizer, TokenAnchor, TokenAttribution};
 
 use super::{
     CohereCmdReasoningParser, DeepSeekR1ReasoningParser, DelimitedReasoningParser,
-    KimiReasoningParser, MiniMaxM3ReasoningParser, PoolsideV1ReasoningParser,
-    Qwen3ReasoningParser, ReasoningDelta, ReasoningParser, Result, SeedOssReasoningParser,
-    Step3p5ReasoningParser,
+    KimiReasoningParser, MiniMaxM3ReasoningParser, PoolsideV1ReasoningParser, Qwen3ReasoningParser,
+    ReasoningDelta, ReasoningParser, Result, SeedOssReasoningParser, Step3p5ReasoningParser,
 };
 
 pub(crate) const THINK_START_ID: u32 = 256;
@@ -437,31 +436,39 @@ fn poolside_v1_ignores_end_marker_before_assistant_turn() {
     let mut parser = PoolsideV1ReasoningParser::new(tokenizer).unwrap();
     parser.initialize(&[THINK_END_ID, ASSISTANT_START_ID]).unwrap();
 
-    let delta = parser.push("reason</think>answer").unwrap();
-    assert_eq!(delta.reasoning.as_deref(), Some("reason"));
-    assert_eq!(delta.content.as_deref(), Some("answer"));
+    let delta = push_str(&mut parser, "reason</think>answer");
+    assert_eq!(reasoning_str(&delta), Some("reason"));
+    assert_eq!(content_str(&delta), Some("answer"));
 }
 
 #[test]
 fn poolside_v1_respects_end_marker_in_current_turn() {
+    // Non-thinking generation. The Laguna chat template renders
+    // `<assistant></think>` when `enable_thinking` is false, so the current
+    // turn already carries a `</think>` boundary. Prompt-first init resolves
+    // it to not-in-reasoning and the whole completion is content -- the
+    // `default_in_reasoning = true` fallback never applies here.
     let tokenizer = Arc::new(fake_tokenizer());
     let mut parser = PoolsideV1ReasoningParser::new(tokenizer).unwrap();
     parser.initialize(&[ASSISTANT_START_ID, THINK_END_ID]).unwrap();
 
-    let delta = parser.push("answer").unwrap();
+    let delta = push_str(&mut parser, "answer");
     assert_eq!(delta.reasoning, None);
-    assert_eq!(delta.content.as_deref(), Some("answer"));
+    assert_eq!(content_str(&delta), Some("answer"));
 }
 
 #[test]
 fn poolside_v1_respects_start_marker_in_current_turn() {
+    // Thinking generation. The Laguna template renders `<assistant><think>`
+    // when `enable_thinking` is true, so the current turn opens with a
+    // `<think>` boundary and the completion starts in reasoning.
     let tokenizer = Arc::new(fake_tokenizer());
     let mut parser = PoolsideV1ReasoningParser::new(tokenizer).unwrap();
     parser.initialize(&[ASSISTANT_START_ID, THINK_START_ID]).unwrap();
 
-    let delta = parser.push("reason</think>answer").unwrap();
-    assert_eq!(delta.reasoning.as_deref(), Some("reason"));
-    assert_eq!(delta.content.as_deref(), Some("answer"));
+    let delta = push_str(&mut parser, "reason</think>answer");
+    assert_eq!(reasoning_str(&delta), Some("reason"));
+    assert_eq!(content_str(&delta), Some("answer"));
 }
 
 #[test]
@@ -469,9 +476,9 @@ fn poolside_v1_defaults_to_reasoning_without_prompt_boundary() {
     let tokenizer = Arc::new(fake_tokenizer());
     let mut parser = PoolsideV1ReasoningParser::new(tokenizer).unwrap();
 
-    let delta = parser.push("reason</think>answer").unwrap();
-    assert_eq!(delta.reasoning.as_deref(), Some("reason"));
-    assert_eq!(delta.content.as_deref(), Some("answer"));
+    let delta = push_str(&mut parser, "reason</think>answer");
+    assert_eq!(reasoning_str(&delta), Some("reason"));
+    assert_eq!(content_str(&delta), Some("answer"));
 }
 
 #[test]
