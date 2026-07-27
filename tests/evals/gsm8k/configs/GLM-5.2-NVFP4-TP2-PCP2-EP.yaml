@@ -6,6 +6,7 @@ max_concurrency: 100
 server_args: >-
   --enforce-eager
   --max-model-len 4096
+  --max-num-batched-tokens 32768
   --safetensors-load-strategy prefetch
   --moe-backend flashinfer_cutlass
   --tensor-parallel-size 2
