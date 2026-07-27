@@ -158,10 +158,10 @@ def merge_attn_states(
         prefix_head_stride,
         output_head_stride,
         output_scale,
+        prefill_tokens_with_context,
         head_size,
         padded_head_size,
         output_lse is not None,
-        prefill_tokens_with_context,
         output_scale is not None,
     )
 
@@ -177,11 +177,10 @@ def merge_attn_states_kernel(
     prefix_head_stride,
     output_head_stride,
     output_scale,  # scale tensor or None
+    prefill_tokens_with_context,
     HEAD_SIZE: tl.constexpr,
     PADDED_HEAD_SIZE: tl.constexpr,
     OUTPUT_LSE: tl.constexpr,
-    # This value varies per batch and does not affect tensor shapes.
-    prefill_tokens_with_context,
     USE_FP8: tl.constexpr,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
