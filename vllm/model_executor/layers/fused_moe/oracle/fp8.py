@@ -477,6 +477,8 @@ def convert_to_fp8_moe_kernel_format(
         )
     elif fp8_backend == Fp8MoeBackend.AITER:
         w13, w2 = rocm_aiter_ops.shuffle_weights(w13, w2)
+        w13.is_shuffled = True
+        w2.is_shuffled = True
     elif fp8_backend == Fp8MoeBackend.AITER_MXFP8:
         w13, w2, w13_scale, w2_scale = rocm_aiter_ops.shuffle_mxfp8_moe_weights(
             w13, w2, w13_scale, w2_scale
