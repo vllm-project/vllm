@@ -3,6 +3,7 @@
 import importlib.util
 import socket
 import uuid
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import msgspec
@@ -20,11 +21,13 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+    ROLE,
     MoRIIOAgentMetadata,
     MoRIIOConnectorMetadata,
     MoRIIOConstants,
     MoRIIOMode,
     resolve_host_ip,
+    set_role,
     zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
@@ -38,6 +41,7 @@ from vllm.utils.network_utils import (
     get_ip,
     make_zmq_path,
 )
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -393,6 +397,48 @@ def test_write_mode_with_chunked_prefill_saves_local_block_ids():
         ],
     ):
         assert block_id == block.block_id, f"{block_id} != {block.block_id}"
+
+
+def test_dcp_block_completes_write_prefill():
+    transfer_config = SimpleNamespace(
+        kv_connector_extra_config={
+            "handshake_port": 1,
+            "notify_port": 2,
+            "host_ip": "127.0.0.1",
+        },
+        kv_role="kv_producer",
+    )
+    config = SimpleNamespace(
+        kv_transfer_config=transfer_config,
+        cache_config=SimpleNamespace(block_size=16),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=2,
+            data_parallel_rank=0,
+            tensor_parallel_size=2,
+        ),
+    )
+    scheduler = MoRIIOConnectorScheduler(config, "engine")
+    set_role(ROLE.PRODUCER)
+
+    params = {
+        "transfer_id": "tx",
+        "remote_block_ids": [],
+        "remote_engine_id": "remote",
+        "remote_host": "127.0.0.1",
+        "remote_handshake_port": 1,
+        "remote_notify_port": 2,
+    }
+    request = SimpleNamespace(
+        request_id="r0",
+        num_prompt_tokens=32,
+        kv_transfer_params=params,
+    )
+    scheduler._reqs_need_save["r0"] = (request, [7])
+
+    metadata = scheduler.build_connector_meta(SchedulerOutput.make_empty())
+
+    assert "r0" in metadata.reqs_to_save
+    assert "r0" not in scheduler._reqs_need_pending_save
 
 
 def test_read_mode_loads_remote_block_ids():
