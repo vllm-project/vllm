@@ -16,12 +16,17 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
+    OffloadingEventGroupSpec,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
     _ConnectorMetricName,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+    GroupOffloadConfig,
     OffloadingConnectorScheduler,
+    RequestGroupState,
     RequestOffloadState,
     is_store_reachable_swa_chunk,
 )
@@ -40,6 +45,8 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
     get_offload_block_hash,
+    get_offload_chunk_idx,
+    get_offload_group_idx,
     make_offload_key,
 )
 from vllm.v1.outputs import KVConnectorOutput
@@ -315,7 +322,6 @@ def test_abort_before_hit_uses_placeholder_then_later_hit_heals_removal(
             req_status.req_context,
             req_status.req,
             group_config,
-            0,
         )
         == 1
     )
@@ -1083,13 +1089,12 @@ _LOOKUP_REQ.request_id = "req"
 _LOOKUP_GROUP_CONFIG = MagicMock()
 
 
-def _maximal_lookup(sched, keys, start_chunk_idx: int = 0):
+def _maximal_lookup(sched, keys):
     return sched._maximal_prefix_lookup(
         keys,
         _EMPTY_REQ_CTX,
         _LOOKUP_REQ,
         _LOOKUP_GROUP_CONFIG,
-        start_chunk_idx,
     )
 
 
@@ -1098,24 +1103,16 @@ class TestMaximalPrefixLookup:
         sched = _make_scheduler_with_lookup({1: LookupResult.HIT, 2: LookupResult.HIT})
         assert _maximal_lookup(sched, to_keys([1, 2])) == 2
 
-    def test_records_absolute_chunk_indices(self):
+    def test_records_lookup_for_each_hit_key(self):
+        # Chunk provenance now travels inside the OffloadKey, so the lookup
+        # path simply records each hit key; no separate chunk_idx is passed.
         keys = to_keys([1, 2])
         sched = _make_scheduler_with_lookup({1: LookupResult.HIT, 2: LookupResult.HIT})
 
-        assert _maximal_lookup(sched, keys, start_chunk_idx=3) == 2
+        assert _maximal_lookup(sched, keys) == 2
         assert sched._events_tracker.record_lookup.call_args_list == [
-            call(
-                _LOOKUP_REQ,
-                _LOOKUP_GROUP_CONFIG,
-                3,
-                keys[0],
-            ),
-            call(
-                _LOOKUP_REQ,
-                _LOOKUP_GROUP_CONFIG,
-                4,
-                keys[1],
-            ),
+            call(_LOOKUP_REQ, _LOOKUP_GROUP_CONFIG, keys[0]),
+            call(_LOOKUP_REQ, _LOOKUP_GROUP_CONFIG, keys[1]),
         ]
 
     def test_all_miss(self):
@@ -1162,7 +1159,6 @@ class TestMaximalPrefixLookup:
         sched._events_tracker.record_lookup.assert_called_once_with(
             _LOOKUP_REQ,
             _LOOKUP_GROUP_CONFIG,
-            1,
             keys[1],
         )
 
@@ -1175,7 +1171,6 @@ class TestMaximalPrefixLookup:
         sched._events_tracker.record_lookup.assert_called_once_with(
             _LOOKUP_REQ,
             _LOOKUP_GROUP_CONFIG,
-            0,
             keys[0],
         )
 
@@ -1189,7 +1184,6 @@ class TestMaximalPrefixLookup:
         sched._events_tracker.record_lookup.assert_called_once_with(
             _LOOKUP_REQ,
             _LOOKUP_GROUP_CONFIG,
-            1,
             keys[1],
         )
 
@@ -2218,7 +2212,10 @@ class TestEagle:
 
     @staticmethod
     def _group_keys(group_idx: int, int_hashes: list[int]) -> list:
-        return [make_offload_key(str(h).encode(), group_idx) for h in int_hashes]
+        return [
+            make_offload_key(str(h).encode(), group_idx, chunk_idx)
+            for chunk_idx, h in enumerate(int_hashes)
+        ]
 
     @staticmethod
     def _make_req_status(
@@ -3204,3 +3201,64 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
     # Verify fence is empty after full lifecycle (cleanup happened).
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
     assert len(runner.connector_scheduler._jobs) == 0
+
+
+class TestUpdateOffloadKeys:
+    """update_offload_keys() assigns each new chunk an absolute,
+    group-relative chunk_idx carried inside its OffloadKey."""
+
+    @staticmethod
+    def _group_config(group_idx: int, hashes_per_chunk: int) -> GroupOffloadConfig:
+        return GroupOffloadConfig(
+            group_idx=group_idx,
+            tokens_per_block=4,
+            tokens_per_chunk=4 * hashes_per_chunk,
+            hashes_per_chunk=hashes_per_chunk,
+            kv_event_group_spec=OffloadingEventGroupSpec(
+                kv_cache_spec_kind=None,
+                kv_cache_spec_sliding_window=None,
+            ),
+            sliding_window_size_in_chunks=None,
+        )
+
+    @staticmethod
+    def _run(group_configs, group_states, block_hashes) -> None:
+        # update_offload_keys only reads config.kv_group_configs,
+        # group_states, and req.block_hashes.
+        fake_self = SimpleNamespace(
+            config=SimpleNamespace(kv_group_configs=tuple(group_configs)),
+            group_states=tuple(group_states),
+            req=SimpleNamespace(block_hashes=list(block_hashes)),
+        )
+        RequestOffloadState.update_offload_keys(fake_self)
+
+    def test_chunk_idx_continues_across_appends(self):
+        """First pass numbers [0, 1]; a later append continues [2, 3]."""
+        hbf = 2
+        gc = self._group_config(group_idx=0, hashes_per_chunk=hbf)
+        gs = RequestGroupState()
+
+        hashes = [str(i).encode() for i in range(2 * hbf)]
+        self._run([gc], [gs], hashes)
+        assert [get_offload_chunk_idx(k) for k in gs.offload_keys] == [0, 1]
+
+        # Append 2 more chunks; numbering must continue, not restart.
+        hashes += [str(i).encode() for i in range(2 * hbf, 4 * hbf)]
+        self._run([gc], [gs], hashes)
+        assert [get_offload_chunk_idx(k) for k in gs.offload_keys] == [0, 1, 2, 3]
+
+    def test_each_group_numbers_chunks_independently_from_zero(self):
+        """Chunk indices are group-relative: every group starts at 0."""
+        g0 = self._group_config(group_idx=0, hashes_per_chunk=1)
+        g1 = self._group_config(group_idx=5, hashes_per_chunk=2)
+        gs0 = RequestGroupState()
+        gs1 = RequestGroupState()
+
+        hashes = [str(i).encode() for i in range(4)]
+        self._run([g0, g1], [gs0, gs1], hashes)
+
+        # hbf=1 -> 4 chunks; hbf=2 -> 2 chunks; both start from 0.
+        assert [get_offload_chunk_idx(k) for k in gs0.offload_keys] == [0, 1, 2, 3]
+        assert [get_offload_group_idx(k) for k in gs0.offload_keys] == [0, 0, 0, 0]
+        assert [get_offload_chunk_idx(k) for k in gs1.offload_keys] == [0, 1]
+        assert [get_offload_group_idx(k) for k in gs1.offload_keys] == [5, 5]

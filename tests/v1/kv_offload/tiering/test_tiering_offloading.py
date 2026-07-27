@@ -65,7 +65,7 @@ def _mock_mmap_region(num_blocks: int, row_bytes: int = 16):
 
 
 def to_keys(int_ids: Iterable[int]) -> list[OffloadKey]:
-    return [make_offload_key(str(i).encode(), 0) for i in int_ids]
+    return [make_offload_key(str(i).encode(), 0, 0) for i in int_ids]
 
 
 def count_hits(manager, keys: list[OffloadKey]) -> int | None:

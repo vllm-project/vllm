@@ -104,8 +104,8 @@ def _record_chunks(
     for chunk_idx in range(num_chunks):
         tail_hash = req.block_hashes[(chunk_idx + 1) * hbf - 1]
         assert tail_hash is not None
-        key = make_offload_key(tail_hash, group_config.group_idx)
-        tracker.record_store(req, group_config, chunk_idx, key)
+        key = make_offload_key(tail_hash, group_config.group_idx, chunk_idx)
+        tracker.record_store(req, group_config, key)
         keys.append(key)
     return keys
 
@@ -121,11 +121,10 @@ def _record_lookup_chunks(
     for chunk_idx in range(num_chunks):
         tail_hash = req.block_hashes[(chunk_idx + 1) * hbf - 1]
         assert tail_hash is not None
-        key = make_offload_key(tail_hash, group_config.group_idx)
+        key = make_offload_key(tail_hash, group_config.group_idx, chunk_idx)
         tracker.record_lookup(
             req,
             group_config,
-            chunk_idx,
             key,
         )
         keys.append(key)
@@ -337,7 +336,7 @@ def test_take_events_factor_gt_1_store_is_order_independent():
         token_count=4 * blocks_per_chunk * 2,
     )
     keys = _record_chunks(tracker, req, group_config, num_chunks=2)
-    unknown_key = make_offload_key(_hash(12345), 0)
+    unknown_key = make_offload_key(_hash(12345), 0, 0)
 
     events = list(tracker.take_events([_stored_event([keys[1], unknown_key, keys[0]])]))
 
@@ -348,6 +347,29 @@ def test_take_events_factor_gt_1_store_is_order_independent():
     assert placeholder.token_ids == []
     assert chunk0.parent_block_hash is None
     assert chunk1.parent_block_hash == chunk0.block_hashes[-1]
+
+
+def test_placeholder_event_decodes_hash_and_group_from_extended_key():
+    """An untracked key still emits a placeholder carrying the tail hash and
+    group_idx decoded from the OffloadKey. chunk_idx lives in the key but is
+    not part of the BlockStored/BlockRemoved wire payload."""
+    tracker = _tracker()
+    tail_hash = _hash(42)
+    key = make_offload_key(tail_hash, group_idx=3, chunk_idx=9)
+
+    stored = list(tracker.take_events([_stored_event([key])]))
+    assert len(stored) == 1
+    assert isinstance(stored[0], BlockStored)
+    assert stored[0].block_hashes == [_wire_hash(tail_hash)]
+    assert stored[0].group_idx == 3
+    assert stored[0].block_size == 0
+    assert stored[0].token_ids == []
+
+    removed = list(tracker.take_events([_removed_event([key])]))
+    assert len(removed) == 1
+    assert isinstance(removed[0], BlockRemoved)
+    assert removed[0].block_hashes == [_wire_hash(tail_hash)]
+    assert removed[0].group_idx == 3
 
 
 def test_take_events_opt_out_keeps_placeholders():
@@ -418,7 +440,6 @@ def test_pending_cpu_removal_consumes_hit_backfill_until_next_hit():
     tracker.record_lookup(
         lookup_req,
         group_config,
-        0,
         key,
     )
     assert tracker._pending_event_metadata[key] is confirmed_meta
@@ -435,7 +456,7 @@ def test_pending_cpu_removal_consumes_hit_backfill_until_next_hit():
     assert stored[0].block_size == 0
     assert stored[0].token_ids == []
 
-    tracker.record_lookup(lookup_req, group_config, 0, key)
+    tracker.record_lookup(lookup_req, group_config, key)
     removed = list(tracker.take_events([_removed_event([key])]))
     assert removed[0].block_hashes == [
         _wire_hash(_hash(0)),
@@ -489,7 +510,7 @@ def test_take_events_supports_restore_after_eviction():
     assert not tracker._pending_event_metadata
 
     req.all_token_ids = [5, 6, 7, 8]
-    tracker.record_store(req, group_config, chunk_idx=0, offload_key=key)
+    tracker.record_store(req, group_config, key)
 
     second_store = list(tracker.take_events([_stored_event([key])]))
     assert len(second_store) == 1

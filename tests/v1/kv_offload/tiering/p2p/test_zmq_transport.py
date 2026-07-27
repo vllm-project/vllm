@@ -10,11 +10,18 @@ import time
 import pytest
 import zmq
 
+from vllm.v1.kv_offload.base import (
+    get_offload_block_hash,
+    get_offload_chunk_idx,
+    get_offload_group_idx,
+    make_offload_key,
+)
 from vllm.v1.kv_offload.tiering.p2p.control.zmq import (
     ZmqConnection,
     ZmqTransport,
     _Sockets,
 )
+from vllm.v1.kv_offload.tiering.p2p.session.protocol import FetchMsg
 
 
 def _free_port() -> int:
@@ -136,6 +143,34 @@ class TestZmqTransportConnectivity:
 
             msgs = _wait_for_messages(transport_a, conn_a_from_b, 1)
             assert msgs == [{"type": "hello", "data": 42}]
+        finally:
+            transport_a.close()
+            transport_b.close()
+
+    def test_offload_key_bytes_survive_transport(self):
+        """P2P carries OffloadKeys as opaque bytes. A full key with a
+        non-zero chunk_idx must round-trip unchanged over the wire and still
+        decode to the same (hash, group, chunk) -- so peers must share the
+        key format (lockstep deployment)."""
+        transport_a, port_a = _make_transport()
+        transport_b, _ = _make_transport()
+
+        try:
+            block_hash = bytes(range(8))
+            key = make_offload_key(block_hash, group_idx=2, chunk_idx=7)
+
+            conn_b = transport_b.connect(f"127.0.0.1:{port_a}")
+            conn_b.send({FetchMsg.KEYS: [key], FetchMsg.BLOCK_INDEXES: [0]})
+
+            new_conns = _wait_for_inbound(transport_a)
+            conn_a = new_conns[0]
+            msgs = _wait_for_messages(transport_a, conn_a, 1)
+
+            received = msgs[0][FetchMsg.KEYS][0]
+            assert received == key
+            assert get_offload_block_hash(received) == block_hash
+            assert get_offload_group_idx(received) == 2
+            assert get_offload_chunk_idx(received) == 7
         finally:
             transport_a.close()
             transport_b.close()

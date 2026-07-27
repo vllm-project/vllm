@@ -321,8 +321,11 @@ class RequestOffloadState:
                 None,
                 group_config.hashes_per_chunk,
             ):
+                # chunk_idx is the absolute, group-relative index; new chunks
+                # continue numbering from the current key count.
+                chunk_idx = len(group_state.offload_keys)
                 group_state.offload_keys.append(
-                    make_offload_key(req_block_hash, group_config.group_idx)
+                    make_offload_key(req_block_hash, group_config.group_idx, chunk_idx)
                 )
 
     def update_block_id_groups(
@@ -548,20 +551,18 @@ class OffloadingConnectorScheduler:
         req_context: ReqContext,
         req: Request,
         group_config: GroupOffloadConfig,
-        start_chunk_idx: int,
     ) -> int | None:
         """Return the number of consecutive offloaded chunks from the start,
         or None if the backend deferred a lookup."""
         hit_count = 0
         defer_lookup = False
-        for local_idx, key in enumerate(keys):
+        for key in keys:
             result = self.manager.lookup(key, req_context)
             match result:
                 case LookupResult.HIT:
                     self._events_tracker.record_lookup(
                         req,
                         group_config,
-                        start_chunk_idx + local_idx,
                         key,
                     )
                     hit_count += 1
@@ -712,7 +713,6 @@ class OffloadingConnectorScheduler:
                         req_status.req_context,
                         req_status.req,
                         group_config,
-                        start_chunk_idx,
                     )
                 else:
                     required_window = sliding_window_size_in_chunks
@@ -1142,9 +1142,7 @@ class OffloadingConnectorScheduler:
 
                     chunk_idx = start_chunk_idx + idx
 
-                    self._events_tracker.record_store(
-                        req, group_config, chunk_idx, offload_key
-                    )
+                    self._events_tracker.record_store(req, group_config, offload_key)
 
                     gpu_block_idx = chunk_idx * blocks_per_chunk
                     for i in range(blocks_per_chunk):
