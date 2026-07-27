@@ -344,6 +344,9 @@ class GraniteMoeModel(nn.Module):
         This function is copied from `MixtralModel.load_weights`, mainly to
         decouple from mixtral, avoiding impact on support like BNB
         quantization.
+
+        Used by GraniteMoeShared, which pre-splits the fused expert weights
+        into ``experts.{e}.w{1,2,3}`` before calling this.
         """
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -431,10 +434,115 @@ class GraniteMoeModel(nn.Module):
             loaded_params.add(name)
         return loaded_params
 
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        """Build the checkpoint->FusedMoE translation table for split experts.
+
+        The split per-expert layout (from llm-compressor FP8 quantization)
+        stores one tensor per expert per projection, named
+        ``experts.{e}.{gate,up,down}_proj.{weight,weight_scale}``. The fused
+        ``FusedMoE`` module instead exposes a single stacked parameter per
+        layer (``experts.w13_*`` for gate+up, ``experts.w2_*`` for down).
+
+        Each returned tuple is
+        ``(param_name, weight_name, expert_id, shard_id)``:
+          - ``weight_name``  is the checkpoint substring to match, e.g.
+            ``experts.3.gate_proj.``.
+          - ``param_name``   is the FusedMoE parameter it maps onto, e.g.
+            ``experts.w13_``.
+          - ``expert_id``    selects the slice within that stacked param.
+          - ``shard_id``     (``w1``/``w2``/``w3``) tells the FusedMoE weight
+            loader which half of ``w13`` (gate vs up) or that it is ``w2``.
+
+        ``load_weights`` iterates this table in ``_load_quant_expert`` to route
+        each split tensor (both ``weight`` and ``weight_scale``) to the right
+        expert slot. The mapping is suffix-agnostic, so weight and scale share
+        one path.
+        """
+        # (param_name, weight_name, expert_id, shard_id)
+        return fused_moe_make_expert_params_mapping(
+            self,
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.num_local_experts,
+        )
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        new_weights = {}
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            (".qkv_proj", ".q_proj", "q"),
+            (".qkv_proj", ".k_proj", "k"),
+            (".qkv_proj", ".v_proj", "v"),
+        ]
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+        expert_params_mapping = self.get_expert_mapping()
+
+        def _load(n, p):
+            if n.endswith("scale"):
+                n = maybe_remap_kv_scale_name(n, params_dict)
+                if n is None:
+                    return
+            if is_pp_missing_parameter(n, self):
+                return
+            param = params_dict[n]
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader(param, p)
+            loaded_params.add(n)
+
+        def _load_shard(n, p, shard_id):
+            if is_pp_missing_parameter(n, self):
+                return
+            param = params_dict[n]
+            weight_loader = param.weight_loader
+            weight_loader(param, p, shard_id)
+            loaded_params.add(n)
+
+        def _load_expert(n, p, name, shard_id, expert_id):
+            if is_pp_missing_parameter(n, self):
+                return
+            param = params_dict[n]
+            weight_loader = param.weight_loader
+            weight_loader(param, p, name, shard_id=shard_id, expert_id=expert_id)
+            loaded_params.add(n)
+
+        def _load_quant_expert(name, loaded_weight):
+            # Handles the split per-expert checkpoint layout
+            # (``experts.{e}.{gate,up,down}_proj.{weight,weight_scale}``), e.g.
+            # produced by llm-compressor FP8 quantization.
+            for param_name, weight_name, expert_id, shard_id in expert_params_mapping:
+                if weight_name not in name:
+                    continue
+                name_mapped = name.replace(weight_name, param_name)
+                if is_pp_missing_parameter(name_mapped, self):
+                    continue
+                param = params_dict[name_mapped]
+                weight_loader = param.weight_loader
+                success = weight_loader(
+                    param,
+                    loaded_weight,
+                    name_mapped,
+                    shard_id=shard_id,
+                    expert_id=expert_id,
+                    return_success=True,
+                )
+                if success:
+                    loaded_params.add(name_mapped)
+                    return name_mapped
+            return None
+
         for n, p in weights:
-            if n.endswith(".block_sparse_moe.input_linear.weight"):
+            if _load_quant_expert(n, p):
+                continue
+
+            # Map the fused expert layout of the unquantized base checkpoint
+            #  from HF (input_linear, output_linear, router)
+            #  to vLLM (experts.routed_experts.{w13_,w2_}, gate).
+            # The renaming and loading logic is identical for weight and
+            # weight_scale tensors, so both suffixes are handled here.
+            if n.endswith(".block_sparse_moe.input_linear.weight") or n.endswith(
+                ".block_sparse_moe.input_linear.weight_scale"
+            ):
                 for e in range(p.size(0)):
                     w1_name = n.replace(
                         ".block_sparse_moe.input_linear.weight",
@@ -445,29 +553,53 @@ class GraniteMoeModel(nn.Module):
                         f".block_sparse_moe.experts.{e}.w3.weight",
                     )
                     w1_param, w3_param = p[e].chunk(2, dim=0)
-                    assert w1_name not in new_weights
-                    assert w3_name not in new_weights
-                    new_weights[w1_name] = w1_param
-                    new_weights[w3_name] = w3_param
-            elif n.endswith(".block_sparse_moe.output_linear.weight"):
+                    _load_expert(
+                        n.replace(".input_linear.", ".experts.routed_experts.w13_"),
+                        w1_param,
+                        w1_name,
+                        shard_id="w1",
+                        expert_id=e,
+                    )
+                    _load_expert(
+                        n.replace(".input_linear.", ".experts.routed_experts.w13_"),
+                        w3_param,
+                        w3_name,
+                        shard_id="w3",
+                        expert_id=e,
+                    )
+            elif n.endswith(".block_sparse_moe.output_linear.weight") or n.endswith(
+                ".block_sparse_moe.output_linear.weight_scale"
+            ):
                 for e in range(p.size(0)):
                     w2_name = n.replace(
                         ".block_sparse_moe.output_linear.weight",
                         f".block_sparse_moe.experts.{e}.w2.weight",
                     )
-                    w2_param = p[e]
-                    assert w2_name not in new_weights
-                    new_weights[w2_name] = w2_param
+                    _load_expert(
+                        n.replace(".output_linear.", ".experts.routed_experts.w2_"),
+                        p[e],
+                        w2_name,
+                        shard_id="w2",
+                        expert_id=e,
+                    )
             elif n.endswith(".block_sparse_moe.router.layer.weight"):
                 gate_name = n.replace(
                     ".block_sparse_moe.router.layer.weight",
                     ".block_sparse_moe.gate.weight",
                 )
-                assert gate_name not in new_weights
-                new_weights[gate_name] = p
+                _load(gate_name, p)
             else:
-                new_weights[n] = p
-        return self._load_weights(new_weights.items())
+                loaded = False
+                for param_name, weight_name, shard_id in stacked_params_mapping:
+                    if weight_name in n:
+                        _load_shard(
+                            n.replace(weight_name, param_name), p, shard_id=shard_id
+                        )
+                        loaded = True
+                        break
+                if not loaded:
+                    _load(n, p)
+        return loaded_params
 
 
 class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
