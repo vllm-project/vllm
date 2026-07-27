@@ -26,7 +26,9 @@ if current_platform.is_cuda_alike():
     class EplbMapAndRecordKernel(
         VllmJitKernel["EplbMapAndRecordKernel.CompileKey"]
     ):
-        BLOCK_SIZE = 256
+        def __init__(self) -> None:
+            self.block_size = 256
+            super().__init__()
 
         @staticmethod
         @triton.jit(
@@ -180,7 +182,19 @@ if current_platform.is_cuda_alike():
             numel: int,
             num_active_experts: int,
         ) -> None:
-            grid = (triton.cdiv(numel, self.block_size),)
+            compile_key = self.dispatch(
+                has_num_unpadded=num_unpadded_tokens is not None,
+                num_active_experts=num_active_experts,
+            )
+            self._guard_warmup_call(
+                compile_key,
+                runtime_context={
+                    "numel": numel,
+                    "num_logical_experts": num_logical_experts,
+                    "map_slots": map_slots,
+                },
+            )
+            grid = (triton.cdiv(numel, compile_key.block_size),)
             self.kernel[grid](
                 topk_ids,
                 logical_replica_count,
@@ -194,8 +208,8 @@ if current_platform.is_cuda_alike():
                 out_size,
                 numel,
                 num_active_experts,
-                HAS_NUM_UNPADDED=num_unpadded_tokens is not None,
-                BLOCK_SIZE=self.block_size,
+                HAS_NUM_UNPADDED=compile_key.has_num_unpadded,
+                BLOCK_SIZE=compile_key.block_size,
             )
 
 

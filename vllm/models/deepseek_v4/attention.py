@@ -22,9 +22,9 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
-from vllm.models.deepseek_v4.common.ops import (
-    fused_indexer_q_rope_quant,
-    fused_q_kv_rmsnorm,
+from vllm.models.deepseek_v4.common.ops import fused_indexer_q_rope_quant
+from vllm.models.deepseek_v4.common.ops.fused_qk_rmsnorm import (
+    _FUSED_Q_KV_RMSNORM_KERNEL,
 )
 
 if TYPE_CHECKING:
@@ -343,7 +343,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             self.attn_gemm_parallel_execute(hidden_states)
         )
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
-        qr, kv = fused_q_kv_rmsnorm(
+        qr, kv = _FUSED_Q_KV_RMSNORM_KERNEL(
             qr,
             kv,
             self.q_norm.weight.data,

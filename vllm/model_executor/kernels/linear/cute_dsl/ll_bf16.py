@@ -12,6 +12,7 @@ from typing import Any, Literal
 import torch
 
 from vllm.model_executor.warmup.jit_warmup import VllmJitKernel, zip_inputs
+from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import compile_cutedsl
 
 logger = logging.getLogger(__name__)
 
@@ -133,60 +134,59 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
             M=m_options,
         )
 
-    @staticmethod
-    def _fake_gemm_tensors(*, M, K, N, divisibility: int):
+    def compile(self, compile_key: CompileKey) -> None:
+        if self._compiled_cache_contains(compile_key):
+            return
+
+        cute, _ = _cute()
         from cutlass import BFloat16, Float32
         from quack.compile_utils import make_fake_tensor
 
-        hidden_states = make_fake_tensor(BFloat16, (M, K), divisibility=divisibility)
-        router_weight = make_fake_tensor(BFloat16, (N, K), divisibility=divisibility)
-        output = make_fake_tensor(Float32, (M, N), divisibility=1)
-        return hidden_states, router_weight, output
+        if compile_key.backend == "splitk":
+            hidden_states = make_fake_tensor(
+                BFloat16, (cute.sym_int(), cute.sym_int()), divisibility=8
+            )
+            router_weight = make_fake_tensor(
+                BFloat16, (cute.sym_int(), cute.sym_int()), divisibility=8
+            )
+            output = make_fake_tensor(
+                Float32, (cute.sym_int(), cute.sym_int()), divisibility=1
+            )
+            compiled = compile_cutedsl(
+                self.kernel(compile_key),
+                hidden_states,
+                router_weight,
+                output,
+            )
+            self._compiled_cache[compile_key] = compiled
+            logger.debug(
+                "Compiled ll_bf16_splitk: sk=%d ns=%d",
+                compile_key.split_k,
+                compile_key.num_stages,
+            )
+            return
 
-    def _compile_splitk(self, compile_key: CompileKey) -> None:
-        cute, _ = _cute()
-        hidden_states, router_weight, output = self._fake_gemm_tensors(
-            M=cute.sym_int(),
-            K=cute.sym_int(),
-            N=cute.sym_int(),
-            divisibility=8,
-        )
-        gemm = self.kernel(compile_key)
-        compiled = cute.compile(
-            gemm,
-            hidden_states,
-            router_weight,
-            output,
-            _stream(),
-            options="--enable-tvm-ffi",
-        )
-        self._compiled_cache[compile_key] = compiled
-        logger.debug(
-            "Compiled ll_bf16_splitk: sk=%d ns=%d",
-            compile_key.split_k,
-            compile_key.num_stages,
-        )
-
-    def _compile_dotprod(self, compile_key: CompileKey) -> None:
-        cute, _ = _cute()
         N = cute.sym_int()
         stride_divisibility = math.gcd(8, compile_key.k)
-        hidden_states, router_weight, output = self._fake_gemm_tensors(
-            M=compile_key.m,
-            K=compile_key.k,
-            N=N,
+        hidden_states = make_fake_tensor(
+            BFloat16,
+            (compile_key.m, compile_key.k),
             divisibility=stride_divisibility,
         )
-        gemm = self.kernel(compile_key)
-        compiled = cute.compile(
-            gemm,
+        router_weight = make_fake_tensor(
+            BFloat16,
+            (N, compile_key.k),
+            divisibility=stride_divisibility,
+        )
+        output = make_fake_tensor(Float32, (compile_key.m, N), divisibility=1)
+        compiled = compile_cutedsl(
+            self.kernel(compile_key),
             hidden_states,
             router_weight,
             output,
             compile_key.m,
             compile_key.k,
             1,  # runtime N placeholder for fake-tensor compile
-            _stream(),
             options="--enable-tvm-ffi --ptxas-options -maxrregcount=64",
         )
         self._compiled_cache[compile_key] = compiled
@@ -196,14 +196,6 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
             compile_key.k,
             compile_key.bs,
         )
-
-    def compile(self, compile_key: CompileKey) -> None:
-        if self._compiled_cache_contains(compile_key):
-            return
-        if compile_key.backend == "splitk":
-            self._compile_splitk(compile_key)
-        else:
-            self._compile_dotprod(compile_key)
 
     @staticmethod
     def _validate_inputs(
@@ -253,7 +245,7 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
         compile_key = self.dispatch(M=M, K=K, N=N)
         self._guard_warmup_call(compile_key)
         runtime_context = {"M": M, "K": K, "N": N}
-        kernel = self._get_compiled_from_cache(
+        compiled = self._get_compiled_from_cache(
             compile_key,
             runtime_context={**runtime_context, "backend": compile_key.backend},
         )
@@ -261,9 +253,9 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
         stream = _stream()
         output = torch.empty(M, N, dtype=output_dtype, device=hidden_states.device)
         if compile_key.backend == "splitk":
-            kernel(hidden_states, router_weight, output, stream, 1.0)
+            compiled(hidden_states, router_weight, output, stream, 1.0)
         else:
-            kernel(hidden_states, router_weight, output, N, stream)
+            compiled(hidden_states, router_weight, output, N, stream)
         return output
 
 

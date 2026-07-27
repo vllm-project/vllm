@@ -19,9 +19,6 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTens
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
-_PREPARE_MEGAMOE_BLOCK_K = 128
-_PREPARE_MEGAMOE_GROUP_K = 32
-
 
 class PrepareMegaMoeInputsKernel(
     VllmJitKernel["PrepareMegaMoeInputsKernel.CompileKey"]
@@ -143,6 +140,11 @@ class PrepareMegaMoeInputsKernel(
         block_topk: int
         has_padding: bool
 
+    def __init__(self) -> None:
+        self.block_k = 128
+        self.group_k = 32
+        super().__init__()
+
     def dispatch(  # type: ignore[override]
         self,
         *,
@@ -186,8 +188,8 @@ class PrepareMegaMoeInputsKernel(
 
         hidden_size = compile_key.hidden_size
         top_k = compile_key.top_k
-        block_k = _PREPARE_MEGAMOE_BLOCK_K
-        group_k = _PREPARE_MEGAMOE_GROUP_K
+        block_k = self.block_k
+        group_k = self.group_k
         # Scale groups are packed into one int32 per BLOCK_K-wide hidden block.
         x_scale_width = hidden_size // block_k
 
@@ -260,8 +262,7 @@ class PrepareMegaMoeInputsKernel(
                 "topk_ids to have the same shape."
             )
 
-        block_k = _PREPARE_MEGAMOE_BLOCK_K
-        grid = (num_tokens, triton.cdiv(hidden_size, block_k))
+        block_k = self.block_k
         block_topk = triton.next_power_of_2(top_k)
         compile_key = self.dispatch(
             hidden_size=hidden_size,
@@ -269,6 +270,7 @@ class PrepareMegaMoeInputsKernel(
             has_padding=is_padding is not None,
         )
         self._guard_warmup_call(compile_key)
+        grid = (num_tokens, triton.cdiv(hidden_size, block_k))
         padding_stride_m = is_padding.stride(0) if is_padding is not None else 0
         self.kernel[grid](
             hidden_states,
@@ -297,32 +299,10 @@ class PrepareMegaMoeInputsKernel(
             hidden_size,
             top_k,
             BLOCK_K=block_k,
-            GROUP_K=_PREPARE_MEGAMOE_GROUP_K,
+            GROUP_K=self.group_k,
             BLOCK_TOPK=block_topk,
             num_warps=4,
         )
 
 
 _PREPARE_MEGAMOE_INPUTS_KERNEL = PrepareMegaMoeInputsKernel()
-
-
-def prepare_megamoe_inputs(
-    hidden_states: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    x_fp8: torch.Tensor,
-    x_sf: torch.Tensor,
-    topk_idx_out: torch.Tensor,
-    topk_weights_out: torch.Tensor,
-    is_padding: torch.Tensor | None = None,
-) -> None:
-    _PREPARE_MEGAMOE_INPUTS_KERNEL(
-        hidden_states,
-        topk_weights,
-        topk_ids,
-        x_fp8,
-        x_sf,
-        topk_idx_out,
-        topk_weights_out,
-        is_padding=is_padding,
-    )

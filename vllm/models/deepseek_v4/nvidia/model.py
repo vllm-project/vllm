@@ -71,7 +71,9 @@ from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
     DeepseekV4FlashInferSM120Attention,
 )
 from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
-from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
+from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import (
+    _PREPARE_MEGAMOE_INPUTS_KERNEL,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
@@ -478,7 +480,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
                 else None,
             )
 
-        prepare_megamoe_inputs(
+        _PREPARE_MEGAMOE_INPUTS_KERNEL(
             hidden_states,
             topk_weights,
             topk_ids,

@@ -21,34 +21,6 @@ from vllm.triton_utils import tl, triton
 # Kernel with prefill workspace support and valid count tracking
 
 
-_SPARSE_INDEX_CONVERSION_WARMUP_CASES = (
-    dict(
-        HAS_PREFILL_WORKSPACE=False,
-        COUNT_VALID=False,
-        COMPACT_TO_FRONT=False,
-        DCP_SIZE=1,
-        DCP_RANK=0,
-        DCP_INTERLEAVE=1,
-    ),
-    dict(
-        HAS_PREFILL_WORKSPACE=False,
-        COUNT_VALID=True,
-        COMPACT_TO_FRONT=False,
-        DCP_SIZE=1,
-        DCP_RANK=0,
-        DCP_INTERLEAVE=1,
-    ),
-    dict(
-        HAS_PREFILL_WORKSPACE=True,
-        COUNT_VALID=True,
-        COMPACT_TO_FRONT=False,
-        DCP_SIZE=1,
-        DCP_RANK=0,
-        DCP_INTERLEAVE=1,
-    ),
-)
-
-
 class ConvertReqIndexToGlobalIndexKernel(
     VllmJitKernel["ConvertReqIndexToGlobalIndexKernel.CompileKey"]
 ):
@@ -195,18 +167,6 @@ class ConvertReqIndexToGlobalIndexKernel(
             dcp_interleave=DCP_INTERLEAVE,
         )
 
-    def _is_valid_warmup_dispatch(
-        self,
-        *,
-        DCP_SIZE: int,
-        HAS_PREFILL_WORKSPACE: bool,
-        COUNT_VALID: bool,
-        COMPACT_TO_FRONT: bool,
-    ) -> bool:
-        return (DCP_SIZE == 1 and not COMPACT_TO_FRONT) or (
-            DCP_SIZE > 1 and COUNT_VALID and not HAS_PREFILL_WORKSPACE
-        )
-
     def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
         block_size = vllm_config.cache_config.block_size
         dcp_size = vllm_config.parallel_config.decode_context_parallel_size
@@ -214,7 +174,30 @@ class ConvertReqIndexToGlobalIndexKernel(
         dcp_rank = get_dcp_group().rank_in_group if dcp_size > 1 else 0
         return self._trace_dispatch(self.dispatch)(
             zip_inputs(
-                *_SPARSE_INDEX_CONVERSION_WARMUP_CASES,
+                dict(
+                    HAS_PREFILL_WORKSPACE=False,
+                    COUNT_VALID=False,
+                    COMPACT_TO_FRONT=False,
+                    DCP_SIZE=1,
+                    DCP_RANK=0,
+                    DCP_INTERLEAVE=1,
+                ),
+                dict(
+                    HAS_PREFILL_WORKSPACE=False,
+                    COUNT_VALID=True,
+                    COMPACT_TO_FRONT=False,
+                    DCP_SIZE=1,
+                    DCP_RANK=0,
+                    DCP_INTERLEAVE=1,
+                ),
+                dict(
+                    HAS_PREFILL_WORKSPACE=True,
+                    COUNT_VALID=True,
+                    COMPACT_TO_FRONT=False,
+                    DCP_SIZE=1,
+                    DCP_RANK=0,
+                    DCP_INTERLEAVE=1,
+                ),
                 dict(
                     HAS_PREFILL_WORKSPACE=False,
                     COUNT_VALID=True,
@@ -226,7 +209,7 @@ class ConvertReqIndexToGlobalIndexKernel(
                 dict(
                     HAS_PREFILL_WORKSPACE=False,
                     COUNT_VALID=True,
-                    COMPACT_TO_FRONT=True,
+                    COMPACT_TO_FRONT=dcp_size > 1,
                     DCP_SIZE=dcp_size,
                     DCP_RANK=dcp_rank,
                     DCP_INTERLEAVE=dcp_interleave,
@@ -234,7 +217,6 @@ class ConvertReqIndexToGlobalIndexKernel(
             ),
             BLOCK_SIZE=block_size,
             BLOCK_N=128,
-            _when=self._is_valid_warmup_dispatch,
         )
 
     def compile(self, compile_key: CompileKey) -> None:

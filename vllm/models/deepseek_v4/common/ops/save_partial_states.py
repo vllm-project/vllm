@@ -15,34 +15,6 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
 
-def save_partial_states(
-    kv: torch.Tensor,
-    score: torch.Tensor,
-    ape: torch.Tensor,
-    positions: torch.Tensor,
-    state_cache: torch.Tensor,
-    slot_mapping: torch.Tensor,
-    block_size: int,
-    state_width: int,
-    compress_ratio: int,
-    pdl_kwargs: dict | None = None,
-) -> None:
-    _SAVE_PARTIAL_STATES_KERNEL(
-        kv,
-        score,
-        ape,
-        positions,
-        state_cache,
-        slot_mapping,
-        block_size,
-        state_width,
-        compress_ratio,
-        pdl_kwargs,
-    )
-
-
-
-
 class SavePartialStatesKernel(VllmJitKernel["SavePartialStatesKernel.CompileKey"]):
     @dataclass(frozen=True)
     class CompileKey:
@@ -142,14 +114,6 @@ class SavePartialStatesKernel(VllmJitKernel["SavePartialStatesKernel.CompileKey"
             launch_pdl=launch_pdl,
         )
 
-    @staticmethod
-    def _uses_compress_ratio(
-        *,
-        compress_ratio: int,
-        compress_ratios: tuple[int, ...],
-    ) -> bool:
-        return compress_ratio in compress_ratios
-
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
         hf_config = vllm_config.model_config.hf_config
         head_dim = int(getattr(hf_config, "head_dim", 0) or 0)
@@ -193,7 +157,9 @@ class SavePartialStatesKernel(VllmJitKernel["SavePartialStatesKernel.CompileKey"
                 ),
             ),
             compress_ratios=compress_ratios,
-            _when=self._uses_compress_ratio,
+            _when=lambda *, compress_ratio, compress_ratios: (
+                compress_ratio in compress_ratios
+            ),
         )
 
     def compile(self, compile_key: CompileKey) -> None:

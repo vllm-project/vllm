@@ -213,17 +213,3 @@ class DSV4TopKKernel(VllmJitKernel["DSV4TopKKernel.CompileKey"]):
 
 
 _DSV4_TOPK_KERNEL = DSV4TopKKernel()
-
-
-def dsv4_topk(
-    gating_output: torch.Tensor,
-    correction_bias: torch.Tensor,
-    indices_dtype: torch.dtype,
-    routed_scaling_factor: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return _DSV4_TOPK_KERNEL(
-        gating_output,
-        correction_bias,
-        indices_dtype,
-        routed_scaling_factor,
-    )

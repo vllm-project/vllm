@@ -426,6 +426,11 @@ class BatchedTritonKernel(VllmJitKernel["BatchedTritonKernel.CompileKey"]):
         group_n: int,
         group_k: int,
         per_act_token_quant: bool,
+        runtime_block_m: int | None = None,
+        runtime_block_n: int | None = None,
+        runtime_block_k: int | None = None,
+        runtime_num_warps: int | None = None,
+        runtime_num_stages: int | None = None,
     ) -> CompileKey:
         config_dtype = _triton_moe_config_dtype(
             dtype,
@@ -443,6 +448,17 @@ class BatchedTritonKernel(VllmJitKernel["BatchedTritonKernel.CompileKey"]):
             group_n=group_n,
             group_k=group_k,
         )
+        block_m = runtime_block_m if runtime_block_m is not None else config.BLOCK_SIZE_M
+        block_n = runtime_block_n if runtime_block_n is not None else config.BLOCK_SIZE_N
+        block_k = runtime_block_k if runtime_block_k is not None else config.BLOCK_SIZE_K
+        num_warps = (
+            runtime_num_warps if runtime_num_warps is not None else config.num_warps
+        )
+        num_stages = (
+            runtime_num_stages
+            if runtime_num_stages is not None
+            else config.num_stages
+        )
         return self.CompileKey(
             dtype=dtype,
             e=num_experts,
@@ -455,11 +471,11 @@ class BatchedTritonKernel(VllmJitKernel["BatchedTritonKernel.CompileKey"]):
             use_fp8_w8a8=use_fp8_w8a8,
             use_int8_w8a16=use_int8_w8a16,
             per_act_token_quant=per_act_token_quant,
-            block_m=config.BLOCK_SIZE_M,
-            block_n=config.BLOCK_SIZE_N,
-            block_k=config.BLOCK_SIZE_K,
-            num_warps=config.num_warps,
-            num_stages=config.num_stages,
+            block_m=block_m,
+            block_n=block_n,
+            block_k=block_k,
+            num_warps=num_warps,
+            num_stages=num_stages,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
@@ -630,23 +646,25 @@ class BatchedTritonKernel(VllmJitKernel["BatchedTritonKernel.CompileKey"]):
         num_warps: int,
         num_stages: int,
     ) -> Any:
-        compile_key = self.CompileKey(
-            dtype=A.dtype,
-            e=A.size(0),
+        compile_key = self.dispatch(
             max_num_tokens=max_num_tokens,
-            n=N,
-            k=K,
-            group_n=group_n,
-            group_k=group_k,
-            compute_type=compute_type,
+            num_experts=A.size(0),
+            hidden_size=K,
+            intermediate_size=N,
+            config_top_k=1,
+            launch_n=N,
+            launch_k=K,
+            dtype=A.dtype,
             use_fp8_w8a8=use_fp8_w8a8,
             use_int8_w8a16=use_int8_w8a16,
+            group_n=group_n,
+            group_k=group_k,
             per_act_token_quant=per_act_token_quant,
-            block_m=BLOCK_M,
-            block_n=BLOCK_N,
-            block_k=BLOCK_K,
-            num_warps=num_warps,
-            num_stages=num_stages,
+            runtime_block_m=BLOCK_M,
+            runtime_block_n=BLOCK_N,
+            runtime_block_k=BLOCK_K,
+            runtime_num_warps=num_warps,
+            runtime_num_stages=num_stages,
         )
         self._guard_warmup_call(
             compile_key,

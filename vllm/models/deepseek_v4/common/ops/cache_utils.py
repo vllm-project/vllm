@@ -228,9 +228,6 @@ def quantize_and_insert_k_cache(
     )
 
 
-_DEQUANTIZE_AND_GATHER_K_NUM_WORKERS = 128
-
-
 class DequantizeAndGatherKCacheKernel(
     VllmJitKernel["DequantizeAndGatherKCacheKernel.CompileKey"]
 ):
@@ -241,6 +238,10 @@ class DequantizeAndGatherKCacheKernel(
         block_stride: int
         use_fnuz: bool
         has_gather_lens: bool
+
+    def __init__(self) -> None:
+        self.num_workers = 128
+        super().__init__()
 
     @staticmethod
     @triton.jit
@@ -426,7 +427,7 @@ class DequantizeAndGatherKCacheKernel(
             fp8_max=448.0,
             n_quant_blocks=7,
             use_fnuz=compile_key.use_fnuz,
-            grid=(1, _DEQUANTIZE_AND_GATHER_K_NUM_WORKERS),
+            grid=(1, self.num_workers),
         )
 
     def __call__(
@@ -449,7 +450,7 @@ class DequantizeAndGatherKCacheKernel(
             has_gather_lens=gather_lens is not None,
         )
         self._guard_warmup_call(compile_key)
-        self.kernel[(num_reqs, _DEQUANTIZE_AND_GATHER_K_NUM_WORKERS)](
+        self.kernel[(num_reqs, self.num_workers)](
             out,
             out.stride(0),
             out.stride(1),
@@ -548,9 +549,6 @@ def compute_global_topk_indices_and_lens(
 
 
 
-_COMPUTE_GLOBAL_TOPK_TRITON_BLOCK_SIZE = 1024
-
-
 class ComputeGlobalTopkIndicesAndLensKernel(
     VllmJitKernel["ComputeGlobalTopkIndicesAndLensKernel.CompileKey"]
 ):
@@ -561,6 +559,10 @@ class ComputeGlobalTopkIndicesAndLensKernel(
         topk: int
         block_table_stride: int
         block_size: int
+
+    def __init__(self) -> None:
+        self.triton_block_size = 1024
+        super().__init__()
 
     @staticmethod
     @triton.jit
@@ -658,7 +660,7 @@ class ComputeGlobalTopkIndicesAndLensKernel(
             compile_key.block_table_stride,
             compile_key.block_size,
             TritonWarmupTensor(torch.bool),
-            TRITON_BLOCK_SIZE=_COMPUTE_GLOBAL_TOPK_TRITON_BLOCK_SIZE,
+            TRITON_BLOCK_SIZE=self.triton_block_size,
             grid=(1,),
         )
 
@@ -691,7 +693,7 @@ class ComputeGlobalTopkIndicesAndLensKernel(
             block_table.stride(0),
             block_size,
             is_valid_token,
-            TRITON_BLOCK_SIZE=_COMPUTE_GLOBAL_TOPK_TRITON_BLOCK_SIZE,
+            TRITON_BLOCK_SIZE=self.triton_block_size,
         )
 
 
@@ -746,42 +748,6 @@ def combine_topk_swa_indices(
     return combined_indices, combined_lens
 
 
-_COMBINE_TOPK_SWA_NUM_WORKERS = 128
-
-
-# Representative pointer alignment variants for Triton pointer specialization.
-_COMBINE_TOPK_SWA_POINTER_INPUTS = zip_inputs(
-    dict(
-        topk_indices=True,
-        query_start_loc=True,
-        seq_lens=True,
-        gather_lens=True,
-    ),
-    dict(
-        topk_indices=True,
-        query_start_loc=False,
-        seq_lens=False,
-        gather_lens=True,
-    ),
-    dict(
-        topk_indices=False,
-        query_start_loc=False,
-        seq_lens=False,
-        gather_lens=False,
-    ),
-)
-
-
-_DSV4_COMBINE_TOPK_SWA_WARMUP_INPUTS = zip_inputs(
-    # DSv4-Flash / SWA-only and C4A.
-    dict(compress_ratio=1, topk=0, topk_width=512),
-    dict(compress_ratio=4, topk=512, topk_width=512),
-    # DSv4-Pro C4A.
-    dict(compress_ratio=4, topk=1024, topk_width=1024),
-    # DSv4-Pro C128A.
-    dict(compress_ratio=128, topk=8192, topk_width=8192),
-)
-
 
 class CombineTopkSwaIndicesKernel(
     VllmJitKernel["CombineTopkSwaIndicesKernel.CompileKey"]
@@ -793,6 +759,10 @@ class CombineTopkSwaIndicesKernel(
         window_size: int
         padded_top_k: int
         input_variant: TritonPointerInputVariant
+
+    def __init__(self) -> None:
+        self.num_workers = 128
+        super().__init__()
 
     @staticmethod
     @triton.jit(
@@ -909,8 +879,37 @@ class CombineTopkSwaIndicesKernel(
         hf_config = vllm_config.model_config.hf_config
         window_size = int(getattr(hf_config, "sliding_window", 128) or 128)
         return self._trace_dispatch(self.dispatch)(
-            _DSV4_COMBINE_TOPK_SWA_WARMUP_INPUTS,
-            _COMBINE_TOPK_SWA_POINTER_INPUTS,
+            zip_inputs(
+                # DSv4-Flash / SWA-only and C4A.
+                dict(compress_ratio=1, topk=0, topk_width=512),
+                dict(compress_ratio=4, topk=512, topk_width=512),
+                # DSv4-Pro C4A.
+                dict(compress_ratio=4, topk=1024, topk_width=1024),
+                # DSv4-Pro C128A.
+                dict(compress_ratio=128, topk=8192, topk_width=8192),
+            ),
+            zip_inputs(
+                # Representative pointer alignment variants for Triton pointer
+                # specialization.
+                dict(
+                    topk_indices=True,
+                    query_start_loc=True,
+                    seq_lens=True,
+                    gather_lens=True,
+                ),
+                dict(
+                    topk_indices=True,
+                    query_start_loc=False,
+                    seq_lens=False,
+                    gather_lens=True,
+                ),
+                dict(
+                    topk_indices=False,
+                    query_start_loc=False,
+                    seq_lens=False,
+                    gather_lens=False,
+                ),
+            ),
             WINDOW_SIZE=window_size,
         )
 
@@ -934,7 +933,7 @@ class CombineTopkSwaIndicesKernel(
             COMPRESS_RATIO=compile_key.compress_ratio,
             WINDOW_SIZE=compile_key.window_size,
             PADDED_TOP_K=compile_key.padded_top_k,
-            grid=(1, _COMBINE_TOPK_SWA_NUM_WORKERS),
+            grid=(1, self.num_workers),
         )
 
     def __call__(
@@ -964,7 +963,7 @@ class CombineTopkSwaIndicesKernel(
             WINDOW_SIZE=WINDOW_SIZE,
         )
         self._guard_warmup_call(compile_key)
-        self.kernel[(num_reqs, _COMBINE_TOPK_SWA_NUM_WORKERS)](
+        self.kernel[(num_reqs, self.num_workers)](
             combined_indices,
             combined_indices.stride(0),
             combined_lens,
@@ -1129,53 +1128,6 @@ def _remap_flashinfer_index(values, block_size, block_span):
     return tl.where(is_valid, values, -1)
 
 
-
-
-_DSV4_FLASHINFER_MIXED_SPARSE_WARMUP_INPUTS = zip_inputs(
-    # SWA-only.
-    dict(
-        compress_ratio=1,
-        topk=0,
-        topk_width=0,
-        decode_compressed_topk=0,
-        decode_compressed_indices_are_local=False,
-        has_decode_compressed_lens=False,
-    ),
-    # DSv4-Flash C4A decode/prefill.
-    dict(
-        compress_ratio=4,
-        topk=512,
-        topk_width=512,
-        decode_compressed_topk=512,
-        decode_compressed_indices_are_local=False,
-        has_decode_compressed_lens=True,
-    ),
-    dict(
-        compress_ratio=4,
-        topk=512,
-        topk_width=512,
-        decode_compressed_topk=512,
-        decode_compressed_indices_are_local=True,
-        has_decode_compressed_lens=False,
-    ),
-    # DSv4-Pro C4A and C128A.
-    dict(
-        compress_ratio=4,
-        topk=1024,
-        topk_width=1024,
-        decode_compressed_topk=1024,
-        decode_compressed_indices_are_local=False,
-        has_decode_compressed_lens=True,
-    ),
-    dict(
-        compress_ratio=128,
-        topk=8192,
-        topk_width=8192,
-        decode_compressed_topk=8192,
-        decode_compressed_indices_are_local=False,
-        has_decode_compressed_lens=True,
-    ),
-)
 
 
 class BuildFlashinferMixedSparseIndicesKernel(
@@ -1426,7 +1378,51 @@ class BuildFlashinferMixedSparseIndicesKernel(
 
         hf_config = vllm_config.model_config.hf_config
         return self._trace_dispatch(self.dispatch)(
-            _DSV4_FLASHINFER_MIXED_SPARSE_WARMUP_INPUTS,
+            zip_inputs(
+                # SWA-only.
+                dict(
+                    compress_ratio=1,
+                    topk=0,
+                    topk_width=0,
+                    decode_compressed_topk=0,
+                    decode_compressed_indices_are_local=False,
+                    has_decode_compressed_lens=False,
+                ),
+                # DSv4-Flash C4A decode/prefill.
+                dict(
+                    compress_ratio=4,
+                    topk=512,
+                    topk_width=512,
+                    decode_compressed_topk=512,
+                    decode_compressed_indices_are_local=False,
+                    has_decode_compressed_lens=True,
+                ),
+                dict(
+                    compress_ratio=4,
+                    topk=512,
+                    topk_width=512,
+                    decode_compressed_topk=512,
+                    decode_compressed_indices_are_local=True,
+                    has_decode_compressed_lens=False,
+                ),
+                # DSv4-Pro C4A and C128A.
+                dict(
+                    compress_ratio=4,
+                    topk=1024,
+                    topk_width=1024,
+                    decode_compressed_topk=1024,
+                    decode_compressed_indices_are_local=False,
+                    has_decode_compressed_lens=True,
+                ),
+                dict(
+                    compress_ratio=128,
+                    topk=8192,
+                    topk_width=8192,
+                    decode_compressed_topk=8192,
+                    decode_compressed_indices_are_local=False,
+                    has_decode_compressed_lens=True,
+                ),
+            ),
             window_size=int(getattr(hf_config, "sliding_window", 128) or 128),
         )
 

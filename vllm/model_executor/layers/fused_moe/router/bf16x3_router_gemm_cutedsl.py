@@ -32,7 +32,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 from vllm.triton_utils import tl, triton
 from vllm.utils import math_utils
 
-__all__ = ["bf16x3_router_gemm"]
+__all__ = ["_BF16X3_ROUTER_GEMM_KERNEL"]
 
 
 @dsl_user_op
@@ -357,8 +357,8 @@ class BF16x3RouterGemmKernel(
         super().__init__()
 
     @staticmethod
-    def kernel(BN: int) -> Any:
-        return Sm100BF16x3RouterGemm(BN)
+    def kernel(compile_key: CompileKey) -> Any:
+        return Sm100BF16x3RouterGemm(compile_key.bn)
 
     def dispatch(  # type: ignore[override]
         self,
@@ -396,7 +396,7 @@ class BF16x3RouterGemmKernel(
         W = make_fake_tensor(Float32, (M, compile_key.k), divisibility=4)
         out = make_fake_tensor(Float32, (SPLIT_K, N, M), divisibility=1)
         self._compiled_cache[compile_key] = compile_cutedsl(
-            self.kernel(compile_key.bn),
+            self.kernel(compile_key),
             X,
             W,
             out,
@@ -416,7 +416,7 @@ class BF16x3RouterGemmKernel(
         base_ctas = grid_m * grid_n
         split_k = min(k_tiles, max(1, num_sms // base_ctas))
 
-        kernel = self._get_compiled_from_cache(
+        compiled = self._get_compiled_from_cache(
             compile_key,
             runtime_context={
                 "X_shape": tuple(X.shape),
@@ -426,7 +426,7 @@ class BF16x3RouterGemmKernel(
         )
 
         partials = X.new_empty(split_k, N, M, dtype=torch.float32)
-        kernel(X, W, partials, split_k)
+        compiled(X, W, partials, split_k)
         if split_k == 1:
             return partials.squeeze(0)
 
@@ -554,14 +554,6 @@ class BF16x3SplitKReduceKernel(
             num_warps=4,
             launch_pdl=True,
         )
-
-def splitk_reduce_triton(partials: torch.Tensor, out: torch.Tensor):
-    _BF16X3_SPLITK_REDUCE_KERNEL(partials, out)
-
-
-def bf16x3_router_gemm(X: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
-    """Return ``X @ W.T`` using the SM100 BF16x3 router GEMM kernel."""
-    return _BF16X3_ROUTER_GEMM_KERNEL(X, W)
 
 
 _BF16X3_ROUTER_GEMM_KERNEL = BF16x3RouterGemmKernel()

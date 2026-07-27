@@ -301,6 +301,15 @@ class FusedMoeNvfp4EmulationKernel(
         top_k: int,
         dtype: torch.dtype,
         mul_routed_weight: bool,
+        runtime_a_rows: int | None = None,
+        runtime_em: int | None = None,
+        runtime_num_valid_tokens: int | None = None,
+        runtime_block_size_m: int | None = None,
+        runtime_block_size_n: int | None = None,
+        runtime_block_size_k: int | None = None,
+        runtime_group_size_m: int | None = None,
+        runtime_block_k_divisible: bool | None = None,
+        runtime_compute_type: Any | None = None,
     ) -> CompileKey:
         config = _triton_moe_warmup_config(
             num_experts=num_experts,
@@ -312,28 +321,68 @@ class FusedMoeNvfp4EmulationKernel(
             group_n=0,
             group_k=0,
         )
-        a_rows = batch_tokens * routed_multiplier
+        a_rows = runtime_a_rows if runtime_a_rows is not None else batch_tokens * routed_multiplier
+        block_size_m = (
+            runtime_block_size_m
+            if runtime_block_size_m is not None
+            else config.block_size_m
+        )
+        block_size_n = (
+            runtime_block_size_n
+            if runtime_block_size_n is not None
+            else config.block_size_n
+        )
+        block_size_k = (
+            runtime_block_size_k
+            if runtime_block_size_k is not None
+            else config.block_size_k
+        )
+        group_size_m = (
+            runtime_group_size_m
+            if runtime_group_size_m is not None
+            else config.group_size_m
+        )
+        em = (
+            runtime_em
+            if runtime_em is not None
+            else _triton_moe_warmup_em(
+                num_tokens=a_rows,
+                top_k=top_k,
+                block_size_m=block_size_m,
+                naive_block_assignment=False,
+            )
+        )
+        num_valid_tokens = (
+            runtime_num_valid_tokens
+            if runtime_num_valid_tokens is not None
+            else a_rows * top_k
+        )
+        block_k_divisible = (
+            runtime_block_k_divisible
+            if runtime_block_k_divisible is not None
+            else launch_k % block_size_k == 0
+        )
+        compute_type = (
+            runtime_compute_type
+            if runtime_compute_type is not None
+            else _triton_moe_compute_type(dtype)
+        )
         return self.CompileKey(
             dtype=dtype,
             num_experts=num_experts,
             n=launch_n,
             k=launch_k,
             a_rows=a_rows,
-            em=_triton_moe_warmup_em(
-                num_tokens=a_rows,
-                top_k=top_k,
-                block_size_m=config.block_size_m,
-                naive_block_assignment=False,
-            ),
-            num_valid_tokens=a_rows * top_k,
+            em=em,
+            num_valid_tokens=num_valid_tokens,
             top_k=top_k,
-            block_size_m=config.block_size_m,
-            block_size_n=config.block_size_n,
-            block_size_k=config.block_size_k,
-            group_size_m=config.group_size_m,
+            block_size_m=block_size_m,
+            block_size_n=block_size_n,
+            block_size_k=block_size_k,
+            group_size_m=group_size_m,
             mul_routed_weight=mul_routed_weight,
-            block_k_divisible=launch_k % config.block_size_k == 0,
-            compute_type=_triton_moe_compute_type(dtype),
+            block_k_divisible=block_k_divisible,
+            compute_type=compute_type,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
@@ -494,22 +543,27 @@ class FusedMoeNvfp4EmulationKernel(
         BLOCK_SIZE_K: int,
         GROUP_SIZE_M: int,
     ) -> Any:
-        compile_key = self.CompileKey(
-            dtype=A.dtype,
+        compile_key = self.dispatch(
+            batch_tokens=A.size(0),
+            routed_multiplier=1,
             num_experts=B.size(0),
-            n=N,
-            k=K,
-            a_rows=A.size(0),
-            em=EM,
-            num_valid_tokens=num_valid_tokens,
+            hidden_size=K,
+            intermediate_size=N,
+            config_top_k=top_k,
+            launch_n=N,
+            launch_k=K,
             top_k=top_k,
-            block_size_m=BLOCK_SIZE_M,
-            block_size_n=BLOCK_SIZE_N,
-            block_size_k=BLOCK_SIZE_K,
-            group_size_m=GROUP_SIZE_M,
+            dtype=A.dtype,
             mul_routed_weight=MUL_ROUTED_WEIGHT,
-            block_k_divisible=block_k_diviable,
-            compute_type=compute_type,
+            runtime_a_rows=A.size(0),
+            runtime_em=EM,
+            runtime_num_valid_tokens=num_valid_tokens,
+            runtime_block_size_m=BLOCK_SIZE_M,
+            runtime_block_size_n=BLOCK_SIZE_N,
+            runtime_block_size_k=BLOCK_SIZE_K,
+            runtime_group_size_m=GROUP_SIZE_M,
+            runtime_block_k_divisible=block_k_diviable,
+            runtime_compute_type=compute_type,
         )
         self._guard_warmup_call(compile_key)
         grid = (
@@ -567,14 +621,18 @@ def invoke_fused_moe_nvfp4_emulation_kernel(
     config: dict[str, Any],
     compute_type: tl.dtype,
 ):
-    """Launch the fused NVFP4 emulation MoE kernel."""
+    """Launch the fused NVFP4 emulation MoE kernel.
+
+    B has shape [E, N, K_packed] where K_packed = K // 2 (two FP4 per byte).
+    B_scale has shape [E, N, K // group_size] in FP8-E4M3 (stored as uint8).
+    w_global_scale has shape [E] (per-expert scalar).
+    """
     assert B_scale is not None and B_scale.ndim == 3
-    del act_global_scale
 
     N = B.size(1)
     K = A.size(1)
     M = A.size(0)
-    num_valid_tokens = M * top_k
+    num_tokens = M * top_k
 
     EM = sorted_token_ids.size(0)
     if A.size(0) < config["BLOCK_SIZE_M"]:
@@ -596,7 +654,7 @@ def invoke_fused_moe_nvfp4_emulation_kernel(
         N,
         K,
         EM,
-        num_valid_tokens,
+        num_tokens,
         A.stride(0),
         A.stride(1),
         B.stride(0),

@@ -201,10 +201,10 @@ class GateLinear(ReplicatedLinear):
         # Tier 4: experimental bf16x3 CuteDSL kernel for fp32 router weights
         if self.allow_bf16x3_router_gemm and x.dtype == torch.bfloat16:
             from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_cutedsl import (  # noqa: E501
-                bf16x3_router_gemm,
+                _BF16X3_ROUTER_GEMM_KERNEL,
             )
 
-            output = bf16x3_router_gemm(x, self.weight)
+            output = _BF16X3_ROUTER_GEMM_KERNEL(x, self.weight)
             return output, None
 
         # Tier 5: cuBLAS bf16→fp32
@@ -241,10 +241,10 @@ def fp32_router_gemm_dispatch_impl(
 
     if allow_bf16x3_router_gemm and x.dtype == torch.bfloat16:
         from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_cutedsl import (  # noqa: E501
-            bf16x3_router_gemm,
+            _BF16X3_ROUTER_GEMM_KERNEL,
         )
 
-        return bf16x3_router_gemm(x, weight)
+        return _BF16X3_ROUTER_GEMM_KERNEL(x, weight)
 
     return torch.nn.functional.linear(x.float(), weight)
 

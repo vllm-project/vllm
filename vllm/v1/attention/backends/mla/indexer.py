@@ -47,7 +47,9 @@ logger = init_logger(__name__)
 class PrepareUniformDecodeKernel(
     VllmJitKernel["PrepareUniformDecodeKernel.CompileKey"]
 ):
-    BLOCK_SIZE = 1024
+    def __init__(self) -> None:
+        self.block_size = 1024
+        super().__init__()
 
     @dataclass(frozen=True)
     class CompileKey:
@@ -87,12 +89,11 @@ class PrepareUniformDecodeKernel(
         # All reqs now have decode_len = 1.
         tl.store(decode_lens_ptr + idx, 1)
 
-    def dispatch(self, *, BLOCK_SIZE: int) -> CompileKey:  # type: ignore[override]
-        return self.CompileKey(block_size=BLOCK_SIZE)
+    def dispatch(self, *, block_size: int) -> CompileKey:  # type: ignore[override]
+        return self.CompileKey(block_size=block_size)
 
-    def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
-        del vllm_config
-        return self._trace_dispatch(self.dispatch)(BLOCK_SIZE=self.block_size)
+    def get_warmup_keys(self, _vllm_config: VllmConfig) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(block_size=self.block_size)
 
     def compile(self, compile_key: CompileKey) -> None:
         warmup = getattr(self.kernel, "warmup", None)
@@ -121,9 +122,7 @@ class PrepareUniformDecodeKernel(
         max_decode_len: int,
     ) -> None:
         num_decode_tokens = decode_seq_lens.shape[0]
-        compile_key = self.dispatch(
-            BLOCK_SIZE=triton.next_power_of_2(max_decode_len),
-        )
+        compile_key = self.dispatch(block_size=self.block_size)
         self._guard_warmup_call(compile_key)
         self.kernel[(num_decode_tokens,)](
             seq_lens,
@@ -260,16 +259,12 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     max_local_total_seq_lens: int = 0
 
 
-_BUILD_PREFILL_CHUNK_METADATA_INPUT_VARIANTS = (
-    TritonPointerInputVariant.from_alignment(uncompressed_seq_lens=True),
-    TritonPointerInputVariant.from_alignment(uncompressed_seq_lens=False),
-)
-
-
 class BuildPrefillChunkMetadataKernel(
     VllmJitKernel["BuildPrefillChunkMetadataKernel.CompileKey"]
 ):
-    BLOCK_SIZE = 1024
+    def __init__(self) -> None:
+        self.block_size = 1024
+        super().__init__()
 
     @dataclass(frozen=True)
     class CompileKey:
@@ -401,7 +396,14 @@ class BuildPrefillChunkMetadataKernel(
             DCP_INTERLEAVE=dcp_interleave,
             BLOCK_SIZE=self.block_size,
             COMPRESS_RATIO=list(compress_ratios),
-            input_variant=_BUILD_PREFILL_CHUNK_METADATA_INPUT_VARIANTS,
+            input_variant=(
+                TritonPointerInputVariant.from_alignment(
+                    uncompressed_seq_lens=True
+                ),
+                TritonPointerInputVariant.from_alignment(
+                    uncompressed_seq_lens=False
+                ),
+            ),
         )
 
     def compile(self, compile_key: CompileKey) -> None:

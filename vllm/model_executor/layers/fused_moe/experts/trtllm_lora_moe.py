@@ -107,9 +107,7 @@ class TrtLlmLoraUnpermuteActivationKernel(
         if vllm_config.lora_config is None:
             return []
         hf_config = vllm_config.model_config.hf_config
-        intermediate_size = int(
-            getattr(hf_config, "moe_intermediate_size", 0) or 0
-        )
+        intermediate_size = hf_config.moe_intermediate_size
         dtype = vllm_config.model_config.dtype
         if intermediate_size <= 0:
             return []

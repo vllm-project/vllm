@@ -1097,21 +1097,55 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
         rope_head_dim: int,
         compress_ratio: int,
         cache_block_size: int,
-        cache_alignment: int,
+        cache_alignment: int | None = None,
+        runtime_state_width: int | None = None,
+        runtime_quant_block: int | None = None,
+        runtime_token_stride: int | None = None,
+        runtime_scale_dim: int | None = None,
+        runtime_kv_block_stride: int | None = None,
     ) -> CompileKey:
         overlap = compress_ratio == 4
-        quant_block = 32 if use_fp4_cache else 128
-        token_stride = head_dim // 2 if use_fp4_cache else head_dim
-        scale_dim = head_dim // quant_block if use_fp4_cache else 4
+        default_quant_block = 32 if use_fp4_cache else 128
+        quant_block = (
+            runtime_quant_block
+            if runtime_quant_block is not None
+            else default_quant_block
+        )
+        default_token_stride = head_dim // 2 if use_fp4_cache else head_dim
+        token_stride = (
+            runtime_token_stride
+            if runtime_token_stride is not None
+            else default_token_stride
+        )
+        default_scale_dim = head_dim // quant_block if use_fp4_cache else 4
+        scale_dim = (
+            runtime_scale_dim
+            if runtime_scale_dim is not None
+            else default_scale_dim
+        )
         raw_kv_cache_block_size = cache_block_size // compress_ratio
         kv_cache_block_size = (
             raw_kv_cache_block_size if raw_kv_cache_block_size >= 1 else 1
+        )
+        default_kv_block_stride = round_up(
+            kv_cache_block_size * (token_stride + scale_dim),
+            cache_alignment,
+        )
+        kv_block_stride = (
+            runtime_kv_block_stride
+            if runtime_kv_block_stride is not None
+            else default_kv_block_stride
+        )
+        state_width = (
+            runtime_state_width
+            if runtime_state_width is not None
+            else head_dim * (1 + overlap)
         )
         return self.CompileKey(
             use_fp4_cache=use_fp4_cache,
             head_size=head_dim,
             triton_block_size=triton.next_power_of_2(head_dim),
-            state_width=head_dim * (1 + overlap),
+            state_width=state_width,
             compress_ratio=compress_ratio,
             overlap=overlap,
             rope_head_dim=rope_head_dim,
@@ -1121,10 +1155,7 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
             scale_dim=scale_dim,
             block_size=cache_block_size,
             kv_cache_block_size=kv_cache_block_size,
-            kv_block_stride=round_up(
-                kv_cache_block_size * (token_stride + scale_dim),
-                cache_alignment,
-            ),
+            kv_block_stride=kv_block_stride,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
@@ -1224,26 +1255,18 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
         token_stride: int,
         scale_dim: int,
     ) -> None:
-        overlap = compress_ratio == 4
-        raw_kv_cache_block_size = block_size // compress_ratio
-        kv_cache_block_size = (
-            raw_kv_cache_block_size if raw_kv_cache_block_size >= 1 else 1
-        )
-        compile_key = self.CompileKey(
+        compile_key = self.dispatch(
             use_fp4_cache=use_fp4_cache,
-            head_size=head_dim,
-            triton_block_size=triton.next_power_of_2(head_dim),
-            state_width=state_width,
-            compress_ratio=compress_ratio,
-            overlap=overlap,
+            head_dim=head_dim,
             rope_head_dim=rope_head_dim,
-            fp8_max=448.0,
-            quant_block=quant_block,
-            token_stride=token_stride,
-            scale_dim=scale_dim,
-            block_size=block_size,
-            kv_cache_block_size=kv_cache_block_size,
-            kv_block_stride=kv_cache.stride(0),
+            compress_ratio=compress_ratio,
+            cache_block_size=block_size,
+            cache_alignment=1,
+            runtime_state_width=state_width,
+            runtime_quant_block=quant_block,
+            runtime_token_stride=token_stride,
+            runtime_scale_dim=scale_dim,
+            runtime_kv_block_stride=kv_cache.stride(0),
         )
         self._guard_warmup_call(compile_key)
         self.kernel(use_fp4_cache)[(num_actual,)](

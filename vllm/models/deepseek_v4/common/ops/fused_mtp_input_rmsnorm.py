@@ -308,44 +308,6 @@ class MTPSharedHeadRMSNormKernel(
         )
         return out
 
-def mtp_shared_head_rmsnorm(
-    hidden_states: torch.Tensor,
-    weight: torch.Tensor,
-    eps: float,
-) -> torch.Tensor:
-    """RMSNorm for MTP's SharedHead.norm, on (T, H) bf16 input.
-
-    Uses the same ``_rmsnorm_row`` body as ``fused_mtp_input_rmsnorm`` so the
-    MTP draft path runs one consistent RMSNorm implementation end to end.
-    """
-    return _MTP_SHARED_HEAD_RMSNORM_KERNEL(hidden_states, weight, eps)
-
-
-def fused_mtp_input_rmsnorm(
-    inputs_embeds: torch.Tensor,
-    positions: torch.Tensor,
-    previous_hidden_states: torch.Tensor,
-    enorm_weight: torch.Tensor,
-    hnorm_weight: torch.Tensor,
-    eps: float,
-    hc_mult: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Returns (enorm_out, hnorm_out).
-
-    enorm_out has the same shape as inputs_embeds (2D, [T, H]).
-    hnorm_out has the same shape as previous_hidden_states (3D, [T, hc_mult, H]).
-    previous_hidden_states must already be reshaped to 3D.
-    """
-    return _FUSED_MTP_INPUT_RMSNORM_KERNEL(
-        inputs_embeds,
-        positions,
-        previous_hidden_states,
-        enorm_weight,
-        hnorm_weight,
-        eps,
-        hc_mult,
-    )
-
 
 _FUSED_MTP_INPUT_RMSNORM_KERNEL = FusedMTPInputRMSNormKernel()
 _MTP_SHARED_HEAD_RMSNORM_KERNEL = MTPSharedHeadRMSNormKernel()

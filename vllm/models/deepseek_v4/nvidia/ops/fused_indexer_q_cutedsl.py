@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from functools import cache
 from typing import Any
 
 import cutlass
@@ -16,19 +15,16 @@ from vllm.cute_utils import (
     _bf16x2_max,
     cvt,
     recast_val,
+    torch_to_cute_dtype,
 )
 from vllm.model_executor.warmup.jit_warmup import (
     VllmJitKernel,
 )
+from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import compile_cutedsl
 from vllm.vllm_flash_attn.cute import utils as cute_utils
 
 # MXFP4: 32 elements per block, packed 2 nibbles per byte, ue8m0 block scale.
 MXFP4_BLOCK_SIZE = 32
-
-_TORCH_TO_CUTE = {
-    torch.bfloat16: BFloat16,
-    torch.float32: Float32,
-}
 
 
 def fused_indexer_q_rope_quant_mxfp4_cutedsl(
@@ -42,41 +38,17 @@ def fused_indexer_q_rope_quant_mxfp4_cutedsl(
     index_q_scale: torch.Tensor,
     index_weights_out: torch.Tensor,
 ) -> None:
-    num_tokens, num_heads, head_dim = index_q.shape
-    rope_dim = index_q_cos_sin_cache.shape[-1]
-    rope_type = _TORCH_TO_CUTE[index_q_cos_sin_cache.dtype]
-
-    # compile all variants at first invocation
-    for coarsen in (1, 4):
-        _INDEXER_Q_CUTEDSL_KERNEL(
-            use_fp4=True,
-            head_dim=head_dim,
-            rope_dim=rope_dim,
-            num_heads=num_heads,
-            cos_sin_dtype=rope_type,
-            coarsen=coarsen,
-        )
-
-    # heuristic
-    coarsen = 1 if num_tokens < 512 else 4
-    compiled = _INDEXER_Q_CUTEDSL_KERNEL(
+    _INDEXER_Q_CUTEDSL_KERNEL(
+        positions=positions,
+        q=index_q,
+        cos_sin_cache=index_q_cos_sin_cache,
+        weights=index_weights,
+        weights_softmax_scale=index_weights_softmax_scale,
+        weights_head_scale=index_weights_head_scale,
+        q_quant=index_q_packed,
+        q_scale=index_q_scale,
+        weights_out=index_weights_out,
         use_fp4=True,
-        head_dim=head_dim,
-        rope_dim=rope_dim,
-        num_heads=num_heads,
-        cos_sin_dtype=rope_type,
-        coarsen=coarsen,
-    )
-    scale = float(index_weights_softmax_scale * index_weights_head_scale)
-    compiled(
-        positions,
-        index_q,
-        index_q_cos_sin_cache,
-        index_weights,
-        index_q_packed,
-        index_q_scale,
-        index_weights_out,
-        scale,
     )
 
 
@@ -90,39 +62,17 @@ def fused_indexer_q_rope_quant_fp8_cutedsl(
     index_q_fp8: torch.Tensor,
     index_weights_out: torch.Tensor,
 ) -> None:
-    num_tokens, num_heads, head_dim = index_q.shape
-    rope_dim = index_q_cos_sin_cache.shape[-1]
-    rope_type = _TORCH_TO_CUTE[index_q_cos_sin_cache.dtype]
-
-    for coarsen in (1, 4):
-        _INDEXER_Q_CUTEDSL_KERNEL(
-            use_fp4=False,
-            head_dim=head_dim,
-            rope_dim=rope_dim,
-            num_heads=num_heads,
-            cos_sin_dtype=rope_type,
-            coarsen=coarsen,
-        )
-
-    coarsen = 1 if num_tokens < 512 else 4
-    compiled = _INDEXER_Q_CUTEDSL_KERNEL(
-        use_fp4=False,
-        head_dim=head_dim,
-        rope_dim=rope_dim,
-        num_heads=num_heads,
-        cos_sin_dtype=rope_type,
-        coarsen=coarsen,
-    )
-    scale = float(index_weights_softmax_scale * index_weights_head_scale)
     # The cute kernel treats the FP8 buffer as raw bytes (Uint8).
-    compiled(
-        positions,
-        index_q,
-        index_q_cos_sin_cache,
-        index_weights,
-        index_q_fp8.view(torch.uint8),
-        index_weights_out,
-        scale,
+    _INDEXER_Q_CUTEDSL_KERNEL(
+        positions=positions,
+        q=index_q,
+        cos_sin_cache=index_q_cos_sin_cache,
+        weights=index_weights,
+        weights_softmax_scale=index_weights_softmax_scale,
+        weights_head_scale=index_weights_head_scale,
+        q_quant=index_q_fp8.view(torch.uint8),
+        weights_out=index_weights_out,
+        use_fp4=False,
     )
 
 
@@ -401,58 +351,6 @@ class IndexerQMxFp4Kernel(IndexerQRopeQuantKernel):
                 weights[weight_token_id, weight_head_id].to(Float32) * scale
             )
 
-    @cache
-    @staticmethod
-    def compile(
-        head_dim: int = 128,
-        rope_dim: int = 64,
-        num_heads: int = 64,
-        cos_sin_dtype: type[cutlass.Numeric] = Float32,
-        coarsen: int = 4,
-    ):
-        num_tokens = cute.sym_int()
-        max_pos = cute.sym_int()
-
-        q = make_fake_tensor(
-            BFloat16, (num_tokens, num_heads, head_dim), divisibility=16
-        )
-        positions = make_fake_tensor(Int64, (num_tokens,), divisibility=1)
-        cos_sin_cache = make_fake_tensor(
-            cos_sin_dtype,
-            (max_pos, rope_dim),
-            divisibility=8,
-        )
-        weights = make_fake_tensor(BFloat16, (num_tokens, num_heads), divisibility=8)
-        q_fp4 = make_fake_tensor(
-            Uint8,
-            (num_tokens, num_heads, head_dim // 2),
-            divisibility=16,
-        )
-        q_scale = make_fake_tensor(
-            Uint8,
-            (num_tokens, num_heads, head_dim // MXFP4_BLOCK_SIZE),
-            divisibility=4,
-        )
-        weights_out = make_fake_tensor(Float32, (num_tokens, num_heads), divisibility=4)
-
-        kernel = IndexerQMxFp4Kernel(
-            head_dim, rope_dim, num_heads, cos_sin_dtype, coarsen
-        )
-        stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
-        return cute.compile(
-            kernel,
-            positions,
-            q,
-            cos_sin_cache,
-            weights,
-            q_fp4,
-            q_scale,
-            weights_out,
-            Float32(0.0),
-            stream,
-            options="--enable-tvm-ffi",
-        )
-
 
 class IndexerQFp8Kernel(IndexerQRopeQuantKernel):
     """Eight-thread subwarps process one ``(token, head)`` row and emit
@@ -592,56 +490,8 @@ class IndexerQFp8Kernel(IndexerQRopeQuantKernel):
                 cp_u32x4 = cute.make_copy_atom(cp_op, Uint32, num_bits_per_copy=128)
                 cute.copy(cp_u32x4, packed, cute.recast_tensor(dst, Uint32))
 
-    @cache
-    @staticmethod
-    def compile(
-        head_dim: int = 128,
-        rope_dim: int = 64,
-        num_heads: int = 64,
-        cos_sin_dtype: type[cutlass.Numeric] = Float32,
-        coarsen: int = 4,
-    ):
-        num_tokens = cute.sym_int()
-        max_pos = cute.sym_int()
 
-        q = make_fake_tensor(
-            BFloat16, (num_tokens, num_heads, head_dim), divisibility=16
-        )
-        positions = make_fake_tensor(Int64, (num_tokens,), divisibility=1)
-        cos_sin_cache = make_fake_tensor(
-            cos_sin_dtype,
-            (max_pos, rope_dim),
-            divisibility=8,
-        )
-        weights = make_fake_tensor(BFloat16, (num_tokens, num_heads), divisibility=8)
-        q_fp8 = make_fake_tensor(
-            Uint8,
-            (num_tokens, num_heads, head_dim),
-            divisibility=16,
-        )
-        weights_out = make_fake_tensor(Float32, (num_tokens, num_heads), divisibility=4)
-
-        kernel = IndexerQFp8Kernel(
-            head_dim, rope_dim, num_heads, cos_sin_dtype, coarsen
-        )
-        stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
-        return cute.compile(
-            kernel,
-            positions,
-            q,
-            cos_sin_cache,
-            weights,
-            q_fp8,
-            weights_out,
-            Float32(0.0),
-            stream,
-            options="--enable-tvm-ffi",
-        )
-
-
-class IndexerQCuteDSLKernel(
-    VllmJitKernel["IndexerQCuteDSLKernel.CompileKey"]
-):
+class IndexerQCuteDSLKernel(VllmJitKernel["IndexerQCuteDSLKernel.CompileKey"]):
     @dataclass(frozen=True)
     class CompileKey:
         use_fp4: bool
@@ -693,30 +543,9 @@ class IndexerQCuteDSLKernel(
         )
 
     @staticmethod
-    def kernel(
-        *,
-        use_fp4: bool,
-        head_dim: int,
-        rope_dim: int,
-        num_heads: int,
-        cos_sin_dtype: type[cutlass.Numeric],
-        coarsen: int,
-    ) -> Any:
-        kernel_type = IndexerQMxFp4Kernel if use_fp4 else IndexerQFp8Kernel
-        return kernel_type(
-            head_dim,
-            rope_dim,
-            num_heads,
-            cos_sin_dtype,
-            coarsen,
-        )
-
-    def compile(self, compile_key: CompileKey) -> None:
-        if self._compiled_cache_contains(compile_key):
-            return
-
+    def kernel(compile_key: CompileKey) -> IndexerQRopeQuantKernel:
         kernel_type = IndexerQMxFp4Kernel if compile_key.use_fp4 else IndexerQFp8Kernel
-        self._compiled_cache[compile_key] = kernel_type.compile(
+        return kernel_type(
             compile_key.head_dim,
             compile_key.rope_dim,
             compile_key.num_heads,
@@ -724,16 +553,91 @@ class IndexerQCuteDSLKernel(
             compile_key.coarsen,
         )
 
+    def compile(self, compile_key: CompileKey) -> None:
+        if self._compiled_cache_contains(compile_key):
+            return
+
+        num_tokens = cute.sym_int()
+        max_pos = cute.sym_int()
+        q = make_fake_tensor(
+            BFloat16,
+            (num_tokens, compile_key.num_heads, compile_key.head_dim),
+            divisibility=16,
+        )
+        positions = make_fake_tensor(Int64, (num_tokens,), divisibility=1)
+        cos_sin_cache = make_fake_tensor(
+            compile_key.cos_sin_dtype,
+            (max_pos, compile_key.rope_dim),
+            divisibility=8,
+        )
+        weights = make_fake_tensor(
+            BFloat16, (num_tokens, compile_key.num_heads), divisibility=8
+        )
+        weights_out = make_fake_tensor(
+            Float32, (num_tokens, compile_key.num_heads), divisibility=4
+        )
+        if compile_key.use_fp4:
+            q_packed = make_fake_tensor(
+                Uint8,
+                (num_tokens, compile_key.num_heads, compile_key.head_dim // 2),
+                divisibility=16,
+            )
+            q_scale = make_fake_tensor(
+                Uint8,
+                (
+                    num_tokens,
+                    compile_key.num_heads,
+                    compile_key.head_dim // MXFP4_BLOCK_SIZE,
+                ),
+                divisibility=4,
+            )
+            self._compiled_cache[compile_key] = compile_cutedsl(
+                self.kernel(compile_key),
+                positions,
+                q,
+                cos_sin_cache,
+                weights,
+                q_packed,
+                q_scale,
+                weights_out,
+                Float32(0.0),
+            )
+            return
+
+        q_fp8 = make_fake_tensor(
+            Uint8,
+            (num_tokens, compile_key.num_heads, compile_key.head_dim),
+            divisibility=16,
+        )
+        self._compiled_cache[compile_key] = compile_cutedsl(
+            self.kernel(compile_key),
+            positions,
+            q,
+            cos_sin_cache,
+            weights,
+            q_fp8,
+            weights_out,
+            Float32(0.0),
+        )
+
     def __call__(
         self,
         *,
+        positions: torch.Tensor,
+        q: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        weights: torch.Tensor,
+        weights_softmax_scale: float,
+        weights_head_scale: float,
+        q_quant: torch.Tensor,
+        weights_out: torch.Tensor,
         use_fp4: bool,
-        head_dim: int,
-        rope_dim: int,
-        num_heads: int,
-        cos_sin_dtype: type[cutlass.Numeric],
-        coarsen: int,
+        q_scale: torch.Tensor | None = None,
     ) -> Any:
+        num_tokens, num_heads, head_dim = q.shape
+        rope_dim = cos_sin_cache.shape[-1]
+        cos_sin_dtype = torch_to_cute_dtype(cos_sin_cache.dtype)
+        coarsen = 1 if num_tokens < 512 else 4
         compile_key = self.dispatch(
             use_fp4=use_fp4,
             head_dim=head_dim,
@@ -754,7 +658,29 @@ class IndexerQCuteDSLKernel(
                 "coarsen": coarsen,
             },
         )
-        return kernel
+        scale = float(weights_softmax_scale * weights_head_scale)
+        if compile_key.use_fp4:
+            if q_scale is None:
+                raise ValueError("MXFP4 indexer-Q requires q_scale.")
+            return kernel(
+                positions,
+                q,
+                cos_sin_cache,
+                weights,
+                q_quant,
+                q_scale,
+                weights_out,
+                scale,
+            )
+        return kernel(
+            positions,
+            q,
+            cos_sin_cache,
+            weights,
+            q_quant,
+            weights_out,
+            scale,
+        )
 
 
 _INDEXER_Q_CUTEDSL_KERNEL = IndexerQCuteDSLKernel()

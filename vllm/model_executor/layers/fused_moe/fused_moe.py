@@ -646,6 +646,18 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
         mul_routed_weight: bool,
         has_bias: bool,
         naive_block_assignment: bool,
+        runtime_a_rows: int | None = None,
+        runtime_em: int | None = None,
+        runtime_num_valid_tokens: int | None = None,
+        runtime_block_size_m: int | None = None,
+        runtime_block_size_n: int | None = None,
+        runtime_block_size_k: int | None = None,
+        runtime_group_size_m: int | None = None,
+        runtime_split_k: int | None = None,
+        runtime_compute_type: Any | None = None,
+        runtime_swap_ab: bool | None = None,
+        runtime_num_warps: int | None = None,
+        runtime_num_stages: int | None = None,
     ) -> CompileKey:
         config_dtype = _get_config_dtype_str(
             use_fp8_w8a8=use_fp8_w8a8,
@@ -653,9 +665,7 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
             use_int4_w4a16=use_int4_w4a16,
             dtype=dtype,
         )
-        block_shape = None
-        if group_n > 0 and group_k > 0:
-            block_shape = [group_n, group_k]
+        block_shape = [group_n, group_k] if group_n > 0 and group_k > 0 else None
         config = try_get_optimal_moe_config(
             (num_experts, 2 * intermediate_size, hidden_size),
             (num_experts, hidden_size, intermediate_size),
@@ -664,38 +674,85 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
             batch_tokens,
             block_shape=block_shape,
         )
-        a_rows = batch_tokens * routed_multiplier
-        block_size_k = config["BLOCK_SIZE_K"]
-        if group_n > 0 and group_k > 0:
-            block_size_k = min(block_size_k, min(group_n, group_k))
+        a_rows = runtime_a_rows if runtime_a_rows is not None else batch_tokens * routed_multiplier
+        config_block_size_k = (
+            min(config["BLOCK_SIZE_K"], min(group_n, group_k))
+            if group_n > 0 and group_k > 0
+            else config["BLOCK_SIZE_K"]
+        )
+        block_size_m = (
+            runtime_block_size_m
+            if runtime_block_size_m is not None
+            else config["BLOCK_SIZE_M"]
+        )
+        block_size_n = (
+            runtime_block_size_n
+            if runtime_block_size_n is not None
+            else config["BLOCK_SIZE_N"]
+        )
+        block_size_k = (
+            runtime_block_size_k
+            if runtime_block_size_k is not None
+            else config_block_size_k
+        )
         routed_tokens = a_rows * top_k
-        if naive_block_assignment:
-            em = routed_tokens * config["BLOCK_SIZE_M"]
-        else:
-            em = triton.cdiv(routed_tokens, config["BLOCK_SIZE_M"]) * config[
-                "BLOCK_SIZE_M"
-            ]
-        if dtype == torch.float32:
-            compute_type = tl.float32
-        elif dtype == torch.float16:
-            compute_type = tl.float16
-        else:
-            compute_type = tl.bfloat16
+        em = (
+            runtime_em
+            if runtime_em is not None
+            else routed_tokens * block_size_m
+            if naive_block_assignment
+            else triton.cdiv(routed_tokens, block_size_m) * block_size_m
+        )
+        num_valid_tokens = (
+            runtime_num_valid_tokens
+            if runtime_num_valid_tokens is not None
+            else a_rows * top_k
+        )
+        group_size_m = (
+            runtime_group_size_m
+            if runtime_group_size_m is not None
+            else config["GROUP_SIZE_M"]
+        )
+        split_k = runtime_split_k if runtime_split_k is not None else config["SPLIT_K"]
+        default_compute_type = (
+            tl.float32
+            if dtype == torch.float32
+            else tl.float16
+            if dtype == torch.float16
+            else tl.bfloat16
+        )
+        compute_type = (
+            runtime_compute_type
+            if runtime_compute_type is not None
+            else default_compute_type
+        )
+        default_swap_ab = use_fp8_w8a8 and enable_swap_ab(block_size_m, block_size_n)
+        swap_ab = runtime_swap_ab if runtime_swap_ab is not None else default_swap_ab
+        num_warps = (
+            runtime_num_warps
+            if runtime_num_warps is not None
+            else config.get("num_warps", 4)
+        )
+        num_stages = (
+            runtime_num_stages
+            if runtime_num_stages is not None
+            else config.get("num_stages", 3)
+        )
         return self.CompileKey(
             dtype=dtype,
             n=launch_n,
             k=launch_k,
             a_rows=a_rows,
             em=em,
-            num_valid_tokens=a_rows * top_k,
+            num_valid_tokens=num_valid_tokens,
             group_n=group_n,
             group_k=group_k,
             naive_block_assignment=naive_block_assignment,
-            block_size_m=config["BLOCK_SIZE_M"],
-            block_size_n=config["BLOCK_SIZE_N"],
+            block_size_m=block_size_m,
+            block_size_n=block_size_n,
             block_size_k=block_size_k,
-            group_size_m=config["GROUP_SIZE_M"],
-            split_k=config["SPLIT_K"],
+            group_size_m=group_size_m,
+            split_k=split_k,
             mul_routed_weight=mul_routed_weight,
             top_k=top_k,
             compute_type=compute_type,
@@ -704,10 +761,9 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
             use_int8_w8a16=use_int8_w8a16,
             per_channel_quant=per_channel_quant,
             has_bias=has_bias,
-            swap_ab=use_fp8_w8a8
-            and enable_swap_ab(config["BLOCK_SIZE_M"], config["BLOCK_SIZE_N"]),
-            num_warps=config.get("num_warps", 4),
-            num_stages=config.get("num_stages", 3),
+            swap_ab=swap_ab,
+            num_warps=num_warps,
+            num_stages=num_stages,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
@@ -913,32 +969,39 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
         num_warps: int,
         num_stages: int,
     ) -> Any:
-        compile_key = self.CompileKey(
-            dtype=dtype,
-            n=N,
-            k=K,
-            a_rows=A_ROWS,
-            em=EM,
-            num_valid_tokens=num_valid_tokens,
-            group_n=group_n,
-            group_k=group_k,
-            naive_block_assignment=naive_block_assignment,
-            block_size_m=BLOCK_SIZE_M,
-            block_size_n=BLOCK_SIZE_N,
-            block_size_k=BLOCK_SIZE_K,
-            group_size_m=GROUP_SIZE_M,
-            split_k=SPLIT_K,
-            mul_routed_weight=MUL_ROUTED_WEIGHT,
+        compile_key = self.dispatch(
+            batch_tokens=A_ROWS,
+            routed_multiplier=1,
+            num_experts=B.size(0),
+            hidden_size=K,
+            intermediate_size=N,
+            config_top_k=top_k,
+            launch_n=N,
+            launch_k=K,
             top_k=top_k,
-            compute_type=compute_type,
+            dtype=dtype,
             use_fp8_w8a8=use_fp8_w8a8,
             use_int8_w8a8=use_int8_w8a8,
             use_int8_w8a16=use_int8_w8a16,
+            use_int4_w4a16=False,
             per_channel_quant=per_channel_quant,
+            group_n=group_n,
+            group_k=group_k,
+            mul_routed_weight=MUL_ROUTED_WEIGHT,
             has_bias=HAS_BIAS,
-            swap_ab=SWAP_AB,
-            num_warps=num_warps,
-            num_stages=num_stages,
+            naive_block_assignment=naive_block_assignment,
+            runtime_a_rows=A_ROWS,
+            runtime_em=EM,
+            runtime_num_valid_tokens=num_valid_tokens,
+            runtime_block_size_m=BLOCK_SIZE_M,
+            runtime_block_size_n=BLOCK_SIZE_N,
+            runtime_block_size_k=BLOCK_SIZE_K,
+            runtime_group_size_m=GROUP_SIZE_M,
+            runtime_split_k=SPLIT_K,
+            runtime_compute_type=compute_type,
+            runtime_swap_ab=SWAP_AB,
+            runtime_num_warps=num_warps,
+            runtime_num_stages=num_stages,
         )
         self._guard_warmup_call(
             compile_key,

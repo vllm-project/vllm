@@ -186,6 +186,8 @@ _CMP_OPS: dict[type[ast.cmpop], Callable[[Any, Any], bool]] = {
     ast.GtE: operator.ge,
     ast.In: lambda left, right: left in right,
     ast.NotIn: lambda left, right: left not in right,
+    ast.Is: operator.is_,
+    ast.IsNot: operator.is_not,
 }
 
 

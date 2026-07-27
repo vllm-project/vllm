@@ -334,14 +334,16 @@ class StableTopKFromGatheredCandidatesKernel(
             divisibility=1,
         )
         self._compiled_cache[cache_key] = compile_cutedsl(
-            self.kernel(compile_key), gathered, out
+            self.kernel(compile_key),
+            gathered,
+            out,
         )
 
     def __call__(self, gathered: torch.Tensor, out: torch.Tensor, *, topk: int) -> Any:
         compile_key = self.dispatch(topk=topk, num_candidates=gathered.shape[1])
         self._guard_warmup_call(compile_key)
         cache_key = (compile_key.topk, compile_key.num_candidates)
-        kernel = self._get_compiled_from_cache(
+        compiled = self._get_compiled_from_cache(
             compile_key,
             cache_key=cache_key,
             runtime_context={
@@ -350,7 +352,7 @@ class StableTopKFromGatheredCandidatesKernel(
                 "topk": topk,
             },
         )
-        return kernel(gathered, out)
+        return compiled(gathered, out)
 
 
 _PACK_DCP_TOPK_CANDIDATES_KERNEL = PackDCPTopkCandidatesKernel()

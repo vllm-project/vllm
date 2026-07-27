@@ -179,14 +179,36 @@ class FusedInvRopeFP8QuantKernel(
         quant_group_size: int,
         tma_aligned_scales: bool,
         use_gdc: bool,
+        runtime_fp8_max: float | None = None,
+        runtime_chunks_per_head: int | None = None,
+        runtime_rope_start: int | None = None,
+        runtime_half_rope: int | None = None,
     ) -> CompileKey:
+        fp8_max = (
+            runtime_fp8_max
+            if runtime_fp8_max is not None
+            else torch.finfo(torch.float8_e4m3fn).max
+        )
+        chunks_per_head = (
+            runtime_chunks_per_head
+            if runtime_chunks_per_head is not None
+            else head_dim // quant_group_size
+        )
+        rope_start = (
+            runtime_rope_start
+            if runtime_rope_start is not None
+            else nope_dim % quant_group_size
+        )
+        half_rope = (
+            runtime_half_rope if runtime_half_rope is not None else rope_dim // 2
+        )
         return self.CompileKey(
             heads_per_group=heads_per_group,
-            fp8_max=torch.finfo(torch.float8_e4m3fn).max,
+            fp8_max=fp8_max,
             quant_group_size=quant_group_size,
-            chunks_per_head=head_dim // quant_group_size,
-            rope_start=nope_dim % quant_group_size,
-            half_rope=rope_dim // 2,
+            chunks_per_head=chunks_per_head,
+            rope_start=rope_start,
+            half_rope=half_rope,
             tma_aligned_scales=tma_aligned_scales,
             use_gdc=use_gdc,
         )
@@ -277,15 +299,18 @@ class FusedInvRopeFP8QuantKernel(
         use_gdc: bool,
         grid: tuple[int, int],
     ) -> None:
-        compile_key = self.CompileKey(
+        compile_key = self.dispatch(
             heads_per_group=heads_per_group,
-            fp8_max=fp8_max,
+            head_dim=chunks_per_head * quant_group_size,
+            nope_dim=rope_start,
+            rope_dim=half_rope * 2,
             quant_group_size=quant_group_size,
-            chunks_per_head=chunks_per_head,
-            rope_start=rope_start,
-            half_rope=half_rope,
             tma_aligned_scales=tma_aligned_scales,
             use_gdc=use_gdc,
+            runtime_fp8_max=fp8_max,
+            runtime_chunks_per_head=chunks_per_head,
+            runtime_rope_start=rope_start,
+            runtime_half_rope=half_rope,
         )
         self._guard_warmup_call(compile_key)
         self.kernel[grid](

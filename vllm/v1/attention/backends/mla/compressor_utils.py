@@ -17,7 +17,9 @@ from vllm.triton_utils import tl, triton
 class CompressedSlotMappingKernel(
     VllmJitKernel["CompressedSlotMappingKernel.CompileKey"]
 ):
-    TRITON_BLOCK_SIZE = 1024
+    def __init__(self) -> None:
+        self.triton_block_size = 1024
+        super().__init__()
 
     @dataclass(frozen=True)
     class CompileKey:

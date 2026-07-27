@@ -193,13 +193,3 @@ class FusedQKVRMSNormKernel(VllmJitKernel["FusedQKVRMSNormKernel.CompileKey"]):
 
 
 _FUSED_Q_KV_RMSNORM_KERNEL = FusedQKVRMSNormKernel()
-
-
-def fused_q_kv_rmsnorm(
-    qr: torch.Tensor,
-    kv: torch.Tensor,
-    q_weight: torch.Tensor,
-    kv_weight: torch.Tensor,
-    eps: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return _FUSED_Q_KV_RMSNORM_KERNEL(qr, kv, q_weight, kv_weight, eps)

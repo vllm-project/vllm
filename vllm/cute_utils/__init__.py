@@ -19,7 +19,16 @@ from cutlass.cutlass_dsl import T, dsl_user_op
 _TORCH_TO_CUTE_DTYPE = {
     torch.bfloat16: BFloat16,
     torch.float8_e4m3fn: Float8E4M3FN,
+    torch.float32: Float32,
 }
+
+
+def torch_to_cute_dtype(dtype: torch.dtype):
+    try:
+        return _TORCH_TO_CUTE_DTYPE[dtype]
+    except KeyError as exc:
+        raise TypeError(f"Unsupported CuTe dtype {dtype}") from exc
+
 
 _CUTE_TO_PTX_DTYPE = {
     BFloat16: "bf16",
