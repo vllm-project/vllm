@@ -394,8 +394,10 @@ def output_value(graph: fx.Graph) -> object | None:
 def upstream_linear(node: object, module: nn.Module) -> fx.Node | None:
     """Nearest linear producing `node`, walking back through splits/reshapes.
 
-    Never walks through a leaf call (e.g. an attention interface): its inputs
-    are what attention consumes, not what produced the value."""
+    Non-linear submodules are transparent too (e.g. the dropout GPT-style
+    attentions apply after their output projection). Never walks through a leaf
+    call (e.g. an attention interface): its inputs are what attention consumes,
+    not what produced the value."""
     stack = [node]
     seen: set[fx.Node] = set()
     while stack:
@@ -405,7 +407,11 @@ def upstream_linear(node: object, module: nn.Module) -> fx.Node | None:
         seen.add(current)
         if is_linear(current, module):
             return current
-        if current.op in ("call_function", "call_method") and not is_leaf_call(current):
+        if current.op in (
+            "call_function",
+            "call_method",
+            "call_module",
+        ) and not is_leaf_call(current):
             stack.extend(current.args)
     return None
 
