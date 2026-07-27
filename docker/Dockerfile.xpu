@@ -63,19 +63,21 @@ RUN apt-get update -y && \
     python3-pip && \
     rm -rf /var/lib/apt/lists/*
 
-# Add oneAPI repo, pin oneAPI to 2025.3, then install pinned packages in one layer.
+# Add oneAPI repo, pin oneAPI to 2026.0 (SYCL Graph + work_group_scratch_memory),
+# then install pinned packages in one layer. Matches torch 2.13.0+xpu (intel-sycl-rt 2026.0).
+ARG ONEAPI_VERSION=2026.0
 RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null && \
     echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list && \
     printf '%s\n' \
     'Package: intel-oneapi-* intel-deep-learning-essentials* intel-pti*' \
-    'Pin: version 2025.3*' \
+    "Pin: version ${ONEAPI_VERSION}*" \
     'Pin-Priority: 1001' \
-    > /etc/apt/preferences.d/oneapi-2025.3.pref && \
+    > /etc/apt/preferences.d/oneapi-${ONEAPI_VERSION}.pref && \
     apt-get update -y && \
     apt-get install -y --no-install-recommends \
-    intel-oneapi-compiler-dpcpp-cpp-2025.3 \
-    intel-oneapi-mkl-devel-2025.3 \
-    intel-oneapi-dnnl-devel-2025.3 && \
+    intel-oneapi-compiler-dpcpp-cpp-${ONEAPI_VERSION} \
+    intel-oneapi-mkl-devel-${ONEAPI_VERSION} \
+    intel-oneapi-dnnl-devel-${ONEAPI_VERSION} && \
     rm -rf /var/lib/apt/lists/*
 
 # Install UMD
@@ -93,14 +95,18 @@ RUN mkdir neo && \
     cd .. && \
     rm -rf neo
 
-ENV PATH="/root/.local/bin:$PATH"
+# Expose icx/icpx to torch.utils.cpp_extension (SYCL_HOME) and vllm-xpu-kernels
+# cmake; .bashrc setvars is not sourced by non-interactive Docker RUN layers.
+ENV SYCL_HOME=/opt/intel/oneapi/compiler/${ONEAPI_VERSION}
+ENV PATH="/opt/intel/oneapi/compiler/${ONEAPI_VERSION}/bin:/root/.local/bin:$PATH"
 ENV VIRTUAL_ENV="/opt/venv"
 ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
     && uv venv --python ${PYTHON_VERSION} --seed ${VIRTUAL_ENV}
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
-# This oneccl contains the BMG support which is not the case for default version of oneapi 2025.3.
+# Offline oneCCL 2021.15 for BMG; torch 2.13+xpu also pulls oneccl==2022.0.0 via pip,
+# which we uninstall later so TP keeps using this BMG-capable install.
 ARG ONECCL_INSTALLER="intel-oneccl-2021.15.9.14_offline.sh"
 RUN wget "https://github.com/uxlfoundation/oneCCL/releases/download/2021.15.9/${ONECCL_INSTALLER}" && \
     bash "${ONECCL_INSTALLER}" -a --silent --eula accept && \
@@ -112,7 +118,7 @@ RUN wget "https://github.com/uxlfoundation/oneCCL/releases/download/2021.15.9/${
     printf '%s\n' \
     '/opt/intel/oneapi/ccl/2021.15/lib' \
     '/opt/intel/oneapi/mpi/2021.15/lib' \
-    '/opt/intel/oneapi/compiler/2025.3/lib' \
+    "/opt/intel/oneapi/compiler/${ONEAPI_VERSION}/lib" \
     > /etc/ld.so.conf.d/oneapi-ccl.conf && \
     ldconfig
 
@@ -136,7 +142,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 
 
-ENV LD_LIBRARY_PATH=/opt/intel/oneapi/ccl/2021.15/lib:/opt/intel/oneapi/mpi/2021.15/lib:/opt/intel/oneapi/compiler/2025.3/lib:/usr/local/lib
+ENV LD_LIBRARY_PATH=/opt/intel/oneapi/ccl/2021.15/lib:/opt/intel/oneapi/mpi/2021.15/lib:/opt/intel/oneapi/compiler/${ONEAPI_VERSION}/lib:/opt/venv/lib:/usr/local/lib
 CMD ["/bin/bash"]
 
 ######################### UCX + NIXL BUILD STAGE #########################
@@ -181,13 +187,18 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM vllm-base AS vllm-openai
 
 ARG NIXL_VERSION=v1.2.0
+# Re-declare so ${ONEAPI_VERSION} expands in this stage's ENV/RUN layers.
+ARG ONEAPI_VERSION=2026.0
 
 # Copy compiled UCX runtime libraries and the pre-built NIXL wheel.
 # No compiler or autotools are installed in this stage.
 COPY --from=ucx-nixl-build /tmp/ucx_install /tmp/ucx_install
 COPY --from=ucx-nixl-build /tmp/nixl_wheels /tmp/nixl_wheels
 
-ENV LD_LIBRARY_PATH=/tmp/ucx_install/lib:${LD_LIBRARY_PATH}
+# /opt/venv/lib holds intel-sycl-rt libsycl.so.*; oneCCL 2021.15 stays on path for
+# BMG experiments but pip oneccl (reinstalled below) must win via RPATH for so.9.
+ENV SYCL_HOME=/opt/intel/oneapi/compiler/${ONEAPI_VERSION}
+ENV LD_LIBRARY_PATH=/tmp/ucx_install/lib:/opt/intel/oneapi/ccl/2021.15/lib:/opt/intel/oneapi/mpi/2021.15/lib:/opt/intel/oneapi/compiler/${ONEAPI_VERSION}/lib:/opt/venv/lib:/usr/local/lib
 
 # Install RDMA runtime libraries (no build tools) and the pre-built NIXL wheel.
 # Do not uninstall/reinstall large Python packages here to avoid extra layer
@@ -208,16 +219,32 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     && uv pip install nixl==${NIXL_VERSION} && uv pip uninstall nixl-cu13 \
     && rm -rf /tmp/nixl_wheels
 
+# Do NOT source global setvars.sh here: apt may pull 2026.1 *runtime* as a
+# dependency and setvars points `latest` at 2026.1, which lacks a full icpx.
+# Pin the 2026.0 compiler explicitly for vllm-xpu-kernels cmake.
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,src=requirements/common.txt,target=/workspace/vllm/requirements/common.txt \
     --mount=type=bind,src=requirements/xpu.txt,target=/workspace/vllm/requirements/xpu.txt \
     --mount=type=bind,src=requirements/test/xpu.txt,target=/workspace/vllm/requirements/test/xpu.txt \
+    source "${SYCL_HOME}/env/vars.sh" && \
+    export CC="${SYCL_HOME}/bin/icx" CXX="${SYCL_HOME}/bin/icpx" && \
+    export PATH="${SYCL_HOME}/bin:${PATH}" && \
+    test -x "${SYCL_HOME}/bin/icpx" && \
     uv pip install grpcio-tools protobuf nanobind && \
-    uv pip install -r /workspace/vllm/requirements/xpu.txt && \
+    uv pip install torch==2.13.0 torchvision==0.28.0 torchaudio==2.11.0 && \
+    uv pip install 'setuptools>=77.0.3,<80.0.0' setuptools-scm wheel cmake \
+        ninja packaging regex jinja2 psutil build numpy && \
+    uv pip install --no-build-isolation -r /workspace/vllm/requirements/xpu.txt && \
     uv pip install --no-build-isolation -r /workspace/vllm/requirements/test/xpu.txt && \
     uv pip uninstall triton triton-xpu && \
-    uv pip install triton-xpu==3.7.1 && \
+    uv pip install triton-xpu==3.7.2 && \
     uv pip uninstall oneccl oneccl-devel
+
+# Offline oneCCL 2021.15 (ldconfig) links libsycl.so.8; oneAPI 2026 / torch 2.13
+# need so.9. Reinstall pip oneccl so RPATH finds so.9-linked libccl in /opt/venv/lib.
+# (BMG TP via 2021.15 is incompatible with this SYCL ABI; revisit with a so.9 CCL.)
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install oneccl==2022.0.0 oneccl-devel==2022.0.0
 
 # Keep source-dependent layers near the end so frequent code-only changes
 # don't invalidate heavy dependency and UCX/NIXL layers.
@@ -235,11 +262,19 @@ RUN --mount=type=bind,source=.git,target=.git \
 ENV VLLM_TARGET_DEVICE=xpu
 ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
 
+# setup.py / cmake need oneAPI XPU runtime discovery (Caffe2Config) plus
+# /opt/venv/lib first so pip oneccl (so.9) wins over oneCCL 2021.15 (so.8).
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=.git,target=.git \
+    source "${SYCL_HOME}/env/vars.sh" && \
+    export LD_LIBRARY_PATH="/opt/venv/lib:${SYCL_HOME}/lib:${LD_LIBRARY_PATH}" && \
+    export CMPLR_ROOT="${SYCL_HOME}" && \
+    python -c "import torch; print(torch.__version__, torch.version.xpu)" && \
     uv pip install --no-build-isolation --no-deps .
 
 RUN --mount=type=cache,target=/root/.cache/uv \
+    source "${SYCL_HOME}/env/vars.sh" && \
+    export LD_LIBRARY_PATH="/opt/venv/lib:${SYCL_HOME}/lib:${LD_LIBRARY_PATH}" && \
     uv pip install -e tests/vllm_test_utils
 
 ENTRYPOINT ["vllm", "serve"]
