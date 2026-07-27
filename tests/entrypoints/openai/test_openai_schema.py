@@ -1,24 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
-from http import HTTPStatus
 from typing import Final
 
 import pytest
 import schemathesis
-from httpx import URL
-from hypothesis import settings
-from schemathesis import GenerationConfig
-from schemathesis.checks import not_a_server_error
-from schemathesis.internal.checks import CheckContext
-from schemathesis.models import Case
-from schemathesis.transports.responses import GenericResponse
+from hypothesis import HealthCheck, settings
+from schemathesis import GenerationMode
+from schemathesis.config import (
+    ChecksConfig,
+    CoveragePhaseConfig,
+    GenerationConfig,
+    PhasesConfig,
+    PositiveDataAcceptanceConfig,
+    ProjectConfig,
+    ProjectsConfig,
+    SchemathesisConfig,
+)
 
 from vllm.platforms import current_platform
 
 from ...utils import RemoteOpenAIServer
-
-schemathesis.experimental.OPEN_API_3_1.enable()
 
 MODEL_NAME = "HuggingFaceTB/SmolVLM-256M-Instruct"
 MAXIMUM_IMAGES = 2
@@ -49,112 +51,87 @@ def server():
 @pytest.fixture(scope="module")
 def get_schema(server):
     # avoid generating null (\x00) bytes in strings during test case generation
-    return schemathesis.openapi.from_uri(
+    return schemathesis.openapi.from_url(
         f"{server.url_root}/openapi.json",
-        generation_config=GenerationConfig(allow_x00=False),
+        config=SchemathesisConfig(
+            projects=ProjectsConfig(
+                default=ProjectConfig(
+                    generation=GenerationConfig(
+                        allow_x00=False,
+                        modes=[GenerationMode.POSITIVE],
+                    ),
+                    checks=ChecksConfig(
+                        positive_data_acceptance=PositiveDataAcceptanceConfig(
+                            enabled=False,
+                        ),
+                    ),
+                    phases=PhasesConfig(
+                        coverage=CoveragePhaseConfig(enabled=False),
+                    ),
+                ),
+            ),
+        ),
     )
 
 
-schema = schemathesis.from_pytest_fixture("get_schema")
+schema = schemathesis.pytest.from_fixture("get_schema")
 
 
 @schemathesis.hook
-def before_generate_case(context: schemathesis.hooks.HookContext, strategy):
+def before_generate_case(context: schemathesis.HookContext, strategy):
     op = context.operation
     assert op is not None
 
-    def no_invalid_types(case: schemathesis.models.Case):
+    def no_invalid_types(case: schemathesis.Case):
         """
-        This filter skips test cases with invalid data that schemathesis
-        incorrectly generates due to permissive schema configurations.
-        
-        1. Skips `POST /tokenize` endpoint cases with `"type": "file"` in 
-           message content, which isn't implemented.
-        
-        2. Skips tool_calls with `"type": "custom"` which schemathesis 
-           incorrectly generates instead of the valid `"type": "function"`.
+        Skips tool_calls with `"type": "custom"` which schemathesis incorrectly
+        generates instead of the valid `"type": "function"`.
 
-        Example test cases that are skipped:
-        curl -X POST -H 'Content-Type: application/json' \
-            -d '{"messages": [{"content": [{"file": {}, "type": "file"}], "role": "user"}]}' \
-            http://localhost:8000/tokenize
-
+        Example test case that is skipped:
         curl -X POST -H 'Content-Type: application/json' \
             -d '{"messages": [{"role": "assistant", "tool_calls": [{"custom": {"input": "", "name": ""}, "id": "", "type": "custom"}]}]}' \
             http://localhost:8000/v1/chat/completions
         """  # noqa: E501
-        if hasattr(case, "body") and isinstance(case.body, dict):
-            if (
-                "messages" in case.body
-                and isinstance(case.body["messages"], list)
-                and len(case.body["messages"]) > 0
-            ):
-                for message in case.body["messages"]:
-                    if not isinstance(message, dict):
-                        continue
+        if (
+            hasattr(case, "body")
+            and isinstance(case.body, dict)
+            and "messages" in case.body
+            and isinstance(case.body["messages"], list)
+            and len(case.body["messages"]) > 0
+        ):
+            for message in case.body["messages"]:
+                if not isinstance(message, dict):
+                    continue
 
-                    # Check for invalid file type in tokenize endpoint
-                    if op.method.lower() == "post" and op.path == "/tokenize":
-                        content = message.get("content", [])
-                        if (
-                            isinstance(content, list)
-                            and len(content) > 0
-                            and any(
-                                isinstance(item, dict) and item.get("type") == "file"
-                                for item in content
-                            )
-                        ):
-                            return False
-
-                    # Check for invalid tool_calls with non-function types
-                    tool_calls = message.get("tool_calls", [])
-                    if isinstance(tool_calls, list):
-                        for tool_call in tool_calls:
-                            if isinstance(tool_call, dict):
-                                if tool_call.get("type") != "function":
-                                    return False
-                                if "custom" in tool_call:
-                                    return False
-
-            # Sometimes structured_outputs.grammar is generated to be empty
-            # Causing a server error in EBNF grammar parsing
-            # https://github.com/vllm-project/vllm/pull/22587#issuecomment-3195253421
-            structured_outputs = case.body.get("structured_outputs", {})
-            grammar = (
-                structured_outputs.get("grammar")
-                if isinstance(structured_outputs, dict)
-                else None
-            )
-
-            if grammar == "":
-                # Allow None (will be handled as no grammar)
-                # But skip empty strings
-                return False
+                tool_calls = message.get("tool_calls", [])
+                if isinstance(tool_calls, list):
+                    for tool_call in tool_calls:
+                        if isinstance(tool_call, dict):
+                            if tool_call.get("type") != "function":
+                                return False
+                            if "custom" in tool_call:
+                                return False
 
         return True
 
     return strategy.filter(no_invalid_types)
 
 
-def customized_not_a_server_error(
-    ctx: CheckContext, response: GenericResponse, case: Case
-) -> bool | None:
-    try:
-        return not_a_server_error(ctx, response, case)
-    except Exception:
-        if (
-            URL(response.request.url).path
-            in ["/v1/chat/completions/render", "/v1/chat/completions"]
-            and response.status_code == HTTPStatus.NOT_IMPLEMENTED.value
-        ):
-            return True
-        raise
-
-
 @schema.parametrize()
-@schema.override(headers={"Content-Type": "application/json"})
-@settings(deadline=LONG_TIMEOUT_SECONDS * 1000, max_examples=50)
-def test_openapi_stateless(case: Case):
+@settings(
+    deadline=LONG_TIMEOUT_SECONDS * 1000,
+    max_examples=50,
+    # Under CI's derandomized hypothesis seed, the schemathesis strategy
+    # for /v1/chat/completions/batch's nested-message body, combined with
+    # the no_invalid_types filter (notably the grammar=="" rule), exceeds
+    # the default filtered-vs-good ratio. The filter is intentional, so
+    # suppress the health check rather than drop the filter — dropping it
+    # exposes pre-existing server bugs out of scope here.
+    # The same nested schema can also trip Hypothesis' entropy budget while
+    # generating large-but-valid request bodies before vLLM is called.
+    suppress_health_check=[HealthCheck.filter_too_much, HealthCheck.data_too_large],
+)
+def test_openapi_stateless(case: schemathesis.Case):
     key = (
         case.operation.method.upper(),
         case.operation.path,
@@ -167,7 +144,10 @@ def test_openapi_stateless(case: Case):
     # (weight_transfer_config) and are meant to be stateful.
     if case.operation.path in (
         "/init_weight_transfer_engine",
+        "/start_weight_update",
+        "/start_draft_weight_update",
         "/update_weights",
+        "/finish_weight_update",
     ):
         return
 
@@ -177,12 +157,12 @@ def test_openapi_stateless(case: Case):
         ("POST", "/v1/chat/completions/batch"): LONG_TIMEOUT_SECONDS,
         ("POST", "/v1/completions"): LONG_TIMEOUT_SECONDS,
         ("POST", "/v1/messages"): LONG_TIMEOUT_SECONDS,
+        ("POST", "/inference/v1/generate"): LONG_TIMEOUT_SECONDS,
     }.get(key, DEFAULT_TIMEOUT_SECONDS)
 
     # No need to verify SSL certificate for localhost
     case.call_and_validate(
         verify=False,
         timeout=timeout,
-        additional_checks=(customized_not_a_server_error,),
-        excluded_checks=(not_a_server_error,),
+        headers={"Content-Type": "application/json"},
     )

@@ -87,6 +87,9 @@ class ChatParams:
     mm_processor_kwargs: dict[str, Any] | None = None
     """The kwargs to pass to the multi-modal processor."""
 
+    return_assistant_tokens_mask: bool = False
+    """Request a per-token assistant mask from apply_chat_template."""
+
     def with_defaults(
         self,
         default_chat_template_kwargs: dict[str, Any] | None = None,
@@ -115,6 +118,7 @@ class ChatParams:
                 default_mm_processor_kwargs,
                 self.mm_processor_kwargs,
             ),
+            return_assistant_tokens_mask=self.return_assistant_tokens_mask,
         )
 
     def get_apply_chat_template_kwargs(self) -> dict[str, Any]:
@@ -167,6 +171,11 @@ class TokenizeParams:
     add_special_tokens: bool = True
     """Whether to add special tokens."""
 
+    return_token_offsets: bool = False
+    """If true, request char-level (start, end) offsets per token. Honored
+    only for Fast (Rust-backed) tokenizers with text input and no multimodal
+    data; otherwise silently ignored."""
+
     needs_detokenization: bool = False
     """
     Whether the tokenized prompt needs to contain the original text.
@@ -197,6 +206,13 @@ class TokenizeParams:
         max_output_tokens = self.max_output_tokens
         max_input_tokens = self.max_input_tokens
         truncate_prompt_tokens = self.truncate_prompt_tokens
+
+        if self.truncation_side not in (None, "left", "right"):
+            raise VLLMValidationError(
+                "`truncation_side` must be either 'left' or 'right'.",
+                parameter="truncation_side",
+                value=self.truncation_side,
+            )
 
         if (
             max_output_tokens is not None
@@ -233,6 +249,9 @@ class TokenizeParams:
         )
         truncate_prompt_tokens = tokenization_kwargs.pop(
             "truncate_prompt_tokens", self.truncate_prompt_tokens
+        )
+        truncation_side = tokenization_kwargs.pop(
+            "truncation_side", self.truncation_side
         )
         do_lower_case = tokenization_kwargs.pop("do_lower_case", self.do_lower_case)
         add_special_tokens = tokenization_kwargs.pop(
@@ -279,7 +298,7 @@ class TokenizeParams:
             ),
             pad_prompt_tokens=pad_prompt_tokens,
             truncate_prompt_tokens=truncate_prompt_tokens,
-            truncation_side=self.truncation_side,
+            truncation_side=truncation_side,
             do_lower_case=do_lower_case,
             add_special_tokens=add_special_tokens,
             needs_detokenization=needs_detokenization,
@@ -295,11 +314,12 @@ class TokenizeParams:
             # while still failing `self._token_len_check` as expected by users
             max_length = self.max_input_tokens + 1
 
-        # Left-side truncation requires the full token sequence so we can
-        # slice from the end in _token_truncation.  Disable HF-level
-        # truncation (which would incorrectly truncate from the right for
-        # pooling models) and let _token_truncation handle it.
-        if self.truncation_side == "left":
+        # Explicit truncation-side overrides require the full token sequence
+        # so we can slice from the requested side in _token_truncation.
+        # Disable tokenizer-level truncation because its default side may
+        # differ from the requested side.  The defense against unbounded
+        # tokenization lives in _text_len_check (character-level pre-trim).
+        if self.truncation_side is not None and self.truncate_prompt_tokens is not None:
             return dict(
                 truncation=False,
                 add_special_tokens=self.add_special_tokens,
@@ -314,15 +334,13 @@ class TokenizeParams:
     def _text_len_check(self, tokenizer: TokenizerLike | None, text: str) -> str:
         """Apply length checks to prompt text if necessary."""
         max_input_tokens = self.max_input_tokens
-        if max_input_tokens is None:
+        if max_input_tokens is None or tokenizer is None:
             return text
 
-        if self.truncate_prompt_tokens is None and tokenizer is not None:
-            max_input_chars = max_input_tokens * tokenizer.max_chars_per_token
+        max_input_chars = max_input_tokens * tokenizer.max_chars_per_token
 
+        if self.truncate_prompt_tokens is None:
             if len(text) > max_input_chars:
-                # To save resources, fail the request outright without even
-                # attempting tokenization
                 raise VLLMValidationError(
                     f"This model's maximum context length is "
                     f"{self.max_total_tokens} tokens. However, you requested "
@@ -335,6 +353,11 @@ class TokenizeParams:
                     parameter="input_text",
                     value=len(text),
                 )
+        elif self.truncation_side is not None and len(text) > max_input_chars:
+            if self.truncation_side == "left":
+                text = text[-max_input_chars:]
+            else:
+                text = text[:max_input_chars]
 
         return text
 

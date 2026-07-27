@@ -22,7 +22,15 @@ import pytest
 from packaging import version
 
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx950
+from vllm.transformers_utils.repo_utils import hf_api
+
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx950
+else:
+
+    def on_gfx950() -> bool:
+        return False
+
 
 MODEL_ACCURACIES = {
     # Full quantization: attention linears and MoE linears
@@ -40,7 +48,7 @@ QUARK_MXFP4_AVAILABLE = importlib.util.find_spec("quark") is not None and versio
 
 def has_huggingface_access(repo):
     try:
-        huggingface_hub.list_repo_refs(repo)
+        hf_api().list_repo_refs(repo)
         return True
     except huggingface_hub.errors.RepositoryNotFoundError:
         return False

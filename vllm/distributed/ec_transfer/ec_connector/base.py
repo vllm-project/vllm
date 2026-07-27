@@ -79,6 +79,14 @@ class ECConnectorBase(ABC):
     def is_consumer(self) -> bool:
         return self._is_consumer
 
+    def shutdown(self) -> None:
+        """
+        Shutdown the connector. This is called when the process
+        is shutting down to ensure that all the async operations are
+        completed and the connector is cleaned up properly.
+        """
+        return None
+
     # ==============================
     # Worker-side methods
     # ==============================
@@ -202,6 +210,23 @@ class ECConnectorBase(ABC):
             the media
         """
         pass
+
+    def ensure_cache_available(
+        self, request: "Request", num_computed_tokens: int
+    ) -> bool:
+        """
+        Ensure encoder cache items are available for the given request.
+        May initiate asynchronous transfers for items not yet local.
+
+        Args:
+            request: the request whose multimodal features to check.
+            num_computed_tokens: tokens already covered by cached KV blocks.
+
+        Returns:
+            True if all items are ready or no transfer is needed.
+            False if any items are still in transit (request should be deferred).
+        """
+        return True
 
     @abstractmethod
     def update_state_after_alloc(self, request: "Request", index: int):

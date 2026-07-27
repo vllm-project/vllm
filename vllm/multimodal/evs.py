@@ -85,7 +85,7 @@ def compute_retention_mask(
     topk_indices = order[:retain_num_tokens]
 
     retention_mask = torch.zeros_like(dissimilarity_flat, dtype=torch.bool)
-    retention_mask[topk_indices] = True
+    retention_mask.index_fill_(0, topk_indices, True)
     retention_mask = retention_mask.reshape(dissimilarity.size())
 
     mask = retention_mask.view(-1)  # "T H W -> (T H W)"

@@ -9,7 +9,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-from vllm._aiter_ops import rocm_aiter_ops
+from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     dequant_mxfp4,
@@ -36,18 +36,14 @@ from .quark_scheme import QuarkScheme
 logger = init_logger(__name__)
 
 
-try:
-    from aiter.ops.shuffle import shuffle_weight
-    from aiter.ops.triton.gemm_afp4wfp4 import (
-        gemm_afp4wfp4,
-        gemm_afp4wfp4_preshuffled_weight_scales,
-    )
-    from aiter.ops.triton.quant import dynamic_mxfp4_quant
-
+# NOTE: Do not import aiter at module scope. Importing aiter eagerly initializes HIP
+# which can force the engine core to spawn instead of fork.
+# is_aiter_found_and_supported() checks platform + arch + library availability via
+# find_spec/amdsmi, so it stays HIP-free.
+# Actual aiter imports are deferred to the functions/methods that need them,
+# where HIP initialization is expected.
+if is_aiter_found_and_supported():
     from vllm.utils.torch_utils import direct_register_custom_op
-
-    if rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled():
-        from aiter import gemm_a4w4, per_1x32_f4_quant_hip
 
     def gemm_with_dynamic_quant(
         x: torch.Tensor,
@@ -57,6 +53,15 @@ try:
         out_dtype: torch.dtype | None = torch.bfloat16,
         x_scales: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        from aiter.ops.triton.gemm_afp4wfp4 import (
+            gemm_afp4wfp4,
+            gemm_afp4wfp4_preshuffled_weight_scales,
+        )
+        from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
+        if rocm_use_aiter_fp4_asm_gemm:
+            from aiter import gemm_a4w4, per_1x32_f4_quant_hip
+
         M = x.shape[0]
         N = weight.shape[0]
         K = weight.shape[1]
@@ -96,21 +101,12 @@ try:
                     x_q = x
                     x_s = x_scales
 
-                # 32 alignment is enough for dim0 padding of output for
-                # gemm_a4w4 kernel
-                y = torch.empty(
-                    (M + 31) // 32 * 32,
-                    weight.shape[0],
-                    device=x_q.device,
-                    dtype=out_dtype,
-                )
-
-                gemm_a4w4(
+                y = gemm_a4w4(
                     x_q,
                     weight.view(x_q.dtype),
                     x_s,
                     weight_scale.view(x_s.dtype),
-                    y,
+                    dtype=out_dtype,
                     bpreshuffle=True,
                 )
             return y[:M]
@@ -146,13 +142,12 @@ try:
         fake_impl=gemm_with_dynamic_quant_fake,
         dispatch_key=current_platform.dispatch_key,
     )
-except (ImportError, AttributeError, RuntimeError):
-    if current_platform.is_rocm():
-        logger.warning(
-            "AITER is not found or QuarkOCP_MX is not supported on the current "
-            "platform. QuarkOCP_MX quantization will not be available."
-        )
-    dynamic_mxfp4_quant = gemm_afp4wfp4 = None
+elif current_platform.is_rocm():
+    logger.warning(
+        "AITER is not found or not supported on the current platform, "
+        "QuarkOCP_MX will fall back to emulation."
+        "Native MXFP4/MXFP6 acceleration will not be available."
+    )
 
 
 class QuarkOCP_MX(QuarkScheme):
@@ -220,8 +215,8 @@ class QuarkOCP_MX(QuarkScheme):
             rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled()
         )
 
-        if not self.emulate and (dynamic_mxfp4_quant is None or gemm_afp4wfp4 is None):
-            # Currently need these kernels if not emulating
+        if not self.emulate and not is_aiter_found_and_supported():
+            # Currently need AITER kernels if not emulating
             raise NotImplementedError(
                 f"{self.__class__.__name__} requires AITER to be installed "
                 "for non-emulation mode! Please refer to "
@@ -270,6 +265,8 @@ class QuarkOCP_MX(QuarkScheme):
     def process_dynamic_mxfp4_weights_after_loading(
         self, layer: torch.nn.Module
     ) -> None:
+        from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
         w_q, w_s = dynamic_mxfp4_quant(layer.weight)
         layer.weight_scale = torch.nn.Parameter(w_s.T.contiguous(), requires_grad=False)
         layer.weight = torch.nn.Parameter(w_q, requires_grad=False)
@@ -288,6 +285,8 @@ class QuarkOCP_MX(QuarkScheme):
             if self.dynamic_mxfp4_quant:
                 self.process_dynamic_mxfp4_weights_after_loading(layer)
             elif self.rocm_use_aiter_fp4_asm_gemm:
+                from aiter.ops.shuffle import shuffle_weight
+
                 # shuffle weight scale
                 weight_scale_shuffle = layer.weight_scale.data
                 sm, sn = weight_scale_shuffle.shape
@@ -376,11 +375,15 @@ class QuarkOCP_MX(QuarkScheme):
             dq_w = self.dequant_func(layer.weight, layer.weight_scale, x.dtype)
             qdq_x = self.quant_dequant_func(x)
             return F.linear(qdq_x, dq_w, bias)
-        else:
-            return torch.ops.vllm.gemm_with_dynamic_quant(
-                x,
-                layer.weight,
-                layer.weight_scale,
-                self.rocm_use_aiter_fp4_asm_gemm,
-                self.out_dtype,
-            )
+        y = torch.ops.vllm.gemm_with_dynamic_quant(
+            x,
+            layer.weight,
+            layer.weight_scale,
+            self.rocm_use_aiter_fp4_asm_gemm,
+            self.out_dtype,
+        )
+        # gemm_with_dynamic_quant has no bias argument; add it here so the
+        # native path matches F.linear (e.g. qkv_proj with qkv_bias=True).
+        if bias is not None:
+            y = y + bias
+        return y

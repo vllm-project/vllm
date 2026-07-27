@@ -460,7 +460,7 @@ async def test_serialize_and_serve_entrypoints(tmp_path):
         result = subprocess.run(
             [
                 sys.executable,
-                f"{VLLM_PATH}/examples/others/tensorize_vllm_model.py",
+                f"{VLLM_PATH}/examples/features/tensorize_vllm_model.py",
                 "--model",
                 model_ref,
                 "serialize",

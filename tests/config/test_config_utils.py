@@ -6,6 +6,7 @@ from enum import Enum
 
 import pytest
 
+from vllm.config.cache import CacheConfig
 from vllm.config.utils import get_hash_factors, hash_factors, normalize_value
 
 # Helpers
@@ -200,4 +201,78 @@ print(hash_factors(envs.compile_factors()))
     assert hash1 == hash2, (
         "compile_factors hash differs between fresh initializations - "
         "dynamic env vars may not be properly ignored"
+    )
+
+
+def test_cache_config_hash_ignores_kv_cache_sizing_knobs():
+    """kv_cache_memory_bytes only sizes the KV cache allocation (like
+    gpu_memory_utilization, which is already ignored); it does not affect
+    the compiled computation graph. If it leaks into the hash, setting the
+    documented fast-boot knob silently invalidates the torch.compile cache
+    and forces a full recompile.
+    """
+    base_hash = CacheConfig().compute_hash()
+    assert CacheConfig(kv_cache_memory_bytes=1 << 30).compute_hash() == base_hash
+    assert CacheConfig(gpu_memory_utilization=0.5).compute_hash() == base_hash
+
+
+def test_envs_compile_factors_relocation_invariant(tmp_path):
+    """Relocating HOME or the XDG roots must not change the compile-cache
+    env hash.
+
+    Location-derived env vars (VLLM_XLA_CACHE_PATH from XDG_CACHE_HOME,
+    VLLM_CONFIG_ROOT from XDG_CONFIG_HOME/HOME) carry no information about
+    compiled artifacts, only about where directories live. When they leak
+    into compile_factors(), a cache produced under one HOME/XDG layout
+    silently misses under another - which defeats copying or pre-baking a
+    compile cache into a container image.
+    """
+    import os
+    import subprocess
+    import sys
+
+    code = """
+import sys
+import logging
+logging.disable(logging.CRITICAL)
+from vllm import envs
+from vllm.config.utils import hash_factors
+print(hash_factors(envs.compile_factors()))
+"""
+
+    def hash_with(extra_env):
+        env = {**dict(os.environ), "VLLM_LOGGING_LEVEL": "ERROR"}
+        # Drop explicit overrides so the derived defaults are what is
+        # exercised, then apply the relocation under test.
+        for key in ("VLLM_XLA_CACHE_PATH", "VLLM_CONFIG_ROOT", "VLLM_CACHE_ROOT"):
+            env.pop(key, None)
+        env.update(extra_env)
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            check=True,
+            env=env,
+        )
+        return result.stdout.strip()
+
+    xdg_cache = tmp_path / "relocated-xdg-cache"
+    xdg_config = tmp_path / "relocated-xdg-config"
+    new_home = tmp_path / "relocated-home"
+    for d in (xdg_cache, xdg_config, new_home):
+        d.mkdir()
+
+    base = hash_with({})
+    relocated_xdg = hash_with(
+        {"XDG_CACHE_HOME": str(xdg_cache), "XDG_CONFIG_HOME": str(xdg_config)}
+    )
+    relocated_home = hash_with({"HOME": str(new_home)})
+
+    assert relocated_xdg == base, (
+        "XDG_CACHE_HOME/XDG_CONFIG_HOME relocation changed the compile-cache "
+        "env hash - a location-only derived var is leaking into the key"
+    )
+    assert relocated_home == base, (
+        "HOME relocation changed the compile-cache env hash - a "
+        "location-only derived var is leaking into the key"
     )

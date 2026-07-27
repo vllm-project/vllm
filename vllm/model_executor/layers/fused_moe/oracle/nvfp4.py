@@ -17,19 +17,16 @@ from vllm.model_executor.layers.fused_moe.config import (
     nvfp4_moe_quant_config,
     nvfp4_w4a16_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
-    SharedExperts,
-)
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     prepare_nvfp4_moe_layer_for_fi_or_cutlass,
     prepare_nvfp4_moe_layer_for_flashinfer_cutedsl,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    FlashinferMoeBackend,
-    get_flashinfer_moe_backend,
-)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_nvfp4_moe_layer_for_marlin,
+)
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    kE2M1ToFloat_handle,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -43,8 +40,11 @@ class NvFp4MoeBackend(Enum):
     FLASHINFER_CUTLASS = "FLASHINFER_CUTLASS"
     FLASHINFER_CUTEDSL = "FLASHINFER_CUTEDSL"
     FLASHINFER_CUTEDSL_BATCHED = "FLASHINFER_CUTEDSL_BATCHED"
+    FLASHINFER_B12X = "FLASHINFER_B12X"
     VLLM_CUTLASS = "VLLM_CUTLASS"
     MARLIN = "MARLIN"
+    HUMMING = "HUMMING"
+    EMULATION = "EMULATION"
 
 
 FLASHINFER_NVFP4_MOE_BACKENDS = [
@@ -52,13 +52,8 @@ FLASHINFER_NVFP4_MOE_BACKENDS = [
     NvFp4MoeBackend.FLASHINFER_CUTLASS,
     NvFp4MoeBackend.FLASHINFER_CUTEDSL,
     NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED,
+    NvFp4MoeBackend.FLASHINFER_B12X,
 ]
-
-fi_2_vllm_backend_map: dict[FlashinferMoeBackend, NvFp4MoeBackend] = {
-    FlashinferMoeBackend.CUTLASS: NvFp4MoeBackend.FLASHINFER_CUTLASS,
-    FlashinferMoeBackend.TENSORRT_LLM: NvFp4MoeBackend.FLASHINFER_TRTLLM,
-    FlashinferMoeBackend.CUTEDSL: NvFp4MoeBackend.FLASHINFER_CUTEDSL,
-}
 
 
 def is_global_sf_supported_for_nvfp4_backend(backend: NvFp4MoeBackend) -> bool:
@@ -85,7 +80,7 @@ def backend_to_kernel_cls(
         ]
 
     elif backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
-        from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (  # noqa: E501
             FlashInferExperts,
         )
 
@@ -105,19 +100,44 @@ def backend_to_kernel_cls(
 
         return [FlashInferCuteDSLBatchedExperts]
 
+    elif backend == NvFp4MoeBackend.FLASHINFER_B12X:
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_b12x_moe import (  # noqa: E501
+            FlashInferB12xExperts,
+        )
+
+        return [FlashInferB12xExperts]
+
     elif backend == NvFp4MoeBackend.VLLM_CUTLASS:
-        from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
             CutlassExpertsFp4,
         )
 
         return [CutlassExpertsFp4]
 
     elif backend == NvFp4MoeBackend.MARLIN:
-        from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
             MarlinExperts,
         )
 
         return [MarlinExperts]
+    elif backend == NvFp4MoeBackend.HUMMING:
+        from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+            BatchedHummingGroupedExperts,
+            HummingGroupedExperts,
+            HummingIndexedExperts,
+        )
+
+        return [
+            BatchedHummingGroupedExperts,
+            HummingGroupedExperts,
+            HummingIndexedExperts,
+        ]
+    elif backend == NvFp4MoeBackend.EMULATION:
+        from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (
+            Nvfp4QuantizationEmulationTritonExperts,
+        )
+
+        return [Nvfp4QuantizationEmulationTritonExperts]
     else:
         raise ValueError(f"Unknown NvFP4 MoE backend: {backend.value}")
 
@@ -129,7 +149,10 @@ def map_nvfp4_backend(runner_backend: MoEBackend) -> NvFp4MoeBackend:
         "flashinfer_trtllm": NvFp4MoeBackend.FLASHINFER_TRTLLM,
         "flashinfer_cutlass": NvFp4MoeBackend.FLASHINFER_CUTLASS,
         "flashinfer_cutedsl": NvFp4MoeBackend.FLASHINFER_CUTEDSL,
+        "flashinfer_b12x": NvFp4MoeBackend.FLASHINFER_B12X,
         "marlin": NvFp4MoeBackend.MARLIN,
+        "humming": NvFp4MoeBackend.HUMMING,
+        "emulation": NvFp4MoeBackend.EMULATION,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -150,6 +173,9 @@ def select_nvfp4_moe_backend(
     """
 
     # NOTE: the kernels are selected in the following order.
+    # FLASHINFER_B12X is intentionally excluded from auto-selection until
+    # the upstream CUTLASS SM121 MMA op guard is resolved; use
+    # moe_backend="flashinfer_b12x" to opt in explicitly.
     AVAILABLE_BACKENDS = [
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
         NvFp4MoeBackend.FLASHINFER_CUTEDSL,
@@ -157,12 +183,22 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
         NvFp4MoeBackend.VLLM_CUTLASS,
         NvFp4MoeBackend.MARLIN,
+        NvFp4MoeBackend.HUMMING,
+        NvFp4MoeBackend.EMULATION,
     ]
 
-    # NOTE(rob): this is kind of a hack. We need to peak into
-    # the prepare-finalize selection to determine if we are using
-    # the batched or standard expert format.
-    use_batched = config.moe_parallel_config.use_deepep_ll_kernels
+    NVFP4_BACKENDS_WITH_CLAMP = {
+        NvFp4MoeBackend.FLASHINFER_TRTLLM,
+        NvFp4MoeBackend.FLASHINFER_CUTLASS,
+        NvFp4MoeBackend.MARLIN,
+    }
+
+    if config.swiglu_limit is not None:
+        AVAILABLE_BACKENDS = [
+            b for b in AVAILABLE_BACKENDS if b in NVFP4_BACKENDS_WITH_CLAMP
+        ]
+
+    use_batched = config.moe_parallel_config.use_batched_activation_format
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
         if use_batched
@@ -215,45 +251,19 @@ def select_nvfp4_moe_backend(
             and requested_backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL
         ):
             requested_backend = NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED
+        if (
+            config.swiglu_limit is not None
+            and requested_backend not in NVFP4_BACKENDS_WITH_CLAMP
+        ):
+            raise ValueError(
+                f"Model sets swiglu_limit={config.swiglu_limit}, but the "
+                f"explicitly requested moe_backend={runner_backend!r} does "
+                f"not apply the SwiGLU clamp. Use 'flashinfer_trtllm' or "
+                f"'flashinfer_cutlass' instead."
+            )
         return _return_or_raise(
             requested_backend, config, weight_key, activation_key, activation_format
         )
-
-    if envs.is_set("VLLM_USE_FLASHINFER_MOE_FP4"):
-        if not envs.VLLM_USE_FLASHINFER_MOE_FP4:
-            # If the user rejects FlashInfer remove those backends.
-            for b in FLASHINFER_NVFP4_MOE_BACKENDS:
-                AVAILABLE_BACKENDS.remove(b)
-
-        elif envs.is_set("VLLM_FLASHINFER_MOE_BACKEND"):
-            # If user is explicit about backend, validate it.
-            backend = fi_2_vllm_backend_map[get_flashinfer_moe_backend()]
-            return _return_or_raise(
-                backend, config, weight_key, activation_key, activation_format
-            )
-        else:
-            # If the user is not explicit about the backend, try each.
-            for backend in FLASHINFER_NVFP4_MOE_BACKENDS:
-                for k_cls in backend_to_kernel_cls(backend):
-                    supported, reason = k_cls.is_supported_config(
-                        k_cls,
-                        config,
-                        weight_key,
-                        activation_key,
-                        activation_format,
-                    )
-                    if supported:
-                        logger.info_once(_make_log_backend(backend), scope="local")
-                        return backend, k_cls
-                    else:
-                        logger.debug_once(
-                            _make_log_unsupported(backend, reason), scope="local"
-                        )
-
-            raise NotImplementedError(
-                "Found VLLM_USE_FLASHINFER_MOE_FP4=1, but no "
-                "FlashInfer NVFP4 MoE backend supports the configuration."
-            )
 
     if envs.VLLM_TEST_FORCE_FP8_MARLIN:
         backend = NvFp4MoeBackend.MARLIN
@@ -271,12 +281,11 @@ def select_nvfp4_moe_backend(
                 activation_key,
                 activation_format,
             )
-
             if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
+                logger.info_once(_make_log_backend(backend))
                 return backend, k_cls
             else:
-                logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
+                logger.debug_once(_make_log_unsupported(backend, reason))
 
     raise NotImplementedError(
         "No NvFp4 MoE backend supports the deployment configuration."
@@ -285,7 +294,7 @@ def select_nvfp4_moe_backend(
 
 def convert_to_nvfp4_moe_kernel_format(
     nvfp4_backend: NvFp4MoeBackend,
-    layer: torch.nn.Module,
+    layer: RoutedExperts,
     w13: torch.Tensor,
     w13_scale: torch.Tensor,
     w13_scale_2: torch.Tensor,
@@ -352,6 +361,41 @@ def convert_to_nvfp4_moe_kernel_format(
             a2_scale=a2_scale,
             is_act_and_mul=is_act_and_mul,
         )
+    elif nvfp4_backend == NvFp4MoeBackend.HUMMING:
+        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+            convert_to_humming_moe_kernel_format,
+        )
+
+        # Discriminate the source checkpoint layout by its global-scale param:
+        # compressed-tensors uses *_weight_global_scale, modelopt *_weight_scale_2.
+        # The logical schema is identical (nvfp4 group-16); only the on-layer
+        # param names differ. TODO: normalize both methods to a single canonical
+        # layout upstream so the oracle needs neither the probe nor the re-alias.
+        if hasattr(layer, "w13_weight_global_scale"):
+            quant_config = {
+                "quant_method": "compressed-tensors",
+                "format": "nvfp4-pack-quantized",
+                "type": "float",
+                "num_bits": 4,
+                "strategy": "group",
+                "group_size": 16,
+            }
+            # CT pack-quantized reads `weight_packed`; the method renamed it to
+            # `weight`. Re-alias (convert replaces all params anyway).
+            layer.w13_weight_packed = layer.w13_weight
+            layer.w2_weight_packed = layer.w2_weight
+        else:
+            quant_config = {"quant_method": "modelopt", "quant_algo": "nvfp4"}
+
+        convert_to_humming_moe_kernel_format(layer, quant_config=quant_config)
+        a13_scale = None
+        a2_scale = None
+        w13 = layer.w13_weight
+        w13_scale = layer.w13_weight_scale
+        w13_scale_2 = getattr(layer, "w13_global_scale", None)
+        w2 = layer.w2_weight
+        w2_scale = layer.w2_weight_scale
+        w2_scale_2 = getattr(layer, "w2_global_scale", None)
     elif nvfp4_backend == NvFp4MoeBackend.MARLIN:
         a13_scale = None
         a2_scale = None
@@ -372,6 +416,34 @@ def convert_to_nvfp4_moe_kernel_format(
             w2_scale_2=w2_scale_2,
             is_act_and_mul=is_act_and_mul,
         )
+    elif nvfp4_backend == NvFp4MoeBackend.EMULATION:
+        # Move the E2M1 lookup table to the device now, because
+        # `.to(device)` is not allowed during CUDA graph capture.
+        kE2M1ToFloat_handle.val = kE2M1ToFloat_handle.val.to(w13.device)
+
+        if a13_scale is None or a2_scale is None:
+            raise ValueError(
+                "Activation global scales should not be None, got"
+                f" a13_scale={a13_scale}, a2_scale={a2_scale}"
+            )
+
+        if torch.unique(a13_scale).numel() != 1 or torch.unique(a2_scale).numel() != 1:
+            logger.warning_once(
+                "In NVFP4 linear, the activation global scale for inputs are different"
+                " for MOE w13 (gate_up_proj) layer or MOE w2 (down_proj). Using"
+                " a13_scale = a13_scale.max() and a2_scale = a2_scale.max()."
+            )
+
+        # 1. We take the max following e.g. quantization/utils/flashinfer_fp4_moe.py.
+        # 2. moe_kernel_quantize_input -> ref_nvfp4_quant_dequant
+        # use the inverse scale directly (large global scale).
+        # NOTE: Before this point, `a13_scale` and `a2_scale` are such that:
+        # `FP8_MAX = activation[expert_id].abs().max() * global_scale[expert_id]`,
+        # and `global_scale[expert_id]` are small (~1e-4).
+        # Taking the largest global scale likely results in overflowing the FP8 range
+        # for other experts - other selection strategies may be used.
+        a13_scale = 1.0 / a13_scale.max().to(torch.float32)
+        a2_scale = 1.0 / a2_scale.max().to(torch.float32)
     else:
         raise ValueError(f"Unknown NvFp4 backend for MoE: {nvfp4_backend}")
 
@@ -395,13 +467,34 @@ def make_nvfp4_moe_quant_config(
     w2_scale_2: torch.Tensor,
     a13_scale: torch.Tensor,
     a2_scale: torch.Tensor,
+    swiglu_limit: float | None = None,
+    layer: torch.nn.Module | None = None,
 ) -> FusedMoEQuantConfig:
-    if backend == NvFp4MoeBackend.MARLIN:
+    if backend == NvFp4MoeBackend.HUMMING:
+        from vllm.model_executor.layers.fused_moe import RoutedExperts
+        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+            get_humming_moe_quant_config,
+        )
+
+        assert isinstance(layer, RoutedExperts)
+        return get_humming_moe_quant_config(layer)
+    elif backend == NvFp4MoeBackend.MARLIN:
         return nvfp4_w4a16_moe_quant_config(
             g1_alphas=w13_scale_2,
             g2_alphas=w2_scale_2,
             w1_scale=w13_scale,
             w2_scale=w2_scale,
+            gemm1_clamp_limit=swiglu_limit,
+        )
+    elif backend == NvFp4MoeBackend.EMULATION:
+        return nvfp4_moe_quant_config(
+            g1_alphas=w13_scale_2,
+            g2_alphas=w2_scale_2,
+            a1_gscale=a13_scale,
+            a2_gscale=a2_scale,
+            w1_scale=w13_scale,
+            w2_scale=w2_scale,
+            gemm1_clamp_limit=swiglu_limit,
         )
 
     # Pass w13_scale_2 / w2_scale_2 directly as g1/g2_alphas.
@@ -418,13 +511,14 @@ def make_nvfp4_moe_quant_config(
         # NOTE(rob): this is a hack until the MoE kernels
         # create their own quant configs. TRTLLM kernel
         # does not accept swizzled input quant scales.
-        is_nvfp4_scale_swizzled=(
+        is_scale_swizzled=(
             backend
             not in (
                 NvFp4MoeBackend.FLASHINFER_TRTLLM,
                 NvFp4MoeBackend.FLASHINFER_CUTEDSL,
             )
         ),
+        gemm1_clamp_limit=swiglu_limit,
     )
 
 
@@ -432,8 +526,10 @@ def make_nvfp4_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
     experts_cls: type[mk.FusedMoEExperts],
+    backend: NvFp4MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    shared_experts: SharedExperts | None = None,
+    layer: torch.nn.Module | None = None,
+    per_token_activation: bool = False,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
@@ -447,6 +543,13 @@ def make_nvfp4_moe_kernel(
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
+    extra_kwargs = {}
+    if backend == NvFp4MoeBackend.HUMMING:
+        assert layer is not None
+        extra_kwargs = {"layer": layer}
+    if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM and per_token_activation:
+        extra_kwargs["per_token_activation"] = True
+
     # Create Experts.
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
@@ -456,22 +559,18 @@ def make_nvfp4_moe_kernel(
             quant_config=moe_quant_config,
             max_num_tokens=max_num_tokens,
             num_dispatchers=prepare_finalize.num_dispatchers(),
+            **extra_kwargs,
         )
     else:
         experts = experts_cls(
             moe_config=moe_config,
             quant_config=moe_quant_config,
+            **extra_kwargs,
         )
 
-    # NOTE(rob): we only want the mk to control the shared_expert
-    # if using all2all (for SBO). bnell is making this explicit in
-    # the new MoE runner class.
     kernel = mk.FusedMoEKernel(
         prepare_finalize,
         experts,
-        shared_experts=shared_experts,
-        inplace=False,
     )
 
-    # TODO(rob): update inplace logic to be part of the kernel.
     return kernel

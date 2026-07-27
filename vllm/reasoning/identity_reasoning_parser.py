@@ -7,14 +7,11 @@ from typing import TYPE_CHECKING
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
-from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-
-logger = init_logger(__name__)
 
 
 class IdentityReasoningParser(ReasoningParser):
@@ -32,6 +29,14 @@ class IdentityReasoningParser(ReasoningParser):
                 "The model tokenizer must be passed to the ReasoningParser "
                 "constructor during construction."
             )
+
+    @property
+    def reasoning_start_str(self) -> str | None:
+        return None
+
+    @property
+    def reasoning_end_str(self) -> str | None:
+        return None
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         # Always return True, since we never treat reasoning specially

@@ -13,6 +13,15 @@ from vllm.utils.torch_utils import (
     get_accelerator_view_from_cpu_tensor,
 )
 
+# Default round-robin depth for the UVA buffer pools. Must be >= the number of
+# concurrent in-flight steps (engine batch_queue_size).
+_DEFAULT_MAX_CONCURRENCY = 2
+
+
+def set_default_max_concurrency(n: int) -> None:
+    global _DEFAULT_MAX_CONCURRENCY
+    _DEFAULT_MAX_CONCURRENCY = max(2, n)
+
 
 def async_copy_to_gpu(
     x: torch.Tensor | np.ndarray,
@@ -27,10 +36,9 @@ def async_copy_to_gpu(
         assert device is not None
         out = torch.empty_like(x, device=device)
 
-    # Copy directly to GPU — explicit pin_memory() causes sporadic stalls
-    # under high concurrency due to CUDA driver contention. The driver
-    # handles the transfer efficiently without manual pinning.
-    return out.copy_(x, non_blocking=True)
+    # pin_memory() is no-op if the memory is already pinned.
+    pinned = x.pin_memory()
+    return out.copy_(pinned, non_blocking=True)
 
 
 class UvaBuffer:
@@ -47,8 +55,10 @@ class UvaBufferPool:
         self,
         size: int | Sequence[int],
         dtype: torch.dtype,
-        max_concurrency: int = 2,
+        max_concurrency: int | None = None,
     ):
+        if max_concurrency is None:
+            max_concurrency = _DEFAULT_MAX_CONCURRENCY
         self.size = size
         self.dtype = dtype
         self.max_concurrency = max_concurrency
@@ -80,7 +90,10 @@ class UvaBufferPool:
 
 class UvaBackedTensor:
     def __init__(
-        self, size: int | Sequence[int], dtype: torch.dtype, max_concurrency: int = 2
+        self,
+        size: int | Sequence[int],
+        dtype: torch.dtype,
+        max_concurrency: int | None = None,
     ):
         self.dtype = dtype
 
@@ -104,9 +117,11 @@ class StagedWriteTensor:
         size: int | Sequence[int],
         dtype: torch.dtype,
         device: torch.device,
-        max_concurrency: int = 2,
+        max_concurrency: int | None = None,
         uva_instead_of_gpu: bool = False,
     ):
+        if max_concurrency is None:
+            max_concurrency = _DEFAULT_MAX_CONCURRENCY
         supported_dtypes = [torch.int32, torch.int64, torch.float32]
         if dtype not in supported_dtypes:
             raise ValueError(
@@ -167,7 +182,7 @@ class StagedWriteTensor:
 
         # Special handling for write_contents
         write_contents = async_tensor_h2d(
-            self._staged_write_contents, self.dtype, self.device, pin_memory=True
+            self._staged_write_contents, device=self.device, dtype=self.dtype
         )
 
         # Write diffs to the GPU buffer
@@ -178,7 +193,9 @@ class StagedWriteTensor:
             starts_uva,
             write_contents,
             cu_lens_uva,
+            None,
             BLOCK_SIZE=1024,
+            MULTI_GROUP=False,
         )
         # Clear the staged writes
         self.clear_staged_writes()
@@ -190,15 +207,81 @@ class StagedWriteTensor:
         self._staged_write_cu_lens.clear()
 
 
+class FusedStagedWriter:
+    """Applies the staged writes of several `StagedWriteTensor`s at once."""
+
+    def __init__(
+        self, device: torch.device, max_writes: int, max_concurrency: int | None = None
+    ):
+        new_pool = partial(
+            UvaBufferPool, dtype=torch.int32, max_concurrency=max_concurrency
+        )
+        self.group_ids = new_pool(max_writes)
+        self.indices = new_pool(max_writes)
+        self.starts = new_pool(max_writes)
+        self.cu_lens = new_pool(max_writes)
+        self.device = device
+
+    def apply(
+        self,
+        tensors: Sequence[StagedWriteTensor],
+        output_ptrs: torch.Tensor,
+        output_strides: torch.Tensor,
+    ) -> None:
+        """Apply and clear the staged writes of `tensors` with one kernel."""
+        group_ids: list[int] = []
+        indices: list[int] = []
+        starts: list[int] = []
+        contents: list[int | float] = []
+        cu_lens: list[int] = []
+
+        for group_id, t in enumerate(tensors):
+            n = len(t._staged_write_indices)
+            if n == 0:
+                continue
+
+            group_ids.extend([group_id] * n)
+            indices.extend(t._staged_write_indices)
+            starts.extend(t._staged_write_starts)
+            content_base = len(contents)
+            contents.extend(t._staged_write_contents)
+            cu_lens.extend(content_base + cu_len for cu_len in t._staged_write_cu_lens)
+
+        if not group_ids:
+            return
+
+        group_ids_uva = self.group_ids.copy_to_uva(group_ids)
+        indices_uva = self.indices.copy_to_uva(indices)
+        starts_uva = self.starts.copy_to_uva(starts)
+        cu_lens_uva = self.cu_lens.copy_to_uva(cu_lens)
+        contents_gpu = async_tensor_h2d(contents, device=self.device, dtype=torch.int32)
+
+        _apply_write_kernel[(len(group_ids),)](
+            output_ptrs,
+            output_strides,
+            indices_uva,
+            starts_uva,
+            contents_gpu,
+            cu_lens_uva,
+            group_ids_uva,
+            BLOCK_SIZE=1024,
+            MULTI_GROUP=True,
+        )
+        for t in tensors:
+            t.clear_staged_writes()
+
+
 @triton.jit
 def _apply_write_kernel(
-    output_ptr,
-    output_stride,
+    output_ptr,  # MULTI_GROUP: ptr-to-ptrs [num_groups]; else: data ptr
+    output_stride,  # MULTI_GROUP: ptr-to-strides [num_groups]; else: row stride
     write_indices_ptr,
     write_starts_ptr,
     write_contents_ptr,
     write_cu_lens_ptr,
+    write_group_ids_ptr,  # [num_writes], used only when MULTI_GROUP
     BLOCK_SIZE: tl.constexpr,
+    MULTI_GROUP: tl.constexpr,
 ):
     pid = tl.program_id(0)
     row_idx = tl.load(write_indices_ptr + pid)
@@ -208,10 +291,26 @@ def _apply_write_kernel(
     cu_end = tl.load(write_cu_lens_ptr + pid)
     content_len = cu_end - cu_start
 
+    if MULTI_GROUP:
+        # Each write targets a different output tensor (KV cache group);
+        # resolve its base pointer and row stride per write.
+        group_id = tl.load(write_group_ids_ptr + pid)
+        row_ptr = _load_ptr(output_ptr + group_id, tl.int32)
+        row_stride = tl.load(output_stride + group_id)
+    else:
+        row_ptr = output_ptr
+        row_stride = output_stride
+    row_ptr += row_idx * row_stride + start_idx
+
     for i in range(0, content_len, BLOCK_SIZE):
         block = i + tl.arange(0, BLOCK_SIZE)
         mask = block < content_len
         content = tl.load(write_contents_ptr + cu_start + block, mask=mask)
-        tl.store(
-            output_ptr + row_idx * output_stride + start_idx + block, content, mask=mask
-        )
+        tl.store(row_ptr + block, content, mask=mask)
+
+
+@triton.jit
+def _load_ptr(ptr_to_ptr, elem_dtype):
+    ptr = tl.load(ptr_to_ptr)
+    ptr = tl.cast(ptr, tl.pointer_type(elem_dtype))
+    return tl.multiple_of(ptr, 16)

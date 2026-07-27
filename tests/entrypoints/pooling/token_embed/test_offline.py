@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import logging
 import weakref
 
 import pytest
@@ -64,15 +63,12 @@ def test_token_ids_prompts(llm: LLM):
 
 @pytest.mark.parametrize("task", ["embed", "classify", "token_classify", "plugin"])
 def test_unsupported_tasks(llm: LLM, task: PoolingTask, caplog_vllm):
-    if task == "embed":
-        with caplog_vllm.at_level(level=logging.WARNING, logger="vllm"):
-            llm.encode(prompt, pooling_task=task, use_tqdm=False)
-        assert "deprecated" in caplog_vllm.text
+    if task == "plugin":
+        err_msg = "No IOProcessor plugin installed."
+    elif task == "embed":
+        err_msg = "Try switching the model's pooling_task via.+"
     else:
-        if task == "plugin":
-            err_msg = "No IOProcessor plugin installed."
-        else:
-            err_msg = "Classification API is not supported by this model.+"
+        err_msg = "Classification API is not supported by this model.+"
 
-        with pytest.raises(ValueError, match=err_msg):
-            llm.encode(prompt, pooling_task=task, use_tqdm=False)
+    with pytest.raises(ValueError, match=err_msg):
+        llm.encode(prompt, pooling_task=task, use_tqdm=False)

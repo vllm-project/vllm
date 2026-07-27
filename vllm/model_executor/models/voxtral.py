@@ -4,21 +4,23 @@
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
-from typing import Literal, cast
+from typing import cast
 
 import numpy as np
 import regex as re
 import torch
 import torch.nn as nn
-from mistral_common.audio import Audio, mel_filter_bank
-from mistral_common.protocol.instruct.chunk import AudioChunk, RawAudio, TextChunk
+from mistral_common.audio import mel_filter_bank
+from mistral_common.protocol.instruct.chunk import AudioChunk, TextChunk
 from mistral_common.protocol.instruct.messages import UserMessage
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from mistral_common.protocol.transcription.request import TranscriptionRequest
+from mistral_common.tokens.tokenizers.audio import Audio
 from transformers import BatchFeature, WhisperConfig
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import MultiModalDataDict, PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -181,7 +183,7 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]):
                 sampling_rate=feature_extractor.sampling_rate,
                 format=format,
             )
-            chunk = AudioChunk(input_audio=RawAudio.from_audio(audio_item))
+            chunk = AudioChunk.from_audio(audio_item)
             audio_chunks.append(chunk)
 
         request = ChatCompletionRequest(
@@ -348,6 +350,10 @@ class VoxtralForConditionalGeneration(
                 dim=config.text_config.hidden_size,
             )
 
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors
+        )
+
     def get_mm_mapping(self) -> MultiModelKeys:
         """Get module prefix for multimodal models to filter LoRA modules."""
         return MultiModelKeys.from_string_field(
@@ -446,19 +452,18 @@ class VoxtralForConditionalGeneration(
     # for speech-to-text transcription
     def get_generation_prompt(
         cls,
-        audio: np.ndarray,
-        model_config: ModelConfig,
-        stt_config: SpeechToTextConfig,
-        language: str | None,
-        task_type: Literal["transcribe", "translate"],
-        request_prompt: str,
-        to_language: str | None,
+        stt_params: SpeechToTextParams,
     ) -> PromptType:
+        audio = stt_params.audio
+        model_config = stt_params.model_config
+        stt_config = stt_params.stt_config
+        language = stt_params.language
+
         tokenizer = cached_tokenizer_from_config(model_config)
         audio = Audio(audio, int(stt_config.sample_rate), format="wav")  # lossless
         req = TranscriptionRequest(
             model=model_config.model,
-            audio=RawAudio.from_audio(audio),
+            audio=audio.to_base64(audio.format),
             language=language,
         )
 

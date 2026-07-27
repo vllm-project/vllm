@@ -185,7 +185,7 @@ run_epd_1e_1pd() {
 
     # Start proxy
     echo "Starting EPD proxy on port $PROXY_PORT"
-    python "${GIT_ROOT}/examples/online_serving/disaggregated_encoder/disagg_epd_proxy.py" \
+    python "${GIT_ROOT}/examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py" \
         --host "0.0.0.0" \
         --port "$PROXY_PORT" \
         --encode-servers-urls "http://localhost:$ENCODE_PORT" \
@@ -411,7 +411,7 @@ run_epd_1e_1p_1d() {
     
     # Start proxy
     echo "Starting EPD proxy on port $PROXY_PORT"
-    python "${GIT_ROOT}/examples/online_serving/disaggregated_encoder/disagg_epd_proxy.py" \
+    python "${GIT_ROOT}/examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py" \
         --host "0.0.0.0" \
         --port "$PROXY_PORT" \
         --encode-servers-urls "http://localhost:$ENCODE_PORT" \
