@@ -328,7 +328,7 @@ class BuildPrefillChunkMetadataKernel(
         dcp_interleave = parallel_config.cp_kv_cache_interleave_size
         dcp_rank = get_dcp_group().rank_in_group if dcp_world > 1 else 0
         compress_ratios = tuple(
-            int(ratio)
+            max(1, int(ratio))
             for ratio in (getattr(hf_config, "compress_ratios", None) or (1,))
         )
         return self._trace_dispatch(self.dispatch)(
