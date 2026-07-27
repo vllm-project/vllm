@@ -50,6 +50,28 @@ def test_add_request_sets_trace_replay_generation_bounds():
     engine_core.scheduler.add_request.assert_called_once_with(request)
 
 
+def test_add_request_clears_cached_eos_for_trace_replay():
+    # The frontend caches the EOS token id (update_from_generation_config)
+    # before trace-replay flips ignore_eos. check_stop compares the last token
+    # against this cached id, NOT the flag, so a trace that contains EOS would
+    # stop early unless the cache is cleared. Here EOS (20) sits mid-trace.
+    params = SamplingParams(
+        max_tokens=16,
+        trace_decode_token_ids=[10, 20, 30],
+    )
+    params.update_from_generation_config({}, eos_token_id=20)
+    assert params.eos_token_id == 20  # cached by the frontend
+
+    request = _make_request(params)
+    engine_core = _make_engine_core()
+
+    engine_core.add_request(request)
+
+    assert request.sampling_params.eos_token_id is None
+    assert request.sampling_params.ignore_eos is True
+    assert request.sampling_params.max_tokens == 3
+
+
 @pytest.mark.parametrize(
     ("use_spec_decode", "n"),
     [

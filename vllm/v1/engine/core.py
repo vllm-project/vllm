@@ -462,8 +462,16 @@ class EngineCore:
             )
         else:
             new_max = len(params.trace_decode_token_ids)
+            # ignore_eos alone is insufficient: check_stop compares against the
+            # cached sampling_params.eos_token_id (populated in the frontend
+            # before ignore_eos was flipped here), not the flag. Clear it so a
+            # trace containing the EOS token replays fully instead of stopping
+            # early.
             request.sampling_params = msgspec.structs.replace(
-                params, max_tokens=new_max, ignore_eos=True
+                params,
+                max_tokens=new_max,
+                ignore_eos=True,
+                _eos_token_id=None,
             )
             request.max_tokens = new_max
 
