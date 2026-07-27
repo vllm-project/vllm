@@ -12,6 +12,7 @@ import torch.nn.functional as F
 
 from vllm.third_party.flash_linear_attention.ops.fused_gdn_prefill_post_conv import (
     fused_post_conv_prep,
+    fused_split_qkv_post_conv_prep,
 )
 
 
@@ -207,3 +208,50 @@ def test_fused_post_conv_l0():
     )
     assert q.shape == (0, H, K)
     assert g.shape == (0, HV)
+
+
+@pytest.mark.parametrize("L", [0, 1, 127, 512])
+def test_fused_split_qkv_post_conv_correctness(L):
+    """Test the in-place postprocessing used by AITER split-QKV output."""
+    torch.manual_seed(42)
+    device = "cuda"
+    H, HV, K, V = 4, 8, 128, 128
+
+    q = torch.randn(L, H * K, dtype=torch.bfloat16, device=device)
+    k = torch.randn(L, H * K, dtype=torch.bfloat16, device=device)
+    v = torch.randn(L, HV * V, dtype=torch.bfloat16, device=device)
+    a = torch.randn(L, HV, dtype=torch.bfloat16, device=device)
+    b = torch.randn(L, HV, dtype=torch.bfloat16, device=device)
+    A_log = torch.randn(HV, dtype=torch.float32, device=device) - 2.0
+    dt_bias = torch.randn(HV, dtype=torch.float32, device=device) * 0.1
+
+    ref = reference_post_conv(
+        torch.cat((q, k, v), dim=-1),
+        a,
+        b,
+        A_log,
+        dt_bias,
+        H,
+        K,
+        V,
+    )
+    actual = fused_split_qkv_post_conv_prep(
+        q,
+        k,
+        v,
+        a,
+        b,
+        A_log,
+        dt_bias,
+        num_k_heads=H,
+        head_k_dim=K,
+        head_v_dim=V,
+    )
+
+    for actual_tensor, ref_tensor in zip(actual, ref):
+        torch.testing.assert_close(
+            actual_tensor,
+            ref_tensor,
+            atol=1e-2,
+            rtol=1e-2,
+        )

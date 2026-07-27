@@ -397,6 +397,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 compute_causal_conv1d_metadata(
                     non_spec_query_start_loc_cpu,
                     device=query_start_loc.device,
+                    block_sizes=(8, 64),
                 )
             )
             if spec_sequence_masks is None and num_decodes > 0:
