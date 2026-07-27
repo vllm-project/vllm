@@ -165,6 +165,7 @@ class InklingRenderer(BaseRenderer[HfTokenizer]):
             content_format="string",
             media_io_kwargs=params.media_io_kwargs,
             mm_processor_kwargs=params.mm_processor_kwargs,
+            executor=self._executor,
         )
 
         token_ids = await self._render_async(messages, params)

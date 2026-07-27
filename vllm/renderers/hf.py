@@ -1072,6 +1072,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             ),
             media_io_kwargs=params.media_io_kwargs,
             mm_processor_kwargs=params.mm_processor_kwargs,
+            executor=self._executor,
         )
 
         prompt_embeds_tensors: list[torch.Tensor] | None = None

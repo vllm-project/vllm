@@ -4,6 +4,7 @@
 import asyncio
 import warnings
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from typing import Literal
 from unittest.mock import MagicMock
 
@@ -516,6 +517,59 @@ async def test_parse_chat_messages_single_image_with_uuid_async(
     ]
     _assert_mm_data_is_image_input(mm_data, 1)
     _assert_mm_uuids(mm_uuids, 1, expected_uuids=[image_uuid])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_executor", [True, False])
+async def test_parse_chat_messages_executor_offload_async(
+    phi3v_model_config,
+    image_url,
+    use_executor,
+):
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "text", "text": "What's in the image?"},
+            ],
+        },
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_info", "arguments": '{"x": 1}'},
+                }
+            ],
+        },
+    ]
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        submitted = []
+        original_submit = executor.submit
+
+        def recording_submit(*args, **kwargs):
+            submitted.append(args)
+            return original_submit(*args, **kwargs)
+
+        executor.submit = recording_submit  # type: ignore[method-assign]
+        conversation, mm_data, mm_uuids = await parse_chat_messages_async(
+            messages,
+            phi3v_model_config,
+            content_format="string",
+            executor=executor if use_executor else None,
+        )
+
+    assert len(submitted) == (1 if use_executor else 0)
+    assert conversation[0] == {
+        "role": "user",
+        "content": "<|image_1|>\nWhat's in the image?",
+    }
+    assert conversation[1]["tool_calls"][0]["function"]["arguments"] == {"x": 1}
+    _assert_mm_data_is_image_input(mm_data, 1)
+    _assert_mm_uuids(mm_uuids, 1, expected_uuids=[None])
 
 
 @pytest.mark.asyncio

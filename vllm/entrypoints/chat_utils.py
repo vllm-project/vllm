@@ -7,6 +7,7 @@ import types
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Iterable
+from concurrent.futures import Executor
 from dataclasses import dataclass
 from functools import cached_property, lru_cache, partial
 from itertools import accumulate
@@ -1937,22 +1938,14 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
                     function["arguments"] = {}
 
 
-def parse_chat_messages(
+def _parse_chat_messages_into(
     messages: list[ChatCompletionMessageParam],
     model_config: ModelConfig,
+    mm_tracker: BaseMultiModalItemTracker,
     content_format: ChatTemplateContentFormat,
-    media_io_kwargs: dict[str, dict[str, Any]] | None = None,
-    mm_processor_kwargs: dict[str, Any] | None = None,
-) -> tuple[
-    list[ConversationMessage],
-    MultiModalDataDict | None,
-    MultiModalUUIDDict | None,
-]:
+    mm_processor_kwargs: dict[str, Any] | None,
+) -> list[ConversationMessage]:
     conversation: list[ConversationMessage] = []
-    mm_tracker = MultiModalItemTracker(
-        model_config,
-        media_io_kwargs=media_io_kwargs,
-    )
 
     for msg in messages:
         sub_messages = _parse_chat_message_content(
@@ -1970,6 +1963,33 @@ def parse_chat_messages(
         conversation.extend(sub_messages)
 
     _postprocess_messages(conversation)
+
+    return conversation
+
+
+def parse_chat_messages(
+    messages: list[ChatCompletionMessageParam],
+    model_config: ModelConfig,
+    content_format: ChatTemplateContentFormat,
+    media_io_kwargs: dict[str, dict[str, Any]] | None = None,
+    mm_processor_kwargs: dict[str, Any] | None = None,
+) -> tuple[
+    list[ConversationMessage],
+    MultiModalDataDict | None,
+    MultiModalUUIDDict | None,
+]:
+    mm_tracker = MultiModalItemTracker(
+        model_config,
+        media_io_kwargs=media_io_kwargs,
+    )
+
+    conversation = _parse_chat_messages_into(
+        messages,
+        model_config,
+        mm_tracker,
+        content_format,
+        mm_processor_kwargs,
+    )
 
     mm_data, mm_uuids = mm_tracker.resolve_items()
 
@@ -1982,33 +2002,29 @@ async def parse_chat_messages_async(
     content_format: ChatTemplateContentFormat,
     media_io_kwargs: dict[str, dict[str, Any]] | None = None,
     mm_processor_kwargs: dict[str, Any] | None = None,
+    executor: Executor | None = None,
 ) -> tuple[
     list[ConversationMessage],
     MultiModalDataDict | None,
     MultiModalUUIDDict | None,
 ]:
-    conversation: list[ConversationMessage] = []
     mm_tracker = AsyncMultiModalItemTracker(
         model_config,
         media_io_kwargs=media_io_kwargs,
     )
 
-    for msg in messages:
-        sub_messages = _parse_chat_message_content(
-            msg,
-            mm_tracker,
-            content_format,
-            interleave_strings=(
-                content_format == "string"
-                and model_config.multimodal_config is not None
-                and model_config.multimodal_config.interleave_mm_strings
-            ),
-            mm_processor_kwargs=mm_processor_kwargs,
-        )
-
-        conversation.extend(sub_messages)
-
-    _postprocess_messages(conversation)
+    parse = partial(
+        _parse_chat_messages_into,
+        messages,
+        model_config,
+        mm_tracker,
+        content_format,
+        mm_processor_kwargs,
+    )
+    if executor is None:
+        conversation = parse()
+    else:
+        conversation = await asyncio.get_running_loop().run_in_executor(executor, parse)
 
     mm_data, mm_uuids = await mm_tracker.resolve_items()
 

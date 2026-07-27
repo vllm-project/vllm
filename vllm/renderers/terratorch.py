@@ -54,6 +54,7 @@ class TerratorchRenderer(BaseRenderer):
             content_format="string",
             media_io_kwargs=params.media_io_kwargs,
             mm_processor_kwargs=params.mm_processor_kwargs,
+            executor=self._executor,
         )
 
         prompt = parse_dec_only_prompt([1])  # Dummy token IDs

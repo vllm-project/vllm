@@ -70,6 +70,7 @@ class DeepseekV4Renderer(BaseRenderer[DeepseekV4Tokenizer]):
             content_format="string",
             media_io_kwargs=params.media_io_kwargs,
             mm_processor_kwargs=params.mm_processor_kwargs,
+            executor=self._executor,
         )
 
         prompt_raw = await self._apply_chat_template_async(
