@@ -41,7 +41,11 @@ from vllm.v1.kv_offload.worker.worker import (
     TransferResult,
     TransferSpec,
 )
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput
+from vllm.v1.outputs import (
+    EMPTY_MODEL_RUNNER_OUTPUT,
+    DraftTokenIds,
+    KVConnectorOutput,
+)
 from vllm.v1.request import Request, RequestStatus
 
 from .utils import (
@@ -148,25 +152,42 @@ class TransferSummary:
 
 class RequestRunner:
     def __init__(
-        self, offloaded_block_size: int, gpu_block_size: int, num_gpu_blocks: int
+        self,
+        offloaded_block_size: int,
+        gpu_block_size: int,
+        num_gpu_blocks: int,
+        async_scheduling: bool,
+        extra_config_overrides: dict[str, Any] | None = None,
+        num_speculative_tokens: int | None = None,
     ):
         self.offloaded_block_size: int = offloaded_block_size
         self.gpu_block_size: int = gpu_block_size
         self.num_gpu_blocks: int = num_gpu_blocks
+        self.async_scheduling: bool = async_scheduling
 
         self.req_id: int = -1
 
         vllm_config = create_vllm_config(
-            block_size=gpu_block_size, max_num_batched_tokens=1000
+            block_size=gpu_block_size,
+            max_num_batched_tokens=1000,
+            num_speculative_tokens=num_speculative_tokens,
         )
+        vllm_config.scheduler_config.async_scheduling = async_scheduling
+        extra_config: dict[str, Any] = {
+            "spec_name": "MockOffloadingSpec",
+            "spec_module_path": "tests.v1.kv_connector.unit.test_offloading_connector",
+            "block_size": offloaded_block_size,
+            # Preserve legacy behavior for existing tests; the dedicated test
+            # below overrides this to exercise prompt-only offloading.
+            "offload_prompt_only": False,
+        }
+        if extra_config_overrides:
+            extra_config.update(extra_config_overrides)
+
         vllm_config.kv_transfer_config = KVTransferConfig(
             kv_connector="OffloadingConnector",
             kv_role="kv_both",
-            kv_connector_extra_config={
-                "spec_name": "MockOffloadingSpec",
-                "spec_module_path": "tests.v1.kv_connector.unit.test_offloading_connector",  # noqa: E501
-                "block_size": offloaded_block_size,
-            },
+            kv_connector_extra_config=extra_config,
         )
 
         self.scheduler: Scheduler = create_scheduler(
@@ -301,7 +322,31 @@ class RequestRunner:
             for block_idx, block in enumerate(blocks):
                 self.gpu_block_index[block.block_id] = block_idx
 
-    def _run(self, decoded_tokens: list[int], complete_transfers: bool):
+    def _update_from_output(
+        self,
+        scheduler_output,
+        model_runner_output,
+        draft_token_ids: list[int] | None,
+    ) -> None:
+        drafts = None
+        if draft_token_ids is not None:
+            drafts = DraftTokenIds([str(self.req_id)], [draft_token_ids])
+            if self.async_scheduling:
+                self.scheduler.update_draft_token_ids_in_output(
+                    drafts, scheduler_output
+                )
+
+        self.scheduler.update_from_output(scheduler_output, model_runner_output)
+
+        if drafts is not None and not self.async_scheduling:
+            self.scheduler.update_draft_token_ids(drafts)
+
+    def _run(
+        self,
+        decoded_tokens: list[int | list[int]],
+        complete_transfers: bool,
+        draft_token_ids: list[list[int] | None] | None = None,
+    ):
         """
         Runs multiple engine (scheduler + worker) steps.
         Assumes a single request is running.
@@ -311,8 +356,15 @@ class RequestRunner:
             complete_transfers: complete transfers immediately
         """
 
-        tokens_iter = iter(decoded_tokens)
-        token_id = next(tokens_iter, None)
+        if draft_token_ids is None:
+            draft_token_ids = [None] * len(decoded_tokens)
+        assert len(draft_token_ids) == len(decoded_tokens)
+
+        steps_iter = iter(zip(decoded_tokens, draft_token_ids))
+        step = next(steps_iter, None)
+        prev_scheduler_output = None
+        prev_model_runner_output = None
+        prev_draft_token_ids = None
         while True:
             assert self.scheduler.requests
 
@@ -331,9 +383,6 @@ class RequestRunner:
             self.worker_connector.bind_connector_metadata(kv_connector_metadata)
             self.worker_connector.start_load_kv(self._dummy_ctx)
 
-            if scheduler_output.total_num_scheduled_tokens > 0:
-                self.worker_connector.wait_for_save()
-
             if complete_transfers:
                 self.offloading_spec.complete_transfers()
 
@@ -343,28 +392,54 @@ class RequestRunner:
 
             self.worker_connector.clear_connector_metadata()
 
+            token_ids = step[0] if step is not None else 0
+            sampled_token_ids = (
+                token_ids if isinstance(token_ids, list) else [token_ids]
+            )
             model_runner_output = create_model_runner_output(
                 reqs=self.scheduler.running,
                 finished_sending=finished_sending,
                 finished_recving=finished_recving,
-                token_id=token_id or 0,
+                sampled_token_ids=[
+                    sampled_token_ids.copy() for _ in self.scheduler.running
+                ],
             )
 
-            prev_token_id = token_id
+            current_draft_token_ids = step[1] if step is not None else None
+            prev_had_eos = EOS_TOKEN_ID in sampled_token_ids
             if self.scheduler.running:
-                token_id = next(tokens_iter, None)
+                step = next(steps_iter, None)
 
-            self.scheduler.update_from_output(scheduler_output, model_runner_output)
+            if self.async_scheduling:
+                # Async scheduling applies the previous step's model output
+                # after the current step has already been scheduled.
+                if prev_model_runner_output is not None:
+                    self._update_from_output(
+                        prev_scheduler_output,
+                        prev_model_runner_output,
+                        prev_draft_token_ids,
+                    )
+                prev_scheduler_output = scheduler_output
+                prev_model_runner_output = model_runner_output
+                prev_draft_token_ids = current_draft_token_ids
+            else:
+                self._update_from_output(
+                    scheduler_output,
+                    model_runner_output,
+                    current_draft_token_ids,
+                )
 
-            if (
-                prev_token_id == EOS_TOKEN_ID
-                and prev_token_id != token_id
-                and self.scheduler.requests
-            ):
+            if prev_had_eos and step is None and self.scheduler.requests:
                 # continue for one more step to allow offloading to kick off
                 continue
 
-            if token_id is None:
+            if step is None:
+                if self.async_scheduling:
+                    self._update_from_output(
+                        prev_scheduler_output,
+                        prev_model_runner_output,
+                        prev_draft_token_ids,
+                    )
                 break
 
         self._parse_transfers()
@@ -376,9 +451,15 @@ class RequestRunner:
             while self.scheduler.requests:
                 scheduler_output = self.scheduler.schedule()
 
+                kv_connector_metadata = scheduler_output.kv_connector_metadata
+                assert kv_connector_metadata is not None
+                assert isinstance(kv_connector_metadata, OffloadingConnectorMetadata)
+                self.worker_connector.bind_connector_metadata(kv_connector_metadata)
+
                 finished_sending, finished_recving = self.worker_connector.get_finished(
                     scheduler_output.finished_req_ids
                 )
+                self.worker_connector.clear_connector_metadata()
 
                 assert not finished_recving
 
@@ -391,11 +472,12 @@ class RequestRunner:
 
     def run(
         self,
-        decoded_tokens: list[int],
+        decoded_tokens: list[int | list[int]],
         complete_transfers: bool = True,
         expected_stored_gpu_block_indexes: tuple[int, ...] = (),
         expected_loaded_gpu_block_indexes: tuple[int, ...] = (),
         expected_flushed_gpu_block_indexes: tuple[int, ...] = (),
+        draft_token_ids: list[list[int] | None] | None = None,
     ):
         """
         Runs multiple engine (scheduler + worker) steps.
@@ -413,7 +495,7 @@ class RequestRunner:
         """
 
         self.manager.reset_mock()
-        self._run(decoded_tokens, complete_transfers)
+        self._run(decoded_tokens, complete_transfers, draft_token_ids)
 
         loaded_gpu_block_indexes: set[int] = set()
         for transfer in self.completed_loads:
@@ -445,11 +527,21 @@ class RequestRunner:
 def request_runner():
     runners = []
 
-    def runner_factory(offloaded_block_size, gpu_block_size, num_gpu_blocks):
+    def runner_factory(
+        offloaded_block_size,
+        gpu_block_size,
+        num_gpu_blocks,
+        async_scheduling,
+        extra_config_overrides=None,
+        num_speculative_tokens=None,
+    ):
         runner = RequestRunner(
             offloaded_block_size=offloaded_block_size,
             gpu_block_size=gpu_block_size,
             num_gpu_blocks=num_gpu_blocks,
+            async_scheduling=async_scheduling,
+            extra_config_overrides=extra_config_overrides,
+            num_speculative_tokens=num_speculative_tokens,
         )
         runners.append(runner)
         return runner
@@ -466,7 +558,119 @@ def generate_store_output(block_hashes: Iterable[BlockHash]):
     )
 
 
-def test_offloading_connector(request_runner):
+def test_offload_prompt_only_defaults_to_true():
+    vllm_config = create_vllm_config(block_size=4)
+    vllm_config.kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={},
+    )
+
+    spec = MockOffloadingSpec(vllm_config, MagicMock(spec=KVCacheConfig))
+
+    assert spec.offload_prompt_only is True
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_offload_prompt_only(request_runner, async_scheduling: bool):
+    gpu_block_size = 4
+    block_size_factor = 3
+    offloaded_block_size = gpu_block_size * block_size_factor
+    num_prompt_blocks = 2
+    num_decode_blocks = 4
+    prompt_gpu_block_indexes = tuple(range(num_prompt_blocks * block_size_factor))
+
+    runner = request_runner(
+        offloaded_block_size=offloaded_block_size,
+        gpu_block_size=gpu_block_size,
+        num_gpu_blocks=100,
+        async_scheduling=async_scheduling,
+        extra_config_overrides={"offload_prompt_only": True},
+    )
+    offered_hashes: set[BlockHash] = set()
+
+    def prepare_store(block_hashes: Iterable[BlockHash]):
+        block_hashes = list(block_hashes)
+        offered_hashes.update(block_hashes)
+        return generate_store_output(block_hashes)
+
+    runner.manager.prepare_store.side_effect = prepare_store
+
+    runner.new_request(token_ids=[0] * offloaded_block_size * num_prompt_blocks)
+    runner.run(
+        decoded_tokens=[0] * (offloaded_block_size * num_decode_blocks),
+        expected_stored_gpu_block_indexes=prompt_gpu_block_indexes,
+    )
+
+    assert len(offered_hashes) == num_prompt_blocks
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_spec_decode_offloads_only_materialized_tokens(
+    request_runner, async_scheduling: bool
+):
+    """Rejected drafts and async placeholders must not cross store boundaries."""
+    runner = request_runner(
+        offloaded_block_size=4,
+        gpu_block_size=4,
+        num_gpu_blocks=100,
+        async_scheduling=async_scheduling,
+        extra_config_overrides={"offload_prompt_only": False},
+        num_speculative_tokens=3,
+    )
+    runner.manager.prepare_store.side_effect = generate_store_output
+    runner.new_request(token_ids=[0, 0, 0])
+
+    # Prefill leaves one materialized output token at the first block boundary.
+    runner.run(
+        decoded_tokens=[10],
+        draft_token_ids=[[11, 12, 13]],
+    )
+
+    # Reject every draft. Only the first materialized block can become eligible.
+    runner.run(
+        decoded_tokens=[[20]],
+        draft_token_ids=[[21, 22, 23]],
+    )
+    runner.manager.prepare_store.assert_called_once()
+    req = runner.scheduler.requests[str(runner.req_id)]
+    assert (req.num_computed_tokens, req.num_tokens) == (4, 5)
+
+    # Accept one draft plus the bonus token. Seven materialized tokens are
+    # still insufficient for a second four-token block. This step submits the
+    # first block's store job from the preceding scheduler step.
+    runner.run(
+        decoded_tokens=[[21, 30]],
+        draft_token_ids=[[31, 32, 33]],
+        expected_stored_gpu_block_indexes=(0,),
+    )
+    assert (req.num_computed_tokens, req.num_tokens) == (6, 7)
+
+    # Accept all three drafts plus the bonus token. The second block becomes
+    # eligible only on the following scheduler step, after the accepted token
+    # IDs have been appended to the request.
+    runner.run(
+        decoded_tokens=[[31, 32, 33, 40]],
+        draft_token_ids=[[41, 42, 43]],
+    )
+    assert (req.num_computed_tokens, req.num_tokens) == (10, 11)
+    runner.run(
+        decoded_tokens=[[50]],
+        draft_token_ids=[[51, 52, 53]],
+    )
+    runner.manager.prepare_store.assert_called_once()
+
+    # Store transfers are submitted at the beginning of the following engine
+    # step, after the block-producing forward has completed.
+    runner.run(
+        decoded_tokens=[[60]],
+        draft_token_ids=[[61, 62, 63]],
+        expected_stored_gpu_block_indexes=(1,),
+    )
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_offloading_connector(request_runner, async_scheduling: bool):
     offloaded_block_size = 12
     gpu_block_size = 4
     num_gpu_blocks = 100
@@ -476,6 +680,7 @@ def test_offloading_connector(request_runner):
         offloaded_block_size=offloaded_block_size,
         gpu_block_size=gpu_block_size,
         num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=async_scheduling,
     )
 
     # 3 blocks, store just the middle block (skip first and last)
@@ -498,26 +703,28 @@ def test_offloading_connector(request_runner):
     runner.run(decoded_tokens=[0])
     runner.manager.prepare_store.assert_called()
 
-    # 1 more block, now set block_hashes_to_store = []
+    # 1 more block (+ token for async scheduling), now set
+    # block_hashes_to_store = []
     runner.manager.prepare_store.side_effect = (
         lambda block_hashes: generate_store_output([])
     )
-    runner.run(decoded_tokens=[0] * offloaded_block_size)
+    runner.run(decoded_tokens=[0] * (offloaded_block_size + 1))
 
-    # 1 more block, now check touch was called with all 6 blocks
+    # 1 more block (+ token for kicking off offloading), now check touch was
+    # called with all 6 blocks
     runner.manager.prepare_store.side_effect = (
         lambda block_hashes: generate_store_output(block_hashes)
     )
-    runner.run(decoded_tokens=[0] * offloaded_block_size)
+    runner.run(
+        decoded_tokens=[0] * (offloaded_block_size + 1),
+        expected_stored_gpu_block_indexes=(15, 16, 17),
+    )
     runner.manager.touch.assert_called()
     block_hashes1 = list(runner.manager.touch.call_args.args[0])
     assert len(block_hashes1) == 6
 
     # terminate request
-    runner.run(
-        decoded_tokens=[EOS_TOKEN_ID],
-        expected_stored_gpu_block_indexes=(15, 16, 17),
-    )
+    runner.run(decoded_tokens=[EOS_TOKEN_ID])
 
     # create a new request differing only on the last token
     runner.new_request(token_ids=[0] * (offloaded_block_size * 6 - 1) + [1])
@@ -608,7 +815,8 @@ def test_offloading_connector(request_runner):
     assert event.medium == "B"
 
 
-def test_request_preemption(request_runner):
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_request_preemption(request_runner, async_scheduling: bool):
     offloaded_block_size = 12
     gpu_block_size = 4
     num_gpu_blocks = 100
@@ -617,6 +825,7 @@ def test_request_preemption(request_runner):
         offloaded_block_size=offloaded_block_size,
         gpu_block_size=gpu_block_size,
         num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=async_scheduling,
     )
 
     free_block_queue = runner.scheduler.kv_cache_manager.block_pool.free_block_queue
@@ -674,7 +883,8 @@ def test_request_preemption(request_runner):
     )
 
 
-def test_concurrent_lookups_of_the_same_prefix(request_runner):
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_concurrent_lookups_of_the_same_prefix(request_runner, async_scheduling: bool):
     offloaded_block_size = 12
     gpu_block_size = 4
     num_gpu_blocks = 100
@@ -683,6 +893,7 @@ def test_concurrent_lookups_of_the_same_prefix(request_runner):
         offloaded_block_size=offloaded_block_size,
         gpu_block_size=gpu_block_size,
         num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=async_scheduling,
     )
 
     # store 1 blocks
@@ -732,7 +943,8 @@ def test_concurrent_lookups_of_the_same_prefix(request_runner):
     assert transfer_jobs == list(runner.offloading_spec.handler.transfer_specs)
 
 
-def test_abort_loading_requests(request_runner):
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_abort_loading_requests(request_runner, async_scheduling: bool):
     offloaded_block_size = 12
     gpu_block_size = 4
     num_gpu_blocks = 100
@@ -741,6 +953,7 @@ def test_abort_loading_requests(request_runner):
         offloaded_block_size=offloaded_block_size,
         gpu_block_size=gpu_block_size,
         num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=async_scheduling,
     )
 
     # store 1 blocks

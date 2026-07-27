@@ -167,12 +167,19 @@ class OffloadingConnector(KVConnectorBase_V1):
         pass
 
     def wait_for_save(self):
-        assert self.connector_worker is not None
-        assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
-        self.connector_worker.prepare_store_kv(self._connector_metadata)
+        # Store deferral is handled in get_finished(), which always runs even
+        # when wait_for_save() is skipped (e.g. kv_connector_no_forward).
+        pass
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         assert self.connector_worker is not None
+        assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
+
+        # Defer store jobs to the next step's start_kv_transfers. Done here
+        # (rather than wait_for_save) so stores are queued even on steps where
+        # wait_for_save is skipped.
+        self.connector_worker.prepare_store_kv(self._connector_metadata)
+
         return self.connector_worker.get_finished(finished_req_ids)
 
     def get_num_new_matched_tokens(
@@ -248,6 +255,7 @@ class OffloadingConnectorScheduler:
         self.gpu_block_size = spec.gpu_block_size
         self.offloaded_block_size = spec.offloaded_block_size
         self.block_size_factor = self.offloaded_block_size // self.gpu_block_size
+        self.offload_prompt_only: bool = spec.offload_prompt_only
         self.manager: OffloadingManager = spec.get_manager()
 
         self._requests: dict[ReqId, Request] = {}
@@ -416,7 +424,14 @@ class OffloadingConnectorScheduler:
 
             req = self._requests[req_id]
             new_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            total_tokens = req.num_computed_tokens + new_tokens
+            expected_tokens = req.num_computed_tokens + new_tokens
+            # With async scheduling, expected_tokens can include output
+            # placeholders whose token IDs are not available yet.
+            total_tokens = min(expected_tokens, req.num_tokens)
+            # Clamp the store boundary to the prompt so decode blocks never
+            # become eligible in this or any later scheduler step.
+            if self.offload_prompt_only:
+                total_tokens = min(total_tokens, req.num_prompt_tokens)
             num_blocks = total_tokens // self.offloaded_block_size
             start_block_idx = self._next_stored_block_idx.get(req_id, 0)
             num_new_blocks = num_blocks - start_block_idx
@@ -424,8 +439,8 @@ class OffloadingConnectorScheduler:
             if num_new_blocks <= 0:
                 continue
 
-            # NOTE: In async scheduling, placeholders may temporarily make
-            # len(req.block_hashes) < num_blocks * self.block_size_factor.
+            num_gpu_blocks = num_blocks * self.block_size_factor
+            assert len(req.block_hashes) >= num_gpu_blocks
 
             new_block_hashes = self._get_block_hashes(
                 req, start_idx=start_block_idx, end_idx=num_blocks

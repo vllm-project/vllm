@@ -7,6 +7,7 @@ This directory used to contain vLLM's benchmark scripts and utilities for perfor
 - **Serving benchmarks**: Scripts for testing online inference performance (latency, throughput)
 - **Throughput benchmarks**: Scripts for testing offline batch inference performance
 - **Specialized benchmarks**: Tools for testing specific features like structured output, prefix caching, long document QA, request prioritization, and multi-modal inference
+- **OffloadingConnector benchmark**: End-to-end recompute versus CPU KV load measurement, strict cache-source validation, and decode-block store verification. See [offloading/README.md](./offloading/README.md).
 - **Dataset utilities**: Framework for loading and sampling from various benchmark datasets (ShareGPT, HuggingFace datasets, synthetic data, etc.)
 
 ## Usage

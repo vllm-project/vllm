@@ -17,6 +17,7 @@ from vllm.config import (
     KVTransferConfig,
     ModelConfig,
     SchedulerConfig,
+    SpeculativeConfig,
     VllmConfig,
 )
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
@@ -31,6 +32,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # 
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -97,6 +99,7 @@ def create_vllm_config(
     hf_overrides: dict[str, Any] | None = None,
     attention_backend: str | None = None,
     kv_load_failure_policy: Literal["recompute", "fail"] = "fail",
+    num_speculative_tokens: int | None = None,
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
     model_config = ModelConfig(
@@ -129,6 +132,11 @@ def create_vllm_config(
         kv_load_failure_policy=kv_load_failure_policy,
     )
     attention_config = AttentionConfig(backend=attention_backend)
+    speculative_config = (
+        SpeculativeConfig(model="ngram", num_speculative_tokens=num_speculative_tokens)
+        if num_speculative_tokens is not None
+        else None
+    )
     return VllmConfig(
         scheduler_config=scheduler_config,
         model_config=model_config,
@@ -136,13 +144,14 @@ def create_vllm_config(
         kv_transfer_config=kv_transfer_config,
         device_config=DeviceConfig("cpu"),
         attention_config=attention_config,
+        speculative_config=speculative_config,
     )
 
 
 def create_scheduler(
     vllm_config: VllmConfig,
     num_blocks: int = 10000,
-) -> Scheduler:
+) -> Scheduler | AsyncScheduler:
     """Initialize Scheduler For Testing."""
     block_size = vllm_config.cache_config.block_size
     kv_cache_config = KVCacheConfig(
@@ -161,7 +170,10 @@ def create_scheduler(
         ],
     )
     vllm_config.cache_config.num_gpu_blocks = num_blocks
-    return Scheduler(
+    scheduler_cls = (
+        AsyncScheduler if vllm_config.scheduler_config.async_scheduling else Scheduler
+    )
+    return scheduler_cls(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         log_stats=True,
@@ -239,6 +251,7 @@ def create_model_runner_output(
     invalid_block_ids: set[int] | None = None,
     use_eos: bool = False,
     token_id: int = 0,
+    sampled_token_ids: list[list[int]] | None = None,
 ) -> ModelRunnerOutput:
     """Make dummy model runner output for testing."""
 
@@ -247,8 +260,12 @@ def create_model_runner_output(
     req_id_to_index = {req_id: idx for idx, req_id in enumerate(req_ids)}
 
     # Make sampled tokens.
-    sampled_token = EOS_TOKEN_ID if use_eos else token_id
-    sampled_token_ids = [[sampled_token] for _ in req_ids]
+    if sampled_token_ids is None:
+        sampled_token = EOS_TOKEN_ID if use_eos else token_id
+        sampled_token_ids = [[sampled_token] for _ in req_ids]
+    else:
+        assert not use_eos
+        assert len(sampled_token_ids) == len(req_ids)
 
     kv_connector_output = (
         None
