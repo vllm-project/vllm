@@ -1,0 +1,158 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from types import SimpleNamespace
+
+import torch
+
+from vllm.config.speculative import SpeculativeConfig
+from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
+
+
+def test_dspark_standard_rejection_uses_probabilistic_draft_sampling(monkeypatch):
+    draft_model_config = SimpleNamespace(
+        model="DeepSeek-V4-Flash-DSpark-hybrid",
+        architectures=["Qwen3DSparkModel"],
+        hf_config=SimpleNamespace(model_type="deepseek_v4"),
+        max_model_len=4096,
+        verify_with_parallel_config=lambda parallel_config: None,
+    )
+    target_model_config = SimpleNamespace(
+        model="deepseek-ai/DeepSeek-V4-Flash",
+        quantization=None,
+        tokenizer="deepseek-ai/DeepSeek-V4-Flash",
+        tokenizer_mode="deepseek_v4",
+        trust_remote_code=True,
+        allowed_local_media_path="",
+        allowed_media_domains=None,
+        dtype="auto",
+        seed=0,
+        tokenizer_revision=None,
+        hf_overrides={},
+        max_model_len=4096,
+        enforce_eager=False,
+        max_logprobs=20,
+        config_format="auto",
+    )
+    target_parallel_config = SimpleNamespace(
+        pipeline_parallel_size=1,
+        tensor_parallel_size=1,
+        distributed_executor_backend=None,
+        max_parallel_loading_workers=None,
+        disable_custom_all_reduce=False,
+        ray_workers_use_nsight=False,
+        placement_group=None,
+    )
+    monkeypatch.setattr(
+        "vllm.config.speculative.ModelConfig",
+        lambda **kwargs: draft_model_config,
+    )
+
+    speculative_config = SpeculativeConfig(
+        method="dspark",
+        num_speculative_tokens=5,
+        draft_sample_method="greedy",
+        rejection_sample_method="standard",
+        target_model_config=target_model_config,
+        target_parallel_config=target_parallel_config,
+    )
+
+    assert speculative_config.draft_sample_method == "probabilistic"
+
+
+def test_dspark_sequential_sampling_writes_persistent_draft_logits(monkeypatch):
+    num_reqs = 2
+    num_speculative_steps = 3
+    vocab_size = 4
+    max_num_reqs = 5
+    state_ids = torch.tensor([3, 1], dtype=torch.int32)
+
+    speculator = object.__new__(DSparkSpeculator)
+    speculator.num_speculative_steps = num_speculative_steps
+    speculator.sample_indices = torch.arange(num_reqs * num_speculative_steps)
+    speculator.sample_idx_mapping = state_ids.repeat_interleave(num_speculative_steps)
+    speculator.sample_pos = torch.arange(10, 10 + num_reqs * num_speculative_steps)
+    speculator.input_buffers = SimpleNamespace(
+        input_ids=torch.arange(max_num_reqs * num_speculative_steps)
+    )
+    speculator._anchor_idx = torch.tensor([0, num_speculative_steps])
+    speculator.temperature = torch.ones(max_num_reqs)
+    speculator.seeds = torch.arange(max_num_reqs, dtype=torch.int64)
+    speculator.use_fp64_gumbel = False
+    speculator._step_cols = torch.arange(num_speculative_steps, dtype=torch.int32)
+    speculator.draft_tokens = torch.empty(
+        max_num_reqs,
+        num_speculative_steps,
+        dtype=torch.int64,
+    )
+    speculator.draft_logits = torch.full(
+        (max_num_reqs, num_speculative_steps, vocab_size),
+        float("nan"),
+    )
+
+    class FakeModel:
+
+        def compute_logits(self, hidden_states):
+            return torch.arange(
+                hidden_states.shape[0] * vocab_size,
+                dtype=torch.float32,
+            ).view(hidden_states.shape[0], vocab_size)
+
+        def markov_embed(self, previous_tokens):
+            return previous_tokens.to(torch.float32).unsqueeze(-1)
+
+        def markov_bias(self, markov_embed):
+            return torch.ones(markov_embed.shape[0], vocab_size)
+
+    sampled_by_step: list[torch.Tensor] = []
+
+    def fake_gumbel_sample(
+        logits,
+        idx_mapping,
+        temperature,
+        seeds,
+        pos,
+        apply_temperature,
+        output_processed_logits=None,
+        output_processed_logits_col=None,
+        output_processed_logits_inplace=False,
+        use_fp64=False,
+    ):
+        assert output_processed_logits is speculator.draft_logits
+        assert output_processed_logits_col is not None
+        assert output_processed_logits_inplace is False
+        col = int(output_processed_logits_col.item())
+        output_processed_logits[idx_mapping.long(), col] = logits
+        sampled = idx_mapping.to(torch.int64) * 10 + col
+        sampled_by_step.append(sampled)
+        return sampled
+
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.spec_decode.dspark.speculator.gumbel_sample",
+        fake_gumbel_sample,
+    )
+    speculator.model = FakeModel()
+
+    DSparkSpeculator._sample_sequential(
+        speculator,
+        num_reqs,
+        torch.zeros(num_reqs * num_speculative_steps, 1),
+    )
+
+    for col in range(num_speculative_steps):
+        row_logits = torch.arange(
+            num_reqs * num_speculative_steps * vocab_size,
+            dtype=torch.float32,
+        ).view(num_reqs, num_speculative_steps, vocab_size)[:, col]
+        torch.testing.assert_close(
+            speculator.draft_logits[state_ids.long(), col],
+            row_logits + 1.0,
+        )
+        torch.testing.assert_close(
+            speculator.draft_tokens[:num_reqs, col],
+            sampled_by_step[col],
+        )
+
+    draft_logits = speculator.draft_logits
+    DSparkSpeculator.clear_runtime_draft_logits(speculator)
+    assert speculator.draft_logits is draft_logits

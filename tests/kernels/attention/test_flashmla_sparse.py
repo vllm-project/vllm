@@ -4,6 +4,47 @@ import pytest
 import torch
 
 
+def test_compute_global_topk_indices_and_lens_allows_inplace_output():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for the Triton sparse index kernel")
+
+    from vllm.models.deepseek_v4.common.ops import compute_global_topk_indices_and_lens
+
+    device = torch.device("cuda")
+    local_indices = torch.tensor(
+        [[0, 1, -1, 5], [2, -1, 3, 4]],
+        dtype=torch.int32,
+        device=device,
+    )
+    token_to_req_indices = torch.tensor([0, 1], dtype=torch.int32, device=device)
+    block_table = torch.tensor([[10, 11], [20, 21]], dtype=torch.int32, device=device)
+    is_valid_token = torch.tensor([True, True], dtype=torch.bool, device=device)
+
+    expected_indices, expected_lens = compute_global_topk_indices_and_lens(
+        local_indices.clone(),
+        token_to_req_indices,
+        block_table,
+        block_size=4,
+        is_valid_token=is_valid_token,
+    )
+
+    lens = torch.empty((local_indices.shape[0],), dtype=torch.int32, device=device)
+    actual_indices, actual_lens = compute_global_topk_indices_and_lens(
+        local_indices,
+        token_to_req_indices,
+        block_table,
+        block_size=4,
+        is_valid_token=is_valid_token,
+        global_topk_indices=local_indices,
+        topk_lens=lens,
+    )
+
+    assert actual_indices.data_ptr() == local_indices.data_ptr()
+    assert actual_lens.data_ptr() == lens.data_ptr()
+    torch.testing.assert_close(actual_indices.cpu(), expected_indices.cpu())
+    torch.testing.assert_close(actual_lens.cpu(), expected_lens.cpu())
+
+
 def test_sparse_flashmla_metadata_smoke():
     import vllm.v1.attention.ops.flashmla as fm
 

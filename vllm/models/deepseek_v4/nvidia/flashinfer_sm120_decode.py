@@ -410,21 +410,31 @@ class DeepseekV4FlashInferSM120DecodeAttention(DeepseekV4FlashMLAAttention):
                 topk_indices = global_indices.view(num_prefill_tokens, 1, -1)
             else:
                 assert attn_metadata.c128a_prefill_topk_indices is not None
-                # c128a_prefill_topk_indices are per-request-local compressed
-                # block positions (0..n-1, -1 padded) -- the same basis the
-                # decode path maps through the block table. The paged packed
-                # runner has no block table of its own, so convert to global
-                # KV-cache slots (+ lens) here, mirroring the C4 branch above.
-                # C128A is already per-request-local, so unlike C4 it needs no
-                # cu_base rebase.
-                global_indices, topk_lens = compute_global_topk_indices_and_lens(
-                    attn_metadata.c128a_prefill_topk_indices,
-                    swa_metadata.token_to_req_indices[num_decode_tokens:num_tokens],
-                    attn_metadata.block_table[:num_reqs],
-                    block_size,
-                    swa_metadata.is_valid_token[num_decode_tokens:num_tokens],
-                )
-                topk_indices = global_indices.view(num_prefill_tokens, 1, -1)
+                if attn_metadata.c128a_global_prefill_topk_indices is None:
+                    # c128a_prefill_topk_indices are per-request-local compressed
+                    # block positions (0..n-1, -1 padded). The packed runner has
+                    # no block table of its own, so the first C128A SM120 prefill
+                    # layer maps them to global KV-cache slots in-place. Later
+                    # layers reuse the same global view and avoid another 128 MiB
+                    # full-context temporary plus a repeated conversion launch.
+                    assert attn_metadata.c128a_prefill_topk_lens is not None
+                    global_indices, topk_lens = compute_global_topk_indices_and_lens(
+                        attn_metadata.c128a_prefill_topk_indices,
+                        swa_metadata.token_to_req_indices[num_decode_tokens:num_tokens],
+                        attn_metadata.block_table[:num_reqs],
+                        block_size,
+                        swa_metadata.is_valid_token[num_decode_tokens:num_tokens],
+                        global_topk_indices=attn_metadata.c128a_prefill_topk_indices,
+                        topk_lens=attn_metadata.c128a_prefill_topk_lens,
+                    )
+                    attn_metadata.c128a_global_prefill_topk_indices = (
+                        global_indices.view(num_prefill_tokens, 1, -1)
+                    )
+                    attn_metadata.c128a_prefill_topk_lens = topk_lens
+                topk_indices = attn_metadata.c128a_global_prefill_topk_indices
+                topk_lens = attn_metadata.c128a_prefill_topk_lens
+                assert topk_indices is not None
+                assert topk_lens is not None
             topk_indices = topk_indices.contiguous()
 
         # --- Launch the packed prefill kernel via the runner. num_tokens > 64

@@ -27,9 +27,12 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.logger import init_logger
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
+
+logger = init_logger(__name__)
 
 
 class DSparkSpeculator(DFlashSpeculator):
@@ -43,7 +46,12 @@ class DSparkSpeculator(DFlashSpeculator):
         draft_hidden = (
             vllm_config.speculative_config.draft_model_config.get_hidden_size()
         )
-        super().__init__(vllm_config, device, hidden_states_size=draft_hidden)
+        super().__init__(
+            vllm_config,
+            device,
+            hidden_states_size=draft_hidden,
+            allocate_hidden_states=False,
+        )
 
         # Whether to sample from the anchor position. When True, uses anchor-as-first
         # (N slots, each position predicts the next token). When False, uses 1+N
@@ -56,14 +64,27 @@ class DSparkSpeculator(DFlashSpeculator):
         else:
             self.num_query_per_req = 1 + self.num_speculative_steps
 
-        self._step_cols = torch.arange(
-            self.num_speculative_steps, dtype=torch.int32, device=device
-        )
-
         self._anchor_idx = (
             torch.arange(self.max_num_reqs, dtype=torch.int64, device=device)
             * self.num_query_per_req
         )
+
+        self._step_cols = torch.arange(
+            self.num_speculative_steps, dtype=torch.int32, device=device
+        )
+        if self.speculative_config.draft_sample_method == "probabilistic":
+            # DSpark draft generation is CUDA-graph replayed, so Python-side
+            # reassignment of self.draft_logits to an intermediate base_logits
+            # tensor would not run per replay. Keep a persistent graph-written
+            # buffer keyed by request-state index for probabilistic rejection.
+            self.draft_logits = torch.zeros(
+                self.max_num_reqs,
+                self.num_speculative_steps,
+                self.vocab_size,
+                dtype=torch.float32,
+                device=device,
+            )
+            logger.info("Using DSpark preallocated draft logits for rejection.")
 
     def load_draft_model(
         self,
@@ -71,6 +92,11 @@ class DSparkSpeculator(DFlashSpeculator):
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
         return load_dspark_model(target_model, self.vllm_config)
+
+    def clear_runtime_draft_logits(self) -> None:
+        # The persistent draft_logits buffer is graph-written every draft step.
+        # Do not clear it; rejection only reads rows selected by idx_map.
+        pass
 
     def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
         # Sequential Markov sampling over the backbone's output hidden states.
@@ -93,7 +119,11 @@ class DSparkSpeculator(DFlashSpeculator):
             # Sequential stage: Markov bias from the previously sampled token.
             markov_embed = self.model.markov_embed(prev)
             bias = self.model.markov_bias(markov_embed)
-            logits_i = base_logits[:, i] + bias
+            logits_i = base_logits[:, i]
+            if bias.dtype == logits_i.dtype:
+                logits_i.add_(bias)
+            else:
+                logits_i.copy_(logits_i + bias)
             if self.draft_logits is not None:
                 # sample_pos is the predicted token's position Q; the target
                 # verifies it with the predecessor's Gumbel key (Q-1). Pass Q-1.

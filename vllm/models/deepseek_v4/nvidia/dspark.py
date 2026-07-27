@@ -22,9 +22,9 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
-    hc_head_fused_kernel_tilelang,
     mhc_fused_post_pre_tilelang,
-    mhc_post_tilelang,
+    mhc_fused_post_pre_tilelang_reuse_residual,
+    mhc_post_hc_head_tilelang,
     mhc_pre_tilelang,
 )
 from vllm.model_executor.layers.fused_moe import (
@@ -627,7 +627,7 @@ class DeepSeekV4DSparkLayer(nn.Module):
                 norm_eps=attn_norm_eps,
             )
         else:
-            residual, post_mix, res_mix, x = mhc_fused_post_pre_tilelang(
+            residual, post_mix, res_mix, x = mhc_fused_post_pre_tilelang_reuse_residual(
                 x,
                 residual,
                 post_mix,
@@ -650,7 +650,7 @@ class DeepSeekV4DSparkLayer(nn.Module):
 
         ffn_norm_weight = self.ffn_norm.weight.data
         ffn_norm_eps = self.ffn_norm.variance_epsilon
-        residual, post_mix, res_mix, x = mhc_fused_post_pre_tilelang(
+        residual, post_mix, res_mix, x = mhc_fused_post_pre_tilelang_reuse_residual(
             x,
             residual,
             post_mix,
@@ -922,9 +922,11 @@ class DeepSeekV4DSpark(nn.Module):
                 res_mix,
                 residual,
             )
-        x = mhc_post_tilelang(x, residual, post_mix, res_mix)
-        x = hc_head_fused_kernel_tilelang(
+        x = mhc_post_hc_head_tilelang(
             x,
+            residual,
+            post_mix,
+            res_mix,
             self.hc_head_fn,
             self.hc_head_scale,
             self.hc_head_base,

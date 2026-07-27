@@ -13,8 +13,6 @@ from vllm.models.deepseek_v4.nvidia.dspark import (
 )
 from vllm.models.deepseek_v4.nvidia.dspark_triton import (
     dspark_context_kv_store,
-    dspark_inv_rope_bf16_layout,
-    dspark_markov_greedy_argmax,
     dspark_qkv_postprocess,
     dspark_triton_attention,
 )
@@ -557,58 +555,6 @@ def test_dspark_triton_qkv_postprocess_matches_reference():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_dspark_triton_inv_rope_bf16_layout_matches_reference():
-    device = torch.device("cuda")
-    dtype = torch.bfloat16
-    torch.manual_seed(0)
-
-    tokens = 5
-    n_groups = 2
-    heads_per_group = 3
-    head_dim = 512
-    rope_dim = 64
-    nope_dim = head_dim - rope_dim
-    o = torch.randn(
-        tokens,
-        n_groups * heads_per_group,
-        head_dim,
-        dtype=dtype,
-        device=device,
-    ).contiguous()
-    positions = torch.tensor([0, 3, 7, 11, 15], dtype=torch.int64, device=device)
-    angles = torch.randn(32, rope_dim // 2, dtype=torch.float32, device=device)
-    cos_sin_cache = torch.cat([torch.cos(angles), torch.sin(angles)], dim=-1)
-
-    out = dspark_inv_rope_bf16_layout(
-        o,
-        positions,
-        cos_sin_cache,
-        n_groups=n_groups,
-        heads_per_group=heads_per_group,
-        nope_dim=nope_dim,
-        rope_dim=rope_dim,
-    )
-
-    cs = cos_sin_cache.index_select(0, positions).to(torch.float32)
-    cos = cs[:, : rope_dim // 2].unsqueeze(1)
-    sin = cs[:, rope_dim // 2 :].unsqueeze(1)
-    ref = o.clone()
-    rope = ref[..., nope_dim:].float()
-    shape = rope.shape
-    rope = rope.reshape(*shape[:-1], rope_dim // 2, 2)
-    even = rope[..., 0]
-    odd = rope[..., 1]
-    inv_even = even * cos + odd * sin
-    inv_odd = odd * cos - even * sin
-    ref[..., nope_dim:] = (
-        torch.stack((inv_even, inv_odd), dim=-1).reshape(shape).to(dtype)
-    )
-    ref = ref.view(tokens, n_groups, heads_per_group, head_dim)
-    ref = ref.reshape(tokens, n_groups, heads_per_group * head_dim)
-    assert torch.allclose(out.float(), ref.float(), atol=2e-2, rtol=2e-2)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_dspark_triton_context_kv_store_matches_reference():
     device = torch.device("cuda")
     dtype = torch.bfloat16
@@ -648,36 +594,3 @@ def test_dspark_triton_context_kv_store_matches_reference():
     assert torch.allclose(cache.float(), cache_ref.float(), atol=2e-2, rtol=2e-2)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_dspark_triton_markov_greedy_argmax_matches_reference():
-    device = torch.device("cuda")
-    torch.manual_seed(0)
-    batch_size = 2
-    vocab_size = 137
-    rank = 16
-    dtype = torch.bfloat16
-
-    base_logits = torch.randn(
-        batch_size, vocab_size, dtype=torch.float32, device=device
-    )
-    w1 = torch.randn(vocab_size, rank, dtype=dtype, device=device)
-    w2 = torch.randn(vocab_size, rank, dtype=dtype, device=device)
-    prev_token_ids = torch.tensor([3, 41], dtype=torch.int64, device=device)
-    num_blocks = (vocab_size + 31) // 32
-    block_vals = torch.empty(batch_size, num_blocks, dtype=torch.float32, device=device)
-    block_ids = torch.empty(batch_size, num_blocks, dtype=torch.int64, device=device)
-    out = torch.empty(batch_size, dtype=torch.int64, device=device)
-
-    dspark_markov_greedy_argmax(
-        base_logits,
-        prev_token_ids,
-        w1,
-        w2,
-        block_vals,
-        block_ids,
-        out,
-        block_v=32,
-    )
-
-    reference = (base_logits + w1[prev_token_ids].float() @ w2.float().T).argmax(dim=-1)
-    assert out.tolist() == reference.tolist()

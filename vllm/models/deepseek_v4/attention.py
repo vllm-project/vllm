@@ -422,8 +422,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
         return scratch[:num_tokens]
 
+    def _qnorm_rope_can_write_inplace(self) -> bool:
+        return self.n_local_heads == self.padded_heads
+
     def reserve_profile_scratch(self) -> None:
         if self.kv_cache_torch_dtype != torch.uint8:
+            return
+        if self._qnorm_rope_can_write_inplace():
             return
         device = self.q_norm.weight.device
         if device.type not in ("cuda", "xpu"):
@@ -640,6 +645,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             # Profile run: kernel doesn't fire; produce a padded tensor so
             # downstream FlashMLA gets the right shape.
             if self.kv_cache_torch_dtype == torch.uint8:
+                if self._qnorm_rope_can_write_inplace():
+                    return q
                 return self._get_q_padded_scratch(q)
             if self.n_local_heads < self.padded_heads:
                 return F.pad(
@@ -669,7 +676,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             #            the padding head slots into a reusable q buffer.
             #   KV side: GPT-J RoPE + UE8M0 FP8 quant + paged cache insert.
             swa_kv_cache_2d = swa_kv_cache.view(swa_kv_cache.shape[0], -1)
-            q_out = self._get_q_padded_scratch(q)
+            if self._qnorm_rope_can_write_inplace():
+                q_out = q
+            else:
+                q_out = self._get_q_padded_scratch(q)
             torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
                 q,
                 kv,

@@ -94,6 +94,8 @@ def gumbel_block_argmax(
     processed_logits_ptr,
     processed_logits_stride,
     processed_logits_col_ptr,
+    inplace_processed_logits_ptr,
+    inplace_processed_logits_stride,
     vocab_size,
     APPLY_TEMPERATURE: tl.constexpr,
     USE_FP64: tl.constexpr,
@@ -123,6 +125,15 @@ def gumbel_block_argmax(
             processed_logits_ptr
             + req_state_idx * processed_logits_stride
             + col * vocab_size
+            + block,
+            logits,
+            mask=mask & is_valid_req,
+        )
+
+    if inplace_processed_logits_ptr is not None:
+        tl.store(
+            inplace_processed_logits_ptr
+            + token_idx * inplace_processed_logits_stride
             + block,
             logits,
             mask=mask & is_valid_req,
@@ -167,6 +178,8 @@ def _gumbel_sample_kernel(
     processed_logits_ptr,
     processed_logits_stride,
     processed_logits_col_ptr,
+    inplace_processed_logits_ptr,
+    inplace_processed_logits_stride,
     logits_ptr,
     logits_stride,
     expanded_idx_mapping_ptr,
@@ -202,6 +215,8 @@ def _gumbel_sample_kernel(
         processed_logits_ptr,
         processed_logits_stride,
         processed_logits_col_ptr,
+        inplace_processed_logits_ptr,
+        inplace_processed_logits_stride,
         vocab_size,
         APPLY_TEMPERATURE=APPLY_TEMPERATURE,
         USE_FP64=USE_FP64,
@@ -221,6 +236,7 @@ def gumbel_sample(
     apply_temperature: bool,
     output_processed_logits: torch.Tensor | None = None,
     output_processed_logits_col: torch.Tensor | None = None,
+    output_processed_logits_inplace: bool = False,
     use_fp64: bool = False,
 ) -> torch.Tensor:
     # Enforce contiguity on non-strided input tensors
@@ -246,6 +262,8 @@ def gumbel_sample(
         output_processed_logits,
         output_processed_logits.stride(0) if output_processed_logits is not None else 0,
         output_processed_logits_col,
+        logits if output_processed_logits_inplace else None,
+        logits.stride(0) if output_processed_logits_inplace else 0,
         logits,
         logits.stride(0),
         expanded_idx_mapping,

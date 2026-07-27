@@ -23,6 +23,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
     hc_head_fused_kernel_tilelang,
     mhc_fused_post_pre_tilelang,
+    mhc_fused_post_pre_tilelang_reuse_residual,
+    mhc_post_hc_head_tilelang,
+    mhc_post_mean_tilelang,
+    mhc_post_mean_hc_head_tilelang,
     mhc_post_tilelang,
     mhc_pre_broadcast_tilelang,
     mhc_pre_tilelang,
@@ -948,6 +952,15 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     return DeepseekV4FlashMLAAttention
 
 
+def _needs_mtp_target_hidden_buffer(vllm_config: VllmConfig) -> bool:
+    spec_config = vllm_config.speculative_config
+    if spec_config is None or spec_config.method != "mtp":
+        return False
+    draft_config = spec_config.draft_model_config
+    hf_config = getattr(draft_config, "hf_config", None)
+    return hasattr(hf_config, "compress_ratios") and hasattr(hf_config, "hc_mult")
+
+
 class DeepseekV4DecoderLayer(nn.Module):
     def __init__(
         self,
@@ -1067,7 +1080,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                     norm_eps=attn_norm_eps,
                 )
         else:
-            residual, post_mix, res_mix, x = mhc_fused_post_pre_tilelang(
+            residual, post_mix, res_mix, x = mhc_fused_post_pre_tilelang_reuse_residual(
                 x,
                 residual,
                 post_mix,
@@ -1091,7 +1104,7 @@ class DeepseekV4DecoderLayer(nn.Module):
 
         ffn_norm_weight = self.ffn_norm.weight.data
         ffn_norm_eps = self.ffn_norm.variance_epsilon
-        residual, post_mix, res_mix, x = mhc_fused_post_pre_tilelang(
+        residual, post_mix, res_mix, x = mhc_fused_post_pre_tilelang_reuse_residual(
             x,
             residual,
             post_mix,
@@ -1198,11 +1211,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         )
         # Pre-hc_head residual stream buffer for the MTP draft. Stable
         # address (outside the cudagraph pool) so the copy_ in forward()
-        # refreshes it correctly across captured shapes.
-        # refreshes it correctly across captured shapes. Only allocated on
-        # the last PP rank — that's where MTP target hidden states are
-        # produced.
-        if get_pp_group().is_last_rank:
+        # refreshes it correctly across captured shapes. Only allocate it
+        # when an MTP drafter can consume it; DSpark/DFlash use aux hidden
+        # states instead.
+        if get_pp_group().is_last_rank and _needs_mtp_target_hidden_buffer(
+            vllm_config
+        ):
             self._mtp_hidden_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 self.hc_dim,
@@ -1257,10 +1271,14 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         residual, post_mix, res_mix = None, None, None
         aux_hidden_states: list[torch.Tensor] = []
         final_aux_recon: torch.Tensor | None = None  # avoid duplicate mhc_post call
+        final_aux_mean_pending = False
+        is_last_rank = get_pp_group().is_last_rank
+        ran_decoder_layer = False
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
+            ran_decoder_layer = True
             hidden_states, residual, post_mix, res_mix = layer(
                 hidden_states,
                 positions,
@@ -1270,36 +1288,92 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 residual,
             )
             if idx + 1 in self.aux_hidden_state_layers:
-                # Reconstruct the aux hidden state for draft models
-                aux_recon = mhc_post_tilelang(
-                    hidden_states, residual, post_mix, res_mix
-                )
-                aux_hidden_states.append(aux_recon.mean(dim=1))
-                final_aux_recon = aux_recon
-        if layer is not None:
+                if (
+                    idx + 1 == self.end_layer
+                    and is_last_rank
+                    and self._mtp_hidden_buffer is None
+                ):
+                    final_aux_mean_pending = True
+                    final_aux_recon = None
+                elif idx + 1 == self.end_layer:
+                    # The final local layer may need the full post tensor for
+                    # PP handoff or the MTP target hidden buffer.
+                    aux_recon = mhc_post_tilelang(
+                        hidden_states, residual, post_mix, res_mix
+                    )
+                    aux_hidden_states.append(aux_recon.mean(dim=1))
+                    final_aux_recon = aux_recon
+                else:
+                    aux_hidden_states.append(
+                        mhc_post_mean_tilelang(
+                            hidden_states,
+                            residual,
+                            post_mix,
+                            res_mix,
+                        )
+                    )
+                    final_aux_recon = None
+
+        final_post_materialized = not ran_decoder_layer
+        if ran_decoder_layer:
             # Reuse if the last layer was captured as an aux hidden state
-            if self.end_layer in self.aux_hidden_state_layers:
+            if final_aux_mean_pending:
+                pass
+            elif self.end_layer in self.aux_hidden_state_layers:
                 hidden_states = final_aux_recon
-            else:
+                final_post_materialized = True
+            elif (
+                not is_last_rank
+                or self._mtp_hidden_buffer is not None
+            ):
                 hidden_states = mhc_post_tilelang(
                     hidden_states, residual, post_mix, res_mix
                 )
+                final_post_materialized = True
 
-        if not get_pp_group().is_last_rank:
+        if not is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
 
-        # Stash pre-hc_head residual for the MTP draft (captured copy_).
-        num_tokens = hidden_states.shape[0]
-        self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
+        if self._mtp_hidden_buffer is not None:
+            assert final_post_materialized
+            # Stash pre-hc_head residual for the MTP draft (captured copy_).
+            num_tokens = hidden_states.shape[0]
+            self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
-        hidden_states = hc_head_fused_kernel_tilelang(
-            hidden_states,
-            self.hc_head_fn,
-            self.hc_head_scale,
-            self.hc_head_base,
-            self.rms_norm_eps,
-            self.hc_eps,
-        )
+        if final_aux_mean_pending:
+            hidden_states, aux_mean = mhc_post_mean_hc_head_tilelang(
+                hidden_states,
+                residual,
+                post_mix,
+                res_mix,
+                self.hc_head_fn,
+                self.hc_head_scale,
+                self.hc_head_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+            )
+            aux_hidden_states.append(aux_mean)
+        elif ran_decoder_layer and not final_post_materialized:
+            hidden_states = mhc_post_hc_head_tilelang(
+                hidden_states,
+                residual,
+                post_mix,
+                res_mix,
+                self.hc_head_fn,
+                self.hc_head_scale,
+                self.hc_head_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+            )
+        else:
+            hidden_states = hc_head_fused_kernel_tilelang(
+                hidden_states,
+                self.hc_head_fn,
+                self.hc_head_scale,
+                self.hc_head_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+            )
         hidden_states = self.norm(hidden_states)
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states

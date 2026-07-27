@@ -129,6 +129,10 @@ class DeepseekV4FlashMLAMetadata(AttentionMetadata):
     c128a_decode_topk_lens: torch.Tensor | None = None
     # Prefill: local topk indices (used by combine_topk_swa_indices).
     c128a_prefill_topk_indices: torch.Tensor | None = None
+    # SM120 packed prefill lazily maps local C128A indices to global slot ids
+    # once per step and reuses them across layers.
+    c128a_global_prefill_topk_indices: torch.Tensor | None = None
+    c128a_prefill_topk_lens: torch.Tensor | None = None
 
 
 class DeepseekV4FlashMLAMetadataBuilder(
@@ -180,18 +184,17 @@ class DeepseekV4FlashMLAMetadataBuilder(
             # into adjacent rows (present in both decode and prefill branches of
             # _build_c128a_topk_metadata_kernel).
             self.c128a_max_compressed = c128a_max_compressed
-            self.c128a_global_decode_buffer = torch.empty(
+            # Decode rows and prefill rows partition the same per-step token
+            # batch, so a single backing matrix is enough. Decode writes the
+            # leading num_decode_tokens rows and prefill writes the following
+            # num_prefill_tokens rows.
+            self.c128a_topk_buffer = torch.empty(
                 (max_num_batched_tokens, c128a_max_compressed),
                 dtype=torch.int32,
                 device=device,
             )
             self.c128a_decode_lens_buffer = torch.empty(
                 max_num_batched_tokens, dtype=torch.int32, device=device
-            )
-            self.c128a_prefill_buffer = torch.empty(
-                (max_num_batched_tokens, c128a_max_compressed),
-                dtype=torch.int32,
-                device=device,
             )
 
     def build(
@@ -235,6 +238,7 @@ class DeepseekV4FlashMLAMetadataBuilder(
             ),
             c128a_decode_topk_lens=c128a_fields.get("c128a_decode_topk_lens"),
             c128a_prefill_topk_indices=c128a_fields.get("c128a_prefill_topk_indices"),
+            c128a_prefill_topk_lens=c128a_fields.get("c128a_prefill_topk_lens"),
         )
 
     def _build_c128a_metadata(
@@ -270,9 +274,8 @@ class DeepseekV4FlashMLAMetadataBuilder(
             cm.block_table_tensor[:num_decodes],
             block_size,
             cm.slot_mapping,
-            self.c128a_global_decode_buffer,
+            self.c128a_topk_buffer,
             self.c128a_decode_lens_buffer,
-            self.c128a_prefill_buffer,
             max_compressed_tokens=self.c128a_max_compressed,
             max_seq_len=cm.max_seq_len,
         )
@@ -285,6 +288,9 @@ class DeepseekV4FlashMLAMetadataBuilder(
             result["c128a_decode_topk_lens"] = decode_lens
         if num_prefill_tokens > 0:
             result["c128a_prefill_topk_indices"] = prefill_local
+            result["c128a_prefill_topk_lens"] = self.c128a_decode_lens_buffer[
+                num_decode_tokens:num_total
+            ]
         return result
 
 
@@ -296,9 +302,8 @@ def build_c128a_topk_metadata(
     block_table: torch.Tensor,
     block_size: int,
     slot_mapping: torch.Tensor,
-    global_decode_buffer: torch.Tensor,
+    topk_buffer: torch.Tensor,
     decode_lens_buffer: torch.Tensor,
-    prefill_buffer: torch.Tensor,
     max_compressed_tokens: int = 8192,
     max_seq_len: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -312,9 +317,10 @@ def build_c128a_topk_metadata(
     """
     num_tokens = positions.shape[0]
     num_prefill_tokens = num_tokens - num_decode_tokens
+    prefill_buffer = topk_buffer[num_decode_tokens:num_tokens]
 
     if num_tokens == 0:
-        global_decode = global_decode_buffer[:num_decode_tokens, :0]
+        global_decode = topk_buffer[:num_decode_tokens, :0]
         decode_lens = decode_lens_buffer[:num_decode_tokens]
         prefill_local = prefill_buffer[:num_prefill_tokens, :0]
         return global_decode, decode_lens, prefill_local
@@ -339,7 +345,7 @@ def build_c128a_topk_metadata(
         alignment=_C128A_TOPK_ALIGNMENT,
     )
 
-    global_decode = global_decode_buffer[:num_decode_tokens, :effective_topk]
+    global_decode = topk_buffer[:num_decode_tokens, :effective_topk]
     decode_lens = decode_lens_buffer[:num_decode_tokens]
     prefill_local = prefill_buffer[:num_prefill_tokens, :effective_topk]
 
@@ -353,8 +359,8 @@ def build_c128a_topk_metadata(
         return global_decode, decode_lens, prefill_local
 
     _build_c128a_topk_metadata_kernel[(num_tokens,)](
-        global_decode_buffer,
-        global_decode_buffer.stride(0),
+        topk_buffer,
+        topk_buffer.stride(0),
         decode_lens_buffer,
         prefill_buffer,
         prefill_buffer.stride(0),
