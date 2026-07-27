@@ -340,12 +340,17 @@ fn fence_json_opt_event(input: &mut XlamInput<'_>) -> ModalResult<XlamEvent> {
 
 /// Inside the JSON array: parse one tool-call header.
 fn header_event(input: &mut XlamInput<'_>) -> ModalResult<XlamEvent> {
-    match tool_call_header_event(input, XLAM_CONFIG)? {
-        JsonToolCallEvent::ToolCallHeader { function_name } => {
-            Ok(XlamEvent::ToolCallHeader { function_name })
-        }
-        _ => unreachable!("tool_call_header_event only emits ToolCallHeader"),
-    }
+    alt((
+        // Allow empty array or trailing comma by checking for `]` first.
+        seq!(_: ws0, _: literal("]")).value(XlamEvent::ArrayEnd),
+        |input: &mut XlamInput<'_>| match tool_call_header_event(input, XLAM_CONFIG)? {
+            JsonToolCallEvent::ToolCallHeader { function_name } => {
+                Ok(XlamEvent::ToolCallHeader { function_name })
+            }
+            _ => unreachable!("tool_call_header_event only emits ToolCallHeader"),
+        },
+    ))
+    .parse_next(input)
 }
 
 /// Inside the arguments object: stream bytes until `{...}` closes.
@@ -378,19 +383,14 @@ fn after_array_event(input: &mut XlamInput<'_>) -> ModalResult<XlamEvent> {
     alt((
         seq!(_: ws0, _: literal(TOOL_CALL_CLOSE)).value(XlamEvent::ClosingTagDropped),
         seq!(_: ws0, _: literal(FENCE_TAG)).value(XlamEvent::ClosingTagDropped),
-        // If neither is found, but we see safe text, just transition to Done and output it.
-        // Wait, if it doesn't match a closing tag, we just transition to Done immediately.
+        // If neither is found, but we see safe text before a possible marker, emit it.
         |input: &mut XlamInput<'_>| {
-            // We need to wait for a possible closing tag.
-            // If the buffer doesn't start with whitespace, `</`, or ```, it's not a tag.
-            // Let's use safe_text_len_mul.
             let markers = &[TOOL_CALL_CLOSE, FENCE_TAG];
-            if let Ok(_len) = safe_text_len_mul(input, markers) {
-                // If there is text before a marker, emit it and go to Done.
-                return Ok(XlamEvent::ClosingTagDropped); // just reuse the event to go to Done
+            if let Ok(len) = safe_text_len_mul(input, markers) {
+                return Ok(XlamEvent::Text { len });
             }
             // If we are stuck waiting for a marker but it's not completing,
-            // we'll just hang in AfterArray until Done flushes it.
+            // we'll hang in AfterArray until Done flushes it.
             crate::tool::utils::incomplete()
         },
     ))
