@@ -17,14 +17,26 @@ import pytest
 
 from tests.parser.engine.conftest import make_mock_tokenizer
 from tests.parser.engine.trace_builder import build_samples
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
+)
+from vllm.parser import llama_json
+from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine_config import ParserState
 from vllm.parser.llama_json import (
     LlamaJsonParser,
     _args_value_span,
+    _closeable_prefix,
     _envelope_name,
     _llama_arg_converter,
+    _scan_json_value,
+    _splice_types,
     _top_level_name,
+    _ValueScan,
 )
+from vllm.parser.parser_manager import ParserManager
+from vllm.tool_parsers.llama_tool_parser import Llama3JsonToolParser
 
 PYTHON_TAG = "<|python_tag|>"
 
@@ -184,21 +196,16 @@ class TestSpanHelpers:
         assert _top_level_name('{"name": "f') is None
 
     def test_envelope_classification(self):
-        # A call needs an args key next to "name" (legacy KeyError'd
-        # otherwise); {"name": ...} alone counts only once closed.
-        call = '{"name": "f", "parameters": {"x": 1}}'
-        assert _envelope_name(call, closed=False) == "f"
-        assert _envelope_name('{"name": "f"}', closed=True) == "f"
-        assert _envelope_name('{"name": "f"}', closed=False) is None
+        # A call needs an args key next to "name": legacy KeyError'd on
+        # the bare {"name": ...} form and fell back to content.
+        assert _envelope_name('{"name": "f", "parameters": {"x": 1}}') == "f"
+        assert _envelope_name('{"name": "f"}') is None
+        assert _envelope_name('{"name": "f"') is None
         # Prose JSON with a "name" field is not a call (user-data shape).
-        prose = '{"name": "John", "age": 30, "city": "New York"}'
-        assert _envelope_name(prose, closed=True) is None
-        assert _envelope_name('{"name": "f", "id": 1}', closed=True) is None
+        assert _envelope_name('{"name": "John", "age": 30, "city": "NY"}') is None
+        assert _envelope_name('{"name": "f", "id": 1}') is None
         # Extra keys are fine once an args key is present (legacy accepted).
-        assert (
-            _envelope_name('{"id": 1, "name": "f", "parameters": {}}', closed=True)
-            == "f"
-        )
+        assert _envelope_name('{"id": 1, "name": "f", "parameters": {}}') == "f"
 
     def test_top_level_name_escapes(self):
         # An escaped quote must not terminate the span, and completed
@@ -206,6 +213,135 @@ class TestSpanHelpers:
         assert _top_level_name('{"name": "a\\"') is None
         assert _top_level_name('{"name": "a\\"b"}') == 'a"b'
         assert _top_level_name('{"name": "tool\\u00e9"}') == "toolé"
+
+    def test_escaped_key_names_recognized(self):
+        # Keys with JSON escapes must match after decoding, as legacy's
+        # json.loads did (llama_json.py _decode_key).
+        assert _envelope_name('{"na\\u006de": "f", "parameters": {}}') == "f"
+        esc_args = '{"name": "f", "arg\\u0075ments": {"x": 1}}'
+        assert _args_value_span(esc_args) == '{"x": 1}'
+
+    @pytest.mark.parametrize(
+        ("span", "completed"),
+        [
+            ('{"x": 1}', '{"x": 1}'),
+            ('{"x": "lo', '{"x": "lo"}'),
+            ('{"x": "lo\\', '{"x": "lo"}'),
+            ('{"a": 1, "b": ', '{"a": 1}'),
+            ('{"a": 1, "b": tr', '{"a": 1}'),
+            ('{"a": [1, {"b": "c', '{"a": [1, {"b": "c"}]}'),
+            ('["a", ', '["a"]'),
+            ("{invalid json}", "{}"),
+            ("{", "{}"),
+            ('"str', '"str"'),
+            ("42", "42"),
+            ("null", "null"),
+        ],
+    )
+    def test_incomplete_spans_completed_to_valid_json(self, span, completed):
+        # Truncated/malformed argument spans are cut back to their last
+        # completable point and closed by appending only, so the final
+        # arguments always parse and never retract streamed text.
+        end, closers = _closeable_prefix(span)
+        assert span[:end] + closers == completed
+        json.loads(completed)
+        raw = f'{{"name": "f", "parameters": {span}'
+        assert _llama_arg_converter(raw, False) == completed
+        assert completed.startswith(_llama_arg_converter(raw, True))
+
+    @pytest.mark.parametrize(
+        ("span", "completed"),
+        [
+            ('{"x": 0}', '{"x": 0}'),
+            ('{"x": -0}', '{"x": -0}'),
+            ('{"x": 1.5}', '{"x": 1.5}'),
+            ('{"x": 1e5}', '{"x": 1e5}'),
+            ('{"x": 1E+5}', '{"x": 1E+5}'),
+            ('{"x": 1.5e-3}', '{"x": 1.5e-3}'),
+            ('{"x": 0.}', '{"x": 0}'),
+            ('{"x": 0.e1}', '{"x": 0}'),
+            ('{"x": 1.e+2}', '{"x": 1}'),
+            ('{"x": 1.e-2}', '{"x": 1}'),
+            ('{"x": 1e}', '{"x": 1}'),
+            ('{"x": 1e+}', '{"x": 1}'),
+            ('{"x": 01}', '{"x": 0}'),
+            ('{"x": -}', "{}"),
+            ('{"x": .5}', "{}"),
+            ('{"x": +1}', "{}"),
+            ('{"x": "a\nb"}', '{"x": "a"}'),
+            ('{"x": "a\rb"}', '{"x": "a"}'),
+            ('{"x": "a\tb"}', '{"x": "a"}'),
+            ('{"x": "a\x00b"}', '{"x": "a"}'),
+            ('{"x": "a\\nb"}', '{"x": "a\\nb"}'),
+            ('{"o": {"x": "a\nb"}, "y": 2}', '{"o": {"x": "a"}}'),
+            ('{"l": ["a\nb", "c"]}', '{"l": ["a"]}'),
+            ('{"a": 1, "k\ny": 2}', '{"a": 1}'),
+        ],
+    )
+    def test_invalid_tokens_cut_back_to_valid_json(self, span, completed):
+        # A number that never becomes valid (no digits after the point,
+        # a leading zero) and a raw control character inside a string are
+        # lexical errors *inside* a token; they are cut back like a
+        # truncation so the reported arguments still parse.
+        end, closers = _closeable_prefix(span)
+        assert span[:end] + closers == completed
+        json.loads(completed)
+        raw = f'{{"name": "f", "parameters": {span}'
+        assert _llama_arg_converter(raw, False) == completed
+
+    def test_closeable_prefix_is_monotonic(self):
+        # Prefix-stability of the streamed text depends on the cut point
+        # never moving backwards as more of the value arrives.
+        span = '{"a": [1, 2.5e3, {"b": "c\\"d"}], "e": true, "f": null}'
+        prev = 0
+        for i in range(len(span) + 1):
+            end, closers = _closeable_prefix(span[:i])
+            assert end >= prev
+            if end:
+                json.loads(span[:end] + closers)
+            prev = end
+
+
+class TestArgCoalescing:
+    """Guards the O(n^2) fix: the engine emits ~one arg event per char, so
+    the arg-rescan must run once per feed, not once per char."""
+
+    def _arg(self, value, idx=0):
+        return SemanticEvent(EventType.ARG_VALUE_CHUNK, value, idx)
+
+    def test_consecutive_same_index_merged(self):
+        events = [self._arg(c) for c in '{"x": 1}']
+        out = LlamaJsonParser._coalesce_arg_events(events)
+        assert len(out) == 1
+        assert out[0].type == EventType.ARG_VALUE_CHUNK
+        assert out[0].value == '{"x": 1}'
+        assert out[0].tool_index == 0
+
+    def test_boundary_events_break_runs(self):
+        events = [
+            SemanticEvent(EventType.TOOL_CALL_START, "{", 0),
+            self._arg("a", 0),
+            self._arg("b", 0),
+            SemanticEvent(EventType.TOOL_CALL_END, "", 0),
+            SemanticEvent(EventType.TOOL_CALL_START, "{", 1),
+            self._arg("c", 1),
+            self._arg("d", 1),
+            SemanticEvent(EventType.TOOL_CALL_END, "", 1),
+        ]
+        out = LlamaJsonParser._coalesce_arg_events(events)
+        assert [(e.type, e.value, e.tool_index) for e in out] == [
+            (EventType.TOOL_CALL_START, "{", 0),
+            (EventType.ARG_VALUE_CHUNK, "ab", 0),
+            (EventType.TOOL_CALL_END, "", 0),
+            (EventType.TOOL_CALL_START, "{", 1),
+            (EventType.ARG_VALUE_CHUNK, "cd", 1),
+            (EventType.TOOL_CALL_END, "", 1),
+        ]
+
+    def test_different_index_not_merged(self):
+        events = [self._arg("a", 0), self._arg("b", 1)]
+        out = LlamaJsonParser._coalesce_arg_events(events)
+        assert [(e.value, e.tool_index) for e in out] == [("a", 0), ("b", 1)]
 
 
 class TestNonStreaming:
@@ -335,12 +471,20 @@ class TestNonStreaming:
         assert result.tool_calls[0].function.arguments == '{"b": 2}'
         assert result.content == 'Config {"parameters": {"a": 1}} used:'
 
-    def test_name_only_call_empty_args(self, parser, mock_request):
-        # Deliberate change vs legacy (KeyError fallback to content).
-        result = parser.extract_tool_calls_from_content('{"name": "f"}', mock_request)
-        assert result.tools_called is True
-        assert result.tool_calls[0].function.name == "f"
-        assert result.tool_calls[0].function.arguments == "{}"
+    @pytest.mark.parametrize(
+        "text",
+        ['{"name": "f"}', '{"name": "f"', '{"name": "Alice"}'],
+        ids=["closed", "truncated", "person-shaped"],
+    )
+    def test_name_only_envelope_is_content(self, parser, mock_request, text):
+        # An envelope with no parameters/arguments key is not a call:
+        # legacy KeyError'd and fell back to content, and a name-only
+        # object is far more often prose than a call.  Nothing has been
+        # streamed for it at that point, so the fallback is safe.
+        result = parser.extract_tool_calls_from_content(text, mock_request)
+        assert result.tools_called is False
+        assert result.tool_calls == []
+        assert result.content == text
 
     def test_nested_json_quotes_brackets_escapes(self, parser, mock_request):
         text = (
@@ -392,12 +536,31 @@ class TestNonStreaming:
         assert result.tools_called is True
         assert result.tool_calls[0].function.arguments == expected_args
 
-    def test_truncated_args_partial_span(self, parser, mock_request):
-        text = '{"name": "f", "parameters": {"x": "lo'
+    @pytest.mark.parametrize(
+        ("text", "expected_args"),
+        [
+            ('{"name": "f", "parameters": {"x": "lo', '{"x": "lo"}'),
+            ('{"name": "f", "parameters": {"a": 1, "b": ', '{"a": 1}'),
+            ('{"name": "f", "parameters": ["a", ', '["a"]'),
+            ('{"name": "f", "parameters":', "{}"),
+            ('{"name": "f", "parameters": {invalid json}}', "{}"),
+        ],
+        ids=["open-string", "dangling-key", "open-array", "no-value", "malformed"],
+    )
+    def test_incomplete_args_completed_to_valid_json(
+        self, parser, mock_request, text, expected_args
+    ):
+        # The name is streamed as soon as the args key is seen and cannot
+        # be retracted, so the call stands — but its arguments must still
+        # be parseable JSON.  This is a deliberate deviation from legacy
+        # non-streaming, which failed closed to content when raw_decode
+        # rejected the envelope; it matches the other engine parsers and
+        # is pending maintainer sign-off (see the re-review response).
         result = parser.extract_tool_calls_from_content(text, mock_request)
         assert result.tools_called is True
         assert result.tool_calls[0].function.name == "f"
-        assert result.tool_calls[0].function.arguments == '{"x": "lo'
+        assert result.tool_calls[0].function.arguments == expected_args
+        json.loads(result.tool_calls[0].function.arguments)
 
     def test_via_registered_tool_parser_adapter(self, mock_tokenizer, mock_request):
         from vllm.tool_parsers import ToolParserManager
@@ -555,12 +718,75 @@ class TestStreaming:
 
     def test_truncated_json_flushed_at_finish(self, parser, mock_request):
         # Legacy lost parsed-but-unstreamed args when generation stopped.
+        # The already-streamed '{"x": "lo' is completed by appending.
         text = '{"name": "f", "parameters": {"x": "lo'
         results = _stream(parser, mock_request, text, chunk_size=5)
         content, calls = _accumulate(results)
         assert content == ""
         assert calls[0]["name"] == "f"
-        assert calls[0]["args"] == '{"x": "lo'
+        assert calls[0]["args"] == '{"x": "lo"}'
+
+    @pytest.mark.parametrize("chunk_size", [1, 4])
+    def test_every_truncation_offset_parity_and_valid_args(
+        self, mock_tokenizer, mock_request, chunk_size
+    ):
+        # Generation can stop at any byte.  At every cut, streaming must
+        # still agree with non-streaming and any reported call must carry
+        # parseable arguments.
+        full = '{"name": "get_weather", "parameters": {"city": "SF", "n": 3}}'
+        for i in range(len(full) + 1):
+            text = full[:i]
+            reference = LlamaJsonParser(mock_tokenizer).extract_tool_calls_from_content(
+                text, mock_request
+            )
+            parser = LlamaJsonParser(mock_tokenizer)
+            content, calls = _accumulate(
+                _stream(parser, mock_request, text, chunk_size)
+            )
+            assert content.rstrip() == (reference.content or "").rstrip(), text
+            assert [(c["name"], c["args"]) for c in calls] == [
+                (tc.function.name, tc.function.arguments) for tc in reference.tool_calls
+            ], text
+            for call in calls:
+                json.loads(call["args"])
+
+    @pytest.mark.parametrize("chunk_size", [1, 2, 3, 7, 100])
+    def test_invalid_token_repair_parity_and_valid_args(
+        self, mock_tokenizer, mock_request, chunk_size
+    ):
+        # Malformed numbers and raw control characters are repaired by
+        # cutting the value back, which must happen identically in both
+        # modes and at every feed size.
+        bodies = [
+            '{"x": 1.5e-3}',
+            '{"x": 0.e1}',
+            '{"x": 1.e+2}',
+            '{"x": 1.e-2}',
+            '{"x": 0.}',
+            '{"x": 1e}',
+            '{"x": 01}',
+            '{"x": .5}',
+            '{"x": +1}',
+            '{"x": -}',
+            '{"x": "a\nb"}',
+            '{"x": "a\rb"}',
+            '{"x": "a\tb"}',
+            '{"x": "a\x00b"}',
+            '{"o": {"x": "a\nb"}, "y": 2}',
+            '{"l": ["a\nb", "c"]}',
+        ]
+        for body in bodies:
+            text = '{"name": "f", "parameters": ' + body + "}"
+            reference = LlamaJsonParser(mock_tokenizer).extract_tool_calls_from_content(
+                text, mock_request
+            )
+            parser = LlamaJsonParser(mock_tokenizer)
+            _, calls = _accumulate(_stream(parser, mock_request, text, chunk_size))
+            assert [(c["name"], c["args"]) for c in calls] == [
+                (tc.function.name, tc.function.arguments) for tc in reference.tool_calls
+            ], body
+            for call in calls:
+                json.loads(call["args"])
 
     def test_streaming_matches_non_streaming_case_table(
         self, mock_tokenizer, mock_request
@@ -588,6 +814,10 @@ class TestStreaming:
             '{"parameters": {"name": "inner"}, "name": "outer"}',
             'Example: {"name": "John", "age": 30} then {"name": "f", "parameters": {}}',
             '{"name": "f", "id": 1}',
+            '{"name": "f", "parameters": {invalid json}}',
+            '{"name": "f", "parameters": {"x": "lo',
+            '{"name": "f", "parameters": {"a": 1, "b": ',
+            '{"name": "f"}{"name": "g", "parameters": {"a": 1}}',
         ]
         for text in cases:
             reference = LlamaJsonParser(mock_tokenizer).extract_tool_calls_from_content(
@@ -678,3 +908,181 @@ class TestTraceBuilderSamples:
     def test_samples_self_validate(self):
         samples = build_samples("llama_json")
         assert samples
+
+
+_STR = {"type": "string"}
+_INT = {"type": "integer"}
+
+
+class TestSchemaCoercionStreamingParity:
+    """Schema coercion must not truncate streamed arguments.
+
+    The engine streams the model's verbatim argument text and only coerces
+    at flush, re-serialising the whole object; the corrected value then
+    stopped being an extension of what had already been streamed, the
+    append-only guard dropped it, and the client was left with invalid JSON
+    such as ``{"a":"foo","x":``.
+    """
+
+    @staticmethod
+    def _tools(properties):
+        return [
+            ChatCompletionToolsParam(
+                type="function",
+                function={
+                    "name": "f",
+                    "parameters": {"type": "object", "properties": properties},
+                },
+            )
+        ]
+
+    @pytest.mark.parametrize("chunk_size", [1, 2, 3, 4, 7, 17, 100])
+    @pytest.mark.parametrize(
+        ("properties", "body"),
+        [
+            ({"a": _STR, "x": _INT}, '{"a":"foo","x":"1"}'),
+            ({"x": _INT, "a": _STR}, '{"x":"1","a":"foo"}'),
+            ({"x": _INT, "y": _INT}, '{"x": "1", "y": "2"}'),
+            ({"b": {"type": "boolean"}, "a": _STR}, '{"b":"true","a":"q"}'),
+            ({"z": _STR, "a": _STR}, '{"z":123,"a":"q"}'),
+            (
+                {"o": {"type": "object", "properties": {"n": _INT}}, "a": _STR},
+                '{"o":{"n":"5"},"a":"q"}',
+            ),
+            (
+                {"l": {"type": "array", "items": _INT}, "a": _STR},
+                '{"l":["1","2"],"a":"q"}',
+            ),
+            ({"a": _STR, "x": _INT}, '{"a":"foo","x":2}'),
+            ({"a": _STR}, '{"a":"foo","zz":"1"}'),
+            ({"a": _STR}, "{}"),
+            # An empty schema is still a schema: it types every value as
+            # a string, so streaming must splice it like any other one
+            # (a truthiness test made it a no-op mid-stream only).
+            ({"x": {}}, '{"x":1.5}'),
+            ({"x": {}}, '{"x":true}'),
+            ({"x": {}}, '{"x":null}'),
+            ({"x": {}, "y": {}}, '{"x":"s","y":2}'),
+            ({"o": {"type": "object", "properties": {"n": {}}}}, '{"o":{"n":5}}'),
+            ({"l": {"type": "array", "items": {}}}, '{"l":[1,2]}'),
+            ({"o": {}}, '{"o":{"n":5}}'),
+        ],
+    )
+    def test_streamed_arguments_match_non_streaming(
+        self, mock_tokenizer, mock_request, properties, body, chunk_size
+    ):
+        tools = self._tools(properties)
+        mock_request.tools = tools
+        text = '{"name": "f", "parameters": ' + body + "}"
+
+        non_streaming = LlamaJsonParser(mock_tokenizer, tools).extract_tool_calls(
+            text, mock_request
+        )
+        expected = non_streaming.tool_calls[0].function.arguments
+        json.loads(expected)
+
+        parser = LlamaJsonParser(mock_tokenizer, tools)
+        _, calls = _accumulate(_stream(parser, mock_request, text, chunk_size))
+
+        assert calls[0]["args"] == expected
+        assert json.loads(calls[0]["args"]) == json.loads(expected)
+
+    @pytest.mark.parametrize("chunk_size", [1, 2, 4, 7, 100])
+    def test_coercion_applied_and_json_valid_at_every_chunk_size(
+        self, mock_tokenizer, mock_request, chunk_size
+    ):
+        tools = self._tools({"a": _STR, "x": _INT})
+        mock_request.tools = tools
+        text = '{"name":"f","parameters":{"a":"foo","x":"1"}}'
+
+        parser = LlamaJsonParser(mock_tokenizer, tools)
+        _, calls = _accumulate(_stream(parser, mock_request, text, chunk_size))
+
+        assert json.loads(calls[0]["args"]) == {"a": "foo", "x": 1}
+
+    def test_coercion_keeps_the_model_separators(self, mock_tokenizer):
+        tools = self._tools({"a": _STR, "x": _INT})
+        parser = LlamaJsonParser(mock_tokenizer, tools)
+        assert parser._fix_arg_types('{"a":"foo","x":"1"}', "f") == '{"a":"foo","x":1}'
+        assert (
+            parser._fix_arg_types('{"a": "foo", "x": "1"}', "f")
+            == '{"a": "foo", "x": 1}'
+        )
+
+
+class TestIncrementalArgScanning:
+    """Argument scanning carries state across feeds instead of restarting.
+
+    Re-reading the whole accumulated envelope on every streamed chunk made
+    a single tool call quadratic in its argument length.  These are shape
+    assertions rather than timings: the resumed scan must answer exactly
+    what a full rescan answers, and the schema lookup must not repeat per
+    chunk.
+    """
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            '{"a": 1, "b": [2, {"c": "d"}]}',
+            '"plain string"',
+            '"br{a}ce[s] and \\" escapes \\\\"',
+            '{"k": "unbalanced { [ \\" inside"}',
+            "12345",
+            "true",
+            '["a", "b"]',
+            '{"a": "\\u0041\\\\", "b": {}}',
+            "{}",
+        ],
+    )
+    def test_value_scan_matches_full_rescan_at_every_length(self, raw):
+        scan = _ValueScan(0)
+        for cut in range(1, len(raw) + 1):
+            assert scan.end(raw[:cut]) == _scan_json_value(raw[:cut], 0)
+
+    def test_schema_lookup_is_not_repeated_per_chunk(
+        self, mock_tokenizer, mock_request, monkeypatch
+    ):
+        tools = [
+            ChatCompletionToolsParam(
+                type="function",
+                function={
+                    "name": "f",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"x": {"type": "string"}},
+                    },
+                },
+            )
+        ]
+        mock_request.tools = tools
+        looked_up = []
+        real = llama_json.find_tool_properties
+
+        def counting(tools, name):
+            looked_up.append(name)
+            return real(tools, name)
+
+        monkeypatch.setattr(llama_json, "find_tool_properties", counting)
+
+        text = '{"name": "f", "parameters": {"x": "' + "a" * 200 + '"}}'
+        parser = LlamaJsonParser(mock_tokenizer, tools)
+        _, calls = _accumulate(_stream_text_only(parser, mock_request, text, 1))
+
+        assert json.loads(calls[0]["args"]) == {"x": "a" * 200}
+        # One lookup for the call, not one per streamed character.
+        assert looked_up == ["f"]
+
+    def test_splice_keeps_every_unchanged_byte_with_many_edits(self):
+        raw = '{"a": 1, "b": 2, "c": "keep", "d": 3}'
+        schema = {
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"},
+                "c": {"type": "string"},
+                "d": {"type": "string"},
+            }
+        }
+        assert (
+            _splice_types(raw, 0, len(raw), schema)
+            == '{"a": "1", "b": "2", "c": "keep", "d": "3"}'
+        )
