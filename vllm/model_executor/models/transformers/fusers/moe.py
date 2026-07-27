@@ -13,6 +13,7 @@ import torch
 from torch import fx, nn
 
 from vllm.distributed import tensor_model_parallel_all_gather
+from vllm.model_executor.layers.fused_moe import GateLinear
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.transformers.fx_utils import (
     find_node,
@@ -229,11 +230,11 @@ class MoEBlockFuser:
                 return None
         return cls(gate_name, scoring_func, shared_name, shared_gate_name)
 
-    def gate(self, moe_block: nn.Module, prefix: str) -> ReplicatedLinear:
-        """Rebuild the HF gate as a `ReplicatedLinear` for vLLM's fused MoE."""
+    def gate(self, moe_block: nn.Module, prefix: str) -> GateLinear:
+        """Rebuild the HF gate as a `GateLinear` for vLLM's fused MoE."""
         hf_gate = getattr(moe_block, self.gate_name)
         num_experts, hidden_size = hf_gate.weight.shape
-        gate = ReplicatedLinear(
+        gate = GateLinear(
             hidden_size,
             num_experts,
             bias=False,
