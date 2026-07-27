@@ -702,9 +702,8 @@ ENV PYTORCH_NVML_BASED_CUDA_CHECK=1
 
 # Pre-install vLLM test dependencies.
 COPY requirements/test/rocm.txt /tmp/rocm-test-reqs.txt
-# Set UV_SKIP_WHEEL_FILENAME_CHECK=1 for pre-release bitsandbytes.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    UV_SKIP_WHEEL_FILENAME_CHECK=1 uv pip install --system -r /tmp/rocm-test-reqs.txt
+    uv pip install --system -r /tmp/rocm-test-reqs.txt
 
 # Rebuild fastsafetensors from source so its C++ extension is compiled with
 # USE_ROCM and can detect libamdhip64.so at runtime.
