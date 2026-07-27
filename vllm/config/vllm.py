@@ -2080,6 +2080,13 @@ class VllmConfig:
                     f"Model: {self.model_config.model}"
                 )
 
+        # The Transformers backend needs HF weights, not Mistral's consolidated
+        if (
+            self.model_config.model_impl == "transformers"
+            and self.load_config.load_format == "auto"
+        ):
+            self.load_config.load_format = "hf"
+
     def compile_debug_dump_path(self) -> Path | None:
         """Returns a rank-aware path for dumping
         torch.compile debug information.
