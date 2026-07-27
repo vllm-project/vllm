@@ -6,7 +6,6 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ConversationMessage,
     parse_chat_messages,
-    parse_chat_messages_async,
 )
 from vllm.logger import init_logger
 from vllm.tokenizers.mistral import MistralTokenizer
@@ -93,13 +92,11 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         tokenizer = self.get_tokenizer()
-        conversation, mm_data, mm_uuids = await parse_chat_messages_async(
+        conversation, mm_data, mm_uuids = await self._parse_chat_messages_async(
             messages,
-            self.model_config,
             content_format="string",
             media_io_kwargs=params.media_io_kwargs,
             mm_processor_kwargs=params.mm_processor_kwargs,
-            executor=self._parse_executor,
         )
 
         prompt_raw = await self._apply_chat_template_async(

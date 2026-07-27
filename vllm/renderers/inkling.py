@@ -18,7 +18,6 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ConversationMessage,
     parse_chat_messages,
-    parse_chat_messages_async,
 )
 from vllm.logger import init_logger
 from vllm.tokenizers.hf import HfTokenizer
@@ -159,13 +158,11 @@ class InklingRenderer(BaseRenderer[HfTokenizer]):
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
-        conversation, mm_data, mm_uuids = await parse_chat_messages_async(
+        conversation, mm_data, mm_uuids = await self._parse_chat_messages_async(
             messages,
-            self.model_config,
             content_format="string",
             media_io_kwargs=params.media_io_kwargs,
             mm_processor_kwargs=params.mm_processor_kwargs,
-            executor=self._parse_executor,
         )
 
         token_ids = await self._render_async(messages, params)

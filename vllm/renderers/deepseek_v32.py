@@ -6,7 +6,6 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ConversationMessage,
     parse_chat_messages,
-    parse_chat_messages_async,
 )
 from vllm.tokenizers.deepseek_v32 import DeepseekV32Tokenizer
 from vllm.utils.async_utils import make_async
@@ -64,13 +63,11 @@ class DeepseekV32Renderer(BaseRenderer[DeepseekV32Tokenizer]):
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
-        conversation, mm_data, mm_uuids = await parse_chat_messages_async(
+        conversation, mm_data, mm_uuids = await self._parse_chat_messages_async(
             messages,
-            self.model_config,
             content_format="string",
             media_io_kwargs=params.media_io_kwargs,
             mm_processor_kwargs=params.mm_processor_kwargs,
-            executor=self._parse_executor,
         )
 
         prompt_raw = await self._apply_chat_template_async(

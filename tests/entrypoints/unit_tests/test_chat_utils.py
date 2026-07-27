@@ -5,6 +5,7 @@ import asyncio
 import warnings
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from typing import Literal
 from unittest.mock import MagicMock
 
@@ -18,6 +19,7 @@ from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     AsyncMultiModalItemTracker,
     ConversationMessage,
+    _parse_chat_messages_into,
     _postprocess_messages,
     parse_chat_messages,
     parse_chat_messages_async,
@@ -546,23 +548,28 @@ async def test_parse_chat_messages_executor_offload_async(
         },
     ]
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        submitted = []
-        original_submit = executor.submit
-
-        def recording_submit(*args, **kwargs):
-            submitted.append(args)
-            return original_submit(*args, **kwargs)
-
-        executor.submit = recording_submit  # type: ignore[method-assign]
+    if use_executor:
+        mm_tracker = AsyncMultiModalItemTracker(phi3v_model_config)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            conversation = await asyncio.get_running_loop().run_in_executor(
+                executor,
+                partial(
+                    _parse_chat_messages_into,
+                    messages,
+                    phi3v_model_config,
+                    mm_tracker,
+                    "string",
+                    None,
+                ),
+            )
+        mm_data, mm_uuids = await mm_tracker.resolve_items()
+    else:
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
             messages,
             phi3v_model_config,
             content_format="string",
-            executor=executor if use_executor else None,
         )
 
-    assert len(submitted) == (1 if use_executor else 0)
     assert conversation[0] == {
         "role": "user",
         "content": "<|image_1|>\nWhat's in the image?",

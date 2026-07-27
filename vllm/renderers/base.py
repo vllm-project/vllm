@@ -5,7 +5,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from concurrent.futures import Executor, ThreadPoolExecutor
-from functools import cached_property
+from functools import cached_property, partial
 from typing import TYPE_CHECKING, Any, Generic, overload
 
 from typing_extensions import TypeVar
@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.entrypoints.chat_utils import (
         ChatCompletionMessageParam,
+        ChatTemplateContentFormat,
         ConversationMessage,
     )
 
@@ -165,6 +166,43 @@ class BaseRenderer(ABC, Generic[_T]):
 
     def _decode(self, *args, **kwargs):
         return self.get_tokenizer().decode(*args, **kwargs)
+
+    async def _parse_chat_messages_async(
+        self,
+        messages: list["ChatCompletionMessageParam"],
+        content_format: "ChatTemplateContentFormat",
+        media_io_kwargs: dict[str, dict[str, Any]] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+    ) -> tuple[
+        list["ConversationMessage"],
+        MultiModalDataDict | None,
+        MultiModalUUIDDict | None,
+    ]:
+        from vllm.entrypoints.chat_utils import (
+            AsyncMultiModalItemTracker,
+            _parse_chat_messages_into,
+        )
+
+        mm_tracker = AsyncMultiModalItemTracker(
+            self.model_config,
+            media_io_kwargs=media_io_kwargs,
+        )
+
+        conversation = await asyncio.get_running_loop().run_in_executor(
+            self._parse_executor,
+            partial(
+                _parse_chat_messages_into,
+                messages,
+                self.model_config,
+                mm_tracker,
+                content_format,
+                mm_processor_kwargs,
+            ),
+        )
+
+        mm_data, mm_uuids = await mm_tracker.resolve_items()
+
+        return conversation, mm_data, mm_uuids
 
     def get_mm_processor(self) -> "BaseMultiModalProcessor":
         if self.mm_processor is None:

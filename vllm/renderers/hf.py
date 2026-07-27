@@ -25,7 +25,6 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateResolutionError,
     load_chat_template,
     parse_chat_messages,
-    parse_chat_messages_async,
 )
 from vllm.inputs import EmbedsPrompt
 from vllm.inputs.engine import MultiModalInput
@@ -1060,9 +1059,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 _ensure_prompt_embeds_placeholder_token(tokenizer)
             )
 
-        conversation, mm_data, mm_uuids = await parse_chat_messages_async(
+        conversation, mm_data, mm_uuids = await self._parse_chat_messages_async(
             messages,
-            model_config,
             content_format=resolve_chat_template_content_format(
                 chat_template=params.chat_template,
                 tools=params.chat_template_kwargs.get("tools"),
@@ -1072,7 +1070,6 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             ),
             media_io_kwargs=params.media_io_kwargs,
             mm_processor_kwargs=params.mm_processor_kwargs,
-            executor=self._parse_executor,
         )
 
         prompt_embeds_tensors: list[torch.Tensor] | None = None

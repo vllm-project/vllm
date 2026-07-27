@@ -7,7 +7,6 @@ import types
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Iterable
-from concurrent.futures import Executor
 from dataclasses import dataclass
 from functools import cached_property, lru_cache, partial
 from itertools import accumulate
@@ -2002,7 +2001,6 @@ async def parse_chat_messages_async(
     content_format: ChatTemplateContentFormat,
     media_io_kwargs: dict[str, dict[str, Any]] | None = None,
     mm_processor_kwargs: dict[str, Any] | None = None,
-    executor: Executor | None = None,
 ) -> tuple[
     list[ConversationMessage],
     MultiModalDataDict | None,
@@ -2013,18 +2011,13 @@ async def parse_chat_messages_async(
         media_io_kwargs=media_io_kwargs,
     )
 
-    parse = partial(
-        _parse_chat_messages_into,
+    conversation = _parse_chat_messages_into(
         messages,
         model_config,
         mm_tracker,
         content_format,
         mm_processor_kwargs,
     )
-    if executor is None:
-        conversation = parse()
-    else:
-        conversation = await asyncio.get_running_loop().run_in_executor(executor, parse)
 
     mm_data, mm_uuids = await mm_tracker.resolve_items()
 
