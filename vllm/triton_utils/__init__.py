@@ -23,6 +23,8 @@ else:
     gl = TritonLanguagePlaceholder()
     aggregate = TritonLanguagePlaceholder()
 
+from vllm.triton_utils.tensor_descriptor import use_tensor_descriptor
+
 LOG2E = 1.4426950408889634
 LOGE2 = 0.6931471805599453
 
@@ -36,4 +38,5 @@ __all__ = [
     "gluon",
     "gl",
     "aggregate",
+    "use_tensor_descriptor",
 ]
