@@ -169,20 +169,25 @@ def _fused_norm_rope_kernel(
     if slot_mapping_ptr is None:
         # Memory profiling run.
         return
-    slot_idx = tl.load(slot_mapping_ptr + tok_idx)
-    if slot_idx < 0:
-        # Padding
-        return
 
     if pid == 2:
-        # Q RMS norm
+        # Query normalization is independent of KV-cache ownership. Under DCP,
+        # non-owner ranks have a negative slot mapping but still need a valid
+        # local query shard for the subsequent query-head AllGather.
         q_block = tl.arange(0, Q_BLOCK_SIZE)
         q_mask = q_block < Q_DIM
         q_c = tl.load(q_c_ptr + tok_idx * q_c_stride + q_block, mask=q_mask, other=0.0)
         q_c_rms_w = tl.load(q_rms_norm_w_ptr + q_block, mask=q_mask)
         q_c = _rms_norm(q_c, q_c_rms_w, q_rms_eps, Q_DIM)
         tl.store(q_c_out_ptr + tok_idx * q_c_out_stride + q_block, q_c, mask=q_mask)
-    elif pid == 1:
+        return
+
+    slot_idx = tl.load(slot_mapping_ptr + tok_idx)
+    if slot_idx < 0:
+        # Padding
+        return
+
+    if pid == 1:
         # KV RMS Norm + KV RoPE + MLA concat_and_cache.
         # Merged so the normed kv_c and RoPE'd k_pe can be written
         # to the MLA KV cache directly without a separate kernel.
