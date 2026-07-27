@@ -1220,9 +1220,6 @@ class ZmqStatLogger(AggregateStatLoggerBase):
     ):
         self.vllm_config = vllm_config
         self.engine_indexes = engine_indexes
-        self.last_scheduler_stats_dict: dict[int, SchedulerStats] = {
-            idx: SchedulerStats() for idx in self.engine_indexes
-        }
         self.cache_config_info: dict[str, Any] | None = None
         if vllm_config.cache_config is not None:
             self.cache_config_info = vllm_config.cache_config.metrics_info()
@@ -1253,26 +1250,13 @@ class ZmqStatLogger(AggregateStatLoggerBase):
         mm_cache_stats: MultiModalCacheStats | None = None,
         engine_idx: int = 0,
     ):
-        if not self.running:
+        if not self.running or scheduler_stats is None:
             return
 
-        if scheduler_stats is not None:
-            self.last_scheduler_stats_dict[engine_idx] = scheduler_stats
-
-        num_running = sum(
-            s.num_running_reqs for s in self.last_scheduler_stats_dict.values()
-        )
-        num_waiting = sum(
-            s.num_waiting_reqs for s in self.last_scheduler_stats_dict.values()
-        )
-        kv_usage = sum(
-            s.kv_cache_usage for s in self.last_scheduler_stats_dict.values()
-        ) / len(self.engine_indexes)
-
         msg = ZmqMetricsStats(
-            num_requests_running=num_running,
-            num_requests_waiting=num_waiting,
-            kv_cache_usage_perc=kv_usage,
+            num_requests_running=scheduler_stats.num_running_reqs,
+            num_requests_waiting=scheduler_stats.num_waiting_reqs,
+            kv_cache_usage_perc=scheduler_stats.kv_cache_usage,
             cache_config_info=self.cache_config_info,
             engine_id=str(engine_idx),
         )
@@ -1400,7 +1384,16 @@ class StatLoggerManager:
                 PrometheusStatLogger(vllm_config, self.engine_indexes)
             )
         if vllm_config.observability_config.enable_zmq_metrics:
-            self.stat_loggers.append(ZmqStatLogger(vllm_config, self.engine_indexes))
+            if client_count > 1 or len(self.engine_indexes) > 1:
+                logger.warning(
+                    "ZmqStatLogger created with api_server_count or engine count "
+                    "more than 1; disabling it as ZMQ metrics logger only supports "
+                    "a single engine."
+                )
+            else:
+                self.stat_loggers.append(
+                    ZmqStatLogger(vllm_config, self.engine_indexes)
+                )
 
     def record(
         self,
