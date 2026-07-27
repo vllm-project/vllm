@@ -109,11 +109,7 @@ class TPAwareNormMixin(nn.Module):
 
 
 class TPAwareRMSNorm(TPAwareNormMixin, RMSNorm):
-    """`RMSNorm` that reconstructs a TP-sharded input before normalizing.
-
-    `RMSNorm` is the provider (vLLM or hw-agnostic) resolved by the layer
-    registry at import time.
-    """
+    """`RMSNorm` that reconstructs a TP-sharded input before normalizing."""
 
 
 class TPAwareGemmaRMSNorm(TPAwareNormMixin, GemmaRMSNorm):
