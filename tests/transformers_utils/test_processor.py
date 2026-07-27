@@ -65,3 +65,33 @@ def test_get_processor_kwargs_from_processor_module_scan_returns_full_union():
     proc = _ProcWithoutUnpack()
     keys = get_processor_kwargs_keys(get_processor_kwargs_type(proc))
     _assert_has_all_expected(keys)
+
+
+# ---- _check_special_mm_tokens patch ----
+
+
+class _FakeMMProcessor:
+    image_token = "<image>"
+    image_token_id = 7
+
+
+def test_check_special_mm_tokens_patched_and_equivalent():
+    import pytest
+    import torch
+    from transformers import BatchFeature
+    from transformers.processing_utils import ProcessorMixin
+
+    check = ProcessorMixin._check_special_mm_tokens
+    assert check._vllm_patched is True
+
+    proc = _FakeMMProcessor()
+    text = ["a <image> b <image>"]
+    ok_ids = BatchFeature({"input_ids": torch.tensor([[1, 7, 2, 7]])})
+    check(proc, text, ok_ids, modalities=["image"])
+
+    bad_ids = BatchFeature({"input_ids": torch.tensor([[1, 7, 2, 3]])})
+    with pytest.raises(ValueError, match="Mismatch in `image` token count"):
+        check(proc, text, bad_ids, modalities=["image"])
+
+    list_ids = BatchFeature({"input_ids": [[1, 7, 2, 7]]})
+    check(proc, text, list_ids, modalities=["image"])

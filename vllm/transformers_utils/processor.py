@@ -3,7 +3,7 @@
 
 import importlib
 import inspect
-from functools import lru_cache
+from functools import lru_cache, wraps
 from typing import TYPE_CHECKING, Any, cast, get_args, get_type_hints
 
 from transformers import (
@@ -77,8 +77,27 @@ def _transformers_v4_compatibility_init() -> Any:
         ProcessorMixin.__init__ = __init__
 
 
+def _patch_check_special_mm_tokens() -> None:
+    """Avoid tensor path in `_check_special_mm_tokens`; drop once fixed upstream."""
+    original = ProcessorMixin._check_special_mm_tokens
+    if hasattr(original, "_vllm_patched"):
+        return
+
+    @wraps(original)
+    def _check_special_mm_tokens(self, text, text_inputs, modalities):
+        input_ids = text_inputs.get("input_ids")
+        if input_ids is not None and hasattr(input_ids, "tolist"):
+            text_inputs = BatchFeature({**text_inputs, "input_ids": input_ids.tolist()})
+        return original(self, text, text_inputs, modalities)
+
+    if not hasattr(ProcessorMixin, "_mock_name"):
+        _check_special_mm_tokens._vllm_patched = True  # type: ignore[attr-defined]
+        ProcessorMixin._check_special_mm_tokens = _check_special_mm_tokens
+
+
 _transformers_v4_compatibility_import()
 _transformers_v4_compatibility_init()
+_patch_check_special_mm_tokens()
 
 _P = TypeVar("_P", bound=ProcessorMixin, default=ProcessorMixin)
 _I = TypeVar("_I", bound=BaseImageProcessor, default=BaseImageProcessor)
