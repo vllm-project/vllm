@@ -10,7 +10,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import copy, deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from functools import reduce
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
@@ -230,7 +230,11 @@ from vllm.v1.worker.ubatch_utils import (
     maybe_create_ubatch_slices,
     split_attn_metadata,
 )
-from vllm.v1.worker.utils import is_residual_scattered_for_sp, raise_if_nan_logits
+from vllm.v1.worker.utils import (
+    EncoderTimingStats,
+    is_residual_scattered_for_sp,
+    raise_if_nan_logits,
+)
 from vllm.v1.worker.workspace import lock_workspace
 
 from .utils import (
@@ -7894,19 +7898,3 @@ class GPUModelRunner(
                     stats.encoder_forward_secs += per_request_time
                     stats.num_encoder_calls += 1
 
-
-@dataclass
-class EncoderTimingStats:
-    """Per-request timing statistics for encoder forward pass."""
-
-    encoder_forward_secs: float = 0.0
-    """Time spent in vision encoder forward pass (seconds)."""
-
-    num_encoder_calls: int = 0
-    """Number of times encoder was called for this request."""
-
-    def to_dict(self) -> dict[str, float | int]:
-        return {
-            "encoder_forward_secs": self.encoder_forward_secs,
-            "num_encoder_calls": self.num_encoder_calls,
-        }

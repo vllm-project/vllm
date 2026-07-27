@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import threading
+import time
+from collections.abc import Collection
+
 import numpy as np
 import torch
 
@@ -13,7 +17,10 @@ from vllm.multimodal.utils import (
     set_mm_embedding_modality,
 )
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
-from vllm.v1.worker.utils import sanity_check_mm_encoder_outputs
+from vllm.v1.worker.utils import (
+    EncoderTimingStats,
+    sanity_check_mm_encoder_outputs,
+)
 
 logger = init_logger(__name__)
 
@@ -27,6 +34,7 @@ class EncoderRunner:
         encoder_cache: EncoderCache,
         dtype: torch.dtype,
         device: torch.device,
+        enable_timing: bool = False,
     ):
         self.model = model
         self.max_num_tokens = max_num_tokens
@@ -35,6 +43,9 @@ class EncoderRunner:
         self.dtype = dtype
         self.device = device
         self.is_realtime = supports_realtime(model)
+        self.enable_timing = enable_timing
+        self.encoder_timing_registry: dict[str, EncoderTimingStats] = {}
+        self._timing_lock = threading.Lock()
 
         self.inputs_embeds = torch.zeros(
             max_num_tokens, hidden_size, dtype=dtype, device=device
@@ -99,8 +110,15 @@ class EncoderRunner:
 
     @torch.inference_mode()
     def execute_mm_encoder(
-        self, mm_kwargs: list[tuple[str, MultiModalKwargsItem]]
+        self,
+        mm_kwargs: list[tuple[str, MultiModalKwargsItem]],
+        request_ids: Collection[str] | None = None,
     ) -> list[torch.Tensor]:
+        should_time = self.enable_timing and request_ids
+        if should_time:
+            torch.accelerator.synchronize()
+            start_time = time.perf_counter()
+
         encoder_outputs: list[torch.Tensor] = []
         for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
             mm_kwargs, device=self.device, pin_memory=True
@@ -108,7 +126,28 @@ class EncoderRunner:
             batch_outputs = self.model.embed_multimodal(**mm_kwargs_batch)
             sanity_check_mm_encoder_outputs(batch_outputs, expected_num_items=num_items)
             encoder_outputs.extend(batch_outputs)
+
+        if should_time:
+            assert request_ids is not None
+            torch.accelerator.synchronize()
+            per_request_time = (time.perf_counter() - start_time) / len(request_ids)
+            with self._timing_lock:
+                for req_id in request_ids:
+                    stats = self.encoder_timing_registry.setdefault(
+                        req_id, EncoderTimingStats()
+                    )
+                    stats.encoder_forward_secs += per_request_time
+                    stats.num_encoder_calls += 1
         return encoder_outputs
+
+    def get_encoder_timing_stats(self) -> dict[str, dict[str, float | int]]:
+        with self._timing_lock:
+            stats = {
+                req_id: stats_obj.to_dict()
+                for req_id, stats_obj in self.encoder_timing_registry.items()
+            }
+            self.encoder_timing_registry.clear()
+            return stats
 
     def gather_mm_embeddings(
         self,
