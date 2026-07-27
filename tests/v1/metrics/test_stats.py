@@ -373,10 +373,15 @@ def test_zmq_stat_logger_record():
     """Test ZmqStatLogger record method for single engine."""
     vllm_config = MagicMock(spec=VllmConfig)
     vllm_config.cache_config = None
-    vllm_config.observability_config.zmq_metrics_port = 5555
+    vllm_config.observability_config.zmq_metrics_endpoint = "tcp://*:5555"
 
-    with patch("zmq.Context.instance"):
+    with patch("zmq.Context.instance") as mock_ctx_inst:
+        mock_socket = MagicMock()
+        mock_ctx_inst.return_value.socket.return_value = mock_socket
+
         logger_inst = ZmqStatLogger(vllm_config, engine_indexes=[0])
+        mock_socket.bind.assert_called_once_with("tcp://*:5555")
+
         sched_stats = SchedulerStats(
             num_running_reqs=3,
             num_waiting_reqs=7,
@@ -392,6 +397,16 @@ def test_zmq_stat_logger_record():
         assert msg.num_requests_waiting == 7
         assert msg.kv_cache_usage_perc == 0.42
         assert msg.engine_id == "0"
+        logger_inst.shutdown()
+
+    # Test connect mode
+    vllm_config.observability_config.zmq_metrics_endpoint = "tcp://127.0.0.1:5555"
+    with patch("zmq.Context.instance") as mock_ctx_inst:
+        mock_socket = MagicMock()
+        mock_ctx_inst.return_value.socket.return_value = mock_socket
+
+        logger_inst = ZmqStatLogger(vllm_config, engine_indexes=[0])
+        mock_socket.connect.assert_called_once_with("tcp://127.0.0.1:5555")
         logger_inst.shutdown()
 
 
