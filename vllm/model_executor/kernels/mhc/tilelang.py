@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
@@ -18,73 +19,59 @@ def _torch_hc_prenorm_gemm(
     sqrsum[0].copy_(x_float.square().sum(dim=-1))
 
 
-def _tilelang_hc_prenorm_gemm(
+def _hc_prenorm_gemm_outputs(
     x: torch.Tensor,
     fn: torch.Tensor,
-    out: torch.Tensor,
-    sqrsum: torch.Tensor,
+    *,
     hidden_size: int,
     hc_mult: int,
-    tile_n: int = 12,
-    n_thr: int = 512,
-    n_splits: int = 1,
-) -> None:
-    from vllm.model_executor.kernels.mhc.tilelang_kernels import (
-        hc_prenorm_gemm_block_m_tilelang,
-        hc_prenorm_gemm_tilelang,
+    use_tilelang_fallback: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from vllm.utils.deep_gemm import (
+        is_deep_gemm_supported,
+        tf32_hc_prenorm_gemm,
     )
 
-    assert out.shape[0] == n_splits
-    assert sqrsum.shape[0] == n_splits
-    assert x.shape[1] == hc_mult * hidden_size
-    assert x.shape[1] % n_splits == 0
-    assert (x.shape[1] // n_splits) % n_thr == 0
-    use_default_config = tile_n == 12 and n_thr == 512
-    if n_splits == 1 and use_default_config and x.shape[0] >= 1024:
-        hc_prenorm_gemm_block_m_tilelang(
-            x,
-            fn,
-            out,
-            sqrsum,
-            hidden_size,
-            hc_mult,
-            fn.shape[0],
-            n_thr,
-            tile_n,
-            2,
-        )
-        return
-    if (
-        n_splits == 1
-        and use_default_config
-        and x.shape[0] < 128
-        and x.shape[1] % 1024 == 0
-    ):
-        hc_prenorm_gemm_tilelang(
-            x,
-            fn,
-            out,
-            sqrsum,
-            hidden_size,
-            hc_mult,
-            fn.shape[0],
-            1024,
-            4,
-            n_splits,
-        )
-        return
-    hc_prenorm_gemm_tilelang(
-        x,
-        fn,
-        out,
-        sqrsum,
-        hidden_size,
-        hc_mult,
-        fn.shape[0],
-        n_thr,
-        tile_n,
-        n_splits,
+    from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+        compute_num_split,
     )
+
+    use_deep_gemm = is_deep_gemm_supported() or not use_tilelang_fallback
+    num_tokens = x.shape[0]
+    n_splits = (
+        compute_num_split(64, x.shape[1], cdiv(num_tokens, 64))
+        if use_deep_gemm
+        else 1
+    )
+    out = torch.empty(
+        n_splits,
+        num_tokens,
+        fn.shape[0],
+        dtype=torch.float32,
+        device=x.device,
+    )
+    sqrsum = torch.empty(
+        n_splits,
+        num_tokens,
+        dtype=torch.float32,
+        device=x.device,
+    )
+    if use_deep_gemm:
+        tf32_hc_prenorm_gemm(x, fn, out, sqrsum, n_splits)
+    else:
+        from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+            HC_PRENORM_GEMM_TILELANG_KERNEL,
+        )
+
+        HC_PRENORM_GEMM_TILELANG_KERNEL(
+            x,
+            fn,
+            out,
+            sqrsum,
+            hidden_size,
+            hc_mult,
+        )
+    return out, sqrsum
 
 
 def mhc_pre_tilelang(
@@ -129,10 +116,6 @@ def mhc_pre_tilelang(
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
     )
-    from vllm.utils.deep_gemm import (
-        is_deep_gemm_supported,
-        tf32_hc_prenorm_gemm,
-    )
     assert residual.dtype == torch.bfloat16
     assert fn.dtype == torch.float32
     assert hc_scale.dtype == torch.float32
@@ -161,24 +144,6 @@ def mhc_pre_tilelang(
     residual_flat = residual.view(-1, hc_mult, hidden_size)
     num_tokens = residual_flat.shape[0]
 
-    use_deep_gemm = is_deep_gemm_supported()
-    compile_key = MHC_PRE_BIG_FUSE_TILELANG_KERNEL.compile_key_for_runtime(
-        num_tokens=num_tokens,
-        hidden_size=hidden_size,
-        hc_mult=hc_mult,
-        use_deep_gemm=use_deep_gemm,
-        is_fused=False,
-        is_broadcast=False,
-        use_norm_weight=norm_weight is not None,
-        rms_eps=rms_eps,
-        hc_pre_eps=hc_pre_eps,
-        hc_sinkhorn_eps=hc_sinkhorn_eps,
-        hc_post_mult_value=hc_post_mult_value,
-        sinkhorn_repeat=sinkhorn_repeat,
-        norm_eps=norm_eps,
-    )
-    n_splits = compile_key.n_splits
-
     post_mix = torch.empty(
         num_tokens, hc_mult, dtype=torch.float32, device=residual.device
     )
@@ -189,74 +154,29 @@ def mhc_pre_tilelang(
         num_tokens, hidden_size, dtype=torch.bfloat16, device=residual.device
     )
 
-    gemm_out_mul = torch.empty(
-        n_splits, num_tokens, hc_mult3, dtype=torch.float32, device=residual.device
+    gemm_out_mul, gemm_out_sqrsum = _hc_prenorm_gemm_outputs(
+        residual_flat.view(num_tokens, hc_mult * hidden_size),
+        fn,
+        hidden_size=hidden_size,
+        hc_mult=hc_mult,
     )
-    gemm_out_sqrsum = torch.empty(
-        n_splits, num_tokens, dtype=torch.float32, device=residual.device
+    MHC_PRE_BIG_FUSE_TILELANG_KERNEL(
+        gemm_out_mul,
+        gemm_out_sqrsum,
+        hc_scale,
+        hc_base,
+        residual_flat,
+        post_mix,
+        comb_mix,
+        layer_input,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_mult_value,
+        sinkhorn_repeat,
+        norm_weight=norm_weight,
+        norm_eps=norm_eps,
     )
-
-    residual_2d = residual_flat.view(num_tokens, hc_mult * hidden_size)
-    if use_deep_gemm:
-        tf32_hc_prenorm_gemm(
-            residual_2d,
-            fn,
-            gemm_out_mul,
-            gemm_out_sqrsum,
-            n_splits,
-        )
-    else:
-        _tilelang_hc_prenorm_gemm(
-            residual_2d,
-            fn,
-            gemm_out_mul,
-            gemm_out_sqrsum,
-            hidden_size,
-            hc_mult,
-        )
-
-    if norm_weight is None:
-        MHC_PRE_BIG_FUSE_TILELANG_KERNEL(
-            gemm_out_mul,
-            gemm_out_sqrsum,
-            hc_scale,
-            hc_base,
-            residual_flat,
-            post_mix,
-            comb_mix,
-            layer_input,
-            hidden_size,
-            rms_eps,
-            hc_pre_eps,
-            hc_sinkhorn_eps,
-            hc_post_mult_value,
-            sinkhorn_repeat,
-            n_splits,
-            hc_mult,
-            compile_key=compile_key,
-        )
-    else:
-        MHC_PRE_BIG_FUSE_TILELANG_KERNEL(
-            gemm_out_mul,
-            gemm_out_sqrsum,
-            hc_scale,
-            hc_base,
-            residual_flat,
-            post_mix,
-            comb_mix,
-            layer_input,
-            norm_weight,
-            hidden_size,
-            rms_eps,
-            hc_pre_eps,
-            hc_sinkhorn_eps,
-            hc_post_mult_value,
-            sinkhorn_repeat,
-            norm_eps,
-            n_splits,
-            hc_mult,
-            compile_key=compile_key,
-        )
 
     return (
         post_mix.view(*outer_shape, hc_mult, 1),
@@ -327,7 +247,6 @@ def mhc_pre_broadcast_tilelang(
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
     )
-
     assert norm_weight is not None, "broadcast mHC pre currently requires fused RMSNorm"
     assert residual.dtype == torch.bfloat16
     assert residual.dim() == 2
@@ -354,23 +273,6 @@ def mhc_pre_broadcast_tilelang(
     residual_flat = residual
     num_tokens = residual.shape[0]
 
-    compile_key = MHC_PRE_BIG_FUSE_TILELANG_KERNEL.compile_key_for_runtime(
-        num_tokens=num_tokens,
-        hidden_size=hidden_size,
-        hc_mult=hc_mult,
-        use_deep_gemm=True,
-        is_fused=False,
-        is_broadcast=True,
-        use_norm_weight=True,
-        rms_eps=rms_eps,
-        hc_pre_eps=hc_pre_eps,
-        hc_sinkhorn_eps=hc_sinkhorn_eps,
-        hc_post_mult_value=hc_post_mult_value,
-        sinkhorn_repeat=sinkhorn_repeat,
-        norm_eps=norm_eps,
-    )
-    n_splits = compile_key.n_splits
-
     residual_out = torch.empty(
         num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=residual.device
     )
@@ -383,21 +285,13 @@ def mhc_pre_broadcast_tilelang(
     layer_input = torch.empty(
         num_tokens, hidden_size, dtype=torch.bfloat16, device=residual.device
     )
-    gemm_out_mul = torch.empty(
-        n_splits, num_tokens, hc_mult3, dtype=torch.float32, device=residual.device
-    )
-    gemm_out_sqrsum = torch.empty(
-        n_splits, num_tokens, dtype=torch.float32, device=residual.device
-    )
 
-    from vllm.utils.deep_gemm import tf32_hc_prenorm_gemm
-
-    tf32_hc_prenorm_gemm(
+    gemm_out_mul, gemm_out_sqrsum = _hc_prenorm_gemm_outputs(
         residual_flat,
         fn_broadcast,
-        gemm_out_mul,
-        gemm_out_sqrsum,
-        n_splits,
+        hidden_size=hidden_size,
+        hc_mult=hc_mult,
+        use_tilelang_fallback=False,
     )
     MHC_PRE_BIG_FUSE_TILELANG_KERNEL(
         gemm_out_mul,
@@ -405,21 +299,17 @@ def mhc_pre_broadcast_tilelang(
         hc_scale,
         hc_base,
         residual_flat,
-        residual_out,
         post_mix,
         comb_mix,
         layer_input,
-        norm_weight,
-        hidden_size,
         rms_eps,
         hc_pre_eps,
         hc_sinkhorn_eps,
         hc_post_mult_value,
         sinkhorn_repeat,
-        norm_eps,
-        n_splits,
-        hc_mult,
-        compile_key=compile_key,
+        residual_out=residual_out,
+        norm_weight=norm_weight,
+        norm_eps=norm_eps,
     )
     return (
         residual_out,
@@ -533,52 +423,8 @@ def mhc_fused_post_pre_tilelang(
     post_layer_mix_flat = post_layer_mix.view(num_tokens, hc_mult)
     comb_res_mix_flat = comb_res_mix.view(num_tokens, hc_mult, hc_mult)
 
-    from vllm.utils.deep_gemm import is_deep_gemm_supported
-
-    use_deep_gemm = is_deep_gemm_supported()
     use_small_fma = num_tokens <= 16
-    pre_compile_key = MHC_PRE_BIG_FUSE_TILELANG_KERNEL.compile_key_for_runtime(
-        num_tokens=num_tokens,
-        hidden_size=hidden_size,
-        hc_mult=hc_mult,
-        use_deep_gemm=use_deep_gemm,
-        is_fused=use_small_fma,
-        is_broadcast=False,
-        use_norm_weight=norm_weight is not None,
-        rms_eps=rms_eps,
-        hc_pre_eps=hc_pre_eps,
-        hc_sinkhorn_eps=hc_sinkhorn_eps,
-        hc_post_mult_value=hc_post_mult_value,
-        sinkhorn_repeat=sinkhorn_repeat,
-        norm_eps=norm_eps,
-    )
-    n_splits = pre_compile_key.n_splits
-    if use_small_fma:
-        fused_compile_key = MHC_FUSED_TILELANG_KERNEL.compile_key_for_runtime(
-            num_tokens=num_tokens,
-            hidden_size=hidden_size,
-            hc_mult=hc_mult,
-            use_deep_gemm=use_deep_gemm,
-        )
-        tile_n = fused_compile_key.tile_n
-    else:
-        fused_compile_key = None
-        tile_n = 1
 
-    gemm_out_mul = torch.empty(
-        n_splits,
-        num_tokens,
-        hc_mult3,
-        dtype=torch.float32,
-        device=residual.device,
-    )
-    gemm_out_sqrsum = torch.empty(
-        n_splits,
-        num_tokens,
-        dtype=torch.float32,
-        device=residual.device,
-    )
-    residual_cur = torch.empty_like(residual_flat)
     post_mix_cur = torch.empty(
         num_tokens,
         hc_mult,
@@ -599,22 +445,35 @@ def mhc_fused_post_pre_tilelang(
     )
 
     if use_small_fma:
-        MHC_FUSED_TILELANG_KERNEL(
+        gemm_out_mul, gemm_out_sqrsum, residual_cur = MHC_FUSED_TILELANG_KERNEL(
             comb_res_mix_flat,
             residual_flat,
             post_layer_mix_flat,
             x_flat,
             fn.view(hc_mult3, hc_mult, hidden_size),
-            gemm_out_mul,
-            gemm_out_sqrsum,
-            residual_cur,
             hc_mult,
             hidden_size,
             hc_mult3,
-            tile_n=tile_n,
-            split_k=n_splits,
+        )
+        MHC_PRE_BIG_FUSE_TILELANG_KERNEL(
+            gemm_out_mul,
+            gemm_out_sqrsum,
+            hc_scale,
+            hc_base,
+            residual_cur,
+            post_mix_cur,
+            comb_mix_cur,
+            layer_input_cur,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
+            norm_weight=norm_weight,
+            norm_eps=norm_eps,
         )
     else:
+        residual_cur = torch.empty_like(residual_flat)
         MHC_POST_TILELANG_KERNEL(
             comb_res_mix_flat,
             residual_flat,
@@ -624,49 +483,12 @@ def mhc_fused_post_pre_tilelang(
             residual.shape[-2],
             residual.shape[-1],
         )
-
-        residual_cur_2d = residual_cur.view(num_tokens, hc_mult * hidden_size)
-        if use_deep_gemm:
-            from vllm.utils.deep_gemm import tf32_hc_prenorm_gemm
-
-            tf32_hc_prenorm_gemm(
-                residual_cur_2d,
-                fn,
-                gemm_out_mul,
-                gemm_out_sqrsum,
-                n_splits,
-            )
-        else:
-            _tilelang_hc_prenorm_gemm(
-                residual_cur_2d,
-                fn,
-                gemm_out_mul,
-                gemm_out_sqrsum,
-                hidden_size,
-                hc_mult,
-            )
-
-    if norm_weight is None:
-        MHC_PRE_BIG_FUSE_TILELANG_KERNEL(
-            gemm_out_mul,
-            gemm_out_sqrsum,
-            hc_scale,
-            hc_base,
-            residual_cur,
-            post_mix_cur,
-            comb_mix_cur,
-            layer_input_cur,
-            hidden_size,
-            rms_eps,
-            hc_pre_eps,
-            hc_sinkhorn_eps,
-            hc_post_mult_value,
-            sinkhorn_repeat,
-            n_splits,
-            hc_mult,
-            compile_key=pre_compile_key,
+        gemm_out_mul, gemm_out_sqrsum = _hc_prenorm_gemm_outputs(
+            residual_cur.view(num_tokens, hc_mult * hidden_size),
+            fn,
+            hidden_size=hidden_size,
+            hc_mult=hc_mult,
         )
-    else:
         MHC_PRE_BIG_FUSE_TILELANG_KERNEL(
             gemm_out_mul,
             gemm_out_sqrsum,
@@ -676,17 +498,13 @@ def mhc_fused_post_pre_tilelang(
             post_mix_cur,
             comb_mix_cur,
             layer_input_cur,
-            norm_weight,
-            hidden_size,
             rms_eps,
             hc_pre_eps,
             hc_sinkhorn_eps,
             hc_post_mult_value,
             sinkhorn_repeat,
-            norm_eps,
-            n_splits,
-            hc_mult,
-            compile_key=pre_compile_key,
+            norm_weight=norm_weight,
+            norm_eps=norm_eps,
         )
 
     return (
