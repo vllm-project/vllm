@@ -131,7 +131,11 @@ def get_connector_metric_definitions() -> dict[str, OffloadingMetricMetadata]:
             documentation=(
                 "Number of requests whose HIT_PENDING deadline expired, causing "
                 "pending blocks to be treated as misses for the rest of the "
-                "request. A non-zero value means offload writes are leaking."
+                "request. A non-zero value means a write stayed pending past "
+                "the deadline, which is not proof of a leak: only the P2P "
+                "secondary tier bounds transfer time, so on the CPU, "
+                "filesystem and object-store backends a healthy but slow "
+                "write can cross the deadline too."
             ),
         ),
     }

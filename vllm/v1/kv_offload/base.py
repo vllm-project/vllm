@@ -568,17 +568,23 @@ class OffloadingSpec(ABC):
         #
         # The check cannot distinguish two cases:
         #  - The request is waiting on a promotion it initiated itself. That
-        #    wait tracks a live transfer, bounded by the P2P session's
-        #    _LOAD_TIMEOUT_S (30s) + _ABORT_ACK_TIMEOUT_S (10s) = 40s, after
-        #    which the finished-job poll resolves the block either way. This is
-        #    the only case a too-short deadline can harm, by discarding a hit
-        #    that was about to land.
+        #    wait tracks a live transfer, so it is the only case a too-short
+        #    deadline can harm, by discarding a hit about to land. How long it
+        #    may legitimately run is backend-specific: the P2P secondary tier
+        #    bounds it at _LOAD_TIMEOUT_S (30s) + _ABORT_ACK_TIMEOUT_S (10s) =
+        #    40s, after which the finished-job poll resolves the block either
+        #    way. The CPU, filesystem and object-store backends have no
+        #    equivalent ceiling, so there a healthy but slow write can cross
+        #    any fixed deadline, costing a cache miss and local recomputation
+        #    but never correctness.
         #  - The request touched a key left write-pending by an earlier,
         #    unrelated request whose write leaked. No live transfer exists and
         #    nothing bounds the wait. This is the case that hangs, and it is
         #    resolved at any deadline value.
-        # The default clears the first case's 40s ceiling with margin, since
-        # the second is insensitive to the value. Set 0 to disable the deadline
+        # The default clears P2P's 40s ceiling with margin, since the second
+        # case is insensitive to the value. It is therefore derived from the
+        # one backend that publishes a bound; deployments on a slow filesystem
+        # or object store may need to raise it. Set 0 to disable the deadline
         # and defer indefinitely on HIT_PENDING.
         self.hit_pending_deadline_s: float = float(
             self.extra_config.get(
