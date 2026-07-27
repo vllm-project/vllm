@@ -1,0 +1,40 @@
+{
+  "stamp": "20260727T151703Z",
+  "model": "Qwen/Qwen2.5-0.5B-Instruct (local snapshot)",
+  "image": "hal/vllm-xpu:oneapi-2026.0-torch2.13-3deb3160c",
+  "image_id": "sha256:dea444d9bdcddced6888b2b0f3287f56209fc4e77e0ed76a9e5c832fad78b925",
+  "runtime_versions": "2.13.0+xpu 20260000 2026.0.0 3.7.2 0.1.12.dev33+gaa15657",
+  "device": "Intel Arc Pro B70 (ZE_AFFINITY_MASK=0)",
+  "overlay": "branch fa-in-graph-dense-validation",
+  "A_eager": {
+    "arm": "A_eager",
+    "ttft_ms_mean": 36.13830520771444,
+    "ttft_ms_p50": 35.96674790605903,
+    "decode_tok_s_mean": 66.9903286592578,
+    "decode_tok_s_p50": 67.02044078091986,
+    "text_stable": true,
+    "n_iters": 8,
+    "gen_tokens": 128
+  },
+  "B_fa_in_graph": {
+    "arm": "B_fa_in_graph",
+    "ttft_ms_mean": 22.560039826203138,
+    "ttft_ms_p50": 22.59373920969665,
+    "decode_tok_s_mean": 401.6270630907512,
+    "decode_tok_s_p50": 401.8357500338107,
+    "text_stable": true,
+    "n_iters": 8,
+    "gen_tokens": 128
+  },
+  "greedy_prefix_match_chars": 681,
+  "greedy_len_A": 770,
+  "greedy_len_B": 768,
+  "per_arm_temp0_stable": {
+    "A": true,
+    "B": true
+  },
+  "decode_tok_s_delta_pct": 499.52991891352355,
+  "ttft_delta_pct": -37.57305524834836,
+  "text_A": " A GPU (Graphics Processing Unit) is an electronic device that can perform complex mathematical operations and data processing tasks much faster than a CPU, allowing it to handle graphics-intensive applications such as video games, rendering 3D models, and simulating physics simulations. It also has the ability to handle large amounts of data simultaneously, making it ideal for handling high-resolution images and videos. Additionally, GPUs are often used in conjunction with other hardware components like RAM and storage devices to create powerful computing environments. In summary, GPUs provide a powerful computational platform for performing complex calculations and data processing tasks, enabling users to create highly efficient and interactive applications.",
+  "text_B": " A GPU (Graphics Processing Unit) is an electronic device that can perform complex mathematical operations and data processing tasks much faster than a CPU, allowing it to handle graphics-intensive applications such as video games, rendering 3D models, and simulating physics simulations. It also has the ability to handle large amounts of data simultaneously, making it ideal for handling high-resolution images and videos. Additionally, GPUs are often used in conjunction with other hardware components like RAM and storage devices to create powerful computing environments. In summary, GPUs provide a powerful computational platform for performing complex calculations and data transformations, enabling users to create highly detailed and realistic visualizations."
+}

@@ -7,6 +7,7 @@ from vllm.utils.torch_utils import (
     common_broadcastable_dtype,
     current_stream,
     is_lossless_cast,
+    supports_xpu_fa_in_graph,
 )
 
 
@@ -96,6 +97,25 @@ def _test_stream_thread(main_expected_stream: torch.cuda.Stream):
         child_thread.join(timeout=5)
         if child_thread.is_alive():
             pytest.fail("Child thread failed to exit properly")
+
+
+@pytest.mark.parametrize(
+    ("graph_supported", "xpu_ver", "expected"),
+    [
+        (True, "20260000", True),  # oneAPI 2026.0 -> FA capturable
+        (True, "20260100", True),  # newer 2026.x
+        (True, "20250302", False),  # oneAPI 2025.3 -> scratch not capturable
+        (True, None, False),  # non-XPU torch build
+        (True, "not-a-number", False),  # unparsable -> fail closed
+        (False, "20260000", False),  # torch too old for any XPU graph
+    ],
+)
+def test_supports_xpu_fa_in_graph(monkeypatch, graph_supported, xpu_ver, expected):
+    monkeypatch.setattr(
+        "vllm.utils.torch_utils.supports_xpu_graph", lambda: graph_supported
+    )
+    monkeypatch.setattr(torch.version, "xpu", xpu_ver, raising=False)
+    assert supports_xpu_fa_in_graph() is expected
 
 
 def test_current_stream_multithread():

@@ -1,0 +1,6 @@
+# Large / host-local smoke artifacts (keep AB_COMPARE / meta / smoke summaries)
+results/**
+!results/AB_COMPARE_*
+!results/*_meta_*
+!results/*_smoke_*
+*.log

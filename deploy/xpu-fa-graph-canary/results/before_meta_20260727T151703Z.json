@@ -1,0 +1,9 @@
+{
+  "stamp": "20260727T151703Z",
+  "arm": "A_eager",
+  "enforce_eager": true,
+  "graphs": false,
+  "smoke": "PASS",
+  "ttft_ms_mean": 36.13830520771444,
+  "decode_tok_s_mean": 66.9903286592578
+}
