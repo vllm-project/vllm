@@ -1675,8 +1675,12 @@ class MooncakeConnectorWorker:
                 )
                 continue
             if isinstance(layer_spec, MambaSpec):
-                conv, _ = cache_or_caches
-                cache_list = [conv]
+                # Mamba conv+ssm state is packed into a single page-view
+                # tensor [num_blocks, 1, 1, page_size_bytes] (conv at offset 0,
+                # recurrent state after). Register the whole page so the full
+                # state transfers per block; the decode side recomputes the
+                # last token on top of it.
+                cache_list = [cache_or_caches]
             else:
                 # K and V are packed into one blocks-first tensor per layer,
                 # so each layer registers as a single region.

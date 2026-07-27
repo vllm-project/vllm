@@ -1145,6 +1145,7 @@ class GPUModelRunner(
         """
         self._kv_block_zeroer = KVBlockZeroer(
             self.device,
+            pin_memory=PIN_MEMORY,
             attn_groups_iter=self._kv_cache_spec_attn_group_iterator(),
             kernel_block_sizes=self._kernel_block_sizes,
             cache_dtype=self.cache_config.cache_dtype,
