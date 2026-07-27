@@ -26,7 +26,7 @@ use winnow::token::literal;
 use super::{JsonToolCallConfig, JsonToolCallEvent, JsonToolCallWhitespace};
 use super::{argument_delta_event, tool_call_header_event};
 use crate::tool::utils::{JsonObjectScanState, parse_buffered_event, safe_text_len_mul};
-use crate::tool::{Result, Tool, ToolCallDelta, ToolParser, ToolParserOutput};
+use crate::tool::{Result, Tool, ToolCallDelta, ToolParser, ToolParserEvent, ToolParserOutput};
 
 // All known sentinels that open a tool-call block.
 // The array start `[` itself is NOT listed here — we scan for it in Text mode
@@ -127,6 +127,8 @@ enum SentinelKind {
 /// * `</think>...[...]`
 pub struct XlamToolParser {
     buffer: String,
+    cursor: usize,
+    tentative_events: Vec<ToolParserEvent>,
     mode: XlamMode,
     active_tool_index: Option<usize>,
     emitted_tool_count: usize,
@@ -136,20 +138,42 @@ impl XlamToolParser {
     fn new(_tools: &[Tool]) -> Self {
         Self {
             buffer: String::new(),
+            cursor: 0,
+            tentative_events: Vec::new(),
             mode: XlamMode::Text,
             active_tool_index: None,
             emitted_tool_count: 0,
         }
     }
 
-    fn apply_event(&mut self, event: XlamEvent, output: &mut ToolParserOutput) -> Result<()> {
+    fn is_tentative(&self) -> bool {
+        matches!(
+            self.mode,
+            XlamMode::AfterToolCallsTag
+                | XlamMode::FenceJsonOpt
+                | XlamMode::AfterXmlOpen
+                | XlamMode::AfterThink
+                | XlamMode::Header
+        )
+    }
+
+    fn apply_event(
+        &mut self,
+        event: XlamEvent,
+        output: &mut ToolParserOutput,
+        consumed_len: usize,
+    ) -> Result<()> {
+        let mut text_to_push = None;
+        let mut call_to_push = None;
+
         match event {
-            XlamEvent::Text { len } => {
-                output.push_text(&self.buffer[..len]);
+            XlamEvent::Text { len: _ } => {
+                let text = self.buffer[self.cursor - consumed_len..self.cursor].to_string();
+                text_to_push = Some(text);
             }
             XlamEvent::SentinelEntered(kind) => {
                 if kind == SentinelKind::Think {
-                    output.push_text(THINK_CLOSE);
+                    text_to_push = Some(THINK_CLOSE.to_string());
                 }
                 self.mode = match kind {
                     SentinelKind::ToolCallsTag => XlamMode::AfterToolCallsTag,
@@ -168,22 +192,23 @@ impl XlamToolParser {
                 self.mode = XlamMode::Arguments {
                     json_scan: JsonObjectScanState::default(),
                 };
-                output.push_call(ToolCallDelta {
+                call_to_push = Some(ToolCallDelta {
                     tool_index,
                     name: Some(function_name),
                     arguments: String::new(),
                 });
             }
-            XlamEvent::Arguments { len } => {
+            XlamEvent::Arguments { len: _ } => {
                 let Some(tool_index) = self.active_tool_index else {
                     return Err(parsing_failed!(
                         "xLAM arguments without an active tool call"
                     ));
                 };
-                output.push_call(ToolCallDelta {
+                let arguments = self.buffer[self.cursor - consumed_len..self.cursor].to_string();
+                call_to_push = Some(ToolCallDelta {
                     tool_index,
                     name: None,
-                    arguments: self.buffer[..len].to_string(),
+                    arguments,
                 });
             }
             XlamEvent::ToolCallClose => {
@@ -200,6 +225,23 @@ impl XlamToolParser {
                 self.mode = XlamMode::Done;
             }
         }
+
+        if self.is_tentative() {
+            if let Some(text) = text_to_push {
+                self.tentative_events.push(ToolParserEvent::Text(text));
+            }
+            if let Some(call) = call_to_push {
+                self.tentative_events.push(ToolParserEvent::ToolCall(call));
+            }
+        } else {
+            if let Some(text) = text_to_push {
+                output.push_text(text);
+            }
+            if let Some(call) = call_to_push {
+                output.push_call(call);
+            }
+        }
+
         Ok(())
     }
 
@@ -207,6 +249,8 @@ impl XlamToolParser {
         self.mode = XlamMode::Text;
         self.active_tool_index = None;
         self.emitted_tool_count = 0;
+        self.cursor = 0;
+        self.tentative_events.clear();
         std::mem::take(&mut self.buffer)
     }
 }
@@ -224,16 +268,37 @@ impl ToolParser for XlamToolParser {
 
         // In Done mode flush any trailing text and clear the buffer.
         if matches!(self.mode, XlamMode::Done) {
-            output.push_text(&self.buffer);
+            output.push_text(&self.buffer[self.cursor..]);
             self.buffer.clear();
+            self.cursor = 0;
             return Ok(());
         }
 
-        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
-            parse_next_xlam_event(input, &mut self.mode)
-        })? {
-            self.apply_event(event, output)?;
-            self.buffer.drain(..consumed_len);
+        while let Some((event, consumed_len)) =
+            parse_buffered_event(&self.buffer[self.cursor..], |input| {
+                parse_next_xlam_event(input, &mut self.mode)
+            })?
+        {
+            self.cursor += consumed_len;
+            let was_tentative = self.is_tentative();
+            self.apply_event(event, output, consumed_len)?;
+
+            if was_tentative && !self.is_tentative() {
+                // We just transitioned out of tentative state (e.g. into Arguments).
+                // Flush all tentative events and discard the buffered text up to cursor.
+                for ev in self.tentative_events.drain(..) {
+                    match ev {
+                        ToolParserEvent::Text(text) => output.push_text(text),
+                        ToolParserEvent::ToolCall(call) => output.push_call(call),
+                    }
+                }
+                self.buffer.drain(..self.cursor);
+                self.cursor = 0;
+            } else if !self.is_tentative() {
+                // If not tentative, we can safely drain the consumed bytes immediately.
+                self.buffer.drain(..self.cursor);
+                self.cursor = 0;
+            }
         }
 
         Ok(())
@@ -251,7 +316,7 @@ impl ToolParser for XlamToolParser {
                 output.push_text(&self.buffer);
             }
             XlamMode::AfterArray | XlamMode::Done => {
-                output.push_text(&self.buffer);
+                output.push_text(&self.buffer[self.cursor..]);
             }
             // Incomplete tool call — hard error.
             XlamMode::Header | XlamMode::Arguments { .. } => {
@@ -763,10 +828,9 @@ mod tests {
         let mut output = parser.parse_chunk("<tool_call>   ").unwrap();
 
         output.append(parser.finish().unwrap());
-        // Since the `<tool_call>` tag was successfully consumed by SentinelEntered(XmlOpen),
-        // and we never started an array, we just flush the remaining whitespace.
-        // (Note: The `<tool_call>` prefix itself is correctly discarded just like the Python fallback does).
-        assert_eq!(output.normal_text(), "   ");
+        // Since we fixed eager sentinel consumption, the sentinel is correctly
+        // preserved and flushed when the parser finishes without finding a valid array.
+        assert_eq!(output.normal_text(), "<tool_call>   ");
         assert!(output.calls().is_empty());
     }
 
@@ -778,6 +842,26 @@ mod tests {
         assert!(
             error.to_report_string().contains("xLAM"),
             "error should mention xLAM: {error}"
+        );
+    }
+
+    #[test]
+    fn xlam_parse_complete_bare_array_fallback() {
+        let mut parser = XlamToolParser::new(&test_tools());
+        // A bare array that is NOT a valid tool call.
+        let _input = "The values are [1, 2, 3]";
+        // Parse the safe text first (up to the bracket)
+        let output1 = parser.parse_chunk("The values are ").unwrap();
+        assert_eq!(output1.normal_text(), "The values are ");
+
+        // Parse the bracket and the invalid content
+        let _error = parser.parse_chunk("[1, 2, 3]").unwrap_err();
+
+        // The parser should error out, but the uncommitted buffer MUST retain the `[`
+        assert_eq!(
+            parser.reset(),
+            "[1, 2, 3]",
+            "The `[` character must be preserved on fallback"
         );
     }
 }
