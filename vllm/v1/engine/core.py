@@ -10,7 +10,7 @@ from collections import defaultdict, deque
 from collections.abc import Callable, Generator
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
-from enum import Enum, IntEnum, auto
+from enum import IntEnum
 from functools import partial
 from inspect import isclass, signature
 from logging import DEBUG
@@ -103,10 +103,6 @@ _R = TypeVar("_R")  # Return type for collective_rpc
 class EngineCore:
     """Inner loop of vLLM's Engine."""
 
-    class WeightUpdateType(Enum):
-        TARGET = auto()
-        DRAFT = auto()
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -129,10 +125,8 @@ class EngineCore:
             )
 
         self.log_stats = log_stats
-
-        # Monotonically increasing version of the target model's weights.
-        self._weight_version = 0
-        self._active_weight_update_type: EngineCore.WeightUpdateType | None = None
+        # Opaque weight version supplied by the caller.
+        self._weight_version = "default"
 
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
@@ -964,23 +958,11 @@ class EngineCore:
     ) -> list[_R]:
         return self.model_executor.collective_rpc(method, timeout, args, kwargs)
 
-    def start_weight_update(self) -> None:
-        self.collective_rpc("start_weight_update")
-        self._active_weight_update_type = self.WeightUpdateType.TARGET
+    def set_weight_version(self, weight_version: str) -> None:
+        self._weight_version = weight_version
 
-    def start_draft_weight_update(self) -> None:
-        self.collective_rpc("start_draft_weight_update")
-        self._active_weight_update_type = self.WeightUpdateType.DRAFT
-
-    def finish_weight_update(self) -> None:
-        self.collective_rpc("finish_weight_update")
-        # Advance the target model's weight version only after a successful finish.
-        if self._active_weight_update_type is self.WeightUpdateType.TARGET:
-            self._weight_version += 1
-        self._active_weight_update_type = None
-
-    def get_weight_version(self) -> int:
-        """Return the latest committed version of the target model's weights."""
+    def get_weight_version(self) -> str:
+        """Return the latest committed weight version."""
         return self._weight_version
 
     def preprocess_add_request(self, request: EngineCoreRequest) -> tuple[Request, int]:

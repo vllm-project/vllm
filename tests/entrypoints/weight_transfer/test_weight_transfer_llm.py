@@ -234,6 +234,7 @@ def test_update_weights_calls_engine():
             assert shapes == test_shapes
 
         llm.finish_weight_update()
+        assert llm.get_weight_version() == "default"
 
 
 @create_new_process_for_each_test()
@@ -259,7 +260,7 @@ def test_full_weight_transfer_flow():
             weight_transfer_config=WeightTransferConfig(backend="nccl"),
         )
 
-        assert llm.get_weight_version() == 0
+        assert llm.get_weight_version() == "default"
 
         # Step 1: Initialize weight transfer engine
         llm.init_weight_transfer_engine(
@@ -280,12 +281,15 @@ def test_full_weight_transfer_flow():
             )
         )
 
-        assert llm.get_weight_version() == 0
+        assert llm.get_weight_version() == "default"
 
         # Step 4: Finish weight update
-        llm.finish_weight_update()
+        llm.finish_weight_update("step-42")
 
-        assert llm.get_weight_version() == 1
+        assert llm.get_weight_version() == "step-42"
+
+        llm.update_weight_version("manual-version")
+        assert llm.get_weight_version() == "manual-version"
 
         # Verify the full flow completed
         def check_flow(self):

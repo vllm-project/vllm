@@ -425,17 +425,11 @@ class LLMEngine:
     ) -> list[_R]:
         return self.engine_core.collective_rpc(method, timeout, args, kwargs)
 
-    def start_weight_update(self) -> None:
-        self.engine_core.start_weight_update()
+    def set_weight_version(self, weight_version: str) -> None:
+        self.engine_core.set_weight_version(weight_version)
 
-    def start_draft_weight_update(self) -> None:
-        self.engine_core.start_draft_weight_update()
-
-    def finish_weight_update(self) -> None:
-        self.engine_core.finish_weight_update()
-
-    def get_weight_version(self) -> int:
-        """Return the latest committed version of the target model's weights."""
+    def get_weight_version(self) -> str:
+        """Return the latest committed weight version."""
         return self.engine_core.get_weight_version()
 
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:

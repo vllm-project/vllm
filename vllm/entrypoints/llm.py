@@ -864,11 +864,11 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
 
     def start_weight_update(self) -> None:
         """Start a new weight update."""
-        self.llm_engine.start_weight_update()
+        self.llm_engine.collective_rpc("start_weight_update")
 
     def start_draft_weight_update(self) -> None:
         """Start a new weight update targeting the speculative draft model."""
-        self.llm_engine.start_draft_weight_update()
+        self.llm_engine.collective_rpc("start_draft_weight_update")
 
     def update_weights(self, request: WeightTransferUpdateRequest | dict) -> None:
         """
@@ -885,12 +885,18 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             "update_weights", kwargs={"update_info": update_info_dict}
         )
 
-    def finish_weight_update(self) -> None:
-        """Finish the current weight update."""
-        self.llm_engine.finish_weight_update()
+    def finish_weight_update(self, weight_version: str | None = None) -> None:
+        """Finish the weight update and set its version if provided."""
+        self.llm_engine.collective_rpc("finish_weight_update")
+        if weight_version is not None:
+            self.llm_engine.set_weight_version(weight_version)
 
-    def get_weight_version(self) -> int:
-        """Return the latest committed version of the target model's weights."""
+    def update_weight_version(self, new_version: str) -> None:
+        """Set the weight version without updating weights."""
+        self.llm_engine.set_weight_version(new_version)
+
+    def get_weight_version(self) -> str:
+        """Return the latest committed weight version."""
         return self.llm_engine.get_weight_version()
 
     def __repr__(self) -> str:

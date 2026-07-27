@@ -1083,11 +1083,11 @@ class AsyncLLM(EngineClient):
 
     async def start_weight_update(self) -> None:
         """Start a new weight update."""
-        await self.engine_core.start_weight_update_async()
+        await self.collective_rpc("start_weight_update")
 
     async def start_draft_weight_update(self) -> None:
         """Start a new weight update targeting the speculative draft model."""
-        await self.engine_core.start_draft_weight_update_async()
+        await self.collective_rpc("start_draft_weight_update")
 
     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
         """
@@ -1100,10 +1100,16 @@ class AsyncLLM(EngineClient):
             "update_weights", kwargs={"update_info": request.update_info}
         )
 
-    async def finish_weight_update(self) -> None:
-        """Finish the current weight update."""
-        await self.engine_core.finish_weight_update_async()
+    async def finish_weight_update(self, weight_version: str | None = None) -> None:
+        """Finish the weight update and set its version if provided."""
+        await self.collective_rpc("finish_weight_update")
+        if weight_version is not None:
+            await self.update_weight_version(weight_version)
 
-    async def get_weight_version(self) -> int:
-        """Return the latest committed version of the target model's weights."""
+    async def update_weight_version(self, new_version: str) -> None:
+        """Set the weight version without updating weights."""
+        await self.engine_core.set_weight_version_async(new_version)
+
+    async def get_weight_version(self) -> str:
+        """Return the latest committed weight version."""
         return await self.engine_core.get_weight_version_async()
