@@ -2442,7 +2442,9 @@ def _topk_softmax_cpu(
     gating_output: torch.Tensor,
     renormalize: bool,
     bias: torch.Tensor | None,
+    is_padding: torch.Tensor | None,
 ) -> None:
+    # is_padding is a GPU-only padding hint; unused on the CPU path.
     _native_topk_score_then_select(
         torch.softmax,
         topk_weights,
@@ -2461,7 +2463,10 @@ def _topk_sigmoid_cpu(
     gating_output: torch.Tensor,
     renormalize: bool,
     bias: torch.Tensor | None,
+    routed_scaling_factor: float,
+    is_padding: torch.Tensor | None,
 ) -> None:
+    # is_padding is a GPU-only padding hint; unused on the CPU path.
     _native_topk_score_then_select(
         torch.sigmoid,
         topk_weights,
@@ -2471,15 +2476,31 @@ def _topk_sigmoid_cpu(
         renormalize,
         bias,
     )
+    if routed_scaling_factor != 1.0:
+        topk_weights.mul_(routed_scaling_factor)
 
 
-def _topk_cpu_fake(
+def _topk_softmax_cpu_fake(
     topk_weights: torch.Tensor,
     topk_indices: torch.Tensor,
     token_expert_indices: torch.Tensor,
     gating_output: torch.Tensor,
     renormalize: bool,
     bias: torch.Tensor | None,
+    is_padding: torch.Tensor | None,
+) -> None:
+    return None
+
+
+def _topk_sigmoid_cpu_fake(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool,
+    bias: torch.Tensor | None,
+    routed_scaling_factor: float,
+    is_padding: torch.Tensor | None,
 ) -> None:
     return None
 
@@ -2492,7 +2513,7 @@ if not (hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, "topk_softmax
         "topk_softmax",
         _topk_softmax_cpu,
         mutates_args=["topk_weights", "topk_indices", "token_expert_indices"],
-        fake_impl=_topk_cpu_fake,
+        fake_impl=_topk_softmax_cpu_fake,
         target_lib=_moe_C_cpu_lib,
         dispatch_key="CPU",
     )
@@ -2500,7 +2521,7 @@ if not (hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, "topk_softmax
         "topk_sigmoid",
         _topk_sigmoid_cpu,
         mutates_args=["topk_weights", "topk_indices", "token_expert_indices"],
-        fake_impl=_topk_cpu_fake,
+        fake_impl=_topk_sigmoid_cpu_fake,
         target_lib=_moe_C_cpu_lib,
         dispatch_key="CPU",
     )
