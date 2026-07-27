@@ -217,9 +217,14 @@ def warmup_kernels(
         model_runner.scheduler_config.max_num_seqs,
         model_runner.scheduler_config.max_num_batched_tokens
         // max(prompt_len, decode_query_len),
-        # Reserve block 0 (null block) and ensure we have enough blocks.
-        max(1, (model_runner.kv_cache_config.num_blocks - 1) // max_blocks_per_req),
     )
+    if max_blocks_per_req > 0:
+        # Reserve block 0 (null block) and ensure we have enough blocks.
+        # Encoder-only models allocate no KV blocks, so this cap doesn't apply.
+        num_reqs = min(
+            num_reqs,
+            max(1, (model_runner.kv_cache_config.num_blocks - 1) // max_blocks_per_req),
+        )
 
     req_ids = [f"_warmup_{i}_" for i in range(num_reqs)]
 
