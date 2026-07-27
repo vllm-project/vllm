@@ -1,0 +1,5 @@
+results/serve_*.log
+results/smoke_*.log
+!results/AB_COMPARE_*
+!results/outputs_*
+!results/arm_*
