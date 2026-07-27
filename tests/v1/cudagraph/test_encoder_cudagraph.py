@@ -25,7 +25,6 @@ from vllm.v1.worker.encoder_cudagraph import (
 from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphCaptureInputs,
     EncoderCudaGraphConfig,
-    EncoderCudaGraphPathConfig,
     EncoderCudaGraphReplayBuffers,
     EncoderItemSpec,
 )
@@ -81,15 +80,9 @@ class _MockVllmConfig:
 class _MockModel(SupportsEncoderCudaGraph):
     """Minimal mock implementing SupportsEncoderCudaGraph for __init__."""
 
-    def __init__(
-        self,
-        min_budget: int = 4,
-        max_budget: int = 128,
-        paths: dict[str, EncoderCudaGraphPathConfig] | None = None,
-    ):
+    def __init__(self, min_budget: int = 4, max_budget: int = 128):
         self._min_budget = min_budget
         self._max_budget = max_budget
-        self._paths = paths
 
     def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
         return EncoderCudaGraphConfig(
@@ -99,7 +92,6 @@ class _MockModel(SupportsEncoderCudaGraph):
                 "dummy_buf",
             ],
             out_hidden_size=32,
-            **({"paths": self._paths} if self._paths is not None else {}),
         )
 
     def get_encoder_cudagraph_budget_range(self, vllm_config):
@@ -121,7 +113,6 @@ def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
         buffer_keys=[],
         out_hidden_size=32,
     )
-    mgr.path_token_budgets = {"default": mgr.token_budgets}
     mgr.budget_graphs = {"default": {}}
     mgr.graph_pool = None
     mgr.graph_hits = 0
@@ -199,43 +190,6 @@ class TestFindBudgetGraph:
         mgr = _make_manager_with_budgets([8192, 2048, 4096])
         assert mgr.get_num_graphs_to_capture() == 3
 
-    def test_path_specific_budgets_skip_zero_token_graph(self):
-        paths = {
-            "global": EncoderCudaGraphPathConfig(min_token_budget=16),
-            "local": EncoderCudaGraphPathConfig(
-                min_token_budget=8,
-                allow_zero_tokens=True,
-            ),
-        }
-        mgr = EncoderCudaGraphManager(
-            _MockVllmConfig(token_budgets=[8, 32], max_mm_items=4),
-            torch.device("cpu"),
-            torch.float32,
-            _MockModel(paths=paths),
-        )
-
-        assert mgr.path_token_budgets == {
-            "global": [16, 32],
-            "local": [0, 8, 16, 32],
-        }
-        assert mgr.get_num_graphs_to_capture() == 5
-
-
-class TestEncoderItemSpec:
-    def test_path_tokens_default_to_output_tokens(self):
-        spec = EncoderItemSpec(input_size=8, output_tokens=4)
-        assert spec.get_path_output_tokens("default") == 4
-        assert spec.get_path_output_tokens("local") == 0
-
-    def test_path_tokens_are_model_defined(self):
-        spec = EncoderItemSpec(
-            input_size=12,
-            output_tokens=7,
-            path_output_tokens={"global": 3, "local": 4},
-        )
-        assert spec.get_path_output_tokens("global") == 3
-        assert spec.get_path_output_tokens("local") == 4
-
 
 # ---------------------------------------------------------------------------
 # get_cumulative_stats
@@ -279,155 +233,6 @@ class TestGetCumulativeStats:
         stats = mgr.get_cumulative_stats()
         assert stats["num_budgets"] == 0  # no graphs captured yet
         assert stats["token_budgets"] == budgets
-
-
-class _MultiPathMockModel:
-    def get_encoder_cudagraph_item_specs(
-        self, mm_kwargs: dict[str, Any]
-    ) -> list[EncoderItemSpec]:
-        return mm_kwargs["specs"]
-
-    def select_encoder_cudagraph_items(
-        self, mm_kwargs: dict[str, Any], indices: list[int]
-    ) -> dict[str, Any]:
-        return {"specs": [mm_kwargs["specs"][i] for i in indices]}
-
-    def encoder_eager_forward(
-        self, mm_kwargs: dict[str, Any], path: str = "default"
-    ) -> torch.Tensor:
-        num_tokens = sum(
-            spec.get_path_output_tokens(path) for spec in mm_kwargs["specs"]
-        )
-        return torch.full((num_tokens, 1), -1.0)
-
-    def postprocess_encoder_output(
-        self,
-        outputs: dict[str, torch.Tensor],
-        indices: list[int],
-        per_item_out_tokens: list[int],
-        dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
-        clone: bool = False,
-        batch_mm_kwargs: dict[str, Any] | None = None,
-    ) -> None:
-        assert batch_mm_kwargs is not None
-        specs = batch_mm_kwargs["specs"]
-        offsets = dict.fromkeys(outputs, 0)
-        for index, spec in zip(indices, specs):
-            parts = []
-            for path, output in outputs.items():
-                num_tokens = spec.get_path_output_tokens(path)
-                start = offsets[path]
-                parts.append(output[start : start + num_tokens])
-                offsets[path] += num_tokens
-            dest[index] = torch.cat(parts)
-
-
-def _make_multi_path_manager() -> EncoderCudaGraphManager:
-    mgr = object.__new__(EncoderCudaGraphManager)
-    mgr.path_token_budgets = {
-        "global": [4, 8],
-        "local": [0, 2, 4],
-    }
-    mgr.max_batch_size = 2
-    mgr.model = _MultiPathMockModel()
-    mgr.graph_hits = 0
-    mgr.graph_misses = 0
-    return mgr
-
-
-class TestMultiPathExecution:
-    def test_replays_each_non_empty_path_and_restores_order(self, monkeypatch):
-        mgr = _make_multi_path_manager()
-        calls = []
-
-        def run_graph(mm_kwargs, token_budget, path="default"):
-            calls.append((path, token_budget))
-            num_tokens = sum(
-                spec.get_path_output_tokens(path) for spec in mm_kwargs["specs"]
-            )
-            value = 1.0 if path == "global" else 2.0
-            return torch.full((num_tokens, 1), value)
-
-        monkeypatch.setattr(mgr, "_run_budget_graph", run_graph)
-        specs = [
-            EncoderItemSpec(
-                input_size=6,
-                output_tokens=6,
-                path_output_tokens={"global": 4, "local": 2},
-            ),
-            EncoderItemSpec(
-                input_size=2,
-                output_tokens=2,
-                path_output_tokens={"global": 2},
-            ),
-            EncoderItemSpec(
-                input_size=4,
-                output_tokens=4,
-                path_output_tokens={"global": 2, "local": 2},
-            ),
-        ]
-
-        outputs = mgr._execute_local({"specs": specs})
-
-        assert [output.shape[0] for output in outputs] == [6, 2, 4]
-        assert calls == [
-            ("global", 4),
-            ("local", 2),
-            ("global", 4),
-            ("local", 2),
-        ]
-
-    def test_uses_partial_eager_fallback(self, monkeypatch):
-        mgr = _make_multi_path_manager()
-        graph_paths = []
-        eager_paths = []
-
-        def run_graph(mm_kwargs, token_budget, path="default"):
-            graph_paths.append(path)
-            return torch.ones((2, 1))
-
-        original_eager = mgr.model.encoder_eager_forward
-
-        def run_eager(mm_kwargs, path="default"):
-            eager_paths.append(path)
-            return original_eager(mm_kwargs, path)
-
-        monkeypatch.setattr(mgr, "_run_budget_graph", run_graph)
-        monkeypatch.setattr(mgr.model, "encoder_eager_forward", run_eager)
-        specs = [
-            EncoderItemSpec(
-                input_size=8,
-                output_tokens=8,
-                path_output_tokens={"global": 2, "local": 6},
-            )
-        ]
-
-        outputs = mgr._execute_local({"specs": specs})
-
-        assert outputs[0].shape == (8, 1)
-        assert graph_paths == ["global"]
-        assert eager_paths == ["local"]
-
-    def test_skips_zero_token_path(self, monkeypatch):
-        mgr = _make_multi_path_manager()
-        graph_paths = []
-
-        def run_graph(mm_kwargs, token_budget, path="default"):
-            graph_paths.append(path)
-            return torch.ones((2, 1))
-
-        monkeypatch.setattr(mgr, "_run_budget_graph", run_graph)
-        specs = [
-            EncoderItemSpec(
-                input_size=2,
-                output_tokens=2,
-                path_output_tokens={"global": 2},
-            )
-        ]
-
-        mgr._execute_local({"specs": specs})
-
-        assert graph_paths == ["global"]
 
 
 # ---------------------------------------------------------------------------
@@ -624,7 +429,6 @@ def _make_manager_for_gpu(
     mgr.log_stats_interval = 100
     mgr.model = model
     mgr.config = model.get_encoder_cudagraph_config()
-    mgr.path_token_budgets = {"default": mgr.token_budgets}
     mgr.device = device
     mgr.dtype = dtype
     return mgr
