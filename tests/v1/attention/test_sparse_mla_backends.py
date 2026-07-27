@@ -1817,6 +1817,36 @@ def test_hisparse_backup_packed_indexer_pages():
 
 
 @requires_hisparse_ops
+def test_hisparse_gather_zeroes_unaligned_destination():
+    """Invalid host rows are safely zeroed even at a byte-unaligned address."""
+    device = torch.device(DEVICE_TYPE)
+    row_bytes = 16
+    host_cache = torch.ones(1, row_bytes, dtype=torch.uint8).pin_memory()
+    storage = torch.full((2 * row_bytes + 1,), 7, dtype=torch.uint8, device=device)
+    hot_cache = torch.as_strided(
+        storage,
+        size=(2, 1, row_bytes),
+        stride=(row_bytes + 1, row_bytes, 1),
+    )
+    global_indices = torch.tensor([[1]], dtype=torch.int32, device=device)
+    hot_indices = torch.tensor([[1]], dtype=torch.int32, device=device)
+    miss_mask = torch.ones_like(global_indices)
+
+    torch.ops._C_cache_ops.hisparse_gather_plan(
+        host_cache,
+        hot_cache,
+        global_indices,
+        hot_indices,
+        miss_mask,
+        None,
+    )
+    torch.accelerator.synchronize()
+
+    torch.testing.assert_close(hot_cache[1, 0], torch.zeros_like(hot_cache[1, 0]))
+    assert storage[row_bytes].item() == 7
+
+
+@requires_hisparse_ops
 def test_hisparse_rotates_newest_slot_without_copy_or_reload():
     """Selected newest bytes stay put while the reserved-slot role rotates."""
     device = torch.device(DEVICE_TYPE)

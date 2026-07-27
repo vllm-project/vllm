@@ -72,13 +72,31 @@ __device__ __forceinline__ void copy_row_warp(int lane_id, const char* src,
 // addressing contract as copy_row_warp.
 __device__ __forceinline__ void zero_row_warp(int lane_id, char* dst,
                                               int64_t row_bytes) {
-  const int64_t num_vec = row_bytes / 16;
-  uint64_t* dst8 = reinterpret_cast<uint64_t*>(dst);
-  for (int64_t j = lane_id; j < num_vec; j += kWarpSize) {
-    uint64_t* d = dst8 + j * 2;
-    asm volatile("st.global.cg.v2.b64 [%0],{%1,%2};" ::"l"(d), "l"(0ULL),
-                 "l"(0ULL)
-                 : "memory");
+  const auto alignment =
+      reinterpret_cast<uintptr_t>(dst) | static_cast<uintptr_t>(row_bytes);
+  if ((alignment & 15) == 0) {
+    const int64_t num_vec = row_bytes / 16;
+    uint64_t* dst8 = reinterpret_cast<uint64_t*>(dst);
+    for (int64_t j = lane_id; j < num_vec; j += kWarpSize) {
+      uint64_t* d = dst8 + j * 2;
+      asm volatile("st.global.cg.v2.b64 [%0],{%1,%2};" ::"l"(d), "l"(0ULL),
+                   "l"(0ULL)
+                   : "memory");
+    }
+    return;
+  }
+
+  if ((alignment & 3) == 0) {
+    const int64_t num_words = row_bytes / 4;
+    unsigned int* dst_words = reinterpret_cast<unsigned int*>(dst);
+    for (int64_t j = lane_id; j < num_words; j += kWarpSize) {
+      __stcg(dst_words + j, 0u);
+    }
+    return;
+  }
+
+  for (int64_t j = lane_id; j < row_bytes; j += kWarpSize) {
+    __stcg(dst + j, static_cast<char>(0));
   }
 }
 
@@ -735,7 +753,7 @@ void hisparse_swap_in(
   const auto top_k = static_cast<int32_t>(global_indices.size(1));
   const auto hot_size = static_cast<int32_t>(lru_slots.size(1));
   STD_TORCH_CHECK(hot_size >= top_k, "hot buffer size must be >= top_k");
-  STD_TORCH_CHECK(hot_size < 32767, "hot buffer size must fit int16 slots");
+  STD_TORCH_CHECK(hot_size <= 32767, "hot buffer size must fit int16 slots");
   STD_TORCH_CHECK(region_stride == hot_size + 1,
                   "region_stride must contain the LRU plus one reserved row");
   STD_TORCH_CHECK(device_global_indices.size(1) == region_stride,

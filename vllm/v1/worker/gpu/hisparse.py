@@ -147,8 +147,10 @@ def init_hisparse_runtime(
             kernel_block_size = indexer_spec.kv_cache_specs[layer_name].block_size
             assert source_spec.block_size % kernel_block_size == 0
             blocks_per_kv_block = source_spec.block_size // kernel_block_size
+            tensor_config = tensor_configs[cache_name]
             source_cache = raw_tensor.view(source_spec.dtype).view(
-                kv_cache_config.num_blocks_by_pool[0] * blocks_per_kv_block,
+                kv_cache_config.num_blocks_by_pool[tensor_config.block_pool_id]
+                * blocks_per_kv_block,
                 kernel_block_size,
                 source_spec.head_size,
             )
@@ -173,15 +175,38 @@ def init_hisparse_runtime(
         )
         coordinator.bind_hot_block_table(block_tables.input_block_tables[hot_group_id])
 
+    source_group_ids = [
+        group_id
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+        if any(
+            name.endswith(HISPARSE_INDEXER_SOURCE_SUFFIX) for name in group.layer_names
+        )
+    ]
+    indexer_group_ids = [
+        group_id
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+        if group.layer_names
+        and all(get_indexer_source(name) is not None for name in group.layer_names)
+    ]
+    if len(source_group_ids) != 1 or len(indexer_group_ids) != 1:
+        raise RuntimeError(
+            "HiSparse requires exactly one source group and one indexer group; "
+            f"found source={source_group_ids}, indexer={indexer_group_ids}."
+        )
+    source_group_id = source_group_ids[0]
+    indexer_group = kv_cache_config.kv_cache_groups[indexer_group_ids[0]]
     cache_pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
-    indexer_group = kv_cache_config.kv_cache_groups[1]
     for layer_name in indexer_group.layer_names:
         source = get_indexer_source(layer_name)
         assert source is not None
         cache_pairs.append((source[0], kv_caches[layer_name]))
-        bind_indexer_source_slot_mapping(layer_name, block_tables.slot_mappings[0])
+        bind_indexer_source_slot_mapping(
+            layer_name, block_tables.slot_mappings[source_group_id]
+        )
 
-    block_size = kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
+    block_size = kv_cache_config.kv_cache_groups[
+        source_group_id
+    ].kv_cache_spec.block_size
     return HiSparseRuntime(
         cache_pairs,
         max_num_reqs,

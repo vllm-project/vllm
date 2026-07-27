@@ -135,6 +135,48 @@ def test_hisparse_hma_splits_scheduler_blocks_into_kernel_blocks(block_size):
     assert all(group.kv_cache_spec.block_size == 64 for group in hot_groups)
 
 
+def test_hisparse_hma_rejects_mixed_hot_page_sizes():
+    specs = {
+        "model.layers.0.self_attn": MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+        ),
+        "model.layers.0.self_attn.indexer": MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+        ),
+        "model.layers.1.self_attn": MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=640,
+            dtype=torch.bfloat16,
+        ),
+    }
+    group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
+    assert group_spec is not None
+    group = KVCacheGroupSpec(list(specs), group_spec)
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(
+            hisparse_config=HiSparseConfig(host_pool_gib=1.0)
+        ),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(index_topk=128)),
+        cache_config=SimpleNamespace(num_gpu_blocks_override=7),
+    )
+
+    with pytest.raises(ValueError, match="require one page size"):
+        kv_cache_utils._get_hisparse_hma_config(
+            config,
+            group,
+            available_memory=2**30,
+            host_budget=2**30,
+            log_layout=False,
+        )
+
+
 @pytest.fixture(autouse=True)
 def _auto_init_hash_fn(request):
     hash_fn: Callable

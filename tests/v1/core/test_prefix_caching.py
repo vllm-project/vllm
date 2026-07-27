@@ -180,6 +180,59 @@ def test_independent_block_pool_domains():
     assert [pool.get_num_free_blocks() for pool in manager.block_pools] == [3, 2]
 
 
+def test_hisparse_ephemeral_pool_skips_caching_without_disabling_zeroing():
+    block_size = 16
+    full = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    mamba = MambaSpec(
+        block_size=block_size,
+        shapes=((1, 4),),
+        dtypes=(torch.float32,),
+    )
+    hot = HiSparseHotSpec(
+        block_size=block_size,
+        page_size=block_size * 4,
+        blocks_per_request=2,
+    )
+    config = KVCacheConfig(
+        num_blocks=4,
+        num_blocks_by_pool=[4, 4],
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["full"], full, block_pool_id=0),
+            KVCacheGroupSpec(["mamba"], mamba, block_pool_id=0),
+            KVCacheGroupSpec(
+                ["hot"],
+                hot,
+                block_pool_id=1,
+                enable_prefix_caching=False,
+            ),
+        ],
+    )
+    assert config.needs_kv_cache_zeroing
+    assert config.zeroing_block_pool_ids == {0}
+
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=128,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    assert [pool.enable_caching for pool in manager.block_pools] == [True, False]
+    assert [
+        group_manager.enable_caching
+        for group_manager in manager.coordinator.single_type_managers
+    ] == [True, True, False]
+    assert [
+        group_manager._record_new_block_ids
+        for group_manager in manager.coordinator.single_type_managers
+    ] == [True, False, False]
+
+
 def test_prefix_cache_source_rebuilds_ephemeral_groups():
     block_size = 16
     full = FullAttentionSpec(
@@ -220,6 +273,11 @@ def test_prefix_cache_source_rebuilds_ephemeral_groups():
         enable_caching=True,
         hash_block_size=block_size,
     )
+    assert [pool.enable_caching for pool in manager.block_pools] == [True, False]
+    assert [
+        group_manager.enable_caching
+        for group_manager in manager.coordinator.single_type_managers
+    ] == [True, False, False]
     assert [g.enable_kv_transfer for g in config.kv_cache_groups] == [
         True,
         False,

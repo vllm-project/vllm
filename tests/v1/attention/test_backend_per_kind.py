@@ -101,3 +101,20 @@ def test_hisparse_config_warns_about_block_padding(caplog: pytest.LogCaptureFixt
     assert resolved is not None
     assert resolved.lru_size == 256
     assert "allocates 63 unused padding rows" in caplog.text
+
+
+def test_hisparse_config_rejects_slot_indices_larger_than_int16():
+    vllm_config = SimpleNamespace(
+        attention_config=AttentionConfig(
+            hisparse_config=HiSparseConfig(host_pool_gib=1.0, device_buffer_size=32768)
+        )
+    )
+    resolved = ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)
+    assert resolved is not None
+    assert resolved.lru_size == 32767
+
+    vllm_config.attention_config.hisparse_config = HiSparseConfig(
+        host_pool_gib=1.0, device_buffer_size=32769
+    )
+    with pytest.raises(ValueError, match="int16 slot-index limit"):
+        ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)

@@ -85,6 +85,19 @@ def test_hisparse_requires_v2_model_runner():
         _ = config.use_v2_model_runner
 
 
+def test_hisparse_rejects_decode_context_parallelism():
+    with pytest.raises(ValueError, match="decode context parallelism"):
+        VllmConfig(
+            attention_config=AttentionConfig(
+                hisparse_config=HiSparseConfig(host_pool_gib=1.0)
+            ),
+            parallel_config=ParallelConfig(
+                tensor_parallel_size=2,
+                decode_context_parallel_size=2,
+            ),
+        )
+
+
 @pytest.mark.parametrize(
     ("use_v2_model_runner", "expected_capture_sizes"),
     [

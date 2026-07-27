@@ -1043,6 +1043,28 @@ class KVCacheConfig:
         return len(kv_cache_precisions) > 1
 
     @property
+    def zeroing_block_pool_ids(self) -> frozenset[int]:
+        """Physical pools whose newly allocated blocks require zeroing."""
+        pool_precisions: dict[int, set[tuple[torch.dtype, KVQuantMode]]] = {}
+        zeroing_pools = {
+            group.block_pool_id
+            for group in self.kv_cache_groups
+            if isinstance(group.kv_cache_spec, MambaSpec)
+        }
+        for group in self.kv_cache_groups:
+            spec = group.kv_cache_spec
+            if isinstance(spec, AttentionSpec):
+                pool_precisions.setdefault(group.block_pool_id, set()).add(
+                    (spec.dtype, spec.kv_quant_mode)
+                )
+        zeroing_pools.update(
+            pool_id
+            for pool_id, precisions in pool_precisions.items()
+            if len(precisions) > 1
+        )
+        return frozenset(zeroing_pools)
+
+    @property
     def needs_kv_cache_zeroing(self) -> bool:
         """Whether newly allocated KV cache blocks must be zeroed before use.
 
@@ -1051,12 +1073,4 @@ class KVCacheConfig:
         groups can be reinterpreted under a different precision and decode stale
         bytes to NaN/Inf. Uniform-precision caches skip zeroing.
         """
-        if any(
-            isinstance(group.kv_cache_spec, HiSparseHotSpec)
-            for group in self.kv_cache_groups
-        ):
-            # HiSparse source/indexer/hot pages are fully initialized before
-            # use; zeroing also cannot address its independent pool domains
-            # with one unqualified block-ID list.
-            return False
-        return self.has_mamba_layers or self.has_mixed_precision_kv_cache
+        return bool(self.zeroing_block_pool_ids)

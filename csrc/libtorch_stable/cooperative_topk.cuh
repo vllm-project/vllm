@@ -460,7 +460,7 @@ __device__ void large_topk(const float* __restrict__ row_input,
   // (wrong-row gather or illegal memory access downstream).
   for (uint32_t i = s_total_above + s_total_equal + tx; i < TopK;
        i += hist4096::kBlockSize) {
-    row_output[i] = -1u;
+    row_output[i] = -1;
   }
   if (s_total_above + s_total_equal <= TopK) {  // no ties to refine
     return;

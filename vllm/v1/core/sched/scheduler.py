@@ -2260,10 +2260,7 @@ class Scheduler(SchedulerInterface):
         pool while the step that runs the copy may still be in flight.
         """
         if not self.defer_block_free or fence_seq <= self.processed_step_seq:
-            if hasattr(self.kv_cache_manager, "free_blocks"):
-                self.kv_cache_manager.free_blocks(blocks)
-            else:
-                self.kv_cache_manager.block_pool.free_blocks(blocks)
+            self.kv_cache_manager.free_blocks(blocks)
             return
         self.deferred_frees.append((fence_seq, blocks[::-1]))
 
@@ -2280,10 +2277,7 @@ class Scheduler(SchedulerInterface):
                 break
             _, blocks = self.deferred_frees.popleft()
             # Free in reverse order so that the tail blocks are evicted first.
-            if hasattr(self.kv_cache_manager, "free_blocks"):
-                self.kv_cache_manager.free_blocks(reversed(blocks))
-            else:
-                self.kv_cache_manager.block_pool.free_blocks(reversed(blocks))
+            self.kv_cache_manager.free_blocks(reversed(blocks))
 
     def get_num_unfinished_requests(self) -> int:
         if self._pause_state == PauseState.PAUSED_ALL:

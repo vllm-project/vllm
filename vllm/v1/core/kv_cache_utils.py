@@ -1447,7 +1447,11 @@ def _get_hisparse_hma_config(
 
     def append_hot_group(layers: list[tuple[str, KVCacheSpec]]) -> None:
         page_sizes = {spec.page_size_bytes for _, spec in layers}
-        assert len(page_sizes) == 1
+        if len(page_sizes) != 1:
+            raise ValueError(
+                "HiSparse hot-cache groups require one page size, got "
+                f"{sorted(page_sizes)}."
+            )
         hot_groups.append(
             KVCacheGroupSpec(
                 [name for name, _ in layers],

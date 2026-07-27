@@ -98,6 +98,7 @@ class KVBlockZeroer:
         cache_dtype: str,
         static_forward_context: dict[str, Any],
         runner_only_attn_layers: set[str] | None = None,
+        zeroing_group_ids: set[int] | None = None,
     ) -> None:
         """Precompute the absolute-address table for the Triton zeroing kernel.
 
@@ -110,6 +111,9 @@ class KVBlockZeroer:
         ``block_id * PAGE_SIZE_EL`` lands at the correct offset.
 
         Only AttentionSpec layers are processed; Mamba layers are skipped.
+        When ``zeroing_group_ids`` is provided, groups in other physical
+        block-pool domains are excluded because their numeric block IDs may
+        overlap.
         """
         self.device = device
         self._meta: tuple[torch.Tensor, int, int, int] | None = None
@@ -121,6 +125,11 @@ class KVBlockZeroer:
         page_size_el: int | None = None
 
         for group in attn_groups_iter:
+            if (
+                zeroing_group_ids is not None
+                and group.kv_cache_group_id not in zeroing_group_ids
+            ):
+                continue
             spec = group.kv_cache_spec
             if not isinstance(spec, FullAttentionSpec):
                 continue

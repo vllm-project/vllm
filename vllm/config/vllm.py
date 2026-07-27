@@ -1306,6 +1306,10 @@ class VllmConfig:
                 )
             if self.speculative_config is not None:
                 raise ValueError("HiSparse does not support speculative decoding.")
+            if self.parallel_config.decode_context_parallel_size > 1:
+                raise ValueError(
+                    "HiSparse does not support decode context parallelism."
+                )
             if self.model_config is not None and not hasattr(
                 self.model_config.hf_config, "index_topk"
             ):

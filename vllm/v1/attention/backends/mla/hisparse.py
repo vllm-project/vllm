@@ -99,6 +99,13 @@ class ResolvedHiSparseConfig:
                 f"index_topk={model_top_k}; expected at least "
                 f"{model_top_k + 1}."
             )
+        max_device_buffer_size = torch.iinfo(torch.int16).max + 1
+        if device_buffer_size > max_device_buffer_size:
+            raise ValueError(
+                "HiSparse device_buffer_size exceeds the int16 slot-index "
+                f"limit: got {device_buffer_size}, maximum is "
+                f"{max_device_buffer_size}."
+            )
         if configured_size is not None:
             padding = -device_buffer_size % HISPARSE_KERNEL_BLOCK_SIZE
             if padding:

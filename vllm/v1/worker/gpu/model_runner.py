@@ -533,12 +533,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
+        zeroing_pools = self.kv_cache_config.zeroing_block_pool_ids
+        zeroing_group_ids = {
+            group_id
+            for group_id, group in enumerate(self.kv_cache_config.kv_cache_groups)
+            if group.block_pool_id in zeroing_pools
+        }
         self.kv_block_zeroer = KVBlockZeroer(
             self.device,
             attn_groups_iter=(g for groups in self.attn_groups for g in groups),
             kernel_block_sizes=self.kernel_block_sizes,
             cache_dtype=self.cache_config.cache_dtype,
             static_forward_context=self.compilation_config.static_forward_context,
+            zeroing_group_ids=zeroing_group_ids,
         )
 
     @torch.inference_mode()

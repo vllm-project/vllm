@@ -88,15 +88,20 @@ class KVCacheCoordinator(ABC):
         self.scheduler_block_size = scheduler_block_size
 
         assert kv_cache_config.num_blocks_by_pool is not None
+        pool_enable_caching = [False] * len(kv_cache_config.num_blocks_by_pool)
+        for group in kv_cache_config.kv_cache_groups:
+            pool_enable_caching[group.block_pool_id] |= (
+                enable_caching and group.enable_prefix_caching
+            )
         self.block_pools = tuple(
             BlockPool(
                 num_gpu_blocks=num_blocks,
-                enable_caching=enable_caching,
+                enable_caching=pool_enable_caching[pool_id],
                 hash_block_size=hash_block_size,
                 enable_kv_cache_events=enable_kv_cache_events,
                 metrics_collector=metrics_collector,
             )
-            for num_blocks in kv_cache_config.num_blocks_by_pool
+            for pool_id, num_blocks in enumerate(kv_cache_config.num_blocks_by_pool)
         )
         # Compatibility alias for callers that only support the traditional
         # single-domain layout.
@@ -116,12 +121,17 @@ class KVCacheCoordinator(ABC):
                 max_in_flight_tokens=max_in_flight_tokens,
                 max_model_len=max_model_len,
                 block_pool=self.block_pools[kv_cache_group.block_pool_id],
-                enable_caching=enable_caching,
+                enable_caching=(
+                    enable_caching and kv_cache_group.enable_prefix_caching
+                ),
                 kv_cache_group_id=i,
                 dcp_world_size=dcp_world_size,
                 pcp_world_size=pcp_world_size,
                 scheduler_block_size=self.scheduler_block_size,
-                needs_kv_cache_zeroing=self.kv_cache_config.needs_kv_cache_zeroing,
+                needs_kv_cache_zeroing=(
+                    kv_cache_group.block_pool_id
+                    in self.kv_cache_config.zeroing_block_pool_ids
+                ),
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
