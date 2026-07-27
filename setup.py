@@ -670,6 +670,72 @@ class precompiled_wheel_utils:
         return None
 
     @staticmethod
+    def warn_if_rocm_torch_version_mismatch(commit: str, variant: str) -> None:
+        """Warn if installed torch differs from the custom ROCm build on
+        wheels.vllm.ai and suggest the correct install command."""
+        import platform
+        from urllib.request import urlopen
+
+        try:
+            installed = torch.__version__
+        except Exception:
+            return
+
+        arch = platform.machine()
+        index_url = f"https://wheels.vllm.ai/rocm/{commit}/{variant}"
+
+        try:
+            with urlopen(f"{index_url}/torch/metadata.json") as resp:
+                torch_wheels = json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            return
+
+        expected = None
+        for w in torch_wheels:
+            if w.get("package_name") == "torch" and arch in w.get("platform_tag", ""):
+                v = w["version"]
+                if w.get("variant") and "+" not in v:
+                    v = f"{v}+{w['variant']}"
+                expected = v
+                break
+        if expected is None or installed == expected:
+            return
+
+        packages = [f"torch=={expected}"]
+        try:
+            with urlopen(f"{index_url}/triton/metadata.json") as resp:
+                for w in json.loads(resp.read().decode("utf-8")):
+                    if w.get("package_name") == "triton" and arch in w.get(
+                        "platform_tag", ""
+                    ):
+                        tv = w["version"]
+                        if w.get("variant") and "+" not in tv:
+                            tv = f"{tv}+{w['variant']}"
+                        packages.append(f"triton=={tv}")
+                        break
+        except Exception:
+            pass
+
+        pkgs = " ".join(packages)
+        logger.warning(
+            "Installed PyTorch %s does not match the custom build %s "
+            "shipped with vLLM ROCm wheels (commit %.12s, variant %s). "
+            "The ABI may differ from official releases. "
+            "If you hit extension load errors, reinstall from the vLLM index:\n"
+            "  pip install %s --extra-index-url %s\n"
+            "  uv pip install %s --extra-index-url %s "
+            "--index-strategy unsafe-best-match",
+            installed,
+            expected,
+            commit,
+            variant,
+            pkgs,
+            index_url,
+            pkgs,
+            index_url,
+        )
+
+    @staticmethod
     def find_local_rocm_wheel() -> str | None:
         """Search for a local vllm wheel in common locations."""
         import glob
@@ -740,6 +806,8 @@ class precompiled_wheel_utils:
             commit, os.getenv("VLLM_PRECOMPILED_WHEEL_VARIANT", None)
         )
         print(f"Using precompiled ROCm wheel commit {commit} with variant {variant}")
+        if variant is not None:
+            precompiled_wheel_utils.warn_if_rocm_torch_version_mismatch(commit, variant)
         wheels, repo_url = None, None
         if variant is not None:
             try:
