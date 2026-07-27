@@ -17,11 +17,11 @@ from torch import nn
 from vllm.logger import init_logger
 from vllm.model_executor.models.transformers.fusers import (
     BaseFuser,
-    FusedQKVFuser,
     GLUFuser,
+    PackedQKVFuser,
     QKVFuser,
+    RewriteFuser,
     RMSNormFuser,
-    StackedFuser,
 )
 from vllm.model_executor.models.transformers.fx_utils import trace
 
@@ -48,9 +48,9 @@ def get_fuser(module: nn.Module) -> BaseFuser | None:
         return None
     if (graph := trace(module)) is None:
         return None
-    for fuser_cls in (GLUFuser, QKVFuser, FusedQKVFuser, RMSNormFuser):
+    for fuser_cls in (GLUFuser, QKVFuser, PackedQKVFuser, RMSNormFuser):
         if (fuser := fuser_cls.match(graph, module)) is not None:
-            if isinstance(fuser, StackedFuser):
+            if isinstance(fuser, RewriteFuser):
                 try:
                     fuser.update_forward(module)
                 except Exception as exc:
