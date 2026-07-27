@@ -1866,7 +1866,7 @@ class Scheduler(SchedulerInterface):
             self._update_from_kv_xfer_finished(kv_connector_output)
 
         # EC Connector: update state from worker-side EC connector output.
-        if ec_connector_output and self.ec_connector is not None:
+        if self.ec_connector is not None and ec_connector_output:
             self.ec_connector.update_connector_output(ec_connector_output)
 
         # Worker-side KV connector stats from the model runner output.
