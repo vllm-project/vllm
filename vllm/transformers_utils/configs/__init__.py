@@ -69,6 +69,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
         "vllm.transformers_utils.configs.moss_transcribe_diarize"
     ),
     "MoonViTConfig": "vllm.transformers_utils.configs.moonvit",
+    "NanbeigeConfig": "vllm.transformers_utils.configs.nanbeige",
     "KimiLinearConfig": "vllm.transformers_utils.configs.kimi_linear",
     "KimiVLConfig": "vllm.transformers_utils.configs.kimi_vl",
     "KimiK25Config": "vllm.transformers_utils.configs.kimi_k25",

@@ -88,6 +88,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "qwen3_engine_reasoning_parser",
         "Qwen3ParserReasoningAdapter",
     ),
+    "nanbeige": (
+        "qwen3_engine_reasoning_parser",
+        "Qwen3ParserReasoningAdapter",
+    ),
     "minimax_m2": (
         "minimax_m2_reasoning_parser",
         "MiniMaxM2ReasoningParser",
