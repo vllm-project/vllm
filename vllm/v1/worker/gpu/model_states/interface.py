@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -58,6 +58,26 @@ class ModelState(ABC):
 
         self.supports_mm_inputs = encoder_cache is not None
         if encoder_cache is not None:
+            from vllm.model_executor.models.interfaces import (
+                SupportsEncoderCudaGraph,
+                supports_encoder_cudagraph,
+            )
+
+            cudagraph_manager = None
+            if (
+                not self.model_config.enforce_eager
+                and vllm_config.compilation_config.cudagraph_mm_encoder
+                and supports_encoder_cudagraph(model)
+            ):
+                from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
+
+                cudagraph_manager = EncoderCudaGraphManager(
+                    vllm_config=vllm_config,
+                    device=device,
+                    dtype=self.dtype,
+                    model=cast(SupportsEncoderCudaGraph, model),
+                )
+
             self.encoder_cache = encoder_cache
             self.encoder_runner = EncoderRunner(
                 model=self.model,
@@ -66,7 +86,7 @@ class ModelState(ABC):
                 encoder_cache=encoder_cache,
                 dtype=self.dtype,
                 device=self.device,
-                vllm_config=self.vllm_config,
+                cudagraph_manager=cudagraph_manager,
             )
 
     def get_supported_generation_tasks(self) -> tuple[GenerationTask, ...]:

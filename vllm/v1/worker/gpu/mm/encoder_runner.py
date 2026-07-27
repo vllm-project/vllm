@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 
-from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMultiModal, supports_realtime
 from vllm.multimodal.encoder_budget import MultiModalBudget
@@ -34,7 +33,7 @@ class EncoderRunner:
         encoder_cache: EncoderCache,
         dtype: torch.dtype,
         device: torch.device,
-        vllm_config: VllmConfig | None = None,
+        cudagraph_manager: "EncoderCudaGraphManager | None" = None,
     ):
         self.model = model
         self.max_num_tokens = max_num_tokens
@@ -43,28 +42,7 @@ class EncoderRunner:
         self.dtype = dtype
         self.device = device
         self.is_realtime = supports_realtime(model)
-        self.cudagraph_manager: EncoderCudaGraphManager | None = None
-        if vllm_config is not None:
-            from vllm.model_executor.models.interfaces import (
-                SupportsEncoderCudaGraph,
-                supports_encoder_cudagraph,
-            )
-
-            if (
-                not vllm_config.model_config.enforce_eager
-                and vllm_config.compilation_config.cudagraph_mm_encoder
-                and supports_encoder_cudagraph(model)
-            ):
-                from vllm.v1.worker.encoder_cudagraph import (
-                    EncoderCudaGraphManager as CudaGraphManager,
-                )
-
-                self.cudagraph_manager = CudaGraphManager(
-                    vllm_config=vllm_config,
-                    device=device,
-                    dtype=dtype,
-                    model=cast(SupportsEncoderCudaGraph, model),
-                )
+        self.cudagraph_manager = cudagraph_manager
 
         self.inputs_embeds = torch.zeros(
             max_num_tokens, hidden_size, dtype=dtype, device=device
