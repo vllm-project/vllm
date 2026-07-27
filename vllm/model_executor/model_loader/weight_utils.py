@@ -698,8 +698,6 @@ def _get_available_ram_bytes() -> int:
     import psutil
 
     host_available = psutil.virtual_memory().available
-    if not current_platform.is_rocm():
-        return host_available
 
     from vllm.utils.cpu_resource_utils import get_cgroup_memory_limit
 
