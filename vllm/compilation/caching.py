@@ -19,6 +19,7 @@ import vllm.envs as envs
 from vllm.compilation.codegen import compile_execution_fn
 from vllm.compilation.compiler_interface import get_inductor_factors
 from vllm.compilation.counter import compilation_counter
+from vllm.compilation.side_stream import StreamMapping
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.utils import hash_factors
 from vllm.logger import init_logger
@@ -260,11 +261,15 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         for node in state["graph_module"].graph.nodes:
             node.meta.pop("source_fn_stack", None)
             node.meta.pop("nn_module_stack", None)
+            if isinstance(node.meta.get("example_value"), torch.Stream):
+                node.meta.pop("example_value")
         for name, submod in state["graph_module"].named_children():
             if hasattr(submod, "graph"):
                 for node in submod.graph.nodes:
                     node.meta.pop("source_fn_stack", None)
                     node.meta.pop("nn_module_stack", None)
+                    if isinstance(node.meta.get("example_value"), torch.Stream):
+                        node.meta.pop("example_value")
 
         if state.get("sym_tensor_indices"):
             # put tensor inputs on meta device since their data
@@ -294,6 +299,7 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
             state["standalone_compile_artifacts"] = standalone_compile_artifacts
             state["sym_shape_indices_map"] = sym_shape_indices_map
             state["returns_tuple_map"] = returns_tuple_map
+            state["stream_mappings"] = compiled_fn.vllm_backend.stream_mappings
         return pickle.dumps(state)
 
     @classmethod
@@ -309,6 +315,7 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         standalone_compile_artifacts = state.pop("standalone_compile_artifacts", None)
         sym_shape_indices_map = state.pop("sym_shape_indices_map", {})
         returns_tuple_map = state.pop("returns_tuple_map", {})
+        stream_mappings = state.pop("stream_mappings", {})
 
         saved_aot_autograd_config = state["aot_autograd_config"]
         if saved_aot_autograd_config is not None:
@@ -329,6 +336,7 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
                     vllm_config=get_current_vllm_config(),
                     sym_shape_indices_map=sym_shape_indices_map,
                     returns_tuple_map=returns_tuple_map,
+                    stream_mappings=stream_mappings,
                     fake_mode=fake_mode,
                 )
 
@@ -414,6 +422,7 @@ def reconstruct_serializable_fn_from_mega_artifact(
     vllm_config: VllmConfig,
     sym_shape_indices_map: dict[str, list[int]],
     returns_tuple_map: dict[str, bool],
+    stream_mappings: dict[str, StreamMapping],
     fake_mode: FakeTensorMode,
 ) -> "VllmSerializableFunction":
     """Construct a VllmSerializableFunction from cached inductor artifacts.
@@ -444,6 +453,7 @@ def reconstruct_serializable_fn_from_mega_artifact(
         vllm_config: The vLLM configuration.
         sym_shape_indices_map: Mapping from submod_name to sym_shape_indices.
         returns_tuple_map: Mapping from submod_name to returns_tuple.
+        stream_mappings: External stream mappings for compiled submodules.
 
     Returns:
         A VllmSerializableFunction that can be called directly.
@@ -506,6 +516,7 @@ def reconstruct_serializable_fn_from_mega_artifact(
             vllm_backend=vllm_backend,
             returns_tuple=returns_tuple,
             compiled_runnables=runnables,
+            stream_mapping=stream_mappings.get(submod_name, ()),
         )
 
         is_first = i == 0
@@ -516,6 +527,7 @@ def reconstruct_serializable_fn_from_mega_artifact(
             compilation_config,
             is_first,
             is_last,
+            stream_mappings.get(submod_name, ()),
         )
 
         submod_callables[submod_name] = wrapped_backend

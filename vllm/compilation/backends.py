@@ -52,6 +52,11 @@ from .partition_rules import (
 from .passes.inductor_pass import InductorPass, pass_context
 from .passes.ir.inplace_functionalization import VllmIRInplaceFunctionalizationPass
 from .passes.pass_manager import PostGradPassManager
+from .side_stream import (
+    StreamMapping,
+    find_stream_mapping,
+    graph_uses_stream_mapping,
+)
 
 logger = init_logger(__name__)
 
@@ -636,6 +641,7 @@ def wrap_with_cudagraph_if_needed(
     compilation_config: CompilationConfig,
     is_first_graph: bool,
     is_last_graph: bool,
+    stream_mapping: StreamMapping = (),
 ) -> Any:
     """
     Wrap a piecewise backend with CUDA graph wrapper if needed.
@@ -648,6 +654,7 @@ def wrap_with_cudagraph_if_needed(
         compilation_config: The compilation configuration
         is_first_graph: Whether this is the first graph in the sequence
         is_last_graph: Whether this is the last graph in the sequence
+        stream_mapping: External streams used by this graph
 
     Returns:
         The wrapped backend if CUDA graphs are enabled, otherwise the original backend
@@ -655,6 +662,7 @@ def wrap_with_cudagraph_if_needed(
     if (
         not compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
         or compilation_config.use_inductor_graph_partition
+        or stream_mapping
     ):
         return piecewise_backend
 
@@ -752,6 +760,13 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
 
             from .piecewise_backend import PiecewiseBackend
 
+            stream_mapping = (
+                self.vllm_backend.stream_mapping
+                if graph_uses_stream_mapping(submod)
+                else ()
+            )
+            self.vllm_backend.stream_mappings[target] = stream_mapping
+
             piecewise_backend = PiecewiseBackend(
                 submod,
                 self.vllm_config,
@@ -761,6 +776,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
                 self.vllm_backend,
                 graph_returns_tuple(submod),
                 submod_name=target,
+                stream_mapping=stream_mapping,
             )
 
             self.module.__dict__[target] = wrap_with_cudagraph_if_needed(
@@ -769,6 +785,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
                 self.compilation_config,
                 piecewise_backend.is_first_graph,
                 piecewise_backend.is_last_graph,
+                piecewise_backend.stream_mapping,
             )
 
             compilation_counter.num_piecewise_capturable_graphs_seen += 1
@@ -1168,6 +1185,8 @@ class VllmBackend:
         assert not self._called, "VllmBackend can only be called once"
 
         self.graph = graph
+        self.stream_mapping = find_stream_mapping(graph)
+        self.stream_mappings: dict[str, StreamMapping] = {}
         self.configure_post_pass()
 
         if self.compilation_config.use_inductor_graph_partition:

@@ -85,6 +85,11 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         self.rotary_emb = mla_modules.rotary_emb
         self.o_proj = mla_modules.o_proj
         self.indexer = mla_modules.indexer
+        self.indexer_side_stream = (
+            getattr(self.indexer, "indexer_side_stream", None)
+            if self.indexer is not None
+            else None
+        )
         self.indexer_rope_emb = mla_modules.indexer_rotary_emb
         self.is_sparse = mla_modules.is_sparse
 
@@ -195,13 +200,14 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         if self.dcp_q_replicate:
             q_dcp_replicated, q = q, q_proj_layer._local_view(q)
 
+        if indexer_dummy_dep is not None and self.indexer_side_stream is not None:
+            torch.accelerator.current_stream().wait_stream(self.indexer_side_stream)
         attn_out = self.mla_attn(
             q,
             kv_c_normed,
             k_pe,
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
             q_dcp_replicated=q_dcp_replicated,
-            indexer_dummy_dep=indexer_dummy_dep,
         )
 
         return self.o_proj(attn_out)[0]

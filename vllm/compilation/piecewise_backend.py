@@ -16,6 +16,11 @@ from torch._inductor.runtime.triton_heuristics import CachingAutotuner
 from torch._logging._internal import trace_structured
 
 from vllm.compilation.backends import VllmBackend
+from vllm.compilation.side_stream import (
+    StreamMapping,
+    find_stream_mapping,
+    use_stream_mapping,
+)
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.logger import init_logger
@@ -95,6 +100,7 @@ class PiecewiseBackend:
         returns_tuple: bool,
         compiled_runnables: dict[str, Callable[..., Any]] | None = None,
         submod_name: str = "",
+        stream_mapping: StreamMapping | None = None,
     ):
         """
         The backend for piecewise compilation.
@@ -127,6 +133,12 @@ class PiecewiseBackend:
         self.vllm_backend = vllm_backend
         self.compiled_runnables = compiled_runnables
         self.submod_name = submod_name
+        if stream_mapping is None:
+            self.stream_mapping = (
+                find_stream_mapping(graph) if graph is not None else ()
+            )
+        else:
+            self.stream_mapping = stream_mapping
 
         self.is_first_graph = piecewise_compile_index == 0
         self.is_last_graph = piecewise_compile_index == total_piecewise_compiles - 1
@@ -263,16 +275,17 @@ class PiecewiseBackend:
             else:
                 args_list = get_fake_args_from_graph(self.graph)
 
-            range_entry.runnable = self.vllm_backend.compiler_manager.compile(
-                self.graph,
-                args_list,
-                self.vllm_backend.inductor_config,
-                self.compilation_config,
-                compile_range=range_entry.compile_range,
-                graph_index=self.piecewise_compile_index,
-                num_graphs=self.total_piecewise_compiles,
-                is_encoder=self.vllm_backend.is_encoder,
-            )
+            with use_stream_mapping(self.stream_mapping):
+                range_entry.runnable = self.vllm_backend.compiler_manager.compile(
+                    self.graph,
+                    args_list,
+                    self.vllm_backend.inductor_config,
+                    self.compilation_config,
+                    compile_range=range_entry.compile_range,
+                    graph_index=self.piecewise_compile_index,
+                    num_graphs=self.total_piecewise_compiles,
+                    is_encoder=self.vllm_backend.is_encoder,
+                )
 
             range_entry.compiled = True
 
@@ -377,4 +390,5 @@ class PiecewiseBackend:
             "PiecewiseBackend.__init__. "
             f"range_entry={range_entry.compile_range}"
         )
-        return range_entry.runnable(*args)
+        with use_stream_mapping(self.stream_mapping):
+            return range_entry.runnable(*args)
