@@ -1011,6 +1011,16 @@ cases = [
         expected_acceptance_rate=0.80,  # ref: 0.90
         expected_gsm8k_accuracy=0.5,  # ref: 60%. Note gsm8k always runs greedy sampling
     ),
+    # Same Gemma3 model for draft and target. This exercises multi-group KV
+    # draft model metadata handling.
+    ArgsTest(
+        target_model="google/gemma-3-270m-it",
+        draft_model="google/gemma-3-270m-it",
+        sampling_config=greedy_sampling(),
+        num_speculative_tokens=3,
+        expected_acceptance_len=3.95,
+        expected_acceptance_rate=0.98,
+    ),
 ]
 
 
@@ -1391,50 +1401,6 @@ def load_and_process_dataset(data_name: str):
         dataset = dataset.map(lambda x: {"turns": [prompt_fmt.format(**x)]})
 
     return dataset
-
-
-@single_gpu_only
-@large_gpu_mark(min_gb=20)
-def test_self_spec_acceptance_length_gemma3(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """Regression test for self-spec acceptance on multi-group KV models."""
-    with monkeypatch.context() as m:
-        # Batch invariance stabilizes acceptance metrics for this setup.
-        m.setenv("VLLM_BATCH_INVARIANT", "1")
-
-        spec_llm = LLM(
-            model="google/gemma-3-270m-it",
-            speculative_config={
-                "model": "google/gemma-3-270m-it",
-                "method": "draft_model",
-                "num_speculative_tokens": 3,
-                "max_model_len": 2048,
-            },
-            max_num_seqs=100,
-            max_model_len=2048,
-            gpu_memory_utilization=0.5,
-            disable_log_stats=False,
-            attention_config={"backend": "FLASH_ATTN"},
-        )
-
-        test_prompts = get_messages(dataset="test_prompts", n=100)
-        spec_llm.chat(test_prompts, greedy_sampling())
-        metrics = spec_llm.get_metrics()
-
-        acceptance_rate = compute_acceptance_rate(metrics)
-        acceptance_len = compute_acceptance_len(metrics)
-        print(
-            "self-spec gemma3 acceptance: "
-            f"rate={acceptance_rate:.3f}, len={acceptance_len:.3f}"
-        )
-
-        assert acceptance_len >= 3.95
-        assert acceptance_rate >= 0.98
-
-        del spec_llm
-        torch.accelerator.empty_cache()
-        cleanup_dist_env_and_memory()
 
 
 @pytest.fixture
