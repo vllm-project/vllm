@@ -321,6 +321,23 @@ class XPUPlatform(Platform):
         # This allows custom workers (like vllm-omni workers) to be used on XPU
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.xpu_worker.XPUWorker"
+
+        # The batched experts kernel (BatchedTritonExperts) consumes the batched
+        # activation format, which only naive_low_latency produces on XPU. When
+        # that kernel is requested under EP and no all-to-all backend was chosen,
+        # default to naive_low_latency so the batched path works without a second
+        # flag. The fused XPUExperts path (the default) is left untouched.
+        if (
+            parallel_config.enable_expert_parallel
+            and vllm_config.kernel_config.moe_backend == "batched_triton"
+            and parallel_config.all2all_backend == "allgather_reducescatter"
+        ):
+            parallel_config.all2all_backend = "naive_low_latency"
+            logger.info_once(
+                "XPU platform: defaulting all2all_backend to naive_low_latency "
+                "for the batched experts MoE kernel."
+            )
+
         if vllm_config.kv_transfer_config is not None:
             vllm_config.kv_transfer_config.enable_permute_local_kv = True
 
