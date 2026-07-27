@@ -39,7 +39,11 @@ from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     RequestResponseMetadata,
 )
-from vllm.entrypoints.openai.responses.context import ConversationContext, SimpleContext
+from vllm.entrypoints.openai.responses.context import (
+    ConversationContext,
+    HarmonyContext,
+    SimpleContext,
+)
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseCreatedEvent,
     ResponseRawMessageAndToken,
@@ -375,6 +379,19 @@ async def test_online_renderer_preserves_missing_harmony_builtin_tool_behavior()
     assert not isinstance(result, ErrorResponse)
 
 
+@pytest.mark.parametrize(
+    "engine_inputs",
+    [[], [tokens_input([1]), tokens_input([2])]],
+)
+def test_responses_render_result_rejects_non_single_prompt(engine_inputs):
+    renderer = OnlineRenderer.__new__(OnlineRenderer)
+
+    result = renderer._responses_render_result([], engine_inputs)
+
+    assert isinstance(result, ErrorResponse)
+    assert f"got {len(engine_inputs)}" in result.error.message
+
+
 class TestInitializeToolSessions:
     """Test class for _initialize_tool_sessions method"""
 
@@ -472,6 +489,56 @@ class TestInitializeToolSessions:
         assert render_request.input == turn_messages
         assert render_request.instructions is None
         assert render_request.cache_salt == "request-salt"
+
+    @pytest.mark.asyncio
+    async def test_harmony_tool_followup_preserves_cache_salt(
+        self, serving_responses_instance
+    ):
+        class ToolCallingHarmonyContext(HarmonyContext):
+            def __init__(self):
+                self._messages = []
+                self._needs_tool_call = True
+
+            def append_output(self, output) -> None:
+                pass
+
+            def need_builtin_tool_call(self) -> bool:
+                return self._needs_tool_call
+
+            async def call_tool(self):
+                self._needs_tool_call = False
+                return []
+
+            def append_tool_output(self, output) -> None:
+                self._messages.extend(output)
+
+        async def generate_output():
+            yield MagicMock()
+
+        context = ToolCallingHarmonyContext()
+        serving_responses_instance.engine_client.generate.side_effect = (
+            lambda *args, **kwargs: generate_output()
+        )
+        serving_responses_instance.online_renderer.render_responses_harmony_messages = (
+            MagicMock(return_value=tokens_input([8, 9]))
+        )
+        serving_responses_instance._extract_prompt_len = MagicMock(return_value=2)
+
+        async for _ in serving_responses_instance._generate_with_builtin_tools(
+            request_id="req",
+            engine_input=tokens_input([1]),
+            sampling_params=MagicMock(),
+            context=context,
+            request_cache_salt="tenant-salt",
+        ):
+            pass
+
+        (
+            serving_responses_instance.online_renderer.render_responses_harmony_messages.assert_called_once_with(
+                context.messages,
+                cache_salt="tenant-salt",
+            )
+        )
 
     @pytest.mark.asyncio
     async def test_initialize_tool_sessions(
