@@ -338,7 +338,7 @@ def test_unfused_oai_triton_experts_apply_direct_deepseek_v4_topology(workspace_
         num_experts=num_experts,
         experts_per_token=topk,
         hidden_dim=k,
-        intermediate_size_per_partition=n,
+        intermediate_size=n,
     )
     experts = UnfusedOAITritonExperts(moe_config, quant_config)
 

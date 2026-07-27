@@ -249,7 +249,7 @@ def _setup_triton_jit_hook() -> None:
             except (TypeError, ValueError):
                 return None  # best-effort metadata; monitor ignores it
 
-        _guarded._vllm_guarded = True
+        cast(Any, _guarded)._vllm_guarded = True
         _triton_jit.serialize_specialization_data = _guarded
 
     existing_hook = knobs.runtime.jit_post_compile_hook

@@ -695,9 +695,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         # For TRITON backends, weights are wrapped tensors from triton_kernels
         # that don't support .detach(). Manually assign parameters.
         from vllm.platforms.rocm import on_gfx1250
-        uses_triton_weight_format = (
-            self.mxfp4_backend in TRITON_BACKENDS or 
-            (self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and on_gfx1250())
+
+        uses_triton_weight_format = self.mxfp4_backend in TRITON_BACKENDS or (
+            self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and on_gfx1250()
         )
         if not uses_triton_weight_format:
             replace_parameter(layer, "w13_weight", w13)
