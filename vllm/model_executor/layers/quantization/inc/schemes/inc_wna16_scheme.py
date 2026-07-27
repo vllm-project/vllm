@@ -3,6 +3,7 @@
 
 from typing import TYPE_CHECKING
 
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
@@ -43,6 +44,11 @@ class INCWna16Scheme(INCScheme):
                     INCARKLinearMethod,
                     INCXPULinearMethod,
                 )
+
+                backend = envs.VLLM_XPU_INC_W4A16_BACKEND
+                if backend == "xpu":
+                    logger.debug("Using XPU INC backend for layer %s", prefix)
+                    return INCLinearMethod(INCXPULinearMethod(layer_config))
 
                 is_ark_available, ark_error, _, _ = get_ark_state()
                 if is_ark_available:
