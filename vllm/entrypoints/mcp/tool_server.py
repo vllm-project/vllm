@@ -12,6 +12,8 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
+    from argparse import Namespace
+
     from mcp.types import ListToolsResult
 
 
@@ -232,3 +234,16 @@ class DemoToolServer(ToolServer):
         if tool_name not in self.tools:
             raise KeyError(f"Tool '{tool_name}' is not supported")
         yield self.tools[tool_name]
+
+
+async def init_tool_server(args: "Namespace") -> ToolServer | None:
+    tool_server = getattr(args, "tool_server", None)
+    if tool_server == "demo":
+        demo_server = DemoToolServer()
+        await demo_server.init_and_validate()
+        return demo_server
+    if tool_server:
+        mcp_server = MCPToolServer()
+        await mcp_server.add_tool_server(tool_server)
+        return mcp_server
+    return None

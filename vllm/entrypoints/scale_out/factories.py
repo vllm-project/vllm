@@ -27,6 +27,7 @@ def init_render_state(
         state.openai_serving_models,
         state.online_renderer,
         request_logger=request_logger,
+        tool_server=state.tool_server,
     )
 
     state.serving_derender = ServingDerender(
