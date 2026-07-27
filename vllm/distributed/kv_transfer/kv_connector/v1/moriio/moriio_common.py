@@ -61,11 +61,19 @@ class WriteTask:
     remote_ip: str
     enqueue_time: float = field(default_factory=time.perf_counter)
     retried: int = 0
+    # Local KDA recurrent-state slot ids for this write (empty for attention).
+    local_mamba_block_ids: list[int] = field(default_factory=list)
 
 
 @dataclass
 class LayerTransferPlan:
-    """Plan for transferring a single layer."""
+    """Plan for transferring a single layer.
+
+    For attention layers ``sess_idx`` + ``transfer_*`` describe the one
+    transfer. For KDA layers the conv state uses ``sess_idx`` / ``transfer_*``
+    and the ssm state uses ``ssm_sess_idx`` / ``ssm_*`` (two registered regions
+    per layer, hence two sessions), issued as one scheduled write.
+    """
 
     request_id: ReqId
     transfer_id: TransferId
@@ -75,6 +83,11 @@ class LayerTransferPlan:
     transfer_remote_offsets: list[int]
     transfer_sizes: list[int]
     use_batch: bool = True
+    is_mamba: bool = False
+    ssm_sess_idx: int | None = None
+    ssm_local_offsets: list[int] = field(default_factory=list)
+    ssm_remote_offsets: list[int] = field(default_factory=list)
+    ssm_sizes: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -82,6 +95,9 @@ class RemoteAllocInfo:
     """Information about remote block allocation."""
 
     block_ids: list[int]
+    # Remote KDA recurrent-state slot ids sent by the decoder (empty for
+    # attention-only models).
+    mamba_block_ids: list[int] = field(default_factory=list)
     writes_done: int = 0
     writes_expected: int | None = None
     decode_dp_rank: int = 0
@@ -422,6 +438,10 @@ class ReqMeta:
     remote_engine_id: str
     tp_size: int
     remote_dp_size: int
+    # Hybrid (mamba/KDA) per-request recurrent-state slot ids; one logical
+    # slot per request. Empty for attention-only models.
+    mamba_local_block_ids: list[int] = field(default_factory=list)
+    mamba_remote_block_ids: list[int] = field(default_factory=list)
 
 
 class MoRIIOConnectorMetadata(KVConnectorMetadata):
@@ -445,6 +465,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         local_block_ids: list[int],
         kv_transfer_params: dict[str, Any],
         write_mode=False,
+        local_mamba_block_ids: list[int] | None = None,
     ):
         transfer_id = kv_transfer_params["transfer_id"]
 
@@ -473,8 +494,15 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             remote_port=int(remote_handshake_port),
             remote_handshake_port=int(remote_handshake_port),
             remote_notify_port=int(remote_notify_port),
-            tp_size=kv_transfer_params.get("tp_size", 1),
+            tp_size=kv_transfer_params.get(
+                "remote_tp_size", kv_transfer_params.get("tp_size", 1)
+            ),
             remote_dp_size=kv_transfer_params.get("remote_dp_size", 1),
+            mamba_local_block_ids=local_mamba_block_ids or [],
+            mamba_remote_block_ids=kv_transfer_params.get(
+                "remote_mamba_block_ids", []
+            )
+            or [],
         )
         if write_mode:
             self.reqs_to_save[request_id] = _req

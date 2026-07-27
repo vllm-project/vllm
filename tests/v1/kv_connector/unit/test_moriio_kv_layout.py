@@ -33,6 +33,10 @@ moriio_layout = importlib.import_module(
     "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout"
 )
 msgpack = importlib.import_module("msgpack")
+ssm_conv_transfer_utils = importlib.import_module(
+    "vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils"
+)
+MambaConvSplitInfo = ssm_conv_transfer_utils.MambaConvSplitInfo
 
 ROLE = moriio_common.ROLE
 MoRIIOError = moriio_common.MoRIIOError
@@ -349,6 +353,12 @@ def test_write_transfer_plan_caches_offsets_per_geometry():
     class FakeWorker:
         kv_caches: dict[str, torch.Tensor]
         layer_name_to_local_kv_cache_metadata: dict[str, list[Any]]
+
+        def _is_mamba_layer(self, layer_name):
+            return False
+
+        def _region_session_indices(self, layer_name):
+            return [list(self.kv_caches).index(layer_name)]
 
         def _compute_block_transfer_offsets(
             self, layer_name, local_block_ids, remote_block_ids, remote_moriio_meta
@@ -750,3 +760,114 @@ def test_unsupported_shape_raises_value_error():
 
     with pytest.raises(ValueError, match="Unsupported MoRIIO K/V cache shape"):
         moriio_layout.get_layer_transfer_geometry("layer", cache, worker.layer_to_spec)
+
+
+# ---------------------------------------------------------------------------
+# Mamba/KDA (conv + ssm) transfer geometry
+# ---------------------------------------------------------------------------
+
+
+def _slot_strided(num_slots, per_slot_shape, slot_stride, dtype=torch.bfloat16):
+    """Build a slot-strided view: shape (num_slots, *per_slot_shape) whose slot
+    stride (dim 0) exceeds the per-slot element count, mimicking the K3 KDA
+    conv/ssm cache tensors."""
+    inner = 1
+    for d in per_slot_shape:
+        inner *= d
+    assert slot_stride >= inner
+    backing = torch.zeros(num_slots * slot_stride, dtype=dtype)
+    inner_strides = []
+    acc = 1
+    for d in reversed(per_slot_shape):
+        inner_strides.insert(0, acc)
+        acc *= d
+    return backing.as_strided((num_slots, *per_slot_shape), (slot_stride, *inner_strides))
+
+
+def _gdn_split_info(conv_rows=3, key_dim=4, value_dim=8, dtype_size=2):
+    """A GDN-style conv split: sub-projections (key, key, value)."""
+    conv_dim = 2 * key_dim + value_dim
+    conv_state_bytes = conv_dim * conv_rows * dtype_size
+    ssm_state_bytes = 64  # opaque here; ssm size is taken from the tensor
+    return MambaConvSplitInfo(
+        conv_rows=conv_rows,
+        local_proj_dims=(key_dim, key_dim, value_dim),
+        conv_dtype_size=dtype_size,
+        ssm_sizes=(conv_state_bytes, ssm_state_bytes),
+    )
+
+
+def test_mamba_transfer_geometry_is_slot_strided():
+    split = _gdn_split_info()
+    conv_dim = sum(split.local_proj_dims)
+    conv = _slot_strided(5, (conv_dim, split.conv_rows), slot_stride=200)
+    ssm = _slot_strided(5, (2, 4, 4), slot_stride=64)
+
+    geom = moriio_layout.get_mamba_transfer_geometry("kda.0", conv, ssm, {})
+
+    assert geom.num_slots == 5
+    assert geom.conv_slot_stride == 200
+    assert geom.ssm_slot_stride == 64
+    assert geom.conv_slot_bytes == conv_dim * split.conv_rows * conv.element_size()
+    assert geom.ssm_slot_bytes == (2 * 4 * 4) * ssm.element_size()
+    # Region spans the full slot-strided extent (shape[0] * stride(0)), not just
+    # numel(), so the highest-slot transfers stay in-bounds.
+    assert geom.conv_region_len == conv.shape[0] * conv.stride(0) * conv.element_size()
+    assert geom.ssm_region_len == ssm.shape[0] * ssm.stride(0) * ssm.element_size()
+
+
+def test_mamba_conv_ssm_offsets_homogeneous_tp():
+    split = _gdn_split_info()
+    conv_dim = sum(split.local_proj_dims)
+    conv = _slot_strided(6, (conv_dim, split.conv_rows), slot_stride=200)
+    ssm = _slot_strided(6, (2, 4, 4), slot_stride=64)
+    geom = moriio_layout.get_mamba_transfer_geometry("kda.0", conv, ssm, {})
+
+    local_slots = [1, 2]
+    remote_slots = [1, 2]
+    local_offs, remote_offs, sizes = moriio_layout.compute_mamba_conv_ssm_offsets(
+        "kda.0", conv, ssm, {}, local_slots, remote_slots, split,
+        tp_ratio=1, tp_rank=0, world_size=1,
+    )
+
+    n_conv = moriio_layout.compute_mamba_conv_split_count(local_slots, split)
+    assert n_conv == len(local_slots) * len(split.local_proj_dims)
+    assert len(local_offs) == n_conv + len(local_slots)
+
+    # Homogeneous TP: remote conv slices equal local slices; since local==remote
+    # slots, conv local and remote offsets coincide.
+    loc_co = split.local_conv_offsets
+    rem_co = split.remote_conv_offsets(0, 1)
+    k = 0
+    esz = conv.element_size()
+    for ls, rs in zip(local_slots, remote_slots):
+        lbase = ls * geom.conv_slot_stride * esz
+        rbase = rs * geom.conv_slot_stride * esz
+        for (loff, _), (roff, rsz) in zip(loc_co, rem_co):
+            assert local_offs[k] == lbase + loff
+            assert remote_offs[k] == rbase + roff
+            assert sizes[k] == rsz
+            k += 1
+
+    # SSM: whole per-slot block, no head sharding at tp_ratio == 1.
+    essz = ssm.element_size()
+    for j, (ls, rs) in enumerate(zip(local_slots, remote_slots)):
+        assert local_offs[n_conv + j] == ls * geom.ssm_slot_stride * essz
+        assert remote_offs[n_conv + j] == rs * geom.ssm_slot_stride * essz
+        assert sizes[n_conv + j] == geom.ssm_slot_bytes
+
+
+def test_mamba_conv_ssm_offsets_heterogeneous_tp_is_gated():
+    # Heterogeneous-TP mamba transfer is a documented follow-up (remote slot
+    # stride + multi-rank fan-in gather). Until then the offset helper must fail
+    # loudly rather than silently transfer wrong bytes, since the mamba path
+    # bypasses the attention KV-head validator.
+    split = _gdn_split_info()
+    conv_dim = sum(split.local_proj_dims)
+    conv = _slot_strided(4, (conv_dim, split.conv_rows), slot_stride=200)
+    ssm = _slot_strided(4, (2, 4, 4), slot_stride=64)
+    with pytest.raises(NotImplementedError):
+        moriio_layout.compute_mamba_conv_ssm_offsets(
+            "kda.0", conv, ssm, {}, [0], [3], split,
+            tp_ratio=2, tp_rank=1, world_size=1,
+        )
