@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Numerical-equivalence tests for the fused MTP depth-layer input kernel.
+"""ROCm numerical-equivalence tests for the fused MTP depth-layer input kernel.
 
 ``embed_dual_rmsnorm_cat`` must match the unfused module sequence numerically:
 each rmsnorm computes in fp32 and rounds to bf16 at the same points as the

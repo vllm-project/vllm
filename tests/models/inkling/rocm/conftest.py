@@ -9,7 +9,9 @@ from vllm.platforms import current_platform
 @pytest.fixture(autouse=True)
 def require_rocm_cdna4() -> None:
     if not current_platform.is_rocm():
-        from vllm.platforms.rocm import on_gfx950
+        pytest.skip("requires ROCm")
 
-        if not on_gfx950():
-            pytest.skip("requires CDNA4")
+    from vllm.platforms.rocm import on_gfx950
+
+    if not on_gfx950():
+        pytest.skip("requires CDNA4")
