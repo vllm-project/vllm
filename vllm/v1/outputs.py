@@ -51,32 +51,35 @@ class LogprobsLists(NamedTuple):
 
 
 class SamplingMaskLists(NamedTuple):
-    # [num_generated_tokens, max_kept_tokens]
+    # [num_kept_tokens]
     token_ids: np.ndarray
-    # [num_generated_tokens]
-    counts: np.ndarray
+    # [num_generated_tokens + 1]
+    offsets: np.ndarray
     # [num_reqs + 1]
     cu_num_generated_tokens: list[int] | None = None
 
     def slice_request(self, req_idx: int, num_positions: int) -> "SamplingMaskLists":
         if self.cu_num_generated_tokens is None:
             start_idx = req_idx
-            req_end_idx = req_idx + 1
         else:
             start_idx = self.cu_num_generated_tokens[req_idx]
-            req_end_idx = self.cu_num_generated_tokens[req_idx + 1]
         end_idx = start_idx + num_positions
-        if end_idx > req_end_idx:
-            raise RuntimeError(
-                "sampling mask has fewer rows than the generated tokens: "
-                f"request index {req_idx}, requested {num_positions}, "
-                f"available {req_end_idx - start_idx}"
-            )
+        flat_start = self.offsets[start_idx]
+        flat_end = self.offsets[end_idx]
         return SamplingMaskLists(
-            self.token_ids[start_idx:end_idx],
-            self.counts[start_idx:end_idx],
+            self.token_ids[flat_start:flat_end],
+            self.offsets[start_idx : end_idx + 1] - flat_start,
             None,
         )
+
+    @staticmethod
+    def merge(chunks: Sequence["SamplingMaskLists"]) -> "SamplingMaskLists":
+        token_ids = np.concatenate([chunk.token_ids for chunk in chunks])
+        counts = np.concatenate([np.diff(chunk.offsets) for chunk in chunks])
+        offsets = np.empty(len(counts) + 1, dtype=np.int64)
+        offsets[0] = 0
+        np.cumsum(counts, dtype=np.int64, out=offsets[1:])
+        return SamplingMaskLists(token_ids, offsets)
 
 
 class LogprobsTensors(NamedTuple):

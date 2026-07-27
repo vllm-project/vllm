@@ -6,6 +6,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
+from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
@@ -26,6 +27,8 @@ from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
 from vllm.v1.worker.gpu.sample.sampling_mask import compact_sampling_mask
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
 from vllm.v1.worker.gpu.states import RequestState
+
+logger = init_logger(__name__)
 
 
 class Sampler:
@@ -53,48 +56,19 @@ class Sampler:
         self.num_speculative_tokens = num_speculative_tokens
         self.use_flashinfer = flashinfer_sampler_supported()
         self.enable_return_sampling_mask = enable_return_sampling_mask
-        if enable_return_sampling_mask and num_speculative_tokens != 1:
-            raise ValueError(
-                "sampling distribution replay does not support multi-token sampling"
+        if enable_return_sampling_mask and self.use_flashinfer:
+            logger.info_once(
+                "FlashInfer sampling is disabled when returning sampling masks."
             )
 
     def add_request(
         self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
     ) -> None:
-        if self.enable_return_sampling_mask:
-            self._validate_sampling_params(sampling_params)
         self.sampling_states.add_request(req_idx, sampling_params)
         self.penalties_state.add_request(req_idx, sampling_params)
         self.logit_bias_state.add_request(req_idx, prompt_len, sampling_params)
         self.bad_words_state.add_request(req_idx, sampling_params)
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
-
-    @staticmethod
-    def _validate_sampling_params(sampling_params: SamplingParams) -> None:
-        if sampling_params.temperature <= 0:
-            raise ValueError("sampling distribution replay requires temperature > 0")
-        if sampling_params.logprobs != 1:
-            raise ValueError(
-                "sampling distribution replay requires SamplingParams.logprobs=1"
-            )
-        if (
-            sampling_params.repetition_penalty != 1.0
-            or sampling_params.frequency_penalty != 0.0
-            or sampling_params.presence_penalty != 0.0
-        ):
-            raise ValueError(
-                "sampling distribution replay does not support repetition, "
-                "frequency, or presence penalties"
-            )
-        if sampling_params.logit_bias and any(sampling_params.logit_bias.values()):
-            raise ValueError(
-                "sampling distribution replay does not support non-zero logit bias"
-            )
-        if sampling_params.extra_args:
-            raise ValueError(
-                "sampling distribution replay does not support custom "
-                "sampling arguments"
-            )
 
     def apply_staged_writes(self) -> None:
         self.sampling_states.apply_staged_writes()
@@ -136,8 +110,7 @@ class Sampler:
         )
         sampling_mask_tensors = None
         if self.enable_return_sampling_mask:
-            top_k = self.sampling_states.top_k.np[idx_mapping_np]
-            sampling_mask_tensors = compact_sampling_mask(processed_logits, top_k)
+            sampling_mask_tensors = compact_sampling_mask(processed_logits)
 
         if return_logprobs:
             if self.logprobs_mode in PROCESSED_LOGPROBS_MODES:

@@ -332,10 +332,6 @@ class Scheduler(SchedulerInterface):
         self.enable_return_routed_experts = (
             vllm_config.model_config.enable_return_routed_experts
         )
-        self.enable_return_sampling_mask = (
-            vllm_config.model_config.enable_return_sampling_mask
-        )
-
         if self.enable_return_routed_experts:
             assert self.dcp_world_size == 1 and self.pcp_world_size == 1, (
                 "enable_return_routed_experts does not support context parallelism "
@@ -1869,16 +1865,10 @@ class Scheduler(SchedulerInterface):
                 new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
 
             sampling_masks = model_runner_output.sampling_masks
-            if new_token_ids:
-                if sampling_masks is None:
-                    if self.enable_return_sampling_mask:
-                        raise RuntimeError(
-                            f"missing sampling mask for request {req_id}"
-                        )
-                else:
-                    new_sampling_mask = sampling_masks.slice_request(
-                        req_index, len(new_token_ids)
-                    )
+            if new_token_ids and sampling_masks is not None:
+                new_sampling_mask = sampling_masks.slice_request(
+                    req_index, len(new_token_ids)
+                )
 
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]

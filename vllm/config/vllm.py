@@ -944,11 +944,6 @@ class VllmConfig:
             return
         if not self.use_v2_model_runner:
             raise ValueError("sampling distribution replay requires Model Runner V2")
-        if model_config.logprobs_mode != "processed_logprobs":
-            raise ValueError(
-                "sampling distribution replay requires "
-                "logprobs_mode='processed_logprobs'"
-            )
         if self.speculative_config is not None:
             raise ValueError(
                 "sampling distribution replay does not support speculative decoding"

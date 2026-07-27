@@ -9,12 +9,8 @@ from vllm.v1.outputs import LogprobsTensors
 
 @dataclass
 class SamplingMaskTensors:
-    sparse_token_ids: torch.Tensor
-    sparse_row_indices: list[int]
-    packed_mask: torch.Tensor
-    packed_row_indices: list[int]
+    keep: torch.Tensor
     counts: torch.Tensor
-    vocab_size: int
 
 
 @dataclass

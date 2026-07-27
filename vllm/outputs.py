@@ -186,7 +186,6 @@ class RequestOutput:
                         if next_completion.logprobs:
                             assert completion.logprobs is not None
                             completion.logprobs.extend(next_completion.logprobs)  # type: ignore[arg-type]
-                        _merge_sampling_masks(completion, next_completion)
                         completion.cumulative_logprob = (
                             next_completion.cumulative_logprob
                         )
@@ -214,23 +213,6 @@ class RequestOutput:
             f"num_cached_tokens={self.num_cached_tokens}, "
             f"num_cache_creation_tokens={self.num_cache_creation_tokens})"
         )
-
-
-def _merge_sampling_masks(
-    completion: CompletionOutput, next_completion: CompletionOutput
-) -> None:
-    current_mask = completion.sampling_mask
-    next_mask = next_completion.sampling_mask
-    if current_mask is None and next_mask is None:
-        return
-    if current_mask is None or next_mask is None:
-        raise RuntimeError("cannot merge partially missing sampling masks")
-    current_token_ids = list(current_mask.token_ids)
-    current_offsets = list(current_mask.offsets)
-    offset = len(current_token_ids)
-    current_token_ids.extend(next_mask.token_ids)
-    current_offsets.extend(offset + item for item in next_mask.offsets[1:])
-    completion.sampling_mask = SamplingMask(current_token_ids, current_offsets)
 
 
 # Sentinel to indicate request is finished, used with streaming inputs.

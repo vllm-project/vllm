@@ -326,6 +326,13 @@ class InputProcessor:
             )
             if self.tokenizer is not None:
                 sampling_params.update_from_tokenizer(self.tokenizer)
+            if (
+                self.model_config.enable_return_sampling_mask
+                and sampling_params.temperature <= 0
+            ):
+                raise ValueError(
+                    "sampling distribution replay requires temperature > 0"
+                )
         else:
             pooling_params = params.clone()
 
