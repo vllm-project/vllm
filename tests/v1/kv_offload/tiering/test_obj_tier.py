@@ -34,6 +34,10 @@ from vllm.v1.kv_offload.config import (
     OffloadingParallelConfig,
 )
 from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult
+from vllm.v1.kv_offload.tiering.manager import (
+    CPUPrimaryTierOffloadingManager,
+    TieringOffloadingManager,
+)
 from vllm.v1.kv_offload.tiering.obj.config import ObjStoreConfig
 from vllm.v1.kv_offload.tiering.obj.manager import ObjectStoreSecondaryTierManager
 
@@ -208,12 +212,14 @@ def _make_events_spec(enable_kv_cache_events: bool) -> SimpleNamespace:
 def _make_tier(
     num_blocks: int = 4,
     offloading_spec: SimpleNamespace = _OFFLOADING_SPEC,
+    primary_kv_view: memoryview | None = None,
     **tier_kwargs,
 ) -> tuple[ObjectStoreSecondaryTierManager, MockNixlAgent]:
     """Create a tier backed by a fresh MockNixlAgent."""
     mock_agent = MockNixlAgent()
-    tensor = torch.zeros((num_blocks, _BLOCK_ELEMENTS), dtype=_DTYPE)
-    view = memoryview(tensor.numpy())
+    if primary_kv_view is None:
+        tensor = torch.zeros((num_blocks, _BLOCK_ELEMENTS), dtype=_DTYPE)
+        primary_kv_view = memoryview(tensor.numpy())
     with (
         patch("vllm.v1.kv_offload.tiering.obj.manager.nixl_agent_config"),
         patch(
@@ -223,7 +229,7 @@ def _make_tier(
     ):
         tier = ObjectStoreSecondaryTierManager(
             offloading_spec=offloading_spec,
-            primary_kv_view=view,
+            primary_kv_view=primary_kv_view,
             tier_type="obj",
             store_config=_STORE_CONFIG,
             prefix=_RUN_PREFIX,
@@ -436,6 +442,105 @@ class TestMockObjTierFailures:
         by_id = {r.job_id: r for r in results}
         assert not by_id[1].success
         assert by_id[2].success
+
+    def test_release_xfer_failure_retries_without_losing_result(self, monkeypatch):
+        tier, agent = _make_tier(num_blocks=4)
+        agent.check_xfer_state = MagicMock(side_effect=RuntimeError("poll failed"))
+        release_xfer = MagicMock(
+            side_effect=[RuntimeError("transfer is still active"), None]
+        )
+        monkeypatch.setattr(agent, "release_xfer_handle", release_xfer)
+
+        tier.submit_store(make_job(1, [key(1)], [0]))
+
+        # The transfer handle could not be released safely, so the job must
+        # remain tracked and must not be finalized yet.
+        assert list(tier.get_finished_jobs()) == []
+        assert 1 in tier._transfers
+
+        # Cleanup is retried without polling again or changing the failure
+        # verdict. The completion is then returned exactly once.
+        results = list(tier.get_finished_jobs())
+        assert len(results) == 1
+        assert results[0].job_id == 1
+        assert not results[0].success
+        agent.check_xfer_state.assert_called_once()
+        assert release_xfer.call_count == 2
+        assert not tier._transfers
+        assert list(tier.get_finished_jobs()) == []
+
+    @pytest.mark.parametrize(
+        "cleanup_method", ["release_dlist_handle", "deregister_memory"]
+    )
+    def test_post_transfer_cleanup_failure_does_not_lose_result(
+        self, monkeypatch, cleanup_method
+    ):
+        tier, agent = _make_tier(num_blocks=4)
+        monkeypatch.setattr(
+            agent,
+            cleanup_method,
+            MagicMock(side_effect=RuntimeError("cleanup failed")),
+        )
+
+        tier.submit_store(make_job(1, [key(1)], [0]))
+        results = list(tier.get_finished_jobs())
+
+        assert len(results) == 1
+        assert results[0].job_id == 1
+        assert results[0].success
+        assert not tier._transfers
+        assert list(tier.get_finished_jobs()) == []
+
+    def test_xfer_cleanup_retry_finalizes_parent_job_and_primary_pin(self, monkeypatch):
+        num_blocks = 4
+        tensor = torch.zeros((num_blocks, _BLOCK_ELEMENTS), dtype=_DTYPE)
+        primary_kv_view = memoryview(tensor.numpy())
+        mmap_region = MagicMock()
+        mmap_region.create_kv_memoryview.return_value = primary_kv_view
+        primary_tier = CPUPrimaryTierOffloadingManager(
+            num_blocks=num_blocks, mmap_region=mmap_region
+        )
+        obj_tier, agent = _make_tier(
+            num_blocks=num_blocks, primary_kv_view=primary_kv_view
+        )
+        manager = TieringOffloadingManager(
+            primary_tier=primary_tier, secondary_tiers=[obj_tier]
+        )
+
+        keys = [key(1)]
+        primary_result = primary_tier.prepare_store(keys, _CTX)
+        assert primary_result is not None
+        primary_tier.complete_store(keys, _CTX, success=True)
+        job = manager.create_store_job(keys, _CTX)
+        obj_tier.submit_store(job)
+
+        block = primary_tier._policy.get(keys[0])
+        assert block is not None
+        assert block.ref_cnt == 1
+        assert len(manager._transfer_jobs) == 1
+
+        agent.check_xfer_state = MagicMock(side_effect=RuntimeError("poll failed"))
+        release_xfer = MagicMock(
+            side_effect=[RuntimeError("transfer is still active"), None]
+        )
+        monkeypatch.setattr(agent, "release_xfer_handle", release_xfer)
+        schedule_context = ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
+
+        manager.on_schedule_end(schedule_context)
+
+        assert len(manager._transfer_jobs) == 1
+        assert block.ref_cnt == 1
+        assert len(obj_tier._transfers) == 1
+        assert manager.has_pending_work()
+
+        manager.on_schedule_end(schedule_context)
+
+        assert manager._transfer_jobs == {}
+        assert block.ref_cnt == 0
+        assert obj_tier._transfers == {}
+        assert not manager.has_pending_work()
+        agent.check_xfer_state.assert_called_once()
+        assert release_xfer.call_count == 2
 
 
 class TestMockObjTierShutdown:
