@@ -9,7 +9,10 @@ import torch
 import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.warmup.jit_warmup import VllmJitKernel, WarmupIntRange
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+    WarmupIntRange,
+)
 from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
@@ -50,8 +53,8 @@ class CountExpertNumTokensKernel(
 ):
     @dataclass(frozen=True)
     class CompileKey:
-        HAS_EXPERT_MAP: bool
-        BLOCK_SIZE: int
+        has_expert_map: bool
+        block_size: int
 
     @staticmethod
     @triton.jit(do_not_specialize=["num_experts", "topk_numel"])
@@ -94,16 +97,13 @@ class CountExpertNumTokensKernel(
         block_size = min(topk_numel, 1024)
         block_size = triton.next_power_of_2(block_size)
         return self.CompileKey(
-            HAS_EXPERT_MAP=has_expert_map,
-            BLOCK_SIZE=block_size,
+            has_expert_map=has_expert_map,
+            block_size=block_size,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        model_config = getattr(vllm_config, "model_config", None)
-        hf_config = getattr(model_config, "hf_config", None)
-        scheduler_config = getattr(vllm_config, "scheduler_config", None)
-        top_k = int(getattr(hf_config, "num_experts_per_tok", 0) or 0)
-        max_tokens = int(getattr(scheduler_config, "max_num_batched_tokens", 0) or 0)
+        top_k = vllm_config.model_config.hf_config.num_experts_per_tok
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         if top_k <= 0 or max_tokens <= 0:
             return []
         return self._trace_dispatch(self.dispatch)(
@@ -121,8 +121,8 @@ class CountExpertNumTokensKernel(
             1,  # do not specialize num_experts
             1,  # do not specialize topk_numel
             int32_ptr,
-            HAS_EXPERT_MAP=compile_key.HAS_EXPERT_MAP,
-            BLOCK_SIZE=compile_key.BLOCK_SIZE,
+            HAS_EXPERT_MAP=compile_key.has_expert_map,
+            BLOCK_SIZE=compile_key.block_size,
             grid=(1,),
         )
 
@@ -135,6 +135,11 @@ class CountExpertNumTokensKernel(
     ) -> None:
         block_size = min(topk_ids.numel(), 1024)
         block_size = triton.next_power_of_2(block_size)
+        compile_key = self.dispatch(
+            topk_numel=topk_ids.numel(),
+            has_expert_map=expert_map is not None,
+        )
+        self._guard_warmup_call(compile_key)
         self.kernel[(num_local_experts,)](
             topk_ids,
             expert_num_tokens,
@@ -473,8 +478,8 @@ class PackTopkIdsWeightsKernel(
 ):
     @dataclass(frozen=True)
     class CompileKey:
-        BLOCK_SIZE: int
-        USE_GDC: bool
+        block_size: int
+        use_gdc: bool
 
     @staticmethod
     @triton.jit(do_not_specialize=["n_elements"])
@@ -511,7 +516,7 @@ class PackTopkIdsWeightsKernel(
         block_size: int,
         use_gdc: bool,
     ) -> CompileKey:
-        return self.CompileKey(BLOCK_SIZE=block_size, USE_GDC=use_gdc)
+        return self.CompileKey(block_size=block_size, use_gdc=use_gdc)
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
         del vllm_config
@@ -531,9 +536,9 @@ class PackTopkIdsWeightsKernel(
             TritonWarmupTensor(torch.float32),
             TritonWarmupTensor(torch.int32),
             1,  # do not specialize n_elements
-            BLOCK_SIZE=compile_key.BLOCK_SIZE,
-            USE_GDC=compile_key.USE_GDC,
-            launch_pdl=compile_key.USE_GDC,
+            BLOCK_SIZE=compile_key.block_size,
+            USE_GDC=compile_key.use_gdc,
+            launch_pdl=compile_key.use_gdc,
             grid=(1,),
         )
 
@@ -546,6 +551,11 @@ class PackTopkIdsWeightsKernel(
         block_size: int,
         use_gdc: bool,
     ) -> None:
+        compile_key = self.dispatch(
+            block_size=block_size,
+            use_gdc=use_gdc,
+        )
+        self._guard_warmup_call(compile_key)
         grid = (triton.cdiv(ids_flat.numel(), block_size),)
         self.kernel[grid](
             ids_flat,
@@ -608,9 +618,9 @@ class SwigluLimitPadAwareKernel(
 ):
     @dataclass(frozen=True)
     class CompileKey:
-        HAS_LIMIT: bool
-        HAS_EXPERT_MAP: bool
-        BLOCK_SIZE: int
+        has_limit: bool
+        has_expert_map: bool
+        block_size: int
 
     @staticmethod
     @triton.jit(
@@ -683,9 +693,9 @@ class SwigluLimitPadAwareKernel(
         block_size: int,
     ) -> CompileKey:
         return self.CompileKey(
-            HAS_LIMIT=has_limit,
-            HAS_EXPERT_MAP=has_expert_map,
-            BLOCK_SIZE=block_size,
+            has_limit=has_limit,
+            has_expert_map=has_expert_map,
+            block_size=block_size,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
@@ -710,9 +720,9 @@ class SwigluLimitPadAwareKernel(
             1,  # do not specialize input_row_stride
             1,  # do not specialize num_tokens
             1.0,  # do not specialize swiglu_limit
-            HAS_LIMIT=compile_key.HAS_LIMIT,
-            HAS_EXPERT_MAP=compile_key.HAS_EXPERT_MAP,
-            BLOCK_SIZE=compile_key.BLOCK_SIZE,
+            HAS_LIMIT=compile_key.has_limit,
+            HAS_EXPERT_MAP=compile_key.has_expert_map,
+            BLOCK_SIZE=compile_key.block_size,
             grid=(1, 1),
             num_warps=4,
         )
@@ -728,6 +738,12 @@ class SwigluLimitPadAwareKernel(
         num_tokens, gate_up_size = input.shape
         hidden_size = gate_up_size // 2
         block_size = 1024
+        compile_key = self.dispatch(
+            has_limit=swiglu_limit > 0,
+            has_expert_map=expert_map is not None,
+            block_size=block_size,
+        )
+        self._guard_warmup_call(compile_key)
         grid = (min(num_tokens, 256), triton.cdiv(hidden_size, block_size))
         self.kernel[grid](
             input,

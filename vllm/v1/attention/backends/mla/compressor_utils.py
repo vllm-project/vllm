@@ -5,7 +5,9 @@ from typing import Any
 
 import torch
 
-from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+)
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
 )
@@ -19,8 +21,8 @@ class CompressedSlotMappingKernel(
 
     @dataclass(frozen=True)
     class CompileKey:
-        COMPRESS_RATIO: int
-        TRITON_BLOCK_SIZE: int
+        compress_ratio: int
+        triton_block_size: int
 
     @staticmethod
     @triton.jit
@@ -73,13 +75,12 @@ class CompressedSlotMappingKernel(
         compress_ratio: int,
     ) -> CompileKey:
         return self.CompileKey(
-            COMPRESS_RATIO=compress_ratio,
-            TRITON_BLOCK_SIZE=self.TRITON_BLOCK_SIZE,
+            compress_ratio=compress_ratio,
+            triton_block_size=self.triton_block_size,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        model_config = getattr(vllm_config, "model_config", None)
-        hf_config = getattr(model_config, "hf_config", None)
+        hf_config = vllm_config.model_config.hf_config
         compress_ratios = getattr(hf_config, "compress_ratios", None) or ()
         compress_ratios = [int(ratio) for ratio in compress_ratios if int(ratio) > 1]
         if not compress_ratios:
@@ -99,9 +100,9 @@ class CompressedSlotMappingKernel(
             int32_ptr,
             1,
             1,
-            compile_key.COMPRESS_RATIO,
+            compile_key.compress_ratio,
             PAD_ID=-1,
-            TRITON_BLOCK_SIZE=compile_key.TRITON_BLOCK_SIZE,
+            TRITON_BLOCK_SIZE=compile_key.triton_block_size,
             grid=(1,),
         )
 
@@ -114,6 +115,10 @@ class CompressedSlotMappingKernel(
         block_size: int,
         compress_ratio: int,
     ) -> None:
+        compile_key = self.dispatch(
+            compress_ratio=compress_ratio,
+        )
+        self._guard_warmup_call(compile_key)
         self.kernel[(block_table.shape[0],)](
             slot_mapping,
             query_start_loc,
@@ -123,7 +128,7 @@ class CompressedSlotMappingKernel(
             block_size,
             compress_ratio,
             PAD_ID=-1,
-            TRITON_BLOCK_SIZE=self.TRITON_BLOCK_SIZE,
+            TRITON_BLOCK_SIZE=self.triton_block_size,
         )
 
 

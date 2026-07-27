@@ -306,28 +306,28 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
     @dataclass(frozen=True)
     class CompileKey:
         dtype: torch.dtype
-        N: int
-        K: int
-        A_ROWS: int
-        EM: int
+        n: int
+        k: int
+        a_rows: int
+        em: int
         num_valid_tokens: int
         group_n: int
         group_k: int
         naive_block_assignment: bool
-        BLOCK_SIZE_M: int
-        BLOCK_SIZE_N: int
-        BLOCK_SIZE_K: int
-        GROUP_SIZE_M: int
-        SPLIT_K: int
-        MUL_ROUTED_WEIGHT: bool
+        block_size_m: int
+        block_size_n: int
+        block_size_k: int
+        group_size_m: int
+        split_k: int
+        mul_routed_weight: bool
         top_k: int
         compute_type: tl.dtype
         use_fp8_w8a8: bool
         use_int8_w8a8: bool
         use_int8_w8a16: bool
         per_channel_quant: bool
-        HAS_BIAS: bool
-        SWAP_AB: bool
+        has_bias: bool
+        swap_ab: bool
         num_warps: int
         num_stages: int
 
@@ -683,43 +683,40 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
             compute_type = tl.bfloat16
         return self.CompileKey(
             dtype=dtype,
-            N=launch_n,
-            K=launch_k,
-            A_ROWS=a_rows,
-            EM=em,
+            n=launch_n,
+            k=launch_k,
+            a_rows=a_rows,
+            em=em,
             num_valid_tokens=a_rows * top_k,
             group_n=group_n,
             group_k=group_k,
             naive_block_assignment=naive_block_assignment,
-            BLOCK_SIZE_M=config["BLOCK_SIZE_M"],
-            BLOCK_SIZE_N=config["BLOCK_SIZE_N"],
-            BLOCK_SIZE_K=block_size_k,
-            GROUP_SIZE_M=config["GROUP_SIZE_M"],
-            SPLIT_K=config["SPLIT_K"],
-            MUL_ROUTED_WEIGHT=mul_routed_weight,
+            block_size_m=config["BLOCK_SIZE_M"],
+            block_size_n=config["BLOCK_SIZE_N"],
+            block_size_k=block_size_k,
+            group_size_m=config["GROUP_SIZE_M"],
+            split_k=config["SPLIT_K"],
+            mul_routed_weight=mul_routed_weight,
             top_k=top_k,
             compute_type=compute_type,
             use_fp8_w8a8=use_fp8_w8a8,
             use_int8_w8a8=use_int8_w8a8,
             use_int8_w8a16=use_int8_w8a16,
             per_channel_quant=per_channel_quant,
-            HAS_BIAS=has_bias,
-            SWAP_AB=use_fp8_w8a8
+            has_bias=has_bias,
+            swap_ab=use_fp8_w8a8
             and enable_swap_ab(config["BLOCK_SIZE_M"], config["BLOCK_SIZE_N"]),
             num_warps=config.get("num_warps", 4),
             num_stages=config.get("num_stages", 3),
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        model_config = getattr(vllm_config, "model_config", None)
-        hf_config = getattr(model_config, "hf_config", None)
-        scheduler_config = getattr(vllm_config, "scheduler_config", None)
-        hidden_size = int(getattr(hf_config, "hidden_size", 0) or 0)
-        intermediate_size = int(getattr(hf_config, "moe_intermediate_size", 0) or 0)
-        num_experts = int(getattr(hf_config, "n_routed_experts", 0) or 0)
-        top_k = int(getattr(hf_config, "num_experts_per_tok", 0) or 0)
-        max_tokens = int(getattr(scheduler_config, "max_num_batched_tokens", 0) or 0)
-        model_dtype = getattr(model_config, "dtype", torch.bfloat16)
+        hidden_size = vllm_config.model_config.hf_config.hidden_size
+        intermediate_size = vllm_config.model_config.hf_config.moe_intermediate_size
+        num_experts = vllm_config.model_config.hf_config.n_routed_experts
+        top_k = vllm_config.model_config.hf_config.num_experts_per_tok
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        model_dtype = vllm_config.model_config.dtype
         if (
             hidden_size <= 0
             or intermediate_size <= 0
@@ -788,29 +785,29 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
             a_scale_cols = 1
             b_scale_cols = 1
         else:
-            a_scale_cols = triton.cdiv(compile_key.K, compile_key.group_k)
-            b_scale_cols = triton.cdiv(compile_key.K, compile_key.group_k)
+            a_scale_cols = triton.cdiv(compile_key.k, compile_key.group_k)
+            b_scale_cols = triton.cdiv(compile_key.k, compile_key.group_k)
         data_ptr = TritonWarmupTensor(
             compile_key.dtype,
-            shape=(compile_key.A_ROWS, compile_key.K),
+            shape=(compile_key.a_rows, compile_key.k),
         )
         b_ptr = TritonWarmupTensor(
             compile_key.dtype,
-            shape=(1, compile_key.N, compile_key.K),
+            shape=(1, compile_key.n, compile_key.k),
         )
         c_ptr = TritonWarmupTensor(
             torch.bfloat16,
-            shape=(compile_key.A_ROWS, compile_key.top_k, compile_key.N),
+            shape=(compile_key.a_rows, compile_key.top_k, compile_key.n),
         )
         float_ptr = TritonWarmupTensor(torch.float32)
         int32_ptr = TritonWarmupTensor(torch.int32)
         a_scale_ptr = TritonWarmupTensor(
             torch.float32,
-            shape=(compile_key.A_ROWS, a_scale_cols),
+            shape=(compile_key.a_rows, a_scale_cols),
         )
         b_scale_ptr = TritonWarmupTensor(
             torch.float32,
-            shape=(1, compile_key.N, b_scale_cols),
+            shape=(1, compile_key.n, b_scale_cols),
         )
         warmup(
             data_ptr,
@@ -823,48 +820,188 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
             int32_ptr,
             int32_ptr,
             int32_ptr,
-            compile_key.N,
-            compile_key.K,
-            compile_key.EM,
+            compile_key.n,
+            compile_key.k,
+            compile_key.em,
             compile_key.num_valid_tokens,
-            compile_key.K,
+            compile_key.k,
             1,
-            compile_key.N * compile_key.K,
+            compile_key.n * compile_key.k,
             1,
-            compile_key.K,
-            compile_key.N,
+            compile_key.k,
+            compile_key.n,
             1,
             a_scale_cols if compile_key.group_k > 0 else 0,
             1 if compile_key.group_k > 0 else 0,
-            compile_key.N * b_scale_cols if compile_key.group_k > 0 else 0,
+            compile_key.n * b_scale_cols if compile_key.group_k > 0 else 0,
             1 if compile_key.group_k > 0 else 0,
             b_scale_cols if compile_key.group_k > 0 else 0,
-            compile_key.N if compile_key.HAS_BIAS else 0,
-            1 if compile_key.HAS_BIAS else 0,
+            compile_key.n if compile_key.has_bias else 0,
+            1 if compile_key.has_bias else 0,
             compile_key.group_n,
             compile_key.group_k,
             compile_key.naive_block_assignment,
-            BLOCK_SIZE_M=compile_key.BLOCK_SIZE_M,
-            BLOCK_SIZE_N=compile_key.BLOCK_SIZE_N,
-            BLOCK_SIZE_K=compile_key.BLOCK_SIZE_K,
-            GROUP_SIZE_M=compile_key.GROUP_SIZE_M,
-            SPLIT_K=compile_key.SPLIT_K,
-            MUL_ROUTED_WEIGHT=compile_key.MUL_ROUTED_WEIGHT,
+            BLOCK_SIZE_M=compile_key.block_size_m,
+            BLOCK_SIZE_N=compile_key.block_size_n,
+            BLOCK_SIZE_K=compile_key.block_size_k,
+            GROUP_SIZE_M=compile_key.group_size_m,
+            SPLIT_K=compile_key.split_k,
+            MUL_ROUTED_WEIGHT=compile_key.mul_routed_weight,
             top_k=compile_key.top_k,
             compute_type=compile_key.compute_type,
             use_fp8_w8a8=compile_key.use_fp8_w8a8,
             use_int8_w8a8=compile_key.use_int8_w8a8,
             use_int8_w8a16=compile_key.use_int8_w8a16,
             per_channel_quant=compile_key.per_channel_quant,
-            HAS_BIAS=compile_key.HAS_BIAS,
-            SWAP_AB=compile_key.SWAP_AB,
+            HAS_BIAS=compile_key.has_bias,
+            SWAP_AB=compile_key.swap_ab,
             grid=(1,),
             num_warps=compile_key.num_warps,
             num_stages=compile_key.num_stages,
         )
 
-    def __call__(self, grid: Any, *args: Any, **kwargs: Any) -> Any:
-        return self.kernel[grid](*args, **kwargs)
+    def __call__(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        C: torch.Tensor,
+        B_bias: torch.Tensor | None,
+        A_scale: torch.Tensor | None,
+        B_scale: torch.Tensor | None,
+        topk_weights: torch.Tensor | None,
+        sorted_token_ids: torch.Tensor | None,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        N: int,
+        K: int,
+        EM: int,
+        num_valid_tokens: int,
+        stride_am: int,
+        stride_ak: int,
+        stride_be: int,
+        stride_bk: int,
+        stride_bn: int,
+        stride_cm: int,
+        stride_cn: int,
+        stride_asm: int,
+        stride_ask: int,
+        stride_bse: int,
+        stride_bsk: int,
+        stride_bsn: int,
+        stride_bbe: int,
+        stride_bbn: int,
+        group_n: int,
+        group_k: int,
+        *,
+        dtype: torch.dtype,
+        A_ROWS: int,
+        naive_block_assignment: bool,
+        BLOCK_SIZE_M: int,
+        BLOCK_SIZE_N: int,
+        BLOCK_SIZE_K: int,
+        GROUP_SIZE_M: int,
+        SPLIT_K: int,
+        MUL_ROUTED_WEIGHT: bool,
+        top_k: int,
+        compute_type: tl.dtype,
+        use_fp8_w8a8: bool,
+        use_int8_w8a8: bool,
+        use_int8_w8a16: bool,
+        per_channel_quant: bool,
+        HAS_BIAS: bool,
+        SWAP_AB: bool,
+        num_warps: int,
+        num_stages: int,
+    ) -> Any:
+        compile_key = self.CompileKey(
+            dtype=dtype,
+            n=N,
+            k=K,
+            a_rows=A_ROWS,
+            em=EM,
+            num_valid_tokens=num_valid_tokens,
+            group_n=group_n,
+            group_k=group_k,
+            naive_block_assignment=naive_block_assignment,
+            block_size_m=BLOCK_SIZE_M,
+            block_size_n=BLOCK_SIZE_N,
+            block_size_k=BLOCK_SIZE_K,
+            group_size_m=GROUP_SIZE_M,
+            split_k=SPLIT_K,
+            mul_routed_weight=MUL_ROUTED_WEIGHT,
+            top_k=top_k,
+            compute_type=compute_type,
+            use_fp8_w8a8=use_fp8_w8a8,
+            use_int8_w8a8=use_int8_w8a8,
+            use_int8_w8a16=use_int8_w8a16,
+            per_channel_quant=per_channel_quant,
+            has_bias=HAS_BIAS,
+            swap_ab=SWAP_AB,
+            num_warps=num_warps,
+            num_stages=num_stages,
+        )
+        self._guard_warmup_call(
+            compile_key,
+            runtime_context={
+                "A_shape": tuple(A.shape),
+                "B_shape": tuple(B.shape),
+                "EM": EM,
+                "top_k": top_k,
+            },
+        )
+        grid = lambda META: (
+            triton.cdiv(EM, META["BLOCK_SIZE_M"])
+            * triton.cdiv(B.size(1), META["BLOCK_SIZE_N"]),
+        )
+        return self.kernel[grid](
+            A,
+            B,
+            C,
+            B_bias,
+            A_scale,
+            B_scale,
+            topk_weights,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            N,
+            K,
+            EM,
+            num_valid_tokens,
+            stride_am,
+            stride_ak,
+            stride_be,
+            stride_bk,
+            stride_bn,
+            stride_cm,
+            stride_cn,
+            stride_asm,
+            stride_ask,
+            stride_bse,
+            stride_bsk,
+            stride_bsn,
+            stride_bbe,
+            stride_bbn,
+            group_n,
+            group_k,
+            MUL_ROUTED_WEIGHT=MUL_ROUTED_WEIGHT,
+            top_k=top_k,
+            compute_type=compute_type,
+            use_fp8_w8a8=use_fp8_w8a8,
+            use_int8_w8a8=use_int8_w8a8,
+            use_int8_w8a16=use_int8_w8a16,
+            per_channel_quant=per_channel_quant,
+            naive_block_assignment=naive_block_assignment,
+            HAS_BIAS=HAS_BIAS,
+            BLOCK_SIZE_M=BLOCK_SIZE_M,
+            BLOCK_SIZE_N=BLOCK_SIZE_N,
+            BLOCK_SIZE_K=BLOCK_SIZE_K,
+            GROUP_SIZE_M=GROUP_SIZE_M,
+            SPLIT_K=SPLIT_K,
+            SWAP_AB=SWAP_AB,
+            num_warps=num_warps,
+            num_stages=num_stages,
+        )
 
 def invoke_fused_moe_wna16_cuda_kernel(
     A: torch.Tensor,
@@ -956,10 +1093,6 @@ def invoke_fused_moe_wna16_triton_kernel(
         # so num_valid_experts <= batch_size <= BLOCK_SIZE_M,
         # and we can skip some invalid blocks.
         EM = min(sorted_token_ids.size(0), A.size(0) * top_k * config["BLOCK_SIZE_M"])
-    grid = lambda META: (
-        triton.cdiv(EM, META["BLOCK_SIZE_M"])
-        * triton.cdiv(B.size(1), META["BLOCK_SIZE_N"]),
-    )
     config = config.copy()
     config.update(
         get_moe_wna16_block_config(
@@ -1074,10 +1207,6 @@ def invoke_fused_moe_triton_kernel(
             )
     else:
         EM = num_tokens * config["BLOCK_SIZE_M"]
-    grid = lambda META: (
-        triton.cdiv(EM, META["BLOCK_SIZE_M"])
-        * triton.cdiv(B.size(1), META["BLOCK_SIZE_N"]),
-    )
     HAS_BIAS = B_bias is not None
 
     config = config.copy()
@@ -1085,7 +1214,7 @@ def invoke_fused_moe_triton_kernel(
     BLOCK_SIZE_K = config.pop("BLOCK_SIZE_K")
     if block_shape is not None:
         BLOCK_SIZE_K = min(BLOCK_SIZE_K, min(block_shape[0], block_shape[1]))
-    _FUSED_MOE_TRITON_KERNEL(grid,
+    _FUSED_MOE_TRITON_KERNEL(
         A,
         B,
         C,
@@ -1116,6 +1245,8 @@ def invoke_fused_moe_triton_kernel(
         B_bias.stride(1) if B_bias is not None else 0,
         0 if block_shape is None else block_shape[0],
         0 if block_shape is None else block_shape[1],
+        dtype=A.dtype,
+        A_ROWS=A.size(0),
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         top_k=top_k,
         compute_type=compute_type,
@@ -1239,7 +1370,7 @@ class ComputeIdentityKernel(VllmJitKernel["ComputeIdentityKernel.CompileKey"]):
     class CompileKey:
         top_k: int
         hidden_dim: int
-        BLOCK_SIZE: int
+        block_size: int
 
     @staticmethod
     @triton.jit
@@ -1289,14 +1420,12 @@ class ComputeIdentityKernel(VllmJitKernel["ComputeIdentityKernel.CompileKey"]):
         return self.CompileKey(
             top_k=top_k,
             hidden_dim=hidden_dim,
-            BLOCK_SIZE=256,
+            block_size=256,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        model_config = getattr(vllm_config, "model_config", None)
-        hf_config = getattr(model_config, "hf_config", None)
-        hidden_dim = int(getattr(hf_config, "hidden_size", 0) or 0)
-        top_k = int(getattr(hf_config, "num_experts_per_tok", 0) or 0)
+        hidden_dim = vllm_config.model_config.hf_config.hidden_size
+        top_k = vllm_config.model_config.hf_config.num_experts_per_tok
         if hidden_dim <= 0 or top_k <= 0:
             return []
         return self._trace_dispatch(self.dispatch)(
@@ -1320,12 +1449,41 @@ class ComputeIdentityKernel(VllmJitKernel["ComputeIdentityKernel.CompileKey"]):
             hidden_ptr,
             compile_key.hidden_dim,
             compile_key.top_k,
-            BLOCK_SIZE=compile_key.BLOCK_SIZE,
+            BLOCK_SIZE=compile_key.block_size,
             grid=(1,),
         )
 
-    def __call__(self, grid: Any, *args: Any, **kwargs: Any) -> Any:
-        return self.kernel[grid](*args, **kwargs)
+    def __call__(
+        self,
+        *,
+        top_k: int,
+        hidden_states: torch.Tensor,
+        expert_scales: torch.Tensor,
+        num_tokens: int,
+        output: torch.Tensor,
+        hidden_dim: int,
+        scales_stride: int,
+    ) -> Any:
+        compile_key = self.dispatch(top_k=top_k, hidden_dim=hidden_dim)
+        self._guard_warmup_call(
+            compile_key,
+            runtime_context={
+                "num_tokens": num_tokens,
+                "top_k": top_k,
+                "hidden_dim": hidden_dim,
+            },
+        )
+        grid = lambda meta: (num_tokens * (hidden_dim // meta["BLOCK_SIZE"]),)
+        return self.kernel[grid](
+            top_k,
+            hidden_states,
+            expert_scales,
+            num_tokens,
+            output,
+            hidden_dim,
+            scales_stride,
+            BLOCK_SIZE=compile_key.block_size,
+        )
 
 def zero_experts_compute_triton(
     expert_indices: torch.Tensor,
@@ -1334,9 +1492,7 @@ def zero_experts_compute_triton(
     zero_expert_type: str,
     hidden_states: torch.Tensor,
 ) -> torch.Tensor:
-    N = expert_indices.numel()
     top_k = expert_indices.size(-1)
-    grid = lambda meta: (triton.cdiv(N, meta["BLOCK_SIZE"]),)
 
     if zero_expert_type == "identity":
         zero_expert_mask = expert_indices < num_experts
@@ -1351,16 +1507,14 @@ def zero_experts_compute_triton(
     hidden_dim = hidden_states.size(-1)
     num_tokens = hidden_states.size(0)
 
-    grid = lambda meta: (num_tokens * (hidden_dim // meta["BLOCK_SIZE"]),)
-    _COMPUTE_IDENTITY_KERNEL(grid,
-        top_k,
-        hidden_states,
-        zero_expert_scales,
-        num_tokens,
-        output,
-        hidden_dim,
-        zero_expert_scales.stride(0),
-        BLOCK_SIZE=256,
+    _COMPUTE_IDENTITY_KERNEL(
+        top_k=top_k,
+        hidden_states=hidden_states,
+        expert_scales=zero_expert_scales,
+        num_tokens=num_tokens,
+        output=output,
+        hidden_dim=hidden_dim,
+        scales_stride=zero_expert_scales.stride(0),
     )
 
     return output

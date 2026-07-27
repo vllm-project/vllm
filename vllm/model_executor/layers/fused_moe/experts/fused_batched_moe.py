@@ -266,19 +266,19 @@ class BatchedTritonKernel(VllmJitKernel["BatchedTritonKernel.CompileKey"]):
     @dataclass(frozen=True)
     class CompileKey:
         dtype: torch.dtype
-        E: int
+        e: int
         max_num_tokens: int
-        N: int
-        K: int
+        n: int
+        k: int
         group_n: int
         group_k: int
         compute_type: tl.dtype
         use_fp8_w8a8: bool
         use_int8_w8a16: bool
         per_act_token_quant: bool
-        BLOCK_M: int
-        BLOCK_N: int
-        BLOCK_K: int
+        block_m: int
+        block_n: int
+        block_k: int
         num_warps: int
         num_stages: int
 
@@ -445,33 +445,30 @@ class BatchedTritonKernel(VllmJitKernel["BatchedTritonKernel.CompileKey"]):
         )
         return self.CompileKey(
             dtype=dtype,
-            E=num_experts,
+            e=num_experts,
             max_num_tokens=max_num_tokens,
-            N=launch_n,
-            K=launch_k,
+            n=launch_n,
+            k=launch_k,
             group_n=group_n,
             group_k=group_k,
             compute_type=_triton_moe_compute_type(dtype),
             use_fp8_w8a8=use_fp8_w8a8,
             use_int8_w8a16=use_int8_w8a16,
             per_act_token_quant=per_act_token_quant,
-            BLOCK_M=config.BLOCK_SIZE_M,
-            BLOCK_N=config.BLOCK_SIZE_N,
-            BLOCK_K=config.BLOCK_SIZE_K,
+            block_m=config.BLOCK_SIZE_M,
+            block_n=config.BLOCK_SIZE_N,
+            block_k=config.BLOCK_SIZE_K,
             num_warps=config.num_warps,
             num_stages=config.num_stages,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        model_config = getattr(vllm_config, "model_config", None)
-        hf_config = getattr(model_config, "hf_config", None)
-        scheduler_config = getattr(vllm_config, "scheduler_config", None)
-        hidden_size = int(getattr(hf_config, "hidden_size", 0) or 0)
-        intermediate_size = int(getattr(hf_config, "moe_intermediate_size", 0) or 0)
-        num_experts = int(getattr(hf_config, "n_routed_experts", 0) or 0)
-        top_k = int(getattr(hf_config, "num_experts_per_tok", 0) or 0)
-        max_tokens = int(getattr(scheduler_config, "max_num_batched_tokens", 0) or 0)
-        model_dtype = getattr(model_config, "dtype", torch.bfloat16)
+        hidden_size = vllm_config.model_config.hf_config.hidden_size
+        intermediate_size = vllm_config.model_config.hf_config.moe_intermediate_size
+        num_experts = vllm_config.model_config.hf_config.n_routed_experts
+        top_k = vllm_config.model_config.hf_config.num_experts_per_tok
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        model_dtype = vllm_config.model_config.dtype
         if (
             hidden_size <= 0
             or intermediate_size <= 0
@@ -530,29 +527,29 @@ class BatchedTritonKernel(VllmJitKernel["BatchedTritonKernel.CompileKey"]):
         warmup = getattr(self.kernel, "warmup", None)
         assert warmup is not None
         scale_cols = _triton_moe_warmup_scale_stride(
-            compile_key.K, compile_key.group_k
+            compile_key.k, compile_key.group_k
         )
         a_ptr = TritonWarmupTensor(
             compile_key.dtype,
-            shape=(compile_key.E, compile_key.max_num_tokens, compile_key.K),
+            shape=(compile_key.e, compile_key.max_num_tokens, compile_key.k),
         )
         b_ptr = TritonWarmupTensor(
             compile_key.dtype,
-            shape=(compile_key.E, compile_key.N, compile_key.K),
+            shape=(compile_key.e, compile_key.n, compile_key.k),
         )
         c_ptr = TritonWarmupTensor(
             torch.bfloat16,
-            shape=(compile_key.E, compile_key.max_num_tokens, compile_key.N),
+            shape=(compile_key.e, compile_key.max_num_tokens, compile_key.n),
         )
         scale_ptr = TritonWarmupTensor(
             torch.float32,
-            shape=(compile_key.E, compile_key.max_num_tokens, scale_cols),
+            shape=(compile_key.e, compile_key.max_num_tokens, scale_cols),
         )
         b_scale_ptr = TritonWarmupTensor(
             torch.float32,
-            shape=(compile_key.E, compile_key.N, scale_cols),
+            shape=(compile_key.e, compile_key.n, scale_cols),
         )
-        int32_ptr = TritonWarmupTensor(torch.int32, shape=(compile_key.E,))
+        int32_ptr = TritonWarmupTensor(torch.int32, shape=(compile_key.e,))
         warmup(
             a_ptr,
             b_ptr,
@@ -560,24 +557,24 @@ class BatchedTritonKernel(VllmJitKernel["BatchedTritonKernel.CompileKey"]):
             int32_ptr,
             compile_key.compute_type,
             compile_key.max_num_tokens,
-            compile_key.K,
-            compile_key.N,
+            compile_key.k,
+            compile_key.n,
             scale_ptr,
             b_scale_ptr,
             b_scale_ptr,
-            compile_key.max_num_tokens * compile_key.K,
-            compile_key.K,
+            compile_key.max_num_tokens * compile_key.k,
+            compile_key.k,
             1,
-            compile_key.N * compile_key.K,
+            compile_key.n * compile_key.k,
             1,
-            compile_key.K,
-            compile_key.max_num_tokens * compile_key.N,
-            compile_key.N,
+            compile_key.k,
+            compile_key.max_num_tokens * compile_key.n,
+            compile_key.n,
             1,
             compile_key.max_num_tokens * scale_cols,
             scale_cols,
             1,
-            compile_key.N * scale_cols,
+            compile_key.n * scale_cols,
             1,
             scale_cols,
             compile_key.group_n,
@@ -585,16 +582,123 @@ class BatchedTritonKernel(VllmJitKernel["BatchedTritonKernel.CompileKey"]):
             compile_key.use_fp8_w8a8,
             compile_key.use_int8_w8a16,
             compile_key.per_act_token_quant,
-            BLOCK_M=compile_key.BLOCK_M,
-            BLOCK_N=compile_key.BLOCK_N,
-            BLOCK_K=compile_key.BLOCK_K,
+            BLOCK_M=compile_key.block_m,
+            BLOCK_N=compile_key.block_n,
+            BLOCK_K=compile_key.block_k,
             grid=(1,),
             num_warps=compile_key.num_warps,
             num_stages=compile_key.num_stages,
         )
 
-    def __call__(self, grid: Any, *args: Any, **kwargs: Any) -> Any:
-        return self.kernel[grid](*args, **kwargs)
+    def __call__(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        C: torch.Tensor,
+        expert_num_tokens: torch.Tensor,
+        compute_type: tl.dtype,
+        max_num_tokens: int,
+        K: int,
+        N: int,
+        A_scale: torch.Tensor | None,
+        B_scale: torch.Tensor | None,
+        B_zp: torch.Tensor,
+        stride_ae: int,
+        stride_am: int,
+        stride_ak: int,
+        stride_be: int,
+        stride_bk: int,
+        stride_bn: int,
+        stride_ce: int,
+        stride_cm: int,
+        stride_cn: int,
+        stride_ase: int,
+        stride_asm: int,
+        stride_ask: int,
+        stride_bse: int,
+        stride_bsk: int,
+        stride_bsn: int,
+        group_n: int,
+        group_k: int,
+        use_fp8_w8a8: bool,
+        use_int8_w8a16: bool,
+        per_act_token_quant: bool,
+        *,
+        BLOCK_M: int,
+        BLOCK_N: int,
+        BLOCK_K: int,
+        num_warps: int,
+        num_stages: int,
+    ) -> Any:
+        compile_key = self.CompileKey(
+            dtype=A.dtype,
+            e=A.size(0),
+            max_num_tokens=max_num_tokens,
+            n=N,
+            k=K,
+            group_n=group_n,
+            group_k=group_k,
+            compute_type=compute_type,
+            use_fp8_w8a8=use_fp8_w8a8,
+            use_int8_w8a16=use_int8_w8a16,
+            per_act_token_quant=per_act_token_quant,
+            block_m=BLOCK_M,
+            block_n=BLOCK_N,
+            block_k=BLOCK_K,
+            num_warps=num_warps,
+            num_stages=num_stages,
+        )
+        self._guard_warmup_call(
+            compile_key,
+            runtime_context={
+                "experts": A.size(0),
+                "max_num_tokens": max_num_tokens,
+                "N": N,
+                "K": K,
+            },
+        )
+        grid = (
+            expert_num_tokens.size(0),
+            triton.cdiv(max_num_tokens, BLOCK_M) * triton.cdiv(B.size(1), BLOCK_N),
+        )
+        return self.kernel[grid](
+            A,
+            B,
+            C,
+            expert_num_tokens,
+            compute_type,
+            max_num_tokens,
+            K,
+            N,
+            A_scale,
+            B_scale,
+            B_zp,
+            stride_ae,
+            stride_am,
+            stride_ak,
+            stride_be,
+            stride_bk,
+            stride_bn,
+            stride_ce,
+            stride_cm,
+            stride_cn,
+            stride_ase,
+            stride_asm,
+            stride_ask,
+            stride_bse,
+            stride_bsk,
+            stride_bsn,
+            group_n,
+            group_k,
+            use_fp8_w8a8,
+            use_int8_w8a16,
+            per_act_token_quant,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
+            BLOCK_K=BLOCK_K,
+            num_warps=num_warps,
+            num_stages=num_stages,
+        )
 
 
 _BATCHED_TRITON_KERNEL = BatchedTritonKernel()
@@ -625,11 +729,6 @@ def invoke_moe_batched_triton_kernel(
     BLOCK_M = config["BLOCK_SIZE_M"]
     BLOCK_N = config["BLOCK_SIZE_N"]
     BLOCK_K = config["BLOCK_SIZE_K"]
-
-    grid = (
-        expert_num_tokens.size(0),
-        triton.cdiv(max_num_tokens, BLOCK_M) * triton.cdiv(B.size(1), BLOCK_N),
-    )
 
     A_scale = normalize_batched_scales_shape(A_scale, expert_num_tokens.shape[0])
 
@@ -668,7 +767,7 @@ def invoke_moe_batched_triton_kernel(
         stride_asm = 0
         stride_ask = 0
 
-    _BATCHED_TRITON_KERNEL(grid,
+    _BATCHED_TRITON_KERNEL(
         A,
         B,
         C,
@@ -709,6 +808,8 @@ def invoke_moe_batched_triton_kernel(
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
+        num_warps=config.get("num_warps", 4),
+        num_stages=config.get("num_stages", 3),
     )
 
 

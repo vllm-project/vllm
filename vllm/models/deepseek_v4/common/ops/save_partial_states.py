@@ -6,7 +6,10 @@ from typing import Any
 
 import torch
 
-from vllm.model_executor.warmup.jit_warmup import VllmJitKernel, zip_inputs
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+    zip_inputs,
+)
 from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
@@ -43,10 +46,10 @@ def save_partial_states(
 class SavePartialStatesKernel(VllmJitKernel["SavePartialStatesKernel.CompileKey"]):
     @dataclass(frozen=True)
     class CompileKey:
-        HEAD_SIZE: int
-        TRITON_BLOCK_SIZE: int
-        STATE_WIDTH: int
-        COMPRESS_RATIO: int
+        head_size: int
+        triton_block_size: int
+        state_width: int
+        compress_ratio: int
         kv_stride: int
         score_stride: int
         ape_stride: int
@@ -126,10 +129,10 @@ class SavePartialStatesKernel(VllmJitKernel["SavePartialStatesKernel.CompileKey"
         launch_pdl: bool,
     ) -> CompileKey:
         return self.CompileKey(
-            HEAD_SIZE=head_size,
-            TRITON_BLOCK_SIZE=next_power_of_2(head_size),
-            STATE_WIDTH=state_width,
-            COMPRESS_RATIO=compress_ratio,
+            head_size=head_size,
+            triton_block_size=next_power_of_2(head_size),
+            state_width=state_width,
+            compress_ratio=compress_ratio,
             kv_stride=kv_stride,
             score_stride=score_stride,
             ape_stride=ape_stride,
@@ -148,8 +151,7 @@ class SavePartialStatesKernel(VllmJitKernel["SavePartialStatesKernel.CompileKey"
         return compress_ratio in compress_ratios
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        model_config = getattr(vllm_config, "model_config", None)
-        hf_config = getattr(model_config, "hf_config", None)
+        hf_config = vllm_config.model_config.hf_config
         head_dim = int(getattr(hf_config, "head_dim", 0) or 0)
         compress_ratios = tuple(
             sorted(
@@ -211,10 +213,10 @@ class SavePartialStatesKernel(VllmJitKernel["SavePartialStatesKernel.CompileKey"
             compile_key.state_cache_stride1,
             TritonWarmupTensor(torch.int64),
             compile_key.block_size,
-            HEAD_SIZE=compile_key.HEAD_SIZE,
-            TRITON_BLOCK_SIZE=compile_key.TRITON_BLOCK_SIZE,
-            STATE_WIDTH=compile_key.STATE_WIDTH,
-            COMPRESS_RATIO=compile_key.COMPRESS_RATIO,
+            HEAD_SIZE=compile_key.head_size,
+            TRITON_BLOCK_SIZE=compile_key.triton_block_size,
+            STATE_WIDTH=compile_key.state_width,
+            COMPRESS_RATIO=compile_key.compress_ratio,
             launch_pdl=compile_key.launch_pdl,
             grid=(1,),
         )
@@ -250,6 +252,7 @@ class SavePartialStatesKernel(VllmJitKernel["SavePartialStatesKernel.CompileKey"
             block_size=block_size,
             launch_pdl=bool((pdl_kwargs or {}).get("launch_pdl", False)),
         )
+        self._guard_warmup_call(compile_key)
         self.kernel[(num_actual,)](
             kv,
             compile_key.kv_stride,
@@ -263,10 +266,10 @@ class SavePartialStatesKernel(VllmJitKernel["SavePartialStatesKernel.CompileKey"
             compile_key.state_cache_stride1,
             slot_mapping,
             compile_key.block_size,
-            HEAD_SIZE=compile_key.HEAD_SIZE,
-            TRITON_BLOCK_SIZE=compile_key.TRITON_BLOCK_SIZE,
-            STATE_WIDTH=compile_key.STATE_WIDTH,
-            COMPRESS_RATIO=compile_key.COMPRESS_RATIO,
+            HEAD_SIZE=compile_key.head_size,
+            TRITON_BLOCK_SIZE=compile_key.triton_block_size,
+            STATE_WIDTH=compile_key.state_width,
+            COMPRESS_RATIO=compile_key.compress_ratio,
             **(pdl_kwargs or {}),
         )
 

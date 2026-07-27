@@ -66,17 +66,17 @@ class FusedMoeNvfp4EmulationKernel(
     class CompileKey:
         dtype: torch.dtype
         num_experts: int
-        N: int
-        K: int
-        A_ROWS: int
-        EM: int
+        n: int
+        k: int
+        a_rows: int
+        em: int
         num_valid_tokens: int
         top_k: int
-        BLOCK_SIZE_M: int
-        BLOCK_SIZE_N: int
-        BLOCK_SIZE_K: int
-        GROUP_SIZE_M: int
-        MUL_ROUTED_WEIGHT: bool
+        block_size_m: int
+        block_size_n: int
+        block_size_k: int
+        group_size_m: int
+        mul_routed_weight: bool
         block_k_divisible: bool
         compute_type: tl.dtype
 
@@ -316,40 +316,36 @@ class FusedMoeNvfp4EmulationKernel(
         return self.CompileKey(
             dtype=dtype,
             num_experts=num_experts,
-            N=launch_n,
-            K=launch_k,
-            A_ROWS=a_rows,
-            EM=_triton_moe_warmup_em(
+            n=launch_n,
+            k=launch_k,
+            a_rows=a_rows,
+            em=_triton_moe_warmup_em(
                 num_tokens=a_rows,
                 top_k=top_k,
-                block_size_m=config.BLOCK_SIZE_M,
+                block_size_m=config.block_size_m,
                 naive_block_assignment=False,
             ),
             num_valid_tokens=a_rows * top_k,
             top_k=top_k,
-            BLOCK_SIZE_M=config.BLOCK_SIZE_M,
-            BLOCK_SIZE_N=config.BLOCK_SIZE_N,
-            BLOCK_SIZE_K=config.BLOCK_SIZE_K,
-            GROUP_SIZE_M=config.GROUP_SIZE_M,
-            MUL_ROUTED_WEIGHT=mul_routed_weight,
-            block_k_divisible=launch_k % config.BLOCK_SIZE_K == 0,
+            block_size_m=config.block_size_m,
+            block_size_n=config.block_size_n,
+            block_size_k=config.block_size_k,
+            group_size_m=config.group_size_m,
+            mul_routed_weight=mul_routed_weight,
+            block_k_divisible=launch_k % config.block_size_k == 0,
             compute_type=_triton_moe_compute_type(dtype),
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        kernel_config = getattr(vllm_config, "kernel_config", None)
-        if getattr(kernel_config, "moe_backend", None) != "emulation":
+        if vllm_config.kernel_config.moe_backend != "emulation":
             return []
 
-        model_config = getattr(vllm_config, "model_config", None)
-        hf_config = getattr(model_config, "hf_config", None)
-        scheduler_config = getattr(vllm_config, "scheduler_config", None)
-        hidden_size = int(getattr(hf_config, "hidden_size", 0) or 0)
-        intermediate_size = int(getattr(hf_config, "moe_intermediate_size", 0) or 0)
-        num_experts = int(getattr(hf_config, "n_routed_experts", 0) or 0)
-        top_k = int(getattr(hf_config, "num_experts_per_tok", 0) or 0)
-        max_tokens = int(getattr(scheduler_config, "max_num_batched_tokens", 0) or 0)
-        dtype = getattr(model_config, "dtype", torch.bfloat16)
+        hidden_size = vllm_config.model_config.hf_config.hidden_size
+        intermediate_size = vllm_config.model_config.hf_config.moe_intermediate_size
+        num_experts = vllm_config.model_config.hf_config.n_routed_experts
+        top_k = vllm_config.model_config.hf_config.num_experts_per_tok
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        dtype = vllm_config.model_config.dtype
         if (
             hidden_size <= 0
             or intermediate_size <= 0
@@ -388,25 +384,25 @@ class FusedMoeNvfp4EmulationKernel(
     def compile(self, compile_key: CompileKey) -> None:
         warmup = getattr(self.kernel, "warmup", None)
         assert warmup is not None
-        k_packed = compile_key.K // 2
-        k_scale = max(1, compile_key.K // 16)
+        k_packed = compile_key.k // 2
+        k_scale = max(1, compile_key.k // 16)
         c_top_k = max(1, compile_key.top_k)
         c_rows = max(1, compile_key.num_valid_tokens // c_top_k)
         a_ptr = TritonWarmupTensor(
             compile_key.dtype,
-            shape=(compile_key.A_ROWS, compile_key.K),
+            shape=(compile_key.a_rows, compile_key.k),
         )
         b_ptr = TritonWarmupTensor(
             torch.uint8,
-            shape=(compile_key.num_experts, compile_key.N, k_packed),
+            shape=(compile_key.num_experts, compile_key.n, k_packed),
         )
         c_ptr = TritonWarmupTensor(
             compile_key.dtype,
-            shape=(c_rows, c_top_k, compile_key.N),
+            shape=(c_rows, c_top_k, compile_key.n),
         )
         b_scale_ptr = TritonWarmupTensor(
             torch.uint8,
-            shape=(compile_key.num_experts, compile_key.N, k_scale),
+            shape=(compile_key.num_experts, compile_key.n, k_scale),
         )
         w_global_scale_ptr = TritonWarmupTensor(
             torch.float32,
@@ -414,16 +410,16 @@ class FusedMoeNvfp4EmulationKernel(
         )
         topk_weights_ptr = (
             TritonWarmupTensor(torch.float32, shape=(compile_key.num_valid_tokens,))
-            if compile_key.MUL_ROUTED_WEIGHT
+            if compile_key.mul_routed_weight
             else None
         )
         sorted_token_ids_ptr = TritonWarmupTensor(
             torch.int32,
-            shape=(compile_key.EM,),
+            shape=(compile_key.em,),
         )
         expert_ids_ptr = TritonWarmupTensor(
             torch.int32,
-            shape=(triton.cdiv(compile_key.EM, compile_key.BLOCK_SIZE_M),),
+            shape=(triton.cdiv(compile_key.em, compile_key.block_size_m),),
         )
         num_tokens_post_padded_ptr = TritonWarmupTensor(torch.int32)
         warmup(
@@ -436,37 +432,123 @@ class FusedMoeNvfp4EmulationKernel(
             sorted_token_ids_ptr,
             expert_ids_ptr,
             num_tokens_post_padded_ptr,
-            compile_key.N,
-            compile_key.K,
-            compile_key.EM,
+            compile_key.n,
+            compile_key.k,
+            compile_key.em,
             compile_key.num_valid_tokens,
-            compile_key.K,
+            compile_key.k,
             1,
-            compile_key.N * k_packed,
+            compile_key.n * k_packed,
             1,
             k_packed,
-            compile_key.top_k * compile_key.N,
+            compile_key.top_k * compile_key.n,
             1,
-            compile_key.N * k_scale,
+            compile_key.n * k_scale,
             1,
             k_scale,
             block_k_diviable=compile_key.block_k_divisible,
-            MUL_ROUTED_WEIGHT=compile_key.MUL_ROUTED_WEIGHT,
+            MUL_ROUTED_WEIGHT=compile_key.mul_routed_weight,
             top_k=compile_key.top_k,
             compute_type=compile_key.compute_type,
             group_size=16,
-            BLOCK_SIZE_M=compile_key.BLOCK_SIZE_M,
-            BLOCK_SIZE_N=compile_key.BLOCK_SIZE_N,
-            BLOCK_SIZE_K=compile_key.BLOCK_SIZE_K,
-            GROUP_SIZE_M=compile_key.GROUP_SIZE_M,
+            BLOCK_SIZE_M=compile_key.block_size_m,
+            BLOCK_SIZE_N=compile_key.block_size_n,
+            BLOCK_SIZE_K=compile_key.block_size_k,
+            GROUP_SIZE_M=compile_key.group_size_m,
             grid=(1,),
         )
 
-    def __call__(self, grid: Any, *args: Any, **kwargs: Any) -> Any:
-        return self.kernel[grid](*args, **kwargs)
-
-
-_FUSED_MOE_NVFP4_EMULATION_KERNEL = FusedMoeNvfp4EmulationKernel()
+    def __call__(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        C: torch.Tensor,
+        B_scale: torch.Tensor,
+        w_global_scale: torch.Tensor,
+        topk_weights: torch.Tensor | None,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        N: int,
+        K: int,
+        EM: int,
+        num_valid_tokens: int,
+        stride_am: int,
+        stride_ak: int,
+        stride_be: int,
+        stride_bk: int,
+        stride_bn: int,
+        stride_cm: int,
+        stride_cn: int,
+        stride_bse: int,
+        stride_bsk: int,
+        stride_bsn: int,
+        *,
+        block_k_diviable: bool,
+        MUL_ROUTED_WEIGHT: bool,
+        top_k: int,
+        compute_type: tl.dtype,
+        group_size: int,
+        BLOCK_SIZE_M: int,
+        BLOCK_SIZE_N: int,
+        BLOCK_SIZE_K: int,
+        GROUP_SIZE_M: int,
+    ) -> Any:
+        compile_key = self.CompileKey(
+            dtype=A.dtype,
+            num_experts=B.size(0),
+            n=N,
+            k=K,
+            a_rows=A.size(0),
+            em=EM,
+            num_valid_tokens=num_valid_tokens,
+            top_k=top_k,
+            block_size_m=BLOCK_SIZE_M,
+            block_size_n=BLOCK_SIZE_N,
+            block_size_k=BLOCK_SIZE_K,
+            group_size_m=GROUP_SIZE_M,
+            mul_routed_weight=MUL_ROUTED_WEIGHT,
+            block_k_divisible=block_k_diviable,
+            compute_type=compute_type,
+        )
+        self._guard_warmup_call(compile_key)
+        grid = (
+            triton.cdiv(EM, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N),
+        )
+        return self.kernel[grid](
+            A,
+            B,
+            C,
+            B_scale,
+            w_global_scale,
+            topk_weights,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            N,
+            K,
+            EM,
+            num_valid_tokens,
+            stride_am,
+            stride_ak,
+            stride_be,
+            stride_bk,
+            stride_bn,
+            stride_cm,
+            stride_cn,
+            stride_bse,
+            stride_bsk,
+            stride_bsn,
+            block_k_diviable=block_k_diviable,
+            MUL_ROUTED_WEIGHT=MUL_ROUTED_WEIGHT,
+            top_k=top_k,
+            compute_type=compute_type,
+            group_size=group_size,
+            BLOCK_SIZE_M=BLOCK_SIZE_M,
+            BLOCK_SIZE_N=BLOCK_SIZE_N,
+            BLOCK_SIZE_K=BLOCK_SIZE_K,
+            GROUP_SIZE_M=GROUP_SIZE_M,
+        )
 
 
 def invoke_fused_moe_nvfp4_emulation_kernel(
@@ -485,19 +567,14 @@ def invoke_fused_moe_nvfp4_emulation_kernel(
     config: dict[str, Any],
     compute_type: tl.dtype,
 ):
-    """Launch the fused NVFP4 emulation MoE kernel.
-
-    B has shape [E, N, K_packed] where K_packed = K // 2 (two FP4 per byte).
-    B_scale has shape [E, N, K // group_size] in FP8-E4M3 (stored as uint8).
-    w_global_scale has shape [E] (per-expert scalar).
-    """
+    """Launch the fused NVFP4 emulation MoE kernel."""
     assert B_scale is not None and B_scale.ndim == 3
+    del act_global_scale
 
     N = B.size(1)
     K = A.size(1)
-
     M = A.size(0)
-    num_tokens = M * top_k
+    num_valid_tokens = M * top_k
 
     EM = sorted_token_ids.size(0)
     if A.size(0) < config["BLOCK_SIZE_M"]:
@@ -506,11 +583,7 @@ def invoke_fused_moe_nvfp4_emulation_kernel(
             A.size(0) * top_k * config["BLOCK_SIZE_M"],
         )
 
-    grid = lambda META: (
-        triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
-    )
-
-    _FUSED_MOE_NVFP4_EMULATION_KERNEL(grid,
+    return _FUSED_MOE_NVFP4_EMULATION_KERNEL(
         A,
         B,
         C,
@@ -523,16 +596,14 @@ def invoke_fused_moe_nvfp4_emulation_kernel(
         N,
         K,
         EM,
-        num_tokens,
+        num_valid_tokens,
         A.stride(0),
         A.stride(1),
-        # B is [E, N, K//2]: swap N and K strides so kernel indexes [K, N].
         B.stride(0),
         B.stride(2),
         B.stride(1),
         C.stride(1),
         C.stride(2),
-        # B_scale is [E, N, K//group]: swap N and K strides likewise.
         B_scale.stride(0),
         B_scale.stride(2),
         B_scale.stride(1),
@@ -760,3 +831,6 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
         )
 
         self.moe_sum(intermediate_cache3, output)
+
+
+_FUSED_MOE_NVFP4_EMULATION_KERNEL = FusedMoeNvfp4EmulationKernel()

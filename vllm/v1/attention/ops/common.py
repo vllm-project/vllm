@@ -268,10 +268,10 @@ class PackSeqTritonKernel(VllmJitKernel["PackSeqTritonKernel.CompileKey"]):
     @dataclass(frozen=True)
     class CompileKey:
         dtype: torch.dtype
-        PAD_VALUE: float | int
-        PAD_IS_UINT8: bool
-        BLOCK_T: int
-        BLOCK_D: int
+        pad_value: float | int
+        pad_is_uint8: bool
+        block_t: int
+        block_d: int
 
     @staticmethod
     @triton.jit(do_not_specialize=["N", "D", "Lmax"])
@@ -339,10 +339,10 @@ class PackSeqTritonKernel(VllmJitKernel["PackSeqTritonKernel.CompileKey"]):
         is_uint8 = dtype == torch.uint8
         return self.CompileKey(
             dtype=dtype,
-            PAD_VALUE=int(pad_value) if is_uint8 else float(pad_value),
-            PAD_IS_UINT8=is_uint8,
-            BLOCK_T=block_t,
-            BLOCK_D=block_d,
+            pad_value=int(pad_value) if is_uint8 else float(pad_value),
+            pad_is_uint8=is_uint8,
+            block_t=block_t,
+            block_d=block_d,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
@@ -379,10 +379,10 @@ class PackSeqTritonKernel(VllmJitKernel["PackSeqTritonKernel.CompileKey"]):
             1,  # do not specialize N
             1,  # do not specialize D
             1,  # do not specialize Lmax
-            PAD_VALUE=compile_key.PAD_VALUE,
-            PAD_IS_UINT8=compile_key.PAD_IS_UINT8,
-            BLOCK_T=compile_key.BLOCK_T,
-            BLOCK_D=compile_key.BLOCK_D,
+            PAD_VALUE=compile_key.pad_value,
+            PAD_IS_UINT8=compile_key.pad_is_uint8,
+            BLOCK_T=compile_key.block_t,
+            BLOCK_D=compile_key.block_d,
             grid=(1, 1, 1),
             num_warps=4,
             num_stages=2,
@@ -402,6 +402,13 @@ class PackSeqTritonKernel(VllmJitKernel["PackSeqTritonKernel.CompileKey"]):
         block_t: int,
         block_d: int,
     ) -> None:
+        compile_key = self.dispatch(
+            dtype=x_reshaped.dtype,
+            pad_value=pad_value,
+            block_t=block_t,
+            block_d=block_d,
+        )
+        self._guard_warmup_call(compile_key)
         grid = (lengths.numel(), triton.cdiv(Lmax, block_t), triton.cdiv(D, block_d))
         self.kernel[grid](
             x_reshaped,
@@ -493,8 +500,8 @@ class UnpackSeqTritonKernel(VllmJitKernel["UnpackSeqTritonKernel.CompileKey"]):
     @dataclass(frozen=True)
     class CompileKey:
         dtype: torch.dtype
-        BLOCK_T: int
-        BLOCK_D: int
+        block_t: int
+        block_d: int
 
     @staticmethod
     @triton.jit(do_not_specialize=["B", "Lmax", "D"])
@@ -546,7 +553,7 @@ class UnpackSeqTritonKernel(VllmJitKernel["UnpackSeqTritonKernel.CompileKey"]):
         block_t: int,
         block_d: int,
     ) -> CompileKey:
-        return self.CompileKey(dtype=dtype, BLOCK_T=block_t, BLOCK_D=block_d)
+        return self.CompileKey(dtype=dtype, block_t=block_t, block_d=block_d)
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
         del vllm_config
@@ -568,8 +575,8 @@ class UnpackSeqTritonKernel(VllmJitKernel["UnpackSeqTritonKernel.CompileKey"]):
             1,  # do not specialize B
             1,  # do not specialize Lmax
             1,  # do not specialize D
-            BLOCK_T=compile_key.BLOCK_T,
-            BLOCK_D=compile_key.BLOCK_D,
+            BLOCK_T=compile_key.block_t,
+            BLOCK_D=compile_key.block_d,
             grid=(1, 1, 1),
             num_warps=4,
             num_stages=2,
@@ -587,6 +594,12 @@ class UnpackSeqTritonKernel(VllmJitKernel["UnpackSeqTritonKernel.CompileKey"]):
         block_t: int,
         block_d: int,
     ) -> None:
+        compile_key = self.dispatch(
+            dtype=packed_reshaped.dtype,
+            block_t=block_t,
+            block_d=block_d,
+        )
+        self._guard_warmup_call(compile_key)
         grid = (B, triton.cdiv(Lmax, block_t), triton.cdiv(D, block_d))
         self.kernel[grid](
             packed_reshaped,

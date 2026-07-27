@@ -12,7 +12,9 @@ from typing import Any
 
 import torch
 
-from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+)
 from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -190,13 +192,11 @@ class FusedInvRopeFP8QuantKernel(
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        model_config = getattr(vllm_config, "model_config", None)
-        hf_config = getattr(model_config, "hf_config", None)
+        hf_config = vllm_config.model_config.hf_config
         if hf_config is None:
             return []
 
-        parallel_config = getattr(vllm_config, "parallel_config", None)
-        tp_size = int(getattr(parallel_config, "tensor_parallel_size", 1) or 1)
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
         num_heads = int(getattr(hf_config, "num_attention_heads", 0) or 0)
         num_groups = int(getattr(hf_config, "o_groups", 0) or 0)
         if num_heads <= 0 or num_groups <= 0:
@@ -277,6 +277,17 @@ class FusedInvRopeFP8QuantKernel(
         use_gdc: bool,
         grid: tuple[int, int],
     ) -> None:
+        compile_key = self.CompileKey(
+            heads_per_group=heads_per_group,
+            fp8_max=fp8_max,
+            quant_group_size=quant_group_size,
+            chunks_per_head=chunks_per_head,
+            rope_start=rope_start,
+            half_rope=half_rope,
+            tma_aligned_scales=tma_aligned_scales,
+            use_gdc=use_gdc,
+        )
+        self._guard_warmup_call(compile_key)
         self.kernel[grid](
             o,
             positions,

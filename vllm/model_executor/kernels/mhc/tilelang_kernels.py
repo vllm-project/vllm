@@ -7,7 +7,10 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.model_executor.warmup.jit_warmup import VllmJitKernel, WarmupIntRange
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+    WarmupIntRange,
+)
 from vllm.model_executor.warmup.jit_warmup_tilelang_helper import (
     compile_tilelang,
     make_tilelang_warmup_tensor,
@@ -1051,7 +1054,7 @@ class MhcPreBigFuseTileLangKernel(
             hc_sinkhorn_eps=hc_sinkhorn_eps,
             hc_post_mult_value=hc_post_mult_value,
             sinkhorn_repeat=sinkhorn_repeat,
-            norm_eps=norm_eps,
+            norm_eps=norm_eps if use_norm_weight else 0.0,
         )
 
     def get_warmup_keys(
@@ -1087,6 +1090,39 @@ class MhcPreBigFuseTileLangKernel(
             _when=lambda *, is_broadcast, is_fused: not (
                 is_broadcast and is_fused
             ),
+        )
+
+    def compile_key_for_runtime(
+        self,
+        *,
+        num_tokens: int,
+        hidden_size: int,
+        hc_mult: int,
+        use_deep_gemm: bool,
+        is_fused: bool,
+        is_broadcast: bool,
+        use_norm_weight: bool,
+        rms_eps: float,
+        hc_pre_eps: float,
+        hc_sinkhorn_eps: float,
+        hc_post_mult_value: float,
+        sinkhorn_repeat: int,
+        norm_eps: float,
+    ) -> CompileKey:
+        return self.dispatch(
+            num_tokens=num_tokens,
+            hidden_size=hidden_size,
+            hc_mult=hc_mult,
+            use_deep_gemm=use_deep_gemm,
+            is_fused=is_fused,
+            is_broadcast=is_broadcast,
+            use_norm_weight=use_norm_weight,
+            rms_eps=rms_eps,
+            hc_pre_eps=hc_pre_eps,
+            hc_sinkhorn_eps=hc_sinkhorn_eps,
+            hc_post_mult_value=hc_post_mult_value,
+            sinkhorn_repeat=sinkhorn_repeat,
+            norm_eps=norm_eps,
         )
 
     def compile(self, compile_key: CompileKey) -> None:
@@ -1194,10 +1230,17 @@ class MhcPreBigFuseTileLangKernel(
                 hc_mult,
             )
 
-    def __call__(self, *args: Any, use_norm_weight: bool, is_broadcast: bool) -> Any:
+    def __call__(self, *args: Any, compile_key: CompileKey) -> Any:
+        self._guard_warmup_call(
+            compile_key,
+            runtime_context={
+                "is_broadcast": compile_key.is_broadcast,
+                "use_norm_weight": compile_key.use_norm_weight,
+            },
+        )
         return self.kernel(
-            use_norm_weight=use_norm_weight,
-            is_broadcast=is_broadcast,
+            use_norm_weight=compile_key.use_norm_weight,
+            is_broadcast=compile_key.is_broadcast,
         )(*args)
 
 
@@ -1262,8 +1305,33 @@ class MhcPostTileLangKernel(VllmJitKernel["MhcPostTileLangKernel.CompileKey"]):
             hidden_size,
         )
 
-    def __call__(self, *args: Any) -> Any:
-        return self.kernel()(*args)
+    def __call__(
+        self,
+        comb_mix: Any,
+        residual: Any,
+        post_mix: Any,
+        layer_input: Any,
+        out: Any,
+        hc_mult: int,
+        hidden_size: int,
+    ) -> Any:
+        compile_key = self.CompileKey(
+            hidden_size=hidden_size,
+            hc_mult=hc_mult,
+        )
+        self._guard_warmup_call(
+            compile_key,
+            runtime_context={"hidden_size": hidden_size, "hc_mult": hc_mult},
+        )
+        return self.kernel()(
+            comb_mix,
+            residual,
+            post_mix,
+            layer_input,
+            out,
+            hc_mult,
+            hidden_size,
+        )
 
 
 class MhcFusedTileLangKernel(VllmJitKernel["MhcFusedTileLangKernel.CompileKey"]):
@@ -1324,6 +1392,21 @@ class MhcFusedTileLangKernel(VllmJitKernel["MhcFusedTileLangKernel.CompileKey"])
             _when=self._uses_fused_tilelang_kernel,
         )
 
+    def compile_key_for_runtime(
+        self,
+        *,
+        num_tokens: int,
+        hidden_size: int,
+        hc_mult: int,
+        use_deep_gemm: bool,
+    ) -> CompileKey:
+        return self.dispatch(
+            num_tokens=num_tokens,
+            hidden_size=hidden_size,
+            hc_mult=hc_mult,
+            use_deep_gemm=use_deep_gemm,
+        )
+
     def compile(self, compile_key: CompileKey) -> None:
         num_tokens = 1
         hidden_size = compile_key.hidden_size
@@ -1366,8 +1449,53 @@ class MhcFusedTileLangKernel(VllmJitKernel["MhcFusedTileLangKernel.CompileKey"])
             split_k=compile_key.n_splits,
         )
 
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        return self.kernel()(*args, **kwargs)
+    def __call__(
+        self,
+        comb_mix: Any,
+        residual_in: Any,
+        post_mix: Any,
+        x_in: Any,
+        weight_t: Any,
+        yp_out: Any,
+        rp_out: Any,
+        residual_out: Any,
+        hc_mult: int,
+        hidden_size: int,
+        hc_mult3: int,
+        *,
+        tile_n: int = 1,
+        split_k: int = 1,
+    ) -> Any:
+        compile_key = self.CompileKey(
+            hidden_size=hidden_size,
+            hc_mult=hc_mult,
+            n_splits=split_k,
+            tile_n=tile_n,
+        )
+        self._guard_warmup_call(
+            compile_key,
+            runtime_context={
+                "hidden_size": hidden_size,
+                "hc_mult": hc_mult,
+                "tile_n": tile_n,
+                "split_k": split_k,
+            },
+        )
+        return self.kernel()(
+            comb_mix,
+            residual_in,
+            post_mix,
+            x_in,
+            weight_t,
+            yp_out,
+            rp_out,
+            residual_out,
+            hc_mult,
+            hidden_size,
+            hc_mult3,
+            tile_n=tile_n,
+            split_k=split_k,
+        )
 
 
 class HcHeadFusedTileLangKernel(
@@ -1444,8 +1572,44 @@ class HcHeadFusedTileLangKernel(
             hc_mult,
         )
 
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        return self.kernel()(*args, **kwargs)
+    def __call__(
+        self,
+        residual: Any,
+        fn: Any,
+        hc_scale: Any,
+        hc_base: Any,
+        out: Any,
+        hidden_size: int,
+        rms_eps: float,
+        hc_eps: float,
+        hc_mult: int,
+    ) -> Any:
+        compile_key = self.CompileKey(
+            hidden_size=hidden_size,
+            hc_mult=hc_mult,
+            rms_eps=rms_eps,
+            hc_eps=hc_eps,
+        )
+        self._guard_warmup_call(
+            compile_key,
+            runtime_context={
+                "hidden_size": hidden_size,
+                "hc_mult": hc_mult,
+                "rms_eps": rms_eps,
+                "hc_eps": hc_eps,
+            },
+        )
+        return self.kernel()(
+            residual,
+            fn,
+            hc_scale,
+            hc_base,
+            out,
+            hidden_size,
+            rms_eps,
+            hc_eps,
+            hc_mult,
+        )
 
 
 MHC_PRE_BIG_FUSE_TILELANG_KERNEL = MhcPreBigFuseTileLangKernel()

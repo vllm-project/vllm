@@ -12,7 +12,9 @@ from typing import Any
 
 import torch
 
-from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+)
 from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
@@ -138,7 +140,7 @@ class PrepareMegaMoeInputsKernel(
     class CompileKey:
         hidden_size: int
         top_k: int
-        BLOCK_TOPK: int
+        block_topk: int
         has_padding: bool
 
     def dispatch(  # type: ignore[override]
@@ -152,22 +154,23 @@ class PrepareMegaMoeInputsKernel(
         return self.CompileKey(
             hidden_size=hidden_size,
             top_k=top_k,
-            BLOCK_TOPK=block_topk,
+            block_topk=block_topk,
             has_padding=has_padding,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        kernel_config = getattr(vllm_config, "kernel_config", None)
-        if getattr(kernel_config, "moe_backend", None) != "deep_gemm_mega_moe":
+        if (
+            vllm_config.kernel_config.moe_backend
+            != "deep_gemm_mega_moe"
+        ):
             return []
 
-        model_config = getattr(vllm_config, "model_config", None)
-        hf_config = getattr(model_config, "hf_config", None)
+        hf_config = vllm_config.model_config.hf_config
         if getattr(hf_config, "model_type", None) != "deepseek_v4":
             return []
 
-        hidden_size = int(getattr(hf_config, "hidden_size", 0) or 0)
-        top_k = int(getattr(hf_config, "num_experts_per_tok", 0) or 0)
+        hidden_size = vllm_config.model_config.hf_config.hidden_size
+        top_k = vllm_config.model_config.hf_config.num_experts_per_tok
         if hidden_size <= 0 or top_k <= 0:
             return []
 
@@ -226,7 +229,7 @@ class PrepareMegaMoeInputsKernel(
             top_k,
             BLOCK_K=block_k,
             GROUP_K=group_k,
-            BLOCK_TOPK=compile_key.BLOCK_TOPK,
+            BLOCK_TOPK=compile_key.block_topk,
             num_warps=4,
             grid=(1, triton.cdiv(hidden_size, block_k)),
         )
@@ -260,6 +263,12 @@ class PrepareMegaMoeInputsKernel(
         block_k = _PREPARE_MEGAMOE_BLOCK_K
         grid = (num_tokens, triton.cdiv(hidden_size, block_k))
         block_topk = triton.next_power_of_2(top_k)
+        compile_key = self.dispatch(
+            hidden_size=hidden_size,
+            top_k=top_k,
+            has_padding=is_padding is not None,
+        )
+        self._guard_warmup_call(compile_key)
         padding_stride_m = is_padding.stride(0) if is_padding is not None else 0
         self.kernel[grid](
             hidden_states,

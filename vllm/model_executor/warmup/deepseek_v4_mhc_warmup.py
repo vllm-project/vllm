@@ -19,44 +19,21 @@ from vllm.tracing import instrument
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-_NVIDIA_MHC_LAYER_ATTRS = (
-    "attn_norm",
-    "ffn_norm",
-    "hc_attn_base",
-    "hc_attn_fn",
-    "hc_attn_scale",
-    "hc_eps",
-    "hc_ffn_base",
-    "hc_ffn_fn",
-    "hc_ffn_scale",
-    "hc_mult",
-    "hc_post_alpha",
-    "hc_sinkhorn_iters",
-    "hidden_size",
-    "rms_norm_eps",
-)
-
-_NVIDIA_MHC_MODEL_ATTRS = (
-    "config",
-    "hc_eps",
-    "hc_head_base",
-    "hc_head_fn",
-    "hc_head_scale",
-    "hc_mult",
-    "rms_norm_eps",
-)
-
 
 def _find_first_mhc_layer(model: torch.nn.Module) -> torch.nn.Module | None:
+    from vllm.models.deepseek_v4.nvidia.model import DeepseekV4DecoderLayer
+
     for module in model.modules():
-        if all(hasattr(module, attr) for attr in _NVIDIA_MHC_LAYER_ATTRS):
+        if isinstance(module, DeepseekV4DecoderLayer):
             return module
     return None
 
 
 def _find_deepseek_v4_model(model: torch.nn.Module) -> torch.nn.Module | None:
+    from vllm.models.deepseek_v4.nvidia.model import DeepseekV4Model
+
     for module in model.modules():
-        if all(hasattr(module, attr) for attr in _NVIDIA_MHC_MODEL_ATTRS):
+        if isinstance(module, DeepseekV4Model):
             return module
     return None
 
@@ -127,5 +104,3 @@ def deepseek_v4_mhc_warmup(
             rms_eps=float(deepseek_model.rms_norm_eps),
             hc_eps=float(deepseek_model.hc_eps),
         )
-
-    torch.accelerator.synchronize()

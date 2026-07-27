@@ -22,7 +22,10 @@ import torch
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
-from vllm.model_executor.warmup.jit_warmup import VllmJitKernel, zip_inputs
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+    zip_inputs,
+)
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonPointerInputVariant,
     TritonWarmupTensor,
@@ -375,10 +378,8 @@ class DequantizeAndGatherKCacheKernel(
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        model_config = getattr(vllm_config, "model_config", None)
-        max_model_len = int(getattr(model_config, "max_model_len", 1) or 1)
-        cache_config = getattr(vllm_config, "cache_config", None)
-        block_size = int(getattr(cache_config, "block_size", 64) or 64)
+        max_model_len = vllm_config.model_config.max_model_len
+        block_size = vllm_config.cache_config.block_size
         if max_model_len <= 0 or block_size <= 0:
             return []
 
@@ -441,6 +442,13 @@ class DequantizeAndGatherKCacheKernel(
         use_fnuz: bool = False,
     ) -> None:
         num_reqs = seq_lens.shape[0]
+        compile_key = self.dispatch(
+            max_model_len=block_table.shape[-1] * block_size,
+            cache_block_size=block_size,
+            use_fnuz=use_fnuz,
+            has_gather_lens=gather_lens is not None,
+        )
+        self._guard_warmup_call(compile_key)
         self.kernel[(num_reqs, _DEQUANTIZE_AND_GATHER_K_NUM_WORKERS)](
             out,
             out.stride(0),
@@ -621,11 +629,8 @@ class ComputeGlobalTopkIndicesAndLensKernel(
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        model_config = getattr(vllm_config, "model_config", None)
-        hf_config = getattr(model_config, "hf_config", None)
-        index_topk = int(getattr(hf_config, "index_topk", 0) or 0)
-        cache_config = getattr(vllm_config, "cache_config", None)
-        cache_block_size = int(getattr(cache_config, "block_size", 64) or 64)
+        index_topk = vllm_config.model_config.hf_config.index_topk
+        cache_block_size = vllm_config.cache_config.block_size
         if index_topk <= 0 or cache_block_size <= 0:
             return []
 
@@ -634,7 +639,7 @@ class ComputeGlobalTopkIndicesAndLensKernel(
         return self._trace_dispatch(self.dispatch)(
             topk_width=index_topk,
             block_size=warmup_block_size,
-            max_model_len=int(getattr(model_config, "max_model_len", 1) or 1),
+            max_model_len=vllm_config.model_config.max_model_len,
         )
 
     def compile(self, compile_key: CompileKey) -> None:
@@ -668,6 +673,12 @@ class ComputeGlobalTopkIndicesAndLensKernel(
         is_valid_token: torch.Tensor,
     ) -> None:
         num_tokens = topk_indices.shape[0]
+        compile_key = self.dispatch(
+            topk_width=topk_indices.shape[-1],
+            block_size=block_size,
+            max_model_len=block_table.shape[-1] * block_size,
+        )
+        self._guard_warmup_call(compile_key)
         self.kernel[(num_tokens,)](
             global_topk_indices,
             global_topk_indices.stride(0),
@@ -777,10 +788,10 @@ class CombineTopkSwaIndicesKernel(
 ):
     @dataclass(frozen=True)
     class CompileKey:
-        TOP_K: int
-        COMPRESS_RATIO: int
-        WINDOW_SIZE: int
-        PADDED_TOP_K: int
+        top_k: int
+        compress_ratio: int
+        window_size: int
+        padded_top_k: int
         input_variant: TritonPointerInputVariant
 
     @staticmethod
@@ -883,23 +894,19 @@ class CombineTopkSwaIndicesKernel(
             gather_lens=gather_lens,
         )
         return self.CompileKey(
-            TOP_K=topk,
-            COMPRESS_RATIO=compress_ratio,
-            WINDOW_SIZE=WINDOW_SIZE,
-            PADDED_TOP_K=padded_topk,
+            top_k=topk,
+            compress_ratio=compress_ratio,
+            window_size=WINDOW_SIZE,
+            padded_top_k=padded_topk,
             input_variant=input_variant,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        scheduler_config = getattr(vllm_config, "scheduler_config", None)
-        max_num_batched_tokens = int(
-            getattr(scheduler_config, "max_num_batched_tokens", 0) or 0
-        )
+        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         if max_num_batched_tokens <= 0:
             return []
 
-        model_config = getattr(vllm_config, "model_config", None)
-        hf_config = getattr(model_config, "hf_config", None)
+        hf_config = vllm_config.model_config.hf_config
         window_size = int(getattr(hf_config, "sliding_window", 128) or 128)
         return self._trace_dispatch(self.dispatch)(
             _DSV4_COMBINE_TOPK_SWA_WARMUP_INPUTS,
@@ -923,10 +930,10 @@ class CombineTopkSwaIndicesKernel(
             input_variant.pointer("gather_lens", torch.int32),
             1,  # do not specialize M
             1,  # do not specialize N
-            TOP_K=compile_key.TOP_K,
-            COMPRESS_RATIO=compile_key.COMPRESS_RATIO,
-            WINDOW_SIZE=compile_key.WINDOW_SIZE,
-            PADDED_TOP_K=compile_key.PADDED_TOP_K,
+            TOP_K=compile_key.top_k,
+            COMPRESS_RATIO=compile_key.compress_ratio,
+            WINDOW_SIZE=compile_key.window_size,
+            PADDED_TOP_K=compile_key.padded_top_k,
             grid=(1, _COMBINE_TOPK_SWA_NUM_WORKERS),
         )
 
@@ -946,6 +953,17 @@ class CombineTopkSwaIndicesKernel(
         WINDOW_SIZE: int,
     ) -> None:
         num_reqs = seq_lens.shape[0]
+        compile_key = self.dispatch(
+            topk_width=topk_indices.shape[-1],
+            topk_indices=topk_indices is not None,
+            query_start_loc=query_start_loc is not None,
+            seq_lens=seq_lens is not None,
+            gather_lens=gather_lens is not None,
+            topk=TOP_K,
+            compress_ratio=COMPRESS_RATIO,
+            WINDOW_SIZE=WINDOW_SIZE,
+        )
+        self._guard_warmup_call(compile_key)
         self.kernel[(num_reqs, _COMBINE_TOPK_SWA_NUM_WORKERS)](
             combined_indices,
             combined_indices.stride(0),
@@ -1165,17 +1183,17 @@ class BuildFlashinferMixedSparseIndicesKernel(
 ):
     @dataclass(frozen=True)
     class CompileKey:
-        WINDOW_SIZE: int
-        COMPRESS_RATIO: int
-        TOP_K: int
-        PADDED_TOP_K: int
-        DECODE_COMPRESSED_TOPK: int
-        DECODE_COMPRESSED_INDICES_ARE_LOCAL: bool
-        HAS_DECODE_COMPRESSED_LENS: bool
-        SWA_BLOCK_SIZE: int
-        COMPRESSED_BLOCK_SIZE: int
-        WINDOW_BLOCK_SIZE: int
-        TOPK_BLOCK_SIZE: int
+        window_size: int
+        compress_ratio: int
+        top_k: int
+        padded_top_k: int
+        decode_compressed_topk: int
+        decode_compressed_indices_are_local: bool
+        has_decode_compressed_lens: bool
+        swa_block_size: int
+        compressed_block_size: int
+        window_block_size: int
+        topk_block_size: int
 
     @staticmethod
     @triton.jit(
@@ -1388,29 +1406,25 @@ class BuildFlashinferMixedSparseIndicesKernel(
             swa_block_size if compress_ratio == 1 else 256 // compress_ratio
         )
         return self.CompileKey(
-            WINDOW_SIZE=window_size,
-            COMPRESS_RATIO=compress_ratio,
-            TOP_K=topk,
-            PADDED_TOP_K=padded_topk,
-            DECODE_COMPRESSED_TOPK=decode_compressed_topk,
-            DECODE_COMPRESSED_INDICES_ARE_LOCAL=decode_compressed_indices_are_local,
-            HAS_DECODE_COMPRESSED_LENS=has_decode_compressed_lens,
-            SWA_BLOCK_SIZE=swa_block_size,
-            COMPRESSED_BLOCK_SIZE=compressed_block_size,
-            WINDOW_BLOCK_SIZE=window_block_size,
-            TOPK_BLOCK_SIZE=topk_block_size,
+            window_size=window_size,
+            compress_ratio=compress_ratio,
+            top_k=topk,
+            padded_top_k=padded_topk,
+            decode_compressed_topk=decode_compressed_topk,
+            decode_compressed_indices_are_local=decode_compressed_indices_are_local,
+            has_decode_compressed_lens=has_decode_compressed_lens,
+            swa_block_size=swa_block_size,
+            compressed_block_size=compressed_block_size,
+            window_block_size=window_block_size,
+            topk_block_size=topk_block_size,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        scheduler_config = getattr(vllm_config, "scheduler_config", None)
-        max_num_batched_tokens = int(
-            getattr(scheduler_config, "max_num_batched_tokens", 0) or 0
-        )
+        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         if max_num_batched_tokens <= 0:
             return []
 
-        model_config = getattr(vllm_config, "model_config", None)
-        hf_config = getattr(model_config, "hf_config", None)
+        hf_config = vllm_config.model_config.hf_config
         return self._trace_dispatch(self.dispatch)(
             _DSV4_FLASHINFER_MIXED_SPARSE_WARMUP_INPUTS,
             window_size=int(getattr(hf_config, "sliding_window", 128) or 128),
@@ -1422,8 +1436,8 @@ class BuildFlashinferMixedSparseIndicesKernel(
         int32_ptr = TritonWarmupTensor(torch.int32)
         bool_ptr = TritonWarmupTensor(torch.bool)
         max_block_size = max(
-            compile_key.WINDOW_BLOCK_SIZE,
-            compile_key.TOPK_BLOCK_SIZE,
+            compile_key.window_block_size,
+            compile_key.topk_block_size,
         )
         num_warps = 4 if max_block_size >= 256 else 1
         warmup(
@@ -1437,7 +1451,7 @@ class BuildFlashinferMixedSparseIndicesKernel(
             int32_ptr,
             (
                 bool_ptr
-                if compile_key.DECODE_COMPRESSED_INDICES_ARE_LOCAL
+                if compile_key.decode_compressed_indices_are_local
                 else int32_ptr
             ),
             int32_ptr,
@@ -1447,25 +1461,25 @@ class BuildFlashinferMixedSparseIndicesKernel(
             int32_ptr,
             int32_ptr,
             1,  # do not specialize swa_block_table_stride
-            compile_key.SWA_BLOCK_SIZE,
+            compile_key.swa_block_size,
             1,  # do not specialize swa_block_span
             int32_ptr,
             1,  # do not specialize compressed_block_table_stride
-            compile_key.COMPRESSED_BLOCK_SIZE,
+            compile_key.compressed_block_size,
             1,  # do not specialize compressed_block_span
             1,  # do not specialize NUM_DECODE_TOKENS
-            WINDOW_SIZE=compile_key.WINDOW_SIZE,
-            COMPRESS_RATIO=compile_key.COMPRESS_RATIO,
-            TOP_K=compile_key.TOP_K,
-            PADDED_TOP_K=compile_key.PADDED_TOP_K,
+            WINDOW_SIZE=compile_key.window_size,
+            COMPRESS_RATIO=compile_key.compress_ratio,
+            TOP_K=compile_key.top_k,
+            PADDED_TOP_K=compile_key.padded_top_k,
             PREFILL_TOPK_STRIDE=1,
-            DECODE_COMPRESSED_TOPK=compile_key.DECODE_COMPRESSED_TOPK,
+            DECODE_COMPRESSED_TOPK=compile_key.decode_compressed_topk,
             DECODE_COMPRESSED_INDICES_ARE_LOCAL=(
-                compile_key.DECODE_COMPRESSED_INDICES_ARE_LOCAL
+                compile_key.decode_compressed_indices_are_local
             ),
-            HAS_DECODE_COMPRESSED_LENS=compile_key.HAS_DECODE_COMPRESSED_LENS,
-            WINDOW_BLOCK_SIZE=compile_key.WINDOW_BLOCK_SIZE,
-            TOPK_BLOCK_SIZE=compile_key.TOPK_BLOCK_SIZE,
+            HAS_DECODE_COMPRESSED_LENS=compile_key.has_decode_compressed_lens,
+            WINDOW_BLOCK_SIZE=compile_key.window_block_size,
+            TOPK_BLOCK_SIZE=compile_key.topk_block_size,
             grid=(1,),
             num_warps=num_warps,
         )
@@ -1503,6 +1517,16 @@ class BuildFlashinferMixedSparseIndicesKernel(
         num_warps: int,
     ) -> None:
         num_tokens = sparse_indices.shape[0]
+        compile_key = self.dispatch(
+            window_size=window_size,
+            compress_ratio=compress_ratio,
+            topk=topk,
+            topk_width=padded_topk,
+            decode_compressed_topk=decode_compressed_topk,
+            decode_compressed_indices_are_local=decode_compressed_indices_are_local,
+            has_decode_compressed_lens=has_decode_compressed_lens,
+        )
+        self._guard_warmup_call(compile_key)
         self.kernel[(num_tokens,)](
             sparse_indices,
             sparse_indices.stride(0),

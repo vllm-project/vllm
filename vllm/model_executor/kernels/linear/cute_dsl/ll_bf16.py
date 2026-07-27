@@ -45,9 +45,6 @@ _TUNED_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int]]] = {
         **{M: (5, 4) for M in range(6, 17)},
     },
 }
-_EMPTY_TUNED_CONFIG: dict[int, tuple[int, int]] = {}
-
-
 _cute_ctx = None
 
 
@@ -79,18 +76,11 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
     @dataclass(frozen=True, slots=True)
     class CompileKey:
         backend: Literal["dotprod", "splitk"]
-        M: int = 0
-        K: int = 0
+        m: int = 0
+        k: int = 0
         bs: int = 0
         split_k: int = 0
         num_stages: int = 0
-
-    def __init__(self) -> None:
-        # Dot-prod: keyed on (M, K, bs), because M and K are Constexpr.
-        self._compiled_cache: dict[tuple[int, int, int], Any] = {}
-        # Split-K: keyed on (split_k, num_stages), fully shape-dynamic.
-        self._splitk_cache: dict[tuple[int, int], Any] = {}
-        super().__init__()
 
     @staticmethod
     def kernel(compile_key: CompileKey) -> Any:
@@ -109,7 +99,7 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
         from ._ll_bf16_dotprod import LLBf16Dotprod
 
         return LLBf16Dotprod(
-            k=compile_key.K,
+            k=compile_key.k,
             bs=compile_key.bs,
             use_pdl=_use_pdl(),
         )
@@ -117,10 +107,13 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
     def dispatch(self, *, M: int, K: int, N: int) -> CompileKey:
         dotprod_max_m = _TUNED_DOTPROD_MAX_M.get((K, N), _DEFAULT_DOTPROD_MAX_M)
         if dotprod_max_m >= M or K < 2048:
-            return self.CompileKey(backend="dotprod", M=M, K=K, bs=_DEFAULT_DOTPROD_BS)
+            return self.CompileKey(backend="dotprod", m=M, k=K, bs=_DEFAULT_DOTPROD_BS)
 
-        split_k, num_stages = _TUNED_CONFIGS.get((K, N), _EMPTY_TUNED_CONFIG).get(
-            M, _DEFAULT_SPLITK_CONFIG
+        tuned_config = _TUNED_CONFIGS.get((K, N))
+        split_k, num_stages = (
+            tuned_config.get(M, _DEFAULT_SPLITK_CONFIG)
+            if tuned_config is not None
+            else _DEFAULT_SPLITK_CONFIG
         )
         return self.CompileKey(backend="splitk", split_k=split_k, num_stages=num_stages)
 
@@ -167,7 +160,7 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
             _stream(),
             options="--enable-tvm-ffi",
         )
-        self._splitk_cache[(compile_key.split_k, compile_key.num_stages)] = compiled
+        self._compiled_cache[compile_key] = compiled
         logger.debug(
             "Compiled ll_bf16_splitk: sk=%d ns=%d",
             compile_key.split_k,
@@ -177,10 +170,10 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
     def _compile_dotprod(self, compile_key: CompileKey) -> None:
         cute, _ = _cute()
         N = cute.sym_int()
-        stride_divisibility = math.gcd(8, compile_key.K)
+        stride_divisibility = math.gcd(8, compile_key.k)
         hidden_states, router_weight, output = self._fake_gemm_tensors(
-            M=compile_key.M,
-            K=compile_key.K,
+            M=compile_key.m,
+            K=compile_key.k,
             N=N,
             divisibility=stride_divisibility,
         )
@@ -190,29 +183,26 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
             hidden_states,
             router_weight,
             output,
-            compile_key.M,
-            compile_key.K,
+            compile_key.m,
+            compile_key.k,
             1,  # runtime N placeholder for fake-tensor compile
             _stream(),
             options="--enable-tvm-ffi --ptxas-options -maxrregcount=64",
         )
-        self._compiled_cache[(compile_key.M, compile_key.K, compile_key.bs)] = compiled
+        self._compiled_cache[compile_key] = compiled
         logger.debug(
             "Compiled ll_bf16_dotprod: M=%d, K=%d, bs=%d",
-            compile_key.M,
-            compile_key.K,
+            compile_key.m,
+            compile_key.k,
             compile_key.bs,
         )
 
     def compile(self, compile_key: CompileKey) -> None:
-        if compile_key.backend == "splitk":
-            splitk_cache_key = (compile_key.split_k, compile_key.num_stages)
-            if splitk_cache_key not in self._splitk_cache:
-                self._compile_splitk(compile_key)
+        if self._compiled_cache_contains(compile_key):
             return
-
-        dotprod_cache_key = (compile_key.M, compile_key.K, compile_key.bs)
-        if dotprod_cache_key not in self._compiled_cache:
+        if compile_key.backend == "splitk":
+            self._compile_splitk(compile_key)
+        else:
             self._compile_dotprod(compile_key)
 
     @staticmethod
@@ -261,16 +251,12 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
         M, K = hidden_states.shape
         N = router_weight.shape[0]
         compile_key = self.dispatch(M=M, K=K, N=N)
-        if compile_key.backend == "splitk":
-            splitk_cache_key = (compile_key.split_k, compile_key.num_stages)
-            if splitk_cache_key not in self._splitk_cache:
-                self.compile(compile_key)
-            kernel = self._splitk_cache[splitk_cache_key]
-        else:
-            dotprod_cache_key = (compile_key.M, compile_key.K, compile_key.bs)
-            if dotprod_cache_key not in self._compiled_cache:
-                self.compile(compile_key)
-            kernel = self._compiled_cache[dotprod_cache_key]
+        self._guard_warmup_call(compile_key)
+        runtime_context = {"M": M, "K": K, "N": N}
+        kernel = self._get_compiled_from_cache(
+            compile_key,
+            runtime_context={**runtime_context, "backend": compile_key.backend},
+        )
 
         stream = _stream()
         output = torch.empty(M, N, dtype=output_dtype, device=hidden_states.device)

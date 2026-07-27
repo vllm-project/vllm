@@ -11,7 +11,9 @@ from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
-from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+)
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
 )
@@ -113,9 +115,9 @@ if current_platform.is_cuda_alike():
 
         @dataclass(frozen=True)
         class CompileKey:
-            HAS_NUM_UNPADDED: bool
-            NUM_ACTIVE_EXPERTS: int
-            BLOCK_SIZE: int
+            has_num_unpadded: bool
+            num_active_experts: int
+            block_size: int
 
         def dispatch(  # type: ignore[override]
             self,
@@ -124,18 +126,16 @@ if current_platform.is_cuda_alike():
             num_active_experts: int,
         ) -> CompileKey:
             return self.CompileKey(
-                HAS_NUM_UNPADDED=has_num_unpadded,
-                NUM_ACTIVE_EXPERTS=num_active_experts,
-                BLOCK_SIZE=self.BLOCK_SIZE,
+                has_num_unpadded=has_num_unpadded,
+                num_active_experts=num_active_experts,
+                block_size=self.block_size,
             )
 
         def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-            parallel_config = getattr(vllm_config, "parallel_config", None)
+            parallel_config = vllm_config.parallel_config
             if not bool(getattr(parallel_config, "enable_eplb", False)):
                 return []
-            model_config = getattr(vllm_config, "model_config", None)
-            hf_config = getattr(model_config, "hf_config", None)
-            top_k = int(getattr(hf_config, "num_experts_per_tok", 0) or 0)
+            top_k = vllm_config.model_config.hf_config.num_experts_per_tok
             if top_k <= 0:
                 return []
             return self._trace_dispatch(self.dispatch)(
@@ -154,14 +154,14 @@ if current_platform.is_cuda_alike():
                 int32_ptr,
                 int32_ptr,
                 TritonWarmupTensor(torch.bool),
-                int32_ptr if compile_key.HAS_NUM_UNPADDED else None,
+                int32_ptr if compile_key.has_num_unpadded else None,
                 1,
                 1,
                 1,
                 1,
-                compile_key.NUM_ACTIVE_EXPERTS,
-                HAS_NUM_UNPADDED=compile_key.HAS_NUM_UNPADDED,
-                BLOCK_SIZE=compile_key.BLOCK_SIZE,
+                compile_key.num_active_experts,
+                HAS_NUM_UNPADDED=compile_key.has_num_unpadded,
+                BLOCK_SIZE=compile_key.block_size,
                 grid=(1,),
             )
 
@@ -180,7 +180,7 @@ if current_platform.is_cuda_alike():
             numel: int,
             num_active_experts: int,
         ) -> None:
-            grid = (triton.cdiv(numel, self.BLOCK_SIZE),)
+            grid = (triton.cdiv(numel, self.block_size),)
             self.kernel[grid](
                 topk_ids,
                 logical_replica_count,
@@ -195,7 +195,7 @@ if current_platform.is_cuda_alike():
                 numel,
                 num_active_experts,
                 HAS_NUM_UNPADDED=num_unpadded_tokens is not None,
-                BLOCK_SIZE=self.BLOCK_SIZE,
+                BLOCK_SIZE=self.block_size,
             )
 
 

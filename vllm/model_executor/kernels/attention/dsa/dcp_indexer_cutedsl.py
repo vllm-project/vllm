@@ -9,7 +9,9 @@ import torch
 from cutlass import Float32, Int32
 from quack.compile_utils import make_fake_tensor
 
-from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+)
 from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import compile_cutedsl
 from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
 from vllm.triton_utils import tl, triton
@@ -69,12 +71,12 @@ class PackDCPTopkCandidatesKernel(
 ):
     @dataclass(frozen=True)
     class CompileKey:
-        DCP_RANK: int
-        DCP_WORLD_SIZE: int
-        CP_INTERLEAVE: int
-        HAS_ROW_STARTS: bool
-        TOPK: int
-        BLOCK_SIZE: int
+        dcp_rank: int
+        dcp_world_size: int
+        cp_interleave: int
+        has_row_starts: bool
+        topk: int
+        block_size: int
 
     @staticmethod
     @triton.jit(
@@ -156,27 +158,20 @@ class PackDCPTopkCandidatesKernel(
         block_size: int,
     ) -> CompileKey:
         return self.CompileKey(
-            DCP_RANK=dcp_rank,
-            DCP_WORLD_SIZE=dcp_world_size,
-            CP_INTERLEAVE=cp_interleave,
-            HAS_ROW_STARTS=has_row_starts,
-            TOPK=topk,
-            BLOCK_SIZE=block_size,
+            dcp_rank=dcp_rank,
+            dcp_world_size=dcp_world_size,
+            cp_interleave=cp_interleave,
+            has_row_starts=has_row_starts,
+            topk=topk,
+            block_size=block_size,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        parallel_config = getattr(vllm_config, "parallel_config", None)
-        dcp_world_size = int(
-            getattr(parallel_config, "decode_context_parallel_size", 1) or 1
-        )
+        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         if dcp_world_size <= 1:
             return []
-        cp_interleave = int(
-            getattr(parallel_config, "cp_kv_cache_interleave_size", 1) or 1
-        )
-        model_config = getattr(vllm_config, "model_config", None)
-        hf_config = getattr(model_config, "hf_config", None)
-        topk = int(getattr(hf_config, "index_topk", 0) or 0)
+        cp_interleave = vllm_config.parallel_config.cp_kv_cache_interleave_size
+        topk = vllm_config.model_config.hf_config.index_topk
         if topk <= 0:
             return []
 
@@ -214,12 +209,12 @@ class PackDCPTopkCandidatesKernel(
             1,  # do not specialize packed_stride1
             1,  # do not specialize packed_stride2
             1,  # do not specialize num_cols
-            DCP_RANK=compile_key.DCP_RANK,
-            DCP_WORLD_SIZE=compile_key.DCP_WORLD_SIZE,
-            CP_INTERLEAVE=compile_key.CP_INTERLEAVE,
-            HAS_ROW_STARTS=compile_key.HAS_ROW_STARTS,
-            TOPK=compile_key.TOPK,
-            BLOCK_SIZE=compile_key.BLOCK_SIZE,
+            DCP_RANK=compile_key.dcp_rank,
+            DCP_WORLD_SIZE=compile_key.dcp_world_size,
+            CP_INTERLEAVE=compile_key.cp_interleave,
+            HAS_ROW_STARTS=compile_key.has_row_starts,
+            TOPK=compile_key.topk,
+            BLOCK_SIZE=compile_key.block_size,
             grid=(1, 1),
             num_warps=8,
         )
@@ -246,6 +241,15 @@ class PackDCPTopkCandidatesKernel(
         topk: int,
         block_size: int,
     ) -> None:
+        compile_key = self.dispatch(
+            dcp_rank=dcp_rank,
+            dcp_world_size=dcp_world_size,
+            cp_interleave=cp_interleave,
+            has_row_starts=has_row_starts,
+            topk=topk,
+            block_size=block_size,
+        )
+        self._guard_warmup_call(compile_key)
         grid = (topk_indices.shape[0], triton.cdiv(topk, block_size))
         self.kernel[grid](
             logits,
@@ -278,9 +282,16 @@ class StableTopKFromGatheredCandidatesKernel(
         topk: int
         num_candidates: int
 
-    def __init__(self) -> None:
-        self._compiled_cache: dict[tuple[int, int], Any] = {}
-        super().__init__()
+    @staticmethod
+    def kernel(compile_key: CompileKey) -> Any:
+        from ._stable_topk_from_gathered_candidates import (
+            StableTopKFromGatheredCandidatesImpl,
+        )
+
+        return StableTopKFromGatheredCandidatesImpl(
+            topk=compile_key.topk,
+            num_candidates=compile_key.num_candidates,
+        )
 
     def dispatch(  # type: ignore[override]
         self,
@@ -291,15 +302,10 @@ class StableTopKFromGatheredCandidatesKernel(
         return self.CompileKey(topk=topk, num_candidates=num_candidates)
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        parallel_config = getattr(vllm_config, "parallel_config", None)
-        dcp_world_size = int(
-            getattr(parallel_config, "decode_context_parallel_size", 1) or 1
-        )
+        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         if dcp_world_size <= 1:
             return []
-        model_config = getattr(vllm_config, "model_config", None)
-        hf_config = getattr(model_config, "hf_config", None)
-        topk = int(getattr(hf_config, "index_topk", 0) or 0)
+        topk = vllm_config.model_config.hf_config.index_topk
         if topk <= 0:
             return []
         return self._trace_dispatch(self.dispatch)(
@@ -309,12 +315,11 @@ class StableTopKFromGatheredCandidatesKernel(
 
     def compile(self, compile_key: CompileKey) -> None:
         cache_key = (compile_key.topk, compile_key.num_candidates)
-        if cache_key in self._compiled_cache:
+        if self._compiled_cache_contains(
+            compile_key,
+            cache_key=cache_key,
+        ):
             return
-
-        from ._stable_topk_from_gathered_candidates import (
-            StableTopKFromGatheredCandidatesImpl,
-        )
 
         num_rows = cute.sym_int()
         gathered = cute.runtime.make_fake_tensor(
@@ -328,18 +333,24 @@ class StableTopKFromGatheredCandidatesKernel(
             (num_rows, compile_key.topk),
             divisibility=1,
         )
-        impl = StableTopKFromGatheredCandidatesImpl(
-            topk=compile_key.topk,
-            num_candidates=compile_key.num_candidates,
+        self._compiled_cache[cache_key] = compile_cutedsl(
+            self.kernel(compile_key), gathered, out
         )
-        self._compiled_cache[cache_key] = compile_cutedsl(impl, gathered, out)
 
     def __call__(self, gathered: torch.Tensor, out: torch.Tensor, *, topk: int) -> Any:
         compile_key = self.dispatch(topk=topk, num_candidates=gathered.shape[1])
+        self._guard_warmup_call(compile_key)
         cache_key = (compile_key.topk, compile_key.num_candidates)
-        if cache_key not in self._compiled_cache:
-            self.compile(compile_key)
-        return self._compiled_cache[cache_key](gathered, out)
+        kernel = self._get_compiled_from_cache(
+            compile_key,
+            cache_key=cache_key,
+            runtime_context={
+                "gathered_shape": tuple(gathered.shape),
+                "out_shape": tuple(out.shape),
+                "topk": topk,
+            },
+        )
+        return kernel(gathered, out)
 
 
 _PACK_DCP_TOPK_CANDIDATES_KERNEL = PackDCPTopkCandidatesKernel()

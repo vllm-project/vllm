@@ -9,7 +9,9 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
-from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+)
 from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
@@ -422,7 +424,7 @@ class BuildC128ATopkMetadataKernel(
         compress_ratio: int
         max_compressed_tokens: int
         block_size: int
-        BLOCK_SIZE: int
+        triton_block_size: int
 
     def dispatch(  # type: ignore[override]
         self,
@@ -430,18 +432,17 @@ class BuildC128ATopkMetadataKernel(
         compress_ratio: int,
         max_compressed_tokens: int,
         block_size: int,
-        BLOCK_SIZE: int,
+        triton_block_size: int,
     ) -> CompileKey:
         return self.CompileKey(
             compress_ratio=compress_ratio,
             max_compressed_tokens=max_compressed_tokens,
             block_size=block_size,
-            BLOCK_SIZE=BLOCK_SIZE,
+            triton_block_size=triton_block_size,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        model_config = getattr(vllm_config, "model_config", None)
-        hf_config = getattr(model_config, "hf_config", None)
+        hf_config = vllm_config.model_config.hf_config
         if getattr(hf_config, "model_type", None) != "deepseek_v4":
             return []
 
@@ -460,7 +461,7 @@ class BuildC128ATopkMetadataKernel(
             # DeepSeek V4 sparse MLA uses 256-token KV pages; C128A metadata
             # works in compressed-token units.
             block_size=256 // compress_ratio,
-            BLOCK_SIZE=1024,
+            triton_block_size=1024,
         )
 
     def compile(self, compile_key: CompileKey) -> None:
@@ -484,7 +485,7 @@ class BuildC128ATopkMetadataKernel(
             1,  # do not specialize block_table_stride
             compile_key.block_size,
             int64_ptr,
-            BLOCK_SIZE=compile_key.BLOCK_SIZE,
+            BLOCK_SIZE=compile_key.triton_block_size,
             grid=(1,),
         )
 
@@ -502,6 +503,13 @@ class BuildC128ATopkMetadataKernel(
         block_size: int,
         slot_mapping: torch.Tensor,
     ) -> None:
+        compile_key = self.dispatch(
+            compress_ratio=compress_ratio,
+            max_compressed_tokens=max_compressed_tokens,
+            block_size=block_size,
+            triton_block_size=1024,
+        )
+        self._guard_warmup_call(compile_key)
         self.kernel[(positions.shape[0],)](
             global_decode_buffer,
             global_decode_buffer.stride(0),

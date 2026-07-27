@@ -17,7 +17,9 @@ from vllm.cute_utils import (
     cvt,
     recast_val,
 )
-from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+)
 from vllm.vllm_flash_attn.cute import utils as cute_utils
 
 # MXFP4: 32 elements per block, packed 2 nibbles per byte, ue8m0 block scale.
@@ -649,10 +651,6 @@ class IndexerQCuteDSLKernel(
         cos_sin_dtype: type[cutlass.Numeric]
         coarsen: int
 
-    def __init__(self) -> None:
-        self._compiled_cache: dict[IndexerQCuteDSLKernel.CompileKey, Any] = {}
-        super().__init__()
-
     def dispatch(  # type: ignore[override]
         self,
         *,
@@ -673,8 +671,7 @@ class IndexerQCuteDSLKernel(
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        model_config = getattr(vllm_config, "model_config", None)
-        hf_config = getattr(model_config, "hf_config", None)
+        hf_config = vllm_config.model_config.hf_config
         if hf_config is None:
             return []
 
@@ -715,7 +712,7 @@ class IndexerQCuteDSLKernel(
         )
 
     def compile(self, compile_key: CompileKey) -> None:
-        if compile_key in self._compiled_cache:
+        if self._compiled_cache_contains(compile_key):
             return
 
         kernel_type = IndexerQMxFp4Kernel if compile_key.use_fp4 else IndexerQFp8Kernel
@@ -745,9 +742,19 @@ class IndexerQCuteDSLKernel(
             cos_sin_dtype=cos_sin_dtype,
             coarsen=coarsen,
         )
-        if compile_key not in self._compiled_cache:
-            self.compile(compile_key)
-        return self._compiled_cache[compile_key]
+        self._guard_warmup_call(compile_key)
+        kernel = self._get_compiled_from_cache(
+            compile_key,
+            runtime_context={
+                "use_fp4": use_fp4,
+                "head_dim": head_dim,
+                "rope_dim": rope_dim,
+                "num_heads": num_heads,
+                "cos_sin_dtype": cos_sin_dtype,
+                "coarsen": coarsen,
+            },
+        )
+        return kernel
 
 
 _INDEXER_Q_CUTEDSL_KERNEL = IndexerQCuteDSLKernel()

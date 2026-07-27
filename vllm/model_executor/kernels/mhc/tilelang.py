@@ -133,7 +133,6 @@ def mhc_pre_tilelang(
         is_deep_gemm_supported,
         tf32_hc_prenorm_gemm,
     )
-
     assert residual.dtype == torch.bfloat16
     assert fn.dtype == torch.float32
     assert hc_scale.dtype == torch.float32
@@ -163,7 +162,7 @@ def mhc_pre_tilelang(
     num_tokens = residual_flat.shape[0]
 
     use_deep_gemm = is_deep_gemm_supported()
-    compile_key = MHC_PRE_BIG_FUSE_TILELANG_KERNEL.dispatch(
+    compile_key = MHC_PRE_BIG_FUSE_TILELANG_KERNEL.compile_key_for_runtime(
         num_tokens=num_tokens,
         hidden_size=hidden_size,
         hc_mult=hc_mult,
@@ -234,8 +233,7 @@ def mhc_pre_tilelang(
             sinkhorn_repeat,
             n_splits,
             hc_mult,
-            use_norm_weight=False,
-            is_broadcast=False,
+            compile_key=compile_key,
         )
     else:
         MHC_PRE_BIG_FUSE_TILELANG_KERNEL(
@@ -257,8 +255,7 @@ def mhc_pre_tilelang(
             norm_eps,
             n_splits,
             hc_mult,
-            use_norm_weight=True,
-            is_broadcast=False,
+            compile_key=compile_key,
         )
 
     return (
@@ -357,7 +354,7 @@ def mhc_pre_broadcast_tilelang(
     residual_flat = residual
     num_tokens = residual.shape[0]
 
-    compile_key = MHC_PRE_BIG_FUSE_TILELANG_KERNEL.dispatch(
+    compile_key = MHC_PRE_BIG_FUSE_TILELANG_KERNEL.compile_key_for_runtime(
         num_tokens=num_tokens,
         hidden_size=hidden_size,
         hc_mult=hc_mult,
@@ -422,8 +419,7 @@ def mhc_pre_broadcast_tilelang(
         norm_eps,
         n_splits,
         hc_mult,
-        use_norm_weight=True,
-        is_broadcast=True,
+        compile_key=compile_key,
     )
     return (
         residual_out,
@@ -440,18 +436,20 @@ def mhc_post_tilelang(
     comb_res_mix: torch.Tensor,
 ) -> torch.Tensor:
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
-        mhc_post_tilelang as _mhc_post_kernel,
+        MHC_POST_TILELANG_KERNEL,
     )
 
     out = torch.empty_like(residual)
-    _mhc_post_kernel(
+    hc_mult = residual.shape[-2]
+    hidden_size = residual.shape[-1]
+    MHC_POST_TILELANG_KERNEL(
         comb_res_mix,
         residual,
         post_layer_mix.squeeze(-1),
         x,
         out,
-        residual.shape[-2],
-        residual.shape[-1],
+        hc_mult,
+        hidden_size,
     )
     return out
 
@@ -538,15 +536,34 @@ def mhc_fused_post_pre_tilelang(
     from vllm.utils.deep_gemm import is_deep_gemm_supported
 
     use_deep_gemm = is_deep_gemm_supported()
-    compile_key = MHC_FUSED_TILELANG_KERNEL.dispatch(
+    use_small_fma = num_tokens <= 16
+    pre_compile_key = MHC_PRE_BIG_FUSE_TILELANG_KERNEL.compile_key_for_runtime(
         num_tokens=num_tokens,
         hidden_size=hidden_size,
         hc_mult=hc_mult,
         use_deep_gemm=use_deep_gemm,
+        is_fused=use_small_fma,
+        is_broadcast=False,
+        use_norm_weight=norm_weight is not None,
+        rms_eps=rms_eps,
+        hc_pre_eps=hc_pre_eps,
+        hc_sinkhorn_eps=hc_sinkhorn_eps,
+        hc_post_mult_value=hc_post_mult_value,
+        sinkhorn_repeat=sinkhorn_repeat,
+        norm_eps=norm_eps,
     )
-    use_small_fma = num_tokens <= 16
-    tile_n = compile_key.tile_n
-    n_splits = compile_key.n_splits
+    n_splits = pre_compile_key.n_splits
+    if use_small_fma:
+        fused_compile_key = MHC_FUSED_TILELANG_KERNEL.compile_key_for_runtime(
+            num_tokens=num_tokens,
+            hidden_size=hidden_size,
+            hc_mult=hc_mult,
+            use_deep_gemm=use_deep_gemm,
+        )
+        tile_n = fused_compile_key.tile_n
+    else:
+        fused_compile_key = None
+        tile_n = 1
 
     gemm_out_mul = torch.empty(
         n_splits,
@@ -647,8 +664,7 @@ def mhc_fused_post_pre_tilelang(
             sinkhorn_repeat,
             n_splits,
             hc_mult,
-            use_norm_weight=False,
-            is_broadcast=False,
+            compile_key=pre_compile_key,
         )
     else:
         MHC_PRE_BIG_FUSE_TILELANG_KERNEL(
@@ -670,8 +686,7 @@ def mhc_fused_post_pre_tilelang(
             norm_eps,
             n_splits,
             hc_mult,
-            use_norm_weight=True,
-            is_broadcast=False,
+            compile_key=pre_compile_key,
         )
 
     return (
@@ -753,9 +768,11 @@ def hc_head_fused_kernel_tilelang(
     )
     if num_tokens == 0:
         return out
-    from vllm.model_executor.kernels.mhc.tilelang_kernels import hc_head_fuse_tilelang
+    from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+        HC_HEAD_FUSED_TILELANG_KERNEL,
+    )
 
-    hc_head_fuse_tilelang(
+    HC_HEAD_FUSED_TILELANG_KERNEL(
         hs_flat,
         fn,
         hc_scale,

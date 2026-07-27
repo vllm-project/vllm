@@ -5,7 +5,9 @@ from typing import Any
 
 import torch
 
-from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+)
 from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
@@ -16,9 +18,9 @@ from vllm.utils.math_utils import next_power_of_2
 class FusedQKVRMSNormKernel(VllmJitKernel["FusedQKVRMSNormKernel.CompileKey"]):
     @dataclass(frozen=True)
     class CompileKey:
-        Q_SIZE: int
-        KV_SIZE: int
-        BLOCK_SIZE: int
+        q_size: int
+        kv_size: int
+        block_size: int
         q_in_stride: int
         q_out_stride: int
         kv_in_stride: int
@@ -87,9 +89,9 @@ class FusedQKVRMSNormKernel(VllmJitKernel["FusedQKVRMSNormKernel.CompileKey"]):
     ) -> CompileKey:
         max_size = q_size if q_size >= kv_size else kv_size
         return self.CompileKey(
-            Q_SIZE=q_size,
-            KV_SIZE=kv_size,
-            BLOCK_SIZE=next_power_of_2(max_size),
+            q_size=q_size,
+            kv_size=kv_size,
+            block_size=next_power_of_2(max_size),
             q_in_stride=q_in_stride,
             q_out_stride=q_out_stride,
             kv_in_stride=kv_in_stride,
@@ -98,8 +100,7 @@ class FusedQKVRMSNormKernel(VllmJitKernel["FusedQKVRMSNormKernel.CompileKey"]):
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        model_config = getattr(vllm_config, "model_config", None)
-        hf_config = getattr(model_config, "hf_config", None)
+        hf_config = vllm_config.model_config.hf_config
         q_size = int(getattr(hf_config, "q_lora_rank", 0) or 0)
         kv_size = int(getattr(hf_config, "head_dim", 0) or 0)
         if q_size <= 0 or kv_size <= 0:
@@ -133,9 +134,9 @@ class FusedQKVRMSNormKernel(VllmJitKernel["FusedQKVRMSNormKernel.CompileKey"]):
             compile_key.kv_in_stride,
             compile_key.kv_out_stride,
             compile_key.eps,
-            Q_SIZE=compile_key.Q_SIZE,
-            KV_SIZE=compile_key.KV_SIZE,
-            BLOCK_SIZE=compile_key.BLOCK_SIZE,
+            Q_SIZE=compile_key.q_size,
+            KV_SIZE=compile_key.kv_size,
+            BLOCK_SIZE=compile_key.block_size,
             grid=(1, 2),
         )
 
@@ -171,6 +172,7 @@ class FusedQKVRMSNormKernel(VllmJitKernel["FusedQKVRMSNormKernel.CompileKey"]):
             kv_out_stride=kv_out.stride(0),
             eps=eps,
         )
+        self._guard_warmup_call(compile_key)
         self.kernel[(num_tokens, 2)](
             qr,
             qr_out,
@@ -183,9 +185,9 @@ class FusedQKVRMSNormKernel(VllmJitKernel["FusedQKVRMSNormKernel.CompileKey"]):
             compile_key.kv_in_stride,
             compile_key.kv_out_stride,
             compile_key.eps,
-            Q_SIZE=compile_key.Q_SIZE,
-            KV_SIZE=compile_key.KV_SIZE,
-            BLOCK_SIZE=compile_key.BLOCK_SIZE,
+            Q_SIZE=compile_key.q_size,
+            KV_SIZE=compile_key.kv_size,
+            BLOCK_SIZE=compile_key.block_size,
         )
         return qr_out, kv_out
 

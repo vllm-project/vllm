@@ -14,7 +14,10 @@ from cutlass.cute.nvgpu import cpasync
 from quack.compile_utils import make_fake_tensor
 
 from vllm.cute_utils import _bf16x2_mul, cvt
-from vllm.model_executor.warmup.jit_warmup import VllmJitKernel, zip_inputs
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+    zip_inputs,
+)
 
 
 def dequantize_and_gather_k_cache_cutedsl(
@@ -342,10 +345,6 @@ class DequantGatherKCacheCuteDSLKernel(
         block_size: int
         has_gather_lens: bool
 
-    def __init__(self) -> None:
-        self._compiled_cache: dict[DequantGatherKCacheCuteDSLKernel.CompileKey, Any] = {}
-        super().__init__()
-
     def dispatch(  # type: ignore[override]
         self,
         *,
@@ -358,8 +357,7 @@ class DequantGatherKCacheCuteDSLKernel(
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        cache_config = getattr(vllm_config, "cache_config", None)
-        block_size = int(getattr(cache_config, "block_size", 64) or 64)
+        block_size = vllm_config.cache_config.block_size
         if block_size <= 0:
             return []
 
@@ -377,7 +375,7 @@ class DequantGatherKCacheCuteDSLKernel(
         return DequantGatherKCacheKernel(block_size=block_size)
 
     def compile(self, compile_key: CompileKey) -> None:
-        if compile_key in self._compiled_cache:
+        if self._compiled_cache_contains(compile_key):
             return
 
         self._compiled_cache[compile_key] = DequantGatherKCacheKernel.compile(
@@ -390,9 +388,15 @@ class DequantGatherKCacheCuteDSLKernel(
             block_size=block_size,
             has_gather_lens=has_gather_lens,
         )
-        if compile_key not in self._compiled_cache:
-            self.compile(compile_key)
-        return self._compiled_cache[compile_key]
+        self._guard_warmup_call(compile_key)
+        kernel = self._get_compiled_from_cache(
+            compile_key,
+            runtime_context={
+                "block_size": block_size,
+                "has_gather_lens": has_gather_lens,
+            },
+        )
+        return kernel
 
 
 _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL = DequantGatherKCacheCuteDSLKernel()

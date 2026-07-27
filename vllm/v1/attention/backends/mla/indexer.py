@@ -51,7 +51,7 @@ class PrepareUniformDecodeKernel(
 
     @dataclass(frozen=True)
     class CompileKey:
-        BLOCK_SIZE: int
+        block_size: int
 
     @staticmethod
     @triton.jit
@@ -88,11 +88,11 @@ class PrepareUniformDecodeKernel(
         tl.store(decode_lens_ptr + idx, 1)
 
     def dispatch(self, *, BLOCK_SIZE: int) -> CompileKey:  # type: ignore[override]
-        return self.CompileKey(BLOCK_SIZE=BLOCK_SIZE)
+        return self.CompileKey(block_size=BLOCK_SIZE)
 
     def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
         del vllm_config
-        return self._trace_dispatch(self.dispatch)(BLOCK_SIZE=self.BLOCK_SIZE)
+        return self._trace_dispatch(self.dispatch)(BLOCK_SIZE=self.block_size)
 
     def compile(self, compile_key: CompileKey) -> None:
         warmup = getattr(self.kernel, "warmup", None)
@@ -107,7 +107,7 @@ class PrepareUniformDecodeKernel(
             1,
             int32_ptr,
             1,
-            BLOCK_SIZE=compile_key.BLOCK_SIZE,
+            BLOCK_SIZE=compile_key.block_size,
             grid=(1,),
         )
 
@@ -121,6 +121,10 @@ class PrepareUniformDecodeKernel(
         max_decode_len: int,
     ) -> None:
         num_decode_tokens = decode_seq_lens.shape[0]
+        compile_key = self.dispatch(
+            BLOCK_SIZE=triton.next_power_of_2(max_decode_len),
+        )
+        self._guard_warmup_call(compile_key)
         self.kernel[(num_decode_tokens,)](
             seq_lens,
             decode_seq_lens,
@@ -130,7 +134,7 @@ class PrepareUniformDecodeKernel(
             expanded_block_table.stride(0),
             decode_lens,
             max_decode_len,
-            BLOCK_SIZE=self.BLOCK_SIZE,
+            BLOCK_SIZE=self.block_size,
         )
 
 
@@ -271,11 +275,11 @@ class BuildPrefillChunkMetadataKernel(
     class CompileKey:
         query_slice_start: int
         query_slice_stop: int
-        DCP_RANK: int
-        DCP_WORLD: int
-        DCP_INTERLEAVE: int
-        BLOCK_SIZE: int
-        COMPRESS_RATIO: int
+        dcp_rank: int
+        dcp_world: int
+        dcp_interleave: int
+        block_size: int
+        compress_ratio: int
         input_variant: TritonPointerInputVariant
 
     @staticmethod
@@ -370,11 +374,11 @@ class BuildPrefillChunkMetadataKernel(
         return self.CompileKey(
             query_slice_start=query_slice_start,
             query_slice_stop=query_slice_stop,
-            DCP_RANK=DCP_RANK,
-            DCP_WORLD=DCP_WORLD,
-            DCP_INTERLEAVE=DCP_INTERLEAVE,
-            BLOCK_SIZE=BLOCK_SIZE,
-            COMPRESS_RATIO=COMPRESS_RATIO,
+            dcp_rank=DCP_RANK,
+            dcp_world=DCP_WORLD,
+            dcp_interleave=DCP_INTERLEAVE,
+            block_size=BLOCK_SIZE,
+            compress_ratio=COMPRESS_RATIO,
             input_variant=input_variant,
         )
 
@@ -395,7 +399,7 @@ class BuildPrefillChunkMetadataKernel(
             DCP_RANK=dcp_rank,
             DCP_WORLD=dcp_world,
             DCP_INTERLEAVE=dcp_interleave,
-            BLOCK_SIZE=self.BLOCK_SIZE,
+            BLOCK_SIZE=self.block_size,
             COMPRESS_RATIO=list(compress_ratios),
             input_variant=_BUILD_PREFILL_CHUNK_METADATA_INPUT_VARIANTS,
         )
@@ -414,11 +418,11 @@ class BuildPrefillChunkMetadataKernel(
             int32_ptr,
             compile_key.query_slice_start,
             compile_key.query_slice_stop,
-            compile_key.DCP_RANK,
-            compile_key.DCP_WORLD,
-            compile_key.DCP_INTERLEAVE,
-            BLOCK_SIZE=compile_key.BLOCK_SIZE,
-            COMPRESS_RATIO=compile_key.COMPRESS_RATIO,
+            compile_key.dcp_rank,
+            compile_key.dcp_world,
+            compile_key.dcp_interleave,
+            BLOCK_SIZE=compile_key.block_size,
+            COMPRESS_RATIO=compile_key.compress_ratio,
             grid=(1,),
         )
 
@@ -440,6 +444,19 @@ class BuildPrefillChunkMetadataKernel(
         num_reqs: int,
         COMPRESS_RATIO: int,
     ) -> None:
+        compile_key = self.dispatch(
+            query_slice_start=query_slice_start,
+            query_slice_stop=query_slice_stop,
+            DCP_RANK=DCP_RANK,
+            DCP_WORLD=DCP_WORLD,
+            DCP_INTERLEAVE=DCP_INTERLEAVE,
+            BLOCK_SIZE=self.block_size,
+            COMPRESS_RATIO=COMPRESS_RATIO,
+            input_variant=TritonPointerInputVariant.from_alignment(
+                uncompressed_seq_lens=uncompressed_seq_lens.data_ptr() % 16 == 0,
+            ),
+        )
+        self._guard_warmup_call(compile_key)
         self.kernel[(num_reqs,)](
             query_start_loc,
             uncompressed_seq_lens,
@@ -453,7 +470,7 @@ class BuildPrefillChunkMetadataKernel(
             DCP_RANK,
             DCP_WORLD,
             DCP_INTERLEAVE,
-            BLOCK_SIZE=self.BLOCK_SIZE,
+            BLOCK_SIZE=self.block_size,
             COMPRESS_RATIO=COMPRESS_RATIO,
         )
 

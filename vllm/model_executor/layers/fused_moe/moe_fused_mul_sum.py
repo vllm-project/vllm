@@ -6,90 +6,24 @@ from typing import Any
 import torch
 from torch._subclasses.fake_tensor import FakeTensor
 
-from vllm.model_executor.warmup.jit_warmup import VllmJitKernel, WarmupIntRange
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+    WarmupIntRange,
+)
 from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-
-
-def _heuristic_config(
-    num_tokens: int,
-    top_k: int,
-    size: int,
-    element_size: int,
-):
-    is_fp32 = element_size > 2
-    is_sm90_plus = current_platform.has_device_capability(90)
-    is_sm80_before = not current_platform.has_device_capability(80)
-
-    if current_platform.has_device_capability(90):
-        # SM90/SM100+: prefer small tiles + many CTAs.
-        if is_fp32:
-            BLOCK_M = 1 if num_tokens <= 4 else 2
-        else:
-            if num_tokens <= 4:
-                BLOCK_M = 1
-            elif num_tokens <= 128:
-                BLOCK_M = 2
-            else:
-                BLOCK_M = 4
-    elif is_fp32:
-        if num_tokens <= 4:
-            BLOCK_M = 1
-        elif num_tokens <= 32:
-            BLOCK_M = 2
-        elif num_tokens <= 128:
-            BLOCK_M = 4
-        else:
-            BLOCK_M = 4
-    else:
-        if num_tokens <= 4:
-            BLOCK_M = 1
-        elif num_tokens <= 32:
-            BLOCK_M = 2
-        elif num_tokens <= 128:
-            BLOCK_M = 4
-        elif num_tokens <= 1024:
-            BLOCK_M = 16
-        else:
-            BLOCK_M = 8
-
-    if is_fp32:
-        max_block_k = 256
-    elif is_sm80_before or is_sm90_plus:
-        max_block_k = 512
-    else:
-        max_block_k = 1024
-    BLOCK_K = min(triton.next_power_of_2(size), max_block_k)
-    BLOCK_K = max(BLOCK_K, 256)
-
-    total = BLOCK_M * BLOCK_K
-    if is_fp32:
-        num_warps = max(8, min(16, total // 64))
-    else:
-        num_warps = max(4, min(16, total // 256))
-
-    if is_sm80_before:
-        num_warps = min(num_warps, 8)
-        num_stages = 2
-    elif is_sm90_plus:
-        num_warps = min(num_warps, 8)
-        num_stages = 4 if total <= 2048 else 2
-    else:
-        num_stages = 4 if total <= 2048 else 2
-
-    return BLOCK_M, BLOCK_K, num_warps, num_stages
 
 
 class MoeFusedMulSumKernel(VllmJitKernel["MoeFusedMulSumKernel.CompileKey"]):
     @dataclass(frozen=True)
     class CompileKey:
         dtype: torch.dtype
-        HAS_EXPERT_MAP: bool
+        has_expert_map: bool
         top_k: int
         size: int
-        BLOCK_M: int
-        BLOCK_K: int
+        block_m: int
+        block_k: int
         num_warps: int
         num_stages: int
 
@@ -159,30 +93,76 @@ class MoeFusedMulSumKernel(VllmJitKernel["MoeFusedMulSumKernel.CompileKey"]):
         dtype: torch.dtype,
         has_expert_map: bool,
     ) -> CompileKey:
-        block_m, block_k, num_warps, num_stages = _heuristic_config(
-            num_tokens,
-            top_k,
-            size,
-            element_size,
-        )
+        is_fp32 = element_size > 2
+        is_sm90_plus = current_platform.has_device_capability(90)
+        is_sm80_before = not current_platform.has_device_capability(80)
+
+        if current_platform.has_device_capability(90):
+            if is_fp32:
+                BLOCK_M = 1 if num_tokens <= 4 else 2
+            elif num_tokens <= 4:
+                BLOCK_M = 1
+            elif num_tokens <= 128:
+                BLOCK_M = 2
+            else:
+                BLOCK_M = 4
+        elif is_fp32:
+            if num_tokens <= 4:
+                BLOCK_M = 1
+            elif num_tokens <= 32:
+                BLOCK_M = 2
+            else:
+                BLOCK_M = 4
+        elif num_tokens <= 4:
+            BLOCK_M = 1
+        elif num_tokens <= 32:
+            BLOCK_M = 2
+        elif num_tokens <= 128:
+            BLOCK_M = 4
+        elif num_tokens <= 1024:
+            BLOCK_M = 16
+        else:
+            BLOCK_M = 8
+
+        if is_fp32:
+            max_block_k = 256
+        elif is_sm80_before or is_sm90_plus:
+            max_block_k = 512
+        else:
+            max_block_k = 1024
+        BLOCK_K = min(triton.next_power_of_2(size), max_block_k)
+        BLOCK_K = max(BLOCK_K, 256)
+
+        total = BLOCK_M * BLOCK_K
+        if is_fp32:
+            num_warps = max(8, min(16, total // 64))
+        else:
+            num_warps = max(4, min(16, total // 256))
+
+        if is_sm80_before:
+            num_warps = min(num_warps, 8)
+            num_stages = 2
+        elif is_sm90_plus:
+            num_warps = min(num_warps, 8)
+            num_stages = 4 if total <= 2048 else 2
+        else:
+            num_stages = 4 if total <= 2048 else 2
+
         return self.CompileKey(
             dtype=dtype,
-            HAS_EXPERT_MAP=has_expert_map,
+            has_expert_map=has_expert_map,
             top_k=top_k,
             size=size,
-            BLOCK_M=block_m,
-            BLOCK_K=block_k,
+            block_m=BLOCK_M,
+            block_k=BLOCK_K,
             num_warps=num_warps,
             num_stages=num_stages,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        model_config = getattr(vllm_config, "model_config", None)
-        hf_config = getattr(model_config, "hf_config", None)
-        scheduler_config = getattr(vllm_config, "scheduler_config", None)
-        size = int(getattr(hf_config, "hidden_size", 0) or 0)
-        top_k = int(getattr(hf_config, "num_experts_per_tok", 0) or 0)
-        max_tokens = int(getattr(scheduler_config, "max_num_batched_tokens", 0) or 0)
+        size = vllm_config.model_config.hf_config.hidden_size
+        top_k = vllm_config.model_config.hf_config.num_experts_per_tok
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         if size <= 0 or top_k <= 0 or max_tokens <= 0:
             return []
         return self._trace_dispatch(self.dispatch)(
@@ -219,11 +199,11 @@ class MoeFusedMulSumKernel(VllmJitKernel["MoeFusedMulSumKernel.CompileKey"]):
             int32_ptr,
             1,  # do not specialize num_tokens
             compile_key.top_k * compile_key.size,
-            compile_key.HAS_EXPERT_MAP,
+            compile_key.has_expert_map,
             compile_key.top_k,
             compile_key.size,
-            compile_key.BLOCK_M,
-            compile_key.BLOCK_K,
+            compile_key.block_m,
+            compile_key.block_k,
             grid=(1, 1),
             num_warps=compile_key.num_warps,
             num_stages=compile_key.num_stages,
@@ -238,13 +218,19 @@ class MoeFusedMulSumKernel(VllmJitKernel["MoeFusedMulSumKernel.CompileKey"]):
         expert_map: torch.Tensor | None,
     ) -> None:
         num_tokens, top_k, size = inputs.shape
-        block_m, block_k, num_warps, num_stages = _heuristic_config(
-            num_tokens,
-            top_k,
-            size,
-            inputs.element_size(),
+        compile_key = self.dispatch(
+            num_tokens=num_tokens,
+            top_k=top_k,
+            size=size,
+            element_size=inputs.element_size(),
+            dtype=inputs.dtype,
+            has_expert_map=expert_map is not None,
         )
-        grid = (triton.cdiv(size, block_k), triton.cdiv(num_tokens, block_m))
+        self._guard_warmup_call(compile_key)
+        grid = (
+            triton.cdiv(size, compile_key.block_k),
+            triton.cdiv(num_tokens, compile_key.block_m),
+        )
         self.kernel[grid](
             inputs,
             topk_weights,
@@ -256,10 +242,10 @@ class MoeFusedMulSumKernel(VllmJitKernel["MoeFusedMulSumKernel.CompileKey"]):
             expert_map is not None,
             top_k,
             size,
-            block_m,
-            block_k,
-            num_warps=num_warps,
-            num_stages=num_stages,
+            compile_key.block_m,
+            compile_key.block_k,
+            num_warps=compile_key.num_warps,
+            num_stages=compile_key.num_stages,
         )
 
 

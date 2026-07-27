@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
+
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_cutedsl
 
@@ -17,13 +18,12 @@ logger = init_logger(__name__)
 
 
 def _is_deepseek_v4_config(worker: "Worker") -> bool:
-    model_config = getattr(worker.vllm_config, "model_config", None)
-    hf_config = getattr(model_config, "hf_config", None)
+    hf_config = worker.vllm_config.model_config.hf_config
     return getattr(hf_config, "model_type", None) == "deepseek_v4"
 
 
 def _warm_prepare_megamoe_inputs(worker: "Worker") -> None:
-    kernel_config = getattr(worker.vllm_config, "kernel_config", None)
+    kernel_config = worker.vllm_config.kernel_config
     if getattr(kernel_config, "moe_backend", None) != "deep_gemm_mega_moe":
         return
 
@@ -83,7 +83,7 @@ def _warm_router_auxiliary_kernels(worker: "Worker") -> None:
 
     _EPLB_MAP_AND_RECORD_KERNEL.warmup(worker.vllm_config)
 
-    kernel_config = getattr(worker.vllm_config, "kernel_config", None)
+    kernel_config = worker.vllm_config.kernel_config
     if not bool(getattr(kernel_config, "enable_bf16x3_router_gemm", False)):
         return
     if not has_cutedsl():
@@ -101,7 +101,7 @@ def _warm_router_auxiliary_kernels(worker: "Worker") -> None:
 
 
 def _warm_generic_moe_kernels(worker: "Worker") -> None:
-    kernel_config = getattr(worker.vllm_config, "kernel_config", None)
+    kernel_config = worker.vllm_config.kernel_config
     if getattr(kernel_config, "moe_backend", None) == "deep_gemm_mega_moe":
         return
 
@@ -132,7 +132,7 @@ def _warm_generic_moe_kernels(worker: "Worker") -> None:
 
         _FUSED_MOE_NVFP4_EMULATION_KERNEL.warmup(worker.vllm_config)
 
-    if getattr(worker.vllm_config, "lora_config", None) is not None:
+    if worker.vllm_config.lora_config is not None:
         from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (
             _TRTLLM_LORA_FINALIZE_KERNEL,
             _TRTLLM_LORA_UNPERMUTE_ACTIVATION_KERNEL,
@@ -141,7 +141,7 @@ def _warm_generic_moe_kernels(worker: "Worker") -> None:
         _TRTLLM_LORA_UNPERMUTE_ACTIVATION_KERNEL.warmup(worker.vllm_config)
         _TRTLLM_LORA_FINALIZE_KERNEL.warmup(worker.vllm_config)
 
-    parallel_config = getattr(worker.vllm_config, "parallel_config", None)
+    parallel_config = worker.vllm_config.parallel_config
     if getattr(parallel_config, "all2all_backend", None) == "deepep_v2":
         from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_v2 import (
             _GLOBALIZE_RECV_TOPK_IDX_KERNEL,
@@ -155,7 +155,7 @@ def _warm_generic_moe_kernels(worker: "Worker") -> None:
 
 
 def _warm_deep_gemm_moe_helper_kernels(worker: "Worker") -> None:
-    kernel_config = getattr(worker.vllm_config, "kernel_config", None)
+    kernel_config = worker.vllm_config.kernel_config
     if getattr(kernel_config, "moe_backend", None) != "deep_gemm_mega_moe":
         return
 
@@ -211,8 +211,7 @@ def _warm_sparse_indexer_helper_kernels(worker: "Worker") -> None:
     _PACK_SEQ_TRITON_KERNEL.warmup(worker.vllm_config)
     _UNPACK_SEQ_TRITON_KERNEL.warmup(worker.vllm_config)
 
-    parallel_config = getattr(worker.vllm_config, "parallel_config", None)
-    if int(getattr(parallel_config, "decode_context_parallel_size", 1) or 1) <= 1:
+    if worker.vllm_config.parallel_config.decode_context_parallel_size <= 1:
         return
     if not has_cutedsl():
         return

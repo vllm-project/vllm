@@ -22,7 +22,9 @@ from typing import Any
 
 import torch
 
-from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+)
 from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
@@ -55,9 +57,9 @@ class FusedMTPInputRMSNormKernel(
 ):
     @dataclass(frozen=True)
     class CompileKey:
-        HIDDEN: int
-        HC_MULT: int
-        BLOCK_SIZE: int
+        hidden: int
+        hc_mult: int
+        block_size: int
         eps: float
 
     @staticmethod
@@ -125,15 +127,14 @@ class FusedMTPInputRMSNormKernel(
         eps: float,
     ) -> CompileKey:
         return self.CompileKey(
-            HIDDEN=hidden,
-            HC_MULT=hc_mult,
-            BLOCK_SIZE=next_power_of_2(hidden),
+            hidden=hidden,
+            hc_mult=hc_mult,
+            block_size=next_power_of_2(hidden),
             eps=eps,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        model_config = getattr(vllm_config, "model_config", None)
-        hf_config = getattr(model_config, "hf_config", None)
+        hf_config = vllm_config.model_config.hf_config
         if int(getattr(hf_config, "num_nextn_predict_layers", 0) or 0) <= 0:
             return []
 
@@ -157,10 +158,10 @@ class FusedMTPInputRMSNormKernel(
             bf16_ptr,
             bf16_ptr,
             compile_key.eps,
-            HIDDEN=compile_key.HIDDEN,
-            HC_MULT=compile_key.HC_MULT,
-            BLOCK_SIZE=compile_key.BLOCK_SIZE,
-            grid=(1, compile_key.HC_MULT + 1),
+            HIDDEN=compile_key.hidden,
+            HC_MULT=compile_key.hc_mult,
+            BLOCK_SIZE=compile_key.block_size,
+            grid=(1, compile_key.hc_mult + 1),
         )
 
     def __call__(
@@ -195,6 +196,7 @@ class FusedMTPInputRMSNormKernel(
             return enorm_out, hnorm_out
 
         compile_key = self.dispatch(hidden=hidden, hc_mult=hc_mult, eps=eps)
+        self._guard_warmup_call(compile_key)
         self.kernel[(num_tokens, hc_mult + 1)](
             inputs_embeds,
             positions,
@@ -204,9 +206,9 @@ class FusedMTPInputRMSNormKernel(
             enorm_out,
             hnorm_out,
             eps,
-            HIDDEN=compile_key.HIDDEN,
-            HC_MULT=compile_key.HC_MULT,
-            BLOCK_SIZE=compile_key.BLOCK_SIZE,
+            HIDDEN=compile_key.hidden,
+            HC_MULT=compile_key.hc_mult,
+            BLOCK_SIZE=compile_key.block_size,
         )
         return enorm_out, hnorm_out
 
@@ -216,8 +218,8 @@ class MTPSharedHeadRMSNormKernel(
 ):
     @dataclass(frozen=True)
     class CompileKey:
-        HIDDEN: int
-        BLOCK_SIZE: int
+        hidden: int
+        block_size: int
         eps: float
 
     @staticmethod
@@ -251,14 +253,13 @@ class MTPSharedHeadRMSNormKernel(
         eps: float,
     ) -> CompileKey:
         return self.CompileKey(
-            HIDDEN=hidden,
-            BLOCK_SIZE=next_power_of_2(hidden),
+            hidden=hidden,
+            block_size=next_power_of_2(hidden),
             eps=eps,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        model_config = getattr(vllm_config, "model_config", None)
-        hf_config = getattr(model_config, "hf_config", None)
+        hf_config = vllm_config.model_config.hf_config
         if int(getattr(hf_config, "num_nextn_predict_layers", 0) or 0) <= 0:
             return []
 
@@ -276,8 +277,8 @@ class MTPSharedHeadRMSNormKernel(
             TritonWarmupTensor(torch.float32),
             bf16_ptr,
             compile_key.eps,
-            HIDDEN=compile_key.HIDDEN,
-            BLOCK_SIZE=compile_key.BLOCK_SIZE,
+            HIDDEN=compile_key.hidden,
+            BLOCK_SIZE=compile_key.block_size,
             grid=(1,),
         )
 
@@ -296,13 +297,14 @@ class MTPSharedHeadRMSNormKernel(
             return out
 
         compile_key = self.dispatch(hidden=hidden, eps=eps)
+        self._guard_warmup_call(compile_key)
         self.kernel[(num_tokens,)](
             hidden_states,
             weight,
             out,
             eps,
-            HIDDEN=compile_key.HIDDEN,
-            BLOCK_SIZE=compile_key.BLOCK_SIZE,
+            HIDDEN=compile_key.hidden,
+            BLOCK_SIZE=compile_key.block_size,
         )
         return out
 

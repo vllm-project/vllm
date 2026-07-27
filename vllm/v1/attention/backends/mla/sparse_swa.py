@@ -289,7 +289,7 @@ class ComputePrefillMetadataKernel(
 ):
     @dataclass(frozen=True)
     class CompileKey:
-        BLOCK_SIZE: int
+        block_size: int
 
     @staticmethod
     @triton.jit(do_not_specialize=["num_prefills", "num_decodes", "window_size"])
@@ -330,7 +330,7 @@ class ComputePrefillMetadataKernel(
         num_prefills: int,
     ) -> CompileKey:
         return self.CompileKey(
-            BLOCK_SIZE=next_power_of_2(num_prefills),
+            block_size=next_power_of_2(num_prefills),
         )
 
     def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
@@ -354,10 +354,10 @@ class ComputePrefillMetadataKernel(
             int32_ptr,
             int32_ptr,
             int32_ptr,
-            compile_key.BLOCK_SIZE,
+            compile_key.block_size,
             0,
             1,
-            BLOCK_SIZE=compile_key.BLOCK_SIZE,
+            BLOCK_SIZE=compile_key.block_size,
             grid=(1,),
         )
 
@@ -371,6 +371,7 @@ class ComputePrefillMetadataKernel(
         window_size: int,
     ) -> None:
         compile_key = self.dispatch(num_prefills=num_prefills)
+        self._guard_warmup_call(compile_key)
         self.kernel[(1,)](
             prefill_gather_lens,
             seq_lens,
@@ -378,7 +379,7 @@ class ComputePrefillMetadataKernel(
             num_prefills,
             num_decodes,
             window_size,
-            BLOCK_SIZE=compile_key.BLOCK_SIZE,
+            BLOCK_SIZE=compile_key.block_size,
         )
 
 
@@ -732,9 +733,9 @@ class ComputeSWAIndicesAndLensKernel(
 ):
     @dataclass(frozen=True)
     class CompileKey:
-        WINDOW_SIZE: int
+        window_size: int
         block_size: int
-        TRITON_BLOCK_SIZE: int
+        triton_block_size: int
 
     @staticmethod
     @triton.jit(
@@ -808,9 +809,9 @@ class ComputeSWAIndicesAndLensKernel(
         block_size: int,
     ) -> CompileKey:
         return self.CompileKey(
-            WINDOW_SIZE=window_size,
+            window_size=window_size,
             block_size=block_size,
-            TRITON_BLOCK_SIZE=1024,
+            triton_block_size=1024,
         )
 
     def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
@@ -831,7 +832,7 @@ class ComputeSWAIndicesAndLensKernel(
             int32_ptr,
             1,  # do not specialize swa_indices_stride
             int32_ptr,
-            compile_key.WINDOW_SIZE,
+            compile_key.window_size,
             int32_ptr,
             int32_ptr,
             int32_ptr,
@@ -840,7 +841,7 @@ class ComputeSWAIndicesAndLensKernel(
             1,  # do not specialize block_table_stride
             compile_key.block_size,
             0,  # do not specialize token_offset
-            TRITON_BLOCK_SIZE=compile_key.TRITON_BLOCK_SIZE,
+            TRITON_BLOCK_SIZE=compile_key.triton_block_size,
             grid=(1,),
         )
 
@@ -859,6 +860,11 @@ class ComputeSWAIndicesAndLensKernel(
         num_tokens: int,
         token_offset: int,
     ) -> None:
+        compile_key = self.dispatch(
+            window_size=window_size,
+            block_size=block_size,
+        )
+        self._guard_warmup_call(compile_key)
         self.kernel[(num_tokens,)](
             swa_indices,
             swa_indices.stride(0),
@@ -881,10 +887,10 @@ class ComputeDSparkNoncausalSWAIndicesKernel(
 ):
     @dataclass(frozen=True)
     class CompileKey:
-        WINDOW_SIZE: int
-        INDEX_WIDTH: int
+        window_size: int
+        index_width: int
         block_size: int
-        TRITON_BLOCK_SIZE: int
+        triton_block_size: int
 
     @staticmethod
     @triton.jit(
@@ -965,10 +971,10 @@ class ComputeDSparkNoncausalSWAIndicesKernel(
         block_size: int,
     ) -> CompileKey:
         return self.CompileKey(
-            WINDOW_SIZE=window_size,
-            INDEX_WIDTH=cdiv(window_size + num_speculative_tokens, 128) * 128,
+            window_size=window_size,
+            index_width=cdiv(window_size + num_speculative_tokens, 128) * 128,
             block_size=block_size,
-            TRITON_BLOCK_SIZE=1024,
+            triton_block_size=1024,
         )
 
     def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
@@ -995,8 +1001,8 @@ class ComputeDSparkNoncausalSWAIndicesKernel(
             int32_ptr,
             1,  # do not specialize swa_indices_stride
             int32_ptr,
-            compile_key.WINDOW_SIZE,
-            compile_key.INDEX_WIDTH,
+            compile_key.window_size,
+            compile_key.index_width,
             int32_ptr,
             int32_ptr,
             int32_ptr,
@@ -1005,7 +1011,7 @@ class ComputeDSparkNoncausalSWAIndicesKernel(
             1,  # do not specialize block_table_stride
             compile_key.block_size,
             0,  # do not specialize token_offset
-            TRITON_BLOCK_SIZE=compile_key.TRITON_BLOCK_SIZE,
+            TRITON_BLOCK_SIZE=compile_key.triton_block_size,
             grid=(1,),
         )
 
@@ -1025,6 +1031,12 @@ class ComputeDSparkNoncausalSWAIndicesKernel(
         num_tokens: int,
         token_offset: int,
     ) -> None:
+        compile_key = self.dispatch(
+            window_size=window_size,
+            num_speculative_tokens=index_width,
+            block_size=block_size,
+        )
+        self._guard_warmup_call(compile_key)
         self.kernel[(num_tokens,)](
             swa_indices,
             swa_indices.stride(0),

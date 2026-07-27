@@ -8,7 +8,10 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group
-from vllm.model_executor.warmup.jit_warmup import VllmJitKernel, zip_inputs
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+    zip_inputs,
+)
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
 )
@@ -51,14 +54,14 @@ class ConvertReqIndexToGlobalIndexKernel(
 ):
     @dataclass(frozen=True)
     class CompileKey:
-        BLOCK_SIZE: int
-        BLOCK_N: int
-        HAS_PREFILL_WORKSPACE: bool
-        COUNT_VALID: bool
-        COMPACT_TO_FRONT: bool
-        DCP_SIZE: int
-        DCP_RANK: int
-        DCP_INTERLEAVE: int
+        block_size: int
+        block_n: int
+        has_prefill_workspace: bool
+        count_valid: bool
+        compact_to_front: bool
+        dcp_size: int
+        dcp_rank: int
+        dcp_interleave: int
 
     @staticmethod
     @triton.jit
@@ -182,14 +185,14 @@ class ConvertReqIndexToGlobalIndexKernel(
         DCP_INTERLEAVE: int,
     ) -> CompileKey:
         return self.CompileKey(
-            BLOCK_SIZE=BLOCK_SIZE,
-            BLOCK_N=BLOCK_N,
-            HAS_PREFILL_WORKSPACE=HAS_PREFILL_WORKSPACE,
-            COUNT_VALID=COUNT_VALID,
-            COMPACT_TO_FRONT=COMPACT_TO_FRONT,
-            DCP_SIZE=DCP_SIZE,
-            DCP_RANK=DCP_RANK,
-            DCP_INTERLEAVE=DCP_INTERLEAVE,
+            block_size=BLOCK_SIZE,
+            block_n=BLOCK_N,
+            has_prefill_workspace=HAS_PREFILL_WORKSPACE,
+            count_valid=COUNT_VALID,
+            compact_to_front=COMPACT_TO_FRONT,
+            dcp_size=DCP_SIZE,
+            dcp_rank=DCP_RANK,
+            dcp_interleave=DCP_INTERLEAVE,
         )
 
     def _is_valid_warmup_dispatch(
@@ -205,15 +208,9 @@ class ConvertReqIndexToGlobalIndexKernel(
         )
 
     def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
-        cache_config = getattr(vllm_config, "cache_config", None)
-        block_size = int(getattr(cache_config, "block_size", 64) or 64)
-        parallel_config = getattr(vllm_config, "parallel_config", None)
-        dcp_size = int(
-            getattr(parallel_config, "decode_context_parallel_size", 1) or 1
-        )
-        dcp_interleave = int(
-            getattr(parallel_config, "cp_kv_cache_interleave_size", 1) or 1
-        )
+        block_size = vllm_config.cache_config.block_size
+        dcp_size = vllm_config.parallel_config.decode_context_parallel_size
+        dcp_interleave = vllm_config.parallel_config.cp_kv_cache_interleave_size
         dcp_rank = get_dcp_group().rank_in_group if dcp_size > 1 else 0
         return self._trace_dispatch(self.dispatch)(
             zip_inputs(
@@ -244,9 +241,9 @@ class ConvertReqIndexToGlobalIndexKernel(
         warmup = getattr(self.kernel, "warmup", None)
         assert warmup is not None
         int32_ptr = TritonWarmupTensor(torch.int32)
-        valid_count_ptr = int32_ptr if compile_key.COUNT_VALID else None
-        prefill_req_ptr = int32_ptr if compile_key.HAS_PREFILL_WORKSPACE else None
-        prefill_start_ptr = int32_ptr if compile_key.HAS_PREFILL_WORKSPACE else None
+        valid_count_ptr = int32_ptr if compile_key.count_valid else None
+        prefill_req_ptr = int32_ptr if compile_key.has_prefill_workspace else None
+        prefill_start_ptr = int32_ptr if compile_key.has_prefill_workspace else None
         warmup(
             int32_ptr,
             int32_ptr,
@@ -256,14 +253,14 @@ class ConvertReqIndexToGlobalIndexKernel(
             prefill_req_ptr,
             prefill_start_ptr,
             1,
-            compile_key.BLOCK_SIZE,
-            compile_key.BLOCK_N,
-            compile_key.HAS_PREFILL_WORKSPACE,
-            compile_key.COUNT_VALID,
-            compile_key.COMPACT_TO_FRONT,
-            compile_key.DCP_SIZE,
-            compile_key.DCP_RANK,
-            compile_key.DCP_INTERLEAVE,
+            compile_key.block_size,
+            compile_key.block_n,
+            compile_key.has_prefill_workspace,
+            compile_key.count_valid,
+            compile_key.compact_to_front,
+            compile_key.dcp_size,
+            compile_key.dcp_rank,
+            compile_key.dcp_interleave,
             1,
             1,
             1,
@@ -293,6 +290,17 @@ class ConvertReqIndexToGlobalIndexKernel(
         DCP_RANK: int,
         DCP_INTERLEAVE: int,
     ) -> None:
+        compile_key = self.dispatch(
+            BLOCK_SIZE=BLOCK_SIZE,
+            BLOCK_N=BLOCK_N,
+            HAS_PREFILL_WORKSPACE=HAS_PREFILL_WORKSPACE,
+            COUNT_VALID=COUNT_VALID,
+            COMPACT_TO_FRONT=COMPACT_TO_FRONT,
+            DCP_SIZE=DCP_SIZE,
+            DCP_RANK=DCP_RANK,
+            DCP_INTERLEAVE=DCP_INTERLEAVE,
+        )
+        self._guard_warmup_call(compile_key)
         tiles_per_row = token_indices.shape[1] // BLOCK_N
         self.kernel[(req_id.shape[0], tiles_per_row)](
             req_id,

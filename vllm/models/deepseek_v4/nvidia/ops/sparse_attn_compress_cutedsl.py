@@ -20,7 +20,9 @@ from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import T, dsl_user_op
 from quack.compile_utils import make_fake_tensor
 
-from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+)
 from vllm.utils.math_utils import round_up
 
 _TORCH_TO_CUTE = {
@@ -2237,9 +2239,8 @@ class SparseAttnCompressorCuteDSLKernel(
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        model_config = getattr(vllm_config, "model_config", None)
-        hf_config = getattr(model_config, "hf_config", None)
-        cache_config = getattr(vllm_config, "cache_config", None)
+        hf_config = vllm_config.model_config.hf_config
+        cache_block_size = vllm_config.cache_config.block_size
         if hf_config is None:
             return []
 
@@ -2252,15 +2253,14 @@ class SparseAttnCompressorCuteDSLKernel(
                 }
             )
         )
-        cache_block_size = int(getattr(cache_config, "block_size", 0) or 0)
         if not compress_ratios or cache_block_size <= 0:
             return []
 
-        cache_dtype = getattr(cache_config, "cache_dtype", None)
+        cache_dtype = vllm_config.cache_config.cache_dtype
         store_full_kv = cache_dtype != "fp8_ds_mla"
         store_full_fp8 = cache_dtype in ("fp8", "fp8_e4m3")
         cache_alignment = 576 if cache_dtype == "fp8_ds_mla" else 512
-        model_dtype = getattr(model_config, "dtype", torch.bfloat16)
+        model_dtype = vllm_config.model_config.dtype
         return self._trace_dispatch(self.dispatch)(
             compress_ratio=compress_ratios,
             cache_block_size=cache_block_size,
