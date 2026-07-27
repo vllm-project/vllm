@@ -17,7 +17,11 @@ logger = init_logger(__name__)
 
 router = APIRouter()
 
-_ALLOWED_INSTRUCTIONS = {"retry"}
+_ALLOWED_INSTRUCTIONS = {"retry", "scale_down"}
+
+_REQUIRED_PARAMS: dict[str, set[str]] = {
+    "scale_down": {"removed_dp_ranks"},
+}
 
 
 def _validate_payload(body: dict) -> tuple[str, dict]:
@@ -31,6 +35,11 @@ def _validate_payload(body: dict) -> tuple[str, dict]:
     params = body.get("params", {})
     if not isinstance(params, dict):
         raise HTTPException(400, "'params' must be an object.")
+    missing = _REQUIRED_PARAMS.get(instruction, set()) - set(params.keys())
+    if missing:
+        raise HTTPException(
+            400, f"Missing params for '{instruction}': {sorted(missing)}"
+        )
     return instruction, params
 
 
