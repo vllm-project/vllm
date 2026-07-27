@@ -7897,4 +7897,3 @@ class GPUModelRunner(
                     stats = self.encoder_timing_registry[req_id]
                     stats.encoder_forward_secs += per_request_time
                     stats.num_encoder_calls += 1
-
