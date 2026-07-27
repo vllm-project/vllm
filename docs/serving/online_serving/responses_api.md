@@ -692,6 +692,198 @@ The following vLLM-specific fields are also returned in `ResponsesResponse`:
 
 ---
 
+## Testing
+
+### Layout
+
+Integration and unit tests for the Responses API live under
+`tests/entrypoints/openai/responses/`.  Shared fixtures and helper utilities
+are defined in `conftest.py`; each test file covers a distinct concern:
+
+| File | Covers |
+|---|---|
+| `test_basic.py` | Basic text input, instructions, multi-turn chat, structured input |
+| `test_simple.py` | Streaming consistency, logprobs, reasoning tokens, max-tokens |
+| `test_errors.py` | Validation failures and error responses |
+| `test_stateful.py` | Store lifecycle, `previous_response_id`, background mode |
+| `test_function_call.py` | Function tool invocation and follow-up turns |
+| `test_structured_output.py` | JSON schema / structured-output requests |
+| `test_sampling_params.py` | Extra sampling parameters |
+| `test_streaming_events.py` | `SimpleStreamingEventProcessor` / `split_delta` unit tests |
+| `test_serving_responses.py` | `OpenAIServingResponses` internal unit tests |
+| `test_serving_responses_extra.py` | Validation failures, store lifecycle, cancel/retrieve routes, usage accounting, streaming sequence numbers |
+| `test_harmony.py` | Harmony (gpt-oss) model end-to-end |
+| `test_harmony_utils.py` | `harmony_to_response_output` / `response_previous_input_to_harmony` unit tests |
+| `test_mcp_tools.py` | MCP tool integration |
+| `test_protocol.py` | Protocol / schema correctness |
+
+### Running the tests
+
+```bash
+# 1. Create and activate the virtual environment
+uv venv --python 3.12
+source .venv/bin/activate
+
+# 2. Install vLLM (Python-only changes only need the precompiled wheel)
+VLLM_USE_PRECOMPILED=1 uv pip install -e . --torch-backend=auto
+
+# 3. Install test dependencies
+uv pip install -r requirements/test/cuda.in
+
+# 4. Run the full suite
+.venv/bin/python -m pytest tests/entrypoints/openai/responses/ -v
+
+# 5. Run a single file
+.venv/bin/python -m pytest tests/entrypoints/openai/responses/test_basic.py -v
+```
+
+Most tests that exercise the server start a `RemoteOpenAIServer` and therefore
+require a GPU.  The pure unit tests (e.g. `test_harmony_utils.py`,
+`test_streaming_events.py`, `test_serving_responses_extra.py`) run without a
+GPU and finish in seconds.
+
+### Fixtures provided by `conftest.py`
+
+| Fixture | Scope | Description |
+|---|---|---|
+| `pairs_of_event_types` | function | `dict[str, str]` mapping every `done` event type to its matching `start` event type (e.g. `"response.completed" → "response.created"`). Pass to `validate_streaming_event_stack`. |
+| `default_server_args` | module | Default `vllm serve` flags for Qwen3 tests: `--max-model-len 18192`, `--enforce-eager`, `--enable-auto-tool-choice`, xgrammar backend, `hermes` tool-call parser, `qwen3` reasoning parser. |
+| `server_with_store` | module | `RemoteOpenAIServer` started with `default_server_args`, `VLLM_ENABLE_RESPONSES_API_STORE=1`, and `VLLM_SERVER_DEV_MODE=1`. |
+| `client` | function | Async OpenAI client connected to `server_with_store`. |
+
+Individual test files may define their own `server` and `client` fixtures that
+override the module-scoped defaults (e.g. to use a different model or omit the
+store).
+
+### Helper utilities
+
+**`validate_streaming_event_stack(events, pairs_of_event_types)`**
+
+Validates three aspects of a collected SSE event list in one call:
+
+1. *Pairing* — every `start` event is closed by its matching `done` event
+   (stack-based; derived automatically from `pairs_of_event_types`).
+2. *Ordering* — `response.created` is first, `response.completed` is last,
+   `response.in_progress` is the second event if present, and there is exactly
+   one `created` / one `completed`.
+3. *Field consistency* — `item_id`, `output_index`, and `content_index` are
+   consistent across all events within each output-item lifecycle.
+
+```python
+events = []
+async for event in stream:
+    events.append(event)
+validate_streaming_event_stack(events, pairs_of_event_types)
+```
+
+**`retry_for_tool_call(client, *, model, expected_tool_type, max_retries=3, **create_kwargs)`**
+
+Calls `client.responses.create` up to `max_retries` times and returns the
+first response that contains an output item of `expected_tool_type`.  Returns
+the last response if none match (so assertions still fire with a clear
+diagnostic).
+
+```python
+response = await retry_for_tool_call(
+    client,
+    model=MODEL,
+    expected_tool_type="function_call",
+    input="What is the weather in Paris?",
+    tools=[...],
+)
+assert has_output_type(response, "function_call")
+```
+
+**`retry_streaming_for(client, *, model, validate_events, max_retries=3, **create_kwargs)`**
+
+Calls `client.responses.create(stream=True)` up to `max_retries` times,
+returning the first event list for which `validate_events(events)` returns
+`True`.
+
+```python
+events = await retry_streaming_for(
+    client,
+    model=MODEL,
+    validate_events=lambda evts: events_contain_type(evts, "function_call"),
+    input="What is the weather in Paris?",
+    tools=[...],
+)
+```
+
+**`has_output_type(response, type_name)`**
+
+Returns `True` if `response.output` contains at least one item whose `.type`
+equals `type_name`.
+
+**`events_contain_type(events, type_substring)`**
+
+Returns `True` if any event's `.type` contains `type_substring`.
+
+**`log_response_diagnostics(response, *, label="Response Diagnostics")`**
+
+Logs reasoning text, tool-call attempts, MCP items, and output types at
+`INFO` level using Python's standard `logging` module.  Pass `--log-cli-level
+INFO` to pytest (or run with `pytest -s`) to see the output.  Returns the
+extracted `dict` so callers can make additional assertions.
+
+```python
+diagnostics = log_response_diagnostics(response, label="tool call test")
+assert diagnostics["model_attempted_tool_calls"]
+```
+
+### Writing a new test
+
+1. **Create a new file** (or add to an existing one) under
+   `tests/entrypoints/openai/responses/`.
+2. **Reuse the shared fixtures** — import from `conftest` or let pytest
+   inject them automatically:
+
+   ```python
+   import pytest
+   from .conftest import (
+       validate_streaming_event_stack,
+       has_output_type,
+       log_response_diagnostics,
+   )
+
+   @pytest.mark.asyncio
+   async def test_my_feature(
+       client,
+       pairs_of_event_types,
+   ):
+       response = await client.responses.create(
+           model="Qwen/Qwen3-1.7B",
+           input="Hello!",
+       )
+       assert response.status == "completed"
+       assert has_output_type(response, "message")
+   ```
+
+3. **For streaming tests**, collect events and call
+   `validate_streaming_event_stack`:
+
+   ```python
+   @pytest.mark.asyncio
+   async def test_streaming(client, pairs_of_event_types):
+       stream = await client.responses.create(
+           model="Qwen/Qwen3-1.7B",
+           input="Count to three.",
+           stream=True,
+       )
+       events = [e async for e in stream]
+       validate_streaming_event_stack(events, pairs_of_event_types)
+   ```
+
+4. **For tests that need the store**, use `server_with_store` / `client`
+   directly (both are in scope via `conftest.py`) — no extra setup needed.
+
+5. **For pure unit tests** that mock the engine, follow the pattern in
+   `test_serving_responses_extra.py`: create a `_make_serving()` helper that
+   returns an `OpenAIServingResponses` backed by `MagicMock` objects so that
+   no GPU is required.
+
+---
+
 ## No Full OpenAI Parity
 
 The current implementation does **not** support:
