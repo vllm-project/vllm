@@ -84,16 +84,15 @@ class _ClientRequestState:
     unsent: list[OffloadKey] = field(default_factory=list)
     # Current lookup round. LookupMsgs carry it, each fetch closes it and
     # advances it, so every round's supply/demand/completion is isolated
-    # on the wire. PD loads never probe and stay round-less (key None).
+    # on the wire. PD clients never probe and stay on round 0.
     round_seq: int = 0
 
     # Monotonic lookup/fetch signalling phase; see ``ClientPhase``.
     phase: ClientPhase = ClientPhase.REGISTERED
-    # In-flight loads keyed by the round their fetch carried (None for
-    # PD). The scheduler submits loads incrementally as chunks resolve,
-    # so several can be in flight at once; TransferDone/AbortAck match
-    # by round.
-    loads: dict[int | None, _InboundLoadState] = field(default_factory=dict)
+    # In-flight loads keyed by the round their fetch carried. The
+    # scheduler submits loads incrementally as chunks resolve, so several
+    # can be in flight at once; TransferDone/AbortAck match by round.
+    loads: dict[int, _InboundLoadState] = field(default_factory=dict)
 
 
 class LoadResult(NamedTuple):
@@ -183,21 +182,6 @@ class ClientRole:
         if st is not None and not st.loads and not st.probes and not st.unsent:
             del self._requests[kv_request_id]
 
-    def _pop_load(
-        self, st: _ClientRequestState, round_seq: int | None
-    ) -> tuple[int | None, _InboundLoadState] | None:
-        """Pop the load a completion/ack refers to, or None if unknown.
-
-        A missing round with exactly one load in flight falls back to
-        that load, so a round-less peer still completes it.
-        """
-        load = st.loads.pop(round_seq, None)
-        if load is not None:
-            return round_seq, load
-        if round_seq is None and len(st.loads) == 1:
-            return st.loads.popitem()
-        return None
-
     def _on_load_terminal(self, kv_request_id: str, st: _ClientRequestState) -> None:
         """Wind down id-level state once no load remains in flight."""
         if st.loads:
@@ -239,24 +223,23 @@ class ClientRole:
             send_ready,
         )
         st = self._get_or_create_request(kv_request_id)
-        # A symmetric request probed its keys; a PD load never does and
-        # stays round-less.
-        round_seq: int | None = st.round_seq if st.probes else None
+        round_seq = st.round_seq
+        st.round_seq += 1
         st.loads[round_seq] = _InboundLoadState(
             job_id=job_id,
             submitted_at=time.monotonic(),
         )
         self._active_loads.add(kv_request_id)
         st.phase = ClientPhase.FETCH_SENT
-        msg: dict = {
-            TYPE_KEY: FetchMsg.TYPE,
-            FetchMsg.KV_REQUEST_ID: kv_request_id,
-            FetchMsg.KEYS: list(keys),
-            FetchMsg.BLOCK_INDEXES: [int(idx) for idx in block_ids],
-        }
-        if round_seq is not None:
-            msg[FetchMsg.ROUND_SEQ] = round_seq
-        self._send(msg)
+        self._send(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: kv_request_id,
+                FetchMsg.KEYS: list(keys),
+                FetchMsg.BLOCK_INDEXES: [int(idx) for idx in block_ids],
+                FetchMsg.ROUND_SEQ: round_seq,
+            }
+        )
         # Issuing the fetch closes this lookup round, so drop all probe
         # state. Once the peer serves the fetch both sides unpin, so a
         # stale cached True would let a later lookup() return HIT for a
@@ -265,7 +248,6 @@ class ClientRole:
         if st.probes:
             assert all(st.probes.get(key) is True for key in keys)
             st.probes.clear()
-            st.round_seq += 1
 
     def finish(self, kv_request_id: str) -> None:
         """Finish a request: abort in-flight loads and release lookup state.
@@ -291,13 +273,13 @@ class ClientRole:
             for round_seq, load in st.loads.items():
                 if load.aborted_at is not None:
                     continue
-                msg: dict = {
-                    TYPE_KEY: AbortFetchMsg.TYPE,
-                    AbortFetchMsg.KV_REQUEST_ID: kv_request_id,
-                }
-                if round_seq is not None:
-                    msg[AbortFetchMsg.ROUND_SEQ] = round_seq
-                self._send(msg)
+                self._send(
+                    {
+                        TYPE_KEY: AbortFetchMsg.TYPE,
+                        AbortFetchMsg.KV_REQUEST_ID: kv_request_id,
+                        AbortFetchMsg.ROUND_SEQ: round_seq,
+                    }
+                )
             st.loads.clear()
             self._active_loads.discard(kv_request_id)
         elif st.phase is ClientPhase.PROBING:
@@ -317,13 +299,12 @@ class ClientRole:
         self._maybe_prune(kv_request_id)
 
     def on_transfer_done(
-        self, kv_request_id: str, success: bool, round_seq: int | None = None
+        self, kv_request_id: str, success: bool, round_seq: int
     ) -> None:
         """Handle a TransferDoneMsg from the peer."""
         st = self._requests.get(kv_request_id)
-        popped = self._pop_load(st, round_seq) if st is not None else None
-        if st is not None and popped is not None:
-            _, load = popped
+        load = st.loads.pop(round_seq, None) if st is not None else None
+        if st is not None and load is not None:
             self._completed_loads.append(
                 LoadResult(
                     job_id=load.job_id,
@@ -347,12 +328,11 @@ class ClientRole:
                 round_seq,
             )
 
-    def on_abort_ack(self, kv_request_id: str, round_seq: int | None = None) -> None:
+    def on_abort_ack(self, kv_request_id: str, round_seq: int) -> None:
         """Handle an AbortAckMsg from the peer."""
         st = self._requests.get(kv_request_id)
-        popped = self._pop_load(st, round_seq) if st is not None else None
-        if st is not None and popped is not None:
-            _, load = popped
+        load = st.loads.pop(round_seq, None) if st is not None else None
+        if st is not None and load is not None:
             logger.warning(
                 "P2PSession %s: load request %s (job_id=%d) timed out; "
                 "load job completed with failure. If this recurs, ensure "
@@ -506,7 +486,7 @@ class ClientRole:
         until finish_request clears it — see ``_ClientRequestState.probes``.
         """
         now = time.monotonic()
-        to_remove: list[tuple[str, int | None]] = []
+        to_remove: list[tuple[str, int]] = []
         for req_id in self._active_loads:
             st = self._requests[req_id]
             assert st.loads
@@ -520,13 +500,13 @@ class ClientRole:
                             req_id,
                             round_seq,
                         )
-                        msg: dict = {
-                            TYPE_KEY: AbortFetchMsg.TYPE,
-                            AbortFetchMsg.KV_REQUEST_ID: req_id,
-                        }
-                        if round_seq is not None:
-                            msg[AbortFetchMsg.ROUND_SEQ] = round_seq
-                        self._send(msg)
+                        self._send(
+                            {
+                                TYPE_KEY: AbortFetchMsg.TYPE,
+                                AbortFetchMsg.KV_REQUEST_ID: req_id,
+                                AbortFetchMsg.ROUND_SEQ: round_seq,
+                            }
+                        )
                 else:
                     if now - load.aborted_at >= _ABORT_ACK_TIMEOUT_S:
                         to_remove.append((req_id, round_seq))

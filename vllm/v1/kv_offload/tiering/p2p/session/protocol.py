@@ -101,13 +101,6 @@ def _require_non_neg_int(msg: dict, key: str, *, name: str = "") -> None:
         raise ValueError(f"{label}: expected non-negative int, got {val!r}")
 
 
-def _validate_round_seq(msg: dict, key: str) -> None:
-    """Optional non-negative int; absent for PD peers."""
-    val = msg.get(key)
-    if val is not None and (not isinstance(val, int) or val < 0):
-        raise ValueError(f"{key}: expected non-negative int, got {val!r}")
-
-
 def _require_list(msg: dict, key: str, *, name: str = "") -> None:
     """Raise ValueError if msg[key] is not a list."""
     val = msg.get(key)
@@ -194,9 +187,8 @@ class FetchMsg:
         KV_REQUEST_ID: Identifies this block transfer request.
         KEYS: List of block keys (OffloadKey bytes). May be empty.
         BLOCK_INDEXES: List of remote block indexes (same length as KEYS).
-        ROUND_SEQ: Lookup round this fetch closes. Present iff the client
-            runs the symmetric lookup phase; PD fetches omit it and keep
-            single-round semantics.
+        ROUND_SEQ: Lookup round this fetch closes. PD clients never probe
+            and stay on their single round 0.
     """
 
     TYPE = "fetch"
@@ -209,7 +201,7 @@ class FetchMsg:
     def validate(msg: dict) -> None:
         """Raise ValueError if any field has an invalid type or value."""
         _require(msg, FetchMsg.KV_REQUEST_ID, str)
-        _validate_round_seq(msg, FetchMsg.ROUND_SEQ)
+        _require_non_neg_int(msg, FetchMsg.ROUND_SEQ)
         _require_list(msg, FetchMsg.KEYS)
         _require_list(msg, FetchMsg.BLOCK_INDEXES)
         keys = msg[FetchMsg.KEYS]
@@ -248,7 +240,7 @@ class LookupMsg:
         """Raise ValueError if any field has an invalid type or value."""
         _require(msg, LookupMsg.KV_REQUEST_ID, str)
         _require_list(msg, LookupMsg.KEYS)
-        _validate_round_seq(msg, LookupMsg.ROUND_SEQ)
+        _require_non_neg_int(msg, LookupMsg.ROUND_SEQ)
 
 
 class LookupRespMsg:
@@ -295,7 +287,7 @@ class TransferDoneMsg:
         SUCCESS: Whether the transfer completed successfully.
         ROUND_SEQ: The fetch round that completed. Several loads can be
             in flight per id (the scheduler submits loads incrementally),
-            so completions are matched by round. Absent for PD.
+            so completions are matched by round.
     """
 
     TYPE = "transfer_done"
@@ -308,7 +300,7 @@ class TransferDoneMsg:
         """Raise ValueError if any field has an invalid type or value."""
         _require(msg, TransferDoneMsg.KV_REQUEST_ID, str)
         _require(msg, TransferDoneMsg.SUCCESS, bool)
-        _validate_round_seq(msg, TransferDoneMsg.ROUND_SEQ)
+        _require_non_neg_int(msg, TransferDoneMsg.ROUND_SEQ)
 
 
 class AbortFetchMsg:
@@ -316,8 +308,7 @@ class AbortFetchMsg:
 
     Fields:
         KV_REQUEST_ID: The request to cancel.
-        ROUND_SEQ: The fetch round to cancel; absent aborts the whole id
-            (PD / legacy).
+        ROUND_SEQ: The fetch round to cancel.
     """
 
     TYPE = "abort_fetch"
@@ -328,7 +319,7 @@ class AbortFetchMsg:
     def validate(msg: dict) -> None:
         """Raise ValueError if any field has an invalid type or value."""
         _require(msg, AbortFetchMsg.KV_REQUEST_ID, str)
-        _validate_round_seq(msg, AbortFetchMsg.ROUND_SEQ)
+        _require_non_neg_int(msg, AbortFetchMsg.ROUND_SEQ)
 
 
 class AbortAckMsg:
@@ -347,4 +338,4 @@ class AbortAckMsg:
     def validate(msg: dict) -> None:
         """Raise ValueError if any field has an invalid type or value."""
         _require(msg, AbortAckMsg.KV_REQUEST_ID, str)
-        _validate_round_seq(msg, AbortAckMsg.ROUND_SEQ)
+        _require_non_neg_int(msg, AbortAckMsg.ROUND_SEQ)

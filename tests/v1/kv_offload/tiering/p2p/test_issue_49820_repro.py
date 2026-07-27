@@ -41,15 +41,15 @@ def _send_lookup(conn, keys, round_seq):
 
 
 def _fetch(conn, keys, idxs, round_seq):
-    msg = {
-        TYPE_KEY: FetchMsg.TYPE,
-        FetchMsg.KV_REQUEST_ID: KV,
-        FetchMsg.KEYS: keys,
-        FetchMsg.BLOCK_INDEXES: idxs,
-    }
-    if round_seq is not None:
-        msg[FetchMsg.ROUND_SEQ] = round_seq
-    conn.enqueue(msg)
+    conn.enqueue(
+        {
+            TYPE_KEY: FetchMsg.TYPE,
+            FetchMsg.KV_REQUEST_ID: KV,
+            FetchMsg.KEYS: keys,
+            FetchMsg.BLOCK_INDEXES: idxs,
+            FetchMsg.ROUND_SEQ: round_seq,
+        }
+    )
 
 
 def _drive_round_0_then_lookup_1(cb, session, conn, transport):
@@ -173,12 +173,12 @@ def test_unmatched_symmetric_fetch_fails_fast():
     assert session._server._requests.get(KV) is None
 
 
-def test_pd_fetch_without_round_still_parks_demand():
-    """A round-less fetch (PD) keeps the fetch-before-store flow: demand
-    parks and a later store fulfills it."""
+def test_pd_fetch_keeps_fetch_before_store_flow():
+    """A round without lookup-pinned supply (PD) parks unmatched demand:
+    a later store fulfills it instead of the fetch failing fast."""
     session, conn, transport = _make_session()
     _activate(session, conn)
-    _fetch(conn, [b"k1"], [5], None)
+    _fetch(conn, [b"k1"], [5], 0)
     session.poll()
     assert len(transport._transfers) == 0  # parked, not failed
     session.add_stored_blocks(KV, [b"k1"], [3], job_id=1)

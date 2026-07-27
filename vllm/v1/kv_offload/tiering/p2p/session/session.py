@@ -374,7 +374,7 @@ class P2PSession:
                 for bh in msg[FetchMsg.KEYS]
             ]
             block_indexes = msg[FetchMsg.BLOCK_INDEXES]
-            round_seq = msg.get(FetchMsg.ROUND_SEQ)
+            round_seq = msg[FetchMsg.ROUND_SEQ]
             # Run the server-role state machine inline as today —
             # add_fetch_demand records demand against any blocks we've
             # already seen in `available`. Report the kv_request_id so
@@ -387,20 +387,20 @@ class P2PSession:
             AbortFetchMsg.validate(msg)
             self._server.on_abort_fetch(
                 msg[AbortFetchMsg.KV_REQUEST_ID],
-                msg.get(AbortFetchMsg.ROUND_SEQ),
+                msg[AbortFetchMsg.ROUND_SEQ],
             )
         elif msg_type == TransferDoneMsg.TYPE:
             TransferDoneMsg.validate(msg)
             self._client.on_transfer_done(
                 msg[TransferDoneMsg.KV_REQUEST_ID],
                 msg[TransferDoneMsg.SUCCESS],
-                msg.get(TransferDoneMsg.ROUND_SEQ),
+                msg[TransferDoneMsg.ROUND_SEQ],
             )
         elif msg_type == AbortAckMsg.TYPE:
             AbortAckMsg.validate(msg)
             self._client.on_abort_ack(
                 msg[AbortAckMsg.KV_REQUEST_ID],
-                msg.get(AbortAckMsg.ROUND_SEQ),
+                msg[AbortAckMsg.ROUND_SEQ],
             )
         elif msg_type == LookupMsg.TYPE:
             LookupMsg.validate(msg)
@@ -409,7 +409,7 @@ class P2PSession:
                 OffloadKey(bh if isinstance(bh, bytes) else bytes(bh))
                 for bh in msg[LookupMsg.KEYS]
             ]
-            self._server.on_lookup(kv_request_id, keys, msg.get(LookupMsg.ROUND_SEQ))
+            self._server.on_lookup(kv_request_id, keys, msg[LookupMsg.ROUND_SEQ])
         elif msg_type == LookupRespMsg.TYPE:
             LookupRespMsg.validate(msg)
             kv_request_id = msg[LookupRespMsg.KV_REQUEST_ID]
