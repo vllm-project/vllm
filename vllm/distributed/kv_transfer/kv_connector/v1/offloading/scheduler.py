@@ -50,7 +50,7 @@ from vllm.v1.kv_offload.base import (
     make_offload_key,
 )
 from vllm.v1.outputs import KVConnectorOutput
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
 
@@ -860,6 +860,7 @@ class OffloadingConnectorScheduler:
                     num_pending_gpu_blocks
                     <= group_config.sliding_window_size_in_chunks
                     * self.config.blocks_per_chunk
+                    + 1
                 )
 
             num_chunks = cdiv(num_cached_tokens, tokens_per_chunk)
@@ -975,7 +976,9 @@ class OffloadingConnectorScheduler:
                 continue
             req = req_status.req
 
-            if req.is_finished():
+            if req.status is RequestStatus.FINISHED_ABORTED:
+                num_tokens_after_batch = req.num_computed_tokens
+            elif req.is_finished():
                 num_tokens_after_batch = req.num_tokens
             else:
                 num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]

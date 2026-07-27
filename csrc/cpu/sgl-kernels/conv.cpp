@@ -451,6 +451,90 @@ void causal_conv1d_update_kernel_impl(
   });
 }
 
+template <typename scalar_t>
+void causal_conv1d_update_multi_kernel_impl(
+    scalar_t* __restrict__ out,
+    const scalar_t* __restrict__ input,
+    scalar_t* __restrict__ conv_states,
+    const scalar_t* __restrict__ weight,
+    const scalar_t* __restrict__ bias,
+    const int32_t* __restrict__ num_accepted_tokens,
+    const int32_t* __restrict__ conv_indices,
+    bool silu_activation,
+    int64_t batch,
+    int64_t dim,
+    int64_t seqlen,
+    int64_t width,
+    int64_t state_len,
+    int64_t conv_state_slot_stride) {
+  constexpr int64_t BLOCK_N = block_size_n() * 2;
+  const int64_t NB = div_up(dim, BLOCK_N);
+
+  AT_DISPATCH_BOOL2(bias != nullptr, has_bias, silu_activation, has_silu, [&] {
+    at::parallel_for(0, batch * NB, 0, [&](int64_t begin, int64_t end) {
+      int64_t bs{0}, nb{0};
+      data_index_init(begin, bs, batch, nb, NB);
+
+      for (int64_t i = begin; i < end; ++i) {
+        const int64_t nb_start = nb * BLOCK_N;
+        const int64_t nb_size = std::min(dim - nb_start, BLOCK_N);
+        const int32_t conv_state_index = conv_indices[bs];
+        const int32_t history_offset = num_accepted_tokens[bs] - 1;
+
+        switch (width << 4 | nb_size >> 4) {
+          case 0x42:
+            tinygemm_kernel<scalar_t, 4, 32, has_bias, has_silu>::apply(
+                input + bs * seqlen * dim + nb_start,
+                weight + nb_start * width,
+                out + bs * seqlen * dim + nb_start,
+                has_bias ? bias + nb_start : nullptr,
+                conv_states + conv_state_index * conv_state_slot_stride +
+                    history_offset * dim + nb_start,
+                true,
+                seqlen,
+                dim,
+                true);
+            break;
+          case 0x44:
+            tinygemm_kernel<scalar_t, 4, 64, has_bias, has_silu>::apply(
+                input + bs * seqlen * dim + nb_start,
+                weight + nb_start * width,
+                out + bs * seqlen * dim + nb_start,
+                has_bias ? bias + nb_start : nullptr,
+                conv_states + conv_state_index * conv_state_slot_stride +
+                    history_offset * dim + nb_start,
+                true,
+                seqlen,
+                dim,
+                true);
+            break;
+          default:
+            TORCH_CHECK(false, "Unexpected block size, ", width, " x ", nb_size);
+        }
+
+        data_index_step(bs, batch, nb, NB);
+      }
+    });
+  });
+
+  at::parallel_for(0, batch, 0, [&](int64_t begin, int64_t end) {
+    for (int64_t bs = begin; bs < end; ++bs) {
+      const int32_t conv_state_index = conv_indices[bs];
+      const int32_t num_accepted = num_accepted_tokens[bs];
+      scalar_t* state = conv_states + conv_state_index * conv_state_slot_stride;
+
+      std::memmove(
+          state,
+          state + num_accepted * dim,
+          (state_len - seqlen) * dim * sizeof(scalar_t));
+      std::memcpy(
+          state + (state_len - seqlen) * dim,
+          input + bs * seqlen * dim,
+          seqlen * dim * sizeof(scalar_t));
+    }
+  });
+}
+
 }  // anonymous namespace
 
 // from [dim, width] or [N, K]
@@ -545,7 +629,7 @@ at::Tensor get_block_indices(const std::optional<at::Tensor>& offsets, int64_t n
 //   query_start_loc: (batch + 1) int32
 //   cache_indices: (batch)  int32
 //   has_initial_state: (batch) bool
-//   conv_states: (..., dim, width - 1) itype
+//   conv_states: (..., dim, state_len) itype, where state_len >= width - 1
 //   activation: either None or "silu" or "swish"
 //   pad_slot_id: int
 //
@@ -586,11 +670,14 @@ at::Tensor causal_conv1d_fwd_cpu(
     CHECK_EQ(conv_states_val.scalar_type(), scalar_type);
     CHECK_GE(padded_batch, batch);
     CHECK_EQ(conv_states_val.size(1), dim);
-    CHECK_EQ(conv_states_val.size(2), width - 1);
+    const int64_t state_len = conv_states_val.size(2);
+    CHECK_GE(state_len, width - 1);
 
     // adjust `conv_states` to be contiguous on `dim`
     // should happen only once
     if (conv_states_val.stride(-2) != 1) {
+      TORCH_CHECK(state_len == width - 1,
+          "causal_conv1d_fwd_cpu: wide conv_states must be contiguous on dim.");
       auto conv_states_copy = conv_states_val.clone();
       conv_states_val.as_strided_({padded_batch, dim, width - 1}, {(width - 1) * dim, 1, dim});
       conv_states_val.copy_(conv_states_copy);
@@ -651,14 +738,14 @@ at::Tensor causal_conv1d_fwd_cpu(
 
 // API aligned with GPUs
 //
-//   x: (batch, dim) or (batch, dim, seqlen)
+//   x: (batch, dim) or (batch, seqlen, dim)
 //   conv_state: (..., dim, state_len), where state_len >= width - 1
 //   weight: (dim, width)
 //   bias: (dim,)
-//   cache_seqlens: (batch,), dtype int32.
+//   num_accepted_tokens: (batch,), dtype int32.
 //   conv_state_indices: (batch,), dtype int32
 //   pad_slot_id: int
-//   out: (batch, dim) or (batch, dim, seqlen)
+//   out: (batch, dim) or (batch, seqlen, dim)
 //
 at::Tensor causal_conv1d_update_cpu(
     const at::Tensor& x,
@@ -666,7 +753,7 @@ at::Tensor causal_conv1d_update_cpu(
     const at::Tensor& weight,
     const std::optional<at::Tensor>& bias,
     bool silu_activation,
-    const std::optional<at::Tensor>& cache_seqlens,
+    const std::optional<at::Tensor>& num_accepted_tokens,
     const std::optional<at::Tensor>& conv_state_indices,
     int64_t pad_slot_id,
     bool is_vnni) {
@@ -674,13 +761,13 @@ at::Tensor causal_conv1d_update_cpu(
   CHECK_CONTIGUOUS(weight);
   auto packed_w = is_vnni ? weight : causal_conv1d_weight_pack(weight);
 
-  // TODO: add multi-token prediction support
-  TORCH_CHECK(x.dim() == 2, "causal_conv1d_update_cpu: expect x to be 2D tensor.");
-  TORCH_CHECK(!cache_seqlens.has_value(), "causal_conv1d_update_cpu: don't support cache_seqlens.");
+  TORCH_CHECK(
+      x.dim() == 2 || x.dim() == 3,
+      "causal_conv1d_update_cpu: expect x to be 2D or 3D tensor.");
 
   int64_t batch = x.size(0);
-  int64_t dim = x.size(1);
-  int64_t seqlen = 1;
+  int64_t dim = x.dim() == 2 ? x.size(1) : x.size(2);
+  int64_t seqlen = x.dim() == 2 ? 1 : x.size(1);
   int64_t width = weight.size(-1);
 
   const auto scalar_type = x.scalar_type();
@@ -690,10 +777,84 @@ at::Tensor causal_conv1d_update_cpu(
 
   CHECK_EQ(conv_states.scalar_type(), scalar_type);
   CHECK_EQ(conv_states.size(1), dim);
-  CHECK_EQ(conv_states.size(2), width - 1);
+  const int64_t state_len = conv_states.size(2);
+  CHECK_GE(state_len, width - 1);
+
+  if (x.dim() == 3) {
+    TORCH_CHECK(
+        num_accepted_tokens.has_value(),
+        "causal_conv1d_update_cpu: num_accepted_tokens is required for 3D x.");
+    TORCH_CHECK(
+        conv_state_indices.has_value(),
+        "causal_conv1d_update_cpu: conv_state_indices is required for 3D x.");
+    CHECK_OPTIONAL_SHAPE_DTYPE(num_accepted_tokens, batch, at::kInt);
+    TORCH_CHECK(
+        width == 4,
+        "causal_conv1d_update_cpu: support only width of 4 for 3D x.");
+    TORCH_CHECK(
+        seqlen > 0,
+        "causal_conv1d_update_cpu: expect non-empty sequence for 3D x.");
+    TORCH_CHECK(
+        state_len >= seqlen,
+        "causal_conv1d_update_cpu: state_len must be >= seqlen for 3D x.");
+    TORCH_CHECK(
+        conv_states.stride(-2) == 1 && conv_states.stride(-1) == dim,
+        "causal_conv1d_update_cpu: 3D x requires SD conv_states layout.");
+
+    const int32_t* accepted_counts =
+        num_accepted_tokens.value().data_ptr<int32_t>();
+    const int32_t* indices = conv_state_indices.value().data_ptr<int32_t>();
+    const int64_t num_slots = conv_states.size(0);
+    for (int64_t bs = 0; bs < batch; ++bs) {
+      const int32_t num_accepted = accepted_counts[bs];
+      const int32_t conv_state_index = indices[bs];
+      TORCH_CHECK(
+          conv_state_index != pad_slot_id,
+          "causal_conv1d_update_cpu: 3D x does not support pad slots.");
+      TORCH_CHECK(
+          conv_state_index >= 0 && conv_state_index < num_slots,
+          "causal_conv1d_update_cpu: conv_state_indices out of range.");
+      TORCH_CHECK(
+          num_accepted >= 1 && num_accepted <= seqlen,
+          "causal_conv1d_update_cpu: num_accepted_tokens must be in [1, "
+          "seqlen].");
+      TORCH_CHECK(
+          num_accepted - 1 + width - 1 <= state_len,
+          "causal_conv1d_update_cpu: history window exceeds conv_states.");
+    }
+
+    int64_t conv_state_slot_stride = conv_states.stride(0);
+    at::Tensor out = at::empty_like(x);
+    AT_DISPATCH_REDUCED_FLOATING_TYPES(
+        scalar_type, "causal_conv1d_update_multi_kernel_impl", [&] {
+          causal_conv1d_update_multi_kernel_impl<scalar_t>(
+              out.data_ptr<scalar_t>(),
+              x.data_ptr<scalar_t>(),
+              conv_states.data_ptr<scalar_t>(),
+              packed_w.data_ptr<scalar_t>(),
+              conditional_data_ptr<scalar_t>(bias),
+              accepted_counts,
+              indices,
+              silu_activation,
+              batch,
+              dim,
+              seqlen,
+              width,
+              state_len,
+              conv_state_slot_stride);
+        });
+    return out;
+  }
+
+  TORCH_CHECK(
+      !num_accepted_tokens.has_value(),
+      "causal_conv1d_update_cpu: num_accepted_tokens is only supported for 3D "
+      "x.");
 
   // adjust `conv_states` to be contiguous on `dim`
   if (conv_states.stride(-2) != 1) {
+    TORCH_CHECK(state_len == width - 1,
+        "causal_conv1d_update_cpu: wide conv_states must be contiguous on dim.");
     int64_t num_cache_lines = conv_states.size(0);
     auto conv_states_copy = conv_states.clone();
     conv_states.as_strided_({num_cache_lines, dim, width - 1}, {(width - 1) * dim, 1, dim});
