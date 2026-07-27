@@ -29,6 +29,20 @@ def test_get_open_port(monkeypatch: pytest.MonkeyPatch):
                     s3.bind(("localhost", get_open_port()))
 
 
+def test_get_open_port_vllm_port_in_dp_reserved_range(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # VLLM_PORT falling inside the data-parallel reserved window used to make
+    # get_open_port() loop forever (issue #50024). It must instead return a
+    # port outside the reserved range.
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_DP_MASTER_PORT", "5680")
+        # 5682 is inside [5680, 5690).
+        m.setenv("VLLM_PORT", "5682")
+        port = get_open_port()
+        assert port not in range(5680, 5690)
+
+
 def test_get_open_ports_list_with_vllm_port(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m:
         m.setenv("VLLM_PORT", "5678")
