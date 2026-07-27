@@ -34,6 +34,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.repo_utils import hf_api
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx942, on_gfx950
@@ -65,7 +66,7 @@ if QUARK_MXFP4_AVAILABLE:
     from quark.torch.quantization.config.config import FP4PerGroupSpec
 
 try:
-    huggingface_hub.list_repo_refs(
+    hf_api().list_repo_refs(
         "amd/Llama-3.3-70B-Instruct-WMXFP4-AMXFP4-KVFP8-Scale-UINT8-SQ"
     )
     HF_HUB_AMD_ORG_ACCESS = True
