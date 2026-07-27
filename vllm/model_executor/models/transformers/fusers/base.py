@@ -13,8 +13,7 @@ from torch import fx, nn
 from vllm.model_executor.models.utils import ShardId, maybe_prefix
 
 if TYPE_CHECKING:
-    from vllm.config.model import ModelConfig
-    from vllm.model_executor.layers.quantization import QuantizationConfig
+    from vllm.config import VllmConfig
 
 
 @dataclass
@@ -36,16 +35,12 @@ class BaseFuser(ABC):
         """Match the pattern in `graph`, returning a fuser if found."""
 
     @abstractmethod
-    def validate(self, module: nn.Module, model_config: "ModelConfig") -> bool:
+    def validate(self, module: nn.Module, vllm_config: "VllmConfig") -> bool:
         """Whether this fuser can be applied to this `module` instance."""
 
     @abstractmethod
     def fuse(
-        self,
-        module: nn.Module,
-        prefix: str,
-        model_config: "ModelConfig",
-        quant_config: "QuantizationConfig",
+        self, module: nn.Module, prefix: str, vllm_config: "VllmConfig"
     ) -> nn.Module:
         """Apply the fusion to an already-validated `module`, returning the
         module to install in its place (mutated in place, or freshly built)."""
@@ -123,24 +118,16 @@ class StackedFuser(BaseFuser):
 
     @abstractmethod
     def update_attrs(
-        self,
-        module: nn.Module,
-        prefix: str,
-        model_config: "ModelConfig",
-        quant_config: "QuantizationConfig",
+        self, module: nn.Module, prefix: str, vllm_config: "VllmConfig"
     ) -> None:
         """Replace `module`'s submodules with the merged module."""
 
     def fuse(
-        self,
-        module: nn.Module,
-        prefix: str,
-        model_config: "ModelConfig",
-        quant_config: "QuantizationConfig",
+        self, module: nn.Module, prefix: str, vllm_config: "VllmConfig"
     ) -> nn.Module:
         """Fuse an already-validated `module` in place (see `Fusers.__getitem__`).
 
         Builds the merged submodule and binds the compiled forward."""
-        self.update_attrs(module, prefix, model_config, quant_config)
+        self.update_attrs(module, prefix, vllm_config)
         module.forward = types.MethodType(self.fused_forward, module)
         return module
