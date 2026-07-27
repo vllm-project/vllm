@@ -161,6 +161,33 @@ def test_unpin_asserts_on_unpinned():
         cache.unpin("a")
 
 
+# ── has_held_entries ─────────────────────────────────────────────────────────
+
+
+def test_has_held_entries_empty_cache():
+    cache = _cache()
+    assert cache.has_held_entries() is False
+
+
+def test_has_held_entries_true_while_not_ready():
+    cache = _cache()
+    cache.alloc("a", 2)  # not ready → held
+    assert cache.has_held_entries() is True
+    cache.mark_ready("a")  # ready + unpinned → settled
+    assert cache.has_held_entries() is False
+
+
+def test_has_held_entries_true_while_pinned():
+    cache = _cache()
+    cache.alloc("a", 2)
+    cache.mark_ready("a")
+    assert cache.has_held_entries() is False
+    cache.pin("a")  # pinned → held
+    assert cache.has_held_entries() is True
+    cache.unpin("a")
+    assert cache.has_held_entries() is False
+
+
 # ── eviction ─────────────────────────────────────────────────────────────────
 
 
