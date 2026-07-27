@@ -2174,7 +2174,11 @@ class NixlBaseConnectorWorker:
 
             # Build the heartbeat message: "HB:req1,req2,..."
             hb_msg = ("HB:" + ",".join(hb_info.req_ids)).encode()
-            for agent_name in self._remote_agents[engine_id].values():
+            # Snapshot the agents: handshakes run on a background executor whose
+            # done-callback assigns ``self._remote_agents[eid] = ...``, so one
+            # completing mid-iteration would raise "dictionary changed size
+            # during iteration". A just-registered agent is picked up next cycle.
+            for agent_name in list(self._remote_agents[engine_id].values()):
                 try:
                     self.nixl_wrapper.send_notif(agent_name, notif_msg=hb_msg)
                 except Exception:

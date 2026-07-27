@@ -163,3 +163,49 @@ def test_handle_heartbeat():
     assert w._reqs_to_send["req-b"] >= far_future
     # req-unknown: not added.
     assert "req-unknown" not in w._reqs_to_send
+
+
+# ===================================================================
+# Worker: _send_heartbeats concurrent-registration race
+# ===================================================================
+
+
+def test_send_heartbeats_tolerates_concurrent_agent_registration():
+    """A handshake completing mid-iteration must not crash the worker.
+
+    Handshakes run on a background executor whose done-callback assigns
+    ``self._remote_agents[eid] = ...``. If that lands while _send_heartbeats
+    is iterating ``self._remote_agents[engine_id].values()``, Python raises
+    "RuntimeError: dictionary changed size during iteration", which kills the
+    decode EngineCore. Snapshotting the values before iterating closes the race.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+        NixlBaseConnectorWorker,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        HeartbeatInfo,
+        NixlConnectorMetadata,
+    )
+
+    engine_id = "my-engine-id"
+    w = object.__new__(NixlBaseConnectorWorker)
+    w._remote_agents = {engine_id: {0: "agent-0", 1: "agent-1"}}
+    w._ensure_handshake = MagicMock(return_value=None)
+
+    def _mutating_send_notif(agent_name, notif_msg):
+        del agent_name, notif_msg
+        # Simulate a handshake done-callback registering a new agent mid-loop.
+        idx = len(w._remote_agents[engine_id])
+        w._remote_agents[engine_id][idx] = f"agent-{idx}"
+
+    w.nixl_wrapper = MagicMock()
+    w.nixl_wrapper.send_notif.side_effect = _mutating_send_notif
+
+    metadata = NixlConnectorMetadata()
+    metadata.heartbeat_by_engine[engine_id] = HeartbeatInfo(
+        req_ids={"req-1"}, host="localhost", port=1234, tp_size=1
+    )
+
+    # Must not raise "dictionary changed size during iteration".
+    w._send_heartbeats(metadata)
+    assert w.nixl_wrapper.send_notif.call_count >= 1
