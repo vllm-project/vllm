@@ -1988,12 +1988,12 @@ def test_lookup_rejects_boundary_missing_one_mamba_shard():
     _refresh_group_tp_replication_factors(worker)
 
     worker.store.batch_is_exist.side_effect = lambda keys: [1] * len(keys)
-    assert worker.lookup(32, [b"h0", b"h1"]) == 32
+    assert worker.lookup(33, [b"h0", b"h1"]) == 32
 
     worker.store.batch_is_exist.side_effect = lambda keys: [
         0 if "tp_rank:1" in k and "group:1" in k else 1 for k in keys
     ]
-    assert worker.lookup(32, [b"h0", b"h1"]) == 0
+    assert worker.lookup(33, [b"h0", b"h1"]) == 0
 
 
 def test_lookup_requires_all_dcp_rank_namespaces():
@@ -2053,7 +2053,7 @@ def test_lookup_partial_tail_uses_hash_alignment():
         scheduler_block_size=16,
         hash_block_size=4,
     )
-    worker._init_lookup_key_prefixes()
+    _refresh_group_tp_replication_factors(worker)
     worker.store.batch_is_exist.return_value = [0, 0, 1, 0, 0, 1]
 
     assert worker.lookup(13, [b"h0", b"h1", b"h2"]) == 12
