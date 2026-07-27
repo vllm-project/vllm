@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
+from typing import TYPE_CHECKING, cast
+
 import numpy as np
 import torch
 
@@ -14,8 +17,10 @@ from vllm.multimodal.utils import (
     set_mm_embedding_modality,
 )
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
-from vllm.v1.worker.gpu.mm.encoder_cudagraph import EncoderCudaGraph
 from vllm.v1.worker.utils import sanity_check_mm_encoder_outputs
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
 logger = init_logger(__name__)
 
@@ -38,11 +43,89 @@ class EncoderRunner:
         self.dtype = dtype
         self.device = device
         self.is_realtime = supports_realtime(model)
-        self.cudagraph = EncoderCudaGraph.create(vllm_config, model, device, dtype)
+        self.cudagraph_manager = self._create_cudagraph_manager(
+            vllm_config, model, device, dtype
+        )
 
         self.inputs_embeds = torch.zeros(
             max_num_tokens, hidden_size, dtype=dtype, device=device
         )
+
+    @staticmethod
+    def _create_cudagraph_manager(
+        vllm_config: VllmConfig | None,
+        model: SupportsMultiModal,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> "EncoderCudaGraphManager | None":
+        if vllm_config is None:
+            return None
+
+        from vllm.model_executor.models.interfaces import (
+            SupportsEncoderCudaGraph,
+            supports_encoder_cudagraph,
+        )
+
+        if (
+            vllm_config.model_config.enforce_eager
+            or not vllm_config.compilation_config.cudagraph_mm_encoder
+            or not supports_encoder_cudagraph(model)
+        ):
+            return None
+
+        from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
+
+        return EncoderCudaGraphManager(
+            vllm_config=vllm_config,
+            device=device,
+            dtype=dtype,
+            model=cast(SupportsEncoderCudaGraph, model),
+        )
+
+    def has_cudagraph(self) -> bool:
+        return self.cudagraph_manager is not None
+
+    @torch.inference_mode()
+    def profile_memory(self) -> int:
+        manager = self.cudagraph_manager
+        assert manager is not None
+        logger.info(
+            "Profiling encoder CUDA graph memory for %d graphs",
+            manager.get_num_graphs_to_capture(),
+        )
+        try:
+            gc.collect()
+            torch.accelerator.empty_cache()
+            memory_before = torch.accelerator.get_memory_info()[0]
+            self.capture()
+            memory_after = torch.accelerator.get_memory_info()[0]
+            memory_used = max(memory_before - memory_after, 0)
+        finally:
+            self.clear()
+            gc.collect()
+            torch.accelerator.empty_cache()
+
+        logger.info(
+            "Estimated encoder CUDA graph memory: %.2f GiB",
+            memory_used / (1 << 30),
+        )
+        return memory_used
+
+    @torch.inference_mode()
+    def capture(self) -> None:
+        manager = self.cudagraph_manager
+        assert manager is not None
+
+        from vllm.distributed.parallel_state import graph_capture
+        from vllm.platforms import current_platform
+
+        with graph_capture(device=self.device):
+            manager.capture(graph_pool=current_platform.graph_pool_handle())
+            torch.accelerator.synchronize()
+
+    def clear(self) -> None:
+        if self.cudagraph_manager is not None:
+            self.cudagraph_manager.clear()
 
     def prepare_mm_inputs(
         self, scheduled_encoder_inputs: dict[str, list[int]]
@@ -107,9 +190,10 @@ class EncoderRunner:
         for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
             mm_kwargs, device=self.device, pin_memory=True
         ):
+            manager = self.cudagraph_manager
             cudagraph_output = (
-                self.cudagraph.execute(modality, mm_kwargs_batch)
-                if self.cudagraph is not None
+                manager.execute(mm_kwargs_batch)
+                if manager is not None and manager.supports_modality(modality)
                 else None
             )
             batch_outputs = (
