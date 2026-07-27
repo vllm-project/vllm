@@ -504,7 +504,10 @@ def _shard_fp8_qkv_proj(
     would not be possible anyway).
     """
     assert num_kv_heads % tp_size == 0 or tp_size % num_kv_heads == 0, (
-        "TP size and the number of KV heads must divide one another."
+        f"tp_size ({tp_size}) and num_kv_heads ({num_kv_heads}) must divide "
+        "one another: either tp_size divides num_kv_heads (TP evenly splits "
+        "the KV heads across ranks) or num_kv_heads divides tp_size (each KV "
+        "head is evenly replicated across TP ranks)."
     )
 
     q_rows_per_group = (num_heads // num_kv_heads) * head_dim
