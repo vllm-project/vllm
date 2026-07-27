@@ -244,6 +244,7 @@ class ChannelWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
             output = output + bias
         return output.to(out_dtype).view(*output_shape)
 
+
 class BlockWiseTorchFP8ScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
     """FP8 block-scaled linear kernel using ``torch._scaled_mm``.
 
@@ -303,9 +304,22 @@ class BlockWiseTorchFP8ScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
         As: torch.Tensor,
         Bs: torch.Tensor,
     ) -> torch.Tensor:
-        # B is [N, K] from the checkpoint; B.t() is the [K, N] operand.
-        # Bs is [ceil(N/128), ceil(K/128)] from the checkpoint; Bs.t() gives
-        # the [ceil(K/128), ceil(N/128)] scale the op expects for B.t().
+        # torch._scaled_mm implemented by cuBLASLt requires the M dimension to be a
+        # multiple of 4; pad A (and its column-major scale) up and slice back.
+        # https://docs.nvidia.com/cuda/cublas/index.html?highlight=128%2520element%25201D%2520and%2520128x128%25202D#scaling-factors-layouts  # noqa: E501
+        M = A.shape[0]
+        pad = (-M) % 4 if current_platform.is_cuda() else 0
+        if pad:
+            Ap = A.new_empty((M + pad, A.shape[1]))
+            Ap[:M] = A
+            A = Ap
+            # As is column-major [M, ceil(K/128)] (stride (1, M)); build a padded
+            # column-major buffer and copy only the valid rows. Padded rows are left
+            # uninitialized — they don't affect the sliced-back output.
+            Asp = As.new_empty((As.shape[1], M + pad)).t()
+            Asp[:M] = As
+            As = Asp
+
         output = torch._scaled_mm(
             A,
             B.t(),
@@ -315,4 +329,6 @@ class BlockWiseTorchFP8ScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
         )
         if type(output) is tuple and len(output) == 2:
             output = output[0]
+        if pad:
+            output = output[:M, :]
         return output
