@@ -820,7 +820,16 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
                 for q, d in zip(queries, docs)
             ]
 
-        ctx.request = PoolingCompletionRequest(task="token_embed", input=prompts)
+        # Forward truncation from the real request: the base factory reads
+        # these off ctx.request, so omitting them here silently drops
+        # truncate_prompt_tokens for Jina rerank/score (unlike the embed and
+        # bi/cross-encoder paths, which read them from the real request).
+        ctx.request = PoolingCompletionRequest(
+            task="token_embed",
+            input=prompts,
+            truncate_prompt_tokens=request.truncate_prompt_tokens,
+            truncation_side=request.truncation_side,
+        )
         requests = PoolingIOProcessor.get_request_factory_online(self, ctx)
         ctx.request = request
         return requests
