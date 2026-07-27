@@ -782,6 +782,7 @@ class FlashAttentionImpl(AttentionImpl):
         self.attn_type = attn_type
         self.vllm_flash_attn_version = get_flash_attn_version(
             requires_alibi=alibi_slopes is not None,
+            requires_local_attention=sliding_window is not None,
             head_size=head_size,
             has_sinks=sinks is not None,
         )

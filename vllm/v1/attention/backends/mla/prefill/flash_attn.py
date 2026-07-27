@@ -288,26 +288,23 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
 
     @classmethod
     def supports_mla_dimensions(cls, mla_dimensions: MLADimensions) -> bool:
-        dims_deepseek = MLADimensions(
-            qk_nope_head_dim=128,
-            qk_rope_head_dim=64,
-            v_head_dim=128,
-        )
-        dims_glm = MLADimensions(
-            qk_nope_head_dim=192,
-            qk_rope_head_dim=64,
-            v_head_dim=256,
-        )
-        dims_mistral_s4 = MLADimensions(
-            qk_nope_head_dim=64,
-            qk_rope_head_dim=64,
-            v_head_dim=128,
-        )
-        fa_version = get_flash_attn_version()
-        if fa_version == 4:
-            return mla_dimensions in [dims_deepseek, dims_mistral_s4]
-        else:
-            return mla_dimensions in [dims_deepseek, dims_glm, dims_mistral_s4]
+        return mla_dimensions in [
+            MLADimensions(
+                qk_nope_head_dim=128,
+                qk_rope_head_dim=64,
+                v_head_dim=128,
+            ),
+            MLADimensions(
+                qk_nope_head_dim=192,
+                qk_rope_head_dim=64,
+                v_head_dim=256,
+            ),
+            MLADimensions(
+                qk_nope_head_dim=64,
+                qk_rope_head_dim=64,
+                v_head_dim=128,
+            ),
+        ]
 
     def __init__(
         self,

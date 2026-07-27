@@ -1358,6 +1358,10 @@ def main():
                             profile_memory=args.profile_memory,
                             warmup_ms=args.warmup_ms,
                             prefill_backend=pb,
+                            kv_lora_rank=args.kv_lora_rank,
+                            qk_nope_head_dim=args.qk_nope_head_dim,
+                            qk_rope_head_dim=args.qk_rope_head_dim,
+                            v_head_dim=args.v_head_dim,
                         )
 
                         result = run_benchmark(config)
