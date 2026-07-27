@@ -752,18 +752,12 @@ class MoERunner(MoERunnerInterface):
             assert len(result) == 2
             hidden_states, router_logits = result
 
-        # NOTE: Similar with DP, PCP also needs dispatch and combine. For
-        # simplicity, AgRsAll2All was added separately for PCP here. Maybe
-        # we should modify All2AllManager abstraction to better support PCP.
-        if self.moe_config.pcp_size > 1:
-            hidden_states = get_pcp_group().all_gather(
-                hidden_states,
-                dim=0,
-            )
-            router_logits = get_pcp_group().all_gather(
-                router_logits,
-                dim=0,
-            )
+        if (
+            self.moe_config.pcp_size > 1
+            and not self.moe_config.moe_parallel_config.use_all2all_kernels
+        ):
+            hidden_states = get_pcp_group().all_gather(hidden_states, dim=0)
+            router_logits = get_pcp_group().all_gather(router_logits, dim=0)
 
         return hidden_states, router_logits
 
@@ -777,11 +771,11 @@ class MoERunner(MoERunnerInterface):
                 hidden_states, self.moe_config.is_sequence_parallel
             )
 
-        if self.moe_config.pcp_size > 1:
-            hidden_states = get_pcp_group().reduce_scatter(
-                hidden_states,
-                dim=0,
-            )
+        if (
+            self.moe_config.pcp_size > 1
+            and not self.moe_config.moe_parallel_config.use_all2all_kernels
+        ):
+            hidden_states = get_pcp_group().reduce_scatter(hidden_states, dim=0)
 
         if self.shared_experts is not None:
             assert shared_output is not None

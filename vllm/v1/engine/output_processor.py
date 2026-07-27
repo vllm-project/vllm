@@ -172,6 +172,7 @@ class RequestState:
         self.is_prefilling = True
         self.queue = queue
         self.num_cached_tokens = 0
+        self.num_cache_creation_tokens = 0
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
@@ -223,6 +224,9 @@ class RequestState:
             if not sampling_params.detokenize:
                 tokenizer = None
             output_kind = sampling_params.output_kind
+            if sampling_params.stream_interval is not None:
+                # clamp to the engine-level stream interval.
+                stream_interval = max(sampling_params.stream_interval, stream_interval)
             logprobs_processor = LogprobsProcessor.from_new_request(
                 tokenizer=tokenizer,
                 request=request,
@@ -377,6 +381,7 @@ class RequestState:
             kv_transfer_params=kv_transfer_params,
             ec_transfer_params=ec_transfer_params,
             num_cached_tokens=self.num_cached_tokens,
+            num_cache_creation_tokens=self.num_cache_creation_tokens,
             metrics=self.stats,
         )
 
@@ -638,6 +643,9 @@ class OutputProcessor:
                 if engine_core_output.prefill_stats is not None:
                     req_state.num_cached_tokens = (
                         engine_core_output.prefill_stats.num_cached_tokens
+                    )
+                    req_state.num_cache_creation_tokens = (
+                        engine_core_output.prefill_stats.num_cache_creation_tokens
                     )
                 req_state.is_prefilling = False
 
