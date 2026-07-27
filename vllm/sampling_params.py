@@ -794,7 +794,6 @@ class SamplingParams(
             )
 
     def _validate_stop_token_ids(self, model_config: ModelConfig) -> None:
-        """Validate stop_token_ids are within vocabulary range."""
         if not self.stop_token_ids:
             return
 

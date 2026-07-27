@@ -933,5 +933,4 @@ def sample_recovered_tokens_kernel(
             max_val = local_max
             recovered_id = v + local_id
 
-    recovered_id = tl.minimum(recovered_id, vocab_size - 1)
     tl.store(output_token_ids_ptr + token_idx, recovered_id)
