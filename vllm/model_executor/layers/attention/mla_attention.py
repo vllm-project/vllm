@@ -2247,21 +2247,21 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
 
             # Extract kv_c_normed from workspace
             kv_c_normed = workspace[:toks][..., : self.kv_lora_rank]
-            # When FP8 weights are used without FP8 prefill, kv_b_proj expects
-            # model dtype input and will quantize internally.
-            # For quantized layers (AWQ/GPTQ) that lack a .weight attribute,
-            # use params_dtype which is the expected input dtype.
+            # Determine the expected input dtype for kv_b_proj.
+            # When weights have been repacked into a non-floating-point
+            # format (e.g. int32 for FP8 Marlin, uint8 for NVFP4), fall
+            # back to params_dtype which is the model's compute dtype.
             _kv_b_proj_w_dtype = (
                 self.kv_b_proj.weight.dtype
                 if hasattr(self.kv_b_proj, "weight")
+                and self.kv_b_proj.weight.dtype.is_floating_point
                 else self.kv_b_proj.params_dtype
             )
-            # For NVFP4, weights are packed uint8 — keep input in model dtype
-            # since the NVFP4 linear layer quantizes internally.
-            if (
-                use_fp8_prefill or _kv_b_proj_w_dtype != current_platform.fp8_dtype()
-            ) and _kv_b_proj_w_dtype != torch.uint8:
-                kv_c_normed = kv_c_normed.to(self.kv_b_proj.weight.dtype)
+            # When FP8 weights are used without FP8 prefill, kv_b_proj
+            # quantizes internally — skip the cast so input stays in
+            # model dtype.
+            if use_fp8_prefill or _kv_b_proj_w_dtype != current_platform.fp8_dtype():
+                kv_c_normed = kv_c_normed.to(_kv_b_proj_w_dtype)
 
             k_pe = workspace[:toks][..., self.kv_lora_rank :].unsqueeze(1)
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
@@ -2417,11 +2417,10 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             kv_b_proj_w_dtype = (
                 self.kv_b_proj.weight.dtype
                 if hasattr(self.kv_b_proj, "weight")
+                and self.kv_b_proj.weight.dtype.is_floating_point
                 else self.kv_b_proj.params_dtype
             )
-            if (
-                use_fp8_prefill or kv_b_proj_w_dtype != current_platform.fp8_dtype()
-            ) and kv_b_proj_w_dtype != torch.uint8:
+            if use_fp8_prefill or kv_b_proj_w_dtype != current_platform.fp8_dtype():
                 kv_c_normed = kv_c_normed.to(kv_b_proj_w_dtype)
 
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
