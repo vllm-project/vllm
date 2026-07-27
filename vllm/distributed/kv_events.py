@@ -44,8 +44,7 @@ class KVCacheEvent(
 
 MEDIUM_GPU = "GPU"
 MEDIUM_CPU = "CPU"
-MEDIUM_FS = "FS"
-MEDIUM_OBJ = "OBJ"
+MEDIUM_STORAGE = "STORAGE"
 
 
 class BlockStored(KVCacheEvent):
@@ -74,6 +73,8 @@ class BlockStored(KVCacheEvent):
     # filter groups as they are learned. Remove events only need group_idx+hash.
     kv_cache_spec_kind: str | None = None
     kv_cache_spec_sliding_window: int | None = None
+    locality: str | None = None
+    """LOCAL or REMOTE relative to the publisher; None means unspecified."""
 
     def __hash__(self) -> int:
         return hash(
@@ -88,6 +89,7 @@ class BlockStored(KVCacheEvent):
                 self.group_idx,
                 self.kv_cache_spec_kind,
                 self.kv_cache_spec_sliding_window,
+                self.locality,
             )
         )
 
@@ -96,6 +98,8 @@ class BlockRemoved(KVCacheEvent):
     block_hashes: list[ExternalBlockHash]
     medium: str | None
     group_idx: int | None = None
+    locality: str | None = None
+    """LOCAL or REMOTE relative to the publisher; None means unspecified."""
 
     def __hash__(self) -> int:
         return hash(
@@ -103,6 +107,7 @@ class BlockRemoved(KVCacheEvent):
                 tuple(self.block_hashes),
                 self.medium,
                 self.group_idx,
+                self.locality,
             )
         )
 

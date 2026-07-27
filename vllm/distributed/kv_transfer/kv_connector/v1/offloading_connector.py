@@ -23,6 +23,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
+    build_offloading_config,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
     OffloadPromMetrics,
@@ -56,14 +59,17 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     ):
         super().__init__(vllm_config, role, kv_cache_config)
 
-        spec = OffloadingSpecFactory.create_spec(vllm_config, kv_cache_config)
+        offloading_config = build_offloading_config(vllm_config, kv_cache_config)
+        spec = OffloadingSpecFactory.create_spec(offloading_config)
 
         self.connector_scheduler: OffloadingConnectorScheduler | None = None
         self.connector_worker: OffloadingConnectorWorker | None = None
         if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler = OffloadingConnectorScheduler(spec)
+            self.connector_scheduler = OffloadingConnectorScheduler(
+                spec, vllm_config, kv_cache_config
+            )
         elif role == KVConnectorRole.WORKER:
-            self.connector_worker = OffloadingConnectorWorker(spec)
+            self.connector_worker = OffloadingConnectorWorker(spec, kv_cache_config)
 
     def shutdown(self) -> None:
         if self.connector_worker is not None:
