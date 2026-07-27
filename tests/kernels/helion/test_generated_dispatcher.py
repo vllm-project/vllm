@@ -17,6 +17,12 @@ from vllm.kernels.helion_generated import (
 from vllm.kernels.helion_generated.manifests import (
     GENERATED_KERNEL_MANIFESTS,
 )
+from vllm.kernels.helion_generated.ops import (
+    fused_qk_norm_rope,
+    per_token_group_fp8_quant,
+    rms_norm_per_block_quant,
+    silu_and_mul_per_block_quant,
+)
 
 
 def test_generator_registry_covers_source_kernels():
@@ -35,15 +41,18 @@ def test_generator_registry_covers_source_kernels():
 
 
 def test_exact_matching_and_token_bucketing():
-    dispatcher._select_module.cache_clear()
-    assert dispatcher._select_module("nvidia_h100", 2048, 128, 1).endswith("_t1")
-    assert dispatcher._select_module("nvidia_h100", 2048, 128, 1).endswith("_t1")
-    assert dispatcher._select_module.cache_info().hits == 1
-    assert dispatcher._select_module("nvidia_h100", 2048, 128, 3).endswith("_t4")
-    assert dispatcher._select_module("nvidia_h100", 2048, 128, 8193).endswith("_t8192")
-    assert dispatcher._select_module("nvidia_h100", 2049, 128, 1) is None
-    assert dispatcher._select_module("nvidia_h100", 2048, 64, 1) is None
-    assert dispatcher._select_module("nvidia_h200", 2048, 128, 1) is None
+    assert per_token_group_fp8_quant._select_module(
+        "nvidia_h100", 2048, 128, 1
+    ).endswith("_t1")
+    assert per_token_group_fp8_quant._select_module(
+        "nvidia_h100", 2048, 128, 3
+    ).endswith("_t4")
+    assert per_token_group_fp8_quant._select_module(
+        "nvidia_h100", 2048, 128, 8193
+    ).endswith("_t8192")
+    assert per_token_group_fp8_quant._select_module("nvidia_h100", 2049, 128, 1) is None
+    assert per_token_group_fp8_quant._select_module("nvidia_h100", 2048, 64, 1) is None
+    assert per_token_group_fp8_quant._select_module("nvidia_h200", 2048, 128, 1) is None
 
 
 def test_fusion_kernel_token_bucketing():
@@ -73,15 +82,17 @@ def test_launcher_import_is_cached(monkeypatch):
         return real_import(name)
 
     monkeypatch.setattr(dispatcher.importlib, "import_module", counting_import)
-    module = dispatcher._select_module("nvidia_h100", 2048, 128, 2)
+    module = per_token_group_fp8_quant._select_module("nvidia_h100", 2048, 128, 2)
     assert module is not None
     assert dispatcher._load_launcher(module) is dispatcher._load_launcher(module)
     assert calls == 1
 
 
 def test_warmup_bucket_selection(monkeypatch):
-    monkeypatch.setattr(dispatcher, "_runtime_platform", lambda: "nvidia_h100")
-    assert dispatcher.selected_token_buckets([1, 3, 64, 65, 9000]) == (
+    monkeypatch.setattr(
+        per_token_group_fp8_quant, "_runtime_platform", lambda: "nvidia_h100"
+    )
+    assert per_token_group_fp8_quant.selected_token_buckets([1, 3, 64, 65, 9000]) == (
         1,
         4,
         64,
@@ -92,27 +103,40 @@ def test_warmup_bucket_selection(monkeypatch):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
 def test_layout_matching(monkeypatch):
-    monkeypatch.setattr(dispatcher, "_runtime_platform", lambda: "nvidia_h100")
+    monkeypatch.setattr(
+        per_token_group_fp8_quant, "_runtime_platform", lambda: "nvidia_h100"
+    )
     x = torch.empty((5, 2048), device="cuda", dtype=torch.bfloat16)
     q = torch.empty_like(x, dtype=torch.float8_e4m3fn)
     row = torch.empty((5, 16), device="cuda", dtype=torch.float32)
     column = torch.empty((16, 5), device="cuda", dtype=torch.float32).t()
     tma = torch.empty_strided((5, 16), (1, 8), device="cuda", dtype=torch.float32)
 
-    assert dispatcher._eligible_module(x, q, row, 128, False, False)
-    assert dispatcher._eligible_module(x, q, column, 128, True, False)
-    assert dispatcher._eligible_module(x, q, tma, 128, True, True)
-    assert dispatcher._eligible_module(x, q, row, 128, True, False) is None
-    assert dispatcher._eligible_module(x, q, row, 64, False, False) is None
+    assert per_token_group_fp8_quant._eligible_module(x, q, row, 128, False, False)
+    assert per_token_group_fp8_quant._eligible_module(x, q, column, 128, True, False)
+    assert per_token_group_fp8_quant._eligible_module(x, q, tma, 128, True, True)
     assert (
-        dispatcher._eligible_module(x[:, :1024], q[:, :1024], row, 128, False, False)
+        per_token_group_fp8_quant._eligible_module(x, q, row, 128, True, False) is None
+    )
+    assert (
+        per_token_group_fp8_quant._eligible_module(x, q, row, 64, False, False) is None
+    )
+    assert (
+        per_token_group_fp8_quant._eligible_module(
+            x[:, :1024], q[:, :1024], row, 128, False, False
+        )
         is None
     )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
 def test_fusion_kernel_exact_matching(monkeypatch):
-    monkeypatch.setattr(dispatcher, "_runtime_platform", lambda: "nvidia_h100")
+    for module in (
+        fused_qk_norm_rope,
+        rms_norm_per_block_quant,
+        silu_and_mul_per_block_quant,
+    ):
+        monkeypatch.setattr(module, "_runtime_platform", lambda: "nvidia_h100")
     device = "cuda"
 
     input = torch.empty((5, 2048), device=device, dtype=torch.bfloat16)
@@ -120,11 +144,11 @@ def test_fusion_kernel_exact_matching(monkeypatch):
     weight = torch.empty(2048, device=device, dtype=input.dtype)
     scale = torch.empty((16, 5), device=device, dtype=torch.float32).t()
     residual = torch.empty_like(input)
-    assert dispatcher._eligible_rms_norm_per_block_quant(
+    assert rms_norm_per_block_quant._eligible_module(
         result, input, weight, scale, None, None, 128, True
     )
     assert (
-        dispatcher._eligible_rms_norm_per_block_quant(
+        rms_norm_per_block_quant._eligible_module(
             result, input, weight, scale, None, residual, 128, True
         )
         is None
@@ -133,11 +157,11 @@ def test_fusion_kernel_exact_matching(monkeypatch):
     silu_input = torch.empty((5, 12288), device=device, dtype=torch.bfloat16)
     silu_out = torch.empty((5, 6144), device=device, dtype=torch.float8_e4m3fn)
     silu_scales = torch.empty((48, 5), device=device, dtype=torch.float32).t()
-    assert dispatcher._eligible_silu_and_mul_per_block_quant(
+    assert silu_and_mul_per_block_quant._eligible_module(
         silu_out, silu_input, silu_scales, 128, None, True
     )
     assert (
-        dispatcher._eligible_silu_and_mul_per_block_quant(
+        silu_and_mul_per_block_quant._eligible_module(
             silu_out,
             silu_input,
             torch.empty_like(silu_scales.contiguous()),
@@ -153,11 +177,11 @@ def test_fusion_kernel_exact_matching(monkeypatch):
     k_weight = torch.empty_like(q_weight)
     cache = torch.empty((40960, 128), device=device, dtype=qkv.dtype)
     positions = torch.arange(5, device=device, dtype=torch.int64)
-    assert dispatcher._eligible_fused_qk_norm_rope(
+    assert fused_qk_norm_rope._eligible_module(
         qkv, 16, 8, 8, 128, q_weight, k_weight, cache, True, positions, -1
     )
     assert (
-        dispatcher._eligible_fused_qk_norm_rope(
+        fused_qk_norm_rope._eligible_module(
             qkv, 16, 8, 8, 128, q_weight, k_weight, cache, False, positions, -1
         )
         is None
@@ -175,18 +199,22 @@ def test_unsupported_case_uses_native_fallback(
         nonlocal calls
         calls += 1
 
-    monkeypatch.setattr(dispatcher, "_runtime_platform", lambda: platform)
-    monkeypatch.setattr(dispatcher, "_native_fallback", fallback)
+    monkeypatch.setattr(
+        per_token_group_fp8_quant, "_runtime_platform", lambda: platform
+    )
+    monkeypatch.setattr(per_token_group_fp8_quant, "_native_fallback", fallback)
     x = torch.empty((2, hidden_size), device="cuda", dtype=torch.bfloat16)
     q = torch.empty_like(x, dtype=torch.float8_e4m3fn)
     s = torch.empty((2, hidden_size // 128), device="cuda", dtype=torch.float32)
-    dispatcher.per_token_group_fp8_quant(x, q, s, 128, 1e-10, -448, 448, False)
+    per_token_group_fp8_quant.per_token_group_fp8_quant(
+        x, q, s, 128, 1e-10, -448, 448, False
+    )
     assert calls == 1
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
 def test_generated_execution_does_not_import_helion(monkeypatch):
-    module_path = dispatcher._select_module("nvidia_h100", 2048, 128, 2)
+    module_path = per_token_group_fp8_quant._select_module("nvidia_h100", 2048, 128, 2)
     assert module_path is not None
     sys.modules.pop(module_path, None)
     real_import = builtins.__import__
@@ -305,9 +333,7 @@ def test_generated_fusion_op_map_preserves_mutations():
 
 def test_generated_fusion_warmup_case_selection(monkeypatch):
     monkeypatch.setattr(dispatcher, "_runtime_platform", lambda: "nvidia_h100")
-    cases = dispatcher._selected_fusion_cases(
-        "silu_and_mul_per_block_quant", [3, 20000]
-    )
+    cases = dispatcher._selected_cases("silu_and_mul_per_block_quant", [3, 20000])
     assert (6144, 128, 4) in cases
     assert (6144, 128, 16384) in cases
     assert len(cases) == 6
@@ -315,17 +341,19 @@ def test_generated_fusion_warmup_case_selection(monkeypatch):
 
 def test_warm_up_helion_kernels_combines_generated_warmups(monkeypatch):
     calls = []
-    monkeypatch.setattr(
-        dispatcher,
-        "warmup_per_token_group_fp8_quant",
-        lambda token_counts, device: calls.append((tuple(token_counts), device)),
+    modules = (
+        fused_qk_norm_rope,
+        per_token_group_fp8_quant,
+        rms_norm_per_block_quant,
+        silu_and_mul_per_block_quant,
     )
-    monkeypatch.setattr(
-        dispatcher,
-        "warmup_generated_fusion_kernels",
-        lambda token_counts, device: calls.append((tuple(token_counts), device)),
-    )
+    for module in modules:
+        monkeypatch.setattr(
+            module,
+            "warmup",
+            lambda token_counts, device: calls.append((tuple(token_counts), device)),
+        )
 
     warm_up_helion_kernels(iter([3, 17]), "cuda:1")
 
-    assert calls == [((3, 17), "cuda:1"), ((3, 17), "cuda:1")]
+    assert calls == [((3, 17), "cuda:1")] * len(modules)

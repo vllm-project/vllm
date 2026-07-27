@@ -710,8 +710,8 @@ def per_token_group_quant_fp8_helion_generated(
     while a CUDA graph is capturing; the eager router that decides when to call
     it lives in `input_quant_fp8.QuantFP8.forward_cuda`.
     """
-    # Import registers torch.ops.vllm_helion_generated.*.
-    import vllm.kernels.helion_generated.dispatcher  # noqa: F401
+    # Import registers torch.ops.vllm_helion_generated.per_token_group_fp8_quant.
+    import vllm.kernels.helion_generated.ops.per_token_group_fp8_quant  # noqa: F401
 
     if use_ue8m0 is None:
         use_ue8m0 = is_deep_gemm_e8m0_used()

@@ -82,9 +82,9 @@ def test_generated_ue8m0_matches_native():
 
 def test_generated_runs_inside_cuda_graph_capture():
     """A warmed generated launcher can be captured and replayed."""
-    from vllm.kernels.helion_generated.dispatcher import (
-        _runtime_platform,
-        warmup_per_token_group_fp8_quant,
+    from vllm.kernels.helion_generated.dispatcher import _runtime_platform
+    from vllm.kernels.helion_generated.ops.per_token_group_fp8_quant import (
+        warmup,
     )
 
     if _runtime_platform() not in {"nvidia_h100", "nvidia_b200"}:
@@ -95,7 +95,7 @@ def test_generated_runs_inside_cuda_graph_capture():
     native_q, native_s = fp8_utils.per_token_group_quant_fp8(
         x, group_size=_GROUP_SIZE, use_ue8m0=False
     )
-    warmup_per_token_group_fp8_quant([64])
+    warmup([64])
 
     torch.accelerator.synchronize()
     graph = torch.cuda.CUDAGraph()

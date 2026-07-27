@@ -15,11 +15,6 @@ def warm_up_helion_kernels(
     token_counts: Iterable[int],
     device: torch.device | str = "cuda",
 ) -> None:
-    from vllm.kernels.helion_generated.dispatcher import (
-        warmup_generated_fusion_kernels,
-        warmup_per_token_group_fp8_quant,
-    )
+    from vllm.kernels.helion_generated.ops import warm_up_all_ops
 
-    token_counts = tuple(token_counts)
-    warmup_per_token_group_fp8_quant(token_counts, device)
-    warmup_generated_fusion_kernels(token_counts, device)
+    warm_up_all_ops(token_counts, device)
