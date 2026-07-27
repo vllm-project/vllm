@@ -670,6 +670,51 @@ class precompiled_wheel_utils:
         return None
 
     @staticmethod
+    def warn_if_rocm_torch_version_mismatch(
+        wheels: list[dict], repo_url: str, arch: str
+    ) -> None:
+        """Warn if installed torch differs from the custom ROCm build on
+        wheels.vllm.ai and suggest the correct install command."""
+        try:
+            installed = torch.__version__
+        except Exception:
+            return
+
+        def _wheel_version(pkg: str) -> str | None:
+            for w in wheels:
+                if w.get("package_name") == pkg and arch in w.get("platform_tag", ""):
+                    v = w["version"]
+                    if w.get("variant") and "+" not in v:
+                        v = f"{v}+{w['variant']}"
+                    return v
+            return None
+
+        expected = _wheel_version("torch")
+        if expected is None or installed == expected:
+            return
+
+        pkgs = f"torch=={expected}"
+        triton_ver = _wheel_version("triton")
+        if triton_ver:
+            pkgs += f" triton=={triton_ver}"
+
+        logger.warning(
+            "Installed PyTorch %s does not match the custom build %s "
+            "shipped with vLLM ROCm wheels. The ABI may differ from "
+            "official releases. If you hit extension load errors, "
+            "reinstall from the vLLM index:\n"
+            "  pip install %s --extra-index-url %s\n"
+            "  uv pip install %s --extra-index-url %s "
+            "--index-strategy unsafe-best-match",
+            installed,
+            expected,
+            pkgs,
+            repo_url,
+            pkgs,
+            repo_url,
+        )
+
+    @staticmethod
     def find_local_rocm_wheel() -> str | None:
         """Search for a local vllm wheel in common locations."""
         import glob
@@ -745,6 +790,9 @@ class precompiled_wheel_utils:
             try:
                 wheels, repo_url = precompiled_wheel_utils.fetch_metadata_for_variant(
                     commit, variant, rocm=True
+                )
+                precompiled_wheel_utils.warn_if_rocm_torch_version_mismatch(
+                    wheels, repo_url, arch
                 )
             except Exception as e:
                 logger.warning(
