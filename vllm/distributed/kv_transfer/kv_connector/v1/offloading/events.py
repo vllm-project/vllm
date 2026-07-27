@@ -19,7 +19,13 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
+from vllm.distributed.kv_events import (
+    MEDIUM_CPU,
+    MEDIUM_STORAGE,
+    BlockRemoved,
+    BlockStored,
+    KVCacheEvent,
+)
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
@@ -28,6 +34,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_sliding_window,
 )
 from vllm.v1.kv_offload.base import (
+    Medium,
     OffloadingEvent,
     OffloadingKVEventsConfig,
     OffloadKey,
@@ -42,6 +49,11 @@ if TYPE_CHECKING:
     )
 
 logger = init_logger(__name__)
+
+_MEDIUM_TO_EVENT_STR: dict[Medium, str] = {
+    Medium.CPU: MEDIUM_CPU,
+    Medium.STORAGE: MEDIUM_STORAGE,
+}
 
 
 class OffloadingEventGroupSpec(NamedTuple):
@@ -218,7 +230,7 @@ class OffloadingEventsTracker:
     def _placeholder_stored(
         self,
         key: OffloadKey,
-        medium: str,
+        medium: Medium,
         locality: str | None,
     ) -> BlockStored:
         return BlockStored(
@@ -229,7 +241,7 @@ class OffloadingEventsTracker:
             token_ids=[],
             lora_id=None,
             block_size=0,
-            medium=medium,
+            medium=_MEDIUM_TO_EVENT_STR[medium],
             lora_name=None,
             group_idx=get_offload_group_idx(key),
             locality=locality,
@@ -267,7 +279,7 @@ class OffloadingEventsTracker:
                 token_ids=list(meta.token_ids),
                 block_size=meta.block_size,
                 lora_id=meta.lora_id,
-                medium=event.medium,
+                medium=_MEDIUM_TO_EVENT_STR[event.medium],
                 lora_name=meta.lora_name,
                 extra_keys=(
                     list(meta.extra_keys) if meta.extra_keys is not None else None
@@ -308,7 +320,7 @@ class OffloadingEventsTracker:
         for group_idx, hashes in by_group.items():
             yield BlockRemoved(
                 block_hashes=hashes,
-                medium=event.medium,
+                medium=_MEDIUM_TO_EVENT_STR[event.medium],
                 group_idx=group_idx,
                 locality=locality,
             )
