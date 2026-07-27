@@ -102,18 +102,20 @@ compiled-kernel cache. A restore executes the process images it finds there, so
 anyone who can write to that path can run code in the next server that reads
 it.
 
-Do not share one snapshot volume across containers that do not already trust
-each other. Containers in the default image run as the same user, so a
-compromised container that mounts the volume can replace the images that every
-later container restores, and that survives the container replacement which
-would otherwise clear it. Give each trust domain its own volume, or mount the
-volume read-only in the containers that only restore.
+Give each trust domain its own snapshot volume. The default image runs as
+root, so containers that share one volume also share write access to it, and a
+compromised container can replace the images that every later container
+restores. That outlives the container which wrote it, and container
+replacement would otherwise clear it. The volume has to stay writable, because
+a restore takes a lock file inside it, so read-only mounting is not an
+alternative.
 
-vLLM refuses to create or restore a snapshot when its directory or the root
-above it is owned by another user or is group- or world-writable, and falls
-back to a cold start. That check covers a loosened or foreign-owned directory.
-It cannot cover a writer running as the same user, which is why the separation
-above matters.
+vLLM refuses to create or restore a snapshot under a world-writable directory
+and falls back to a cold start. That catches a volume mounted or pre-created
+at 0777. It is not a general integrity check, and it deliberately allows
+group-writable and root-owned directories, because arbitrary-UID pods need
+those. Anyone inside the trust domain of the volume can still replace the
+images, which is why the separation above is the real control.
 
 ## Build image from source
 

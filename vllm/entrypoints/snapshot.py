@@ -1277,8 +1277,8 @@ def create_snapshot(force: bool = False, dry_run: bool = False) -> None:
         unsafe = _trust_miss(path)
         if unsafe:
             raise RuntimeError(
-                f"refusing to write a snapshot under a directory that another "
-                f"user could replace ({unsafe}): {path}"
+                f"refusing to write a snapshot under a world-writable "
+                f"directory ({unsafe}): {path}"
             )
     if dry_run:
         _print_dry_run(key, directory)
@@ -1351,21 +1351,25 @@ def _trust_miss(directory: Path) -> str | None:
     """Reason to distrust a snapshot directory, or None.
 
     criu restore executes the images, so the snapshot directory is trusted
-    input, in the same class as the weights directory. This rejects one that
-    a second user could have written. The 0700 mode from creation only holds
-    while nothing loosens it. The root is created with exist_ok, so a
-    pre-existing root keeps whatever mode it arrived with. A replaceable
-    parent defeats a check on the directory alone, so the root is checked
-    too. Same-uid writers stay out of scope. No check here can cover them,
-    because the reference value would live where they can edit it.
+    input. World-writable is the one unambiguous signal: it is never a
+    deliberate layout, and it means any local user can swap the images.
+
+    Group ownership deliberately is not checked. The image chmods its caches
+    g+rwX so that an arbitrary-UID OpenShift pod can use them, and the
+    OpenShift example in the deployment docs runs with fsGroup 0, so
+    group-writable is a supported layout here rather than evidence of
+    tampering. For the same reason a foreign owner is not checked: those pods
+    run as an arbitrary UID against a root-owned volume.
+
+    That leaves every same-trust-domain writer in scope, and no check local to
+    the volume can cover them, because the reference value would live where
+    they can edit it. The deployment docs carry that boundary.
     """
     try:
         info = directory.stat()
     except OSError:
         return f"trust.stat.{directory.name}"
-    if info.st_uid != os.geteuid():
-        return f"trust.owner.{directory.name}"
-    if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+    if info.st_mode & stat.S_IWOTH:
         return f"trust.mode.{directory.name}"
     return None
 
@@ -1666,6 +1670,15 @@ def _restore_serve() -> None:
             _diagnose_miss(root, key_obj, key, live_env),
         )
         return
+    # Before _acquire_lock, which opens a lock file inside root: on a
+    # world-writable root that name can be a planted symlink, and this
+    # process is root in the default image.
+    unsafe = _trust_miss(root)
+    if unsafe:
+        logger.warning(
+            "snapshot restore refused, %s is world-writable (%s)", root, unsafe
+        )
+        return
     lock = _acquire_lock(root, key)
     try:
         manifest = read_manifest(directory)
@@ -1674,8 +1687,7 @@ def _restore_serve() -> None:
             # A trust refusal is an operator problem, not a cache miss.
             if miss.startswith("trust."):
                 logger.warning(
-                    "snapshot restore refused, %s is writable by another user "
-                    "or not owned by this one (%s)",
+                    "snapshot restore refused, %s is world-writable (%s)",
                     directory,
                     miss,
                 )
