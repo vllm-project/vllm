@@ -581,12 +581,11 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
 
             gated_norm_shapes.add((num_v_heads // layer.tp_size, head_v_dim))
 
-        match_aiter_quant_op = True
-        register_hip_patterns = True
+        # RDNA4 uses native quant ops and supports only Triton replacements.
+        match_aiter_quant_op = not rocm_aiter_ops.is_rdna_aiter_enabled()
         if rocm_aiter_ops.is_rdna_aiter_enabled():
             # RDNA4 uses native quant ops and supports only Triton replacements.
             match_aiter_quant_op = False
-            register_hip_patterns = False
 
         # Make sure fused add patterns are before simple rms norm,
         # as the latter is a subset of the former in torch ops.
@@ -627,7 +626,7 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             match_aiter_quant_options = (
                 [True, False] if is_quant_fp8_enabled else [False]
             )
-            if not register_hip_patterns:
+            if not match_aiter_quant_op:
                 match_aiter_quant_options = []
 
             for match_aiter_quant in match_aiter_quant_options:
