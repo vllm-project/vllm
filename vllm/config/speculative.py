@@ -45,6 +45,7 @@ MTPModelTypes = Literal[
     "nemotron_h_mtp",
     "exaone_moe_mtp",
     "exaone4_5_mtp",
+    "qwen3_mtp",
     "qwen3_next_mtp",
     "qwen3_5_mtp",
     "longcat_flash_mtp",
@@ -504,6 +505,16 @@ class SpeculativeConfig:
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["NemotronHMTPModel"]}
             )
+
+        if (
+            hf_config.model_type == "qwen3"
+            and initial_architecture == "Qwen3ForCausalLM"
+            and getattr(hf_config, "num_nextn_predict_layers", 0) > 0
+        ):
+            hf_config.model_type = "qwen3_mtp"
+        if hf_config.model_type == "qwen3_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update({"n_predict": n_predict, "architectures": ["Qwen3MTP"]})
 
         if hf_config.model_type == "qwen3_next":
             hf_config.model_type = "qwen3_next_mtp"
