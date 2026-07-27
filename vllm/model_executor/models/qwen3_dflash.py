@@ -571,15 +571,17 @@ class DFlashQwen3Model(nn.Module):
         return all_k, all_v
 
     def _normalize_context_k(self, all_k: torch.Tensor) -> torch.Tensor:
-        # --- Grouped RMSNorm K across all layers ([L, num_ctx, nkv, hd]) ---
-        # The weight is selected per layer by the outermost (layer) index.
+        # The vLLM RMSNorm kernel accepts one 1-D weight vector and reuses it
+        # for every input row. Normalize each draft layer separately so its
+        # own K-norm weight is applied.
         all_k_normed = torch.empty_like(all_k)
-        ops.rms_norm(
-            all_k_normed,
-            all_k,
-            self._k_norm_weights,
-            self._rms_norm_eps,
-        )
+        for layer_idx, weight in enumerate(self._k_norm_weights):
+            ops.rms_norm(
+                all_k_normed[layer_idx],
+                all_k[layer_idx],
+                weight,
+                self._rms_norm_eps,
+            )
         return all_k_normed
 
     def precompute_and_store_context_kv(
