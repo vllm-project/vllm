@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+
 import pytest
 from transformers import AutoTokenizer
 
@@ -64,17 +66,18 @@ def test_extract_tool_calls_no_json(parser):
 
 
 def test_extract_tool_calls_invalid_json(parser):
-    # Malformed params after a valid "name": the engine emits the call
-    # with the verbatim malformed span (streaming has already sent the
-    # name and cannot retract it; legacy non-streaming fell back to
-    # content while legacy streaming dropped everything).
+    # Malformed params after a valid "name": streaming has already sent
+    # the name and cannot retract it, so the call is still reported — but
+    # the arguments are cut back to the longest closeable prefix and
+    # closed, so a client never receives invalid JSON.
     model_output = '{"name": "invalidTool", "parameters": {invalid json}'
     result = parser.extract_tool_calls(model_output, None)
 
     assert result.tools_called is True
     assert len(result.tool_calls) == 1
     assert result.tool_calls[0].function.name == "invalidTool"
-    assert result.tool_calls[0].function.arguments == "{invalid json}"
+    assert result.tool_calls[0].function.arguments == "{}"
+    assert json.loads(result.tool_calls[0].function.arguments) == {}
 
 
 def test_extract_tool_calls_with_arguments_key(parser):
@@ -247,12 +250,12 @@ def test_extract_tool_calls_missing_name_key(parser):
 
 
 def test_extract_tool_calls_missing_parameters_and_arguments_key(parser):
-    # A "name"-only envelope is a call with empty arguments (legacy
-    # rejected it via an accidental KeyError fallback).
+    # A "name"-only envelope carries no parameters/arguments key, so it is
+    # not a tool call and comes back as content — matching legacy, which
+    # raised KeyError and fell back to content.
     model_output = '{"name": "toolWithoutParams"}'
     result = parser.extract_tool_calls(model_output, None)
 
-    assert result.tools_called is True
-    assert len(result.tool_calls) == 1
-    assert result.tool_calls[0].function.name == "toolWithoutParams"
-    assert result.tool_calls[0].function.arguments == "{}"
+    assert result.tools_called is False
+    assert len(result.tool_calls) == 0
+    assert result.content == model_output
