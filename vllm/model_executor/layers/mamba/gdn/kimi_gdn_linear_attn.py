@@ -300,7 +300,11 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                 quant_config=self.quant_config,
                 prefix=f"{prefix}.g_b_proj",
             )
-        self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
+        self.o_norm = FusedRMSNormGated(
+            self.head_dim,
+            activation="sigmoid",
+            enforce_enable=current_platform.is_rocm(),
+        )
         self.o_proj = RowParallelLinear(
             self.projection_size,
             self.hidden_size,

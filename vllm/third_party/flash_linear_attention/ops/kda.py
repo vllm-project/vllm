@@ -465,9 +465,10 @@ class FusedRMSNormGated(CustomOp):
         activation: str = "swish",
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
+        enforce_enable: bool = False,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
-        super().__init__()
+        super().__init__(enforce_enable=enforce_enable)
 
         self.hidden_size = hidden_size
         self.elementwise_affine = elementwise_affine
