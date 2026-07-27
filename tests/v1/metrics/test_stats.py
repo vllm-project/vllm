@@ -2,6 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
 from vllm.v1.engine import EngineCoreOutputs, FinishReason
+
+from dataclasses import fields
+from unittest.mock import MagicMock, patch
+import msgspec
+
+from vllm.config import VllmConfig
+from vllm.v1.engine import FinishReason
+from vllm.v1.metrics.loggers import StatLoggerManager, ZmqStatLogger
 from vllm.v1.metrics.stats import (
     IterationStats,
     PrefillStats,
@@ -9,6 +17,7 @@ from vllm.v1.metrics.stats import (
     RequestStateStats,
     SchedulerIterationDetails,
     SchedulerStats,
+    ZmqMetricsStats,
 )
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.utils import compute_iteration_details
@@ -288,3 +297,123 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.external_kv_transfer == 999
     assert stats.cached_tokens == 999
     assert stats.total == 1000
+
+
+REQUIRED_ZMQ_METRICS_STATS_FIELDS = {
+    "num_requests_running",
+    "num_requests_waiting",
+    "kv_cache_usage_perc",
+    "cache_config_info",
+    "engine_id",
+}
+
+
+def test_zmq_metrics_stats_encoding_decoding():
+    """Test ZmqMetricsStats encoding and decoding with custom values,
+
+    verifying that the message has all and only the required fields.
+    """
+    stats = ZmqMetricsStats(
+        num_requests_running=5,
+        num_requests_waiting=10,
+        kv_cache_usage_perc=0.75,
+        cache_config_info={"block_size": 16, "num_gpu_blocks": 100},
+        engine_id="engine-0",
+    )
+
+    # Verify dataclass fields match REQUIRED_ZMQ_METRICS_STATS_FIELDS
+    dataclass_field_names = {f.name for f in fields(ZmqMetricsStats)}
+    assert dataclass_field_names == REQUIRED_ZMQ_METRICS_STATS_FIELDS
+
+    # Encode message
+    encoder = msgspec.msgpack.Encoder()
+    payload = encoder.encode(stats)
+
+    # Decode payload into a dict and verify keys
+    decoded_dict = msgspec.msgpack.decode(payload)
+    assert isinstance(decoded_dict, dict)
+    assert set(decoded_dict.keys()) == REQUIRED_ZMQ_METRICS_STATS_FIELDS
+
+    # Verify content
+    assert decoded_dict["num_requests_running"] == 5
+    assert decoded_dict["num_requests_waiting"] == 10
+    assert decoded_dict["kv_cache_usage_perc"] == 0.75
+    assert decoded_dict["cache_config_info"] == {
+        "block_size": 16,
+        "num_gpu_blocks": 100,
+    }
+    assert decoded_dict["engine_id"] == "engine-0"
+
+    # Decode into ZmqMetricsStats dataclass
+    decoded_stats = msgspec.msgpack.decode(payload, type=ZmqMetricsStats)
+    assert decoded_stats == stats
+
+
+def test_zmq_metrics_stats_defaults_encoding_decoding():
+    """Test default ZmqMetricsStats encoding and decoding."""
+    stats = ZmqMetricsStats()
+
+    encoder = msgspec.msgpack.Encoder()
+    payload = encoder.encode(stats)
+
+    decoded_dict = msgspec.msgpack.decode(payload)
+    assert set(decoded_dict.keys()) == REQUIRED_ZMQ_METRICS_STATS_FIELDS
+
+    assert decoded_dict["num_requests_running"] == 0
+    assert decoded_dict["num_requests_waiting"] == 0
+    assert decoded_dict["kv_cache_usage_perc"] == 0.0
+    assert decoded_dict["cache_config_info"] is None
+    assert decoded_dict["engine_id"] is None
+
+    decoded_stats = msgspec.msgpack.decode(payload, type=ZmqMetricsStats)
+    assert decoded_stats == stats
+
+
+def test_zmq_stat_logger_record():
+    """Test ZmqStatLogger record method for single engine."""
+    vllm_config = MagicMock(spec=VllmConfig)
+    vllm_config.cache_config = None
+    vllm_config.observability_config.zmq_metrics_port = 5555
+
+    with patch("zmq.Context.instance"):
+        logger_inst = ZmqStatLogger(vllm_config, engine_indexes=[0])
+        sched_stats = SchedulerStats(
+            num_running_reqs=3,
+            num_waiting_reqs=7,
+            kv_cache_usage=0.42,
+        )
+        logger_inst.record(
+            scheduler_stats=sched_stats, iteration_stats=None, engine_idx=0
+        )
+
+        msg = logger_inst.queue.get_nowait()
+        assert msg is not None
+        assert msg.num_requests_running == 3
+        assert msg.num_requests_waiting == 7
+        assert msg.kv_cache_usage_perc == 0.42
+        assert msg.engine_id == "0"
+        logger_inst.shutdown()
+
+
+def test_stat_logger_manager_multi_engine_disables_zmq(caplog):
+    """Test StatLoggerManager disables ZmqStatLogger when engine_idxs > 1."""
+    vllm_config = MagicMock(spec=VllmConfig)
+    vllm_config.observability_config.enable_zmq_metrics = True
+    vllm_config.kv_transfer_config = None
+    vllm_config.speculative_config = None
+    vllm_config.model_config.served_model_name = "test-model"
+    vllm_config.model_config.max_model_len = 100
+    vllm_config.model_config.is_diffusion = False
+
+    mgr = StatLoggerManager(
+        vllm_config=vllm_config,
+        engine_idxs=[0, 1],
+        enable_default_loggers=False,
+    )
+    assert not any(
+        isinstance(logger_item, ZmqStatLogger) for logger_item in mgr.stat_loggers
+    )
+    assert (
+        "disabling it as ZMQ metrics logger only supports a single engine"
+        in caplog.text
+    )

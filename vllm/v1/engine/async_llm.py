@@ -261,6 +261,7 @@ class AsyncLLM(EngineClient):
         """Shutdown, cleaning up the background proc and IPC."""
         if logger_manager := getattr(self, "logger_manager", None):
             logger_manager.shutdown()
+            self.logger_manager = None
 
         shutdown_prometheus()
 

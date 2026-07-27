@@ -443,8 +443,8 @@ class LLMEngine:
                 module.cleanup()
 
     def shutdown(self):
-        if self.logger_manager is not None:
-            self.logger_manager.shutdown()
+        if logger_manager := getattr(self, "logger_manager", None):
+            logger_manager.shutdown()
             self.logger_manager = None
 
         dp_group = getattr(self, "dp_group", None)
