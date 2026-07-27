@@ -96,7 +96,7 @@ def build_compiled_helion_op_map() -> dict[
     torch._ops.OpOverload, torch._ops.OpOverload
 ]:
     """Prefer checked-in kernels, then add remaining source-Helion routes."""
-    from vllm.kernels.helion_generated.fusion_dispatcher import (
+    from vllm.kernels.helion_generated.dispatcher import (
         build_compiled_generated_op_map,
     )
 

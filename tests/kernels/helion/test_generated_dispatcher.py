@@ -10,7 +10,10 @@ from pathlib import Path
 import pytest
 import torch
 
-from vllm.kernels.helion_generated import dispatcher, fusion_dispatcher
+from vllm.kernels.helion_generated import (
+    dispatcher,
+    warm_up_helion_kernels,
+)
 from vllm.kernels.helion_generated.manifests import (
     GENERATED_KERNEL_MANIFESTS,
 )
@@ -110,7 +113,6 @@ def test_layout_matching(monkeypatch):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
 def test_fusion_kernel_exact_matching(monkeypatch):
     monkeypatch.setattr(dispatcher, "_runtime_platform", lambda: "nvidia_h100")
-    monkeypatch.setattr(fusion_dispatcher, "_runtime_platform", lambda: "nvidia_h100")
     device = "cuda"
 
     input = torch.empty((5, 2048), device=device, dtype=torch.bfloat16)
@@ -118,11 +120,11 @@ def test_fusion_kernel_exact_matching(monkeypatch):
     weight = torch.empty(2048, device=device, dtype=input.dtype)
     scale = torch.empty((16, 5), device=device, dtype=torch.float32).t()
     residual = torch.empty_like(input)
-    assert fusion_dispatcher._eligible_rms_norm_per_block_quant(
+    assert dispatcher._eligible_rms_norm_per_block_quant(
         result, input, weight, scale, None, None, 128, True
     )
     assert (
-        fusion_dispatcher._eligible_rms_norm_per_block_quant(
+        dispatcher._eligible_rms_norm_per_block_quant(
             result, input, weight, scale, None, residual, 128, True
         )
         is None
@@ -131,11 +133,11 @@ def test_fusion_kernel_exact_matching(monkeypatch):
     silu_input = torch.empty((5, 12288), device=device, dtype=torch.bfloat16)
     silu_out = torch.empty((5, 6144), device=device, dtype=torch.float8_e4m3fn)
     silu_scales = torch.empty((48, 5), device=device, dtype=torch.float32).t()
-    assert fusion_dispatcher._eligible_silu_and_mul_per_block_quant(
+    assert dispatcher._eligible_silu_and_mul_per_block_quant(
         silu_out, silu_input, silu_scales, 128, None, True
     )
     assert (
-        fusion_dispatcher._eligible_silu_and_mul_per_block_quant(
+        dispatcher._eligible_silu_and_mul_per_block_quant(
             silu_out,
             silu_input,
             torch.empty_like(silu_scales.contiguous()),
@@ -151,11 +153,11 @@ def test_fusion_kernel_exact_matching(monkeypatch):
     k_weight = torch.empty_like(q_weight)
     cache = torch.empty((40960, 128), device=device, dtype=qkv.dtype)
     positions = torch.arange(5, device=device, dtype=torch.int64)
-    assert fusion_dispatcher._eligible_fused_qk_norm_rope(
+    assert dispatcher._eligible_fused_qk_norm_rope(
         qkv, 16, 8, 8, 128, q_weight, k_weight, cache, True, positions, -1
     )
     assert (
-        fusion_dispatcher._eligible_fused_qk_norm_rope(
+        dispatcher._eligible_fused_qk_norm_rope(
             qkv, 16, 8, 8, 128, q_weight, k_weight, cache, False, positions, -1
         )
         is None
@@ -287,7 +289,7 @@ def test_generated_artifacts_have_stable_runtime_contract():
 
 
 def test_generated_fusion_op_map_preserves_mutations():
-    op_map = fusion_dispatcher.build_compiled_generated_op_map()
+    op_map = dispatcher.build_compiled_generated_op_map()
     assert len(op_map) == 3
     for native_op, routed_op in op_map.items():
         native_mutations = tuple(
@@ -302,10 +304,28 @@ def test_generated_fusion_op_map_preserves_mutations():
 
 
 def test_generated_fusion_warmup_case_selection(monkeypatch):
-    monkeypatch.setattr(fusion_dispatcher, "_runtime_platform", lambda: "nvidia_h100")
-    cases = fusion_dispatcher._selected_fusion_cases(
+    monkeypatch.setattr(dispatcher, "_runtime_platform", lambda: "nvidia_h100")
+    cases = dispatcher._selected_fusion_cases(
         "silu_and_mul_per_block_quant", [3, 20000]
     )
     assert (6144, 128, 4) in cases
     assert (6144, 128, 16384) in cases
     assert len(cases) == 6
+
+
+def test_warm_up_helion_kernels_combines_generated_warmups(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        dispatcher,
+        "warmup_per_token_group_fp8_quant",
+        lambda token_counts, device: calls.append((tuple(token_counts), device)),
+    )
+    monkeypatch.setattr(
+        dispatcher,
+        "warmup_generated_fusion_kernels",
+        lambda token_counts, device: calls.append((tuple(token_counts), device)),
+    )
+
+    warm_up_helion_kernels(iter([3, 17]), "cuda:1")
+
+    assert calls == [((3, 17), "cuda:1"), ((3, 17), "cuda:1")]

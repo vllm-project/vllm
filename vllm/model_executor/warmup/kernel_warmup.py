@@ -83,12 +83,7 @@ def kernel_warmup(worker: "Worker"):
     qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
 
     if envs.VLLM_USE_HELION_KERNELS:
-        from vllm.kernels.helion_generated.dispatcher import (
-            warmup_per_token_group_fp8_quant,
-        )
-        from vllm.kernels.helion_generated.fusion_dispatcher import (
-            warmup_generated_fusion_kernels,
-        )
+        from vllm.kernels.helion_generated import warm_up_helion_kernels
 
         compilation_config = worker.vllm_config.compilation_config
         warmup_sizes = [
@@ -98,11 +93,7 @@ def kernel_warmup(worker: "Worker"):
         ]
         warmup_sizes.extend(compilation_config.cudagraph_capture_sizes or [])
         warmup_sizes.append(worker.scheduler_config.max_num_batched_tokens)
-        warmup_per_token_group_fp8_quant(
-            warmup_sizes,
-            getattr(worker.model_runner, "device", torch.device("cuda")),
-        )
-        warmup_generated_fusion_kernels(
+        warm_up_helion_kernels(
             warmup_sizes,
             getattr(worker.model_runner, "device", torch.device("cuda")),
         )
