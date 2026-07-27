@@ -3,13 +3,127 @@
 
 """Tests for the /render endpoints that expose prompt preprocessing."""
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
 import httpx
 import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteLaunchRenderServer
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.scale_out.render.api_router import router
+from vllm.entrypoints.scale_out.render.serving import ServingRender
+from vllm.renderers.online_renderer import OnlineRenderer
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+
+
+def _build_responses_serving_render() -> ServingRender:
+    serving = ServingRender.__new__(ServingRender)
+    serving.model_config = SimpleNamespace(
+        max_model_len=100,
+        is_encoder_decoder=False,
+    )
+    serving.default_sampling_params = {}
+    serving.override_max_tokens = None
+    serving.tool_server = MagicMock()
+    serving.online_renderer = MagicMock()
+    serving.online_renderer.create_error_response = (
+        OnlineRenderer.create_error_response.__get__(serving.online_renderer)
+    )
+    serving.online_renderer.validate_chat_template = (
+        OnlineRenderer.validate_chat_template.__get__(serving.online_renderer)
+    )
+    serving.online_renderer.trust_request_chat_template = True
+    serving._check_model = AsyncMock(return_value=None)
+    return serving
+
+
+@pytest.mark.skip_global_cleanup
+def test_responses_render_route_is_registered():
+    assert any(route.path == "/v1/responses/render" for route in router.routes)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_render_responses_returns_generate_request_without_stored_state():
+    serving = _build_responses_serving_render()
+    serving.online_renderer.render_responses = AsyncMock(
+        return_value=MagicMock(
+            messages=[{"role": "user", "content": "Test prompt"}],
+            engine_input={"prompt_token_ids": [7, 8, 9]},
+        )
+    )
+    request = ResponsesRequest(
+        model=MODEL_NAME,
+        input="Test prompt",
+        max_output_tokens=12,
+        stream=True,
+        cache_salt="request-salt",
+        priority=3,
+        kv_transfer_params={"do_remote_prefill": True},
+        ec_transfer_params={"remote": True},
+    )
+
+    response = await serving.render_responses_request(request)
+
+    assert response.token_ids == [7, 8, 9]
+    assert response.request_id == request.request_id
+    assert response.sampling_params.max_tokens == 12
+    assert response.model == MODEL_NAME
+    assert response.stream is True
+    assert response.cache_salt == "request-salt"
+    assert response.priority == 3
+    assert response.kv_transfer_params == {"do_remote_prefill": True}
+    assert response.ec_transfer_params == {"remote": True}
+    serving.online_renderer.render_responses.assert_awaited_once_with(
+        request,
+        previous_messages=None,
+        previous_response_outputs=None,
+        tool_server=serving.tool_server,
+        skip_mm_cache=True,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_render_responses_rejects_previous_response_id():
+    serving = _build_responses_serving_render()
+    serving.online_renderer.render_responses = AsyncMock()
+    request = ResponsesRequest(
+        model=MODEL_NAME,
+        input="Test prompt",
+        previous_response_id="resp_previous",
+    )
+
+    response = await serving.render_responses_request(request)
+
+    assert isinstance(response, ErrorResponse)
+    assert response.error.code == 400
+    assert response.error.param == "previous_response_id"
+    serving.online_renderer.render_responses.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_render_responses_rejects_untrusted_request_template():
+    serving = _build_responses_serving_render()
+    serving.online_renderer.trust_request_chat_template = False
+    serving.online_renderer.render_responses = AsyncMock()
+    request = ResponsesRequest(
+        model=MODEL_NAME,
+        input="Test prompt",
+        chat_template_kwargs={"chat_template": "{{ messages }}"},
+    )
+
+    response = await serving.render_responses_request(request)
+
+    assert isinstance(response, ErrorResponse)
+    assert response.error.code == 400
+    assert "untrusted chat template" in response.error.message.lower()
+    serving.online_renderer.render_responses.assert_not_awaited()
 
 
 @pytest.fixture(scope="module")
@@ -26,6 +140,25 @@ async def client(server):
         base_url=server.url_for(""), timeout=30.0
     ) as http_client:
         yield http_client
+
+
+@pytest.mark.asyncio
+async def test_responses_render_basic(client):
+    response = await client.post(
+        "/v1/responses/render",
+        json={
+            "model": MODEL_NAME,
+            "input": "When should a Responses handler return an empty string?",
+            "max_output_tokens": 7,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["model"] == MODEL_NAME
+    assert data["request_id"].startswith("resp_")
+    assert data["sampling_params"]["max_tokens"] == 7
+    assert data["token_ids"]
 
 
 @pytest.mark.asyncio
