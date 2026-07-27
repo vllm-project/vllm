@@ -20,6 +20,7 @@ from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
     FusedMoEMethodBase,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     FusedMoeWeightScaleSupported,
     RoutedExperts,
@@ -1390,6 +1391,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     ) -> None:
         super().__init__(moe_config)
         self.quant_config = quant_config
+        self.intermediate_size_per_partition_alignment = quant_config.group_size
         # W4A16 mode fires for W4A16_NVFP4 on-disk checkpoints. With
         # activation_key=None every W4A4 backend's _supports_quant_scheme
         # rejects itself (they all require (kNvfp4Static, kNvfp4Dynamic)
@@ -1406,6 +1408,25 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
         )
+
+    def maybe_roundup_sizes(
+        self,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        act_dtype: torch.dtype,
+        moe_parallel_config: FusedMoEParallelConfig,
+    ) -> tuple[int, int]:
+        hidden_size, intermediate_size_per_partition = super().maybe_roundup_sizes(
+            hidden_size,
+            intermediate_size_per_partition,
+            act_dtype,
+            moe_parallel_config,
+        )
+        alignment = self.intermediate_size_per_partition_alignment
+        intermediate_size_per_partition = (
+            (intermediate_size_per_partition + alignment - 1) // alignment * alignment
+        )
+        return hidden_size, intermediate_size_per_partition
 
     def maybe_make_prepare_finalize(
         self,
