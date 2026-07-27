@@ -2371,35 +2371,10 @@ def fp32_router_gemm(
     return output
 
 
-def bf16_skinny_gemm(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-) -> torch.Tensor:
-    """Skinny bf16 GEMM (M<=32): x [M, K] @ weight [N, K]^T -> [M, N].
-
-    Single block-per-column kernel with fp32 accumulation; replaces cuBLAS
-    splitK for weight-bandwidth-bound decode shapes (e.g. MTP eh_proj).
-    """
-    output = torch.empty((x.shape[0], weight.shape[0]), dtype=x.dtype, device=x.device)
-    torch.ops._C.bf16_skinny_gemm(output, x, weight)
-    return output
-
-
 if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "fp32_router_gemm"):
 
     @register_fake("_C::fp32_router_gemm")
     def fp32_router_gemm_fake(
-        output: torch.Tensor,
-        mat_a: torch.Tensor,
-        mat_b: torch.Tensor,
-    ) -> None:
-        return
-
-
-if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "bf16_skinny_gemm"):
-
-    @register_fake("_C::bf16_skinny_gemm")
-    def bf16_skinny_gemm_fake(
         output: torch.Tensor,
         mat_a: torch.Tensor,
         mat_b: torch.Tensor,
@@ -3530,6 +3505,7 @@ def causal_conv1d_update_cpu(
     silu_activation: bool,
     conv_state_indices: torch.Tensor | None,
     is_vnni: bool,
+    num_accepted_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.ops._C.causal_conv1d_update_cpu(
         x,
@@ -3537,7 +3513,7 @@ def causal_conv1d_update_cpu(
         weight,
         bias,
         silu_activation,
-        None,
+        num_accepted_tokens,
         conv_state_indices,
         -1,
         is_vnni,
@@ -3812,6 +3788,15 @@ def cpu_prepack_moe_weight(
     return output
 
 
+def cpu_prepack_moe_weight_int8(
+    weight: torch.Tensor,
+    isa: str,
+) -> torch.Tensor:
+    output = torch.empty_like(weight)
+    torch.ops._C.prepack_moe_weight_int8(weight, output, isa)
+    return output
+
+
 def cpu_fused_moe(
     input: torch.Tensor,
     w13: torch.Tensor,
@@ -3830,6 +3815,39 @@ def cpu_fused_moe(
         input,
         w13,
         w2,
+        w13_bias,
+        w2_bias,
+        topk_weights,
+        topk_ids,
+        skip_weighted,
+        act,
+        isa,
+    )
+    return output
+
+
+def cpu_fused_moe_int8(
+    input: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w13_bias: torch.Tensor | None,
+    w2_bias: torch.Tensor | None,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    act: str,
+    isa: str,
+    skip_weighted: bool = False,
+) -> torch.Tensor:
+    output = torch.empty_like(input)
+    torch.ops._C.cpu_fused_moe_int8(
+        output,
+        input,
+        w13,
+        w2,
+        w13_scale,
+        w2_scale,
         w13_bias,
         w2_bias,
         topk_weights,
