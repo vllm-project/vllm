@@ -3,7 +3,6 @@
 """RMSNorm fuser: detect the norm structurally and swap in vLLM's fused RMSNorm."""
 
 from dataclasses import dataclass
-from functools import cache
 from typing import TYPE_CHECKING
 
 import torch
@@ -109,14 +108,16 @@ class TPAwareNormMixin(nn.Module):
         return super().forward(x, residual)
 
 
-@cache
-def _tp_aware_norm_cls(base: type) -> type:
-    """A `TPAwareNormMixin`-wrapped subclass of RMSNorm-like `base`.
+class TPAwareRMSNorm(TPAwareNormMixin, RMSNorm):
+    """`RMSNorm` that reconstructs a TP-sharded input before normalizing.
 
-    `base` comes from the layer registry (vLLM or hw-agnostic), so the norm can
-    reconstruct a TP-sharded input before normalizing regardless of provider.
+    `RMSNorm` is the provider (vLLM or hw-agnostic) resolved by the layer
+    registry at import time.
     """
-    return type(f"TPAware{base.__name__}", (TPAwareNormMixin, base), {})
+
+
+class TPAwareGemmaRMSNorm(TPAwareNormMixin, GemmaRMSNorm):
+    """`GemmaRMSNorm` that reconstructs a TP-sharded input before normalizing."""
 
 
 @dataclass
@@ -213,11 +214,9 @@ class RMSNormFuser(BaseFuser):
             dtype = weight.dtype if weight is not None else model_config.dtype
             eps = torch.finfo(dtype).eps
         if self.zero_centered:
-            cls = _tp_aware_norm_cls(GemmaRMSNorm)
-            return cls(hidden_size=hidden_size, eps=eps)
+            return TPAwareGemmaRMSNorm(hidden_size=hidden_size, eps=eps)
         has_weight = weight is not None
-        cls = _tp_aware_norm_cls(RMSNorm)
-        return cls(
+        return TPAwareRMSNorm(
             hidden_size=hidden_size,
             eps=eps,
             has_weight=has_weight,
