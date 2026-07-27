@@ -1879,17 +1879,33 @@ def scaled_fp8_quant(
         assert num_token_padding is None, "padding not supported if output passed in"
         assert output.dtype == out_dtype
 
-    if scale is None:
-        if use_per_token_if_dynamic:
-            scale = torch.empty((shape[0], 1), device=input.device, dtype=torch.float32)
-            torch.ops._C.dynamic_per_token_scaled_fp8_quant(
-                output, input, scale, scale_ub
-            )
-        else:
-            scale = torch.empty(1, device=input.device, dtype=torch.float32)
-            torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
+    if current_platform.is_cpu():
+        # CPU does not implement static/dynamic_scaled_fp8_quant; use native
+        # PyTorch math instead (same approach as sglang's requantize_with_max_scale_cpu).
+        fp8_max = torch.finfo(out_dtype).max
+        x = input.float()
+        if scale is None:
+            if use_per_token_if_dynamic:
+                abs_max = x.abs().amax(dim=1, keepdim=True)
+                scale = (abs_max / fp8_max).clamp(min=1e-7).to(torch.float32)
+            else:
+                abs_max = x.abs().max()
+                scale = (abs_max / fp8_max).clamp(min=1e-7).view(1).to(torch.float32)
+        q = (x / scale).clamp(-fp8_max, fp8_max).to(out_dtype)
+        output.copy_(q)
     else:
-        torch.ops._C.static_scaled_fp8_quant(output, input, scale, group_shape)
+        if scale is None:
+            if use_per_token_if_dynamic:
+                scale = torch.empty((shape[0], 1), device=input.device,
+                                    dtype=torch.float32)
+                torch.ops._C.dynamic_per_token_scaled_fp8_quant(
+                    output, input, scale, scale_ub
+                )
+            else:
+                scale = torch.empty(1, device=input.device, dtype=torch.float32)
+                torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
+        else:
+            torch.ops._C.static_scaled_fp8_quant(output, input, scale, group_shape)
 
     return output, scale
 
@@ -3023,6 +3039,7 @@ class CPUQuantMethod(IntEnum):
     FP8_W8A16 = 2
     INT4_W4A8 = 3
     MXFP4 = 4
+    FP8_W8A8 = 5
 
 
 if hasattr(torch.ops._C, "fused_experts_cpu"):
@@ -3040,6 +3057,7 @@ if hasattr(torch.ops._C, "fused_experts_cpu"):
         w2_scale: torch.Tensor | None,
         w1_zero: torch.Tensor | None,
         w2_zero: torch.Tensor | None,
+        a1_scale: torch.Tensor | None,
         block_size: list[int] | None,
         w1_bias: torch.Tensor | None,
         w2_bias: torch.Tensor | None,
@@ -3086,6 +3104,7 @@ def fused_experts_cpu(
     alpha: float | None = None,
     limit: float | None = None,
     is_vnni: bool = True,
+    a1_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.ops._C.fused_experts_cpu(
         hidden_states,
@@ -3099,6 +3118,7 @@ def fused_experts_cpu(
         w2_scale,
         w1_zero,
         w2_zero,
+        a1_scale,
         block_size,
         w1_bias,
         w2_bias,
@@ -3226,6 +3246,52 @@ def fp8_scaled_mm_cpu(
     return torch.ops._C.fp8_scaled_mm_cpu(
         mat1, mat2, scales2, block_size, bias, out_dtype, is_vnni
     )
+
+
+# FP8 W8A8 CPU kernels
+if hasattr(torch.ops._C, "float8_linear_prepack_cpu"):
+
+    @register_fake("_C::float8_linear_prepack_cpu")
+    def float8_linear_prepack_cpu_fake(
+        weight: torch.Tensor,
+        scales: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return torch.empty_like(weight), torch.empty_like(scales)
+
+
+_supports_cpu_fp8_w8a8 = bool(hasattr(torch.ops._C, "float8_linear_prepack_cpu"))
+
+
+if hasattr(torch.ops._C, "fp8_scaled_mm_with_quant"):
+
+    @register_fake("_C::fp8_scaled_mm_with_quant")
+    def fp8_scaled_mm_with_quant_fake(
+        act: torch.Tensor,
+        act_scales: torch.Tensor | None,
+        channelwise: bool,
+        weight: torch.Tensor,
+        weight_scales: torch.Tensor,
+        bias: torch.Tensor | None,
+        output_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        M = act.reshape(-1, act.size(-1)).size(0)
+        N = weight.size(0) * weight.size(-1)
+        return torch.empty((M, N), dtype=output_dtype, device=act.device)
+
+
+def fp8_scaled_mm_with_quant(
+    act: torch.Tensor,
+    act_scales: torch.Tensor | None,
+    channelwise: bool,
+    weight: torch.Tensor,
+    weight_scales: torch.Tensor,
+    bias: torch.Tensor | None,
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    return torch.ops._C.fp8_scaled_mm_with_quant(
+        act, act_scales, channelwise, weight, weight_scales, bias, output_dtype
+    )
+
 
 
 def chunk_gated_delta_rule_cpu(

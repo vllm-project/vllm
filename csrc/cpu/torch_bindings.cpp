@@ -73,6 +73,7 @@ at::Tensor fused_experts_cpu(
     const std::optional<at::Tensor>& w2_scale,
     const std::optional<at::Tensor>& w1_zero,
     const std::optional<at::Tensor>& w2_zero,
+    const std::optional<at::Tensor>& a1_scale,
     const std::optional<std::vector<int64_t>> block_size,
     const std::optional<at::Tensor>& w1_bias,
     const std::optional<at::Tensor>& w2_bias,
@@ -90,6 +91,22 @@ at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2,
                              std::vector<int64_t> block_size,
                              const std::optional<at::Tensor>& bias,
                              at::ScalarType out_dtype, bool is_vnni);
+
+// Adapted from sglang: FP8 W8A8 kernels
+std::tuple<at::Tensor, at::Tensor> float8_linear_prepack_impl(
+    const at::Tensor& weight, const at::Tensor& scales);
+at::Tensor fp8_scaled_mm_with_quant(
+    const at::Tensor& act,
+    const std::optional<at::Tensor>& act_scales,
+    bool channelwise,
+    const at::Tensor& weight,
+    const at::Tensor& weight_scales,
+    const std::optional<at::Tensor>& bias,
+    at::ScalarType output_dtype);
+std::tuple<at::Tensor, at::Tensor> quantize_fp8e4m3_vec(
+    const at::Tensor& t,
+    bool channelwise,
+    c10::optional<at::Tensor> scale_opt);
 
 // Adapted from sglang: INT4 W4A8 kernels
 std::tuple<at::Tensor, at::Tensor, at::Tensor> convert_weight_packed_scale_zp(
@@ -444,7 +461,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "fused_experts_cpu(Tensor hidden_states, Tensor w1, Tensor w2, Tensor "
       "topk_weights, Tensor topk_ids, bool "
       "inplace, int moe_comp_method, Tensor? w1_scale, Tensor? w2_scale, "
-      "Tensor? w1_zero, Tensor? w2_zero, int[]? block_size, "
+      "Tensor? w1_zero, Tensor? w2_zero, Tensor? a1_scale, int[]? block_size, "
       "Tensor? w1_bias, Tensor? w2_bias, float? alpha, float? limit, "
       "bool is_vnni) -> "
       "Tensor");
@@ -462,7 +479,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "bool is_vnni) -> Tensor");
   ops.impl("fp8_scaled_mm_cpu", torch::kCPU, &fp8_scaled_mm_cpu);
 
-  // Adapted from sglang: casual_conv1d kernels
+  // Adapted from sglang: FP8 W8A8 kernels
+  ops.def(
+      "float8_linear_prepack_cpu(Tensor weight, Tensor scales) -> (Tensor, Tensor)");
+  ops.impl("float8_linear_prepack_cpu", torch::kCPU, &float8_linear_prepack_impl);
+  ops.def(
+      "fp8_scaled_mm_with_quant(Tensor act, Tensor? act_scales, bool channelwise, "
+      "Tensor weight, Tensor weight_scales, Tensor? bias, ScalarType output_dtype) -> Tensor");
+  ops.impl("fp8_scaled_mm_with_quant", torch::kCPU, &fp8_scaled_mm_with_quant);
+  ops.def(
+      "quantize_fp8e4m3_vec(Tensor input, bool channelwise, Tensor? scale_opt) -> (Tensor, Tensor)");
+  ops.impl("quantize_fp8e4m3_vec", torch::kCPU, &quantize_fp8e4m3_vec);
+
   ops.def("causal_conv1d_weight_pack(Tensor weight) -> Tensor");
   ops.impl("causal_conv1d_weight_pack", torch::kCPU,
            &causal_conv1d_weight_pack);

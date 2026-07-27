@@ -93,7 +93,7 @@ constexpr bool operator==(int a, CPUAcTMethod b) {
   return a == static_cast<int>(b);
 }
 
-enum class CPUQuantMethod : int64_t { BF16 = 0, INT8_W8A8 = 1, FP8_W8A16 = 2, INT4_W4A8 = 3, MXFP4 = 4 };
+enum class CPUQuantMethod : int64_t { BF16 = 0, INT8_W8A8 = 1, FP8_W8A16 = 2, INT4_W4A8 = 3, MXFP4 = 4, FP8_W8A8 = 5 };
 
 constexpr bool operator==(CPUQuantMethod a, int64_t b) {
   return static_cast<int64_t>(a) == b;
@@ -383,3 +383,55 @@ void tinygemm_kernel(
     bool brg,
     int64_t block_size_K,
     bool do_unpack = true);
+
+// FP8 W8A8 tinygemm kernel (defined in gemm_fp8_w8a8.cpp)
+void tinygemm_kernel(
+    float* C,
+    const at::Float8_e4m3fn* A,
+    const float* scales_a,
+    const at::Float8_e4m3fn* B,
+    const float* scales_b,
+    int64_t M,
+    int64_t K,
+    int64_t lda,
+    int64_t ldc,
+    int64_t ldsa,
+    float* ukernel_buf,
+    at::BFloat16* dqA_buf,
+    at::BFloat16* dqB_buf);
+
+// FP8 W8A8 quantize activation (defined in gemm_fp8_w8a8.cpp)
+std::tuple<at::Tensor, at::Tensor> quantize_fp8e4m3_vec(
+    const at::Tensor& t,
+    bool channelwise,
+    c10::optional<at::Tensor> scale_opt);
+
+// FP8 W8A8 fused MoE kernel (defined in moe_fp8_w8a8.cpp)
+template <typename scalar_t>
+void fused_experts_fp8_a8_kernel_impl(
+    scalar_t* __restrict__ output,
+    scalar_t* __restrict__ ic0,
+    scalar_t* __restrict__ ic1,
+    scalar_t* __restrict__ ic2,
+    at::Float8_e4m3fn* __restrict__ A_tmp,
+    scalar_t* __restrict__ B_tmp,
+    float* __restrict__ C_tmp,
+    float* __restrict__ Ukernel_tmp,
+    const at::Float8_e4m3fn* __restrict__ input,
+    const at::Float8_e4m3fn* __restrict__ packed_w1,
+    const at::Float8_e4m3fn* __restrict__ packed_w2,
+    const float* __restrict__ As,
+    const float* __restrict__ w1s,
+    const float* __restrict__ w2s,
+    int64_t block_size_N,
+    int64_t block_size_K,
+    const float* __restrict__ topk_weights,
+    const int32_t* __restrict__ sorted_ids,
+    const int32_t* __restrict__ expert_ids,
+    const int32_t* __restrict__ offsets,
+    int64_t M,
+    int64_t N,
+    int64_t K,
+    int64_t E,
+    int64_t topk,
+    int64_t num_tokens_post_pad);

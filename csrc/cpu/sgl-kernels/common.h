@@ -7,10 +7,44 @@
 
 #include <ATen/ATen.h>
 #include <ATen/Parallel.h>
+#include <cstring>
 
 #if defined(_OPENMP)
 #include <omp.h>
 #endif
+
+// Adapted from sglang: dispatch utilities for FP8 W8A8 kernels
+#define AT_DISPATCH_OUT_TYPES(TYPE, NAME, ...)                                          \
+  AT_DISPATCH_SWITCH(                                                                   \
+      TYPE,                                                                             \
+      NAME,                                                                             \
+      AT_PRIVATE_CASE_TYPE_USING_HINT(at::ScalarType::Float, out_t, __VA_ARGS__)        \
+          AT_PRIVATE_CASE_TYPE_USING_HINT(at::ScalarType::BFloat16, out_t, __VA_ARGS__) \
+              AT_PRIVATE_CASE_TYPE_USING_HINT(at::ScalarType::Half, out_t, __VA_ARGS__))
+
+#define AT_DISPATCH_CASE_ENUM_NO_RETURN(VALUE, TYPE, HINT, ...) \
+  case VALUE: {                                                 \
+    constexpr TYPE HINT = VALUE;                                \
+    __VA_ARGS__;                                                \
+    break;                                                      \
+  }
+
+#define AT_DISPATCH_BOOL_NO_RETURN(VALUE, NAME, HINT, ...)            \
+  [&]() {                                                             \
+    switch (VALUE) {                                                  \
+      AT_DISPATCH_CASE_ENUM_NO_RETURN(true, bool, HINT, __VA_ARGS__)  \
+      AT_DISPATCH_CASE_ENUM_NO_RETURN(false, bool, HINT, __VA_ARGS__) \
+    }                                                                 \
+  }()
+
+#define AT_DISPATCH_QUANT_MODE_NO_RETURN(MODE, NAME, HINT, ...)           \
+  [&]() {                                                                 \
+    switch (MODE) {                                                       \
+      AT_DISPATCH_CASE_ENUM_NO_RETURN(PER_TENSOR, int, HINT, __VA_ARGS__) \
+      AT_DISPATCH_CASE_ENUM_NO_RETURN(PER_ROW, int, HINT, __VA_ARGS__)    \
+      AT_DISPATCH_CASE_ENUM_NO_RETURN(PER_GROUP, int, HINT, __VA_ARGS__)  \
+    }                                                                     \
+  }()
 
 namespace {
 
@@ -427,6 +461,32 @@ struct Unroll<1> {
 template <typename T>
 inline T* conditional_data_ptr(const std::optional<at::Tensor>& opt) {
   return opt.has_value() ? opt.value().data_ptr<T>() : nullptr;
+}
+
+// Adapted from sglang: M blocking utilities for FP8 W8A8 kernels
+inline int64_t get_m_block(int64_t M) {
+  if (M <= 48) {
+    return M;
+  } else if (M < 64) {
+    return 32;
+  } else if (M < 96) {
+    return 64;
+  } else {
+    return 128;
+  }
+}
+
+inline std::tuple<bool, int64_t, int64_t, int64_t> get_m_blocking(int64_t M) {
+  bool parallel_on_M = M > 128;
+  int64_t block_m = get_m_block(M);
+  int64_t Mc = (M + block_m - 1) / block_m;
+  int64_t Mc_parallel = parallel_on_M ? Mc : 1;
+  return std::make_tuple(parallel_on_M, block_m, Mc, Mc_parallel);
+}
+
+template <typename T>
+void zero_buffer(T* data, int64_t size) {
+  memset(data, 0, sizeof(T) * size);
 }
 
 }  // anonymous namespace

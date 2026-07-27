@@ -2,7 +2,33 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU quantized fused MoE experts."""
 
+import os
+
 import torch
+
+# Set VLLM_CPU_MOE_FP8_W8A8=1 to enable the FP8 W8A8 MoE path on CPU
+# (stage-1 FP8×FP8 GEMM). Defaults to W8A16 to match the upstream baseline.
+# Mirrors SGLang's SGLANG_DEEPSEEK_FP8A8 env-var selection approach.
+_CPU_MOE_FP8_W8A8: bool = os.getenv("VLLM_CPU_MOE_FP8_W8A8", "0") == "1"
+
+
+def _use_fp8_w8a8_moe() -> bool:
+    """Return True when CPU FP8 W8A8 MoE is both enabled and supported.
+
+    Requires the env var ``VLLM_CPU_MOE_FP8_W8A8=1`` **and** the
+    compiled sgl-kernel ops (``float8_linear_prepack_cpu`` /
+    ``quantize_fp8e4m3_vec``) to be available.
+    """
+    if not _CPU_MOE_FP8_W8A8:
+        return False
+    try:
+        return (
+            hasattr(torch.ops._C, "float8_linear_prepack_cpu")
+            and hasattr(torch.ops._C, "quantize_fp8e4m3_vec")
+        )
+    except Exception:
+        return False
+
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._custom_ops import (
@@ -700,4 +726,230 @@ class CPUExpertsInt8(mk.FusedMoEExpertsMonolithic):
             None,  # alpha
             None,  # limit
             True,  # is_vnni
+        )
+
+
+# ===========================================================================
+# FP8 W8A8 MoE
+# ===========================================================================
+
+
+def prepare_fp8_w8a8_moe_layer_for_cpu(
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Prepack FP8 W8A8 MoE weights for CPU kernel.
+
+    w13 uses float8_linear_prepack_cpu (FP8×FP8 AMX GEMM).
+    w2 uses convert_weight_packed (BF16×FP8 W8A16 stage-2 path).
+    """
+    E = w13.size(0)
+
+    packed_w13_list = []
+    packed_w13_scale_list = []
+
+    for i in range(E):
+        w1_exp = w13[i]        # [2N, K] FP8
+        ws_exp = w13_scale[i]  # [2N, K/128] or [2N_blocks, K/128]
+
+        # Align scale rows to weight rows if necessary (for block-128 checkpoints
+        # where scale may have fewer rows: [2N/128, K/128] → [2N, K/128])
+        if ws_exp.size(0) < w1_exp.size(0):
+            repeat_factor = w1_exp.size(0) // ws_exp.size(0)
+            ws_exp = torch.repeat_interleave(ws_exp, repeat_factor, dim=0)
+        ws_exp = ws_exp[: w1_exp.size(0), :].contiguous()
+
+        pw, ps = torch.ops._C.float8_linear_prepack_cpu(w1_exp, ws_exp)
+        packed_w13_list.append(pw)
+        packed_w13_scale_list.append(ps)
+
+    packed_w13 = torch.stack(packed_w13_list)
+    packed_w13_scale = torch.stack(packed_w13_scale_list)
+
+    # w2 uses the W8A16 path (BF16 activation × FP8 weight), VNNI packed
+    packed_w2 = torch.ops._C.convert_weight_packed(w2)
+    return packed_w13, packed_w13_scale, packed_w2, w2_scale
+
+
+class CPUExpertsFp8W8A8(mk.FusedMoEExpertsMonolithic):
+    """CPU FP8 W8A8 block-quantized monolithic MoE experts.
+
+    Stage 1: FP8×FP8 GEMM via AMX (hidden_states quantized to FP8 on-the-fly).
+    Stage 2: BF16×FP8 GEMM (W8A16 path, activation is BF16 after SiLU).
+    """
+
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        super().__init__(moe_config, quant_config)
+
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        # Receives BF16 hidden states; quantization to FP8 is done inside apply()
+        return True
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        # Requires the FP8 W8A8 ops to be compiled and available.
+        # Note: env-var gating for block-quant is done in _supports_quant_scheme();
+        # per-channel quant always uses W8A8 when ops are present.
+        if not current_platform.is_cpu():
+            return False
+        try:
+            return (
+                hasattr(torch.ops._C, "float8_linear_prepack_cpu")
+                and hasattr(torch.ops._C, "quantize_fp8e4m3_vec")
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation == MoEActivation.SILU
+
+    @staticmethod
+    def _supports_parallel_config(
+        moe_parallel_config: FusedMoEParallelConfig,
+    ) -> bool:
+        return True
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        # Block-quantized FP8 (e.g. DeepSeek-V3 style): W8A8 is opt-in via
+        # VLLM_CPU_MOE_FP8_W8A8=1; default falls back to CPUExpertsFp8 (W8A16).
+        if (weight_key, activation_key) == (kFp8Static128BlockSym, kFp8Dynamic128Sym):
+            return _CPU_MOE_FP8_W8A8
+        return False
+
+    @staticmethod
+    def _supports_routing_method(
+        routing_method: RoutingMethodType,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return routing_method in [
+            RoutingMethodType.Default,
+            RoutingMethodType.Renormalize,
+            RoutingMethodType.RenormalizeNaive,
+        ]
+
+    @staticmethod
+    def _supports_router_logits_dtype(
+        router_logits_dtype: torch.dtype | None,
+        routing_method: RoutingMethodType,
+    ) -> bool:
+        return True
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        """Prepack FP8 W8A8 MoE weights: w13 via float8_linear_prepack_cpu,
+        w2 via convert_weight_packed."""
+        from vllm.model_executor.utils import replace_parameter
+
+        packed_w13, packed_w13_scale, packed_w2, w2_scale = (
+            prepare_fp8_w8a8_moe_layer_for_cpu(
+                layer.w13_weight,
+                layer.w2_weight,
+                layer.w13_weight_scale_inv,
+                layer.w2_weight_scale_inv,
+            )
+        )
+        replace_parameter(layer, "w13_weight", packed_w13)
+        replace_parameter(layer, "w13_weight_scale_inv", packed_w13_scale)
+        replace_parameter(layer, "w2_weight", packed_w2)
+        replace_parameter(layer, "w2_weight_scale_inv", w2_scale)
+
+    def apply(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        router_logits: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        apply_router_weight_on_input: bool,
+        num_expert_group: int | None = None,
+        e_score_correction_bias: torch.Tensor | None = None,
+        routed_scaling_factor: float | None = None,
+        topk_group: int | None = None,
+    ) -> torch.Tensor:
+        from vllm.model_executor.layers.fused_moe.cpu_fused_moe import (
+            select_experts,
+        )
+
+        topk_weights, topk_ids = select_experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            use_grouped_topk=num_expert_group is not None,
+            top_k=self.moe_config.experts_per_token,
+            renormalize=self.moe_config.routing_method
+            in (
+                RoutingMethodType.Renormalize,
+                RoutingMethodType.RenormalizeNaive,
+            ),
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            scoring_func="softmax",
+            routed_scaling_factor=(
+                routed_scaling_factor
+                if routed_scaling_factor is not None
+                else 1.0
+            ),
+            e_score_correction_bias=e_score_correction_bias,
+        )
+
+        block_shape = (
+            list(self.quant_config.block_shape)
+            if self.quant_config.block_shape
+            else (
+                [
+                    self.quant_config._w1.shape.row,
+                    self.quant_config._w1.shape.col,
+                ]
+                if self.quant_config._w1.shape is not None
+                else None
+            )
+        )
+
+        # Quantize hidden_states (BF16) → FP8 with per-token scales
+        hidden_states_2d = hidden_states.reshape(-1, hidden_states.shape[-1])
+        x_fp8, x_scales = torch.ops._C.quantize_fp8e4m3_vec(
+            hidden_states_2d, True, None
+        )
+
+        return fused_experts_cpu(
+            x_fp8,
+            w1,
+            w2,
+            topk_weights,
+            topk_ids,
+            False,  # inplace
+            CPUQuantMethod.FP8_W8A8,
+            self.w1_scale,  # w1_scale
+            self.w2_scale,  # w2_scale
+            None,  # w1_zero
+            None,  # w2_zero
+            block_shape,  # block_size
+            None,  # w1_bias
+            None,  # w2_bias
+            None,  # alpha
+            None,  # limit
+            True,  # is_vnni
+            x_scales,  # a1_scale: per-token FP8 activation scales
         )
