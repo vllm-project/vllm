@@ -72,6 +72,21 @@ def is_aiter_found_and_supported() -> bool:
     return False
 
 
+def is_aiter_found_and_supported_on_rdna4() -> bool:
+    """RDNA4 (gfx12) analog of `is_aiter_found_and_supported()`.
+
+    gfx12 has no aiter CK build, so this deliberately stays off the gfx9
+    `@if_aiter_supported` umbrella; it reports only that aiter's Triton
+    kernels are usable here. Like its gfx9 counterpart it checks platform +
+    arch + library availability and does not check environment variables.
+    """
+    if current_platform.is_rocm() and IS_AITER_FOUND:
+        from vllm.platforms.rocm import on_rdna4
+
+        return on_rdna4()
+    return False
+
+
 @functools.cache
 def _load_gemm_tuned_configs(
     q_dtype_w: torch.dtype, csv_path: str
@@ -1917,8 +1932,12 @@ class rocm_aiter_ops:
         return "gate_mode" in inspect.signature(fused_moe).parameters
 
     @staticmethod
-    @if_aiter_supported
     def register_ops_once() -> None:
+        if not (
+            is_aiter_found_and_supported() or is_aiter_found_and_supported_on_rdna4()
+        ):
+            return
+
         global _OPS_REGISTERED
         if not _OPS_REGISTERED:
             # register all the custom ops here
@@ -2794,23 +2813,17 @@ class rocm_aiter_ops:
         from vllm.platforms.rocm import on_gfx950, on_rdna4
 
         gfx950_tuned = {
-            (512, 7168),
             (1024, 8192),
             (2112, 7168),
             (3072, 1536),
+            (32768, 8192),
             (4096, 7168),
             (4608, 7168),
-            (7168, 256),
+            (512, 7168),
             (7168, 2048),
-            (7168, 16384),
-            (7168, 18432),
+            (7168, 256),
             (8192, 1024),
             (8192, 32768),
-            (16384, 1536),
-            (24576, 1536),
-            (32768, 512),
-            (32768, 8192),
-            (36864, 7168),
         }
         rdna4_tuned = gfx950_tuned | {
             (2048, 2048),
@@ -2821,7 +2834,13 @@ class rocm_aiter_ops:
             (6144, 1536),
             (6144, 2048),
             (7168, 2304),
+            (7168, 16384),
+            (7168, 18432),
             (8192, 8192),
+            (16384, 1536),
+            (24576, 1536),
+            (32768, 512),
+            (36864, 7168),
         }
         if on_rdna4():
             return (n, k) in rdna4_tuned

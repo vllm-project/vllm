@@ -581,6 +581,13 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
 
             gated_norm_shapes.add((num_v_heads // layer.tp_size, head_v_dim))
 
+        match_aiter_quant_op = True
+        register_hip_patterns = True
+        if rocm_aiter_ops.is_rdna_aiter_enabled():
+            # RDNA4 uses native quant ops and supports only Triton replacements.
+            match_aiter_quant_op = False
+            register_hip_patterns = False
+
         # Make sure fused add patterns are before simple rms norm,
         # as the latter is a subset of the former in torch ops.
         # The DoubleQuant patterns handle 1 rms_norm -> 2 group_fp8_quant
@@ -592,22 +599,22 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
         for epsilon in [1e-5, 1e-6]:
             # Fuse aiter rms_norm + 2x aiter group fp8 quant
             DoubleAiterRMSFp8GroupQuantPattern(
-                epsilon, FP8_DTYPE, GroupShape(1, 128)
+                epsilon, FP8_DTYPE, GroupShape(1, 128), match_aiter_quant_op
             ).register(self.patterns)
 
             # View-tolerant sibling for DSv3.2 q_c norm fan-out
             DoubleAiterRMSFp8GroupQuantViewPattern(
-                epsilon, FP8_DTYPE, GroupShape(1, 128)
+                epsilon, FP8_DTYPE, GroupShape(1, 128), match_aiter_quant_op
             ).register(self.patterns)
 
             #  Fuse aiter rms_norm + aiter dynamic group fp8 quant
             AiterRMSFp8GroupQuantPattern(
-                epsilon, FP8_DTYPE, GroupShape(1, 128)
+                epsilon, FP8_DTYPE, GroupShape(1, 128), match_aiter_quant_op
             ).register(self.patterns)
 
             # Fuse aiter fused_add_rms_norm + aiter dynamic group fp8 quant
             AiterFusedAddRMSFp8GroupQuantPattern(
-                epsilon, FP8_DTYPE, GroupShape(1, 128)
+                epsilon, FP8_DTYPE, GroupShape(1, 128), match_aiter_quant_op
             ).register(self.patterns)
 
             # When quant_fp8 custom ops are disabled, both AITER and native
@@ -620,6 +627,8 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             match_aiter_quant_options = (
                 [True, False] if is_quant_fp8_enabled else [False]
             )
+            if not register_hip_patterns:
+                match_aiter_quant_options = []
 
             for match_aiter_quant in match_aiter_quant_options:
                 # Fuse aiter rms_norm + (aiter / vllm built-in)
@@ -650,6 +659,7 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
                         GroupShape(1, 128),
                         num_heads=num_heads,
                         head_dim=head_dim,
+                        match_aiter_quant=match_aiter_quant_op,
                     ).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
@@ -682,10 +692,10 @@ class AiterSiluMulFp8GroupQuantPattern(VllmPatternReplacement):
 
     FUSED_SILU_MUL_QUANT_OP = rocm_aiter_ops.get_act_mul_fused_fp8_group_quant_op()
 
-    def __init__(self) -> None:
+    def __init__(self, match_aiter_quant_op: bool = True) -> None:
         self.silu_and_mul_matcher = MatcherSiluAndMul()
         self.quant_matcher = MatcherQuantFP8(
-            quant_key=kFp8Dynamic128Sym, match_rocm_aiter=True
+            quant_key=kFp8Dynamic128Sym, match_rocm_aiter=match_aiter_quant_op
         )
 
     def get_inputs(self) -> list[torch.Tensor]:
@@ -728,7 +738,13 @@ class RocmAiterSiluMulFp8GroupQuantFusionPass(VllmFusionPatternMatcherPass):
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config, "rocm_aiter_silu_mul_fp8_group_quant_fusion_pass")
 
-        self.register(AiterSiluMulFp8GroupQuantPattern())
+        match_aiter_quant_op = True
+        if rocm_aiter_ops.is_rdna_aiter_enabled():
+            match_aiter_quant_op = False
+
+        self.register(
+            AiterSiluMulFp8GroupQuantPattern(match_aiter_quant_op=match_aiter_quant_op)
+        )
 
         self.dump_patterns(config, self.pm_pass)
 
