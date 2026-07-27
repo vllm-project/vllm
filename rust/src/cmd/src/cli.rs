@@ -636,6 +636,8 @@ pub struct ServeArgs {
     pub uds: Option<String>,
 
     /// Development session used to reconnect this frontend to a running EngineCore.
+    ///
+    /// This implies frontend-only external-engine mode.
     #[arg(long)]
     pub engine_session: Option<PathBuf>,
 
@@ -654,8 +656,13 @@ pub struct ServeArgs {
 }
 
 impl ServeArgs {
-    /// Build the OpenAI-server runtime config used after the managed Python
-    /// engine starts.
+    /// Return whether the Rust frontend should connect to an externally owned
+    /// EngineCore instead of spawning a managed local engine.
+    pub fn uses_external_engine(&self) -> bool {
+        self.engine_session.is_some() || self.managed_engine.data_parallel_size_local == Some(0)
+    }
+
+    /// Build the OpenAI-server runtime config for the selected engine transport.
     pub fn to_frontend_config(&self, handshake_address: String) -> Config {
         let listener_mode = match &self.uds {
             Some(path) => HttpListenerMode::BindUnix { path: path.clone() },

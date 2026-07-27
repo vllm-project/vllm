@@ -317,11 +317,21 @@ impl EngineCoreClient {
         Ok(client)
     }
 
+    /// Wait until the cached engine identity has reconnected in both
+    /// directions before exposing the frontend as ready.
+    ///
+    /// Binding the saved frontend endpoints only creates listeners; the
+    /// engine-side DEALER/PUSH sockets reconnect asynchronously. A successful
+    /// read-only utility round trip proves that requests can reach EngineCore
+    /// and responses can return through the replacement output socket.
     async fn wait_for_reattach(&self, path: PathBuf) -> Result<()> {
         let deadline = Instant::now() + REATTACH_TIMEOUT;
         let mut last_error = "engine did not reconnect".to_string();
 
         loop {
+            // The sleep state itself is irrelevant here. `is_sleeping` is the
+            // smallest existing read-only utility call available as a
+            // bidirectional liveness probe.
             match timeout_at(deadline, self.is_sleeping()).await {
                 Ok(Ok(_)) => {
                     info!(path = %path.display(), "reattached engine session");

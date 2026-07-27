@@ -75,20 +75,20 @@ vllm-rs serve Qwen/Qwen3-0.6B \
   --data-parallel-address 127.0.0.1 \
   --data-parallel-rpc-port 62100 \
   --data-parallel-size 1 \
-  --data-parallel-size-local 0 \
   --engine-session /tmp/vllm-rs-engine-session.json
 ```
 
 When the session file does not exist, the frontend performs the normal
 handshake and writes the engine transport state to it. Stop the frontend only,
 then run the same command again to bind the saved endpoints and reconnect to
-the already loaded EngineCore. Reattach is currently a development-only DP=1
-workflow. It does not preserve HTTP request state: if the frontend exits with
-active requests, their clients disconnect, EngineCore continues them, and the
-replacement frontend discards their stale outputs while accepting new work.
-Prefer restarting while idle to avoid wasted engine work. Run only one frontend
-for a session at a time, and delete the session file whenever EngineCore is
-restarted.
+the already loaded EngineCore. `--engine-session` implies frontend-only
+external-engine mode, so `--data-parallel-size-local 0` is not required.
+Reattach is currently a development-only DP=1 workflow. It does not preserve
+HTTP request state: if the frontend exits with active requests, their clients
+disconnect, EngineCore continues them, and the replacement frontend discards
+their stale outputs while accepting new work. Prefer restarting while idle to
+avoid wasted engine work. Run only one frontend for a session at a time, and
+delete the session file whenever EngineCore is restarted.
 
 To build the `vllm-rs` in isolation:
 

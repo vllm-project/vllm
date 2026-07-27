@@ -1532,8 +1532,6 @@ fn serve_engine_session_selects_handshake_then_reattach() {
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
-        "--data-parallel-size-local",
-        "0",
         "--engine-session",
         &session_arg,
     ])
@@ -1542,6 +1540,8 @@ fn serve_engine_session_selects_handshake_then_reattach() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
+    assert!(args.uses_external_engine());
+    assert_eq!(args.managed_engine.data_parallel_size_local, None);
     let initial = args.to_frontend_config("tcp://127.0.0.1:29550".to_string());
     assert!(matches!(
         initial.transport_mode,
