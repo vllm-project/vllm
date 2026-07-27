@@ -368,12 +368,12 @@ def test_qkv_identifies_output_projection():
         assert get_fuser(PerHeadQKNormAttention()).o_name == "o_proj"
 
 
-def test_fuser_is_cached_per_class():
+def test_fuser_is_cached_per_class_and_structure():
     with torch.device("meta"):
         fuser_a = get_fuser(GLUMLP())
         fuser_b = get_fuser(GLUMLP())
     assert fuser_a is fuser_b
-    assert GLUMLP in get_fuser.cache
+    assert any(key[0] is GLUMLP for key in get_fuser.cache)
 
 
 @pytest.mark.parametrize("cls", [NotAnMLP, UntraceableMLP])
