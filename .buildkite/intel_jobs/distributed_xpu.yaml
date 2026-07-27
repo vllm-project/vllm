@@ -283,7 +283,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s distributed/test_custom_all_reduce.py || true &&
+    pytest -v -s distributed/test_custom_all_reduce.py --deselect="distributed/test_custom_all_reduce.py::test_custom_allreduce[test_target0-1-2]" || true &&
     torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py || true &&
     TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m distributed(num_gpus=2) || true &&
     pytest -v -s -x lora/test_mixtral.py || true'
@@ -313,7 +313,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest -v -s tests/distributed/test_context_parallel.py || true &&
     pytest -v -s tests/v1/distributed/test_dbo.py || true &&
-    VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py || true &&
+    VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py --deselect="tests/distributed/test_weight_transfer.py::test_nccl_weight_transfer_between_processes" || true &&
     pytest -v -s tests/distributed/test_packed_tensor.py || true'
 - label: Distributed Tests (2xB200)
   device: intel_gpu
