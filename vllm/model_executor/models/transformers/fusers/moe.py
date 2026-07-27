@@ -6,7 +6,7 @@ import ast
 import inspect
 import textwrap
 import types
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
 import torch
@@ -75,6 +75,25 @@ def _is_scalar_gate(module: nn.Module) -> bool:
     )
 
 
+def _forced_dtype(nodes: Iterable[fx.Node]) -> torch.dtype | None:
+    """The floating dtype `nodes` cast to, if any.
+
+    Computations that must run in higher precision say so in their forward (e.g.
+    `hidden_states.type(torch.float32)`), so the dtype is readable from the graph
+    even when the config does not name it."""
+    for node in nodes:
+        if node.op not in ("call_method", "call_function"):
+            continue
+        name = str(node.target).rsplit(".", 1)[-1]
+        if name == "float":
+            return torch.float32
+        if name in ("to", "type"):
+            for arg in (*node.args[1:], *node.kwargs.values()):
+                if isinstance(arg, torch.dtype) and arg.is_floating_point:
+                    return arg
+    return None
+
+
 def _reaches(node: fx.Node, key: str) -> set[fx.Node]:
     """Returns the set of nodes reachable from `node` by following `key` edges."""
     seen: set[fx.Node] = set()
@@ -127,10 +146,13 @@ class MoEBlockFuser:
     scoring_func: str
     shared_name: str | None
     shared_gate_name: str | None
+    router_dtype: torch.dtype | None = None
 
     @staticmethod
-    def _match_router(gate: nn.Module) -> str | None:
-        """Matches `topk(score(linear(x)))`, `score` being `softmax`/`sigmoid`."""
+    def _match_router(gate: nn.Module) -> tuple[str, torch.dtype | None] | None:
+        """Matches `topk(score(linear(x)))`, `score` being `softmax`/`sigmoid`.
+
+        Returns the scoring function and the dtype the router computes in."""
         state = {name for name, _ in named_state(gate)}
         if "weight" not in state or state - {"weight", "e_score_correction_bias"}:
             return None
@@ -151,9 +173,11 @@ class MoEBlockFuser:
         if len(scorers) != 1:
             return None
         scorer = scorers[0]
-        if not any(is_op(n, "linear") for n in _reaches(scorer, "all_input_nodes")):
+        logits_cone = _reaches(scorer, "all_input_nodes")
+        if not any(is_op(n, "linear") for n in logits_cone):
             return None
-        return "softmax" if is_op(scorer, "softmax") else "sigmoid"
+        scoring_func = "softmax" if is_op(scorer, "softmax") else "sigmoid"
+        return scoring_func, _forced_dtype(logits_cone)
 
     @staticmethod
     def _match_shared_experts(
@@ -197,10 +221,14 @@ class MoEBlockFuser:
         if _returns_tuple(type(moe_block)):
             return None
         # Router: the child that scores + top-k selects.
-        gate_name = scoring_func = None
+        gate_name = scoring_func = router_dtype = None
         for name, child in moe_block.named_children():
-            if name != experts_name and (func := cls._match_router(child)) is not None:
-                gate_name, scoring_func = name, func
+            if (
+                name != experts_name
+                and (router := cls._match_router(child)) is not None
+            ):
+                gate_name = name
+                scoring_func, router_dtype = router
                 break
         if gate_name is None or scoring_func is None:
             return None
@@ -228,9 +256,11 @@ class MoEBlockFuser:
         for name, child in moe_block.named_children():
             if name not in accounted and next(named_state(child), None) is not None:
                 return None
-        return cls(gate_name, scoring_func, shared_name, shared_gate_name)
+        return cls(gate_name, scoring_func, shared_name, shared_gate_name, router_dtype)
 
-    def gate(self, moe_block: nn.Module, prefix: str) -> GateLinear:
+    def gate(
+        self, moe_block: nn.Module, prefix: str, out_dtype: torch.dtype | None = None
+    ) -> GateLinear:
         """Rebuild the HF gate as a `GateLinear` for vLLM's fused MoE."""
         hf_gate = getattr(moe_block, self.gate_name)
         num_experts, hidden_size = hf_gate.weight.shape
@@ -238,6 +268,7 @@ class MoEBlockFuser:
             hidden_size,
             num_experts,
             bias=False,
+            out_dtype=out_dtype or self.router_dtype,
             prefix=maybe_prefix(prefix, self.gate_name),
         )
         if (bias := getattr(hf_gate, "e_score_correction_bias", None)) is not None:

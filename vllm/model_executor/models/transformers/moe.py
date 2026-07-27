@@ -34,7 +34,7 @@ from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.transformers.fuser import get_fuser
 from vllm.model_executor.models.transformers.fusers.moe import MoEBlockFuser
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, direct_register_custom_op
 
 from .utils import log_replacement
 
@@ -190,6 +190,10 @@ class MoEMixin(MixtureOfExperts):
             apply_routed_scale_to_output=apply_routed_scale_to_output,
         )
 
+        # Dtype the router computes in, if it is not the activation dtype.
+        config_router_dtype = getattr(text_config, "moe_router_dtype", None)
+        config_router_dtype = STR_DTYPE_TO_TORCH_DTYPE.get(config_router_dtype)
+
         # Grouped topk routing kwargs
         num_expert_group = getattr(text_config, "n_group", None)
         topk_group = getattr(text_config, "topk_group", None)
@@ -293,7 +297,9 @@ class MoEMixin(MixtureOfExperts):
                             down_name = getattr(glu_fuser, "down_name", None)
                             if down_name is not None:
                                 shared_down_projs.append((hf_shared, down_name))
-                        gate = fuser.gate(moe_block, prefix)
+                        # Prefer config, otherwise read it from fuser.
+                        router_dtype = config_router_dtype or fuser.router_dtype
+                        gate = fuser.gate(moe_block, prefix, router_dtype)
                         kwargs |= dict(
                             scoring_func=fuser.scoring_func,
                             is_sequence_parallel=(
@@ -302,6 +308,8 @@ class MoEMixin(MixtureOfExperts):
                             gate=gate,
                             shared_experts=shared_experts,
                         )
+                        if router_dtype is not None:
+                            kwargs["router_logits_dtype"] = router_dtype
                         if use_grouped_topk:
                             kwargs |= grouped_topk_routing_kwargs
                         if routed_scaling_factor != 1.0:

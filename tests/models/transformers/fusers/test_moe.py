@@ -40,6 +40,18 @@ class ScaledRouter(TopKRouter):
         return logits, value, index
 
 
+class Fp32Router(TopKRouter):
+    """Router that computes its logits in fp32 (DeepSeek/GLM style)."""
+
+    def forward(self, hidden_states):
+        logits = F.linear(
+            hidden_states.type(torch.float32), self.weight.type(torch.float32)
+        )
+        scores = F.softmax(logits, dim=-1)
+        value, index = torch.topk(scores, self.top_k, dim=-1)
+        return logits, value.to(hidden_states.dtype), index
+
+
 class GroupedRouter(TopKRouter):
     """Group-limited router (DeepSeek `group_limited_greedy`), scaled weights."""
 
@@ -281,6 +293,17 @@ def test_moe_fuser_matches_correction_router():
     fuser = MoEBlockFuser.match(block, "experts")
     assert isinstance(fuser, MoEBlockFuser)
     assert fuser.scoring_func == "sigmoid"
+
+
+def test_moe_fuser_reads_router_dtype_from_the_gate():
+    """A router that computes its logits in fp32 must keep routing in fp32 when
+    rebuilt, even though no config field names the dtype. The cast back to the
+    activation dtype after the top-k must not be mistaken for the routing dtype."""
+    with torch.device("meta"):
+        fp32 = MoEBlockFuser.match(MoEBlock(Fp32Router), "experts")
+        default = MoEBlockFuser.match(MoEBlock(TopKRouter), "experts")
+    assert fp32.router_dtype == torch.float32
+    assert default.router_dtype is None
 
 
 def test_moe_fuser_detects_shared_experts():
