@@ -16,7 +16,9 @@
 # limitations under the License.
 """Transformers modeling backend utilities."""
 
+from collections.abc import Iterator
 from contextlib import contextmanager
+from itertools import chain
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -207,6 +209,11 @@ def recursive_replace_linear(
                 setattr(module, child_name, new_module)
 
     _recursive_replace(model, prefix=prefix)
+
+
+def named_state(module: nn.Module) -> Iterator[tuple[str, torch.Tensor]]:
+    """`module`'s own state (i.e. named parameters and buffers)."""
+    return chain(module.named_parameters(), module.named_buffers())
 
 
 def log_replacement(name: str, old_module: nn.Module, new_module: nn.Module):
