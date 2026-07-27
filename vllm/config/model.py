@@ -559,20 +559,31 @@ class ModelConfig:
                 or _HF_COMMIT_HASH_PATTERN.fullmatch(self.revision) is None
             )
         ):
-            self.revision = (
-                hf_api()
-                .model_info(
-                    self.model,
-                    revision=self.revision,
-                    token=self.hf_token,
+            try:
+                resolved_revision = (
+                    hf_api()
+                    .model_info(
+                        self.model,
+                        revision=self.revision,
+                        token=self.hf_token,
+                    )
+                    .sha
                 )
-                .sha
-            )
-            if (
-                self.tokenizer == self.model
-                and self.tokenizer_revision == requested_revision
-            ):
-                self.tokenizer_revision = self.revision
+            except Exception:
+                logger.debug(
+                    "Failed to resolve revision for %s; falling back to %s.",
+                    self.model,
+                    requested_revision,
+                    exc_info=True,
+                )
+            else:
+                if resolved_revision is not None:
+                    self.revision = resolved_revision
+                    if (
+                        self.tokenizer == self.model
+                        and self.tokenizer_revision == requested_revision
+                    ):
+                        self.tokenizer_revision = resolved_revision
 
         if self.override_attention_dtype is not None and not current_platform.is_rocm():
             warnings.warn(
