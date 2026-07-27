@@ -8,9 +8,12 @@
 `triton-xpu 3.7.2`, kernels `@aa156578`)
 **Graph modes under canary:** PIECEWISE (01 clamp) **and** FA-in-graph FULL
 (03 opt-out) — ladder, eager baseline first
-**Status:** plan — results to be recorded below after the hal run
-**Production:** Ornith DaemonSet stays **paused / eager**. No cutover here
-(that is 05).
+**Status:** implemented + validated on `hal` (Arc Pro B70). All three arms
+(eager / PIECEWISE / FA-in-graph FULL) passed S1–S7. Graphs give ~+420–432%
+single-stream decode with no corruption. **Recommendation: go for 05 with arm
+C (FA-in-graph, resolves to `FULL_AND_PIECEWISE`).**
+**Production:** Ornith DaemonSet left **paused / eager**, untouched. No cutover
+here (that is 05).
 
 ---
 
@@ -240,7 +243,75 @@ gpt-oss or any other model, kernels changes, 128k-context validation.
 
 ---
 
-## Results
+## Results (hal, Arc Pro B70)
 
-_To be recorded after the hal run: per-arm S1–S7 outcomes, A/B table,
-captured-graph counts, and the 05 recommendation._
+Image `hal/vllm-xpu:oneapi-2026.0-torch2.13-3deb3160c` + this branch overlaid
+(`vllm/_custom_ops.py`, `vllm/envs.py`, `vllm/platforms/xpu.py`,
+`vllm/utils/torch_utils.py`) into both the installed and `/workspace` vLLM
+copies. `torch 2.13.0+xpu`, `torch.version.xpu=20260000`, kernels
+`@aa156578` unchanged. Model `/models/Ornith-1.0-35B-MXFP4`
+(compressed-tensors MXFP4 MoE + hybrid GDN/Mamba), bf16, fp8 KV, 32k context,
+`--max-num-batched-tokens 4096`, `--max-num-seqs 2`, util 0.85, greedy,
+single stream, `ZE_AFFINITY_MASK=0`. Standalone `docker run` — production
+DaemonSet never touched.
+
+### `is_padding` fix
+
+Arm A first **failed to boot** on the stock tree with
+`_moe_C::topk_softmax() is missing value for argument 'is_padding'` — exactly
+the error the production ConfigMap patch works around. With the in-tree fix
+(`vllm/_custom_ops.py`) all arms boot cleanly and the runtime patch is no
+longer needed. This alone is required for Ornith on this tree, graphs or not.
+
+### A/B (8×128-tok greedy completions after warmup)
+
+| Arm | Ready s | TTFT ms mean | TTFT ms p50 | Decode tok/s mean | Decode tok/s p50 |
+|-----|---------|--------------|-------------|-------------------|------------------|
+| A: eager (prod config) | 135 | 154.7 | 154.3 | 13.9 | 13.9 |
+| B: PIECEWISE | 201 | 72.6 | 71.9 | 72.2 | 72.2 |
+| C: FA-in-graph FULL | 180 | 66.6 | 66.4 | 74.0 | 74.0 |
+
+**B vs A:** decode **+419%**, TTFT −53%. **C vs A:** decode **+432%**,
+TTFT −57%.
+
+### Correctness (S1–S7, all arms)
+
+- **S1** all Ready; **no `work_group_scratch_memory` / SYCL Graph error** in
+  any arm. Arm B captured PIECEWISE (3 sizes, 0.12 GiB, GDN/Mamba ops in
+  `splitting_ops` so they stay outside capture). Arm C logged
+  `FlashAttention-in-graph enabled` and — because `GDNAttentionBackend` is
+  `UNIFORM_BATCH` — auto-downgraded `FULL → FULL_AND_PIECEWISE` (2 decode FULL
+  graphs, 0.01 GiB), as designed. Graph memory tax negligible; no OOM at 32k.
+- **S2** `2+2 → "4"` on every arm.
+- **S3** 512-tok structured explanation coherent on every arm; no `!` loops /
+  NaN / collapse.
+- **S4** temp=0 repeats **byte-identical within every arm** (short and long).
+- **S5** MoE routing (code / math / prose / multilingual) coherent and correct
+  on every arm — MXFP4 MoE captured in-graph produces no garbage.
+- **S6** GDN/Mamba state recall after ~2k-token filler: all arms recalled
+  `MAGNETIC-YELLOW-42` / `Dr. Elena Vasquez` **byte-identically** — no linear-
+  attention state corruption under graph replay.
+- **S7** eager-compare: short + state-recall outputs byte-identical A/B/C. Long
+  free-form generations (S3/S5) share identical prefixes and diverge only at a
+  single greedy word-choice branch point ("process" vs "calculation",
+  "dew-kissed" vs "frost-kissed"), after which the continuations are fully
+  coherent. This is the bf16 near-tie flip 03 documented, **not corruption**
+  (similarity metric is low only because one early flip cascades). No arm
+  produced garbage on any prompt.
+
+Artifacts: `deploy/xpu-ornith-graphs-canary/results/AB_COMPARE_20260727T153842Z.{json,md}`
+plus per-arm `outputs_*` / `arm_*`.
+
+### Go / No-go for 05
+
+**GO.** Both graph arms pass all smokes with large, near-equal decode uplift.
+Arm C (FA-in-graph → `FULL_AND_PIECEWISE`) is the recommended 05 mode: it is
+marginally faster than B, exercises the full 03 capability, and the GDN
+auto-downgrade means it is really "FA + MoE in FULL graphs, GDN/Mamba
+piecewise" — the safest full-graph shape available for this model. Arm B
+(PIECEWISE) is the fallback if 05's DS-profile validation surfaces any issue.
+
+**05 must still validate on the production DS profile before flipping**: full
+128k context (not 32k), `--enable-prefix-caching`, tool/reasoning parsers,
+`--max-num-seqs`/util at prod values, and the `is_padding` fix baked into the
+image (retiring `patch_topk_is_padding.py`). Production stays eager until then.

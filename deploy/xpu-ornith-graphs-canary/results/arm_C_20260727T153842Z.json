@@ -1,0 +1,10 @@
+{
+  "arm": "C",
+  "ready_s": 180,
+  "ttft_ms_mean": 66.64750992786139,
+  "ttft_ms_p50": 66.37931894510984,
+  "decode_tok_s_mean": 73.97087479858321,
+  "decode_tok_s_p50": 73.97098004907271,
+  "text": "\n\n<think>\nHere's a thinking process:\n\n1.  **Analyze User Input:**\n   - **Topic:** GPU (Graphics Processing Unit)\n   - **Task:** Explain what it does\n   - **Constraint:** Exactly two sentences\n\n2.  **Identify Key Concepts about GPUs:**\n   - Originally designed for rendering graphics/images\n   - Now widely used for parallel processing tasks (AI, scientific computing, video processing, etc.)\n   - Contains thousands of smaller, efficient cores optimized for handling multiple tasks simultaneously\n   - Contrasts with CPU (which has fewer, more powerful cores for sequential tasks)\n\n",
+  "text_stable": true
+}
