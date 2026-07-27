@@ -1,0 +1,63 @@
+{
+  "hy3": {
+    "target": "/apdcephfs_sgfd2/share_300532381/ruicen/draft_models/HY3-R3-SFT0628-RL0629-exp163_step80",
+    "served_name": "hy3",
+    "tp": 8,
+    "methods": {
+      "ar": null,
+      "mtp-3": {
+        "method": "mtp",
+        "model": "/apdcephfs_sgfd2/share_300532381/ruicen/draft_models/Hy3_angelspec_opensource",
+        "num_speculative_tokens": 3
+      },
+      "dflash-7": {
+        "method": "dflash",
+        "model": "/apdcephfs_sgfd2/share_300532381/ruicen/draft_models/hy3_dflash_iter_0018433_hf",
+        "num_speculative_tokens": 7
+      },
+      "dfly-7": {
+        "model": "/apdcephfs_sgfd2/share_300532381/ruicen/draft_models/hy3_dfly_hf_final",
+        "num_speculative_tokens": 7
+      },
+      "dfly-7-dcut": {
+        "model": "/apdcephfs_sgfd2/share_300532381/ruicen/draft_models/hy3_dfly_hf_final",
+        "num_speculative_tokens": 7,
+        "dflash_dcut": "auto"
+      }
+    }
+  },
+  "qwen3-8b": {
+    "target": "/apdcephfs_sgfd2/share_300532381/ruicen/draft_models/Qwen3-8B",
+    "served_name": "qwen3-8b",
+    "tp": 1,
+    "methods": {
+      "ar": null,
+      "mtp-3": {
+        "method": "mtp",
+        "model": "/apdcephfs_sgfd2/share_300532381/ruicen/draft_models/qwen3-8b-mtp-iter_0013831_served",
+        "num_speculative_tokens": 3
+      },
+      "dflash-7": {
+        "method": "dspark",
+        "model": "/apdcephfs_sgfd2/share_300532381/ruicen/draft_models/dflash_qwen3_8b_block7",
+        "num_speculative_tokens": 7
+      },
+      "dspark-7": {
+        "method": "dspark",
+        "model": "/apdcephfs_sgfd2/share_300532381/ruicen/draft_models/dspark_qwen3_8b_block7",
+        "num_speculative_tokens": 7
+      },
+      "dfly-7": {
+        "method": "dspark",
+        "model": "/apdcephfs_sgfd2/share_300532381/ruicen/draft_models/qwen3_8b_dfly_hf_final",
+        "num_speculative_tokens": 7
+      },
+      "dfly-7-dcut": {
+        "method": "dspark",
+        "model": "/apdcephfs_sgfd2/share_300532381/ruicen/draft_models/qwen3_8b_dfly_hf_final",
+        "num_speculative_tokens": 7,
+        "dflash_dcut": "auto"
+      }
+    }
+  }
+}
