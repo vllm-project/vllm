@@ -72,6 +72,13 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
                 scale_layout = CDNA4MXScaleLayout
         else:
             scale_layout = StridedLayout
+        constraints = {
+            "block_m": 64,
+            "block_n": 512,
+            "block_k": 256,
+            "split_k": 1,
+        }
+        opt_flags.update_opt_flags_constraints(constraints)
     else:
         value_layout, value_layout_opts = layout.make_default_matmul_mxfp4_w_layout(
             mx_axis=1
