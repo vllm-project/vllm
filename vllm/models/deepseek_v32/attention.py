@@ -31,10 +31,8 @@ from vllm.model_executor.models.deepseek_v2 import (
     yarn_get_mscale,
 )
 from vllm.model_executor.models.utils import extract_layer_index
-from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
-from vllm.platforms import current_platform
-from vllm.utils.torch_utils import _encode_layer_name, is_quantized_kv_cache
+from vllm.utils.torch_utils import is_quantized_kv_cache
 
 
 class DeepseekV32Indexer(nn.Module):
