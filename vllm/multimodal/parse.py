@@ -670,7 +670,11 @@ class MultiModalDataParser:
         else:
             data_items = data  # type: ignore[assignment]
 
-        new_videos = list[Any]()
+        new_videos = list[
+            np.ndarray
+            | MediaWithBytes[np.ndarray]
+            | tuple[np.ndarray | MediaWithBytes[np.ndarray], dict[str, Any]]
+        ]()
         metadata_lst: list[dict[str, Any] | None] = []
         for data_item in data_items:
             video, metadata = self._get_video_with_metadata(data_item)
