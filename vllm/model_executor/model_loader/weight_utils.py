@@ -694,7 +694,7 @@ def _get_checkpoints_size_bytes(files: list[str]) -> int:
 
 
 def _get_available_ram_bytes() -> int:
-    """Return available RAM, honoring cgroup limits on ROCm."""
+    """Return available RAM, honoring cgroup limits."""
     import psutil
 
     host_available = psutil.virtual_memory().available
