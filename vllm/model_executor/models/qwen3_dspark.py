@@ -51,17 +51,19 @@ def _get_hpc_module():
     except (ImportError, OSError) as error:
         logger.warning_once("[dspark] hpc module is unavailable: %s", error)
         return None
-    required_ops = ("fused_rmsnorm_blockwise_quant", "add")
-    if not all(hasattr(hpc, name) for name in required_ops):
+    required_ops = ("fused_rmsnorm_with_scale",)
+    missing_ops = [name for name in required_ops if not hasattr(hpc, name)]
+    if missing_ops:
         logger.warning_once(
-            "[dspark] hpc module does not provide all required correction ops."
+            "[dspark] hpc module does not provide required correction ops: %s",
+            missing_ops,
         )
         return None
     return hpc
 
 
 class HpcHiddenCorrectionMixin:
-    """HPC RMSNorm/add helpers shared by hidden-correction variants."""
+    """HPC RMSNorm helpers shared by hidden-correction variants."""
 
     def _init_hpc_correction(self, *, default_enabled: bool = True) -> None:
         self._use_hpc_correction = (
@@ -69,7 +71,14 @@ class HpcHiddenCorrectionMixin:
             != "0"
         )
         self._hpc_norm_disabled = False
-        self._hpc_add_disabled = False
+        self._hpc_rms_scale: torch.Tensor | None = None
+
+    def _get_hpc_rms_scale(self, x: torch.Tensor) -> torch.Tensor:
+        scale = self._hpc_rms_scale
+        if scale is None or scale.device != x.device:
+            scale = torch.ones(2, dtype=torch.float32, device=x.device)
+            self._hpc_rms_scale = scale
+        return scale
 
     def _norm_with_hpc(self, norm: RMSNorm, x: torch.Tensor) -> torch.Tensor:
         if not self._use_hpc_correction or self._hpc_norm_disabled:
@@ -82,16 +91,18 @@ class HpcHiddenCorrectionMixin:
             self._hpc_norm_disabled = True
             return norm(x)
         try:
-            # hpc-ops 5.2.0 assumes dense row-major input but does not reject
-            # strided views such as hidden_per_step[:, i]. Materialize those
-            # views to avoid silently normalizing values from adjacent steps.
+            # hpc fused_rmsnorm_with_scale assumes dense row-major input but does
+            # not reject strided views such as hidden_per_step[:, i]. Materialize
+            # those views to avoid silently normalizing adjacent-step values.
             hpc_input = x if x.is_contiguous() else x.contiguous()
-            return hpc.fused_rmsnorm_blockwise_quant(
+            rms_out, _, _ = hpc.fused_rmsnorm_with_scale(
                 hpc_input,
                 norm.weight.data,
-                norm.variance_epsilon,
-                False,
+                eps=norm.variance_epsilon,
+                scale=self._get_hpc_rms_scale(hpc_input),
+                is_moe=True,
             )
+            return rms_out.to(dtype=x.dtype)
         except (RuntimeError, TypeError) as error:
             self._hpc_norm_disabled = True
             logger.warning_once(
@@ -105,31 +116,8 @@ class HpcHiddenCorrectionMixin:
         hidden_states: torch.Tensor,
         delta: torch.Tensor,
     ) -> torch.Tensor:
-        delta = delta.to(hidden_states.dtype)
-        if (
-            not self._use_hpc_correction
-            or self._hpc_add_disabled
-            or not hidden_states.is_cuda
-        ):
-            return hidden_states + delta
-
-        # hpc-ops 5.2.0 exposes add for FP32 only. Hidden correction normally
-        # runs in BF16, so avoid a known failing dispatch and retain torch.add.
-        if hidden_states.dtype != torch.float32:
-            return hidden_states + delta
-
-        hpc = _get_hpc_module()
-        if hpc is None:
-            self._hpc_add_disabled = True
-            return hidden_states + delta
-        try:
-            return hpc.add(hidden_states, delta)
-        except (RuntimeError, TypeError) as error:
-            self._hpc_add_disabled = True
-            logger.warning_once(
-                "[dspark] hpc add failed; falling back to torch add: %s", error
-            )
-            return hidden_states + delta
+        # Current hpc-ops package does not export a standalone add kernel.
+        return hidden_states + delta.to(hidden_states.dtype)
 
 
 class PositionAdaptiveAlpha(nn.Module):
