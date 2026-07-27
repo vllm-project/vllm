@@ -34,6 +34,7 @@ NUM_MAPPINGS = [3]
 NUM_MAPPINGS_PER_GROUP = [2]
 
 
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific test")
 def test_rocm_cpu_to_gpu_uses_dma(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(gpu_worker, "HAS_TRITON", True)
     monkeypatch.setattr(gpu_worker.current_platform, "is_xpu", lambda: False)
