@@ -9,6 +9,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.tasks import GenerationTask
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -94,6 +95,15 @@ class ModelState(ABC):
 
     def apply_staged_writes(self) -> None:
         return None
+
+    def get_additional_cg_support(self) -> tuple[AttentionCGSupport, str | None]:
+        """Cudagraph support of attention groups this ModelState builds outside
+        ``init_attn_backend`` (e.g. encoder-only layers).
+
+        Returns the minimum support level and its backend name. The default of
+        ``ALWAYS`` imposes no extra constraint on the runner's cudagraph mode.
+        """
+        return AttentionCGSupport.ALWAYS, None
 
     def preprocess_state(
         self,
