@@ -159,10 +159,17 @@ def get_open_port() -> int:
     if "VLLM_DP_MASTER_PORT" in os.environ:
         dp_master_port = envs.VLLM_DP_MASTER_PORT
         reserved_port_range = range(dp_master_port, dp_master_port + 10)
+        # Start scanning from VLLM_PORT when set (via _get_open_port's default).
+        start_port = envs.VLLM_PORT
         while True:
-            candidate_port = _get_open_port()
+            candidate_port = _get_open_port(start_port=start_port)
             if candidate_port not in reserved_port_range:
                 return candidate_port
+            # The candidate fell inside the DP-reserved range. Resume the
+            # search just past the range instead of retrying the same port
+            # forever (which happens when VLLM_PORT itself is reserved, since
+            # _get_open_port would keep returning it).
+            start_port = reserved_port_range.stop
     return _get_open_port()
 
 
