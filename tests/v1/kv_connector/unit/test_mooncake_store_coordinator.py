@@ -21,6 +21,15 @@ from vllm.v1.kv_cache_interface import (
 )
 
 
+def _mamba_align(block_size=32):
+    return MambaSpec(
+        block_size=block_size,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+
+
 def _make_coord(groups, hash_block_size, use_eagle=False, retention_interval=None):
     """Construct a coordinator using the natural LCM of group block sizes as
     the scheduler block size — mirrors ``resolve_kv_cache_block_sizes`` for
@@ -197,6 +206,49 @@ def test_coordinator_group_block_size_double_hash():
     )
     assert hit == 64
     assert hit % 32 == 0
+
+
+# ----- Fine-grained partial hits (full attention + mamba "align") -----
+
+
+def test_coordinator_fine_grained_partial_tail_hit():
+    """K3 shape: FA + mamba-align, block_size=32 over hash_block_size=16. When
+    both groups have the sub-block boundary hash, the reconciled hit lands on
+    the hash boundary (48), not the block boundary (32)."""
+    groups = [
+        KVCacheGroupSpec(["L0"], _full(32)),
+        KVCacheGroupSpec(["L1"], _mamba_align(32)),
+    ]
+    coord = _make_coord(groups, hash_block_size=16)
+    assert coord.enable_partial_hash_hits
+    hs = _hashes(4)  # 4 hash units of 16 = 64 tokens; block 0 = [0,32), etc.
+    # Both groups: full block 0 (key = last sub-hash hs[1]) + partial boundary
+    # at token 48 (key = hs[2]). No hs[3] -> block 1 is not full.
+    exists = {(g, bytes(h)) for g in (0, 1) for h in (hs[1], hs[2])}
+    cmap = ExternalCachedBlockPool(16, exists)
+    _masks, hit = coord.find_longest_cache_hit(
+        hs, max_length=64, cached_block_pool=cmap
+    )
+    assert hit == 48
+
+
+def test_coordinator_fine_grained_clips_when_one_group_missing_tail():
+    """If only one group has the sub-block boundary, min-convergence clips the
+    reconciled hit back to the block boundary (32)."""
+    groups = [
+        KVCacheGroupSpec(["L0"], _full(32)),
+        KVCacheGroupSpec(["L1"], _mamba_align(32)),
+    ]
+    coord = _make_coord(groups, hash_block_size=16)
+    hs = _hashes(4)
+    # Full block 0 for both; partial boundary hs[2] only for FA (group 0).
+    exists = {(g, bytes(hs[1])) for g in (0, 1)}
+    exists |= {(0, bytes(hs[2]))}
+    cmap = ExternalCachedBlockPool(16, exists)
+    _masks, hit = coord.find_longest_cache_hit(
+        hs, max_length=64, cached_block_pool=cmap
+    )
+    assert hit == 32
 
 
 # ----- store_mask -----
