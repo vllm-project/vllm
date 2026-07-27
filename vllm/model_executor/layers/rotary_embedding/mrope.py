@@ -5,6 +5,7 @@
 import numpy as np
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .base import RotaryEmbeddingBase
@@ -197,9 +198,7 @@ def triton_mrope(
     # Small adjacent-pair tiles perform best with one wave per program on
     # ROCm. Keep the existing launch shape for larger rotary dimensions,
     # NeoX, and other backends.
-    use_single_wave = (
-        torch.version.hip is not None and not is_neox_style and pad_rd <= 64
-    )
+    use_single_wave = current_platform.is_rocm() and not is_neox_style and pad_rd <= 64
     num_warps = 1 if use_single_wave else 4
     _triton_mrope_forward[(n_row,)](
         q,
