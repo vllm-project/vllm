@@ -422,6 +422,10 @@ class ReqMeta:
     remote_engine_id: str
     tp_size: int
     remote_dp_size: int
+    # Prefill DP rank that owns this request's KV (forwarded by the proxy). The
+    # read must target this rank's memory registration; the default 0 preserves
+    # the symmetric single-DP behaviour.
+    remote_dp_rank: int = 0
 
 
 class MoRIIOConnectorMetadata(KVConnectorMetadata):
@@ -475,6 +479,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             remote_notify_port=int(remote_notify_port),
             tp_size=kv_transfer_params.get("tp_size", 1),
             remote_dp_size=kv_transfer_params.get("remote_dp_size", 1),
+            remote_dp_rank=kv_transfer_params.get("remote_dp_rank", 0),
         )
         if write_mode:
             self.reqs_to_save[request_id] = _req
