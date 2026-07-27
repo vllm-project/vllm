@@ -33,6 +33,7 @@ from vllm.model_executor.models.deepseek_v2 import (
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 
 from .kernels import fused_norm_rope, fused_q
 
@@ -531,11 +532,6 @@ class DeepseekV32Attention(MLAAttention):
                     "The NVIDIA DeepSeek-v3.2/GLM-5.2 override does not yet "
                     "support combined PCP and DCP attention."
                 )
-            if self.dcp_a2a:
-                raise NotImplementedError(
-                    "The NVIDIA DeepSeek-v3.2/GLM-5.2 override currently "
-                    "supports DCP only with dcp_comm_backend='ag_rs'."
-                )
             if isinstance(mqa_q_arg, tuple):
                 mqa_q_arg = torch.cat(mqa_q_arg, dim=-1)
             # Each TP/DCP rank projects only its local query-head shard. Every
@@ -552,12 +548,21 @@ class DeepseekV32Attention(MLAAttention):
                     "The NVIDIA DCP attention path requires per-head LSE from "
                     "the sparse MLA backend."
                 )
-            attn_out = cp_lse_ag_out_rs(
-                attn_out,
-                lse,
-                get_dcp_group(),
-                is_lse_base_on_e=self.impl.lse_base_on_e,
-            )
+            dcp_group = get_dcp_group()
+            if self.dcp_a2a:
+                attn_out = dcp_a2a_lse_reduce(
+                    attn_out,
+                    lse,
+                    dcp_group,
+                    is_lse_base_on_e=self.impl.lse_base_on_e,
+                )
+            else:
+                attn_out = cp_lse_ag_out_rs(
+                    attn_out,
+                    lse,
+                    dcp_group,
+                    is_lse_base_on_e=self.impl.lse_base_on_e,
+                )
         x = attn_out.view(
             num_actual, self.num_local_heads, self.kv_lora_rank
         ).transpose(0, 1)
