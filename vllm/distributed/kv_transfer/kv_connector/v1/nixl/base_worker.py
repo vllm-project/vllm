@@ -96,7 +96,6 @@ class NixlBaseConnectorWorker:
         physical_blocks_per_logical: int,
     ) -> np.ndarray:
         """Compute NIXL descriptor IDs for given block IDs."""
-        num_fa_regions = self.num_regions
         num_ssm_regions = 0
         if self._has_mamba:
             assert self._conv_decomp is not None
@@ -108,7 +107,7 @@ class NixlBaseConnectorWorker:
         num_blocks = dst_num_blocks
         if block_size_ratio is not None:
             num_blocks = int(num_blocks * block_size_ratio)
-        num_fa_descs = num_fa_regions * num_blocks
+        num_fa_descs = self.num_regions * num_blocks
 
         # All-attention fast path: single vectorized broadcast.
         if num_ssm_regions == 0:
@@ -119,7 +118,7 @@ class NixlBaseConnectorWorker:
             # always differ (different areas). Therefore we can just flatten the
             # block_ids and compute the descs ids for all groups at once.
             block_arr = np.concatenate(block_ids)[None, :]
-            region_ids = np.arange(num_fa_regions)[:, None]
+            region_ids = np.arange(self.num_regions)[:, None]
             return (region_ids * num_blocks + block_arr).flatten()
 
         # Compute desc ids per group using the right stride: FA descs have
@@ -130,7 +129,7 @@ class NixlBaseConnectorWorker:
         for i, group in enumerate(block_ids):
             group_arr = np.asarray(group)
             if _is_attention_spec(self._group_spec_types[i]):
-                fa_region_ids = np.arange(num_fa_regions)[:, None]
+                fa_region_ids = np.arange(self.num_regions)[:, None]
                 all_descs.append(
                     (fa_region_ids * num_blocks + group_arr[None, :]).flatten()
                 )
