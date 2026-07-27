@@ -12,7 +12,7 @@ if(FLASH_KDA_SRC_DIR)
 else()
   FetchContent_Declare(
     flashkda
-    GIT_REPOSITORY git@github.com:Inferact/FlashKDA.git
+    GIT_REPOSITORY https://github.com/vllm-project/FlashKDA.git
     GIT_TAG a3e42bbbece3bb38f7c426b880315294a336e82f
     GIT_PROGRESS TRUE
     GIT_SUBMODULES cutlass
