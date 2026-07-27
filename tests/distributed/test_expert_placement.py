@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+
 import pytest
 import torch
 
 from vllm.model_executor.layers.fused_moe.expert_map_manager import (
     determine_expert_map,
 )
+from vllm.model_executor.layers.fused_moe.riy import RiyState, build_riy_prune_map
 
 
 def verify_round_robin_pattern(expert_map, ep_rank, ep_size, global_num_experts):
@@ -138,6 +141,49 @@ def test_expert_placement_edge_cases(expert_placement_strategy, world_size):
         )
 
 
+def test_riy_profile_builds_per_layer_prune_map(tmp_path):
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(json.dumps({"pruned_experts": [[0, 1], [1, 2]]}))
+
+    num_kept, expert_map, logit_mask = build_riy_prune_map(
+        layer_idx=0,
+        original_num_experts=4,
+        profile_path=str(profile_path),
+    )
+
+    assert num_kept == 3
+    assert expert_map.tolist() == [0, -1, 1, 2]
+    assert logit_mask.tolist() == [0.0, float("-inf"), 0.0, 0.0]
+
+
+def test_riy_profile_rejects_out_of_range_expert(tmp_path):
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(json.dumps({"pruned_experts": [[0, 4]]}))
+
+    with pytest.raises(ValueError, match="out of range"):
+        build_riy_prune_map(
+            layer_idx=0,
+            original_num_experts=4,
+            profile_path=str(profile_path),
+        )
+
+
+def test_runtime_mask_rejects_out_of_range_indices():
+    state = RiyState()
+    state.initialize(num_layers=2, num_experts=4)
+
+    with pytest.raises(ValueError, match="out of range"):
+        state.set_mask([(2, 0)])
+
+
+def test_runtime_mask_rejects_pruning_every_expert_in_a_layer():
+    state = RiyState()
+    state.initialize(num_layers=2, num_experts=4)
+
+    with pytest.raises(ValueError, match="every expert"):
+        state.set_mask([(0, 0), (0, 1), (0, 2), (0, 3)])
+
+
 def test_expert_filter_compacts_kept_experts_without_ep():
     local_num_experts, expert_map, _ = determine_expert_map(
         ep_size=1,
@@ -169,6 +215,27 @@ def test_expert_filter_rejects_pruning_every_expert():
             ep_rank=0,
             global_num_experts=4,
             expert_filter=torch.zeros(4, dtype=torch.bool),
+        )
+
+
+def test_expert_filter_rejects_rank_without_local_experts():
+    with pytest.raises(ValueError, match="EP rank 0"):
+        determine_expert_map(
+            ep_size=2,
+            ep_rank=0,
+            global_num_experts=4,
+            expert_filter=torch.tensor([False, False, True, True]),
+        )
+
+
+def test_expert_filter_rejects_round_robin_placement():
+    with pytest.raises(NotImplementedError, match="round-robin"):
+        determine_expert_map(
+            ep_size=2,
+            ep_rank=0,
+            global_num_experts=4,
+            expert_placement_strategy="round_robin",
+            expert_filter=torch.ones(4, dtype=torch.bool),
         )
 
 

@@ -11,6 +11,7 @@ what to do with them via the admin API or offline tooling.
 """
 
 import json
+import os
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,6 +30,7 @@ class RiyLayerStats:
     Tensors live on GPU to avoid CPU transfers in the hot path
     (which fail silently during CUDA Graph replay).
     """
+
     num_experts: int
     device: torch.device = field(default_factory=lambda: torch.device("cpu"))
     # Token count per expert (how often selected by router)
@@ -37,18 +39,18 @@ class RiyLayerStats:
     weight_sum: torch.Tensor = field(init=False)
 
     def __post_init__(self):
-        self.freq = torch.zeros(self.num_experts, dtype=torch.int64,
-                                device=self.device)
-        self.weight_sum = torch.zeros(self.num_experts, dtype=torch.float32,
-                                      device=self.device)
+        self.freq = torch.zeros(self.num_experts, dtype=torch.int64, device=self.device)
+        self.weight_sum = torch.zeros(
+            self.num_experts, dtype=torch.float32, device=self.device
+        )
 
     def reset(self):
         # Replace tensors instead of in-place zero — safe from HTTP thread
         # (in-place .zero_() on GPU tensors from a non-CUDA thread crashes)
-        self.freq = torch.zeros(self.num_experts, dtype=torch.int64,
-                                device=self.device)
-        self.weight_sum = torch.zeros(self.num_experts, dtype=torch.float32,
-                                      device=self.device)
+        self.freq = torch.zeros(self.num_experts, dtype=torch.int64, device=self.device)
+        self.weight_sum = torch.zeros(
+            self.num_experts, dtype=torch.float32, device=self.device
+        )
 
     def ensure_device(self, device: torch.device):
         """Move tensors to device on first call from GPU."""
@@ -85,9 +87,9 @@ class RiyState:
         self._quantization = ""
         # Pre-allocated GPU tensors for compiled stats (R2)
         # Addresses must be stable — used by @torch.compile'd function
-        self._freq_pass: torch.Tensor | None = None       # (num_layers, num_experts)
-        self._weight_pass: torch.Tensor | None = None      # (num_layers, num_experts)
-        self._collecting_flag: torch.Tensor | None = None   # scalar, 0 or 1
+        self._freq_pass: torch.Tensor | None = None  # (num_layers, num_experts)
+        self._weight_pass: torch.Tensor | None = None  # (num_layers, num_experts)
+        self._collecting_flag: torch.Tensor | None = None  # scalar, 0 or 1
         self._tensors_initialized = False
 
     def initialize(self, num_layers: int, num_experts: int):
@@ -95,16 +97,20 @@ class RiyState:
         with self._lock:
             self._num_layers = num_layers
             self._num_experts = num_experts
-            self._layer_stats = [
-                RiyLayerStats(num_experts) for _ in range(num_layers)
-            ]
+            self._layer_stats = [RiyLayerStats(num_experts) for _ in range(num_layers)]
             self._enabled = True
-            logger.info("RIY initialized: %d layers, %d experts/layer",
-                        num_layers, num_experts)
+            logger.info(
+                "RIY initialized: %d layers, %d experts/layer", num_layers, num_experts
+            )
 
-    def register_layer(self, layer_idx: int, num_experts: int,
-                       hidden_size: int = 0, intermediate_size: int = 0,
-                       quantization: str = ""):
+    def register_layer(
+        self,
+        layer_idx: int,
+        num_experts: int,
+        hidden_size: int = 0,
+        intermediate_size: int = 0,
+        quantization: str = "",
+    ):
         """Register a MoE layer. Called from FusedMoE.__init__."""
         with self._lock:
             if hidden_size and not self._hidden_size:
@@ -116,8 +122,7 @@ class RiyState:
             if layer_idx >= self._num_layers:
                 # Grow stats list
                 while len(self._layer_stats) <= layer_idx:
-                    self._layer_stats.append(
-                        RiyLayerStats(num_experts))
+                    self._layer_stats.append(RiyLayerStats(num_experts))
                 self._num_layers = len(self._layer_stats)
             self._enabled = True
             _should_load = not self._profile_loaded
@@ -130,10 +135,12 @@ class RiyState:
     def _try_load_profile_from_config(self):
         """Load RIY profile from env var or CLI config."""
         import os
+
         profile_path = os.environ.get("RIY_EXPERT_PROFILE", "")
         if not profile_path:
             try:
                 from vllm.config import get_current_vllm_config
+
                 cfg = get_current_vllm_config()
                 profile_path = cfg.parallel_config.riy_expert_profile or ""
             except Exception:
@@ -168,19 +175,22 @@ class RiyState:
             if n_layers == 0:
                 return  # Not ready yet
             self._freq_pass = torch.zeros(
-                n_layers, self._num_experts,
-                dtype=torch.int64, device=device)
+                n_layers, self._num_experts, dtype=torch.int64, device=device
+            )
             self._weight_pass = torch.zeros(
-                n_layers, self._num_experts,
-                dtype=torch.float32, device=device)
-            self._collecting_flag = torch.zeros(
-                (), dtype=torch.int32, device=device)
+                n_layers, self._num_experts, dtype=torch.float32, device=device
+            )
+            self._collecting_flag = torch.zeros((), dtype=torch.int32, device=device)
             self._tensors_initialized = True
             # Update num_layers if we got a better count
             if n_layers > self._num_layers:
                 self._num_layers = n_layers
-            logger.info("RIY tensors allocated on %s: %d layers x %d experts",
-                        device, n_layers, self._num_experts)
+            logger.info(
+                "RIY tensors allocated on %s: %d layers x %d experts",
+                device,
+                n_layers,
+                self._num_experts,
+            )
 
     def get_freq_view(self, layer_idx: int) -> torch.Tensor | None:
         """Get 1D freq slice for a layer (stable address for compiled graph)."""
@@ -227,6 +237,7 @@ class RiyState:
             for i in range(self._num_layers):
                 try:
                     if self._freq_pass is not None:
+                        assert self._weight_pass is not None
                         freq = self._freq_pass[i].detach().cpu().tolist()
                         wsum = self._weight_pass[i].detach().cpu().tolist()
                     else:
@@ -236,11 +247,13 @@ class RiyState:
                 except Exception:
                     freq = [0] * self._num_experts
                     wsum = [0.0] * self._num_experts
-                layers.append({
-                    "layer": i,
-                    "freq": freq,
-                    "weight_sum": wsum,
-                })
+                layers.append(
+                    {
+                        "layer": i,
+                        "freq": freq,
+                        "weight_sum": wsum,
+                    }
+                )
             return {
                 "num_layers": self._num_layers,
                 "num_experts": self._num_experts,
@@ -251,8 +264,19 @@ class RiyState:
 
     def set_mask(self, pruned_experts: list[tuple[int, int]]):
         """Set expert mask. Experts in the list will be deactivated."""
+        mask = set(pruned_experts)
         with self._lock:
-            self._mask = set(pruned_experts)
+            per_layer: dict[int, int] = {}
+            for layer_idx, expert_idx in mask:
+                if not 0 <= layer_idx < self._num_layers:
+                    raise ValueError(f"Layer index {layer_idx} is out of range")
+                if not 0 <= expert_idx < self._num_experts:
+                    raise ValueError(f"Expert index {expert_idx} is out of range")
+                per_layer[layer_idx] = per_layer.get(layer_idx, 0) + 1
+            if any(count >= self._num_experts for count in per_layer.values()):
+                raise ValueError("A runtime mask cannot prune every expert in a layer")
+
+            self._mask = mask
             self._rebuild_mask_tensors()
             logger.info("RIY mask set: %d experts masked", len(self._mask))
 
@@ -277,8 +301,12 @@ class RiyState:
         with self._lock:
             self._profile_mask = set(experts)
         self.set_mask(experts)
-        logger.info("RIY profile loaded: %s (%s, %d experts)",
-                     path, profile.get("workload", "unknown"), len(experts))
+        logger.info(
+            "RIY profile loaded: %s (%s, %d experts)",
+            path,
+            profile.get("workload", "unknown"),
+            len(experts),
+        )
 
     def get_profile_mask(self) -> list[list[int]]:
         """Get the profile-loaded mask (persistent, from --riy-expert-profile)."""
@@ -291,7 +319,8 @@ class RiyState:
         for layer_idx, expert_idx in self._mask:
             if layer_idx not in self._mask_tensors:
                 self._mask_tensors[layer_idx] = torch.zeros(
-                    self._num_experts, dtype=torch.bool)
+                    self._num_experts, dtype=torch.bool
+                )
             self._mask_tensors[layer_idx][expert_idx] = True
 
     def get_mask_tensor(self, layer_idx: int) -> torch.Tensor | None:
@@ -305,8 +334,9 @@ class RiyState:
         """
         ensure_riy_server()
 
-    def record_stats(self, layer_idx: int, topk_ids: torch.Tensor,
-                     topk_weights: torch.Tensor):
+    def record_stats(
+        self, layer_idx: int, topk_ids: torch.Tensor, topk_weights: torch.Tensor
+    ):
         """Record activation stats for a layer. Called from hot path.
 
         Skips during CUDA Graph capture/replay — scatter_add_ on
@@ -319,21 +349,21 @@ class RiyState:
         # Frequency: count per expert (on GPU)
         ids_flat = topk_ids.flatten().long()
         stats.freq.scatter_add_(
-            0, ids_flat,
-            torch.ones_like(ids_flat, dtype=torch.int64))
+            0, ids_flat, torch.ones_like(ids_flat, dtype=torch.int64)
+        )
         # Weight magnitude: sum of routing weights per expert (on GPU)
-        stats.weight_sum.scatter_add_(
-            0, ids_flat, topk_weights.flatten().float())
+        stats.weight_sum.scatter_add_(0, ids_flat, topk_weights.flatten().float())
+
+
+_riy_profile_cache: dict[str, dict] = {}
 
 
 def _load_riy_profile(profile_path: str) -> dict:
     """Load and cache RIY profile."""
-    if not hasattr(_load_riy_profile, '_cache'):
-        _load_riy_profile._cache = {}
-    if profile_path not in _load_riy_profile._cache:
-        with open(profile_path) as f:
-            _load_riy_profile._cache[profile_path] = json.load(f)
-    return _load_riy_profile._cache[profile_path]
+    if profile_path not in _riy_profile_cache:
+        with open(profile_path) as file:
+            _riy_profile_cache[profile_path] = json.load(file)
+    return _riy_profile_cache[profile_path]
 
 
 def build_riy_prune_map(
@@ -360,11 +390,28 @@ def build_riy_prune_map(
     """
     profile = _load_riy_profile(profile_path)
 
-    # Collect pruned expert IDs for THIS layer
+    pruned_experts = profile.get("pruned_experts")
+    if not isinstance(pruned_experts, list):
+        raise ValueError("RIY profile must contain a pruned_experts list")
+
     pruned_ids: set[int] = set()
-    for l, e in profile["pruned_experts"]:
-        if l == layer_idx:
-            pruned_ids.add(e)
+    for entry in pruned_experts:
+        if not (
+            isinstance(entry, list)
+            and len(entry) == 2
+            and all(isinstance(value, int) for value in entry)
+        ):
+            raise ValueError("Each pruned_experts entry must be a [layer, expert] pair")
+        entry_layer, expert_idx = entry
+        if entry_layer < 0 or expert_idx < 0:
+            raise ValueError("Layer and expert indices must be non-negative")
+        if expert_idx >= original_num_experts:
+            raise ValueError(
+                f"Expert index {expert_idx} is out of range for "
+                f"{original_num_experts} experts"
+            )
+        if entry_layer == layer_idx:
+            pruned_ids.add(expert_idx)
 
     expert_map = torch.full((original_num_experts,), -1, dtype=torch.int32)
     logit_mask = torch.zeros(original_num_experts, dtype=torch.float32)
@@ -376,14 +423,19 @@ def build_riy_prune_map(
         else:
             logit_mask[i] = float("-inf")
 
-    logger.info("RIY layer %d: %d/%d experts kept (%d pruned)",
-                layer_idx, compact_idx, original_num_experts, len(pruned_ids))
+    logger.info(
+        "RIY layer %d: %d/%d experts kept (%d pruned)",
+        layer_idx,
+        compact_idx,
+        original_num_experts,
+        len(pruned_ids),
+    )
     return compact_idx, expert_map, logit_mask
 
 
-def apply_riy_mask(topk_weights: torch.Tensor,
-                   topk_ids: torch.Tensor,
-                   mask_tensor: torch.Tensor) -> torch.Tensor:
+def apply_riy_mask(
+    topk_weights: torch.Tensor, topk_ids: torch.Tensor, mask_tensor: torch.Tensor
+) -> torch.Tensor:
     """Zero out masked experts and renormalize weights.
 
     Args:
@@ -404,45 +456,6 @@ def apply_riy_mask(topk_weights: torch.Tensor,
     return topk_weights
 
 
-# ── Custom op for graph-compatible stats recording ────────────────────────────
-
-def _riy_record_impl(
-    topk_ids: torch.Tensor,
-    topk_weights: torch.Tensor,
-    freq_view: torch.Tensor,
-    weight_view: torch.Tensor,
-    collecting: torch.Tensor,
-) -> None:
-    """Accumulate expert stats. Safe inside CUDA Graph capture + replay."""
-    _ids = topk_ids.reshape(-1).long()
-    _cf = collecting.long().expand(_ids.shape[0])
-    freq_view.scatter_add_(0, _ids, _cf)
-    _w = topk_weights.reshape(-1).to(weight_view.dtype)
-    _cf_f = collecting.float().expand(_w.shape[0])
-    weight_view.scatter_add_(0, _ids, _w * _cf_f)
-
-
-def _riy_record_fake(
-    topk_ids: torch.Tensor,
-    topk_weights: torch.Tensor,
-    freq_view: torch.Tensor,
-    weight_view: torch.Tensor,
-    collecting: torch.Tensor,
-) -> None:
-    """Fake impl for torch.compile tracing — no-op."""
-    pass
-
-
-# Register as vllm custom op
-from vllm.utils.torch_utils import direct_register_custom_op
-direct_register_custom_op(
-    op_name="riy_record",
-    op_func=_riy_record_impl,
-    mutates_args=["freq_view", "weight_view"],
-    fake_impl=_riy_record_fake,
-)
-
-
 # Global singleton
 _riy_state = RiyState()
 
@@ -453,7 +466,8 @@ def get_riy_state() -> RiyState:
 
 # ── Standalone HTTP server (runs in EngineCore process) ───────────────────────
 
-def _start_riy_server(port: int = 8019):
+
+def _start_riy_server(host: str = "127.0.0.1", port: int = 8019):
     """Start a minimal HTTP server for RIY stats/mask API.
 
     Runs in a daemon thread inside the EngineCore worker process, so it
@@ -464,9 +478,8 @@ def _start_riy_server(port: int = 8019):
     Must be started from on_forward() (not register_layer), because
     register_layer runs in the parent process that forks and dies.
     """
-    from http.server import HTTPServer, BaseHTTPRequestHandler
     import json as _json
-    import socket
+    from http.server import BaseHTTPRequestHandler, HTTPServer
 
     class RiyHandler(BaseHTTPRequestHandler):
         def log_message(self, format, *args):
@@ -477,7 +490,6 @@ def _start_riy_server(port: int = 8019):
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(body)
 
@@ -485,34 +497,44 @@ def _start_riy_server(port: int = 8019):
             riy = get_riy_state()
             if self.path == "/riy/stats":
                 if not riy.enabled:
-                    self._json_response(
-                        {"error": "not initialized"}, 503)
+                    self._json_response({"error": "not initialized"}, 503)
                 else:
                     self._json_response(riy.get_stats())
             elif self.path == "/riy/mask":
-                self._json_response({
-                    "pruned_experts": riy.get_mask(),
-                    "count": len(riy.get_mask()),
-                    "profile_experts": riy.get_profile_mask(),
-                    "profile_count": len(riy._profile_mask),
-                })
+                self._json_response(
+                    {
+                        "pruned_experts": riy.get_mask(),
+                        "count": len(riy.get_mask()),
+                        "profile_experts": riy.get_profile_mask(),
+                        "profile_count": len(riy._profile_mask),
+                    }
+                )
             elif self.path == "/riy/health":
-                self._json_response({
-                    "enabled": riy.enabled,
-                    "collecting": riy.collecting,
-                    "num_layers": riy._num_layers,
-                    "num_experts": riy._num_experts,
-                    "hidden_size": riy._hidden_size,
-                    "intermediate_size": riy._intermediate_size,
-                    "quantization": riy._quantization,
-                    "mask_size": len(riy._mask),
-                })
+                self._json_response(
+                    {
+                        "enabled": riy.enabled,
+                        "collecting": riy.collecting,
+                        "num_layers": riy._num_layers,
+                        "num_experts": riy._num_experts,
+                        "hidden_size": riy._hidden_size,
+                        "intermediate_size": riy._intermediate_size,
+                        "quantization": riy._quantization,
+                        "mask_size": len(riy._mask),
+                    }
+                )
             else:
                 self._json_response({"error": "not found"}, 404)
 
         def do_POST(self):
             riy = get_riy_state()
-            content_len = int(self.headers.get("Content-Length", 0))
+            try:
+                content_len = int(self.headers.get("Content-Length", 0))
+            except ValueError:
+                self._json_response({"error": "invalid Content-Length"}, 400)
+                return
+            if content_len > 1_048_576:
+                self._json_response({"error": "request body too large"}, 413)
+                return
             body = self.rfile.read(content_len) if content_len else b""
 
             if self.path == "/riy/stats/start":
@@ -526,28 +548,38 @@ def _start_riy_server(port: int = 8019):
                 self._json_response({"status": "reset"})
             elif self.path == "/riy/mask":
                 if not riy.enabled:
-                    self._json_response(
-                        {"error": "not initialized"}, 503)
+                    self._json_response({"error": "not initialized"}, 503)
                     return
-                data = _json.loads(body)
-                experts = [tuple(x) for x in data["pruned_experts"]]
-                riy.set_mask(experts)
-                self._json_response(
-                    {"status": "mask_set", "count": len(experts)})
+                try:
+                    data = _json.loads(body)
+                    experts = [tuple(x) for x in data["pruned_experts"]]
+                    riy.set_mask(experts)
+                except (
+                    _json.JSONDecodeError,
+                    KeyError,
+                    TypeError,
+                    ValueError,
+                ) as error:
+                    self._json_response({"error": str(error)}, 400)
+                    return
+                self._json_response({"status": "mask_set", "count": len(experts)})
             elif self.path == "/riy/profile/load":
                 if not riy.enabled:
-                    self._json_response(
-                        {"error": "not initialized"}, 503)
+                    self._json_response({"error": "not initialized"}, 503)
                     return
-                data = _json.loads(body)
                 try:
+                    data = _json.loads(body)
                     riy.load_profile(data["path"])
-                    self._json_response({
-                        "status": "profile_loaded",
-                        "count": len(riy.get_mask()),
-                    })
-                except FileNotFoundError as e:
-                    self._json_response({"error": str(e)}, 404)
+                    self._json_response(
+                        {
+                            "status": "profile_loaded",
+                            "count": len(riy.get_mask()),
+                        }
+                    )
+                except FileNotFoundError as error:
+                    self._json_response({"error": str(error)}, 404)
+                except (KeyError, TypeError, ValueError) as error:
+                    self._json_response({"error": str(error)}, 400)
             else:
                 self._json_response({"error": "not found"}, 404)
 
@@ -559,19 +591,20 @@ def _start_riy_server(port: int = 8019):
             else:
                 self._json_response({"error": "not found"}, 404)
 
-    # Allow port reuse in case parent process still holds it
     class ReusableHTTPServer(HTTPServer):
         allow_reuse_address = True
-        allow_reuse_port = True
 
     try:
-        server = ReusableHTTPServer(("0.0.0.0", port), RiyHandler)
-        logger.info("RIY HTTP server started on port %d (pid=%d)",
-                     port, __import__('os').getpid())
+        server = ReusableHTTPServer((host, port), RiyHandler)
+        logger.info(
+            "RIY HTTP server started on %s:%d (pid=%d)",
+            host,
+            port,
+            os.getpid(),
+        )
         server.serve_forever()
     except OSError as e:
-        logger.warning("RIY HTTP server failed to start on port %d: %s",
-                        port, e)
+        logger.warning("RIY HTTP server failed to start on port %d: %s", port, e)
 
 
 _riy_server_started = False
@@ -594,6 +627,6 @@ def ensure_riy_server(port: int = 8019):
         riy = get_riy_state()
         if not riy._collecting:
             riy.start_collection()
-        t = threading.Thread(
-            target=_start_riy_server, args=(port,), daemon=True)
+        host = os.environ.get("VLLM_RIY_HOST", "127.0.0.1")
+        t = threading.Thread(target=_start_riy_server, args=(host, port), daemon=True)
         t.start()

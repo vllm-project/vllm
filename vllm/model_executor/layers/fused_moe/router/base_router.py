@@ -1,19 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from abc import abstractmethod
 from collections.abc import Callable
 
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-import os as _os_riy
-
 from vllm.model_executor.layers.fused_moe.riy import (
     apply_riy_mask,
     get_riy_state,
 )
+from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
+    FusedMoERouter,
+)
+from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
-_riy_monitor_enabled = _os_riy.environ.get('VLLM_RIY_MONITOR', '0') == '1'
+_riy_monitor_enabled = os.environ.get("VLLM_RIY_MONITOR", "0") == "1"
 
 
 def _is_capturing() -> bool:
@@ -29,12 +34,7 @@ def _is_capturing() -> bool:
     during graph replay (it's just not captured into the graph).
     """
     return torch.compiler.is_compiling()
-from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
-    FusedMoERouter,
-)
-from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
-from vllm.v1.worker.ubatching import dbo_current_ubatch_id
+
 
 if current_platform.is_cuda_alike():
 
@@ -177,23 +177,6 @@ else:
         num_unpadded_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return topk_ids
-
-    def riy_record_stats_compiled(
-        topk_ids: torch.Tensor,
-        topk_weights: torch.Tensor,
-        freq_view: torch.Tensor,
-        weight_view: torch.Tensor,
-        collecting: torch.Tensor,
-    ) -> None:
-        # CPU fallback: plain scatter_add_
-        ids_flat = topk_ids.flatten().long()
-        gate = collecting.long()
-        freq_view.scatter_add_(
-            0, ids_flat,
-            torch.ones_like(ids_flat, dtype=torch.int64) * gate)
-        weight_view.scatter_add_(
-            0, ids_flat,
-            topk_weights.flatten().to(weight_view.dtype) * collecting.float())
 
 
 class BaseRouter(FusedMoERouter):
@@ -345,12 +328,15 @@ class BaseRouter(FusedMoERouter):
 
         # Step 3b: RIY — stats on registered buffers (graph-compatible)
         if self.riy_freq_view is not None:
-            _ids = topk_ids.reshape(-1).long()
-            _cf = self.riy_collecting_flag.long().expand(_ids.shape[0])
-            self.riy_freq_view.scatter_add_(0, _ids, _cf)
-            _w = topk_weights.reshape(-1).to(self.riy_weight_view.dtype)
-            _cf_f = self.riy_collecting_flag.float().expand(_w.shape[0])
-            self.riy_weight_view.scatter_add_(0, _ids, _w * _cf_f)
+            assert self.riy_weight_view is not None
+            assert self.riy_collecting_flag is not None
+            ids = topk_ids.reshape(-1).long()
+            collecting = self.riy_collecting_flag
+            self.riy_freq_view.scatter_add_(
+                0, ids, collecting.long().expand(ids.shape[0])
+            )
+            weights = topk_weights.reshape(-1).to(self.riy_weight_view.dtype)
+            self.riy_weight_view.scatter_add_(0, ids, weights * collecting.float())
 
         # Step 3c: RIY — mask + HTTP server (only with VLLM_RIY_MONITOR=1)
         if not _is_capturing() and _riy_monitor_enabled:
@@ -360,9 +346,7 @@ class BaseRouter(FusedMoERouter):
                 mask_t = riy.get_mask_tensor(self.layer_idx)
                 if mask_t is not None:
                     mask_t = mask_t.to(topk_ids.device)
-                    topk_weights = apply_riy_mask(
-                        topk_weights, topk_ids, mask_t
-                    )
+                    topk_weights = apply_riy_mask(topk_weights, topk_ids, mask_t)
 
         # Capture logical ids before EPLB mapping.
         if self.capture_fn is not None:

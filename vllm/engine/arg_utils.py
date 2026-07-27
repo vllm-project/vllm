@@ -1146,7 +1146,9 @@ class EngineArgs:
             **parallel_kwargs["disable_nccl_for_dp_synchronization"],
         )
         parallel_group.add_argument("--enable-eplb", **parallel_kwargs["enable_eplb"])
-        parallel_group.add_argument("--riy-expert-profile", **parallel_kwargs["riy_expert_profile"])
+        parallel_group.add_argument(
+            "--riy-expert-profile", **parallel_kwargs["riy_expert_profile"]
+        )
         parallel_group.add_argument("--eplb-config", **parallel_kwargs["eplb_config"])
         parallel_group.add_argument(
             "--expert-placement-strategy",

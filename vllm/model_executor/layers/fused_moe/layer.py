@@ -5,6 +5,7 @@ import os
 from collections.abc import Callable
 from typing import Any
 
+import regex as re
 import torch
 
 import vllm.envs as envs
@@ -263,8 +264,6 @@ def FusedMoE(
     max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
     # Extract layer index from prefix (e.g. "model.layers.5.mlp" → 5)
-    import re
-
     from vllm.model_executor.layers.fused_moe.riy import (
         build_riy_prune_map,
         get_riy_state,
@@ -284,9 +283,8 @@ def FusedMoE(
 
     riy_expert_filter = None
     riy_logit_mask = None
-    riy_profile = (
-        vllm_config.parallel_config.riy_expert_profile
-        or os.environ.get("RIY_EXPERT_PROFILE", "")
+    riy_profile = vllm_config.parallel_config.riy_expert_profile or os.environ.get(
+        "RIY_EXPERT_PROFILE", ""
     )
     if riy_profile and os.path.exists(riy_profile) and layer_idx >= 0:
         num_kept, riy_prune_map, riy_logit_mask = build_riy_prune_map(
@@ -297,7 +295,12 @@ def FusedMoE(
                 f"RIY profile keeps {num_kept} experts in layer {layer_idx}, "
                 f"but top_k is {top_k}"
             )
-        riy_expert_filter = riy_prune_map >= 0
+        if num_kept < global_num_experts:
+            riy_expert_filter = riy_prune_map >= 0
+        else:
+            riy_logit_mask = None
+        if riy_expert_filter is not None and eplb_state is not None:
+            raise NotImplementedError("RIY profile pruning does not support EPLB")
 
     # Create ExpertMapManager to compose profile pruning with EP placement.
     expert_map_manager = ExpertMapManager(
@@ -357,9 +360,7 @@ def FusedMoE(
         )
 
     if riy_logit_mask is not None:
-        router.prune_logit_mask = riy_logit_mask.to(
-            vllm_config.device_config.device
-        )
+        router.prune_logit_mask = riy_logit_mask.to(vllm_config.device_config.device)
 
     if layer_idx >= 0 and os.environ.get("VLLM_RIY_MONITOR", "0") == "1":
         riy = get_riy_state()

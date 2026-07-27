@@ -64,7 +64,7 @@ def determine_expert_map(
     assert ep_size > 0
 
     if expert_filter is not None:
-        expert_filter = torch.as_tensor(expert_filter, dtype=torch.bool, device="cpu")
+        expert_filter = torch.as_tensor(expert_filter, dtype=torch.bool)
         if expert_filter.shape != (global_num_experts,):
             raise ValueError(
                 "expert_filter must have shape "
@@ -72,22 +72,25 @@ def determine_expert_map(
             )
         if not torch.any(expert_filter):
             raise ValueError("expert_filter must keep at least one expert")
+        if ep_size > 1 and expert_placement_strategy == "round_robin":
+            raise NotImplementedError(
+                "expert_filter does not support round-robin expert placement"
+            )
 
     if ep_size == 1:
         if expert_filter is None:
             return (global_num_experts, None, None)
-        local_experts = torch.where(expert_filter)[0]
-        local_num_experts = local_experts.numel()
         expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32)
+        local_filter = expert_filter.to(expert_map.device)
+        local_experts = torch.where(local_filter)[0]
+        local_num_experts = local_experts.numel()
         expert_map[local_experts] = torch.arange(
-            local_num_experts, dtype=torch.int32
+            local_num_experts, dtype=torch.int32, device=expert_map.device
         )
     else:
         base_experts = global_num_experts // ep_size
         remainder = global_num_experts % ep_size
-        local_num_experts = (
-            base_experts + 1 if ep_rank < remainder else base_experts
-        )
+        local_num_experts = base_experts + 1 if ep_rank < remainder else base_experts
         expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32)
 
         if expert_placement_strategy == "linear":
@@ -110,7 +113,8 @@ def determine_expert_map(
             )
 
         if expert_filter is not None:
-            local_experts = torch.where((expert_map >= 0) & expert_filter)[0]
+            local_filter = expert_filter.to(expert_map.device)
+            local_experts = torch.where((expert_map >= 0) & local_filter)[0]
             local_num_experts = local_experts.numel()
             if local_num_experts == 0:
                 raise ValueError(
@@ -118,7 +122,7 @@ def determine_expert_map(
                 )
             expert_map.fill_(-1)
             expert_map[local_experts] = torch.arange(
-                local_num_experts, dtype=torch.int32
+                local_num_experts, dtype=torch.int32, device=expert_map.device
             )
 
     expert_mask = None
