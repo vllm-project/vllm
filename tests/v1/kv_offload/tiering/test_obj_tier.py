@@ -464,7 +464,7 @@ class TestMockObjTierFailures:
         assert len(results) == 1
         assert results[0].job_id == 1
         assert not results[0].success
-        agent.check_xfer_state.assert_called_once()
+        assert agent.check_xfer_state.call_count == 2
         assert release_xfer.call_count == 2
         assert not tier._transfers
         assert list(tier.get_finished_jobs()) == []
@@ -539,7 +539,7 @@ class TestMockObjTierFailures:
         assert block.ref_cnt == 0
         assert obj_tier._transfers == {}
         assert not manager.has_pending_work()
-        agent.check_xfer_state.assert_called_once()
+        assert agent.check_xfer_state.call_count == 2
         assert release_xfer.call_count == 2
 
 

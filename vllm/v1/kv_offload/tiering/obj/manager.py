@@ -58,7 +58,6 @@ class TransferEntry(NamedTuple):
     xfer_handle: "nixl_xfer_handle"
     files_desc: object
     obj_handle: "nixl_prepped_dlist_handle"
-    success: bool | None = None
 
 
 class ObjAsyncLookupManager(AsyncLookupManager):
@@ -300,27 +299,20 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         """Poll all in-flight transfers once; move newly-completed (success or
         failure) into ``_pending_results`` and release their NIXL handles."""
         for job_id, entry in list(self._transfers.items()):
-            if entry.success is None:
-                try:
-                    state = self._agent.check_xfer_state(entry.xfer_handle)
-                except Exception as exc:
-                    success = False
-                    logger.warning(
-                        "check_xfer_state raised for job %d: %s", job_id, exc
-                    )
+            try:
+                state = self._agent.check_xfer_state(entry.xfer_handle)
+            except Exception as exc:
+                success = False
+                logger.warning("check_xfer_state raised for job %d: %s", job_id, exc)
+            else:
+                if state == NIXL_PROC:
+                    continue
+                if state == NIXL_DONE:
+                    success = True
                 else:
-                    if state == NIXL_PROC:
-                        continue
-                    if state == NIXL_DONE:
-                        success = True
-                    else:
-                        success = False
-                        logger.warning("transfer failed job=%d state=%s", job_id, state)
-                entry = entry._replace(success=success)
-                self._transfers[job_id] = entry
+                    success = False
+                    logger.warning("transfer failed job=%d state=%s", job_id, state)
 
-            final_success = entry.success
-            assert final_success is not None
             try:
                 self._agent.release_xfer_handle(entry.xfer_handle)
             except Exception as exc:
@@ -345,9 +337,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
                 logger.warning("deregister_memory failed for job %d: %s", job_id, exc)
 
             del self._transfers[job_id]
-            self._pending_results.append(
-                JobResult(job_id=job_id, success=final_success)
-            )
+            self._pending_results.append(JobResult(job_id=job_id, success=success))
 
     def get_finished_jobs(self) -> Iterable[JobResult]:
         """Poll in-flight transfers; return completed (job_id, success) pairs."""
