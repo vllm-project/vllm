@@ -74,6 +74,10 @@ pub(super) fn prepare_generate_request(
         priority: request.priority,
         cache_salt: request.cache_salt,
         add_special_tokens: false,
+        // TODO: accept `truncate_prompt_tokens` on the internal generate route
+        // once a caller needs it; the prompt arrives pre-tokenized here.
+        truncate_prompt_tokens: None,
+        truncation_side: None,
         data_parallel_rank: ctx.data_parallel_rank,
         reasoning_parser_kwargs: None,
         lora_request: lora_resolution.lora_request.clone(),

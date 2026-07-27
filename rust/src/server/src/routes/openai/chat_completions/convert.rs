@@ -163,6 +163,8 @@ pub(super) fn prepare_chat_request(
         documents: request.documents,
         cache_salt: request.cache_salt,
         add_special_tokens: request.add_special_tokens,
+        truncate_prompt_tokens: request.truncate_prompt_tokens,
+        truncation_side: request.truncation_side,
         data_parallel_rank: ctx.data_parallel_rank,
         lora_request: lora_resolution.lora_request.clone(),
     };
@@ -406,6 +408,7 @@ mod tests {
         ChatTool as VllmChatTool, ChatToolChoice, GenerationPromptMode,
         SamplingParams as VllmSamplingParams,
     };
+    use vllm_text::TruncationSide;
     use vllm_text::output::TextDecodeOptions;
 
     use super::prepare_chat_request;
@@ -640,6 +643,25 @@ mod tests {
             ..VllmSamplingParams::default()
         };
         assert_eq!(prepared.chat_request.sampling_params, expected);
+    }
+
+    #[test]
+    fn prepare_chat_request_forwards_prompt_truncation() {
+        let prepared = prepare_chat_request(
+            ChatCompletionRequest {
+                truncate_prompt_tokens: Some(8),
+                truncation_side: Some(TruncationSide::Left),
+                ..base_request()
+            },
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid")
+        .chat_request;
+
+        // Truncation itself runs after chat rendering, in `vllm_text`.
+        assert_eq!(prepared.truncate_prompt_tokens, Some(8));
+        assert_eq!(prepared.truncation_side, Some(TruncationSide::Left));
     }
 
     #[test]

@@ -82,13 +82,6 @@ pub(super) fn validate_request_compat(
             "spaces_between_special_tokens is not supported."
         );
     }
-    if request.truncate_prompt_tokens.is_some() {
-        bail_invalid_request!(
-            param = "truncate_prompt_tokens",
-            "truncate_prompt_tokens is not supported."
-        );
-    }
-
     Ok(())
 }
 

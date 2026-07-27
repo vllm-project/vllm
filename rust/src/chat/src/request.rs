@@ -9,7 +9,7 @@ use serde_json::Value;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 pub use vllm_parser::tool::Tool as ChatTool;
 pub use vllm_text::SamplingParams;
-use vllm_text::TextDecodeOptions;
+use vllm_text::{TextDecodeOptions, TruncationSide};
 
 use crate::AssistantMessageExt;
 use crate::error::{Error, Result};
@@ -483,6 +483,14 @@ pub struct ChatRequest {
     pub cache_salt: Option<String>,
     /// Whether to add special tokens (e.g. BOS) during prompt tokenization.
     pub add_special_tokens: bool,
+    /// Number of prompt tokens to keep after rendering:
+    /// - `None` means no truncation.
+    /// - `-1` maps to the model context length.
+    #[serde(default)]
+    pub truncate_prompt_tokens: Option<i64>,
+    /// Which side to truncate from when `truncate_prompt_tokens` is active.
+    #[serde(default)]
+    pub truncation_side: Option<TruncationSide>,
     /// Override data parallel rank.
     #[serde(default)]
     pub data_parallel_rank: Option<u32>,
@@ -508,6 +516,8 @@ impl ChatRequest {
             documents: None,
             cache_salt: None,
             add_special_tokens: false,
+            truncate_prompt_tokens: None,
+            truncation_side: None,
             data_parallel_rank: None,
             lora_request: None,
         }

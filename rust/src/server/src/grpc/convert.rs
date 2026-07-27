@@ -36,12 +36,6 @@ pub fn to_text_request(
         )));
     }
 
-    if req.truncate_prompt_tokens != 0 {
-        return Err(Status::invalid_argument(
-            "truncate_prompt_tokens is not supported",
-        ));
-    }
-
     let prompt = match req.prompt {
         Some(pb::generate_request::Prompt::Text(text)) => Prompt::Text(text),
         Some(pb::generate_request::Prompt::TokenIds(ids)) => Prompt::TokenIds(ids.ids),
@@ -99,6 +93,12 @@ pub fn to_text_request(
         priority: req.priority,
         cache_salt: kv.map(|k| &k.cache_salt).filter(|s| !s.is_empty()).cloned(),
         add_special_tokens: true,
+        // The proto uses 0 as "unset", so it cannot express Python's -1
+        // (truncate to the model context length).
+        truncate_prompt_tokens: (req.truncate_prompt_tokens != 0)
+            .then_some(req.truncate_prompt_tokens.into()),
+        // TODO: expose `truncation_side` in the proto once a caller needs it.
+        truncation_side: None,
         data_parallel_rank: None,
         reasoning_parser_kwargs: None,
         lora_request: None,

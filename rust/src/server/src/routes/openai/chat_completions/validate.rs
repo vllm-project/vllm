@@ -83,11 +83,6 @@ pub(super) fn validate_request_compat(
         );
     }
     reject_non_default(
-        request.truncate_prompt_tokens.as_ref(),
-        "truncate_prompt_tokens",
-        "truncate_prompt_tokens is not supported.",
-    )?;
-    reject_non_default(
         request.media_io_kwargs.as_ref(),
         "media_io_kwargs",
         "media_io_kwargs is not supported.",

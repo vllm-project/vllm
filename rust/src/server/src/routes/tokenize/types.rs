@@ -93,6 +93,10 @@ impl TokenizeChatRequest {
             documents: None,
             cache_salt: None,
             add_special_tokens: self.add_special_tokens,
+            // /tokenize reports what the prompt tokenizes to, so it must not
+            // silently drop tokens.
+            truncate_prompt_tokens: None,
+            truncation_side: None,
             data_parallel_rank: None,
             lora_request: None,
         })

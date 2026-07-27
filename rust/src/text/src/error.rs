@@ -30,6 +30,15 @@ pub enum Error {
     MinTokensExceedsMaxTokens { min_tokens: u32, max_tokens: u32 },
     #[error("`thinking_token_budget` must be a non-negative integer or -1 for unlimited.")]
     InvalidThinkingTokenBudget,
+    #[error(
+        "`truncate_prompt_tokens`={truncate_prompt_tokens} cannot be greater than \
+         this model's maximum context length {max_model_len}. \
+         Please request a smaller truncation size."
+    )]
+    TruncatePromptTokensTooLarge {
+        max_model_len: u32,
+        truncate_prompt_tokens: i64,
+    },
     #[error("invalid repetition detection params: {message}")]
     InvalidRepetitionDetection { message: String },
     #[error("text request stream `{request_id}` closed before terminal output")]
@@ -52,6 +61,7 @@ impl Error {
             | Self::TokenIds(_)
             | Self::MinTokensExceedsMaxTokens { .. }
             | Self::InvalidThinkingTokenBudget
+            | Self::TruncatePromptTokensTooLarge { .. }
             | Self::InvalidRepetitionDetection { .. }
             // An empty tokenized prompt detected later, at request prepare
             // time, surfaces through the transparent Llm wrapper.

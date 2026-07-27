@@ -146,6 +146,8 @@ pub(super) fn prepare_completion_request(
         priority: request.priority.unwrap_or(0),
         cache_salt: request.cache_salt,
         add_special_tokens: request.add_special_tokens,
+        truncate_prompt_tokens: request.truncate_prompt_tokens,
+        truncation_side: request.truncation_side,
         data_parallel_rank: ctx.data_parallel_rank,
         reasoning_parser_kwargs: None,
         lora_request: lora_resolution.lora_request.clone(),
@@ -200,7 +202,7 @@ fn completion_echo_text(
 mod tests {
     use axum::http::HeaderMap;
     use serde_json::json;
-    use vllm_text::Prompt;
+    use vllm_text::{Prompt, TruncationSide};
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::prepare_completion_request;
@@ -331,6 +333,28 @@ mod tests {
         );
         assert!(prepared.text_request.sampling_params.ignore_eos);
         assert!(!prepared.text_request.decode_options.skip_special_tokens);
+    }
+
+    #[test]
+    fn prepare_completion_request_forwards_prompt_truncation() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "truncate_prompt_tokens": 8,
+            "truncation_side": "left",
+        }))
+        .expect("parse request");
+        let prepared = prepare_completion_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+            &test_tokenizer(),
+        )
+        .expect("prepare")
+        .text_request;
+
+        assert_eq!(prepared.truncate_prompt_tokens, Some(8));
+        assert_eq!(prepared.truncation_side, Some(TruncationSide::Left));
     }
 
     #[test]

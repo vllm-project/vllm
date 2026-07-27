@@ -126,6 +126,21 @@ mod tests {
     }
 
     #[test]
+    fn truncate_prompt_tokens_too_large_maps_to_invalid_request() {
+        let api_error = text_submit_error(
+            "failed to submit completion request",
+            vllm_text::Error::TruncatePromptTokensTooLarge {
+                max_model_len: 8,
+                truncate_prompt_tokens: 9,
+            },
+        );
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert!(response.error.message.contains("truncate_prompt_tokens"));
+    }
+
+    #[test]
     fn min_tokens_above_max_tokens_maps_to_invalid_request() {
         let api_error = text_submit_error(
             "failed to submit completion request",

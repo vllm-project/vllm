@@ -36,6 +36,26 @@ impl Default for Prompt {
     }
 }
 
+/// Which side to truncate from when `truncate_prompt_tokens` is active.
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/main/vllm/renderers/params.py>
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TruncationSide {
+    /// Keep the first N tokens, truncating from the end.
+    ///
+    /// This is the default because it matches the Hugging Face tokenizer
+    /// default that Python falls back to when the request leaves
+    /// `truncation_side` unset.
+    // TODO: read the tokenizer's own configured `truncation_side` so models
+    // that ship a non-default value keep parity with Python.
+    #[default]
+    Right,
+    /// Keep the last N tokens, truncating from the start.
+    Left,
+}
+
 /// User-facing sampling parameters accepted by `vllm-text`.
 ///
 /// This intentionally keeps only the subset that the current Rust text layer
@@ -180,6 +200,15 @@ pub struct TextRequest {
     pub cache_salt: Option<String>,
     /// Whether to add special tokens (e.g. BOS) during prompt tokenization.
     pub add_special_tokens: bool,
+    /// Number of prompt tokens to keep:
+    /// - `None` means no truncation.
+    /// - `-1` maps to the model context length.
+    #[serde(default)]
+    pub truncate_prompt_tokens: Option<i64>,
+    /// Which side to truncate from when `truncate_prompt_tokens` is active.
+    /// `None` falls back to [`TruncationSide::Right`].
+    #[serde(default)]
+    pub truncation_side: Option<TruncationSide>,
     /// Override data parallel rank.
     #[serde(default)]
     pub data_parallel_rank: Option<u32>,
@@ -211,6 +240,8 @@ impl TextRequest {
             priority: 0,
             cache_salt: None,
             add_special_tokens: false,
+            truncate_prompt_tokens: None,
+            truncation_side: None,
             data_parallel_rank: None,
             reasoning_parser_kwargs: None,
             lora_request: None,

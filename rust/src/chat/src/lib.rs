@@ -166,6 +166,8 @@ impl ChatRequestProcessor {
             priority: request.priority,
             cache_salt: request.cache_salt,
             add_special_tokens: request.add_special_tokens,
+            truncate_prompt_tokens: request.truncate_prompt_tokens,
+            truncation_side: request.truncation_side,
             data_parallel_rank: request.data_parallel_rank,
             reasoning_parser_kwargs,
             lora_request: request.lora_request,
