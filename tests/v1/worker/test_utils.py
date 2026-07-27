@@ -5,10 +5,11 @@ import torch
 
 import vllm.v1.worker.utils as worker_utils
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+from vllm.v1.worker.gpu.hisparse import _expand_source_block_ids
 from vllm.v1.worker.utils import bind_kv_cache, copy_kv_cache_blocks_inplace
 
 
-def test_copy_cpu_kv_cache_blocks_ignores_storage_padding(monkeypatch):
+def test_copy_cpu_kv_cache_logical_blocks_ignores_storage_padding(monkeypatch):
     waited_for_host_writes = False
 
     def wait_for_host_writes():
@@ -18,10 +19,10 @@ def test_copy_cpu_kv_cache_blocks_ignores_storage_padding(monkeypatch):
     monkeypatch.setattr(
         worker_utils, "wait_for_hisparse_host_writes", wait_for_host_writes
     )
-    backing = torch.full((6, 2, 3), -1, dtype=torch.float32)
-    cache = backing[1:5]
-    cache[1] = 7
-    cache[3] = 11
+    backing = torch.full((10, 2, 3), -1, dtype=torch.float32)
+    cache = backing[1:9]
+    cache[2:4] = 7
+    cache[6:8] = 11
 
     copy_kv_cache_blocks_inplace(
         [cache],
@@ -32,11 +33,17 @@ def test_copy_cpu_kv_cache_blocks_ignores_storage_padding(monkeypatch):
         ],
     )
 
-    torch.testing.assert_close(cache[0], torch.full_like(cache[0], 7))
-    torch.testing.assert_close(cache[2], torch.full_like(cache[2], 11))
+    torch.testing.assert_close(cache[0:2], torch.full_like(cache[0:2], 7))
+    torch.testing.assert_close(cache[4:6], torch.full_like(cache[4:6], 11))
     assert waited_for_host_writes
     assert (backing[0] == -1).all()
-    assert (backing[5] == -1).all()
+    assert (backing[9] == -1).all()
+
+
+def test_expand_hisparse_source_blocks_into_kernel_pages():
+    expanded = _expand_source_block_ids([3, 7], blocks_per_kv_block=2, count=3)
+
+    assert expanded.tolist() == [6, 7, 14]
 
 
 def test_bind_kv_cache(default_vllm_config):

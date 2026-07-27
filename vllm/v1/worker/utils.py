@@ -346,11 +346,7 @@ def prepare_kernel_block_sizes(
             # This is likely Mamba or other non-attention cache, no splitting.
             kernel_block_sizes.append(kv_cache_spec.block_size)
         elif isinstance(kv_cache_spec, HiSparseHotSpec):
-            if kv_cache_spec.block_size % 64 != 0:
-                raise ValueError(
-                    "HiSparse hot-cache block size must be divisible by 64."
-                )
-            kernel_block_sizes.append(64)
+            kernel_block_sizes.append(kv_cache_spec.block_size)
         else:
             raise NotImplementedError(
                 f"unknown kv cache spec {kv_cache_group.kv_cache_spec}"
@@ -543,8 +539,9 @@ def copy_kv_cache_blocks_inplace(
             src_indices, dst_indices = indices.unbind(dim=1)
             for tensor in storage_tensors:
                 if tensor.device == device:
-                    assert tensor.shape[0] == num_blocks
-                    tensor[dst_indices] = tensor[src_indices]
+                    assert tensor.numel() % num_blocks == 0
+                    blocks = tensor.view(num_blocks, -1)
+                    blocks[dst_indices] = blocks[src_indices]
             continue
         else:
             indices = async_tensor_h2d(indices_np, device=device)

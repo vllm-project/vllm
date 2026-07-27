@@ -48,7 +48,7 @@ logger = init_logger(__name__)
 
 # fp8_ds_mla KV row: 512 B quantized NoPE + 16 B scales + 128 B RoPE.
 FP8_DS_MLA_ROW_BYTES = 656
-HISPARSE_BLOCK_SIZE = 64
+HISPARSE_KERNEL_BLOCK_SIZE = 64
 
 
 def is_hisparse_decode_batch(
@@ -87,7 +87,7 @@ class ResolvedHiSparseConfig:
         # boundary entries thrash between steps.
         configured_size = config.device_buffer_size
         if configured_size is None:
-            device_buffer_size = round_up(2 * model_top_k, HISPARSE_BLOCK_SIZE)
+            device_buffer_size = round_up(2 * model_top_k, HISPARSE_KERNEL_BLOCK_SIZE)
         else:
             device_buffer_size = configured_size
 
@@ -100,15 +100,15 @@ class ResolvedHiSparseConfig:
                 f"{model_top_k + 1}."
             )
         if configured_size is not None:
-            padding = -device_buffer_size % HISPARSE_BLOCK_SIZE
+            padding = -device_buffer_size % HISPARSE_KERNEL_BLOCK_SIZE
             if padding:
                 logger.warning(
                     "HiSparse device_buffer_size=%d is not aligned to the "
-                    "%d-token cache block size and allocates %d unused "
+                    "%d-token kernel block size and allocates %d unused "
                     "padding rows per hot group. Use %d to use all allocated "
                     "rows.",
                     device_buffer_size,
-                    HISPARSE_BLOCK_SIZE,
+                    HISPARSE_KERNEL_BLOCK_SIZE,
                     padding,
                     device_buffer_size + padding,
                 )

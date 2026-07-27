@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import torch
 
 from vllm.utils.math_utils import cdiv
@@ -19,6 +20,16 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.block_table import BlockTables
 
 
+def _expand_source_block_ids(
+    source_blocks: list[int], blocks_per_kv_block: int, count: int
+) -> np.ndarray:
+    """Expand logical host block IDs into kernel-page IDs."""
+    num_source_blocks = cdiv(count, blocks_per_kv_block)
+    logical_ids = np.asarray(source_blocks[:num_source_blocks], dtype=np.int32)
+    offsets = np.arange(blocks_per_kv_block, dtype=np.int32)
+    return (logical_ids[:, None] * blocks_per_kv_block + offsets).reshape(-1)[:count]
+
+
 class HiSparseRuntime:
     def __init__(
         self,
@@ -30,7 +41,11 @@ class HiSparseRuntime:
     ) -> None:
         self.cache_pairs = cache_pairs
         self.block_size = block_size
-        capacity = max_num_reqs * cdiv(max_model_len, block_size)
+        kernel_block_size = cache_pairs[0][0].shape[1]
+        assert block_size % kernel_block_size == 0
+        self.kernel_block_size = kernel_block_size
+        self.blocks_per_kv_block = block_size // kernel_block_size
+        capacity = max_num_reqs * cdiv(max_model_len, kernel_block_size)
         self.src_cpu = torch.empty(capacity, dtype=torch.int32, pin_memory=True)
         self.dst_cpu = torch.empty(capacity, dtype=torch.int32, pin_memory=True)
         self.src_gpu = torch.empty(capacity, dtype=torch.int32, device=device)
@@ -47,9 +62,11 @@ class HiSparseRuntime:
                 return
             source_blocks = block_ids[0]
             indexer_blocks = block_ids[1]
+            # The host manager returns logical scheduler blocks; the GPU
+            # indexer manager returns already-split kernel-page blocks.
             count = min(
-                cdiv(num_tokens, self.block_size),
-                len(source_blocks),
+                cdiv(num_tokens, self.kernel_block_size),
+                len(source_blocks) * self.blocks_per_kv_block,
                 len(indexer_blocks),
             )
             end = num_pairs + count
@@ -58,7 +75,9 @@ class HiSparseRuntime:
                     "HiSparse prefix restore exceeded its preallocated block-ID "
                     f"capacity ({end} > {src.size})."
                 )
-            src[num_pairs:end] = source_blocks[:count]
+            src[num_pairs:end] = _expand_source_block_ids(
+                source_blocks, self.blocks_per_kv_block, count
+            )
             dst[num_pairs:end] = indexer_blocks[:count]
             num_pairs = end
 
@@ -124,9 +143,14 @@ def init_hisparse_runtime(
             source_spec = source_group_spec.kv_cache_specs[cache_name]
             assert isinstance(source_spec, AttentionSpec)
             assert kv_cache_config.num_blocks_by_pool is not None
+            indexer_spec, _ = group_specs[layer_name]
+            assert isinstance(indexer_spec, UniformTypeKVCacheSpecs)
+            kernel_block_size = indexer_spec.kv_cache_specs[layer_name].block_size
+            assert source_spec.block_size % kernel_block_size == 0
+            blocks_per_kv_block = source_spec.block_size // kernel_block_size
             source_cache = raw_tensor.view(source_spec.dtype).view(
-                kv_cache_config.num_blocks_by_pool[0],
-                source_spec.block_size,
+                kv_cache_config.num_blocks_by_pool[0] * blocks_per_kv_block,
+                kernel_block_size,
                 source_spec.head_size,
             )
             register_indexer_source(layer_name, source_cache)

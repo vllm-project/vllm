@@ -1365,7 +1365,10 @@ def _get_hisparse_hma_config(
     log_layout: bool = True,
 ) -> KVCacheConfig:
     """Build independent host-source and GPU-HMA allocator domains."""
-    from vllm.v1.attention.backends.mla.hisparse import ResolvedHiSparseConfig
+    from vllm.v1.attention.backends.mla.hisparse import (
+        HISPARSE_KERNEL_BLOCK_SIZE,
+        ResolvedHiSparseConfig,
+    )
 
     assert isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
     specs = group.kv_cache_spec.kv_cache_specs
@@ -1380,13 +1383,17 @@ def _get_hisparse_hma_config(
     block_sizes = {spec.block_size for spec in specs.values()}
     assert len(block_sizes) == 1, "HiSparse HMA requires one scheduler block size."
     block_size = block_sizes.pop()
-    if block_size != 64:
-        raise ValueError(f"HiSparse HMA requires block_size=64, got {block_size}.")
+    if block_size % HISPARSE_KERNEL_BLOCK_SIZE != 0:
+        raise ValueError(
+            "HiSparse scheduler block size must be divisible by its "
+            f"{HISPARSE_KERNEL_BLOCK_SIZE}-token kernel block size, got "
+            f"{block_size}."
+        )
     config = ResolvedHiSparseConfig.from_vllm_config(
         vllm_config, vllm_config.model_config.hf_config.index_topk
     )
     assert config is not None
-    hot_blocks_per_request = config.num_hot_blocks(block_size)
+    hot_blocks_per_request = config.num_hot_blocks(HISPARSE_KERNEL_BLOCK_SIZE)
 
     source_specs = {
         (
@@ -1395,7 +1402,13 @@ def _get_hisparse_hma_config(
         for name, spec in specs.items()
     }
     host_group_spec = UniformTypeKVCacheSpecs.from_specs(source_specs)
-    indexer_group_spec = UniformTypeKVCacheSpecs.from_specs(indexer_specs)
+    # Host pages retain the scheduler block size. The packed GPU slab uses
+    # native kernel pages so indexer and hot-cache block IDs share one layout.
+    gpu_indexer_specs = {
+        name: spec.copy_with_new_block_size(HISPARSE_KERNEL_BLOCK_SIZE)
+        for name, spec in indexer_specs.items()
+    }
+    indexer_group_spec = UniformTypeKVCacheSpecs.from_specs(gpu_indexer_specs)
     assert host_group_spec is not None and indexer_group_spec is not None
     host_group = KVCacheGroupSpec(list(source_specs), host_group_spec, block_pool_id=0)
     indexer_group = KVCacheGroupSpec(
@@ -1406,7 +1419,7 @@ def _get_hisparse_hma_config(
         enable_kv_transfer=False,
     )
 
-    indexer_page = sum(spec.page_size_bytes for spec in indexer_specs.values())
+    indexer_page = sum(spec.page_size_bytes for spec in gpu_indexer_specs.values())
 
     def layer_prefix(name: str) -> str:
         if ".self_attn." in name:
@@ -1422,7 +1435,12 @@ def _get_hisparse_hma_config(
     for layer_name, layer_spec in host_specs.items():
         if layer_prefix(layer_name) in indexer_prefixes or not hot_units:
             hot_units.append([])
-        hot_units[-1].append((f"{layer_name}{HISPARSE_HOT_SUFFIX}", layer_spec))
+        hot_units[-1].append(
+            (
+                f"{layer_name}{HISPARSE_HOT_SUFFIX}",
+                layer_spec.copy_with_new_block_size(HISPARSE_KERNEL_BLOCK_SIZE),
+            )
+        )
 
     hot_groups: list[KVCacheGroupSpec] = []
     current: list[tuple[str, KVCacheSpec]] = []
@@ -1435,7 +1453,7 @@ def _get_hisparse_hma_config(
             KVCacheGroupSpec(
                 [name for name, _ in layers],
                 HiSparseHotSpec(
-                    block_size=block_size,
+                    block_size=HISPARSE_KERNEL_BLOCK_SIZE,
                     page_size=page_sizes.pop(),
                     blocks_per_request=hot_blocks_per_request,
                 ),

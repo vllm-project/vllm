@@ -12,6 +12,7 @@ import torch
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config.attention import HiSparseConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
@@ -44,6 +45,7 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
+    HiSparseHotSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -87,6 +89,50 @@ def test_hisparse_memory_usage_keeps_indexer_source_on_host():
     config = SimpleNamespace(attention_config=SimpleNamespace(hisparse_config=object()))
 
     assert kv_cache_utils._hisparse_gpu_host_usage_split(config, [group]) == (50, 350)
+
+
+@pytest.mark.parametrize("block_size", [64, 128, 256])
+def test_hisparse_hma_splits_scheduler_blocks_into_kernel_blocks(block_size):
+    specs = {
+        "model.layers.0.self_attn": MLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+        ),
+        "model.layers.0.self_attn.indexer": MLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+        ),
+    }
+    group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
+    assert group_spec is not None
+    group = KVCacheGroupSpec(list(specs), group_spec)
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(
+            hisparse_config=HiSparseConfig(host_pool_gib=1.0)
+        ),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(index_topk=128)),
+        cache_config=SimpleNamespace(num_gpu_blocks_override=7),
+    )
+
+    cache_config = kv_cache_utils._get_hisparse_hma_config(
+        config,
+        group,
+        available_memory=2**30,
+        host_budget=2**30,
+        log_layout=False,
+    )
+
+    host_group, indexer_group, *hot_groups = cache_config.kv_cache_groups
+    assert cache_config.num_blocks_by_pool == [7, 7]
+    assert host_group.kv_cache_spec.block_size == block_size
+    assert indexer_group.kv_cache_spec.block_size == 64
+    assert hot_groups
+    assert all(isinstance(group.kv_cache_spec, HiSparseHotSpec) for group in hot_groups)
+    assert all(group.kv_cache_spec.block_size == 64 for group in hot_groups)
 
 
 @pytest.fixture(autouse=True)
