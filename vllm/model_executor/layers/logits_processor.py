@@ -144,8 +144,10 @@ class LogitsProcessor(PluggableLayer):
         # Get the logits for the next tokens.
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
 
-        # Gather logits for TP
-        logits = self._gather_logits(logits)
+        # Gather logits only when the head itself is TP-sharded. A replicated
+        # head already produces the complete vocabulary on every rank.
+        if not getattr(lm_head, "replicated", False):
+            logits = self._gather_logits(logits)
 
         # Remove paddings in vocab (if any).
         if logits is not None:
@@ -169,7 +171,11 @@ class LogitsProcessor(PluggableLayer):
                 "The local argmax reduction optimization is not supported for "
                 "non-positive logit scaling factors."
             )
-        tp_size = get_tensor_model_parallel_world_size()
+        tp_size = (
+            1
+            if getattr(lm_head, "replicated", False)
+            else get_tensor_model_parallel_world_size()
+        )
 
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
         if self.soft_cap is not None:

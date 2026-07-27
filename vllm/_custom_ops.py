@@ -2733,6 +2733,79 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     )
 
 
+def fused_kda_decode(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    conv_state: torch.Tensor,
+    raw_g: torch.Tensor,
+    raw_beta: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    state_indices: torch.Tensor,
+    state: torch.Tensor,
+    out: torch.Tensor | None = None,
+    lower_bound: float | None = None,
+    output_gate: torch.Tensor | None = None,
+    norm_weight: torch.Tensor | None = None,
+    norm_eps: float = 1e-5,
+) -> torch.Tensor:
+    if out is None:
+        out = torch.empty(
+            1,
+            x.shape[0],
+            raw_g.shape[2],
+            raw_g.shape[3],
+            dtype=x.dtype,
+            device=x.device,
+        )
+    torch.ops._C.fused_kda_decode(
+        x,
+        weight,
+        bias,
+        conv_state,
+        raw_g,
+        raw_beta,
+        A_log,
+        dt_bias,
+        state_indices,
+        state,
+        out,
+        lower_bound,
+        output_gate,
+        norm_weight,
+        norm_eps,
+    )
+    return out
+
+
+def kimi_k3_attn_res(
+    prefix: torch.Tensor,
+    delta: torch.Tensor,
+    blocks: torch.Tensor,
+    norm_weight: torch.Tensor,
+    qk_weight: torch.Tensor,
+    output_norm_weight: torch.Tensor,
+    num_blocks: int,
+    eps: float,
+    output_norm_eps: float,
+) -> torch.Tensor:
+    output = torch.empty_like(prefix)
+    torch.ops._C.kimi_k3_attn_res(
+        prefix,
+        delta,
+        blocks,
+        norm_weight,
+        qk_weight,
+        output_norm_weight,
+        output,
+        num_blocks,
+        eps,
+        output_norm_eps,
+    )
+    return output
+
+
 def concat_and_cache_mla(
     kv_c: torch.Tensor,
     k_pe: torch.Tensor,
@@ -2743,6 +2816,26 @@ def concat_and_cache_mla(
 ) -> None:
     torch.ops._C_cache_ops.concat_and_cache_mla(
         kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale
+    )
+
+
+def concat_and_cache_mla_grouped(
+    kv_c: torch.Tensor,
+    k_pe: torch.Tensor,
+    kv_cache_ptrs: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    block_size: int,
+    block_stride: int,
+    entry_stride: int,
+) -> None:
+    torch.ops._C_cache_ops.concat_and_cache_mla_grouped(
+        kv_c,
+        k_pe,
+        kv_cache_ptrs,
+        slot_mapping,
+        block_size,
+        block_stride,
+        entry_stride,
     )
 
 
@@ -3013,6 +3106,63 @@ def all_reduce(
     torch.ops._C_custom_ar.all_reduce(fa, inp, out, reg_buffer, reg_buffer_sz_bytes)
 
 
+def custom_all_gather(
+    fa: int,
+    inp: torch.Tensor,
+    out: torch.Tensor,
+    reg_buffer: int,
+    reg_buffer_sz_bytes: int,
+) -> None:
+    torch.ops._C_custom_ar.custom_all_gather(
+        fa, inp, out, reg_buffer, reg_buffer_sz_bytes
+    )
+
+
+def mnnvl_lamport_all_gather(
+    fa: int,
+    inp: torch.Tensor,
+    out: torch.Tensor,
+    local_buffer: int,
+    multicast_buffer: int,
+    epoch_buffer: int,
+    stage_sz_bytes: int,
+) -> None:
+    torch.ops._C_custom_ar.mnnvl_lamport_all_gather(
+        fa,
+        inp,
+        out,
+        local_buffer,
+        multicast_buffer,
+        epoch_buffer,
+        stage_sz_bytes,
+    )
+
+
+def custom_reduce_scatter(
+    fa: int,
+    inp: torch.Tensor,
+    out: torch.Tensor,
+    reg_buffer: int,
+    reg_buffer_sz_bytes: int,
+) -> None:
+    torch.ops._C_custom_ar.custom_reduce_scatter(
+        fa, inp, out, reg_buffer, reg_buffer_sz_bytes
+    )
+
+
+def mnnvl_lamport_reduce_scatter(
+    fa: int,
+    inp: torch.Tensor,
+    out: torch.Tensor,
+    local_buffer: int,
+    epoch_buffer: int,
+    stage_sz_bytes: int,
+) -> None:
+    torch.ops._C_custom_ar.mnnvl_lamport_reduce_scatter(
+        fa, inp, out, local_buffer, epoch_buffer, stage_sz_bytes
+    )
+
+
 def dispose(fa: int) -> None:
     torch.ops._C_custom_ar.dispose(fa)
 
@@ -3117,18 +3267,18 @@ def dsv3_fused_a_gemm(
     output: torch.Tensor,
     mat_a: torch.Tensor,
     mat_b: torch.Tensor,
+    enable_pdl: bool = False,
 ) -> None:
-    """DeepSeek V3 fused A GEMM (SM 9.0+, bf16 only, 1-16 tokens).
+    """Low-latency fused-A-style GEMM (SM 9.0+, BF16, 1-16 tokens).
 
-    Computes output = mat_a @ mat_b.T where:
-      mat_a: [num_tokens, 7168] row-major bf16 (hidden states)
-      mat_b: [7168, 2112] column-major bf16 (weight transposed)
-      output: [num_tokens, 2112] row-major bf16
+    Computes ``output = mat_a @ mat_b`` for the compiled Kimi K3 and
+    DeepSeek V3 projection shapes. ``mat_a`` and ``output`` are row-major;
+    ``mat_b`` is the column-major transposed weight. ``enable_pdl`` permits
+    programmatic dependent launch for callers that have validated it.
 
-    Optimized for the DeepSeek V2/V3 QKV A-projection at small batch sizes.
-    Requires SM 9.0+ (Hopper).
+    Requires SM 9.0+.
     """
-    torch.ops._C.dsv3_fused_a_gemm(output, mat_a, mat_b)
+    torch.ops._C.dsv3_fused_a_gemm(output, mat_a, mat_b, enable_pdl)
 
 
 if hasattr(torch.ops._C, "weight_packed_linear"):

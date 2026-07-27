@@ -13,6 +13,8 @@ from vllm.parser.engine.registered_adapters import Qwen3ParserReasoningAdapter
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 
 class ThinkReasoningParser(BaseThinkingReasoningParser):
     @property
@@ -249,6 +251,95 @@ def test_parse_delta_reasoning_boundary_no_tool_parser(tokenizer, request_obj):
     assert len(tool_calls) == 0
     assert "<tool_call>" in content
     assert "get_weather" in content
+
+
+class _SplitCloseReasoningParser:
+    close_ids = [2, 3]
+
+    @staticmethod
+    def _close_index(input_ids: list[int]) -> int:
+        for i in range(len(input_ids) - 1):
+            if input_ids[i : i + 2] == _SplitCloseReasoningParser.close_ids:
+                return i
+        return -1
+
+    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+        return self._close_index(input_ids) != -1
+
+    def is_reasoning_end_streaming(
+        self,
+        input_ids: list[int],
+        delta_ids: list[int],
+    ) -> bool:
+        return self.is_reasoning_end(input_ids)
+
+    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
+        close_index = self._close_index(input_ids)
+        if close_index == -1:
+            return []
+        return input_ids[close_index + len(self.close_ids) :]
+
+    def extract_reasoning_streaming(self, *args, **kwargs):
+        current_token_ids = kwargs["current_token_ids"] if kwargs else args[4]
+        if self.is_reasoning_end(current_token_ids):
+            return DeltaMessage(content="tail")
+        return DeltaMessage(reasoning=kwargs["delta_text"] if kwargs else args[2])
+
+    def extract_reasoning(self, model_output, request):
+        return None, model_output
+
+
+class _RecordingToolParser:
+    supports_required_and_named = False
+
+    def __init__(self):
+        self.current_token_ids: list[list[int]] = []
+
+    def extract_tool_calls(self, model_output, request):
+        raise AssertionError("non-streaming path is not used")
+
+    def extract_tool_calls_streaming(
+        self,
+        previous_text,
+        current_text,
+        delta_text,
+        previous_token_ids,
+        current_token_ids,
+        delta_token_ids,
+        request,
+    ):
+        self.current_token_ids.append(list(current_token_ids))
+        return DeltaMessage(content=delta_text)
+
+
+class _SplitCloseParser(DelegatingParser):
+    def __init__(self):
+        super().__init__(tokenizer=None)
+        self.reasoning_parser = _SplitCloseReasoningParser()
+        self.recording_tool_parser = _RecordingToolParser()
+        self.tool_parser = self.recording_tool_parser
+
+
+def test_parse_delta_extracts_content_ids_from_full_current_ids(request_obj):
+    parser = _SplitCloseParser()
+
+    parser.parse_delta(
+        "reasoning[close]",
+        [9, 2],
+        request_obj,
+        prompt_token_ids=[],
+        finished=False,
+    )
+    result = parser.parse_delta(
+        "think[sep]tail",
+        [3, 4],
+        request_obj,
+        finished=False,
+    )
+
+    assert result is not None
+    assert result.content == "tail"
+    assert parser.recording_tool_parser.current_token_ids == [[4]]
 
 
 def test_parse_delta_reasoning_only_no_think_leak(tokenizer, request_obj):

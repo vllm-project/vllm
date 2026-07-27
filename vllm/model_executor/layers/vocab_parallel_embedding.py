@@ -232,6 +232,7 @@ class VocabParallelEmbedding(PluggableLayer):
         padding_size: padding size for the vocabulary.
         quant_config: quant config for the layer
         prefix: full name of the layer in the state dict
+        replicated: whether to replicate the embedding on every TP rank.
     """  # noqa: E501
 
     # --8<-- [end:vocab_parallel_embedding]
@@ -245,12 +246,15 @@ class VocabParallelEmbedding(PluggableLayer):
         padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        *,
+        replicated: bool = False,
     ):
         super().__init__()
 
         # Keep the input dimensions.
-        tp_rank = get_tensor_model_parallel_rank()
-        self.tp_size = get_tensor_model_parallel_world_size()
+        self.replicated = replicated
+        tp_rank = get_tensor_model_parallel_rank() if not replicated else 0
+        self.tp_size = get_tensor_model_parallel_world_size() if not replicated else 1
         self.num_embeddings = num_embeddings
         self.padding_size = padding_size
         self.org_vocab_size = org_num_embeddings or num_embeddings
@@ -487,8 +491,12 @@ class VocabParallelEmbedding(PluggableLayer):
         # Mask the output embedding.
         if self.tp_size > 1:
             output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
-        # Reduce across all the model parallel GPUs.
-        output = tensor_model_parallel_all_reduce(output_parallel)
+        # Reduce sharded embeddings across all the model parallel GPUs.
+        output = (
+            output_parallel
+            if self.replicated
+            else tensor_model_parallel_all_reduce(output_parallel)
+        )
         return output
 
     def extra_repr(self) -> str:
@@ -516,6 +524,7 @@ class ParallelLMHead(VocabParallelEmbedding):
         params_dtype: type of the parameters.
         org_num_embeddings: original vocabulary size (without LoRA).
         padding_size: padding size for the vocabulary.
+        replicated: whether to replicate the head on every TP rank.
     """
 
     # --8<-- [end:parallel_lm_head]
@@ -530,6 +539,8 @@ class ParallelLMHead(VocabParallelEmbedding):
         padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        *,
+        replicated: bool = False,
     ):
         super().__init__(
             num_embeddings,
@@ -539,6 +550,7 @@ class ParallelLMHead(VocabParallelEmbedding):
             padding_size,
             quant_config,
             prefix,
+            replicated=replicated,
         )
         self.quant_config = quant_config
         if bias:

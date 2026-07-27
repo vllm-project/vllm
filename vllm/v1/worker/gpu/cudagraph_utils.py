@@ -498,10 +498,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                 block_tables,
                 attn_groups,
                 kv_cache_config,
-                skip_attn=(
-                    desc.cg_mode == CUDAGraphMode.PIECEWISE
-                    and not self.use_breakable_cg
-                ),
+                capture_attn=desc.cg_mode == CUDAGraphMode.FULL,
             )
 
             # Capture with dummy rows marked as padding.
@@ -510,7 +507,6 @@ class ModelCudaGraphManager(CudaGraphManager):
             def forward_fn(cg_mode: CUDAGraphMode) -> None:
                 batch_descriptor = None
                 if cg_mode == CUDAGraphMode.PIECEWISE:
-                    assert (attn_metadata is not None) == self.use_breakable_cg
                     batch_descriptor = BatchDescriptor(
                         num_tokens=num_tokens,
                         has_lora=has_lora,
@@ -593,7 +589,7 @@ def prepare_inputs_to_capture(
     block_tables: BlockTables,
     attn_groups: list[list[AttentionGroup]],
     kv_cache_config: KVCacheConfig,
-    skip_attn: bool = False,
+    capture_attn: bool,
 ) -> AttentionState:
     input_batch = InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
@@ -614,15 +610,15 @@ def prepare_inputs_to_capture(
         )
         input_batch.dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[:num_reqs]
 
-    attn_metadata = None
-    if not skip_attn:
-        attn_metadata = model_state.prepare_attn(
-            input_batch,
-            CUDAGraphMode.NONE,
-            input_block_tables,
-            slot_mappings,
-            attn_groups,
-            kv_cache_config,
-            for_capture=True,
-        )
+    attn_metadata = model_state.prepare_attn(
+        input_batch,
+        CUDAGraphMode.NONE,
+        input_block_tables,
+        slot_mappings,
+        attn_groups,
+        kv_cache_config,
+        # Note: For linear attention, the attention metadata may differ between
+        # FULL and PIECEWISE capture.
+        for_capture=capture_attn,
+    )
     return AttentionState(attn_metadata, slot_mappings_by_layer)

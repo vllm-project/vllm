@@ -131,6 +131,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
+    AITER_SITUV2_A8W4: bool = False
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_USE_AITER_MHA: bool = True
@@ -175,6 +176,7 @@ if TYPE_CHECKING:
     VLLM_RAY_EXTRA_ENV_VARS_TO_COPY: str = ""
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_MARLIN_INPUT_DTYPE: Literal["int8", "fp8"] | None = None
+    VLLM_MARLIN_MXFP8_INPUT_QDQ: bool = False
     VLLM_HUMMING_ONLINE_QUANT_CONFIG: dict[str, Any] | None = None
     VLLM_HUMMING_INPUT_QUANT_CONFIG: dict[str, Any] | None = None
     VLLM_HUMMING_USE_F16_ACCUM: bool = False
@@ -268,8 +270,10 @@ if TYPE_CHECKING:
     VLLM_NCCL_INCLUDE_PATH: str | None = None
     VLLM_GC_DEBUG: str = ""
     VLLM_DEBUG_WORKSPACE: bool = False
+    VLLM_ENABLE_K3_LATENT_MOE_TAIL_FUSION: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
+    VLLM_ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
@@ -1000,7 +1004,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Backend for Video IO — selects the frame-sampling algorithm.
     # - "opencv": uniform sampling.
     # - "opencv_dynamic": duration-aware dynamic sampling.
-    # - "identity": returns raw video bytes for model processor to handle.
     #
     # Custom backend implementations can be registered
     # via `@VIDEO_LOADER_REGISTRY.register("my_custom_video_loader")` and
@@ -1206,6 +1209,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MOE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in ("true", "1")
+    ),
+    # Route K3 SiTU MXFP4 MoE through the a8w4 (fp8 activation) gate/up-
+    # interleaved flydsl kernels instead of the default a16w4 separated path.
+    # Shared with the AITER runtime, which reads the same env var directly.
+    "AITER_SITUV2_A8W4": lambda: (
+        os.getenv("AITER_SITUV2_A8W4", "0").lower() in ("true", "1")
     ),
     # MoE sorting dispatch policy for AITER fused MoE kernels.
     #   0 = auto (default): single-pass for small batches, multi-pass
@@ -1441,6 +1450,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # The activation dtype for marlin kernel
     "VLLM_MARLIN_INPUT_DTYPE": env_with_choices(
         "VLLM_MARLIN_INPUT_DTYPE", None, ["int8", "fp8"]
+    ),
+    # Debug-only: simulate W4A8 activations on W4A16 Marlin by applying
+    # MXFP8 quantize-dequantize to both Marlin GEMM inputs.
+    "VLLM_MARLIN_MXFP8_INPUT_QDQ": lambda: bool(
+        int(os.getenv("VLLM_MARLIN_MXFP8_INPUT_QDQ", "0"))
     ),
     # The online quantization dtype for humming kernel
     "VLLM_HUMMING_ONLINE_QUANT_CONFIG": lambda: maybe_convert_json_str_or_file(
@@ -1889,6 +1903,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Debug workspace allocations.
     # logging of workspace resize operations.
     "VLLM_DEBUG_WORKSPACE": lambda: bool(int(os.getenv("VLLM_DEBUG_WORKSPACE", "0"))),
+    # Enable the experimental Kimi K3 latent-MoE tail fusion.
+    # Currently supported only on SM100 with TP=8/16 and BF16.
+    "VLLM_ENABLE_K3_LATENT_MOE_TAIL_FUSION": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_K3_LATENT_MOE_TAIL_FUSION", "0"))
+    ),
     # Disables parallel execution of shared_experts via separate cuda stream
     "VLLM_DISABLE_SHARED_EXPERTS_STREAM": lambda: bool(
         int(os.getenv("VLLM_DISABLE_SHARED_EXPERTS_STREAM", "0"))
@@ -1899,6 +1918,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # TODO(alexm-redhat): Tune to be more dynamic based on GPU type
     "VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD": lambda: int(
         int(os.getenv("VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD", 256))
+    ),
+    # Token-count cutoff for overlapping the MoE router gate with the
+    # routed-expert down projection on a separate CUDA stream (latent MoE).
+    # At or below this many tokens the launch-bound decode path benefits from
+    # multi-stream overlap; above it the GEMMs saturate the device and the
+    # cross-stream sync is pure overhead, so it falls back to sequential.
+    "VLLM_ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD": lambda: int(
+        os.getenv("VLLM_ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD", "256")
     ),
     # Token-count cutoff for multi-stream overlap of the attention input
     # GEMM with auxiliary GEMMs (e.g. fused_wqa_wkv overlapped with indexer

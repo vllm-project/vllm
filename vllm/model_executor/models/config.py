@@ -339,6 +339,39 @@ class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
                 )
 
 
+class KimiK3ForConditionalGenerationConfig(VerifyAndUpdateConfig):
+    """Route MXFP4-checkpointed Kimi-K3 MoE experts to the MXFP4 interface.
+
+    Kimi-K3 ships its routed experts as compressed-tensors
+    ``mxfp4-pack-quantized`` (``quant_method="compressed-tensors"``), which
+    lands them on ``CompressedTensorsW4A4Mxfp4MoEMethod`` and its narrow kernel
+    selection. Rewriting ``quant_method`` to ``"mxfp4"`` selects ``Mxfp4Config``
+    (hence ``Mxfp4MoEMethod``) with its full backend set, while any non-MXFP4
+    checkpoint is left untouched. Covers both the main model and the MTP draft.
+
+    ``model_arch_config.quantization_config`` is a separate dict, snapshotted in
+    ``ModelConfig.__init__`` before this hook runs, and it is what
+    ``_verify_quantization`` reads when resolving the quant method. Patch it
+    alongside the hf configs so the rewrite lands before resolution; otherwise
+    the main model still resolves to compressed-tensors.
+    """
+
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        for cfg in (
+            model_config.hf_config,
+            model_config.hf_text_config,
+            model_config.model_arch_config,
+        ):
+            quant_config = getattr(cfg, "quantization_config", None)
+            if (
+                isinstance(quant_config, dict)
+                and quant_config.get("quant_method") == "compressed-tensors"
+                and quant_config.get("format") == "mxfp4-pack-quantized"
+            ):
+                quant_config["quant_method"] = "mxfp4"
+
+
 class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -846,6 +879,8 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
     "JinaForRanking": JinaForRankingConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
+    "KimiK3ForConditionalGeneration": KimiK3ForConditionalGenerationConfig,
+    "KimiK3MTPModel": KimiK3ForConditionalGenerationConfig,
     "LlamaBidirectionalForSequenceClassification": LlamaBidirectionalConfig,
     "LlamaBidirectionalModel": LlamaBidirectionalConfig,
     "LlamaNemotronVLForSequenceClassification": LlamaNemotronVLConfig,

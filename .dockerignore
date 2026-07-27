@@ -3,6 +3,7 @@
 dist
 vllm/*.so
 vllm/vllm-rs
+.git
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

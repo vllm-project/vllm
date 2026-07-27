@@ -8,7 +8,9 @@ from collections.abc import Callable
 import torch
 
 import vllm._custom_ops as ops
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation,
@@ -52,6 +54,68 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
+
+logger = init_logger(__name__)
+
+_MXFP8_BLOCK_SIZE = 32
+
+
+def _mxfp8_qdq_for_marlin_input(x: torch.Tensor) -> torch.Tensor:
+    """Simulate MXFP8 activations, then feed BF16 back to W4A16 Marlin.
+
+    This is intentionally a debug/reference path. The Marlin GEMM still receives
+    BF16 activations, but those activations carry the precision loss from an
+    MXFP8 quantize-dequantize step.
+    """
+    if x.dtype != torch.bfloat16:
+        raise ValueError(
+            "VLLM_MARLIN_MXFP8_INPUT_QDQ expects BF16 Marlin inputs, "
+            f"but got {x.dtype}."
+        )
+
+    original_cols = x.size(-1)
+    pad_cols = (-original_cols) % _MXFP8_BLOCK_SIZE
+
+    qdq_input = x.contiguous()
+    if pad_cols:
+        padded_shape = (*qdq_input.shape[:-1], original_cols + pad_cols)
+        padded = torch.zeros(
+            padded_shape,
+            dtype=qdq_input.dtype,
+            device=qdq_input.device,
+        )
+        padded[..., :original_cols] = qdq_input
+        qdq_input = padded
+
+    qdq_shape = qdq_input.shape
+    num_blocks = qdq_input.size(-1) // _MXFP8_BLOCK_SIZE
+    qdq_blocks = qdq_input.float().view(
+        *qdq_shape[:-1],
+        num_blocks,
+        _MXFP8_BLOCK_SIZE,
+    )
+
+    amax = qdq_blocks.abs().amax(dim=-1)
+    amax = amax.clamp(min=torch.finfo(torch.float32).tiny)
+    fp8_max = torch.finfo(torch.float8_e4m3fn).max
+    scale_exp = torch.ceil(torch.log2(amax / fp8_max)) + 127.0
+    scale_exp = scale_exp.clamp(0, 254).to(torch.uint8)
+    descale = torch.exp2(scale_exp.float() - 127.0)
+
+    qdq_fp8 = (qdq_blocks / descale.unsqueeze(-1)).view(qdq_shape)
+    qdq_fp8 = qdq_fp8.to(torch.float8_e4m3fn)
+    qdq_output = qdq_fp8.float().view(
+        *qdq_shape[:-1],
+        num_blocks,
+        _MXFP8_BLOCK_SIZE,
+    )
+    qdq_output = qdq_output * descale.unsqueeze(-1)
+    qdq_output = qdq_output.view(qdq_shape).to(torch.bfloat16)
+
+    if pad_cols:
+        qdq_output = qdq_output[..., :original_cols]
+
+    return qdq_output.contiguous()
 
 
 def _fused_marlin_moe(
@@ -101,6 +165,19 @@ def _fused_marlin_moe(
     if workspace is None:
         workspace = marlin_make_workspace_new(hidden_states.device, 4)
 
+    simulate_mxfp8_input_qdq = envs.VLLM_MARLIN_MXFP8_INPUT_QDQ
+    if simulate_mxfp8_input_qdq:
+        if input_dtype is not None:
+            raise ValueError(
+                "VLLM_MARLIN_MXFP8_INPUT_QDQ simulates W4A8 on the W4A16 "
+                "Marlin path; do not combine it with VLLM_MARLIN_INPUT_DTYPE."
+            )
+        logger.warning_once(
+            "Using W4A16 Marlin with MXFP8 activation QDQ simulation. "
+            "Both Marlin GEMM inputs are quantized to MXFP8 and dequantized "
+            "back to BF16 before GEMM. This is for accuracy comparison only."
+        )
+
     if intermediate_cache13 is None:
         intermediate_cache13 = torch.empty(
             (M * num_topk * max(w13_num_shards * N, K),),
@@ -131,6 +208,8 @@ def _fused_marlin_moe(
             a_scales1 = a_scales1 * input_global_scale1
     elif input_dtype == torch.float8_e4m3fn:
         gate_up_input, a_scales1 = marlin_quant_input(hidden_states, input_dtype)
+    elif simulate_mxfp8_input_qdq:
+        gate_up_input = _mxfp8_qdq_for_marlin_input(hidden_states)
 
     intermediate_cache1 = ops.moe_wna16_marlin_gemm(
         gate_up_input,
@@ -187,6 +266,8 @@ def _fused_marlin_moe(
         intermediate_cache2, a_scales2 = marlin_quant_input(
             intermediate_cache2, input_dtype
         )
+    elif simulate_mxfp8_input_qdq:
+        intermediate_cache2 = _mxfp8_qdq_for_marlin_input(intermediate_cache2)
 
     output = ops.moe_wna16_marlin_gemm(
         intermediate_cache2,
@@ -423,6 +504,7 @@ def batched_fused_marlin_moe(
     clamp_limit: float | None = None,
     gemm1_alpha: float = 1.0,
     gemm1_beta: float = 0.0,
+    activation_func: Callable[..., None] = apply_moe_activation,
 ) -> torch.Tensor:
     """
     This function massages the inputs so the batched hidden_states can be
@@ -530,6 +612,7 @@ def batched_fused_marlin_moe(
         quant_type=quant_type,
         apply_router_weight_on_input=apply_router_weight_on_input,
         activation=activation,
+        activation_func=activation_func,
         expert_map=expert_map,
         block_size_m=block_size_m,
         sorted_token_ids=sorted_token_ids,
@@ -645,6 +728,7 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
             MoEActivation.SILU,
             MoEActivation.GELU,
             MoEActivation.GELU_TANH,
+            MoEActivation.SITU,
             MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUOAI_UNINTERLEAVE,
             MoEActivation.SWIGLUSTEP,
@@ -656,10 +740,10 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return not (
-            moe_parallel_config.use_fi_nvl_two_sided_kernels
-            or moe_parallel_config.use_fi_nvl_one_sided_kernels
-        )
+        # One-sided FI-NVL all2all pairs with MarlinExperts fine (the
+        # compressed-tensors MXFP4 path runs this exact combo); only the
+        # two-sided kernels are unsupported here.
+        return not moe_parallel_config.use_fi_nvl_two_sided_kernels
 
     @property
     def quant_type_id(self) -> int:
@@ -1021,6 +1105,28 @@ class BatchedMarlinExperts(MarlinExpertsBase):
         apply_router_weight_on_input: bool,
     ):
         assert expert_tokens_meta is not None, "Num valid tokens per batch is required"
+
+        def activation_func(
+            act: MoEActivation,
+            act_output: torch.Tensor,
+            act_input: torch.Tensor,
+            **kwargs,
+        ) -> None:
+            if act != MoEActivation.SITU:
+                self.activation(act, act_output, act_input, **kwargs)
+                return
+
+            num_experts, max_num_tokens = hidden_states.shape[:2]
+            beta = self.moe_config.activation_situ_beta
+            linear_beta = self.moe_config.activation_situ_linear_beta
+            torch.ops._C.masked_situ_and_mul(
+                act_output.view(num_experts, max_num_tokens, -1),
+                act_input.view(num_experts, max_num_tokens, -1),
+                expert_tokens_meta.expert_num_tokens,
+                1.0 if beta is None else beta,
+                -1.0 if linear_beta is None else linear_beta,
+            )
+
         return batched_fused_marlin_moe(
             hidden_states=hidden_states,
             expert_num_tokens=expert_tokens_meta.expert_num_tokens,
@@ -1051,4 +1157,5 @@ class BatchedMarlinExperts(MarlinExpertsBase):
             clamp_limit=self.gemm1_clamp_limit,
             gemm1_alpha=self.gemm1_alpha,
             gemm1_beta=self.gemm1_beta,
+            activation_func=activation_func,
         )

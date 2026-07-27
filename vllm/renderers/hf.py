@@ -850,7 +850,6 @@ def build_video_prompts_from_mm_data(
     video_prompts_dict: dict[int, list[str]] = defaultdict(list)
 
     for item in vision_chunks:
-        # vision_chunk items are always dicts (VisionChunkImage/VisionChunkVideo)
         assert isinstance(item, dict)
         if item.get("type") == "video_chunk":
             video_idx = item.get("video_idx", 0)
@@ -866,7 +865,7 @@ def build_video_prompts_from_mm_data(
     return video_prompts
 
 
-def replace_vision_chunk_video_placeholder(
+def replace_vision_chunk_placeholders(
     prompt_raw: str | list[int],
     mm_data: MultiModalDataDict,
     video_placeholder: str | None,
@@ -889,6 +888,7 @@ def replace_vision_chunk_video_placeholder(
                 len(prompt_raw_parts) - 1,
                 len(video_prompts),
             )
+
     return prompt_raw
 
 
@@ -933,6 +933,13 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
         tokenizer = self.get_tokenizer()
+        tools = params.chat_template_kwargs.get("tools")
+        chat_template = resolve_chat_template(
+            tokenizer,
+            chat_template=params.chat_template,
+            tools=tools,
+            model_config=model_config,
+        )
 
         prompt_embeds_placeholder_token_id: int | None = None
         if model_config.enable_prompt_embeds:
@@ -945,7 +952,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             model_config,
             content_format=resolve_chat_template_content_format(
                 chat_template=params.chat_template,
-                tools=params.chat_template_kwargs.get("tools"),
+                tools=tools,
                 given_format=params.chat_template_content_format,
                 tokenizer=tokenizer,
                 model_config=model_config,
@@ -967,6 +974,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 mm_data = None
 
         chat_template_kwargs = params.get_apply_chat_template_kwargs()
+        chat_template_kwargs["chat_template"] = chat_template
         if prompt_embeds_tensors:
             # prompt_embeds post-processing requires prompt_token_ids.
             if chat_template_kwargs.get("tokenize") is False:
@@ -991,7 +999,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             )
 
         # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5
-        # model which uses unified vision chunks for both images and videos.
+        # and Kimi-K3 models which use unified vision chunks for both
+        # images and videos.
         if (
             self.use_unified_vision_chunk
             and mm_uuids is not None
@@ -999,13 +1008,12 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         ):
             mm_uuids = rebuild_mm_uuids_from_mm_data(mm_uuids, mm_data)
 
-            # get video placeholder, replace it with runtime video-chunk prompts
             video_placeholder = getattr(
                 model_config.hf_config, "video_placeholder", None
             )
             prompt_raw = cast(
                 list[int],
-                replace_vision_chunk_video_placeholder(
+                replace_vision_chunk_placeholders(
                     prompt_raw,
                     mm_data,
                     video_placeholder,
@@ -1053,6 +1061,13 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
         tokenizer = self.get_tokenizer()
+        tools = params.chat_template_kwargs.get("tools")
+        chat_template = resolve_chat_template(
+            tokenizer,
+            chat_template=params.chat_template,
+            tools=tools,
+            model_config=model_config,
+        )
 
         prompt_embeds_placeholder_token_id: int | None = None
         if model_config.enable_prompt_embeds:
@@ -1065,7 +1080,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             model_config,
             content_format=resolve_chat_template_content_format(
                 chat_template=params.chat_template,
-                tools=params.chat_template_kwargs.get("tools"),
+                tools=tools,
                 given_format=params.chat_template_content_format,
                 tokenizer=tokenizer,
                 model_config=model_config,
@@ -1084,6 +1099,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 mm_data = None
 
         chat_template_kwargs = params.get_apply_chat_template_kwargs()
+        chat_template_kwargs["chat_template"] = chat_template
         if prompt_embeds_tensors:
             # prompt_embeds post-processing requires prompt_token_ids.
             if chat_template_kwargs.get("tokenize") is False:
@@ -1116,7 +1132,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             )
 
         # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5
-        # model which uses unified vision chunks for both images and videos.
+        # and Kimi-K3 models which use unified vision chunks for both
+        # images and videos.
         if (
             self.use_unified_vision_chunk
             and mm_uuids is not None
@@ -1130,7 +1147,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             )
             prompt_raw = cast(
                 list[int],
-                replace_vision_chunk_video_placeholder(
+                replace_vision_chunk_placeholders(
                     prompt_raw,
                     mm_data,
                     video_placeholder,
@@ -1141,6 +1158,15 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
 
         if assistant_tokens_mask is not None:
             cast(dict, prompt)["_assistant_tokens_mask"] = assistant_tokens_mask
+
+        if isinstance(prompt_raw, str):
+            logger.info("Final prompt (str): %s", prompt_raw)
+        else:
+            logger.info(
+                "Final prompt (tokens, len=%d): %s",
+                len(prompt_raw),
+                tokenizer.decode(prompt_raw, skip_special_tokens=False),
+            )
 
         # See `render_messages` for the rationale.
         if prompt_embeds_tensors and mm_data:

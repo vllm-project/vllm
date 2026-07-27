@@ -341,3 +341,84 @@ def test_trim_reasoning_for_advance():
     next_step = [post, post]
     request.append_output_token_ids(next_step)
     assert manager.trim_reasoning_for_advance(request, next_step) == next_step
+
+
+def test_should_advance_boundary_applies_to_json_grammars():
+    """With speculative decoding, the boundary step carries tokens sampled
+    after the reasoning-end marker for *every* grammar kind, not just
+    structural tags. Deferring the advance desyncs the FSM from the emitted
+    tokens (the next step re-derives from the initial state and duplicates
+    the grammar prefix, e.g. '{"' + '{"city": ...}').
+    """
+    from vllm.v1.structured_output.backend_types import StructuredOutputOptions
+
+    tokenizer, manager, request, prompt, marker = _setup_boundary_request("xgrammar")
+    structured_req = request.structured_output_request
+    structured_req.__dict__["structured_output_key"] = (
+        StructuredOutputOptions.JSON,
+        "{}",
+    )
+
+    pre = tokenizer.encode(" ")[0]
+    post = tokenizer.encode("{")[0]
+    step_tokens = [pre, marker, post]
+    request.append_output_token_ids(step_tokens)
+
+    assert manager.should_advance(request)
+    assert structured_req.reasoning_ended
+    assert structured_req.reasoning_end_token_index == len(prompt) + 1
+    # The scheduler advances with the trimmed suffix: only the post-marker
+    # token reaches the grammar.
+    assert manager.trim_reasoning_for_advance(request, step_tokens) == [post]
+
+
+class _K3StyleReasoner:
+    """Multi-token markers with last-close-after-last-open semantics,
+    mirroring KimiK3ReasoningParser (close=[8,2,9], open=[7,2,9])."""
+
+    _CLOSE = [8, 2, 9]
+    _OPEN = [7, 2, 9]
+
+    @staticmethod
+    def _last(ids: list[int], sub: list[int]) -> int:
+        for i in range(len(ids) - len(sub), -1, -1):
+            if ids[i : i + len(sub)] == sub:
+                return i
+        return -1
+
+    def is_reasoning_end(self, input_ids) -> bool:
+        ids = list(input_ids)
+        last_close = self._last(ids, self._CLOSE)
+        last_open = self._last(ids, self._OPEN)
+        if last_open == -1:
+            return last_close != -1
+        return last_close > last_open
+
+    def is_reasoning_end_streaming(self, input_ids, delta_ids) -> bool:
+        return self.is_reasoning_end(input_ids)
+
+
+def test_find_reasoning_end_index_is_frame_independent():
+    """Regression: the boundary index must anchor at the prompt end, not the
+    step frame. With spec decode + async scheduling the frame can start past
+    the marker; a frame-anchored walk fires immediately for full-sequence
+    parsers and reports the frame start, so the trim drops grammar tokens
+    (or keeps marker tokens) and the FSM desyncs from the emitted stream.
+    """
+    # Prompt: stale close from a prior turn, then the current think-open
+    # (the agent-continuation shape).
+    prompt = [1, 8, 2, 9, 5, 7, 2, 9]
+    # Output: reasoning tokens, close marker, then grammar tokens.
+    out = [11, 12, 8, 2, 9, 30, 31]
+    all_ids = prompt + out
+    marker_end = len(prompt) + 4
+
+    reasoner = _K3StyleReasoner()
+    assert not reasoner.is_reasoning_end(prompt)
+    assert reasoner.is_reasoning_end(all_ids)
+
+    # Independent of any frame: always the marker's final-token index.
+    got = StructuredOutputManager._find_reasoning_end_index(
+        reasoner, all_ids, len(prompt)
+    )
+    assert got == marker_end

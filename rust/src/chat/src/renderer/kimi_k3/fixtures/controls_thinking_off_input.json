@@ -1,0 +1,15 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "json pls"
+    }
+  ],
+  "add_generation_prompt": true,
+  "template_kwargs": {
+    "thinking": false,
+    "response_format": {
+      "type": "json_object"
+    }
+  }
+}

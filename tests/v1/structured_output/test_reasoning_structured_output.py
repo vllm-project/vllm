@@ -330,6 +330,9 @@ class TestReasoningStructuredOutput:
             def __init__(self, *_, **__):
                 pass
 
+            def is_reasoning_end(self, input_ids):
+                return marker in list(input_ids)
+
             def is_reasoning_end_streaming(self, input_ids, delta_ids):
                 return marker in list(delta_ids)
 
