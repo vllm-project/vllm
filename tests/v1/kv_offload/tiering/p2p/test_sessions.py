@@ -49,6 +49,7 @@ from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
 from vllm.v1.kv_offload.tiering.p2p.session.server import (
     _CANCEL_DRAIN_TIMEOUT_S,
     _InflightXfer,
+    _OutboundRequestState,
 )
 from vllm.v1.kv_offload.tiering.p2p.session.session import (
     _MAX_CONSECUTIVE_DISPATCH_ERRORS,
@@ -1379,7 +1380,12 @@ class TestServerFlows:
         tid = 42
         session._server._inflight_add(
             tid,
-            _InflightXfer(kv_request_id="req-1", block_count=1, job_ids={1}),
+            _InflightXfer(
+                kv_request_id="req-1",
+                block_count=1,
+                job_ids={1},
+                round=_OutboundRequestState(inflight=1),
+            ),
         )
         transport._cancel_still_inflight.add(tid)
 
@@ -1407,7 +1413,12 @@ class TestServerFlows:
         tid = 42
         session._server._inflight_add(
             tid,
-            _InflightXfer(kv_request_id="req-1", block_count=1, job_ids={1}),
+            _InflightXfer(
+                kv_request_id="req-1",
+                block_count=1,
+                job_ids={1},
+                round=_OutboundRequestState(inflight=1),
+            ),
         )
         transport._cancel_still_inflight.add(tid)
 
@@ -1441,7 +1452,12 @@ class TestServerFlows:
         tid = 42
         session._server._inflight_add(
             tid,
-            _InflightXfer(kv_request_id="req-1", block_count=1, job_ids={1}),
+            _InflightXfer(
+                kv_request_id="req-1",
+                block_count=1,
+                job_ids={1},
+                round=_OutboundRequestState(inflight=1),
+            ),
         )
         transport._cancel_still_inflight.add(tid)
 
@@ -1478,7 +1494,12 @@ class TestServerFlows:
         tid = 42
         session._server._inflight_add(
             tid,
-            _InflightXfer(kv_request_id="req-1", block_count=1, job_ids={1}),
+            _InflightXfer(
+                kv_request_id="req-1",
+                block_count=1,
+                job_ids={1},
+                round=_OutboundRequestState(inflight=1),
+            ),
         )
         transport._cancel_still_inflight.add(tid)
 
@@ -2449,7 +2470,12 @@ class TestInflightPerReqInvariant:
                 tid = kv_id_idx * 10 + j
                 session._server._inflight_add(
                     tid,
-                    _InflightXfer(kv_request_id=kv_id, block_count=1, job_ids={tid}),
+                    _InflightXfer(
+                        kv_request_id=kv_id,
+                        block_count=1,
+                        job_ids={tid},
+                        round=_OutboundRequestState(inflight=1),
+                    ),
                 )
         assert _srv_total_inflight(session) == len(session._server._inflight)
         assert session._server._has_inflight_for("req-0")

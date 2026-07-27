@@ -86,6 +86,10 @@ class _ClientRequestState:
     # advances it, so every round's supply/demand/completion is isolated
     # on the wire. PD clients never probe and stay on round 0.
     round_seq: int = 0
+    # This id ran the symmetric lookup phase (register_lookup); a fetch
+    # with keys then requires every key to be a confirmed probe. PD
+    # loads never probe.
+    probed: bool = False
 
     # Monotonic lookup/fetch signalling phase; see ``ClientPhase``.
     phase: ClientPhase = ClientPhase.REGISTERED
@@ -245,9 +249,12 @@ class ClientRole:
         # stale cached True would let a later lookup() return HIT for a
         # block the producer may have evicted; clearing forces a fresh
         # probe under the next round.
-        if st.probes:
+        if st.probed and keys:
+            assert st.probes, (
+                f"symmetric fetch for {kv_request_id} has keys but no probes"
+            )
             assert all(st.probes.get(key) is True for key in keys)
-            st.probes.clear()
+        st.probes.clear()
 
     def finish(self, kv_request_id: str) -> None:
         """Finish a request: abort in-flight loads and release lookup state.
@@ -385,6 +392,7 @@ class ClientRole:
         round, since the block is unpinned once served.
         """
         st = self._get_or_create_request(kv_request_id)
+        st.probed = True
         okey = OffloadKey(key)
         if okey in st.probes:
             return st.probes[okey]
@@ -526,7 +534,7 @@ class ClientRole:
                         )
         for req_id, round_seq in to_remove:
             st = self._requests[req_id]
-            st.loads.pop(round_seq, None)
+            st.loads.pop(round_seq)
             self._on_load_terminal(req_id, st)
 
         results = self._completed_loads

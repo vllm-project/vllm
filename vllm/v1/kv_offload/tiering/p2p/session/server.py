@@ -901,6 +901,7 @@ class ServerRole:
         if xfer is None:
             return None
         xfer.round.inflight -= 1
+        assert xfer.round.inflight >= 0
         st = self._requests.get(xfer.kv_request_id)
         if st is not None:
             st.inflight_tids.discard(tid)
