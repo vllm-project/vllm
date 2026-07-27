@@ -97,10 +97,8 @@ steps:
         --ignore=kernels/test_kda.py
         --ignore=kernels/test_bf16x3_router_gemm_cutedsl.py
         --ignore=kernels/test_ll_bf16_gemm.py
-        --ignore=kernels/test_mhc_kernels.py
         --ignore=kernels/test_shuffle_rows.py
     # BROKEN on main, pending kernel fixes (B200):
-    #   test_mhc_kernels.py (3: test_hc_prenorm_gemm_tilelang)
     #   test_shuffle_rows.py (1: test_shuffle_rows_edge_cases)
 
 - label: Kernels Attention Test %N
