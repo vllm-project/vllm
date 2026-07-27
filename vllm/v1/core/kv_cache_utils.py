@@ -19,6 +19,10 @@ from vllm.utils.hashing import sha256_cbor, xxhash_cbor
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1.attention.backends.mla.hisparse import (
+    HISPARSE_KERNEL_BLOCK_SIZE,
+    ResolvedHiSparseConfig,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     ChunkedLocalAttentionSpec,
@@ -1365,11 +1369,6 @@ def _get_hisparse_hma_config(
     log_layout: bool = True,
 ) -> KVCacheConfig:
     """Build independent host-source and GPU-HMA allocator domains."""
-    from vllm.v1.attention.backends.mla.hisparse import (
-        HISPARSE_KERNEL_BLOCK_SIZE,
-        ResolvedHiSparseConfig,
-    )
-
     assert isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
     specs = group.kv_cache_spec.kv_cache_specs
     host_specs = {

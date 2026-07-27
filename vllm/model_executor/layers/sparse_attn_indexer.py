@@ -31,6 +31,7 @@ from vllm.utils.torch_utils import (
     _resolve_layer_name,
     direct_register_custom_op,
 )
+from vllm.v1.attention.backends.mla.hisparse import get_indexer_source
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
 )
@@ -401,8 +402,6 @@ def sparse_attn_indexer(
             quant_block_size,
             scale_fmt,
         )
-        from vllm.v1.attention.backends.mla.hisparse import get_indexer_source
-
         source = get_indexer_source(k_cache_prefix)
         if source is not None:
             host_cache, source_slot_mapping = source

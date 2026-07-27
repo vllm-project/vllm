@@ -59,6 +59,7 @@ from vllm.v1.attention.backends.mla.hisparse import (
     hisparse_prefill_staging_remap,
 )
 from vllm.v1.attention.backends.mla.indexer import split_indexer_prefill_chunks
+from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
 from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
     split_prefill_chunks,
@@ -462,8 +463,6 @@ def test_sparse_backend_decode_correctness(
 
     # The sparse builder clones the layer's dense-MHA prefill backend from
     # static_forward_context; register a mock layer carrying one.
-    from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
-
     prefill_backend = get_mla_prefill_backend(vllm_config)(
         num_heads=num_heads,
         scale=scale,
@@ -1103,8 +1102,6 @@ def test_sparse_backend_prefill_correctness(
 
     # The sparse builder clones the layer's dense-MHA prefill backend from
     # static_forward_context; register a mock layer carrying one.
-    from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
-
     prefill_backend = get_mla_prefill_backend(vllm_config)(
         num_heads=num_heads,
         scale=scale,
@@ -1965,8 +1962,6 @@ def test_hisparse_mixed_batch_bf16_row_split(
         randomize_blocks=False,
         kv_cache_dtype="auto",
     )
-
-    from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
 
     prefill_backend = get_mla_prefill_backend(vllm_config)(
         num_heads=num_heads,

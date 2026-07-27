@@ -35,6 +35,7 @@ from vllm.v1.kv_cache_interface import (
     TQFullAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.worker.gpu.hisparse import HiSparseRuntime, init_hisparse_runtime
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import (
     AttentionGroup,
@@ -45,7 +46,6 @@ from vllm.v1.worker.utils import (
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.block_table import BlockTables
-    from vllm.v1.worker.gpu.hisparse import HiSparseRuntime
 
 logger = init_logger(__name__)
 
@@ -495,8 +495,6 @@ def init_kv_cache(
     )
     hisparse_runtime = None
     if vllm_config.attention_config.hisparse_config is not None:
-        from vllm.v1.worker.gpu.hisparse import init_hisparse_runtime
-
         hisparse_runtime = init_hisparse_runtime(
             forward_context=forward_context,
             kv_cache_config=kv_cache_config,

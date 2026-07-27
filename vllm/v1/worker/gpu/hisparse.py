@@ -8,6 +8,15 @@ import numpy as np
 import torch
 
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backends.mla.hisparse import (
+    bind_indexer_source_slot_mapping,
+    get_indexer_source,
+    register_indexer_source,
+)
+from vllm.v1.core.kv_cache_utils import (
+    HISPARSE_HOT_SUFFIX,
+    HISPARSE_INDEXER_SOURCE_SUFFIX,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     HiSparseHotSpec,
@@ -115,16 +124,6 @@ def init_hisparse_runtime(
     max_model_len: int,
     device: torch.device,
 ) -> HiSparseRuntime | None:
-    from vllm.v1.attention.backends.mla.hisparse import (
-        bind_indexer_source_slot_mapping,
-        get_indexer_source,
-        register_indexer_source,
-    )
-    from vllm.v1.core.kv_cache_utils import (
-        HISPARSE_HOT_SUFFIX,
-        HISPARSE_INDEXER_SOURCE_SUFFIX,
-    )
-
     tensor_configs = {
         name: tensor_config
         for tensor_config in kv_cache_config.kv_cache_tensors
