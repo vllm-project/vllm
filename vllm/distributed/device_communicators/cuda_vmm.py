@@ -640,7 +640,7 @@ def _tensor_from_cuda_pointer(
     managed.manager_ctx = None
 
     @_DLPACK_DELETER
-    def deleter(_: ctypes.POINTER(_DLManagedTensor)) -> None:
+    def deleter(_: Any) -> None:
         return None
 
     managed.deleter = deleter
@@ -741,7 +741,7 @@ class RankMajorPeerView:
         """Synchronize the local device and deterministically release mappings."""
         if self._closed:
             return
-        torch.cuda.synchronize(self.device)
+        torch.accelerator.synchronize(self.device)
 
         self.local_view = None
         self.rank_local_view = None
@@ -835,7 +835,7 @@ def create_rank_major_peer_view(
     resolved_device = torch.device("cuda")
     try:
         driver = _get_cuda_driver()
-        current_device = torch.cuda.current_device()
+        current_device = torch.accelerator.current_device_index()
         if device is None:
             resolved_device = torch.device(f"cuda:{current_device}")
         elif isinstance(device, int):
