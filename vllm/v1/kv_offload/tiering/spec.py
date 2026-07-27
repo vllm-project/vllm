@@ -127,7 +127,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         )
         metrics[TieringOffloadingMetrics.BACKPRESSURE_ACTIVE] = OffloadingGaugeMetadata(
             documentation=(
-                "Whether back-pressure is active on a secondary tier "
+                "Indicates when a secondary tier is experiencing back-pressure."
                 "(1 = active, 0 = inactive)."
             ),
             labelnames=("tier_type",),
