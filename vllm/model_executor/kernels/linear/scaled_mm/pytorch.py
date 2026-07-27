@@ -252,27 +252,17 @@ class ChannelWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
 class BlockWiseTorchFP8ScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
     """FP8 block-scaled linear kernel using ``torch._scaled_mm``.
 
-    Implements the DeepSeek-style block-scaled path of ``torch._scaled_mm``
-    (v1), which dispatches on the shapes of the scale tensors. For
+    Implements the block-scaled path of ``torch._scaled_mm``, which dispatches on the shapes of the scale tensors. For
     ``A = [M, K]`` and ``B = [K, N]`` (both fp8) the op's block path
     requires, with float32 scales:
       * 1x128 activation: ``scale_a = [M, ceil(K / 128)]``
       * 128x128 weight:   ``scale_b = [ceil(K / 128), ceil(N / 128)]``
 
-    The op supports this path on CUDA (cuBLASLt) and XPU (oneDNN). The
-    logical scale shapes are identical across both; only the physical scale
-    layout differs: CUDA requires cuBLAS-specific strides (outer-dim-major
-    for 1x128), while XPU accepts either row- or column-major and normalizes
-    internally. We therefore request column-major activation scales on CUDA
-    (matching the op's requirement) and default row-major on XPU.
     """
 
     def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
         super().__init__(config)
         act_scale_descriptor = config.activation_quant_key.scale
-        # CUDA's block path requires outer-dim-major (column-major)
-        # activation scales; XPU accepts either. Weight scales are handled
-        # via a transpose in apply_block_scaled_mm.
         self.quant_fp8 = QuantFP8(
             static=act_scale_descriptor.static,
             group_shape=act_scale_descriptor.group_shape,
@@ -285,8 +275,6 @@ class BlockWiseTorchFP8ScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
-        # torch._scaled_mm implements the fp8 128-block path on CUDA
-        # (cuBLASLt) and XPU (oneDNN).
         if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
             return False, "requires CUDA, ROCm or XPU."
         return True, None
@@ -299,13 +287,11 @@ class BlockWiseTorchFP8ScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
         if not can_implement_base:
             return can_implement_base, reason
 
-        # torch._scaled_mm's DeepSeek block path is the 1x128 activation /
-        # 128x128 weight pair with float32 scales.
         act_group_shape = config.activation_quant_key.scale.group_shape
         if act_group_shape != GroupShape(1, 128):
             return (
                 False,
-                "requires 1x128 (per-token-group) activation quantization.",
+                "requires 1x128 activation quantization.",
             )
         weight_group_shape = config.weight_quant_key.scale.group_shape
         if weight_group_shape != GroupShape(128, 128):
@@ -335,4 +321,3 @@ class BlockWiseTorchFP8ScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
         if type(output) is tuple and len(output) == 2:
             output = output[0]
         return output
-
