@@ -40,9 +40,7 @@ class TieringOffloadingMetrics:
     LOOKUP_SYNC_DELAY = "vllm:kv_offload_tiering_lookup_sync_delay_seconds"
     LOOKUP_ASYNC_DELAY = "vllm:kv_offload_tiering_lookup_async_delay_seconds"
     BACKPRESSURE_ACTIVE = "vllm:kv_offload_tiering_backpressure_active"
-    BACKPRESSURE_STORES_DROPPED = (
-        "vllm:kv_offload_tiering_backpressure_stores_dropped"
-    )
+    BACKPRESSURE_STORES_DROPPED = "vllm:kv_offload_tiering_backpressure_stores_dropped"
 
 
 @dataclass
