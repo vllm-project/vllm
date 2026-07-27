@@ -297,13 +297,13 @@ def test_cp_generation(
     num_gpus_available,
 ):
     if (
-        current_platform.is_cuda()
+        current_platform.is_cuda_alike()
         and model_id == "deepseek-ai/DeepSeek-V2-Lite-Chat"
         and torch.cuda.get_device_capability() < (9, 0)
     ):
         pytest.skip(reason="MLA+DCP requires compute capability of 9.0 or higher")
     if (
-        current_platform.is_cuda()
+        current_platform.is_cuda_alike()
         and model_id == "Qwen/Qwen2.5-1.5B-Instruct"
         and torch.cuda.get_device_capability() != (9, 0)
     ):
