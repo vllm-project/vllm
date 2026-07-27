@@ -89,6 +89,10 @@ class BaseRenderer(ABC, Generic[_T]):
         # MM preprocessing; must stay single-worker per #38418 (P0/P1 order).
         self._mm_executor: Executor = ThreadPoolExecutor(max_workers=1)
 
+        # Separate small executor for chat message parsing so it never queues
+        # behind long tokenization or chat-template calls in the shared pool.
+        self._parse_executor: Executor = ThreadPoolExecutor(max_workers=2)
+
         # Offload tokenization to the thread pool. The sync
         # ``_tokenize_prompt`` already encapsulates the unified ``__call__``
         # path and char-offset extraction, so the async variant is just it
@@ -297,6 +301,11 @@ class BaseRenderer(ABC, Generic[_T]):
             mm_executor := getattr(self, "_mm_executor", None)
         ) is not None and mm_executor is not executor:
             mm_executor.shutdown(wait=False)
+
+        if (
+            parse_executor := getattr(self, "_parse_executor", None)
+        ) is not None and parse_executor is not executor:
+            parse_executor.shutdown(wait=False)
 
     def get_bos_token_id(self) -> int | None:
         if self.tokenizer is None:
