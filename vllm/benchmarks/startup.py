@@ -364,14 +364,15 @@ def main(args: argparse.Namespace):
                     baseline_regressed = True
                     for d in cmp["phases"]:
                         if d["regressed"]:
-                            print(f"  REGRESSION  {d['name']:<22} "
-                                  f"{d['baseline_s']:.3f}s -> "
-                                  f"{d['current_s']:.3f}s "
-                                  f"(delta {d['delta_s']:+.3f}s)")
+                            print(
+                                f"  REGRESSION  {d['name']:<22} "
+                                f"{d['baseline_s']:.3f}s -> "
+                                f"{d['current_s']:.3f}s "
+                                f"(delta {d['delta_s']:+.3f}s)"
+                            )
         print("-" * 60)
         if args.phase_baseline is not None:
-            status = ("REGRESSION DETECTED" if baseline_regressed
-                      else "no regression")
+            status = "REGRESSION DETECTED" if baseline_regressed else "no regression"
             print(f"Baseline comparison ({args.phase_baseline}): {status}")
             print("-" * 60)
 

@@ -104,8 +104,7 @@ def test_startup_per_phase_spans(
             #    timing-fix edge cases where end_ns could precede start_ns).
             for row in report["phases"]:
                 assert row["duration_s"] >= 0.0, (
-                    f"phase '{row['name']}' has negative duration "
-                    f"{row['duration_s']}"
+                    f"phase '{row['name']}' has negative duration {row['duration_s']}"
                 )
                 # The phase must be present (not a missing placeholder),
                 # since we asserted all names are present above.
@@ -151,9 +150,7 @@ def test_bench_startup_per_phase_flag():
     )
     # Every canonical phase name should appear in the printed table.
     for phase_name in COLD_START_PHASES:
-        assert phase_name in result.stdout, (
-            f"phase '{phase_name}' not in stdout table"
-        )
+        assert phase_name in result.stdout, f"phase '{phase_name}' not in stdout table"
 
 
 # ---------------------------------------------------------------------------
@@ -170,23 +167,40 @@ def test_select_phase_spans_picks_earliest():
     """
     spans = [
         # Duplicate "Worker init": the later-starting one must NOT win.
-        {"name": "Worker init", "start_time_unix_nano": 200_000_000,
-         "end_time_unix_nano": 300_000_000},
-        {"name": "Worker init", "start_time_unix_nano": 100_000_000,
-         "end_time_unix_nano": 150_000_000},
+        {
+            "name": "Worker init",
+            "start_time_unix_nano": 200_000_000,
+            "end_time_unix_nano": 300_000_000,
+        },
+        {
+            "name": "Worker init",
+            "start_time_unix_nano": 100_000_000,
+            "end_time_unix_nano": 150_000_000,
+        },
         # end < start (#40698 timing-fix edge case) -> duration clamped to 0.0.
-        {"name": "Loading (GPU)", "start_time_unix_nano": 400_000_000,
-         "end_time_unix_nano": 100_000_000},
-        {"name": "Init device", "start_time_unix_nano": 200_000_000,
-         "end_time_unix_nano": 250_000_000},
-        {"name": "Allocate KV cache", "start_time_unix_nano": 500_000_000,
-         "end_time_unix_nano": 550_000_000},
-        {"name": "Warmup (GPU)", "start_time_unix_nano": 600_000_000,
-         "end_time_unix_nano": 700_000_000},
+        {
+            "name": "Loading (GPU)",
+            "start_time_unix_nano": 400_000_000,
+            "end_time_unix_nano": 100_000_000,
+        },
+        {
+            "name": "Init device",
+            "start_time_unix_nano": 200_000_000,
+            "end_time_unix_nano": 250_000_000,
+        },
+        {
+            "name": "Allocate KV cache",
+            "start_time_unix_nano": 500_000_000,
+            "end_time_unix_nano": 550_000_000,
+        },
+        {
+            "name": "Warmup (GPU)",
+            "start_time_unix_nano": 600_000_000,
+            "end_time_unix_nano": 700_000_000,
+        },
         # "Capture model" is intentionally absent -> missing placeholder.
         # An unknown span is a logged warning, never a failure.
-        {"name": "Mystery phase", "start_time_unix_nano": 0,
-         "end_time_unix_nano": 0},
+        {"name": "Mystery phase", "start_time_unix_nano": 0, "end_time_unix_nano": 0},
     ]
     result = select_phase_spans(spans, COLD_START_PHASES)
 
@@ -212,23 +226,125 @@ def test_select_phase_spans_picks_earliest():
     assert all(s.duration_s >= 0.0 for s in result)
 
 
+def test_select_phase_spans_picks_innermost_for_nested_worker_init():
+    """At tp>1, "Worker init" nests twice per worker: the outer
+    ``WorkerProc.__init__`` span wraps ``init_device()`` and ``load_model()``
+    (the ``"Init device"`` and ``"Loading (GPU)"`` phases), and the inner
+    ``init_worker`` span is nested inside it. Picking the outer span by earliest
+    start would make ``total_phase_time_s`` double-count the sibling phases it
+    wraps; the consumer picks the innermost so the chosen span does not subsume
+    them. A warning fires because the phase has more than one matching span.
+    No GPU.
+    """
+    import logging
+
+    # Outer "Worker init" (1.0 s) subsumes "Init device" + "Loading (GPU)";
+    # inner "Worker init" (0.2 s) is nested inside the outer.
+    spans = [
+        {
+            "name": "Worker init",
+            "start_time_unix_nano": 0,
+            "end_time_unix_nano": 1_000_000_000,
+        },  # outer
+        {
+            "name": "Worker init",
+            "start_time_unix_nano": 200_000_000,
+            "end_time_unix_nano": 400_000_000,
+        },  # inner (nested)
+        {
+            "name": "Init device",
+            "start_time_unix_nano": 50_000_000,
+            "end_time_unix_nano": 150_000_000,
+        },  # 0.1 s, within outer
+        {
+            "name": "Loading (GPU)",
+            "start_time_unix_nano": 160_000_000,
+            "end_time_unix_nano": 180_000_000,
+        },  # 0.02 s, within outer
+        {
+            "name": "Capture model",
+            "start_time_unix_nano": 410_000_000,
+            "end_time_unix_nano": 460_000_000,
+        },  # 0.05 s
+        {
+            "name": "Allocate KV cache",
+            "start_time_unix_nano": 470_000_000,
+            "end_time_unix_nano": 540_000_000,
+        },  # 0.07 s
+        {
+            "name": "Warmup (GPU)",
+            "start_time_unix_nano": 550_000_000,
+            "end_time_unix_nano": 700_000_000,
+        },  # 0.15 s
+    ]
+    # vLLM's logger tree does not propagate to the root handler pytest's caplog
+    # taps, so attach a handler directly to the consumer's own logger.
+    consumer_log = logging.getLogger("vllm.benchmarks.startup_spans")
+    records: list[logging.LogRecord] = []
+    handler = logging.Handler()
+    handler.emit = records.append
+    prev_level = consumer_log.level
+    consumer_log.addHandler(handler)
+    consumer_log.setLevel(logging.WARNING)
+    try:
+        result = select_phase_spans(spans, COLD_START_PHASES)
+    finally:
+        consumer_log.removeHandler(handler)
+        consumer_log.setLevel(prev_level)
+
+    assert len(result) == len(COLD_START_PHASES) == 6
+    worker = result[0]
+    assert worker.name == "Worker init"
+    # (a) the inner span is picked, not the outer that subsumes siblings.
+    assert worker.start_ns == 200_000_000
+    assert worker.duration_s == 0.2
+    assert worker.match_count == 2
+    # (b) total_phase_time_s does NOT double-count: inner WI (0.2) + ID (0.1)
+    # + LG (0.02) + CM (0.05) + AK (0.07) + WU (0.15) = 0.59 s. Picking the
+    # outer (1.0 s, which subsumes ID+LG) would have summed to 1.39 s.
+    report = build_phase_report(result)
+    assert report["total_phase_time_s"] == pytest.approx(0.59, abs=1e-9)
+    assert report["phases"][0]["match_count"] == 2
+    # (c) a warning fires when a phase has more than one matching span.
+    messages = [r.getMessage() for r in records]
+    assert any("Worker init" in m and "matching spans" in m for m in messages), messages
+
+
 def test_build_phase_report_shape():
     """build_phase_report returns the frozen version, 6 phase rows, the summed
     total, and echoes wall_clock_startup_s. No GPU.
     """
     spans = [
-        {"name": "Worker init", "start_time_unix_nano": 0,
-         "end_time_unix_nano": 100_000_000},   # 0.10 s
-        {"name": "Init device", "start_time_unix_nano": 0,
-         "end_time_unix_nano": 50_000_000},    # 0.05 s
-        {"name": "Loading (GPU)", "start_time_unix_nano": 0,
-         "end_time_unix_nano": 200_000_000},   # 0.20 s
-        {"name": "Capture model", "start_time_unix_nano": 0,
-         "end_time_unix_nano": 80_000_000},    # 0.08 s
-        {"name": "Allocate KV cache", "start_time_unix_nano": 0,
-         "end_time_unix_nano": 70_000_000},    # 0.07 s
-        {"name": "Warmup (GPU)", "start_time_unix_nano": 0,
-         "end_time_unix_nano": 150_000_000},   # 0.15 s
+        {
+            "name": "Worker init",
+            "start_time_unix_nano": 0,
+            "end_time_unix_nano": 100_000_000,
+        },  # 0.10 s
+        {
+            "name": "Init device",
+            "start_time_unix_nano": 0,
+            "end_time_unix_nano": 50_000_000,
+        },  # 0.05 s
+        {
+            "name": "Loading (GPU)",
+            "start_time_unix_nano": 0,
+            "end_time_unix_nano": 200_000_000,
+        },  # 0.20 s
+        {
+            "name": "Capture model",
+            "start_time_unix_nano": 0,
+            "end_time_unix_nano": 80_000_000,
+        },  # 0.08 s
+        {
+            "name": "Allocate KV cache",
+            "start_time_unix_nano": 0,
+            "end_time_unix_nano": 70_000_000,
+        },  # 0.07 s
+        {
+            "name": "Warmup (GPU)",
+            "start_time_unix_nano": 0,
+            "end_time_unix_nano": 150_000_000,
+        },  # 0.15 s
     ]
     phase_spans = select_phase_spans(spans, COLD_START_PHASES)
     report = build_phase_report(phase_spans, wall_clock_startup_s=1.0)
@@ -266,9 +382,9 @@ def test_in_memory_span_sink_export_and_poll():
         grpc.channel_ready_future(channel).result(timeout=5.0)
         stub = TraceServiceStub(channel)
 
-        span = Span(name="Worker init",
-                    start_time_unix_nano=100,
-                    end_time_unix_nano=200)
+        span = Span(
+            name="Worker init", start_time_unix_nano=100, end_time_unix_nano=200
+        )
         request = ExportTraceServiceRequest()
         rs = request.resource_spans.add()
         ss = rs.scope_spans.add()
@@ -299,18 +415,48 @@ def test_compare_to_baseline_and_format(tmp_path):
     current = {
         "phase_list_version": PHASE_LIST_VERSION,
         "phases": [
-            {"name": "Worker init", "duration_s": 0.15, "start_ns": 0,
-             "end_ns": 0, "missing": False},      # +0.05 < 0.5 -> ok (abs)
-            {"name": "Init device", "duration_s": 0.04, "start_ns": 0,
-             "end_ns": 0, "missing": False},      # 0 delta -> ok
-            {"name": "Loading (GPU)", "duration_s": 11.5, "start_ns": 0,
-             "end_ns": 0, "missing": False},      # +1.5 > max(0.5,1.0) -> reg
-            {"name": "Capture model", "duration_s": 0.0, "start_ns": 0,
-             "end_ns": 0, "missing": True},       # missing -> skipped
-            {"name": "Allocate KV cache", "duration_s": 0.07, "start_ns": 0,
-             "end_ns": 0, "missing": False},      # 0 delta -> ok
-            {"name": "Warmup (GPU)", "duration_s": 1.20, "start_ns": 0,
-             "end_ns": 0, "missing": False},      # +0.70 > 0.5 -> reg (abs)
+            {
+                "name": "Worker init",
+                "duration_s": 0.15,
+                "start_ns": 0,
+                "end_ns": 0,
+                "missing": False,
+            },  # +0.05 < 0.5 -> ok (abs)
+            {
+                "name": "Init device",
+                "duration_s": 0.04,
+                "start_ns": 0,
+                "end_ns": 0,
+                "missing": False,
+            },  # 0 delta -> ok
+            {
+                "name": "Loading (GPU)",
+                "duration_s": 11.5,
+                "start_ns": 0,
+                "end_ns": 0,
+                "missing": False,
+            },  # +1.5 > max(0.5,1.0) -> reg
+            {
+                "name": "Capture model",
+                "duration_s": 0.0,
+                "start_ns": 0,
+                "end_ns": 0,
+                "missing": True,
+            },  # missing -> skipped
+            {
+                "name": "Allocate KV cache",
+                "duration_s": 0.07,
+                "start_ns": 0,
+                "end_ns": 0,
+                "missing": False,
+            },  # 0 delta -> ok
+            {
+                "name": "Warmup (GPU)",
+                "duration_s": 1.20,
+                "start_ns": 0,
+                "end_ns": 0,
+                "missing": False,
+            },  # +0.70 > 0.5 -> reg (abs)
         ],
         "total_phase_time_s": 12.96,
         "wall_clock_startup_s": 13.5,
