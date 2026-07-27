@@ -1162,21 +1162,30 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
                 parameter="image_embeds",
             )
 
-        if isinstance(image_embeds, dict):
-            embeds = {
-                k: self._connector.fetch_image_embedding(v)
-                for k, v in image_embeds.items()
-            }
-        elif isinstance(image_embeds, str):
-            embedding = self._connector.fetch_image_embedding(image_embeds)
-            embeds = embedding
-        else:
-            embeds = None
-
         placeholder = self._tracker.add(
-            "image_embeds", partial(self._item_with_uuid_async, embeds, uuid)
+            "image_embeds",
+            partial(self._image_embeds_with_uuid_async, image_embeds, uuid),
         )
         self._add_placeholder("image", placeholder)
+
+    async def _image_embeds_with_uuid_async(
+        self,
+        image_embeds: str | dict[str, str] | None,
+        uuid: str | None,
+    ):
+        if isinstance(image_embeds, dict):
+            tensors = await asyncio.gather(
+                *(
+                    self._connector.fetch_image_embedding_async(v)
+                    for v in image_embeds.values()
+                )
+            )
+            embeds = dict(zip(image_embeds, tensors))
+        elif isinstance(image_embeds, str):
+            embeds = await self._connector.fetch_image_embedding_async(image_embeds)
+        else:
+            embeds = None
+        return embeds, uuid
 
     def parse_audio_embeds(
         self,
@@ -1190,21 +1199,30 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
                 parameter="audio_embeds",
             )
 
-        if isinstance(audio_embeds, dict):
-            embeds = {
-                k: self._connector.fetch_audio_embedding(v)
-                for k, v in audio_embeds.items()
-            }
-        elif isinstance(audio_embeds, str):
-            embedding = self._connector.fetch_audio_embedding(audio_embeds)
-            embeds = embedding
-        else:
-            embeds = None
-
         placeholder = self._tracker.add(
-            "audio_embeds", partial(self._item_with_uuid_async, embeds, uuid)
+            "audio_embeds",
+            partial(self._audio_embeds_with_uuid_async, audio_embeds, uuid),
         )
         self._add_placeholder("audio", placeholder)
+
+    async def _audio_embeds_with_uuid_async(
+        self,
+        audio_embeds: str | dict[str, str] | None,
+        uuid: str | None,
+    ):
+        if isinstance(audio_embeds, dict):
+            tensors = await asyncio.gather(
+                *(
+                    self._connector.fetch_audio_embedding_async(v)
+                    for v in audio_embeds.values()
+                )
+            )
+            embeds = dict(zip(audio_embeds, tensors))
+        elif isinstance(audio_embeds, str):
+            embeds = await self._connector.fetch_audio_embedding_async(audio_embeds)
+        else:
+            embeds = None
+        return embeds, uuid
 
     def parse_image_pil(
         self,
