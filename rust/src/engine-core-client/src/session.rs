@@ -148,8 +148,11 @@ pub(crate) fn read(path: &Path) -> Result<(String, String, Vec<ConnectedEngine>)
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::mock_engine::default_ready_response;
+    use crate::test_utils::setup_bootstrapped_mock_engine;
     use crate::transport::connect_reattach;
 
     #[tokio::test]
@@ -158,16 +161,30 @@ mod tests {
         let path = dir.path().join("engine-session.json");
         let input_address = format!("ipc://{}", dir.path().join("input.sock").display());
         let output_address = format!("ipc://{}", dir.path().join("output.sock").display());
-        let connected = connect_reattach(
-            &input_address,
-            &output_address,
-            vec![ConnectedEngine {
-                engine_id: EngineId::from_engine_index(0),
-                ready_response: default_ready_response(),
-            }],
+        let connect_path = path.clone();
+        let connect_input = input_address.clone();
+        let connect_output = output_address.clone();
+        let connected_task = tokio::spawn(async move {
+            connect_reattach(
+                &connect_path,
+                &connect_input,
+                &connect_output,
+                vec![ConnectedEngine {
+                    engine_id: EngineId::from_engine_index(0),
+                    ready_response: default_ready_response(),
+                }],
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap()
+        });
+        let (_dealer, _push) = setup_bootstrapped_mock_engine(
+            input_address.clone(),
+            output_address.clone(),
+            EngineId::from_engine_index(0),
         )
-        .await
-        .unwrap();
+        .await;
+        let connected = connected_task.await.unwrap();
 
         write(&path, &connected).unwrap();
         let (actual_input, actual_output, engines) = read(&path).unwrap();

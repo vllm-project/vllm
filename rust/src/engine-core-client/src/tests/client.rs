@@ -1456,28 +1456,6 @@ async fn reattach_drops_stale_output_and_serves_new_request() {
             )
             .await;
 
-            let utility = recv_engine_message(&mut dealer).await;
-            assert_eq!(utility[0].as_ref(), &[0x03]);
-            let payload = decode_value(&utility[1]);
-            let array = payload.as_array().expect("utility payload array");
-            assert_eq!(array[0], Value::from(7));
-            assert_eq!(array[2], Value::from("is_sleeping"));
-            let call_id = array[1].as_u64().expect("call_id");
-            send_outputs(
-                &mut push,
-                UtilityCallOutput {
-                    engine_index: 0,
-                    timestamp: 0.0,
-                    output: UtilityOutput {
-                        call_id: call_id.into(),
-                        failure_message: None,
-                        result: Some(utility_result_value(false)),
-                    },
-                }
-                .into(),
-            )
-            .await;
-
             let add = recv_engine_message(&mut dealer).await;
             assert_eq!(add[0].as_ref(), &[0x00]);
             let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();

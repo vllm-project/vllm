@@ -8,9 +8,7 @@ use std::time::Duration;
 use futures::future::{join_all, try_join_all};
 use itertools::Itertools;
 use serde::Serialize;
-use thiserror_ext::AsReport as _;
 use tokio::sync::mpsc;
-use tokio::time::{Instant, sleep, timeout_at};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace};
 
@@ -239,7 +237,6 @@ impl EngineCoreClient {
     /// handshake. In bootstrapped mode it binds the provided frontend
     /// sockets and waits for the expected engine registration frames.
     pub async fn connect(config: EngineCoreClientConfig) -> Result<Self> {
-        let mut reattach = None;
         let connected = match &config.transport_mode {
             TransportMode::HandshakeOwner {
                 handshake_address,
@@ -303,60 +300,18 @@ impl EngineCoreClient {
                     });
                 }
                 let (input_address, output_address, engines) = session::read(path)?;
-                let connected =
-                    transport::connect_reattach(&input_address, &output_address, engines).await?;
-                reattach = Some(path.clone());
-                connected
+                transport::connect_reattach(
+                    path,
+                    &input_address,
+                    &output_address,
+                    engines,
+                    REATTACH_TIMEOUT,
+                )
+                .await?
             }
         };
 
-        let client = Self::from_connected(config, connected).await?;
-        if let Some(path) = reattach {
-            client.wait_for_reattach(path).await?;
-        }
-        Ok(client)
-    }
-
-    /// Wait until the cached engine identity has reconnected in both
-    /// directions before exposing the frontend as ready.
-    ///
-    /// Binding the saved frontend endpoints only creates listeners; the
-    /// engine-side DEALER/PUSH sockets reconnect asynchronously. A successful
-    /// read-only utility round trip proves that requests can reach EngineCore
-    /// and responses can return through the replacement output socket.
-    async fn wait_for_reattach(&self, path: PathBuf) -> Result<()> {
-        let deadline = Instant::now() + REATTACH_TIMEOUT;
-        let mut last_error = "engine did not reconnect".to_string();
-
-        loop {
-            // The sleep state itself is irrelevant here. `is_sleeping` is the
-            // smallest existing read-only utility call available as a
-            // bidirectional liveness probe.
-            match timeout_at(deadline, self.is_sleeping()).await {
-                Ok(Ok(_)) => {
-                    info!(path = %path.display(), "reattached engine session");
-                    return Ok(());
-                }
-                Ok(Err(error)) => last_error = error.to_report_string(),
-                Err(_) => {
-                    return Err(Error::ReattachTimeout {
-                        path,
-                        timeout: REATTACH_TIMEOUT,
-                        message: last_error,
-                    });
-                }
-            }
-
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(Error::ReattachTimeout {
-                    path,
-                    timeout: REATTACH_TIMEOUT,
-                    message: last_error,
-                });
-            }
-            sleep(remaining.min(Duration::from_millis(50))).await;
-        }
+        Self::from_connected(config, connected).await
     }
 
     /// Create a new client instance from the connected transport state after

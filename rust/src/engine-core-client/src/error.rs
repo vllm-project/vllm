@@ -43,6 +43,8 @@ pub enum Error {
         timeout: Duration,
         message: String,
     },
+    #[error("ZMQ {socket} monitor closed while waiting for engine reattach")]
+    ReattachMonitorClosed { socket: &'static str },
     #[error("ZMQ runtime task failed")]
     ZmqRuntimeTask(#[from] tokio::task::JoinError),
     #[error("engine core reported fatal failure")]
