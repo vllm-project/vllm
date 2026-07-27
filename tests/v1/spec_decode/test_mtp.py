@@ -5,6 +5,7 @@ from unittest import mock
 
 import pytest
 import torch
+from torch import nn
 
 from tests.v1.attention.utils import (
     BatchSpec,
@@ -22,6 +23,9 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.load import LoadConfig
+from vllm.model_executor.models.deepseek_mtp import (
+    DeepSeekMultiTokenPredictorLayer,
+)
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -113,6 +117,84 @@ def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_gro
     assert proposer.model.lm_head == target_model.lm_head
     # MTP shares embed_tokens with target model
     assert proposer.model.model.embed_tokens == target_model.model.embed_tokens
+
+
+def test_mtp_first_pass_shifts_tokens_without_shifting_positions():
+    device = torch.device(DEVICE_TYPE)
+    proposer = _create_mtp_proposer(num_speculative_tokens=1)
+    batch_spec = BatchSpec(seq_lens=[3, 2], query_lens=[3, 2])
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec, block_size=16, device=device
+    )
+    target_token_ids = torch.tensor([10, 11, 12, 20, 21], device=device)
+    target_positions = torch.tensor([0, 1, 2, 0, 1], device=device)
+    target_hidden_states = torch.zeros(
+        (5, proposer.hidden_size), dtype=proposer.dtype, device=device
+    )
+    next_token_ids = torch.tensor([13, 22], dtype=torch.int32, device=device)
+
+    num_tokens, _, _ = proposer.set_inputs_first_pass(
+        target_token_ids=target_token_ids,
+        next_token_ids=next_token_ids,
+        target_positions=target_positions,
+        target_hidden_states=target_hidden_states,
+        token_indices_to_sample=None,
+        cad=common_attn_metadata,
+        num_rejected_tokens_gpu=None,
+    )
+
+    assert num_tokens == 5
+    torch.testing.assert_close(
+        proposer.input_ids[:num_tokens],
+        torch.tensor([11, 12, 13, 21, 22], dtype=torch.int32, device=device),
+    )
+    torch.testing.assert_close(proposer.positions[:num_tokens], target_positions)
+
+
+def test_mtp_layer_preserves_position_zero_embedding():
+    class CaptureProjection(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.inputs: torch.Tensor | None = None
+
+        def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+            self.inputs = inputs
+            return inputs
+
+    class IdentityMTPBlock(nn.Module):
+        use_sequence_parallel_moe = False
+
+        def forward(
+            self,
+            *,
+            positions: torch.Tensor,
+            hidden_states: torch.Tensor,
+            residual: torch.Tensor | None,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            return hidden_states, torch.zeros_like(hidden_states)
+
+    layer = DeepSeekMultiTokenPredictorLayer.__new__(DeepSeekMultiTokenPredictorLayer)
+    nn.Module.__init__(layer)
+    projection = CaptureProjection()
+    layer.enorm = nn.Identity()
+    layer.hnorm = nn.Identity()
+    layer.eh_proj = projection
+    layer.mtp_block = IdentityMTPBlock()
+    layer.shared_head = nn.Identity()
+
+    inputs_embeds = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+    positions = torch.tensor([0, 1])
+    previous_hidden_states = torch.zeros_like(inputs_embeds)
+
+    layer(
+        input_ids=torch.tensor([1, 2]),
+        positions=positions,
+        previous_hidden_states=previous_hidden_states,
+        inputs_embeds=inputs_embeds,
+    )
+
+    assert projection.inputs is not None
+    torch.testing.assert_close(projection.inputs[:, :2], inputs_embeds)
 
 
 @pytest.mark.parametrize("num_speculative_tokens", [1])
