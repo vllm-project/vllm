@@ -946,10 +946,7 @@ def test_sparse_backend_prefill_correctness(
     # Compute dense reference outputs.
     total_query_tokens = sum(query_lens)
     sparse_indices = torch.full(
-        (total_query_tokens, topk_tokens),
-        -1 if masked_mha else 0,
-        dtype=torch.int32,
-        device=device,
+        (total_query_tokens, topk_tokens), -1, dtype=torch.int32, device=device
     )
 
     all_q, all_kv_c_new, all_k_pe_new = [], [], []
