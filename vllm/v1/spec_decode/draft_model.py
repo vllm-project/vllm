@@ -268,6 +268,8 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         block_table: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> None:
+        if not self._is_multi_group:
+            return
         self._per_group_block_tables[gid] = block_table
         self._per_group_slot_mappings[gid] = slot_mapping
 
@@ -387,6 +389,8 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         slot_mapping: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         per_layer: dict[str, torch.Tensor] = {}
+        if not self._is_multi_group:
+            return super()._get_slot_mapping(num_tokens, slot_mapping)
         for attn_group in self.draft_attn_groups:
             gid = attn_group.kv_cache_group_id
             buf = self._slot_mapping_buffer_for(gid)
