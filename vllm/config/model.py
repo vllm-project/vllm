@@ -511,6 +511,7 @@ class ModelConfig:
         self.served_model_name = get_served_model_name(
             self.model, self.served_model_name
         )
+        requested_revision = self.revision
         self.model = maybe_model_redirect(self.model)
         # The tokenizer is consistent with the model by default.
         if self.tokenizer is None:
@@ -571,6 +572,15 @@ class ModelConfig:
             token=self.hf_token,
         )
         self.hf_config = hf_config
+        if (self.hf_config_path is None or self.hf_config_path == self.model) and (
+            resolved_revision := getattr(hf_config, "_commit_hash", None)
+        ) is not None:
+            self.revision = resolved_revision
+            if (
+                self.tokenizer == self.model
+                and self.tokenizer_revision == requested_revision
+            ):
+                self.tokenizer_revision = resolved_revision
         if dict_overrides:
             self._apply_dict_overrides(hf_config, dict_overrides)
         self.hf_text_config = get_hf_text_config(self.hf_config)
