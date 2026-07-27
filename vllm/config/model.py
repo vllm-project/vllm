@@ -84,6 +84,11 @@ def _resolve_hf_revision(
     revision: str | None,
     token: bool | str | None,
 ) -> str | None:
+    """Best-effort attempt to resolve HF revision to a commit hash.
+
+    Resolving commit hash once prevent multiple HTTP calls downstream
+    while avoid concurrency issues while loading models.
+    """
     if (
         Path(repo_id).exists()
         or envs.VLLM_USE_MODELSCOPE
