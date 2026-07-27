@@ -178,6 +178,8 @@ from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
     CPUFp8BlockScaledMMKernel,
+    CPUFp8BlockScaledMMW8A8Kernel,
+    CPUFp8W8A8ScaledMMLinearKernel,
     CPUInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
@@ -412,6 +414,7 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         ChannelWiseTorchFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.CPU: [
+        CPUFp8W8A8ScaledMMLinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
         ChannelWiseTorchFP8ScaledMMLinearKernel,
     ],
@@ -443,6 +446,7 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
         TritonFp8BlockScaledMMKernel,
     ],
     PlatformEnum.CPU: [
+        CPUFp8BlockScaledMMW8A8Kernel,  # W8A8 preferred; falls back to W8A16 below
         CPUFp8BlockScaledMMKernel,
     ],
     PlatformEnum.XPU: [
