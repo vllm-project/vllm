@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import io
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -9,6 +10,7 @@ import pybase64
 import pytest
 from PIL import Image
 
+from vllm import envs
 from vllm.assets.base import get_vllm_public_assets
 from vllm.assets.video import (
     video_get_metadata,
@@ -24,10 +26,23 @@ from vllm.multimodal.video import (
 
 from ..utils import cosine_similarity, create_video_from_image, normalize_image
 
-pytestmark = pytest.mark.cpu_test
+pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 ASSETS_DIR = Path(__file__).parent.parent / "assets"
 assert ASSETS_DIR.exists()
+
+
+@pytest.fixture(autouse=True)
+def _clear_video_decode_cache():
+    import vllm.multimodal.media.video as video_media
+
+    envs_cache_was_enabled = envs._is_envs_cache_enabled()
+    envs.disable_envs_cache()
+    video_media._VIDEO_DECODE_CACHE.clear()
+    yield
+    video_media._VIDEO_DECODE_CACHE.clear()
+    if envs_cache_was_enabled:
+        envs.enable_envs_cache()
 
 
 @VIDEO_LOADER_REGISTRY.register("assert_10_frames_1_fps")
@@ -66,6 +81,134 @@ def test_video_media_io_kwargs(monkeypatch: pytest.MonkeyPatch):
         with pytest.raises(AssertionError, match="bad fps"):
             videoio = VideoMediaIO(imageio, **{"num_frames": 10, "fps": 2.0})
             _ = videoio.load_bytes(b"test")
+
+
+def test_video_decode_cache_reuses_across_media_io_instances(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    class CountingVideoLoader(VideoLoader):
+        calls = 0
+
+        @classmethod
+        def load_bytes(
+            cls, data: bytes, num_frames: int = -1, **kwargs
+        ) -> tuple[npt.NDArray, dict]:
+            cls.calls += 1
+            return np.array([[[[cls.calls]]]]), {"calls": cls.calls}
+
+    VIDEO_LOADER_REGISTRY.register("test_counting_decode_cache")(CountingVideoLoader)
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "test_counting_decode_cache")
+        m.setenv("VLLM_VIDEO_DECODE_CACHE_SIZE", "2")
+        envs.disable_envs_cache()
+        imageio = ImageMediaIO()
+        video_path = tmp_path / "video.bin"
+        video_path.write_bytes(b"video")
+
+        frames_1, metadata_1 = VideoMediaIO(imageio, num_frames=10).load_file(
+            video_path
+        )
+        frames_1[0, 0, 0, 0] = 99
+        metadata_1["calls"] = 99
+        frames_2, metadata_2 = VideoMediaIO(imageio, num_frames=10).load_file(
+            video_path
+        )
+
+    assert CountingVideoLoader.calls == 1
+    assert frames_2[0, 0, 0, 0] == 1
+    assert metadata_2["calls"] == 1
+
+
+def test_video_decode_cache_key_includes_loader_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    class KwargsVideoLoader(VideoLoader):
+        calls = 0
+
+        @classmethod
+        def load_bytes(
+            cls, data: bytes, num_frames: int = -1, **kwargs
+        ) -> tuple[npt.NDArray, dict]:
+            cls.calls += 1
+            return np.array([[[[cls.calls]]]]), {"calls": cls.calls}
+
+    VIDEO_LOADER_REGISTRY.register("test_kwargs_decode_cache")(KwargsVideoLoader)
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "test_kwargs_decode_cache")
+        m.setenv("VLLM_VIDEO_DECODE_CACHE_SIZE", "2")
+        envs.disable_envs_cache()
+        imageio = ImageMediaIO()
+        video_path = tmp_path / "video.bin"
+        video_path.write_bytes(b"video")
+
+        VideoMediaIO(imageio, num_frames=10, fps=1.0).load_file(video_path)
+        VideoMediaIO(imageio, num_frames=10, fps=2.0).load_file(video_path)
+
+    assert KwargsVideoLoader.calls == 2
+
+
+def test_video_decode_cache_waits_for_inflight_load(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    decode_started = threading.Event()
+    finish_decode = threading.Event()
+    calls_lock = threading.Lock()
+
+    class SlowVideoLoader(VideoLoader):
+        calls = 0
+
+        @classmethod
+        def load_bytes(
+            cls, data: bytes, num_frames: int = -1, **kwargs
+        ) -> tuple[npt.NDArray, dict]:
+            with calls_lock:
+                cls.calls += 1
+                calls = cls.calls
+            decode_started.set()
+            assert finish_decode.wait(timeout=5)
+            return np.array([[[[calls]]]]), {"calls": calls}
+
+    VIDEO_LOADER_REGISTRY.register("test_inflight_decode_cache")(SlowVideoLoader)
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "test_inflight_decode_cache")
+        m.setenv("VLLM_VIDEO_DECODE_CACHE_SIZE", "2")
+        envs.disable_envs_cache()
+        imageio = ImageMediaIO()
+        video_path = tmp_path / "video.bin"
+        video_path.write_bytes(b"video")
+        results: list[tuple[npt.NDArray, dict]] = []
+        errors: list[BaseException] = []
+
+        def load_video() -> None:
+            try:
+                videoio = VideoMediaIO(imageio, num_frames=10)
+                results.append(videoio.load_file(video_path))
+            except BaseException as exc:
+                errors.append(exc)
+
+        owner_thread = threading.Thread(target=load_video)
+        owner_thread.start()
+        assert decode_started.wait(timeout=5)
+
+        waiter_thread = threading.Thread(target=load_video)
+        waiter_thread.start()
+        finish_decode.set()
+
+        owner_thread.join(timeout=5)
+        waiter_thread.join(timeout=5)
+
+    assert not owner_thread.is_alive()
+    assert not waiter_thread.is_alive()
+    assert not errors
+    assert SlowVideoLoader.calls == 1
+    assert len(results) == 2
+    assert [metadata["calls"] for _, metadata in results] == [1, 1]
 
 
 @pytest.mark.parametrize("is_color", [True, False])
