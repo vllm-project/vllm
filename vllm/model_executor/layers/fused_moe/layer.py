@@ -286,7 +286,9 @@ def FusedMoE(
     riy_profile = vllm_config.parallel_config.riy_expert_profile or os.environ.get(
         "RIY_EXPERT_PROFILE", ""
     )
-    if riy_profile and os.path.exists(riy_profile) and layer_idx >= 0:
+    if riy_profile and not os.path.exists(riy_profile):
+        raise FileNotFoundError(f"RIY profile not found: {riy_profile}")
+    if riy_profile and layer_idx >= 0:
         num_kept, riy_prune_map, riy_logit_mask = build_riy_prune_map(
             layer_idx, global_num_experts, riy_profile
         )

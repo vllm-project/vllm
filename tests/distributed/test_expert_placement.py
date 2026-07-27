@@ -9,7 +9,7 @@ import torch
 from vllm.model_executor.layers.fused_moe.expert_map_manager import (
     determine_expert_map,
 )
-from vllm.model_executor.layers.fused_moe.riy import RiyState, build_riy_prune_map
+from vllm.model_executor.layers.fused_moe.riy import build_riy_prune_map
 
 
 def verify_round_robin_pattern(expert_map, ep_rank, ep_size, global_num_experts):
@@ -166,22 +166,6 @@ def test_riy_profile_rejects_out_of_range_expert(tmp_path):
             original_num_experts=4,
             profile_path=str(profile_path),
         )
-
-
-def test_runtime_mask_rejects_out_of_range_indices():
-    state = RiyState()
-    state.initialize(num_layers=2, num_experts=4)
-
-    with pytest.raises(ValueError, match="out of range"):
-        state.set_mask([(2, 0)])
-
-
-def test_runtime_mask_rejects_pruning_every_expert_in_a_layer():
-    state = RiyState()
-    state.initialize(num_layers=2, num_experts=4)
-
-    with pytest.raises(ValueError, match="every expert"):
-        state.set_mask([(0, 0), (0, 1), (0, 2), (0, 3)])
 
 
 def test_expert_filter_compacts_kept_experts_without_ep():

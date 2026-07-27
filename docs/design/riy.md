@@ -55,10 +55,9 @@ The server can be bound to another trusted interface with `VLLM_RIY_HOST`.
 It has no authentication or transport encryption and must not be exposed to an
 untrusted network.
 
-Runtime masks submitted through the control server change routing but do not
-release already allocated expert weights. Only a load-time profile reduces model
-memory. Monitoring state is process-local and is not yet aggregated across TP or
-EP workers.
+Monitoring state is process-local and is not yet aggregated across TP or EP
+workers. Runtime mask updates are intentionally not exposed; changing the
+allocated expert set requires a restart with a new load-time profile.
 
 ## Implementation
 

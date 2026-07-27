@@ -370,6 +370,23 @@ def test_fused_topk(
     assert_routing_results_close(topk_weights, topk_ids, baseline_weights, baseline_ids)
 
 
+def test_fused_topk_excludes_profile_pruned_experts():
+    router = create_fused_moe_router(
+        top_k=2,
+        global_num_experts=4,
+        renormalize=True,
+    )
+    router.prune_logit_mask = torch.tensor(
+        [0.0, float("-inf"), 0.0, 0.0], device="cuda"
+    )
+    hidden_states, router_logits = make_test_data(8, 16, 4)
+    router_logits[:, 1] = router_logits.max() + 10
+
+    _, topk_ids = router.select_experts(hidden_states, router_logits)
+
+    assert not torch.any(topk_ids == 1)
+
+
 @pytest.mark.parametrize("m,k", MK_S)
 @pytest.mark.parametrize("top_k", TOP_KS)
 @pytest.mark.parametrize("global_num_experts", NUM_EXPERTS)

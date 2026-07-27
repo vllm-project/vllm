@@ -14,7 +14,6 @@ import json
 import os
 import threading
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import torch
 
@@ -74,13 +73,6 @@ class RiyState:
         self._num_layers = 0
         self._num_experts = 0
         self._layer_stats: list[RiyLayerStats] = []
-        # Mask: set of (layer, expert) tuples to deactivate
-        self._mask: set[tuple[int, int]] = set()
-        # Profile mask: experts loaded from --riy-expert-profile (persistent)
-        self._profile_mask: set[tuple[int, int]] = set()
-        # Pre-computed per-layer mask tensors on device (for hot path)
-        self._mask_tensors: dict[int, torch.Tensor] = {}
-        self._profile_loaded = False
         # Expert dimensions for VRAM estimation
         self._hidden_size = 0
         self._intermediate_size = 0
@@ -125,31 +117,6 @@ class RiyState:
                     self._layer_stats.append(RiyLayerStats(num_experts))
                 self._num_layers = len(self._layer_stats)
             self._enabled = True
-            _should_load = not self._profile_loaded
-            if _should_load:
-                self._profile_loaded = True
-        # Load profile OUTSIDE the lock to avoid deadlock
-        if _should_load:
-            self._try_load_profile_from_config()
-
-    def _try_load_profile_from_config(self):
-        """Load RIY profile from env var or CLI config."""
-        import os
-
-        profile_path = os.environ.get("RIY_EXPERT_PROFILE", "")
-        if not profile_path:
-            try:
-                from vllm.config import get_current_vllm_config
-
-                cfg = get_current_vllm_config()
-                profile_path = cfg.parallel_config.riy_expert_profile or ""
-            except Exception:
-                pass
-        if profile_path:
-            try:
-                self.load_profile(profile_path)
-            except Exception as e:
-                logger.warning("RIY profile load failed: %s", e)
 
     @property
     def enabled(self) -> bool:
@@ -258,74 +225,8 @@ class RiyState:
                 "num_layers": self._num_layers,
                 "num_experts": self._num_experts,
                 "collecting": self._collecting,
-                "mask_size": len(self._mask),
                 "layers": layers,
             }
-
-    def set_mask(self, pruned_experts: list[tuple[int, int]]):
-        """Set expert mask. Experts in the list will be deactivated."""
-        mask = set(pruned_experts)
-        with self._lock:
-            per_layer: dict[int, int] = {}
-            for layer_idx, expert_idx in mask:
-                if not 0 <= layer_idx < self._num_layers:
-                    raise ValueError(f"Layer index {layer_idx} is out of range")
-                if not 0 <= expert_idx < self._num_experts:
-                    raise ValueError(f"Expert index {expert_idx} is out of range")
-                per_layer[layer_idx] = per_layer.get(layer_idx, 0) + 1
-            if any(count >= self._num_experts for count in per_layer.values()):
-                raise ValueError("A runtime mask cannot prune every expert in a layer")
-
-            self._mask = mask
-            self._rebuild_mask_tensors()
-            logger.info("RIY mask set: %d experts masked", len(self._mask))
-
-    def clear_mask(self):
-        with self._lock:
-            self._mask.clear()
-            self._mask_tensors.clear()
-            logger.info("RIY mask cleared")
-
-    def get_mask(self) -> list[list[int]]:
-        with self._lock:
-            return sorted([list(t) for t in self._mask])
-
-    def load_profile(self, path: str):
-        """Load mask from a RIY profile JSON."""
-        p = Path(path)
-        if not p.exists():
-            raise FileNotFoundError(f"RIY profile not found: {path}")
-        with open(p) as f:
-            profile = json.load(f)
-        experts = [tuple(x) for x in profile["pruned_experts"]]
-        with self._lock:
-            self._profile_mask = set(experts)
-        self.set_mask(experts)
-        logger.info(
-            "RIY profile loaded: %s (%s, %d experts)",
-            path,
-            profile.get("workload", "unknown"),
-            len(experts),
-        )
-
-    def get_profile_mask(self) -> list[list[int]]:
-        """Get the profile-loaded mask (persistent, from --riy-expert-profile)."""
-        with self._lock:
-            return sorted([list(t) for t in self._profile_mask])
-
-    def _rebuild_mask_tensors(self):
-        """Rebuild per-layer boolean mask tensors from the mask set."""
-        self._mask_tensors.clear()
-        for layer_idx, expert_idx in self._mask:
-            if layer_idx not in self._mask_tensors:
-                self._mask_tensors[layer_idx] = torch.zeros(
-                    self._num_experts, dtype=torch.bool
-                )
-            self._mask_tensors[layer_idx][expert_idx] = True
-
-    def get_mask_tensor(self, layer_idx: int) -> torch.Tensor | None:
-        """Get pre-computed mask tensor for a layer. None = no mask."""
-        return self._mask_tensors.get(layer_idx)
 
     def on_forward(self):
         """Called on every MoE forward pass (Python-level, not in graph).
@@ -433,29 +334,6 @@ def build_riy_prune_map(
     return compact_idx, expert_map, logit_mask
 
 
-def apply_riy_mask(
-    topk_weights: torch.Tensor, topk_ids: torch.Tensor, mask_tensor: torch.Tensor
-) -> torch.Tensor:
-    """Zero out masked experts and renormalize weights.
-
-    Args:
-        topk_weights: (num_tokens, top_k) routing weights
-        topk_ids: (num_tokens, top_k) expert indices
-        mask_tensor: (num_experts,) bool tensor, True = masked
-
-    Returns:
-        Modified topk_weights with masked experts zeroed and renormalized.
-    """
-    # Find which selections hit masked experts
-    hit = mask_tensor[topk_ids.long()]  # (num_tokens, top_k)
-    # Zero their weights
-    topk_weights = topk_weights.masked_fill(hit, 0.0)
-    # Renormalize per token
-    denom = topk_weights.sum(dim=-1, keepdim=True).clamp(min=1e-9)
-    topk_weights = topk_weights / denom
-    return topk_weights
-
-
 # Global singleton
 _riy_state = RiyState()
 
@@ -468,7 +346,7 @@ def get_riy_state() -> RiyState:
 
 
 def _start_riy_server(host: str = "127.0.0.1", port: int = 8019):
-    """Start a minimal HTTP server for RIY stats/mask API.
+    """Start a minimal HTTP server for RIY statistics.
 
     Runs in a daemon thread inside the EngineCore worker process, so it
     has direct access to the RiyState singleton (same process, same memory).
@@ -500,15 +378,6 @@ def _start_riy_server(host: str = "127.0.0.1", port: int = 8019):
                     self._json_response({"error": "not initialized"}, 503)
                 else:
                     self._json_response(riy.get_stats())
-            elif self.path == "/riy/mask":
-                self._json_response(
-                    {
-                        "pruned_experts": riy.get_mask(),
-                        "count": len(riy.get_mask()),
-                        "profile_experts": riy.get_profile_mask(),
-                        "profile_count": len(riy._profile_mask),
-                    }
-                )
             elif self.path == "/riy/health":
                 self._json_response(
                     {
@@ -519,7 +388,6 @@ def _start_riy_server(host: str = "127.0.0.1", port: int = 8019):
                         "hidden_size": riy._hidden_size,
                         "intermediate_size": riy._intermediate_size,
                         "quantization": riy._quantization,
-                        "mask_size": len(riy._mask),
                     }
                 )
             else:
@@ -527,16 +395,6 @@ def _start_riy_server(host: str = "127.0.0.1", port: int = 8019):
 
         def do_POST(self):
             riy = get_riy_state()
-            try:
-                content_len = int(self.headers.get("Content-Length", 0))
-            except ValueError:
-                self._json_response({"error": "invalid Content-Length"}, 400)
-                return
-            if content_len > 1_048_576:
-                self._json_response({"error": "request body too large"}, 413)
-                return
-            body = self.rfile.read(content_len) if content_len else b""
-
             if self.path == "/riy/stats/start":
                 riy.start_collection()
                 self._json_response({"status": "collecting"})
@@ -546,48 +404,6 @@ def _start_riy_server(host: str = "127.0.0.1", port: int = 8019):
             elif self.path == "/riy/stats/reset":
                 riy.reset_stats()
                 self._json_response({"status": "reset"})
-            elif self.path == "/riy/mask":
-                if not riy.enabled:
-                    self._json_response({"error": "not initialized"}, 503)
-                    return
-                try:
-                    data = _json.loads(body)
-                    experts = [tuple(x) for x in data["pruned_experts"]]
-                    riy.set_mask(experts)
-                except (
-                    _json.JSONDecodeError,
-                    KeyError,
-                    TypeError,
-                    ValueError,
-                ) as error:
-                    self._json_response({"error": str(error)}, 400)
-                    return
-                self._json_response({"status": "mask_set", "count": len(experts)})
-            elif self.path == "/riy/profile/load":
-                if not riy.enabled:
-                    self._json_response({"error": "not initialized"}, 503)
-                    return
-                try:
-                    data = _json.loads(body)
-                    riy.load_profile(data["path"])
-                    self._json_response(
-                        {
-                            "status": "profile_loaded",
-                            "count": len(riy.get_mask()),
-                        }
-                    )
-                except FileNotFoundError as error:
-                    self._json_response({"error": str(error)}, 404)
-                except (KeyError, TypeError, ValueError) as error:
-                    self._json_response({"error": str(error)}, 400)
-            else:
-                self._json_response({"error": "not found"}, 404)
-
-        def do_DELETE(self):
-            riy = get_riy_state()
-            if self.path == "/riy/mask":
-                riy.clear_mask()
-                self._json_response({"status": "mask_cleared"})
             else:
                 self._json_response({"error": "not found"}, 404)
 

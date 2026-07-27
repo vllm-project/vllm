@@ -7,10 +7,7 @@ from collections.abc import Callable
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.model_executor.layers.fused_moe.riy import (
-    apply_riy_mask,
-    get_riy_state,
-)
+from vllm.model_executor.layers.fused_moe.riy import get_riy_state
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
@@ -338,15 +335,10 @@ class BaseRouter(FusedMoERouter):
             weights = topk_weights.reshape(-1).to(self.riy_weight_view.dtype)
             self.riy_weight_view.scatter_add_(0, ids, weights * collecting.float())
 
-        # Step 3c: RIY — mask + HTTP server (only with VLLM_RIY_MONITOR=1)
-        if not _is_capturing() and _riy_monitor_enabled:
+        if _riy_monitor_enabled and not _is_capturing():
             riy = get_riy_state()
             if riy.enabled and self.layer_idx >= 0:
                 riy.on_forward()
-                mask_t = riy.get_mask_tensor(self.layer_idx)
-                if mask_t is not None:
-                    mask_t = mask_t.to(topk_ids.device)
-                    topk_weights = apply_riy_mask(topk_weights, topk_ids, mask_t)
 
         # Capture logical ids before EPLB mapping.
         if self.capture_fn is not None:
