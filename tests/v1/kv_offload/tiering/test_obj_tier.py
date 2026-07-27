@@ -15,9 +15,11 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 import torch
 
 from vllm.v1.kv_offload.base import (
+    Locality,
     LookupResult,
     OffloadingKVEventsConfig,
     OffloadKey,
@@ -265,6 +267,12 @@ def lookup_and_wait(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("locality", ["local", ""])
+def test_invalid_locality_raises_at_construction(locality):
+    with pytest.raises(ValueError, match="Locality"):
+        _make_tier(locality=locality)
+
+
 class TestMockObjTierBasic:
     def setup_method(self):
         self.tier, self.agent = _make_tier(num_blocks=4)
@@ -453,6 +461,7 @@ class TestObjTierKVEvents:
         self.tier, self.agent = _make_tier(
             offloading_spec=_make_events_spec(enable_kv_cache_events=True),
             enable_kv_events=True,
+            locality="REMOTE",
         )
 
     def test_successful_store_emits_stored_event(self):
@@ -466,9 +475,31 @@ class TestObjTierKVEvents:
         assert events[0].keys == keys
         # Literal medium pins the wire contract, not just the constant choice.
         assert events[0].medium == "OBJ"
+        assert events[0].locality is Locality.REMOTE
         assert not events[0].removed
         # take_events drains the buffer.
         assert list(self.tier.take_events()) == []
+
+    @pytest.mark.parametrize(
+        ("locality", "expected"),
+        [(None, None), ("LOCAL", Locality.LOCAL)],
+    )
+    def test_store_event_uses_configured_locality(self, locality, expected):
+        locality_config = {} if locality is None else {"locality": locality}
+        tier, _ = _make_tier(
+            offloading_spec=_make_events_spec(enable_kv_cache_events=True),
+            enable_kv_events=True,
+            **locality_config,
+        )
+        try:
+            tier.submit_store(make_job(1, [key(1)], [0]))
+            assert all(r.success for r in drain(tier))
+
+            events = list(tier.take_events())
+            assert len(events) == 1
+            assert events[0].locality is expected
+        finally:
+            tier.shutdown()
 
     def test_mixed_job_results_emit_event_only_for_successful_job(self):
         """With a failed and a successful store job resolving in the same

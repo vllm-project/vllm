@@ -2205,7 +2205,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
         num_warps=4,
     )
 
-    _sparse_attn_decode_reduce_kernel[(num_queries, heads_blocks)](
+    _sparse_attn_decode_reduce_kernel[(num_queries, num_heads)](
         part_m,
         part_l,
         part_acc,
@@ -2221,7 +2221,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
         num_heads,
         HAS_ATTN_SINK=has_attn_sink,
         COMB_DIM=comb_dim,
-        BLOCK_H=block_h,
+        BLOCK_H=1,
         NUM_SPLITS=num_splits,
         SPLITS_PAD=triton.next_power_of_2(num_splits),
         num_warps=4,

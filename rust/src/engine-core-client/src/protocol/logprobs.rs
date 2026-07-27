@@ -269,6 +269,19 @@ impl WireLogprobs {
             );
         }
 
+        // Empty position lists may be encoded as either [0, 0] or [0, k + 1].
+        if token_ids.rows == 0 {
+            return Ok(Logprobs {
+                positions: Vec::new(),
+            });
+        }
+        if token_ids.cols == 0 {
+            bail_ext_value_decode!(
+                "{field_prefix}: zero-column logprobs payload with {} rows",
+                token_ids.rows
+            );
+        }
+
         let mut positions = Vec::with_capacity(token_ids.rows);
         for ((token_ids_row, logprobs_row), sampled_rank) in token_ids
             .data
