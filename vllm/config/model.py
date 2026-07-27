@@ -560,7 +560,7 @@ class ModelConfig:
         ):
             raise ValueError("cumem allocator is not supported on current platform.")
 
-        # The Transformers backend needs the HF config, not Mistral's params.json
+        # AutoModel.from_config resolves by class, needs typed HF config not params.json
         if self.model_impl == "transformers" and self.config_format == "auto":
             self.config_format = "hf"
 

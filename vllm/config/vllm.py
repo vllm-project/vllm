@@ -2080,7 +2080,7 @@ class VllmConfig:
                     f"Model: {self.model_config.model}"
                 )
 
-        # The Transformers backend needs HF weights, not Mistral's consolidated
+        # Mistral's consolidated weight names don't map to HF modules; use HF weights
         if (
             self.model_config.model_impl == "transformers"
             and self.load_config.load_format == "auto"
