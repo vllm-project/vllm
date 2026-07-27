@@ -207,6 +207,9 @@ where
         let (health_reporter, health_service) = health_reporter();
         let engine_health = state.engine_core_client().subscribe_health();
         health_reporter.set_serving::<grpc::GenerateGrpcService>().await;
+        health_reporter.set_serving::<grpc::ControlGrpcService>().await;
+        let control_service =
+            grpc::ControlGrpcService::new(grpc::ControlServiceImpl::new(state.clone()));
         let generate_service =
             grpc::GenerateGrpcService::new(grpc::GenerateServiceImpl::new(state.clone()));
         let svc = TonicServer::builder()
@@ -214,6 +217,7 @@ where
             .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
             .layer(middleware::request_runtime_layer(state.clone()))
             .add_service(health_service)
+            .add_service(control_service)
             .add_service(generate_service);
         info!(%addr, tls = grpc_tls.is_some(), "starting gRPC server");
         Some((grpc_listener, svc, grpc_tls, health_reporter, engine_health))

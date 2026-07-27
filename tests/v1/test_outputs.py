@@ -2,7 +2,32 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from unittest import TestCase
 
-from vllm.v1.outputs import LogprobsLists
+import torch
+
+from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+
+
+def test_logprobs_tensors_cat():
+    first = LogprobsTensors(
+        torch.tensor([[1, 2]]),
+        torch.tensor([[0.1, 0.2]]),
+        torch.tensor([1]),
+    )
+    second = LogprobsTensors(
+        torch.tensor([[3, 4]]),
+        torch.tensor([[0.3, 0.4]]),
+        torch.tensor([2]),
+    )
+
+    result = LogprobsTensors.cat([first, second], [0, 1, 2])
+
+    assert result.logprob_token_ids.tolist() == [[1, 2], [3, 4]]
+    assert result.logprobs.tolist() == (
+        first.logprobs.tolist() + second.logprobs.tolist()
+    )
+    assert result.selected_token_ranks.tolist() == [1, 2]
+    assert result.cu_num_generated_tokens == [0, 1, 2]
+    assert LogprobsTensors.cat([first]) is first
 
 
 class TestLogprobsLists(TestCase):

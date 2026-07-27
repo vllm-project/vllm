@@ -90,7 +90,8 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
         let tid = config.tokenizer_id.as_deref().unwrap_or(&model_id);
         tracing::info!(tokenizer = tid, "loading tokenizer");
         let server_info = Some((config.base_url.as_str(), model_id.as_str()));
-        let t = crate::tokenizer::load_tokenizer(tid, config.trust_remote_code, server_info)?;
+        let t =
+            crate::tokenizer::load_tokenizer(tid, config.trust_remote_code, server_info).await?;
         Some(t)
     };
 
@@ -139,7 +140,7 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
             let path = match config.dataset_path.as_deref() {
                 Some(p) => p,
                 None => {
-                    downloaded = crate::datasets::sharegpt::download_sharegpt_dataset()?;
+                    downloaded = crate::datasets::sharegpt::download_sharegpt_dataset().await?;
                     downloaded.as_str()
                 }
             };
