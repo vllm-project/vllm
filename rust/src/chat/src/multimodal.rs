@@ -349,6 +349,13 @@ pub struct MediaAccessOptions {
     pub allowed_media_domains: Option<Vec<String>>,
 }
 
+/// Mirror Python's `bool(int(VLLM_MEDIA_URL_ALLOW_REDIRECTS))`: redirects are
+/// enabled unless the variable is explicitly set to `0`. Unset or unparsable
+/// values default to enabled, matching `reqwest`'s built-in behavior.
+fn media_url_allow_redirects(raw: Option<&str>) -> bool {
+    raw.and_then(|v| v.trim().parse::<i64>().ok()) != Some(0)
+}
+
 impl MultimodalModelInfo {
     /// Load and resolve multimodal support from model files.
     ///
@@ -428,8 +435,24 @@ impl MultimodalModelInfo {
             return Ok(None);
         }
 
+        // Refuse to follow redirects when the operator disables them, so an
+        // allow-listed host cannot bounce a media fetch to a disallowed or
+        // internal target. Matches `vllm/multimodal/media/connector.py`, which
+        // passes `allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS`.
+        let redirect_policy = if media_url_allow_redirects(
+            std::env::var("VLLM_MEDIA_URL_ALLOW_REDIRECTS").ok().as_deref(),
+        ) {
+            reqwest_0_13::redirect::Policy::default()
+        } else {
+            reqwest_0_13::redirect::Policy::none()
+        };
+        let http_client = reqwest_0_13::Client::builder()
+            .redirect(redirect_policy)
+            .build()
+            .map_err(|e| multimodal!("failed to build media HTTP client: {e}"))?;
+
         let media_connector = Arc::new(MediaConnector::new(
-            reqwest_0_13::Client::new(),
+            http_client,
             MediaConnectorConfig {
                 allowed_domains: media_access.allowed_media_domains,
                 ..Default::default()
@@ -1119,5 +1142,147 @@ mod tests {
         let encoded = serde_json::to_string(&parse_limits(source)).expect("map should serialize");
 
         assert_eq!(encoded, source);
+    }
+}
+
+#[cfg(test)]
+mod redirect_tests {
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpListener};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use llm_multimodal::{
+        ImageFetchConfig, MediaConnector, MediaConnectorConfig, MediaConnectorError, MediaSource,
+    };
+
+    use super::media_url_allow_redirects;
+
+    #[test]
+    fn allow_redirects_matches_python_semantics() {
+        assert!(media_url_allow_redirects(None), "unset -> enabled");
+        assert!(media_url_allow_redirects(Some("1")), "1 -> enabled");
+        assert!(!media_url_allow_redirects(Some("0")), "0 -> disabled");
+        assert!(
+            media_url_allow_redirects(Some(" 2 ")),
+            "non-zero -> enabled"
+        );
+        assert!(
+            media_url_allow_redirects(Some("garbage")),
+            "unparsable -> default enabled"
+        );
+    }
+
+    /// Tiny blocking HTTP/1.1 server on 127.0.0.1.
+    ///   GET /allowed  -> 302 redirect to `http://internal.test:{port}/internal`
+    ///   GET /internal -> 200 "SECRET"
+    /// Returns `(addr, allowed_hit, internal_hit)` so tests can distinguish
+    /// "initial request was made" from "redirect was followed".
+    fn spawn_server() -> (SocketAddr, Arc<AtomicBool>, Arc<AtomicBool>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let allowed_hit = Arc::new(AtomicBool::new(false));
+        let internal_hit = Arc::new(AtomicBool::new(false));
+        let a_hit = Arc::clone(&allowed_hit);
+        let i_hit = Arc::clone(&internal_hit);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let path = req.split_whitespace().nth(1).unwrap_or("/");
+                let resp = if path.starts_with("/internal") {
+                    i_hit.store(true, Ordering::SeqCst);
+                    "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 6\r\n\r\nSECRET"
+                        .to_string()
+                } else {
+                    a_hit.store(true, Ordering::SeqCst);
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: http://internal.test:{}/internal\r\n\
+                         Connection: close\r\nContent-Length: 0\r\n\r\n",
+                        addr.port()
+                    )
+                };
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        (addr, allowed_hit, internal_hit)
+    }
+
+    /// Build a connector whose allow-list contains only `allowed.test`.
+    fn connector(client: reqwest_0_13::Client) -> MediaConnector {
+        MediaConnector::new(
+            client,
+            MediaConnectorConfig {
+                allowed_domains: Some(vec!["allowed.test".to_string()]),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    /// Current behavior (default client, follows redirects): the allow-list is
+    /// bypassed — an allowed host redirects to a NON-allowed host and the fetch
+    /// still reaches it.
+    #[tokio::test]
+    async fn following_redirects_bypasses_domain_allowlist() {
+        let (addr, allowed_hit, internal_hit) = spawn_server();
+        let client = reqwest_0_13::Client::builder()
+            .resolve("allowed.test", addr)
+            .resolve("internal.test", addr)
+            .build()
+            .unwrap();
+        let conn = connector(client);
+        let url = format!("http://allowed.test:{}/allowed", addr.port());
+        // Decode of "SECRET" fails; we only care that the redirect hop happened.
+        let _ = conn.fetch_image(MediaSource::Url(url), ImageFetchConfig::default()).await;
+        assert!(
+            allowed_hit.load(Ordering::SeqCst),
+            "initial request was made"
+        );
+        assert!(
+            internal_hit.load(Ordering::SeqCst),
+            "follow-redirect client reached the disallowed internal host (SSRF bypass)"
+        );
+    }
+
+    /// Fixed behavior when `VLLM_MEDIA_URL_ALLOW_REDIRECTS=0` (Policy::none):
+    /// the redirect to the non-allowed host is NOT followed, even though the
+    /// initial (allow-listed) request still goes out.
+    #[tokio::test]
+    async fn refusing_redirects_blocks_the_hop() {
+        let (addr, allowed_hit, internal_hit) = spawn_server();
+        let client = reqwest_0_13::Client::builder()
+            .resolve("allowed.test", addr)
+            .resolve("internal.test", addr)
+            .redirect(reqwest_0_13::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let conn = connector(client);
+        let url = format!("http://allowed.test:{}/allowed", addr.port());
+        let _ = conn.fetch_image(MediaSource::Url(url), ImageFetchConfig::default()).await;
+        assert!(
+            allowed_hit.load(Ordering::SeqCst),
+            "initial allow-listed request was still made (not a setup failure)"
+        );
+        assert!(
+            !internal_hit.load(Ordering::SeqCst),
+            "redirect to a disallowed host must not be followed"
+        );
+    }
+
+    /// The allow-list itself works for the initial URL, so redirects are the
+    /// only way past it.
+    #[tokio::test]
+    async fn disallowed_initial_host_is_rejected() {
+        let conn = connector(reqwest_0_13::Client::new());
+        let res = conn
+            .fetch_image(
+                MediaSource::Url("http://internal.test/secret".to_string()),
+                ImageFetchConfig::default(),
+            )
+            .await;
+        assert!(matches!(res, Err(MediaConnectorError::DisallowedDomain(_))));
     }
 }
