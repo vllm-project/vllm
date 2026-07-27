@@ -181,8 +181,13 @@ def test_tp2_ar_rms_fp4_fusions(
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
-    "model_name, matches_fn, model_kwargs, hf_overrides",
-    [llama3_8b, qwen3_a3b, gpt_oss_20b],
+    "model_name, matches_fn, model_kwargs, hf_overrides, model_impl",
+    [
+        (*llama3_8b, "auto"),
+        (*llama3_8b, "transformers"),
+        (*qwen3_a3b, "auto"),
+        (*gpt_oss_20b, "auto"),
+    ],
 )
 @pytest.mark.parametrize(
     "attn_backend",
@@ -202,17 +207,26 @@ def test_tp2_ar_rms_fusions(
     matches_fn: Callable[[int], Matches],
     model_kwargs: dict,
     hf_overrides: Callable[[int], dict],
+    model_impl: str,
     attn_backend: AttentionBackendCase,
     n_layers: int,
     custom_ops: str,
     inductor_graph_partition: bool,
     run_e2e_fusion_test,
 ):
+    if model_impl == "transformers" and not current_platform.is_rocm():
+        pytest.skip("Transformers 3D AR+RMS regression is ROCm-only")
+
     matches = matches_fn(n_layers)
+    if model_impl == "transformers":
+        # TODO(BadrBasowid): Match the vLLM backend's fusion count once the
+        # separate residual add and RMSNorm operations are fused.
+        matches = matches._replace(aiter_ar_rms_fusion=1)
 
     # Reduce size of model and skip weight loading time
     model_kwargs["hf_overrides"] = hf_overrides(n_layers)
     model_kwargs["load_format"] = "dummy"
+    model_kwargs["model_impl"] = model_impl
     model_kwargs["max_model_len"] = 1024
     model_kwargs["kernel_config"] = {"enable_flashinfer_autotune": False}
     model_kwargs["disable_custom_all_reduce"] = False
