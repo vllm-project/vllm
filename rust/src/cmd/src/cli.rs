@@ -148,11 +148,6 @@ pub struct SharedRuntimeArgs {
     #[arg(long)]
     #[serde(default)]
     pub language_model_only: bool,
-    /// Override the maximum model context length. When set, the frontend uses
-    /// this value instead of the model's `max_position_embeddings` from
-    /// `config.json`.
-    #[arg(long)]
-    pub max_model_len: Option<u32>,
     /// Maximum number of log probabilities to return when `logprobs` is
     /// specified in sampling parameters. `-1` means no cap.
     #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
@@ -664,7 +659,6 @@ impl ServeArgs {
 
         self.managed_engine.clone().into_config(
             self.runtime.model.clone(),
-            self.runtime.max_model_len,
             self.runtime.max_logprobs,
             profiler_config,
             reasoning_parser.as_deref(),
