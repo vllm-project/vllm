@@ -105,18 +105,11 @@ def _peer_id_from_params(role_params: dict) -> str | None:
 
 @dataclass(slots=True)
 class P2PSourceInfo:
-    """Consumer side: this request fetches from a remote (prefiller or peer).
-
-    ``wire_id`` is the id used on the session wire. PD keeps the router
-    id verbatim (the prefiller correlates by it); symmetric P2P suffixes
-    it per engine request so concurrent requests sharing a router id
-    cannot collide.
-    """
+    """Consumer side: this request fetches from a remote (prefiller or peer)."""
 
     kv_request_id: str
     peer_id: str
     do_probe: bool  # False for remote_prefiller (PD), True for remote_kv_source
-    wire_id: str = ""
 
 
 @dataclass(slots=True)
@@ -170,11 +163,6 @@ def _annotate_req_context(req_context: ReqContext) -> None:
     """
     source = _parse_source(req_context.kv_transfer_params)
     if source is not None:
-        source.wire_id = (
-            f"{source.kv_request_id}#{req_context.req_id}"
-            if source.do_probe
-            else source.kv_request_id
-        )
         req_context.set_state(source)
     dest = _parse_dest(req_context.kv_transfer_params)
     if dest is not None:
@@ -342,7 +330,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         source = req_context.get_state(P2PSourceInfo)
         if source is None:
             return LookupResult.MISS
-        if source.wire_id in self._failed_req_ids:
+        if source.kv_request_id in self._failed_req_ids:
             return LookupResult.MISS
 
         # Symmetric-P2P consumer (``remote_kv_source`` sub-dict): probe the
@@ -355,7 +343,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             session = self._sessions.get(source.peer_id)
             if session is None:
                 return LookupResult.MISS
-            result = session.register_lookup(source.wire_id, key)
+            result = session.register_lookup(source.kv_request_id, key)
             if result is True:
                 return LookupResult.HIT
             if result is False:
@@ -403,7 +391,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         """
         source = req_context.get_state(P2PSourceInfo)
         dest = req_context.get_state(P2PDestInfo)
-        kv_request_id = source.wire_id if source is not None else None
+        kv_request_id = source.kv_request_id if source is not None else None
         if kv_request_id is None and dest is not None:
             kv_request_id = dest.kv_request_id
         if not kv_request_id:
@@ -493,7 +481,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             self._local_id,
             job_id,
             len(block_ids),
-            source.wire_id if source is not None else None,
+            source.kv_request_id if source is not None else None,
             source.peer_id if source is not None else None,
         )
         if source is None:
@@ -505,7 +493,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             self._finished_jobs.append(JobResult(job_id=job_id, success=False))
             return
 
-        kv_request_id = source.wire_id
+        kv_request_id = source.kv_request_id
         peer_id = source.peer_id
 
         if not keys:
