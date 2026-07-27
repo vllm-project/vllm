@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 import torch.nn as nn
+from torch.profiler import record_function
 from transformers import DeepseekV2Config, DeepseekV3Config
 
+import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_dcp_group, get_tensor_model_parallel_world_size
@@ -32,7 +34,10 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.torch_utils import is_quantized_kv_cache
-from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.common import (
+    cp_lse_ag_out_rs,
+    cp_lse_vmm_out_gather,
+)
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 
 from .kernels import fused_norm_rope, fused_q
@@ -340,6 +345,26 @@ class DeepseekV32Attention(MLAAttention):
             rope_parameters=config.rope_parameters,
             is_neox_style=not getattr(config, "indexer_rope_interleave", False),
         )
+        self._dcp_output_vmm_max_rows = 0
+        if envs.VLLM_DCP_OUTPUT_VMM:
+            dcp_group = get_dcp_group()
+            if dcp_group.world_size > 1:
+                from vllm.v1.attention.ops.dcp_output_vmm import (
+                    DEFAULT_MAX_ROWS,
+                    get_dcp_output_vmm_workspace,
+                )
+
+                # Initialize collectively during model construction, before
+                # memory profiling or CUDA-graph warmup. All layers reuse this
+                # fail-closed singleton.
+                get_dcp_output_vmm_workspace(
+                    DEFAULT_MAX_ROWS,
+                    num_local_heads * dcp_group.world_size,
+                    kv_lora_rank,
+                    dcp_group.cpu_group,
+                    dcp_group.device,
+                )
+                self._dcp_output_vmm_max_rows = DEFAULT_MAX_ROWS
 
     def forward(  # type: ignore[override]
         self,
@@ -557,12 +582,39 @@ class DeepseekV32Attention(MLAAttention):
                     is_lse_base_on_e=self.impl.lse_base_on_e,
                 )
             else:
-                attn_out = cp_lse_ag_out_rs(
-                    attn_out,
-                    lse,
-                    dcp_group,
-                    is_lse_base_on_e=self.impl.lse_base_on_e,
+                is_decode_only = (
+                    attn_metadata.num_prefills == 0  # type: ignore[attr-defined]
+                    and attn_metadata.num_decode_tokens  # type: ignore[attr-defined]
+                    == num_actual
                 )
+                use_bounded_vmm = (
+                    envs.VLLM_DCP_OUTPUT_VMM
+                    and is_decode_only
+                    and num_actual <= self._dcp_output_vmm_max_rows
+                )
+                if use_bounded_vmm:
+                    with record_function(
+                        f"dcp.output_lse.route.vmm.decode.rows.{num_actual}"
+                    ):
+                        attn_out = cp_lse_vmm_out_gather(
+                            attn_out,
+                            lse,
+                            dcp_group,
+                            is_lse_base_on_e=self.impl.lse_base_on_e,
+                        )
+                else:
+                    route = (
+                        "explicit_ag_rs.non_bounded_shape"
+                        if envs.VLLM_DCP_OUTPUT_VMM
+                        else "explicit_ag_rs.baseline"
+                    )
+                    with record_function(f"dcp.output_lse.route.{route}"):
+                        attn_out = cp_lse_ag_out_rs(
+                            attn_out,
+                            lse,
+                            dcp_group,
+                            is_lse_base_on_e=self.impl.lse_base_on_e,
+                        )
         x = attn_out.view(
             num_actual, self.num_local_heads, self.kv_lora_rank
         ).transpose(0, 1)

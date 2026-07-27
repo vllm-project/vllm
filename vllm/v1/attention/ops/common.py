@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
+from torch.profiler import record_function
 
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.triton_utils import tl, triton
@@ -222,10 +223,24 @@ def cp_lse_ag_out_rs(
     cp_attn_out: [ B, H, D ]
     cp_attn_lse: [ B, H ]
     """
-    out, lse = _cp_lse_common(
-        cp_attn_out, cp_attn_lse, cp_group, ctx=ctx, is_lse_base_on_e=is_lse_base_on_e
-    )
-    out = cp_group.reduce_scatter(out, dim=1)
+    with record_function("dcp.output_lse.iteration"):
+        cp_attn_lse = cp_attn_lse.contiguous()
+        with record_function("dcp.output_lse.lse_all_gather"):
+            lses = cp_group.all_gather(cp_attn_lse, dim=0).reshape(
+                (cp_group.world_size,) + cp_attn_lse.shape
+            )
+        if ctx is None:
+            ctx = CPTritonContext()
+        with record_function("dcp.output_lse.correction"):
+            out, lse = correct_attn_out(
+                cp_attn_out,
+                lses,
+                cp_group.rank_in_group,
+                ctx,
+                is_lse_base_on_e=is_lse_base_on_e,
+            )
+        with record_function("dcp.output_lse.output_reduce_scatter"):
+            out = cp_group.reduce_scatter(out, dim=1)
 
     if return_lse:
         cp_num_heads = lse.shape[1] // cp_group.world_size
@@ -233,6 +248,48 @@ def cp_lse_ag_out_rs(
         lse = lse[:, cp_num_heads * cp_rank : cp_num_heads * (cp_rank + 1)]
         return out, lse
     return out
+
+
+def cp_lse_vmm_out_gather(
+    cp_attn_out: torch.Tensor,
+    cp_attn_lse: torch.Tensor,
+    cp_group: GroupCoordinator,
+    ctx: CPTritonContext | None = None,
+    return_lse: bool = False,
+    is_lse_base_on_e=True,
+):
+    """Run the bounded owner-local VMM merge with no collective fallback."""
+    from vllm.v1.attention.ops.dcp_output_vmm import (
+        DEFAULT_MAX_ROWS,
+        get_dcp_output_vmm_workspace,
+    )
+
+    if cp_group.world_size == 1:
+        return cp_attn_out
+
+    total_heads = cp_attn_out.shape[1]
+    head_dim = cp_attn_out.shape[2]
+    workspace = get_dcp_output_vmm_workspace(
+        DEFAULT_MAX_ROWS,
+        total_heads,
+        head_dim,
+        cp_group.cpu_group,
+        cp_group.device,
+    )
+    rows = cp_attn_out.shape[0]
+    if rows > DEFAULT_MAX_ROWS:
+        raise RuntimeError(
+            "DCP output VMM decode policy exceeded its fail-closed row bound: "
+            f"max_rows={DEFAULT_MAX_ROWS}, requested={rows}."
+        )
+
+    with record_function(f"dcp.output_lse.route.vmm.rows.{rows}"):
+        return workspace.merge(
+            cp_attn_out,
+            cp_attn_lse,
+            is_lse_base_on_e=is_lse_base_on_e,
+            return_lse=return_lse,
+        )
 
 
 def cp_lse_ag_out_ar(
