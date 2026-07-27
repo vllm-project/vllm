@@ -6,6 +6,7 @@ import torch
 
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import convert_rs_fp16x2, softplus
 from vllm.model_executor.layers.mamba.ops.replayssm_config import get_replayssm_config
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
@@ -583,7 +584,7 @@ def selective_state_update_replayssm_output_only(
     # AMD Triton does not support tf32x3. Its default is TF32 on MI300, which
     # exceeds the fp32 error tolerance here, so require IEEE on every ROCm GPU
     # while retaining the faster tf32x3 path on CUDA.
-    dot_input_precision = "tf32x3" if torch.version.cuda is not None else "ieee"
+    dot_input_precision = "ieee" if current_platform.is_rocm() else "tf32x3"
 
     grid = lambda META: (triton.cdiv(dim, META["BLOCK_SIZE_M"]), batch, nheads)
     z_strides = (z.stride(0), z.stride(1), z.stride(2)) if z is not None else (0, 0, 0)
