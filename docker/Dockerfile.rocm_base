@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=ubuntu:24.04
+ARG BASE_IMAGE=ubuntu:22.04
 ARG TRITON_BRANCH="release/3.6.x"
 ARG TRITON_REPO="https://github.com/triton-lang/triton.git"
 ARG FA_BRANCH="0e60e394"
@@ -28,7 +28,7 @@ ENV MAX_JOBS=${MAX_JOBS}
 # Required for RCCL in ROCm7.1
 ENV HSA_NO_SCRATCH_RECLAIM=1
 
-ARG PYTHON_VERSION=3.14
+ARG PYTHON_VERSION=3.12
 ENV PYTHON_VERSION=${PYTHON_VERSION}
 
 RUN mkdir -p /app
@@ -44,7 +44,7 @@ RUN apt-get update -y \
     done \
     && apt-get update -y \
     && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
-       python-is-python3 \
+       python${PYTHON_VERSION}-lib2to3 python-is-python3 \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \

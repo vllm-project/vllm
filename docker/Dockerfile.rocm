@@ -17,7 +17,7 @@ ARG NIC_BACKEND=all
 # Users can specify a custom version compatible with their host drivers.
 # The default version has been tested with ioinic-dkms=25.11.1.001
 ARG AINIC_VERSION=1.117.3-hydra
-ARG UBUNTU_CODENAME=noble
+ARG UBUNTU_CODENAME=jammy
 
 # Sccache configuration. Release builds use this today; CI can opt in when a
 # shared S3-compatible cache backend is available.
@@ -438,7 +438,7 @@ RUN cd /opt/nixl && \
         --exclude 'libcore*' \
         --exclude 'libpull*' \
         /tmp/nixl_wheels/nixl_rocm*.whl \
-        --plat manylinux_2_39_$(uname -m) \
+        --plat manylinux_2_34_$(uname -m) \
         --wheel-dir /tmp/nixl_wheels/repaired && \
     ./contrib/wheel_add_ucx_plugins.py \
         --ucx-plugins-dir ${UCX_HOME}/lib/ucx \
