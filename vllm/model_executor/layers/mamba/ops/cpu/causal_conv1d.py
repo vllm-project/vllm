@@ -14,7 +14,7 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 def resolve_cpu_conv_weights(
     conv: torch.nn.Module,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """Return plain fallback weights and an optional packed native weight."""
+    """Return authoritative plain weights and an optional packed native weight."""
     plain_weight = getattr(conv, "_cpu_unpacked_conv_weight", None)
     if plain_weight is None:
         plain_weight = conv.weight.flatten(start_dim=1)
