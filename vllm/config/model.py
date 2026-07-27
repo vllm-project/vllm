@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
 import huggingface_hub
-import regex as re
 import torch
+from huggingface_hub.file_download import REGEX_COMMIT_HASH
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
 import vllm.envs as envs
@@ -78,7 +78,41 @@ else:
 
 logger = init_logger(__name__)
 
-_HF_COMMIT_HASH_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+
+def _resolve_hf_revision(
+    repo_id: str,
+    revision: str | None,
+    token: bool | str | None,
+) -> str | None:
+    if (
+        Path(repo_id).exists()
+        or envs.VLLM_USE_MODELSCOPE
+        or huggingface_hub.constants.HF_HUB_OFFLINE
+        or (revision is not None and REGEX_COMMIT_HASH.match(revision))
+    ):
+        return revision
+
+    try:
+        resolved_revision = (
+            hf_api()
+            .model_info(
+                repo_id,
+                revision=revision,
+                token=token,
+            )
+            .sha
+        )
+    except Exception:
+        logger.debug(
+            "Failed to resolve revision for %s; falling back to %s.",
+            repo_id,
+            revision,
+            exc_info=True,
+        )
+        return revision
+
+    return resolved_revision or revision
+
 
 # Process-local record of which (arch, target) model-class overrides have been
 # registered in *this* process. Must not live on ModelConfig: that instance is
@@ -549,41 +583,28 @@ class ModelConfig:
 
         # If loading model/tokenizer from HF Hub, resolve the revision once
         # to prevent resolving it multiple times downstream.
-        if (
-            (self.hf_config_path is None or self.hf_config_path == self.model)
-            and not Path(self.model).exists()
-            and not envs.VLLM_USE_MODELSCOPE
-            and not huggingface_hub.constants.HF_HUB_OFFLINE
-            and (
-                self.revision is None
-                or _HF_COMMIT_HASH_PATTERN.fullmatch(self.revision) is None
+        can_resolve_model_revision = (
+            self.hf_config_path is None or self.hf_config_path == self.model
+        )
+        if can_resolve_model_revision:
+            self.revision = _resolve_hf_revision(
+                self.model,
+                self.revision,
+                self.hf_token,
             )
+
+        if (
+            can_resolve_model_revision
+            and self.tokenizer == self.model
+            and self.tokenizer_revision == requested_revision
         ):
-            try:
-                resolved_revision = (
-                    hf_api()
-                    .model_info(
-                        self.model,
-                        revision=self.revision,
-                        token=self.hf_token,
-                    )
-                    .sha
-                )
-            except Exception:
-                logger.debug(
-                    "Failed to resolve revision for %s; falling back to %s.",
-                    self.model,
-                    requested_revision,
-                    exc_info=True,
-                )
-            else:
-                if resolved_revision is not None:
-                    self.revision = resolved_revision
-                    if (
-                        self.tokenizer == self.model
-                        and self.tokenizer_revision == requested_revision
-                    ):
-                        self.tokenizer_revision = resolved_revision
+            self.tokenizer_revision = self.revision
+        else:
+            self.tokenizer_revision = _resolve_hf_revision(
+                self.tokenizer,
+                self.tokenizer_revision,
+                self.hf_token,
+            )
 
         if self.override_attention_dtype is not None and not current_platform.is_rocm():
             warnings.warn(
