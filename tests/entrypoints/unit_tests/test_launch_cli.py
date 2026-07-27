@@ -306,6 +306,22 @@ def test_snapshot_create_falls_through_on_stale_manifest(monkeypatch, tmp_path):
     assert maybe_restore_serve() is None
 
 
+def test_snapshot_group_writable_dir_is_not_restored(monkeypatch, tmp_path):
+    # criu restore executes the images, so a snapshot directory another user
+    # could write must not be trusted. An otherwise-valid exact-key snapshot
+    # whose mode was loosened after creation must miss instead of early-exiting
+    # 3, which is what the same snapshot does at 0700.
+    import vllm.entrypoints.snapshot as snapshot_module
+
+    monkeypatch.setattr(snapshot_module, "_entry_state", {})
+    monkeypatch.setattr(sys, "argv", ["vllm", "snapshot", "create"])
+    monkeypatch.delenv("VLLM_SNAPSHOT", raising=False)
+    monkeypatch.setenv("VLLM_SNAPSHOT_ROOT", str(tmp_path))
+    monkeypatch.setattr(snapshot_module, "lookup_key", lambda env: {"stub": 1})
+    _prime_snapshot_dir(tmp_path, key_from({"stub": 1})).chmod(0o770)
+    assert maybe_restore_serve() is None
+
+
 def test_snapshot_create_flags_skip_early_exit(monkeypatch, tmp_path):
     # Any token beyond the bare two-token form (--force here, but equally
     # --dry-run/--help/typos) must reach argparse on the slow path even when

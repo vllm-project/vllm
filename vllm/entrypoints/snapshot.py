@@ -28,6 +28,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -1267,6 +1268,13 @@ def create_snapshot(force: bool = False, dry_run: bool = False) -> None:
     key_obj = lookup_key(create_env)  # raises SnapshotKeyError on editable/RECORD-less
     key = key_from(key_obj)
     root = _snapshot_root()
+    if root.exists():
+        unsafe = _trust_miss(root)
+        if unsafe:
+            raise RuntimeError(
+                f"refusing to write a snapshot under a directory that another "
+                f"user could replace ({unsafe}): {root}"
+            )
     directory = root / key
     if dry_run:
         _print_dry_run(key, directory)
@@ -1335,9 +1343,35 @@ def _diagnose_miss(
     return f"no snapshot (nearest differs at {field})" if field else "no snapshot"
 
 
+def _trust_miss(directory: Path) -> str | None:
+    """Reason to distrust a snapshot directory, or None.
+
+    criu restore executes the images, so the snapshot directory is trusted
+    input, in the same class as the weights directory. This rejects one that
+    a second user could have written. The 0700 mode from creation only holds
+    while nothing loosens it. The root is created with exist_ok, so a
+    pre-existing root keeps whatever mode it arrived with. A replaceable
+    parent defeats a check on the directory alone, so the root is checked
+    too. Same-uid writers stay out of scope. No check here can cover them,
+    because the reference value would live where they can edit it.
+    """
+    try:
+        info = directory.stat()
+    except OSError:
+        return f"trust.stat.{directory.name}"
+    if info.st_uid != os.geteuid():
+        return f"trust.owner.{directory.name}"
+    if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return f"trust.mode.{directory.name}"
+    return None
+
+
 def _validate_layer2(
     manifest: dict[str, Any], directory: Path, live_env: dict[str, str]
 ) -> str | None:
+    trust = _trust_miss(directory) or _trust_miss(directory.parent)
+    if trust:
+        return trust
     for record in manifest.get("shared_objects", []):
         current = object_identity(record["path"])
         if current is None or current != record["id"]:

@@ -97,6 +97,17 @@ Fleets pinned to one image can bake the snapshot instead by running
 the runtime kernel and CPU (compatibility, not same-host identity). Set
 `VLLM_SNAPSHOT=0` to opt out.
 
+Treat `VLLM_SNAPSHOT_ROOT` as trusted input, on the same footing as the model
+directory and the compiled-kernel cache. A restore executes the process images
+it finds there, so anyone who can write to that path can run code in the next
+server that reads it. vLLM refuses to create or restore a snapshot when its
+directory or the root above it is group-writable, world-writable, or owned by
+another user, and falls back to a cold start. That check cannot help against a
+writer running as the same user, so do not share one snapshot volume across
+containers that do not already trust each other. A poisoned volume outlives the
+container that wrote it, which is the property container replacement normally
+removes.
+
 ## Build image from source
 
 --8<-- "docs/getting_started/installation/gpu.md:build-image-from-source"
