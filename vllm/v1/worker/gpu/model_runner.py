@@ -1467,6 +1467,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states, input_batch, grammar_output
         )
 
+        if (sampler_output.num_nans is not None
+                and sampler_output.num_nans.any()
+                and self.kv_block_zeroer is not None):
+            total = sampler_output.num_nans.sum().item()
+            affected = (sampler_output.num_nans > 0).sum().item()
+            num_blocks = self.kv_cache_config.num_blocks
+            logger.warning(
+                "Detected %d NaN logit(s) across %d request(s). "
+                "Zeroing all %d KV cache blocks.",
+                total, affected, num_blocks)
+            self.kv_block_zeroer.zero_block_ids(list(range(num_blocks)))
+
         if self.pp_handler is not None:
             # Broadcast to non-last PP ranks (handles spec decode multi-token).
             self.pp_handler.broadcast(

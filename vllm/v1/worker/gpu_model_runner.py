@@ -5735,6 +5735,17 @@ class GPUModelRunner(
                     if num_nans_for_index is not None and req_index < logits.shape[0]
                     else 0
                 )
+
+            if any(v > 0 for v in num_nans_in_logits.values()):
+                affected = sum(1 for v in num_nans_in_logits.values() if v > 0)
+                total = sum(num_nans_in_logits.values())
+                logger.warning(
+                    "Detected %d NaN logit(s) across %d request(s). "
+                    "Zeroing all %d KV cache blocks.",
+                    total, affected, self.kv_cache_config.num_blocks)
+                self._zero_block_ids(
+                    list(range(self.kv_cache_config.num_blocks)))
+
             return num_nans_in_logits
         except IndexError:
             return {}
