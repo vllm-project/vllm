@@ -134,6 +134,10 @@ class All2AllManagerBase:
         """
         raise NotImplementedError
 
+    def update_mask(self, rank: int, masked: bool = True) -> None:
+        """Set the mask for a specific EP rank. Used during scale-down."""
+        raise NotImplementedError
+
     def set_num_sms(self, num_sms: int):
         pass
 
