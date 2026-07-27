@@ -56,6 +56,12 @@ from vllm.v1.kv_offload.tiering.base import (
 
 logger = init_logger(__name__)
 
+# Primary blocks kept out of reach of in-flight promotions, as headroom for
+# GPU->primary offloads of requests that are actually running. The primary tier
+# serves both through the same allocator, so without a reserve the promotions
+# of a deep waiting queue can make real offloads fail to allocate.
+PROMOTION_HEADROOM_BLOCKS = 1
+
 
 @dataclass
 class PendingPromotion:
@@ -207,6 +213,12 @@ class TieringOffloadingManager(OffloadingManager):
         # Reset at the end of each step in on_schedule_end().
         self._processed_jobs_this_step: bool = False
 
+        # Primary blocks reserved by promotions that have not completed yet.
+        # Used to keep speculative promotions from claiming the last of the
+        # pool while still letting a request promote into an empty one
+        # (see _promotion_budget_exhausted).
+        self._num_inflight_promotion_blocks: int = 0
+
         # Per-request state for prepared GPU->primary stores and finalization.
         # Secondary tiers are finalized only after pending primary stores reach
         # complete_store(), since complete_store() can still submit cascades.
@@ -264,6 +276,8 @@ class TieringOffloadingManager(OffloadingManager):
                 if job_metadata.is_promotion:
                     # secondary→primary transfer (promotion) completed.
                     # Make blocks available in primary tier.
+                    self._num_inflight_promotion_blocks -= len(job_metadata.keys)
+                    assert self._num_inflight_promotion_blocks >= 0
                     self.primary_tier.complete_write(
                         job_metadata.keys,
                         job_metadata.req_context,
@@ -394,8 +408,13 @@ class TieringOffloadingManager(OffloadingManager):
             req_context: Per-request context forwarded to primary.prepare_write().
 
         Returns:
-            True if promotion was initiated, False if primary tier is full.
+            True if promotion was initiated, False if the promotion budget is
+            exhausted or the primary tier is full.
         """
+        if self._promotion_budget_exhausted():
+            # Leave the rest of the pool for offloads of running requests.
+            return False
+
         # Allocate space in primary tier for promoted block.
         # Must happen immediately so primary.lookup() returns None (in-flight)
         # for this key on any subsequent lookup() call within the same step,
@@ -406,6 +425,8 @@ class TieringOffloadingManager(OffloadingManager):
             # Primary tier is full; caller should treat the block as unavailable
             # rather than retrying indefinitely.
             return False
+
+        self._num_inflight_promotion_blocks += len(primary_write_result.keys_to_store)
 
         store_spec = primary_write_result.store_spec
         assert isinstance(store_spec, CPULoadStoreSpec)
@@ -421,6 +442,23 @@ class TieringOffloadingManager(OffloadingManager):
         entry.keys.extend(primary_write_result.keys_to_store)
         entry.block_ids.extend(store_spec.block_ids)
         return True
+
+    def _promotion_budget_exhausted(self) -> bool:
+        """Whether a promotion would eat into the store headroom.
+
+        The scheduler looks up every queued request before deciding which ones
+        it admits, so without a reserve the promotions of a deep waiting queue
+        can claim the whole primary tier for requests that never run this step,
+        starving offloads of the requests that do. Promotions are speculative,
+        so they yield the last blocks; a request whose prefix misses here simply
+        recomputes it.
+        """
+        if self._num_inflight_promotion_blocks == 0:
+            # Never block the first promotion: a request must be able to make
+            # progress even when the pool is otherwise fully committed.
+            return False
+        allocatable = self.primary_tier.get_num_allocatable_blocks()
+        return allocatable <= PROMOTION_HEADROOM_BLOCKS
 
     def _flush_pending_promotions(self) -> None:
         """Submit one batched submit_load() per (tier, request).
@@ -796,6 +834,9 @@ class TieringOffloadingManager(OffloadingManager):
         # reset below invalidates; their submit_load() has not yet been
         # called so no tier I/O is touching that memory.
         self._pending_load_submissions.clear()
+        # Those reservations will never reach complete_write(), so drop their
+        # share of the promotion budget along with the slots themselves.
+        self._num_inflight_promotion_blocks = 0
 
         finished_req_ids = []
         for req_id, state in self._req_state.items():

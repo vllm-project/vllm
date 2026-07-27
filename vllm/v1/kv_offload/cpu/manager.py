@@ -84,6 +84,10 @@ class CPUOffloadingManager(OffloadingManager):
     def _get_num_free_blocks(self) -> int:
         return len(self._free_list) + self._num_blocks - self._num_allocated_blocks
 
+    def get_num_allocatable_blocks(self) -> int:
+        """Blocks a store could take right now: free plus evictable ones."""
+        return self._get_num_free_blocks() + self._num_evictable_cache_blocks
+
     def _allocate_blocks(self, keys: list[OffloadKey]) -> list[BlockStatus]:
         num_fresh = min(len(keys), self._num_blocks - self._num_allocated_blocks)
         num_reused = len(keys) - num_fresh
