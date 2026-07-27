@@ -74,8 +74,6 @@ EAGLE3_MODEL_CONFIGS = [
         verifier="openai/gpt-oss-20b",
         drafter="RedHatAI/gpt-oss-20b-speculator.eagle3",
         expected_acceptance_length=2.56,
-        # pos-1 measured ~0.485-0.492 across H200/H100 and FLASH/TRITON; the
-        # old 0.512 baseline put the rtol floor above the real value.
         expected_acceptance_lengths_per_pos=[0.7165, 0.4900, 0.3337],
         id="gpt-oss-20b-eagle3",
         # FLASHINFER incompatible: gpt-oss-20b uses sink attention which
