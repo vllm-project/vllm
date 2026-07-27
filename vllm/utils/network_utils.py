@@ -159,6 +159,17 @@ def get_open_port() -> int:
     if "VLLM_DP_MASTER_PORT" in os.environ:
         dp_master_port = envs.VLLM_DP_MASTER_PORT
         reserved_port_range = range(dp_master_port, dp_master_port + 10)
+        if envs.VLLM_PORT is not None:
+            # VLLM_PORT pins where the scan starts, so calling _get_open_port()
+            # again would keep returning the same reserved port forever. Restart
+            # the scan above the range, the same way get_open_ports_list()
+            # advances its start port.
+            port = _get_open_port(start_port=envs.VLLM_PORT, max_attempts=1000)
+            if port in reserved_port_range:
+                port = _get_open_port(
+                    start_port=reserved_port_range.stop, max_attempts=1000
+                )
+            return port
         while True:
             candidate_port = _get_open_port()
             if candidate_port not in reserved_port_range:

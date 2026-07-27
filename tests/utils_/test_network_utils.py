@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import socket
+from types import SimpleNamespace
 
 import pytest
 import zmq
 
+from vllm.utils import network_utils
 from vllm.utils.network_utils import (
     get_open_port,
     get_open_ports_list,
@@ -27,6 +29,99 @@ def test_get_open_port(monkeypatch: pytest.MonkeyPatch):
                 s2.bind(("localhost", get_open_port()))
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s3:
                     s3.bind(("localhost", get_open_port()))
+
+
+def test_get_open_port_skips_dp_reserved_range(monkeypatch: pytest.MonkeyPatch):
+    # VLLM_PORT makes the port scan deterministic, so a candidate landing in
+    # the data parallel reserved range used to loop forever.
+    dp_master_port = 5678
+    reserved_port_range = range(dp_master_port, dp_master_port + 10)
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_PORT", str(dp_master_port))
+        m.setenv("VLLM_DP_MASTER_PORT", str(dp_master_port))
+        port = get_open_port()
+        assert port not in reserved_port_range
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("localhost", port))
+
+
+def test_get_open_port_dp_without_vllm_port(monkeypatch: pytest.MonkeyPatch):
+    dp_master_port = 5678
+    reserved_port_range = range(dp_master_port, dp_master_port + 10)
+    with monkeypatch.context() as m:
+        m.delenv("VLLM_PORT", raising=False)
+        m.setenv("VLLM_DP_MASTER_PORT", str(dp_master_port))
+        port = get_open_port()
+        assert port not in reserved_port_range
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("localhost", port))
+
+
+def test_get_open_port_dp_vllm_port_above_range(monkeypatch: pytest.MonkeyPatch):
+    # The scan only ever counts upward, so a VLLM_PORT above the reserved
+    # range must be honoured as-is rather than pushed higher.
+    dp_master_port = 5678
+    reserved_port_range = range(dp_master_port, dp_master_port + 10)
+    start_port = reserved_port_range.stop + 12
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_PORT", str(start_port))
+        m.setenv("VLLM_DP_MASTER_PORT", str(dp_master_port))
+        port = get_open_port()
+        assert port >= start_port
+        assert port not in reserved_port_range
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("localhost", port))
+
+
+def test_get_open_port_without_dp_master_port(monkeypatch: pytest.MonkeyPatch):
+    start_port = 5678
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_PORT", str(start_port))
+        m.delenv("VLLM_DP_MASTER_PORT", raising=False)
+        port = get_open_port()
+        assert port >= start_port
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("localhost", port))
+
+
+def test_get_open_port_dp_reserved_range_exhausted(monkeypatch: pytest.MonkeyPatch):
+    dp_master_port = 5678
+    reserved_port_range = range(dp_master_port, dp_master_port + 10)
+
+    class OnlyReservedPortsFree:
+        """Socket stub where every port outside the reserved range is taken."""
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+        def bind(self, address):
+            if address[1] not in reserved_port_range:
+                raise OSError("address already in use")
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_PORT", str(dp_master_port))
+        m.setenv("VLLM_DP_MASTER_PORT", str(dp_master_port))
+        m.setattr(
+            network_utils,
+            "socket",
+            SimpleNamespace(
+                socket=OnlyReservedPortsFree,
+                AF_INET=socket.AF_INET,
+                AF_INET6=socket.AF_INET6,
+                SOCK_STREAM=socket.SOCK_STREAM,
+            ),
+        )
+        with pytest.raises(
+            RuntimeError,
+            match=f"starting from port {reserved_port_range.stop}",
+        ):
+            get_open_port()
 
 
 def test_get_open_ports_list_with_vllm_port(monkeypatch: pytest.MonkeyPatch):
