@@ -1635,6 +1635,46 @@ class Scheduler(SchedulerInterface):
         kv_connector_output = model_runner_output.kv_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
 
+        if num_nans_in_logits and any(
+            v > 0 for v in num_nans_in_logits.values()
+        ):
+            total = sum(num_nans_in_logits.values())
+            affected = sum(
+                1 for v in num_nans_in_logits.values() if v > 0)
+            logger.warning(
+                "Detected %d NaN logit(s) across %d request(s). "
+                "Aborting all requests and resetting KV cache.",
+                total, affected)
+
+            aborted = self.finish_requests(
+                None, RequestStatus.FINISHED_ABORTED)
+            self.kv_cache_manager.reset_prefix_cache()
+
+            outputs: dict[int, list[EngineCoreOutput]] = defaultdict(
+                list)
+            for request in aborted:
+                outputs[request.client_index].append(
+                    EngineCoreOutput(
+                        request_id=request.request_id,
+                        new_token_ids=[],
+                        finish_reason=request.get_finished_reason(),
+                    ))
+
+            engine_core_outputs = {
+                ci: EngineCoreOutputs(outputs=outs)
+                for ci, outs in outputs.items()
+            }
+            finished_req_ids = self.finished_req_ids_dict
+            if finished_req_ids:
+                for ci, fset in finished_req_ids.items():
+                    if (eco := engine_core_outputs.get(ci)) is not None:
+                        eco.finished_requests = fset
+                    else:
+                        engine_core_outputs[ci] = EngineCoreOutputs(
+                            finished_requests=fset)
+                finished_req_ids.clear()
+            return engine_core_outputs
+
         # Every GPU write enqueued by this and earlier steps has completed, so it is
         # safe to return deferred-free blocks to the pool.
         if self.defer_block_free and scheduler_output.total_num_scheduled_tokens > 0:
