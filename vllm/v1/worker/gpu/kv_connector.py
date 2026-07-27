@@ -18,6 +18,7 @@ from vllm.forward_context import (
 )
 from vllm.v1.attention.backends.mla.hisparse import (
     invalidate_blocks,
+    record_hisparse_host_writes,
     release_pinned_state,
     take_hisparse_stats,
 )
@@ -57,6 +58,7 @@ class KVConnector:
     ) -> KVConnectorOutput | None:
         if self.hisparse_block_size is None:
             return None
+        record_hisparse_host_writes()
         stats = take_hisparse_stats()
         return KVConnectorOutput(hisparse_stats=stats) if stats is not None else None
 

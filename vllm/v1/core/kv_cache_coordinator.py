@@ -649,9 +649,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         )
 
     def verify_and_split_kv_cache_groups(self) -> None:
-        """
-        Groups KV cache groups by their spec type for efficient batch processing
-        during cache hit lookup.
+        """Group prefix-cache groups by spec type for efficient hit lookup.
+
+        Despite the coordinator name, this may leave one group: hybrid layouts
+        can contain auxiliary groups, such as HiSparse hot caches, that do not
+        participate in prefix caching.
         """
         self.attention_groups: list[SpecGroup] = []
         for i, g in enumerate(self.kv_cache_config.kv_cache_groups):

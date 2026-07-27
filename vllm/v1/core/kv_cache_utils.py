@@ -12,8 +12,6 @@ from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any, NamedTuple, NewType, TypeAlias, cast, overload
 
-import regex as re
-
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -1413,8 +1411,11 @@ def _get_hisparse_hma_config(
     def layer_prefix(name: str) -> str:
         if ".self_attn." in name:
             return name.partition(".self_attn.")[0]
-        match = re.match(r"(.*\.layers\.\d+)(?:\.|$)", name)
-        return match.group(1) if match is not None else name
+        prefix, separator, suffix = name.rpartition(".layers.")
+        layer_index = suffix.partition(".")[0]
+        if separator and layer_index.isdigit():
+            return f"{prefix}{separator}{layer_index}"
+        return name
 
     indexer_prefixes = {layer_prefix(name) for name in indexer_specs}
     hot_units: list[list[tuple[str, KVCacheSpec]]] = []

@@ -2084,7 +2084,6 @@ def test_hisparse_mixed_batch_bf16_row_split(
     # Host-resident pool with identical contents.
     kv_pool = kv_cache.cpu().pin_memory()
 
-    hisparse._PREFILL_REMAP = None
     staging_calls = []
     original_stage = coordinator.stage_prefill_cache
 

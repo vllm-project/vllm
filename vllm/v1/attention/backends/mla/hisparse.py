@@ -124,7 +124,6 @@ _METRICS_INTERVAL = 2000
 _metrics_calls = 0
 _metrics_last = HiSparseStats()
 _CURRENT_GROUP_LEADER: HiSparseCoordinator | None = None
-_PREFILL_REMAP: tuple[tuple, HiSparsePrefillStagingPlan] | None = None
 
 
 def take_hisparse_stats() -> HiSparseStats | None:
@@ -227,7 +226,7 @@ def _covers_registered_host_range(ptr: int, nbytes: int) -> bool:
 def release_pinned_state() -> bool:
     """Synchronize, unregister host KV pools, and drop global state."""
     global _CURRENT_GROUP_LEADER, _PINNED_STAGING, _PINNED_STAGING_EVENT
-    global _PREFILL_REMAP, _metrics_calls, _metrics_last
+    global _metrics_calls, _metrics_last
     released = bool(_PINNED_HOST_POOLS or _PINNED_STAGING is not None)
     if _PINNED_HOST_POOLS:
         try:
@@ -279,7 +278,6 @@ def release_pinned_state() -> bool:
     _GROUP_PLANS.clear()
     _COPY_STREAMS.clear()
     _CURRENT_GROUP_LEADER = None
-    _PREFILL_REMAP = None
     with suppress(RuntimeError):
         torch._C._host_emptyCache()
     _INDEXER_SOURCES.clear()
@@ -326,6 +324,30 @@ def invalidate_blocks(block_ids: list[int], block_size: int) -> None:
             )
             slots = (blocks[:, None] * block_size + offsets[None, :]).flatten()
         coordinator.invalidate_slots(slots)
+
+
+def record_hisparse_host_writes() -> None:
+    """Record completion points for host KV writes from the current step."""
+    recorded_devices: set[torch.device] = set()
+    for coordinator in _COORDINATORS:
+        device = coordinator.device
+        if coordinator._host_cache is None or device in recorded_devices:
+            continue
+        if coordinator._host_write_event is None:
+            coordinator._host_write_event = torch.Event()
+        coordinator._host_write_event.record(torch.accelerator.current_stream(device))
+        recorded_devices.add(device)
+
+
+def wait_for_hisparse_host_writes() -> None:
+    """Wait for pending GPU writes before accessing host KV from the CPU."""
+    waited_devices: set[torch.device] = set()
+    for coordinator in _COORDINATORS:
+        device = coordinator.device
+        event = coordinator._host_write_event
+        if event is not None and device not in waited_devices:
+            event.synchronize()
+            waited_devices.add(device)
 
 
 def hisparse_prefill_staging_remap(
@@ -519,6 +541,7 @@ class HiSparseCoordinator:
         self._copy_stream = _get_copy_stream(self.device)
 
         self._host_cache: torch.Tensor | None = None
+        self._host_write_event: torch.Event | None = None
         # The host backup runs inline on the current stream: the decode
         # KV-update executes inside the FULL_DECODE_ONLY CUDA graph, where a
         # cross-stream wait raises "dependency created on uncaptured work in
@@ -627,26 +650,12 @@ class HiSparseCoordinator:
         seq_lens: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Gather referenced host context blocks into a compact GPU cache."""
-        global _PREFILL_REMAP
         block_size = kv_cache.shape[1]
-        key = (
-            block_table.data_ptr(),
-            block_table.shape,
-            block_table._version,
-            seq_lens.data_ptr(),
-            seq_lens.shape,
-            seq_lens._version,
+        plan = build_hisparse_prefill_staging_plan(
+            block_table,
+            seq_lens,
             block_size,
         )
-        cached = _PREFILL_REMAP
-        if cached is not None and cached[0] == key:
-            plan = cached[1]
-        else:
-            plan = build_hisparse_prefill_staging_plan(
-                block_table, seq_lens, block_size
-            )
-            _PREFILL_REMAP = (key, plan)
-
         return self.gather_prefill_cache(kv_cache, plan), plan.block_table
 
     def gather_prefill_cache(
@@ -691,6 +700,8 @@ class HiSparseCoordinator:
 
     def _invalidate_hot_copies(self, slots: torch.Tensor) -> None:
         assert self.device_global_indices is not None
+        # Block recycling runs once per batch. If it becomes frequent enough
+        # for this full-state scan to matter, maintain a reverse slot index.
         stale = torch.isin(
             self.device_global_indices, slots.to(device=self.device, dtype=torch.int32)
         )
@@ -778,8 +789,8 @@ class HiSparseCoordinator:
             newest_slots,
             global_slots,
         )
-        # Recycled-slot hygiene is handled at block-assignment time: the
-        # The KV connector invalidates every block (re)assigned to any request
+        # Recycled-slot hygiene is handled at block-assignment time. The KV
+        # connector invalidates every block (re)assigned to any request
         # (new, resumed, or growing) before the step that first writes it,
         # so no per-step in-graph invalidation is needed here.
 

@@ -25,6 +25,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     MultipleOf,
 )
+from vllm.v1.attention.backends.mla.hisparse import wait_for_hisparse_host_writes
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -535,9 +536,9 @@ def copy_kv_cache_blocks_inplace(
     )
     for device in {tensor.device for tensor in storage_tensors}:
         if device.type == "cpu":
-            # Pinned host pages may still be read or written by CUDA kernels from
-            # the prior step. COW is rare; synchronize before the host copy.
-            torch.accelerator.synchronize()
+            # Pinned host pages may still be read or written by HiSparse's
+            # compute stream from the prior step.
+            wait_for_hisparse_host_writes()
             indices = torch.from_numpy(indices_np)
             src_indices, dst_indices = indices.unbind(dim=1)
             for tensor in storage_tensors:

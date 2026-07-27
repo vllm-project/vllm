@@ -60,6 +60,8 @@ def _prepare_uniform_decode_kernel(
 
     # Compute number of KVs attended to by this token.
     seq_len = tl.load(seq_lens_ptr + req_id)
+    # HiSparse may not include the reserved newest-token slot in seq_len yet.
+    # Clamp that expected edge case while expanding speculative decode rows.
     per_token_seq_len = tl.maximum(seq_len - max_decode_len + local_idx + 1, 0)
     tl.store(decode_seq_lens_ptr + idx, per_token_seq_len)
 
@@ -732,6 +734,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 seq_lens_buffer = self.decode_seq_lens_buffer[
                     : num_decodes * max_decode_len
                 ].view(num_decodes, max_decode_len)
+                # HiSparse may report a logical length before its reserved
+                # newest-token slot is reflected in the sequence length.
                 seq_lens_buffer[:] = (
                     seq_lens.unsqueeze(1)
                     - max_decode_len

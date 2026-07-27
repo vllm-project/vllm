@@ -34,6 +34,15 @@ def test_hisparse_connector_invalidates_new_blocks_before_forward():
     invalidate.assert_called_once_with([2, 3, 4], 64)
 
 
+def test_hisparse_connector_records_host_writes_after_forward():
+    connector = KVConnector(hisparse_block_size=64)
+
+    with patch("vllm.v1.worker.gpu.kv_connector.record_hisparse_host_writes") as record:
+        connector.post_forward(set())
+
+    record.assert_called_once_with()
+
+
 def _make_empty_scheduler_output():
     return SchedulerOutput(
         scheduled_new_reqs=[],
