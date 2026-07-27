@@ -7,7 +7,7 @@ import signal
 import threading
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Sequence
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from enum import IntEnum
@@ -87,7 +87,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, get_kv_cache_spec_kind
 from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import compute_iteration_details
 from vllm.version import __version__ as VLLM_VERSION
@@ -1745,10 +1745,11 @@ class EngineCoreProc(EngineCore):
         encoder = MsgpackEncoder()
         # Send buffers to reuse.
         reuse_buffers: list[bytearray] = []
-        # Keep references to outputs and buffers until zmq is finished
-        # with them (outputs may contain tensors/np arrays whose
-        # backing buffers were extracted for zero-copy send).
-        pending = deque[tuple[zmq.MessageTracker, Any, bytearray]]()
+        # Payload buffers that can't be reused yet because zmq may still be
+        # sending them.
+        # Buffers of the zero-copy tensor/ndarray frames don't need tracking
+        # here: zmq itself holds a reference to each until it's done with it.
+        pending = deque[tuple[zmq.MessageTracker, bytearray]]()
 
         # We must set linger to ensure the ENGINE_CORE_DEAD
         # message is sent prior to closing the socket.
@@ -1789,19 +1790,37 @@ class EngineCoreProc(EngineCore):
 
                 # Reclaim buffers that zmq is finished with.
                 while pending and pending[-1][0].done:
-                    reuse_buffers.append(pending.pop()[2])
+                    reclaimed = pending.pop()[1]
+                    if len(reuse_buffers) < max_reuse_bufs:
+                        reuse_buffers.append(reclaimed)
 
                 buffer = reuse_buffers.pop() if reuse_buffers else bytearray()
                 buffers = encoder.encode_into(outputs, buffer)
-                tracker = sockets[client_index].send_multipart(
-                    buffers, copy=False, track=True
+                tracker = self._send_msg_tracking_payload(
+                    sockets[client_index], buffers
                 )
                 if not tracker.done:
-                    ref = outputs if len(buffers) > 1 else None
-                    pending.appendleft((tracker, ref, buffer))
+                    pending.appendleft((tracker, buffer))
                 elif len(reuse_buffers) < max_reuse_bufs:
                     # Limit the number of buffers to reuse.
                     reuse_buffers.append(buffer)
+
+    @staticmethod
+    def _send_msg_tracking_payload(
+        socket: zmq.Socket, buffers: Sequence[bytestr]
+    ) -> zmq.MessageTracker:
+        """Send `buffers` as a zero-copy multipart message, returning a tracker
+        for the *first* frame.
+
+        Used instead of `Socket.send_multipart()` because we reuse the buffer
+        passed to `MsgpackEncoder.encode_into()`: `send_multipart()` returns a
+        tracker for the last frame only.
+        """
+        more_flag = zmq.SNDMORE if len(buffers) > 1 else 0
+        tracker = socket.send(buffers[0], more_flag, copy=False, track=True)
+        if more_flag:
+            socket.send_multipart(buffers[1:], copy=False)
+        return tracker
 
     def _handle_request_preproc_error(self, request: EngineCoreRequest) -> None:
         """Log and return a request-scoped error response for exceptions raised
