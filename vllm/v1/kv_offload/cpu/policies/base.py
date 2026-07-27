@@ -4,10 +4,7 @@ import ctypes
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 
-from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
-
-logger = init_logger(__name__)
 
 
 class BlockStatus(ctypes.Structure):
@@ -45,11 +42,7 @@ class CachePolicy(ABC):
     """
 
     @abstractmethod
-    def __init__(self, cache_capacity: int) -> None:
-        logger.warning(
-            "Initializing CachePolicy. This API is experimental and "
-            "subject to change in the future as we iterate the design."
-        )
+    def __init__(self, cache_capacity: int) -> None: ...
 
     @abstractmethod
     def get(self, key: OffloadKey) -> BlockStatus | None:

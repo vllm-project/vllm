@@ -3,7 +3,10 @@
 import importlib
 from collections.abc import Callable
 
+from vllm.logger import init_logger
 from vllm.v1.kv_offload.cpu.policies.base import CachePolicy
+
+logger = init_logger(__name__)
 
 
 class CachePolicyFactory:
@@ -62,6 +65,13 @@ class CachePolicyFactory:
                 f"Unknown cache policy: {name!r}. Supported: {list(cls._registry)}. "
                 "For an out-of-tree policy, also set cache_policy_module_path."
             )
+        logger.warning(
+            "Loading out-of-tree cache policy '%s' from '%s'. This API is "
+            "experimental and subject to change in the future as we "
+            "iterate the design.",
+            name,
+            module_path,
+        )
         module = importlib.import_module(module_path)
         policy_cls = getattr(module, name)
         assert issubclass(policy_cls, CachePolicy)
