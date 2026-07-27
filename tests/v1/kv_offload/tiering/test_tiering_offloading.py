@@ -431,6 +431,37 @@ class TestTieringOffloadingManager:
             "(issue #49902)"
         )
 
+    def test_promotions_leave_room_for_batched_stores(self, manager_setup):
+        """The reserve must cover a whole store batch, not a single block.
+
+        ``prepare_store()`` receives every key a running request offloads in
+        one all-or-nothing call, so leaving one free block is not enough: a
+        two-key store still fails. Once a batch of that size has been seen,
+        promotions must keep that much room free.
+        """
+        running_ctx = ReqContext(req_id="running")
+        self._start_request(running_ctx)
+
+        # Establish the batch size this workload stores in one call.
+        first = self.manager.prepare_store(to_keys([200, 201]), running_ctx)
+        assert first is not None
+        self.manager.complete_store(to_keys([200, 201]), running_ctx, success=True)
+
+        queued_keys = to_keys(range(100, 105))
+        for key in queued_keys:
+            self.secondary_tier1.blocks[key] = True
+        for i, key in enumerate(queued_keys):
+            ctx = ReqContext(req_id=f"queued-{i}")
+            self._start_request(ctx)
+            self.manager.lookup(key, ctx)
+
+        # A store of the same shape must still fit.
+        result = self.manager.prepare_store(to_keys([300, 301]), running_ctx)
+        assert result is not None, (
+            "batched offload store was starved by speculative promotions: the "
+            "reserve must cover a whole store batch (issue #49902)"
+        )
+
     def test_lookup_reports_sync_delay_for_resolved_lookups(self, manager_setup):
         """Resolved lookups report one sync delay sample on allocation."""
         self._start_request()

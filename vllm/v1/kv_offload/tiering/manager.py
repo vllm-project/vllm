@@ -56,11 +56,13 @@ from vllm.v1.kv_offload.tiering.base import (
 
 logger = init_logger(__name__)
 
-# Primary blocks kept out of reach of in-flight promotions, as headroom for
-# GPU->primary offloads of requests that are actually running. The primary tier
-# serves both through the same allocator, so without a reserve the promotions
-# of a deep waiting queue can make real offloads fail to allocate.
-PROMOTION_HEADROOM_BLOCKS = 1
+# Lower bound on the primary blocks kept out of reach of in-flight promotions,
+# used until a GPU->primary store has been seen. The primary tier serves
+# promotions and stores through the same allocator, so without a reserve the
+# promotions of a deep waiting queue can make real offloads fail to allocate.
+# prepare_store() is all-or-nothing over a whole batch of keys, so the reserve
+# grows to the largest batch observed (see _store_headroom_blocks).
+MIN_PROMOTION_HEADROOM_BLOCKS = 1
 
 
 @dataclass
@@ -214,10 +216,12 @@ class TieringOffloadingManager(OffloadingManager):
         self._processed_jobs_this_step: bool = False
 
         # Primary blocks reserved by promotions that have not completed yet.
-        # Used to keep speculative promotions from claiming the last of the
-        # pool while still letting a request promote into an empty one
-        # (see _promotion_budget_exhausted).
         self._num_inflight_promotion_blocks: int = 0
+
+        # Largest GPU->primary store batch seen so far. prepare_store() is
+        # all-or-nothing, so this is how much room a running request may need
+        # in one call, and hence how much promotions must leave free.
+        self._max_store_batch_blocks: int = 0
 
         # Per-request state for prepared GPU->primary stores and finalization.
         # Secondary tiers are finalized only after pending primary stores reach
@@ -443,22 +447,41 @@ class TieringOffloadingManager(OffloadingManager):
         entry.block_ids.extend(store_spec.block_ids)
         return True
 
+    def _store_headroom_blocks(self) -> int:
+        """Blocks to keep available for one GPU->primary store call.
+
+        Capped at half the pool so a large store batch cannot reserve so much
+        that promotions stop happening altogether on a small primary tier.
+        """
+        headroom = max(self._max_store_batch_blocks, MIN_PROMOTION_HEADROOM_BLOCKS)
+        return min(headroom, max(self.primary_tier._num_blocks // 2, 1))
+
     def _promotion_budget_exhausted(self) -> bool:
-        """Whether a promotion would eat into the store headroom.
+        """Whether promoting one more block would eat into the store headroom.
 
         The scheduler looks up every queued request before deciding which ones
         it admits, so without a reserve the promotions of a deep waiting queue
         can claim the whole primary tier for requests that never run this step,
-        starving offloads of the requests that do. Promotions are speculative,
-        so they yield the last blocks; a request whose prefix misses here simply
-        recomputes it.
+        starving the offloads of the requests that do. Promotions are
+        speculative, so they yield: a prefix that misses here is recomputed,
+        whereas a store that cannot allocate drops KV that was already
+        computed.
         """
-        if self._num_inflight_promotion_blocks == 0:
-            # Never block the first promotion: a request must be able to make
-            # progress even when the pool is otherwise fully committed.
-            return False
+        headroom = self._store_headroom_blocks()
+
+        # Never let promotions alone occupy the room a store batch needs, even
+        # when the pool is otherwise empty.
+        budget = max(self.primary_tier._num_blocks - headroom, 1)
+        if self._num_inflight_promotion_blocks >= budget:
+            return True
+
+        # Blocks held by running requests are not the promotions' doing, so
+        # only yield once this promotion would itself consume the last of the
+        # room a store batch needs.
         allocatable = self.primary_tier.get_num_allocatable_blocks()
-        return allocatable <= PROMOTION_HEADROOM_BLOCKS
+        return (
+            self._num_inflight_promotion_blocks > 0 and allocatable - 1 < headroom
+        )
 
     def _flush_pending_promotions(self) -> None:
         """Submit one batched submit_load() per (tier, request).
@@ -566,6 +589,11 @@ class TieringOffloadingManager(OffloadingManager):
         #    making it evictable for the first time.
         # Both must be accounted for before the eviction decision below.
         self._maybe_process_finished_jobs()
+
+        # Remember how much room a store call asks for, so promotions leave
+        # that much free. Recorded before the attempt below, so a store that
+        # fails to allocate still widens the reserve that protects the next one.
+        self._max_store_batch_blocks = max(self._max_store_batch_blocks, len(keys))
 
         # Step 2: Store to primary tier (new blocks only).
         # Cascading of these newly-stored blocks to ALL secondary tiers
