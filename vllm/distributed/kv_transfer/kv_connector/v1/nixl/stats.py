@@ -23,7 +23,14 @@ if TYPE_CHECKING:
 
 @dataclass
 class NixlKVConnectorStats(KVConnectorStats):
-    """Container for transfer performance metrics"""
+    """Container for NIXL transfer performance metrics.
+
+    Each successful transfer is recorded as one rank-local observation. When
+    tensor parallelism is enabled, aggregation concatenates the observations
+    from all ranks into one combined pool before CLI logging. The reduced
+    count, averages, percentiles, and throughput therefore describe rank-level
+    transfers observed during the logging interval, not per-request totals.
+    """
 
     def __post_init__(self):
         if not self.data:
@@ -80,11 +87,14 @@ class NixlKVConnectorStats(KVConnectorStats):
             for k, v in other.data.items():
                 accumulator = self.data[k]
                 assert isinstance(accumulator, list)
+                # Preserve each worker/rank observation for reduce() to
+                # summarize over the combined observation pool.
                 accumulator.extend(v)
         return self
 
     def reduce(self) -> dict[str, int | float]:
-        # Compute compact representative stats suitable for CLI logging
+        # Compute compact representative stats suitable for CLI logging over
+        # the combined pool of worker/rank observations.
         if self.num_successful_transfers == 0:
             # CLI logging only reports successful transfers stats. If all requests in
             # the interval were unsuccessful, Prom will report failures stats instead.
@@ -108,9 +118,14 @@ class NixlKVConnectorStats(KVConnectorStats):
         assert n == self.num_successful_transfers
 
         total_mb = mb.sum()
+        # This is the average rank-local payload size, not the total bytes for
+        # one logical KV transfer across all ranks.
         avg_mb = total_mb / n
 
         total_time_seconds = xfer_time.sum()
+        # This is total rank-local MB divided by total rank-local transfer
+        # time, so it is an average over observations rather than aggregate
+        # system throughput across tensor-parallel ranks.
         throughput_mb_s = total_mb / total_time_seconds
 
         return {

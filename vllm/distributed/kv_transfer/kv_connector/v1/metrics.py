@@ -51,6 +51,15 @@ class KVConnectorStats:
 
 
 class KVConnectorLogging:
+    """Collect and log KV connector stats for one logging interval.
+
+    The logging path is observe() -> aggregate() -> reduce() -> log().
+    observe() receives stats that are already aggregated across workers for a
+    scheduler sync. Additional observe() calls in the same logging interval are
+    accumulated with aggregate(), and reduce() converts the accumulated
+    observations into the single ``KV Transfer metrics`` log line.
+    """
+
     def __init__(self, kv_transfer_config: KVTransferConfig | None):
         # Instantiate the connector's stats class.
         if kv_transfer_config and kv_transfer_config.kv_connector:
@@ -69,6 +78,8 @@ class KVConnectorLogging:
         # Note that this is not the same as the logging interval.
         # We expect transfer_stats_data to be aggregated across all workers and
         # consist of observations from a single connector or a MultiConnector.
+        # Connector-specific reduce() implementations should document how those
+        # pre-aggregated observations are summarized for logging.
         transfer_stats = self.connector_cls.build_kv_connector_stats(
             transfer_stats_data
         )
@@ -85,7 +96,8 @@ class KVConnectorLogging:
         if self.transfer_stats_accumulator is None:
             self.transfer_stats_accumulator = transfer_stats
         else:
-            # Accumulate last interval stats.
+            # Accumulate already worker-aggregated stats for this logging
+            # interval.
             self.transfer_stats_accumulator = self.transfer_stats_accumulator.aggregate(
                 transfer_stats
             )
