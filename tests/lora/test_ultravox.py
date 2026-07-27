@@ -28,7 +28,6 @@ from vllm.lora.request import LoRARequest
 
 from ..conftest import AudioTestAssets, VllmRunner
 from ..models.registry import HF_EXAMPLE_MODELS
-from ..models.utils import check_logprobs_close
 
 MODEL_NAME = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
 
@@ -175,6 +174,45 @@ def _check_model_available() -> None:
     model_info.check_transformers_version(on_fail="skip")
 
 
+def _assert_token_logprobs_close(
+    reference_outputs,
+    lora_outputs,
+    *,
+    atol: float,
+) -> None:
+    """Compare the generated path and its logprobs, not just top-k membership."""
+    assert len(reference_outputs) == len(lora_outputs)
+
+    for reference, actual in zip(reference_outputs, lora_outputs):
+        reference_ids, _, reference_logprobs = reference
+        actual_ids, _, actual_logprobs = actual
+
+        assert reference_ids == actual_ids
+        assert reference_logprobs is not None
+        assert actual_logprobs is not None
+        assert len(reference_ids) == len(reference_logprobs)
+        assert len(actual_ids) == len(actual_logprobs)
+
+        reference_values = torch.tensor(
+            [
+                step_logprobs[token_id].logprob
+                for token_id, step_logprobs in zip(reference_ids, reference_logprobs)
+            ]
+        )
+        actual_values = torch.tensor(
+            [
+                step_logprobs[token_id].logprob
+                for token_id, step_logprobs in zip(actual_ids, actual_logprobs)
+            ]
+        )
+        torch.testing.assert_close(
+            actual_values,
+            reference_values,
+            rtol=0,
+            atol=atol,
+        )
+
+
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [16])
 def test_tower_and_connector_lora_are_applied(
@@ -290,6 +328,12 @@ def test_tower_connector_lora_matches_merged_weights(
         dtype=dtype,
         enforce_eager=True,
         limit_mm_per_prompt={"audio": 1},
+        # Keep preprocessing and kernel shapes identical to the adapter run.
+        # In particular, tower/connector LoRA mode pads every chunk to the
+        # Whisper tower's full context before applying the attention mask.
+        enable_lora=True,
+        enable_tower_connector_lora=True,
+        max_lora_rank=RANK,
     ) as vllm_model:
         merged_outputs = vllm_model.generate_greedy_logprobs(
             [prompt],
@@ -298,9 +342,4 @@ def test_tower_connector_lora_matches_merged_weights(
             audios=[[audio]],
         )
 
-    check_logprobs_close(
-        outputs_0_lst=merged_outputs,
-        outputs_1_lst=lora_outputs,
-        name_0="merged-weights",
-        name_1="tower-connector-lora",
-    )
+    _assert_token_logprobs_close(merged_outputs, lora_outputs, atol=2e-2)
