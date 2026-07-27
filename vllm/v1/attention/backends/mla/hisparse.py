@@ -14,9 +14,9 @@ concurrency.
   writing straight into pinned memory, so the backup is stream-ordered with
   the decode kernels and needs no host synchronization.
 - Each active request owns ``device_buffer_size`` logical hot rows backed by
-  ephemeral blocks from the shared GPU HMA pool. Slots
-  ``[0, device_buffer_size - 1)`` are LRU-managed; the final slot is reserved
-  for the newest token, which the KV-cache update writes there directly.
+  ephemeral blocks from the shared GPU HMA pool. One row is reserved for the
+  newest token. When selected, that row joins the LRU and an evicted row takes
+  over its reserved role, without moving KV bytes.
 - At decode time, the indexer's top-k positions are converted to global slot
   ids and a swap-in kernel resolves them against the hot region: hits are
   reused, misses are copied from the pinned host pool, and the LRU order is
@@ -419,7 +419,13 @@ class _GroupPlan:
     replay is CUDA-graph-capture safe.
     """
 
-    __slots__ = ("global_indices", "hot_indices", "miss_mask", "valid_counts")
+    __slots__ = (
+        "global_indices",
+        "hot_indices",
+        "miss_mask",
+        "newest_indices",
+        "valid_counts",
+    )
 
     def __init__(self, device: torch.device, max_rows: int, top_k: int) -> None:
         self.global_indices = torch.full(
@@ -430,6 +436,9 @@ class _GroupPlan:
         )
         self.miss_mask = torch.zeros(
             (max_rows, top_k), dtype=torch.int32, device=device
+        )
+        self.newest_indices = torch.full(
+            (max_rows,), -1, dtype=torch.int64, device=device
         )
         self.valid_counts: torch.Tensor | None = None
 
@@ -512,7 +521,7 @@ class HiSparseCoordinator:
         # "shared" layers, which replay their leader's plan and never resolve
         # the LRU themselves.
         self.device_global_indices: torch.Tensor | None = torch.full(
-            (max_num_reqs, config.lru_size),
+            (max_num_reqs, self.region_stride),
             -1,
             dtype=torch.int32,
             device=self.device,
@@ -522,6 +531,15 @@ class HiSparseCoordinator:
         self.lru_slots: torch.Tensor | None = lru_init.repeat(
             max_num_reqs, 1
         ).contiguous()
+        self.reserved_slots: torch.Tensor | None = torch.full(
+            (max_num_reqs,),
+            config.lru_size,
+            dtype=torch.int16,
+            device=self.device,
+        )
+        self._newest_slots = torch.empty(
+            max_num_reqs, dtype=torch.int64, device=self.device
+        )
         self.request_state_indices = torch.arange(
             max_num_reqs, dtype=torch.int32, device=self.device
         )
@@ -570,6 +588,7 @@ class HiSparseCoordinator:
         _COORDINATORS.remove(self)
         self.device_global_indices = None
         self.lru_slots = None
+        self.reserved_slots = None
         self._lru_init = None
 
     def hot_cache_paged(self, block_size: int) -> torch.Tensor:
@@ -694,9 +713,14 @@ class HiSparseCoordinator:
         """Drop all hot-buffer bookkeeping (hits become misses)."""
         if self.device_global_indices is None:
             return
-        assert self.lru_slots is not None and self._lru_init is not None
+        assert (
+            self.lru_slots is not None
+            and self.reserved_slots is not None
+            and self._lru_init is not None
+        )
         self.device_global_indices.fill_(-1)
         self.lru_slots.copy_(self._lru_init.expand_as(self.lru_slots))
+        self.reserved_slots.fill_(self.config.lru_size)
 
     def _invalidate_hot_copies(self, slots: torch.Tensor) -> None:
         assert self.device_global_indices is not None
@@ -761,18 +785,24 @@ class HiSparseCoordinator:
         # mismatch trips the backup kernel's shape check and kills the rank
         # (and with it the whole DP fleet).
         num_tokens = min(kv_c_normed.shape[0], slot_mapping.numel(), self.max_num_reqs)
+        if num_tokens == 0:
+            return
         state_rows = self.request_state_indices[:num_tokens]
-        newest_logical = self.config.lru_size
-        hot_block_size = self.hot_cache.shape[1]
-        physical_slots = (
-            self.hot_block_table[:num_tokens, newest_logical // hot_block_size].to(
-                torch.int64
-            )
-            * hot_block_size
-            + newest_logical % hot_block_size
-        )
-        newest_slots = torch.where(state_rows >= 0, physical_slots, -1)
         global_slots = slot_mapping[:num_tokens].to(torch.int64)
+        if self.leader is not None:
+            newest_slots = self._plan.newest_indices[:num_tokens]
+            concat_slot_mapping = newest_slots
+            concat_kwargs = {}
+        else:
+            assert self.reserved_slots is not None
+            newest_slots = self._newest_slots[:num_tokens]
+            concat_slot_mapping = global_slots
+            concat_kwargs = {
+                "hot_block_table": self.hot_block_table,
+                "reserved_slots": self.reserved_slots,
+                "request_state_indices": state_rows,
+                "resolved_slots": newest_slots,
+            }
 
         # -1-padded slots (CUDA-graph padding) are skipped by the backup
         # kernel.
@@ -780,9 +810,10 @@ class HiSparseCoordinator:
             kv_c_normed[:num_tokens],
             k_pe[:num_tokens].squeeze(1),
             self.hot_cache,
-            newest_slots,
+            concat_slot_mapping,
             kv_cache_dtype=kv_cache_dtype,
             scale=k_scale,
+            **concat_kwargs,
         )
         self._backup_rows(
             self.hot_cache,
@@ -912,10 +943,12 @@ class HiSparseCoordinator:
             self._plan.global_indices[:num_tokens].copy_(global_indices)
             hot_indices = self._plan.hot_indices[:num_tokens]
             miss_mask = self._plan.miss_mask[:num_tokens]
+            newest_indices = self._plan.newest_indices[:num_tokens]
             hot_indices.fill_(-1)
         else:
             hot_indices = self._hot_indices[:num_tokens]
             miss_mask = None
+            newest_indices = None
 
         attention_indices = self._attention_indices[:num_tokens]
 
@@ -930,9 +963,11 @@ class HiSparseCoordinator:
             hot_indices,
             self.device_global_indices,
             self.lru_slots,
+            self.reserved_slots,
             self.request_state_indices,
             self.region_stride,
             miss_mask,
+            newest_indices,
             self._swap_stats,
             attention_indices,
             self.attention_block_stride,

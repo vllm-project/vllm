@@ -131,7 +131,7 @@ __device__ __forceinline__ void store_hot_index(
 //   s_chunk_off[nbc + 1]     prefix sums for hit (then miss) compaction
 //   s_evict_off[nbc + 1]     prefix sums for evictable compaction
 //   s_hash_keys[hash_size]   open addressing: global id -> top-k index
-//   s_counters[2]            [0] buffer hits, [1] resolved-in-phase-1 count
+//   s_counters[4]            hits, phase-1 resolved, rotate?, unused
 //   s_lru_out[hot_size]      int16, compacted slots: [hits fwd | evict bwd]
 //   s_hash_vals[hash_size]   int16 hash values (top-k index)
 // Valid global ids must be unique within each row.
@@ -143,9 +143,11 @@ __global__ void hisparse_swap_in_kernel(
     const int32_t* __restrict__ newest_global,    // [num_rows] or nullptr
     int32_t* __restrict__ hot_indices,            // [num_rows, top_k]
     int32_t* __restrict__ attention_indices,      // [num_rows, top_k]
-    int32_t* __restrict__ miss_mask,  // [num_rows, top_k] or nullptr
-    int32_t* __restrict__ device_global_indices,  // [max_rows, hot_size]
+    int32_t* __restrict__ miss_mask,       // [num_rows, top_k] or nullptr
+    int64_t* __restrict__ newest_indices,  // [num_rows] or nullptr
+    int32_t* __restrict__ device_global_indices,  // [max_rows, region_stride]
     int16_t* __restrict__ lru_slots,              // [max_rows, hot_size]
+    int16_t* __restrict__ reserved_slots,         // [max_rows]
     unsigned long long* __restrict__ stats,       // [2] hits,misses or nullptr
     const int32_t* __restrict__ request_state_indices,  // [num_rows] or nullptr
     const int64_t host_rows, const int64_t row_bytes,
@@ -168,6 +170,9 @@ __global__ void hisparse_swap_in_kernel(
       hot_indices[index] = -1;
       if (attention_indices != nullptr) attention_indices[index] = -1;
     }
+    if (newest_indices != nullptr && threadIdx.x == 0) {
+      newest_indices[batch_row] = -1;
+    }
     return;
   }
   const int tid = threadIdx.x;
@@ -177,6 +182,7 @@ __global__ void hisparse_swap_in_kernel(
 
   const int32_t newest_id =
       (newest_global != nullptr) ? newest_global[batch_row] : -1;
+  const int16_t newest_slot = reserved_slots[state_row];
 
   const int32_t* row_topk =
       global_indices + static_cast<int64_t>(batch_row) * top_k;
@@ -189,7 +195,7 @@ __global__ void hisparse_swap_in_kernel(
                           ? miss_mask + static_cast<int64_t>(batch_row) * top_k
                           : nullptr;
   int32_t* row_dgi =
-      device_global_indices + static_cast<int64_t>(state_row) * hot_size;
+      device_global_indices + static_cast<int64_t>(state_row) * region_stride;
   int16_t* row_lru = lru_slots + static_cast<int64_t>(state_row) * hot_size;
 
   extern __shared__ char smem_raw[];
@@ -198,11 +204,18 @@ __global__ void hisparse_swap_in_kernel(
   int32_t* s_evict_off = s_chunk_off + (num_buffer_chunks + 1);
   int32_t* s_hash_keys = s_evict_off + (num_buffer_chunks + 1);
   int32_t* s_counters = s_hash_keys + hash_size;
-  int16_t* s_lru_out = reinterpret_cast<int16_t*>(s_counters + 2);
+  int16_t* s_lru_out = reinterpret_cast<int16_t*>(s_counters + 4);
   int16_t* s_hash_vals = s_lru_out + hot_size;
 
-  if (tid < 2) {
+  if (tid < 4) {
     s_counters[tid] = 0;
+  }
+  if (newest_indices != nullptr && tid == 0) {
+    newest_indices[batch_row] =
+        (newest_slot >= 0 && newest_slot < region_stride)
+            ? get_physical_hot_row(hot_block_table, batch_row, hot_table_stride,
+                                   hot_block_size, newest_slot)
+            : -1;
   }
   for (int i = tid; i < hash_size; i += blockDim.x) {
     s_hash_keys[i] = kHashEmpty;
@@ -222,15 +235,17 @@ __global__ void hisparse_swap_in_kernel(
                       attention_block_stride);
       s_topk[i] = kTokenDone;
       atomicAdd(&s_counters[1], 1);
-    } else if (g == newest_id) {
-      // Newest token lives in the reserved slot past the LRU range.
+    } else if (g == newest_id && newest_slot >= 0 &&
+               newest_slot < region_stride) {
+      // Newest token lives in the row currently reserved for this request.
       store_hot_index(row_out, row_attention, i,
                       static_cast<int32_t>(get_physical_hot_row(
                           hot_block_table, batch_row, hot_table_stride,
-                          hot_block_size, hot_size)),
+                          hot_block_size, newest_slot)),
                       hot_block_size, attention_block_stride);
       s_topk[i] = kTokenDone;
       atomicAdd(&s_counters[1], 1);
+      atomicExch(&s_counters[2], 1);
     } else {
       int slot = hash_slot(g, hash_size);
       while (true) {
@@ -260,10 +275,10 @@ __global__ void hisparse_swap_in_kernel(
     const int16_t slot = has_valid_pos ? row_lru[pos] : int16_t(-1);
     // Corruption tripwire: lru/dgi are long-lived device state; if some
     // external writer (e.g. stray RDMA into reused VRAM) corrupts a slot
-    // out of [0, hot_size), treat it as no-hit so it degrades to a re-miss
+    // out of [0, region_stride), treat it as no-hit so it degrades to a re-miss
     // instead of an unbounded dgi read (phases 3/5 bound the write side).
     const int32_t cached_g =
-        (slot >= 0 && slot < hot_size) ? row_dgi[slot] : -1;
+        (slot >= 0 && slot < region_stride) ? row_dgi[slot] : -1;
 
     int found_topk_idx = -1;
     if (cached_g >= 0) {
@@ -375,7 +390,7 @@ __global__ void hisparse_swap_in_kernel(
     if (is_miss) {
       const int m = s_chunk_off[chunk_idx] + local_miss_off;
       const int16_t evict_slot = s_lru_out[hot_size - 1 - m];
-      if (evict_slot < 0 || evict_slot >= hot_size) {
+      if (evict_slot < 0 || evict_slot >= region_stride) {
         // Corruption tripwire: an out-of-range slot (corrupted lru state,
         // see phase 2) must not become a hot-cache/dgi write. Resolve the
         // entry as invalid (-1, masked by attention, not in the miss set);
@@ -401,6 +416,22 @@ __global__ void hisparse_swap_in_kernel(
 
   const int total_hits = s_counters[0];
   const int total_misses = top_k - total_hits - s_counters[1];
+  // A selected newest row joins the LRU without moving its bytes. The next
+  // evictable LRU row becomes the reserved destination for the following
+  // decode step. Newest consumes a top-k position without occupying the LRU,
+  // so this exchange candidate always exists.
+  if (tid == 0 && s_counters[2] != 0) {
+    const int16_t next_reserved = s_lru_out[hot_size - 1 - total_misses];
+    if (next_reserved >= 0 && next_reserved < region_stride &&
+        newest_slot >= 0 && newest_slot < region_stride) {
+      row_dgi[newest_slot] = newest_id;
+      row_dgi[next_reserved] = -1;
+      reserved_slots[state_row] = next_reserved;
+    } else {
+      s_counters[2] = 0;
+    }
+  }
+  __syncthreads();
 
   // Aggregate hit/miss counters (hit rate + PCIe gather volume telemetry).
   if (stats != nullptr && threadIdx.x == 0) {
@@ -409,15 +440,19 @@ __global__ void hisparse_swap_in_kernel(
   }
 
   // Phase 4: write back the LRU order: stale evictables at the front,
-  // freshly loaded misses next, hits at the MRU back.
+  // freshly loaded misses next, hits, then the admitted newest row at MRU.
   const int total_evictable = hot_size - total_hits;
+  const int remaining_evictable =
+      total_evictable - total_misses - s_counters[2];
   for (int i = tid; i < hot_size; i += blockDim.x) {
-    if (i < total_misses) {
-      row_lru[total_evictable - total_misses + i] = s_lru_out[hot_size - 1 - i];
-    } else if (i < total_evictable) {
-      row_lru[i - total_misses] = s_lru_out[hot_size - 1 - i];
+    if (i < remaining_evictable) {
+      row_lru[i] = s_lru_out[hot_size - 1 - total_misses - s_counters[2] - i];
+    } else if (i < remaining_evictable + total_misses) {
+      row_lru[i] = s_lru_out[hot_size - 1 - (i - remaining_evictable)];
+    } else if (i < hot_size - s_counters[2]) {
+      row_lru[i] = s_lru_out[i - remaining_evictable - total_misses];
     } else {
-      row_lru[i] = s_lru_out[i - total_evictable];
+      row_lru[i] = newest_slot;
     }
   }
 
@@ -425,7 +460,7 @@ __global__ void hisparse_swap_in_kernel(
   for (int m = warp_id; m < total_misses; m += NUM_WARPS) {
     const int32_t g = s_topk[m];
     const int16_t evict_slot = s_lru_out[hot_size - 1 - m];
-    if (evict_slot < 0 || evict_slot >= hot_size) {
+    if (evict_slot < 0 || evict_slot >= region_stride) {
       // Corruption tripwire (see phase 3): phase 3 skipped this entry, so
       // s_topk[m] is stale; skip the copy instead of writing out of range.
       continue;
@@ -633,10 +668,11 @@ void hisparse_swap_in(
     std::optional<torch::stable::Tensor> const& newest_global_indices,
     torch::stable::Tensor& hot_indices,
     torch::stable::Tensor& device_global_indices,
-    torch::stable::Tensor& lru_slots,
+    torch::stable::Tensor& lru_slots, torch::stable::Tensor& reserved_slots,
     std::optional<torch::stable::Tensor> const& request_state_indices,
     int64_t region_stride,
     std::optional<torch::stable::Tensor> const& miss_mask,
+    std::optional<torch::stable::Tensor> const& newest_indices,
     std::optional<torch::stable::Tensor> const& stats,
     std::optional<torch::stable::Tensor> const& attention_indices,
     int64_t attention_block_stride) {
@@ -649,7 +685,8 @@ void hisparse_swap_in(
           hot_block_table.dim() == 2,
       "hot_block_table must be a 2D int32 CUDA tensor");
   STD_TORCH_CHECK(global_indices.is_cuda() && hot_indices.is_cuda() &&
-                      device_global_indices.is_cuda() && lru_slots.is_cuda(),
+                      device_global_indices.is_cuda() && lru_slots.is_cuda() &&
+                      reserved_slots.is_cuda(),
                   "index tensors must be on CUDA");
   STD_TORCH_CHECK(
       global_indices.scalar_type() == torch::headeronly::ScalarType::Int &&
@@ -659,8 +696,9 @@ void hisparse_swap_in(
       device_global_indices.scalar_type() == torch::headeronly::ScalarType::Int,
       "device_global_indices must be int32");
   STD_TORCH_CHECK(
-      lru_slots.scalar_type() == torch::headeronly::ScalarType::Short,
-      "lru_slots must be int16");
+      lru_slots.scalar_type() == torch::headeronly::ScalarType::Short &&
+          reserved_slots.scalar_type() == torch::headeronly::ScalarType::Short,
+      "lru_slots/reserved_slots must be int16");
   STD_TORCH_CHECK(global_indices.dim() == 2 && global_indices.is_contiguous(),
                   "global_indices must be contiguous 2D");
   STD_TORCH_CHECK(hot_indices.size(0) == global_indices.size(0) &&
@@ -670,10 +708,16 @@ void hisparse_swap_in(
   STD_TORCH_CHECK(
       device_global_indices.dim() == 2 && device_global_indices.is_contiguous(),
       "device_global_indices must be contiguous 2D");
-  STD_TORCH_CHECK(lru_slots.size(0) == device_global_indices.size(0) &&
-                      lru_slots.size(1) == device_global_indices.size(1) &&
-                      lru_slots.is_contiguous(),
-                  "lru_slots must match device_global_indices");
+  STD_TORCH_CHECK(
+      lru_slots.dim() == 2 &&
+          lru_slots.size(0) == device_global_indices.size(0) &&
+          lru_slots.is_contiguous(),
+      "lru_slots must be contiguous with one row per request state");
+  STD_TORCH_CHECK(
+      reserved_slots.dim() == 1 &&
+          reserved_slots.numel() == device_global_indices.size(0) &&
+          reserved_slots.is_contiguous(),
+      "reserved_slots must be contiguous with one entry per request state");
 
   STD_TORCH_CHECK(hot_cache.dim() == 3,
                   "hot_cache must be [num_blocks, block_size, row_width]");
@@ -689,11 +733,13 @@ void hisparse_swap_in(
 
   const auto num_rows = static_cast<int32_t>(global_indices.size(0));
   const auto top_k = static_cast<int32_t>(global_indices.size(1));
-  const auto hot_size = static_cast<int32_t>(device_global_indices.size(1));
+  const auto hot_size = static_cast<int32_t>(lru_slots.size(1));
   STD_TORCH_CHECK(hot_size >= top_k, "hot buffer size must be >= top_k");
   STD_TORCH_CHECK(hot_size < 32767, "hot buffer size must fit int16 slots");
-  STD_TORCH_CHECK(region_stride > hot_size,
-                  "region_stride must reserve a newest slot past hot_size");
+  STD_TORCH_CHECK(region_stride == hot_size + 1,
+                  "region_stride must contain the LRU plus one reserved row");
+  STD_TORCH_CHECK(device_global_indices.size(1) == region_stride,
+                  "device_global_indices must cover the full hot region");
   STD_TORCH_CHECK(device_global_indices.size(0) >= num_rows,
                   "device_global_indices has too few rows");
   STD_TORCH_CHECK(hot_block_table.size(0) >= num_rows &&
@@ -741,6 +787,17 @@ void hisparse_swap_in(
     miss_mask_ptr = mm.mutable_data_ptr<int32_t>();
   }
 
+  int64_t* newest_indices_ptr = nullptr;
+  if (newest_indices.has_value()) {
+    auto const& indices = newest_indices.value();
+    STD_TORCH_CHECK(
+        indices.is_cuda() &&
+            indices.scalar_type() == torch::headeronly::ScalarType::Long &&
+            indices.numel() >= num_rows && indices.is_contiguous(),
+        "newest_indices must be contiguous int64 on CUDA");
+    newest_indices_ptr = indices.mutable_data_ptr<int64_t>();
+  }
+
   unsigned long long* stats_ptr = nullptr;
   if (stats.has_value()) {
     auto const& st = stats.value();
@@ -776,7 +833,7 @@ void hisparse_swap_in(
   const int hash_size = 2 * top_k;
   const int num_buffer_chunks = (hot_size + kWarpSize - 1) / kWarpSize;
   const size_t smem_bytes =
-      sizeof(int32_t) * (top_k + 2 * (num_buffer_chunks + 1) + hash_size + 2) +
+      sizeof(int32_t) * (top_k + 2 * (num_buffer_chunks + 1) + hash_size + 4) +
       sizeof(int16_t) * (hot_size + hash_size);
 
   const torch::stable::accelerator::DeviceGuard device_guard(
@@ -793,8 +850,10 @@ void hisparse_swap_in(
       hot_block_table.const_data_ptr<int32_t>(),
       global_indices.const_data_ptr<int32_t>(), newest_ptr,
       hot_indices.mutable_data_ptr<int32_t>(), attention_indices_ptr,
-      miss_mask_ptr, device_global_indices.mutable_data_ptr<int32_t>(),
-      lru_slots.mutable_data_ptr<int16_t>(), stats_ptr, request_state_ptr,
+      miss_mask_ptr, newest_indices_ptr,
+      device_global_indices.mutable_data_ptr<int32_t>(),
+      lru_slots.mutable_data_ptr<int16_t>(),
+      reserved_slots.mutable_data_ptr<int16_t>(), stats_ptr, request_state_ptr,
       host_rows, row_bytes, hot_block_stride, hot_block_table.stride(0),
       hot_block_size, top_k, hot_size, hash_size, region_stride,
       attention_block_stride);

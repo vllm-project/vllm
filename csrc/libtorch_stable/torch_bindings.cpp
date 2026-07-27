@@ -810,7 +810,11 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                     Tensor! kv_cache,"
       "                     Tensor slot_mapping,"
       "                     str kv_cache_dtype,"
-      "                     Tensor scale) -> ()");
+      "                     Tensor scale,"
+      "                     Tensor? hot_block_table=None,"
+      "                     Tensor? reserved_slots=None,"
+      "                     Tensor? request_state_indices=None,"
+      "                     Tensor(a!)? resolved_slots=None) -> ()");
 
 #ifndef USE_ROCM
   ops.def(
@@ -822,11 +826,13 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                 Tensor! hot_indices,"
       "                 Tensor! device_global_indices,"
       "                 Tensor! lru_slots,"
+      "                 Tensor! reserved_slots,"
       "                 Tensor? request_state_indices,"
       "                 int region_stride,"
       "                 Tensor(a!)? miss_mask=None,"
-      "                 Tensor(b!)? stats=None,"
-      "                 Tensor(c!)? attention_indices=None,"
+      "                 Tensor(b!)? newest_indices=None,"
+      "                 Tensor(c!)? stats=None,"
+      "                 Tensor(d!)? attention_indices=None,"
       "                 int attention_block_stride=0) -> ()");
 
   ops.def(

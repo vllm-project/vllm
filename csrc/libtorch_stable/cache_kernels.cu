@@ -399,24 +399,48 @@ __global__ void reshape_and_cache_flash_kernel(
   }
 }
 
-template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt,
+          bool resolve_reserved>
 __global__ void concat_and_cache_mla_kernel(
     const scalar_t* __restrict__ kv_c,  // [num_tokens, kv_lora_rank]
     const scalar_t* __restrict__ k_pe,  // [num_tokens, pe_dim]
     cache_t* __restrict__ kv_cache,  // [num_blocks, block_size, (kv_lora_rank
                                      // + pe_dim)]
     const int64_t* __restrict__ slot_mapping,  // [num_tokens]
-    const int block_stride,                    //
-    const int entry_stride,                    //
-    const int kv_c_stride,                     //
-    const int k_pe_stride,                     //
-    const int kv_lora_rank,                    //
-    const int pe_dim,                          //
-    const int block_size,                      //
-    const float* scale                         //
+    const int32_t* __restrict__ hot_block_table,
+    const int16_t* __restrict__ reserved_slots,
+    const int32_t* __restrict__ request_state_indices,
+    int64_t* __restrict__ resolved_slots, const int64_t hot_table_stride,
+    const int block_stride,  //
+    const int entry_stride,  //
+    const int kv_c_stride,   //
+    const int k_pe_stride,   //
+    const int kv_lora_rank,  //
+    const int pe_dim,        //
+    const int block_size,    //
+    const float* scale       //
 ) {
   const int64_t token_idx = blockIdx.x;
-  const int64_t slot_idx = slot_mapping[token_idx];
+  __shared__ int64_t s_slot_idx;
+  int64_t slot_idx;
+  if constexpr (resolve_reserved) {
+    if (threadIdx.x == 0) {
+      const int32_t state_row = request_state_indices[token_idx];
+      if (state_row < 0) {
+        s_slot_idx = -1;
+      } else {
+        const int64_t logical_slot = reserved_slots[state_row];
+        const int64_t block = hot_block_table[token_idx * hot_table_stride +
+                                              logical_slot / block_size];
+        s_slot_idx = block * block_size + logical_slot % block_size;
+      }
+      resolved_slots[token_idx] = s_slot_idx;
+    }
+    __syncthreads();
+    slot_idx = s_slot_idx;
+  } else {
+    slot_idx = slot_mapping[token_idx];
+  }
   // NOTE: slot_idx can be -1 if the token is padded
   if (slot_idx < 0) {
     return;
@@ -443,24 +467,48 @@ __global__ void concat_and_cache_mla_kernel(
   copy(k_pe, kv_cache, k_pe_stride, block_stride, pe_dim, kv_lora_rank);
 }
 
-template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt,
+          bool resolve_reserved>
 __global__ void concat_and_cache_ds_mla_kernel(
     const scalar_t* __restrict__ kv_c,  // [num_tokens, kv_lora_rank]
     const scalar_t* __restrict__ k_pe,  // [num_tokens, pe_dim]
     cache_t* __restrict__ kv_cache,  // [num_blocks, block_size, (kv_lora_rank
                                      // + pe_dim)]
     const int64_t* __restrict__ slot_mapping,  // [num_tokens]
-    const int block_stride,                    //
-    const int entry_stride,                    //
-    const int kv_c_stride,                     //
-    const int k_pe_stride,                     //
-    const int kv_lora_rank,                    //
-    const int pe_dim,                          //
-    const int block_size,                      //
-    const float* scale                         //
+    const int32_t* __restrict__ hot_block_table,
+    const int16_t* __restrict__ reserved_slots,
+    const int32_t* __restrict__ request_state_indices,
+    int64_t* __restrict__ resolved_slots, const int64_t hot_table_stride,
+    const int block_stride,  //
+    const int entry_stride,  //
+    const int kv_c_stride,   //
+    const int k_pe_stride,   //
+    const int kv_lora_rank,  //
+    const int pe_dim,        //
+    const int block_size,    //
+    const float* scale       //
 ) {
   const int64_t token_idx = blockIdx.x;
-  const int64_t slot_idx = slot_mapping[token_idx];
+  __shared__ int64_t s_slot_idx;
+  int64_t slot_idx;
+  if constexpr (resolve_reserved) {
+    if (threadIdx.x == 0) {
+      const int32_t state_row = request_state_indices[token_idx];
+      if (state_row < 0) {
+        s_slot_idx = -1;
+      } else {
+        const int64_t logical_slot = reserved_slots[state_row];
+        const int64_t block = hot_block_table[token_idx * hot_table_stride +
+                                              logical_slot / block_size];
+        s_slot_idx = block * block_size + logical_slot % block_size;
+      }
+      resolved_slots[token_idx] = s_slot_idx;
+    }
+    __syncthreads();
+    slot_idx = s_slot_idx;
+  } else {
+    slot_idx = slot_mapping[token_idx];
+  }
   // NOTE: slot_idx can be -1 if the token is padded
   if (slot_idx < 0) {
     return;
@@ -817,26 +865,52 @@ void reshape_and_cache_flash(
 // KV_T is the data type of key and value tensors.
 // CACHE_T is the stored data type of kv-cache.
 // KV_DTYPE is the real data type of kv-cache.
-#define CALL_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE)                    \
-  vllm::concat_and_cache_mla_kernel<KV_T, CACHE_T, KV_DTYPE>                  \
-      <<<grid, block, 0, stream>>>(                                           \
-          reinterpret_cast<KV_T*>(kv_c.data_ptr()),                           \
-          reinterpret_cast<KV_T*>(k_pe.data_ptr()),                           \
-          reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),                    \
-          slot_mapping.const_data_ptr<int64_t>(), block_stride, entry_stride, \
-          kv_c_stride, k_pe_stride, kv_lora_rank, pe_dim, block_size,         \
+#define CALL_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE)                   \
+  vllm::concat_and_cache_mla_kernel<KV_T, CACHE_T, KV_DTYPE, false>          \
+      <<<grid, block, 0, stream>>>(                                          \
+          reinterpret_cast<KV_T*>(kv_c.data_ptr()),                          \
+          reinterpret_cast<KV_T*>(k_pe.data_ptr()),                          \
+          reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),                   \
+          slot_mapping.const_data_ptr<int64_t>(), nullptr, nullptr, nullptr, \
+          nullptr, 0, block_stride, entry_stride, kv_c_stride, k_pe_stride,  \
+          kv_lora_rank, pe_dim, block_size,                                  \
+          reinterpret_cast<const float*>(scale.data_ptr()));
+
+#define CALL_HISPARSE_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE)          \
+  vllm::concat_and_cache_mla_kernel<KV_T, CACHE_T, KV_DTYPE, true>           \
+      <<<grid, block, 0, stream>>>(                                          \
+          reinterpret_cast<KV_T*>(kv_c.data_ptr()),                          \
+          reinterpret_cast<KV_T*>(k_pe.data_ptr()),                          \
+          reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),                   \
+          slot_mapping.const_data_ptr<int64_t>(), hot_block_table_ptr,       \
+          reserved_slots_ptr, request_state_indices_ptr, resolved_slots_ptr, \
+          hot_table_stride, block_stride, entry_stride, kv_c_stride,         \
+          k_pe_stride, kv_lora_rank, pe_dim, block_size,                     \
           reinterpret_cast<const float*>(scale.data_ptr()));
 
 // KV_T is the data type of key and value tensors.
 // CACHE_T is the stored data type of kv-cache.
-#define CALL_CONCAT_AND_CACHE_DS_MLA(KV_T, CACHE_T, KV_DTYPE)                 \
-  vllm::concat_and_cache_ds_mla_kernel<KV_T, CACHE_T, KV_DTYPE>               \
-      <<<grid, block, 0, stream>>>(                                           \
-          reinterpret_cast<KV_T*>(kv_c.data_ptr()),                           \
-          reinterpret_cast<KV_T*>(k_pe.data_ptr()),                           \
-          reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),                    \
-          slot_mapping.const_data_ptr<int64_t>(), block_stride, entry_stride, \
-          kv_c_stride, k_pe_stride, kv_lora_rank, pe_dim, block_size,         \
+#define CALL_CONCAT_AND_CACHE_DS_MLA(KV_T, CACHE_T, KV_DTYPE)                \
+  vllm::concat_and_cache_ds_mla_kernel<KV_T, CACHE_T, KV_DTYPE, false>       \
+      <<<grid, block, 0, stream>>>(                                          \
+          reinterpret_cast<KV_T*>(kv_c.data_ptr()),                          \
+          reinterpret_cast<KV_T*>(k_pe.data_ptr()),                          \
+          reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),                   \
+          slot_mapping.const_data_ptr<int64_t>(), nullptr, nullptr, nullptr, \
+          nullptr, 0, block_stride, entry_stride, kv_c_stride, k_pe_stride,  \
+          kv_lora_rank, pe_dim, block_size,                                  \
+          reinterpret_cast<const float*>(scale.data_ptr()));
+
+#define CALL_HISPARSE_CONCAT_AND_CACHE_DS_MLA(KV_T, CACHE_T, KV_DTYPE)       \
+  vllm::concat_and_cache_ds_mla_kernel<KV_T, CACHE_T, KV_DTYPE, true>        \
+      <<<grid, block, 0, stream>>>(                                          \
+          reinterpret_cast<KV_T*>(kv_c.data_ptr()),                          \
+          reinterpret_cast<KV_T*>(k_pe.data_ptr()),                          \
+          reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),                   \
+          slot_mapping.const_data_ptr<int64_t>(), hot_block_table_ptr,       \
+          reserved_slots_ptr, request_state_indices_ptr, resolved_slots_ptr, \
+          hot_table_stride, block_stride, entry_stride, kv_c_stride,         \
+          k_pe_stride, kv_lora_rank, pe_dim, block_size,                     \
           reinterpret_cast<const float*>(scale.data_ptr()));
 
 void concat_and_cache_mla(
@@ -845,7 +919,11 @@ void concat_and_cache_mla(
     torch::stable::Tensor& kv_cache,  // [num_blocks, block_size, (kv_lora_rank
                                       // + pe_dim)]
     torch::stable::Tensor& slot_mapping,  // [num_tokens] or [num_actual_tokens]
-    const std::string& kv_cache_dtype, torch::stable::Tensor& scale) {
+    const std::string& kv_cache_dtype, torch::stable::Tensor& scale,
+    std::optional<torch::stable::Tensor> const& hot_block_table,
+    std::optional<torch::stable::Tensor> const& reserved_slots,
+    std::optional<torch::stable::Tensor> const& request_state_indices,
+    std::optional<torch::stable::Tensor> const& resolved_slots) {
   // NOTE(woosuk): In vLLM V1, key.size(0) can be different from
   // slot_mapping.size(0) because of padding for CUDA graphs.
   // In vLLM V0, key.size(0) is always equal to slot_mapping.size(0) because
@@ -880,6 +958,54 @@ void concat_and_cache_mla(
   int block_stride = kv_cache.stride(0);
   int entry_stride = kv_cache.stride(1);
 
+  const bool resolve_reserved =
+      hot_block_table.has_value() || reserved_slots.has_value() ||
+      request_state_indices.has_value() || resolved_slots.has_value();
+  const int32_t* hot_block_table_ptr = nullptr;
+  const int16_t* reserved_slots_ptr = nullptr;
+  const int32_t* request_state_indices_ptr = nullptr;
+  int64_t* resolved_slots_ptr = nullptr;
+  int64_t hot_table_stride = 0;
+  if (resolve_reserved) {
+    STD_TORCH_CHECK(
+        hot_block_table.has_value() && reserved_slots.has_value() &&
+            request_state_indices.has_value() && resolved_slots.has_value(),
+        "HiSparse reserved-row resolution requires hot_block_table, "
+        "reserved_slots, request_state_indices, and resolved_slots");
+    auto const& table = hot_block_table.value();
+    auto const& reserved = reserved_slots.value();
+    auto const& states = request_state_indices.value();
+    auto const& output = resolved_slots.value();
+    STD_TORCH_CHECK(
+        table.is_cuda() &&
+            table.scalar_type() == torch::headeronly::ScalarType::Int &&
+            table.dim() == 2 && table.size(0) >= num_tokens,
+        "hot_block_table must be a 2D int32 CUDA tensor with one row per "
+        "token");
+    STD_TORCH_CHECK(
+        reserved.is_cuda() &&
+            reserved.scalar_type() == torch::headeronly::ScalarType::Short &&
+            reserved.dim() == 1 && reserved.is_contiguous(),
+        "reserved_slots must be contiguous 1D int16 on CUDA");
+    STD_TORCH_CHECK(
+        states.is_cuda() &&
+            states.scalar_type() == torch::headeronly::ScalarType::Int &&
+            states.numel() >= num_tokens && states.is_contiguous(),
+        "request_state_indices must be contiguous int32 on CUDA with one "
+        "entry per token");
+    STD_TORCH_CHECK(
+        output.is_cuda() &&
+            output.scalar_type() == torch::headeronly::ScalarType::Long &&
+            output.numel() == num_tokens && output.is_contiguous(),
+        "resolved_slots must be contiguous int64 on CUDA with one entry per "
+        "token");
+    hot_block_table_ptr = table.const_data_ptr<int32_t>();
+    reserved_slots_ptr = reserved.const_data_ptr<int16_t>();
+    request_state_indices_ptr = states.const_data_ptr<int32_t>();
+    resolved_slots_ptr = output.mutable_data_ptr<int64_t>();
+    hot_table_stride = table.stride(0);
+  }
+
   const torch::stable::accelerator::DeviceGuard device_guard(
       kv_c.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
@@ -892,13 +1018,23 @@ void concat_and_cache_mla(
     // The RoPE part (last 64 elements) is handled by another 1 warp (32
     // threads). So in total, we use 3 warps (96 threads) per block.
     dim3 block(96);
-    DISPATCH_BY_KV_CACHE_DTYPE(kv_c.scalar_type(), kv_cache_dtype,
-                               CALL_CONCAT_AND_CACHE_DS_MLA);
+    if (resolve_reserved) {
+      DISPATCH_BY_KV_CACHE_DTYPE(kv_c.scalar_type(), kv_cache_dtype,
+                                 CALL_HISPARSE_CONCAT_AND_CACHE_DS_MLA);
+    } else {
+      DISPATCH_BY_KV_CACHE_DTYPE(kv_c.scalar_type(), kv_cache_dtype,
+                                 CALL_CONCAT_AND_CACHE_DS_MLA);
+    }
   } else {
     dim3 grid(num_tokens);
     dim3 block(std::min(kv_lora_rank, 512));
-    DISPATCH_BY_KV_CACHE_DTYPE(kv_c.scalar_type(), kv_cache_dtype,
-                               CALL_CONCAT_AND_CACHE_MLA);
+    if (resolve_reserved) {
+      DISPATCH_BY_KV_CACHE_DTYPE(kv_c.scalar_type(), kv_cache_dtype,
+                                 CALL_HISPARSE_CONCAT_AND_CACHE_MLA);
+    } else {
+      DISPATCH_BY_KV_CACHE_DTYPE(kv_c.scalar_type(), kv_cache_dtype,
+                                 CALL_CONCAT_AND_CACHE_MLA);
+    }
   }
 }
 

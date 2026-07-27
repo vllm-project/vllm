@@ -1344,7 +1344,6 @@ def fallback_swap_in(
     """
     assert coordinator._host_cache is not None
     num_tokens, _ = global_indices.shape
-    buf = coordinator.config.lru_size
     hot_indices.fill_(-1)
 
     global_cpu = global_indices.cpu().tolist()
@@ -1353,6 +1352,7 @@ def fallback_swap_in(
     )
     dgi_cpu = coordinator.device_global_indices[:num_tokens].cpu().tolist()
     lru_cpu = coordinator.lru_slots[:num_tokens].cpu().tolist()
+    reserved_cpu = coordinator.reserved_slots[:num_tokens].cpu().tolist()
 
     miss_src: list[int] = []
     miss_dst: list[int] = []
@@ -1363,7 +1363,9 @@ def fallback_swap_in(
             if g < 0:
                 continue
             if g == newest_cpu[row]:
-                hot_indices[row, col] = _hisparse_hot_slot(coordinator, row, buf)
+                hot_indices[row, col] = _hisparse_hot_slot(
+                    coordinator, row, reserved_cpu[row]
+                )
             elif g in slot_of_global:
                 hit_cols[slot_of_global[g]] = col
 
@@ -1390,13 +1392,30 @@ def fallback_swap_in(
             miss_src.append(g)
             miss_dst.append(physical_slot)
 
-        lru_cpu[row] = evictables[len(misses) :] + miss_slots + hit_slots
+        admitted_slots = []
+        if newest_cpu[row] >= 0 and newest_cpu[row] in global_cpu[row]:
+            old_reserved = reserved_cpu[row]
+            next_reserved = evictables[len(misses)]
+            admitted_slots.append(old_reserved)
+            dgi_cpu[row][old_reserved] = newest_cpu[row]
+            dgi_cpu[row][next_reserved] = -1
+            reserved_cpu[row] = next_reserved
+
+        lru_cpu[row] = (
+            evictables[len(misses) + len(admitted_slots) :]
+            + miss_slots
+            + hit_slots
+            + admitted_slots
+        )
 
     coordinator.device_global_indices[:num_tokens] = torch.tensor(
         dgi_cpu, dtype=torch.int32, device=coordinator.device
     )
     coordinator.lru_slots[:num_tokens] = torch.tensor(
         lru_cpu, dtype=torch.int16, device=coordinator.device
+    )
+    coordinator.reserved_slots[:num_tokens] = torch.tensor(
+        reserved_cpu, dtype=torch.int16, device=coordinator.device
     )
 
     if miss_src:
@@ -1491,20 +1510,34 @@ def test_hisparse_kernel_matches_fallback():
     )
     req_ids = torch.arange(num_reqs, dtype=torch.int32, device=device)
     seq_len = blocks_per_req * block_size
-    newest_pos = seq_len - 1
-    slot_mapping = block_table[:, -1].to(torch.int64) * block_size + (block_size - 1)
-    newest_global = slot_mapping.to(torch.int32).contiguous()
-
+    scale = torch.tensor(1.0, device=device)
     for step in range(8):
-        topk = torch.stack(
-            [
-                torch.randperm(seq_len, device=device)[:top_k].to(torch.int32)
-                for _ in range(num_reqs)
-            ]
+        newest_pos = seq_len - 8 + step
+        slot_mapping = (
+            block_table[:, newest_pos // block_size].to(torch.int64) * block_size
+            + newest_pos % block_size
         )
+        newest_global = slot_mapping.to(torch.int32).contiguous()
+        topk_rows = []
+        for _ in range(num_reqs):
+            permutation = torch.randperm(seq_len - 1, device=device)
+            permutation += permutation >= newest_pos
+            topk_rows.append(permutation[:top_k].to(torch.int32))
+        topk = torch.stack(topk_rows)
         # Sprinkle in padding and the newest position.
         topk[:, -1] = -1
         topk[:, 0] = newest_pos
+
+        newest_rows = flat_pool[slot_mapping.cpu()].to(device)
+        for coordinator in (kernel_c, fallback_c):
+            coordinator.write_newest_rows(
+                newest_rows[:, :-2],
+                newest_rows[:, -2:].view(num_reqs, 1, 2),
+                kv_pool,
+                slot_mapping,
+                "auto",
+                scale,
+            )
 
         hot_k, idx_k = kernel_c.swap_in(
             kv_cache=kv_pool,
@@ -1538,6 +1571,9 @@ def test_hisparse_kernel_matches_fallback():
         torch.testing.assert_close(
             kernel_c.lru_slots, fallback_c.lru_slots, rtol=0, atol=0
         )
+        torch.testing.assert_close(
+            kernel_c.reserved_slots, fallback_c.reserved_slots, rtol=0, atol=0
+        )
         torch.testing.assert_close(kernel_c.hot_cache, fallback_c.hot_cache)
 
         # Data correctness: every valid hot index holds the right KV row.
@@ -1546,13 +1582,9 @@ def test_hisparse_kernel_matches_fallback():
         global_ref = _triton_convert_reference_impl(
             req_ids, block_table, topk, block_size, top_k
         )
-        newest_mask = topk == newest_pos
         gathered = flat_hot[idx_k[valid].to(torch.long)].cpu()
         expected = flat_pool[global_ref[valid].cpu().to(torch.long)]
-        # Newest rows are served from the reserved slot, which this test
-        # does not populate; exclude them from the data check.
-        data_mask = ~newest_mask[valid].cpu()
-        torch.testing.assert_close(gathered[data_mask], expected[data_mask])
+        torch.testing.assert_close(gathered, expected)
 
 
 @requires_hisparse_ops
@@ -1785,6 +1817,116 @@ def test_hisparse_backup_packed_indexer_pages():
 
 
 @requires_hisparse_ops
+def test_hisparse_rotates_newest_slot_without_copy_or_reload():
+    """Selected newest bytes stay put while the reserved-slot role rotates."""
+    device = torch.device(DEVICE_TYPE)
+    block_size = 4
+    row_width = 8
+    kv_pool = torch.zeros(8, block_size, row_width, dtype=torch.float32).pin_memory()
+    coordinator = _make_hisparse_coordinator(block_size=block_size, row_width=row_width)
+    block_table = torch.arange(8, dtype=torch.int32, device=device).view(1, -1)
+    req_ids = torch.zeros(1, dtype=torch.int32, device=device)
+    scale = torch.tensor(1.0, device=device)
+
+    first_slot = torch.tensor([4], dtype=torch.int64, device=device)
+    first_kv_c = torch.randn(1, row_width - 2, device=device)
+    first_k_pe = torch.randn(1, 1, 2, device=device)
+    first_row = torch.cat([first_kv_c[0], first_k_pe[0, 0]]).clone()
+    initial_reserved = coordinator.reserved_slots[0].item()
+    first_hot_slot = _hisparse_hot_slot(coordinator, 0, initial_reserved)
+    coordinator.write_newest_rows(
+        first_kv_c, first_k_pe, kv_pool, first_slot, "auto", scale
+    )
+    topk = torch.tensor([[4, -1, -1, -1]], dtype=torch.int32, device=device)
+    coordinator.swap_in(
+        kv_cache=kv_pool,
+        req_id_per_token=req_ids,
+        block_table=block_table,
+        topk_indices=topk,
+        block_size=block_size,
+        slot_mapping=first_slot,
+    )
+
+    second_slot = torch.tensor([5], dtype=torch.int64, device=device)
+    coordinator.write_newest_rows(
+        torch.randn(1, row_width - 2, device=device),
+        torch.randn(1, 1, 2, device=device),
+        kv_pool,
+        second_slot,
+        "auto",
+        scale,
+    )
+    torch.accelerator.synchronize()
+    kv_pool.view(-1, row_width)[first_slot.item()].fill_(1234)
+    _, hot_indices = coordinator.swap_in(
+        kv_cache=kv_pool,
+        req_id_per_token=req_ids,
+        block_table=block_table,
+        topk_indices=topk,
+        block_size=block_size,
+        slot_mapping=second_slot,
+    )
+    torch.accelerator.synchronize()
+
+    hot_row = coordinator.hot_cache.view(-1, row_width)[hot_indices[0, 0]]
+    torch.testing.assert_close(hot_row, first_row)
+    assert hot_indices[0, 0].item() == first_hot_slot
+    assert coordinator.reserved_slots[0].item() != initial_reserved
+    assert coordinator._swap_stats.tolist() == [1, 0]
+
+
+@requires_hisparse_ops
+def test_hisparse_shared_layer_uses_prerotation_newest_slot():
+    """Shared layers write current KV into the leader's pre-rotation row."""
+    device = torch.device(DEVICE_TYPE)
+    block_size = 4
+    row_width = 8
+    leader_pool = torch.zeros(
+        8, block_size, row_width, dtype=torch.float32
+    ).pin_memory()
+    shared_pool = torch.zeros_like(leader_pool).pin_memory()
+    hisparse._GROUP_PLANS.clear()
+    leader = _make_hisparse_coordinator(block_size=block_size, row_width=row_width)
+    shared = _make_hisparse_coordinator(block_size=block_size, row_width=row_width)
+    shared.join_group(leader)
+    shared.bind_source_cache(shared_pool)
+    block_table = torch.arange(8, dtype=torch.int32, device=device).view(1, -1)
+    req_ids = torch.zeros(1, dtype=torch.int32, device=device)
+    scale = torch.tensor(1.0, device=device)
+    slot = torch.tensor([4], dtype=torch.int64, device=device)
+    topk = torch.tensor([[4, -1, -1, -1]], dtype=torch.int32, device=device)
+
+    leader.write_newest_rows(
+        torch.randn(1, row_width - 2, device=device),
+        torch.randn(1, 1, 2, device=device),
+        leader_pool,
+        slot,
+        "auto",
+        scale,
+    )
+    leader.swap_in(
+        kv_cache=leader_pool,
+        req_id_per_token=req_ids,
+        block_table=block_table,
+        topk_indices=topk,
+        block_size=block_size,
+        slot_mapping=slot,
+        produce_plan=True,
+    )
+    shared_kv_c = torch.randn(1, row_width - 2, device=device)
+    shared_k_pe = torch.randn(1, 1, 2, device=device)
+    shared_row = torch.cat([shared_kv_c[0], shared_k_pe[0, 0]]).clone()
+    shared.write_newest_rows(shared_kv_c, shared_k_pe, shared_pool, slot, "auto", scale)
+    torch.accelerator.synchronize()
+
+    current_newest = leader._plan.newest_indices[0]
+    assert current_newest.item() >= 0
+    torch.testing.assert_close(
+        shared.hot_cache.view(-1, row_width)[current_newest], shared_row
+    )
+
+
+@requires_hisparse_ops
 def test_hisparse_newest_write_and_recycled_slot_invalidation():
     """Newest writes clamp padding and invalidated rows are loaded again."""
     device = torch.device(DEVICE_TYPE)
@@ -1805,7 +1947,14 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
     block_table = torch.tensor([[2, 0, 4]], dtype=torch.int32, device=device)
     req_ids = torch.tensor([0], dtype=torch.int32, device=device)
     newest_global = 4 * block_size
-    slot_mapping = torch.tensor([newest_global], dtype=torch.int64, device=device)
+    padded_global = 1
+    padded_row = flat_pool[padded_global].clone()
+    slot_mapping = torch.tensor(
+        [newest_global, padded_global], dtype=torch.int64, device=device
+    )
+    coordinator.set_request_state_indices(
+        torch.tensor([0, -1], dtype=torch.int32, device=device)
+    )
 
     kv_c = torch.randn(3, row_width - 2, device=device)
     k_pe = torch.randn(3, 1, 2, device=device)
@@ -1820,6 +1969,7 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
     torch.accelerator.synchronize()
     expected_row = torch.cat([kv_c[0], k_pe[0, 0]]).cpu()
     torch.testing.assert_close(flat_pool[newest_global], expected_row)
+    torch.testing.assert_close(flat_pool[padded_global], padded_row)
     flat_hot = coordinator.hot_cache.view(-1, row_width)
     newest_hot_slot = _hisparse_hot_slot(coordinator, 0, buf)
     torch.testing.assert_close(flat_hot[newest_hot_slot].cpu(), expected_row)
@@ -1840,6 +1990,7 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
     torch.accelerator.synchronize()
     stale_hot_slot = hot_indices[0, 0].item()
     stale_row = flat_hot[stale_hot_slot].clone()
+    assert coordinator.reserved_slots[0].item() == buf
 
     flat_pool[8] += 1000
     coordinator.invalidate_slots(torch.tensor([8], device=device))
