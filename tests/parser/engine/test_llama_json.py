@@ -836,6 +836,81 @@ class TestStreaming:
             ], text
 
 
+class TestLegacyParityContracts:
+    """Deliberate, documented behavior changes vs. the legacy parser.
+
+    Both are forced by the streaming contract — output is append-only and
+    must match the non-streaming result exactly; see the module docstring
+    of vllm/parser/llama_json.py.
+    """
+
+    @pytest.mark.parametrize("chunk_size", [1, 3, 7, 64])
+    def test_leading_prose_is_content_alongside_call_in_both_modes(
+        self, mock_tokenizer, mock_request, chunk_size
+    ):
+        """Prose before the envelope is content in BOTH modes.
+
+        Legacy dropped it non-streaming (content=None) and, streaming,
+        returned the whole output as content with no tool call at all.
+        Streaming cannot retract prose already emitted before the "{"
+        arrives, so reporting it is the only parity-preserving option.
+        """
+        text = 'Let me check. {"name": "get_weather", "parameters": {"city": "SF"}}'
+        reference = LlamaJsonParser(mock_tokenizer).extract_tool_calls_from_content(
+            text, mock_request
+        )
+        assert reference.tools_called is True
+        assert reference.content == "Let me check."
+        assert reference.tool_calls[0].function.name == "get_weather"
+
+        parser = LlamaJsonParser(mock_tokenizer)
+        content, calls = _accumulate(_stream(parser, mock_request, text, chunk_size))
+        # Non-streaming strips content whitespace around tool calls;
+        # streaming cannot retract the space it already emitted.
+        assert content.rstrip() == reference.content
+        assert [c["name"] for c in calls] == ["get_weather"]
+        assert [c["args"] for c in calls] == [
+            tc.function.arguments for tc in reference.tool_calls
+        ]
+
+    @pytest.mark.parametrize("chunk_size", [1, 3, 7, 64])
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            (
+                '{"name": "f", "parameters": {"a": 1}, "arguments": {"b": 2}}',
+                '{"a": 1}',
+            ),
+            (
+                '{"name": "f", "arguments": {"b": 2}, "parameters": {"a": 1}}',
+                '{"b": 2}',
+            ),
+        ],
+        ids=["parameters-first", "arguments-first"],
+    )
+    def test_duplicate_alias_first_in_text_wins(
+        self, mock_tokenizer, mock_request, text, expected, chunk_size
+    ):
+        """With both aliases present, the first one in the text wins.
+
+        Legacy preferred "arguments" non-streaming, but its streaming path
+        asserted on the duplicate and emitted no arguments at all.  The
+        value streams as soon as its key is seen, so preferring a later
+        "arguments" would have to retract already-streamed "parameters"
+        text; first-in-text-wins is identical at every chunk size and in
+        both modes.
+        """
+        reference = LlamaJsonParser(mock_tokenizer).extract_tool_calls_from_content(
+            text, mock_request
+        )
+        assert [tc.function.arguments for tc in reference.tool_calls] == [expected]
+
+        parser = LlamaJsonParser(mock_tokenizer)
+        content, calls = _accumulate(_stream(parser, mock_request, text, chunk_size))
+        assert content == ""
+        assert [c["args"] for c in calls] == [expected]
+
+
 class TestToolChoiceNone:
     """tool_choice="none" (including tool-less requests, where "none" is
     the default) must return tool-call-shaped JSON as content.
