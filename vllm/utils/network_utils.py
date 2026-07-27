@@ -159,10 +159,12 @@ def get_open_port() -> int:
     if "VLLM_DP_MASTER_PORT" in os.environ:
         dp_master_port = envs.VLLM_DP_MASTER_PORT
         reserved_port_range = range(dp_master_port, dp_master_port + 10)
+        next_port = envs.VLLM_PORT
         while True:
-            candidate_port = _get_open_port()
+            candidate_port = _get_open_port(start_port=next_port, max_attempts=1000)
             if candidate_port not in reserved_port_range:
                 return candidate_port
+            next_port = candidate_port + 1
     return _get_open_port()
 
 
