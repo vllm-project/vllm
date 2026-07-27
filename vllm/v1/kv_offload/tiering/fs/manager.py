@@ -49,7 +49,11 @@ from vllm.v1.kv_offload.tiering.base import (
     ScheduleEndContext,
     SecondaryTierManager,
 )
-from vllm.v1.kv_offload.tiering.fs.io import batch_load_block, batch_store_block, probe_o_direct
+from vllm.v1.kv_offload.tiering.fs.io import (
+    batch_load_block,
+    batch_store_block,
+    probe_o_direct,
+)
 from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
 
 if TYPE_CHECKING:
