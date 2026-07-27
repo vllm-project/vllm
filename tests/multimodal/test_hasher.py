@@ -134,3 +134,46 @@ def test_hash_image_exif_id():
     assert hasher.hash_kwargs(image=image1) == hasher.hash_kwargs(image=id.bytes)
     # second image has non-UUID in ImageID, so it should hash to the image data
     assert hasher.hash_kwargs(image=image2) == hasher.hash_kwargs(image=image2a)
+
+
+def _rgba_png_bytes() -> bytes:
+    from io import BytesIO
+
+    image = Image.new("RGBA", (8, 8), (255, 0, 0, 128))
+    buf = BytesIO()
+    image.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_hash_collision_media_io_config():
+    from vllm.multimodal.media.image import ImageMediaIO
+
+    data = _rgba_png_bytes()
+    white = ImageMediaIO(rgba_background_color=(255, 255, 255)).load_bytes(data)
+    black = ImageMediaIO(rgba_background_color=(0, 0, 0)).load_bytes(data)
+    white2 = ImageMediaIO(rgba_background_color=(255, 255, 255)).load_bytes(data)
+    keep = ImageMediaIO(image_mode=None).load_bytes(data)
+
+    hasher = MultiModalHasher
+    assert hasher.hash_kwargs(image=white) != hasher.hash_kwargs(image=black)
+    assert hasher.hash_kwargs(image=white) != hasher.hash_kwargs(image=keep)
+    assert hasher.hash_kwargs(image=white) == hasher.hash_kwargs(image=white2)
+
+
+def test_hash_media_io_noop_config_preserves_hash():
+    from io import BytesIO
+
+    from vllm.multimodal.media.base import MediaWithBytes
+    from vllm.multimodal.media.image import ImageMediaIO
+
+    image = Image.new("RGB", (8, 8), (0, 128, 255))
+    buf = BytesIO()
+    image.save(buf, format="PNG")
+    data = buf.getvalue()
+
+    loaded = ImageMediaIO().load_bytes(data)
+    assert loaded.io_config is None
+
+    plain = MediaWithBytes(loaded.media, data)
+    hasher = MultiModalHasher
+    assert hasher.hash_kwargs(image=loaded) == hasher.hash_kwargs(image=plain)
