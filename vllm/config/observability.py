@@ -86,8 +86,8 @@ class ObservabilityConfig:
     enable_zmq_metrics: bool = False
     """Enable publishing metrics via ZMQ."""
 
-    zmq_metrics_port: int = 5556
-    """Port to bind the ZMQ PUB socket to."""
+    zmq_metrics_endpoint: str = "tcp://*:5556"
+    """Endpoint to bind/connect the ZMQ PUB socket to."""
 
     @cached_property
     def collect_model_forward_time(self) -> bool:

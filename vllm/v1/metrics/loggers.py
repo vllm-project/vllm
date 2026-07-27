@@ -1338,10 +1338,18 @@ class ZmqStatLogger(AggregateStatLoggerBase):
         self._ctx = zmq.Context.instance()
         self._pub = self._ctx.socket(zmq.PUB)
 
-        port = vllm_config.observability_config.zmq_metrics_port
-        endpoint = f"tcp://*:{port}"
-        logger.info("Binding ZMQ metrics publisher to %s", endpoint)
-        self._pub.bind(endpoint)
+        endpoint = vllm_config.observability_config.zmq_metrics_endpoint
+        if endpoint and (
+            "*" in endpoint
+            or "::" in endpoint
+            or endpoint.startswith("ipc://")
+            or endpoint.startswith("inproc://")
+        ):
+            logger.info("Binding ZMQ metrics publisher to %s", endpoint)
+            self._pub.bind(endpoint)
+        elif endpoint:
+            logger.info("Connecting ZMQ metrics publisher to %s", endpoint)
+            self._pub.connect(endpoint)
 
         self._thread = threading.Thread(
             target=self._publisher_thread,
