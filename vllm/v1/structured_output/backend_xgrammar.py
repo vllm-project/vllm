@@ -248,6 +248,20 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         ):
             return True
 
+        # A string mixing a generative constraint (pattern or format) with
+        # explicit length bounds. xgrammar compiles the pattern/format side
+        # and silently drops minLength/maxLength from the grammar, so output
+        # can violate the bound without any error surfacing. Verified against
+        # the compiled EBNF: pattern/format grammars come out byte-identical
+        # with and without the length keywords, while maxLength alone lowers
+        # to {0, N} correctly.
+        if (
+            obj.get("type") == "string"
+            and ("pattern" in obj or "format" in obj)
+            and ("minLength" in obj or "maxLength" in obj)
+        ):
+            return True
+
         # Unsupported keywords for objects
         if obj.get("type") == "object" and any(
             key in obj for key in ("patternProperties", "propertyNames")
