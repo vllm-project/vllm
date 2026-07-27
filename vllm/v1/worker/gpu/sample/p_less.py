@@ -16,7 +16,7 @@ def _p_less_kernel(
 ):
     token_idx = tl.program_id(0).to(tl.int64)
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
-    p_less = tl.load(p_less_ptr + req_state_idx).to(tl.bool)
+    p_less = tl.load(p_less_ptr + req_state_idx).to(tl.int1)
     if not p_less:
         return
 
@@ -44,7 +44,7 @@ def _p_less_kernel(
         )
         exps = tl.exp(logits - max_logit)
         sum_exps += tl.sum(exps)
-        sum_squared_exps += tl.sum(exps**2.0)
+        sum_squared_exps += tl.sum(exps * exps)
     threshold = tl.log(sum_squared_exps) - tl.log(sum_exps) + max_logit
 
     for i in range(0, vocab_size, BLOCK_SIZE):
