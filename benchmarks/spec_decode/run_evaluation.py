@@ -17,14 +17,22 @@ from typing import Any
 from urllib import request
 
 ROOT = Path("/apdcephfs_sgfd2/share_300532381/ruicen/draft_models")
-JSON_ROOT = ROOT / "processed_jsonl_datasets"
+JSON_ROOT = ROOT / "deepspec_eval_datasets"
 DATASETS = {
-    "math500": "math500_eval.jsonl",
-    "humaneval": "humaneval_eval.jsonl",
-    "gsm8k": "gsm8k_eval.jsonl",
-    "mtbench": "mt-bench_eval.jsonl",
-    "livecodebench": "livecodebench_eval.jsonl",
-    "mbpp": "mbpp_eval.jsonl",
+    "math500": "math500.jsonl",
+    "humaneval": "humaneval.jsonl",
+    "gsm8k": "gsm8k.jsonl",
+    "mtbench": "mt-bench.jsonl",
+    "livecodebench": "livecodebench.jsonl",
+    "mbpp": "mbpp.jsonl",
+}
+DATASET_LIMITS = {
+    "gsm8k": 500,
+    "math500": 500,
+    "humaneval": 164,
+    "mbpp": 256,
+    "livecodebench": 500,
+    "mtbench": 80,
 }
 CONCURRENCIES = [4, 8, 16, 32, 64, 128]
 CLIENT = Path(__file__).with_name("load_generator.py")
@@ -132,13 +140,16 @@ def complete(path: Path, args: argparse.Namespace) -> bool:
         result = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return False
+    dataset = result.get("dataset_name")
+    max_prompts = args.max_prompts or DATASET_LIMITS.get(dataset)
     return (
         result.get("status") == "ok"
         and result.get("warmup_seconds") == args.warmup_seconds
         and result.get("measure_seconds") == args.measure_seconds
         and result.get("repeats") == args.repeats
         and result.get("max_tokens") == args.max_tokens
-        and result.get("max_prompts") == args.max_prompts
+        and result.get("max_prompts") == max_prompts
+        and result.get("prompt_seed") == args.prompt_seed
     )
 
 
@@ -162,6 +173,7 @@ def run_cell(
     if args.resume and complete(result, args):
         print(f"skip {method} {dataset} c{concurrency}", flush=True)
         return
+    max_prompts = args.max_prompts or DATASET_LIMITS[dataset]
     command = [
         sys.executable,
         str(CLIENT),
@@ -184,7 +196,9 @@ def run_cell(
         "--max-tokens",
         str(args.max_tokens),
         "--max-prompts",
-        str(args.max_prompts),
+        str(max_prompts),
+        "--prompt-seed",
+        str(args.prompt_seed),
         "--request-prefix",
         f"{args.model_family}-{method}-{dataset}-c{concurrency}",
     ]
@@ -324,6 +338,7 @@ def main() -> int:
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--max-prompts", type=int, default=0)
+    parser.add_argument("--prompt-seed", type=int, default=980406)
     parser.add_argument("--server-timeout", type=int, default=2400)
     parser.add_argument(
         "--resume",
@@ -369,7 +384,12 @@ def main() -> int:
         "measure_seconds": args.measure_seconds,
         "repeats": args.repeats,
         "max_tokens": args.max_tokens,
-        "max_prompts": args.max_prompts,
+        "dataset_root": str(args.dataset_root),
+        "dataset_prompt_limits": {
+            dataset: args.max_prompts or DATASET_LIMITS[dataset]
+            for dataset in args.datasets
+        },
+        "prompt_seed": args.prompt_seed,
         "max_num_seqs": args.max_num_seqs,
         "gpu_memory_utilization": args.gpu_memory_utilization,
         "request": {

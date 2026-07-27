@@ -16,14 +16,27 @@
 吞吐、请求吞吐、总 token 吞吐、平均接受长度（MAT）和 draft token
 接受率。MAT 是辅助诊断指标，不是本工具的主要评测目标。
 
-这是性能评测工具，不负责准确率打分。处理后的每行 JSONL 必须包含一个
-`prompt`，并作为独立的单轮请求发送。原始 `load_from_disk` 数据集、
-MT-Bench 多轮对话和 judge 打分不属于本评测协议。
+这是性能评测工具，不负责准确率打分。数据集与 DeepSpec 对齐，每行 JSONL
+包含 `turns`，只把第一轮作为独立的单轮请求发送。MT-Bench 后续轮次和
+judge 打分不属于本评测协议。
 
 ## 默认数据
 
-- 处理后数据集：
-  `/apdcephfs_sgfd2/share_300532381/ruicen/draft_models/processed_jsonl_datasets`
+- DeepSpec 数据集：
+  `/apdcephfs_sgfd2/share_300532381/ruicen/draft_models/deepspec_eval_datasets`
+
+默认使用 DeepSpec 的固定抽样规则（`seed=980406`）：
+
+- GSM8K：从 1319 条中抽取 500 条；
+- MATH-500：500 条；
+- HumanEval：164 条；
+- MBPP：从 257 条中抽取 256 条；
+- LiveCodeBench：从 1055 条中抽取 500 条；
+- MT-Bench：80 条。
+
+数据来源、prompt 和抽样子集与 DeepSpec 对齐；吞吐协议仍保持
+`temperature=0`、4096 tokens 和闭环并发，不改成 DeepSpec 的离线
+`temperature=1`、2048 tokens、batch size 1 协议。
 
 ## 推理与采样设置
 
@@ -104,6 +117,9 @@ cd <代码目录>
 默认启用断点续跑，同一输出目录中的已完成单元会自动跳过。更换 checkpoint
 时应使用新输出目录，或通过 `--no-resume` 强制重跑。runner 只停止自己
 启动的 server 进程组，不使用 `pkill`。
+
+`--max-prompts` 默认为 `0`，表示使用上述各数据集的 DeepSpec 上限；传入
+正整数可统一覆盖该上限，适合 smoke 测试。
 
 ## 模型配置
 

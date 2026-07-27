@@ -6,6 +6,7 @@
 import argparse
 import asyncio
 import json
+import random
 import time
 from pathlib import Path
 from typing import Any
@@ -26,20 +27,25 @@ CHAT_KWARGS = {
 }
 
 
-def load_prompts(path: Path, limit: int) -> list[str]:
+def load_prompts(path: Path, limit: int, seed: int = 980406) -> list[str]:
     prompts = []
     with path.open(encoding="utf-8") as stream:
         for line in stream:
             if not line.strip():
                 continue
-            prompt = json.loads(line).get("prompt")
+            row = json.loads(line)
+            prompt = row.get("prompt")
+            if prompt is None:
+                turns = row.get("turns")
+                prompt = turns[0] if isinstance(turns, list) and turns else None
             if not isinstance(prompt, str) or not prompt:
                 raise ValueError(f"missing prompt in {path}")
             prompts.append(prompt)
-            if limit and len(prompts) >= limit:
-                break
     if not prompts:
         raise ValueError(f"no prompts in {path}")
+    if limit and len(prompts) > limit:
+        random.Random(seed).shuffle(prompts)
+        prompts = prompts[:limit]
     return prompts
 
 
@@ -129,7 +135,7 @@ def window(
 
 
 async def run(args: argparse.Namespace) -> dict[str, Any]:
-    prompts = load_prompts(args.dataset, args.max_prompts)
+    prompts = load_prompts(args.dataset, args.max_prompts, args.prompt_seed)
     timeout = aiohttp.ClientTimeout(total=3600)
     connector = aiohttp.TCPConnector(limit=args.concurrency + 1)
     stop = asyncio.Event()
@@ -207,6 +213,8 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         "repeats": args.repeats,
         "max_tokens": args.max_tokens,
         "max_prompts": args.max_prompts,
+        "prompt_count": len(prompts),
+        "prompt_seed": args.prompt_seed,
         "request": {
             **request_payload(args.model, "<prompt>", args.max_tokens),
             "messages": "<dataset prompt>",
@@ -228,6 +236,7 @@ def main() -> int:
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--max-prompts", type=int, default=0)
+    parser.add_argument("--prompt-seed", type=int, default=980406)
     parser.add_argument("--request-prefix", default="throughput")
     parser.add_argument("--require-spec", action="store_true")
     args = parser.parse_args()
