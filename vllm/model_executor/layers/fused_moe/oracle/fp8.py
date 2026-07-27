@@ -33,6 +33,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
     kFp8Static128BlockSym,
+    kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
 
@@ -113,8 +114,16 @@ def _get_priority_backends(
     if (
         current_platform.is_cuda()
         and current_platform.is_device_capability(90)
-        and activation_key == kFp8Dynamic128Sym
-        and weight_key == kFp8Static128BlockSym
+        and (
+            (
+                activation_key == kFp8Dynamic128Sym
+                and weight_key == kFp8Static128BlockSym
+            )
+            or (
+                activation_key == kFp8StaticTensorSym
+                and weight_key == kFp8StaticTensorSym
+            )
+        )
     ):
         if moe_config.moe_parallel_config.ep_size > 1:
             _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.FLASHINFER_CUTLASS)
