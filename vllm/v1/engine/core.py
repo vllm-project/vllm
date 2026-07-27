@@ -78,6 +78,11 @@ from vllm.v1.engine.utils import (
     get_physical_gpu_ids_for_local_dp_rank,
 )
 from vllm.v1.executor import Executor
+from vllm.v1.fault_tolerance.engine_core_sentinel import (
+    FT_UTILITY_METHOD,
+    EngineCoreSentinel,
+    fault_tolerant_wrapper,
+)
 from vllm.v1.kv_cache_interface import KVCacheConfig, get_kv_cache_spec_kind
 from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
@@ -1052,6 +1057,7 @@ class EngineCoreProc(EngineCore):
             # Only publish request queue stats to coordinator for "internal"
             # and "hybrid" LB modes.
             self.publish_dp_lb_stats = internal_dp_balancing
+            self.last_counts = (0, 0)
 
             self.addresses = addresses
             self.process_input_queue_block = True
@@ -1069,6 +1075,16 @@ class EngineCoreProc(EngineCore):
                 executor_fail_callback,
                 internal_dp_balancing,
             )
+
+            # Initialize fault tolerance settings.
+            self.enable_fault_tolerance = (
+                vllm_config.parallel_config.enable_fault_tolerance
+            )
+            if self.enable_fault_tolerance:
+                self.ft_sentinel = EngineCoreSentinel(
+                    engine=self,
+                    parallel_config=vllm_config.parallel_config,
+                )
 
             # Background Threads and Queues for IO. These enable us to
             # overlap ZMQ socket IO with GPU since they release the GIL,
@@ -1355,15 +1371,32 @@ class EngineCoreProc(EngineCore):
         """Returns true if shutdown has not been requested."""
         return self.shutdown_state == EngineShutdownState.RUNNING
 
+    @fault_tolerant_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
         while self._handle_shutdown():
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
+            # Publish request counts before and after GPU step to ensure freshness.
+            self._maybe_publish_request_counts()
             # 2) Step the engine core and return the outputs.
             self._process_engine_step()
+            self._maybe_publish_request_counts()
 
         raise SystemExit
+
+    def _maybe_publish_request_counts(self):
+        if not self.publish_dp_lb_stats:
+            return
+
+        # Publish our request counts (if they've changed).
+        counts = self.scheduler.get_request_counts()
+        if counts != self.last_counts:
+            self.last_counts = counts
+            stats = SchedulerStats(
+                *counts, kv_cache_usage=self.scheduler.get_kv_cache_usage()
+            )
+            self.output_queue.put_nowait((-1, EngineCoreOutputs(scheduler_stats=stats)))
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
@@ -1672,6 +1705,14 @@ class EngineCoreProc(EngineCore):
                         except Exception:
                             self._handle_request_preproc_error(req)
                             continue
+                    elif request_type == EngineCoreRequestType.UTILITY:
+                        request = generic_decoder.decode(data_frames)
+                        client_idx, call_id, method, args = request
+                        if method == FT_UTILITY_METHOD:
+                            self.ft_sentinel.handle_command(
+                                client_idx, call_id, args[0]
+                            )
+                            continue
                     else:
                         request = generic_decoder.decode(data_frames)
 
@@ -1866,7 +1907,6 @@ class DPEngineCoreProc(EngineCoreProc):
         # finished with DP peers every N steps.
         self.step_counter = 0
         self.current_wave = 0
-        self.last_counts = (0, 0)
 
         # Two-phase pause protocol state. When pending_pause is True, the
         # engine keeps stepping (dummy batches) while waiting for all DP
@@ -2003,12 +2043,16 @@ class DPEngineCoreProc(EngineCoreProc):
         if not self.publish_dp_lb_stats:
             return
 
-        # Publish our request counts (if they've changed).
+        # Publish our request counts (if they've changed), stamped with the
+        # lockstep-synchronized step counter and wave number.
         counts = self.scheduler.get_request_counts()
         if counts != self.last_counts:
             self.last_counts = counts
             stats = SchedulerStats(
-                *counts, step_counter=self.step_counter, current_wave=self.current_wave
+                *counts,
+                kv_cache_usage=self.scheduler.get_kv_cache_usage(),
+                step_counter=self.step_counter,
+                current_wave=self.current_wave,
             )
             self.output_queue.put_nowait((-1, EngineCoreOutputs(scheduler_stats=stats)))
 
@@ -2021,6 +2065,7 @@ class DPEngineCoreProc(EngineCoreProc):
             and self.step_counter % self.prefill_schedule_interval != 0
         )
 
+    @fault_tolerant_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
 
