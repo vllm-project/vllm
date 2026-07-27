@@ -774,6 +774,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             use_masked_mha = (
                 self.prefill_backend is not None
                 and self.impl.masked_mha_available  # type: ignore[attr-defined]
+                and self.impl.dcp_world_size <= 1
                 and prefill is not None
                 and _use_b200_dsv32_masked_mha(
                     device_name=self._sparse_mla_routing_device_name,

@@ -691,7 +691,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             )
             dense_mask = torch.nn.functional.pad(dense_mask, (0, 1))
             suffix_topk = topk_per_req
-        if dense_mask is None:
+        else:
             suffix_topk = self._remap_topk_to_ranges(topk_per_req, context_lens, q_lens)
         suffix_output, suffix_lse = self._run_masked_mha(
             q=q,
