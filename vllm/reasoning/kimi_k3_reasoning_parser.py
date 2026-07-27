@@ -104,6 +104,8 @@ class KimiK3ReasoningParser(ReasoningParser):
         self._think_close_ids = tokenizer.encode(
             self._think_close, add_special_tokens=False
         )
+        self._last_streaming_delta_token_ids: tuple[int, ...] | None = None
+        self._last_streaming_content_token_ids: list[int] | None = None
 
     @property
     def reasoning_start_str(self) -> str | None:
@@ -140,13 +142,22 @@ class KimiK3ReasoningParser(ReasoningParser):
             return last_close != -1
         return last_close > last_open
 
-    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
+    def _extract_content_ids(self, input_ids: list[int]) -> list[int]:
         if not self._thinking_enabled:
             return input_ids
         idx = _subseq_index(input_ids, self._think_close_ids)
         if idx == -1:
             return []  # still reasoning
         return input_ids[idx + len(self._think_close_ids) :]
+
+    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
+        cached_delta_ids = self._last_streaming_delta_token_ids
+        cached_content_ids = self._last_streaming_content_token_ids
+        self._last_streaming_delta_token_ids = None
+        self._last_streaming_content_token_ids = None
+        if cached_delta_ids == tuple(input_ids) and cached_content_ids is not None:
+            return cached_content_ids
+        return self._extract_content_ids(input_ids)
 
     def _strip_content_wrapper(self, text: str) -> str:
         """Strip ``<|open|>response<|sep|>…<|close|>response<|sep|>`` wrapper and
@@ -313,6 +324,8 @@ class KimiK3ReasoningParser(ReasoningParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
+        self._last_streaming_delta_token_ids = None
+        self._last_streaming_content_token_ids = None
         if not self._thinking_enabled:
             return DeltaMessage(content=delta_text)
 
@@ -324,6 +337,10 @@ class KimiK3ReasoningParser(ReasoningParser):
         # split the buffer at the close marker into reasoning vs trailing content.
         m_close = self._think_close_re.search(current_text)
         if m_close is not None:
+            self._last_streaming_delta_token_ids = tuple(delta_token_ids)
+            self._last_streaming_content_token_ids = self._extract_content_ids(
+                list(current_token_ids)
+            )
             m_open = self._think_open_re.search(current_text)
             r_start = m_open.end() if m_open is not None else 0
             reasoning = current_text[r_start : m_close.start()]

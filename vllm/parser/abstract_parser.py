@@ -849,7 +849,7 @@ class DelegatingParser(Parser):
             if should_transition:
                 state.reasoning_ended = True
                 reasoning_transitioned = True
-                current_token_ids = self.extract_content_ids(current_token_ids)
+                current_token_ids = self.extract_content_ids(delta_token_ids)
                 # Flush whenever the reasoning parser is engine-based (not only
                 # when _engine_based is True): it buffers the post-marker text
                 # (e.g. the "<" of "<tool_call>"), surfaced via finish_streaming().

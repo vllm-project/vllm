@@ -168,6 +168,7 @@ def test_streaming_split_close_marker_hands_content_downstream():
     assert isinstance(closed, DeltaMessage)
     assert closed.reasoning is None
     assert closed.content == f"{RESPONSE_OPEN}answer"
+    assert parser.extract_content_ids([2, 3, 10]) == [10]
 
 
 def test_thinking_disabled_streams_content():
