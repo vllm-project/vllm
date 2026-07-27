@@ -413,9 +413,9 @@ def _replayssm_output_only_kernel(
             B_all_dot = tl.where(
                 offs_k_dot[:, None] == write_pos, B_cur_tile[None, :], B_all_dot
             )
-            # tf32x3 on CUDA and ieee elsewhere keep fp32 parity with the
-            # elementwise baseline (plain tf32 on fp32 inputs drifts ~1e-2);
-            # bf16/fp16 inputs are unaffected by this flag.
+            # CUDA uses tf32x3 to keep fp32 parity with the elementwise
+            # baseline. Other platforms use their backend default; bf16/fp16
+            # inputs are unaffected by this flag.
             B_scaled = (B_all_dot.to(tl.float32) * scale_dot[:, None]).to(
                 x_ptr.dtype.element_ty
             )
@@ -581,10 +581,9 @@ def selective_state_update_replayssm_output_only(
     nf_nds = triton.cdiv(bs_dstate, nf_dstate_tile)
     fl_dstate_tile = max(16, min(fl_tile, bs_dstate))
     fl_nds = triton.cdiv(bs_dstate, fl_dstate_tile)
-    # AMD Triton does not support tf32x3. Its default is TF32 on MI300, which
-    # exceeds the fp32 error tolerance here, so require IEEE on every ROCm GPU
-    # while retaining the faster tf32x3 path on CUDA.
-    dot_input_precision = "ieee" if current_platform.is_rocm() else "tf32x3"
+    # AMD Triton does not support tf32x3, so use its backend default. CUDA
+    # retains tf32x3 to preserve fp32 parity with the elementwise baseline.
+    dot_input_precision = None if current_platform.is_rocm() else "tf32x3"
 
     grid = lambda META: (triton.cdiv(dim, META["BLOCK_SIZE_M"]), batch, nheads)
     z_strides = (z.stride(0), z.stride(1), z.stride(2)) if z is not None else (0, 0, 0)
