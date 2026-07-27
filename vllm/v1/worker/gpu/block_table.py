@@ -123,7 +123,7 @@ class BlockTables:
         if self.num_kv_cache_groups == 1:
             # Single group: write directly, skipping the per-write group lookup.
             self.block_tables[0].apply_write()
-        else:
+        elif self.num_kv_cache_groups > 1:
             # Multiple groups: apply all block tables with one fused kernel.
             assert self.fused_writer is not None
             self.fused_writer.apply(
