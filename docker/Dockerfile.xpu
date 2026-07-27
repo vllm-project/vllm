@@ -142,7 +142,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 
 
-ENV LD_LIBRARY_PATH=/opt/intel/oneapi/ccl/2021.15/lib:/opt/intel/oneapi/mpi/2021.15/lib:/opt/intel/oneapi/compiler/${ONEAPI_VERSION}/lib:/usr/local/lib
+ENV LD_LIBRARY_PATH=/opt/intel/oneapi/ccl/2021.15/lib:/opt/intel/oneapi/mpi/2021.15/lib:/opt/intel/oneapi/compiler/${ONEAPI_VERSION}/lib:/opt/venv/lib:/usr/local/lib
 CMD ["/bin/bash"]
 
 ######################### UCX + NIXL BUILD STAGE #########################
@@ -187,13 +187,18 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM vllm-base AS vllm-openai
 
 ARG NIXL_VERSION=v1.2.0
+# Re-declare so ${ONEAPI_VERSION} expands in this stage's ENV/RUN layers.
+ARG ONEAPI_VERSION=2026.0
 
 # Copy compiled UCX runtime libraries and the pre-built NIXL wheel.
 # No compiler or autotools are installed in this stage.
 COPY --from=ucx-nixl-build /tmp/ucx_install /tmp/ucx_install
 COPY --from=ucx-nixl-build /tmp/nixl_wheels /tmp/nixl_wheels
 
-ENV LD_LIBRARY_PATH=/tmp/ucx_install/lib:${LD_LIBRARY_PATH}
+# /opt/venv/lib holds intel-sycl-rt libsycl.so.*; oneCCL 2021.15 stays on path for
+# BMG experiments but pip oneccl (reinstalled below) must win via RPATH for so.9.
+ENV SYCL_HOME=/opt/intel/oneapi/compiler/${ONEAPI_VERSION}
+ENV LD_LIBRARY_PATH=/tmp/ucx_install/lib:/opt/intel/oneapi/ccl/2021.15/lib:/opt/intel/oneapi/mpi/2021.15/lib:/opt/intel/oneapi/compiler/${ONEAPI_VERSION}/lib:/opt/venv/lib:/usr/local/lib
 
 # Install RDMA runtime libraries (no build tools) and the pre-built NIXL wheel.
 # Do not uninstall/reinstall large Python packages here to avoid extra layer
@@ -235,6 +240,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install triton-xpu==3.7.2 && \
     uv pip uninstall oneccl oneccl-devel
 
+# Offline oneCCL 2021.15 (ldconfig) links libsycl.so.8; oneAPI 2026 / torch 2.13
+# need so.9. Reinstall pip oneccl so RPATH finds so.9-linked libccl in /opt/venv/lib.
+# (BMG TP via 2021.15 is incompatible with this SYCL ABI; revisit with a so.9 CCL.)
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install oneccl==2022.0.0 oneccl-devel==2022.0.0
+
 # Keep source-dependent layers near the end so frequent code-only changes
 # don't invalidate heavy dependency and UCX/NIXL layers.
 COPY . .
@@ -251,11 +262,19 @@ RUN --mount=type=bind,source=.git,target=.git \
 ENV VLLM_TARGET_DEVICE=xpu
 ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
 
+# setup.py / cmake need oneAPI XPU runtime discovery (Caffe2Config) plus
+# /opt/venv/lib first so pip oneccl (so.9) wins over oneCCL 2021.15 (so.8).
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=.git,target=.git \
+    source "${SYCL_HOME}/env/vars.sh" && \
+    export LD_LIBRARY_PATH="/opt/venv/lib:${SYCL_HOME}/lib:${LD_LIBRARY_PATH}" && \
+    export CMPLR_ROOT="${SYCL_HOME}" && \
+    python -c "import torch; print(torch.__version__, torch.version.xpu)" && \
     uv pip install --no-build-isolation --no-deps .
 
 RUN --mount=type=cache,target=/root/.cache/uv \
+    source "${SYCL_HOME}/env/vars.sh" && \
+    export LD_LIBRARY_PATH="/opt/venv/lib:${SYCL_HOME}/lib:${LD_LIBRARY_PATH}" && \
     uv pip install -e tests/vllm_test_utils
 
 ENTRYPOINT ["vllm", "serve"]

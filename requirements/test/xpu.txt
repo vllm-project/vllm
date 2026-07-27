@@ -944,7 +944,9 @@ transformers==5.14.1
     #   compressed-tensors
     #   sentence-transformers
     #   xgrammar
-triton==3.7.2
+# xgrammar depends on unversioned triton; PyPI tops out at 3.7.1.
+# Dockerfile uninstalls this and force-installs triton-xpu==3.7.2 for XPU.
+triton==3.7.1
     # via xgrammar
 triton-xpu==3.7.2
     # via torch

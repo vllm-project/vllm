@@ -196,7 +196,7 @@ Ordered, all **off** production Ornith DS:
 |------|------------|
 | torch / oneAPI mismatch → broken XPU init | Pair **torch 2.13.0+xpu** with toolkit **2026.0**; verify pip `intel-sycl-rt` version in smoke |
 | `torchaudio` missing 2.13+xpu on index | Pin or relax at implement; don’t block serving on audio if unused |
-| oneCCL 2021.15 BMG vs torch `oneccl 2022.0` | Keep uninstall-pip + offline BMG until TP smoke; or migrate carefully |
+| oneCCL 2021.15 BMG vs torch `oneccl 2022.0` | **Resolved for this image:** keep pip `oneccl==2022.0.0` (so.9). Offline 2021.15 remains installed for experiments but must not win the loader; BMG TP blocked until so.9 CCL |
 | Larger image / longer `hal` builds | Accept; use BuildKit caches; schedule off-peak |
 | Host driver older than UMD | Keep compute-runtime 26.18 unless init fails; align with host inventory |
 | Accidental overwrite of `kris-fork-*` | **New tag namespace only**; never `docker tag` over production |
@@ -213,11 +213,11 @@ Ordered, all **off** production Ornith DS:
 - [x] **T1** Edit `Dockerfile.xpu` oneAPI pin → 2026.0 + path/`LD_LIBRARY_PATH` updates.
 - [x] **T2** Bump `requirements/xpu.txt` to `torch==2.13.0`; fix vision/audio pins; Dockerfile `triton-xpu==3.7.2`.
 - [x] **T3** Refresh `requirements/test/xpu.txt` Intel RT pins (or document regen command).
-- [x] **T4** Resolve oneCCL strategy (keep BMG 2021.15 vs 2022.0); update comments.
-- [ ] **T5** Build `${TAG}` on `hal`; record size/time.
-- [ ] **T6** Container smokes (toolkit versions, XPU init, eager, `01` canary flags).
+- [x] **T4** Resolve oneCCL strategy: pip `oneccl==2022.0.0` for so.9; BMG 2021.15 not ABI-compatible with oneAPI 2026 (documented).
+- [x] **T5** Build `hal/vllm-xpu:oneapi-2026.0-torch2.13-3deb3160c` on `hal` (~24.6GB); see `ONEAPI_2026_BUILD_NOTES.md`.
+- [x] **T6** Container smokes: toolkit versions, XPU init, matmul, `XPUGraph` capture, `supports_xpu_graph True`. Eager serve + `01` canary **deferred** (need small model with real weights / non-toy head_dim).
 - [ ] **T7** Optional scratch-in-graph / FA probe; record result for `03`.
-- [x] **T8** Minimal doc note (install inc + plan status). Optional `intel_vllm_triton` note deferred until tag exists on `hal`.
+- [x] **T8** Minimal doc note (install inc + plan status + build notes Done/Caveats).
 
 ---
 
