@@ -9,10 +9,15 @@ from vllm.v1.metrics.reader import Counter
 from ...models.utils import check_logprobs_close
 from ...utils import large_gpu_mark, multi_gpu_test
 
-# Mamba2 (Nemotron-3) hybrid.
+# Mamba2 (Nemotron-3) and GDN (Qwen3.5) hybrids.
 MAMBA2_MODEL = "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"
+GDN_MODEL = "Qwen/Qwen3.5-4B"
 MODELS = [
     pytest.param(MAMBA2_MODEL, marks=large_gpu_mark(min_gb=40)),
+]
+SPEC_MODELS = [
+    pytest.param(MAMBA2_MODEL, marks=large_gpu_mark(min_gb=40)),
+    pytest.param(GDN_MODEL, marks=large_gpu_mark(min_gb=40)),
 ]
 
 PROMPTS = [
@@ -136,3 +141,39 @@ def test_replayssm_prefix_caching_matches_baseline_tp2(vllm_runner, model_name):
     _check_replayssm_prefix_caching_parity(
         vllm_runner, model_name, tensor_parallel_size=2
     )
+
+
+def _check_replayssm_spec_parity(vllm_runner, model_name, *, num_spec_tokens=3):
+    # Speculative verify must reproduce the baseline spec path token for token:
+    # the ring replays the same recurrence the per-draft snapshots would have.
+    # Exercises the block-keyed cursors, the commit/rollback, the flush cadence
+    # and CUDA-graph capture of the fixed two-launch decode sequence.
+    common = dict(
+        max_model_len=1024,
+        trust_remote_code=True,
+        enable_prefix_caching=False,
+        mamba_cache_mode="none",
+        speculative_config={
+            "method": "ngram",
+            "num_speculative_tokens": num_spec_tokens,
+            "prompt_lookup_max": 3,
+        },
+    )
+    with vllm_runner(model_name, **common) as llm:
+        baseline = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
+    with vllm_runner(
+        model_name, use_replayssm_spec=True, replayssm_buffer_len=16, **common
+    ) as llm:
+        replay = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
+
+    check_logprobs_close(
+        outputs_0_lst=baseline,
+        outputs_1_lst=replay,
+        name_0="baseline_spec",
+        name_1="replayssm_spec",
+    )
+
+
+@pytest.mark.parametrize("model_name", SPEC_MODELS)
+def test_replayssm_spec_decode_matches_baseline(vllm_runner, model_name):
+    _check_replayssm_spec_parity(vllm_runner, model_name)

@@ -43,6 +43,7 @@ def _make_vllm_config(
             block_size=block_size,
             mamba_cache_mode="all",
             use_replayssm=False,
+            use_replayssm_spec=False,
             replayssm_buffer_len=16,
         ),
         compilation_config=SimpleNamespace(

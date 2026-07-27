@@ -727,7 +727,8 @@ class GPUModelRunner(
             is_pooling_model=self.is_pooling_model,
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
             reasoning_config=self.vllm_config.reasoning_config,
-            use_replayssm=self.cache_config.use_replayssm,
+            use_replayssm=self.cache_config.use_replayssm
+            or self.cache_config.use_replayssm_spec,
         )
 
         # Separate cuda stream for overlapping transfer of sampled token ids from
@@ -2415,7 +2416,7 @@ class GPUModelRunner(
             rswa_prefix_lens = num_prompt_tokens_cpu
 
         replayssm_decode_base_cpu = None
-        if self.cache_config.use_replayssm:
+        if self.cache_config.use_replayssm or self.cache_config.use_replayssm_spec:
             replayssm_decode_base_cpu = (
                 self.input_batch.replayssm_decode_base_cpu_tensor[:num_reqs_padded]
             )
@@ -2491,7 +2492,19 @@ class GPUModelRunner(
             )
 
             extra_attn_metadata_args = {}
-            if use_spec_decode and isinstance(
+            # use_spec_decode is step-level: it is False whenever the drafter
+            # proposed nothing anywhere in the batch. ReplaySSM-spec still needs
+            # the cursors on those steps, or the rows fall through to the
+            # baseline kernel and advance a checkpoint the ring has moved past.
+            needs_replayssm_spec_args = (
+                self.cache_config.use_replayssm_spec
+                and self.speculative_config is not None
+                and isinstance(
+                    builder,
+                    (Mamba2AttentionMetadataBuilder, GDNAttentionMetadataBuilder),
+                )
+            )
+            if (use_spec_decode or needs_replayssm_spec_args) and isinstance(
                 builder,
                 (
                     Mamba2AttentionMetadataBuilder,
@@ -7270,7 +7283,8 @@ class GPUModelRunner(
                 is_pooling_model=self.is_pooling_model,
                 cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
                 reasoning_config=self.vllm_config.reasoning_config,
-                use_replayssm=self.cache_config.use_replayssm,
+                use_replayssm=self.cache_config.use_replayssm
+                or self.cache_config.use_replayssm_spec,
                 slot_mapping_modes=slot_mapping_modes,
             )
 

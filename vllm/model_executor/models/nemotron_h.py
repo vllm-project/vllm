@@ -751,6 +751,10 @@ class NemotronHForCausalLM(
             cache_config.mamba_cache_dtype,
             cache_config.mamba_ssm_cache_dtype,
         )
+        if cache_config.use_replayssm_spec:
+            return MambaStateDtypeCalculator.append_replayssm_spec_ring(
+                base_dtype, vllm_config.model_config.dtype
+            )
         if cache_config.use_replayssm:
             return MambaStateDtypeCalculator.append_replayssm_ring(
                 base_dtype, vllm_config.model_config.dtype
@@ -772,6 +776,8 @@ class NemotronHForCausalLM(
             - conv_state_shape: Shape for convolutional state cache
             - temporal_state_shape: Shape for state space model cache
             - x_cache/dt_cache/B_cache ring-buffer shapes (use_replayssm only)
+            - post_conv_cache/dt_cache circular ring shapes
+              (use_replayssm_spec only)
         """
         parallel_config = vllm_config.parallel_config
         cache_config = vllm_config.cache_config
@@ -788,6 +794,15 @@ class NemotronHForCausalLM(
             conv_kernel=hf_config.conv_kernel,
             num_spec=vllm_config.num_speculative_tokens,
         )
+        if cache_config.use_replayssm_spec:
+            return MambaStateShapeCalculator.append_replayssm_spec_ring(
+                base_shape,
+                intermediate_size,
+                hf_config.n_groups,
+                parallel_config.tensor_parallel_size,
+                cache_config.replayssm_buffer_len,
+                vllm_config.num_speculative_tokens,
+            )
         if cache_config.use_replayssm:
             return MambaStateShapeCalculator.append_replayssm_ring(
                 base_shape,

@@ -93,6 +93,36 @@ class MambaStateDtypeCalculator:
         return (*base_dtypes, activation_dtype, torch.float32, activation_dtype)
 
     @classmethod
+    def append_replayssm_spec_ring(
+        cls,
+        base_dtypes: tuple[torch.dtype, ...],
+        model_dtype: ModelDType | torch.dtype,
+    ) -> tuple[torch.dtype, ...]:
+        """Append the ReplaySSM spec ring dtypes to a base ``(conv, ssm)`` tuple:
+        ``(post_conv_cache, dt_cache)`` = ``(activation, fp32)``. ``dt`` drives
+        the cumulative decay replay and stays fp32 regardless of state dtype.
+        """
+        activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
+        return (*base_dtypes, activation_dtype, torch.float32)
+
+    @classmethod
+    def append_gated_delta_net_replayssm_spec_ring(
+        cls,
+        base_dtypes: tuple[torch.dtype, ...],
+        model_dtype: ModelDType | torch.dtype,
+    ) -> tuple[torch.dtype, ...]:
+        """Append the GDN ReplaySSM spec ring dtypes to a base ``(conv, ssm)``
+        tuple: ``(d_cache, k_cache, g_cache)``. The d/k caches use fp16 for bf16
+        activations, which reconstructs the state more accurately at the same
+        width; ``g`` drives the cumulative decay replay and stays fp32.
+        """
+        activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
+        ring_dtype = (
+            torch.float16 if activation_dtype == torch.bfloat16 else activation_dtype
+        )
+        return (*base_dtypes, ring_dtype, ring_dtype, torch.float32)
+
+    @classmethod
     def _mamba_state_dtype(
         cls,
         model_dtype: ModelDType | torch.dtype,
@@ -221,6 +251,43 @@ class MambaStateShapeCalculator:
         )
 
     @classmethod
+    def replayssm_spec_ring_len(cls, replayssm_buffer_len: int, num_spec: int) -> int:
+        """Physical ring length: next_pow2 of the L = B + 1 + num_spec window,
+        so wraparound indexing is a bit-mask instead of a modulo.
+        """
+        return 1 << (replayssm_buffer_len + num_spec).bit_length()
+
+    @classmethod
+    def append_replayssm_spec_ring(
+        cls,
+        base_shapes: tuple[tuple[int, ...], ...],
+        intermediate_size: int,
+        n_groups: int,
+        tp_world_size: int,
+        replayssm_buffer_len: int,
+        num_spec: int,
+    ) -> tuple[tuple[int, ...], ...]:
+        """Append the ReplaySSM spec ring shapes (post_conv_cache, dt_cache) to a
+        base ``(conv, ssm)`` tuple. ``post_conv_cache`` holds x|B only; C is read
+        fresh from conv_out, so its width excludes one n_groups * state_size
+        block of the conv width. ``base_shapes`` must already carry the spec conv
+        window (``mamba2_state_shape(..., num_spec=num_spec)``).
+        """
+        local_nheads, _head_dim, state_size = base_shapes[1]
+        n_groups_ext = n_groups + cls.extra_groups_for_head_shards(
+            n_groups, tp_world_size
+        )
+        conv_dim_local = divide(
+            intermediate_size + n_groups_ext * state_size, tp_world_size
+        )
+        ring_len = cls.replayssm_spec_ring_len(replayssm_buffer_len, num_spec)
+        return (
+            *base_shapes,
+            (ring_len, conv_dim_local),
+            (local_nheads, ring_len),
+        )
+
+    @classmethod
     def short_conv_state_shape(
         cls,
         tp_world_size: int,
@@ -266,6 +333,32 @@ class MambaStateShapeCalculator:
             head_k_dim,
         )
         return conv_state_shape, temporal_state_shape
+
+    @classmethod
+    def append_gated_delta_net_replayssm_spec_ring(
+        cls,
+        base_shapes: tuple[tuple[int, ...], ...],
+        num_k_heads: int,
+        num_v_heads: int,
+        head_k_dim: int,
+        head_v_dim: int,
+        tp_world_size: int,
+        replayssm_buffer_len: int,
+        num_spec: int,
+    ) -> tuple[tuple[int, ...], ...]:
+        """Append the GDN ReplaySSM spec ring shapes (d_cache, k_cache, g_cache)
+        to a base ``(conv, ssm)`` tuple. ``base_shapes`` must already carry the
+        spec conv window (``gated_delta_net_state_shape(..., num_spec)``).
+        """
+        ring_len = cls.replayssm_spec_ring_len(replayssm_buffer_len, num_spec)
+        local_v_heads = divide(num_v_heads, tp_world_size)
+        local_k_heads = divide(num_k_heads, tp_world_size)
+        return (
+            *base_shapes,
+            (local_v_heads, ring_len, head_v_dim),
+            (local_k_heads, ring_len, head_k_dim),
+            (local_v_heads, ring_len),
+        )
 
     @classmethod
     def kda_state_shape(
