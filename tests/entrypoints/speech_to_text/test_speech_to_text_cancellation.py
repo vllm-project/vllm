@@ -53,7 +53,7 @@ async def test_non_streaming_cancel_aborts_engine_requests(
     server.asr_config = SimpleNamespace(max_audio_clip_s=30)
     server._check_model = AsyncMock(return_value=None)
     server._maybe_get_adapters = Mock(return_value=None)
-    server._preprocess_speech_to_text = AsyncMock(return_value=(engine_inputs, 40.0))
+    server._preprocess_speech_to_text = AsyncMock(return_value=(engine_inputs, 40.0, [0.0]))
     server._log_inputs = Mock()
 
     request = SimpleNamespace(
@@ -122,7 +122,7 @@ async def test_non_streaming_cancel_advances_all_chunk_generators():
     server.asr_config = SimpleNamespace(max_audio_clip_s=30)
     server._check_model = AsyncMock(return_value=None)
     server._maybe_get_adapters = Mock(return_value=None)
-    server._preprocess_speech_to_text = AsyncMock(return_value=(engine_inputs, 90.0))
+    server._preprocess_speech_to_text = AsyncMock(return_value=(engine_inputs, 90.0, [0.0]))
     server._log_inputs = Mock()
 
     request = SimpleNamespace(
