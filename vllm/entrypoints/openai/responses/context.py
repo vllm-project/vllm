@@ -431,6 +431,10 @@ class ParsableContext(ConversationContext):
         if isinstance(tool_session, Tool):
             return await tool_session.get_result_parsable_context(self)
         args = json.loads(last_msg.arguments)
+        if "code" not in args:
+            raise ValueError(
+                "code_interpreter tool call is missing the required 'code' field."
+            )
         param = {
             "code": args["code"],
         }
