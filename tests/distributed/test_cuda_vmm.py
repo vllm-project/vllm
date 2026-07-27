@@ -85,7 +85,7 @@ def test_handle_export_uses_posix_collectively(monkeypatch) -> None:
         )
         return (0, local_fd)
 
-    driver.cuMemExportToShareableHandle = export
+    monkeypatch.setattr(driver, "cuMemExportToShareableHandle", export, raising=False)
     monkeypatch.setattr(cuda_vmm, "_driver", driver)
     monkeypatch.setattr(cuda_vmm.dist, "get_world_size", lambda _group: 2)
 
@@ -306,9 +306,9 @@ def test_close_can_retry_a_failed_unmap(monkeypatch) -> None:
         driver.unmapped.append((address, size))
         return (0,)
 
-    driver.cuMemUnmap = unmap
+    monkeypatch.setattr(driver, "cuMemUnmap", unmap)
     monkeypatch.setattr(cuda_vmm, "_driver", driver)
-    monkeypatch.setattr(cuda_vmm.torch.cuda, "synchronize", lambda _device: None)
+    monkeypatch.setattr(cuda_vmm.torch.accelerator, "synchronize", lambda _device: None)
     view = RankMajorPeerView(
         global_view=MagicMock(),
         rank_local_view=None,
@@ -347,7 +347,7 @@ def _rank_major_peer_worker(rank: int, world_size: int, port: int) -> None:
         RANK=str(rank),
         WORLD_SIZE=str(world_size),
     )
-    torch.cuda.set_device(rank)
+    torch.accelerator.set_device_index(rank)
     dist.init_process_group("gloo", rank=rank, world_size=world_size)
     try:
         module_path = (
@@ -444,7 +444,7 @@ def _rank_major_peer_worker(rank: int, world_size: int, port: int) -> None:
 
 
 def _peer_access_available(world_size: int) -> bool:
-    if not current_platform.is_cuda() or torch.cuda.device_count() < world_size:
+    if not current_platform.is_cuda() or current_platform.device_count() < world_size:
         return False
     return all(
         src == dst or torch.cuda.can_device_access_peer(src, dst)

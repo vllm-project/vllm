@@ -43,6 +43,11 @@ def make_rank_major_tensor_view(
     local_tensor: torch.Tensor,
 ) -> torch.Tensor:
     """Mirror a tensor view across every rank segment without copying bytes."""
+    local_view = allocation.local_view
+    global_view = allocation.global_view
+    if local_view is None or global_view is None:
+        raise RuntimeError("Peer allocation is closed.")
+
     element_size = local_tensor.element_size()
     if allocation.bytes_per_rank % element_size != 0:
         raise ValueError(
@@ -50,7 +55,7 @@ def make_rank_major_tensor_view(
             f"{allocation.bytes_per_rank} bytes vs {element_size}."
         )
 
-    local_offset_bytes = local_tensor.data_ptr() - allocation.local_view.data_ptr()
+    local_offset_bytes = local_tensor.data_ptr() - local_view.data_ptr()
     view_span = 0 if local_tensor.numel() == 0 else 1
     for size, stride in zip(local_tensor.shape, local_tensor.stride()):
         if size > 0:
@@ -64,7 +69,7 @@ def make_rank_major_tensor_view(
     if local_offset_bytes % element_size != 0:
         raise ValueError("Tensor view is not aligned to its element size.")
 
-    global_typed = allocation.global_view.view(local_tensor.dtype)
+    global_typed = global_view.view(local_tensor.dtype)
     rank_stride = allocation.bytes_per_rank // element_size
     return torch.as_strided(
         global_typed,
@@ -148,12 +153,13 @@ class PeerMemoryFence:
             require_native_atomics=True,
             device=device,
         )
-        self._allocation.local_view.zero_()
+        local_view = self._allocation.local_view
+        if local_view is None:
+            raise RuntimeError("Peer-memory fence allocation is closed.")
+        local_view.zero_()
         torch.accelerator.synchronize()
         dist.barrier(group=group)
-        self._peer_signals = make_rank_major_tensor_view(
-            self._allocation, self._allocation.local_view
-        )
+        self._peer_signals = make_rank_major_tensor_view(self._allocation, local_view)
 
     def __call__(self) -> None:
         if self._closed:
