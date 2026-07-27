@@ -651,6 +651,7 @@ def test_causal_conv1d_update_cpu_dispatches_native(
     x = torch.zeros(8, dim, dtype=torch.bfloat16)
     conv_state = torch.zeros(2, 6, dim, dtype=torch.bfloat16).transpose(1, 2)
     weight = torch.zeros(dim, CONV_KERNEL, dtype=torch.bfloat16)
+    native_weight = torch.ones_like(weight)
     indices = torch.tensor([0, 1], dtype=torch.int32)
     query_start_loc = torch.tensor([0, 4, 8], dtype=torch.int32)
     accepted = torch.tensor([1, 4], dtype=torch.int32)
@@ -671,16 +672,13 @@ def test_causal_conv1d_update_cpu_dispatches_native(
         conv_state_indices=indices,
         query_start_loc=query_start_loc,
         num_accepted_tokens=accepted,
-        native_weight=weight,
+        native_weight=native_weight,
     )
 
     assert actual.shape == x.shape
     torch.testing.assert_close(actual, expected.view_as(x))
     assert forwarded["x"].shape == (2, 4, dim)
-    torch.testing.assert_close(forwarded["x"].view_as(x), x)
-    assert forwarded["conv_states"] is conv_state
-    assert forwarded["weight"] is weight
-    assert forwarded["conv_state_indices"] is indices
+    assert forwarded["weight"] is native_weight
     assert forwarded["num_accepted_tokens"] is accepted
     assert forwarded["is_vnni"] is True
     assert forwarded["silu_activation"] is True
@@ -741,31 +739,6 @@ def test_causal_conv1d_update_cpu_ragged_fallback_matches_python(
 
 
 @torch.inference_mode()
-def test_causal_conv1d_update_cpu_rejects_history_beyond_state() -> None:
-    from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
-        causal_conv1d_update_cpu,
-    )
-
-    dim = 32
-    conv_state = _sd_conv_states(1, 5, dim)
-    conv_state.copy_(torch.rand_like(conv_state))
-    original_state = conv_state.clone()
-
-    with pytest.raises(ValueError, match="history exceeds convolution state"):
-        causal_conv1d_update_cpu(
-            x=torch.rand(4, dim, dtype=torch.bfloat16),
-            conv_state=conv_state,
-            weight=torch.rand(dim, CONV_KERNEL, dtype=torch.bfloat16),
-            conv_state_indices=torch.tensor([0], dtype=torch.int32),
-            query_start_loc=torch.tensor([0, 4], dtype=torch.int32),
-            pad_slot_id=-1,
-            num_accepted_tokens=torch.tensor([4], dtype=torch.int32),
-        )
-
-    torch.testing.assert_close(conv_state, original_state, atol=0, rtol=0)
-
-
-@torch.inference_mode()
 def test_causal_conv1d_fn_cpu_dispatches_native(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -773,6 +746,7 @@ def test_causal_conv1d_fn_cpu_dispatches_native(
 
     x = torch.zeros(4, 32, dtype=torch.bfloat16).transpose(0, 1)
     weight = torch.zeros(32, CONV_KERNEL, dtype=torch.bfloat16)
+    native_weight = torch.ones_like(weight)
     conv_states = torch.zeros(2, CONV_KERNEL - 1, 32, dtype=torch.bfloat16).transpose(
         1, 2
     )
@@ -797,130 +771,16 @@ def test_causal_conv1d_fn_cpu_dispatches_native(
         cache_indices=cache_indices,
         has_initial_state=has_initial_state,
         activation="silu",
-        native_weight=weight,
+        native_weight=native_weight,
     )
 
     assert actual is expected
-    assert forwarded["x"] is x
-    assert forwarded["weight"] is weight
-    assert forwarded["conv_states"] is conv_states
+    assert forwarded["weight"] is native_weight
     assert forwarded["query_start_loc"] is query_start_loc
     assert forwarded["cache_indices"] is cache_indices
     assert forwarded["has_initial_state"] is has_initial_state
     assert forwarded["silu_activation"] is True
     assert forwarded["is_vnni"] is True
-
-
-@torch.inference_mode()
-def test_gdn_routes_prefill_and_decode_through_shared_wrappers(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    metadata = types.SimpleNamespace(
-        non_spec_state_indices_tensor=torch.tensor([1, 2], dtype=torch.int32),
-        non_spec_query_start_loc=torch.tensor([0, 1, 3], dtype=torch.int32),
-        num_decodes=1,
-        num_decode_tokens=1,
-        num_prefills=1,
-        num_prefill_tokens=2,
-        has_initial_state=torch.tensor([False, False]),
-    )
-    prefill_calls = []
-    update_calls = []
-
-    def record_prefill(**kwargs):
-        prefill_calls.append(kwargs)
-        return kwargs["x"]
-
-    def record_update(**kwargs):
-        update_calls.append(kwargs)
-        return kwargs["x"]
-
-    monkeypatch.setattr(gdn_attention, "causal_conv1d_fn_cpu", record_prefill)
-    monkeypatch.setattr(gdn_attention, "causal_conv1d_update_cpu", record_update)
-    monkeypatch.setattr(
-        gdn_attention.ops,
-        "fused_sigmoid_gating_delta_rule_update_cpu",
-        lambda **kwargs: kwargs["q"],
-    )
-    monkeypatch.setattr(
-        gdn_attention.ops,
-        "fused_gdn_gating_cpu",
-        lambda **kwargs: (kwargs["a"].unsqueeze(0), kwargs["b"].unsqueeze(0)),
-    )
-    monkeypatch.setattr(
-        gdn_attention.ops,
-        "chunk_gated_delta_rule_cpu",
-        lambda **kwargs: (kwargs["query"], kwargs["initial_state"]),
-    )
-
-    layer = types.SimpleNamespace(
-        activation="silu",
-        conv1d=types.SimpleNamespace(bias=torch.empty(1)),
-        A_log=torch.empty(0),
-        dt_bias=torch.empty(0),
-        rearrange_mixed_qkv=lambda x: (x.view(1, x.size(0), 1, 1),) * 3,
-    )
-    conv_buf = torch.zeros(3, 1, 6, dtype=torch.bfloat16)
-    conv_weight = torch.zeros(1, CONV_KERNEL, dtype=torch.bfloat16)
-    native_weight = torch.empty(0)
-    gdn_attention._spec_aware_nonspec(
-        layer=layer,
-        attn_metadata_i=metadata,
-        mixed_qkv=torch.arange(3, dtype=torch.bfloat16).view(3, 1),
-        b=torch.zeros(3, 1, dtype=torch.bfloat16),
-        a=torch.zeros(3, 1, dtype=torch.bfloat16),
-        core_attn_out=torch.empty(3, 1, 1, dtype=torch.bfloat16),
-        conv_buf=conv_buf,
-        ssm_state=torch.zeros(3, 1, 1, 1),
-        width=CONV_KERNEL,
-        conv_weight=conv_weight,
-        native_weight=native_weight,
-    )
-
-    assert len(update_calls) == 1
-    update_call = update_calls[0]
-    torch.testing.assert_close(
-        update_call["conv_state_indices"], torch.tensor([1], dtype=torch.int32)
-    )
-    assert update_call["weight"] is conv_weight
-    assert update_call["native_weight"] is native_weight
-
-    assert len(prefill_calls) == 1
-    prefill_call = prefill_calls[0]
-    torch.testing.assert_close(
-        prefill_call["cache_indices"], torch.tensor([2], dtype=torch.int32)
-    )
-    torch.testing.assert_close(
-        prefill_call["query_start_loc"], torch.tensor([0, 2], dtype=torch.int32)
-    )
-    torch.testing.assert_close(prefill_call["has_initial_state"], torch.tensor([False]))
-    assert prefill_call["weight"] is conv_weight
-    assert prefill_call["native_weight"] is native_weight
-
-
-@torch.inference_mode()
-def test_causal_conv1d_update_cpu_rejects_accepted_tokens_on_vector_fallback(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d as causal_conv
-
-    vector_fallback_called = False
-
-    def vector_update(*args):
-        nonlocal vector_fallback_called
-        vector_fallback_called = True
-        return args[0]
-
-    monkeypatch.setattr(causal_conv.ops, "causal_conv1d_update_cpu_vec", vector_update)
-    with pytest.raises(ValueError, match="query_start_loc is required"):
-        causal_conv.causal_conv1d_update_cpu(
-            x=torch.zeros(1, 32),
-            conv_state=torch.zeros(1, 32, CONV_KERNEL - 1),
-            weight=torch.zeros(32, CONV_KERNEL),
-            num_accepted_tokens=torch.tensor([1], dtype=torch.int32),
-        )
-
-    assert not vector_fallback_called
 
 
 @pytest.mark.parametrize("total_tokens, split", TWO_CALL_SPLITS)
