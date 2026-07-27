@@ -1761,7 +1761,9 @@ def _make_bare_worker(
     # path; everything flows through the coordinator).
     from vllm.v1.kv_cache_interface import (
         FullAttentionSpec,
+        KVCacheConfig,
         KVCacheGroupSpec,
+        KVCacheTensor,
     )
 
     worker.disk_offload_buffer_budget_bytes = None
@@ -1774,6 +1776,16 @@ def _make_bare_worker(
     )
     group = KVCacheGroupSpec(["layer0", "__cross_layer__"], spec)
     worker._kv_cache_groups = [group]
+    worker._kv_cache_config = KVCacheConfig(
+        num_blocks=num_gpu_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=spec.page_size_bytes * num_gpu_blocks,
+                shared_by=["layer0"],
+            )
+        ],
+        kv_cache_groups=[group],
+    )
     worker.pcp_size = 1
     worker.dcp_size = 1
     worker.hash_block_size = block_size
@@ -1793,6 +1805,35 @@ def _make_bare_worker(
     )
     _refresh_group_tp_replication_factors(worker)
     return worker
+
+
+def _configure_bare_worker_groups(
+    worker: mooncake_store_worker.MooncakeStoreWorker,
+    groups,
+    kv_cache_tensors,
+) -> None:
+    from vllm.v1.kv_cache_interface import KVCacheConfig
+
+    worker._kv_cache_groups = groups
+    worker._kv_cache_config = KVCacheConfig(
+        num_blocks=worker.cache_config.num_gpu_blocks,
+        kv_cache_tensors=kv_cache_tensors,
+        kv_cache_groups=groups,
+    )
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=g_idx),
+            block_size=group.kv_cache_spec.block_size,
+            hash_block_size=worker.hash_block_size,
+        )
+        for g_idx, group in enumerate(groups)
+    ]
+    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        groups,
+        scheduler_block_size=worker.block_size,
+        hash_block_size=worker.hash_block_size,
+    )
+    _refresh_group_tp_replication_factors(worker)
 
 
 def test_lookup_key_prefixes_cover_dcp_rank_namespaces():
@@ -2302,6 +2343,223 @@ def test_register_kv_caches_kv_first_two_segments():
     base = tensor.untyped_storage().data_ptr()
     assert db.kv_caches_base_addr == [base, base + seg_stride]
     assert db.block_len == [seg_stride // num_blocks] * 2
+
+
+def test_register_kv_caches_isolates_k3_shaped_groups():
+    """Each group describes only its layers, even when groups alias storage."""
+    from vllm.v1.kv_cache_interface import (
+        KVCacheGroupSpec,
+        KVCacheTensor,
+        MambaSpec,
+        MLAAttentionSpec,
+    )
+
+    num_blocks = 10
+    worker = _make_bare_worker(num_gpu_blocks=num_blocks, block_size=1)
+    mla_spec = MLAAttentionSpec(
+        block_size=1,
+        num_kv_heads=1,
+        head_size=2,
+        dtype=torch.float16,
+    )
+    kda_spec = MambaSpec(
+        block_size=1,
+        shapes=((2,),),
+        dtypes=(torch.float16,),
+    )
+    groups = [
+        KVCacheGroupSpec(["mla.0"], mla_spec),
+        KVCacheGroupSpec(["kda.0", "kda.1"], kda_spec),
+        KVCacheGroupSpec(["kda.2"], kda_spec),
+        KVCacheGroupSpec(["kda.3"], kda_spec),
+    ]
+
+    shared = torch.zeros(num_blocks, 2, dtype=torch.float16)
+    kda_extra = torch.zeros_like(shared)
+    kda_2 = torch.zeros_like(shared)
+    kda_3 = torch.zeros_like(shared)
+    page_size = shared.untyped_storage().nbytes() // num_blocks
+    tensor_configs = [
+        KVCacheTensor(
+            size=shared.untyped_storage().nbytes(),
+            shared_by=["mla.0", "kda.0"],
+        ),
+        KVCacheTensor(
+            size=kda_extra.untyped_storage().nbytes(),
+            shared_by=["kda.1"],
+        ),
+        KVCacheTensor(
+            size=kda_2.untyped_storage().nbytes(),
+            shared_by=["kda.2"],
+        ),
+        KVCacheTensor(
+            size=kda_3.untyped_storage().nbytes(),
+            shared_by=["kda.3"],
+        ),
+    ]
+    _configure_bare_worker_groups(worker, groups, tensor_configs)
+
+    _register_with_mocked_threads(
+        worker,
+        {
+            "mla.0": shared,
+            "kda.0": [shared],
+            "kda.1": [kda_extra],
+            "kda.2": [kda_2],
+            "kda.3": [kda_3],
+        },
+    )
+
+    expected_addrs = [
+        [shared.untyped_storage().data_ptr()],
+        [
+            shared.untyped_storage().data_ptr(),
+            kda_extra.untyped_storage().data_ptr(),
+        ],
+        [kda_2.untyped_storage().data_ptr()],
+        [kda_3.untyped_storage().data_ptr()],
+    ]
+    assert [db.kv_caches_base_addr for db in worker.token_dbs] == expected_addrs
+    assert [db.block_len for db in worker.token_dbs] == [
+        [page_size],
+        [page_size, page_size],
+        [page_size],
+        [page_size],
+    ]
+    assert [db.block_stride for db in worker.token_dbs] == [
+        [page_size],
+        [page_size, page_size],
+        [page_size],
+        [page_size],
+    ]
+
+    block_hash = BlockHash(b"same-hash")
+    keys = [db.key_for(block_hash) for db in worker.token_dbs]
+    values = [db.prepare_value_for_block(0)[0] for db in worker.token_dbs]
+    assert len(set(keys)) == 4
+    assert values == expected_addrs
+
+    registered_addrs = {
+        call.args[0] for call in worker.store.register_buffer.call_args_list
+    }
+    assert registered_addrs == {
+        shared.untyped_storage().data_ptr(),
+        kda_extra.untyped_storage().data_ptr(),
+        kda_2.untyped_storage().data_ptr(),
+        kda_3.untyped_storage().data_ptr(),
+    }
+
+
+def test_register_kv_caches_uses_unpadded_length_and_physical_stride():
+    from vllm.v1.kv_cache_interface import (
+        KVCacheGroupSpec,
+        KVCacheTensor,
+        MLAAttentionSpec,
+    )
+
+    num_blocks = 10
+    physical_page_size = 16
+    transferred_page_size = 8
+    worker = _make_bare_worker(num_gpu_blocks=num_blocks, block_size=1)
+    spec = MLAAttentionSpec(
+        block_size=1,
+        num_kv_heads=1,
+        head_size=4,
+        dtype=torch.float16,
+        page_size_padded=physical_page_size,
+    )
+    group = KVCacheGroupSpec(["mla.0"], spec)
+    backing = torch.zeros(num_blocks * physical_page_size, dtype=torch.uint8)
+    view = torch.as_strided(
+        backing.view(torch.float16),
+        size=(num_blocks, transferred_page_size // 2),
+        stride=(physical_page_size // 2, 1),
+    )
+    _configure_bare_worker_groups(
+        worker,
+        [group],
+        [
+            KVCacheTensor(
+                size=backing.untyped_storage().nbytes(),
+                shared_by=["mla.0"],
+            )
+        ],
+    )
+
+    _register_with_mocked_threads(worker, {"mla.0": view})
+
+    db = worker.token_dbs[0]
+    assert db.block_len == [transferred_page_size]
+    assert db.block_stride == [physical_page_size]
+    addrs, sizes = db.prepare_value_for_block(3)
+    assert addrs == [backing.untyped_storage().data_ptr() + 3 * physical_page_size]
+    assert sizes == [transferred_page_size]
+    addrs, sizes, block_id = db.prepare_value(3, 4, [0, 1, 2, 3])
+    assert block_id == 3
+    assert addrs == [backing.untyped_storage().data_ptr() + 3 * physical_page_size]
+    assert sizes == [transferred_page_size]
+
+
+def test_register_kv_caches_isolates_packed_group_offsets():
+    from vllm.v1.kv_cache_interface import (
+        KVCacheGroupSpec,
+        KVCacheTensor,
+        MLAAttentionSpec,
+    )
+
+    num_blocks = 10
+    page_size = 8
+    block_stride = 2 * page_size
+    worker = _make_bare_worker(num_gpu_blocks=num_blocks, block_size=1)
+    spec = MLAAttentionSpec(
+        block_size=1,
+        num_kv_heads=1,
+        head_size=4,
+        dtype=torch.float16,
+    )
+    groups = [
+        KVCacheGroupSpec(["mla.0"], spec),
+        KVCacheGroupSpec(["mla.1"], spec),
+    ]
+    backing = torch.zeros(num_blocks * block_stride, dtype=torch.uint8)
+    views = [
+        torch.as_strided(
+            backing.view(torch.float16),
+            size=(num_blocks, page_size // 2),
+            stride=(block_stride // 2, 1),
+            storage_offset=offset // 2,
+        )
+        for offset in (0, page_size)
+    ]
+    tensor_configs = [
+        KVCacheTensor(
+            size=backing.untyped_storage().nbytes(),
+            shared_by=[f"mla.{g_idx}"],
+            offset=g_idx * page_size,
+            block_stride=block_stride,
+        )
+        for g_idx in range(2)
+    ]
+    _configure_bare_worker_groups(worker, groups, tensor_configs)
+
+    _register_with_mocked_threads(
+        worker,
+        {"mla.0": views[0], "mla.1": views[1]},
+    )
+
+    base_addr = backing.untyped_storage().data_ptr()
+    assert [db.kv_caches_base_addr for db in worker.token_dbs] == [
+        [base_addr],
+        [base_addr + page_size],
+    ]
+    assert [db.block_len for db in worker.token_dbs] == [[page_size], [page_size]]
+    assert [db.block_stride for db in worker.token_dbs] == [
+        [block_stride],
+        [block_stride],
+    ]
+    worker.store.register_buffer.assert_called_once_with(
+        base_addr, backing.untyped_storage().nbytes()
+    )
 
 
 def test_register_kv_caches_cross_layer_single_segment():
