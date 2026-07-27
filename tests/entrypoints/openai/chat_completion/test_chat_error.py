@@ -503,6 +503,68 @@ def test_batch_structural_tag_response_format_invalid(format_value):
         )
 
 
+@pytest.mark.parametrize(
+    "streaming_kwargs",
+    [
+        {"stream": True},
+        {"stream_options": {"include_usage": True}},
+    ],
+)
+def test_batch_streaming_rejected(streaming_kwargs):
+    """Batch chat has no streaming path. `stream` is not a declared field on the
+    batch model, so without an explicit check it survives as an extra and is
+    forwarded to ChatCompletionRequest, which truncates the response to the last
+    delta instead of failing."""
+    with pytest.raises(
+        ValidationError,
+        match="do not support streaming",
+    ):
+        BatchChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[[{"role": "user", "content": "hello"}]],
+            **streaming_kwargs,
+        )
+
+
+def test_batch_tool_use_rejected():
+    """Batch chat never passes tool definitions to the renderer, so a request
+    carrying them must fail rather than silently drop them."""
+    with pytest.raises(
+        ValidationError,
+        match="do not support tool use",
+    ):
+        BatchChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[[{"role": "user", "content": "hello"}]],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+        )
+
+
+def test_batch_without_streaming_or_tools_accepted():
+    """Control case: the explicit off values stay valid and do not leak a
+    streaming or tool-calling request into the per-conversation requests."""
+    request = BatchChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[[{"role": "user", "content": "hello"}]],
+        stream=False,
+        tools=None,
+        tool_choice="none",
+    )
+
+    single = request.to_chat_completion_request(request.messages[0])
+    assert single.stream is False
+    assert single.tools is None
+    assert single.tool_choice == "none"
+
+
 @pytest.mark.parametrize("structural_tag", ["not json", ""])
 def test_structured_outputs_structural_tag_invalid(structural_tag):
     """Malformed direct structured_outputs structural tags should be rejected."""
