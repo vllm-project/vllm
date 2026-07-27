@@ -15,6 +15,7 @@ from vllm.config.utils import getattr_iter
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     ConfigFormat,
+    get_gemma4_head_dim_range,
     get_safetensors_params_metadata,
 )
 from vllm.utils.torch_utils import common_broadcastable_dtype
@@ -590,6 +591,11 @@ class Gemma4MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_num_hidden_layers(self) -> int:
         return getattr(self.hf_text_config, "num_hidden_layers", 0)
 
+    def get_head_size(self) -> int:
+        return get_gemma4_head_dim_range(self.hf_text_config)[1] or (
+            super().get_head_size()
+        )
+
 
 class Gemma4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def is_mm_prefix_lm(self, supports_multimodal: bool = True) -> bool:
@@ -604,9 +610,9 @@ class Gemma4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
         # Gemma4 uses dual head dimensions: head_dim (sliding attention)
         # and global_head_dim (full attention).  Return the largest so
         # that attention backends allocate buffers large enough for both.
-        head_dim = getattr(self.hf_text_config, "head_dim", 0)
-        global_head_dim = getattr(self.hf_text_config, "global_head_dim", 0)
-        return max(head_dim, global_head_dim) or super().get_head_size()
+        return get_gemma4_head_dim_range(self.hf_text_config)[1] or (
+            super().get_head_size()
+        )
 
 
 class MossAudioModelArchConfigConvertor(ModelArchConfigConvertorBase):

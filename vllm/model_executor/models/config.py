@@ -209,19 +209,31 @@ class Gemma4Config(VerifyAndUpdateConfig):
         uniform kernel path and avoiding the mixed FA3+FA4 penalty.
         When FA4 is not available we fall back to Triton.
         """
-        hf_text_config = vllm_config.model_config.hf_text_config
-        head_dim = getattr(hf_text_config, "head_dim", None)
-        global_head_dim = getattr(hf_text_config, "global_head_dim", None)
+        from vllm.transformers_utils.config import get_gemma4_head_dim_range
 
-        if head_dim is None or global_head_dim is None or head_dim == global_head_dim:
+        hf_config = vllm_config.model_config.hf_config
+        hf_text_config = vllm_config.model_config.hf_text_config
+
+        # transformers 5.15+ makes Gemma4's per-layer head_dim raise when read
+        # globally (e.g. via the config's bugged auto-generated __eq__), which breaks
+        # later config comparisons at model-load time. vLLM handles the
+        # heterogeneous head dims explicitly (see gemma4_head_dim /
+        # get_gemma4_head_dim_range), so opt into global access on both the
+        # top-level and text configs to avoid the __eq__ bug.
+        # TODO remove when fixed on transformers side.
+        for cfg in (hf_config, hf_text_config):
+            if getattr(cfg, "is_heterogeneous", False):
+                cfg.allow_global_per_layer_attribute_access = True
+
+        min_dim, max_dim = get_gemma4_head_dim_range(hf_text_config)
+
+        if not min_dim or not max_dim or min_dim == max_dim:
             return
 
         from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-        max_head_dim = max(head_dim, global_head_dim)
-
-        if is_fa_version_supported(4) and max_head_dim <= 512:
+        if is_fa_version_supported(4) and max_dim <= 512:
             if (
                 vllm_config.attention_config.flash_attn_version is None
                 and vllm_config.attention_config.backend
@@ -232,8 +244,8 @@ class Gemma4Config(VerifyAndUpdateConfig):
                     "Gemma4 model has heterogeneous head dimensions "
                     "(head_dim=%d, global_head_dim=%d). Using FA4 for "
                     "all layers to avoid mixed FA3/FA4 penalty.",
-                    head_dim,
-                    global_head_dim,
+                    min_dim,
+                    max_dim,
                 )
         elif vllm_config.attention_config.backend is None:
             vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
@@ -241,8 +253,8 @@ class Gemma4Config(VerifyAndUpdateConfig):
                 "Gemma4 model has heterogeneous head dimensions "
                 "(head_dim=%d, global_head_dim=%d). FA4 not available, "
                 "forcing TRITON_ATTN backend.",
-                head_dim,
-                global_head_dim,
+                min_dim,
+                max_dim,
             )
 
 

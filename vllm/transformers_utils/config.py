@@ -59,6 +59,24 @@ if Version(version("transformers")) < Version("5.0.0"):
     )
 
 
+def get_gemma4_head_dim_range(config: PretrainedConfig) -> tuple[int, int]:
+    """Handles both the transformers <=5.14 schema (two named global
+    scalars: head_dim/global_head_dim) and the transformers >=5.15 schema
+    (head_dim lives in per_layer_config).
+    The schema is detected via ``is_heterogeneous`` so the result is independent of
+    whether global per-layer attribute access has been enabled on the config.
+    """
+    if getattr(config, "is_heterogeneous", False):
+        num_layers = getattr(config, "num_hidden_layers", 0)
+        dims = [config.per_layer_config[i].head_dim for i in range(num_layers)]
+        return (min(dims), max(dims)) if dims else (0, 0)
+    head_dim = getattr(config, "head_dim", 0) or 0
+    global_head_dim = getattr(config, "global_head_dim", 0) or 0
+    min_head_dim = min(head_dim, global_head_dim) if global_head_dim else head_dim
+    max_head_dim = max(head_dim, global_head_dim)
+    return (min_head_dim, max_head_dim)
+
+
 class LazyConfigDict(dict):
     def __getitem__(self, key):
         if isinstance(value := super().__getitem__(key), type):

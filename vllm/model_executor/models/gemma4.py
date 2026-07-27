@@ -84,6 +84,21 @@ from .utils import (
 
 logger = init_logger(__name__)
 
+
+def gemma4_head_dim(config, layer_idx: int) -> int:
+    """Handles both the transformers <=5.14 schema (two named global
+    scalars: head_dim/global_head_dim) and the transformers >=5.15 schema
+    (head_dim lives in per_layer_config).
+    The schema is detected via ``is_heterogeneous`` so the result is independent of
+    whether global per-layer attribute access has been enabled on the config.
+    """
+    if getattr(config, "is_heterogeneous", False):
+        return config.per_layer_config[layer_idx].head_dim
+    is_full = config.layer_types[layer_idx] == "full_attention"
+    head_dim = config.head_dim
+    return getattr(config, "global_head_dim", head_dim) if is_full else head_dim
+
+
 _GEMMA4_EXPERT_PARENT_MAPPER = WeightsMapper(
     orig_to_new_regex={
         re.compile(r"(?<!\.moe)\.experts$"): ".moe.experts",
@@ -572,10 +587,7 @@ class Gemma4DecoderLayer(nn.Module):
         # Gemma4 uses different head dimensions for sliding vs full attention
         layer_type = config.layer_types[layer_idx]
         self.is_full_attention = layer_type == "full_attention"
-        if self.is_full_attention:
-            head_dim = getattr(config, "global_head_dim", config.head_dim)
-        else:
-            head_dim = config.head_dim
+        head_dim = gemma4_head_dim(config, layer_idx)
 
         # Determine if this full-attention layer uses k_eq_v
         # (laptop variant: no v_proj, K reused as V on full attention layers)
