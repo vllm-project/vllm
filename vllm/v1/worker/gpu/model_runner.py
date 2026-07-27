@@ -730,20 +730,28 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def profile_cudagraph_memory(self) -> int:
         # NOTE(woosuk): Decoder CUDA graph memory profiling for V2 is TBD.
-        return self.model_state.profile_additional_cudagraph_memory()
+        if (
+            self.model_state.supports_mm_inputs
+            and self.model_state.encoder_runner.has_cudagraph()
+        ):
+            return self.model_state.encoder_runner.profile_memory()
+        return 0
 
     def needs_cudagraph_memory_profile(self) -> bool:
-        return (
-            self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            or self.model_state.has_additional_cudagraphs()
+        return self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE or (
+            self.model_state.supports_mm_inputs
+            and self.model_state.encoder_runner.has_cudagraph()
         )
 
     @torch.inference_mode()
     def capture_model(self) -> int:
         assert self.cudagraph_manager is not None
         capture_decoder = self.cudagraph_manager.needs_capture()
-        capture_additional = self.model_state.has_additional_cudagraphs()
-        if not capture_decoder and not capture_additional:
+        capture_encoder = (
+            self.model_state.supports_mm_inputs
+            and self.model_state.encoder_runner.has_cudagraph()
+        )
+        if not capture_decoder and not capture_encoder:
             logger.warning(
                 "Skipping CUDA graph capture because no CUDA graphs are configured"
             )
@@ -773,8 +781,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if self.speculator is not None:
                     self.speculator.capture()
 
-            if capture_additional:
-                self.model_state.capture_additional_cudagraphs()
+            if capture_encoder:
+                self.model_state.encoder_runner.capture()
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
@@ -1634,8 +1642,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.attn_groups.clear()
         if hasattr(self, "kv_cache_config"):
             del self.kv_cache_config
-        if hasattr(self, "model_state"):
-            self.model_state.clear_additional_cudagraphs()
+        if hasattr(self, "model_state") and self.model_state.supports_mm_inputs:
+            self.model_state.encoder_runner.clear()
         free_before_shutdown(self.vllm_config)
         if hasattr(self, "model_state"):
             del self.model_state

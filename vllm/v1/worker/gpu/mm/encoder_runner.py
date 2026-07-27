@@ -43,43 +43,31 @@ class EncoderRunner:
         self.dtype = dtype
         self.device = device
         self.is_realtime = supports_realtime(model)
-        self.cudagraph_manager = self._create_cudagraph_manager(
-            vllm_config, model, device, dtype
-        )
+        self.cudagraph_manager: EncoderCudaGraphManager | None = None
+        if vllm_config is not None:
+            from vllm.model_executor.models.interfaces import (
+                SupportsEncoderCudaGraph,
+                supports_encoder_cudagraph,
+            )
+
+            if (
+                not vllm_config.model_config.enforce_eager
+                and vllm_config.compilation_config.cudagraph_mm_encoder
+                and supports_encoder_cudagraph(model)
+            ):
+                from vllm.v1.worker.encoder_cudagraph import (
+                    EncoderCudaGraphManager as CudaGraphManager,
+                )
+
+                self.cudagraph_manager = CudaGraphManager(
+                    vllm_config=vllm_config,
+                    device=device,
+                    dtype=dtype,
+                    model=cast(SupportsEncoderCudaGraph, model),
+                )
 
         self.inputs_embeds = torch.zeros(
             max_num_tokens, hidden_size, dtype=dtype, device=device
-        )
-
-    @staticmethod
-    def _create_cudagraph_manager(
-        vllm_config: VllmConfig | None,
-        model: SupportsMultiModal,
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> "EncoderCudaGraphManager | None":
-        if vllm_config is None:
-            return None
-
-        from vllm.model_executor.models.interfaces import (
-            SupportsEncoderCudaGraph,
-            supports_encoder_cudagraph,
-        )
-
-        if (
-            vllm_config.model_config.enforce_eager
-            or not vllm_config.compilation_config.cudagraph_mm_encoder
-            or not supports_encoder_cudagraph(model)
-        ):
-            return None
-
-        from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
-
-        return EncoderCudaGraphManager(
-            vllm_config=vllm_config,
-            device=device,
-            dtype=dtype,
-            model=cast(SupportsEncoderCudaGraph, model),
         )
 
     def has_cudagraph(self) -> bool:
