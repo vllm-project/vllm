@@ -25,9 +25,11 @@ class ImageMediaIO(MediaIO[Image.Image]):
     error handling.
     """
 
-    def __init__(self, image_mode: str = "RGB", **kwargs) -> None:
+    def __init__(self, image_mode: str | None = "RGB", **kwargs) -> None:
         super().__init__()
 
+        # Target mode for loaded images; `None` keeps the original mode
+        # (i.e. no conversion, alpha channel is preserved as-is).
         self.image_mode = image_mode
         # `kwargs` contains custom arguments from
         # --media-io-kwargs for this modality, merged with
@@ -62,7 +64,7 @@ class ImageMediaIO(MediaIO[Image.Image]):
         """Convert image mode with custom background color."""
         if isinstance(image, MediaWithBytes):
             image = image.media
-        if image.mode == self.image_mode:
+        if self.image_mode is None or image.mode == self.image_mode:
             return image
         elif image.mode == "RGBA" and self.image_mode == "RGB":
             return rgba_to_rgb(image, self.rgba_background_color)

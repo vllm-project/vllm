@@ -58,13 +58,14 @@ def encode_audio_url(
 def encode_image_base64(
     image: Image.Image,
     *,
-    image_mode: str = "RGB",
+    image_mode: str | None = "RGB",
     format: str = "PNG",
 ) -> str:
     """
     Encode a pillow image to base64 format.
 
     By default, the image is converted into RGB format before being encoded.
+    Pass `image_mode=None` to keep the original image mode.
     """
     image_io = ImageMediaIO(image_mode=image_mode)
     return image_io.encode_base64(image, image_format=format)
@@ -73,13 +74,14 @@ def encode_image_base64(
 def encode_image_url(
     image: Image.Image,
     *,
-    image_mode: str = "RGB",
+    image_mode: str | None = "RGB",
     format: str = "PNG",
 ) -> str:
     """
     Encode a pillow image as a data URL.
 
     By default, the image is converted into RGB format before being encoded.
+    Pass `image_mode=None` to keep the original image mode.
     """
     image_b64 = encode_image_base64(image, image_mode=image_mode, format=format)
     mimetype = mimetypes.types_map.get("." + format.lower(), "image")
