@@ -442,18 +442,18 @@ class MiniMaxM3SparseTritonImpl(MiniMaxM3SparseImpl):
         return output
 
 
-def select_main_impl_cls(
+def select_main_backend_and_impl_cls(
     *,
     topk_blocks: int,
     kv_cache_dtype: str,
     num_kv_heads: int,
-) -> type[MiniMaxM3SparseImpl]:
-    """Pick the main attend impl off the main KV-cache dtype.
+) -> tuple[type[MiniMaxM3SparseBackend], type[MiniMaxM3SparseImpl]]:
+    """Pick the main attention backend and implementation.
 
     Blackwell (SM100) uses the MSA attend for supported top-k block counts
     when the KV cache is BF16 or FP8 E4M3; MI355 uses AITER sparse PA
     with shuffle KV cache layout; Other platforms and FP8 E5M2 fall
-    back to Triton. The MSA modules are imported lazily avoid import errors
+    back to Triton. The MSA modules are imported lazily to avoid import errors
     on unsupported platforms.
     """
     use_aiter_sparse_pa = minimax_m3_use_aiter_sparse_pa(num_kv_heads)
@@ -477,11 +477,26 @@ def select_main_impl_cls(
             MiniMaxM3SparseAiterPAImpl,
         )
 
-        return MiniMaxM3SparseAiterPAImpl
+        return MiniMaxM3SparseBackend, MiniMaxM3SparseAiterPAImpl
     if use_msa:
         from vllm.models.minimax_m3.nvidia.sparse_attention_msa import (
+            MiniMaxM3SparseMSABackend,
             MiniMaxM3SparseMSAImpl,
         )
 
-        return MiniMaxM3SparseMSAImpl
-    return MiniMaxM3SparseTritonImpl
+        return MiniMaxM3SparseMSABackend, MiniMaxM3SparseMSAImpl
+    return MiniMaxM3SparseBackend, MiniMaxM3SparseTritonImpl
+
+
+def select_main_impl_cls(
+    *,
+    topk_blocks: int,
+    kv_cache_dtype: str,
+    num_kv_heads: int,
+) -> type[MiniMaxM3SparseImpl]:
+    """Backward-compatible implementation-only selector."""
+    return select_main_backend_and_impl_cls(
+        topk_blocks=topk_blocks,
+        kv_cache_dtype=kv_cache_dtype,
+        num_kv_heads=num_kv_heads,
+    )[1]

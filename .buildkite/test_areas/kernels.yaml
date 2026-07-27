@@ -280,6 +280,13 @@ steps:
   - vllm/cute_utils/
   - vllm/model_executor/layers/mamba/ops/gdn_chunk_cutedsl/
   - vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_cutedsl.py
+  - cmake/external_projects/fmha_sm100.cmake
+  - vllm/envs.py
+  - vllm/models/minimax_m3/common/sparse_attention.py
+  - vllm/models/minimax_m3/nvidia/model.py
+  - vllm/models/minimax_m3/nvidia/msa_cutlass_sparse_decode.py
+  - vllm/models/minimax_m3/nvidia/sparse_attention_msa.py
+  - tests/kernels/attention/test_minimax_m3_msa_cutlass_sparse_decode.py
   - tests/kernels/mamba/test_gdn_prefill_cutedsl.py
   - tests/kernels/test_bf16x3_router_gemm_cutedsl.py
   - tests/kernels/test_ll_bf16_gemm.py
@@ -294,6 +301,7 @@ steps:
     - pytest -v -s tests/kernels/attention/test_flashinfer_trtllm_attention.py
     - pytest -v -s tests/kernels/attention/test_cutlass_mla_decode.py
     - pytest -v -s tests/kernels/attention/test_flashinfer_mla_decode.py
+    - pytest -v -s tests/kernels/attention/test_minimax_m3_msa_cutlass_sparse_decode.py
     - pytest -v -s tests/kernels/test_top_k_per_row.py
     # Quantization
     - pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8'

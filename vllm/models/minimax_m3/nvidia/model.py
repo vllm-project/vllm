@@ -79,7 +79,7 @@ from vllm.models.minimax_m3.common.mm_preprocess import (
 from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseBackend,
     MiniMaxM3SparseImpl,
-    select_main_impl_cls,
+    select_main_backend_and_impl_cls,
 )
 from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -505,15 +505,15 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # the attend impl reads them back (so nothing crosses the eager break as a
         # Python value, which would freeze at capture).
         self.topk_indices_buffer = topk_indices_buffer
-        self.attn_backend = MiniMaxM3SparseBackend
         # Indexer (top-k selection) and main attention are separate impls, each
         # picking Triton vs MSA off its cache dtype. impl is AttentionImplBase
         # (broader than the AttentionImpl that AttentionLayerBase annotates).
-        self.impl: MiniMaxM3SparseImpl = select_main_impl_cls(  # type: ignore[assignment]
+        self.attn_backend, impl_cls = select_main_backend_and_impl_cls(
             topk_blocks=sparse_cfg["sparse_topk_blocks"],
             kv_cache_dtype=self.kv_cache_dtype,
             num_kv_heads=self.num_kv_heads,
-        )(
+        )
+        self.impl: MiniMaxM3SparseImpl = impl_cls(  # type: ignore[assignment]
             self.num_heads,
             self.head_dim,
             self.scaling,
