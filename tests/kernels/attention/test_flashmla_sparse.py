@@ -45,6 +45,53 @@ def test_compute_global_topk_indices_and_lens_allows_inplace_output():
     torch.testing.assert_close(actual_lens.cpu(), expected_lens.cpu())
 
 
+def test_compute_global_topk_indices_and_lens_bounds_block_table_gather():
+    """Out-of-range top-k indices must fall out as -1, not gather past the row.
+
+    The indices are data: they come from the indexer's top-k, which writes into a
+    ``torch.empty`` buffer shared by every layer, so an unwritten or corrupted slot
+    can hold a large positive value. Checking only ``>= 0`` made that an illegal
+    access on every TP rank (the failure upstream hit on SM12x once its logits
+    kernel started emitting NaN bit patterns as indices).
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for the Triton sparse index kernel")
+
+    from vllm.models.deepseek_v4.common.ops import compute_global_topk_indices_and_lens
+
+    device = torch.device("cuda")
+    block_size = 4
+    # Two blocks per request, so block_index 2 and above are out of range.
+    block_table = torch.tensor([[10, 11], [20, 21]], dtype=torch.int32, device=device)
+    # 0x7FC00000 is the NaN bit pattern upstream observed being written as an index.
+    local_indices = torch.tensor(
+        [[0, 8, 2143289344, 5], [2, -1, 3, 4]],
+        dtype=torch.int32,
+        device=device,
+    )
+    token_to_req_indices = torch.tensor([0, 1], dtype=torch.int32, device=device)
+    is_valid_token = torch.tensor([True, True], dtype=torch.bool, device=device)
+
+    indices, lens = compute_global_topk_indices_and_lens(
+        local_indices,
+        token_to_req_indices,
+        block_table,
+        block_size=block_size,
+        is_valid_token=is_valid_token,
+    )
+
+    expected = torch.tensor(
+        [
+            [10 * block_size + 0, -1, -1, 11 * block_size + 1],
+            [20 * block_size + 2, -1, 20 * block_size + 3, 21 * block_size + 0],
+        ],
+        dtype=torch.int32,
+    )
+    torch.testing.assert_close(indices.cpu(), expected)
+    # Rejected entries must not be counted, or downstream reads padding as real.
+    torch.testing.assert_close(lens.cpu(), torch.tensor([2, 3], dtype=torch.int32))
+
+
 def test_sparse_flashmla_metadata_smoke():
     import vllm.v1.attention.ops.flashmla as fm
 

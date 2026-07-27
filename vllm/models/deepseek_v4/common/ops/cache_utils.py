@@ -661,9 +661,17 @@ def _compute_global_topk_indices_and_lens_kernel(
             mask=mask,
             other=-1,
         )
-        is_valid = (local_idx >= 0) & is_valid_token
-
+        # local_idx is data, not a loop bound: it comes from the indexer's top-k,
+        # which writes into a torch.empty buffer shared by every layer. An
+        # unwritten or corrupted slot can therefore hold a large positive value,
+        # and checking only `>= 0` let it gather past the end of the block table
+        # -- an illegal access that takes down every TP rank. Bound the row offset
+        # as well; out-of-range entries fall out as -1 and are excluded from
+        # topk_lens, so a producer bug degrades one token instead of the engine.
         block_indices = local_idx // block_size
+        is_valid = (
+            (local_idx >= 0) & is_valid_token & (block_indices < block_table_stride)
+        )
         block_numbers = tl.load(
             block_table_ptr + req_idx * block_table_stride + block_indices,
             mask=mask & is_valid,
