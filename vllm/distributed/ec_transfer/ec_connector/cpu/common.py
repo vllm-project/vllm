@@ -7,7 +7,10 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
+from vllm.distributed.ec_transfer.ec_connector.base import (
+    ECConnectorMetadata,
+    ECConnectorWorkerMetadata,
+)
 from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
     ECSharedRegion,
 )
@@ -33,6 +36,26 @@ class ECCPUConnectorMetadata(ECConnectorMetadata):
     # the worker's start_load_caches copies mmap[block_ids] → GPU
     # encoder_cache.
     loads: dict[str, list[int]] = field(default_factory=dict)
+
+
+@dataclass
+class ECCPUWorkerMetadata(ECConnectorWorkerMetadata):
+    """Per-step worker → scheduler payload for the ECCPUConnector.
+
+    Reports mm_hashes whose GPU copies have completed this step: saved
+    entries become safe to mark ready, loaded entries become safe to unpin.
+    Built by `ECCPUWorker.build_connector_worker_meta`; consumed by
+    `ECCPUScheduler.update_connector_output`.
+    """
+
+    completed_saves: list[str] = field(default_factory=list)
+    completed_loads: list[str] = field(default_factory=list)
+
+    def aggregate(self, other: ECConnectorWorkerMetadata) -> ECConnectorWorkerMetadata:
+        assert isinstance(other, ECCPUWorkerMetadata)
+        self.completed_saves.extend(other.completed_saves)
+        self.completed_loads.extend(other.completed_loads)
+        return self
 
 
 def _get_encoder_cache_hidden_dim(vllm_config: "VllmConfig") -> int:

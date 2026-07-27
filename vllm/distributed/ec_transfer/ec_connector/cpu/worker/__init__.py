@@ -7,6 +7,8 @@ per-step connector metadata (`ECCPUConnectorMetadata`) to decide which
 blocks to copy in each direction.
 """
 
+from collections import deque
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
@@ -14,6 +16,7 @@ import torch
 from vllm._custom_ops import swap_blocks_batch
 from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
     ECCPUConnectorMetadata,
+    ECCPUWorkerMetadata,
     create_ec_shared_region,
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.worker.descriptor_buffers import (
@@ -34,6 +37,24 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+@dataclass
+class Transfer:
+    """A batched copy in flight on a dedicated GPU stream.
+
+    Its descriptor buffers and stream are held until `end_event` fires; only
+    then are the buffers and stream safe to recycle and the `mm_hashes` safe to
+    report as complete. `start_event`/`end_event` bracket the copy so its
+    elapsed time can be measured on completion.
+    """
+
+    start_event: torch.Event
+    end_event: torch.Event
+    mm_hashes: list[str]
+    bufs: DescriptorBuffers
+    stream: torch.Stream
+    num_bytes: int
+
+
 class ECCPUWorker:
     """Worker-side delegate for the ECCPUConnector.
 
@@ -43,8 +64,12 @@ class ECCPUWorker:
       batched call in `flush_saves`.
     - Consumer role: copies `mmap[block_ids]` → `encoder_cache[mm_hash]`
       for all entries in `metadata.loads` via a single `swap_blocks_batch`
-      call on the load stream.
+      call on a dedicated stream.
     - On `ec_both` nodes both paths run back-to-back in a single step.
+
+    Every batched copy runs on a stream drawn from a pool so it overlaps the
+    compute stream, bracketed by a start/end event pair. The stream, events,
+    and descriptor buffers are recycled once the end event fires.
     """
 
     def __init__(self, vllm_config: "VllmConfig") -> None:
@@ -62,15 +87,66 @@ class ECCPUWorker:
             get_tensor_model_parallel_rank() == 0 and get_pcp_group().rank_in_group == 0
         )
 
-        # Dedicated stream for async mmap→GPU loads (overlaps with compute).
-        self._load_stream = current_platform.Stream()
-
         # Descriptor buffer pool (recycled across steps, shared by both paths).
         self._buf_pool = DescriptorBufferPool()
 
         # Active save buffer being filled during save_caches calls this step.
         self._save_bufs: DescriptorBuffers | None = None
         self._save_count: int = 0
+        # mm_hashes accumulated into the active save buffer this step.
+        self._save_mm_hashes: list[str] = []
+
+        # Batched copies whose end event has not yet fired. Buffers and stream
+        # stay held until the event fires; the mm_hashes are reported to the
+        # scheduler only then. Separate per direction because saves and loads
+        # can be in flight concurrently.
+        self._inflight_saves: deque[Transfer] = deque()
+        self._inflight_loads: deque[Transfer] = deque()
+
+        # Streams and timing events recycled across steps to avoid per-step
+        # create/destroy churn. Shared by both directions.
+        self._stream_pool: list[torch.Stream] = []
+        self._event_pool: list[torch.Event] = []
+
+    def _acquire_stream(self) -> torch.Stream:
+        if self._stream_pool:
+            return self._stream_pool.pop()
+        return current_platform.Stream()
+
+    def _acquire_event(self) -> torch.Event:
+        return (
+            self._event_pool.pop()
+            if self._event_pool
+            else torch.Event(enable_timing=True)
+        )
+
+    def _collect_finished(self, inflight: deque[Transfer], direction: str) -> list[str]:
+        """Pop transfers whose end event has fired, recycle their stream,
+        events, and buffers, and return the mm_hashes that completed.
+
+        The front check is conservative: a transfer is reported only once its
+        own end event fires, so completed hashes are always genuinely done. A
+        later transfer that happens to finish first simply waits behind the
+        front and is reported on a subsequent poll.
+        """
+        done: list[str] = []
+        while inflight and inflight[0].end_event.query():
+            transfer = inflight.popleft()
+            done.extend(transfer.mm_hashes)
+            elapsed_ms = transfer.start_event.elapsed_time(transfer.end_event)
+            logger.debug(
+                "EC %s: %d entr%s (%d bytes) took %.3f ms",
+                direction,
+                len(transfer.mm_hashes),
+                "y" if len(transfer.mm_hashes) == 1 else "ies",
+                transfer.num_bytes,
+                elapsed_ms,
+            )
+            self._buf_pool.release(transfer.bufs)
+            self._stream_pool.append(transfer.stream)
+            self._event_pool.append(transfer.start_event)
+            self._event_pool.append(transfer.end_event)
+        return done
 
     def save_caches(
         self,
@@ -99,6 +175,7 @@ class ECCPUWorker:
         if self._save_bufs is None:
             total = sum(len(v) for v in connector_metadata.saves.values())
             self._save_bufs = self._buf_pool.acquire(total)
+            self._save_mm_hashes = []
 
         assert self._save_count + len(block_ids) <= self._save_bufs.src_ptrs.numel()
 
@@ -115,9 +192,18 @@ class ECCPUWorker:
             idx += 1
 
         self._save_count = idx
+        self._save_mm_hashes.append(mm_hash)
 
     def flush_saves(self) -> None:
-        """Flush all accumulated saves in a single swap_blocks_batch call."""
+        """Flush all accumulated saves in a single swap_blocks_batch call.
+
+        Runs the copy on a pooled stream gated behind the compute stream that
+        produced the encoder outputs, brackets it with start/end events, and
+        enqueues the batch as in-flight. The stream, events, and descriptor
+        buffers are recycled only once the end event fires (see
+        `_collect_finished`), which is also when the saved mm_hashes become
+        safe to mark ready.
+        """
         if self._save_count == 0:
             return
 
@@ -125,11 +211,33 @@ class ECCPUWorker:
         assert bufs is not None
         src_ptrs, dst_ptrs, sizes = bufs
         n = self._save_count
-        swap_blocks_batch(src_ptrs[:n], dst_ptrs[:n], sizes[:n])
+        num_bytes = int(sizes[:n].sum().item())
 
-        self._buf_pool.release(bufs)
+        stream = self._acquire_stream()
+        # Gate the GPU→CPU copy behind the compute stream: it reads the encoder
+        # outputs the model just produced there.
+        stream.wait_stream(current_platform.current_stream())
+        start_event = self._acquire_event()
+        end_event = self._acquire_event()
+        with current_platform.stream(stream):
+            start_event.record(stream)
+            swap_blocks_batch(src_ptrs[:n], dst_ptrs[:n], sizes[:n])
+            end_event.record(stream)
+
+        self._inflight_saves.append(
+            Transfer(
+                start_event=start_event,
+                end_event=end_event,
+                mm_hashes=self._save_mm_hashes,
+                bufs=bufs,
+                stream=stream,
+                num_bytes=num_bytes,
+            )
+        )
+
         self._save_bufs = None
         self._save_count = 0
+        self._save_mm_hashes = []
 
     def start_load_caches(
         self,
@@ -146,18 +254,17 @@ class ECCPUWorker:
         device_type = current_platform.device_type
         src_base = blocks.data_ptr()
 
-        # Pre-filter: only hashes not already in encoder_cache.
-        load_items = {
-            h: idxs
-            for h, idxs in connector_metadata.loads.items()
-            if h not in encoder_cache
-        }
-        if not load_items:
-            return
-
+        # Copy every dispatched load. The scheduler routes an input here only
+        # after missing the GPU encoder cache, so a resident hit is not expected;
+        # copying unconditionally keeps every scheduler pin balanced by exactly
+        # one completion report.
+        load_items = connector_metadata.loads
         total_blocks = sum(len(idxs) for idxs in load_items.values())
 
-        with current_platform.stream(self._load_stream):
+        stream = self._acquire_stream()
+        start_event = self._acquire_event()
+        end_event = self._acquire_event()
+        with current_platform.stream(stream):
             # Single contiguous destination buffer for all loads.
             dst_buf = torch.empty(
                 total_blocks, block_size, dtype=torch.int8, device=device_type
@@ -177,9 +284,19 @@ class ECCPUWorker:
                     dst_ptrs[op_idx] = dst_buf_base + op_idx * block_size
                     op_idx += 1
 
+            start_event.record(stream)
             swap_blocks_batch(src_ptrs, dst_ptrs, sizes, is_src_access_order_any=True)
-
-            self._buf_pool.release(bufs)
+            end_event.record(stream)
+            self._inflight_loads.append(
+                Transfer(
+                    start_event=start_event,
+                    end_event=end_event,
+                    mm_hashes=list(load_items.keys()),
+                    bufs=bufs,
+                    stream=stream,
+                    num_bytes=total_blocks * block_size,
+                )
+            )
 
             # Slice contiguous buffer into per-hash views.
             offset = 0
@@ -190,12 +307,32 @@ class ECCPUWorker:
                 )
                 offset += n
 
-        current_platform.current_stream().wait_stream(self._load_stream)
+        current_platform.current_stream().wait_stream(stream)
+
+    def build_connector_worker_meta(self) -> ECCPUWorkerMetadata | None:
+        """Report the mm_hashes whose GPU copies have completed this step.
+
+        Returns None when nothing finished, so the scheduler sees no payload.
+        """
+        completed_saves = self._collect_finished(self._inflight_saves, "save")
+        completed_loads = self._collect_finished(self._inflight_loads, "load")
+        if not completed_saves and not completed_loads:
+            return None
+        return ECCPUWorkerMetadata(
+            completed_saves=completed_saves,
+            completed_loads=completed_loads,
+        )
 
     def shutdown(self) -> None:
-        self._load_stream.synchronize()
+        for transfer in (*self._inflight_saves, *self._inflight_loads):
+            transfer.end_event.synchronize()
         self._save_bufs = None
         self._save_count = 0
+        self._save_mm_hashes = []
+        self._inflight_saves.clear()
+        self._inflight_loads.clear()
+        self._stream_pool.clear()
+        self._event_pool.clear()
         try:
             self._region.cleanup()
         except Exception:

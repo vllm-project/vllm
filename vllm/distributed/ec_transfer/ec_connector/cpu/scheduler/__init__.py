@@ -11,19 +11,18 @@ from typing import TYPE_CHECKING
 
 from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
     ECCPUConnectorMetadata,
+    ECCPUWorkerMetadata,
     create_ec_shared_region,
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.embedding_cache import (
     EmbeddingCache,
-)
-from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.step_tracker import (
-    StepTracker,
 )
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.outputs import ECConnectorOutput
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -41,12 +40,6 @@ class ECCPUScheduler:
         self._region = create_ec_shared_region(vllm_config)
         # Block allocator + LRU eviction policy for the shared region.
         self._cache = EmbeddingCache(self._region.num_blocks)
-
-        max_batches = vllm_config.max_concurrent_batches
-        # Delays mark_ready until the GPU→mmap DMA is guaranteed complete.
-        self._ready_tracker = StepTracker(max_batches)
-        # Delays unpin until the mmap→GPU DMA is guaranteed complete.
-        self._unpin_tracker = StepTracker(max_batches)
 
         # mm_hash → block IDs allocated this step for GPU→mmap saves.
         self._pending_saves: dict[str, list[int]] = {}
@@ -72,30 +65,16 @@ class ECCPUScheduler:
             entry = self._cache.alloc(mm_hash, feature.mm_position.length)
             if entry is not None:
                 self._pending_saves[mm_hash] = list(entry.block_ids)
-                self._ready_tracker.add(mm_hash, request.request_id)
 
         if self._is_consumer and mm_hash not in self._pending_loads:
             entry = self._cache.get(mm_hash)
             if entry is not None and entry.ready:
                 self._cache.pin(mm_hash)
                 self._pending_loads[mm_hash] = list(entry.block_ids)
-                self._unpin_tracker.add(mm_hash, request.request_id)
 
     def build_connector_meta(
         self, scheduler_output: "SchedulerOutput"
     ) -> ECCPUConnectorMetadata:
-        finished = (
-            scheduler_output.finished_req_ids if scheduler_output is not None else set()
-        )
-
-        for key in self._ready_tracker.step(finished):
-            entry = self._cache.get(key)
-            if entry is not None and not entry.ready:
-                self._cache.mark_ready(key)
-
-        for key in self._unpin_tracker.step(finished):
-            self._cache.unpin(key)
-
         meta = ECCPUConnectorMetadata()
         if self._is_producer:
             meta.saves = self._pending_saves
@@ -105,13 +84,35 @@ class ECCPUScheduler:
             self._pending_loads = {}
         return meta
 
+    def update_connector_output(self, connector_output: "ECConnectorOutput") -> None:
+        """Apply the worker's memcpy-completion report to the cache.
+
+        Completed saves become safe to mark ready; completed loads become safe
+        to unpin.
+        """
+        meta = connector_output.ec_connector_worker_meta
+        if not isinstance(meta, ECCPUWorkerMetadata):
+            return
+        for mm_hash in meta.completed_saves:
+            entry = self._cache.get(mm_hash)
+            if entry is not None and not entry.ready:
+                self._cache.mark_ready(mm_hash)
+        for mm_hash in meta.completed_loads:
+            entry = self._cache.get(mm_hash)
+            if entry is not None and not entry.evictable:
+                self._cache.unpin(mm_hash)
+
+    def has_pending_push_work(self) -> bool:
+        """True while any dispatched save or load has not been confirmed done.
+
+        Keeps the engine stepping so the worker's completion reports are polled
+        even when no requests are otherwise runnable.
+        """
+        return self._cache.has_held_entries()
+
     def shutdown(self) -> None:
-        # drain_all() covers both entries still in _current (never
-        # consumed by build_connector_meta) and entries in slots.
+        self._pending_saves.clear()
         self._pending_loads.clear()
-        for mm_hash in self._unpin_tracker.drain_all():
-            self._cache.unpin(mm_hash)
-        self._ready_tracker.drain_all()
 
         self._is_producer = False
         self._is_consumer = False
