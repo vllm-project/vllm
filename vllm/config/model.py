@@ -5,8 +5,11 @@ import warnings
 from collections.abc import Callable
 from dataclasses import InitVar, field
 from functools import cached_property
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
+import huggingface_hub
+import regex as re
 import torch
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
@@ -46,6 +49,7 @@ from vllm.transformers_utils.model_arch_config_convertor import (
     MODEL_ARCH_CONFIG_CONVERTORS,
     ModelArchConfigConvertorBase,
 )
+from vllm.transformers_utils.repo_utils import hf_api
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.import_utils import LazyLoader
@@ -73,6 +77,8 @@ else:
     LogitsProcessor = Any
 
 logger = init_logger(__name__)
+
+_HF_COMMIT_HASH_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 
 # Process-local record of which (arch, target) model-class overrides have been
 # registered in *this* process. Must not live on ModelConfig: that instance is
@@ -541,6 +547,31 @@ class ModelConfig:
 
         self.maybe_pull_model_tokenizer_for_runai(self.model, self.tokenizer)
 
+        if (
+            (self.hf_config_path is None or self.hf_config_path == self.model)
+            and not Path(self.model).exists()
+            and not envs.VLLM_USE_MODELSCOPE
+            and not huggingface_hub.constants.HF_HUB_OFFLINE
+            and (
+                self.revision is None
+                or _HF_COMMIT_HASH_PATTERN.fullmatch(self.revision) is None
+            )
+        ):
+            self.revision = (
+                hf_api()
+                .model_info(
+                    self.model,
+                    revision=self.revision,
+                    token=self.hf_token,
+                )
+                .sha
+            )
+            if (
+                self.tokenizer == self.model
+                and self.tokenizer_revision == requested_revision
+            ):
+                self.tokenizer_revision = self.revision
+
         if self.override_attention_dtype is not None and not current_platform.is_rocm():
             warnings.warn(
                 "override-attention-dtype is set but not using ROCm platform",
@@ -572,15 +603,6 @@ class ModelConfig:
             token=self.hf_token,
         )
         self.hf_config = hf_config
-        if (self.hf_config_path is None or self.hf_config_path == self.model) and (
-            resolved_revision := getattr(hf_config, "_commit_hash", None)
-        ) is not None:
-            self.revision = resolved_revision
-            if (
-                self.tokenizer == self.model
-                and self.tokenizer_revision == requested_revision
-            ):
-                self.tokenizer_revision = resolved_revision
         if dict_overrides:
             self._apply_dict_overrides(hf_config, dict_overrides)
         self.hf_text_config = get_hf_text_config(self.hf_config)

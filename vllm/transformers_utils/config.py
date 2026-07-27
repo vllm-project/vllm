@@ -253,8 +253,6 @@ class HFConfigParser(ConfigParserBase):
             code_revision=code_revision,
             **kwargs,
         )
-        if commit_hash := config_dict.get("_commit_hash"):
-            kwargs["_commit_hash"] = commit_hash
         # Use custom model class if it's in our registry
         model_type = config_dict.get("model_type")
         if model_type is None:
