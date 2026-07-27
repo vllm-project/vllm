@@ -456,7 +456,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         logical_local = self._as_grouped_block_ids(local_block_ids)
         logical_remote = self._as_grouped_block_ids(remote_block_ids)
-
         physical_local = self._logical_to_kernel_block_ids(
             logical_local, self._physical_blocks_per_logical_kv_block
         )
