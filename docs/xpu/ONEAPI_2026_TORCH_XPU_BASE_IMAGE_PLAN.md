@@ -215,8 +215,8 @@ Ordered, all **off** production Ornith DS:
 - [x] **T3** Refresh `requirements/test/xpu.txt` Intel RT pins (or document regen command).
 - [x] **T4** Resolve oneCCL strategy: pip `oneccl==2022.0.0` for so.9; BMG 2021.15 not ABI-compatible with oneAPI 2026 (documented).
 - [x] **T5** Build `hal/vllm-xpu:oneapi-2026.0-torch2.13-3deb3160c` on `hal` (~24.6GB); see `ONEAPI_2026_BUILD_NOTES.md`.
-- [x] **T6** Container smokes: toolkit versions, XPU init, matmul, `XPUGraph` capture, `supports_xpu_graph True`. Eager serve + `01` canary **deferred** (need small model with real weights / non-toy head_dim).
-- [ ] **T7** Optional scratch-in-graph / FA probe; record result for `03`.
+- [x] **T6** Container smokes: toolkit versions, XPU init, matmul, `XPUGraph` capture, `supports_xpu_graph True`. Eager serve + `01` canary + FULL graph serve done on Qwen2.5-0.5B-Instruct (see `ONEAPI_2026_BUILD_NOTES.md` A/B metrics).
+- [x] **T7** FA-in-graph probe: `flash_attn_varlen_func` captures/replays in `XPUGraph` with prealloc `out`; no `work_group_scratch_memory` error. `03` unblocked.
 - [x] **T8** Minimal doc note (install inc + plan status + build notes Done/Caveats).
 
 ---
