@@ -322,6 +322,8 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             query_end = (
                 query_start_loc_cpu[num_decodes + chunk_end] - prefill_token_base
             )
+            if query_start == query_end:
+                continue
 
             combined_indices, combined_lens = combine_topk_swa_indices(
                 topk_indices[query_start:query_end],
