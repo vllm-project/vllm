@@ -1965,7 +1965,7 @@ class NixlBaseConnectorWorker:
             has_stale = first_stale < len(block_ids)
             indices = None
             if convert or has_stale:
-                async_tensor_h2d(block_ids, device, torch.long)
+                indices = async_tensor_h2d(block_ids, device, torch.long)
 
             if convert:
                 for cache in attn_caches:
