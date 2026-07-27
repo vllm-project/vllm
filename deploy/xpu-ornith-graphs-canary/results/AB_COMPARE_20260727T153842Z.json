@@ -1,0 +1,99 @@
+{
+  "stamp": "20260727T153842Z",
+  "arms_completed": [
+    "A",
+    "B",
+    "C"
+  ],
+  "perf": {
+    "A": {
+      "arm": "A",
+      "ready_s": 135,
+      "ttft_ms_mean": 154.6645169146359,
+      "ttft_ms_p50": 154.25815689377487,
+      "decode_tok_s_mean": 13.90798141361377,
+      "decode_tok_s_p50": 13.899489735913571,
+      "text_stable": true
+    },
+    "B": {
+      "arm": "B",
+      "ready_s": 201,
+      "ttft_ms_mean": 72.61261437088251,
+      "ttft_ms_p50": 71.91291311755776,
+      "decode_tok_s_mean": 72.21054819387433,
+      "decode_tok_s_p50": 72.21244936090346,
+      "text_stable": true
+    },
+    "C": {
+      "arm": "C",
+      "ready_s": 180,
+      "ttft_ms_mean": 66.64750992786139,
+      "ttft_ms_p50": 66.37931894510984,
+      "decode_tok_s_mean": 73.97087479858321,
+      "decode_tok_s_p50": 73.97098004907271,
+      "text_stable": true
+    }
+  },
+  "output_agreement": {
+    "A_vs_B": {
+      "S2_short": {
+        "identical": true,
+        "similarity": 1.0
+      },
+      "S3_long": {
+        "identical": false,
+        "similarity": 0.4874
+      },
+      "S5_code": {
+        "identical": true,
+        "similarity": 1.0
+      },
+      "S5_math": {
+        "identical": false,
+        "similarity": 0.5315
+      },
+      "S5_prose": {
+        "identical": false,
+        "similarity": 0.7061
+      },
+      "S5_multilingual": {
+        "identical": false,
+        "similarity": 0.9356
+      },
+      "S6_state_recall": {
+        "identical": true,
+        "similarity": 1.0
+      }
+    },
+    "A_vs_C": {
+      "S2_short": {
+        "identical": true,
+        "similarity": 1.0
+      },
+      "S3_long": {
+        "identical": false,
+        "similarity": 0.8291
+      },
+      "S5_code": {
+        "identical": true,
+        "similarity": 1.0
+      },
+      "S5_math": {
+        "identical": false,
+        "similarity": 0.6346
+      },
+      "S5_prose": {
+        "identical": false,
+        "similarity": 0.7061
+      },
+      "S5_multilingual": {
+        "identical": false,
+        "similarity": 0.9356
+      },
+      "S6_state_recall": {
+        "identical": true,
+        "similarity": 1.0
+      }
+    }
+  }
+}

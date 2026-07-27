@@ -1,0 +1,113 @@
+# DRAFT ONLY — DO NOT APPLY as part of feature 04.
+# Isolated k8s canary for Ornith under XPU graphs, for later use in the ops
+# repo (intel_vllm_triton). Differences from production vllm-xpu:
+#   - own name/labels (vllm-xpu-canary), port 8021 (prod: 8004)
+#   - opt-in node label hal.local/vllm-xpu-canary=true (no node has it by
+#     default -> Desired 0; labeling the node is the deliberate go action)
+#   - graphs enabled (arm B/PIECEWISE shown; arm C = FORCE_PIECEWISE "0"
+#     + -cc.cudagraph_mode=FULL)
+#   - no runtime topk patch: this branch fixes is_padding in-tree
+# Rollback: remove the node label (Desired -> 0) or kubectl delete ds
+# vllm-xpu-canary. Production vllm-xpu (eager) is never modified by this.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: vllm-xpu-canary
+  namespace: inference
+  labels:
+    app: vllm-xpu-canary
+    backend: xpu
+spec:
+  selector:
+    matchLabels:
+      app: vllm-xpu-canary
+  updateStrategy:
+    type: OnDelete
+  template:
+    metadata:
+      labels:
+        app: vllm-xpu-canary
+        backend: xpu
+    spec:
+      hostNetwork: true
+      nodeSelector:
+        intel.com/gpu.present: "true"
+        hal.local/vllm-xpu-canary: "true"   # opt-in; absent by default
+      tolerations:
+        - effect: NoSchedule
+          key: gpu
+          operator: Exists
+      containers:
+        - name: vllm
+          image: docker.io/hal/vllm-xpu:oneapi-2026.0-torch2.13-3deb3160c
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              source /opt/intel/oneapi/setvars.sh && \
+              vllm serve /models/Ornith-1.0-35B-MXFP4 \
+                --port 8021 \
+                --host 0.0.0.0 \
+                --max-model-len 32768 \
+                --max-num-batched-tokens 4096 \
+                --gpu-memory-utilization 0.85 \
+                --max-num-seqs 2 \
+                --dtype bfloat16 \
+                --kv-cache-dtype fp8 \
+                --attention-backend FLASH_ATTN \
+                -cc.cudagraph_mode=PIECEWISE \
+                --served-model-name ornith-canary \
+                --trust-remote-code \
+                --api-key dummy-key \
+                --limit-mm-per-prompt '{"image":0}' \
+                --default-chat-template-kwargs '{"enable_thinking": false}'
+          env:
+            - name: ZE_AFFINITY_MASK
+              value: "0"
+            - name: VLLM_XPU_ENABLE_XPU_GRAPH
+              value: "1"
+            - name: VLLM_XPU_GRAPH_FORCE_PIECEWISE
+              value: "1"
+          ports:
+            - containerPort: 8021
+              hostPort: 8021
+              protocol: TCP
+          resources:
+            limits:
+              cpu: "16"
+              memory: 24Gi
+              gpu.intel.com/xe: "1"
+            requests:
+              cpu: "4"
+              memory: 8Gi
+              gpu.intel.com/xe: "1"
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: models
+              mountPath: /models
+              readOnly: true
+            - name: tank-models
+              mountPath: /tank/nas/models
+              readOnly: true
+            - name: dri
+              mountPath: /dev/dri
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: models
+          hostPath:
+            path: /root/models
+            type: Directory
+        - name: tank-models
+          hostPath:
+            path: /tank/nas/models
+            type: Directory
+        - name: dri
+          hostPath:
+            path: /dev/dri
+            type: Directory
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 12Gi
