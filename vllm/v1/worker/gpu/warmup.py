@@ -157,13 +157,10 @@ def warmup_kernels(
     worker_execute_model: Callable[[SchedulerOutput], Any],
     worker_sample_tokens: Callable[[GrammarOutput | None], Any],
 ) -> None:
-    """Run two execute_model + sample_tokens iterations to JIT compile
-    triton kernels. We must call the provided worker's execute_model for
-    pipeline parallel coordination.
+    """Run scheduler-realistic prefill and decode steps to JIT compile kernels.
 
-    The first iteration simulates a prefill with requests of
-    decode_query_len + 1 prompt tokens each. The second iteration simulates
-    a decode step with all requests generating decode_query_len tokens.
+    We must call the provided worker's execute_model for pipeline parallel
+    coordination.
     """
     num_spec_steps = model_runner.num_speculative_steps
     decode_query_len = model_runner.decode_query_len
@@ -347,16 +344,17 @@ def warmup_kernels(
         if num_reqs >= 2:
             # Mixed spec / non-spec: GDN and KDA reclassify the non-spec decode
             # as a prefill and split the batch into spec/non-spec token indices.
-            # Two also covers the num_reqs variant that is neither 1 nor %16.
             decode_steps.append(([0, 1], [use_spec_decode, False]))
             if use_spec_decode:
+                # Exercise the model paths that split a batch by whether each
+                # request received draft tokens.
                 decode_steps.append(([0, 1], [False, False]))
         if num_reqs > 1:
-            # num_reqs == 1 specialization of the runner-owned Triton kernels
-            # (mamba align/postprocess, ...).
             decode_steps.append(([0], [use_spec_decode]))
             if use_spec_decode:
                 decode_steps.append(([0], [False]))
+        elif use_spec_decode:
+            decode_steps.append(([0], [False]))
 
         for step_indices, step_spec_flags in decode_steps:
             _run_decode_step(step_indices, step_spec_flags)

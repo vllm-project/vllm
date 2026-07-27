@@ -39,12 +39,8 @@ from vllm.v1.kv_cache_interface import (
 
 logger = init_logger(__name__)
 
-# Covers the three Triton specializations of the runtime ``n_blocks`` argument
-# of ``_zero_kv_blocks_kernel``: ``== 1``, ``% 16 == 0``, and neither.
-_ZERO_KV_WARMUP_N_BLOCKS = (1, 2, 16)
 
-
-@triton.jit
+@triton.jit(do_not_specialize=["n_blocks"])
 def _zero_kv_blocks_kernel(
     seg_addrs_ptr,
     seg_page_sizes_ptr,
@@ -211,18 +207,9 @@ class KVBlockZeroer:
         )
 
     def warmup(self, num_kv_blocks: int) -> None:
-        """JIT-compile the zeroing kernel before the first real request.
-
-        ``n_blocks`` is a runtime (non-constexpr) Triton argument, so it is
-        specialized into three variants: ``== 1``, ``% 16 == 0`` and
-        everything else. Warm one launch per variant; zeroing already-zero
-        blocks is a no-op, and no request holds a block at warmup time.
-        """
-        if self._meta is None:
-            return
-        for n_blocks in _ZERO_KV_WARMUP_N_BLOCKS:
-            if n_blocks <= num_kv_blocks:
-                self.zero_block_ids(list(range(n_blocks)))
+        """JIT-compile the zeroing kernel before the first real request."""
+        if num_kv_blocks > 0:
+            self.zero_block_ids([0])
 
 
 @dataclass

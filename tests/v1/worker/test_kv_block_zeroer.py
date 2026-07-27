@@ -92,8 +92,8 @@ def test_non_uniform_page_sizes():
 def test_warmup_compiles_every_n_blocks_specialization():
     """After warmup, no launch should trigger a first-request JIT compile.
 
-    ``n_blocks`` is a runtime Triton argument, so it is specialized into
-    ``== 1`` / ``% 16 == 0`` / neither. Warmup must cover all three.
+    ``n_blocks`` is ``do_not_specialize``, so a single warmup launch must
+    cover every block count.
     """
     device = torch.device("cuda")
     num_blocks = 64
@@ -131,11 +131,10 @@ def test_warmup_compiles_every_n_blocks_specialization():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_warmup_respects_available_block_count():
-    """A tiny KV cache must not be warmed with out-of-range block IDs."""
+    """An empty KV cache must not be warmed with out-of-range block IDs."""
     device = torch.device("cuda")
-    num_blocks = 2
     page_size_el = 4
-    storage = torch.ones((num_blocks, page_size_el), dtype=torch.int32, device=device)
+    storage = torch.ones((1, page_size_el), dtype=torch.int32, device=device)
 
     zeroer = KVBlockZeroer.__new__(KVBlockZeroer)
     zeroer.device = device
@@ -147,8 +146,7 @@ def test_warmup_respects_available_block_count():
         1,
     )
 
-    zeroer.warmup(num_blocks)
+    zeroer.warmup(0)
     torch.accelerator.synchronize()
 
-    # Only blocks 0..1 exist; nothing past the allocation may be touched.
-    assert torch.all(storage == 0)
+    assert torch.all(storage == 1)
