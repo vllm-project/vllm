@@ -163,7 +163,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
     def _decode_and_chunk_speech(
         self,
         audio_data: bytes,
-    ) -> tuple[list[np.ndarray], float]:
+    ) -> tuple[list[np.ndarray], list[float], float]:
         # Decode audio bytes.  For container formats (MP4, M4A, WebM) that
         # soundfile cannot detect from a BytesIO stream, _load_audio_bytes
         # transparently falls back to ffmpeg via an in-memory fd.
@@ -200,7 +200,19 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 min_energy_window_size=self.asr_config.min_energy_split_window_size,
             )
 
-        return chunks, duration
+        chunk_start_times = self._compute_chunk_start_times(chunks, sr)
+        return chunks, chunk_start_times, duration
+
+    @staticmethod
+    def _compute_chunk_start_times(
+        chunks: list[np.ndarray], sample_rate: float
+    ) -> list[float]:
+        chunk_start_times: list[float] = []
+        current_time = 0.0
+        for chunk in chunks:
+            chunk_start_times.append(current_time)
+            current_time += chunk.shape[-1] / sample_rate
+        return chunk_start_times
 
     async def _detect_language(
         self,
@@ -258,7 +270,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         request: SpeechToTextRequest,
         audio_data: bytes,
         request_id: str,
-    ) -> tuple[list[EngineInput], float]:
+    ) -> tuple[list[EngineInput], list[float], float]:
         # Validate request
         request.language = self.model_cls.validate_language(request.language)
         request.to_language = (
@@ -275,7 +287,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             )
 
         # Run cpu intensive preprocess step in a separate thread pool executor.
-        chunks, duration = await self._decode_and_chunk_speech_async(audio_data)
+        chunks, chunk_start_times, duration = await self._decode_and_chunk_speech_async(
+            audio_data
+        )
 
         if request.language is None and getattr(
             self.model_cls, "supports_explicit_language_detection", False
@@ -306,7 +320,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         engine_inputs = await self.renderer.render_cmpl_async(parsed_prompts)
 
-        return engine_inputs, duration
+        return engine_inputs, chunk_start_times, duration
 
     def _preprocess_verbose_prompt(self, prompt: EncoderDecoderDictPrompt):
         dec_prompt = prompt["decoder_prompt"]
@@ -467,10 +481,12 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         lora_request = self._maybe_get_adapters(request)
 
-        engine_inputs, duration_s = await self._preprocess_speech_to_text(
-            request=request,
-            audio_data=audio_data,
-            request_id=request_id,
+        engine_inputs, chunk_start_times, duration_s = (
+            await self._preprocess_speech_to_text(
+                request=request,
+                audio_data=audio_data,
+                request_id=request_id,
+            )
         )
 
         # Schedule the request and get the result generator.
@@ -582,16 +598,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 "translate": TranslationSegment,
             }
             segment_class: type[SpeechToTextSegment] = segments_types[self.task_type]
-            chunk_size_in_s = self.asr_config.max_audio_clip_s
-            if chunk_size_in_s is None:
-                assert len(list_result_generator) == 1, (
-                    "`max_audio_clip_s` is set to None, audio cannot be chunked"
-                )
             result_generator = merge_async_iterators(*list_result_generator)
             async for idx, op in result_generator:
-                start_time = (
-                    float(idx * chunk_size_in_s) if chunk_size_in_s is not None else 0.0
-                )
+                start_time = chunk_start_times[idx]
                 if request.response_format == "verbose_json":
                     assert op.outputs[0].logprobs
                     segments: list[SpeechToTextSegment] = self._get_verbose_segments(
