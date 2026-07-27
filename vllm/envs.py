@@ -2114,6 +2114,13 @@ def compile_factors() -> dict[str, object]:
         "VLLM_CACHE_ROOT",
         # Runtime memory-plan persistence; does not affect compiled graphs.
         "VLLM_ENABLE_STARTUP_PLAN",
+        # Location-only derived paths: where a cache/config directory lives
+        # cannot affect compiled artifacts, and hashing them means relocating
+        # HOME or the XDG roots silently invalidates every compile cache
+        # (VLLM_CACHE_ROOT above and VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR below
+        # are already ignored for the same reason).
+        "VLLM_XLA_CACHE_PATH",
+        "VLLM_CONFIG_ROOT",
         "LD_LIBRARY_PATH",
         "VLLM_SERVER_DEV_MODE",
         "VLLM_DP_MASTER_IP",
