@@ -5,7 +5,6 @@ mod convert;
 mod types;
 mod validate;
 
-use std::collections::HashMap;
 use std::convert::Infallible;
 use std::result::Result;
 use std::sync::Arc;
@@ -29,8 +28,8 @@ use vllm_text::{
 
 use self::convert::{ResponseOptions, prepare_completion_request};
 use super::utils::logprobs::{
-    collected_logprobs_to_openai, decoded_logprobs_to_openai, decoded_prompt_logprobs_to_maps,
-    decoded_prompt_logprobs_to_openai, text_len,
+    collected_logprobs_to_openai, decoded_logprobs_to_openai, decoded_prompt_logprobs_to_openai,
+    prompt_logprobs_to_maps, text_len,
 };
 use super::utils::types::Usage;
 use crate::config::ApiServerOptions;
@@ -502,27 +501,6 @@ fn prompt_only_logprobs_to_openai(
 
     Err(server_error!(
         "prompt-only completion requested logprobs but generation returned none"
-    ))
-}
-
-fn prompt_logprobs_to_maps(
-    prompt_logprobs: Option<&DecodedPromptLogprobs>,
-    prompt_token_ids: &[u32],
-    return_tokens_as_token_ids: bool,
-) -> Result<Vec<Option<HashMap<String, f32>>>, ApiError> {
-    if let Some(prompt_logprobs) = prompt_logprobs {
-        return Ok(decoded_prompt_logprobs_to_maps(
-            prompt_logprobs,
-            return_tokens_as_token_ids,
-        ));
-    }
-
-    if let [_token_id] = prompt_token_ids {
-        return Ok(vec![None]);
-    }
-
-    Err(server_error!(
-        "completion response requested prompt_logprobs but generation returned none"
     ))
 }
 
