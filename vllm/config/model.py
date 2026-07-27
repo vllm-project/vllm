@@ -547,6 +547,8 @@ class ModelConfig:
 
         self.maybe_pull_model_tokenizer_for_runai(self.model, self.tokenizer)
 
+        # If loading model/tokenizer from HF Hub, resolve the revision once
+        # to prevent resolving it multiple times downstream.
         if (
             (self.hf_config_path is None or self.hf_config_path == self.model)
             and not Path(self.model).exists()
