@@ -32,40 +32,106 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
     # [1, 2, 4] + range(8, 256, 8) + range(256, max_graph_size + 1, 16),
     # but is capped here to cover only small M values.
     m_size_list = [1, 2, 4, 8, 16, 24, 32]
-    b_shape_list = [
+
+    fp8: torch.dtype = current_platform.fp8_dtype()
+    int8: torch.dtype = torch.int8
+
+    # Each entry maps a (K, N) weight shape to a single input dtype.
+    b_shape_dtype_list: list[tuple[tuple[int, int], torch.dtype]] = [
         # qwen3-1.7B
         # TP=1
-        (2048, 4096),
-        (2048, 2048),
-        (2048, 12288),
-        (6144, 2048),
+        ((2048, 4096), fp8),
+        ((2048, 2048), fp8),
+        ((2048, 12288), fp8),
+        ((6144, 2048), fp8),
+        # qwen3-4B
+        # TP=1
+        ((2560, 6144), fp8),
+        ((4096, 2560), fp8),
+        ((2560, 19456), fp8),
+        ((9728, 2560), fp8),
+        ((2560, 6144), int8),
+        ((4096, 2560), int8),
+        ((2560, 19456), int8),
+        ((9728, 2560), int8),
         # qwen3-8B
         # TP=1
-        (4096, 6144),
-        (4096, 4096),
-        (4096, 24576),
-        (12288, 4096),
+        ((4096, 6144), fp8),
+        ((4096, 4096), fp8),
+        ((4096, 24576), fp8),
+        ((12288, 4096), fp8),
+        # qwen3-14B
+        # TP=1
+        ((5120, 7168), fp8),
+        ((5120, 5120), fp8),
+        ((5120, 34816), fp8),
+        ((17408, 5120), fp8),
         # qwen3-32B
         # TP=1
-        (5120, 10240),
-        (8192, 5120),
-        (5120, 51200),
-        (25600, 5120),
+        ((5120, 10240), fp8),
+        ((8192, 5120), fp8),
+        ((5120, 51200), fp8),
+        ((25600, 5120), fp8),
+        ((5120, 10240), int8),
+        ((8192, 5120), int8),
+        ((5120, 51200), int8),
+        ((25600, 5120), int8),
+        # TP=2
+        ((5120, 5120), fp8),
+        ((4096, 5120), fp8),
+        ((5120, 25600), fp8),
+        ((12800, 5120), fp8),
+        ((5120, 5120), int8),
+        ((4096, 5120), int8),
+        ((5120, 25600), int8),
+        ((12800, 5120), int8),
+        # llama3.1-8B
+        # TP=1
+        ((4096, 28672), fp8),
+        ((14336, 4096), fp8),
+        ((4096, 6144), int8),
+        ((4096, 4096), int8),
+        ((4096, 28672), int8),
+        ((14336, 4096), int8),
+        # llama3.3-70B
+        # TP=2
+        ((8192, 5120), fp8),
+        ((4096, 8192), fp8),
+        ((8192, 28672), fp8),
+        ((14336, 8192), fp8),
+        ((8192, 5120), int8),
+        ((4096, 8192), int8),
+        ((8192, 28672), int8),
+        ((14336, 8192), int8),
+        # mistral-24B
+        # TP=1
+        ((5120, 6144), fp8),
+        ((4096, 5120), fp8),
+        ((5120, 65536), fp8),
+        ((32768, 5120), fp8),
+        # TP=2
+        ((5120, 3072), fp8),
+        ((2048, 5120), fp8),
+        ((5120, 32768), fp8),
+        ((16384, 5120), fp8),
     ]
     has_bias = False
 
-    in_dtype: torch.dtype = current_platform.fp8_dtype()
     scale_dtype: torch.dtype = torch.float32
     out_dtype: torch.dtype = torch.bfloat16
     inputs = {}
-    for M, (K, N) in product(m_size_list, b_shape_list):
+    for M, ((K, N), in_dtype) in product(m_size_list, b_shape_dtype_list):
         scale = 1.0 / math.sqrt(K)
-        a = (scale * (0.5 + torch.rand(M, K, dtype=torch.float32, device="cuda"))).to(
-            in_dtype
-        )
-        b = (scale * (0.5 + torch.rand(N, K, dtype=torch.float32, device="cuda"))).to(
-            in_dtype
-        )
+        if in_dtype.is_floating_point:
+            a = (
+                scale * (0.5 + torch.rand(M, K, dtype=torch.float32, device="cuda"))
+            ).to(in_dtype)
+            b = (
+                scale * (0.5 + torch.rand(N, K, dtype=torch.float32, device="cuda"))
+            ).to(in_dtype)
+        else:
+            a = torch.randint(-32, 32, (M, K), dtype=in_dtype, device="cuda")
+            b = torch.randint(-32, 32, (N, K), dtype=in_dtype, device="cuda")
         b = b.t()
         out = torch.empty((M, N), dtype=out_dtype, device=a.device)
         a_scales = 0.5 + torch.rand((1, M), dtype=scale_dtype, device="cuda")
@@ -77,20 +143,20 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
             else None
         )
 
-        config_key = CaseKey({"K": K, "N": N, "M": M})
+        config_key = CaseKey({"K": K, "N": N, "M": M, "in_dtype": str(in_dtype)})
         inputs[config_key] = (out, a, b, a_scales, b_scales, bias)
 
     return inputs
 
 
-_pick_cache: dict[tuple[int, int, int], CaseKey | None] = {}
+_pick_cache: dict[tuple[int, int, int, str], CaseKey | None] = {}
 
 
 def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | None:
     """Pick the best pre-tuned config for the given input shape.
 
-    K/N are picked by closest match. M is bucketed to the smallest tuned
-    M >= runtime M.
+    Configs are matched within the runtime input dtype. K/N are picked by
+    closest match. M is bucketed to the smallest tuned M >= runtime M.
     """
 
     if not config_keys:
@@ -100,8 +166,9 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
 
     M, K = a.shape
     N = b.shape[1]
+    in_dtype = str(a.dtype)
 
-    cache_key = (M, K, N)
+    cache_key = (M, K, N, in_dtype)
     if cache_key in _pick_cache:
         return _pick_cache[cache_key]
 
@@ -110,7 +177,9 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
         if key.is_default():
             continue
 
-        if all(k in key for k in ("K", "N", "M")):
+        if all(k in key for k in ("K", "N", "M", "in_dtype")):
+            if "in_dtype" not in key or key["in_dtype"] != in_dtype:
+                continue
             configs.setdefault(key["K"], {}).setdefault(key["N"], []).append(key["M"])
 
     if not configs:
@@ -127,6 +196,7 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
             "K": best_K,
             "N": best_N,
             "M": best_M,
+            "in_dtype": in_dtype,
         }
     )
     _pick_cache[cache_key] = result

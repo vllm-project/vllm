@@ -31,10 +31,21 @@ if not has_helion():
     )
 
 
-def _generate_input(M: int, K: int, N: int, has_bias: bool = False) -> tuple[Any, ...]:
-    in_dtype = current_platform.fp8_dtype()
-    a = torch.randn(M, K, dtype=torch.float32, device="cuda").to(in_dtype)
-    b = torch.randn(N, K, dtype=torch.float32, device="cuda").to(in_dtype)
+def _generate_input(
+    M: int,
+    K: int,
+    N: int,
+    has_bias: bool = False,
+    in_dtype: torch.dtype | None = None,
+) -> tuple[Any, ...]:
+    if in_dtype is None:
+        in_dtype = current_platform.fp8_dtype()
+    if in_dtype.is_floating_point:
+        a = torch.randn(M, K, dtype=torch.float32, device="cuda").to(in_dtype)
+        b = torch.randn(N, K, dtype=torch.float32, device="cuda").to(in_dtype)
+    else:
+        a = torch.randint(-32, 32, (M, K), dtype=in_dtype, device="cuda")
+        b = torch.randint(-32, 32, (N, K), dtype=in_dtype, device="cuda")
     b = b.t()
     c = torch.empty((M, N), dtype=torch.bfloat16, device=a.device)
     scale_a = torch.randn(M, 1, dtype=torch.float32, device="cuda")
@@ -58,33 +69,51 @@ def reset_config_manager_singleton():
 class TestScaledMmConfigPicker:
     def setup_method(self):
         _pick_cache.clear()
+        self.fp8 = str(current_platform.fp8_dtype())
+        self.int8 = str(torch.int8)
 
     def test_config_picker_exact_match(self):
         config_keys = [
-            CaseKey({"K": 2048, "N": 4096, "M": 16}),
-            CaseKey({"K": 4096, "N": 6144, "M": 16}),
-            CaseKey({"K": 4096, "N": 4096, "M": 16}),
+            CaseKey({"K": 2048, "N": 4096, "M": 16, "in_dtype": self.fp8}),
+            CaseKey({"K": 4096, "N": 6144, "M": 16, "in_dtype": self.fp8}),
+            CaseKey({"K": 4096, "N": 4096, "M": 16, "in_dtype": self.fp8}),
         ]
 
         args = _generate_input(16, 4096, 6144, True)
         selected_key = pick_config(args, config_keys)
-        assert selected_key == CaseKey({"K": 4096, "N": 6144, "M": 16})
+        assert selected_key == CaseKey(
+            {"K": 4096, "N": 6144, "M": 16, "in_dtype": self.fp8}
+        )
 
     def test_config_picker_closest_match(self):
         config_keys = [
-            CaseKey({"K": 2048, "N": 4096, "M": 16}),
-            CaseKey({"K": 2048, "N": 4096, "M": 32}),
-            CaseKey({"K": 2048, "N": 6144, "M": 16}),
-            CaseKey({"K": 2048, "N": 6144, "M": 32}),
-            CaseKey({"K": 4096, "N": 4096, "M": 16}),
-            CaseKey({"K": 4096, "N": 4096, "M": 32}),
-            CaseKey({"K": 4096, "N": 6144, "M": 16}),
-            CaseKey({"K": 4096, "N": 6144, "M": 32}),
+            CaseKey({"K": 2048, "N": 4096, "M": 16, "in_dtype": self.fp8}),
+            CaseKey({"K": 2048, "N": 4096, "M": 32, "in_dtype": self.fp8}),
+            CaseKey({"K": 2048, "N": 6144, "M": 16, "in_dtype": self.fp8}),
+            CaseKey({"K": 2048, "N": 6144, "M": 32, "in_dtype": self.fp8}),
+            CaseKey({"K": 4096, "N": 4096, "M": 16, "in_dtype": self.fp8}),
+            CaseKey({"K": 4096, "N": 4096, "M": 32, "in_dtype": self.fp8}),
+            CaseKey({"K": 4096, "N": 6144, "M": 16, "in_dtype": self.fp8}),
+            CaseKey({"K": 4096, "N": 6144, "M": 32, "in_dtype": self.fp8}),
         ]
 
         args = _generate_input(20, 3000, 500, False)
         selected_key = pick_config(args, config_keys)
-        assert selected_key == CaseKey({"K": 2048, "N": 4096, "M": 32})
+        assert selected_key == CaseKey(
+            {"K": 2048, "N": 4096, "M": 32, "in_dtype": self.fp8}
+        )
+
+    def test_config_picker_matches_in_dtype(self):
+        config_keys = [
+            CaseKey({"K": 4096, "N": 6144, "M": 16, "in_dtype": self.fp8}),
+            CaseKey({"K": 2048, "N": 4096, "M": 16, "in_dtype": self.int8}),
+        ]
+
+        args = _generate_input(16, 4096, 6144, in_dtype=torch.int8)
+        selected_key = pick_config(args, config_keys)
+        assert selected_key == CaseKey(
+            {"K": 2048, "N": 4096, "M": 16, "in_dtype": self.int8}
+        )
 
     def test_config_picker_no_configs(self):
         config_keys: list[dict] = []
@@ -93,21 +122,32 @@ class TestScaledMmConfigPicker:
         selected_key = pick_config(args, config_keys)
         assert selected_key is None
 
+    def test_config_picker_no_matching_in_dtype(self):
+        config_keys = [
+            CaseKey({"K": 4096, "N": 6144, "M": 16, "in_dtype": self.fp8}),
+        ]
+
+        args = _generate_input(16, 4096, 6144, in_dtype=torch.int8)
+        selected_key = pick_config(args, config_keys)
+        assert selected_key is None
+
     def test_config_picker_fallback_to_largest(self):
         config_keys = [
-            CaseKey({"K": 2048, "N": 4096, "M": 16}),
-            CaseKey({"K": 2048, "N": 4096, "M": 32}),
-            CaseKey({"K": 2048, "N": 6144, "M": 16}),
-            CaseKey({"K": 2048, "N": 6144, "M": 32}),
-            CaseKey({"K": 4096, "N": 4096, "M": 16}),
-            CaseKey({"K": 4096, "N": 4096, "M": 32}),
-            CaseKey({"K": 4096, "N": 6144, "M": 16}),
-            CaseKey({"K": 4096, "N": 6144, "M": 32}),
+            CaseKey({"K": 2048, "N": 4096, "M": 16, "in_dtype": self.fp8}),
+            CaseKey({"K": 2048, "N": 4096, "M": 32, "in_dtype": self.fp8}),
+            CaseKey({"K": 2048, "N": 6144, "M": 16, "in_dtype": self.fp8}),
+            CaseKey({"K": 2048, "N": 6144, "M": 32, "in_dtype": self.fp8}),
+            CaseKey({"K": 4096, "N": 4096, "M": 16, "in_dtype": self.fp8}),
+            CaseKey({"K": 4096, "N": 4096, "M": 32, "in_dtype": self.fp8}),
+            CaseKey({"K": 4096, "N": 6144, "M": 16, "in_dtype": self.fp8}),
+            CaseKey({"K": 4096, "N": 6144, "M": 32, "in_dtype": self.fp8}),
         ]
 
         args = _generate_input(64, 8192, 7000, False)
         selected_key = pick_config(args, config_keys)
-        assert selected_key == CaseKey({"K": 4096, "N": 6144, "M": 32})
+        assert selected_key == CaseKey(
+            {"K": 4096, "N": 6144, "M": 32, "in_dtype": self.fp8}
+        )
 
 
 def _get_8bit_types():
