@@ -21,7 +21,10 @@ class HiSparseConfig:
     """Per-rank pinned host pool size in GiB."""
 
     device_buffer_size: int | None = Field(default=None, gt=0)
-    """Per-request GPU hot-buffer rows. Defaults to twice the model top-k."""
+    """Total per-request GPU hot-buffer rows, including the newest-token slot.
+
+    Defaults to twice the model top-k, rounded up to the cache block size.
+    """
 
 
 @config

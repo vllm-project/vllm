@@ -1347,7 +1347,7 @@ def fallback_swap_in(
     """
     assert coordinator._host_cache is not None
     num_tokens, _ = global_indices.shape
-    buf = coordinator.config.device_buffer_size
+    buf = coordinator.config.lru_size
     hot_indices.fill_(-1)
 
     global_cpu = global_indices.cpu().tolist()
@@ -1412,7 +1412,7 @@ def fallback_swap_in(
 def _make_hisparse_coordinator(
     *,
     top_k: int = 4,
-    device_buffer_size: int = 4,
+    device_buffer_size: int = 5,
     max_num_reqs: int = 2,
     row_width: int = 8,
     block_size: int = 64,
@@ -1803,7 +1803,7 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
     flat_pool = kv_pool.reshape(-1, row_width)
 
     coordinator = _make_hisparse_coordinator(block_size=block_size)
-    buf = coordinator.config.device_buffer_size
+    buf = coordinator.config.lru_size
 
     block_table = torch.tensor([[2, 0, 4]], dtype=torch.int32, device=device)
     req_ids = torch.tensor([0], dtype=torch.int32, device=device)

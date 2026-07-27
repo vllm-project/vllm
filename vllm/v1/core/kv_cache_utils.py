@@ -1388,7 +1388,7 @@ def _get_hisparse_hma_config(
         vllm_config, vllm_config.model_config.hf_config.index_topk
     )
     assert config is not None
-    hot_blocks_per_request = cdiv(config.device_buffer_size + 1, block_size)
+    hot_blocks_per_request = config.num_hot_blocks(block_size)
 
     source_specs = {
         (

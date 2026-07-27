@@ -13,11 +13,10 @@ concurrency.
   reserved hot slot and are scattered back to the host pool by a CUDA kernel
   writing straight into pinned memory, so the backup is stream-ordered with
   the decode kernels and needs no host synchronization.
-- Each active request owns ``device_buffer_size + 1`` logical hot rows backed
-  by ephemeral blocks from the shared GPU HMA pool.
-  Slots ``[0, device_buffer_size)`` are LRU-managed; slot ``device_buffer_size``
-  is reserved for the newest token, which the KV-cache update writes there
-  directly.
+- Each active request owns ``device_buffer_size`` logical hot rows backed by
+  ephemeral blocks from the shared GPU HMA pool. Slots
+  ``[0, device_buffer_size - 1)`` are LRU-managed; the final slot is reserved
+  for the newest token, which the KV-cache update writes there directly.
 - At decode time, the indexer's top-k positions are converted to global slot
   ids and a swap-in kernel resolves them against the hot region: hits are
   reused, misses are copied from the pinned host pool, and the LRU order is
@@ -38,7 +37,7 @@ from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import round_up
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
@@ -49,6 +48,7 @@ logger = init_logger(__name__)
 
 # fp8_ds_mla KV row: 512 B quantized NoPE + 16 B scales + 128 B RoPE.
 FP8_DS_MLA_ROW_BYTES = 656
+HISPARSE_BLOCK_SIZE = 64
 
 
 def is_hisparse_decode_batch(
@@ -66,6 +66,13 @@ class ResolvedHiSparseConfig:
     device_buffer_size: int
     host_pool_gib: float
 
+    @property
+    def lru_size(self) -> int:
+        return self.device_buffer_size - 1
+
+    def num_hot_blocks(self, block_size: int) -> int:
+        return cdiv(self.device_buffer_size, block_size)
+
     @classmethod
     def from_vllm_config(
         cls,
@@ -78,16 +85,33 @@ class ResolvedHiSparseConfig:
 
         # Default 2x top_k: at exactly top_k the LRU has zero slack and
         # boundary entries thrash between steps.
-        device_buffer_size = config.device_buffer_size
-        if device_buffer_size is None:
-            device_buffer_size = 2 * model_top_k
+        configured_size = config.device_buffer_size
+        if configured_size is None:
+            device_buffer_size = round_up(2 * model_top_k, HISPARSE_BLOCK_SIZE)
+        else:
+            device_buffer_size = configured_size
 
-        if device_buffer_size < model_top_k:
+        if device_buffer_size - 1 < model_top_k:
             raise ValueError(
-                "HiSparse device_buffer_size must be at least the model's "
-                f"index_topk. Got device_buffer_size={device_buffer_size}, "
-                f"index_topk={model_top_k}."
+                "HiSparse device_buffer_size must include the newest-token "
+                "slot plus at least the model's index_topk LRU rows. Got "
+                f"device_buffer_size={device_buffer_size}, "
+                f"index_topk={model_top_k}; expected at least "
+                f"{model_top_k + 1}."
             )
+        if configured_size is not None:
+            padding = -device_buffer_size % HISPARSE_BLOCK_SIZE
+            if padding:
+                logger.warning(
+                    "HiSparse device_buffer_size=%d is not aligned to the "
+                    "%d-token cache block size and allocates %d unused "
+                    "padding rows per hot group. Use %d to use all allocated "
+                    "rows.",
+                    device_buffer_size,
+                    HISPARSE_BLOCK_SIZE,
+                    padding,
+                    device_buffer_size + padding,
+                )
         return cls(
             top_k=model_top_k,
             device_buffer_size=device_buffer_size,
@@ -445,7 +469,7 @@ class HiSparseCoordinator:
         self.device = torch.device(device)
         # Logical slots per request. Physical rows come from its ephemeral HMA
         # block table and need not be contiguous in the shared slab.
-        self.region_stride = config.device_buffer_size + 1
+        self.region_stride = config.device_buffer_size
 
         row_bytes = row_width * kv_dtype.itemsize
         if row_bytes % 16 != 0:
@@ -466,14 +490,12 @@ class HiSparseCoordinator:
         # "shared" layers, which replay their leader's plan and never resolve
         # the LRU themselves.
         self.device_global_indices: torch.Tensor | None = torch.full(
-            (max_num_reqs, config.device_buffer_size),
+            (max_num_reqs, config.lru_size),
             -1,
             dtype=torch.int32,
             device=self.device,
         )
-        lru_init = torch.arange(
-            config.device_buffer_size, dtype=torch.int16, device=self.device
-        )
+        lru_init = torch.arange(config.lru_size, dtype=torch.int16, device=self.device)
         self._lru_init: torch.Tensor | None = lru_init
         self.lru_slots: torch.Tensor | None = lru_init.repeat(
             max_num_reqs, 1
@@ -729,7 +751,7 @@ class HiSparseCoordinator:
         # (and with it the whole DP fleet).
         num_tokens = min(kv_c_normed.shape[0], slot_mapping.numel(), self.max_num_reqs)
         state_rows = self.request_state_indices[:num_tokens]
-        newest_logical = self.config.device_buffer_size
+        newest_logical = self.config.lru_size
         hot_block_size = self.hot_cache.shape[1]
         physical_slots = (
             self.hot_block_table[:num_tokens, newest_logical // hot_block_size].to(
@@ -1007,9 +1029,11 @@ def create_hisparse_coordinator(
     )
     logger.info_once(
         "Enabled experimental HiSparse HMA hot cache: top_k=%d, "
-        "device_buffer_size=%d, host_pool_gib=%s, max_num_seqs=%d.",
+        "device_buffer_size=%d (%d LRU + 1 newest), host_pool_gib=%s, "
+        "max_num_seqs=%d.",
         config.top_k,
         config.device_buffer_size,
+        config.lru_size,
         config.host_pool_gib,
         max_num_reqs,
     )

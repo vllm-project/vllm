@@ -77,10 +77,27 @@ def test_hisparse_config_resolves_model_constraints():
         )
     )
     resolved = ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)
-    assert resolved is not None and resolved.device_buffer_size == 256
+    assert resolved is not None
+    assert resolved.device_buffer_size == 256
+    assert resolved.lru_size == 255
+    assert resolved.num_hot_blocks(64) == 4
 
     vllm_config.attention_config.hisparse_config = HiSparseConfig(
-        host_pool_gib=1.0, device_buffer_size=127
+        host_pool_gib=1.0, device_buffer_size=128
     )
-    with pytest.raises(ValueError, match="at least the model's index_topk"):
+    with pytest.raises(ValueError, match="expected at least 129"):
         ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)
+
+
+def test_hisparse_config_warns_about_block_padding(caplog: pytest.LogCaptureFixture):
+    vllm_config = SimpleNamespace(
+        attention_config=AttentionConfig(
+            hisparse_config=HiSparseConfig(host_pool_gib=1.0, device_buffer_size=257)
+        )
+    )
+
+    resolved = ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)
+
+    assert resolved is not None
+    assert resolved.lru_size == 256
+    assert "allocates 63 unused padding rows" in caplog.text
