@@ -107,9 +107,23 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
             else:
                 i_t = 0
             # Load state index and check for invalid entries
-            state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(
-                tl.int64
-            )
+            # ``i_t`` is ``num_accepted_tokens - 1`` and is otherwise
+            # unbounded, while ``ssm_state_indices`` has only
+            # ``stride_indices_seq`` columns per request. A zero accepted
+            # count gives ``i_t == -1`` (a read before this request's row,
+            # and before the tensor for ``i_n == 0``); a stale or too-large
+            # count reads past the row. The ``state_idx <= 0`` guard below
+            # only rejects non-positive values, so an out-of-range read that
+            # returns a garbage positive int32 flows into
+            # ``h0 + state_idx * stride_init_state_token`` and is
+            # dereferenced, faulting the SM. Mask the load to the row and let
+            # ``other=0`` fall into the existing invalid-state path.
+            idx_in_row = (i_t >= 0) & (i_t < stride_indices_seq)
+            state_idx = tl.load(
+                ssm_state_indices + i_n * stride_indices_seq + i_t,
+                mask=idx_in_row,
+                other=0,
+            ).to(tl.int64)
             # Skip if state index is invalid (NULL_BLOCK_ID=0)
             if state_idx <= 0:
                 return
