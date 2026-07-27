@@ -6,7 +6,7 @@ set -e
 
 # Default values
 # Keep DEEPGEMM_GIT_REF in sync with cmake/external_projects/deepgemm.cmake
-DEEPGEMM_GIT_REPO="git@github.com:Inferact/DeepGEMM.git"
+DEEPGEMM_GIT_REPO="https://github.com/vllm-project/DeepGEMM.git"
 # NOTE: This is currently targeting nv-dev branch due to sm120 support
 DEEPGEMM_GIT_REF="f5a76426fa084087169693fd0cd815223576d6e9"
 WHEEL_DIR=""
