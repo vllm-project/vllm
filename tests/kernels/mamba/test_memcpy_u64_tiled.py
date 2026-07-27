@@ -18,6 +18,11 @@ copy_size]`` slice copy for every combination of:
 * ``NUM_TILES``: 1 (SD conv callsite, single-CTA memcpy) and
   ``_TEMPORAL_TILES`` (temporal callsite, u64 range partitioned across
   CTAs).
+* ``COPY_BLOCK_SIZE``: the production value 1024 (single-tile at these
+  sizes) and a small value 8 so the existing ``copy_size`` cases actually
+  cross tile boundaries under ``NUM_TILES=_TEMPORAL_TILES``. The
+  partitioning math is COPY_BLOCK_SIZE-agnostic, so testing at a small
+  value covers boundary arithmetic for all values.
 """
 
 from __future__ import annotations
@@ -71,9 +76,14 @@ def _memcpy_wrapper_kernel(
 
 
 # Copy sizes: 0/1/7 (all-head), 8 (all-body when dst-aligned), 15 (head+body
-# or body+tail), 16/17 (small tiled body), 1024 (one COPY_BLOCK_SIZE),
-# 4 KiB (multi-tile body).
+# or body+tail), 16/17 (small tiled body), 1024 and 4 KiB (spans all 16
+# tiles at COPY_BLOCK_SIZE=8; single-tile at COPY_BLOCK_SIZE=1024).
 _COPY_SIZES = [0, 1, 7, 8, 15, 16, 17, 1024, 4 * 1024]
+# COPY_BLOCK_SIZE: 1024 matches the production launch; 8 shrinks the
+# per-tile rounding so ``_COPY_SIZES``' 1024/4096 cases actually cross
+# tile boundaries under NUM_TILES=_TEMPORAL_TILES (partitioning math is
+# COPY_BLOCK_SIZE-agnostic, so a small value proves it for all values).
+_COPY_BLOCK_SIZES = [8, 1024]
 # (src_off, dst_off) pairs. Torch tensors are 256B-aligned at data_ptr, so
 # slicing by these bytes yields a controlled sub-8B alignment. The kernel
 # branches on ``(src ^ dst) & 7``, so we cover both sides plus the aligned
@@ -94,7 +104,10 @@ _NUM_TILES = [1, _TEMPORAL_TILES]
 @_parametrize("copy_size", _COPY_SIZES)
 @_parametrize("src_off,dst_off", _ALIGN_PAIRS)
 @_parametrize("num_tiles", _NUM_TILES)
-def test_memcpy_u64_tiled_matches_slice_copy(copy_size, src_off, dst_off, num_tiles):
+@_parametrize("copy_block_size", _COPY_BLOCK_SIZES)
+def test_memcpy_u64_tiled_matches_slice_copy(
+    copy_size, src_off, dst_off, num_tiles, copy_block_size
+):
     device = torch.device("cuda")
     torch.manual_seed(0)
 
@@ -113,7 +126,7 @@ def test_memcpy_u64_tiled_matches_slice_copy(copy_size, src_off, dst_off, num_ti
         copy_size,
         src_off,
         dst_off,
-        COPY_BLOCK_SIZE=1024,
+        COPY_BLOCK_SIZE=copy_block_size,
         NUM_TILES=num_tiles,
     )
     torch.accelerator.synchronize()
@@ -126,5 +139,6 @@ if __name__ == "__main__":
     for cs in _COPY_SIZES:
         for so, do in _ALIGN_PAIRS:
             for nt in _NUM_TILES:
-                test_memcpy_u64_tiled_matches_slice_copy(cs, so, do, nt)
+                for cbs in _COPY_BLOCK_SIZES:
+                    test_memcpy_u64_tiled_matches_slice_copy(cs, so, do, nt, cbs)
     print("ok")

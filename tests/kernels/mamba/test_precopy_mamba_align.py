@@ -146,14 +146,27 @@ def _reference(convs, ssms, bt, src_col, dst_col, bias, num_reqs, conv_dim_first
     return conv_ref, ssm_ref
 
 
+# COPY_BLOCK_SIZE: 1024 matches the production launch; 8 shrinks the
+# per-tile rounding so the 4 KiB SSM block actually crosses tile
+# boundaries under TEMPORAL_TILES=_TEMPORAL_TILES. The partitioning math
+# is COPY_BLOCK_SIZE-agnostic, so a small value proves it for all values.
+_COPY_BLOCK_SIZES = [8, 1024]
+
+
 @_parametrize("conv_state_dim_first", [False, True])
 @_parametrize("num_reqs", [1, 4, 16])
 @_parametrize("token_bias", [0, 1, 2])
 @_parametrize("has_idx_mapping", [True, False])
 @_parametrize("temporal_tiles", [1, _TEMPORAL_TILES])
+@_parametrize("copy_block_size", _COPY_BLOCK_SIZES)
 @_cuda_required
 def test_precopy_matches_v1_copy_specs(
-    num_reqs, token_bias, has_idx_mapping, conv_state_dim_first, temporal_tiles
+    num_reqs,
+    token_bias,
+    has_idx_mapping,
+    conv_state_dim_first,
+    temporal_tiles,
+    copy_block_size,
 ):
     device = torch.device("cuda")
     torch.manual_seed(0)
@@ -420,9 +433,13 @@ if __name__ == "__main__":
             for mapping in (True, False):
                 for dim_first in (False, True):
                     for tt in (1, _TEMPORAL_TILES):
-                        test_precopy_matches_v1_copy_specs(nr, tb, mapping, dim_first, tt)
-                        print(
-                            f"OK num_reqs={nr} token_bias={tb} "
-                            f"has_idx_mapping={mapping} conv_dim_first={dim_first}"
-                            f"temporal_tiles={tt}"
-                        )
+                        for cbs in _COPY_BLOCK_SIZES:
+                            test_precopy_matches_v1_copy_specs(
+                                nr, tb, mapping, dim_first, tt, cbs
+                            )
+                            print(
+                                f"OK num_reqs={nr} token_bias={tb} "
+                                f"has_idx_mapping={mapping} conv_dim_first={dim_first}"
+                                f"temporal_tiles={tt} "
+                                f"copy_block_size={cbs}"
+                            )
