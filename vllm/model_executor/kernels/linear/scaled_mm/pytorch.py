@@ -278,9 +278,12 @@ class BlockWiseTorchFP8ScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
         # _check_deepseek_support():
         # https://github.com/pytorch/pytorch/blob/33812ece06e2b0d597f73fbe41de03a83f9109f9/aten/src/ATen/native/cuda/ScaledBlas.cpp#L804-L820 # noqa: E501
         if current_platform.is_cuda():
-            if compute_capability is None:
-                compute_capability = current_platform.get_device_capability().to_int()
-            if compute_capability != 90:
+            is_sm90 = (
+                compute_capability == 90
+                if compute_capability is not None
+                else current_platform.is_device_capability(90)
+            )
+            if not is_sm90:
                 return (
                     False,
                     "DeepSeek-style (1x128, 128x128) block scaling on CUDA "
