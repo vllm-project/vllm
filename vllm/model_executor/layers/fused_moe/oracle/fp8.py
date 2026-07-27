@@ -127,7 +127,8 @@ def _get_priority_backends(
         _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.XPU)
 
     if current_platform.is_cpu():
-        # CPU platform uses FP8 W8A16 fused MoE kernel.
+        # CPU platform: single CPU backend; W8A8 vs W8A16 is decided by
+        # VLLM_CPU_MOE_FP8_W8A8 env var inside CPUExpertsFp8W8A8._supports_quant_scheme().
         _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.CPU)
 
     return _AVAILABLE_BACKENDS
@@ -230,11 +231,14 @@ def backend_to_kernel_cls(
         return [XPUExpertsFp8, XPUExpertsMxFp8, XPUExpertsBlockFp8]
 
     elif backend == Fp8MoeBackend.CPU:
+        # For block-quant FP8: W8A8 when VLLM_CPU_MOE_FP8_W8A8=1 (CPUExpertsFp8W8A8),
+        # otherwise W8A16 (CPUExpertsFp8).
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
             CPUExpertsFp8,
+            CPUExpertsFp8W8A8,
         )
 
-        return [CPUExpertsFp8]
+        return [CPUExpertsFp8W8A8, CPUExpertsFp8]
 
     elif backend == Fp8MoeBackend.HPC:
         from vllm.model_executor.layers.fused_moe.hpc_moe import (
@@ -539,10 +543,18 @@ def convert_to_fp8_moe_kernel_format(
         )
     elif fp8_backend == Fp8MoeBackend.CPU:
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            _use_fp8_w8a8_moe,
             prepare_fp8_moe_layer_for_cpu,
+            prepare_fp8_w8a8_moe_layer_for_cpu,
         )
 
-        w13, w2 = prepare_fp8_moe_layer_for_cpu(w13, w2)
+        # Block quant: W8A8 when VLLM_CPU_MOE_FP8_W8A8=1, else W8A16.
+        if _use_fp8_w8a8_moe():
+            w13, w13_scale, w2, w2_scale = prepare_fp8_w8a8_moe_layer_for_cpu(
+                w13, w2, w13_scale, w2_scale
+            )
+        else:
+            w13, w2 = prepare_fp8_moe_layer_for_cpu(w13, w2)
     else:
         if fp8_backend not in [
             Fp8MoeBackend.TRITON,
@@ -590,8 +602,33 @@ def make_fp8_moe_quant_config(
     a method of the modular kernel itself.
     """
 
-    # MARLIN and CPU are mixed precision W8A16 config.
-    if fp8_backend == Fp8MoeBackend.MARLIN or fp8_backend == Fp8MoeBackend.CPU:
+    # CPU: block quant uses W8A8 when VLLM_CPU_MOE_FP8_W8A8=1, else W8A16.
+    if fp8_backend == Fp8MoeBackend.CPU:
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            _use_fp8_w8a8_moe,
+        )
+
+        if _use_fp8_w8a8_moe():
+            return fp8_w8a8_moe_quant_config(
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
+                a1_scale=a1_scale,
+                block_shape=block_shape,
+            )
+        else:
+            return fp8_w8a16_moe_quant_config(
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
+                w1_bias=w1_bias,
+                w2_bias=w2_bias,
+                block_shape=block_shape,
+                gemm1_alpha=gemm1_alpha,
+                gemm1_beta=gemm1_beta,
+                gemm1_clamp_limit=swiglu_limit,
+            )
+
+    # MARLIN is mixed precision W8A16 config.
+    if fp8_backend == Fp8MoeBackend.MARLIN:
         return fp8_w8a16_moe_quant_config(
             w1_scale=w1_scale,
             w2_scale=w2_scale,
