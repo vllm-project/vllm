@@ -132,9 +132,7 @@ def test_mxfp8_aiter_requires_swigluoai_activation(
         moe_backend="aiter",
     )
 
-    with pytest.raises(
-        ValueError, match="requires activation=swigluoai_uninterleave"
-    ):
+    with pytest.raises(ValueError, match="requires activation=swigluoai_uninterleave"):
         select_mxfp8_moe_backend(config)
 
 
