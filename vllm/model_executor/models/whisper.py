@@ -1268,6 +1268,10 @@ class WhisperForConditionalGeneration(
         n_mel = torch.where(differs, ar, ar.new_zeros(())).amax(dim=1) + 1  # [N]
         nframes = (n_mel // 2).clamp_(1, src)
         n = fs.shape[0]
+        # More audio items than the slot buffer holds: the runner skipped the
+        # slot routing for this batch, so KSLOT holds nothing to read here.
+        if n * src > _WORD_ALIGN_KSLOT.shape[0]:
+            return
         slots = _WORD_ALIGN_KSLOT[torch.arange(n, device=fs.device) * src]
         _WORD_ALIGN_NFRAMES[slots] = nframes  # GPU scatter — no host sync
 
