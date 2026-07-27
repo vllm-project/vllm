@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import uuid
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
@@ -10,6 +11,7 @@ from PIL import Image, ImageDraw
 
 from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.media.base import MediaWithBytes
+from vllm.multimodal.media.image import ImageMediaIO
 from vllm.multimodal.parse import MultiModalDataParser
 
 pytestmark = pytest.mark.cpu_test
@@ -137,8 +139,6 @@ def test_hash_image_exif_id():
 
 
 def _rgba_png_bytes() -> bytes:
-    from io import BytesIO
-
     image = Image.new("RGBA", (8, 8), (255, 0, 0, 128))
     buf = BytesIO()
     image.save(buf, format="PNG")
@@ -146,8 +146,6 @@ def _rgba_png_bytes() -> bytes:
 
 
 def test_hash_collision_media_io_config():
-    from vllm.multimodal.media.image import ImageMediaIO
-
     data = _rgba_png_bytes()
     white = ImageMediaIO(rgba_background_color=(255, 255, 255)).load_bytes(data)
     black = ImageMediaIO(rgba_background_color=(0, 0, 0)).load_bytes(data)
@@ -161,11 +159,6 @@ def test_hash_collision_media_io_config():
 
 
 def test_hash_media_io_noop_config_preserves_hash():
-    from io import BytesIO
-
-    from vllm.multimodal.media.base import MediaWithBytes
-    from vllm.multimodal.media.image import ImageMediaIO
-
     image = Image.new("RGB", (8, 8), (0, 128, 255))
     buf = BytesIO()
     image.save(buf, format="PNG")
