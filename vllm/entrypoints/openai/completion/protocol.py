@@ -233,6 +233,16 @@ class CompletionRequest(OpenAIBaseModel):
         ),
     )
 
+    stream_interval: Annotated[int, Field(ge=1)] | None = Field(
+        default=None,
+        description=(
+            "Number of tokens to batch into each streamed chunk. Raises the "
+            "server's `--stream-interval` for this request. Values below the "
+            "server setting are clamped up to it. The first and last chunks "
+            "are always sent immediately. Ignored for non-streaming requests."
+        ),
+    )
+
     # --8<-- [end:completion-extra-params]
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
@@ -365,6 +375,7 @@ class CompletionRequest(OpenAIBaseModel):
             output_kind=RequestOutputKind.DELTA
             if self.stream
             else RequestOutputKind.FINAL_ONLY,
+            stream_interval=self.stream_interval,
             structured_outputs=self.extract_structured_outputs(),
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
