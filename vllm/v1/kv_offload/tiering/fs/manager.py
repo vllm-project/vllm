@@ -49,7 +49,7 @@ from vllm.v1.kv_offload.tiering.base import (
     ScheduleEndContext,
     SecondaryTierManager,
 )
-from vllm.v1.kv_offload.tiering.fs.io import load_block, store_block
+from vllm.v1.kv_offload.tiering.fs.io import load_block, probe_o_direct, store_block
 from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
 
 if TYPE_CHECKING:
@@ -168,6 +168,18 @@ class FileSystemTierManager(SecondaryTierManager):
                     self.file_mapper.get_run_config(), f, indent=2, sort_keys=True
                 )
 
+        # Prefer O_DIRECT to bypass the page cache, but fall back to buffered
+        # I/O on filesystems that reject it (e.g. overlayfs, some NFS mounts)
+        # rather than failing every block.
+        self._use_o_direct = probe_o_direct(os.path.dirname(config_path))
+        if not self._use_o_direct:
+            logger.warning(
+                "O_DIRECT is not supported at '%s'; falling back to buffered "
+                "I/O for the '%s' KV offload tier.",
+                root_dir,
+                tier_type,
+            )
+
         self._pool = DualQueueThreadPool(
             n_read_threads,
             n_write_threads,
@@ -198,6 +210,7 @@ class FileSystemTierManager(SecondaryTierManager):
                 self._primary_kv_view,
                 int(bid) * self._block_size,
                 self._block_size,
+                self._use_o_direct,
             )
             for key, bid in zip(job_metadata.keys, job_metadata.block_ids)
         )
@@ -212,6 +225,7 @@ class FileSystemTierManager(SecondaryTierManager):
                 self._primary_kv_view,
                 int(bid) * self._block_size,
                 self._block_size,
+                self._use_o_direct,
             )
             for key, bid in zip(job_metadata.keys, job_metadata.block_ids)
         )
