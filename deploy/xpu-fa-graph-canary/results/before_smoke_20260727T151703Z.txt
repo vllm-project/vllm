@@ -1,0 +1,4 @@
+arm=A eager
+SHORT 2+2->4 temp0 stable PASS
+LONG coherent PASS
+SMOKE_OK

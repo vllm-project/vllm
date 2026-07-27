@@ -1,0 +1,12 @@
+{
+  "stamp": "20260727T151703Z",
+  "arm": "B_fa_in_graph",
+  "enforce_eager": false,
+  "graphs": true,
+  "force_piecewise": false,
+  "backend": "FLASH_ATTN",
+  "cudagraph_mode": "FULL->FULL_AND_PIECEWISE",
+  "smoke": "PASS",
+  "ttft_ms_mean": 22.560039826203138,
+  "decode_tok_s_mean": 401.6270630907512
+}

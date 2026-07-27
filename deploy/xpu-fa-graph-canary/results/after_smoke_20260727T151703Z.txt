@@ -1,0 +1,7 @@
+arm=B FA-in-graph FULL
+startup READY; no work_group_scratch error
+FlashAttention-in-graph enabled log present
+SHORT 2+2->4 temp0 stable PASS
+LONG coherent PASS
+text identical to eager PASS
+SMOKE_OK
