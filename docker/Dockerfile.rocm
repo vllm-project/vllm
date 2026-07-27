@@ -394,12 +394,6 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 ENV PATH=/usr/local/ucx/bin:$PATH
 ENV LD_LIBRARY_PATH=${UCX_HOME}/lib:${LD_LIBRARY_PATH}
 
-# Remove old Abseil packages to allow NIXL to use its subproject fallback
-# Ubuntu 24.04's Abseil (20220623) is too old and lacks absl_log support
-RUN apt-get purge -y libabsl-dev libabsl20220623 || true && \
-    apt-get autoremove -y && \
-    rm -rf /var/lib/apt/lists/*
-
 RUN --mount=type=cache,target=/root/.cache/ccache \
     git clone ${NIXL_REPO} /opt/nixl && \
     cd /opt/nixl && \
@@ -541,7 +535,7 @@ RUN mkdir -p /install
 # .keep file ensures directory always exists for COPY to work
 COPY docker/context/base-wheels/ /tmp/base-wheels/
 # This is how we know if we are building for a wheel release or not.
-# If there are not wheels found there, we are not building for a wheel release.
+# If there are not wheels found there, we are not building for a wheel release. 
 # So we exit with an error. To skip this stage.
 RUN if [ -n "$(ls /tmp/base-wheels/*.whl 2>/dev/null)" ]; then \
         echo "Found custom wheels - copying to /install"; \
