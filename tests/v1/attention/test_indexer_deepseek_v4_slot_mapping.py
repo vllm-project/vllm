@@ -33,6 +33,42 @@ def test_indexer_warmup_normalizes_zero_compress_ratios():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_indexer_expanded_block_table_buffer_alignment():
+    """Regression test: expanded_block_table_buffer must match the 128-aligned
+    column count used by BlockTableGroup, otherwise _prepare_decode_tensors
+    crashes with a size mismatch when repeat_interleave produces a block table
+    wider than the pre-allocated buffer.
+    """
+    device = torch.device("cuda")
+
+    # block_size=64 → alignment unit = 128 // 64 = 2
+    # max_model_len=192 → cdiv(192, 64) = 3 (odd, not aligned)
+    # BlockTableGroup would round to 4, but the old indexer code used 3.
+    block_size = 64
+    max_model_len = block_size * 3  # 192 → 3 blocks, aligned to 4
+    kv_cache_spec = MLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+    )
+    vllm_config = create_vllm_config(
+        max_model_len=max_model_len, block_size=block_size)
+    builder = DeepseekV32IndexerMetadataBuilder(
+        kv_cache_spec=kv_cache_spec,
+        layer_names=["dummy"],
+        vllm_config=vllm_config,
+        device=device,
+    )
+
+    align = 128 // block_size  # 2
+    unaligned = kv_cache_spec.max_num_blocks_per_req(vllm_config, max_model_len)
+    aligned = -(-unaligned // align) * align  # cdiv then multiply
+    assert aligned > unaligned, "pick a max_model_len that actually misaligns"
+    assert builder.expanded_block_table_buffer.shape[1] == aligned
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_storage_block_size():
     """Regression test: DeepseekV4 compression path must compute slot_mapping from
     compressed positions, not reuse the uncompressed common metadata mapping.
