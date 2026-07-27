@@ -17,6 +17,26 @@ dropped like all text after the first completed call, matching the
 legacy parser.  A balanced ``{...}`` that never produces a top-level
 ``"name"`` key was prose JSON, not a tool call; its text is restored
 as content in place.
+
+Deliberate contract changes vs. the legacy parser, both forced by the
+streaming contract (output is append-only and must match the
+non-streaming result exactly):
+
+* Prose preceding an envelope is returned as ``content`` alongside the
+  tool calls.  Legacy returned ``content=None`` non-streaming and, from
+  its streaming path, returned the whole output — prose *and* envelope —
+  as content with no tool call at all.  Prose emitted before the opening
+  ``{`` arrives cannot be retracted, so reporting it in both modes is
+  the only parity-preserving option; it matches the other engine-backed
+  parsers, and the OpenAI chat-completion schema allows ``content`` and
+  ``tool_calls`` together.
+* When an envelope carries both ``parameters`` and ``arguments``, the
+  one appearing first in the text wins.  Legacy preferred ``arguments``
+  non-streaming, but its streaming path asserted on the duplicate and
+  emitted no arguments at all.  The value streams as soon as its key is
+  seen, so honoring a later ``arguments`` would have to retract the
+  already-streamed ``parameters`` text, which the engine's safe-prefix
+  guard turns into permanently truncated JSON.
 """
 
 from __future__ import annotations
