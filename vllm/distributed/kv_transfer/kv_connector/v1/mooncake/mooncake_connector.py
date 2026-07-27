@@ -1030,13 +1030,7 @@ class MooncakeConnectorWorker:
             # Start bootstrap server on global rank 0.
             if should_launch_bootstrap_server(vllm_config):
                 _, port = get_mooncake_bootstrap_addr(vllm_config)
-                self.bootstrap_server = MooncakeBootstrapServer(
-                    "0.0.0.0",
-                    port,
-                    expected_tp_size=self.tp_size,
-                    expected_pp_size=self.pp_size,
-                    wait_for_complete_topology=self.pcp_size > 1,
-                )
+                self.bootstrap_server = MooncakeBootstrapServer("0.0.0.0", port)
                 self.bootstrap_server.start()
 
         if not self.is_kv_producer:
@@ -1138,9 +1132,6 @@ class MooncakeConnectorWorker:
             self._mooncake_receiver_t.join()
 
     async def register_worker_with_bootstrap(self):
-        if self.pcp_rank != 0:
-            return
-
         host, port = get_mooncake_bootstrap_addr(self.vllm_config)
         url = make_zmq_path("http", host, port) + "/register"
         worker_addr = make_zmq_path("tcp", self.hostname, self.side_channel_port)
@@ -1774,8 +1765,8 @@ class MooncakeConnectorWorker:
             self.kv_block_len_per_layer,
         )
 
-        # No need to launch server for D node.
-        if self.is_kv_consumer:
+        # Only the canonical PCP replica owns Mooncake sending.
+        if self.is_kv_consumer or self.pcp_rank != 0:
             return
 
         ready_event = threading.Event()
@@ -1947,24 +1938,9 @@ class MooncakeConnectorWorker:
         url = remote_bootstrap_addr + "/query"
         try:
             async with httpx.AsyncClient() as client:
-
-                async def query_topology() -> dict:
-                    while True:
-                        response = await client.get(url)
-                        if response.status_code != 503:
-                            response.raise_for_status()
-                            break
-                        logger.debug(
-                            "Prefiller topology at %s is not ready; retrying.",
-                            remote_bootstrap_addr,
-                        )
-                        await asyncio.sleep(1)
-                    return response.json()
-
-                data = await asyncio.wait_for(
-                    query_topology(),
-                    timeout=envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
-                )
+                response = await client.get(url)
+                response.raise_for_status()
+                data: dict = response.json()
                 for _, dp_entry in data.items():
                     remote_engine_id = dp_entry["engine_id"]
                     self._remote_agents[remote_engine_id] = {
@@ -1981,10 +1957,9 @@ class MooncakeConnectorWorker:
                 remote_bootstrap_addr,
                 e,
             )
-        finally:
-            # Always notify waiters, including when this task is cancelled.
-            self._pending_bootstrap_queries[remote_bootstrap_addr].set()
-            del self._pending_bootstrap_queries[remote_bootstrap_addr]
+        # Always notify others regardless of connection success or failure.
+        self._pending_bootstrap_queries[remote_bootstrap_addr].set()
+        del self._pending_bootstrap_queries[remote_bootstrap_addr]
 
     def receive_kv(
         self,
@@ -2054,9 +2029,6 @@ class MooncakeConnectorWorker:
                 self.receive_kv(remote_engine_id, pull_metas)
 
     async def record_send_reqs(self, metadata: MooncakeConnectorMetadata):
-        if self.pcp_rank != 0:
-            return
-
         for p_req_id, (transfer_id, block_ids) in metadata.reqs_to_send.items():
             if block_ids:
                 # Already gone through request_finished()
@@ -2090,8 +2062,10 @@ class MooncakeConnectorWorker:
                 self._start_load_kv(metadata.reqs_to_recv), self.receiver_loop
             )
 
-        if not self.is_kv_consumer and (
-            metadata.reqs_to_send or metadata.reqs_not_processed
+        if (
+            not self.is_kv_consumer
+            and self.pcp_rank == 0
+            and (metadata.reqs_to_send or metadata.reqs_not_processed)
         ):
             asyncio.run_coroutine_threadsafe(
                 self.record_send_reqs(metadata), self.sender_loop
