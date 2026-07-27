@@ -147,6 +147,11 @@ def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blo
 
     vllm_config = create_vllm_config(block_size=local_block_size)
     vllm_config.cache_config.enable_prefix_caching = False
+    # kv_buffer_device defaults to the *real* platform's device type, which on
+    # a CPU-only test host would make this a host-buffer worker: host xfer
+    # buffers are per-layer, so the HMA shared-tensor regions this test builds
+    # would not be deduplicated. Pin it to the faked device type.
+    vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
 
     from unittest.mock import MagicMock
 
