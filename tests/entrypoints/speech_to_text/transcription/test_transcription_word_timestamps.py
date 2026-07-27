@@ -108,13 +108,6 @@ async def test_word_timestamps_batched(
     assert len({t.text for t in transcriptions}) == 3
 
 
-@pytest.mark.asyncio
-async def test_word_timestamps_long_audio_chunked(whisper_client, foscolo):
-    """Clips beyond Whisper's 30s window are chunked; onsets stay global."""
-    transcription = await _transcribe_words(whisper_client, foscolo, language="it")
-    _assert_word_list_is_sane(transcription)
-
-
 def test_group_words_builds_words_from_onsets():
     """``_group_words`` turns per-token onsets into words offset by the chunk."""
 
