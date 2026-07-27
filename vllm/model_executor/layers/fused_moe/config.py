@@ -861,6 +861,8 @@ def nvfp4_w4a16_moe_quant_config(
     g2_alphas: torch.Tensor,
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
+    gemm1_alpha: float | None = None,
+    gemm1_beta: float | None = None,
     gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
     """
@@ -873,6 +875,8 @@ def nvfp4_w4a16_moe_quant_config(
         g1_alphas=g1_alphas,
         g2_alphas=g2_alphas,
         weight_dtype="nvfp4",
+        gemm1_alpha=gemm1_alpha,
+        gemm1_beta=gemm1_beta,
         gemm1_clamp_limit=gemm1_clamp_limit,
     )
 
