@@ -9,6 +9,8 @@ implementations they are derived from, so a divergence shows up as a test
 failure rather than as drifting timestamps.
 """
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
@@ -23,6 +25,7 @@ from vllm.model_executor.models.whisper import (
     _word_align_median_filter,
     _word_align_neg_weights,
 )
+from vllm.v1.worker.gpu.word_align import WordAlignCapturer
 
 TIME_PRECISION = 0.02
 
@@ -192,3 +195,91 @@ def test_capture_without_encoder_keys_leaves_kbuf_untouched():
     _word_align_capture(q, None, qbuf, kbuf, qslot, qpos, kslot, kpos, 0)
     torch.testing.assert_close(qbuf[0, 0, 0], q[0])
     assert bool((kbuf == 7.0).all())
+
+
+def _fake_batch(req_ids, num_scheduled, num_computed):
+    """Minimal stand-in for the fields WordAlignCapturer reads off InputBatch."""
+    num_scheduled = np.asarray(num_scheduled, dtype=np.int32)
+    qsl = np.zeros(len(req_ids) + 1, dtype=np.int32)
+    np.cumsum(num_scheduled, out=qsl[1:])
+    return SimpleNamespace(
+        req_ids=list(req_ids),
+        num_reqs=len(req_ids),
+        num_tokens=int(num_scheduled.sum()),
+        num_tokens_after_padding=int(num_scheduled.sum()),
+        query_start_loc=torch.from_numpy(qsl),
+        idx_mapping=torch.arange(len(req_ids), dtype=torch.int32),
+        num_scheduled_tokens=num_scheduled,
+        num_computed_tokens_np=np.asarray(num_computed, dtype=np.int32),
+    )
+
+
+def _capturer(num_slots=2, max_frames=4, max_tokens=16):
+    cap = WordAlignCapturer()
+    cap.enabled = True
+    cap.scratch = num_slots
+    cap._free = list(range(num_slots))
+    cap.max_frames = max_frames
+    cap.device = torch.device("cpu")
+    cap.qslot = torch.zeros(max_tokens, dtype=torch.int64)
+    cap.kslot = torch.zeros(num_slots * max_frames, dtype=torch.int64)
+    cap.kpos = torch.zeros(num_slots * max_frames, dtype=torch.int64)
+    cap._arange = torch.arange(max_tokens, dtype=torch.int32)
+    return cap
+
+
+def test_capture_pool_routes_each_request_to_its_own_slot():
+    cap = _capturer()
+    cap.before_forward(_fake_batch(["a", "b"], [2, 3], [0, 0]))
+
+    assert set(cap.slot_of) == {"a", "b"}
+    assert cap.slot_of["a"] != cap.slot_of["b"]
+    # Two tokens for "a" then three for "b", each on its own slot.
+    expected = [cap.slot_of["a"]] * 2 + [cap.slot_of["b"]] * 3
+    assert cap.qslot[:5].tolist() == expected
+    # Both are prefilling, so each contributes one full encoder window.
+    assert cap.kslot[:4].tolist() == [cap.slot_of["a"]] * 4
+    assert cap.kslot[4:8].tolist() == [cap.slot_of["b"]] * 4
+
+
+def test_capture_pool_keeps_slot_across_steps():
+    cap = _capturer()
+    cap.before_forward(_fake_batch(["a"], [3], [0]))
+    slot = cap.slot_of["a"]
+    cap.before_forward(_fake_batch(["a"], [1], [3]))  # decode step
+
+    assert cap.slot_of["a"] == slot
+    assert cap.npos["a"] == 4  # 3 computed + 1 scheduled
+
+
+def test_capture_pool_exhaustion_leaves_requests_untracked():
+    """Overflow requests must land on scratch, not share another's buffer."""
+    cap = _capturer(num_slots=2)
+    cap.before_forward(_fake_batch(["a", "b", "c"], [1, 1, 1], [0, 0, 0]))
+
+    assert set(cap.slot_of) == {"a", "b"}
+    assert "c" not in cap.slot_of
+    assert cap.qslot[2].item() == cap.scratch
+
+
+def test_capture_pool_releases_slot_on_removal():
+    cap = _capturer(num_slots=2)
+    cap.before_forward(_fake_batch(["a", "b"], [1, 1], [0, 0]))
+    freed = cap.slot_of["a"]
+    cap.remove_request("a")
+
+    assert "a" not in cap.slot_of and "a" not in cap.npos
+    assert freed in cap._free
+    # The freed slot is handed to the next request that needs one.
+    cap.before_forward(_fake_batch(["b", "c"], [1, 1], [1, 0]))
+    assert cap.slot_of["c"] == freed
+
+
+def test_capture_pool_skips_oversized_encoder_batch():
+    """The profiling run schedules more encoder rows than the pool holds."""
+    cap = _capturer(num_slots=2, max_frames=4)
+    cap.kslot.fill_(7)
+    cap.before_forward(_fake_batch(["a", "b", "c"], [1, 1, 1], [0, 0, 0]))
+
+    # 3 prefills x 4 frames = 12 rows, buffer holds 8: left untouched.
+    assert bool((cap.kslot == 7).all())
