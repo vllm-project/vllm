@@ -1018,7 +1018,7 @@ cases = [
         draft_model="google/gemma-3-270m-it",
         sampling_config=greedy_sampling(),
         num_speculative_tokens=3,
-        expected_acceptance_len=3.95,
+        expected_acceptance_len=0.98 * (3 + 1),  # epsilon discount of K + 1
         expected_acceptance_rate=0.98,
     ),
 ]
