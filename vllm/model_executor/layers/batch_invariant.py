@@ -1109,13 +1109,6 @@ def enable_batch_invariant_mode():
     _batch_invariant_MODE = True
     _batch_invariant_LIB = torch.library.Library("aten", "IMPL")
 
-    # Tensor descriptors need a global-memory allocator; must be set outside
-    # torch.compile regions (triton.set_allocator modifies global state).
-    def _triton_alloc_fn(size: int, alignment: int, stream: int | None):
-        return torch.empty(size, device="xpu", dtype=torch.int8)
-
-    triton.set_allocator(_triton_alloc_fn)
-
     key = current_platform.dispatch_key
     if current_platform.is_cuda():
         if current_platform.is_device_capability_family(80):
@@ -1134,6 +1127,13 @@ def enable_batch_invariant_mode():
 
         _fp16_block_size_n = 256 if get_max_shared_memory_bytes() > 106496 else 128
     elif current_platform.is_xpu():
+        # Tensor descriptors need a global-memory allocator; must be set outside
+        # torch.compile regions (triton.set_allocator modifies global state).
+        def _triton_alloc_fn(size: int, alignment: int, stream: int | None):
+            return torch.empty(size, device="xpu", dtype=torch.int8)
+
+        triton.set_allocator(_triton_alloc_fn)
+
         _NUM_SMS = num_compute_units(0)
         _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, key)
         _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, key)
