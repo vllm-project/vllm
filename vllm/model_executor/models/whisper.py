@@ -951,22 +951,38 @@ class WhisperForConditionalGeneration(
         device: torch.device,
         dtype: torch.dtype,
         max_slots: int,
-        max_q_tokens: int,
+        positions: torch.Tensor,
         max_k_frames: int,
     ) -> None:
         """Allocate per-slot capture buffers and turn on cross-attention capture.
 
         Called once by the model runner (before compilation) when word
         timestamps are enabled. ``max_slots`` bounds the number of concurrent
-        word-timestamp requests; ``max_q_tokens``/``max_k_frames`` bound the
-        per-forward decoder-token / encoder-frame counts.
+        word-timestamp requests; ``max_k_frames`` bounds the per-forward
+        encoder-frame count. ``positions`` is the runner's own per-token
+        position buffer, reused directly as the capture row index so no
+        separate buffer has to be allocated and refilled each step.
         """
         global _WORD_ALIGN_ENABLED, _WORD_ALIGN_QBUF, _WORD_ALIGN_KBUF
         global _WORD_ALIGN_QSLOT, _WORD_ALIGN_QPOS, _WORD_ALIGN_KSLOT, _WORD_ALIGN_KPOS
         global _WORD_ALIGN_NFRAMES, _WORD_ALIGN_POOL
         cfg = self.config
-        n_layers = cfg.decoder_layers
         n_heads = cfg.decoder_attention_heads
+        self._word_align_heads = [tuple(h) for h in alignment_heads]
+        # Only the decoder layers that carry alignment heads need capturing;
+        # disable the rest so their capture op compiles out, and index the
+        # buffers by alignment-layer rank rather than by decoder layer so no
+        # memory is reserved for layers that never write (turbo: 2 of 32).
+        align_layers = sorted({h[0] for h in self._word_align_heads})
+        layer_slot = {layer: i for i, layer in enumerate(align_layers)}
+        for m in self.modules():
+            if isinstance(m, WhisperCrossAttention):
+                m._align_layer = layer_slot.get(getattr(m, "_align_layer", -1), -1)
+        # Remap the heads onto the compacted layer indexing.
+        self._word_align_heads = [
+            (layer_slot[layer], head) for layer, head in self._word_align_heads
+        ]
+        n_layers = len(align_layers)
         _WORD_ALIGN_QBUF = torch.zeros(
             max_slots,
             n_layers,
@@ -984,37 +1000,27 @@ class WhisperForConditionalGeneration(
             dtype=dtype,
         )
         z = lambda n: torch.zeros(n, device=device, dtype=torch.long)  # noqa: E731
-        _WORD_ALIGN_QSLOT, _WORD_ALIGN_QPOS = z(max_q_tokens), z(max_q_tokens)
+        _WORD_ALIGN_QSLOT = z(positions.shape[0])
+        _WORD_ALIGN_QPOS = positions
         _WORD_ALIGN_KSLOT, _WORD_ALIGN_KPOS = z(max_k_frames), z(max_k_frames)
         _WORD_ALIGN_NFRAMES = torch.full(
             (max_slots,), cfg.max_source_positions, device=device, dtype=torch.long
         )
         _WORD_ALIGN_POOL = ThreadPoolExecutor(max_workers=min(8, (os.cpu_count() or 4)))
-        self._word_align_heads = [tuple(h) for h in alignment_heads]
         self._word_align_eos = eos_token_id
         self._word_align_mfw = median_filter_width
         self._word_align_nheads = n_heads
         self._word_align_hdim = cfg.d_model // n_heads
-        # Only the decoder layers that carry alignment heads need capturing;
-        # disable the rest so their capture op compiles out (halves the work on
-        # turbo, where only 2 of 4 layers are used).
-        align_layers = {h[0] for h in self._word_align_heads}
-        for m in self.modules():
-            if (
-                isinstance(m, WhisperCrossAttention)
-                and getattr(m, "_align_layer", -1) >= 0
-                and m._align_layer not in align_layers
-            ):
-                m._align_layer = -1
         _WORD_ALIGN_ENABLED = True
 
     @staticmethod
     def word_align_index_tensors() -> tuple[torch.Tensor, ...]:
-        """Return the (qslot, qpos, kslot, kpos) device buffers the runner
-        fills each step to route capture rows to per-request slots."""
+        """Return the (qslot, kslot, kpos) device buffers the runner fills each
+        step to route capture rows to per-request slots. The q positions come
+        from the runner's own ``positions`` buffer, bound in
+        ``enable_word_align``."""
         return (
             _WORD_ALIGN_QSLOT,
-            _WORD_ALIGN_QPOS,
             _WORD_ALIGN_KSLOT,
             _WORD_ALIGN_KPOS,
         )
@@ -1025,7 +1031,6 @@ class WhisperForConditionalGeneration(
         sampled_token_ids: list[list[int]],
         req_slots: dict[str, int],
         req_npos: dict[str, int],
-        live_slots: dict[str, int] | None = None,
     ) -> dict[str, list[float]] | None:
         """DTW-align each request that finishes this step; return per-token times.
 
@@ -1035,12 +1040,6 @@ class WhisperForConditionalGeneration(
         # Phase 1 (GPU, this thread): recompute + standardize each finishing
         # request's weights and pull them to the host.
         jobs: list[tuple[str, np.ndarray]] = []
-        # Async-readout race guard: this can run after the step, by which point a
-        # finished request's slot may have been freed and reassigned. Slots that a
-        # live request now owns have had their capture buffer overwritten, so a
-        # finished request pointing at such a slot is skipped below (no timestamps)
-        # rather than reading another request's cross-attention data.
-        used = set(live_slots.values()) if live_slots is not None else None
         for i, req_id in enumerate(req_ids):
             toks = sampled_token_ids[i] if i < len(sampled_token_ids) else None
             if not toks or toks[-1] != self._word_align_eos:
@@ -1049,8 +1048,6 @@ class WhisperForConditionalGeneration(
             n = req_npos.get(req_id, 0)
             if slot is None or n <= 0:
                 continue
-            if used is not None and live_slots.get(req_id) != slot and slot in used:
-                continue  # slot reused by another live request → stale, skip
             # crop the DTW to this request's real audio length (not the 30s pad)
             nframes = int(_WORD_ALIGN_NFRAMES[slot])
             jobs.append(

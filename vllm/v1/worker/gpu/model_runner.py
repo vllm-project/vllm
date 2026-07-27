@@ -116,6 +116,7 @@ from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
+from vllm.v1.worker.gpu.word_align import WordAlignCapturer
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import KVBlockZeroer, copy_kv_cache_blocks_inplace
 
@@ -237,6 +238,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 device=self.device,
             )
 
+        # Whisper word-timestamp capture (opt-in, initialized in load_model).
+        self.word_align = WordAlignCapturer()
+
         # Samplers and decode_query_len created in load_model() after
         # model_state exists (num_new_sampled_tokens_per_step from ModelState).
         self.sampler: Sampler | None = None
@@ -321,6 +325,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.model_state = init_model_state(
             self.vllm_config, self.model, self.encoder_cache, self.device
         )
+
+        # Must run before graph capture so the compiled decoder includes the
+        # cross-attention capture op.
+        self.word_align.init(self)
 
         self.decode_query_len = (
             self.num_speculative_steps
@@ -774,6 +782,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Call model_state.remove_request *before* req_states.remove_request
         # so the model_state can still look up the slot index.
         self.model_state.remove_request(req_id)
+        self.word_align.remove_request(req_id)
         req_idx = self.req_states.remove_request(req_id)
         if req_idx is None:
             return False
@@ -1228,6 +1237,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Common case.
             # Prepare all the inputs and copy to the input buffers.
             input_batch = self.prepare_inputs(scheduler_output, batch_desc)
+            # Route this step's cross-attention capture rows; must follow
+            # prepare_inputs, which fills the positions buffer it indexes by.
+            self.word_align.before_forward(input_batch)
             block_tables, slot_mappings = self.prepare_attn(input_batch)
             # Mamba "align" pre-copy: migrate recurrent state across block
             # boundaries before the forward. Runs only on real batches, and
@@ -1488,6 +1500,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_sampled_tokens=num_sampled,
             main_stream=self.main_stream,
             copy_stream=self.output_copy_stream,
+            word_align_fn=self.word_align.make_readout_fn(input_batch),
         )
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
