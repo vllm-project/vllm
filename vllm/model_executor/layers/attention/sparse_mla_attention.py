@@ -65,6 +65,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         try:
             self.dcp_world_size = get_dcp_group().world_size
         except AssertionError:
+            # DCP might not be initialized in testing
             self.dcp_world_size = 1
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
         self.dcp_local_block_size = self.cp_kv_cache_interleave_size
@@ -78,6 +79,8 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         )
         workspace_rows = self.chunked_prefill_workspace_size
         if self.dcp_world_size > 1:
+            # DCP gathers each rank's local KV shard into the workspace, so it
+            # needs an extra 1/DCP rows beyond the TP allocation.
             assert self.chunked_prefill_workspace_size % self.dcp_world_size == 0
             workspace_rows += self.chunked_prefill_workspace_size // self.dcp_world_size
         self.chunked_prefill_workspace = torch.empty(
@@ -231,7 +234,11 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         common_attn_metadata: "CommonAttentionMetadata",
         num_decodes: int,
         num_prefills: int,
-    ) -> tuple[torch.Tensor | None, int, torch.Tensor | None]:
+    ) -> tuple[
+        torch.Tensor | None,  # prefill_query_start_loc
+        int,  # prefill_max_query_len
+        torch.Tensor | None,  # prefill_query_lens_cpu
+    ]:
         if num_prefills == 0:
             return None, 0, None
 
