@@ -2148,7 +2148,8 @@ class MoRIIOConnectorWorker:
         validate_moriio_heterogeneous_tp_kv_heads(
             local_tp_size=self.world_size,
             remote_tp_size=(
-                remote_tp_size if remote_tp_size and remote_tp_size > 0
+                remote_tp_size
+                if remote_tp_size and remote_tp_size > 0
                 else self.world_size
             ),
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
