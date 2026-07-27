@@ -127,7 +127,10 @@ def _merge_dcp_topk_global(
             raise RuntimeError(
                 "DCP top-k VMM dispatch selected without a VMM workspace."
             )
-        if rows not in _logged_dcp_topk_vmm_rows:
+        # Keep one rows=32 reachability marker for integration validation, but
+        # do not synchronously log every first-seen dynamic batch size from
+        # the serving hot path.
+        if rows == 32 and rows not in _logged_dcp_topk_vmm_rows:
             _logged_dcp_topk_vmm_rows.add(rows)
             logger.info(
                 "Executing owner-local CUDA VMM DCP top-k merge for decode rows=%d.",
