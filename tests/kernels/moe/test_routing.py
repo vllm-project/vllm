@@ -6,7 +6,6 @@ from unittest.mock import patch
 import pytest
 import torch
 
-import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
@@ -668,7 +667,6 @@ def test_single_group_topk_delegates_to_standard_topk(
         expected_weights *= routed_scaling_factor
 
     with (
-        patch.object(envs, "VLLM_BATCH_INVARIANT", False),
         patch.object(current_platform, "is_rocm", return_value=True),
         patch.object(rocm_aiter_ops, "is_fused_moe_enabled", return_value=False),
         patch(
@@ -714,7 +712,7 @@ def test_single_group_topk_delegates_to_standard_topk(
         assert router.routing_method_type is RoutingMethodType.DeepSeekV3
 
 
-@pytest.mark.parametrize("fallback", ["batch_invariant", "aiter", "non_rocm"])
+@pytest.mark.parametrize("fallback", ["aiter", "non_rocm"])
 def test_single_group_topk_preserves_grouped_fallbacks(fallback: str):
     router = GroupedTopKRouter(
         top_k=2,
@@ -732,7 +730,6 @@ def test_single_group_topk_preserves_grouped_fallbacks(fallback: str):
     is_rocm = fallback != "non_rocm"
 
     with (
-        patch.object(envs, "VLLM_BATCH_INVARIANT", fallback == "batch_invariant"),
         patch.object(current_platform, "is_rocm", return_value=is_rocm),
         patch.object(rocm_aiter_ops, "is_fused_moe_enabled", return_value=use_aiter),
         patch.object(
