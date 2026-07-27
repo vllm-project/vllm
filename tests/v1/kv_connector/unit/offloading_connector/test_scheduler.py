@@ -67,7 +67,7 @@ def _reduce_kv_connector_stats(runner):
 
 def _stub_prefix_scan(num_hit_chunks: int):
     """Stub `_maximal_prefix_lookup` with a fixed hit count, no HIT_PENDING."""
-    return lambda keys, ctx, *_: _LookupScan(num_hit_chunks, False)
+    return lambda keys, ctx, *_: _LookupScan(num_hit_chunks, None)
 
 
 def test_scheduler_reports_allocation_failure(request_runner):
@@ -327,7 +327,7 @@ def test_abort_before_hit_uses_placeholder_then_later_hit_heals_removal(
             req_status.req,
             group_config,
             0,
-        )
+        ).num_hit_chunks
         == 1
     )
     assert key in tracker._pending_event_metadata
@@ -1276,37 +1276,67 @@ class TestMaximalPrefixLookup:
         sched = _make_scheduler_with_lookup({1: LookupResult.RETRY})
         scan = _maximal_scan(sched, to_keys([1]), downgrade_hit_pending=True)
         assert scan.num_hit_chunks is None
-        assert scan.saw_hit_pending is False
+        assert scan.first_pending_key is None
 
 
 class TestLookupScanSignal:
-    """The scan reports why it deferred, so only HIT_PENDING arms the deadline."""
+    """The scan reports *which* block deferred it, so the deadline can key on it.
+
+    An identity rather than a bare flag is what stops a newly pending key from
+    inheriting an older key's elapsed time.
+    """
 
     def test_prefix_scan_reports_hit_pending(self):
         sched = _make_scheduler_with_lookup({1: LookupResult.HIT_PENDING})
-        assert _maximal_scan(sched, to_keys([1])).saw_hit_pending is True
+        keys = to_keys([1])
+        assert _maximal_scan(sched, keys).first_pending_key == keys[0]
+
+    def test_prefix_scan_reports_the_lowest_index_pending_key(self):
+        """The prefix cannot resolve past the earliest pending block."""
+        sched = _make_scheduler_with_lookup(
+            {
+                1: LookupResult.HIT,
+                2: LookupResult.HIT_PENDING,
+                3: LookupResult.HIT_PENDING,
+            }
+        )
+        keys = to_keys([1, 2, 3])
+        assert _maximal_scan(sched, keys).first_pending_key == keys[1]
 
     def test_prefix_scan_does_not_report_retry(self):
         sched = _make_scheduler_with_lookup({1: LookupResult.RETRY})
-        assert _maximal_scan(sched, to_keys([1])).saw_hit_pending is False
+        assert _maximal_scan(sched, to_keys([1])).first_pending_key is None
 
     def test_prefix_scan_reports_nothing_when_resolved(self):
         sched = _make_scheduler_with_lookup({1: LookupResult.HIT})
-        assert _maximal_scan(sched, to_keys([1])).saw_hit_pending is False
+        assert _maximal_scan(sched, to_keys([1])).first_pending_key is None
 
     def test_sliding_scan_reports_hit_pending(self):
         sched = _make_scheduler_with_lookup({1: LookupResult.HIT_PENDING})
-        assert _sliding_scan(sched, to_keys([1]), 1).saw_hit_pending is True
+        keys = to_keys([1])
+        assert _sliding_scan(sched, keys, 1).first_pending_key == keys[0]
+
+    def test_sliding_scan_reports_the_highest_index_pending_key(self):
+        """This scan walks backwards, so its first blocker is the last key."""
+        sched = _make_scheduler_with_lookup(
+            {
+                1: LookupResult.HIT_PENDING,
+                2: LookupResult.HIT_PENDING,
+                3: LookupResult.HIT,
+            }
+        )
+        keys = to_keys([1, 2, 3])
+        assert _sliding_scan(sched, keys, 3).first_pending_key == keys[1]
 
     def test_sliding_scan_does_not_report_retry(self):
         sched = _make_scheduler_with_lookup({1: LookupResult.RETRY})
-        assert _sliding_scan(sched, to_keys([1]), 1).saw_hit_pending is False
+        assert _sliding_scan(sched, to_keys([1]), 1).first_pending_key is None
 
     def test_downgraded_hit_pending_is_not_reported(self):
         """A downgraded pending block is a miss, so it must not re-arm."""
         sched = _make_scheduler_with_lookup({1: LookupResult.HIT_PENDING})
         scan = _maximal_scan(sched, to_keys([1]), downgrade_hit_pending=True)
-        assert scan.saw_hit_pending is False
+        assert scan.first_pending_key is None
         assert scan.num_hit_chunks == 0
 
 
@@ -1508,6 +1538,98 @@ class TestHitPendingDeadline:
         assert sched.get_num_new_matched_tokens(request, 0) == (None, False)
         assert req_status.hit_pending_start_time is None
         assert req_status.hit_pending_expired is False
+
+    def test_new_blocker_does_not_inherit_the_previous_clock(self, monkeypatch):
+        """A newly pending key gets its own deadline, not the old key's clock.
+
+        Without the identity check, a request 59s into waiting on key 1 would
+        carry that elapsed time over to key 2 the moment key 1 resolved and
+        expire a second later, despite key 2's own write being healthy. Any
+        key inheriting an almost-spent clock leaves the 60s default no margin.
+        """
+        clock = _install_fake_clock(monkeypatch, sched_module)
+        results = {
+            1: LookupResult.HIT_PENDING,
+            2: LookupResult.HIT_PENDING,
+            3: LookupResult.HIT_PENDING,
+        }
+        sched = _make_deadline_scheduler(results)
+        request = _make_deadline_request()
+        sched.on_new_request(request)
+        req_status = sched._req_status[request.request_id]
+
+        # Key 1 blocks the prefix and is nearly out of time.
+        assert sched.get_num_new_matched_tokens(request, 0) == (None, False)
+        clock.advance(_SHIPPED_DEADLINE_S - 1.0)
+        assert sched.get_num_new_matched_tokens(request, 0) == (None, False)
+        assert req_status.hit_pending_expired is False
+
+        # Key 1's write lands, so key 2 becomes the blocker. Its own write has
+        # only just started; it must not be charged for key 1's wait.
+        results[1] = LookupResult.HIT
+        assert sched.get_num_new_matched_tokens(request, 0) == (None, False)
+        clock.advance(2.0)
+        assert sched.get_num_new_matched_tokens(request, 0) == (None, False)
+        assert req_status.hit_pending_expired is False
+        assert _expiry_count(sched) == 0
+
+        # Key 2 does expire, but only after a full deadline of its own.
+        clock.advance(_SHIPPED_DEADLINE_S)
+        sched.get_num_new_matched_tokens(request, 0)
+        assert req_status.hit_pending_expired is True
+        assert _expiry_count(sched) == 1
+
+    def test_unchanged_blocker_keeps_accruing(self, monkeypatch):
+        """Re-arming is for a *changed* blocker only.
+
+        Counterpart to the test above: if every pass re-armed, a permanently
+        stalled key would never expire and #49829 would be back.
+        """
+        clock = _install_fake_clock(monkeypatch, sched_module)
+        sched = _make_deadline_scheduler({1: LookupResult.HIT_PENDING})
+        request = _make_deadline_request()
+        sched.on_new_request(request)
+        req_status = sched._req_status[request.request_id]
+
+        # Split the wait across two passes that together reach the deadline.
+        armed_at = None
+        for _ in range(2):
+            assert sched.get_num_new_matched_tokens(request, 0) == (None, False)
+            if armed_at is None:
+                armed_at = req_status.hit_pending_start_time
+                assert armed_at is not None
+            # Same blocker, so the arming instant never moves.
+            assert req_status.hit_pending_start_time == armed_at
+            assert req_status.hit_pending_expired is False
+            clock.advance(_SHIPPED_DEADLINE_S / 2)
+
+        # The elapsed time accrued across passes rather than restarting.
+        sched.get_num_new_matched_tokens(request, 0)
+        assert req_status.hit_pending_expired is True
+        assert _expiry_count(sched) == 1
+
+    def test_disarm_clears_the_tracked_key(self, monkeypatch):
+        """Disarming drops the key with the start time, never just one.
+
+        A key left behind with no start time would read as a *different*
+        blocker on the next pass and silently re-arm instead of arming.
+        """
+        _install_fake_clock(monkeypatch, sched_module)
+        results = {1: LookupResult.HIT_PENDING}
+        sched = _make_deadline_scheduler(results)
+        request = _make_deadline_request()
+        sched.on_new_request(request)
+        req_status = sched._req_status[request.request_id]
+
+        sched.get_num_new_matched_tokens(request, 0)
+        assert req_status.hit_pending_start_time is not None
+        assert req_status.hit_pending_key is not None
+
+        # Nothing is pending any more, so both halves of the timer go.
+        results[1] = LookupResult.MISS
+        sched.get_num_new_matched_tokens(request, 0)
+        assert req_status.hit_pending_start_time is None
+        assert req_status.hit_pending_key is None
 
     def test_retry_deferral_never_expires(self, monkeypatch):
         """RETRY is out of scope: even a long-armed timer cannot fire on it.
@@ -2350,7 +2472,7 @@ def test_async_preempt_readmit_before_transfer_output_is_deferred(request_runner
     free_block_queue.num_free_blocks = num_free_blocks_empty
     assert runner.scheduler.reset_prefix_cache()
     runner.connector_scheduler._maximal_prefix_lookup = lambda keys, *_: _LookupScan(
-        len(keys), False
+        len(keys), None
     )
 
     readmit_output = runner.scheduler.schedule()
