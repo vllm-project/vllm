@@ -341,6 +341,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         # Single non-hybrid attention group, matching the stub block id lists.
         w._has_mamba = False
         w._group_spec_types = (FullAttentionSpec,)
+        w._engine_ttl = 0.0
         w._engine_last_active = {}
 
         # Track _do_start_push_kv invocations.
@@ -569,7 +570,7 @@ def test_do_start_push_kv_drops_request_on_handshake_failure():
     the failure is logged. Blocks are reclaimed by the lease/watchdog, matching
     the old blocking behaviour."""
     w = _StubWriterWorker.fresh()
-    w._logical_to_kernel_block_ids = lambda x: x
+    w._logical_to_kernel_block_ids = lambda x, ratio: x
     xfer_calls: list[dict[str, Any]] = []
     w._xfer_blocks_for_req = lambda **kw: xfer_calls.append(kw)
     failures: list[dict[str, Any]] = []
@@ -1211,8 +1212,8 @@ class TestPushPrefixCaching:
         # computation and count assertions all run for real.
         w.nixl_wrapper = MagicMock()
         w.nixl_wrapper.make_prepped_xfer.return_value = 7
-        w._ensure_d_handshake = lambda *a, **k: True
-        w._logical_to_kernel_block_ids = lambda x: x
+        w._ensure_handshake = lambda *a, **k: None
+        w._logical_to_kernel_block_ids = lambda x, ratio: x
         w._logical_to_remote_kernel_block_ids = lambda block_ids, ratio: block_ids
         return w, engine_id
 
