@@ -138,42 +138,44 @@ def check_interleaved_audio_video(
     num_audio: int,
 ) -> bool:
     """
-    Check if video and audio positions are interleaved in the multimodal region.
+    Check if video and audio positions are interleaved in any per-video span.
 
-    Returns True only for the use_audio_in_video=True case, where video and
-    audio tokens alternate within a single contiguous region with no gaps.
-
-    A simple range-overlap check produces false positives when multiple
-    non-interleaved requests are batched together: audio tokens from request N
-    fall between video tokens from request N and request N+1, making the
-    global ranges overlap even though each individual request is non-interleaved.
-
-    To distinguish true interleaving from this batching artefact we require
-    that every position in the combined [first_VA, last_VA] range is occupied
-    by either a video or an audio token (no text/image gaps).
+    For use_audio_in_video=True, each video placeholder is expanded into one
+    local span containing only video/audio pad tokens, bounded by non-pad
+    tokens such as audio_start/audio_end. Check each contiguous V/A span
+    independently instead of requiring all V/A tokens in the whole sequence to
+    form one global dense range; otherwise multi-video requests can be
+    misclassified as non-interleaved because of the boundary tokens between
+    videos.
     """
     if num_video == 0 or num_audio == 0:
         return False
 
-    video_pos = is_video.nonzero(as_tuple=True)[0]
-    audio_pos = is_audio.nonzero(as_tuple=True)[0]
-
-    # Quick range-overlap pre-check (necessary but not sufficient).
-    if not (
-        video_pos[0].item() < audio_pos[-1].item()
-        and audio_pos[0].item() < video_pos[-1].item()
-    ):
+    va_pos = (is_video | is_audio).nonzero(as_tuple=True)[0]
+    if len(va_pos) == 0:
         return False
 
-    # Density check: for true use_audio_in_video interleaving every position
-    # in the combined span is a video or audio token.  Batched non-interleaved
-    # requests have text/image tokens between the per-request V and A blocks.
-    # combined_start/end encompass all V/A tokens, so num_video + num_audio
-    # equals the number of V/A tokens in range; compare directly to span size.
-    combined_start = min(video_pos[0].item(), audio_pos[0].item())
-    combined_end = max(video_pos[-1].item(), audio_pos[-1].item())
-    total_in_range = combined_end - combined_start + 1
-    return (num_video + num_audio) == total_in_range
+    span_start = 0
+    for span_end in range(1, len(va_pos) + 1):
+        is_last = span_end == len(va_pos)
+        if not is_last and va_pos[span_end].item() == va_pos[span_end - 1].item() + 1:
+            continue
+
+        span = va_pos[span_start:span_end]
+        span_is_video = is_video[span]
+        span_is_audio = is_audio[span]
+        if span_is_video.any() and span_is_audio.any():
+            video_offsets = span_is_video.nonzero(as_tuple=True)[0]
+            audio_offsets = span_is_audio.nonzero(as_tuple=True)[0]
+            if (
+                video_offsets[0].item() < audio_offsets[-1].item()
+                and audio_offsets[0].item() < video_offsets[-1].item()
+            ):
+                return True
+
+        span_start = span_end
+
+    return False
 
 
 def merge_interleaved_embeddings(
@@ -182,58 +184,69 @@ def merge_interleaved_embeddings(
     is_video: torch.Tensor,
     is_audio: torch.Tensor,
     is_multimodal: torch.Tensor,
-    num_video: int,
-    num_audio: int,
 ) -> torch.Tensor:
     """
     Merge embeddings for interleaved audio-in-video sequences.
 
     When use_audio_in_video=True, video and audio tokens are interleaved in
     the token sequence, but embeddings are provided as separate contiguous
-    tensors (video first, then audio). This function reorders video and audio
-    embeddings to match sequence position order and scatters them efficiently.
+    tensors. This function scatters each modality by the ``modality`` attribute
+    attached to each embedding tensor (set during encoder gather) and also
+    supports image embeddings in the same interleaved request.
 
     Args:
         inputs_embeds: The input embeddings tensor to merge into.
-        multimodal_embeddings: List of embedding tensors (video, audio, other).
+        multimodal_embeddings: List of embedding tensors (video, audio, image).
         is_video: Boolean mask for video token positions.
         is_audio: Boolean mask for audio token positions.
         is_multimodal: Boolean mask for all multimodal token positions.
-        num_video: Total count of video tokens.
-        num_audio: Total count of audio tokens.
 
     Returns:
         The merged inputs_embeds tensor with multimodal embeddings scattered
         to their correct positions.
     """
-    # Categorize embeddings by modality based on token counts.
-    # Embeddings come grouped by modality but order varies (e.g., image, video, audio
-    # or video, audio depending on input kwargs order).
-    video_embeds: list[torch.Tensor] = []
-    audio_embeds: list[torch.Tensor] = []
-    other_embeds: list[torch.Tensor] = []
-    video_remaining = num_video
-    audio_remaining = num_audio
+    from vllm.multimodal.utils import get_mm_embedding_modalities
 
-    for emb in multimodal_embeddings:
-        n = emb.shape[0]
-        if video_remaining > 0 and n <= video_remaining:
-            video_embeds.append(emb)
-            video_remaining -= n
-        elif audio_remaining > 0 and n <= audio_remaining:
-            audio_embeds.append(emb)
-            audio_remaining -= n
-        else:
-            other_embeds.append(emb)
+    def _merge_embedding_group(
+        mask: torch.Tensor,
+        embeddings: Sequence[torch.Tensor],
+        modality: str,
+    ) -> None:
+        num_expected_tokens = mask.sum().item()
+        num_actual_tokens = sum(embedding.shape[0] for embedding in embeddings)
+        if num_actual_tokens != num_expected_tokens:
+            raise ValueError(
+                f"Attempted to assign {num_actual_tokens} {modality} tokens "
+                f"to {num_expected_tokens} placeholders"
+            )
+        if embeddings:
+            inputs_embeds[mask] = torch.cat(list(embeddings), dim=0)
 
-    # Scatter each modality to its positions
-    if video_embeds:
-        inputs_embeds[is_video] = torch.cat(video_embeds, dim=0)
-    if audio_embeds:
-        inputs_embeds[is_audio] = torch.cat(audio_embeds, dim=0)
-    if other_embeds:
-        other_mask = is_multimodal & ~is_video & ~is_audio
-        inputs_embeds[other_mask] = torch.cat(other_embeds, dim=0)
+    # Qwen Omni multimodal placeholders are image/video/audio; after excluding
+    # video and audio positions, the remaining multimodal positions are images.
+    is_image = is_multimodal & ~is_video & ~is_audio
+
+    embedding_modalities = get_mm_embedding_modalities(multimodal_embeddings)
+
+    video_embeds = [
+        embedding
+        for embedding, modality in zip(multimodal_embeddings, embedding_modalities)
+        if modality == "video"
+    ]
+    audio_embeds = [
+        embedding
+        for embedding, modality in zip(multimodal_embeddings, embedding_modalities)
+        if modality == "audio"
+    ]
+    image_embeds = [
+        embedding
+        for embedding, modality in zip(multimodal_embeddings, embedding_modalities)
+        if modality == "image"
+    ]
+
+    _merge_embedding_group(is_video, video_embeds, "video")
+    _merge_embedding_group(is_audio, audio_embeds, "audio")
+    _merge_embedding_group(is_image, image_embeds, "image")
 
     return inputs_embeds
 
@@ -495,6 +508,23 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             mm_kwargs = dict(
                 **mm_kwargs,
             )
+
+        merged = self.info.ctx.get_merged_mm_kwargs(mm_kwargs)
+        if mm_data.get("videos") and (
+            merged.keys() & {"size", "min_pixels", "max_pixels"}
+        ):
+            mm_kwargs = dict(mm_kwargs)
+            video_size = dict(self.info.get_hf_processor().video_processor.size)
+            size_override = merged.get("size")
+            if size_override is not None:
+                video_size = video_size | size_override
+            min_pixels = merged.get("min_pixels")
+            if min_pixels is not None:
+                video_size["shortest_edge"] = min_pixels
+            max_pixels = merged.get("max_pixels")
+            if max_pixels is not None:
+                video_size["longest_edge"] = max_pixels
+            mm_kwargs["size"] = video_size
 
         hf_inputs = super()._call_hf_processor(
             prompt=prompt,
@@ -1497,8 +1527,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                 is_video,
                 is_audio,
                 is_multimodal,
-                num_video,
-                num_audio,
             )
 
         # Default: standard merge (no interleaving), same as parent class

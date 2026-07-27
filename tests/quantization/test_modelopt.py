@@ -42,12 +42,12 @@ def _skip(msg: str) -> NoReturn:
 
 def _snapshot_download_or_skip(model_id: str) -> str:
     try:
-        from huggingface_hub import snapshot_download
+        from vllm.transformers_utils.repo_utils import hf_api
     except Exception as e:  # pragma: no cover
         _skip(f"huggingface_hub is required to download {model_id}: {e}")
 
     try:
-        return snapshot_download(
+        return hf_api().snapshot_download(
             repo_id=model_id,
             repo_type="model",
             # These checkpoints are already small; download full repo for simplicity.
@@ -163,6 +163,38 @@ def test_modelopt_mixed_precision_does_not_quantize_unlisted_fused_sibling():
         config._resolve_quant_algo("model.layers.0.linear_attn.in_proj_qkvz") == "FP8"
     )
     assert config._resolve_quant_algo("model.layers.0.linear_attn.in_proj_ba") is None
+
+
+def test_modelopt_mixed_precision_composes_gemma4_mappers():
+    from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
+    from vllm.model_executor.models.gemma4_mm import (
+        Gemma4ForConditionalGeneration,
+    )
+
+    config = _mixed_precision_config(
+        {
+            "model.language_model.layers.0.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16,
+            },
+            "model.language_model.layers.1.moe.experts.gate_up_proj": {
+                "quant_algo": "NVFP4",
+                "group_size": 16,
+            },
+        }
+    )
+
+    config.apply_vllm_mapper(
+        Gemma4ForConditionalGeneration.hf_to_vllm_mapper.get_unstacked_mapper()
+    )
+    config.apply_vllm_mapper(Gemma4ForCausalLM.hf_to_vllm_mapper.get_unstacked_mapper())
+
+    expected_prefix = "language_model.model.layers.0.moe.experts"
+    assert set(config.quantized_layers) == {
+        expected_prefix,
+        "language_model.model.layers.1.moe.gate_up_proj",
+    }
+    assert config._resolve_quant_algo(expected_prefix) == "NVFP4"
 
 
 def test_modelopt_mixed_precision_infers_fused_gate_up_projection():
