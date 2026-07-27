@@ -34,6 +34,20 @@ _R = TypeVar("_R")
 FailureCallback = Callable[[], None]
 
 
+def _sleep_wake_timeout() -> float | None:
+    """Optional bounded timeout for the sleep/wake_up collective RPCs.
+
+    Returns ``None`` (no timeout) unless ``VLLM_SLEEP_WAKE_TIMEOUT_SECONDS`` is
+    set to a positive value. When enabled, a worker that aborts mid-wake (e.g.
+    the cumem hot-wake CUDA crash) surfaces as a ``TimeoutError`` the engine can
+    act on, instead of the engine blocking forever on a dead worker's RPC reply.
+    Disabled by default because a legitimate cold wake can take minutes; only
+    enable with a bound generously above the slowest legitimate wake.
+    """
+    secs = envs.VLLM_SLEEP_WAKE_TIMEOUT_SECONDS
+    return float(secs) if secs and secs > 0 else None
+
+
 class Executor(ABC):
     """Abstract base class for vLLM executors."
 
@@ -315,12 +329,89 @@ class Executor(ABC):
         """Reset the encoder cache in each worker to clear cached encoder outputs."""
         self.collective_rpc("reset_encoder_cache")
 
+    def _fail_on_sleep_wake_timeout(self, op: str) -> None:
+        """Tear down the executor after a timed-out sleep/wake RPC.
+
+        A ``TimeoutError`` from the bounded sleep/wake ``collective_rpc`` means a
+        worker is dead or hung — its reply never arrived. We must NOT fall
+        through to the post-RPC state updates (which would leave the executor in
+        a lying half-state, e.g. ``is_sleeping=True`` with dead workers, or
+        ``is_sleeping=False`` while workers never actually woke).
+
+        Setting ``is_failed`` alone is NOT enough to recover. The real
+        worker-death path (``MultiprocExecutor.start_worker_monitor``) does
+        three things: sets ``is_failed=True``, calls ``shutdown()``, AND invokes
+        the registered ``failure_callback``. Only the callback enqueues
+        ``EXECUTOR_FAILED`` on the engine input queue, which is the *only* thing
+        that makes ``EngineCoreProc._handle_client_request`` raise
+        ``RuntimeError("Executor failed.")`` and tear the engine down via
+        ``_send_engine_dead``.
+
+        Relying on the next ``collective_rpc`` to observe ``is_failed`` does not
+        work for a timed-out ``wake_up``: ``wake_up`` re-raises before
+        ``EngineCore.wake_up`` reaches ``resume_scheduler()``, so the scheduler
+        stays paused, ``has_work()`` is false, no engine step ever runs, and
+        ``is_failed`` is never consulted — the engine sits alive forever with
+        ``is_sleeping()==True`` and ``/health`` lying 200 (a new silent wedge).
+        The re-raised ``TimeoutError`` is itself swallowed by the utility-method
+        catch-all, so it never reaches the engine-dead path either.
+
+        We therefore MIRROR the real death path: mark failed, shut the executor
+        down, and invoke the failure callback so ``EXECUTOR_FAILED`` is actually
+        enqueued and the engine tears down. Re-raise (by the caller) so the
+        caller still sees the timeout. Executors that don't track ``is_failed``
+        / lack a failure callback (uni/ray-v1) simply skip the parts they don't
+        have — the lying state update is still avoided.
+        """
+        # ``is_failed`` is defined on MultiprocExecutor / RayExecutorV2 and is
+        # what gates ``collective_rpc`` into the "Executor failed." fast-fail.
+        if hasattr(self, "is_failed"):
+            self.is_failed = True
+        logger.error(
+            "Timed out waiting for %r collective RPC reply; a worker is dead or "
+            "hung. Tearing down the executor instead of updating sleep/wake "
+            "state.",
+            op,
+        )
+        # Mirror the real worker-death path so the engine actually tears down
+        # rather than waiting on a future collective_rpc that a paused scheduler
+        # guarantees will never happen.
+        try:
+            self.shutdown()
+        except Exception:
+            logger.exception("Error shutting down executor after %r timeout", op)
+        # The failure callback (registered by EngineCore via
+        # register_failure_callback) is the ONLY path that enqueues
+        # EXECUTOR_FAILED and triggers _send_engine_dead. Invoke it if present.
+        callback = getattr(self, "failure_callback", None)
+        if callback is not None:
+            # One-shot, mirroring start_worker_monitor's monitor_workers().
+            self.failure_callback = None
+            try:
+                callback()
+            except Exception:
+                logger.exception(
+                    "Error invoking failure callback after %r timeout", op
+                )
+
     def sleep(self, level: int = 1):
         if self.is_sleeping:
             logger.warning("Executor is already sleeping.")
             return
         time_before_sleep = time.perf_counter()
-        self.collective_rpc("sleep", kwargs=dict(level=level))
+        # The except arm is intentionally always present. When
+        # VLLM_SLEEP_WAKE_TIMEOUT_SECONDS is unset/0, _sleep_wake_timeout()
+        # returns None, collective_rpc blocks without a bounded deadline and
+        # cannot raise the bounded TimeoutError, so this arm is inert and
+        # behavior is identical to upstream. It only activates when the bound
+        # is explicitly opted into.
+        try:
+            self.collective_rpc(
+                "sleep", kwargs=dict(level=level), timeout=_sleep_wake_timeout()
+            )
+        except TimeoutError:
+            self._fail_on_sleep_wake_timeout("sleep")
+            raise
         time_after_sleep = time.perf_counter()
         self.sleeping_tags = {"weights", "kv_cache"}
         self.is_sleeping = True
@@ -340,7 +431,16 @@ class Executor(ABC):
                     )
                     return
         time_before_wakeup = time.perf_counter()
-        self.collective_rpc("wake_up", kwargs=dict(tags=tags))
+        # See sleep(): the except arm is inert when the bound is disabled
+        # (timeout=None can't raise the bounded TimeoutError); behavior is
+        # unchanged from upstream unless VLLM_SLEEP_WAKE_TIMEOUT_SECONDS is set.
+        try:
+            self.collective_rpc(
+                "wake_up", kwargs=dict(tags=tags), timeout=_sleep_wake_timeout()
+            )
+        except TimeoutError:
+            self._fail_on_sleep_wake_timeout("wake_up")
+            raise
         time_after_wakeup = time.perf_counter()
         logger.info(
             "It took %.6f seconds to wake up tags %s.",
