@@ -162,7 +162,7 @@ def get_open_port() -> int:
         # Start scanning from VLLM_PORT when set (via _get_open_port's default).
         start_port = envs.VLLM_PORT
         while True:
-            candidate_port = _get_open_port(start_port=start_port)
+            candidate_port = _get_open_port(start_port=start_port, max_attempts=1000)
             if candidate_port not in reserved_port_range:
                 return candidate_port
             # The candidate fell inside the DP-reserved range. Resume the
