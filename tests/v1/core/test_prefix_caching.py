@@ -2579,6 +2579,37 @@ def test_emit_cached_block_events_zero_cached():
     assert pool.take_events() == []
 
 
+def test_full_report_uses_dcp_effective_block_size():
+    block_size = 16
+    dcp_world_size = 2
+    effective_block_size = block_size * dcp_world_size
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, num_blocks=8),
+        max_model_len=8192,
+        scheduler_block_size=effective_block_size,
+        hash_block_size=effective_block_size,
+        enable_caching=True,
+        enable_kv_cache_events=True,
+        dcp_world_size=dcp_world_size,
+    )
+    token_ids = list(range(2 * effective_block_size))
+    req0 = make_request("dcp_store", token_ids, effective_block_size, sha256)
+    assert manager.allocate_slots(req0, len(token_ids)) is not None
+    manager.take_events()
+    manager.free(req0)
+
+    req1 = make_request("dcp_hit", token_ids, effective_block_size, sha256)
+    req1.kv_cache_report_mode = "full"
+    _, num_computed_tokens, _ = manager.get_computed_blocks(req1)
+    events = manager.take_events()
+
+    assert num_computed_tokens == effective_block_size
+    assert len(events) == 1
+    assert isinstance(events[0], BlockStored)
+    assert events[0].block_size == effective_block_size
+    assert len(events[0].token_ids) == effective_block_size
+
+
 def test_eagle_enabled_removes_last_block():
     """Verify Eagle does NOT remove blocks when request
     length is divisible by block size."""
