@@ -282,6 +282,13 @@ class AttentionBackend(ABC):
         return True
 
     @classmethod
+    def supports_pcp(cls) -> bool:
+        try:
+            return cls.get_impl_cls().supports_pcp
+        except NotImplementedError:
+            return False
+
+    @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """Check if backend supports a given attention type.
 
@@ -327,6 +334,7 @@ class AttentionBackend(ABC):
         use_non_causal: bool = False,
         use_batch_invariant: bool = False,
         use_kv_connector: bool = False,
+        use_pcp: bool = False,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -367,6 +375,8 @@ class AttentionBackend(ABC):
             invalid_reasons.append("batch invariance not supported")
         if use_kv_connector and not cls.supports_kv_connector():
             invalid_reasons.append("KV connector not supported")
+        if use_pcp and not cls.supports_pcp():
+            invalid_reasons.append("PCP not supported")
         combination_reason = cls.supports_combination(
             head_size,
             dtype,
@@ -469,6 +479,11 @@ class CommonAttentionMetadata:
     this stay globally visible; later (generated) tokens additionally see a
     fixed sliding window. None disables R-SWA. The attention backend copies this
     into its own persistent buffer and reads ``rswa_window`` from model config."""
+
+    replayssm_decode_base_cpu: torch.Tensor | None = None
+    """(batch_size,) CPU ring origin for Mamba2 ReplaySSM decode: num_computed
+    at the current decode run's last full-state write. write_pos counts from
+    here, so a preemption-resumed request re-anchors past the prompt boundary."""
 
     # WARNING: Deprecated fields. Will be removed in a future release (v0.15.0)
     _seq_lens_cpu: torch.Tensor | None = None
@@ -581,6 +596,7 @@ class CommonAttentionMetadata:
             dcp_local_seq_lens_cpu=maybe_slice_reqs(self.dcp_local_seq_lens_cpu),
             is_prefilling=maybe_slice_reqs(self.is_prefilling),
             rswa_prefix_lens=maybe_slice_reqs(self.rswa_prefix_lens),
+            replayssm_decode_base_cpu=maybe_slice_reqs(self.replayssm_decode_base_cpu),
         )
 
 
@@ -757,7 +773,9 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
 class AttentionLayer(Protocol):
     _q_scale: torch.Tensor
     _k_scale: torch.Tensor
+    _k_scale_cpu: torch.Tensor
     _v_scale: torch.Tensor
+    _v_scale_cpu: torch.Tensor
     _q_scale_float: float
     _k_scale_float: float
     _v_scale_float: float
@@ -856,8 +874,8 @@ class AttentionImplBase(ABC, Generic[T]):
         except AssertionError:
             self.pcp_world_size = 1
             self.pcp_rank = 0
-        self.total_cp_world_size = self.pcp_world_size * self.dcp_world_size
-        self.total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
+        self.total_cp_world_size = self.dcp_world_size
+        self.total_cp_rank = self.dcp_rank
 
         self.need_to_return_lse_for_decode = (
             self.dcp_world_size > 1 and self.can_return_lse_for_decode
@@ -923,6 +941,14 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         """
         return False
 
+    def fused_qk_norm_rope_kvcache_supported(self):
+        """
+        Does this attention implementation support fused QKNorm+RoPE+KVCache fusion.
+        This is used by the QkNormRopeKvCachePattern to only fuse the QKNorm ops
+        with the RoPE ops and the KV cache update for implementations that support it.
+        """
+        return False
+
     def fused_rope_kvcache_supported(self):
         """
         Does this attention implementation support RoPE+KVCache fusion.
@@ -930,6 +956,29 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         with the KV cache update for implementations that support it.
         """
         return False
+
+    def do_qk_norm_rope_kvcache_update(
+        self,
+        layer: AttentionLayer,
+        qkv: torch.Tensor,
+        q_out: torch.Tensor,
+        k_out: torch.Tensor,
+        positions: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        rms_norm_eps: float,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ):
+        """
+        If `fused_qk_norm_rope_kvcache_supported` returns True, this method
+        will be called by the fused custom op. Applies QK-norm + RoPE and
+        writes K/V to the KV cache. Results are written to the pre-allocated
+        q_out and k_out tensors; V is split from QKV at the graph level.
+        """
+        raise NotImplementedError
 
     def do_rope_and_kv_cache_update(
         self,
@@ -953,6 +1002,8 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
 
 class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     """MLA attention implementation with forward_mqa and forward_mha methods."""
+
+    supports_pcp: bool = True
 
     @abstractmethod
     def __init__(

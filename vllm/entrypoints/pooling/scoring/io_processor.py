@@ -2,24 +2,38 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from collections.abc import Sequence
-from typing import Any, TypeAlias
+from typing import Any, TypeAlias, cast
 
 import torch.nn.functional as F
 
 from vllm import PoolingParams, PoolingRequestOutput, TokensPrompt
-from vllm.inputs import EngineInput
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import safe_apply_chat_template
-from vllm.renderers.inputs.preprocess import extract_target_prompt
+from vllm.renderers.inputs.preprocess import (
+    extract_target_prompt,
+    parse_model_prompt,
+    prompt_to_seq,
+)
 from vllm.tasks import PoolingTask
 from vllm.utils.mistral import is_mistral_tokenizer
 
 from ...chat_utils import ChatTemplateResolutionError
 from ..base.io_processor import PoolingIOProcessor
+from ..pooling.protocol import PoolingCompletionRequest
 from ..typing import (
-    OfflineInputsContext,
+    AnyOfflineInputsContext,
+    AnyPoolingRequest,
+    AnyRenderParam,
+    EncodeChatRenderParams,
+    EncodeCMPLRenderParams,
+    OfflineEncodeInputsContext,
     OfflineOutputsContext,
+    OfflineScoringInputsContext,
+    PoolingEngineInput,
     PoolingServeContext,
+    RequestFactory,
+    RequestGenerator,
+    ScoringRenderParams,
 )
 from .protocol import RerankRequest, ScoreRequest, ScoringRequest
 from .typing import ScoreData, ScoreInput, ScoringData
@@ -155,6 +169,19 @@ class ScoringIOProcessor(PoolingIOProcessor):
         )
         return scoring_data
 
+    def valid_inputs_online(self, request: AnyPoolingRequest):
+        if isinstance(request, ScoreRequest):
+            data_1 = request.data_1
+            data_2 = request.data_2
+        elif isinstance(request, RerankRequest):
+            data_1 = request.query
+            data_2 = request.documents
+        else:
+            raise ValueError(f"Invalid {request.__class__.__name__} request type")
+
+        scoring_data = self.valid_inputs(data_1, data_2)
+        return scoring_data
+
 
 class BiEncoderIOProcessor(ScoringIOProcessor):
     name = "bi-encoder"
@@ -163,19 +190,11 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
     #######################################
     # online APIs
 
-    def pre_process_online(self, ctx: ScoringServeContext):
+    def get_request_factory_online(
+        self, ctx: PoolingServeContext
+    ) -> Sequence[AnyRenderParam]:
         request = ctx.request
-
-        if isinstance(request, ScoreRequest):
-            data_1 = request.data_1
-            data_2 = request.data_2
-        elif isinstance(request, RerankRequest):
-            data_1 = request.query
-            data_2 = request.documents
-        else:
-            raise ValueError(f"Invalid {self.name} request type")
-
-        scoring_data = self.valid_inputs(data_1, data_2)
+        scoring_data = self.valid_inputs_online(request)
 
         max_tokens_per_query, max_tokens_per_doc = self._get_token_limits(
             request=request
@@ -185,19 +204,37 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
                 scoring_data, max_tokens_per_query, max_tokens_per_doc
             )
 
-        tok_params = request.build_tok_params(self.model_config)
-        engine_inputs = self._pre_process(
-            scoring_data,
-            tok_params,
-            prompt_extras={
-                k: v
-                for k in ("mm_processor_kwargs", "cache_salt", "chat_template_kwargs")
-                if (v := getattr(request, k, None)) is not None
-            },
+        data_1 = score_data_to_prompts(scoring_data.data_1, "query", self.model_config)
+        data_2 = score_data_to_prompts(
+            scoring_data.data_2, "document", self.model_config
         )
+        prompts = data_1 + data_2
+        ctx.n_queries = len(data_1)
 
-        ctx.engine_inputs = engine_inputs
-        ctx.n_queries = len(scoring_data.data_1)
+        prompts_seq = prompt_to_seq(prompts)
+        parsed_prompts = [
+            parse_model_prompt(self.model_config, prompt) for prompt in prompts_seq
+        ]
+        num_requests = len(parsed_prompts)
+
+        tok_params = request.build_tok_params(self.model_config)
+        params_seq = self._params_to_seq(ctx.pooling_params, num_requests)
+        seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
+        seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
+
+        requests = [
+            EncodeCMPLRenderParams(
+                prompts=parsed_prompts[i],
+                tok_params=tok_params,
+                prompt_extras=ctx.prompt_extras,
+                skip_mm_cache=False,
+                params=params_seq[i],
+                lora_requests=seq_lora_requests[i],
+                priorities=seq_priority[i],
+            )
+            for i in range(num_requests)
+        ]
+        return requests
 
     def post_process_online(
         self,
@@ -213,25 +250,37 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
     #######################################
     # offline APIs
 
-    def pre_process_offline(self, ctx: OfflineInputsContext) -> Sequence[EngineInput]:
-        assert isinstance(ctx.prompts, ScoringData)
-        assert not isinstance(ctx.pooling_params, Sequence)
-
-        tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
-            **(ctx.tokenization_kwargs or {})
-        )
+    def get_request_factory_offline(
+        self, ctx: AnyOfflineInputsContext
+    ) -> tuple[RequestFactory, int]:
+        assert isinstance(ctx, OfflineScoringInputsContext)
 
         max_tokens_per_query, max_tokens_per_doc = self._get_token_limits(
             pooling_params=ctx.pooling_params
         )
 
-        scoring_data = ctx.prompts
+        scoring_data = ctx.scoring_data
         if max_tokens_per_query > 0 or max_tokens_per_doc > 0:
             scoring_data = self._truncate_scoring_data(
                 scoring_data, max_tokens_per_query, max_tokens_per_doc
             )
 
-        return self._pre_process(scoring_data, tok_params)
+        data_1 = score_data_to_prompts(scoring_data.data_1, "query", self.model_config)
+        data_2 = score_data_to_prompts(
+            scoring_data.data_2, "document", self.model_config
+        )
+        prompts = data_1 + data_2
+
+        return super().get_request_factory_offline(
+            OfflineEncodeInputsContext(
+                pooling_task=self.pooling_task,
+                prompts=prompts,
+                tokenization_kwargs=ctx.tokenization_kwargs,
+                pooling_params=ctx.pooling_params,
+                lora_request=ctx.lora_request,
+                priorities=ctx.priorities,
+            )
+        )
 
     def post_process_offline(
         self,
@@ -242,21 +291,6 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
 
     #######################################
     # helpers
-
-    def _pre_process(
-        self,
-        scoring_data: ScoringData,
-        tok_params: TokenizeParams,
-        prompt_extras: dict[str, Any] | None = None,
-    ) -> Sequence[EngineInput]:
-        data_1 = score_data_to_prompts(scoring_data.data_1, "query", self.model_config)
-        data_2 = score_data_to_prompts(
-            scoring_data.data_2, "document", self.model_config
-        )
-
-        return self._preprocess_cmpl_offline(
-            prompts=data_1 + data_2, tok_params=tok_params, prompt_extras=prompt_extras
-        )
 
     def _post_process(self, outputs: list[PoolingRequestOutput], n_queries: int):
         emb_data_1 = outputs[:n_queries]
@@ -388,86 +422,136 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
     #######################################
     # online APIs
 
-    def pre_process_online(self, ctx: ScoringServeContext):
+    def get_request_factory_online(
+        self, ctx: PoolingServeContext
+    ) -> Sequence[AnyRenderParam]:
         request = ctx.request
+        scoring_data = self.valid_inputs_online(request)
+        data_1 = scoring_data.data_1
+        data_2 = scoring_data.data_2
+        num_requests = len(data_2)
 
-        if isinstance(request, ScoreRequest):
-            data_1 = request.data_1
-            data_2 = request.data_2
-        elif isinstance(request, RerankRequest):
-            data_1 = request.query
-            data_2 = request.documents
-        else:
-            raise ValueError(f"Invalid {self.name} request type")
-
-        scoring_data = self.valid_inputs(data_1, data_2)
+        if len(data_1) == 1:
+            data_1 = data_1 * num_requests
 
         max_tokens_per_query, max_tokens_per_doc = self._get_token_limits(
             request=request
         )
 
         tok_params = request.build_tok_params(self.model_config)
-        pooling_params = self.create_pooling_params(request)
+        seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
+        seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
 
-        engine_inputs, pooling_params_list = self._pre_process(
-            scoring_data,
-            tok_params,
-            pooling_params,
-            chat_template=self.chat_template,
-            max_tokens_per_query=max_tokens_per_query,
-            max_tokens_per_doc=max_tokens_per_doc,
-            prompt_extras={
-                k: v
-                for k in ("mm_processor_kwargs", "cache_salt", "chat_template_kwargs")
-                if (v := getattr(request, k, None)) is not None
-            },
-        )
+        requests = [
+            ScoringRenderParams(
+                data_1=data_1[i],
+                data_2=data_2[i],
+                chat_template=self.chat_template,
+                max_tokens_per_query=max_tokens_per_query,
+                max_tokens_per_doc=max_tokens_per_doc,
+                tok_params=tok_params,
+                prompt_extras=ctx.prompt_extras,
+                skip_mm_cache=False,
+                params=ctx.pooling_params,
+                lora_requests=seq_lora_requests[i],
+                priorities=seq_priority[i],
+            )
+            for i in range(num_requests)
+        ]
 
-        ctx.engine_inputs = engine_inputs
-        ctx.pooling_params = pooling_params_list
+        return requests
 
     #######################################
     # offline APIs
 
-    def pre_process_offline(self, ctx: OfflineInputsContext) -> Sequence[EngineInput]:
-        assert isinstance(ctx.prompts, ScoringData)
-        assert not isinstance(ctx.pooling_params, Sequence)
+    def get_request_factory_offline(
+        self, ctx: AnyOfflineInputsContext
+    ) -> tuple[RequestFactory, int]:
+        assert isinstance(ctx, OfflineScoringInputsContext)
 
-        tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
-            **(ctx.tokenization_kwargs or {})
-        )
+        data_1 = ctx.scoring_data.data_1
+        data_2 = ctx.scoring_data.data_2
+        num_requests = len(data_2)
+
+        if len(data_1) == 1:
+            data_1 = data_1 * num_requests
 
         max_tokens_per_query, max_tokens_per_doc = self._get_token_limits(
             pooling_params=ctx.pooling_params
         )
-
-        prompt_extras = ctx.pooling_params.extra_kwargs if ctx.pooling_params else None
-        engine_inputs, pooling_params_list = self._pre_process(
-            ctx.prompts,
-            tok_params,
-            ctx.pooling_params,
-            ctx.chat_template,
-            max_tokens_per_query=max_tokens_per_query,
-            max_tokens_per_doc=max_tokens_per_doc,
-            prompt_extras=prompt_extras,
+        tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
+            **(ctx.tokenization_kwargs or {})
         )
-        ctx.pooling_params = pooling_params_list
-        return engine_inputs
+        prompt_extras = ctx.pooling_params.extra_kwargs
+
+        seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
+        seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
+
+        def request_factory() -> RequestGenerator:
+            for i in range(num_requests):
+                yield ScoringRenderParams(
+                    data_1=data_1[i],
+                    data_2=data_2[i],
+                    chat_template=ctx.chat_template,
+                    max_tokens_per_query=max_tokens_per_query,
+                    max_tokens_per_doc=max_tokens_per_doc,
+                    tok_params=tok_params,
+                    prompt_extras=prompt_extras,
+                    skip_mm_cache=False,
+                    params=ctx.pooling_params,
+                    lora_requests=seq_lora_requests[i],
+                    priorities=seq_priority[i],
+                )
+
+        return request_factory, num_requests
 
     #######################################
     # helpers
 
-    def _pre_process(
+    def render(
         self,
-        scoring_data: ScoringData,
-        tok_params: TokenizeParams,
-        pooling_params: PoolingParams | None,
-        chat_template: str | None = None,
-        max_tokens_per_query: int = 0,
-        max_tokens_per_doc: int = 0,
-        prompt_extras: dict[str, Any] | None = None,
-    ) -> tuple[Sequence[EngineInput], list[PoolingParams]]:
+        render_params: EncodeCMPLRenderParams
+        | EncodeChatRenderParams
+        | ScoringRenderParams,
+    ) -> PoolingEngineInput:
+        if "data_1" not in render_params:
+            raise ValueError(
+                f"Unsupported render_params type {render_params.__class__.__name__}"
+            )
+        render_params = cast(ScoringRenderParams, render_params)
+
         arrival_time = time.time()
+
+        tok_params = render_params["tok_params"]
+        params = render_params["params"]
+        prompt_extras = render_params["prompt_extras"]
+
+        _, engine_prompt = self.get_score_prompt(
+            data_1=render_params["data_1"],
+            data_2=render_params["data_2"],
+            encode_kwargs=tok_params.get_encode_kwargs(),
+            chat_template=render_params["chat_template"],
+            max_tokens_per_query=render_params["max_tokens_per_query"],
+            max_tokens_per_doc=render_params["max_tokens_per_doc"],
+            chat_template_kwargs=prompt_extras.get("chat_template_kwargs")
+            if prompt_extras
+            else None,
+        )
+
+        tok_params.apply_post_tokenization(self.tokenizer, engine_prompt)
+
+        if token_type_ids := engine_prompt.pop("token_type_ids", None):
+            params = params.clone()
+            compressed = compress_token_type_ids(
+                _apply_post_tokenization_to_token_type_ids(
+                    self.tokenizer, tok_params, token_type_ids
+                )
+            )
+            params.extra_kwargs = {
+                **(params.extra_kwargs or {}),
+                "compressed_token_type_ids": compressed,
+            }
+
         engine_prompt_extras = (
             {
                 k: v
@@ -478,55 +562,18 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             else None
         )
 
-        data_1 = scoring_data.data_1
-        data_2 = scoring_data.data_2
+        if engine_prompt_extras:
+            target_prompt = extract_target_prompt(self.model_config, engine_prompt)
+            target_prompt.update(engine_prompt_extras)
 
-        if len(data_1) == 1:
-            data_1 = data_1 * len(data_2)
+        engine_input = self.renderer.process_for_engine(engine_prompt, arrival_time)
 
-        if pooling_params is None:
-            pooling_params = PoolingParams(task="classify")
-
-        pooling_params_list = list[PoolingParams]()
-        engine_inputs = list[EngineInput]()
-        for q, d in zip(data_1, data_2):
-            _, engine_prompt = self.get_score_prompt(
-                data_1=q,
-                data_2=d,
-                encode_kwargs=tok_params.get_encode_kwargs(),
-                chat_template=chat_template,
-                max_tokens_per_query=max_tokens_per_query,
-                max_tokens_per_doc=max_tokens_per_doc,
-                chat_template_kwargs=prompt_extras.get("chat_template_kwargs")
-                if prompt_extras
-                else None,
-            )
-
-            token_type_ids = engine_prompt.pop("token_type_ids", None)
-            tok_params.apply_post_tokenization(self.tokenizer, engine_prompt)
-
-            if token_type_ids is not None:
-                params = pooling_params.clone()
-                compressed = compress_token_type_ids(
-                    _apply_post_tokenization_to_token_type_ids(
-                        self.tokenizer, tok_params, token_type_ids
-                    )
-                )
-                params.extra_kwargs = {
-                    **(params.extra_kwargs or {}),
-                    "compressed_token_type_ids": compressed,
-                }
-                pooling_params_list.append(params)
-            else:
-                pooling_params_list.append(pooling_params)
-
-            if engine_prompt_extras:
-                target_prompt = extract_target_prompt(self.model_config, engine_prompt)
-                target_prompt.update(engine_prompt_extras)
-            engine_inputs.append(
-                self.renderer.process_for_engine(engine_prompt, arrival_time)
-            )
-        return engine_inputs, pooling_params_list
+        return PoolingEngineInput(
+            prompts=engine_input,
+            params=params,
+            lora_requests=render_params["lora_requests"],
+            priorities=render_params["priorities"],
+        )
 
     def get_score_prompt(
         self,
@@ -731,12 +778,61 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
     name = "jina-reranking-scoring"
     pooling_task: PoolingTask = "token_embed"
 
-    def _pre_process(
-        self,
-        scoring_data: ScoringData,
-        tok_params: TokenizeParams,
-        prompt_extras: dict[str, Any] | None = None,
-    ) -> Sequence[EngineInput]:
+    def get_request_factory_online(
+        self, ctx: PoolingServeContext
+    ) -> Sequence[AnyRenderParam]:
+        request = ctx.request
+        ctx.n_queries = 1
+
+        prompt_extras = ctx.prompt_extras
+        scoring_data = self.valid_inputs_online(request)
+
+        max_tokens_per_query, max_tokens_per_doc = self._get_token_limits(
+            request=request
+        )
+
+        if max_tokens_per_query > 0 or max_tokens_per_doc > 0:
+            scoring_data = self._truncate_scoring_data(
+                scoring_data, max_tokens_per_query, max_tokens_per_doc
+            )
+
+        queries = self.ensure_str(scoring_data.data_1)
+        docs = self.ensure_str(scoring_data.data_2)
+
+        chat_template_kwargs = (
+            prompt_extras.get("chat_template_kwargs") if prompt_extras else None
+        )
+        instruction = (
+            chat_template_kwargs.get("instruction") if chat_template_kwargs else None
+        )
+
+        if len(queries) == 1:
+            prompts = [
+                self.format_docs_prompts_func(
+                    query=queries[0], docs=docs, instruction=instruction
+                )
+            ]
+        else:
+            prompts = [
+                self.format_docs_prompts_func(
+                    query=q, docs=[d], instruction=instruction
+                )
+                for q, d in zip(queries, docs)
+            ]
+
+        ctx.request = PoolingCompletionRequest(task="token_embed", input=prompts)
+        requests = PoolingIOProcessor.get_request_factory_online(self, ctx)
+        ctx.request = request
+        return requests
+
+    def get_request_factory_offline(
+        self, ctx: AnyOfflineInputsContext
+    ) -> tuple[RequestFactory, int]:
+        assert isinstance(ctx, OfflineScoringInputsContext)
+
+        scoring_data = ctx.scoring_data
+        prompt_extras = ctx.pooling_params.extra_kwargs
+
         queries = self.ensure_str(scoring_data.data_1)
         docs = self.ensure_str(scoring_data.data_2)
         chat_template_kwargs = (
@@ -760,8 +856,16 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
                 for q, d in zip(queries, docs)
             ]
 
-        return self._preprocess_cmpl_offline(
-            prompts=prompts, tok_params=tok_params, prompt_extras=prompt_extras
+        return PoolingIOProcessor.get_request_factory_offline(
+            self,
+            OfflineEncodeInputsContext(
+                pooling_task=self.pooling_task,
+                prompts=prompts,
+                tokenization_kwargs=ctx.tokenization_kwargs,
+                pooling_params=ctx.pooling_params,
+                lora_request=ctx.lora_request,
+                priorities=ctx.priorities,
+            ),
         )
 
     def _post_process(self, outputs: list[PoolingRequestOutput], n_queries: int):

@@ -17,6 +17,7 @@ from vllm.compilation.breakable_cudagraph import (
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.distributed.parallel_state import (
     get_pp_group,
     graph_capture,
@@ -138,14 +139,14 @@ class CudaGraphManager:
         self._candidates: dict[tuple[int, int], list[BatchExecutionDescriptor]] = {}
         self._capture_descs: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = {}
 
-        self._init_candidates()
-
         # Breakable CUDA graph (PW CUDA graph without torch.compile)
         self.use_breakable_cg = (
             is_breakable_cudagraph_enabled()
             and self.cudagraph_mode.has_piecewise_cudagraphs()
         )
         self.breakable_cg_runner: BreakableCUDAGraphWrapper | None = None
+
+        self._init_candidates()
 
     def _build_lora_dispatch_map(self) -> tuple[dict[int, int], int]:
         """Precompute actual num_active_loras -> effective captured case.
@@ -253,13 +254,13 @@ class CudaGraphManager:
 
             if mixed_mode:
                 # for PIECEWISE graphs there is no limit on requests when replaying
-                # i.e. no request padding is needed
-                # so we leave it as None
-                num_reqs = (
-                    min(num_tokens, self.max_num_reqs)
-                    if mixed_mode == CUDAGraphMode.FULL
-                    else None
-                )
+                # i.e. no request padding is needed, so we leave it as None.
+                # For breakable PW graphs, break-point kernels read the real batch
+                # from the forward context; in-graph kernels handle the token padding
+                # themselves from the padded slot_mapping (rows with slot == -1).
+                num_reqs = None
+                if mixed_mode == CUDAGraphMode.FULL:
+                    num_reqs = min(num_tokens, self.max_num_reqs)
                 desc = BatchExecutionDescriptor(
                     cg_mode=mixed_mode,
                     num_tokens=num_tokens,
@@ -301,12 +302,10 @@ class CudaGraphManager:
 
         Args:
             create_forward_fn: Factory that prepares inputs (OUTSIDE graph) and
-                returns a forward_fn. For FULL cudagraph mode, it is invoked
-                once with warmup=True for the warmup pass, and again with
-                warmup=False for the captured pass. For attention backends
-                that perform lazy metadata initialization (e.g. FlashMLA),
-                FULL cudagraph capture requires distinct metadatas for warmup
-                and capture.
+                returns a forward_fn. For FULL and breakable PIECEWISE modes,
+                it is invoked once with warmup=True and again with warmup=False
+                because attention backends may mutate or lazily initialize
+                metadata during warmup.
         """
         with graph_capture(device=self.device):
             # Capture in order: PIECEWISE first, then FULL. PIECEWISE has larger
@@ -330,11 +329,17 @@ class CudaGraphManager:
                     logger.debug(
                         "CG Capture: mode=%s, batch_desc=%s", desc.cg_mode.name, desc
                     )
-                    if desc.cg_mode == CUDAGraphMode.PIECEWISE:
+                    if (
+                        desc.cg_mode == CUDAGraphMode.PIECEWISE
+                        and not self.use_breakable_cg
+                    ):
                         forward_fn(CUDAGraphMode.PIECEWISE)
                     else:
                         # Capture with fresh attention state.
                         forward_fn = create_forward_fn(desc, warmup=False)
+                        if desc.cg_mode == CUDAGraphMode.PIECEWISE:
+                            forward_fn(CUDAGraphMode.PIECEWISE)
+                            continue
                         assert desc not in self.graphs, (
                             f"Graph already captured for {desc}"
                         )
@@ -342,6 +347,10 @@ class CudaGraphManager:
                         # Sync offloader's copy stream before capture.
                         # Ensure any pre-capture prefetches from offloader are complete.
                         get_offloader().sync_prev_onload()
+                        if self.pool is not None:
+                            set_graph_pool_id(self.pool)
+                        else:
+                            set_graph_pool_id(current_platform.graph_pool_handle())
                         with torch.cuda.graph(graph, self.pool):
                             forward_fn(CUDAGraphMode.NONE)
                             # Join offloader's copy stream after forward to avoid
@@ -489,7 +498,10 @@ class ModelCudaGraphManager(CudaGraphManager):
                 block_tables,
                 attn_groups,
                 kv_cache_config,
-                skip_attn=(desc.cg_mode == CUDAGraphMode.PIECEWISE),
+                skip_attn=(
+                    desc.cg_mode == CUDAGraphMode.PIECEWISE
+                    and not self.use_breakable_cg
+                ),
             )
 
             # Capture with dummy rows marked as padding.
@@ -498,7 +510,7 @@ class ModelCudaGraphManager(CudaGraphManager):
             def forward_fn(cg_mode: CUDAGraphMode) -> None:
                 batch_descriptor = None
                 if cg_mode == CUDAGraphMode.PIECEWISE:
-                    assert attn_metadata is None
+                    assert (attn_metadata is not None) == self.use_breakable_cg
                     batch_descriptor = BatchDescriptor(
                         num_tokens=num_tokens,
                         has_lora=has_lora,

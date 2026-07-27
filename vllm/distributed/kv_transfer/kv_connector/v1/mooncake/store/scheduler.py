@@ -80,28 +80,18 @@ class MooncakeStoreScheduler:
         Returns ``(None, False)`` when an async lookup is still in flight,
         signaling the scheduler to retry this request on a later step.
         """
-        # Look up against the full prefill range, not just the prompt.
-        token_len = request.num_tokens // self._block_size * self._block_size
-        if token_len < self._block_size:
+        if request.num_tokens < self._block_size:
             return 0, False
 
         num_external_hit_tokens = self.client.lookup(
             request.request_id,
-            token_len,
+            request.num_tokens,
             request.block_hashes,
             non_block=self.lookup_async,
         )
         if num_external_hit_tokens is None:
             # Lookup not ready yet; scheduler will retry on a later step.
             return None, False
-
-        if num_external_hit_tokens == request.num_tokens:
-            # Leave a sub-block tail uncomputed for sampling, on a block
-            # boundary so the recv-side load mask covers every yielded chunk.
-            num_external_hit_tokens = max(
-                0,
-                (request.num_tokens - 1) // self._block_size * self._block_size,
-            )
 
         if num_external_hit_tokens < num_computed_tokens:
             need_to_allocate = 0

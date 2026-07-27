@@ -109,24 +109,45 @@ def _copy_mamba_state_block(
         src_addr = state_base_addr + src_block_id * state_block_stride + src_offset
         num_elems_to_copy = (conv_width - token_bias).to(tl.int64) * state_inner_size
         copy_size = num_elems_to_copy * state_elem_size
-    else:
-        # Temporal state: copy state[bt[src_col + token_bias]] -> state[bt[dst_col]]
-        actual_src_block_id = tl.load(block_table_base + src_col + token_bias).to(
-            tl.int64
-        )
-        src_addr = state_base_addr + actual_src_block_id * state_block_stride
-        # Use natural block data size (inner_size * elem_size), NOT
-        # state_block_stride which is the page stride and can exceed the
-        # actual data when the state tensor uses as_strided page padding.
-        copy_size = state_inner_size * state_elem_size
+        offsets = tl.arange(0, COPY_BLOCK_SIZE)
+        for i in range(0, copy_size, COPY_BLOCK_SIZE):
+            mask = (i + offsets) < copy_size
+            curr_src = (src_addr + i + offsets).to(tl.pointer_type(tl.uint8))
+            curr_dst = (dst_addr + i + offsets).to(tl.pointer_type(tl.uint8))
+            data = tl.load(curr_src, mask=mask)
+            tl.store(curr_dst, data, mask=mask)
+        return
 
+    # Temporal state: copy state[bt[src_col + token_bias]] -> state[bt[dst_col]]
+    actual_src_block_id = tl.load(block_table_base + src_col + token_bias).to(tl.int64)
+    src_addr = state_base_addr + actual_src_block_id * state_block_stride
+    # Use natural block data size (inner_size * elem_size), NOT
+    # state_block_stride which is the page stride and can exceed the
+    # actual data when the state tensor uses as_strided page padding.
+    copy_size = state_inner_size * state_elem_size
+
+    # Vectorize via uint64 (8B per thread → LDG.64/STG.64): both temporal
+    # and SD conv produce src/dst addresses aligned to a full token slice
+    # (inner_size * elem_size) and a copy_size that's a multiple of it,
+    # which is 8B-aligned for all state dtypes in use. A masked byte tail
+    # covers any remaining 0-7 bytes (only reachable for sub-8B slices).
+    copy_size_u64 = copy_size // 8
+    src_u64 = src_addr.to(tl.pointer_type(tl.uint64))
+    dst_u64 = dst_addr.to(tl.pointer_type(tl.uint64))
     offsets = tl.arange(0, COPY_BLOCK_SIZE)
-    for i in range(0, copy_size, COPY_BLOCK_SIZE):
-        mask = (i + offsets) < copy_size
-        curr_src = (src_addr + i + offsets).to(tl.pointer_type(tl.uint8))
-        curr_dst = (dst_addr + i + offsets).to(tl.pointer_type(tl.uint8))
-        data = tl.load(curr_src, mask=mask)
-        tl.store(curr_dst, data, mask=mask)
+    for i in range(0, copy_size_u64, COPY_BLOCK_SIZE):
+        mask = (i + offsets) < copy_size_u64
+        data = tl.load(src_u64 + i + offsets, mask=mask)
+        tl.store(dst_u64 + i + offsets, data, mask=mask)
+
+    tail_start = copy_size_u64 * 8
+    tail_bytes = copy_size - tail_start
+    tail_off = tl.arange(0, 8)
+    tail_src = (src_addr + tail_start).to(tl.pointer_type(tl.uint8))
+    tail_dst = (dst_addr + tail_start).to(tl.pointer_type(tl.uint8))
+    tail_mask = tail_off < tail_bytes
+    tail_data = tl.load(tail_src + tail_off, mask=tail_mask)
+    tl.store(tail_dst + tail_off, tail_data, mask=tail_mask)
 
 
 @triton.jit
@@ -673,6 +694,23 @@ class MambaSpecDecodeGPUContext:
                         self.state_conv_widths[idx] = 0
                         self.state_inner_sizes[idx] = (
                             state[0].numel() if state.dim() > 1 else 1
+                        )
+                        # Temporal copies are vectorized with uint64
+                        # loads/stores; base pointer and block stride must
+                        # be 8B-aligned (tail loop handles copy_size % 8).
+                        base_addr = state.data_ptr()
+                        block_stride_bytes = block_stride_elems * state.element_size()
+                        assert base_addr % 8 == 0, (
+                            f"layer {layer_name}: state.data_ptr() = "
+                            f"{base_addr:#x} is not 8B-aligned; "
+                            f"_copy_mamba_state_block uint64 "
+                            f"vectorization requires it"
+                        )
+                        assert block_stride_bytes % 8 == 0, (
+                            f"layer {layer_name}: block stride = "
+                            f"{block_stride_bytes}B is not 8B-aligned; "
+                            f"_copy_mamba_state_block uint64 "
+                            f"vectorization requires it"
                         )
 
                     self.state_group_indices[idx] = group_local_idx
