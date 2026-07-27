@@ -101,12 +101,12 @@ class MambaHybridModelState(DefaultModelState):
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
         # Must reset the speculative acceptance count in this idx which could be stale.
-        self.num_accepted_tokens_gpu[req_index] = 1
+        self.num_accepted_tokens_gpu[req_index].fill_(1)
         if self._align_mode:
             # Seed the running state block from the resumed/prefilled position.
-            self._mamba_state_idx_gpu[req_index] = (
-                new_req_data.num_computed_tokens - 1
-            ) // self.cache_config.block_size
+            self._mamba_state_idx_gpu[req_index].fill_(
+                (new_req_data.num_computed_tokens - 1) // self.cache_config.block_size
+            )
 
     def _get_mamba_group_info(
         self, kv_cache_config: KVCacheConfig
