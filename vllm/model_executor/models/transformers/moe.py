@@ -286,6 +286,15 @@ class MoEMixin(MixtureOfExperts):
                         and fuser is not None
                         and fuser.shared_name is not None
                     )
+                    if reaches_fp16_trick:
+                        logger.warning_once(
+                            "%s could be fused but routing it in vLLM would apply "
+                            "`routed_scaling_factor` by dividing the shared expert "
+                            "output, which only fp16 overflow protection expects the "
+                            "decoder layer to compensate for. Falling back to routing "
+                            "in Transformers; run in bfloat16 to fuse it.",
+                            moe_block_cls,
+                        )
                     if fuser is not None and not reaches_fp16_trick:
                         # MoE block forward is fully replaced.
                         # gate/router and shared expert (if any) runs in FusedMoE.
