@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
+from vllm.distributed.eplb.metrics import EplbMetricsSnapshot
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -306,6 +307,9 @@ class ModelRunnerOutput:
     # its slot buffer via ``slot_buffer[slot_mapping] = routing_data``.
     # ``None`` when ``enable_return_routed_experts`` is off.
     routed_experts: RoutedExpertsLists | None = None
+
+    # Per-instance EPLB metrics captured by the worker.
+    eplb_metrics: EplbMetricsSnapshot | None = None
 
     @staticmethod
     def with_kv_conn_output_only(
