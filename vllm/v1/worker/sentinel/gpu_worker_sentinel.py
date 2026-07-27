@@ -113,6 +113,11 @@ class WorkerSentinel:
         self.dp_rank = new_dp_rank
         self.dp_size = new_dp_size
 
+        if self.worker.use_v2_model_runner:
+            runner = cast("GPUModelRunnerV2", self.worker.model_runner)
+            runner.dp_size = new_dp_size
+            runner.dp_rank = new_dp_rank
+
         self.worker.model_runner.eep_eplb_suppressed = True
         self._reset_eplb_async_state()
 
