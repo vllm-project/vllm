@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
+import types
 
 import pytest
 import torch
 import torch.nn.functional as F
 
 import vllm._custom_ops as ops
+from vllm.model_executor.layers.mamba.ops.cpu import gdn_attention
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -417,6 +419,207 @@ def _conv_inputs(total_tokens: int):
     return x, weight, bias
 
 
+def _sd_conv_states(
+    num_slots: int, state_len: int, dim: int = CONV_DIM
+) -> torch.Tensor:
+    storage = torch.zeros(num_slots, state_len, dim, dtype=torch.bfloat16)
+    return storage.transpose(1, 2)
+
+
+def _maybe_pack_conv_weight(weight: torch.Tensor, is_vnni: bool) -> torch.Tensor:
+    return ops.causal_conv1d_weight_pack(weight) if is_vnni else weight
+
+
+@torch.inference_mode()
+def test_spec_aware_mixed_routing_preserves_token_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    num_tokens = 4
+    projection = torch.arange(num_tokens * 16, dtype=torch.float32).view(num_tokens, 16)
+    mixed_qkv, b, a = projection[:, :4], projection[:, 4:6], projection[:, 6:8]
+    assert all(not tensor.is_contiguous() for tensor in (mixed_qkv, b, a))
+
+    spec_indices = torch.tensor([0, 2])
+    nonspec_indices = torch.tensor([1, 3])
+    metadata = types.SimpleNamespace(
+        spec_sequence_masks=torch.ones(1, dtype=torch.bool),
+        spec_token_indx=spec_indices,
+        non_spec_token_indx=nonspec_indices,
+        num_prefills=1,
+        num_decodes=0,
+    )
+    routed = []
+
+    def record(*args):
+        routed.append(args[2:5])
+        return args[2]
+
+    monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: True)
+    monkeypatch.setattr(gdn_attention, "_spec_forward", record)
+    monkeypatch.setattr(gdn_attention, "_spec_aware_nonspec_subset", record)
+
+    layer = types.SimpleNamespace(
+        kv_cache=[torch.empty(1, 4, 6), torch.empty(1, 1, 1, 1)]
+    )
+    core_attn_out = torch.empty_like(mixed_qkv)
+    gdn_attention._cpu_gdn_attention_spec_aware(
+        layer=layer,
+        attn_metadata_i=metadata,
+        mixed_qkv=mixed_qkv,
+        b=b,
+        a=a,
+        core_attn_out=core_attn_out,
+        width=CONV_KERNEL,
+        state_len=6,
+    )
+
+    expected_inputs = (mixed_qkv, b, a)
+    assert len(routed) == 2
+    for actual_inputs, indices in zip(routed, (spec_indices, nonspec_indices)):
+        for actual, expected in zip(actual_inputs, expected_inputs):
+            assert actual.is_contiguous()
+            torch.testing.assert_close(actual, expected.index_select(0, indices))
+    torch.testing.assert_close(core_attn_out, mixed_qkv)
+
+
+@torch.inference_mode()
+def test_spec_aware_nonspec_materializes_state_indices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    block_table = torch.arange(8, dtype=torch.int32).view(2, 4)
+    state_indices = block_table[:, 0]
+    assert not state_indices.is_contiguous()
+
+    metadata = types.SimpleNamespace(
+        non_spec_state_indices_tensor=state_indices,
+        non_spec_query_start_loc=torch.tensor([0, 2, 4], dtype=torch.int32),
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_prefills=2,
+        num_prefill_tokens=4,
+        has_initial_state=torch.tensor([False, False]),
+    )
+
+    recorded_indices = None
+
+    def causal_conv1d_fwd_cpu(**kwargs):
+        nonlocal recorded_indices
+        recorded_indices = kwargs["cache_indices"]
+        return kwargs["x"]
+
+    def fused_gdn_gating_cpu(**kwargs):
+        return kwargs["a"], kwargs["b"]
+
+    def chunk_gated_delta_rule_cpu(**kwargs):
+        out = torch.zeros(1, 4, 1, 1)
+        return out, kwargs["initial_state"]
+
+    monkeypatch.setattr(torch.cpu, "_is_amx_tile_supported", lambda: True)
+    monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: False)
+    monkeypatch.setattr(
+        gdn_attention.ops, "causal_conv1d_fwd_cpu", causal_conv1d_fwd_cpu
+    )
+    monkeypatch.setattr(gdn_attention.ops, "fused_gdn_gating_cpu", fused_gdn_gating_cpu)
+    monkeypatch.setattr(
+        gdn_attention.ops,
+        "chunk_gated_delta_rule_cpu",
+        chunk_gated_delta_rule_cpu,
+    )
+
+    layer = types.SimpleNamespace(
+        activation="silu",
+        conv1d=types.SimpleNamespace(weight=torch.empty(0), bias=None),
+        A_log=torch.empty(0),
+        dt_bias=torch.empty(0),
+        rearrange_mixed_qkv=lambda x: (
+            x[:, :1].view(1, 4, 1, 1),
+            x[:, :1].view(1, 4, 1, 1),
+            x[:, :1].view(1, 4, 1, 1),
+        ),
+    )
+    gdn_attention._spec_aware_nonspec(
+        layer=layer,
+        attn_metadata_i=metadata,
+        mixed_qkv=torch.zeros(4, 4),
+        b=torch.zeros(4, 1),
+        a=torch.zeros(4, 1),
+        core_attn_out=torch.zeros(4, 1, 1),
+        conv_buf=torch.zeros(8, 1, 6),
+        ssm_state=torch.zeros(8, 1, 1, 1),
+        width=4,
+    )
+
+    assert recorded_indices is not None
+    assert recorded_indices.is_contiguous()
+    torch.testing.assert_close(
+        recorded_indices, torch.tensor([0, 4], dtype=torch.int32)
+    )
+
+
+@torch.inference_mode()
+def test_spec_forward_prepares_native_conv_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    block_table = torch.tensor([[0, 1], [4, 5]], dtype=torch.int32)
+    state_indices = block_table[:, 0]
+    accepted_counts = torch.tensor([1, 4], dtype=torch.int32)
+    assert not state_indices.is_contiguous()
+    metadata = types.SimpleNamespace(
+        num_spec_decodes=2,
+        spec_state_indices_tensor=block_table,
+        spec_query_start_loc=torch.tensor([0, 4, 8], dtype=torch.int32),
+        num_accepted_tokens=accepted_counts,
+    )
+    forwarded_indices = None
+    forwarded_counts = None
+
+    def causal_conv1d_update_cpu(**kwargs):
+        nonlocal forwarded_counts, forwarded_indices
+        forwarded_indices = kwargs["conv_state_indices"]
+        forwarded_counts = kwargs["num_accepted_tokens"]
+        return kwargs["x"]
+
+    monkeypatch.setattr(torch.cpu, "_is_amx_tile_supported", lambda: True)
+    monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: False)
+    monkeypatch.setattr(
+        gdn_attention.ops, "causal_conv1d_update_cpu", causal_conv1d_update_cpu
+    )
+    monkeypatch.setattr(
+        gdn_attention.ops,
+        "fused_sigmoid_gating_delta_rule_update_spec_cpu",
+        lambda **kwargs: kwargs["q"],
+    )
+
+    layer = types.SimpleNamespace(
+        activation="silu",
+        conv1d=types.SimpleNamespace(weight=torch.empty(1, CONV_KERNEL), bias=None),
+        A_log=None,
+        dt_bias=None,
+        rearrange_mixed_qkv=lambda x: (x.unsqueeze(0),) * 3,
+    )
+    gdn_attention._spec_forward(
+        layer=layer,
+        attn_metadata_i=metadata,
+        mixed_qkv_spec=torch.zeros(8, 1, dtype=torch.bfloat16),
+        b_spec=torch.empty(0),
+        a_spec=torch.empty(0),
+        conv_buf=torch.empty(0),
+        ssm_state=torch.empty(0),
+        width=CONV_KERNEL,
+        state_len=0,
+    )
+
+    expected = (
+        (forwarded_indices, torch.tensor([0, 4], dtype=torch.int32)),
+        (forwarded_counts, torch.tensor([1, 4], dtype=torch.int32)),
+    )
+    for actual, reference in expected:
+        assert actual is not None
+        assert actual.is_contiguous()
+        assert actual.dtype == torch.int32
+        torch.testing.assert_close(actual, reference)
+
+
 @pytest.mark.parametrize("total_tokens, split", TWO_CALL_SPLITS)
 @torch.inference_mode()
 def test_causal_conv1d_torch_two_call_split(total_tokens: int, split: int) -> None:
@@ -474,8 +677,8 @@ def test_causal_conv1d_torch_two_call_split(total_tokens: int, split: int) -> No
 
 
 @pytest.mark.skipif(
-    not torch.cpu._is_avx512_bf16_supported(),
-    reason="causal_conv1d_fwd_cpu requires AVX-512BF16 (Intel Xeon or AMD EPYC)",
+    not torch.cpu._is_amx_tile_supported(),
+    reason="causal_conv1d_fwd_cpu requires AMX/AVX512",
 )
 @pytest.mark.parametrize("total_tokens, split", TWO_CALL_SPLITS)
 @torch.inference_mode()
@@ -514,6 +717,85 @@ def test_causal_conv1d_fwd_cpu_two_call_split(total_tokens: int, split: int) -> 
     out_split = torch.cat([out1, out2], dim=1)
 
     torch.testing.assert_close(out_split, out_full, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not torch.cpu._is_amx_tile_supported(),
+    reason="requires AMX support",
+)
+@torch.inference_mode()
+def test_causal_conv1d_fwd_cpu_accepts_wide_state() -> None:
+    state_len = CONV_KERNEL - 1
+    wide_state_len = state_len + 5
+    is_vnni = True
+    seq_lens = [CHUNK_SIZE - 1, CHUNK_SIZE + 5]
+    total_tokens = sum(seq_lens)
+    x, weight, bias = _conv_inputs(total_tokens)
+    query_start_loc = torch.tensor([0, seq_lens[0], total_tokens], dtype=torch.int32)
+    cache_indices = torch.tensor([2, 0], dtype=torch.int32)
+    has_initial_state = torch.tensor([True, False])
+
+    narrow_state = _sd_conv_states(3, state_len)
+    narrow_state.copy_(
+        tensor_cache(narrow_state.numel(), torch.bfloat16).view_as(narrow_state)
+    )
+    wide_state = _sd_conv_states(3, wide_state_len)
+    wide_state[:, :, :state_len].copy_(narrow_state)
+    wide_state[:, :, state_len:].fill_(7)
+    wide_tail = wide_state[:, :, state_len:].clone()
+
+    conv_weight = _maybe_pack_conv_weight(weight, is_vnni)
+    out_narrow = ops.causal_conv1d_fwd_cpu(
+        x=x.transpose(0, 1),
+        weight=conv_weight,
+        bias=bias,
+        conv_states=narrow_state,
+        query_start_loc=query_start_loc,
+        cache_indices=cache_indices,
+        has_initial_state=has_initial_state,
+        silu_activation=True,
+        is_vnni=is_vnni,
+    )
+    out_wide = ops.causal_conv1d_fwd_cpu(
+        x=x.transpose(0, 1),
+        weight=conv_weight,
+        bias=bias,
+        conv_states=wide_state,
+        query_start_loc=query_start_loc,
+        cache_indices=cache_indices,
+        has_initial_state=has_initial_state,
+        silu_activation=True,
+        is_vnni=is_vnni,
+    )
+
+    torch.testing.assert_close(out_wide, out_narrow, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(
+        wide_state[:, :, :state_len], narrow_state, atol=0, rtol=0
+    )
+    torch.testing.assert_close(wide_state[:, :, state_len:], wide_tail, atol=0, rtol=0)
+
+
+@torch.inference_mode()
+def test_batch_memcpy_cpu_fallback() -> None:
+    """The ctypes batch_memcpy fallback (used when triton-cpu is absent) must
+    copy each src into its dst, validating the (src_ptrs, dst_ptrs, sizes)
+    argument order against ctypes.memmove(dst, src, size).
+    """
+    from vllm.utils.cpu_triton_utils import batch_memcpy_kernel
+
+    # Varied byte sizes, including a non-power-of-two run.
+    sizes_bytes = [256, 1024, 17 * 4, 4096]
+    srcs = [torch.rand(n // 4, dtype=torch.float32) for n in sizes_bytes]
+    dsts = [torch.zeros_like(s) for s in srcs]
+
+    src_ptrs = torch.tensor([s.data_ptr() for s in srcs], dtype=torch.uint64)
+    dst_ptrs = torch.tensor([d.data_ptr() for d in dsts], dtype=torch.uint64)
+    sizes = torch.tensor(sizes_bytes, dtype=torch.int32)
+
+    batch_memcpy_kernel[(len(srcs),)](src_ptrs, dst_ptrs, sizes, BLOCK_SIZE=1024)
+
+    for src, dst in zip(srcs, dsts):
+        torch.testing.assert_close(dst, src)
 
 
 # ---------------------------------------------------------------------------
@@ -798,26 +1080,3 @@ def test_spec_decode_unpacked_conv_weight_stash():
     )
 
     torch.testing.assert_close(out_cpp, out_torch, atol=1e-2, rtol=1e-2)
-
-
-@torch.inference_mode()
-def test_batch_memcpy_cpu_fallback() -> None:
-    """The ctypes batch_memcpy fallback (used when triton-cpu is absent) must
-    copy each src into its dst, validating the (src_ptrs, dst_ptrs, sizes)
-    argument order against ctypes.memmove(dst, src, size).
-    """
-    from vllm.utils.cpu_triton_utils import batch_memcpy_kernel
-
-    # Varied byte sizes, including a non-power-of-two run.
-    sizes_bytes = [256, 1024, 17 * 4, 4096]
-    srcs = [torch.rand(n // 4, dtype=torch.float32) for n in sizes_bytes]
-    dsts = [torch.zeros_like(s) for s in srcs]
-
-    src_ptrs = torch.tensor([s.data_ptr() for s in srcs], dtype=torch.uint64)
-    dst_ptrs = torch.tensor([d.data_ptr() for d in dsts], dtype=torch.uint64)
-    sizes = torch.tensor(sizes_bytes, dtype=torch.int32)
-
-    batch_memcpy_kernel[(len(srcs),)](src_ptrs, dst_ptrs, sizes, BLOCK_SIZE=1024)
-
-    for src, dst in zip(srcs, dsts):
-        torch.testing.assert_close(dst, src)
