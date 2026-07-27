@@ -8,7 +8,9 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.router.base_router import (
+    BaseRouter,
     eplb_map_to_physical_and_record,
 )
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
@@ -371,11 +373,24 @@ def test_fused_topk(
 
 
 def test_fused_topk_excludes_profile_pruned_experts():
-    router = create_fused_moe_router(
-        top_k=2,
-        global_num_experts=4,
-        renormalize=True,
-    )
+    class TorchTopKRouter(BaseRouter):
+        @property
+        def routing_method_type(self) -> RoutingMethodType:
+            return RoutingMethodType.TopK
+
+        def _compute_routing(
+            self,
+            hidden_states: torch.Tensor,
+            router_logits: torch.Tensor,
+            indices_type: torch.dtype | None,
+            *,
+            input_ids: torch.Tensor | None = None,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            del hidden_states, input_ids
+            weights, ids = torch.topk(router_logits, self.top_k, dim=-1)
+            return weights, ids.to(indices_type) if indices_type else ids
+
+    router = TorchTopKRouter(top_k=2, global_num_experts=4)
     router.prune_logit_mask = torch.tensor(
         [0.0, float("-inf"), 0.0, 0.0], device="cuda"
     )
