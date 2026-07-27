@@ -283,6 +283,58 @@ def _nested_tensors_h2d(
     )
 
 
+def _cuda_index_for(device: torch.types.Device) -> int:
+    """Resolve a CUDA device index for reconstructing a CUDA-IPC proxy."""
+    if device is not None and str(device) != "cpu":
+        dev = torch.device(device)
+        if dev.type == "cuda" and dev.index is not None:
+            return dev.index
+    return torch.accelerator.current_device_index()
+
+
+def _reconstruct_cuda_ipc_proxies(tensors: Any, device: torch.types.Device) -> Any:
+    """Replace deferred CUDA-IPC proxy leaves with on-device tensors.
+
+    A no-op unless the ``cuda_ipc`` multimodal transport produced proxies;
+    imported lazily to avoid a circular import.
+    """
+    from vllm.multimodal import gpu_ipc_memory
+
+    if gpu_ipc_memory.is_cuda_ipc_proxy(tensors):
+        return tensors.reconstruct(_cuda_index_for(device))
+    if isinstance(tensors, (list, tuple)):
+        rebuilt = [_reconstruct_cuda_ipc_proxies(t, device) for t in tensors]
+        return type(tensors)(rebuilt) if isinstance(tensors, tuple) else rebuilt
+    return tensors
+
+
+def _batch_has_cuda_ipc_proxy(batch: Any) -> bool:
+    """Whether any leaf in ``batch`` is a deferred CUDA-IPC proxy."""
+    from vllm.multimodal import gpu_ipc_memory
+
+    stack = [batch]
+    while stack:
+        cur = stack.pop()
+        if gpu_ipc_memory.is_cuda_ipc_proxy(cur):
+            return True
+        if isinstance(cur, (list, tuple)):
+            stack.extend(cur)
+    return False
+
+
+def _batch_has_non_cpu_tensor(batch: Any) -> bool:
+    """Whether any leaf tensor in ``batch`` already lives on a non-CPU device."""
+    stack = [batch]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, torch.Tensor):
+            if cur.device.type != "cpu":
+                return True
+        elif isinstance(cur, (list, tuple)):
+            stack.extend(cur)
+    return False
+
+
 BatchedTensorInputs: TypeAlias = dict[str, NestedTensors]
 """
 A dictionary containing nested tensors which have been batched via
@@ -456,6 +508,19 @@ class BaseMultiModalField(ABC):
             pin_memory = False
 
         batch = [elem.data for elem in elems]
+        # Worker side: materialize deferred CUDA-IPC proxies on this device.
+        # Pool-full siblings fall back to a host copy, so move the whole batch
+        # to one device for uniform stacking.
+        if _batch_has_cuda_ipc_proxy(batch):
+            tgt = torch.device(f"cuda:{_cuda_index_for(device)}")
+            batch = [
+                _nested_tensors_h2d(_reconstruct_cuda_ipc_proxies(b, tgt), tgt)
+                for b in batch
+            ]
+        # pin_memory only applies to CPU tensors, so skip it when features are
+        # already on device (CUDA-IPC transport or device="cuda" preprocessing).
+        if pin_memory and _batch_has_non_cpu_tensor(batch):
+            pin_memory = False
         out = self._reduce_data(batch, pin_memory=pin_memory)
         return _nested_tensors_h2d(out, device=device)
 

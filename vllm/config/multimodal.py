@@ -61,7 +61,7 @@ class MultiModalDummyOptionsBuiltins(TypedDict, total=False):
 
 MMEncoderTPMode = Literal["weights", "data"]
 MMCacheType = Literal["shm", "lru"]
-MMTensorIPC = Literal["direct_rpc", "torch_shm"]
+MMTensorIPC = Literal["direct_rpc", "torch_shm", "cuda_ipc"]
 MMDummyOptions: TypeAlias = dict[str, BaseDummyOptions]
 """
 A dictionary containing an entry for each modality type of dummy data.
@@ -197,11 +197,19 @@ class MultiModalConfig:
     """IPC (inter-process communication) method for multimodal tensors.
     - "direct_rpc": Use msgspec serialization via RPC
     - "torch_shm": Use torch.multiprocessing shared memory for zero-copy IPC
+    - "cuda_ipc": Keep GPU-preprocessed features on the device and transport
+      them via a persistent CUDA IPC pool; each tensor-parallel worker reads its
+      copy directly from GPU (same-device copy or NVLink/P2P), avoiding a host
+      round trip. Supports `tensor_parallel_size > 1` on a single node with peer
+      access. Only engages for GPU-resident features (e.g.
+      `mm_processor_kwargs={"device": "cuda"}`); CPU features fall back to
+      "direct_rpc". Requires `mm_ipc_gpu_memory_gb` > 0, which both sizes the
+      pool and reserves the headroom for it.
     Defaults to "direct_rpc". """
     mm_ipc_gpu_memory_gb: float = Field(default=0, ge=0)
     """Amount of GPU memory (in GiB) sequestered on the engine's device for
     GPU-side multimodal work in the API-server (frontend) process, such as
-    hardware video decoding.
+    hardware video decoding or the `mm_tensor_ipc="cuda_ipc"` transport pool.
 
     This budget is carved out of the engine's KV-cache memory so the headroom
     physically exists, and frontend GPU decode paths acquire from a blocking
@@ -262,6 +270,14 @@ class MultiModalConfig:
             raise ValueError(
                 "'mm_shm_cache_max_object_size_mb' should only be set when "
                 "'mm_processor_cache_type' is 'shm'."
+            )
+        # The cuda_ipc pool lives on the frontend's device; its memory must be
+        # reserved from the engine (via mm_ipc_gpu_memory_gb) so the headroom
+        # physically exists, otherwise it would race the workers' KV cache.
+        if self.mm_tensor_ipc == "cuda_ipc" and self.mm_ipc_gpu_memory_gb <= 0:
+            raise ValueError(
+                "mm_tensor_ipc='cuda_ipc' requires 'mm_ipc_gpu_memory_gb' > 0 "
+                "to size and reserve the on-device transport pool."
             )
         # Validate FP8 scale path combinations.
         if self.mm_encoder_attn_dtype != "fp8" and (
