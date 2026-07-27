@@ -1,0 +1,26 @@
+group: Fault Tolerance
+depends_on:
+  - image-build
+steps:
+- label: Fault Tolerance E2E (2xH100)
+  key: fault-tolerance-e2e-2xh100
+  timeout_in_minutes: 35
+  device: h100
+  num_devices: 2
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/fault_tolerance/
+  - vllm/v1/worker/sentinel/
+  - vllm/entrypoints/serve/fault_tolerance/
+  - vllm/distributed/elastic_ep/
+  - vllm/distributed/device_communicators/
+  - vllm/v1/engine/
+  - vllm/v1/worker/
+  - tests/v1/fault_tolerance/
+  - tests/v1/distributed/test_external_lb_dp.py
+  commands:
+  # Base image has no nixl; install it or has_nixl_ep() skips the tests.
+  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  # https://github.com/NVIDIA/nccl/issues/1838
+  - export NCCL_CUMEM_HOST_ENABLE=0
+  - pytest -v -s v1/fault_tolerance/test_fault_tolerance_e2e.py

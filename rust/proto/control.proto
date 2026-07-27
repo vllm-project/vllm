@@ -1,0 +1,53 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+syntax = "proto3";
+package vllm;
+
+service Control {
+  rpc GetServerInfo (GetServerInfoRequest) returns (ServerInfo) {}
+  rpc GetModelInfo (GetModelInfoRequest) returns (ModelInfo) {}
+  rpc Abort (AbortRequest) returns (AbortResponse) {}
+}
+
+message GetServerInfoRequest {}
+
+message ServerInfo {
+  string engine_version = 1;
+  string api_version = 2;
+  string instance_id = 3;
+  ParallelismInfo parallelism = 4;
+  uint32 max_model_len = 5;
+  uint32 kv_block_size = 6;
+  uint64 total_kv_blocks = 7;
+  uint64 max_running_requests = 8;
+  uint64 max_batched_tokens = 9;
+}
+
+message ParallelismInfo {
+  uint32 tensor_parallel_size = 1;
+  uint32 pipeline_parallel_size = 2;
+  uint32 data_parallel_size = 3;
+  uint32 data_parallel_rank = 4;
+  uint32 decode_context_parallel_size = 5;
+}
+
+message GetModelInfoRequest {}
+
+message ModelInfo {
+  string model_id = 1;
+  string served_model_name = 2;
+  repeated string served_model_aliases = 3;
+
+  bool supports_text_input = 20;
+  bool supports_token_ids_input = 21;
+  bool supports_multimodal = 23;
+  string reasoning_parser = 24;
+  string tool_call_parser = 25;
+}
+
+message AbortRequest {
+  repeated string request_ids = 1;
+}
+
+message AbortResponse {}
