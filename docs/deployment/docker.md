@@ -76,10 +76,13 @@ This is enabled by default when the container has the privileges CRIU needs:
 `CAP_SYS_ADMIN` because CRIU's kernel-feature probe mounts a tmpfs, which
 container seccomp/AppArmor policy also has to allow). Without those
 capabilities every start is a normal cold start with zero snapshot overhead.
-The capability check is necessary but not sufficient: a container that has
-the capabilities but still confines CRIU (default seccomp/AppArmor) pays one
-failed priming attempt on first start and then falls back to a normal cold
-start.
+The capability check is necessary but not sufficient. A container that holds
+the capabilities but still confines CRIU (default seccomp or AppArmor) fails
+CRIU's kernel-feature probe. The priming attempt runs the import work before
+that probe, and it leaves no marker behind, so this cost repeats on every
+start rather than only the first one. Serving is unaffected, because the
+failure falls back to a normal cold start. Use `--privileged`, or set
+`VLLM_SNAPSHOT=0` to skip priming entirely on such hosts.
 
 The first privileged start primes the snapshot at normal speed (~546MB under
 `VLLM_SNAPSHOT_ROOT`, default `/root/.cache/vllm/snapshots`); later starts

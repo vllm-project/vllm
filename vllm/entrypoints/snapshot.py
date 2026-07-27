@@ -57,8 +57,12 @@ ACK_TIMEOUT = 10.0
 REAP_DEADLINE = 10.0
 MAX_FRAME = 4 * 1024 * 1024
 
-# The serve process's import envelope plus the EngineCore target graph its
-# child re-imports under spawn; snapshotting the union covers both bills.
+# The serve process's import envelope, plus the EngineCore target graph. The
+# child re-imports that graph because PR-1 restores via spawn, and a spawned
+# child is a fresh interpreter that inherits nothing, so today this pays down
+# the serve process's bill only. The engine modules are listed so the snapshot
+# is already the right shape for a fork-based restore, which is what would
+# cover both.
 UNION_IMPORTS = (
     "vllm.entrypoints.cli.main",
     "vllm.entrypoints.openai.api_server",
