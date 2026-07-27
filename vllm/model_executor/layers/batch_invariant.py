@@ -241,11 +241,10 @@ def matmul_descriptor_persistent(
     b_t = b.t().contiguous()
 
     c = torch.empty((M, N), device=a.device, dtype=dtype)
-    # _NUM_SMS is set by enable_batch_invariant_mode() before torch.compile
-    # traces this function.  Dynamo lifts it as a compile-time constant.
-    # The fallback (num_compute_units) only runs in eager-mode tests that
-    # skip enable_batch_invariant_mode().
-    NUM_SMS = _NUM_SMS if _NUM_SMS > 0 else num_compute_units(0)
+    # This path is XPU-only (via _matmul_dispatch). _NUM_SMS is set by
+    # enable_batch_invariant_mode() before torch.compile traces this function,
+    # so Dynamo can lift it as a compile-time constant.
+    NUM_SMS = _NUM_SMS if _NUM_SMS > 0 else num_compute_units(a.device.index)
 
     def grid(META):
         return (
@@ -307,11 +306,7 @@ def matmul_persistent(
     assert bias is None or bias.dim() == 1, (
         "Currently assuming bias is 1D, let Horace know if you run into this"
     )
-    # _NUM_SMS is set by enable_batch_invariant_mode() before torch.compile
-    # traces this function.  Dynamo lifts it as a compile-time constant.
-    # The fallback (num_compute_units) only runs in eager-mode tests that
-    # skip enable_batch_invariant_mode().
-    NUM_SMS = _NUM_SMS if _NUM_SMS > 0 else num_compute_units(0)
+    NUM_SMS = num_compute_units(a.device.index)
     M, K = a.shape
     K, N = b.shape
     dtype = a.dtype
@@ -1112,7 +1107,6 @@ def enable_batch_invariant_mode():
         return
 
     _batch_invariant_MODE = True
-    _NUM_SMS = num_compute_units(0)
     _batch_invariant_LIB = torch.library.Library("aten", "IMPL")
 
     # Tensor descriptors need a global-memory allocator; must be set outside
@@ -1140,6 +1134,7 @@ def enable_batch_invariant_mode():
 
         _fp16_block_size_n = 256 if get_max_shared_memory_bytes() > 106496 else 128
     elif current_platform.is_xpu():
+        _NUM_SMS = num_compute_units(0)
         _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, key)
         _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, key)
         _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, key)
