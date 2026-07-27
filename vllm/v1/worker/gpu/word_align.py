@@ -4,15 +4,12 @@
 
 Cross-attention Q (and the encoder K at prefill) are recorded into per-request
 buffers before the fused attention kernel, then DTW-aligned once a request
-finishes. Keeping the routing here rather than in the runner follows the
-composition pattern used by ``kv_connector.py``.
-
-The capture slot for a request is simply its ``RequestState`` index, which is
-stable for the request's lifetime, so no separate slot pool is needed. One
-extra slot past ``max_num_reqs`` absorbs cudagraph padding and dummy runs.
+finishes. Attaching this by composition rather than in the runner follows
+``kv_connector.py``.
 """
 
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -26,8 +23,8 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 # A slot holds one request's decoder Q and encoder K, a few MB at Whisper's
-# dimensions, so the pool is capped instead of following max_num_reqs: sizing it
-# by the scheduler's limit would take tens of GiB away from the KV cache.
+# dimensions, so the pool is capped rather than following max_num_reqs, which
+# would cost tens of GiB of KV cache. One extra slot absorbs cudagraph padding.
 MAX_CAPTURE_SLOTS = 64
 
 
@@ -46,7 +43,7 @@ class WordAlignCapturer:
         """Allocate capture buffers and turn on capture in the model.
 
         Must run before graph capture so the compiled decoder includes the
-        capture op. No-op unless requested and the model supports it.
+        capture op.
         """
         if not runner.model_config.enable_word_timestamps:
             return
@@ -78,53 +75,41 @@ class WordAlignCapturer:
         self.scratch = num_slots
         self.max_frames = max_frames
         self._free = list(range(num_slots))
-        self.device = runner.device
-        # Row indices reused every step to map tokens onto batch entries.
+        # Token row indices, reused every step to map tokens onto batch entries.
         self._arange = torch.arange(
             runner.max_num_tokens, device=runner.device, dtype=torch.int32
         )
-        # Each request contributes one full encoder window, so the frame index
-        # is the same ramp on every step: fill it once.
+        # The frame index is the same ramp on every step: fill it once.
         self.kpos.copy_(
             torch.arange(self.kpos.shape[0], device=runner.device) % max_frames
         )
-        # Park every row on the scratch slot so warmup and cudagraph capture,
-        # which run before any real batch, cannot write into a request's slot.
+        # Warmup and graph capture run before any real batch: park them.
         self.qslot.fill_(self.scratch)
         self.enabled = True
         logger.info("Whisper word-timestamp cross-attention capture enabled")
 
     def before_forward(self, input_batch: InputBatch) -> None:
-        """Point this step's capture rows at each request's own slot.
-
-        Runs on every decode step, so it stays on the device: the row-to-slot
-        map is derived from tensors prepare_inputs already put on the GPU, with
-        no host-to-device copy on the token path.
-        """
+        """Point this step's capture rows at each request's own slot."""
         if not self.enabled:
             return
-        num_tokens = input_batch.num_tokens
         for req_id in input_batch.req_ids:
             if req_id not in self.slot_of and self._free:
                 self.slot_of[req_id] = self._free.pop()
-        # Requests that found no free slot stay unmapped and land on the scratch
-        # slot, so they simply get no timestamps rather than corrupting another
-        # request's capture.
+        # Requests left unmapped by an exhausted pool land on the scratch slot,
+        # so they get no timestamps instead of another request's capture.
         slot_np = np.fromiter(
             (self.slot_of.get(r, self.scratch) for r in input_batch.req_ids),
             dtype=np.int64,
             count=input_batch.num_reqs,
         )
-        slot_gpu = torch.from_numpy(slot_np).to(self.device, non_blocking=True)
-        # batch_idx per token, from the query offsets, then slot per batch_idx.
+        slot_gpu = torch.from_numpy(slot_np).to(self.qslot.device, non_blocking=True)
+        num_tokens = input_batch.num_tokens
         batch_idx = torch.searchsorted(
             input_batch.query_start_loc[1 : input_batch.num_reqs + 1],
             self._arange[:num_tokens],
             right=True,
         )
         torch.index_select(slot_gpu, 0, batch_idx, out=self.qslot[:num_tokens])
-        # Park only the cudagraph-padding rows on the scratch slot; the rest of
-        # the buffer is overwritten above.
         pad_end = input_batch.num_tokens_after_padding
         if pad_end > num_tokens:
             self.qslot[num_tokens:pad_end].fill_(self.scratch)
@@ -134,23 +119,19 @@ class WordAlignCapturer:
         for i, req_id in enumerate(input_batch.req_ids):
             self.npos[req_id] = int(num_computed[i]) + int(num_scheduled[i])
 
-        # Encoder rows: only requests on their first step contribute K, and
-        # Whisper pads every clip to a full encoder window, so each such
-        # request contributes exactly max_frames rows in batch order. kpos is
-        # the same ramp every time and is filled once in init().
+        # Only requests on their first step contribute encoder K, one full
+        # window each. An oversized batch is the profiling run, which the
+        # capture op skips as well, so leave the buffer alone.
         prefills = np.flatnonzero(num_computed == 0)
         num_k = prefills.size * self.max_frames
-        # More encoder rows than the buffer holds only happens on the profiling
-        # run; the capture op skips that batch too, so leave the buffer alone.
         if num_k and num_k <= self.kslot.shape[0]:
             self.kslot[:num_k].copy_(
                 torch.from_numpy(np.repeat(slot_np[prefills], self.max_frames)),
                 non_blocking=True,
             )
 
-    def make_readout_fn(self, input_batch: InputBatch) -> Any:
-        """Bind this step's slots so the deferred readout aligns each finishing
-        request against the slot it actually wrote to."""
+    def make_readout_fn(self) -> Callable | None:
+        """Bind this step's slots for the deferred readout."""
         if not self.enabled:
             return None
         slots = dict(self.slot_of)

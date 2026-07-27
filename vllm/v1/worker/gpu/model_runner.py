@@ -238,7 +238,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 device=self.device,
             )
 
-        # Whisper word-timestamp capture (opt-in, initialized in load_model).
         self.word_align = WordAlignCapturer()
 
         # Samplers and decode_query_len created in load_model() after
@@ -1500,7 +1499,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_sampled_tokens=num_sampled,
             main_stream=self.main_stream,
             copy_stream=self.output_copy_stream,
-            word_align_fn=self.word_align.make_readout_fn(input_batch),
+            word_align_fn=self.word_align.make_readout_fn(),
         )
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None

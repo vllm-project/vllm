@@ -978,7 +978,6 @@ class WhisperForConditionalGeneration(
         for m in self.modules():
             if isinstance(m, WhisperCrossAttention):
                 m._align_layer = layer_slot.get(getattr(m, "_align_layer", -1), -1)
-        # Remap the heads onto the compacted layer indexing.
         self._word_align_heads = [
             (layer_slot[layer], head) for layer, head in self._word_align_heads
         ]
