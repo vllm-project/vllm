@@ -29,7 +29,9 @@ from .BlockScaledMMLinearKernel import (
     Fp8BlockScaledDynamicMMLinearKernel,
     Fp8BlockScaledMMLinearKernel,
 )
-from .deep_gemm import DeepGemmFp8BlockScaledMMKernel, fp8_gemm_nt
+from vllm.utils.deep_gemm import fp8_gemm_nt
+
+from .deep_gemm import DeepGemmFp8BlockScaledMMKernel
 from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
@@ -283,6 +285,7 @@ def _dynamic_flashinfer_deepgemm_blockscale_gemm_impl(
             input,
             group_size=group_size,
             column_major_scales=True,
+            tma_aligned_scales=envs.VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES,
             use_ue8m0=use_deep_gemm_e8m0,
         )
         output = torch.empty(
@@ -335,4 +338,5 @@ direct_register_custom_op(
     "dynamic_flashinfer_deepgemm_blockscale_gemm",
     _dynamic_flashinfer_deepgemm_blockscale_gemm_impl,
     fake_impl=_dynamic_flashinfer_deepgemm_blockscale_gemm_fake,
+    tags=(torch.Tag.cudagraph_unsafe,),
 )
