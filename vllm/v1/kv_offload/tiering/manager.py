@@ -302,8 +302,7 @@ class TieringOffloadingManager(OffloadingManager):
         elapsed = time.monotonic() - job_metadata.submit_time
         bp = self._backpressure[tier]
         bp.store_latency_ema = (
-            _BP_EMA_ALPHA * elapsed
-            + (1 - _BP_EMA_ALPHA) * bp.store_latency_ema
+            _BP_EMA_ALPHA * elapsed + (1 - _BP_EMA_ALPHA) * bp.store_latency_ema
         )
         was_under_pressure = bp.is_under_pressure
         if bp.store_latency_ema > _BP_HIGH_WATER_S:
