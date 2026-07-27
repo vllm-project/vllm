@@ -211,6 +211,28 @@ class TestDelegatingPromptDetection:
         assert delta.reasoning == "thinking"
         assert delta.content is None
 
+    def test_prompt_token_ids_do_not_change_non_streaming(
+        self, mock_tokenizer, mock_request
+    ):
+        """Parsers that do not override ``initial_state_from_prompt`` must
+        parse identically with and without the prompt (#49717).
+        """
+        text = "A direct answer with no reasoning markers."
+        # Prompt tail leaves reasoning open, so the hook is reached; the
+        # base predicate returns None, so nothing is seeded.
+        prompt_ids = [_TEXT_ID, _THINK_START_ID]
+
+        with_prompt = _Qwen3DelegatingParser(mock_tokenizer).parse(
+            text, mock_request, prompt_token_ids=prompt_ids
+        )
+        without_prompt = _Qwen3DelegatingParser(mock_tokenizer).parse(
+            text, mock_request
+        )
+
+        assert with_prompt == without_prompt
+        # Qwen3's configured initial state still governs.
+        assert with_prompt[:2] == (text, None)
+
 
 class TestStreaming:
     def test_basic_streaming(self, parser):

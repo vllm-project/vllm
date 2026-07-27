@@ -505,27 +505,25 @@ class Gemma4Parser(ParserEngine):
                 return False
         return False
 
-    def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
-        """Pre-initialise the engine to ``REASONING`` when the prompt ends
-        inside an open ``<|channel>`` block.
+    def initial_state_from_prompt(
+        self, prompt_token_ids: Sequence[int]
+    ) -> ParserState | None:
+        """Start in ``REASONING`` when the prompt ends inside an open
+        ``<|channel>`` block.
 
         This covers the post-tool-response continuation case where the chat
         template leaves the prompt ending with ``<|channel>thought\n``
         (issue #45834). A prompt that merely starts a new model turn must
         not pre-initialise reasoning: the model may answer directly without
-        emitting any channel markers, and the non-streaming path classifies
-        such output as content (issue #48217). When the model does open its
-        own ``<|channel>``, the ``(CONTENT, THINK_START)`` transition
-        handles it, and the ``thought\n`` prefix in the first reasoning
-        chunk is stripped by ``_events_to_delta`` as in the default flow.
+        emitting any channel markers, and such output is content
+        (issue #48217). When the model does open its own ``<|channel>``,
+        the ``(CONTENT, THINK_START)`` transition handles it, and the
+        ``thought\n`` prefix in the first reasoning chunk is stripped by
+        ``_events_to_delta`` as in the default flow.
         """
         if not self._prompt_ends_in_open_reasoning(prompt_token_ids):
-            return
-        self._engine.reset(initial_state=ParserState.REASONING)
-        # Prevent a later default ``initialize_streaming()`` (e.g. from
-        # ``ParserEngineReasoningAdapter.extract_reasoning_streaming``) from
-        # clobbering this with ``CONTENT``.
-        self._streaming_initialized = True
+            return None
+        return ParserState.REASONING
 
     def _events_to_delta(
         self,

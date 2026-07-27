@@ -18,6 +18,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+from vllm.parser.abstract_parser import DelegatingParser
+from vllm.parser.engine.registered_adapters import (
+    Gemma4ParserReasoningAdapter,
+    Gemma4ParserToolAdapter,
+)
 from vllm.parser.gemma4 import Gemma4Parser
 
 # ── Special token IDs (arbitrary but consistent) ─────────────────────
@@ -533,6 +538,157 @@ class TestGemma4ChannelLessOutputConsistency:
 
         assert (stream_reasoning or None) == reasoning
         assert (stream_content or None) == content
+
+
+# ── Prompt leaves reasoning half-open and the model never closes it ───
+
+_HALF_OPEN_TEXT = "The user wants the number of business days between the dates"
+_HALF_OPEN_TOKENS: list[tuple[int, str]] = [
+    (7100 + _i, (" " if _i else "") + _word)
+    for _i, _word in enumerate(_HALF_OPEN_TEXT.split(" "))
+]
+
+# Prompt tails. Only the trailing special token matters for detection.
+_OPEN_CHANNEL_PROMPT = [CHANNEL_START_ID, 3000, 3001]  # ...<|channel>thought\n
+_NEW_TURN_PROMPT = [NEW_TURN_ID, 9100, 9101]  # ...<|turn>model\n
+
+
+class _Gemma4DelegatingParser(DelegatingParser):
+    """The parser shape the serving layer actually builds: two separate
+    ``Gemma4Parser`` engines behind the reasoning and tool adapters.
+    """
+
+    reasoning_parser_cls = Gemma4ParserReasoningAdapter
+    tool_parser_cls = Gemma4ParserToolAdapter
+
+
+def _parse_both_ways(make_parser, tokenizer, request, tokens, prompt_token_ids):
+    """Parse the same generation both ways.
+
+    Returns ``((reasoning, content), (reasoning, content))``, empty strings
+    normalised to ``None`` so the two are directly comparable.
+    """
+    text = "".join(token_text for _, token_text in tokens)
+    token_ids = [token_id for token_id, _ in tokens]
+
+    reasoning, content, _ = make_parser().parse(
+        text,
+        request,
+        enable_auto_tools=True,
+        model_output_token_ids=token_ids,
+        prompt_token_ids=prompt_token_ids,
+    )
+
+    results = _stream_tokens_batched(
+        make_parser(),
+        tokenizer,
+        request,
+        batch_size=1,
+        prompt_token_ids=prompt_token_ids,
+    )
+    stream_reasoning, stream_content, _ = _collect_fields(results)
+
+    return (reasoning or None, content or None), (
+        stream_reasoning or None,
+        stream_content or None,
+    )
+
+
+class TestGemma4HalfOpenReasoningParity:
+    """The non-streaming path must honour a prompt that ends inside an open
+    ``<|channel>`` block, exactly as streaming already does.
+
+    When the model stops before emitting ``<channel|>``, streaming called
+    the whole generation ``reasoning`` while non-streaming, which never saw
+    the prompt, returned it as ``content``.
+
+    Regression test for vllm-project/vllm#49717.
+    """
+
+    @pytest.fixture
+    def half_open_tokenizer(self):
+        return _make_tokenizer(_HALF_OPEN_TOKENS)
+
+    def test_delegating_parser_matches_streaming(
+        self, half_open_tokenizer, request_obj
+    ):
+        """The serving shape: ``DelegatingParser`` over the adapters."""
+        non_streaming, streaming = _parse_both_ways(
+            lambda: _Gemma4DelegatingParser(half_open_tokenizer, None),
+            half_open_tokenizer,
+            request_obj,
+            _HALF_OPEN_TOKENS,
+            _OPEN_CHANNEL_PROMPT,
+        )
+
+        assert non_streaming == streaming, (
+            f"Same generation classified differently: "
+            f"non-streaming={non_streaming!r} streaming={streaming!r}"
+        )
+        assert non_streaming == (_HALF_OPEN_TEXT, None)
+
+    def test_engine_parse_matches_streaming(self, half_open_tokenizer, request_obj):
+        """The direct-engine shape, bypassing ``DelegatingParser``."""
+        non_streaming, streaming = _parse_both_ways(
+            lambda: Gemma4Parser(half_open_tokenizer),
+            half_open_tokenizer,
+            request_obj,
+            _HALF_OPEN_TOKENS,
+            _OPEN_CHANNEL_PROMPT,
+        )
+
+        assert non_streaming == streaming
+        assert non_streaming == (_HALF_OPEN_TEXT, None)
+
+    def test_new_turn_prompt_stays_content(self, half_open_tokenizer, request_obj):
+        """A prompt that merely starts a new model turn must not seed
+        reasoning — the same narrowing #48217 required for streaming.
+        """
+        non_streaming, streaming = _parse_both_ways(
+            lambda: _Gemma4DelegatingParser(half_open_tokenizer, None),
+            half_open_tokenizer,
+            request_obj,
+            _HALF_OPEN_TOKENS,
+            _NEW_TURN_PROMPT,
+        )
+
+        assert non_streaming == streaming
+        assert non_streaming == (None, _HALF_OPEN_TEXT)
+
+    def test_model_opens_own_channel_after_new_turn(self, request_obj):
+        """New-turn prompt, model emits its own ``<|channel>thought\\n`` and
+        closes it: the prefix is stripped, reasoning captured, post-channel
+        text is content — identically on both paths.
+        """
+        tokenizer = _make_tokenizer(_PRE_INIT_THOUGHT_GEN_SEQUENCE)
+        non_streaming, streaming = _parse_both_ways(
+            lambda: _Gemma4DelegatingParser(tokenizer, None),
+            tokenizer,
+            request_obj,
+            _PRE_INIT_THOUGHT_GEN_SEQUENCE,
+            _NEW_TURN_PROMPT,
+        )
+
+        assert non_streaming == streaming
+        assert non_streaming == ("Reasoning body", "Final content")
+
+    def test_omitting_prompt_token_ids_is_unchanged(
+        self, half_open_tokenizer, request_obj
+    ):
+        """Callers that do not pass the prompt keep today's behaviour."""
+        text = "".join(token_text for _, token_text in _HALF_OPEN_TOKENS)
+        token_ids = [token_id for token_id, _ in _HALF_OPEN_TOKENS]
+
+        reasoning, content, _ = _Gemma4DelegatingParser(
+            half_open_tokenizer, None
+        ).parse(
+            text,
+            request_obj,
+            enable_auto_tools=True,
+            model_output_token_ids=token_ids,
+        )
+
+        assert (reasoning, content) == (None, _HALF_OPEN_TEXT)
 
 
 # ── Second model output: two tool calls with holdback ────────────────

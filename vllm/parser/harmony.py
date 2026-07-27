@@ -159,11 +159,15 @@ class HarmonyParser(DelegatingParser):
         request: ChatCompletionRequest | ResponsesRequest,
         enable_auto_tools: bool = False,
         model_output_token_ids: Sequence[int] = (),
+        prompt_token_ids: list[int] | None = None,
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
         """Parse Harmony output from token IDs.
 
         Tool calls are always extracted regardless of ``enable_auto_tools``.
         Callers must decide whether to surface them.
+
+        ``prompt_token_ids`` is ignored: Harmony tracks channel state from
+        the output token stream.
         """
         result = self.process_chunk(model_output_token_ids)
         flushed_segments = self.flush()

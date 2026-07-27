@@ -45,6 +45,7 @@ class MistralParser(DelegatingParser):
         request: ChatCompletionRequest | ResponsesRequest,
         enable_auto_tools: bool = False,
         model_output_token_ids: Sequence[int] = (),
+        prompt_token_ids: list[int] | None = None,
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
         self._maybe_force_auto_tool_parsing(request)
         reasoning, content, tool_calls = super().parse(
@@ -52,6 +53,7 @@ class MistralParser(DelegatingParser):
             request,
             enable_auto_tools,
             model_output_token_ids,
+            prompt_token_ids,
         )
         if tool_calls:
             from vllm.tool_parsers.mistral_tool_parser import MistralToolCall

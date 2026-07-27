@@ -413,6 +413,24 @@ class TestPromptSeededState:
         )
         assert parser._engine.state == ParserState.MESSAGE_HEADER
 
+    def test_non_streaming_prompt_seeding_is_deliberately_unchanged(
+        self, mock_tokenizer, mock_request
+    ):
+        """Inkling overrides ``adjust_initial_state_from_prompt`` rather than
+        ``initial_state_from_prompt``, so it does not opt in to the
+        non-streaming prompt seeding added in #49717.
+        """
+        text = f"{TEXT_START}hello world{END_MESSAGE}"
+        prompt_ids = [200001, _TML_VOCAB[THINK_START]]
+
+        with_prompt = InklingParser(mock_tokenizer).parse(
+            text, mock_request, prompt_token_ids=prompt_ids
+        )
+        without_prompt = InklingParser(mock_tokenizer).parse(text, mock_request)
+
+        assert with_prompt == without_prompt
+        assert with_prompt[:2] == (None, "hello world")
+
     def test_generation_prompt_header_hides_tool_name(self, parser, mock_request):
         text = "get_weather" + _tool_block("get_weather", '{"city":"SF"}')
         delta = parser.parse_delta(

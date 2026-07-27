@@ -895,6 +895,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     request,
                     enable_auto_tools=self.enable_auto_tools,
                     model_output_token_ids=token_ids,
+                    prompt_token_ids=final_res.prompt_token_ids,
                 )
                 suppress_metadata = not request.include_reasoning and parser is not None
                 if not request.include_reasoning:
