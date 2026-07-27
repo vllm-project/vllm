@@ -407,7 +407,7 @@ def fused_recurrent_kda(
     whether to materialize them before launching the recurrent kernel.
     """
     if fuse_gate is None:
-        # gfx950: always fuse the gate. 
+        # gfx950: always fuse the gate.
         fuse_gate = True
 
     if fuse_gate:

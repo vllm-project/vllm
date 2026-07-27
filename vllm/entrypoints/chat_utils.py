@@ -705,15 +705,10 @@ def _resolve_vision_chunk_items(
             # Cast data to proper type for image
             # Use .media (PIL.Image) directly to avoid redundant
             # bytes→PIL conversion in media_processor
-            image_data = data.media if hasattr(data, "media") else data  # type: ignore[union-attr]
-
             if hasattr(data, "media"):
+                image_data = data.media  # type: ignore[union-attr]
                 processed_chunks.append(
-                    VisionChunkImage(
-                        type="image",
-                        image=image_data,
-                        uuid=uuid,
-                    )
+                    VisionChunkImage(type="image", image=image_data, uuid=uuid)
                 )
             else:
                 processed_chunks.append(data)  # type: ignore[arg-type]

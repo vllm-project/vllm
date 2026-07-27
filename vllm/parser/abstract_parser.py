@@ -567,12 +567,12 @@ class DelegatingParser(Parser):
         if self._reasoning_parser is None:
             return DeltaMessage(content=delta_text)
         return self._reasoning_parser.extract_reasoning_streaming(
-            previous_text=previous_text,
-            current_text=current_text,
-            delta_text=delta_text,
-            previous_token_ids=previous_token_ids,
-            current_token_ids=current_token_ids,
-            delta_token_ids=delta_token_ids,
+            previous_text,
+            current_text,
+            delta_text,
+            previous_token_ids,
+            current_token_ids,
+            delta_token_ids,
         )
 
     def extract_tool_calls(
@@ -849,7 +849,7 @@ class DelegatingParser(Parser):
             if should_transition:
                 state.reasoning_ended = True
                 reasoning_transitioned = True
-                current_token_ids = self.extract_content_ids(delta_token_ids)
+                current_token_ids = self.extract_content_ids(current_token_ids)
                 # Flush whenever the reasoning parser is engine-based (not only
                 # when _engine_based is True): it buffers the post-marker text
                 # (e.g. the "<" of "<tool_call>"), surfaced via finish_streaming().

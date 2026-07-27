@@ -850,6 +850,7 @@ def build_video_prompts_from_mm_data(
     video_prompts_dict: dict[int, list[str]] = defaultdict(list)
 
     for item in vision_chunks:
+        # vision_chunk items are always dicts (VisionChunkImage/VisionChunkVideo)
         assert isinstance(item, dict)
         if item.get("type") == "video_chunk":
             video_idx = item.get("video_idx", 0)
@@ -865,7 +866,7 @@ def build_video_prompts_from_mm_data(
     return video_prompts
 
 
-def replace_vision_chunk_placeholders(
+def replace_vision_chunk_video_placeholder(
     prompt_raw: str | list[int],
     mm_data: MultiModalDataDict,
     video_placeholder: str | None,
@@ -888,7 +889,6 @@ def replace_vision_chunk_placeholders(
                 len(prompt_raw_parts) - 1,
                 len(video_prompts),
             )
-
     return prompt_raw
 
 
@@ -1008,12 +1008,13 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         ):
             mm_uuids = rebuild_mm_uuids_from_mm_data(mm_uuids, mm_data)
 
+            # get video placeholder, replace it with runtime video-chunk prompts
             video_placeholder = getattr(
                 model_config.hf_config, "video_placeholder", None
             )
             prompt_raw = cast(
                 list[int],
-                replace_vision_chunk_placeholders(
+                replace_vision_chunk_video_placeholder(
                     prompt_raw,
                     mm_data,
                     video_placeholder,
@@ -1147,7 +1148,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             )
             prompt_raw = cast(
                 list[int],
-                replace_vision_chunk_placeholders(
+                replace_vision_chunk_video_placeholder(
                     prompt_raw,
                     mm_data,
                     video_placeholder,
@@ -1158,15 +1159,6 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
 
         if assistant_tokens_mask is not None:
             cast(dict, prompt)["_assistant_tokens_mask"] = assistant_tokens_mask
-
-        if isinstance(prompt_raw, str):
-            logger.info("Final prompt (str): %s", prompt_raw)
-        else:
-            logger.info(
-                "Final prompt (tokens, len=%d): %s",
-                len(prompt_raw),
-                tokenizer.decode(prompt_raw, skip_special_tokens=False),
-            )
 
         # See `render_messages` for the rationale.
         if prompt_embeds_tensors and mm_data:

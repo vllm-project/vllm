@@ -13,8 +13,6 @@ from vllm.parser.engine.registered_adapters import Qwen3ParserReasoningAdapter
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 
-pytestmark = pytest.mark.skip_global_cleanup
-
 
 class ThinkReasoningParser(BaseThinkingReasoningParser):
     @property
@@ -255,6 +253,13 @@ def test_parse_delta_reasoning_boundary_no_tool_parser(tokenizer, request_obj):
 
 class _SplitCloseReasoningParser:
     close_ids = [2, 3]
+    engine_based_streaming = False
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def adjust_initial_state_from_prompt(self, prompt_token_ids: list[int]) -> None:
+        pass
 
     @staticmethod
     def _close_index(input_ids: list[int]) -> int:
@@ -291,8 +296,9 @@ class _SplitCloseReasoningParser:
 
 class _RecordingToolParser:
     supports_required_and_named = False
+    engine_based_streaming = False
 
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
         self.current_token_ids: list[list[int]] = []
 
     def extract_tool_calls(self, model_output, request):
@@ -313,11 +319,12 @@ class _RecordingToolParser:
 
 
 class _SplitCloseParser(DelegatingParser):
+    reasoning_parser_cls = _SplitCloseReasoningParser
+    tool_parser_cls = _RecordingToolParser
+
     def __init__(self):
         super().__init__(tokenizer=None)
-        self.reasoning_parser = _SplitCloseReasoningParser()
-        self.recording_tool_parser = _RecordingToolParser()
-        self.tool_parser = self.recording_tool_parser
+        self.recording_tool_parser = self.tool_parser
 
 
 def test_parse_delta_extracts_content_ids_from_full_current_ids(request_obj):
