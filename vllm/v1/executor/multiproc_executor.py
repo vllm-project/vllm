@@ -393,6 +393,7 @@ class MultiprocExecutor(Executor):
 
         def get_response():
             responses = []
+            failure_msg = None
             for mq in response_mqs:
                 dequeue_timeout = (
                     None if deadline is None else (deadline - time.monotonic())
@@ -402,11 +403,25 @@ class MultiprocExecutor(Executor):
                 except TimeoutError as e:
                     raise TimeoutError(f"RPC call to {method} timed out.") from e
                 if status != WorkerProc.ResponseStatus.SUCCESS:
-                    raise RuntimeError(
-                        f"Worker failed with error '{result}', please check the"
-                        " stack trace above for the root cause"
-                    )
-                responses.append(result)
+                    if not self.parallel_config.enable_fault_tolerance:
+                        raise RuntimeError(
+                            f"Worker failed with error '{result}',"
+                            " please check the stack trace above for the"
+                            " root cause"
+                        )
+                    # FT mode: keep draining remaining mqs so that residual
+                    # messages (SUCCESS or FAILURE from other workers) do not
+                    # pollute the next collective_rpc (e.g. FT retry's
+                    # handle_ft_command). See #44428 for FT framework context.
+                    if failure_msg is None:
+                        failure_msg = result
+                else:
+                    responses.append(result)
+            if failure_msg is not None:
+                raise RuntimeError(
+                    f"Worker failed with error '{failure_msg}', please check"
+                    " the stack trace above for the root cause"
+                )
             return responses[0] if output_rank is not None else responses
 
         future = FutureWrapper(
