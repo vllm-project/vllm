@@ -19,6 +19,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.models.llama import LlamaDecoderLayer, LlamaForCausalLM
+from vllm.model_executor.parameter import copy_weight
 from vllm.multimodal.inputs import NestedTensors
 
 from .utils import (
@@ -398,7 +399,10 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
                         "Skipping loading mask_hidden."
                     )
                     continue
-                self.mask_hidden.copy_(loaded_weight.view(1, -1))
+                copy_attr = getattr(loaded_weight, "copy_attr", None)
+                loaded_weight = loaded_weight.view(1, -1)
+                loaded_weight.copy_attr = copy_attr
+                copy_weight(self.mask_hidden, loaded_weight)
                 includes_mask_hidden = True
                 continue
             elif "lm_head" not in name:

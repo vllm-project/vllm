@@ -686,9 +686,12 @@ class LagunaModel(nn.Module, EagleModelMixin):
             # variations in head count are handled correctly.
             if "sink" in name:
                 heads_per_rank = loaded_weight.shape[0] // tp_size
+                copy_attr = getattr(loaded_weight, "copy_attr", None)
                 loaded_weight = loaded_weight.narrow(
                     0, tp_rank * heads_per_rank, heads_per_rank
                 )
+                if copy_attr is not None:
+                    loaded_weight.copy_attr = copy_attr
             yield name, loaded_weight
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

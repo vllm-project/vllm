@@ -498,7 +498,10 @@ class Ernie4_5_MoeModel(nn.Module):
             # singleton dim and under a different module name.
             if "e_score_correction_bias" in name:
                 name = name.replace("moe_statics", "gate")
+                copy_attr = getattr(loaded_weight, "copy_attr", None)
                 loaded_weight = loaded_weight.squeeze(0)
+                if copy_attr is not None:
+                    loaded_weight.copy_attr = copy_attr
             yield name, loaded_weight
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

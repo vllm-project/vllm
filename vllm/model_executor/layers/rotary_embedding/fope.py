@@ -186,6 +186,8 @@ class FourierRotaryEmbedding(RotaryEmbedding):
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
         """load fope weights"""
+        from vllm.model_executor.parameter import copy_weight
+
         world_size = get_tensor_model_parallel_world_size()
         rank = get_tensor_model_parallel_rank()
         num_key_value_heads = loaded_weight.size(0)
@@ -195,5 +197,7 @@ class FourierRotaryEmbedding(RotaryEmbedding):
             world_size = num_key_value_heads
             rank = rank // n_replicate
 
+        copy_attr = getattr(loaded_weight, "copy_attr", None)
         loaded_weight = loaded_weight.chunk(world_size, dim=0)[rank]
-        param.data.copy_(loaded_weight)
+        loaded_weight.copy_attr = copy_attr
+        copy_weight(param.data, loaded_weight)

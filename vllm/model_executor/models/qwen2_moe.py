@@ -498,7 +498,9 @@ class Qwen2MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
             for name, loaded_weight in weights:
                 # GGUF: make sure that shared_expert_gate is a 2D tensor.
                 if "mlp.shared_expert_gate" in name and loaded_weight.dim() == 1:
+                    copy_attr = getattr(loaded_weight, "copy_attr", None)
                     loaded_weight = loaded_weight[None, :]
+                    loaded_weight.copy_attr = copy_attr
                 yield name, loaded_weight
 
         loader = AutoWeightsLoader(self)

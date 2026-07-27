@@ -29,6 +29,7 @@ from vllm.model_executor.layers.mamba.linear.minimax_linear_attn import (
     linear_attention_decode,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.parameter import copy_weight
 from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
     RMSNormGated,
     layernorm_fn,
@@ -369,7 +370,10 @@ class BailingGroupRMSNormGate(RMSNormGated):
         tp_rank = get_tensor_model_parallel_rank()
         shard_size = loaded_weight.shape[0] // tp_size
         shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
-        param.data.copy_(loaded_weight[shard].contiguous())
+        copy_attr = getattr(loaded_weight, "copy_attr", None)
+        sharded_weight = loaded_weight[shard].contiguous()
+        sharded_weight.copy_attr = copy_attr
+        copy_weight(param.data, sharded_weight)
 
 
 # --8<-- [start:bailing_moe_linear_attention]
@@ -515,7 +519,7 @@ class BailingMoELinearAttention(LinearAttention):
             assert param.size() == loaded_weight.size(), (
                 f"Shape mismatch: {param.shape} vs {loaded_weight.shape}"
             )
-            param.data.copy_(loaded_weight)
+            copy_weight(param.data, loaded_weight)
 
     def forward(
         self,

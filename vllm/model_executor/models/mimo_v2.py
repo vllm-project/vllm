@@ -49,6 +49,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
+from vllm.model_executor.parameter import copy_weight
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -759,9 +760,11 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
                 total_heads = loaded_weight.shape[0]
                 heads_per_rank = total_heads // tp_size
                 head_start = tp_rank * heads_per_rank
+                copy_attr = getattr(loaded_weight, "copy_attr", None)
                 narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
+                narrow_weight.copy_attr = copy_attr
 
-                param.data.copy_(narrow_weight)
+                copy_weight(param.data, narrow_weight)
                 loaded_params.add(name)
             else:
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)

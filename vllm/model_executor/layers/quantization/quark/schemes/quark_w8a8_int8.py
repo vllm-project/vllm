@@ -55,7 +55,9 @@ class QuarkW8A8Int8(QuarkScheme):
             **kwargs,
         ):
             if loaded_weight.dim() == 1:
+                copy_attr = getattr(loaded_weight, "copy_attr", None)
                 loaded_weight = loaded_weight.unsqueeze(-1)
+                loaded_weight.copy_attr = copy_attr
             return weight_loader(param, loaded_weight, *args, **kwargs)
 
         self.kernel = init_int8_linear_kernel(

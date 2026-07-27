@@ -340,6 +340,8 @@ class MiniMaxText01RMSNormTP(CustomOp):
         shard_world_size: int | None = None,
         shard_rank: int | None = None,
     ) -> None:
+        from vllm.model_executor.parameter import copy_weight
+
         if shard_world_size is None:
             shard_world_size = get_tensor_model_parallel_world_size()
         if shard_rank is None:
@@ -347,7 +349,10 @@ class MiniMaxText01RMSNormTP(CustomOp):
 
         shard_size = loaded_weight.shape[0] // shard_world_size
         shard = slice(shard_rank * shard_size, (shard_rank + 1) * shard_size)
-        param.data.copy_(loaded_weight[shard])
+        copy_attr = getattr(loaded_weight, "copy_attr", None)
+        sharded_weight = loaded_weight[shard]
+        sharded_weight.copy_attr = copy_attr
+        copy_weight(param.data, sharded_weight)
 
     def _forward(
         self,

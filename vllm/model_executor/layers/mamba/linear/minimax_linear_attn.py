@@ -205,8 +205,10 @@ class MiniMaxText01LinearAttention(LinearAttention):
 
     @staticmethod
     def weight_direct_load(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+        from vllm.model_executor.parameter import copy_weight
+
         assert param.size() == loaded_weight.size()
-        param.data.copy_(loaded_weight)
+        copy_weight(param.data, loaded_weight)
         return
 
     @staticmethod

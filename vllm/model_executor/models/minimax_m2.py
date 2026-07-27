@@ -56,6 +56,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.parameter import copy_weight
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import EagleModelMixin, SupportsEagle3, SupportsLoRA, SupportsPP
@@ -121,7 +122,10 @@ class MiniMaxM2MoE(nn.Module):
     @staticmethod
     def ebias_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor) -> None:
         assert param.size() == loaded_weight.size()
-        param.data.copy_(loaded_weight.to(torch.float32))
+        copy_attr = getattr(loaded_weight, "copy_attr", None)
+        loaded_weight = loaded_weight.to(torch.float32)
+        loaded_weight.copy_attr = copy_attr
+        copy_weight(param.data, loaded_weight)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape

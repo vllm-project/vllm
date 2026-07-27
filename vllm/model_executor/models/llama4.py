@@ -436,7 +436,10 @@ class Llama4Model(LlamaModel):
         # [num_experts, hidden_in, hidden_out], so we must transpose the last
         # two dimensions to match the expected layout of the parameters.
         if fused and loaded_weight.ndim == 3:
+            copy_attr = getattr(loaded_weight, "copy_attr", None)
             loaded_weight = loaded_weight.transpose(-1, -2)
+            if copy_attr is not None:
+                loaded_weight.copy_attr = copy_attr
 
             # If the gate_proj and up_proj weights are fused into a single
             # weight tensor, we need to split the weight tensor into a tuple
@@ -680,7 +683,10 @@ class Llama4Model(LlamaModel):
                             and loaded_weight.dtype == torch.float8_e4m3fn
                             and loaded_weight.ndim == 3
                         ):
+                            copy_attr = getattr(loaded_weight, "copy_attr", None)
                             loaded_weight = loaded_weight.transpose(-1, -2)
+                            if copy_attr is not None:
+                                loaded_weight.copy_attr = copy_attr
 
                         # Load the weight into the module parameter with
                         # corresponding shard id and expert id.
@@ -826,6 +832,7 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
         is_q_proj = "wq" in modules or "q_proj" in modules
 
         if (is_weight or is_weight_scale) and (is_k_proj or is_q_proj):
+            copy_attr = getattr(loaded_weight, "copy_attr", None)
             original_ndim = loaded_weight.ndim
             if original_ndim == 1:
                 loaded_weight = loaded_weight.unsqueeze(-1)
@@ -844,5 +851,8 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
 
             if original_ndim == 1:
                 loaded_weight = loaded_weight.squeeze(-1)
+
+            if copy_attr is not None:
+                loaded_weight.copy_attr = copy_attr
 
         return name, loaded_weight

@@ -20,6 +20,7 @@ from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.parameter import copy_weight
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -141,7 +142,11 @@ class NgramEmbedding(nn.Module):
             index = int(
                 weight_name.split("ngram_embeddings.post_projs.")[1].split(".")[0]
             )
-            self.oe_projection.data[index].copy_(loaded_weight.t())
+            copy_attr = getattr(loaded_weight, "copy_attr", None)
+            loaded_weight = loaded_weight.t()
+            if copy_attr is not None:
+                loaded_weight.copy_attr = copy_attr
+            copy_weight(self.oe_projection.data[index], loaded_weight)
             return "ngram_embeddings.oe_projection"
         else:
             raise AssertionError(f"Unexpected ngram weight: {weight_name}")

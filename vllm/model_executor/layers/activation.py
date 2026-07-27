@@ -775,14 +775,18 @@ class ScaledActivation(nn.Module):
         return self.act(x) / self.scales
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
+        from vllm.model_executor.parameter import copy_weight
+
         param_data = param.data
         if self.input_is_parallel:
             tp_rank = get_tensor_model_parallel_rank()
             shard_size = param_data.shape[0]
             start_idx = tp_rank * shard_size
+            copy_attr = getattr(loaded_weight, "copy_attr", None)
             loaded_weight = loaded_weight.narrow(0, start_idx, shard_size)
+            loaded_weight.copy_attr = copy_attr
         assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+        copy_weight(param_data, loaded_weight)
 
 
 _ACTIVATION_REGISTRY = LazyDict(
