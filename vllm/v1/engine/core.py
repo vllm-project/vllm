@@ -234,6 +234,7 @@ class EngineCore:
         self.aborts_queue = queue.Queue[list[str]]()
 
         self._idle_state_callbacks: list[Callable] = []
+        self._process_checkpoint_active = False
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
@@ -862,6 +863,34 @@ class EngineCore:
         """Return whether the scheduler is in any pause state."""
         return self.scheduler.pause_state != PauseState.UNPAUSED
 
+    def checkpoint_prepare(self) -> None | Future:
+        """Pause scheduling, then prepare worker communicators."""
+        pause_future = None if self.is_scheduler_paused() else self.pause_scheduler()
+        if pause_future is None:
+            self._process_checkpoint_active = True
+            self.collective_rpc("checkpoint_prepare")
+            return None
+
+        future = Future[Any]()
+
+        def pause_complete(f: Future):
+            try:
+                f.result()
+                self._process_checkpoint_active = True
+                self.collective_rpc("checkpoint_prepare")
+            except Exception as e:
+                future.set_exception(e)
+            else:
+                future.set_result(None)
+
+        pause_future.add_done_callback(pause_complete)
+        return future
+
+    def checkpoint_restore(self) -> None:
+        """Restore worker communicators without resuming scheduling."""
+        self.collective_rpc("checkpoint_restore")
+        self._process_checkpoint_active = False
+
     def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None | Future:
         """Put the engine to sleep at the specified level.
 
@@ -874,6 +903,12 @@ class EngineCore:
             mode: Pause mode - how to deal with any existing requests, see
                 documentation of pause_scheduler method.
         """
+
+        if self._process_checkpoint_active:
+            if level >= 1:
+                self._reset_caches()
+                self.model_executor.sleep(level)
+            return None
 
         # Pause scheduler before sleeping.
         clear_prefix_cache = level >= 1
@@ -912,6 +947,9 @@ class EngineCore:
 
         if tags is None or tags:
             self.model_executor.wake_up(tags)
+
+        if self._process_checkpoint_active:
+            return
 
         # Partial wakes intentionally keep the remaining allocations asleep.
         # Resume scheduling only once all executor memory is resident again.

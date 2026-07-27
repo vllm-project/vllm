@@ -247,6 +247,12 @@ class EngineCoreClient(ABC):
     async def wake_up_async(self, tags: list[str] | None = None) -> None:
         raise NotImplementedError
 
+    async def checkpoint_prepare_async(self) -> None:
+        raise NotImplementedError
+
+    async def checkpoint_restore_async(self) -> None:
+        raise NotImplementedError
+
     async def is_sleeping_async(self) -> bool:
         raise NotImplementedError
 
@@ -1192,6 +1198,12 @@ class AsyncMPClient(MPClient):
 
     async def wake_up_async(self, tags: list[str] | None = None) -> None:
         await self.call_utility_async("wake_up", tags)
+
+    async def checkpoint_prepare_async(self) -> None:
+        await self.call_utility_async("checkpoint_prepare")
+
+    async def checkpoint_restore_async(self) -> None:
+        await self.call_utility_async("checkpoint_restore")
 
     async def is_sleeping_async(self) -> bool:
         return await self.call_utility_async("is_sleeping")

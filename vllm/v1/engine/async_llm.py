@@ -944,10 +944,10 @@ class AsyncLLM(EngineClient):
             self.logger_manager.record_sleep_state(0, 0)
 
     async def checkpoint_prepare(self) -> None:
-        await self.collective_rpc("checkpoint_prepare")
+        await self.engine_core.checkpoint_prepare_async()
 
     async def checkpoint_restore(self) -> None:
-        await self.collective_rpc("checkpoint_restore")
+        await self.engine_core.checkpoint_restore_async()
 
     async def is_sleeping(self) -> bool:
         return await self.engine_core.is_sleeping_async()
