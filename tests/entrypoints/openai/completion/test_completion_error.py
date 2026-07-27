@@ -610,3 +610,16 @@ class TestCompletionPromptListLimit:
             max_tokens=1,
         )
         assert len(request.prompt_embeds) == 5
+
+
+@pytest.mark.parametrize("field_name", ["prompt_logprobs", "logprobs"])
+def test_non_numeric_logprobs_rejected(field_name):
+    """A non-numeric logprobs value must be a clean 400 validation error, not a
+    TypeError from the mode='before' comparison (which surfaces as HTTP 500)."""
+    with pytest.raises(ValidationError, match=f"`{field_name}` must be an integer"):
+        CompletionRequest(
+            model=MODEL_NAME,
+            prompt="Test prompt",
+            max_tokens=10,
+            **{field_name: "2"},
+        )
