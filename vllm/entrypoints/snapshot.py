@@ -822,8 +822,8 @@ def _acquire_lock(root: Path, key: str) -> _KeyLock:
     unsafe = _trust_miss(root, deny_symlink=False, claim_missing=True)
     if unsafe:
         raise RuntimeError(f"refusing snapshot directory ({unsafe}): {root}")
-    # O_NOFOLLOW: a planted symlink at the lock name must fail, not truncate
-    # its target.
+    # O_NOFOLLOW: a planted symlink at the lock name must fail with ELOOP.
+    # The old by-name open("w") followed it and truncated its target.
     fd = os.open(
         str(root / f"{key}.lock"),
         os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW,
