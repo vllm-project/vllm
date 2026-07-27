@@ -15,6 +15,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv, next_power_of_2
 
+
 @triton.heuristics(
     {
         "STORE_RESIDUAL_OUT": lambda args: args["residual_out"] is not None,
@@ -347,9 +348,10 @@ class FusedRMSNormGated(CustomOp):
         activation: str = "swish",
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
+        enforce_enable: bool = False,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
-        super().__init__()
+        super().__init__(enforce_enable=enforce_enable)
 
         self.hidden_size = hidden_size
         self.elementwise_affine = elementwise_affine
