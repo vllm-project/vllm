@@ -29,6 +29,15 @@ DP_SIZE = 2
 CPU_DISTRIBUTED_TIMEOUT_S = 30
 FAULT_DETECTION_DEADLINE_S = 45
 
+# PowerMoE-3b has 40 logical experts per MoE layer. Shrinking EP 2 -> 1
+# requires the surviving rank to host all of them, so each rank must carry 40
+# redundant expert slots.
+NUM_REDUNDANT_EXPERTS = 40
+
+# scale_down reloads reassigned expert weights from disk before signaling
+# recovery; the busy-loop wrapper only waits engine_recovery_timeout_sec (120s).
+SCALE_DOWN_DEADLINE_S = 150
+
 
 # Patches ``gpu.dp_utils.sync_cudagraph_and_dp_padding`` to raise on ``rank`` at
 # a chosen step. Gated on VLLM_FT_TEST_INJECT_FAULT.
@@ -102,7 +111,7 @@ def _install_fault_injection(monkeypatch, tmp_path, rank: int, step: int) -> Non
     monkeypatch.setenv("VLLM_FT_TEST_INJECT_FAULT", f"rank={rank},step={step}")
 
 
-def _ft_server_args() -> list[str]:
+def _ft_server_args(extra_args: list[str] | None = None) -> list[str]:
     return [
         "--enforce-eager",
         "--dtype",
@@ -119,10 +128,11 @@ def _ft_server_args() -> list[str]:
         str(CPU_DISTRIBUTED_TIMEOUT_S),
         "--fault-tolerance-config",
         '{"engine_recovery_timeout_sec": 120}',
+        *(extra_args or []),
     ]
 
 
-def _ft_manager():
+def _ft_manager(extra_args: list[str] | None = None):
     """Build the shared DP+EP fault-tolerant server topology (one engine/server)."""
     from tests.v1.distributed.test_external_lb_dp import ExternalLBServerManager
 
@@ -130,7 +140,7 @@ def _ft_manager():
         MODEL_NAME,
         DP_SIZE,
         api_server_count=1,  # FT requires a single API server per engine
-        base_server_args=_ft_server_args(),
+        base_server_args=_ft_server_args(extra_args),
         tp_size=1,
     )
 
@@ -376,3 +386,76 @@ def test_worker_kill_survivor_unhealthy_and_dead_rejects_retry():
             "rejection was never recorded in /fault_tolerance/status"
         )
         assert "status is DEAD" in ft_error, ft_error
+
+
+@pytest.mark.skipif(not has_nixl_ep(), reason="Requires nixl_ep all2all backend")
+@multi_gpu_test(num_gpus=2)
+def test_scale_down_removes_dead_rank_and_recovers():
+    """scale_down removes a dead DP rank; the survivor keeps serving alone.
+
+    SIGKILLing rank 1's worker leaves its EngineCore DEAD while rank 0 detects
+    the peer fault and goes UNHEALTHY. ``scale_down`` with
+    ``removed_dp_ranks=[1]`` then:
+
+    - masks the dead EP rank and redistributes its experts onto the survivor's
+      redundant slots (hence ``--enable-eplb`` with one full layer's worth of
+      redundant experts: a 2 -> 1 shrink leaves a single rank hosting all
+      logical experts),
+    - densifies DP (rank 0 stays rank 0 of a size-1 group) and reinits the
+      Gloo DP group,
+    - returns the surviving engine to HEALTHY, serving requests by itself.
+    """
+    eplb_args = [
+        "--enable-eplb",
+        "--eplb-config.num_redundant_experts",
+        str(NUM_REDUNDANT_EXPERTS),
+    ]
+    with _ft_manager(eplb_args) as servers:
+        assert len(servers) == DP_SIZE
+        survivor = _server_for_rank(servers, 0)
+        victim = _server_for_rank(servers, 1)
+
+        # 1. Both engines healthy and serving.
+        _assert_serving_and_healthy((survivor, victim))
+
+        # 2. Kill rank 1's worker; drive both engines into the fault.
+        _kill_worker_process(victim)
+        with _driving(survivor, victim):
+            survivor_faulted, victim_faulted = _wait_for_engines(
+                [survivor, victim],
+                match_key="status",
+                match_values={"dead", "unhealthy"},
+            )
+
+        assert survivor_faulted is not None, (
+            "survivor did not report the peer fault within "
+            f"{FAULT_DETECTION_DEADLINE_S}s -- it likely hung"
+        )
+        assert survivor_faulted["status"] == "unhealthy", survivor_faulted
+        # The status push carries the worker's all2all mask snapshot. Its value
+        # races with the nixl_ep kernel timeout, so only presence is checked;
+        # scale_down sets the mask explicitly regardless.
+        assert "mask" in survivor_faulted, survivor_faulted
+
+        assert victim_faulted is not None, (
+            "victim did not report its worker's death within "
+            f"{FAULT_DETECTION_DEADLINE_S}s"
+        )
+        assert victim_faulted["status"] == "dead", victim_faulted
+
+        # 3. scale_down is sent to surviving engines only: remove dead rank 1.
+        _apply_ft(survivor, "scale_down", {"removed_dp_ranks": [1]})
+
+        # 4. Recovery completes: the survivor is healthy and serving alone.
+        recovered = _wait_for_engines(
+            [survivor],
+            match_key="status",
+            match_values={"healthy"},
+            deadline_s=SCALE_DOWN_DEADLINE_S,
+        )[0]
+        assert recovered is not None, (
+            f"survivor did not recover within {SCALE_DOWN_DEADLINE_S}s after "
+            "scale_down -- expert reload or DP-group reinit likely failed"
+        )
+        completion = _complete(survivor.get_client())
+        assert completion.choices[0].text
