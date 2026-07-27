@@ -8,6 +8,7 @@ from starlette.datastructures import State
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
+from vllm.entrypoints.mcp.tool_server import init_tool_server
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
@@ -63,6 +64,9 @@ async def init_app_state(
     state.vllm_config = vllm_config
     state.args = args
     resolved_chat_template = load_chat_template(args.chat_template)
+    state.tool_server = (
+        await init_tool_server(args) if "generate" in supported_tasks else None
+    )
 
     # Merge default_mm_loras into the static lora_modules
     default_mm_loras = (

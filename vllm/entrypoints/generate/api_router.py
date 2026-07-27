@@ -63,7 +63,6 @@ async def init_generate_state(
 ):
     from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
     from vllm.entrypoints.chat_utils import load_chat_template
-
     # The Cohere serving handler depends on the optional `cohere` SDK for
     # its wire-format protocol models, and is additionally gated on the
     # `VLLM_ENABLE_COHERE_API` env flag (see
@@ -79,12 +78,6 @@ async def init_generate_state(
             CohereServingChatV2 = None  # type: ignore[assignment,misc]
     else:
         CohereServingChatV2 = None  # type: ignore[assignment,misc]
-
-    from vllm.entrypoints.mcp.tool_server import (
-        DemoToolServer,
-        MCPToolServer,
-        ToolServer,
-    )
     from vllm.entrypoints.openai.chat_completion.batch_serving import (
         OpenAIServingChatBatch,
     )
@@ -100,15 +93,6 @@ async def init_generate_state(
         getattr(args, "fingerprint_value", None),
     )
 
-    if args.tool_server == "demo":
-        tool_server: ToolServer | None = DemoToolServer()
-        assert isinstance(tool_server, DemoToolServer)
-        await tool_server.init_and_validate()
-    elif args.tool_server:
-        tool_server = MCPToolServer()
-        await tool_server.add_tool_server(args.tool_server)
-    else:
-        tool_server = None
     resolved_chat_template = load_chat_template(args.chat_template)
 
     # Fold the dedicated ``--cohere-format`` CLI flag into the renderer's
@@ -139,7 +123,7 @@ async def init_generate_state(
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
             enable_auto_tools=args.enable_auto_tool_choice,
             tool_parser=args.tool_call_parser,
-            tool_server=tool_server,
+            tool_server=state.tool_server,
             reasoning_parser=args.structured_outputs_config.reasoning_parser,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,

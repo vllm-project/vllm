@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 import pytest_asyncio
 from openai import OpenAI
@@ -12,6 +14,7 @@ from openai_harmony import Message, ToolDescription, ToolNamespaceConfig
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.mcp.tool_server import (
     MCPToolServer,
+    init_tool_server,
     post_process_tools_description,
 )
 
@@ -37,6 +40,13 @@ _BASE_SERVER_ARGS = [
 _PYTHON_TOOL_INSTRUCTION = (
     "You must use the Python tool to execute code. Never simulate execution."
 )
+
+
+@pytest.mark.asyncio
+async def test_init_tool_server_without_configuration():
+    args = SimpleNamespace(tool_server=None)
+
+    assert await init_tool_server(args) is None
 
 
 @pytest.mark.skip_global_cleanup

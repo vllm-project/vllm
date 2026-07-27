@@ -6,6 +6,7 @@ from starlette.datastructures import State
 
 from vllm.config import VllmConfig
 from vllm.entrypoints.chat_utils import load_chat_template
+from vllm.entrypoints.mcp.tool_server import init_tool_server
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIModelRegistry
 from vllm.entrypoints.scale_out.factories import init_render_state
@@ -46,6 +47,7 @@ async def init_render_app_state(
 
     renderer = renderer_from_config(vllm_config)
     resolved_chat_template = load_chat_template(args.chat_template)
+    state.tool_server = await init_tool_server(args)
 
     state.online_renderer = OnlineRenderer(
         model_config=vllm_config.model_config,
