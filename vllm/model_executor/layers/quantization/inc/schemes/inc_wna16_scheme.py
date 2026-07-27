@@ -20,6 +20,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+XPU_WNA16_SUPPORTED_BITS = {2, 4}
+
 
 class INCWna16Scheme(INCScheme):
     @staticmethod
@@ -35,7 +37,7 @@ class INCWna16Scheme(INCScheme):
     ):
         del config, layer
         if current_platform.is_xpu():
-            if layer_config.bits == 4 and layer_config.sym:
+            if layer_config.bits in XPU_WNA16_SUPPORTED_BITS and layer_config.sym:
                 from .inc_ark_ops import get_ark_state
                 from .inc_wna16_linear import (
                     INCARKLinearMethod,
@@ -45,6 +47,13 @@ class INCWna16Scheme(INCScheme):
                 is_ark_available, ark_error, _, _ = get_ark_state()
                 if is_ark_available:
                     return INCLinearMethod(INCARKLinearMethod(layer_config))
+                elif layer_config.bits == 2:
+                    raise NotImplementedError(
+                        "INC int2 on XPU requires the ARK backend. "
+                        f"Layer: {prefix}. "
+                        f"auto_round_kernel unavailable: "
+                        f"{ark_error or 'unknown error'}"
+                    )
 
                 logger.debug(
                     "ARK backend is unavailable for layer %s; "

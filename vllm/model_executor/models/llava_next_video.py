@@ -36,8 +36,14 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsLoRA,
+    SupportsMultiModal,
+    SupportsPP,
+)
 from .llava import init_vision_tower_for_llava
+from .module_mapping import MultiModelKeys
 from .siglip import SiglipVisionModel
 from .utils import (
     AutoWeightsLoader,
@@ -298,7 +304,14 @@ class LlavaNextMultiModalProjector(nn.Module):
     info=LlavaNextVideoProcessingInfo,
     dummy_inputs=LlavaNextVideoDummyInputsBuilder,
 )
-class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+class LlavaNextVideoForConditionalGeneration(
+    nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP
+):
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # mapping for new names in checkpoint saved after transformers v4.52
@@ -326,6 +339,12 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
 
         self.config = config
         self.multimodal_config = multimodal_config
+
+        vision_encoder_info = get_vision_encoder_info(config)
+        self.patch_grid_length = vision_encoder_info.get_patch_grid_length()
+        self.pooled_grid_length = math.ceil(
+            self.patch_grid_length / config.spatial_pool_stride
+        )
 
         with self._mark_tower_model(vllm_config, "video"):
             # Initialize the vision tower only up to the required feature layer
@@ -460,3 +479,42 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
             ignore_unexpected_prefixes=["image_newline"],
         )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="multi_modal_projector",
+            tower_model="vision_tower",
+        )
+
+    def get_num_mm_encoder_tokens(
+        self,
+        num_video_tokens: int,
+    ) -> int:
+        # Invert the spatial pooling done by `vision_resampler`: each frame
+        # contributes `pooled_grid_length ** 2` tokens after the language
+        # model's placeholder count, but `patch_grid_length ** 2` tokens
+        # when it leaves the vision encoder.
+        pooled_tokens_per_frame = self.pooled_grid_length**2
+        if num_video_tokens <= 0 or pooled_tokens_per_frame <= 0:
+            return 0
+
+        num_frames = num_video_tokens // pooled_tokens_per_frame
+        return num_frames * (self.patch_grid_length**2)
+
+    def get_num_mm_connector_tokens(
+        self,
+        num_vision_tokens: int,
+    ) -> int:
+        # The projector is length-preserving; it runs after
+        # `vision_resampler` has already pooled each frame down to
+        # `pooled_grid_length ** 2` tokens.
+        patch_tokens_per_frame = self.patch_grid_length**2
+        if num_vision_tokens <= 0 or patch_tokens_per_frame <= 0:
+            return 0
+
+        num_frames = num_vision_tokens // patch_tokens_per_frame
+        return num_frames * (self.pooled_grid_length**2)

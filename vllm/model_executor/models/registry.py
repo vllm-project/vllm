@@ -55,6 +55,7 @@ from .interfaces import (
     supports_multimodal_encoder_tp_data,
     supports_multimodal_raw_input_only,
     supports_pp,
+    supports_replayssm,
     supports_transcription,
 )
 from .interfaces_base import (
@@ -159,6 +160,11 @@ _TEXT_GENERATION_MODELS = {
         "vllm.models.minimax_m3",
         "MiniMaxM3SparseForCausalLM",
     ),
+    "InklingForCausalLM": ("vllm.models.inkling", "InklingForCausalLM"),
+    "InklingForConditionalGeneration": (
+        "vllm.models.inkling",
+        "InklingForConditionalGeneration",
+    ),
     "Ministral3ForCausalLM": ("mistral", "MistralForCausalLM"),
     "MistralForCausalLM": ("mistral", "MistralForCausalLM"),
     "MistralLarge3ForCausalLM": ("mistral_large_3", "MistralLarge3ForCausalLM"),
@@ -177,7 +183,6 @@ _TEXT_GENERATION_MODELS = {
     "OlmoeForCausalLM": ("olmoe", "OlmoeForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
     "OrionForCausalLM": ("orion", "OrionForCausalLM"),
-    "OuroForCausalLM": ("ouro", "OuroForCausalLM"),
     "PanguEmbeddedForCausalLM": ("openpangu", "PanguEmbeddedForCausalLM"),
     "PanguProMoEV2ForCausalLM": ("openpangu", "PanguProMoEV2ForCausalLM"),
     "PanguUltraMoEForCausalLM": ("openpangu", "PanguUltraMoEForCausalLM"),
@@ -185,7 +190,6 @@ _TEXT_GENERATION_MODELS = {
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
     "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
-    "Plamo2ForCausalLM": ("plamo2", "Plamo2ForCausalLM"),
     "Plamo3ForCausalLM": ("plamo3", "Plamo3ForCausalLM"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
@@ -210,6 +214,7 @@ _TEXT_GENERATION_MODELS = {
 _EMBEDDING_MODELS = {
     # [Text-only]
     "BertModel": ("bert", "BertEmbeddingModel"),
+    "BertForMaskedLM": ("bert", "BertForMaskedLM"),
     "BertSpladeSparseEmbeddingModel": ("bert", "BertSpladeSparseEmbeddingModel"),
     "BgeM3EmbeddingModel": ("roberta", "BgeM3EmbeddingModel"),
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
@@ -296,6 +301,11 @@ _TOKEN_CLASSIFICATION_MODELS = {
         "qwen3_asr_forced_aligner",
         "Qwen3ASRForcedAlignerForTokenClassification",
     ),
+    "RobertaForTokenClassification": ("roberta", "RobertaForTokenClassification"),
+    "XLMRobertaForTokenClassification": (
+        "roberta",
+        "RobertaForTokenClassification",
+    ),
 }
 
 _SEQUENCE_CLASSIFICATION_MODELS = {
@@ -348,6 +358,10 @@ _MULTIMODAL_MODELS = {
         "Cohere2VisionForConditionalGeneration",
     ),
     "Cosmos3ForConditionalGeneration": ("cosmos3", "Cosmos3ForConditionalGeneration"),
+    "Cosmos3EdgeForConditionalGeneration": (
+        "cosmos3_edge",
+        "Cosmos3EdgeForConditionalGeneration",
+    ),
     "DeepseekVLV2ForCausalLM": ("deepseek_vl2", "DeepseekVLV2ForCausalLM"),
     "DeepseekOCRForCausalLM": ("deepseek_ocr", "DeepseekOCRForCausalLM"),
     "DeepseekOCR2ForCausalLM": ("deepseek_ocr2", "DeepseekOCR2ForCausalLM"),
@@ -594,6 +608,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "DSparkDraftModel": ("vllm.models.deepseek_v4", "DSparkDeepseekV4ForCausalLM"),
     "Qwen3DSparkModel": ("qwen3_dspark", "Qwen3DSparkForCausalLM"),
     "DFlashLagunaForCausalLM": ("laguna_dflash", "DFlashLagunaForCausalLM"),
+    "Gemma4DSparkModel": ("gemma4_dspark", "Gemma4DSparkForCausalLM"),
     "PEagleDraftModel": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "PeagleLlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "Eagle3LlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
@@ -615,6 +630,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "DeepSeekV4MTPModel": ("vllm.models.deepseek_v4", "DeepSeekV4MTP"),
     "MiniMaxM3MTP": ("vllm.models.minimax_m3", "MiniMaxM3MTP"),
     "BailingMoeV25MTPModel": ("bailing_moe_mtp", "BailingMoeV25MTPModel"),
+    "InklingMTPModel": ("vllm.models.inkling", "InklingMTP"),
     "Gemma4MTPModel": ("gemma4_mtp", "Gemma4MTP"),
     "ErnieMTPModel": ("ernie_mtp", "ErnieMTP"),
     "ExaoneMoeMTP": ("exaone_moe_mtp", "ExaoneMoeMTP"),
@@ -643,8 +659,13 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "Olmo2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "SmolLM3ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Starcoder2ForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "VaultGemmaForCausalLM": ("transformers", "TransformersForCausalLM"),
     # Multimodal models
     "Emu3ForConditionalGeneration": (
+        "transformers",
+        "TransformersMultiModalForCausalLM",
+    ),
+    "VibeVoiceAsrForConditionalGeneration": (
         "transformers",
         "TransformersMultiModalForCausalLM",
     ),
@@ -742,6 +763,8 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "TeleChatForCausalLM": "0.25.0",
     "PersimmonForCausalLM": "0.25.0",
     "FuyuForCausalLM": "0.25.0",
+    "Plamo2ForCausalLM": "0.26.0",
+    "OuroForCausalLM": "0.26.0",
 }
 
 _OOT_SUPPORTED_MODELS = {
@@ -771,6 +794,7 @@ class _ModelInfo:
     is_hybrid: bool
     has_noops: bool
     supports_mamba_prefix_caching: bool
+    supports_replayssm: bool
     supports_transcription: bool
     supports_transcription_only: bool
 
@@ -797,6 +821,7 @@ class _ModelInfo:
             is_attention_free=is_attention_free(model),
             is_hybrid=is_hybrid(model),
             supports_mamba_prefix_caching=supports_mamba_prefix_caching(model),
+            supports_replayssm=supports_replayssm(model),
             supports_transcription=supports_transcription(model),
             supports_transcription_only=(
                 supports_transcription(model) and model.supports_transcription_only

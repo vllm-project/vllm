@@ -40,6 +40,9 @@ from vllm.model_executor.layers.quantization.online.mxfp8 import (
     Mxfp8OnlineLinearMethod,
     Mxfp8OnlineMoEMethod,
 )
+from vllm.model_executor.layers.quantization.online.nvfp4 import (
+    Nvfp4OnlineMoEMethod,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Static128BlockSym,
@@ -47,6 +50,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kInt8StaticChannelSym,
     kMxfp8Dynamic,
+    kNvfp4Static,
 )
 
 logger = init_logger(__name__)
@@ -68,6 +72,7 @@ _ONLINE_MOE_METHODS: dict[QuantKey, type] = {
     kFp8StaticChannelSym: Fp8PtpcOnlineMoEMethod,
     kMxfp8Dynamic: Mxfp8OnlineMoEMethod,
     kInt8StaticChannelSym: Int8OnlineMoEMethod,
+    kNvfp4Static: Nvfp4OnlineMoEMethod,
 }
 
 

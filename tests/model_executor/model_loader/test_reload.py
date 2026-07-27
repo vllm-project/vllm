@@ -10,9 +10,11 @@ from torch.nn.parameter import UninitializedParameter
 
 import vllm.model_executor.model_loader.reload.meta as reload_meta
 from vllm.model_executor.layers.linear import QKVParallelLinear
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.reload.layerwise import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
+    initialize_online_processing,
     record_metadata_for_reloading,
 )
 from vllm.model_executor.model_loader.reload.meta import (
@@ -71,6 +73,18 @@ class _ParentAliasedChildBufferLayer(torch.nn.Module):
         )
 
 
+class _ChildAliasOnlyBufferLayer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv1d = torch.nn.Linear(3, 2, bias=False)
+        self.conv1d.weight.data.copy_(
+            torch.arange(6, dtype=torch.float32).reshape(2, 3)
+        )
+        self.register_buffer(
+            "conv_weights", self.conv1d.weight.detach().view(-1), persistent=False
+        )
+
+
 class _AliasedBufferWithUninitializedChildLayer(_AliasedBufferLayer):
     def __init__(self):
         super().__init__()
@@ -78,6 +92,13 @@ class _AliasedBufferWithUninitializedChildLayer(_AliasedBufferLayer):
         self.child.register_parameter(
             "lazy_weight", UninitializedParameter(requires_grad=False)
         )
+
+
+class _NonPersistentBufferLayer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.ones(2, 2))
+        self.register_buffer("scale", torch.tensor(0.25), persistent=False)
 
 
 def test_move_metatensors():
@@ -259,6 +280,58 @@ def test_layerwise_reload_composed_loader_does_not_drop_params(monkeypatch):
     assert torch.equal(layer.D, loaded["D"])
 
 
+class _RecordingQuantMethod(QuantizeMethodBase):
+    """Records the layer's bias at the moment processing runs."""
+
+    uses_meta_device = True
+
+    def __init__(self):
+        self.bias_at_process = None
+
+    def create_weights(self, layer, *weight_args, **extra_weight_attrs):
+        pass
+
+    def apply(self, layer, *args, **kwargs):
+        raise NotImplementedError
+
+    def process_weights_after_loading(self, layer):
+        self.bias_at_process = layer.bias.detach().clone()
+
+
+class _LateBiasLayer(torch.nn.Module):
+    """Mimics an online-quantized linear: `weight` is created on meta by
+    `create_weights()`, which wraps the loaders, and the linear base registers
+    `bias` afterwards."""
+
+    def __init__(self, quant_method):
+        super().__init__()
+        self.quant_method = quant_method
+        weight = torch.nn.Parameter(torch.empty(4, 2, device="meta"))
+        weight.weight_loader = default_weight_loader
+        self.register_parameter("weight", weight)
+        initialize_online_processing(self)
+        bias = torch.nn.Parameter(torch.zeros(4))
+        bias.weight_loader = default_weight_loader
+        self.register_parameter("bias", bias)
+
+
+def test_online_processing_waits_for_late_registered_bias():
+    # Regression test: `bias` is skipped by the meta device paths, but it is
+    # still loaded by a weight loader. Excluding it from the processing trigger
+    # finalized the layer one load early, so the trailing bias was written into
+    # an already-processed layer (e.g. over FP8 Marlin's permuted bias).
+    quant_method = _RecordingQuantMethod()
+    layer = _LateBiasLayer(quant_method)
+    loaded_bias = torch.full((4,), 3.0)
+
+    layer.weight.weight_loader(layer.weight, torch.full((4, 2), 2.0))
+    assert quant_method.bias_at_process is None
+
+    layer.bias.weight_loader(layer.bias, loaded_bias)
+    assert quant_method.bias_at_process is not None
+    assert torch.equal(quant_method.bias_at_process, loaded_bias)
+
+
 def test_layerwise_reload_skips_non_persistent_parameter_alias_buffers(monkeypatch):
     layer = _AliasedBufferLayer()
     model = torch.nn.Sequential(layer)
@@ -289,6 +362,8 @@ def test_layerwise_reload_skips_non_persistent_parameter_alias_buffers(monkeypat
     assert layer.weight_view.untyped_storage().data_ptr() == (
         layer.weight.untyped_storage().data_ptr()
     )
+    assert "weight_view" in layer._non_persistent_buffers_set
+    assert "0.weight_view" not in model.state_dict()
 
 
 def test_capture_layer_to_meta_skips_uninitialized_parameter_storage_ptrs():
@@ -332,6 +407,109 @@ def test_layerwise_reload_skips_child_parameter_alias_buffers(monkeypatch):
     assert layer.conv_weights.untyped_storage().data_ptr() == (
         layer.conv1d.weight.untyped_storage().data_ptr()
     )
+    assert "conv_weights" in layer._non_persistent_buffers_set
+    assert "0.conv_weights" not in model.state_dict()
+
+
+def test_layerwise_reload_restores_alias_buffer_on_zero_size_layer(monkeypatch):
+    layer = _ChildAliasOnlyBufferLayer()
+    model = torch.nn.Sequential(layer)
+    loaded_conv = torch.full_like(layer.conv1d.weight, 7.0)
+
+    def materialize_with_sentinel(meta_tensor):
+        tensor = torch.empty_strided(
+            size=tuple(meta_tensor.size()),
+            stride=tuple(meta_tensor.stride()),
+            dtype=meta_tensor.dtype,
+            requires_grad=False,
+        )
+        tensor.fill_(-123.0)
+        tensor.__class__ = meta_tensor.__class__
+        tensor.__dict__ = meta_tensor.__dict__.copy()
+        return tensor
+
+    monkeypatch.setattr(
+        reload_meta, "materialize_meta_tensor", materialize_with_sentinel
+    )
+
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    layer.conv1d.weight.weight_loader(layer.conv1d.weight, loaded_conv)
+    finalize_layerwise_reload(model, model_config=None)
+
+    assert torch.equal(layer.conv_weights, loaded_conv.view(-1))
+    assert layer.conv_weights.untyped_storage().data_ptr() == (
+        layer.conv1d.weight.untyped_storage().data_ptr()
+    )
+    assert "conv_weights" in layer._non_persistent_buffers_set
+    assert "0.conv_weights" not in model.state_dict()
+
+
+def test_layerwise_reload_preserves_unloaded_non_persistent_buffers(monkeypatch):
+    layer = _NonPersistentBufferLayer()
+    model = torch.nn.Sequential(layer)
+    loaded_weight = torch.full_like(layer.weight, 7.0)
+    original_scale = layer.scale.clone()
+
+    def materialize_with_sentinel(meta_tensor):
+        tensor = torch.empty_strided(
+            size=tuple(meta_tensor.size()),
+            stride=tuple(meta_tensor.stride()),
+            dtype=meta_tensor.dtype,
+            requires_grad=False,
+        )
+        tensor.fill_(-123.0)
+        tensor.__class__ = meta_tensor.__class__
+        tensor.__dict__ = meta_tensor.__dict__.copy()
+        return tensor
+
+    monkeypatch.setattr(
+        reload_meta, "materialize_meta_tensor", materialize_with_sentinel
+    )
+
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    layer.weight.weight_loader(layer.weight, loaded_weight)
+    finalize_layerwise_reload(model, model_config=None)
+
+    assert torch.equal(layer.weight, loaded_weight)
+    assert torch.equal(layer.scale, original_scale)
+    assert "scale" in layer._non_persistent_buffers_set
+    assert "0.scale" not in model.state_dict()
+
+
+def test_layerwise_reload_updates_loaded_non_persistent_buffers(monkeypatch):
+    layer = _NonPersistentBufferLayer()
+    model = torch.nn.Sequential(layer)
+    loaded_weight = torch.full_like(layer.weight, 7.0)
+    loaded_scale = torch.full_like(layer.scale, 0.5)
+
+    def materialize_with_sentinel(meta_tensor):
+        tensor = torch.empty_strided(
+            size=tuple(meta_tensor.size()),
+            stride=tuple(meta_tensor.stride()),
+            dtype=meta_tensor.dtype,
+            requires_grad=False,
+        )
+        tensor.fill_(-123.0)
+        tensor.__class__ = meta_tensor.__class__
+        tensor.__dict__ = meta_tensor.__dict__.copy()
+        return tensor
+
+    monkeypatch.setattr(
+        reload_meta, "materialize_meta_tensor", materialize_with_sentinel
+    )
+
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    layer.weight.weight_loader(layer.weight, loaded_weight)
+    layer.scale.weight_loader(layer.scale, loaded_scale)
+    finalize_layerwise_reload(model, model_config=None)
+
+    assert torch.equal(layer.weight, loaded_weight)
+    assert torch.equal(layer.scale, loaded_scale)
+    assert "scale" in layer._non_persistent_buffers_set
+    assert "0.scale" not in model.state_dict()
 
 
 @pytest.mark.parametrize(

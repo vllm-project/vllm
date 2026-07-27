@@ -1,7 +1,9 @@
-use std::path::Path;
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::time::Duration;
 
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, ZmqMessage};
@@ -29,7 +31,7 @@ pub struct MockEngineConfig {
     /// Engine-ready payload reported after INIT, including max model length,
     /// KV block count, and dtype.
     pub ready_response: EngineCoreReadyResponse,
-    /// Maximum time to wait for IPC endpoints to appear before connecting.
+    /// Maximum time to wait for endpoints to accept connections.
     pub connect_timeout: Duration,
 }
 
@@ -118,22 +120,33 @@ fn peer_identity(engine_id: impl Into<EngineId>) -> Result<PeerIdentity> {
     })
 }
 
-/// Wait for an IPC endpoint path to appear before attempting to connect.
-async fn wait_for_ipc_endpoint(endpoint: &str, connect_timeout: Duration) -> Result<()> {
-    let Some(socket_path) = endpoint.strip_prefix("ipc://") else {
-        return Ok(());
-    };
-
-    timeout(connect_timeout, async {
-        while !Path::new(socket_path).exists() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .map_err(|_| Error::HandshakeTimeout {
-        stage: "mock engine IPC endpoint",
-        timeout: connect_timeout,
-    })
+/// Wait for an endpoint to accept connections before attempting the ZMQ connect.
+async fn wait_for_endpoint(endpoint: &str, connect_timeout: Duration) -> Result<()> {
+    if let Some(socket_path) = endpoint.strip_prefix("ipc://") {
+        timeout(connect_timeout, async {
+            while tokio::net::UnixStream::connect(socket_path).await.is_err() {
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .map_err(|_| Error::HandshakeTimeout {
+            stage: "mock engine IPC endpoint",
+            timeout: connect_timeout,
+        })
+    } else if let Some(address) = endpoint.strip_prefix("tcp://") {
+        timeout(connect_timeout, async {
+            while tokio::net::TcpStream::connect(address).await.is_err() {
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .map_err(|_| Error::HandshakeTimeout {
+            stage: "mock engine TCP endpoint",
+            timeout: connect_timeout,
+        })
+    } else {
+        Ok(())
+    }
 }
 
 /// Encode the engine-ready response sent on input socket registration.
@@ -148,7 +161,7 @@ pub async fn connect_to_frontend(
     config: MockEngineConfig,
 ) -> Result<MockEngineSockets> {
     let engine_handshake = engine_handshake.as_ref();
-    wait_for_ipc_endpoint(engine_handshake, config.connect_timeout).await?;
+    wait_for_endpoint(engine_handshake, config.connect_timeout).await?;
 
     let peer_identity = peer_identity(engine_id)?;
     let mut options = SocketOptions::default();
@@ -189,8 +202,8 @@ pub async fn connect_to_frontend(
     for (input_address, output_address) in
         init.addresses.inputs.iter().zip(init.addresses.outputs.iter())
     {
-        wait_for_ipc_endpoint(input_address, config.connect_timeout).await?;
-        wait_for_ipc_endpoint(output_address, config.connect_timeout).await?;
+        wait_for_endpoint(input_address, config.connect_timeout).await?;
+        wait_for_endpoint(output_address, config.connect_timeout).await?;
 
         let mut input_options = SocketOptions::default();
         input_options.peer_identity(peer_identity.clone());
@@ -257,8 +270,8 @@ pub async fn connect_to_bootstrapped_frontend(
 ) -> Result<(DealerSocket, PushSocket)> {
     let input_address = input_address.as_ref();
     let output_address = output_address.as_ref();
-    wait_for_ipc_endpoint(input_address, config.connect_timeout).await?;
-    wait_for_ipc_endpoint(output_address, config.connect_timeout).await?;
+    wait_for_endpoint(input_address, config.connect_timeout).await?;
+    wait_for_endpoint(output_address, config.connect_timeout).await?;
 
     let peer_identity = peer_identity(engine_id)?;
     let mut input_options = SocketOptions::default();

@@ -72,15 +72,58 @@ def test_non_fp32_head_dtype_uses_cast_path(default_vllm_config):
 
 
 def test_head_dtype_equal_to_model_dtype_uses_quant_method(default_vllm_config):
+    from unittest import mock
+
     vocab_size, hidden_size = 64, 16
     lp = _build_processor(vocab_size)
     lp.head_dtype = torch.bfloat16
 
     hidden_states = torch.randn(4, hidden_size, dtype=torch.bfloat16)
     weight = torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16)
+    lm_head = _FakeLmHead(weight)
 
-    logits = lp._get_logits(hidden_states, _FakeLmHead(weight), None)
+    with mock.patch.object(
+        lm_head.quant_method,
+        "apply",
+        side_effect=lambda layer, x, bias=None: torch.nn.functional.linear(
+            x, layer.weight, bias
+        ),
+    ) as apply_mock:
+        logits = lp._get_logits(hidden_states, lm_head, None)
+
+    apply_mock.assert_called_once()
     assert logits.dtype == torch.bfloat16
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="Exercises the torch.mm(out_dtype=...) device fast path, "
+    "available on CUDA and ROCm.",
+)
+def test_fp32_head_uses_mm_fast_path_on_device(default_vllm_config):
+    # On ROCm, current_platform.is_cuda() is False, so this previously fell
+    # through to the cast path (F.linear) instead of torch.mm(out_dtype=...),
+    # even though ROCm supports the out_dtype mm via its non-Lt GEMM path.
+    from unittest import mock
+
+    vocab_size, hidden_size, num_tokens = 64, 16, 4
+    lp = _build_processor(vocab_size)
+    lp.head_dtype = torch.float32
+
+    hidden_states = torch.randn(
+        num_tokens, hidden_size, dtype=torch.bfloat16, device="cuda"
+    )
+    weight = torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16, device="cuda")
+
+    with mock.patch(
+        "vllm.model_executor.layers.logits_processor.F.linear"
+    ) as linear_mock:
+        logits = lp._get_logits(hidden_states, _FakeLmHead(weight), None)
+
+    linear_mock.assert_not_called()
+    assert logits.dtype == torch.float32
+    expected = torch.nn.functional.linear(hidden_states.float(), weight.float())
+    torch.testing.assert_close(logits, expected)
 
 
 def test_fp32_head_rejects_quantized_lm_head(default_vllm_config):
@@ -122,22 +165,6 @@ def test_get_top_tokens_honors_head_dtype(default_vllm_config):
         dim=-1
     )
     assert torch.equal(top, expected)
-
-
-def test_fp32_head_rejected_with_lora(default_vllm_config):
-    from vllm.lora.layers.logits_processor import LogitsProcessorWithLoRA
-
-    base = _build_processor(64)
-    base.head_dtype = torch.float32
-
-    with pytest.raises(ValueError, match="not yet supported with LoRA"):
-        LogitsProcessorWithLoRA(
-            base,
-            hidden_size=16,
-            dtype=torch.bfloat16,
-            device=torch.device("cpu"),
-            sharded_to_full_mapping=None,
-        )
 
 
 @pytest.mark.core_model

@@ -5,16 +5,16 @@
 set -e
 
 # ROCm CI runs this script inside `run-amd-test.sh` where /vllm-workspace often has no .git
-# (wheel artifact layout). The wrapper passes VLLM_STANDALONE_MERGE_BASE from the agent checkout.
+# (wheel artifact layout). The wrapper passes CI_STANDALONE_MERGE_BASE from the agent checkout.
 merge_base_commit=""
-if [[ -n "${VLLM_STANDALONE_MERGE_BASE:-}" ]]; then
-    merge_base_commit="${VLLM_STANDALONE_MERGE_BASE}"
+if [[ -n "${CI_STANDALONE_MERGE_BASE:-}" ]]; then
+    merge_base_commit="${CI_STANDALONE_MERGE_BASE}"
 elif merge_base_commit="$(git -C /vllm-workspace merge-base HEAD origin/main 2>/dev/null)"; then
     :
 elif merge_base_commit="$(git merge-base HEAD origin/main 2>/dev/null)"; then
     :
 else
-    echo "ERROR: need a git checkout or VLLM_STANDALONE_MERGE_BASE to resolve wheels.vllm.ai commit." >&2
+    echo "ERROR: need a git checkout or CI_STANDALONE_MERGE_BASE to resolve wheels.vllm.ai commit." >&2
     exit 1
 fi
 

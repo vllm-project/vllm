@@ -35,6 +35,7 @@ from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
     SecondaryTierManager,
+    TieringOffloadingMetrics,
 )
 from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
@@ -233,9 +234,9 @@ class TestTieringOffloadingManager:
             secondary_tiers=[self.secondary_tier1, self.secondary_tier2],
         )
 
-    def _simulate_on_schedule_end(self):
+    def _simulate_on_schedule_end(self, new_req_ids: list[str] | None = None):
         """Simulate end of scheduler step: lifecycle flush + drain events."""
-        ctx = ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
+        ctx = ScheduleEndContext(new_req_ids=new_req_ids or [], preempted_req_ids=())
         self.manager.on_schedule_end(ctx)
         list(self.manager.take_events())
 
@@ -394,6 +395,87 @@ class TestTieringOffloadingManager:
 
         # Next lookup should succeed
         assert count_hits(self.manager, blocks) == 3
+
+    def test_lookup_reports_sync_delay_for_resolved_lookups(self, manager_setup):
+        """Resolved lookups report one sync delay sample on allocation."""
+        self._start_request()
+        blocks = to_keys(range(2))
+
+        # No tier has these blocks: they resolve immediately as misses.
+        for block in blocks:
+            assert self.manager.lookup(block, _CTX) is LookupResult.MISS
+
+        stats = self.manager.get_stats()
+        if stats is not None:
+            assert f"{TieringOffloadingMetrics.LOOKUP_SYNC_DELAY}_count" not in (
+                stats.reduce()
+            )
+
+        self._simulate_on_schedule_end(new_req_ids=[_CTX.req_id])
+
+        stats = self.manager.get_stats()
+        assert stats is not None
+        reduced = stats.reduce()
+        assert reduced[f"{TieringOffloadingMetrics.LOOKUP_SYNC_DELAY}_count"] == 1
+        assert f"{TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY}_count" not in reduced
+
+    def test_lookup_reports_async_delay_across_promotion(self, manager_setup):
+        """A new request reports async delay at schedule end."""
+        self._start_request()
+        block = to_keys(range(1))[0]
+        self.secondary_tier1.blocks[block] = True
+
+        # First lookup finds the block in a secondary tier and defers.
+        assert self.manager.lookup(block, _CTX) is LookupResult.RETRY
+
+        # The first scheduler step reports async delay for the new request.
+        self._simulate_on_schedule_end(new_req_ids=[_CTX.req_id])
+        stats = self.manager.get_stats()
+        assert stats is not None
+        reduced = stats.reduce()
+        assert reduced[f"{TieringOffloadingMetrics.LOOKUP_SYNC_DELAY}_count"] == 1
+        assert reduced[f"{TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY}_count"] == 1
+
+        # Promotion completes on the next scheduler step.
+        self._simulate_on_schedule_end()
+
+        # Next lookup resolves via the now-promoted primary-tier block.
+        assert self.manager.lookup(block, _CTX) is LookupResult.HIT
+
+        stats = self.manager.get_stats()
+        if stats is not None:
+            assert f"{TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY}_count" not in (
+                stats.reduce()
+            )
+
+    def test_lookup_reports_async_delay_on_request_finish(self, manager_setup):
+        """Never-allocated lookup delays flush at teardown."""
+        ctx = ReqContext(req_id="req_lookup_finish")
+        self._start_request(ctx)
+        block = to_keys(range(1))[0]
+        self.secondary_tier1.blocks[block] = True
+
+        # Lookup finds the block in a secondary tier and defers.
+        assert self.manager.lookup(block, ctx) is LookupResult.RETRY
+
+        self._simulate_on_schedule_end()
+        stats = self.manager.get_stats()
+        if stats is not None:
+            assert f"{TieringOffloadingMetrics.LOOKUP_SYNC_DELAY}_count" not in (
+                stats.reduce()
+            )
+            assert f"{TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY}_count" not in (
+                stats.reduce()
+            )
+
+        # Request finishes before the deferred lookup is ever resolved.
+        self.manager.on_request_finished(ctx)
+
+        stats = self.manager.get_stats()
+        assert stats is not None
+        reduced = stats.reduce()
+        assert reduced[f"{TieringOffloadingMetrics.LOOKUP_SYNC_DELAY}_count"] == 1
+        assert reduced[f"{TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY}_count"] == 1
 
     def test_partial_lookup(self, manager_setup):
         """Test lookup with partial hits."""
