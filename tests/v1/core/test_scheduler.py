@@ -1577,6 +1577,65 @@ def test_spec_decode_padding_first_decode_step():
     assert out.scheduled_spec_decode_tokens[r2.request_id] == [-1] * num_spec
 
 
+@pytest.mark.parametrize(
+    ("kv_role", "expect_placeholder_drafts"),
+    [
+        pytest.param("kv_consumer", False, id="disagg-consumer"),
+        pytest.param("kv_both", True, id="aggregated-both"),
+    ],
+)
+def test_mamba_first_fallback_spec_padding_scope(
+    kv_role: str,
+    expect_placeholder_drafts: bool,
+):
+    """Only a P/D Mamba decoder's N-1 fallback skips spec padding.
+
+    The steady request still validates its actual drafts. The joining fallback
+    has no output yet and starts at prompt_len - 1, matching a decoder worker
+    after a hybrid-Mamba remote KV handoff. It must not be converted into fake
+    -1 speculative rows merely to preserve the uniform FULL cudagraph shape.
+    An aggregated (``kv_both``) worker retains the normal padding behavior.
+    """
+    num_spec = 3
+    block_size = 16
+    scheduler = create_scheduler(
+        num_speculative_tokens=num_spec,
+        enable_prefix_caching=True,
+        block_size=block_size,
+        use_kv_connector=mock_kv(0, False),
+        kv_role=kv_role,
+        kv_cache_spec=MambaSpec(
+            block_size=block_size,
+            shapes=((1, 1),),
+            dtypes=(torch.float32,),
+            mamba_cache_mode="all",
+        ),
+    )
+    r1, r2 = create_requests(
+        num_requests=2, num_tokens=33, same_prompt=True, max_tokens=16
+    )
+
+    scheduler.add_request(r1)
+    out = scheduler.schedule()
+    assert out.num_scheduled_tokens[r1.request_id] == 33
+    _model_output(scheduler, out, [[100]])
+    scheduler.update_draft_token_ids(DraftTokenIds([r1.request_id], [[1, 2, 3]]))
+
+    scheduler.add_request(r2)
+    out = scheduler.schedule()
+
+    assert out.scheduled_spec_decode_tokens[r1.request_id] == [1, 2, 3]
+    assert r2.num_output_tokens == 0
+    assert r2.num_computed_tokens == r2.num_prompt_tokens - 1
+    assert out.num_scheduled_tokens[r2.request_id] == (
+        1 + num_spec if expect_placeholder_drafts else 1
+    )
+    if expect_placeholder_drafts:
+        assert out.scheduled_spec_decode_tokens[r2.request_id] == [-1] * num_spec
+    else:
+        assert r2.request_id not in out.scheduled_spec_decode_tokens
+
+
 def test_spec_decode_padding_skipped_for_diffusion():
     """Diffusion spec tokens are the fixed-size denoising canvas, not
     rejectable drafts: a first-decode-step request must keep its 1-token span
