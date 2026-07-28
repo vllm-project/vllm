@@ -10,9 +10,11 @@ from torch.nn.parameter import UninitializedParameter
 
 import vllm.model_executor.model_loader.reload.meta as reload_meta
 from vllm.model_executor.layers.linear import QKVParallelLinear
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.reload.layerwise import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
+    initialize_online_processing,
     record_metadata_for_reloading,
 )
 from vllm.model_executor.model_loader.reload.meta import (
@@ -276,6 +278,58 @@ def test_layerwise_reload_composed_loader_does_not_drop_params(monkeypatch):
     assert torch.equal(layer.A, -torch.exp(loaded["A"]))
     assert torch.equal(layer.dt_bias, loaded["dt_bias"])
     assert torch.equal(layer.D, loaded["D"])
+
+
+class _RecordingQuantMethod(QuantizeMethodBase):
+    """Records the layer's bias at the moment processing runs."""
+
+    uses_meta_device = True
+
+    def __init__(self):
+        self.bias_at_process = None
+
+    def create_weights(self, layer, *weight_args, **extra_weight_attrs):
+        pass
+
+    def apply(self, layer, *args, **kwargs):
+        raise NotImplementedError
+
+    def process_weights_after_loading(self, layer):
+        self.bias_at_process = layer.bias.detach().clone()
+
+
+class _LateBiasLayer(torch.nn.Module):
+    """Mimics an online-quantized linear: `weight` is created on meta by
+    `create_weights()`, which wraps the loaders, and the linear base registers
+    `bias` afterwards."""
+
+    def __init__(self, quant_method):
+        super().__init__()
+        self.quant_method = quant_method
+        weight = torch.nn.Parameter(torch.empty(4, 2, device="meta"))
+        weight.weight_loader = default_weight_loader
+        self.register_parameter("weight", weight)
+        initialize_online_processing(self)
+        bias = torch.nn.Parameter(torch.zeros(4))
+        bias.weight_loader = default_weight_loader
+        self.register_parameter("bias", bias)
+
+
+def test_online_processing_waits_for_late_registered_bias():
+    # Regression test: `bias` is skipped by the meta device paths, but it is
+    # still loaded by a weight loader. Excluding it from the processing trigger
+    # finalized the layer one load early, so the trailing bias was written into
+    # an already-processed layer (e.g. over FP8 Marlin's permuted bias).
+    quant_method = _RecordingQuantMethod()
+    layer = _LateBiasLayer(quant_method)
+    loaded_bias = torch.full((4,), 3.0)
+
+    layer.weight.weight_loader(layer.weight, torch.full((4, 2), 2.0))
+    assert quant_method.bias_at_process is None
+
+    layer.bias.weight_loader(layer.bias, loaded_bias)
+    assert quant_method.bias_at_process is not None
+    assert torch.equal(quant_method.bias_at_process, loaded_bias)
 
 
 def test_layerwise_reload_skips_non_persistent_parameter_alias_buffers(monkeypatch):

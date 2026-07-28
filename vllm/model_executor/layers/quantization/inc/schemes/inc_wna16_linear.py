@@ -178,12 +178,7 @@ class INCXPULinearBase(INCLinearScheme):
 
     def __init__(self, layer_config: "INCLayerConfig") -> None:
         self.weight_bits = layer_config.bits
-        group_size = layer_config.group_size
-        if not isinstance(group_size, int):
-            raise ValueError(
-                f"INC XPU WNA16 requires scalar group_size, but found {group_size!r}."
-            )
-        self.group_size = group_size
+        self.group_size = layer_config.group_size
 
         self.sym = layer_config.sym
         self.pack_factor = 32 // self.weight_bits

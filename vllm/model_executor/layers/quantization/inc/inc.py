@@ -34,22 +34,15 @@ class INCConfig(QuantizationConfig):
     Repo: https://github.com/intel/neural-compressor
     """
 
-    AUTO_ROUND_QUANT_METHODS = {"auto-round", "auto_round"}
-
     DEFAULT_INT_PACKING_FORMAT = "auto_round:auto_gptq"
 
-    FP8_BLOCK_BITS = 8
-    FP8_BLOCK_DATA_TYPE = "fp"
-    FP8_BLOCK_PACKING_FORMAT = "auto_round:fp8"
-    FP8_BLOCK_FMT = "e4m3"
-    FP8_BLOCK_ACTIVATION_SCHEME = "dynamic"
-
     SUPPORTED_BITS = {2, 3, 4, 8}
-    SUPPORTED_DTYPES = {"int", "fp"}
+    SUPPORTED_DTYPES = {"int", "mx_fp", "fp"}
     SUPPORTED_FORMATS = {
-        DEFAULT_INT_PACKING_FORMAT,
+        "auto_round:auto_gptq",
         "auto_round:auto_awq",
-        FP8_BLOCK_PACKING_FORMAT,
+        "auto_round:fp8",
+        "auto_round:llm_compressor",
     }
     SUPPORTED_BACKENDS = {
         "auto",
@@ -59,6 +52,18 @@ class INCConfig(QuantizationConfig):
         "awq:marlin",
         "marlin",
     }
+    
+    FP8_BLOCK_BITS = 8
+    FP8_BLOCK_DATA_TYPE = "fp"
+    FP8_BLOCK_PACKING_FORMAT = "auto_round:fp8"
+    FP8_BLOCK_FMT = "e4m3"
+    FP8_BLOCK_ACTIVATION_SCHEME = "dynamic"
+
+    MXFP8_BITS = 8
+    MXFP8_GROUP_SIZE = 32
+    MXFP8_DATA_TYPE = "mx_fp"
+    MXFP8_PACKING_FORMAT = "auto_round:llm_compressor"
+    MXFP8_SUPPORTED_ACT_DTYPES = {"mx_fp", "mx_fp_rceil"}
 
     @staticmethod
     def _normalize_data_type(data_type: str) -> str:
@@ -127,88 +132,117 @@ class INCConfig(QuantizationConfig):
 
     def _validate_supported_quantization(self) -> None:
         if self.data_type == "int":
-            if not isinstance(self.group_size, int):
-                raise ValueError(
-                    "INC int quantization requires scalar group_size, "
-                    f"but found group_size={self.group_size!r}."
-                )
-            if self.packing_format == self.FP8_BLOCK_PACKING_FORMAT:
-                raise ValueError(
-                    f"packing_format={self.packing_format!r} is incompatible "
-                    "with data_type='int'."
-                )
-            return
-
-        if self.data_type == self.FP8_BLOCK_DATA_TYPE:
-            if self.weight_bits != self.FP8_BLOCK_BITS:
-                raise ValueError(
-                    "INC block-wise FP8 only supports bits=8, "
-                    f"but found bits={self.weight_bits}."
-                )
-            if not isinstance(self.group_size, tuple):
-                raise ValueError(
-                    "INC block-wise FP8 requires a 2-D group_size, "
-                    f"but found group_size={self.group_size!r}."
-                )
-            if not self.sym:
-                raise ValueError("INC block-wise FP8 only supports symmetric weights.")
-            if self.packing_format != self.FP8_BLOCK_PACKING_FORMAT:
-                raise ValueError(
-                    "INC block-wise FP8 only supports "
-                    f"packing_format={self.FP8_BLOCK_PACKING_FORMAT!r}, "
-                    f"but found {self.packing_format!r}."
-                )
-            if self.backend != "auto":
-                raise ValueError(
-                    "INC block-wise FP8 only supports backend='auto', "
-                    f"but found backend={self.backend!r}."
-                )
-            return
+            assert isinstance(self.group_size, int), (
+                "INC int quantization requires scalar group_size, "
+                f"but found group_size={self.group_size!r}."
+            )
+            assert self.packing_format != self.FP8_BLOCK_PACKING_FORMAT, (
+                f"packing_format={self.packing_format!r} is incompatible "
+                "with data_type='int'."
+            )
+            
+        elif self.data_type == self.FP8_BLOCK_DATA_TYPE:
+            assert self.weight_bits == self.FP8_BLOCK_BITS, (
+                "INC block-wise FP8 only supports bits=8, "
+                f"but found bits={self.weight_bits}."
+            )
+            assert isinstance(self.group_size, tuple), (
+                "INC block-wise FP8 requires a 2-D group_size, "
+                f"but found group_size={self.group_size!r}."
+            )
+            assert self.sym, "INC block-wise FP8 only supports symmetric weights."
+            assert self.packing_format == self.FP8_BLOCK_PACKING_FORMAT, (
+                "INC block-wise FP8 only supports "
+                f"packing_format={self.FP8_BLOCK_PACKING_FORMAT!r}, "
+                f"but found {self.packing_format!r}."
+            )
+            assert self.backend == "auto", (
+                "INC block-wise FP8 only supports backend='auto', "
+                f"but found backend={self.backend!r}."
+            )
+            
+        elif self.data_type == self.MXFP8_DATA_TYPE:
+            assert self.weight_bits == self.MXFP8_BITS, (
+                f"INC MXFP8 only supports bits=8, but found bits={self.weight_bits}."
+            )
+            assert self.group_size == self.MXFP8_GROUP_SIZE, (
+                "INC MXFP8 only supports group_size=32, "
+                f"but found group_size={self.group_size}."
+            )
+            assert self.sym, "INC MXFP8 only supports symmetric weights."
+            assert self.packing_format == self.MXFP8_PACKING_FORMAT, (
+                "INC MXFP8 only supports "
+                f"packing_format={self.MXFP8_PACKING_FORMAT!r}, "
+                f"but found {self.packing_format!r}."
+            )
+            assert self.backend == "auto", (
+                "INC MXFP8 only supports backend='auto', "
+                f"but found backend={self.backend!r}."
+            )
 
         if self.packing_format == self.FP8_BLOCK_PACKING_FORMAT:
-            raise ValueError(
+            assert self.data_type == self.FP8_BLOCK_DATA_TYPE, (
                 f"packing_format={self.FP8_BLOCK_PACKING_FORMAT!r} requires "
                 f"data_type={self.FP8_BLOCK_DATA_TYPE!r}."
             )
+        elif self.packing_format == self.MXFP8_PACKING_FORMAT:
+            assert self.data_type == self.MXFP8_DATA_TYPE, (
+                f"packing_format={self.MXFP8_PACKING_FORMAT!r} requires "
+                f"data_type={self.MXFP8_DATA_TYPE!r}."
+            )
+
 
     def _validate_raw_config(self, config: dict[str, Any]) -> None:
-        if self.data_type != self.FP8_BLOCK_DATA_TYPE:
-            return
+        if self.data_type == self.FP8_BLOCK_DATA_TYPE:
+            assert isinstance(self.group_size, tuple), "INC block-wise FP8 group_size must be a tuple."
 
-        assert isinstance(self.group_size, tuple)
-
-        expected_fields = {
-            "act_bits": self.FP8_BLOCK_BITS,
-            "act_group_size": self.group_size[0],
-            "act_data_type": self.FP8_BLOCK_DATA_TYPE,
-            "act_sym": True,
-            "act_dynamic": True,
-            "activation_scheme": self.FP8_BLOCK_ACTIVATION_SCHEME,
-            "fmt": self.FP8_BLOCK_FMT,
-            "enable_quanted_input": False,
-        }
-        for field_name, expected_value in expected_fields.items():
-            actual_value = self.get_from_keys_or(config, [field_name], expected_value)
-            if actual_value != expected_value:
-                raise ValueError(
+            expected_fields = {
+                "act_bits": self.FP8_BLOCK_BITS,
+                "act_group_size": self.group_size[0],
+                "act_data_type": self.FP8_BLOCK_DATA_TYPE,
+                "act_sym": True,
+                "act_dynamic": True,
+                "activation_scheme": self.FP8_BLOCK_ACTIVATION_SCHEME,
+                "fmt": self.FP8_BLOCK_FMT,
+                "enable_quanted_input": False,
+            }
+            for field_name, expected_value in expected_fields.items():
+                actual_value = self.get_from_keys_or(config, [field_name], expected_value)
+                assert actual_value == expected_value, (
                     "INC block-wise FP8 only supports "
                     f"{field_name}={expected_value!r}, "
                     f"but found {field_name}={actual_value!r}."
                 )
 
-        raw_weight_block_size = self.get_from_keys_or(
-            config, ["weight_block_size"], None
-        )
-        if raw_weight_block_size is not None:
-            normalized_weight_block_size = INCConfigParser._normalize_group_size(
-                raw_weight_block_size
+            raw_weight_block_size = self.get_from_keys_or(
+                config, ["weight_block_size"], None
             )
-            if normalized_weight_block_size != self.group_size:
-                raise ValueError(
+            if raw_weight_block_size is not None:
+                normalized_weight_block_size = INCConfigParser._normalize_group_size(
+                    raw_weight_block_size
+                )
+                assert normalized_weight_block_size == self.group_size, (
                     "INC block-wise FP8 only supports "
                     f"weight_block_size={self.group_size!r}, "
                     "but found "
                     f"weight_block_size={normalized_weight_block_size!r}."
+                )
+
+        elif self.data_type == self.MXFP8_DATA_TYPE:
+            expected_fields = {
+                "act_bits": self.MXFP8_BITS,
+                "act_data_type": self.MXFP8_DATA_TYPE,
+                "act_group_size": self.MXFP8_GROUP_SIZE,
+                "act_sym": True,
+                "act_dynamic": True,
+                "enable_quanted_input": False,
+            }
+            for field_name, expected_value in expected_fields.items():
+                actual_value = self.get_from_keys_or(config, [field_name], expected_value)
+                assert actual_value == expected_value, (
+                    "INC MXFP8 only supports "
+                    f"{field_name}={expected_value!r}, "
+                    f"but found {field_name}={actual_value!r}."
                 )
 
     @classmethod
@@ -309,11 +343,8 @@ class INCConfig(QuantizationConfig):
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant, hf_config=None
     ) -> "QuantizationMethods | None":
-        del user_quant, hf_config
-
-        quant_method = hf_quant_cfg.get("quant_method", None)
-        if quant_method in cls.AUTO_ROUND_QUANT_METHODS:
-            return cls.get_name()
-        if quant_method == cls.FP8_BLOCK_PACKING_FORMAT:
+        """Override the `auto-round` method to `inc`."""
+        is_auto_round_format = hf_quant_cfg.get("quant_method", None) == "auto-round"
+        if is_auto_round_format:
             return cls.get_name()
         return None

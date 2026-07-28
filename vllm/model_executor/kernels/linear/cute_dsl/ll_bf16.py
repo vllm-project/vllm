@@ -31,18 +31,69 @@ def is_available() -> bool:
     return _cutedsl_available
 
 
+# Default configs
 _DEFAULT_DOTPROD_BS = 128
 _DEFAULT_DOTPROD_MAX_M = 4
 _DEFAULT_SPLITK_CONFIG = (6, 4)
-_TUNED_DOTPROD_MAX_M: dict[tuple[int, int], int] = {
-    (7168, 256): 6,
+
+# ll_bf16 router shapes covered by warmup/tuning:
+# (4096, 256)  # DSV4-Flash
+# (6144, 256)  # GLM5.2
+# (7168, 256)  # DSV3.2
+# (7168, 384)  # DSV4-Pro
+
+# SM100f-specific tuned configs
+_SM100F_TUNED_DOTPROD_BS: dict[tuple[int, int], dict[int, int]] = {
+    (6144, 256): {M: 256 for M in (1, 3, 4)},
 }
-_TUNED_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int]]] = {
+_SM100F_TUNED_SPLITK_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int]]] = {
+    (4096, 256): {
+        **{M: (8, 5) for M in (5, 8)},
+        9: (8, 2),
+    },
+    (7168, 256): {14: (8, 2)},
+    (6144, 256): {M: (8, 2) for M in (9, 12, 16)},
+    (7168, 384): {M: (7, 5) for M in (13, 16)},
+}
+
+# SM90-specific tuned configs
+_SM90_TUNED_DOTPROD_BS: dict[tuple[int, int], dict[int, int]] = {
+    (4096, 256): {M: 256 for M in (1, 3)},
+    (7168, 384): {M: 256 for M in (1, 2)},
+}
+_SM90_TUNED_SPLITK_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int]]] = {
+    (4096, 256): {
+        **{M: (8, 2) for M in range(5, 8)},
+        **{M: (8, 5) for M in range(10, 12)},
+        **{M: (8, 2) for M in (13, 16)},
+        **{M: (8, 5) for M in (14, 15)},
+    },
+    (7168, 256): {8: (6, 5)},
+    (6144, 256): {M: (8, 2) for M in (9, 11)},
     (7168, 384): {
-        5: (4, 4),
-        **{M: (5, 4) for M in range(6, 17)},
+        **{M: (8, 2) for M in (6, 8, 12)},
+        **{M: (7, 5) for M in (7, 9, 10, 11, 13, 14, 15, 16)},
     },
 }
+
+
+def _arch_tuned_configs() -> tuple[
+    dict[tuple[int, int], dict[int, int]],
+    dict[tuple[int, int], dict[int, tuple[int, int]]],
+]:
+    from vllm.platforms import current_platform
+
+    if current_platform.is_device_capability_family(100):
+        return (
+            _SM100F_TUNED_DOTPROD_BS,
+            _SM100F_TUNED_SPLITK_CONFIGS,
+        )
+    if current_platform.is_device_capability(90):
+        return (
+            _SM90_TUNED_DOTPROD_BS,
+            _SM90_TUNED_SPLITK_CONFIGS,
+        )
+    return {}, {}
 
 
 _cute_ctx = None
@@ -89,11 +140,12 @@ class LLBf16Gemm:
         self._splitk_cache: dict[tuple[int, int], Any] = {}
 
     def dispatch(self, *, M: int, K: int, N: int) -> CompileKey:
-        dotprod_max_m = _TUNED_DOTPROD_MAX_M.get((K, N), _DEFAULT_DOTPROD_MAX_M)
-        if dotprod_max_m >= M or K < 2048:
-            return self.CompileKey(backend="dotprod", M=M, K=K, bs=_DEFAULT_DOTPROD_BS)
+        tuned_bs, tuned_splitk = _arch_tuned_configs()
+        if M <= _DEFAULT_DOTPROD_MAX_M or K < 2048:
+            bs = tuned_bs.get((K, N), {}).get(M, _DEFAULT_DOTPROD_BS)
+            return self.CompileKey(backend="dotprod", M=M, K=K, bs=bs)
 
-        split_k, num_stages = _TUNED_CONFIGS.get((K, N), {}).get(
+        split_k, num_stages = tuned_splitk.get((K, N), {}).get(
             M, _DEFAULT_SPLITK_CONFIG
         )
         return self.CompileKey(backend="splitk", split_k=split_k, num_stages=num_stages)
