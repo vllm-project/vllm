@@ -28,7 +28,13 @@ def set_eagle3_aux_hidden_state_layers(
         logger.info("Using Eagle3 auxiliary layers from config: %s", aux_layers)
     else:
         aux_layers = eagle3_model.get_eagle3_default_aux_hidden_state_layers()
-        logger.info("Using Eagle3 auxiliary layers from model: %s", aux_layers)
+        logger.warning_once(
+            "Eagle3 aux layers not set in the draft model config; falling back "
+            "to the default %s. Acceptance will be low if the draft was "
+            "trained on other layers; set "
+            "`eagle_aux_hidden_state_layer_ids` in the draft config.",
+            aux_layers,
+        )
     eagle3_model.set_aux_hidden_state_layers(aux_layers)
 
 
