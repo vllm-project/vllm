@@ -13,7 +13,7 @@ import vllm.envs as envs
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
-from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel, zip_inputs
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.fa_utils import (
     compile_flash_attn_varlen_func_from_specs,
@@ -54,12 +54,6 @@ FA4_MLA_PREFILL_CAUSAL_OPTIONS = (False, True)
 FA4_MLA_PREFILL_LSE_OPTIONS = (False, True)
 
 
-@dataclass(frozen=True)
-class _FA4MLAPrefillShapeProbe:
-    max_seqlen_q: int
-    max_seqlen_k: int
-
-
 class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
     """FA4 MLA prefill compile-key wrapper used by generic JIT warmup."""
 
@@ -96,7 +90,8 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
         dtype: torch.dtype,
         num_heads: int,
         mla_dims: "MLADims",
-        shape_probe: _FA4MLAPrefillShapeProbe,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
         requires_v_padding: bool,
         causal: bool,
         fa_version: int,
@@ -106,17 +101,17 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
     ) -> CompileKey:
         return self.CompileKey(
             q_shape=(
-                batch_size * shape_probe.max_seqlen_q,
+                batch_size * max_seqlen_q,
                 num_heads,
                 mla_dims.qk_nope_head_dim + mla_dims.qk_rope_head_dim,
             ),
             k_shape=(
-                batch_size * shape_probe.max_seqlen_k,
+                batch_size * max_seqlen_k,
                 num_heads,
                 mla_dims.qk_nope_head_dim + mla_dims.qk_rope_head_dim,
             ),
             v_shape=(
-                batch_size * shape_probe.max_seqlen_k,
+                batch_size * max_seqlen_k,
                 num_heads,
                 (
                     mla_dims.qk_nope_head_dim + mla_dims.qk_rope_head_dim
@@ -125,8 +120,8 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
                 ),
             ),
             q_dtype=dtype,
-            max_seqlen_q=shape_probe.max_seqlen_q,
-            max_seqlen_k=shape_probe.max_seqlen_k,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
             softmax_scale=(mla_dims.qk_nope_head_dim + mla_dims.qk_rope_head_dim)
             ** -0.5,
             causal=causal,
@@ -145,6 +140,28 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
             window_size=window_size,
             return_softmax_lse=return_lse,
             num_splits=num_splits,
+        )
+
+    def _is_valid_warmup_shape_probe(
+        self,
+        *,
+        max_seqlen_k: int,
+        num_splits: int,
+        is_sm90: bool,
+        qk_head_dim: int,
+        effective_v_head_dim: int,
+    ) -> bool:
+        long_k = FA4_MLA_PREFILL_LONG_K_BLOCKS * FA4_MLA_PREFILL_K_TILE
+        very_long_k = FA4_MLA_PREFILL_VERY_LONG_K_BLOCKS * FA4_MLA_PREFILL_K_TILE
+        return (
+            max_seqlen_k < long_k
+            or (num_splits != 1 and max_seqlen_k == long_k)
+            or (
+                num_splits != 1
+                and max_seqlen_k == very_long_k
+                and not is_sm90
+                and qk_head_dim != effective_v_head_dim
+            )
         )
 
     def get_warmup_keys(self, vllm_config: "VllmConfig") -> list[CompileKey]:
@@ -182,51 +199,47 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
         effective_v_head_dim = (
             qk_head_dim if requires_v_padding else mla_dims.v_head_dim
         )
-        shape_probes = [
-            _FA4MLAPrefillShapeProbe(1, FA4_MLA_PREFILL_K_TILE),
-            _FA4MLAPrefillShapeProbe(
-                FA4_MLA_PREFILL_Q_TILE + 1,
-                4 * FA4_MLA_PREFILL_K_TILE,
+        shape_probes = (
+            dict(max_seqlen_q=1, max_seqlen_k=FA4_MLA_PREFILL_K_TILE),
+            dict(
+                max_seqlen_q=FA4_MLA_PREFILL_Q_TILE + 1,
+                max_seqlen_k=4 * FA4_MLA_PREFILL_K_TILE,
             ),
-        ]
-        if num_splits != 1:
-            shape_probes.extend(
-                (
-                    _FA4MLAPrefillShapeProbe(
-                        1,
-                        FA4_MLA_PREFILL_LONG_K_BLOCKS * FA4_MLA_PREFILL_K_TILE,
-                    ),
-                    _FA4MLAPrefillShapeProbe(
-                        FA4_MLA_PREFILL_Q_TILE + 1,
-                        FA4_MLA_PREFILL_LONG_K_BLOCKS * FA4_MLA_PREFILL_K_TILE,
-                    ),
-                )
-            )
-            if not is_sm90 and qk_head_dim != effective_v_head_dim:
-                shape_probes.extend(
-                    (
-                        _FA4MLAPrefillShapeProbe(
-                            1,
-                            FA4_MLA_PREFILL_VERY_LONG_K_BLOCKS * FA4_MLA_PREFILL_K_TILE,
-                        ),
-                        _FA4MLAPrefillShapeProbe(
-                            FA4_MLA_PREFILL_Q_TILE + 1,
-                            FA4_MLA_PREFILL_VERY_LONG_K_BLOCKS * FA4_MLA_PREFILL_K_TILE,
-                        ),
-                    )
-                )
+            dict(
+                max_seqlen_q=1,
+                max_seqlen_k=FA4_MLA_PREFILL_LONG_K_BLOCKS * FA4_MLA_PREFILL_K_TILE,
+            ),
+            dict(
+                max_seqlen_q=FA4_MLA_PREFILL_Q_TILE + 1,
+                max_seqlen_k=FA4_MLA_PREFILL_LONG_K_BLOCKS * FA4_MLA_PREFILL_K_TILE,
+            ),
+            dict(
+                max_seqlen_q=1,
+                max_seqlen_k=FA4_MLA_PREFILL_VERY_LONG_K_BLOCKS
+                * FA4_MLA_PREFILL_K_TILE,
+            ),
+            dict(
+                max_seqlen_q=FA4_MLA_PREFILL_Q_TILE + 1,
+                max_seqlen_k=FA4_MLA_PREFILL_VERY_LONG_K_BLOCKS
+                * FA4_MLA_PREFILL_K_TILE,
+            ),
+        )
 
         return self._trace_dispatch(self.dispatch)(
+            zip_inputs(*shape_probes),
             batch_size=FA4_MLA_PREFILL_COMPILE_BATCH_SIZE,
             dtype=dtype,
             num_heads=num_heads,
             mla_dims=mla_dims,
-            shape_probe=shape_probes,
             requires_v_padding=requires_v_padding,
+            is_sm90=is_sm90,
+            qk_head_dim=qk_head_dim,
+            effective_v_head_dim=effective_v_head_dim,
             causal=FA4_MLA_PREFILL_CAUSAL_OPTIONS,
             return_lse=FA4_MLA_PREFILL_LSE_OPTIONS,
             num_splits=num_splits,
             fa_version=fa_version,
+            _when=self._is_valid_warmup_shape_probe,
         )
 
     @staticmethod
