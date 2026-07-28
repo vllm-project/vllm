@@ -39,6 +39,9 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
+from vllm.model_executor.layers.mamba.ops.replayssm_spec_flashinfer import (
+    initialize_replayssm_spec_flashinfer_backend,
+)
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
@@ -479,6 +482,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config, self.kv_cache_config
+        )
+        initialize_replayssm_spec_flashinfer_backend(
+            self.vllm_config.mamba_config,
+            self.kv_cache_config,
+            self.cache_config.use_replayssm_spec,
         )
         cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
             attn_cg_support.min_cg_support,

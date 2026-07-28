@@ -64,6 +64,9 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_ma
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
 )
+from vllm.model_executor.layers.mamba.ops.replayssm_spec_flashinfer import (
+    initialize_replayssm_spec_flashinfer_backend,
+)
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
@@ -7625,6 +7628,11 @@ class GPUModelRunner(
         self.initialize_attn_backend(kv_cache_config, is_profiling=is_profiling)
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config, self.kv_cache_config
+        )
+        initialize_replayssm_spec_flashinfer_backend(
+            self.vllm_config.mamba_config,
+            self.kv_cache_config,
+            self.cache_config.use_replayssm_spec,
         )
         # The kernel block size for all KV cache groups. For example, if
         # kv_cache_manager uses block_size 256 for a given group, but the attention

@@ -33,6 +33,9 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_update,
 )
 from vllm.model_executor.layers.mamba.ops.layernorm_gated import rms_norm_gated
+from vllm.model_executor.layers.mamba.ops.replayssm_spec_flashinfer import (
+    get_replayssm_spec_flashinfer_backend,
+)
 from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_output_only import (  # noqa: E501
     selective_state_update_replayssm_output_only,
 )
@@ -747,8 +750,11 @@ class MambaMixer2(MambaBase, PluggableLayer):
             )
             ssm_state = self.kv_cache[1]
             spec_post_conv_cache = spec_dt_cache = None
+            spec_x_cache = spec_B_cache = None
             x_cache = dt_cache = B_cache = None
-            if self.use_replayssm_spec:
+            if self.use_replayssm_spec_flashinfer:
+                spec_x_cache, spec_B_cache, spec_dt_cache = self.kv_cache[2:]
+            elif self.use_replayssm_spec:
                 spec_post_conv_cache, spec_dt_cache = self.kv_cache[2:]
             elif self.use_replayssm:
                 x_cache, dt_cache, B_cache = self.kv_cache[2:]
@@ -1089,7 +1095,40 @@ class MambaMixer2(MambaBase, PluggableLayer):
             preallocated_ssm_out_d = preallocated_ssm_out_d.view(
                 num_decode_tokens, -1, self.head_dim
             )
-            if self.use_replayssm_spec:
+            if self.use_replayssm_spec_flashinfer:
+                assert self.replayssm_buffer_len is not None
+                assert spec_x_cache is not None
+                assert spec_B_cache is not None
+                assert spec_dt_cache is not None
+                assert query_start_loc_d is not None
+                assert attn_metadata.spec_write_pos_d is not None
+                assert attn_metadata.spec_post_origin_d is not None
+                # FlashInfer takes the split post-conv tensors in varlen form,
+                # not the packed conv_out the Triton kernel scatters itself.
+                get_replayssm_spec_flashinfer_backend()(
+                    ssm_state,
+                    spec_x_cache,
+                    spec_B_cache,
+                    spec_dt_cache,
+                    attn_metadata.spec_post_origin_d,
+                    attn_metadata.spec_write_pos_d,
+                    hidden_states_d.unsqueeze(0),
+                    dt_d.unsqueeze(0),
+                    A_d,
+                    B_d.unsqueeze(0),
+                    C_d.unsqueeze(0),
+                    preallocated_ssm_out_d.unsqueeze(0),
+                    D=D_d,
+                    dt_bias=dt_bias,
+                    dt_softplus=True,
+                    state_batch_indices=state_indices_tensor_d_input[:, 0],
+                    query_start_loc=query_start_loc_d,
+                    max_spec_len=self.max_spec_len,
+                    replayssm_buffer_len=self.replayssm_buffer_len,
+                    # Scratch (and with it the two-kernel path) is wired up
+                    # separately; leaving it unset runs the monolithic kernel.
+                )
+            elif self.use_replayssm_spec:
                 assert self.replayssm_buffer_len is not None
                 assert spec_post_conv_cache is not None
                 assert spec_dt_cache is not None
