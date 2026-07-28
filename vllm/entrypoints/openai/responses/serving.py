@@ -669,7 +669,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             if isinstance(context, HarmonyContext):
                 engine_input = self.online_renderer.render_responses_harmony_messages(
                     context.messages,
-                    cache_salt=request_cache_salt,
+                    cache_salt=None,
                 )
 
                 sampling_params.max_tokens = max_model_len - self._extract_prompt_len(

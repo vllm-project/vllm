@@ -287,9 +287,94 @@ async def test_online_renderer_renders_non_harmony_responses_with_explicit_histo
 
 
 @pytest.mark.asyncio
+async def test_online_renderer_rejects_harmony_history_for_non_harmony_model():
+    renderer = OnlineRenderer.__new__(OnlineRenderer)
+    renderer.use_harmony = False
+    request = ResponsesRequest(input="next")
+
+    result = await renderer.render_responses(
+        request,
+        previous_messages=[
+            OpenAIHarmonyMessage.from_role_and_content(Role.USER, "first")
+        ],
+    )
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error.param == "previous_response_id"
+
+
+@pytest.mark.asyncio
+async def test_online_renderer_rejects_chat_history_for_harmony_model():
+    renderer = OnlineRenderer.__new__(OnlineRenderer)
+    renderer.use_harmony = True
+    request = ResponsesRequest(input="next")
+
+    result = await renderer.render_responses(
+        request,
+        previous_messages=[{"role": "user", "content": "first"}],
+    )
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error.param == "previous_response_id"
+
+
+@pytest.mark.asyncio
+async def test_online_renderer_rejects_unsupported_harmony_tool_choice():
+    renderer = OnlineRenderer.__new__(OnlineRenderer)
+    renderer.use_harmony = True
+    request = ResponsesRequest(
+        input="next",
+        tools=[
+            {
+                "type": "function",
+                "name": "lookup",
+                "parameters": {"type": "object", "properties": {}},
+            }
+        ],
+        tool_choice={"type": "function", "name": "lookup"},
+    )
+
+    result = await renderer.render_responses(request)
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error.code == 400
+    assert result.error.param == "tool_choice"
+
+
+@pytest.mark.asyncio
+async def test_online_renderer_applies_responses_token_budget_to_harmony_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    renderer = OnlineRenderer.__new__(OnlineRenderer)
+    renderer.use_harmony = True
+    renderer.model_config = SimpleNamespace(max_model_len=5)
+    renderer.renderer = SimpleNamespace(
+        tokenizer=SimpleNamespace(truncation_side="left")
+    )
+    monkeypatch.setattr(
+        "vllm.renderers.online_renderer.render_for_completion",
+        lambda messages: [1, 2, 3, 4, 5, 6],
+    )
+    request = ResponsesRequest(
+        input="hello",
+        max_output_tokens=2,
+        truncation="auto",
+    )
+
+    result = await renderer.render_responses(request)
+
+    assert not isinstance(result, ErrorResponse)
+    assert result.engine_input["prompt_token_ids"] == [4, 5, 6]
+
+
+@pytest.mark.asyncio
 async def test_online_renderer_renders_harmony_continuation_with_call_linkage():
     renderer = OnlineRenderer.__new__(OnlineRenderer)
     renderer.use_harmony = True
+    renderer.model_config = SimpleNamespace(max_model_len=100)
+    renderer.renderer = SimpleNamespace(
+        tokenizer=SimpleNamespace(truncation_side="left")
+    )
     previous_messages = [
         OpenAIHarmonyMessage.from_role_and_content(Role.USER, "first"),
     ]
@@ -369,6 +454,10 @@ async def test_online_renderer_returns_typed_error_for_bad_harmony_call_referenc
 async def test_online_renderer_preserves_missing_harmony_builtin_tool_behavior():
     renderer = OnlineRenderer.__new__(OnlineRenderer)
     renderer.use_harmony = True
+    renderer.model_config = SimpleNamespace(max_model_len=100)
+    renderer.renderer = SimpleNamespace(
+        tokenizer=SimpleNamespace(truncation_side="left")
+    )
     request = ResponsesRequest(
         input="search",
         tools=[{"type": "web_search_preview"}],
@@ -491,7 +580,7 @@ class TestInitializeToolSessions:
         assert render_request.cache_salt == "request-salt"
 
     @pytest.mark.asyncio
-    async def test_harmony_tool_followup_preserves_cache_salt(
+    async def test_harmony_tool_followup_does_not_reuse_cache_salt(
         self, serving_responses_instance
     ):
         class ToolCallingHarmonyContext(HarmonyContext):
@@ -529,14 +618,13 @@ class TestInitializeToolSessions:
             engine_input=tokens_input([1]),
             sampling_params=MagicMock(),
             context=context,
-            request_cache_salt="tenant-salt",
         ):
             pass
 
         (
             serving_responses_instance.online_renderer.render_responses_harmony_messages.assert_called_once_with(
                 context.messages,
-                cache_salt="tenant-salt",
+                cache_salt=None,
             )
         )
 
