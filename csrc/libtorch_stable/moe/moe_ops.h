@@ -9,14 +9,16 @@ void topk_softmax(torch::stable::Tensor& topk_weights,
                   torch::stable::Tensor& topk_indices,
                   torch::stable::Tensor& token_expert_indices,
                   torch::stable::Tensor& gating_output, bool renormalize,
-                  std::optional<torch::stable::Tensor> bias);
+                  std::optional<torch::stable::Tensor> bias,
+                  std::optional<torch::stable::Tensor> is_padding);
 
 void topk_sigmoid(torch::stable::Tensor& topk_weights,
                   torch::stable::Tensor& topk_indices,
                   torch::stable::Tensor& token_expert_indices,
                   torch::stable::Tensor& gating_output, bool renormalize,
                   std::optional<torch::stable::Tensor> bias,
-                  double routed_scaling_factor);
+                  double routed_scaling_factor,
+                  std::optional<torch::stable::Tensor> is_padding);
 
 void topk_softplus_sqrt(
     torch::stable::Tensor& topk_weights, torch::stable::Tensor& topk_indices,
@@ -25,7 +27,8 @@ void topk_softplus_sqrt(
     double routed_scaling_factor,
     const std::optional<torch::stable::Tensor>& correction_bias,
     const std::optional<torch::stable::Tensor>& input_ids,
-    const std::optional<torch::stable::Tensor>& tid2eid);
+    const std::optional<torch::stable::Tensor>& tid2eid,
+    const std::optional<torch::stable::Tensor>& is_padding);
 
 void moe_sum(torch::stable::Tensor& input, torch::stable::Tensor& output,
              std::optional<torch::stable::Tensor> topk_ids,

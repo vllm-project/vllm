@@ -57,6 +57,15 @@ class DFlashSpeculator(DraftModelSpeculator):
         # Whether the anchor query position is itself a prediction. DFlash default uses
         # the anchor as the bonus token (only mask tokens predict); DSpark samples from
         # the anchor and the N-1 mask token positions. See _prepare_dflash_inputs_kernel
+        dflash_config = (
+            getattr(self.draft_model_config.hf_config, "dflash_config", None) or {}
+        )
+        if dflash_config.get("sample_from_anchor", False):
+            raise ValueError(
+                "sample_from_anchor=True is not supported for DFlash. "
+                "DFlash uses a fixed 1+N query layout where the anchor "
+                "is the bonus token."
+            )
         self.sample_from_anchor = False
 
         # Context positions for the K/V precompute. Populated by
@@ -269,6 +278,8 @@ class DFlashSpeculator(DraftModelSpeculator):
         num_reqs: int,
         num_reqs_padded: int,
         num_tokens_padded: int,
+        seq_lens_cpu_upper_bound: torch.Tensor,
+        step: int,
         num_query_per_req: int | None = None,
         causal: bool | Mapping[int, bool] = False,
     ) -> dict[str, Any] | None:
@@ -279,6 +290,8 @@ class DFlashSpeculator(DraftModelSpeculator):
             num_reqs,
             num_reqs_padded,
             num_tokens_padded,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+            step=step,
             num_query_per_req=self.num_query_per_req,
             causal=causal,
         )
@@ -427,6 +440,8 @@ class DFlashSpeculator(DraftModelSpeculator):
             num_reqs=num_reqs,
             num_reqs_padded=num_reqs_padded,
             num_tokens_padded=num_tokens_padded,
+            seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
+            step=self.num_query_per_req,
             causal=self._group_causal,
         )
         draft_slot_mappings_by_layer = build_slot_mappings_by_layer(

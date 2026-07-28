@@ -108,6 +108,11 @@ def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
     mgr.token_budgets = sorted(budgets)
     mgr.max_batch_size = 16
     mgr.use_dp = False
+    mgr.config = EncoderCudaGraphConfig(
+        modalities=["image"],
+        buffer_keys=[],
+        out_hidden_size=32,
+    )
     mgr.budget_graphs = {"default": {}}
     mgr.graph_pool = None
     mgr.graph_hits = 0
