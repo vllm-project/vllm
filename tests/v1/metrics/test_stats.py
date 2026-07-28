@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
-from vllm.v1.engine import EngineCoreOutputs, FinishReason
-
 from dataclasses import fields
 from unittest.mock import MagicMock, patch
+
 import msgspec
 
 from vllm.config import VllmConfig
-from vllm.v1.engine import FinishReason
+from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
+from vllm.v1.engine import EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.loggers import StatLoggerManager, ZmqStatLogger
 from vllm.v1.metrics.stats import (
     IterationStats,
