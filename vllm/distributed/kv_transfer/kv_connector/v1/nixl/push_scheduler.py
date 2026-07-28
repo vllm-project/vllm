@@ -245,6 +245,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             # serving layer via abort_immediately. To keep P from
             # stranding the prefill blocks, we still register an empty
             # recv so the worker emits a notif that lets P free them.
+            params["remote_block_ids"] = ()
             self._reqs_need_recv[request.request_id] = (request, [], 0)
             params["do_remote_prefill"] = False
             return False, None

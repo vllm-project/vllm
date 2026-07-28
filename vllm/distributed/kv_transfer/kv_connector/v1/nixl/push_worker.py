@@ -593,7 +593,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 handles.append(handle)
 
         if handles:
-            self._sending_transfers[req_id].extend(handles)
+            with self._sending_transfers_lock:
+                self._sending_transfers[req_id].extend(handles)
 
     def _xfer_blocks(
         self,

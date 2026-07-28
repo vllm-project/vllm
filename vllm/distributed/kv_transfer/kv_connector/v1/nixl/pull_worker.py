@@ -119,6 +119,17 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # Update last activity from this remote. Mind that cleanup is done on main
         # thread (this one), so we don't race on this structure.
         self._engine_last_active[engine_id] = time.perf_counter()
+
+        if self._bidirectional_kv_xfer_enabled and self._is_turn2_read_expired(meta):
+            logger.warning(
+                "Declining expired remote read for %s from engine %s.",
+                req_id,
+                engine_id,
+            )
+            self.xfer_stats.record_kv_expired_req()
+            self._handle_failed_transfer(req_id, None)
+            return
+
         remote_pp_rank = self.transfer_topo.resolve_remote_pp_rank(
             engine_id, self.pp_rank
         )
