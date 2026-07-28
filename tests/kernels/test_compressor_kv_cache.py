@@ -13,6 +13,7 @@ These tests cover:
 """
 
 import math
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -27,6 +28,7 @@ from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
     _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn,
     _launch_two_stage_sparse_attn_compressor,
 )
+from vllm.models.deepseek_v4.compressor import _get_c128_boundary
 from vllm.platforms import current_platform
 
 from .test_fused_indexer_q_rope_quant import quantize_to_mxfp4
@@ -56,6 +58,25 @@ def _ue8m0_reference(x: torch.Tensor, block_size: int, fp8_max: float):
         x_fp8[start:end] = quantized.to(torch.float8_e4m3fn)
 
     return x_fp8, scales
+
+
+@pytest.mark.parametrize(
+    ("starts", "query_start_loc", "expected"),
+    [
+        ([0], [0, 127], False),
+        ([0], [0, 128], True),
+        ([127], [0, 1], True),
+        ([128], [0, 127], False),
+        ([1, 255], [0, 1, 2], True),
+        (None, [0, 1], None),
+    ],
+)
+def test_get_c128_boundary(starts, query_start_loc, expected):
+    metadata = SimpleNamespace(
+        _num_computed_tokens_cpu=None if starts is None else torch.tensor(starts),
+        query_start_loc_cpu=torch.tensor(query_start_loc),
+    )
+    assert _get_c128_boundary(metadata) is expected
 
 
 # ── Test A: DeepseekV4 Attention path ──────────────────────────────────────────────

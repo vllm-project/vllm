@@ -127,6 +127,28 @@ def _register_group(group: "GroupCoordinator") -> None:
     _groups[group.unique_name] = weakref.ref(group)
 
 
+def _apply_to_device_comms(
+    action: Callable[[DeviceCommunicatorBase], None],
+) -> None:
+    """Apply ``action`` to every group's device communicator.
+
+    Walks the registered parallel groups and skips those without a device
+    communicator (absent at ``world_size == 1``).
+    """
+    comms = []
+    for group_ref in _groups.values():
+        group = group_ref()
+        if group is None:
+            continue
+        dc = group.device_communicator
+        if dc is None:
+            continue
+        comms.append(dc)
+
+    for dc in comms:
+        action(dc)
+
+
 def all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
     assert group_name in _groups, f"Group {group_name} is not found."
     group = _groups[group_name]()
@@ -400,13 +422,10 @@ class GroupCoordinator:
         self.rank = torch.distributed.get_rank()
         self.local_rank = local_rank
         self.device_index: int
-        if _WORLD is not None:
-            self.device_index = _WORLD.device_index
-        else:
-            assert local_rank >= 0, (
-                "local_rank must be provided when creating the world group"
-            )
-            self.device_index = local_rank
+        assert local_rank >= 0, (
+            "local_rank must be provided when creating the world group"
+        )
+        self.device_index = local_rank
 
         self_device_group = None
         self_cpu_group = None
@@ -1784,7 +1803,7 @@ def initialize_model_parallel(
             get_world_group().device_group
         )
 
-    # the layout order is: ExternalDP x DP x PP x TP
+    # the layout order is: ExternalDP x DP x PP x PCP x TP
     # ExternalDP is the data parallel group that is not part of the model,
     # every dp rank can generate independently (in verl integration).
     # DP is the data parallel group that is part of the model,
@@ -1821,17 +1840,13 @@ def initialize_model_parallel(
     # Build the DCP model-parallel groups.
     global _DCP
     assert _DCP is None, "decode context model parallel group is already initialized"
-    # Note(hc): In the current implementation of decode context parallel,
-    # dcp_size must not exceed tp_size, because the world size does not
-    # change by DCP, it simply reuses the GPUs of TP group, and split one
-    # TP group into tp_size//dcp_size DCP groups.
-    group_ranks = all_ranks.reshape(-1, decode_context_model_parallel_size).unbind(0)
+    dcp_size = decode_context_model_parallel_size or 1
+    dcp_ranks = local_all_ranks if enable_elastic_ep else all_ranks
+    if dcp_size > 1:
+        # DCP spans PCP first, then TP for full TP x PCP groups.
+        dcp_ranks = dcp_ranks.transpose(-1, -2)
+    group_ranks = dcp_ranks.reshape(-1, dcp_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
-    if enable_elastic_ep:
-        group_ranks = local_all_ranks.reshape(
-            -1, decode_context_model_parallel_size
-        ).unbind(0)
-        group_ranks = [x.tolist() for x in group_ranks]
     _DCP = init_model_parallel_group(
         group_ranks,
         get_world_group().local_rank,
@@ -2005,6 +2020,13 @@ def ensure_model_parallel_initialized(
         f"{pcp_world_size=} vs. "
         f"{prefill_context_model_parallel_size=}"
     )
+    dcp_world_size = get_dcp_group().world_size
+    dcp_model_parallel_size = decode_context_model_parallel_size or 1
+    assert dcp_world_size == dcp_model_parallel_size, (
+        "decode context parallel group already initialized, but of unexpected size: "
+        f"{dcp_world_size=} vs. "
+        f"{dcp_model_parallel_size=}"
+    )
 
 
 def prepare_communication_buffer_for_model(model: torch.nn.Module):
@@ -2026,6 +2048,20 @@ def prepare_communication_buffer_for_model(model: torch.nn.Module):
         _EP.prepare_communication_buffer_for_model(model)
     if _EPLB is not None:
         _EPLB.prepare_communication_buffer_for_model(model)
+
+
+def checkpoint_prepare_distributed_state() -> None:
+    """Prepare every device communicator for a process checkpoint."""
+    torch.accelerator.synchronize()
+    _apply_to_device_comms(lambda comm: comm.checkpoint_prepare())
+    torch.accelerator.synchronize()
+
+
+def checkpoint_restore_distributed_state() -> None:
+    """Restore every device communicator after a process checkpoint."""
+    torch.accelerator.synchronize()
+    _apply_to_device_comms(lambda comm: comm.checkpoint_restore())
+    torch.accelerator.synchronize()
 
 
 def model_parallel_is_initialized():

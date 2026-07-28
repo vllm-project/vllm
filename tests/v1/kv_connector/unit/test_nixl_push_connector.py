@@ -25,6 +25,7 @@ import queue
 import threading
 import time
 from collections import defaultdict
+from concurrent.futures import Future
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -320,6 +321,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._finished_blocks_inbox = queue.Queue()
         w._pending_completion_notifs = queue.Queue()
         w._evict_finished_inbox = queue.Queue()
+        w._deferred_push_inbox = queue.Queue()
         w._push_writer_wake = threading.Event()
         w._push_writer_stop = threading.Event()
         w._push_writer_thread = None
@@ -334,6 +336,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w.world_size = 1
         w.engine_id = "test-decode-engine"
         w._remote_agents = {}
+        w._physical_blocks_per_logical_kv_block = 1
 
         # Track _do_start_push_kv invocations.
         calls: list[tuple[str, Any, dict[str, Any]]] = []
@@ -487,7 +490,7 @@ class TestPushWriterStartLoadKv:
         # path here.
         w._send_heartbeats = lambda metadata: None
         # Stub logical-to-kernel mapping used by reqs_to_recv.
-        w._logical_to_kernel_block_ids = lambda x: x
+        w._logical_to_kernel_block_ids = lambda x, ratio: x
 
         meta = NixlConnectorMetadata()
         meta.push_registrations = {
@@ -504,6 +507,112 @@ class TestPushWriterStartLoadKv:
         assert w._finished_blocks_inbox.qsize() == 1
         assert w._push_writer_wake.is_set()
         assert w.start_push_calls == []
+
+
+# The P→D handshake must run on the base worker's background executor, never
+# blocking the writer thread: ``_do_start_push_kv`` defers the WRITE until the
+# handshake resolves, then re-drives via ``_deferred_push_inbox``. These call
+# the *real* ``_do_start_push_kv`` (the stub overrides it for matching tests).
+def _real_do_start_push_kv(w, *args):
+    return NixlPushConnectorWorker._do_start_push_kv(w, *args)
+
+
+def test_do_start_push_kv_defers_then_writes_when_handshake_ready():
+    """Full happy-path lifecycle: an in-flight handshake defers the WRITE (no
+    NIXL op from the writer or the executor callback); once it resolves the
+    request is re-queued on ``_deferred_push_inbox`` with the wake set; and on
+    re-drive with the handshake ready the WRITE is issued with a correct
+    ReqMeta."""
+    w = _StubWriterWorker.fresh()
+    w._logical_to_kernel_block_ids = lambda x, ratio: x
+    xfer_calls: list[dict[str, Any]] = []
+    w._xfer_blocks_for_req = lambda **kw: xfer_calls.append(kw)
+
+    fut: Future = Future()
+    w._ensure_handshake = lambda *a, **k: fut
+
+    rd = _registration_data("req-hs", decode_engine_id="decode-engine")
+    _real_do_start_push_kv(w, "req-hs", ([1, 2, 3],), rd)
+
+    # Handshake pending -> nothing issued, nothing queued, no wake.
+    assert xfer_calls == []
+    assert w._deferred_push_inbox.qsize() == 0
+    assert not w._push_writer_wake.is_set()
+
+    # Handshake completes: request re-queued for the writer, wake set, but no
+    # *direct* WRITE from the callback (wrong thread for NIXL ops).
+    fut.set_result(({(0, 0): "agent"}, 0.0))
+    assert xfer_calls == []
+    assert w._push_writer_wake.is_set()
+    rid, blocks, reg = w._deferred_push_inbox.get_nowait()
+    assert (rid, blocks, reg) == ("req-hs", ([1, 2, 3],), rd)
+
+    # Re-drive on the writer with the handshake now ready -> WRITE issued.
+    w._ensure_handshake = lambda *a, **k: None
+    _real_do_start_push_kv(w, rid, blocks, reg)
+    assert len(xfer_calls) == 1
+    assert xfer_calls[0]["req_id"] == "req-hs"
+    meta = xfer_calls[0]["meta"]
+    assert meta.remote is not None
+    assert meta.remote.engine_id == "decode-engine"
+    # RemoteMeta.request_id is D's request id from the registration.
+    assert meta.remote.request_id == "req-hs"
+
+
+def test_do_start_push_kv_drops_request_on_handshake_failure():
+    """Handshake raises: the request is dropped (not re-queued, no WRITE) and
+    the failure is logged. Blocks are reclaimed by the lease/watchdog, matching
+    the old blocking behaviour."""
+    w = _StubWriterWorker.fresh()
+    w._logical_to_kernel_block_ids = lambda x: x
+    xfer_calls: list[dict[str, Any]] = []
+    w._xfer_blocks_for_req = lambda **kw: xfer_calls.append(kw)
+    failures: list[dict[str, Any]] = []
+    w._log_failure = lambda **kw: failures.append(kw)
+
+    fut: Future = Future()
+    w._ensure_handshake = lambda *a, **k: fut
+
+    _real_do_start_push_kv(w, "req-fail", ([9],), _registration_data("req-fail"))
+    fut.set_exception(RuntimeError("handshake boom"))
+
+    assert w._deferred_push_inbox.qsize() == 0
+    assert xfer_calls == []
+    assert len(failures) == 1
+    assert failures[0]["failure_type"] == "push_handshake_failed"
+
+
+def test_writer_loop_drains_deferred_push_inbox():
+    """The writer loop drains ``_deferred_push_inbox`` and re-drives
+    ``_do_start_push_kv`` for each entry (event-driven, no polling)."""
+    w = _StubWriterWorker.fresh()
+    w.nixl_wrapper = MagicMock()
+    w.nixl_wrapper.get_new_notifs.return_value = {}
+
+    processed = threading.Event()
+
+    def _tracked(rid, blocks, rd):
+        w.start_push_calls.append((rid, blocks, rd))
+        processed.set()
+
+    w._do_start_push_kv = _tracked  # type: ignore[method-assign]
+
+    w._deferred_push_inbox.put(
+        ("req-retry", ([1, 2],), _registration_data("req-retry"))
+    )
+    w._push_writer_wake.set()
+
+    t = threading.Thread(target=w._push_writer_loop, daemon=True)
+    t.start()
+    try:
+        assert processed.wait(timeout=2.0), "writer did not drain deferred inbox"
+    finally:
+        w._push_writer_stop.set()
+        w._push_writer_wake.set()
+        t.join(timeout=2)
+
+    assert len(w.start_push_calls) == 1
+    assert w.start_push_calls[0][0] == "req-retry"
 
 
 class TestPushWriterNotifs:
@@ -775,7 +884,7 @@ class TestPushWriterNegative:
         """Empty metadata must not wake the writer or enqueue anything."""
         w = _StubWriterWorker.fresh()
         w._send_heartbeats = lambda metadata: None
-        w._logical_to_kernel_block_ids = lambda x: x
+        w._logical_to_kernel_block_ids = lambda x, ratio: x
 
         meta = NixlConnectorMetadata()
         w.start_load_kv(meta)
@@ -944,7 +1053,7 @@ class TestPushWriterMlaReplication:
                 rank_offset_factor=0,
             )
         }
-        w._logical_to_remote_kernel_block_ids = lambda block_ids, ratio: block_ids
+        w._logical_to_kernel_block_ids = lambda block_ids, ratio: block_ids
         w.dst_xfer_side_handles = {engine_id: {r: 1000 + r for r in d_ranks}}
         w.src_xfer_handles_by_block_size = {16: 2000}
         w._remote_agents = {engine_id: {(0, r): f"agent-{r}" for r in d_ranks}}
