@@ -30,6 +30,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     get_conv_copy_spec,
     get_temporal_copy_spec,
 )
+from vllm.model_executor.layers.rwkv7 import rwkv7_recurrent_scan_packed
 from vllm.model_executor.models.config import MODELS_CONFIG_MAP, MambaModelConfig
 from vllm.model_executor.models.rwkv7 import (
     RWKV7Block,
@@ -71,6 +72,87 @@ def _initialize_module_parameters(module: torch.nn.Module) -> None:
             parameter.data.fill_(1.0)
         else:
             parameter.data.normal_(mean=0.0, std=0.02, generator=generator)
+
+
+def _rwkv7_recurrent_oracle_packed(
+    r: torch.Tensor,
+    w: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    kk: torch.Tensor,
+    a: torch.Tensor,
+    state: torch.Tensor,
+    query_start_loc: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    output = torch.empty_like(v)
+    final_state = state.clone()
+    for seq_idx in range(query_start_loc.numel() - 1):
+        start = int(query_start_loc[seq_idx].item())
+        end = int(query_start_loc[seq_idx + 1].item())
+        seq_state = state[seq_idx].transpose(-2, -1)
+        for token_idx in range(start, end):
+            sa = (seq_state * (-kk[token_idx]).unsqueeze(-1)).sum(dim=-2)
+            seq_state = (
+                torch.exp(w[token_idx]).unsqueeze(-1) * seq_state
+                + (kk[token_idx] * a[token_idx]).unsqueeze(-1) * sa.unsqueeze(-2)
+                + k[token_idx].unsqueeze(-1) * v[token_idx].unsqueeze(-2)
+            )
+            output[token_idx] = (seq_state * r[token_idx].unsqueeze(-1)).sum(dim=-2)
+        final_state[seq_idx] = seq_state.transpose(-2, -1)
+    return output, final_state
+
+
+def _test_rwkv7_recurrent_scan_packed(device: str) -> None:
+    generator = torch.Generator(device=device).manual_seed(123)
+    num_tokens, num_heads, key_dim, value_dim = 7, 3, 5, 4
+    vectors = [
+        torch.randn(
+            num_tokens,
+            num_heads,
+            key_dim,
+            device=device,
+            generator=generator,
+        )
+        for _ in range(5)
+    ]
+    r, w, k, kk, a = vectors
+    w = -w.abs()
+    v = torch.randn(
+        num_tokens,
+        num_heads,
+        value_dim,
+        device=device,
+        generator=generator,
+    )
+    state = torch.randn(
+        2,
+        num_heads,
+        value_dim,
+        key_dim,
+        device=device,
+        generator=generator,
+    )
+    query_start_loc = torch.tensor([0, 2, 7], dtype=torch.int32, device=device)
+
+    output, final_state = rwkv7_recurrent_scan_packed(
+        r, w, k, v, kk, a, state, query_start_loc
+    )
+    expected_output, expected_state = _rwkv7_recurrent_oracle_packed(
+        r, w, k, v, kk, a, state, query_start_loc
+    )
+
+    torch.testing.assert_close(output, expected_output, rtol=2e-4, atol=1e-4)
+    torch.testing.assert_close(final_state, expected_state, rtol=2e-4, atol=1e-4)
+
+
+def test_rwkv7_recurrent_scan_packed_matches_oracle():
+    _test_rwkv7_recurrent_scan_packed("cpu")
+
+
+def test_rwkv7_recurrent_scan_packed_matches_oracle_cuda():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to exercise the RWKV7 Triton scan.")
+    _test_rwkv7_recurrent_scan_packed("cuda")
 
 
 def _make_prefill_metadata(

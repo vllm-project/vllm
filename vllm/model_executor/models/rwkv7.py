@@ -31,6 +31,10 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFuncCalculator,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rwkv7 import (
+    rwkv7_recurrent_scan_packed,
+    rwkv7_recurrent_step,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -138,19 +142,31 @@ def _custom_op_tensor_or_none(tensor: torch.Tensor) -> torch.Tensor | None:
 
 
 def _rwkv7_recurrent_step(
-    recurrent_state: torch.Tensor,
+    r: torch.Tensor,
     w: torch.Tensor,
-    kk: torch.Tensor,
-    a: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-) -> torch.Tensor:
-    sa = (recurrent_state * (-kk).unsqueeze(-1)).sum(dim=-2)
-    return (
-        torch.exp(w).unsqueeze(-1) * recurrent_state
-        + (kk * a).unsqueeze(-1) * sa.unsqueeze(-2)
-        + k.unsqueeze(-1) * v.unsqueeze(-2)
+    kk: torch.Tensor,
+    a: torch.Tensor,
+    recurrent_state: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    unbatched = recurrent_state.ndim == 3
+    if unbatched:
+        r, w, k, v, kk, a, recurrent_state = (
+            tensor.unsqueeze(0) for tensor in (r, w, k, v, kk, a, recurrent_state)
+        )
+    output, final_state = rwkv7_recurrent_step(
+        r,
+        w,
+        k,
+        v,
+        kk,
+        a,
+        recurrent_state,
     )
+    if unbatched:
+        return output[0], final_state[0]
+    return output, final_state
 
 
 def _rwkv7_recurrent_scan(
@@ -165,27 +181,25 @@ def _rwkv7_recurrent_scan(
     if initial_state is None:
         recurrent_state = torch.zeros(
             r.shape[1],
-            r.shape[2],
             v.shape[2],
+            r.shape[2],
             device=r.device,
             dtype=torch.float32,
         )
     else:
         recurrent_state = initial_state.to(torch.float32)
-
-    outputs: list[torch.Tensor] = []
-    for idx in range(r.shape[0]):
-        recurrent_state = _rwkv7_recurrent_step(
-            recurrent_state,
-            w[idx],
-            kk[idx],
-            a[idx],
-            k[idx],
-            v[idx],
-        )
-        outputs.append((recurrent_state * r[idx].unsqueeze(-1)).sum(dim=-2))
-
-    return torch.stack(outputs, dim=0), recurrent_state
+    query_start_loc = torch.tensor([0, r.shape[0]], dtype=torch.int32, device=r.device)
+    output, final_state = rwkv7_recurrent_scan_packed(
+        r,
+        w,
+        k,
+        v,
+        kk,
+        a,
+        recurrent_state.unsqueeze(0),
+        query_start_loc,
+    )
+    return output, final_state[0]
 
 
 def _rwkv7_recurrent_scan_varlen(
@@ -198,27 +212,26 @@ def _rwkv7_recurrent_scan_varlen(
     query_start_loc: torch.Tensor,
     initial_state: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    outputs: list[torch.Tensor] = []
-    final_states: list[torch.Tensor] = []
     num_sequences = query_start_loc.numel() - 1
-
-    for seq_idx in range(num_sequences):
-        start = int(query_start_loc[seq_idx].item())
-        end = int(query_start_loc[seq_idx + 1].item())
-        seq_initial_state = None if initial_state is None else initial_state[seq_idx]
-        seq_output, seq_final_state = _rwkv7_recurrent_scan(
-            r[start:end],
-            w[start:end],
-            k[start:end],
-            v[start:end],
-            kk[start:end],
-            a[start:end],
-            seq_initial_state,
+    if initial_state is None:
+        initial_state = torch.zeros(
+            num_sequences,
+            r.shape[1],
+            v.shape[2],
+            r.shape[2],
+            device=r.device,
+            dtype=torch.float32,
         )
-        outputs.append(seq_output)
-        final_states.append(seq_final_state)
-
-    return torch.cat(outputs, dim=0), torch.stack(final_states, dim=0)
+    return rwkv7_recurrent_scan_packed(
+        r,
+        w,
+        k,
+        v,
+        kk,
+        a,
+        initial_state.to(torch.float32),
+        query_start_loc,
+    )
 
 
 def rwkv7_attention(
@@ -737,8 +750,8 @@ class RWKV7Attention(nn.Module):
         )
         final_recurrent_state = hidden_states.new_empty(
             self.local_num_heads,
-            self.head_dim,
             self.head_v_dim,
+            self.head_dim,
             dtype=RWKV7_RUNTIME_DTYPE,
         )
         v_first_out = hidden_states.new_empty(
@@ -776,15 +789,15 @@ class RWKV7Attention(nn.Module):
             v_first,
         )
         recurrent_state = recurrent_state.to(torch.float32)
-        final_recurrent_state = _rwkv7_recurrent_step(
-            recurrent_state,
+        recurrent_output, final_recurrent_state = _rwkv7_recurrent_step(
+            r,
             w,
-            kk,
-            a,
             k,
             v,
+            kk,
+            a,
+            recurrent_state,
         )
-        recurrent_output = (final_recurrent_state * r.unsqueeze(-1)).sum(dim=-2)
 
         output = self._finalize_attention_output(
             recurrent_output,
@@ -918,8 +931,8 @@ class RWKV7Block(nn.Module, MambaBase):
             (self.hidden_size,),
             (
                 self.num_heads // get_tp_world_size(),
-                self.head_dim,
                 self.value_dim // self.num_heads,
+                self.head_dim,
             ),
             (self.hidden_size,),
         )
