@@ -18,6 +18,7 @@ steps:
     - pytest -v -s cuda/test_platform_no_cuda_init.py
 
 - label: Cudagraph
+  device: h200_35gb
   key: cudagraph
   timeout_in_minutes: 30
   source_file_dependencies:
@@ -25,7 +26,10 @@ steps:
   - vllm/v1/cudagraph_dispatcher.py
   - vllm/config/compilation.py
   - vllm/compilation
+  - vllm/v1/worker/encoder_cudagraph.py
+  - vllm/v1/worker/encoder_cudagraph_defs.py
   commands:
     - pytest -v -s v1/cudagraph/test_cudagraph_dispatch.py
     - pytest -v -s v1/cudagraph/test_cudagraph_mode.py
     - pytest -v -s v1/cudagraph/test_breakable_cudagraph.py
+    - pytest -v -s v1/cudagraph/test_encoder_cudagraph.py

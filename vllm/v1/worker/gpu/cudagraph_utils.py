@@ -17,6 +17,7 @@ from vllm.compilation.breakable_cudagraph import (
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.distributed.parallel_state import (
     get_pp_group,
     graph_capture,
@@ -253,12 +254,12 @@ class CudaGraphManager:
 
             if mixed_mode:
                 # for PIECEWISE graphs there is no limit on requests when replaying
-                # i.e. no request padding is needed
-                # so we leave it as None
+                # i.e. no request padding is needed, so we leave it as None.
+                # For breakable PW graphs, break-point kernels read the real batch
+                # from the forward context; in-graph kernels handle the token padding
+                # themselves from the padded slot_mapping (rows with slot == -1).
                 num_reqs = None
-                if mixed_mode == CUDAGraphMode.FULL or (
-                    mixed_mode == CUDAGraphMode.PIECEWISE and self.use_breakable_cg
-                ):
+                if mixed_mode == CUDAGraphMode.FULL:
                     num_reqs = min(num_tokens, self.max_num_reqs)
                 desc = BatchExecutionDescriptor(
                     cg_mode=mixed_mode,
@@ -346,6 +347,10 @@ class CudaGraphManager:
                         # Sync offloader's copy stream before capture.
                         # Ensure any pre-capture prefetches from offloader are complete.
                         get_offloader().sync_prev_onload()
+                        if self.pool is not None:
+                            set_graph_pool_id(self.pool)
+                        else:
+                            set_graph_pool_id(current_platform.graph_pool_handle())
                         with torch.cuda.graph(graph, self.pool):
                             forward_fn(CUDAGraphMode.NONE)
                             # Join offloader's copy stream after forward to avoid
@@ -493,10 +498,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                 block_tables,
                 attn_groups,
                 kv_cache_config,
-                skip_attn=(
-                    desc.cg_mode == CUDAGraphMode.PIECEWISE
-                    and not self.use_breakable_cg
-                ),
+                full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
             )
 
             # Capture with dummy rows marked as padding.
@@ -505,7 +507,6 @@ class ModelCudaGraphManager(CudaGraphManager):
             def forward_fn(cg_mode: CUDAGraphMode) -> None:
                 batch_descriptor = None
                 if cg_mode == CUDAGraphMode.PIECEWISE:
-                    assert (attn_metadata is not None) == self.use_breakable_cg
                     batch_descriptor = BatchDescriptor(
                         num_tokens=num_tokens,
                         has_lora=has_lora,
@@ -588,7 +589,7 @@ def prepare_inputs_to_capture(
     block_tables: BlockTables,
     attn_groups: list[list[AttentionGroup]],
     kv_cache_config: KVCacheConfig,
-    skip_attn: bool = False,
+    full_cudagraph: bool,
 ) -> AttentionState:
     input_batch = InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
@@ -609,15 +610,36 @@ def prepare_inputs_to_capture(
         )
         input_batch.dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[:num_reqs]
 
-    attn_metadata = None
-    if not skip_attn:
-        attn_metadata = model_state.prepare_attn(
-            input_batch,
-            CUDAGraphMode.NONE,
-            input_block_tables,
-            slot_mappings,
-            attn_groups,
-            kv_cache_config,
-            for_capture=True,
-        )
+    # NOTE(woosuk): Attention metadata is required not just by standard attention
+    # kernels, but also by specialized attention-like operations (e.g., Inkling's sconv,
+    # DSV4 compressor), which maintain their own states and require special metadata
+    # such as block tables.
+    # During CUDA graph capture:
+    # - For FULL CUDA graphs: We set for_capture=True so that both attention and
+    #   attention-like ops produce capturable metadata compatible with CUDA graphs.
+    # - For PIECEWISE CUDA graphs: We still build attention metadata, but set
+    #   for_capture=False. This is because:
+    #     * Attention-like ops (such as sconv or DSV4 compressor) may not be used as
+    #       breakpoints in PIECEWISE CUDA graphs, so we must generate their attention
+    #       metadata so they can execute and be captured during graph capture.
+    #     * Standard attention ops that are treated as breakpoints will be executed
+    #       eagerly at capture time (not included in the graph itself), and for these,
+    #       setting for_capture=False is essential. Some attention backends
+    #       (like linear attention) cannot generate capturable metadata for prefill,
+    #       so for_capture=False ensures they execute without issue.
+    #     * We assume that attention-like operations intended for capture will still
+    #       produce capturable metadata, even when for_capture=False. While this
+    #       assumption is brittle, it currently works in practice.
+    # In summary: We always generate attention metadata for both FULL and PIECEWISE
+    # CUDA graphs, setting for_capture=True for FULL graphs, and for_capture=False
+    # for PIECEWISE graphs, to ensure correct execution and capture.
+    attn_metadata = model_state.prepare_attn(
+        input_batch,
+        CUDAGraphMode.NONE,
+        input_block_tables,
+        slot_mappings,
+        attn_groups,
+        kv_cache_config,
+        for_capture=full_cudagraph,
+    )
     return AttentionState(attn_metadata, slot_mappings_by_layer)

@@ -26,6 +26,7 @@ from vllm.models.deepseek_v4.common.ops import (
     fused_indexer_q_rope_quant,
     fused_q_kv_rmsnorm,
 )
+from vllm.models.deepseek_v4.common.ops.fused_indexer_q import MXFP4_BLOCK_SIZE
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import (
@@ -46,6 +47,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.models.deepseek_v4.common.rope import build_deepseek_v4_rope
 from vllm.models.deepseek_v4.compressor import DeepseekCompressor
+from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import (
     execute_in_parallel,
     maybe_execute_in_parallel,
@@ -63,6 +65,25 @@ from vllm.v1.kv_cache_interface import (
 )
 
 logger = init_logger(__name__)
+
+
+@triton.jit
+def _fill_short_context_topk_indices(
+    output,
+    positions,
+    TOP_K: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    PADDED_TOP_K: tl.constexpr,
+):
+    # small triton kernel that selects every candidate, -1 otherwise
+    row = tl.program_id(0)
+    offsets = tl.arange(0, PADDED_TOP_K)
+    num_compressed = (tl.load(positions + row) + 1) // COMPRESS_RATIO
+    tl.store(
+        output + row * TOP_K + offsets,
+        tl.where(offsets < num_compressed, offsets, -1),
+        mask=offsets < TOP_K,
+    )
 
 
 def _resolve_dsv4_kv_cache_dtype(
@@ -727,11 +748,16 @@ class DeepseekV4Indexer(nn.Module):
         )
 
         assert cache_config is not None, "Deepseek V4 indexer requires cache_config"
-        # NOTE(yifan): FP8 indxer cache use the same layout as V3.2:
-        # head_dim bytes = 128 fp8 + 4 fp32 scale = 132.
-        # For FP4 indexer cache, we still allocate the same amount of memory as FP8,
-        # but only use the first half of the memory.
-        k_cache_head_dim = self.head_dim + self.head_dim // self.quant_block_size * 4
+        if self.use_fp4_kv:
+            # MXFP4 stores two values per byte plus one UE8M0 byte per 32 values.
+            # head_dim bytes = 64 packed values + 4 UE8M0 scales = 68.
+            k_cache_head_dim = self.head_dim // 2 + self.head_dim // MXFP4_BLOCK_SIZE
+        else:
+            # NOTE(yifan): FP8 indexer cache uses the same layout as V3.2:
+            # head_dim bytes = 128 fp8 + 4 fp32 scale = 132.
+            k_cache_head_dim = (
+                self.head_dim + self.head_dim // self.quant_block_size * 4
+            )
         self.k_cache = DeepseekV4IndexerCache(
             head_dim=k_cache_head_dim,
             dtype=torch.uint8,
@@ -780,6 +806,29 @@ class DeepseekV4Indexer(nn.Module):
         rotary_emb: nn.Module,
     ) -> torch.Tensor:
         compressor = self.compressor
+
+        attn_metadata = get_forward_context().attn_metadata
+        if isinstance(attn_metadata, dict):
+            indexer_metadata = cast(Any, attn_metadata[self.k_cache.prefix])
+            if indexer_metadata.max_seq_len // self.compress_ratio <= self.topk_tokens:
+                # candidates num smaller than topk, every candidate is selected
+                # but we still need to build k cache
+                compressor(compressed_kv_score, positions, rotary_emb)
+                assert self.topk_indices_buffer is not None
+                num_tokens = (
+                    indexer_metadata.num_decode_tokens
+                    + indexer_metadata.num_prefill_tokens
+                )
+                if num_tokens > 0:
+                    _fill_short_context_topk_indices[(num_tokens,)](
+                        self.topk_indices_buffer,
+                        positions,
+                        TOP_K=self.topk_tokens,
+                        COMPRESS_RATIO=self.compress_ratio,
+                        PADDED_TOP_K=triton.next_power_of_2(self.topk_tokens),
+                        num_warps=8,
+                    )
+                return self.topk_indices_buffer
 
         def wq_b_and_q_quant():
             # ReplicatedLinear returns (output, bias); bias is None.

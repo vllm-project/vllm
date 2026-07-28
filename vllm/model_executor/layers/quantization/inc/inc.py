@@ -49,6 +49,11 @@ class INCConfig(QuantizationConfig):
         "awq:marlin",
         "marlin",
     }
+    MXFP8_BITS = 8
+    MXFP8_GROUP_SIZE = 32
+    MXFP8_DATA_TYPE = "mx_fp"
+    MXFP8_PACKING_FORMAT = "auto_round:llm_compressor"
+    MXFP8_SUPPORTED_ACT_DTYPES = {"mx_fp", "mx_fp_rceil"}
 
     def __init__(
         self,
@@ -72,8 +77,8 @@ class INCConfig(QuantizationConfig):
         is_mxfp = "mx_fp" in data_type
         if data_type not in self.SUPPORTED_DTYPES and not is_mxfp:
             raise ValueError(
-                f"Unsupported data_type: {data_type},"
-                f" currently only support  {self.SUPPORTED_DTYPES}."
+                f"Unsupported data_type: {data_type}, "
+                f"currently only support {self.SUPPORTED_DTYPES}."
             )
         if packing_format not in self.SUPPORTED_FORMATS:
             raise ValueError(
@@ -82,7 +87,7 @@ class INCConfig(QuantizationConfig):
             )
         if backend not in self.SUPPORTED_BACKENDS:
             raise ValueError(
-                f"Unsupported backend: {backend},  "
+                f"Unsupported backend: {backend}, "
                 f"currently only support {self.SUPPORTED_BACKENDS}."
             )
 
@@ -101,11 +106,58 @@ class INCConfig(QuantizationConfig):
         self.pack_factor = Fraction(32, weight_bits)
         self.config_parser = INCConfigParser(self)
 
+        self._validate_supported_quantization()
+
     def __repr__(self) -> str:
         return (
             f"INCConfig(weight_bits={self.weight_bits}, "
             f"group_size={self.group_size}, sym={self.sym})"
         )
+
+    def _validate_supported_quantization(self) -> None:
+        if self.data_type == self.MXFP8_DATA_TYPE:
+            assert self.weight_bits == self.MXFP8_BITS, (
+                f"INC MXFP8 only supports bits=8, but found bits={self.weight_bits}."
+            )
+            assert self.group_size == self.MXFP8_GROUP_SIZE, (
+                "INC MXFP8 only supports group_size=32, "
+                f"but found group_size={self.group_size}."
+            )
+            assert self.sym, "INC MXFP8 only supports symmetric weights."
+            assert self.packing_format == self.MXFP8_PACKING_FORMAT, (
+                "INC MXFP8 only supports "
+                f"packing_format={self.MXFP8_PACKING_FORMAT!r}, "
+                f"but found {self.packing_format!r}."
+            )
+            assert self.backend == "auto", (
+                "INC MXFP8 only supports backend='auto', "
+                f"but found backend={self.backend!r}."
+            )
+        elif self.packing_format == self.MXFP8_PACKING_FORMAT:
+            raise ValueError(
+                f"packing_format={self.MXFP8_PACKING_FORMAT!r} requires "
+                f"data_type={self.MXFP8_DATA_TYPE!r}."
+            )
+
+    def _validate_raw_config(self, config: dict[str, Any]) -> None:
+        if self.data_type != self.MXFP8_DATA_TYPE:
+            return
+
+        expected_fields = {
+            "act_bits": self.MXFP8_BITS,
+            "act_data_type": self.MXFP8_DATA_TYPE,
+            "act_group_size": self.MXFP8_GROUP_SIZE,
+            "act_sym": True,
+            "act_dynamic": True,
+            "enable_quanted_input": False,
+        }
+        for field_name, expected_value in expected_fields.items():
+            actual_value = self.get_from_keys_or(config, [field_name], expected_value)
+            assert actual_value == expected_value, (
+                "INC MXFP8 only supports "
+                f"{field_name}={expected_value!r}, "
+                f"but found {field_name}={actual_value!r}."
+            )
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
@@ -125,7 +177,7 @@ class INCConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "INCConfig":
-        return cls(
+        quant_config = cls(
             weight_bits=cls.get_from_keys(config, ["bits"]),
             group_size=cls.get_from_keys(config, ["group_size"]),
             sym=cls.get_from_keys(config, ["sym"]),
@@ -139,6 +191,8 @@ class INCConfig(QuantizationConfig):
             data_type=cls.get_from_keys_or(config, ["data_type"], "int"),
             backend=cls.get_from_keys_or(config, ["backend", "vllm_backend"], "auto"),
         )
+        quant_config._validate_raw_config(config)
+        return quant_config
 
     def get_layer_config(self, layer, layer_name: str):
         return self.config_parser.get_layer_config(layer, layer_name)
