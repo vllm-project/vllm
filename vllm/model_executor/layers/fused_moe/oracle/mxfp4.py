@@ -502,6 +502,7 @@ def select_mxfp4_moe_backend(
         _get_priority_backends_for_gpt_oss(), requested_activation_key
     )
 
+    unsupported_reasons = []
     for backend in AVAILABLE_BACKENDS:
         # Use requested_activation_key if provided, otherwise use backend default
         act_key = (
@@ -518,6 +519,7 @@ def select_mxfp4_moe_backend(
                 return backend, k_cls
             else:
                 logger.debug_once(_make_log_unsupported(backend, reason))
+                unsupported_reasons.append((backend, reason))
 
     if current_platform.is_xpu():
         backend = Mxfp4MoeBackend.XPU
@@ -541,26 +543,19 @@ def select_mxfp4_moe_backend(
             activation_format,
         )
 
-    if current_platform.is_rocm():
-        backend = Mxfp4MoeBackend.TRITON_UNFUSED
-        logger.info_once(_make_log_backend(backend))
-        return _return_or_raise(
-            Mxfp4MoeBackend.TRITON_UNFUSED,
-            config,
-            kMxfp4Static,
-            None,
-            activation_format,
-        )
-
-    if current_platform.is_cuda():
-        raise NotImplementedError(
-            "No MXFP4 MoE backend supports the deployment configuration. "
-            f"weight_key=kMxfp4Static, activation_key={activation_key}. "
-            "Native backends require specific hardware. "
-            "Set `VLLM_LOGGING_LEVEL=DEBUG` to see detailed unsupported reasons. "
-        )
-
-    return Mxfp4MoeBackend.NONE, None
+    unsupported_log = "; ".join(
+        [
+            f"backend: {backend.value}, reason: {reason}"
+            for backend, reason in unsupported_reasons
+        ]
+    )
+    raise NotImplementedError(
+        "No MXFP4 MoE backend supports the deployment configuration. "
+        f"weight_key=kMxfp4Static, activation_key={activation_key}. "
+        f"Candidate backends were: "
+        f"{[backend.value for backend in AVAILABLE_BACKENDS]}. "
+        f"Unsupported reasons: {unsupported_log}. "
+    )
 
 
 def select_deepseek_v4_mxfp4_moe_backend(
