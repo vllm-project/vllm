@@ -116,6 +116,9 @@ def test_online_quantization(
     if use_rocm_aiter:
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
+    if current_platform.is_xpu() and quant_scheme == "fp8_per_block":
+        pytest.skip("Skip test for online fp8_per_block on XPU platform.")
+
     # `LLM.apply_model` requires pickling a function.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
@@ -151,7 +154,7 @@ def test_online_quantization(
             if quant_scheme == "mxfp4":
                 # Packed e2m1 values, two per byte.
                 assert o_proj.weight.dtype == torch.uint8
-            elif current_platform.is_cuda():
+            elif current_platform.is_cuda() or current_platform.is_xpu():
                 assert o_proj.weight.dtype == torch.float8_e4m3fn
             elif current_platform.is_rocm():
                 assert o_proj.weight.dtype == current_platform.fp8_dtype()
