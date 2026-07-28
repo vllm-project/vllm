@@ -16,6 +16,62 @@ Depending on the use case, there are two possible strategies:
 
 Both approaches are under active development.
 
+### Experimental direct PCP KV stores for GLM-5.2
+
+On a single peer-accessible NVIDIA node, GLM-5.2 can keep the existing
+replicated PCP cache layout while replacing prefill KV/indexer data gathers
+with direct peer-memory stores. vLLM maps every rank's cache once during
+initialization; the fused producer writes its local prefill results into the
+same logical cache slots on every PCP rank. Attention and indexer kernels then
+read their ordinary rank-local cache views. Runtime payload transfer uses
+device load/store semantics rather than a pull/get or receive staging buffer.
+
+This path is experimental and opt-in:
+
+```bash
+VLLM_USE_PCP_DIRECT_KV=1 vllm serve nvidia/GLM-5.2-NVFP4 \
+  --enforce-eager \
+  --no-async-scheduling \
+  --tensor-parallel-size 1 \
+  --prefill-context-parallel-size 4 \
+  --decode-context-parallel-size 1 \
+  --model-class-overrides \
+    '{"GlmMoeDsaForCausalLM":"vllm.models.deepseek_v32.nvidia.model:DeepseekV32ForCausalLM"}' \
+  --enable-expert-parallel \
+  --moe-backend flashinfer_cutlass \
+  --attention-backend FLASHINFER_MLA_SPARSE \
+  --no-enable-prefix-caching \
+  --kv-cache-dtype fp8
+```
+
+The initial implementation is deliberately fail-closed: all PCP ranks must be
+on one host, TP/DCP/DP must each be 1, CUDA graphs are unsupported, and the
+model must use the NVIDIA GLM-5.2 sparse-MLA path with an FP8 KV cache. The
+path also rejects sleep mode, async scheduling, and dual-batch/ubatch overlap.
+Prefix caching/copy-on-write and KV connectors are also rejected because their
+block-copy paths do not yet understand peer-mapped cache ownership. Cache
+allocation and POSIX file-descriptor exchange happen only during startup; the
+per-layer payload path contains producer stores plus a system-scope visibility
+fence, with no KV-update collective or receive-side staging buffer.
+The ordinary collective PCP path remains the default when
+`VLLM_USE_PCP_DIRECT_KV` is unset.
+
+The communication microbenchmark validates byte-identical replicated cache
+images before comparing the collective and direct-store update paths:
+
+```bash
+torchrun --standalone --nproc-per-node=4 \
+  benchmarks/kernels/bench_pcp_kv_update.py \
+  --local-tokens 1,8,32,128,512,2048 \
+  --warmup 20 --repetitions 100 \
+  --min-direct-p50-latency-reduction-percent 10
+```
+
+This synthetic BF16 benchmark excludes model transforms and attention. It
+reports slowest-rank latency percentiles along with logical KV-update
+collective-call and byte accounting for each path; it does not estimate
+physical topology or wire traffic.
+
 ## Decode Context Parallel
 
 Due to the auto-regressive nature of decoding, every decoding step needs to compute a small amount of query tokens w.r.t. a large number of key/value tokens stored in the paged KV cache. The core of decode context parallel is how to shard the KV cache across GPUs.

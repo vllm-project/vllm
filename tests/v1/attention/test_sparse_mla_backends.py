@@ -36,6 +36,7 @@ if not current_platform.is_cuda():
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+    FlashInferMLASparseImpl,
     FlashInferMLASparseTRTLLMBackend,
 )
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
@@ -71,6 +72,24 @@ SPARSE_BACKEND_BATCH_SPECS["large_q_pure_prefill"] = BatchSpec(
 )
 
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_flashinfer_sparse_mla_accepts_zero_local_tokens() -> None:
+    impl = object.__new__(FlashInferMLASparseImpl)
+    impl.num_heads = 4
+    impl.kv_lora_rank = 512
+    q = torch.empty((0, 4, 192), device=DEVICE_TYPE)
+
+    output, lse = impl.forward_mqa(
+        q,
+        torch.empty((1,), device=DEVICE_TYPE),
+        SimpleNamespace(),
+        SimpleNamespace(),
+    )
+
+    assert output.shape == (0, 4, 512)
+    assert output.device == q.device
+    assert lse is None
 
 
 def _float_to_e8m0_truncate(f: float) -> float:
