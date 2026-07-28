@@ -22,8 +22,8 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
-ARG AITER_REPO="https://github.com/maeehart/aiter.git"
-ARG AITER_BRANCH="maeehart/kimi-k3-gfx942-tuning"
+ARG AITER_REPO="https://github.com/ROCm/aiter.git"
+ARG AITER_BRANCH="v0.1.19"
 # Add gfx950 to serve both MI325 and MI355 from one image, at the cost of
 # roughly double the kernel prebuild time.
 ARG GPU_ARCHS="gfx942"
