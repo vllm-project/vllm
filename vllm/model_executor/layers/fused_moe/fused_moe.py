@@ -669,24 +669,20 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
             use_int4_w4a16=use_int4_w4a16,
             dtype=dtype,
         )
-        block_shape = [group_n, group_k] if group_n > 0 and group_k > 0 else None
-        config = try_get_optimal_moe_config(
-            (num_experts, 2 * intermediate_size, hidden_size),
-            (num_experts, hidden_size, intermediate_size),
-            config_top_k,
-            config_dtype,
-            batch_tokens,
-            block_shape=block_shape,
+        config = _triton_moe_config(
+            num_experts=num_experts,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            top_k=config_top_k,
+            config_dtype=config_dtype,
+            num_tokens=batch_tokens,
+            group_n=group_n,
+            group_k=group_k,
         )
         a_rows = (
             runtime_a_rows
             if runtime_a_rows is not None
             else batch_tokens * routed_multiplier
-        )
-        config_block_size_k = (
-            min(config["BLOCK_SIZE_K"], min(group_n, group_k))
-            if group_n > 0 and group_k > 0
-            else config["BLOCK_SIZE_K"]
         )
         block_size_m = (
             runtime_block_size_m
@@ -701,15 +697,17 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
         block_size_k = (
             runtime_block_size_k
             if runtime_block_size_k is not None
-            else config_block_size_k
+            else config["BLOCK_SIZE_K"]
         )
-        routed_tokens = a_rows * top_k
         em = (
             runtime_em
             if runtime_em is not None
-            else routed_tokens * block_size_m
-            if naive_block_assignment
-            else triton.cdiv(routed_tokens, block_size_m) * block_size_m
+            else _triton_moe_em(
+                a_rows,
+                top_k,
+                block_size_m,
+                naive_block_assignment,
+            )
         )
         num_valid_tokens = (
             runtime_num_valid_tokens
@@ -722,29 +720,20 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
             else config["GROUP_SIZE_M"]
         )
         split_k = runtime_split_k if runtime_split_k is not None else config["SPLIT_K"]
-        default_compute_type = (
-            tl.float32
-            if dtype == torch.float32
-            else tl.float16
-            if dtype == torch.float16
-            else tl.bfloat16
-        )
         compute_type = (
             runtime_compute_type
             if runtime_compute_type is not None
-            else default_compute_type
+            else _triton_moe_compute_type(dtype)
         )
         default_swap_ab = use_fp8_w8a8 and enable_swap_ab(block_size_m, block_size_n)
         swap_ab = runtime_swap_ab if runtime_swap_ab is not None else default_swap_ab
         num_warps = (
-            runtime_num_warps
-            if runtime_num_warps is not None
-            else config.get("num_warps", 4)
+            runtime_num_warps if runtime_num_warps is not None else config["num_warps"]
         )
         num_stages = (
             runtime_num_stages
             if runtime_num_stages is not None
-            else config.get("num_stages", 3)
+            else config["num_stages"]
         )
         return self.CompileKey(
             dtype=dtype,
@@ -2011,6 +2000,59 @@ def try_get_optimal_moe_config(
             # Else use the default config
             config = get_default_config(M, E, N, w1_shape[2], top_k, dtype, block_shape)
     return config
+
+
+def _triton_moe_config(
+    *,
+    num_experts: int,
+    hidden_size: int,
+    intermediate_size: int,
+    top_k: int,
+    config_dtype: str | None,
+    num_tokens: int,
+    group_n: int,
+    group_k: int,
+) -> dict[str, int]:
+    block_shape = [group_n, group_k] if group_n > 0 and group_k > 0 else None
+    config = try_get_optimal_moe_config(
+        (num_experts, 2 * intermediate_size, hidden_size),
+        (num_experts, hidden_size, intermediate_size),
+        top_k,
+        config_dtype,
+        num_tokens,
+        block_shape=block_shape,
+    )
+    block_size_k = (
+        min(config["BLOCK_SIZE_K"], min(group_n, group_k))
+        if block_shape is not None
+        else config["BLOCK_SIZE_K"]
+    )
+    return {
+        **config,
+        "BLOCK_SIZE_K": block_size_k,
+        "num_warps": config.get("num_warps", 4),
+        "num_stages": config.get("num_stages", 3),
+    }
+
+
+def _triton_moe_compute_type(dtype: torch.dtype) -> tl.dtype:
+    if dtype == torch.float32:
+        return tl.float32
+    if dtype == torch.float16:
+        return tl.float16
+    return tl.bfloat16
+
+
+def _triton_moe_em(
+    num_tokens: int,
+    top_k: int,
+    block_size_m: int,
+    naive_block_assignment: bool,
+) -> int:
+    routed_tokens = num_tokens * top_k
+    if naive_block_assignment:
+        return routed_tokens * block_size_m
+    return triton.cdiv(routed_tokens, block_size_m) * block_size_m
 
 
 def fused_experts_op(

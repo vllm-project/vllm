@@ -26,8 +26,8 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     _triton_moe_compute_type,
-    _triton_moe_warmup_config,
-    _triton_moe_warmup_em,
+    _triton_moe_config,
+    _triton_moe_em,
     try_get_optimal_moe_config,
     write_zeros_to_output,
 )
@@ -316,7 +316,7 @@ class FusedMoeNvfp4EmulationKernel(
         runtime_block_k_divisible: bool | None = None,
         runtime_compute_type: Any | None = None,
     ) -> CompileKey:
-        config = _triton_moe_warmup_config(
+        config = _triton_moe_config(
             num_experts=num_experts,
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
@@ -334,27 +334,27 @@ class FusedMoeNvfp4EmulationKernel(
         block_size_m = (
             runtime_block_size_m
             if runtime_block_size_m is not None
-            else config.block_size_m
+            else config["BLOCK_SIZE_M"]
         )
         block_size_n = (
             runtime_block_size_n
             if runtime_block_size_n is not None
-            else config.block_size_n
+            else config["BLOCK_SIZE_N"]
         )
         block_size_k = (
             runtime_block_size_k
             if runtime_block_size_k is not None
-            else config.block_size_k
+            else config["BLOCK_SIZE_K"]
         )
         group_size_m = (
             runtime_group_size_m
             if runtime_group_size_m is not None
-            else config.group_size_m
+            else config["GROUP_SIZE_M"]
         )
         em = (
             runtime_em
             if runtime_em is not None
-            else _triton_moe_warmup_em(
+            else _triton_moe_em(
                 num_tokens=a_rows,
                 top_k=top_k,
                 block_size_m=block_size_m,

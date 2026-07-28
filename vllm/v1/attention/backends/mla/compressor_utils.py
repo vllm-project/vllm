@@ -134,9 +134,6 @@ class CompressedSlotMappingKernel(
         )
 
 
-_COMPRESSED_SLOT_MAPPING_KERNEL = CompressedSlotMappingKernel()
-
-
 def get_compressed_slot_mapping(
     num_tokens: int,
     query_start_loc: torch.Tensor,
@@ -167,3 +164,6 @@ def get_compressed_slot_mapping(
         compress_ratio,
     )
     return slot_mapping
+
+
+_COMPRESSED_SLOT_MAPPING_KERNEL = CompressedSlotMappingKernel()

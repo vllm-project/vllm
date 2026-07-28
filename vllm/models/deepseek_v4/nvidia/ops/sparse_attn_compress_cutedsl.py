@@ -400,7 +400,7 @@ class SparseAttnCompressNormRopeStoreC4Kernel(
 
         return host_entrypoint
 
-    def dispatch(
+    def dispatch(  # type: ignore[override]
         self,
         *,
         compress_ratio: int,
@@ -908,7 +908,7 @@ class SparseAttnCompressNormRopeStoreFullC4Kernel(
 
         return host_entrypoint
 
-    def dispatch(
+    def dispatch(  # type: ignore[override]
         self,
         *,
         compress_ratio: int,
@@ -1378,7 +1378,9 @@ class SparseAttnCompressC128Block8Kernel(
 
         return host_entrypoint
 
-    def dispatch(self, *, head_size: int, state_width: int) -> CompileKey:
+    def dispatch(  # type: ignore[override]
+        self, *, head_size: int, state_width: int
+    ) -> CompileKey:
         return self.CompileKey(head_size=head_size, state_width=state_width)
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
@@ -1687,7 +1689,7 @@ class SparseAttnNormRopeStoreKernel(
 
         return host_entrypoint
 
-    def dispatch(
+    def dispatch(  # type: ignore[override]
         self,
         *,
         compress_ratio: int,
@@ -2037,7 +2039,7 @@ class SparseAttnNormRopeStoreFullKernel(
 
         return host_entrypoint
 
-    def dispatch(
+    def dispatch(  # type: ignore[override]
         self,
         *,
         compress_ratio: int,
@@ -2345,9 +2347,8 @@ class SparseAttnCompressorCuteDSL:
         if store_full_fp8 and (not store_full_kv):
             raise ValueError("store_full_fp8 requires store_full_kv.")
         if compress_ratio == 4:
-            c4_store = self.c4_store_full if store_full_kv else self.c4_store
             if store_full_kv:
-                c4_store(
+                self.c4_store_full(
                     state_cache=state_cache,
                     token_to_req_indices=token_to_req_indices,
                     positions=positions,
@@ -2366,7 +2367,7 @@ class SparseAttnCompressorCuteDSL:
                     rope_head_dim=rope_head_dim,
                 )
             else:
-                c4_store(
+                self.c4_store(
                     state_cache=state_cache,
                     token_to_req_indices=token_to_req_indices,
                     positions=positions,

@@ -107,7 +107,7 @@ class BF16x3RouterGemmKernel(VllmJitKernel["BF16x3RouterGemmKernel.CompileKey"])
         cta_tile = (BN, BM, BK)
 
         @cute.jit
-        def make_tma(tensor: cute.Tensor, BM: int, BK: int):
+        def _make_tma(tensor: cute.Tensor, BM: int, BK: int):
             op = cpasync.CopyBulkTensorTileG2SOp()
             swizzle_128B = cute.make_swizzle(3, 4, 3)
             elems = 128 * 8 // tensor.element_type.width  # 128B
@@ -119,7 +119,7 @@ class BF16x3RouterGemmKernel(VllmJitKernel["BF16x3RouterGemmKernel.CompileKey"])
             return cpasync.make_tiled_tma_atom(op, tensor, slayout, (BM, BK))
 
         @cute.kernel
-        def device_kernel(
+        def kernel(
             X_tma: cpasync.TmaInfo,
             W_tma: cpasync.TmaInfo,
             out: cute.Tensor,
@@ -348,13 +348,13 @@ class BF16x3RouterGemmKernel(VllmJitKernel["BF16x3RouterGemmKernel.CompileKey"])
             stream: CUstream,
         ):
             BN, BM, BK = cta_tile
-            W_tma = make_tma(W, BM, BK)
-            X_tma = make_tma(X, BN, BK)
+            W_tma = _make_tma(W, BM, BK)
+            X_tma = _make_tma(X, BN, BK)
 
             grid_m = cute.ceil_div(W.shape[0], BM)
             grid_n = cute.ceil_div(X.shape[0], BN)
 
-            device_kernel(X_tma, W_tma, out).launch(
+            kernel(X_tma, W_tma, out).launch(
                 grid=(grid_m, grid_n, split_k),
                 block=(num_warps * 32, 1, 1),
                 stream=stream,

@@ -54,17 +54,9 @@ def _cute():
     if _cute_ctx is not None:
         return _cute_ctx
     import cutlass.cute as cute
-    from cuda.bindings.driver import CUstream
 
-    _cute_ctx = (cute, CUstream)
+    _cute_ctx = cute
     return _cute_ctx
-
-
-def _stream():
-    _, CUstream = _cute()
-    from vllm.utils.torch_utils import current_stream
-
-    return CUstream(current_stream().cuda_stream)
 
 
 def _use_pdl() -> bool:
@@ -107,18 +99,25 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
             use_pdl=_use_pdl(),
         )
 
-    def dispatch(self, *, M: int, K: int, N: int) -> CompileKey:
+    def dispatch(  # type: ignore[override]
+        self, *, M: int, K: int, N: int
+    ) -> CompileKey:
         dotprod_max_m = _TUNED_DOTPROD_MAX_M.get((K, N), _DEFAULT_DOTPROD_MAX_M)
-        if dotprod_max_m >= M or K < 2048:
-            return self.CompileKey(backend="dotprod", m=M, k=K, bs=_DEFAULT_DOTPROD_BS)
-
+        is_dotprod = dotprod_max_m >= M or K < 2048
         tuned_config = _TUNED_CONFIGS.get((K, N))
-        split_k, num_stages = (
+        splitk_config = (
             tuned_config.get(M, _DEFAULT_SPLITK_CONFIG)
             if tuned_config is not None
             else _DEFAULT_SPLITK_CONFIG
         )
-        return self.CompileKey(backend="splitk", split_k=split_k, num_stages=num_stages)
+        return self.CompileKey(
+            backend="dotprod" if is_dotprod else "splitk",
+            m=M if is_dotprod else 0,
+            k=K if is_dotprod else 0,
+            bs=_DEFAULT_DOTPROD_BS if is_dotprod else 0,
+            split_k=0 if is_dotprod else splitk_config[0],
+            num_stages=0 if is_dotprod else splitk_config[1],
+        )
 
     def get_warmup_keys(
         self,
@@ -140,7 +139,7 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
         if self._compiled_cache_contains(compile_key):
             return
 
-        cute, _ = _cute()
+        cute = _cute()
         from cutlass import BFloat16, Float32
         from quack.compile_utils import make_fake_tensor
 
@@ -252,16 +251,12 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
             runtime_context={**runtime_context, "backend": compile_key.backend},
         )
 
-        stream = _stream()
         output = torch.empty(M, N, dtype=output_dtype, device=hidden_states.device)
         if compile_key.backend == "splitk":
-            compiled(hidden_states, router_weight, output, stream, 1.0)
+            compiled(hidden_states, router_weight, output)
         else:
-            compiled(hidden_states, router_weight, output, N, stream)
+            compiled(hidden_states, router_weight, output, N)
         return output
-
-
-ll_bf16_gemm_kernel = LLBf16Gemm()
 
 
 def ll_bf16_gemm(
@@ -270,3 +265,6 @@ def ll_bf16_gemm(
     output_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     return ll_bf16_gemm_kernel(hidden_states, router_weight, output_dtype)
+
+
+ll_bf16_gemm_kernel = LLBf16Gemm()

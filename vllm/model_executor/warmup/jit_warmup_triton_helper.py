@@ -174,6 +174,8 @@ def trace_triton_kernel_specialization_args(
     kernel: Callable[..., Any],
 ) -> tuple[str, ...]:
     function_def = get_function_source_node(kernel)
+    if not isinstance(function_def, ast.FunctionDef):
+        raise ValueError("Expected Triton kernel to be defined as a function")
     source_fn = getattr(kernel, "fn", kernel)
     arg_names = tuple(inspect.signature(source_fn).parameters)
     constexpr_args = _triton_constexpr_arg_names(kernel, function_def, arg_names)

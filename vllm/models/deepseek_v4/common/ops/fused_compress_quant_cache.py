@@ -1097,7 +1097,7 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
         rope_head_dim: int,
         compress_ratio: int,
         cache_block_size: int,
-        cache_alignment: int | None = None,
+        cache_alignment: int,
         runtime_state_width: int | None = None,
         runtime_quant_block: int | None = None,
         runtime_token_stride: int | None = None,

@@ -318,7 +318,7 @@ class DequantGatherKCacheKernel(VllmJitKernel["DequantGatherKCacheKernel.Compile
 
         return host_entrypoint
 
-    def dispatch(
+    def dispatch(  # type: ignore[override]
         self,
         *,
         block_size: int,

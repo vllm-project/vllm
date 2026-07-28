@@ -13,12 +13,11 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    _get_config_dtype_str,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     _triton_moe_compute_type,
-    _triton_moe_config_dtype,
-    _triton_moe_warmup_config,
-    _triton_moe_warmup_scale_stride,
+    _triton_moe_config,
     try_get_optimal_moe_config,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
@@ -432,13 +431,13 @@ class BatchedTritonKernel(VllmJitKernel["BatchedTritonKernel.CompileKey"]):
         runtime_num_warps: int | None = None,
         runtime_num_stages: int | None = None,
     ) -> CompileKey:
-        config_dtype = _triton_moe_config_dtype(
-            dtype,
-            use_fp8_w8a8,
-            use_int8_w8a16,
-            False,
+        config_dtype = _get_config_dtype_str(
+            dtype=dtype,
+            use_fp8_w8a8=use_fp8_w8a8,
+            use_int8_w8a16=use_int8_w8a16,
+            use_int4_w4a16=False,
         )
-        config = _triton_moe_warmup_config(
+        config = _triton_moe_config(
             num_experts=num_experts,
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
@@ -449,19 +448,21 @@ class BatchedTritonKernel(VllmJitKernel["BatchedTritonKernel.CompileKey"]):
             group_k=group_k,
         )
         block_m = (
-            runtime_block_m if runtime_block_m is not None else config.BLOCK_SIZE_M
+            runtime_block_m if runtime_block_m is not None else config["BLOCK_SIZE_M"]
         )
         block_n = (
-            runtime_block_n if runtime_block_n is not None else config.BLOCK_SIZE_N
+            runtime_block_n if runtime_block_n is not None else config["BLOCK_SIZE_N"]
         )
         block_k = (
-            runtime_block_k if runtime_block_k is not None else config.BLOCK_SIZE_K
+            runtime_block_k if runtime_block_k is not None else config["BLOCK_SIZE_K"]
         )
         num_warps = (
-            runtime_num_warps if runtime_num_warps is not None else config.num_warps
+            runtime_num_warps if runtime_num_warps is not None else config["num_warps"]
         )
         num_stages = (
-            runtime_num_stages if runtime_num_stages is not None else config.num_stages
+            runtime_num_stages
+            if runtime_num_stages is not None
+            else config["num_stages"]
         )
         return self.CompileKey(
             dtype=dtype,
@@ -546,7 +547,11 @@ class BatchedTritonKernel(VllmJitKernel["BatchedTritonKernel.CompileKey"]):
     def compile(self, compile_key: CompileKey) -> None:
         warmup = getattr(self.kernel, "warmup", None)
         assert warmup is not None
-        scale_cols = _triton_moe_warmup_scale_stride(compile_key.k, compile_key.group_k)
+        scale_cols = (
+            triton.cdiv(compile_key.k, compile_key.group_k)
+            if compile_key.group_k > 0
+            else 1
+        )
         a_ptr = TritonWarmupTensor(
             compile_key.dtype,
             shape=(compile_key.e, compile_key.max_num_tokens, compile_key.k),
@@ -719,9 +724,6 @@ class BatchedTritonKernel(VllmJitKernel["BatchedTritonKernel.CompileKey"]):
             num_warps=num_warps,
             num_stages=num_stages,
         )
-
-
-_BATCHED_TRITON_KERNEL = BatchedTritonKernel()
 
 
 def invoke_moe_batched_triton_kernel(
@@ -1320,3 +1322,6 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             per_act_token_quant=self.per_act_token_quant,
             block_shape=self.block_shape,
         )
+
+
+_BATCHED_TRITON_KERNEL = BatchedTritonKernel()

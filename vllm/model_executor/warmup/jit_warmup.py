@@ -202,8 +202,9 @@ def _dispatch_expr_error(node: ast.AST, reason: str) -> ValueError:
     return ValueError(
         f"{reason}: {_dispatch_expr_source(node)}. "
         "Supported dispatch expressions are names, constants, attributes, "
-        "tuple/list literals, conditional expressions, comparisons, boolean "
-        "operators, unary not/minus, arithmetic, and calls without **kwargs."
+        "subscriptions, tuple/list literals, conditional expressions, "
+        "comparisons, boolean operators, unary not/minus, arithmetic, and "
+        "calls without **kwargs."
     )
 
 
@@ -300,6 +301,9 @@ class _DispatchExprEvaluator(ast.NodeVisitor):
 
     def visit_Attribute(self, node: ast.Attribute) -> Any:
         return getattr(self.visit(node.value), node.attr)
+
+    def visit_Subscript(self, node: ast.Subscript) -> Any:
+        return self.visit(node.value)[self.visit(node.slice)]
 
 
 def get_ast_full_name(node: ast.AST) -> str | None:

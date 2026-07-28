@@ -560,9 +560,6 @@ class GlobalizeRecvTopkIdxKernel(
         )
 
 
-_GLOBALIZE_RECV_TOPK_IDX_KERNEL = GlobalizeRecvTopkIdxKernel()
-
-
 def _globalize_recv_topk_idx(
     recv_topk_idx: torch.Tensor,  # [N, topk] local expert IDs, -1 = non-local
     psum_recv_per_rank: torch.Tensor,
@@ -576,3 +573,6 @@ def _globalize_recv_topk_idx(
         num_experts,
     )
     return recv_topk_idx
+
+
+_GLOBALIZE_RECV_TOPK_IDX_KERNEL = GlobalizeRecvTopkIdxKernel()

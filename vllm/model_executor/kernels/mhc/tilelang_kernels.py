@@ -1017,20 +1017,20 @@ class HcPrenormGemmTileLangKernel(
     ) -> CompileKey:
         use_default_config = n_splits == 1 and tile_n == 12 and n_thr == 512
         use_block_m = use_default_config and num_tokens >= 1024
-        if (
+        use_small_tile = (
             use_default_config
             and not use_block_m
             and num_tokens < 128
             and hc_hidden_size % 1024 == 0
-        ):
-            n_thr = 1024
-            tile_n = 4
+        )
+        effective_n_thr = 1024 if use_small_tile else n_thr
+        effective_tile_n = 4 if use_small_tile else tile_n
         return self.CompileKey(
             hidden_size=hidden_size,
             hc_mult=hc_mult,
             n_out=n_out,
-            n_thr=n_thr,
-            tile_n=tile_n,
+            n_thr=effective_n_thr,
+            tile_n=effective_tile_n,
             n_splits=n_splits,
             use_block_m=use_block_m,
             block_m=2 if use_block_m else 1,
@@ -1198,6 +1198,7 @@ class MhcPreBigFuseTileLangKernel(
             compile_key.hc_post_mult_value,
             compile_key.sinkhorn_repeat,
         )
+        middle_args: tuple[Any, ...]
         if compile_key.is_broadcast:
             assert residual_out is not None
             assert norm_weight is not None
@@ -1409,6 +1410,7 @@ class MhcPreBigFuseTileLangKernel(
         use_norm_weight = norm_weight is not None
         n_splits = gemm_out_mul.shape[0]
         if is_broadcast:
+            assert residual_out is not None
             hidden_size = residual.shape[-1]
             hc_mult = residual_out.shape[-2]
         else:

@@ -98,64 +98,56 @@ class MoeFusedMulSumKernel(VllmJitKernel["MoeFusedMulSumKernel.CompileKey"]):
         is_sm80_before = not current_platform.has_device_capability(80)
 
         # SM90/SM100+: prefer small tiles + many CTAs.
-        if current_platform.has_device_capability(90):
-            if is_fp32:
-                BLOCK_M = 1 if num_tokens <= 4 else 2
-            elif num_tokens <= 4:
-                BLOCK_M = 1
-            elif num_tokens <= 128:
-                BLOCK_M = 2
-            else:
-                BLOCK_M = 4
-        elif is_fp32:
-            if num_tokens <= 4:
-                BLOCK_M = 1
-            elif num_tokens <= 32:
-                BLOCK_M = 2
-            else:
-                BLOCK_M = 4
-        elif num_tokens <= 4:
-            BLOCK_M = 1
-        elif num_tokens <= 32:
-            BLOCK_M = 2
-        elif num_tokens <= 128:
-            BLOCK_M = 4
-        elif num_tokens <= 1024:
-            BLOCK_M = 16
-        else:
-            BLOCK_M = 8
+        sm90_block_m = (
+            (1 if num_tokens <= 4 else 2)
+            if is_fp32
+            else 1
+            if num_tokens <= 4
+            else 2
+            if num_tokens <= 128
+            else 4
+        )
+        fp32_block_m = 1 if num_tokens <= 4 else 2 if num_tokens <= 32 else 4
+        default_block_m = (
+            1
+            if num_tokens <= 4
+            else 2
+            if num_tokens <= 32
+            else 4
+            if num_tokens <= 128
+            else 16
+            if num_tokens <= 1024
+            else 8
+        )
+        block_m = (
+            sm90_block_m
+            if is_sm90_plus
+            else fp32_block_m
+            if is_fp32
+            else default_block_m
+        )
 
-        if is_fp32:
-            max_block_k = 256
-        elif is_sm80_before or is_sm90_plus:
-            max_block_k = 512
-        else:
-            max_block_k = 1024
-        BLOCK_K = min(triton.next_power_of_2(size), max_block_k)
-        BLOCK_K = max(BLOCK_K, 256)
+        max_block_k = (
+            256 if is_fp32 else 512 if is_sm80_before or is_sm90_plus else 1024
+        )
+        block_k = max(min(triton.next_power_of_2(size), max_block_k), 256)
 
-        total = BLOCK_M * BLOCK_K
-        if is_fp32:
-            num_warps = max(8, min(16, total // 64))
-        else:
-            num_warps = max(4, min(16, total // 256))
-
-        if is_sm80_before:
-            num_warps = min(num_warps, 8)
-            num_stages = 2
-        elif is_sm90_plus:
-            num_warps = min(num_warps, 8)
-            num_stages = 4 if total <= 2048 else 2
-        else:
-            num_stages = 4 if total <= 2048 else 2
+        total = block_m * block_k
+        base_num_warps = (
+            max(8, min(16, total // 64)) if is_fp32 else max(4, min(16, total // 256))
+        )
+        num_warps = (
+            min(base_num_warps, 8) if is_sm80_before or is_sm90_plus else base_num_warps
+        )
+        num_stages = 2 if is_sm80_before else 4 if total <= 2048 else 2
 
         return self.CompileKey(
             dtype=dtype,
             has_expert_map=has_expert_map,
             top_k=top_k,
             size=size,
-            block_m=BLOCK_M,
-            block_k=BLOCK_K,
+            block_m=block_m,
+            block_k=block_k,
             num_warps=num_warps,
             num_stages=num_stages,
         )
@@ -243,9 +235,6 @@ class MoeFusedMulSumKernel(VllmJitKernel["MoeFusedMulSumKernel.CompileKey"]):
         )
 
 
-_MOE_FUSED_MUL_SUM_KERNEL = MoeFusedMulSumKernel()
-
-
 def moe_fused_mul_sum(
     inputs: torch.Tensor,
     topk_weights: torch.Tensor,
@@ -298,3 +287,6 @@ def moe_fused_mul_sum(
         )
 
     return outputs
+
+
+_MOE_FUSED_MUL_SUM_KERNEL = MoeFusedMulSumKernel()

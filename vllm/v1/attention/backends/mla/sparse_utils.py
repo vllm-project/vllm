@@ -310,9 +310,6 @@ class ConvertReqIndexToGlobalIndexKernel(
         )
 
 
-_CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL = ConvertReqIndexToGlobalIndexKernel()
-
-
 def triton_convert_req_index_to_global_index(
     req_id: torch.Tensor,  # int32 [num_tokens]
     block_table: torch.Tensor,  # int32 [num_requests, max_num_blocks_per_req]
@@ -507,3 +504,6 @@ def triton_filter_and_convert_dcp_index(
         assert valid_counts is not None
         return out, valid_counts
     return out
+
+
+_CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL = ConvertReqIndexToGlobalIndexKernel()

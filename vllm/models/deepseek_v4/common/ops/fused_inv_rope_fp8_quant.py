@@ -347,9 +347,6 @@ class FusedInvRopeFP8QuantKernel(
         )
 
 
-_FUSED_INV_ROPE_FP8_QUANT_KERNEL = FusedInvRopeFP8QuantKernel()
-
-
 def fused_inv_rope_fp8_quant(
     o: torch.Tensor,
     positions: torch.Tensor,
@@ -518,3 +515,6 @@ direct_register_custom_op(
     op_func=_fused_inv_rope_fp8_quant_kernel_impl,
     fake_impl=_fused_inv_rope_fp8_quant_kernel_fake,
 )
+
+
+_FUSED_INV_ROPE_FP8_QUANT_KERNEL = FusedInvRopeFP8QuantKernel()
