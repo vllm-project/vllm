@@ -791,7 +791,9 @@ def invoke_fused_moe_triton_kernel(
     else:
         SWAP_AB = False
 
-    is_quantized = use_fp8_w8a8 or use_int8_w8a8 or use_int8_w8a16 or use_int4_w4a16
+    # Quantized weights always carry a B_scale (see the asserts below); key off
+    # that rather than enumerating quant flags, which misses w8a16-fp8/nvfp4/etc.
+    is_quantized = B_scale is not None
     warn_if_moe_use_td_ineffective("TRITON", is_quantized=is_quantized)
 
     # TD path is unvalidated under quantization; fall back to the pointer path.
