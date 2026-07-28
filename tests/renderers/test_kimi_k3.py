@@ -22,8 +22,10 @@ class StubTokenizer:
     def __init__(self, token_ids: list[int]) -> None:
         self.token_ids = token_ids
         self.calls: list[dict[str, Any]] = []
+        self.conversations: list[list[dict[str, Any]]] = []
 
     def apply_chat_template(self, conversation, **kwargs) -> list[int]:
+        self.conversations.append(conversation)
         self.calls.append(kwargs)
         return list(self.token_ids)
 
@@ -153,6 +155,87 @@ def test_render_messages_returns_token_prompt():
     assert prompt == {"prompt_token_ids": [1, 2, 3]}
     assert "multi_modal_data" not in prompt
     assert conversation[0]["role"] == "user"
+
+
+def test_render_messages_derives_private_xtml_tool_attrs():
+    tokenizer = StubTokenizer([1, 2, 3])
+    renderer = _make_renderer(tokenizer)
+
+    conversation, _ = renderer.render_messages(
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "lookup:0",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{}"},
+                    },
+                    {
+                        "id": "lookup:1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{}"},
+                    },
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "lookup:1",
+                "tool": "client-supplied-name",
+                "index": 99,
+                "content": "second",
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "lookup:0",
+                "content": "first",
+            },
+        ],
+        ChatParams(),
+    )
+
+    assert [message["content"] for message in conversation[1:]] == [
+        "first",
+        "second",
+    ]
+    assert conversation[1]["tool"] == "lookup"
+    assert conversation[1]["index"] == 1
+    assert conversation[2]["tool"] == "lookup"
+    assert conversation[2]["index"] == 2
+    assert tokenizer.conversations[-1] == conversation
+
+
+def test_render_messages_ignores_client_supplied_xtml_tool_attrs():
+    tokenizer = StubTokenizer([1, 2, 3])
+    renderer = _make_renderer(tokenizer)
+
+    conversation, _ = renderer.render_messages(
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "lookup:0",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "unknown",
+                "tool": "lookup",
+                "index": 1,
+                "content": "result",
+            },
+        ],
+        ChatParams(),
+    )
+
+    assert "tool" not in conversation[1]
+    assert "index" not in conversation[1]
 
 
 @pytest.mark.asyncio

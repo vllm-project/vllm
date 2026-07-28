@@ -933,13 +933,6 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
         tokenizer = self.get_tokenizer()
-        tools = params.chat_template_kwargs.get("tools")
-        chat_template = resolve_chat_template(
-            tokenizer,
-            chat_template=params.chat_template,
-            tools=tools,
-            model_config=model_config,
-        )
 
         prompt_embeds_placeholder_token_id: int | None = None
         if model_config.enable_prompt_embeds:
@@ -952,7 +945,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             model_config,
             content_format=resolve_chat_template_content_format(
                 chat_template=params.chat_template,
-                tools=tools,
+                tools=params.chat_template_kwargs.get("tools"),
                 given_format=params.chat_template_content_format,
                 tokenizer=tokenizer,
                 model_config=model_config,
@@ -974,7 +967,6 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 mm_data = None
 
         chat_template_kwargs = params.get_apply_chat_template_kwargs()
-        chat_template_kwargs["chat_template"] = chat_template
         if prompt_embeds_tensors:
             # prompt_embeds post-processing requires prompt_token_ids.
             if chat_template_kwargs.get("tokenize") is False:
@@ -999,8 +991,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             )
 
         # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5
-        # and Kimi-K3 models which use unified vision chunks for both
-        # images and videos.
+        # model which uses unified vision chunks for both images and videos.
         if (
             self.use_unified_vision_chunk
             and mm_uuids is not None
@@ -1062,13 +1053,6 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
         tokenizer = self.get_tokenizer()
-        tools = params.chat_template_kwargs.get("tools")
-        chat_template = resolve_chat_template(
-            tokenizer,
-            chat_template=params.chat_template,
-            tools=tools,
-            model_config=model_config,
-        )
 
         prompt_embeds_placeholder_token_id: int | None = None
         if model_config.enable_prompt_embeds:
@@ -1081,7 +1065,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             model_config,
             content_format=resolve_chat_template_content_format(
                 chat_template=params.chat_template,
-                tools=tools,
+                tools=params.chat_template_kwargs.get("tools"),
                 given_format=params.chat_template_content_format,
                 tokenizer=tokenizer,
                 model_config=model_config,
@@ -1100,7 +1084,6 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 mm_data = None
 
         chat_template_kwargs = params.get_apply_chat_template_kwargs()
-        chat_template_kwargs["chat_template"] = chat_template
         if prompt_embeds_tensors:
             # prompt_embeds post-processing requires prompt_token_ids.
             if chat_template_kwargs.get("tokenize") is False:
@@ -1133,8 +1116,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             )
 
         # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5
-        # and Kimi-K3 models which use unified vision chunks for both
-        # images and videos.
+        # model which uses unified vision chunks for both images and videos.
         if (
             self.use_unified_vision_chunk
             and mm_uuids is not None

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any
+from typing import Any, cast
 
 from vllm.config import VllmConfig
 from vllm.entrypoints.chat_utils import (
@@ -30,6 +30,82 @@ def _merge_k3_media_io_kwargs(
     return merge_media_io_kwargs(_K3_MEDIA_IO_DEFAULTS, media_io_kwargs)
 
 
+def _normalize_k3_tool_messages(
+    conversation: list[ConversationMessage],
+) -> list[dict[str, Any]]:
+    """Reorder tool-result messages to match assistant tool_call order.
+
+    Supports matching by ``tool_call_id`` or by the synthetic
+    ``"{tool}:{zero_based_index}"`` alias. When any tool message in a
+    block cannot be resolved, the whole block is left in its original
+    order (graceful fallback).
+
+    Returns a new list; caller-owned message dicts are not mutated.
+    """
+    normalized: list[dict[str, Any]] = []
+    i = 0
+
+    while i < len(conversation):
+        message = conversation[i]
+        normalized.append(dict(message))
+        i += 1
+
+        if message.get("role") != "assistant":
+            continue
+
+        tool_calls = message.get("tool_calls")
+        if not tool_calls:
+            continue
+
+        # Build the lookup table from the assistant's tool_calls.
+        targets_by_id: dict[str, tuple[int, str]] = {}
+        for position, tool_call in enumerate(tool_calls):
+            function = tool_call.get("function")
+            if not isinstance(function, dict):
+                continue
+            name = function.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+
+            call_target = (position, name)
+            aliases = [f"{name}:{position}"]
+            if tool_call_id := tool_call.get("id"):
+                aliases.insert(0, str(tool_call_id))
+            for alias in aliases:
+                targets_by_id.setdefault(alias, call_target)
+
+        # Collect consecutive tool messages.
+        block_start = i
+        while i < len(conversation) and conversation[i].get("role") == "tool":
+            i += 1
+        if i == block_start:
+            continue
+
+        # Try to resolve every tool message in the block.
+        resolved: list[tuple[int, int, dict[str, Any]]] = []
+        for order, tool_message in enumerate(conversation[block_start:i]):
+            tool_call_id = tool_message.get("tool_call_id")
+            resolved_target = (
+                targets_by_id.get(str(tool_call_id))
+                if tool_call_id is not None
+                else None
+            )
+            if resolved_target is None:
+                normalized.extend(dict(item) for item in conversation[block_start:i])
+                break
+
+            position, name = resolved_target
+            enriched = dict(tool_message)
+            enriched["tool"] = name
+            enriched["index"] = position + 1
+            resolved.append((position, order, enriched))
+        else:
+            resolved.sort(key=lambda item: (item[0], item[1]))
+            normalized.extend(item for _, _, item in resolved)
+
+    return normalized
+
+
 class KimiK3Renderer(BaseRenderer[HfTokenizer]):
     """Render chat prompts with Kimi K3's Python XTML encoding.
 
@@ -47,7 +123,7 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
 
     def _apply_chat_template(
         self,
-        conversation: list[ConversationMessage],
+        conversation: list[dict[str, Any]],
         params: ChatParams,
     ) -> list[int]:
         # Tokenize eagerly: K3 encodes structural markers as special tokens and
@@ -76,13 +152,16 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
             mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
-        prompt = parse_dec_only_prompt(self._apply_chat_template(conversation, params))
+        rendered_conversation = _normalize_k3_tool_messages(conversation)
+        prompt = parse_dec_only_prompt(
+            self._apply_chat_template(rendered_conversation, params)
+        )
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
             prompt["multi_modal_uuids"] = mm_uuids
 
-        return conversation, prompt
+        return cast(list[ConversationMessage], rendered_conversation), prompt
 
     async def render_messages_async(
         self,
@@ -97,11 +176,12 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
             mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
-        token_ids = await self._apply_chat_template_async(conversation, params)
+        rendered_conversation = _normalize_k3_tool_messages(conversation)
+        token_ids = await self._apply_chat_template_async(rendered_conversation, params)
         prompt = parse_dec_only_prompt(token_ids)
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
             prompt["multi_modal_uuids"] = mm_uuids
 
-        return conversation, prompt
+        return cast(list[ConversationMessage], rendered_conversation), prompt
