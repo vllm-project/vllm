@@ -53,7 +53,9 @@ When running vLLM as an HTTP server, the following endpoints are available for w
 | `/init_weight_transfer_engine` | POST | Initialize the weight transfer engine with backend-specific info |
 | `/start_weight_update` | POST | Start a weight update |
 | `/update_weights` | POST | Transfer a batch of weights with backend-specific metadata |
-| `/finish_weight_update` | POST | Finish the weight update and run post-processing |
+| `/finish_weight_update` | POST | Finish the update and optionally commit its `weight_version` |
+| `/update_weight_version` | POST | Update `weight_version` without changing model weights |
+| `/weight_info` | GET | Get the latest committed weight version |
 | `/pause` | POST | Pause generation before weight sync to handle inflight requests |
 | `/resume` | POST | Resume generation after weight sync |
 | `/get_world_size` | GET | Get the number of inference workers (useful for NCCL world size calculation) |
@@ -79,7 +81,7 @@ EngineClass.trainer_send_weights(
 )
 
 # 4. Finish weight update on inference side
-llm.finish_weight_update()
+llm.finish_weight_update(weight_version="step-42")
 ```
 
 See the [NCCL](nccl.md) and [IPC](ipc.md) pages for backend-specific trainer APIs and full examples.
