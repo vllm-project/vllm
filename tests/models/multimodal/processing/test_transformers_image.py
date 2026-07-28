@@ -6,6 +6,7 @@ import torch
 from vllm.assets.image import ImageAsset
 from vllm.config import ModelConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 
 
 @pytest.mark.parametrize("model_id", ["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"])
@@ -95,7 +96,7 @@ def test_image_embeds_inputs():
     image_token = mm_processor.info.get_hf_processor().image_token
     prompt = (
         "<|im_start|>user "
-        f"{image_token * num_image_tokens}\n"
+        f"{image_token}\n"
         "What is the content of this image?<|im_end|><|im_start|>assistant\n"
     )
 
@@ -108,3 +109,22 @@ def test_image_embeds_inputs():
     assert len(result["mm_placeholders"]["image"]) == 1
     assert result["mm_placeholders"]["image"][0].length == num_image_tokens
     assert len(result["mm_kwargs"]["image"]) == 1
+
+
+def test_image_cached_apply_gemma3():
+    model_id = "google/gemma-3-4b-it"
+    model_config = ModelConfig(model=model_id, model_impl="transformers")
+    cache = MultiModalProcessorOnlyCache(model_config)
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config, cache=cache)
+
+    image = ImageAsset("cherry_blossom").pil_image
+    image_token = mm_processor.info.get_hf_processor().boi_token
+    prompt = f"{image_token}\nWhat is the content of this image?"
+
+    for _ in range(2):
+        result = mm_processor(
+            prompt=prompt,
+            mm_items=mm_processor.info.parse_mm_data({"image": image}),
+            hf_processor_mm_kwargs={},
+        )
+        assert len(result["mm_placeholders"]["image"]) == 1
