@@ -190,7 +190,12 @@ def test_matryoshka_dimensions_model_runner_v2(
         hf_outputs = hf_model.encode(prompts)
 
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
-    with vllm_runner(model, runner="pooling", max_model_len=64) as vllm_model:
+    with vllm_runner(
+        model,
+        runner="pooling",
+        max_model_len=64,
+        gpu_memory_utilization=0.25,
+    ) as vllm_model:
         assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
         vllm_outputs = vllm_model.embed(
             prompts,
@@ -205,7 +210,10 @@ def test_matryoshka_dimensions_model_runner_v2(
         expected_outputs.append(output.tolist())
 
     assert [len(output) for output in vllm_outputs] == [768, 256]
-    for expected, actual in zip(expected_outputs, vllm_outputs):
-        torch.testing.assert_close(
-            torch.tensor(actual), torch.tensor(expected), rtol=1e-2, atol=1e-4
-        )
+    check_embeddings_close(
+        embeddings_0_lst=expected_outputs,
+        embeddings_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+        tol=1e-2,
+    )
