@@ -34,6 +34,7 @@ from ..common.mtp import fused_mtp_input
 from .low_latency_gemm import enable_kimi_k3_low_latency_gemm
 from .model import (
     KimiDecoderLayer,
+    KimiK3MixtureOfExperts,
     KimiMoE,
     get_spec_layer_idx_from_weight_name,
     make_kimi_k3_mega_moe_expert_params_mapping,
@@ -199,7 +200,7 @@ class KimiK3MultiTokenPredictor(nn.Module):
         return logits
 
 
-class KimiK3MTP(nn.Module):
+class KimiK3MTP(nn.Module, KimiK3MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_text_config
@@ -208,6 +209,11 @@ class KimiK3MTP(nn.Module):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         enable_kimi_k3_low_latency_gemm(self, vllm_config.model_config.dtype)
+        self.set_moe_parameters(
+            layer.mtp_block.mlp
+            for layer in self.model.layers.values()
+            if isinstance(layer.mtp_block.mlp, KimiMoE)
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -281,6 +287,7 @@ class KimiK3MTP(nn.Module):
                 ckpt_down_proj_name="w2",
                 ckpt_up_proj_name="w3",
                 num_experts=self.config.num_experts,
+                num_redundant_experts=self.num_redundant_experts,
             )
         else:
             expert_params_mapping = []
