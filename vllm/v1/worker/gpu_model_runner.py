@@ -2419,9 +2419,13 @@ class GPUModelRunner(
             rswa_prefix_lens = num_prompt_tokens_cpu
 
         replayssm_decode_base_cpu = None
+        replayssm_needs_reset_cpu = None
         if self.cache_config.use_replayssm or self.cache_config.use_replayssm_spec:
             replayssm_decode_base_cpu = (
                 self.input_batch.replayssm_decode_base_cpu_tensor[:num_reqs_padded]
+            )
+            replayssm_needs_reset_cpu = (
+                self.input_batch.replayssm_needs_reset_cpu_tensor[:num_reqs_padded]
             )
 
         cm_base = CommonAttentionMetadata(
@@ -2432,6 +2436,7 @@ class GPUModelRunner(
             _num_computed_tokens_cpu=num_computed_tokens_cpu,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             replayssm_decode_base_cpu=replayssm_decode_base_cpu,
+            replayssm_needs_reset_cpu=replayssm_needs_reset_cpu,
             num_reqs=num_reqs_padded,
             num_actual_tokens=num_tokens_padded,
             max_query_len=max_query_len,
@@ -2474,6 +2479,10 @@ class GPUModelRunner(
         cached_attn_metadata: dict[
             tuple[KVCacheSpec, type[AttentionMetadataBuilder]], AttentionMetadata
         ] = {}
+
+        # Unpadded decode prefix consumed by FlashInfer ReplaySSM-spec builders
+        # this step; None means no such builder ran, so no flag may be cleared.
+        fi_replayssm_consumed_decodes: int | None = None
 
         def _build_attn_group_metadata(
             kv_cache_gid: int,
@@ -2558,6 +2567,23 @@ class GPUModelRunner(
                 assert isinstance(attn_metadata, list)
                 attn_metadata_dict = attn_metadata[ubid]
 
+            if getattr(builder, "use_replayssm_spec_flashinfer", False):
+                # Unpadded decode count: CUDA-graph padding must never consume
+                # a request's admission flag. Every FlashInfer Mamba group sees
+                # the same batch, so disagreement means a row one group treats
+                # as prefill would have its flag cleared by another.
+                nonlocal fi_replayssm_consumed_decodes
+                group_decodes = attn_metadata_i.num_decodes
+                if fi_replayssm_consumed_decodes is None:
+                    fi_replayssm_consumed_decodes = group_decodes
+                else:
+                    assert fi_replayssm_consumed_decodes == group_decodes, (
+                        "FlashInfer ReplaySSM Mamba groups disagree on the "
+                        f"decode prefix ({fi_replayssm_consumed_decodes} vs "
+                        f"{group_decodes}); clearing admission flags would "
+                        "drop a reset"
+                    )
+
             for layer_name in attn_group.layer_names:
                 attn_metadata_dict[layer_name] = attn_metadata_i
 
@@ -2610,6 +2636,12 @@ class GPUModelRunner(
 
                 else:
                     _build_attn_group_metadata(kv_cache_gid, attn_gid, cm)
+
+        # Every Mamba group has now consumed the admission flags, so the rows in
+        # the decode prefix have had their ring reset and must not reset again.
+        # Rows still prefilling in this step keep their flag for a later step.
+        if fi_replayssm_consumed_decodes:
+            self.input_batch.replayssm_needs_reset[:fi_replayssm_consumed_decodes] = 0
 
         if spec_decode_common_attn_metadata is not None and (
             num_reqs != num_reqs_padded or num_tokens != num_tokens_padded

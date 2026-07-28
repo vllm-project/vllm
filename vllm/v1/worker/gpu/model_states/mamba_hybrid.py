@@ -9,6 +9,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.config.mamba import MambaBackendEnum
 from vllm.model_executor.layers.mamba.mamba_utils import (
     get_conv_copy_spec,
     is_conv_state_dim_first,
@@ -36,6 +37,9 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     is_prefilling: torch.Tensor
     num_accepted_tokens: torch.Tensor | None = None
     num_decode_draft_tokens_cpu: torch.Tensor | None = None
+    # (num_reqs,) int8, batch-order view of the persistent per-request admission
+    # flags. Only the FlashInfer ReplaySSM-spec builder consumes it.
+    replayssm_needs_reset: torch.Tensor | None = None
 
     def get_extra_common_attn_kwargs(
         self,
@@ -54,7 +58,7 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
             (Mamba2AttentionMetadataBuilder, GDNAttentionMetadataBuilder),
         ):
             return {}
-        return {
+        kwargs: dict[str, Any] = {
             "num_accepted_tokens": None
             if self.num_accepted_tokens is None
             else self.num_accepted_tokens[:num_reqs],
@@ -62,6 +66,13 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
             if self.num_decode_draft_tokens_cpu is None
             else self.num_decode_draft_tokens_cpu[:num_reqs],
         }
+        # Triton ReplaySSM-spec builders must keep receiving exactly their
+        # existing arguments, so this is passed only where it is consumed.
+        if self.replayssm_needs_reset is not None and getattr(
+            attn_metadata_builder, "use_replayssm_spec_flashinfer", False
+        ):
+            kwargs["replayssm_needs_reset"] = self.replayssm_needs_reset[:num_reqs]
+        return kwargs
 
 
 class MambaHybridModelState(DefaultModelState):
@@ -79,6 +90,18 @@ class MambaHybridModelState(DefaultModelState):
         self.num_accepted_tokens_gpu = torch.ones(
             self.max_num_reqs, dtype=torch.int32, device=self.device
         )
+        # FlashInfer ReplaySSM-spec admission flags, keyed by persistent request
+        # slot. GPU-resident: DSpark runs only on this runner and its scheduler
+        # must not gain a D2H sync on the decode path.
+        self._replayssm_spec_flashinfer = (
+            self.cache_config.use_replayssm_spec
+            and vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
+        )
+        self.replayssm_needs_reset_gpu: torch.Tensor | None = None
+        if self._replayssm_spec_flashinfer:
+            self.replayssm_needs_reset_gpu = torch.zeros(
+                self.max_num_reqs, dtype=torch.int8, device=self.device
+            )
         # Pre-copy "align" prefix-cache state (V2). The migration of each
         # request's mamba state across block boundaries runs as a fused GPU
         # kernel reusing the postprocess copy machinery, so the per-step src
@@ -102,6 +125,10 @@ class MambaHybridModelState(DefaultModelState):
         super().add_request(req_index, new_req_data)
         # Must reset the speculative acceptance count in this idx which could be stale.
         self.num_accepted_tokens_gpu[req_index] = 1
+        if self.replayssm_needs_reset_gpu is not None:
+            # Runs on admission and on resumption after preemption, which is
+            # exactly the once-per-admission cadence the ring reset needs.
+            self.replayssm_needs_reset_gpu[req_index] = 1
         if self._align_mode:
             # Seed the running state block from the resumed/prefilled position.
             self._mamba_state_idx_gpu[req_index] = (
@@ -269,12 +296,27 @@ class MambaHybridModelState(DefaultModelState):
                 )
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
+        replayssm_needs_reset = None
+        if not for_capture and self.replayssm_needs_reset_gpu is not None:
+            # Gather into batch order like num_accepted_tokens above, but
+            # idx_mapping may carry -1 sentinels for filtered rows under PP, so
+            # clamp the gather and mask those rows off instead of reading slot
+            # -1. The padded tail stays zero: padding must never reset a ring.
+            replayssm_needs_reset = self.replayssm_needs_reset_gpu.new_zeros(num_reqs)
+            idx_mapping = input_batch.idx_mapping
+            valid = idx_mapping >= 0
+            gathered = self.replayssm_needs_reset_gpu[idx_mapping.clamp_min(0)]
+            replayssm_needs_reset[: input_batch.num_reqs] = torch.where(
+                valid, gathered, torch.zeros_like(gathered)
+            )
+
         mamba_attn_metadata = MambaHybridAttnMetadata(
             is_prefilling=is_prefilling,
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
+            replayssm_needs_reset=replayssm_needs_reset,
         )
-        return build_attn_metadata(
+        attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
             num_tokens=num_tokens,
@@ -291,6 +333,44 @@ class MambaHybridModelState(DefaultModelState):
             model_specific_attn_metadata=mamba_attn_metadata,
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
+        )
+        if replayssm_needs_reset is not None:
+            self._clear_replayssm_needs_reset(
+                attn_metadata, attn_groups, input_batch.idx_mapping
+            )
+        return attn_metadata
+
+    def _clear_replayssm_needs_reset(
+        self,
+        attn_metadata: dict[str, Any],
+        attn_groups: list[list[AttentionGroup]],
+        idx_mapping: torch.Tensor,
+    ) -> None:
+        """Clear admission flags for rows that just had their ring reset.
+
+        Runs only after every Mamba group has been built, so a flag is never
+        dropped before some group has seen it. Rows still prefilling keep theirs.
+        """
+        num_decodes: int | None = None
+        for groups in attn_groups:
+            for group in groups:
+                builder = group.get_metadata_builder()
+                if not getattr(builder, "use_replayssm_spec_flashinfer", False):
+                    continue
+                metadata = attn_metadata.get(group.layer_names[0])
+                if metadata is None:
+                    continue
+                if num_decodes is None:
+                    num_decodes = metadata.num_decodes
+                else:
+                    assert num_decodes == metadata.num_decodes, (
+                        "FlashInfer ReplaySSM Mamba groups disagree on the "
+                        f"decode prefix ({num_decodes} vs {metadata.num_decodes})"
+                    )
+        if not num_decodes:
+            return
+        _clear_needs_reset_kernel[(num_decodes,)](
+            idx_mapping, self.replayssm_needs_reset_gpu
         )
 
     def postprocess_state(
@@ -333,6 +413,24 @@ class MambaHybridModelState(DefaultModelState):
                     num_computed_tokens,
                     idx_mapping,
                 )
+
+
+@triton.jit
+def _clear_needs_reset_kernel(
+    idx_mapping_ptr,  # [num_reqs] batch_idx -> req_state_idx (-1 to skip)
+    needs_reset_ptr,  # [max_num_reqs] int8
+):
+    """Clear the admission flag for one decode row.
+
+    Scattering through idx_mapping in a kernel rather than with advanced
+    indexing keeps the -1 sentinel from wrapping around to the last request
+    slot, and avoids a temporary boolean-index allocation on the decode path.
+    """
+    row = tl.program_id(0)
+    req_state_idx = tl.load(idx_mapping_ptr + row)
+    if req_state_idx < 0:
+        return
+    tl.store(needs_reset_ptr + req_state_idx, 0)
 
 
 @triton.jit

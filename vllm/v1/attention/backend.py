@@ -485,6 +485,14 @@ class CommonAttentionMetadata:
     at the current decode run's last full-state write. write_pos counts from
     here, so a preemption-resumed request re-anchors past the prompt boundary."""
 
+    replayssm_needs_reset_cpu: torch.Tensor | None = None
+    """(batch_size,) CPU int8 admission flag for FlashInfer ReplaySSM-spec: 1
+    until the request has been through a FlashInfer decode build, so the ring
+    reset fires exactly once per (re)admission regardless of how many
+    chunked-prefill steps precede the first decode. The classic runner clears it
+    after every Mamba group has consumed it; the V2 runner keeps the equivalent
+    state GPU-resident instead."""
+
     # WARNING: Deprecated fields. Will be removed in a future release (v0.15.0)
     _seq_lens_cpu: torch.Tensor | None = None
     _num_computed_tokens_cpu: torch.Tensor | None = None

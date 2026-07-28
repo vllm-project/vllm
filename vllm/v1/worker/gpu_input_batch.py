@@ -182,6 +182,18 @@ class InputBatch:
         )
         self.replayssm_decode_base = self.replayssm_decode_base_cpu_tensor.numpy()
 
+        # FlashInfer ReplaySSM-spec admission flag: set on every (re)admission
+        # and cleared once the request has actually been through a FlashInfer
+        # decode build, so the ring reset fires exactly once per admission even
+        # when the request runs several chunked-prefill steps first.
+        self.replayssm_needs_reset_cpu_tensor = torch.zeros(
+            (max_num_reqs,),
+            device="cpu",
+            dtype=torch.int8,
+            pin_memory=PIN_MEMORY,
+        )
+        self.replayssm_needs_reset = self.replayssm_needs_reset_cpu_tensor.numpy()
+
         # Block table.
         self.block_table = MultiGroupBlockTable(
             max_num_reqs=max_num_reqs,
@@ -393,6 +405,11 @@ class InputBatch:
             # Ring origin = full context at (re)admission (prompt + any resumed
             # output), so a resumed request re-anchors past the prompt.
             self.replayssm_decode_base[req_index] = request.num_tokens
+            # add_request runs on admission and on resumption after preemption,
+            # which is exactly the once-per-admission cadence the FlashInfer
+            # ring reset needs -- and unlike a block-keyed guess it cannot be
+            # confused by a recycled physical block.
+            self.replayssm_needs_reset[req_index] = 1
 
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
         self.block_table.add_row(request.block_ids, req_index)
@@ -619,6 +636,10 @@ class InputBatch:
                 self.replayssm_decode_base[i2],
                 self.replayssm_decode_base[i1],
             )
+            self.replayssm_needs_reset[i1], self.replayssm_needs_reset[i2] = (
+                self.replayssm_needs_reset[i2],
+                self.replayssm_needs_reset[i1],
+            )
         self.num_computed_tokens_cpu[i1], self.num_computed_tokens_cpu[i2] = (
             self.num_computed_tokens_cpu[i2],
             self.num_computed_tokens_cpu[i1],
@@ -778,6 +799,9 @@ class InputBatch:
             self.num_prompt_tokens[empty_index] = self.num_prompt_tokens[last_req_index]
             if self.use_replayssm:
                 self.replayssm_decode_base[empty_index] = self.replayssm_decode_base[
+                    last_req_index
+                ]
+                self.replayssm_needs_reset[empty_index] = self.replayssm_needs_reset[
                     last_req_index
                 ]
             self.num_computed_tokens_cpu[empty_index] = self.num_computed_tokens_cpu[

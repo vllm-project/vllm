@@ -8,6 +8,7 @@ from typing import Any, ClassVar, TypeVar
 import torch
 
 from vllm.config import VllmConfig
+from vllm.config.mamba import MambaBackendEnum
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -123,6 +124,17 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self.spec_flush_threshold = self.replayssm_buffer_len + self.max_spec_len
         self.spec_ring_len = MambaStateShapeCalculator.replayssm_spec_ring_len(
             self.replayssm_buffer_len, self.num_spec_tokens
+        )
+        # FlashInfer's ring is exactly B + T (it derives max_window from the
+        # ring length), so it gets its own length and its own cursor kernels.
+        self.use_replayssm_spec_flashinfer = (
+            self.use_replayssm_spec
+            and vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
+        )
+        self.spec_fi_ring_len = (
+            MambaStateShapeCalculator.replayssm_spec_flashinfer_ring_len(
+                self.replayssm_buffer_len, self.num_spec_tokens
+            )
         )
 
         assert isinstance(kv_cache_spec, MambaSpec)
@@ -477,9 +489,14 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         *,
         num_accepted_tokens: torch.Tensor | None = None,
         prev_last_scheduled_idx: torch.Tensor | None = None,
+        replayssm_needs_reset: torch.Tensor | None = None,
     ) -> M:
         """
         Compute metadata common to both Mamba1 and Mamba2.
+
+        ``replayssm_needs_reset`` is the V2 runner's GPU-resident admission
+        mask, already gathered into batch order; the classic runner supplies the
+        equivalent on ``common_attn_metadata`` instead.
         """
         num_reqs = common_attn_metadata.num_reqs
 
@@ -715,6 +732,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     state_indices_tensor_d,
                     num_accepted_tokens,
                     num_decodes,
+                    replayssm_needs_reset=replayssm_needs_reset,
                 )
             )
             if self.decode_spec_bc_pre is not None:
@@ -760,6 +778,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         state_indices_tensor_d: torch.Tensor,
         num_accepted_tokens: torch.Tensor,
         num_decodes: int,
+        replayssm_needs_reset: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Advance the block-keyed spec ring cursors for this step.
 
@@ -773,23 +792,17 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         )
 
         device = common_attn_metadata.query_start_loc.device
-        if self.spec_write_pos is None:
-            num_gpu_blocks = self.vllm_config.cache_config.num_gpu_blocks
-            if not num_gpu_blocks:
-                raise ValueError(
-                    "--use-replayssm-spec needs num_gpu_blocks at build time to "
-                    "size the block-keyed cursor buffers"
-                )
-            self.spec_write_pos = torch.zeros(
-                num_gpu_blocks, dtype=torch.int32, device=device
-            )
-            self.spec_post_origin = torch.zeros(
-                num_gpu_blocks, dtype=torch.int32, device=device
-            )
-            self.spec_is_flush = torch.zeros(
-                num_gpu_blocks, dtype=torch.int8, device=device
-            )
+        self._ensure_spec_cursor_buffers(device)
         assert self.spec_post_origin is not None and self.spec_is_flush is not None
+
+        if self.use_replayssm_spec_flashinfer:
+            return self._commit_replayssm_spec_cursors_flashinfer(
+                common_attn_metadata,
+                state_indices_tensor_d,
+                num_accepted_tokens,
+                num_decodes,
+                replayssm_needs_reset,
+            )
 
         block_ids = state_indices_tensor_d[:, 0]
         # Commit first: acceptance is only known after the previous step's
@@ -837,6 +850,97 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             max_cache_len=self.spec_flush_threshold,
             max_spec_len=self.max_spec_len,
             force_flush_mask=force_flush_d,
+        )
+        return self.spec_write_pos, self.spec_post_origin, self.spec_is_flush
+
+    def _ensure_spec_cursor_buffers(self, device: torch.device) -> None:
+        """Lazily size the block-keyed cursors; num_gpu_blocks needs profiling."""
+        if self.spec_write_pos is not None:
+            return
+        num_gpu_blocks = self.vllm_config.cache_config.num_gpu_blocks
+        if not num_gpu_blocks:
+            raise ValueError(
+                "--use-replayssm-spec needs num_gpu_blocks at build time to "
+                "size the block-keyed cursor buffers"
+            )
+        self.spec_write_pos = torch.zeros(
+            num_gpu_blocks, dtype=torch.int32, device=device
+        )
+        self.spec_post_origin = torch.zeros(
+            num_gpu_blocks, dtype=torch.int32, device=device
+        )
+        self.spec_is_flush = torch.zeros(
+            num_gpu_blocks, dtype=torch.int8, device=device
+        )
+
+    def _commit_replayssm_spec_cursors_flashinfer(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        state_indices_tensor_d: torch.Tensor,
+        num_accepted_tokens: torch.Tensor,
+        num_decodes: int,
+        replayssm_needs_reset: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """FlashInfer variant of the cursor commit.
+
+        Differs from the Triton commit in the two places the kernels differ: the
+        ring wraps by subtraction (B + T is not a power of two) and this step's
+        checkpoint decision uses each row's actual length, matching the
+        kernel's ``pnat + seq_len > max_window``. Entry is driven by the
+        once-per-admission flag rather than a decode_base comparison, so no
+        forced flush is needed -- FlashInfer has no is_flush input to force.
+        """
+        from vllm.model_executor.layers.mamba.ops.replayssm_spec_flashinfer_cursors import (  # noqa: E501
+            commit_replayssm_spec_flashinfer,
+            reset_replayssm_spec_flashinfer_cursors,
+        )
+
+        assert self.spec_write_pos is not None
+        assert self.spec_post_origin is not None and self.spec_is_flush is not None
+
+        device = common_attn_metadata.query_start_loc.device
+        block_ids = state_indices_tensor_d[:, 0]
+        query_start_loc_d = common_attn_metadata.query_start_loc[: num_decodes + 1]
+
+        # Commit first: acceptance is only known after the previous step's
+        # sampling, so folding it into this build keeps every cursor update
+        # on-device and avoids a device-to-host sync on num_accepted_tokens.
+        commit_replayssm_spec_flashinfer(
+            self.spec_write_pos,
+            self.spec_post_origin,
+            self.spec_is_flush,
+            num_accepted_tokens.to(torch.int32),
+            query_start_loc_d,
+            block_ids,
+            max_window=self.replayssm_buffer_len,
+            ring_len=self.spec_fi_ring_len,
+        )
+
+        if replayssm_needs_reset is not None:
+            # V2 runner: already gathered into batch order on device, with -1
+            # idx_mapping sentinels and the padded tail masked off.
+            needs_reset_d = replayssm_needs_reset[:num_decodes]
+        else:
+            needs_reset_cpu = common_attn_metadata.replayssm_needs_reset_cpu
+            if needs_reset_cpu is None:
+                raise ValueError(
+                    "--use-replayssm-spec on the flashinfer backend requires the "
+                    "admission flags to reset the ring on entry to decode"
+                )
+            # tolist() so the async copy owns its staging buffer -- the source
+            # is a live pinned tensor the runner clears as soon as this step's
+            # groups are built.
+            needs_reset_d = async_tensor_h2d(
+                needs_reset_cpu[:num_decodes].tolist(), dtype=torch.int8, device=device
+            )
+        reset_replayssm_spec_flashinfer_cursors(
+            self.spec_write_pos,
+            self.spec_post_origin,
+            self.spec_is_flush,
+            needs_reset_d,
+            query_start_loc_d,
+            block_ids,
+            max_window=self.replayssm_buffer_len,
         )
         return self.spec_write_pos, self.spec_post_origin, self.spec_is_flush
 

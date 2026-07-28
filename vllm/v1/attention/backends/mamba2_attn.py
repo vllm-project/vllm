@@ -141,6 +141,7 @@ class Mamba2AttentionMetadataBuilder(
             common_attn_metadata,
             num_accepted_tokens=kwargs.get("num_accepted_tokens"),
             prev_last_scheduled_idx=kwargs.get("prev_last_scheduled_idx"),
+            replayssm_needs_reset=kwargs.get("replayssm_needs_reset"),
         )
 
         seq_idx_p = None
