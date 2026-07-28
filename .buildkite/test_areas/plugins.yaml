@@ -4,7 +4,7 @@ depends_on:
 steps:
 - label: Plugin Tests (2 GPUs)
   key: plugin-tests-2-gpus
-  timeout_in_minutes: 60
+  timeout_in_minutes: 35
   working_dir: "/vllm-workspace/tests"
   num_devices: 2
   source_file_dependencies:

@@ -5,7 +5,10 @@ import torch.nn as nn
 
 from vllm.config import ModelConfig
 from vllm.model_executor.models.interfaces import supports_multimodal_pruning
-from vllm.multimodal.utils import get_mm_features_in_window
+from vllm.multimodal.utils import (
+    copy_mm_embedding_modality,
+    get_mm_features_in_window,
+)
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.rope import RopeState
@@ -42,7 +45,11 @@ class MultiModalPruner:
         speculator reuses the target's already-recomputed positions, hence there is
         no position write-back here.
         """
-        return [mm[:, : self.inputs_embeds_size] for mm in mm_embeds]
+        stripped: list[torch.Tensor] = []
+        for mm in mm_embeds:
+            out = mm[:, : self.inputs_embeds_size]
+            stripped.append(copy_mm_embedding_modality(mm, out))
+        return stripped
 
     def recompute(
         self,
@@ -82,7 +89,10 @@ class MultiModalPruner:
                 num_computed_tokens=num_computed,
             )
             self.rope_state.update_prefill_positions(req_idx, new_positions, delta)
-            cleaned.extend(req_cleaned)
+            cleaned.extend(
+                copy_mm_embedding_modality(src, dst)
+                for src, dst in zip(req_embeds, req_cleaned)
+            )
 
         assert pos == len(mm_embeds)
         return cleaned

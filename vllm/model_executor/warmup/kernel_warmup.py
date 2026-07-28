@@ -17,6 +17,9 @@ from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.deepseek_v4_mhc_warmup import (
     deepseek_v4_mhc_warmup,
 )
+from vllm.model_executor.warmup.fa4_cutedsl_warmup import (
+    fa4_cutedsl_warmup,
+)
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     resolve_flashinfer_autotune_file,
     write_flashinfer_autotune_cache,
@@ -27,7 +30,7 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
 )
 from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
 from vllm.model_executor.warmup.sparse_mla_triton_warmup import (
-    sparse_mla_triton_warmup_if_needed,
+    sparse_mla_triton_warmup,
 )
 from vllm.model_executor.warmup.v1_block_table_warmup import (
     warm_v1_block_table_kernels,
@@ -41,6 +44,53 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
+
+_LL_BF16_WARMUP_M_RANGE = range(1, 17)
+
+
+def _ll_bf16_router_shapes_from_model(
+    model: torch.nn.Module,
+) -> tuple[tuple[int, int], ...]:
+    from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
+
+    shapes: set[tuple[int, int]] = set()
+    for module in model.modules():
+        if not isinstance(module, GateLinear):
+            continue
+        weight = getattr(module, "weight", None)
+        if not isinstance(weight, torch.Tensor):
+            continue
+        if weight.dim() != 2 or weight.dtype != torch.bfloat16:
+            continue
+        n, k = weight.shape
+        if k % 8 == 0:
+            shapes.add((int(k), int(n)))
+    return tuple(sorted(shapes))
+
+
+def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
+    from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
+        is_available as is_ll_bf16_gemm_available,
+    )
+    from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
+        ll_bf16_gemm_kernel,
+    )
+
+    if not is_ll_bf16_gemm_available():
+        return
+
+    shapes = _ll_bf16_router_shapes_from_model(model)
+    if not shapes:
+        logger.info(
+            "Skipping ll_bf16 router GEMM warmup: no bf16 GateLinear shapes found."
+        )
+        return
+
+    logger.info("Warming up ll_bf16 router GEMM kernels for shapes: %s.", shapes)
+    ll_bf16_gemm_kernel.warmup(
+        shapes=shapes,
+        m_values=_LL_BF16_WARMUP_M_RANGE,
+    )
 
 
 def kernel_warmup(worker: "Worker"):
@@ -68,7 +118,6 @@ def kernel_warmup(worker: "Worker"):
     )
 
     # Run next so input-prep kernels JIT against pristine runner state.
-    sparse_mla_triton_warmup_if_needed(worker)
     flashinfer_sparse_mla_decode_autotune_warmup(worker)
     deepseek_v4_sparse_mla_attention_warmup(worker)
 
@@ -93,6 +142,9 @@ def kernel_warmup(worker: "Worker"):
         logger.info("Skipping FlashInfer autotune because it is disabled.")
     elif has_flashinfer() and current_platform.has_device_capability(90):
         flashinfer_autotune(worker.model_runner)
+
+    if current_platform.has_device_capability(90):
+        _warmup_ll_bf16_router_gemm(worker.get_model())
 
     # FlashInfer attention warmup
     # Only warmup if the model has FlashInfer attention groups
@@ -127,7 +179,33 @@ def kernel_warmup(worker: "Worker"):
         )
 
     if worker.vllm_config.kernel_config.enable_cutedsl_warmup:
+        # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
+        # to the shared JIT warmup infrastructure.
+        # https://github.com/vllm-project/vllm/pull/47451
         cutedsl_warmup()
+
+    if worker.vllm_config.kernel_config.enable_jit_warmup:
+        fa4_cutedsl_warmup(worker)
+        sparse_mla_triton_warmup(worker)
+
+
+def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
+    if envs.VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS is not None:
+        return set(envs.VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS) or None
+
+    from vllm.model_executor.kernels.linear import (
+        FlashInferCuteDslNvFp4LinearKernel,
+    )
+
+    for module in runner.get_model().modules():
+        for holder_name in ("quant_method", "scheme"):
+            kernel = getattr(getattr(module, holder_name, None), "kernel", None)
+            # CuTe-DSL mm_fp4 tuning JIT-compiles every tactic and its
+            # fallback is already the heuristic; all mm_fp4 backends share
+            # the "fp4_gemm" op name, so skip only when cute-dsl is selected.
+            if isinstance(kernel, FlashInferCuteDslNvFp4LinearKernel):
+                return {"fp4_gemm"}
+    return None
 
 
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
@@ -146,6 +224,15 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     import vllm.utils.flashinfer as fi_utils
     from vllm.distributed.parallel_state import get_world_group
 
+    autotune_kwargs: dict = {}
+    skip_ops = _flashinfer_autotune_skip_ops(runner)
+    if skip_ops:
+        logger.info(
+            "Skipping FlashInfer autotuning for ops %s",
+            sorted(skip_ops),
+        )
+        autotune_kwargs["skip_ops"] = skip_ops
+
     use_persistent_cache = True
 
     # When distributed, tune on every rank so the collectives stay synchronized.
@@ -153,7 +240,7 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         use_persistent_cache = False
 
     if not use_persistent_cache:
-        with torch.inference_mode(), fi_utils.autotune():
+        with torch.inference_mode(), fi_utils.autotune(**autotune_kwargs):
             runner._dummy_run(
                 num_tokens=runner.scheduler_config.max_num_batched_tokens,
                 skip_eplb=True,
@@ -181,7 +268,9 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
 
     with torch.inference_mode():
         if is_leader:
-            with fi_utils.autotune(tune_mode=True, cache=str(cache_path)):
+            with fi_utils.autotune(
+                tune_mode=True, cache=str(cache_path), **autotune_kwargs
+            ):
                 runner._dummy_run(**dummy_run_kwargs)
         else:
             runner._dummy_run(**dummy_run_kwargs)

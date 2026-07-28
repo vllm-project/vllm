@@ -315,7 +315,7 @@ vLLM CPU supports data parallel (DP), tensor parallel (TP) and pipeline parallel
 - vLLM CPU supports quantizations:
     - AWQ (x86 only)
     - GPTQ (x86 only)
-    - compressed-tensor INT8 W8A8 (x86, s390x)
+    - compressed-tensor INT8 W8A8 (x86 only)
 
 ### Why do I see `get_mempolicy: Operation not permitted` when running in Docker?
 
