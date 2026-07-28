@@ -49,9 +49,12 @@ pub fn generate_random_dataset(
     let (input_low, input_high) = range_ratio.input_bounds(real_input_len);
     let (output_low, output_high) = range_ratio.output_bounds(output_len);
     if !range_ratio.is_fixed() {
-        println!(
-            "Sampling input_len from [{input_low}, {input_high}] and \
-             output_len from [{output_low}, {output_high}]"
+        tracing::info!(
+            input_low,
+            input_high,
+            output_low,
+            output_high,
+            "sampling random request lengths"
         );
     }
 
@@ -305,7 +308,8 @@ mod tests {
     #[test]
     #[ignore]
     fn test_generate_random_dataset_token_ids() {
-        let tokenizer = tokenizer::load_tokenizer("gpt2", false, None).unwrap();
+        let tokenizer =
+            TokenizerKind::Tiktoken(crate::tiktoken::load_builtin_tiktoken("gpt2").unwrap());
         let requests = generate_random_dataset(
             &tokenizer,
             10,  // num_requests
@@ -337,7 +341,8 @@ mod tests {
     #[test]
     #[ignore]
     fn test_generate_random_dataset_text() {
-        let tokenizer = tokenizer::load_tokenizer("gpt2", false, None).unwrap();
+        let tokenizer =
+            TokenizerKind::Tiktoken(crate::tiktoken::load_builtin_tiktoken("gpt2").unwrap());
         let requests = generate_random_dataset(
             &tokenizer,
             10,  // num_requests
@@ -371,7 +376,8 @@ mod tests {
     #[test]
     #[ignore]
     fn test_token_length_exact_local() {
-        let tokenizer = tokenizer::load_tokenizer("gpt2", false, None).unwrap();
+        let tokenizer =
+            TokenizerKind::Tiktoken(crate::tiktoken::load_builtin_tiktoken("gpt2").unwrap());
         let target_len = 512;
         let requests = generate_random_dataset(
             &tokenizer,
@@ -405,11 +411,11 @@ mod tests {
     }
 
     /// Test that tiktoken tokenizer produces exact target token lengths (token ID mode).
-    #[test]
+    #[tokio::test]
     #[ignore]
-    fn test_token_length_exact_tiktoken() {
+    async fn test_token_length_exact_tiktoken() {
         // Use Qwen2.5 which has a tiktoken-format tokenizer
-        let tokenizer = tokenizer::load_tokenizer("Qwen/Qwen2.5-0.5B", false, None);
+        let tokenizer = tokenizer::load_tokenizer("Qwen/Qwen2.5-0.5B", false, None).await;
         let tokenizer = match tokenizer {
             Ok(t) => t,
             Err(e) => {
@@ -453,10 +459,10 @@ mod tests {
 
     /// Test encode/decode roundtrip stability for tiktoken.
     /// After one decode→encode cycle with UTF-8-safe tokens, length must not drift.
-    #[test]
+    #[tokio::test]
     #[ignore]
-    fn test_tiktoken_roundtrip_stability() {
-        let tokenizer = tokenizer::load_tokenizer("Qwen/Qwen2.5-0.5B", false, None);
+    async fn test_tiktoken_roundtrip_stability() {
+        let tokenizer = tokenizer::load_tokenizer("Qwen/Qwen2.5-0.5B", false, None).await;
         let tokenizer = match tokenizer {
             Ok(t) => t,
             Err(e) => {

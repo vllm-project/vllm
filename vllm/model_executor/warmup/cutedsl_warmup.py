@@ -2,6 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Run registered CuTeDSL warmup compile units."""
 
+# TODO(roberto): Remove this compatibility registry after registered CuTeDSL
+# warmups are migrated to the shared JIT warmup infrastructure.
+# https://github.com/vllm-project/vllm/pull/47451
+
 from __future__ import annotations
 
 import time
