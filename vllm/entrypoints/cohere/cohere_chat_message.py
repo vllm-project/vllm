@@ -43,12 +43,33 @@ class CitationSource(OpenAIBaseModel):
     discriminator (``document`` or ``tool``); ``id`` is the citing
     document/tool-output identifier; ``document`` and ``tool_output`` carry
     the original payload that produced the citation.
+
+    ``tool_call_index`` and ``tool_result_indices`` are internal fields
+    populated by the Cohere reasoning parser (which sees only melody's
+    numeric ``(bucket, result_idx)`` addressing). They are consumed by
+    :meth:`vllm.entrypoints.cohere.serving.CohereServingChatV2` to
+    resolve each source against the request's ``documents`` / tool
+    result contents, at which point ``type`` / ``id`` / ``document`` /
+    ``tool_output`` get populated.
+
+    Both flow through the *internal* streaming pipeline (parser ->
+    OpenAI stream chunk -> ``_chat_completion_stream_to_v2``), so they
+    must survive ``model_dump_json`` at that layer -- ``Field(exclude=
+    True)`` would drop them from serialization even when set, breaking
+    the resolver. Suppression from the *outer* Cohere v2 wire is
+    instead enforced by :meth:`_resolve_internal_citation` in serving,
+    which rebuilds wire sources from ``position_to_source`` (whose
+    entries always leave these fields ``None``) and calls
+    ``model_dump(exclude_none=True)`` before handing the payload to
+    :class:`cohere.types.Citation`.
     """
 
-    type: Literal["document", "tool"]
+    type: Literal["document", "tool"] | None = None
     id: str | None = None
     document: dict[str, Any] | None = None
     tool_output: dict[str, Any] | None = None
+    tool_call_index: int | None = None
+    tool_result_indices: list[int] | None = None
 
 
 class Citation(OpenAIBaseModel):

@@ -127,12 +127,17 @@ async def _stream_from(items: list[str]) -> AsyncGenerator[str, None]:
         yield item
 
 
-async def _drain(serving: CohereServingChatV2, items: list[str]) -> list[str]:
+async def _drain(
+    serving: CohereServingChatV2,
+    items: list[str],
+    request: CohereChatV2Request | None = None,
+) -> list[str]:
     """Drive ``_chat_completion_stream_to_v2`` over ``items`` and collect
     the emitted SSE frames."""
-    request = CohereChatV2Request(
-        model="m", messages=[{"role": "user", "content": "hi"}], stream=True
-    )
+    if request is None:
+        request = CohereChatV2Request(
+            model="m", messages=[{"role": "user", "content": "hi"}], stream=True
+        )
     gen = serving._chat_completion_stream_to_v2(_stream_from(items), request)
     return [frame async for frame in gen]
 
@@ -420,18 +425,53 @@ class TestHandleToolCallDeltas:
 
 
 class TestHandleCitationDeltas:
-    def test_citation_objects_emit_start_and_end(self):
+    """Test the per-delta emitter. The reasoning parser produces
+    citations whose sources carry melody's numeric
+    ``(tool_call_index, tool_result_indices)`` addressing (see
+    ``_melody_sources_to_vllm`` in
+    ``vllm/reasoning/cohere_command_reasoning_parser.py``); the
+    handler resolves them against a precomputed
+    ``position_to_source`` map (built once per stream by
+    ``_build_position_to_source``) so the wire event carries real
+    document ids / types / payloads.
+    """
+
+    @staticmethod
+    def _doc_position_map() -> dict[tuple[int, int], CitationSource]:
+        # Simulates the map ``_build_position_to_source`` would build
+        # from a request with two top-level documents. Bucket 0 is
+        # reserved for top-level docs; each ``(bucket, result_idx)``
+        # entry carries the fully-resolved wire-shape source.
+        return {
+            (0, 0): CitationSource(
+                type="document",
+                id="doc_hamlet",
+                document={"id": "doc_hamlet", "text": "Hamlet by Shakespeare."},
+            ),
+            (0, 1): CitationSource(
+                type="document",
+                id="doc_macbeth",
+                document={"id": "doc_macbeth", "text": "Macbeth by Shakespeare."},
+            ),
+        }
+
+    def test_resolved_citation_emits_start_and_end_with_real_id(self):
         serving = _serving()
         state = _StreamState()
         citations = [
             VLLMCitation(
                 start=0,
-                end=5,
-                text="hello",
-                sources=[CitationSource(type="document", id="d1")],
+                end=11,
+                text="Shakespeare",
+                sources=[
+                    CitationSource(tool_call_index=0, tool_result_indices=[0]),
+                ],
+                type="TEXT_CONTENT",
             )
         ]
-        events = serving._handle_citation_deltas(state, citations)
+        events = serving._handle_citation_deltas(
+            state, citations, self._doc_position_map()
+        )
         assert len(events) == 2
         start = _parse_event(events[0])
         end = _parse_event(events[1])
@@ -439,25 +479,91 @@ class TestHandleCitationDeltas:
         assert start["index"] == 0
         cit_payload = start["delta"]["message"]["citations"]
         assert cit_payload["start"] == 0
-        assert cit_payload["end"] == 5
-        assert cit_payload["text"] == "hello"
+        assert cit_payload["end"] == 11
+        assert cit_payload["text"] == "Shakespeare"
+        # Real doc id (not "0"), correct type, and payload attached.
+        assert cit_payload["sources"] == [
+            {
+                "type": "document",
+                "id": "doc_hamlet",
+                "document": {"id": "doc_hamlet", "text": "Hamlet by Shakespeare."},
+            }
+        ]
+        # The internal ``tool_call_index`` / ``tool_result_indices``
+        # coord fields must not leak onto the wire.
+        assert "tool_call_index" not in cit_payload["sources"][0]
+        assert "tool_result_indices" not in cit_payload["sources"][0]
         assert end == {"type": "citation-end", "index": 0}
 
-    def test_dict_citations_accepted(self):
+    def test_source_addressing_multiple_result_indices_expands(self):
+        # One melody source with ``tool_result_indices=[0, 1]`` fans
+        # out to two SDK sources -- one per resolved position.
         serving = _serving()
         state = _StreamState()
-        citations = [{"start": 0, "end": 3, "text": "Hi!", "sources": []}]
-        events = serving._handle_citation_deltas(state, citations)
-        assert len(events) == 2
-        assert _parse_event(events[0])["type"] == "citation-start"
-        assert _parse_event(events[1])["type"] == "citation-end"
+        citations = [
+            VLLMCitation(
+                start=0,
+                end=5,
+                text="works",
+                sources=[
+                    CitationSource(tool_call_index=0, tool_result_indices=[0, 1]),
+                ],
+                type="TEXT_CONTENT",
+            )
+        ]
+        events = serving._handle_citation_deltas(
+            state, citations, self._doc_position_map()
+        )
+        cit_payload = _parse_event(events[0])["delta"]["message"]["citations"]
+        ids = [s["id"] for s in cit_payload["sources"]]
+        assert ids == ["doc_hamlet", "doc_macbeth"]
 
-    def test_malformed_citation_skipped(self):
+    def test_unresolvable_source_drops_whole_citation(self):
+        # A source that doesn't hit any position in the map has no wire
+        # meaning; rather than emit ``sources=[]`` (a citation with no
+        # anchor), we drop the whole citation. Matches the inbound
+        # path's fail-closed policy and dory's ``toMelodyCitations``.
         serving = _serving()
         state = _StreamState()
-        # Neither a dict nor a Pydantic-model-like object.
-        events = serving._handle_citation_deltas(state, [object()])
+        citations = [
+            VLLMCitation(
+                start=0,
+                end=5,
+                text="hello",
+                sources=[
+                    CitationSource(tool_call_index=9, tool_result_indices=[0]),
+                ],
+            )
+        ]
+        events = serving._handle_citation_deltas(
+            state, citations, self._doc_position_map()
+        )
         assert events == []
+
+    def test_plan_rewrite_on_non_reasoning_model(self):
+        # ``is_thinking=True`` citations arrive from melody tagged as
+        # ``THINKING_CONTENT``. On non-reasoning models the reasoning
+        # block is surfaced as ``tool_plan`` (see
+        # ``_chat_completion_to_v2``), so the citation type on the wire
+        # is ``PLAN`` instead.
+        serving = _serving(is_reasoning_model=False)
+        state = _StreamState()
+        citations = [
+            VLLMCitation(
+                start=0,
+                end=5,
+                text="hello",
+                sources=[
+                    CitationSource(tool_call_index=0, tool_result_indices=[0]),
+                ],
+                type="THINKING_CONTENT",
+            )
+        ]
+        events = serving._handle_citation_deltas(
+            state, citations, self._doc_position_map()
+        )
+        cit_payload = _parse_event(events[0])["delta"]["message"]["citations"]
+        assert cit_payload["type"] == "PLAN"
 
 
 # ======================================================================
@@ -787,8 +893,17 @@ class TestChatCompletionStreamToV2:
 
     @pytest.mark.asyncio
     async def test_citations_in_delta_emit_citation_events(self):
+        # End-to-end streaming citation flow. The parser emits an
+        # unresolved source (numeric melody coords only); the streaming
+        # loop resolves against the request's ``documents`` and emits a
+        # wire event with the real doc id and payload.
         serving = _serving()
-        # Pass citation dicts the way the cohere2 reasoning parser does.
+        request = CohereChatV2Request(
+            model="m",
+            messages=[{"role": "user", "content": "hi"}],
+            documents=[{"id": "d1", "data": {"text": "cited"}}],
+            stream=True,
+        )
         items = [
             _make_chunk(role="assistant"),
             _make_chunk(content="hello"),
@@ -798,7 +913,8 @@ class TestChatCompletionStreamToV2:
                         "start": 0,
                         "end": 5,
                         "text": "hello",
-                        "sources": [{"type": "document", "id": "d1"}],
+                        "sources": [{"tool_call_index": 0, "tool_result_indices": [0]}],
+                        "type": "TEXT_CONTENT",
                     }
                 ]
             ),
@@ -812,10 +928,19 @@ class TestChatCompletionStreamToV2:
                 },
             ),
         ]
-        frames = await _drain(serving, items)
-        types = [_parse_event(f)["type"] for f in frames[:-1]]
+        frames = await _drain(serving, items, request=request)
+        parsed = [_parse_event(f) for f in frames[:-1]]
+        types = [p["type"] for p in parsed]
         assert "citation-start" in types
         assert "citation-end" in types
+        cit_start = next(p for p in parsed if p["type"] == "citation-start")
+        assert cit_start["delta"]["message"]["citations"]["sources"] == [
+            {
+                "type": "document",
+                "id": "d1",
+                "document": {"id": "d1", "text": "cited"},
+            }
+        ]
 
     @pytest.mark.asyncio
     async def test_first_chunk_emits_message_start_with_chunk_id(self):

@@ -45,7 +45,12 @@ from pydantic import BaseModel
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
-from vllm.entrypoints.cohere.cohere_chat_message import CohereChatMessage
+from vllm.entrypoints.cohere.cohere_chat_message import (
+    CitationSource as InternalCitationSource,
+)
+from vllm.entrypoints.cohere.cohere_chat_message import (
+    CohereChatMessage,
+)
 from vllm.entrypoints.cohere.protocol import (
     CitationEndEvent,
     CitationStartEvent,
@@ -859,7 +864,7 @@ class CohereServingChatV2(OpenAIServingChat):
             content=content_blocks or None,
             tool_calls=tool_calls,
             tool_plan=tool_plan,
-            citations=self._extract_citations_if_any(msg),
+            citations=self._extract_citations_if_any(msg, request),
         )
 
         usage = self._build_usage(response)
@@ -918,36 +923,238 @@ class CohereServingChatV2(OpenAIServingChat):
             message.citations = citations
         return message
 
-    @staticmethod
-    def _extract_citations_if_any(msg: Any) -> list[Citation] | None:
+    def _extract_citations_if_any(
+        self,
+        msg: Any,
+        request: CohereChatV2Request,
+    ) -> list[Citation] | None:
         """Coerce ``CohereChatMessage.citations`` into the Cohere v2 wire shape.
 
         :class:`CohereChatMessage` carries a
         ``citations: list[vllm...Citation] | None`` field populated by
         :meth:`_finalize_response_message` (which reads it off the
-        reasoning parser's ``last_unary_citations`` cache). We map each
-        internal :class:`vllm...Citation` into the SDK
-        :class:`cohere.types.Citation` wire model, preserving sources
-        and span.
+        reasoning parser's ``last_unary_citations`` cache). The parser
+        emits sources with only melody's numeric addressing (see
+        :func:`_melody_sources_to_vllm` in the parser); this method
+        resolves each ``(tool_call_index, tool_result_index)`` pair
+        against ``request`` to recover the original document id, source
+        type (``document`` vs ``tool``), and payload -- matching dory's
+        ``toCitationsV2`` behavior.
+
+        Also rewrites ``THINKING_CONTENT`` -> ``PLAN`` on non-reasoning
+        models: melody's parser output has only ``is_thinking: bool``,
+        but the wire distinguishes thinking-block citations
+        (``THINKING_CONTENT``) from tool-plan-block citations
+        (``PLAN``), and the discriminator on our side is the
+        ``is_reasoning_model`` server flag (see
+        :meth:`_chat_completion_to_v2` for how the same flag drives
+        thinking-vs-tool_plan surfacing).
         """
         raw = getattr(msg, "citations", None)
         if not raw:
             return None
+        position_to_source = self._build_position_to_source(request)
         out: list[Citation] = []
         for c in raw:
-            try:
-                if isinstance(c, Citation):
-                    out.append(c)
-                    continue
-                if hasattr(c, "model_dump"):
-                    payload = c.model_dump(exclude_none=True)
-                else:
-                    payload = c
-                if isinstance(payload, dict):
-                    out.append(Citation.model_validate(payload))
-            except Exception:  # pragma: no cover - defensive
-                logger.warning("Skipping malformed citation: %r", c, exc_info=True)
+            resolved = self._resolve_internal_citation(c, position_to_source)
+            if resolved is not None:
+                out.append(resolved)
         return out or None
+
+    def _resolve_internal_citation(
+        self,
+        citation: Any,
+        position_to_source: dict[tuple[int, int], InternalCitationSource],
+    ) -> Citation | None:
+        """Resolve one parser-produced citation into the SDK wire shape.
+
+        Returns ``None`` when every source fails to resolve (which
+        would otherwise produce a citation with ``sources=[]`` --
+        clients would see an anchor with no attribution, so it's safer
+        to drop it, matching the inbound path's fail-closed policy).
+
+        Accepts both :class:`InternalCitation` instances (what the
+        unary path receives directly from the parser via
+        ``last_unary_citations``) and plain ``dict`` payloads (what
+        the streaming path sees, because ``DeltaMessage.citations`` is
+        an untyped extras field on the OpenAI wire protocol and dict
+        shapes survive ``model_validate_json`` unchanged). Both flows
+        end up carrying the same key names, so a light normalization
+        step handles both without extra ceremony.
+        """
+
+        def _get(obj: Any, key: str, default: Any = None) -> Any:
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return getattr(obj, key, default)
+
+        raw_sources = _get(citation, "sources") or []
+        resolved_sources: list[InternalCitationSource] = []
+        for src in raw_sources:
+            bucket = _get(src, "tool_call_index")
+            indices = _get(src, "tool_result_indices") or []
+            if bucket is None or not indices:
+                continue
+            for idx in indices:
+                info = position_to_source.get((bucket, idx))
+                if info is not None:
+                    resolved_sources.append(info)
+        if not resolved_sources:
+            return None
+
+        cite_type = _get(citation, "type")
+        if cite_type == "THINKING_CONTENT" and not self._is_reasoning_model:
+            # Non-reasoning Command models surface the reasoning block
+            # as ``tool_plan`` (see ``_chat_completion_to_v2``), so any
+            # ``is_thinking`` citation from melody is actually a PLAN
+            # citation on the wire.
+            cite_type = "PLAN"
+
+        payload = {
+            "start": _get(citation, "start"),
+            "end": _get(citation, "end"),
+            "text": _get(citation, "text"),
+            "sources": [s.model_dump(exclude_none=True) for s in resolved_sources],
+            "type": cite_type,
+        }
+        try:
+            return Citation.model_validate(payload)
+        except Exception:  # pragma: no cover - defensive
+            logger.warning(
+                "Skipping malformed citation payload: %r", payload, exc_info=True
+            )
+            return None
+
+    @classmethod
+    def _build_position_to_source(
+        cls, request: CohereChatV2Request
+    ) -> dict[tuple[int, int], InternalCitationSource]:
+        """Invert the request-side numbering into ``(bucket, idx) -> source``.
+
+        Mirror image of :meth:`_build_doc_id_to_prompt_position`. That
+        helper answers "given a doc id, where does melody place it in
+        the rendered prompt?" -- used on the inbound path to translate
+        assistant-message citations into melody's ``FilterCitation``
+        shape. This helper answers the outbound question: "given a
+        ``(tool_call_index, tool_result_index)`` pair melody's parser
+        emitted, which document from the request produced it?" Both
+        must follow the same numbering rule (melody's
+        ``PromptRenderIds::from_messages`` in
+        ``melody/src/templating/util.rs``); do not diverge one without
+        the other.
+
+        Each entry carries the fully-resolved wire-shape info:
+
+        * ``type`` -- ``"document"`` for the reserved top-level bucket
+          (bucket 0 iff ``request.documents`` is non-empty),
+          ``"tool"`` for any tool-call bucket.
+        * ``id`` -- the original document id (explicit ``id`` field
+          on the request doc, or the ``doc_{idx}`` fallback that
+          ``_apply_cohere_template_kwargs`` synthesizes for unnamed
+          top-level docs).
+        * ``document`` / ``tool_output`` -- the original payload from
+          the request, attached so clients don't have to look ids back
+          up themselves. Only one of the two is set, matching
+          ``sourcesFromDocuments`` in
+          ``blobheart/go/dory/pkg/chat/v2.go``.
+        """
+        position_to_source: dict[tuple[int, int], InternalCitationSource] = {}
+        tool_call_id_to_bucket: dict[str, int] = {}
+        bucket_result_len: dict[int, int] = {}
+        next_bucket = 0
+
+        if request.documents:
+            for idx, doc in enumerate(request.documents):
+                if isinstance(doc, str):
+                    doc_id = f"doc_{idx}"
+                    payload: dict[str, Any] = {"text": doc}
+                else:
+                    doc_id = doc.id or f"doc_{idx}"
+                    payload = (
+                        dict(doc.data)
+                        if isinstance(doc.data, dict)
+                        else {"text": doc.data}
+                    )
+                payload.setdefault("id", doc_id)
+                position_to_source[(0, idx)] = InternalCitationSource(
+                    type="document",
+                    id=doc_id,
+                    document=payload,
+                )
+            next_bucket = 1
+
+        def register_bucket(tool_call_id: str) -> int:
+            nonlocal next_bucket
+            bucket = tool_call_id_to_bucket.get(tool_call_id)
+            if bucket is None:
+                bucket = next_bucket
+                tool_call_id_to_bucket[tool_call_id] = bucket
+                next_bucket += 1
+            return bucket
+
+        for msg in request.messages:
+            if isinstance(msg, ToolChatMessageV2):
+                if not msg.tool_call_id:
+                    continue
+                bucket = register_bucket(msg.tool_call_id)
+                base = bucket_result_len.get(bucket, 0)
+                if isinstance(msg.content, list):
+                    for offset, block in enumerate(msg.content):
+                        info = cls._tool_content_block_to_source(block)
+                        if info is not None:
+                            position_to_source[(bucket, base + offset)] = info
+                    bucket_result_len[bucket] = base + len(msg.content)
+                else:
+                    # A string or missing content is wrapped by the
+                    # cohere renderer into a single text block before
+                    # melody sees it, so it consumes one slot with no
+                    # doc id.
+                    bucket_result_len[bucket] = base + 1
+            elif isinstance(msg, AssistantChatMessageV2) and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    if tc.id:
+                        register_bucket(tc.id)
+
+        return position_to_source
+
+    @staticmethod
+    def _tool_content_block_to_source(
+        block: Any,
+    ) -> InternalCitationSource | None:
+        """Extract the wire-shape source for one tool-message content block.
+
+        Returns ``None`` for text-only blocks or malformed document
+        blocks (both consume a slot in melody's numbering but carry no
+        doc id, so callers still advance the bucket cursor). Split out
+        of :meth:`_build_position_to_source` mainly to give mypy a
+        narrow enough view of the ``Any``-typed cohere SDK block shape
+        that it doesn't need to guess about ``None``-ness.
+        """
+        if getattr(block, "type", None) != "document":
+            return None
+        doc = getattr(block, "document", None)
+        if doc is None:
+            return None
+        doc_id = getattr(doc, "id", None)
+        if not doc_id:
+            return None
+        data = getattr(doc, "data", None)
+        if isinstance(data, dict):
+            payload: dict[str, Any] = dict(data)
+        elif data is None:
+            payload = {}
+        else:
+            # Match the top-level ``documents`` handling (see
+            # ``_apply_cohere_template_kwargs``): non-dict payloads
+            # get wrapped as ``{"text": ...}`` so clients get a
+            # renderable body instead of a bare id.
+            payload = {"text": data}
+        payload.setdefault("id", doc_id)
+        return InternalCitationSource(
+            type="tool",
+            id=doc_id,
+            tool_output=payload,
+        )
 
     @staticmethod
     def _build_usage(response: ChatCompletionResponse) -> CohereUsage | None:
@@ -991,6 +1198,13 @@ class CohereServingChatV2(OpenAIServingChat):
               message-end
         """
         state = _StreamState()
+        # Precomputed once per stream: melody source ``(bucket, idx)``
+        # -> resolved wire-shape ``CitationSource``. See
+        # ``_build_position_to_source`` for the numbering it inverts.
+        # Streaming citations arrive at unpredictable intervals, but
+        # the mapping depends only on ``request``, so building it
+        # eagerly avoids re-walking the history on every delta.
+        position_to_source = self._build_position_to_source(request)
 
         try:
             async for item in generator:
@@ -1055,7 +1269,9 @@ class CohereServingChatV2(OpenAIServingChat):
                 # the cohere renderer/parsers may populate.
                 delta_citations = getattr(delta, "citations", None)
                 if delta_citations:
-                    for ev in self._handle_citation_deltas(state, delta_citations):
+                    for ev in self._handle_citation_deltas(
+                        state, delta_citations, position_to_source
+                    ):
                         yield ev
 
         except Exception as exc:
@@ -1232,31 +1448,27 @@ class CohereServingChatV2(OpenAIServingChat):
         return events
 
     def _handle_citation_deltas(
-        self, state: _StreamState, citations: list
+        self,
+        state: _StreamState,
+        citations: list,
+        position_to_source: dict[tuple[int, int], InternalCitationSource],
     ) -> list[str]:
         """Emit ``citation-start`` / ``citation-end`` events for a delta.
 
         The Cohere reasoning parser populates
         :class:`CohereDeltaMessage.citations` (see
-        :mod:`vllm.entrypoints.cohere.cohere_chat_message`) with
-        :class:`vllm.entrypoints.cohere.cohere_chat_message.Citation` instances
-        once a citation has fully resolved (start/end indices known). We
-        emit a complete start+end pair for each citation in the delta so
-        Cohere clients can attach the annotation to the surrounding text.
+        :mod:`vllm.entrypoints.cohere.cohere_chat_message`) once a
+        citation has fully resolved (start/end indices known). Sources
+        arrive with only melody's numeric ``(bucket, result_idx)``
+        addressing; we resolve them here against ``position_to_source``
+        so the wire event carries real document ids / types / payloads
+        (and drop citations that fail to resolve, matching the unary
+        path's fail-closed policy).
         """
         events: list[str] = []
         for c in citations:
-            payload = c.model_dump(exclude_none=True) if hasattr(c, "model_dump") else c
-            if not isinstance(payload, dict):
-                continue
-            try:
-                citation = Citation.model_validate(payload)
-            except Exception:  # pragma: no cover - defensive
-                logger.warning(
-                    "Skipping malformed streamed citation: %r",
-                    payload,
-                    exc_info=True,
-                )
+            citation = self._resolve_internal_citation(c, position_to_source)
+            if citation is None:
                 continue
             idx = state.next_citation_index()
             events.append(

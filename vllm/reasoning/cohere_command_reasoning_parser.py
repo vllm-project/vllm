@@ -410,27 +410,32 @@ def _schema_dict_from_structured_outputs(
 
 
 def _melody_sources_to_vllm(raw_sources: Any) -> list[CitationSource]:
-    """Convert melody's ``Source`` objects into :class:`CitationSource`.
+    """Convert melody's ``Source`` objects into unresolved :class:`CitationSource`.
 
-    melody's ``Source`` shape is ``{tool_call_index, tool_result_indices,
-    document_ids}``. ``document_ids`` may not be set; if it is empty and
-    we have no resolvable identifier then we fall back to a generic
-    ``tool``-style source carrying the tool-call index for visibility.
+    Melody's ``Source`` shape is ``{tool_call_index, tool_result_indices,
+    document_ids}``. Without :meth:`PyFilterOptions.with_message_history`
+    the ``document_ids`` list is empty, and even with it there's no way
+    at parser time to know whether a bucket is the reserved top-level
+    ``documents`` bucket or a tool call bucket. Rather than guess, we
+    emit each melody source verbatim with just its numeric coordinates;
+    :class:`vllm.entrypoints.cohere.serving.CohereServingChatV2` resolves
+    the coordinates to a fully-populated
+    :class:`~cohere.types.source.DocumentSource` / :class:`ToolSource`
+    using the request context (which knows how it originally assigned
+    the numbering).
+
+    One melody source can address multiple positions inside its bucket
+    (``tool_result_indices`` is a list), so we keep them packed here;
+    serving expands them one-per-position when it builds the wire shape.
     """
     out: list[CitationSource] = []
     for s in raw_sources or []:
-        # TODO Verify the tool vs doc logic
-        doc_ids: list[str] = list(getattr(s, "document_ids", None) or [])
-        if doc_ids:
-            for did in doc_ids:
-                if did:
-                    out.append(CitationSource(type="document", id=did))
-            continue
         tool_call_index = getattr(s, "tool_call_index", None)
+        indices = list(getattr(s, "tool_result_indices", None) or [])
         out.append(
             CitationSource(
-                type="tool",
-                id=(str(tool_call_index) if tool_call_index is not None else None),
+                tool_call_index=tool_call_index,
+                tool_result_indices=indices or None,
             )
         )
     return out

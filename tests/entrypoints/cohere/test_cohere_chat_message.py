@@ -38,6 +38,24 @@ class TestCitationSource:
             "id": "d1",
         }
 
+    def test_internal_coords_survive_serialization(self):
+        # Regression: ``tool_call_index`` / ``tool_result_indices`` are
+        # threaded through the *internal* streaming pipeline (parser ->
+        # OpenAI stream chunk -> ``_chat_completion_stream_to_v2``), so
+        # they must round-trip through ``model_dump_json``. Marking
+        # them ``Field(exclude=True)`` would silently drop them from
+        # serialization even when set -- catching the resolver
+        # empty-handed. This test pins the "survive" invariant.
+        src = CitationSource(tool_call_index=2, tool_result_indices=[0, 3])
+        # Use ``exclude_none=True`` to mirror the way OpenAI's stream
+        # chunk emits deltas.
+        dumped = src.model_dump(exclude_none=True)
+        assert dumped == {"tool_call_index": 2, "tool_result_indices": [0, 3]}
+        # Full JSON round-trip.
+        src2 = CitationSource.model_validate_json(src.model_dump_json())
+        assert src2.tool_call_index == 2
+        assert src2.tool_result_indices == [0, 3]
+
 
 # ======================================================================
 # Citation
