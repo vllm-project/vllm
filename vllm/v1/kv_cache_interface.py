@@ -83,6 +83,14 @@ def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
     return get_kv_quant_mode(kv_cache_dtype).is_per_token_head
 
 
+def align_block_table_width(max_num_blocks: int, block_size: int) -> int:
+    """Align a block-table row to the width required by attention backends."""
+    if block_size > 128:
+        return max_num_blocks
+    alignment = 128 // block_size
+    return cdiv(max_num_blocks, alignment) * alignment
+
+
 class KVCacheSpecKind(str, Enum):
     FULL_ATTENTION = "full_attention"
     MLA_ATTENTION = "mla_attention"

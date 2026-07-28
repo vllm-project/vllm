@@ -9,8 +9,8 @@ import torch
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.kv_cache_interface import align_block_table_width
 from vllm.v1.utils import CpuGpuBuffer
 
 logger = init_logger(__name__)
@@ -275,8 +275,7 @@ class MultiGroupBlockTable:
         # Align to a multiple of (128 / block_size) as required
         # by some attention backends such as TRTLLM (#39324)
         max_num_blocks = [
-            cdiv(n, 128 // bs) * (128 // bs) if bs <= 128 else n
-            for n, bs in zip(max_num_blocks, block_sizes)
+            align_block_table_width(n, bs) for n, bs in zip(max_num_blocks, block_sizes)
         ]
 
         self.block_tables = [
