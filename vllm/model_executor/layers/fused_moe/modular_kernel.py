@@ -10,7 +10,6 @@ from typing import final
 import torch
 
 import vllm.envs as envs
-from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
@@ -901,8 +900,6 @@ class FusedMoEExpertsModular(FusedMoEExperts):
             beta=beta,
             topk_ids=topk_ids,
             expert_map=expert_map,
-            activation_situ_beta=self.moe_config.activation_situ_beta,
-            activation_situ_linear_beta=(self.moe_config.activation_situ_linear_beta),
         )
 
     @abstractmethod
@@ -1196,20 +1193,6 @@ class FusedMoEKernelModularImpl:
         The _prepare method is a wrapper around self.prepare_finalize.prepare
         that handles DBO and async.
         """
-        # Skip cudagraph/DP padding tokens uniformly across all a2a backends:
-        # forcing padded rows' expert ids to -1 makes every prepare_finalize drop
-        # them (not dispatched / not computed by the experts). The V2 model runner
-        # marks them in forward_context.is_padding; it is None for runners that do
-        # not populate it, leaving topk_ids unchanged.
-        # This requires the experts kernel to treat topk_id == -1 as a skip
-        # sentinel.
-        is_padding = None
-        if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
-            is_padding = get_forward_context().is_padding
-        if is_padding is not None:
-            n = topk_ids.shape[0]
-            # TODO: Properly support DBO (padding lives at the batch tail).
-            topk_ids = torch.where(is_padding[:n].unsqueeze(1), -1, topk_ids)
 
         if not self.prepare_finalize.supports_async():
             # We shouldn't be running an a2a kernel that doesn't
@@ -1324,14 +1307,6 @@ class FusedMoEKernelModularImpl:
             activation,
         )
 
-        use_output_alias = (
-            output_alias is not None
-            and output_alias.shape == fused_out.shape
-            and output_alias.dtype == fused_out.dtype
-            and output_alias.device == fused_out.device
-            and output_alias.is_contiguous()
-        )
-
         # If caller's output buffer already matches fused_out shape/dtype, alias
         # to skip the redundant copy in TopKWeightAndReduceNoOP.apply downstream.
         # This eliminates ~94% of __amd_rocclr_copyBuffer events (Copy 2 of the
@@ -1339,10 +1314,15 @@ class FusedMoEKernelModularImpl:
         if current_platform.is_rocm():
             from vllm._aiter_ops import rocm_aiter_ops
 
-            if use_output_alias and rocm_aiter_ops.is_fused_moe_enabled():
+            if (
+                rocm_aiter_ops.is_fused_moe_enabled()
+                and output_alias is not None
+                and output_alias.shape == fused_out.shape
+                and output_alias.dtype == fused_out.dtype
+                and output_alias.device == fused_out.device
+                and output_alias.is_contiguous()
+            ):
                 fused_out = output_alias
-        elif use_output_alias:
-            fused_out = output_alias
 
         self.fused_experts.apply(
             output=fused_out,

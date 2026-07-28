@@ -133,8 +133,6 @@ def _rocm_aiter_fused_moe_impl(
     bias2: torch.Tensor | None = None,
     moe_sorting_dispatch_policy: int = 0,
     swiglu_limit: float = 0.0,
-    beta: float | None = None,
-    linear_beta: float | None = None,
 ) -> torch.Tensor:
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
@@ -145,12 +143,6 @@ def _rocm_aiter_fused_moe_impl(
     extra_kwargs: dict = {}
     if gate_mode and rocm_aiter_ops.fused_moe_supports_gate_mode():
         extra_kwargs["gate_mode"] = gate_mode
-    if (
-        getattr(ActivationType, "Situv2", None) is not None
-        and activation == ActivationType.Situv2
-    ):
-        extra_kwargs["beta"] = beta
-        extra_kwargs["linear_beta"] = linear_beta
 
     return fused_moe(
         hidden_states,
@@ -201,8 +193,6 @@ def _rocm_aiter_fused_moe_fake(
     bias2: torch.Tensor | None = None,
     moe_sorting_dispatch_policy: int = 0,
     swiglu_limit: float = 0.0,
-    beta: float | None = None,
-    linear_beta: float | None = None,
 ) -> torch.Tensor:
     if output_dtype is not None:
         return torch.empty_like(hidden_states, dtype=output_dtype)
@@ -1569,7 +1559,6 @@ class rocm_aiter_ops:
             "silu": ActivationType.Silu,
             "gelu": ActivationType.Gelu,
             "swiglu": ActivationType.Swiglu,
-            "situ": getattr(ActivationType, "Situv2", None),
         }
         return mapping.get(name)
 
@@ -2166,8 +2155,6 @@ class rocm_aiter_ops:
         bias2: torch.Tensor | None = None,
         moe_sorting_dispatch_policy: int = 0,
         swiglu_limit: float = 0.0,
-        beta: float | None = None,
-        linear_beta: float | None = None,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_fused_moe(
             hidden_states,
@@ -2192,8 +2179,6 @@ class rocm_aiter_ops:
             bias2,
             moe_sorting_dispatch_policy,
             swiglu_limit,
-            beta,
-            linear_beta,
         )
 
     @staticmethod

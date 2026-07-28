@@ -12,7 +12,7 @@ import torch
 
 from vllm.triton_utils import tl, triton
 
-from .op import exp, log
+from .op import exp
 
 
 @triton.heuristics(

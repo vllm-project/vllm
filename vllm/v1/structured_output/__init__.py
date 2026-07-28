@@ -430,64 +430,34 @@ class StructuredOutputManager:
         if reasoner.is_reasoning_end_streaming(all_token_ids, delta_ids):
             structured_req.reasoning_ended = True
 
-            # Reasoning just ended this step. The step can carry tokens
-            # sampled *after* the marker (already shaped by the mid-window
-            # bitmask); deferring the FSM advance to the next pass desyncs the
-            # FSM from the emitted tokens — they were sampled against the
-            # grammar's initial state but never accepted, so the next step
-            # re-derives from the initial state and duplicates the grammar
-            # prefix (e.g. '{"' + '{"city": ...}'). Advance through the
-            # post-marker suffix instead; trim_reasoning_for_advance() drops
-            # the reasoning content up to and including the marker, so record
-            # where it ends. The search is anchored at the end of the prompt,
-            # not at the step frame, which can start past the marker under
-            # spec decode + async scheduling.
-            structured_req.reasoning_end_token_index = self._find_reasoning_end_index(
-                reasoner,
-                all_token_ids,
-                len(request.prompt_token_ids or []),
-            )
+            # Record the boundary so the scheduler can exclude reasoning tokens.
+            end_index = self._find_reasoning_end_index(reasoner, all_token_ids, start)
+
+            structured_req.reasoning_end_token_index = end_index
             return True
 
         return False
 
     @staticmethod
     def _find_reasoning_end_index(
-        reasoner: "ReasoningParser", all_token_ids: Sequence[int], floor: int
+        reasoner: "ReasoningParser", all_token_ids: Sequence[int], start: int
     ) -> int:
-        """Locates the last reasoning token (the end marker's final token).
-
-        Binary-searches the flip point of ``is_reasoning_end`` over output
-        prefixes, anchored at ``floor`` (the end of the prompt). It must NOT
-        be anchored at the step frame: with speculative decoding and async
-        scheduling the frame can start past the marker, and for parsers whose
-        ``is_reasoning_end`` inspects the full sequence a frame-anchored walk
-        fires immediately, reporting the frame start instead of the true
-        marker end (which desyncs the grammar from the emitted tokens).
-
-        ``is_reasoning_end`` is monotone over prefixes of a single
-        generation — the current turn's close marker never reopens — which
-        makes the flip point well-defined.
+        """Locates the last reasoning token within ``all_token_ids[start:]``.
 
         Returns:
-            The absolute index of the last reasoning token. When reasoning
-            was already ended at ``floor`` (should not happen on this path;
-            gate init handles it), returns ``floor - 1``.
+            The absolute index of the token at which
+            ``is_reasoning_end_streaming`` first fires. Falls back to the
+            final index when no single token triggers the detection (e.g.
+            a multi-token marker only recognized on the full delta), which
+            conservatively treats the whole step as reasoning content.
         """
-        n = len(all_token_ids)
-        lo, hi = max(floor, 0), n
-        prefix = list(all_token_ids)
-        if reasoner.is_reasoning_end(prefix[:lo]):
-            return lo - 1
-        # Invariants: is_reasoning_end(prefix[:lo]) is False,
-        #             is_reasoning_end(prefix[:hi]) is True (detected caller-side).
-        while hi - lo > 1:
-            mid = (lo + hi) // 2
-            if reasoner.is_reasoning_end(prefix[:mid]):
-                hi = mid
-            else:
-                lo = mid
-        return hi - 1
+        prefix = list(itertools.islice(all_token_ids, start))
+        for idx in range(start, len(all_token_ids)):
+            token = all_token_ids[idx]
+            prefix.append(token)
+            if reasoner.is_reasoning_end_streaming(prefix, [token]):
+                return idx
+        return len(all_token_ids) - 1
 
     def trim_reasoning_for_advance(
         self, request: "Request", new_token_ids: list[int]

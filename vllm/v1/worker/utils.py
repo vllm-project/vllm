@@ -40,7 +40,7 @@ from vllm.v1.kv_cache_interface import (
 logger = init_logger(__name__)
 
 
-@triton.jit(do_not_specialize=["n_blocks"])
+@triton.jit
 def _zero_kv_blocks_kernel(
     seg_addrs_ptr,
     seg_page_sizes_ptr,
@@ -205,11 +205,6 @@ class KVBlockZeroer:
             MAX_CHUNKS=max_chunks,
             BLOCK_SIZE=blk_size,
         )
-
-    def warmup(self, num_kv_blocks: int) -> None:
-        """JIT-compile the zeroing kernel before the first real request."""
-        if num_kv_blocks > 0:
-            self.zero_block_ids([0])
 
 
 @dataclass

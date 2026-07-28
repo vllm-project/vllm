@@ -474,11 +474,7 @@ def prepare_moe_fp4_layer_for_marlin(
 
     group_size = 16 if is_nvfp4 else 32
 
-    # Use the per-rank (local) expert count: under expert parallelism the
-    # w13_weight/w2_weight tensors only hold this rank's experts (created with
-    # local_num_experts), whereas moe_config.num_experts is the global count.
-    # With no EP the two are equal, so the non-EP path is unchanged.
-    e = layer.moe_config.num_local_experts
+    e = layer.moe_config.num_experts
     k = layer.moe_config.hidden_dim
     n = layer.moe_config.intermediate_size_per_partition
 

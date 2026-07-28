@@ -20,7 +20,7 @@ use crate::output::{
 use crate::renderer::hf::{HfChatRenderer, MultimodalRenderInfo};
 use crate::renderer::{
     DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer, HarmonyChatRenderer,
-    InklingChatRenderer, KimiK3ChatRenderer,
+    InklingChatRenderer,
 };
 use crate::request::ChatRequest;
 use crate::{DynChatOutputProcessor, RendererSelection};
@@ -73,7 +73,6 @@ impl HfChatBackend {
             RendererSelection::DeepSeekV4 => Arc::new(DeepSeekV4ChatRenderer::new()),
             RendererSelection::Harmony => Arc::new(HarmonyChatRenderer::new()?),
             RendererSelection::Inkling => Arc::new(InklingChatRenderer::new(tokenizer.clone())?),
-            RendererSelection::KimiK3 => Arc::new(KimiK3ChatRenderer::new()),
         };
 
         info!(

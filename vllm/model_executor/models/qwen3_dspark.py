@@ -39,8 +39,7 @@ class DSparkMarkovHead(nn.Module):
     ``markov_w1[token]`` embeds the previously sampled token (target vocab,
     ``vocab_size``); ``markov_w2`` projects it to a draft-vocab bias
     (``draft_vocab_size``) added to the base draft logits. The two sizes
-    coincide for full-vocab drafts. Set ``replicated`` to keep both weights
-    complete on every TP rank and avoid collectives in the sequential path.
+    coincide for full-vocab drafts.
     """
 
     def __init__(
@@ -49,21 +48,14 @@ class DSparkMarkovHead(nn.Module):
         draft_vocab_size: int,
         markov_rank: int,
         prefix: str,
-        *,
-        replicated: bool = False,
     ) -> None:
         super().__init__()
+        # TODO(ben): profile for which (if any) it makes sense to replicate or TP-shard
         self.markov_w1 = VocabParallelEmbedding(
-            vocab_size,
-            markov_rank,
-            prefix=maybe_prefix(prefix, "markov_w1"),
-            replicated=replicated,
+            vocab_size, markov_rank, prefix=maybe_prefix(prefix, "markov_w1")
         )
         self.markov_w2 = ParallelLMHead(
-            draft_vocab_size,
-            markov_rank,
-            prefix=maybe_prefix(prefix, "markov_w2"),
-            replicated=replicated,
+            draft_vocab_size, markov_rank, prefix=maybe_prefix(prefix, "markov_w2")
         )
 
     def embed(self, token_ids: torch.Tensor) -> torch.Tensor:

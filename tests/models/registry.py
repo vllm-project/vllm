@@ -1024,10 +1024,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "moonshotai/Kimi-K2.5",
         trust_remote_code=True,
     ),
-    "KimiK3ForConditionalGeneration": _HfExamplesInfo(
-        "moonshotai/Kimi-K3",
-        trust_remote_code=True,
-    ),
     "KimiVLForConditionalGeneration": _HfExamplesInfo(
         "moonshotai/Kimi-VL-A3B-Instruct",
         extras={"thinking": "moonshotai/Kimi-VL-A3B-Thinking"},
@@ -1665,12 +1661,6 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         tokenizer_mode="inkling",
         trust_remote_code=True,
         max_model_len=4096,
-    ),
-    "KimiK3MTPModel": _HfExamplesInfo(
-        "moonshotai/Kimi-K3",
-        speculative_model="moonshotai/Kimi-K3",
-        trust_remote_code=True,
-        is_available_online=False,
     ),
     "LongCatFlashMTPModel": _HfExamplesInfo(
         "meituan-longcat/LongCat-Flash-Chat",

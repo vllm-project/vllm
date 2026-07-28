@@ -212,23 +212,6 @@ impl RoundtripCase {
         }
     }
 
-    /// Kimi K3 XTML tool/reasoning channels (native renderer + unified parser).
-    ///
-    /// Needs HF tokenizer files under `HF_HOME` (`tiktoken.model` +
-    /// `tokenizer_config.json`). Weights are not required for this text-level
-    /// roundtrip.
-    fn kimi_k3() -> Self {
-        Self {
-            model_id: "moonshotai/Kimi-K3",
-            assistant_stop_suffix: "<|end_of_msg|>",
-            tool_call_parser: ParserSelection::Auto,
-            reasoning_parser: ParserSelection::Auto,
-            thinking_behavior: ThinkingBehavior::Toggleable { default: true },
-            json_fmt: compact_json_fmt(),
-            sort_json_keys: false,
-        }
-    }
-
     /// SeedOSS with `<seed:think>` / `</seed:think>` reasoning tags.
     fn seed_oss() -> Self {
         Self {
@@ -329,8 +312,6 @@ roundtrip_tests! {
     nemotron_v3 => [reasoning_and_content],
     gemma4 => [tool_call_mix], // Gemma4 strips reasoning in history if there's no tool call
     kimi_k25 => [tool_call_mix], // Kimi K2.5 strips reasoning in history
-    // K3 drops plain-assistant reasoning in history; tool-call turns keep it.
-    kimi_k3 => [tool_call_mix],
     gpt_oss => [tool_call_mix], // Harmony strips reasoning in history if there's no tool call
     inkling => [reasoning_and_content, tool_call_mix],
 }

@@ -19,7 +19,7 @@ from typing import (
 
 import numpy as np
 from PIL.Image import Image
-from typing_extensions import Required, TypeVar
+from typing_extensions import TypeVar
 
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import LazyLoader
@@ -96,13 +96,12 @@ these are directly passed to the model without HF processing.
 """
 
 
-class VisionChunkImage(TypedDict, total=False):
+class VisionChunkImage(TypedDict):
     """Represents an image wrapped as a vision chunk."""
 
-    type: Required[Literal["image"]]
-    image: Required[Image]
+    type: Literal["image"]
+    image: Image
     uuid: str | None
-    prompt: str
 
 
 class VisionChunkVideo(TypedDict):
@@ -279,11 +278,9 @@ def _nested_tensors_h2d(
 
     return json_map_leaves(
         (
-            lambda x: (
-                x.to(device=device, non_blocking=True)
-                if isinstance(x, torch.Tensor)
-                else x
-            )
+            lambda x: x.to(device=device, non_blocking=True)
+            if isinstance(x, torch.Tensor)
+            else x
         ),
         tensors,
     )

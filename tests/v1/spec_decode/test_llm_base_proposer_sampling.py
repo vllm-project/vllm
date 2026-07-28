@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
-
-import pytest
 import torch
 
 from vllm.platforms import current_platform
@@ -11,7 +8,6 @@ from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.llm_base_proposer import (
-    SpecDecodeBaseProposer,
     compute_probs_and_sample_next_token,
 )
 
@@ -72,21 +68,3 @@ def test_compute_probs_and_sample_next_token_uses_fp64_exponential_race():
 
     assert torch.equal(actual_ids, expected_ids)
     assert torch.allclose(actual_probs, probs)
-
-
-@pytest.mark.parametrize(
-    ("architecture", "expected"),
-    [
-        ("DeepSeekMTPModel", True),
-        ("KimiK3MTPModel", True),
-        ("MiniMaxM3ForCausalLM", False),
-    ],
-)
-def test_mtp_model_returns_tuple(architecture: str, expected: bool):
-    proposer = object.__new__(SpecDecodeBaseProposer)
-    proposer.method = "mtp"
-    proposer.draft_model_config = SimpleNamespace(
-        hf_config=SimpleNamespace(architectures=[architecture])
-    )
-
-    assert proposer.model_returns_tuple() is expected
