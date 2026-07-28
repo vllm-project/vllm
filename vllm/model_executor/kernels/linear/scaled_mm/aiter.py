@@ -9,6 +9,9 @@ from vllm._aiter_ops import (
     rocm_aiter_ops,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    _upcast_e8m0_to_fp32,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
 )
@@ -16,6 +19,7 @@ from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
 from .BlockScaledMMLinearKernel import (
+    FP8BlockParams,
     Fp8BlockScaledMMLinearKernel,
 )
 from .cutlass import CutlassInt8ScaledMMLinearKernel
@@ -375,6 +379,17 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             and rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k)
         )
 
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+
+        params = FP8BlockParams.from_layer(layer)
+        if params.weight_scale_inv is not None:
+            ws, attr = params.weight_scale_inv, params.WEIGHT_SCALE_INV
+        else:
+            ws, attr = params.weight_scale, params.WEIGHT_SCALE
+        if ws is not None and ws.dtype == torch.float8_e8m0fnu:
+            replace_parameter(layer, attr, _upcast_e8m0_to_fp32(ws).contiguous())
+
     @classmethod
     def is_supported(cls, compute_capability=None):
         return (
@@ -406,19 +421,12 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         Bs: torch.Tensor,
     ) -> torch.Tensor:
         if As.dtype != Bs.dtype:
-            from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-                _upcast_e8m0_to_fp32,
-            )
-
             if As.dtype == torch.float8_e8m0fnu:
                 As = _upcast_e8m0_to_fp32(As).contiguous()
             else:
                 As = As.to(torch.float32)
 
-            if Bs.dtype == torch.float8_e8m0fnu:
-                Bs = _upcast_e8m0_to_fp32(Bs).contiguous()
-            else:
-                Bs = Bs.to(torch.float32)
+            Bs = Bs.to(torch.float32)
 
         out_dtype = self.config.out_dtype
         if self.use_triton:
