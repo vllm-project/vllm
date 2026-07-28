@@ -25,24 +25,16 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          python-version: "3.12"
       - name: Authorize and run CI command
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        run: >-
+          uv run --no-project --python 3.12
+          .github/workflows/scripts/run_ci_command.py
         env:
           BUILDKITE_API_TOKEN: ${{ secrets.BUILDKITE_API_TOKEN }}
           BUILDKITE_ORGANIZATION: vllm
           BUILDKITE_PIPELINE: ci
           CI_TRUSTED_USERS: ${{ vars.CI_TRUSTED_USERS }}
-        with:
-          script: |
-            const { run } = require(
-              './.github/workflows/scripts/run_ci_command.js'
-            );
-            await run({
-              github,
-              context,
-              core,
-              buildkiteToken: process.env.BUILDKITE_API_TOKEN,
-              organization: process.env.BUILDKITE_ORGANIZATION,
-              pipeline: process.env.BUILDKITE_PIPELINE,
-              trustedUsers: process.env.CI_TRUSTED_USERS,
-            });
+          GH_TOKEN: ${{ github.token }}
