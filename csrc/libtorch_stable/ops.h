@@ -505,6 +505,10 @@ void swigluoai_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
                        double alpha = 1.702, double limit = 7.0);
 void situ_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
                   double beta = 1.0, double linear_beta = -1.0);
+void masked_situ_and_mul(torch::stable::Tensor& out,
+                         torch::stable::Tensor& input,
+                         const torch::stable::Tensor& expert_num_tokens,
+                         double beta = 1.0, double linear_beta = -1.0);
 void gelu_new(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_fast(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_quick(torch::stable::Tensor& out, torch::stable::Tensor& input);

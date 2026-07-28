@@ -494,6 +494,36 @@ __global__ void situ_and_mul_kernel(
   }
 }
 
+template <typename scalar_t>
+__global__ void masked_situ_and_mul_kernel(
+    scalar_t* __restrict__ out, const scalar_t* __restrict__ input,
+    const int* __restrict__ expert_num_tokens, const int max_num_tokens,
+    const int d, const float beta, const float linear_beta) {
+  const int expert = blockIdx.y;
+  const int num_tokens = expert_num_tokens[expert];
+  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= d || num_tokens == 0) {
+    return;
+  }
+
+  const bool clamp_up = linear_beta > 0.0f;
+  const float inv_beta = 1.0f / beta;
+  const float inv_linear_beta = clamp_up ? 1.0f / linear_beta : 0.0f;
+  const int64_t expert_row = static_cast<int64_t>(expert) * max_num_tokens;
+  for (int token = 0; token < num_tokens; ++token) {
+    const int64_t row = expert_row + token;
+    const scalar_t* gate_ptr = input + row * 2 * d;
+    const scalar_t* up_ptr = gate_ptr + d;
+    scalar_t* out_ptr = out + row * d;
+    const float g = (float)VLLM_LDG(&gate_ptr[idx]);
+    const float u = (float)VLLM_LDG(&up_ptr[idx]);
+    const float gate_out = beta * tanhf(g * inv_beta) / (1.0f + expf(-g));
+    const float up_out =
+        clamp_up ? linear_beta * tanhf(u * inv_linear_beta) : u;
+    out_ptr[idx] = (scalar_t)(gate_out * up_out);
+  }
+}
+
 }  // namespace vllm
 
 #define LAUNCH_ACTIVATION_GATE_KERNEL_WITH_PARAM(KERNEL, PACKED_KERNEL, PARAM) \
@@ -607,6 +637,30 @@ void situ_and_mul(torch::stable::Tensor& out,    // [..., d]
       });
 }
 
+void masked_situ_and_mul(torch::stable::Tensor& out,    // [E, T, d]
+                         torch::stable::Tensor& input,  // [E, T, 2 * d]
+                         const torch::stable::Tensor& expert_num_tokens,
+                         double beta, double linear_beta) {
+  int num_experts = input.size(0);
+  int max_num_tokens = input.size(1);
+  int d = input.size(2) / 2;
+  if (num_experts == 0 || max_num_tokens == 0) {
+    return;
+  }
+  constexpr int block_size = 256;
+  dim3 grid((d + block_size - 1) / block_size, num_experts);
+  dim3 block(block_size);
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream();
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "masked_situ_and_mul_kernel", [&] {
+        vllm::masked_situ_and_mul_kernel<scalar_t><<<grid, block, 0, stream>>>(
+            out.mutable_data_ptr<scalar_t>(), input.const_data_ptr<scalar_t>(),
+            expert_num_tokens.const_data_ptr<int>(), max_num_tokens, d,
+            (float)beta, (float)linear_beta);
+      });
+}
 namespace vllm {
 
 // Element-wise activation kernel template.

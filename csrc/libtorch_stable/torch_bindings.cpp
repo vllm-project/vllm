@@ -591,10 +591,13 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "limit=7.0) "
       "-> ()");
 
-  // Kimi SITU (SituGLU) gated activation. linear_beta<=0 means unset.
+  // SituGLU implementation used in Kimi models.
   ops.def(
       "situ_and_mul(Tensor! out, Tensor input, float beta=1.0, float "
       "linear_beta=-1.0) -> ()");
+  ops.def(
+      "masked_situ_and_mul(Tensor! out, Tensor input, Tensor "
+      "expert_num_tokens, float beta=1.0, float linear_beta=-1.0) -> ()");
 
   // GELU implementation used in GPT-2.
   ops.def("gelu_new(Tensor! out, Tensor input) -> ()");
@@ -801,6 +804,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("fatrelu_and_mul", TORCH_BOX(&fatrelu_and_mul));
   ops.impl("swigluoai_and_mul", TORCH_BOX(&swigluoai_and_mul));
   ops.impl("situ_and_mul", TORCH_BOX(&situ_and_mul));
+  ops.impl("masked_situ_and_mul", TORCH_BOX(&masked_situ_and_mul));
   ops.impl("gelu_new", TORCH_BOX(&gelu_new));
   ops.impl("gelu_fast", TORCH_BOX(&gelu_fast));
   ops.impl("gelu_quick", TORCH_BOX(&gelu_quick));
