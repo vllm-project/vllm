@@ -583,13 +583,17 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
         intermediate_size = layer.moe_config.intermediate_size_per_partition_unpadded
 
         # w13 holds two gate/up shards for gated MoE, a single up shard for
-        # non-gated MoE (is_act_and_mul=False).
+        # non-gated MoE (is_act_and_mul=False). Zero the per-shard pad rows of
+        # the weight and, when present, the bias.
         num_w13_shards = 2 if self.moe.is_act_and_mul else 1
-        w13_shard_size = layer.w13_weight.shape[1] // num_w13_shards
-        if w13_shard_size > intermediate_size:
-            for s in range(num_w13_shards):
-                start = s * w13_shard_size + intermediate_size
-                layer.w13_weight[:, start : (s + 1) * w13_shard_size, :] = 0
+        for w13 in (layer.w13_weight, getattr(layer, "w13_bias", None)):
+            if w13 is None:
+                continue
+            shard_size = w13.shape[1] // num_w13_shards
+            if shard_size > intermediate_size:
+                for s in range(num_w13_shards):
+                    start = s * shard_size + intermediate_size
+                    w13[:, start : (s + 1) * shard_size] = 0
         if layer.w13_weight.shape[2] > hidden_size:
             layer.w13_weight[:, :, hidden_size:] = 0
 
@@ -597,13 +601,6 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
             layer.w2_weight[:, hidden_size:, :] = 0
         if layer.w2_weight.shape[2] > intermediate_size:
             layer.w2_weight[:, :, intermediate_size:] = 0
-
-        if getattr(layer, "w13_bias", None) is not None:
-            w13_bias_shard_size = layer.w13_bias.shape[1] // num_w13_shards
-            if w13_bias_shard_size > intermediate_size:
-                for s in range(num_w13_shards):
-                    start = s * w13_bias_shard_size + intermediate_size
-                    layer.w13_bias[:, start : (s + 1) * w13_bias_shard_size] = 0
 
         if (
             getattr(layer, "w2_bias", None) is not None

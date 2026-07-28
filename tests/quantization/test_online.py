@@ -178,71 +178,115 @@ def test_online_quant_load_format_dummy(
         print(outputs[0][1])
 
 
-@pytest.mark.parametrize("is_act_and_mul", [True, False])
-@pytest.mark.parametrize("has_bias", [True, False])
-def test_online_moe_create_weights_w13_dim(is_act_and_mul, has_bias):
-    """w13 holds gate+up (2N) for gated MoE and up only (N) for non-gated MoE
-    (is_act_and_mul=False, e.g. NemotronH relu2)."""
-    from types import SimpleNamespace
+@pytest.mark.skipif(
+    not is_quant_method_supported("fp8"),
+    reason="FP8 is not supported on this GPU type.",
+)
+@pytest.mark.parametrize("gated", [True, False])
+def test_online_moe_fp8_per_block_end_to_end(
+    gated: bool, workspace_init, monkeypatch
+) -> None:
+    """Online fp8 MoE: weight creation, weight loading, post-loading
+    processing and a kernel run, for gated and non-gated layouts.
 
-    from vllm.model_executor.layers.quantization.online.moe_base import (
-        OnlineMoEMethodBase,
+    Non-gated MoE (``is_act_and_mul=False``, e.g. NemotronH relu2) keeps only
+    the up projection in w13, so the online allocation is N rows rather than
+    2N and the per-block pad rows must be zeroed per single shard. An
+    intermediate size that is not block-aligned exercises that padding.
+
+    Pinned to the Marlin MoE backend: it is the fp8 backend that supports
+    non-gated MoE, and it is the one whose tile padding this covers.
+    """
+    monkeypatch.setenv("VLLM_TEST_FORCE_FP8_MARLIN", "1")
+    from tests.kernels.utils import torch_experts
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.config.quantization import QuantizationConfigArgs
+    from vllm.distributed.parallel_state import (
+        init_distributed_environment,
+        initialize_model_parallel,
+        model_parallel_is_initialized,
+    )
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.layers.fused_moe import fused_topk
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
     )
 
-    class _Method(OnlineMoEMethodBase):
-        def __init__(self, moe):
-            self.moe = moe
+    e, top_k, k, n, m = 4, 2, 256, 96, 8
+    dtype = torch.bfloat16
+    device = torch.device("cuda")
+    activation = MoEActivation.SILU if gated else MoEActivation.RELU2_NO_MUL
 
-        def process_weights_after_loading(self, layer):
-            pass
-
-        def get_fused_moe_quant_config(self, layer):
-            return None
-
-    e, n, k = 4, 96, 64
-    moe = SimpleNamespace(is_act_and_mul=is_act_and_mul, has_bias=has_bias)
-    layer = torch.nn.Module()
-    _Method(moe).create_weights(
-        layer=layer,
-        num_experts=e,
-        hidden_size=k,
-        intermediate_size_per_partition=n,
-        params_dtype=torch.bfloat16,
+    quant_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(moe="fp8_per_block")
     )
-    w13_up_dim = 2 * n if is_act_and_mul else n
-    assert layer.w13_weight.shape == (e, w13_up_dim, k)
-    assert layer.w2_weight.shape == (e, k, n)
-    if has_bias:
-        assert layer.w13_bias.shape == (e, w13_up_dim)
-        assert layer.w2_bias.shape == (e, k)
+    vllm_config = VllmConfig()
+    with set_current_vllm_config(vllm_config):
+        if not model_parallel_is_initialized():
+            init_distributed_environment(
+                world_size=1,
+                rank=0,
+                local_rank=0,
+                distributed_init_method="tcp://127.0.0.1:29537",
+                backend="nccl",
+            )
+            initialize_model_parallel(tensor_model_parallel_size=1)
+        layer = FusedMoE(
+            num_experts=e,
+            top_k=top_k,
+            hidden_size=k,
+            intermediate_size=n,
+            params_dtype=dtype,
+            renormalize=False,
+            quant_config=quant_config,
+            activation=activation.value,
+            tp_size=1,
+            dp_size=1,
+            prefix="online_moe",
+        )
+        experts = layer.routed_experts
 
+        # Weight creation: w13 holds one shard per projection, so a non-gated
+        # layer allocates half the rows of a gated one. The intermediate size is
+        # rounded up to the quant block, so compare against the allocated size.
+        num_shards = 2 if gated else 1
+        n_alloc = experts.w2_weight.shape[2]
+        assert n_alloc >= n
+        assert experts.w13_weight.shape == (e, num_shards * n_alloc, k)
 
-@pytest.mark.parametrize("is_act_and_mul", [True, False])
-def test_fp8_per_block_zero_padding(is_act_and_mul):
-    """_zero_padding must zero the roundup-padded rows of each w13 shard: two
-    gate/up shards for gated MoE, a single up shard for non-gated MoE."""
-    from types import SimpleNamespace
+        # Weight loading: fill the real rows of each shard and leave the roundup
+        # pad rows non-zero, so the kernel result is only correct if post-loading
+        # processing zeroes them (otherwise they contaminate the block scales).
+        torch.manual_seed(0)
+        w13 = torch.randn(e, num_shards * n, k, dtype=dtype, device=device) / k**0.5
+        w2 = torch.randn(e, k, n, dtype=dtype, device=device) / n**0.5
+        w13_buf = torch.full(
+            (e, num_shards * n_alloc, k), 3.0, dtype=dtype, device=device
+        )
+        for s in range(num_shards):
+            w13_buf[:, s * n_alloc : s * n_alloc + n] = w13[:, s * n : (s + 1) * n]
+        w2_buf = torch.full((e, k, n_alloc), 3.0, dtype=dtype, device=device)
+        w2_buf[:, :, :n] = w2
+        experts.register_parameter(
+            "w13_weight", torch.nn.Parameter(w13_buf, requires_grad=False)
+        )
+        experts.register_parameter(
+            "w2_weight", torch.nn.Parameter(w2_buf, requires_grad=False)
+        )
 
-    e, n, k = 2, 96, 256  # unpadded sizes; k is already block-aligned
-    n_pad = 128  # rounded up to the 128 quant block
-    num_shards = 2 if is_act_and_mul else 1
-    layer = SimpleNamespace(
-        moe_config=SimpleNamespace(
-            hidden_dim_unpadded=k, intermediate_size_per_partition_unpadded=n
-        ),
-        w13_weight=torch.ones(e, num_shards * n_pad, k),
-        w2_weight=torch.ones(e, k, n_pad),
-        w13_bias=torch.ones(e, num_shards * n_pad),
-        w2_bias=torch.ones(e, k),
-    )
-    method = SimpleNamespace(moe=SimpleNamespace(is_act_and_mul=is_act_and_mul))
-    Fp8PerBlockOnlineMoEMethod._zero_padding(method, layer)
+        # Post-loading processing: zero the pad rows and quantize to fp8.
+        layer._quant_method.process_weights_after_loading(experts)
 
-    w13 = layer.w13_weight.view(e, num_shards, n_pad, k)
-    assert (w13[:, :, :n] == 1).all()
-    assert (w13[:, :, n:] == 0).all()
-    bias = layer.w13_bias.view(e, num_shards, n_pad)
-    assert (bias[..., :n] == 1).all()
-    assert (bias[..., n:] == 0).all()
-    assert (layer.w2_weight[:, :, :n] == 1).all()
-    assert (layer.w2_weight[:, :, n:] == 0).all()
+        # Kernel run against a bf16 reference over the unpadded weights.
+        x = torch.randn(m, k, dtype=dtype, device=device) / 10
+        router_logits = torch.randn(m, e, dtype=dtype, device=device)
+        with set_forward_context(None, vllm_config, num_tokens=m):
+            out = layer(x, router_logits)
+
+        topk_weights, topk_ids, _ = fused_topk(
+            x, router_logits.float(), top_k, renormalize=False
+        )
+        ref = torch_experts(x, w13, w2, topk_weights, topk_ids, activation=activation)
+        torch.testing.assert_close(out, ref, atol=5e-2, rtol=5e-2)
