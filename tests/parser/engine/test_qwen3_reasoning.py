@@ -15,7 +15,12 @@ import pytest
 
 from tests.parser.engine.conftest import make_mock_tokenizer
 from tests.parser.engine.streaming_helpers import simulate_reasoning_streaming
+from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.engine.parser_engine_config import ParserState
+from vllm.parser.engine.registered_adapters import (
+    Qwen3ParserReasoningAdapter,
+    Qwen3ParserToolAdapter,
+)
 from vllm.parser.qwen3 import Qwen3Parser, qwen3_config
 
 _THINK_START_ID = 50
@@ -30,6 +35,11 @@ _QWEN3_VOCAB = {
     "<tool_call>": _TOOL_CALL_ID,
     "</tool_call>": _TOOL_CALL_END_ID,
 }
+
+
+class _Qwen3DelegatingParser(DelegatingParser):
+    reasoning_parser_cls = Qwen3ParserReasoningAdapter
+    tool_parser_cls = Qwen3ParserToolAdapter
 
 
 @pytest.fixture
@@ -162,6 +172,10 @@ class TestIsReasoningEnd:
         """Unpaired <tool_call> is implicit reasoning end."""
         assert parser.is_reasoning_end([_THINK_START_ID, 1, _TOOL_CALL_ID])
 
+    def test_prompt_tool_example_before_generation_think_not_end(self, parser):
+        """Tool examples before the generation <think> must not end reasoning."""
+        assert not parser.is_reasoning_end([_TOOL_CALL_ID, _TEXT_ID, _THINK_START_ID])
+
     def test_paired_tool_call_not_end(self, parser):
         """Paired <tool_call>...</tool_call> (from template) is NOT end."""
         assert not parser.is_reasoning_end(
@@ -176,6 +190,26 @@ class TestIsReasoningEnd:
 
     def test_empty_ids(self, parser):
         assert not parser.is_reasoning_end([])
+
+
+class TestDelegatingPromptDetection:
+    def test_prompt_tool_example_does_not_skip_streaming_reasoning(
+        self, mock_tokenizer, mock_request
+    ):
+        parser = _Qwen3DelegatingParser(mock_tokenizer)
+        prompt_ids = [_TOOL_CALL_ID, _TEXT_ID, _THINK_START_ID]
+
+        delta = parser.parse_delta(
+            "thinking",
+            [_TEXT_ID],
+            mock_request,
+            prompt_token_ids=prompt_ids,
+            finished=False,
+        )
+
+        assert delta is not None
+        assert delta.reasoning == "thinking"
+        assert delta.content is None
 
 
 class TestStreaming:

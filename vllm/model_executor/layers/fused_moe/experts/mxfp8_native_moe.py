@@ -19,7 +19,6 @@ and the top-k weighted reduction run in PyTorch between/after the two GEMMs.
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.experts.mxfp8_emulation_moe import (
     Mxfp8TritonExpertsBase,
 )
@@ -32,7 +31,26 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
-logger = init_logger(__name__)
+
+def _select_cfg(M, N, K, block_m):
+    """Pick the launch config from host constants only (M=num_valid_tokens, N, K,
+    block_m) — graph-capture safe (no GPU-scalar branch)."""
+    # Per-regime winners (measured, isolated cuda-event A/B on gfx950, GPU 3):
+    #   BLOCK_K=256 (fewer K-iters + bigger MX scale-load coalesced with the dot),
+    #   num_stages=2 (software-pipeline overlaps the E8M0 scale-load with the scaled
+    #   MFMA), GROUP_SIZE_M=4 (XCD-friendly swizzle that keeps each touched expert's
+    #   A rows + B column-tiles L2/MALL-resident across its N-tiles -> kills the
+    #   redundant A re-read). num_warps stays 8 (wave64 here did NOT spill: VGPR fits
+    #   and 4 warps was neutral/worse in measurement). BLOCK_K must be a power of two
+    #   and divide K (K=6144 and K=768 are both multiples of 256).
+    BLOCK_K = 256 if K % 256 == 0 else 128
+    return {
+        "BLOCK_N": 128,
+        "BLOCK_K": BLOCK_K,
+        "GROUP_SIZE_M": 4,
+        "num_warps": 8,
+        "num_stages": 2,
+    }
 
 
 @triton.jit
@@ -46,6 +64,7 @@ def _mxfp8_grouped_gemm_kernel(
     sorted_token_ids_ptr,
     expert_ids_ptr,
     num_tokens_post_padded_ptr,
+    EM,
     N,
     K,
     num_valid_tokens,
@@ -67,9 +86,33 @@ def _mxfp8_grouped_gemm_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
 ):
-    pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
+    # ---- Grid-swizzle (super-grouping over M) so consecutive program-ids cover a
+    # GROUP_SIZE_M x grid_n super-block. This keeps a touched expert's A rows + its
+    # B-weight column-tiles L2/MALL-resident across the N-tiles they share, killing
+    # most of the redundant A re-read (the single largest redundant-traffic source:
+    # dot_scaled keeps operands in registers, so A is otherwise re-fetched per N-tile).
+    # ``num_pid_m`` uses EM (= sorted_token_ids.shape[0]), the SAME bound the grid
+    # is sized from, NOT the runtime ``num_tokens_post_padded`` (<= EM). This keeps
+    # the swizzle consistent with the grid: ``group_size_m`` is always >= 1 for every
+    # launched program, so the ``% group_size_m`` / ``// group_size_m`` below can never
+    # hit modulo/division-by-zero. ``num_tokens_post_padded`` is loaded afterwards and
+    # only gates the early-return. Mirrors the reference ``fused_moe_kernel``.
+    pid = tl.program_id(0)
+    num_pid_m = tl.cdiv(EM, BLOCK_M)
+    num_pid_n = tl.cdiv(N, BLOCK_N)
+    if GROUP_SIZE_M == 1:
+        pid_m = pid % num_pid_m
+        pid_n = pid // num_pid_m
+    else:
+        num_pid_in_group = GROUP_SIZE_M * num_pid_n
+        group_id = pid // num_pid_in_group
+        first_pid_m = group_id * GROUP_SIZE_M
+        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+        pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
+        pid_n = (pid % num_pid_in_group) // group_size_m
+
     num_post = tl.load(num_tokens_post_padded_ptr)
     if pid_m * BLOCK_M >= num_post:
         return
@@ -149,9 +192,16 @@ def _grouped_gemm_mxfp8(
     # written — zero them so the downstream reduction ignores their garbage.
     alloc = torch.zeros if expert_map is not None else torch.empty
     out = alloc((M_routed, N), dtype=out_dtype, device=a_q.device)
-    BLOCK_N = 128
-    BLOCK_K = 128
-    grid = (triton.cdiv(sorted_token_ids.shape[0], block_m), triton.cdiv(N, BLOCK_N))
+
+    cfg = _select_cfg(M_routed, N, K, block_m)
+    BLOCK_N = cfg["BLOCK_N"]
+    BLOCK_K = cfg["BLOCK_K"]
+    GROUP_SIZE_M = cfg["GROUP_SIZE_M"]
+
+    n_pid_m = triton.cdiv(sorted_token_ids.shape[0], block_m)
+    n_pid_n = triton.cdiv(N, BLOCK_N)
+    grid = (n_pid_m * n_pid_n,)
+
     _mxfp8_grouped_gemm_kernel[grid](
         a_q,
         a_scale,
@@ -162,6 +212,7 @@ def _grouped_gemm_mxfp8(
         sorted_token_ids,
         expert_ids,
         num_tokens_post_padded,
+        sorted_token_ids.shape[0],  # EM: sizes both the grid and the swizzle
         N,
         K,
         num_valid_tokens,
@@ -183,7 +234,9 @@ def _grouped_gemm_mxfp8(
         BLOCK_M=block_m,
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
-        num_warps=8,
+        GROUP_SIZE_M=GROUP_SIZE_M,
+        num_warps=cfg["num_warps"],
+        num_stages=cfg["num_stages"],
     )
     return out
 
@@ -208,10 +261,16 @@ def fused_moe_mxfp8_native(
     M = T * top_k
 
     block_m = 64
+    # Bin by the actual number of expert weight rows. With fused shared experts
+    # the weight tensor has more rows than ``global_num_experts`` (the routed
+    # count), and their ids fall outside [0, global_num_experts); binning by the
+    # routed count would treat them as invalid. Under EP (expert_map set) the
+    # tensor holds only local experts, so keep the global count for remapping.
+    num_align_experts = w13.shape[0] if expert_map is None else global_num_experts
     sorted_ids, expert_ids, num_post = moe_align_block_size(
         topk_ids,
         block_m,
-        global_num_experts,
+        num_align_experts,
         expert_map,
         ignore_invalid_experts=expert_map is not None,
     )

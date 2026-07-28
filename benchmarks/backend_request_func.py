@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 import aiohttp
 import huggingface_hub.constants
 from tqdm.asyncio import tqdm
-from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
+from transformers import AutoTokenizer, PythonBackend, TokenizersBackend
 
 # NOTE(simon): do not import vLLM here so the benchmark script
 # can run without vLLM installed.
@@ -609,7 +609,7 @@ def get_tokenizer(
     tokenizer_mode: str = "auto",
     trust_remote_code: bool = False,
     **kwargs,
-) -> PreTrainedTokenizer | PreTrainedTokenizerFast:
+) -> PythonBackend | TokenizersBackend:
     if pretrained_model_name_or_path is not None and not os.path.exists(
         pretrained_model_name_or_path
     ):

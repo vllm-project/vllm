@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 from math import prod
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
@@ -15,12 +17,14 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     quant_dequant_mxfp4,
+    xpu_mxfp4_quantize,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp6_utils import (
     quant_dequant_mxfp6,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
+    xpu_mxfp8_quantize,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     ref_nvfp4_quant_dequant,
@@ -31,6 +35,9 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 
 
 @triton.jit
@@ -190,12 +197,24 @@ def _mxfp4_quantize(
     per_act_token_quant: bool,
     block_shape: list[int] | None = None,
 ) -> tuple[torch.Tensor, None]:
+    if current_platform.is_xpu():
+        return xpu_mxfp4_quantize(A)
     assert block_shape is None
     # TODO: native mxfp4 is currently not integrated in vllm,
     # so simulating even on devices supporting this data type natively.
     # Once integrated, `current_platform.supports_mx()` should be used to
     # control quantize+dequantize, or simply quantize here down to mxfp4.
     A = quant_dequant_mxfp4(A)
+
+    return A, None
+
+
+def _fp8_quantize_dequantize(
+    A: torch.Tensor,
+    A_scale: torch.Tensor,
+):
+    qA, qA_scale = ops.scaled_fp8_quant(A, A_scale, use_per_token_if_dynamic=False)
+    A = per_tensor_dequantize(qA, qA_scale).to(A.dtype)
 
     return A, None
 
@@ -208,6 +227,8 @@ def _mxfp8_e4m3_quantize(
     is_sf_swizzled_layout: bool = False,
     mx_alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if current_platform.is_xpu():
+        return xpu_mxfp8_quantize(A)
     assert A_scale is None
     assert not per_act_token_quant
     assert block_shape is None or block_shape == [1, 32]
@@ -268,23 +289,17 @@ def moe_kernel_quantize_input(
             # purpose, because there is no native kernel for weight in ocp_mx_scheme
             # and activation in FP8. The implementation is based on existing
             # non-emulation ops.
-            qA, qA_scale = ops.scaled_fp8_quant(
-                A, A_scale, use_per_token_if_dynamic=False
-            )
-            A = per_tensor_dequantize(qA, qA_scale).to(A.dtype)
-            # After QDQ, we don't need further quantization
-            return A, None
+            # TODO: Remove this `ocp_mx_scheme is not None` block and rely solely
+            # on `quantization_emulation`.
+            return _fp8_quantize_dequantize(A, A_scale)
         # else: For other schemes (e.g., *_a_mxfp6_e3m2, *_a_mxfp6_e2m3),
         # weights are already dequantized, and we proceed with normal
         # activation quantization below.
-
     if quant_dtype == current_platform.fp8_dtype():
         if quantization_emulation:
-            raise NotImplementedError(
-                f"moe_kernel_quantize_input does not support quant_dtype={quant_dtype}"
-                " MOE quantization emulation. Please open an issue."
-            )
-        return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
+            return _fp8_quantize_dequantize(A, A_scale)
+        else:
+            return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == torch.int8:
         if quantization_emulation:
             raise NotImplementedError(
@@ -296,10 +311,11 @@ def moe_kernel_quantize_input(
         if not quantization_emulation:
             return _nvfp4_quantize(A, A_scale, is_sf_swizzled_layout=is_scale_swizzled)
         else:
+            assert A_scale is not None
             A = ref_nvfp4_quant_dequant(A, A_scale, block_size=16)
             return A, None
     elif quant_dtype == "mxfp4":
-        if not quantization_emulation:
+        if not current_platform.is_xpu() and not quantization_emulation:
             raise NotImplementedError(
                 "moe_kernel_quantize_input should not be used for native"
                 " quant_dtype='mxfp4' MOE. Please open an issue."
@@ -308,7 +324,7 @@ def moe_kernel_quantize_input(
     elif quant_dtype == "mxfp8":
         # TODO: `quant_dtype == "mxfp8"` is ambiguous,
         # should be fp8_e4m3. OCP MX also defines `fp8_e5m2`.
-        if quantization_emulation:
+        if not current_platform.is_xpu() and quantization_emulation:
             raise NotImplementedError(
                 "moe_kernel_quantize_input does not support quant_dtype='mxfp8' MOE "
                 "quantization emulation. Please open an issue."
@@ -397,6 +413,23 @@ def _pack_topk_ids_weights_kernel(
     tl.store(output_ptr + offsets, packed, mask=mask)
 
 
+def fi_moe_largest_bucket(moe_config: "FusedMoEConfig") -> int:
+    """Estimate FlashInfer's MoE autotuning maximum token count.
+
+    All DP ranks may contribute `max_num_tokens` to one invocation.
+    Keep FlashInfer's default moe `tune_max_num_tokens=8192`
+    floor to avoid over-underestimation.
+    DeepEP, SP, or PCP may make this underestimate, however overestimation
+    may be dangerous, increasing tuning- cost and memory use.
+
+    NOTE: The DP factor applies even when EP is disabled:
+    > Without `--enable-expert-parallel`, MoE layers would use tensor parallelism.
+
+    For a detailed explanation, see: `docs/serving/data_parallel_deployment.md`
+    """
+    return max(moe_config.max_num_tokens * moe_config.dp_size, 8192)
+
+
 def trtllm_moe_pack_topk_ids_weights(
     topk_ids: torch.Tensor,
     topk_weights: torch.Tensor,
@@ -427,7 +460,7 @@ def trtllm_moe_pack_topk_ids_weights(
 
 
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
-def swiglu_limit_func(
+def _swiglu_limit_torch(
     output: torch.Tensor,
     input: torch.Tensor,  # first half is gate, second half is up
     swiglu_limit: float = 0.0,
@@ -441,3 +474,114 @@ def swiglu_limit_func(
         up = torch.clamp(up, min=-swiglu_limit, max=swiglu_limit)
 
     output.copy_(F.silu(gate) * up)
+
+
+@triton.jit
+def _swiglu_limit_pad_aware_kernel(
+    input_ptr,  # [num_tokens, 2 * hidden_size]
+    output_ptr,  # [num_tokens, hidden_size]
+    topk_ids_ptr,  # [num_tokens, num_topk]
+    expert_map_ptr,  # global -> local expert id, or -1 if non-local
+    hidden_size,
+    input_row_stride,
+    num_tokens,
+    swiglu_limit,
+    HAS_LIMIT: tl.constexpr,
+    HAS_EXPERT_MAP: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Persistent over rows: each CTA owns one column tile and processes a
+    # strided set of token assignments.
+    pid = tl.program_id(0)
+    row_stride = tl.num_programs(0)
+    column_tile = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = column_tile < hidden_size
+
+    for row in tl.range(pid, num_tokens, row_stride):
+        expert_id = tl.load(topk_ids_ptr + row)
+        should_compute = expert_id != -1
+        if HAS_EXPERT_MAP:
+            local_expert_id = tl.load(
+                expert_map_ptr + expert_id,
+                mask=expert_id >= 0,
+                other=-1,
+            )
+            should_compute = should_compute & (local_expert_id != -1)
+
+        if should_compute:
+            gate_offsets = row.to(tl.int64) * input_row_stride + column_tile
+            up_offsets = gate_offsets + hidden_size
+
+            gate = tl.load(input_ptr + gate_offsets, mask=mask, other=0.0).to(
+                tl.float32
+            )
+
+            up = tl.load(input_ptr + up_offsets, mask=mask, other=0.0).to(tl.float32)
+
+            if HAS_LIMIT:
+                gate = tl.minimum(gate, swiglu_limit)
+                up = tl.maximum(up, -swiglu_limit)
+                up = tl.minimum(up, swiglu_limit)
+
+            silu_gate = gate / (1.0 + tl.exp(-gate))
+            result = silu_gate * up
+            tl.store(
+                output_ptr + row.to(tl.int64) * hidden_size + column_tile,
+                result.to(output_ptr.dtype.element_ty),
+                mask=mask,
+            )
+
+
+def _swiglu_limit_pad_aware(
+    output: torch.Tensor,
+    input: torch.Tensor,
+    topk_ids: torch.Tensor,
+    swiglu_limit: float,
+    expert_map: torch.Tensor | None = None,
+) -> None:
+    num_tokens, gate_up_size = input.shape
+    hidden_size = gate_up_size // 2
+    if num_tokens == 0:
+        return
+
+    BLOCK_SIZE = 1024
+    grid = (min(num_tokens, 256), triton.cdiv(hidden_size, BLOCK_SIZE))
+    _swiglu_limit_pad_aware_kernel[grid](
+        input,
+        output,
+        topk_ids,
+        expert_map,
+        hidden_size,
+        gate_up_size,
+        num_tokens,
+        swiglu_limit,
+        HAS_LIMIT=swiglu_limit > 0,
+        HAS_EXPERT_MAP=expert_map is not None,
+        BLOCK_SIZE=BLOCK_SIZE,
+        num_warps=4,
+    )
+
+
+def swiglu_limit_func(
+    output: torch.Tensor,
+    input: torch.Tensor,  # first half is gate, second half is up
+    swiglu_limit: float = 0.0,
+    topk_ids: torch.Tensor | None = None,
+    expert_map: torch.Tensor | None = None,
+) -> None:
+    # The pad-aware Triton kernel skips unrouted token slots (topk_ids == -1)
+    # and, when expert_map is given, slots routed to non-local experts, so it
+    # requires topk_ids. Fall back to the torch implementation otherwise.
+    if topk_ids is not None:
+        _swiglu_limit_pad_aware(output, input, topk_ids, swiglu_limit, expert_map)
+    else:
+        _swiglu_limit_torch(output, input, swiglu_limit)
+
+
+@functools.lru_cache
+def enable_swap_ab(BLOCK_SIZE_M: int, BLOCK_SIZE_N: int) -> bool:
+    return (
+        current_platform.is_device_capability(90)
+        and BLOCK_SIZE_M < 64
+        and BLOCK_SIZE_N >= 64
+    )

@@ -1122,6 +1122,7 @@ class Lfm2VLForConditionalGeneration(
         max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
+        path: str = "default",
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -1167,6 +1168,7 @@ class Lfm2VLForConditionalGeneration(
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
         max_frames_per_batch: int,
+        path: str = "default",
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphReplayBuffers,
@@ -1181,6 +1183,7 @@ class Lfm2VLForConditionalGeneration(
     def encoder_cudagraph_forward(
         self,
         values: dict[str, torch.Tensor],
+        path: str = "default",
     ) -> torch.Tensor:
         embeddings = self.vision_tower.vision_model.embeddings
         pixel_values = values["pixel_values_packed"].to(
@@ -1208,6 +1211,7 @@ class Lfm2VLForConditionalGeneration(
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
+        path: str = "default",
     ) -> torch.Tensor:
         image_input = LFM2VLImageInputs(
             type="pixel_values",

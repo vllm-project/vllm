@@ -23,24 +23,82 @@ def expert_num_tokens_round_up_and_sum(
     return torch.sum(ent).item()
 
 
+def compute_aligned_M_and_alignment(
+    M: int,
+    num_topk: int,
+    local_num_experts: int,
+    alignment: int,
+    expert_tokens_meta: mk.ExpertTokensMetadata | None,
+) -> tuple[int, int]:
+    """Return (M_sum, alignment_used).
+
+    `alignment_used` may be smaller than the caller-supplied `alignment` on
+    SM100/SM120 when DeepGEMM can JIT a smaller BLOCK_M for the per-call
+    expected_m. Callers that index by block size (e.g. ``M_sum // block_m``)
+    or assert workspace alignment must use the returned `alignment_used`,
+    not their original `alignment` argument.
+
+    Prefer this over the int-returning :func:`compute_aligned_M` when the
+    GEMM call site needs to wrap itself in ``mk_alignment_scope`` or
+    otherwise reason about the actual per-expert padding.
+    """
+    if (expert_tokens_meta is not None) and (
+        expert_tokens_meta.expert_num_tokens_cpu is not None
+    ):
+        return (
+            expert_num_tokens_round_up_and_sum(
+                expert_tokens_meta.expert_num_tokens_cpu, alignment=alignment
+            ),
+            alignment,
+        )
+
+    # expert_num_tokens not on cpu. Cap padding by min(M*num_topk,
+    # local_num_experts) — at batch=1 decode only `num_topk` experts can be
+    # active, so the worst-case `local_num_experts*(align-1)` is too loose.
+    # Also shrink `alignment` to DeepGEMM's per-call theoretical BLOCK_M on
+    # SM100/SM120 when smaller.
+    expected_m = M * num_topk
+    try:
+        from vllm.utils.deep_gemm import (
+            get_theoretical_mk_alignment_for_contiguous_layout,
+        )
+
+        # num_groups=local_num_experts so the helper recovers per-expert em;
+        # omitting it over-picks BLOCK_M on SM120 (heuristic assumes em is
+        # already per-expert).
+        per_call_align = get_theoretical_mk_alignment_for_contiguous_layout(
+            expected_m=expected_m,
+            num_groups=local_num_experts,
+        )
+        if per_call_align and per_call_align <= alignment:
+            alignment = per_call_align
+    except Exception:
+        pass
+
+    max_active_experts = min(M * num_topk, local_num_experts)
+    M_sum = (M * num_topk) + max_active_experts * (alignment - 1)
+    M_sum = round_up(M_sum, alignment)
+    return M_sum, alignment
+
+
 def compute_aligned_M(
     M: int,
     num_topk: int,
     local_num_experts: int,
     alignment: int,
     expert_tokens_meta: mk.ExpertTokensMetadata | None,
-):
-    if (expert_tokens_meta is not None) and (
-        expert_tokens_meta.expert_num_tokens_cpu is not None
-    ):
-        return expert_num_tokens_round_up_and_sum(
-            expert_tokens_meta.expert_num_tokens_cpu, alignment=alignment
-        )
+) -> int:
+    """Return ``M_sum`` only (backward-compat wrapper).
 
-    # expert_num_tokens information is not available on the cpu.
-    # compute the max required size.
-    M_sum = (M * num_topk) + local_num_experts * (alignment - 1)
-    M_sum = round_up(M_sum, alignment)
+    Equivalent to :func:`compute_aligned_M_and_alignment`'s first return
+    value. Existing downstream callers and the warmup path that only size
+    a workspace use this. Call sites that need the actual per-expert
+    alignment (to wrap GEMMs in ``mk_alignment_scope``) should use
+    :func:`compute_aligned_M_and_alignment` instead.
+    """
+    M_sum, _ = compute_aligned_M_and_alignment(
+        M, num_topk, local_num_experts, alignment, expert_tokens_meta
+    )
     return M_sum
 
 
@@ -52,12 +110,6 @@ def apply_expert_map(expert_id, expert_map):
 
 
 @triton.jit
-def round_up_128(x: int) -> int:
-    y = 128
-    return ((x + y - 1) // y) * y
-
-
-@triton.jit
 def _fwd_kernel_ep_scatter_1(
     num_recv_tokens_per_expert,
     expert_start_loc,
@@ -65,6 +117,7 @@ def _fwd_kernel_ep_scatter_1(
     num_experts: tl.constexpr,
     BLOCK_E: tl.constexpr,
     BLOCK_EXPERT_NUM: tl.constexpr,
+    ALIGN_M: tl.constexpr,
 ):
     cur_expert = tl.program_id(0)
 
@@ -74,7 +127,8 @@ def _fwd_kernel_ep_scatter_1(
         mask=offset_cumsum < num_experts,
         other=0,
     )
-    tokens_per_expert = round_up_128(tokens_per_expert)
+    # Round up to ALIGN_M so cumsum matches the workspace's per-expert slices.
+    tokens_per_expert = ((tokens_per_expert + ALIGN_M - 1) // ALIGN_M) * ALIGN_M
     cumsum = tl.cumsum(tokens_per_expert) - tokens_per_expert
 
     # Extract this block's offset from the register vector (warp shuffle,
@@ -227,10 +281,12 @@ def ep_scatter(
     output_tensor_scale: torch.Tensor,
     m_indices: torch.Tensor,
     output_index: torch.Tensor,
+    align_m: int = 128,
     block_size: int = 128,
     pack_ue8m0: bool = False,
 ):
-    BLOCK_E = 128  # token num of per expert is aligned to 128
+    # BLOCK_E is the m_indices fill-loop tile (masked), independent of align_m.
+    BLOCK_E = 128
     BLOCK_D = block_size  # block size of activation-scale quantization
     num_warps = 8
     num_experts = num_recv_tokens_per_expert.shape[0]
@@ -238,7 +294,7 @@ def ep_scatter(
     # grid = (triton.cdiv(hidden_size, BLOCK_D), num_experts)
     grid = num_experts
 
-    assert m_indices.shape[0] % BLOCK_E == 0
+    assert m_indices.shape[0] % align_m == 0
     assert expert_start_loc.shape[0] == num_experts
 
     # pack_ue8m0: scatter packs 4 UE8M0 bytes per int32; else copies scales as-is.
@@ -253,6 +309,7 @@ def ep_scatter(
         num_warps=num_warps,
         BLOCK_E=BLOCK_E,
         BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
+        ALIGN_M=align_m,
     )
 
     grid = min(recv_topk.shape[0], 1024 * 8)
@@ -418,7 +475,7 @@ def deepgemm_moe_permute(
     if block_size is not None:
         block_k = block_size
 
-    M_sum = compute_aligned_M(
+    M_sum, align_used = compute_aligned_M_and_alignment(
         M=topk_ids.size(0),
         num_topk=topk_ids.size(1),
         local_num_experts=local_num_experts,
@@ -482,11 +539,12 @@ def deepgemm_moe_permute(
         output_tensor_scale=aq_scale_out,
         m_indices=expert_ids,
         output_index=inv_perm,
+        align_m=align_used,
         block_size=block_k,
         pack_ue8m0=pack_ue8m0,
     )
 
-    return aq_out, aq_scale_out, expert_ids, inv_perm
+    return aq_out, aq_scale_out, expert_ids, inv_perm, align_used
 
 
 def deepgemm_unpermute_and_reduce(

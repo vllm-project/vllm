@@ -176,7 +176,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self,
         request: Request,
         num_computed_tokens: int,
-    ) -> tuple[int, bool]:
+    ) -> tuple[int | None, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(
             request, num_computed_tokens
