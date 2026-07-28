@@ -976,6 +976,60 @@ async def test_kv_producer(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_sender_listener_drops_malformed_frames(monkeypatch):
+    """The sender listener must survive ZMQ envelopes with unexpected
+    frame counts (e.g. from a malicious peer) without terminating."""
+
+    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_producer"
+    )
+
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        prefill_connector = MooncakeConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            _make_test_kv_cache_config(),
+        )
+        prefill_worker = prefill_connector.connector_worker
+        prefill_worker.kv_caches_base_addr = [0x1000]
+        prefill_worker.block_len_per_layer = [4096]
+        prefill_worker.kv_block_len_per_layer = [4096]
+        prefill_worker.registered_layer_names = ["model.layers.0.self_attn"]
+        prefill_worker.registered_layer_indices = [0]
+
+        origin_sender_loop = prefill_worker.sender_loop
+        prefill_worker.sender_loop = asyncio.get_event_loop()
+
+        mock_sock = AsyncMock(spec=zmq.asyncio.Socket)
+        # Simulate: 3-frame malformed message, then a ContextTerminated to
+        # cleanly exit the listener loop.
+        mock_sock.recv_multipart = AsyncMock(
+            side_effect=[
+                [b"id", b"frame1", b"frame2"],  # malformed (3 frames)
+                [b"single-frame"],  # malformed (1 frame)
+                zmq.ContextTerminated(),
+            ]
+        )
+        mock_sock.bind_to_random_port = MagicMock(return_value=9999)
+        mock_sock.close = MagicMock()
+
+        ready_event = MagicMock()
+        ready_event.set = MagicMock()
+
+        with patch.object(prefill_worker, "register_worker_with_bootstrap"):
+            await prefill_worker._mooncake_sender_listener(ready_event)
+
+        # The listener survived the malformed messages and exited gracefully
+        # on ContextTerminated. The queue should be empty (no malformed
+        # messages were dispatched).
+        assert prefill_worker.sender_worker_queue.empty()
+
+        prefill_worker.sender_loop = origin_sender_loop
+        prefill_worker.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_kv_consumuer(monkeypatch):
     """
     Simulates a Consumer Worker (Decoder) initiating a pull from a Producer.
