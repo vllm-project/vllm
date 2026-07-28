@@ -1585,9 +1585,7 @@ class Scheduler(SchedulerInterface):
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
-        hisparse_stats = (
-            kv_connector_output.hisparse_stats if kv_connector_output else None
-        )
+        hisparse_stats = model_runner_output.hisparse_stats
         cudagraph_stats = model_runner_output.cudagraph_stats
 
         # Every GPU write enqueued by this and earlier steps has completed, so it is

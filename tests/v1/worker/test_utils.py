@@ -1,11 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+from typing import Any
+
 import torch
 
 import vllm.v1.worker.utils as worker_utils
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
-from vllm.v1.worker.gpu.hisparse import _expand_source_block_ids
+from vllm.v1.metrics.stats import HiSparseStats
+from vllm.v1.worker.gpu import hisparse as worker_hisparse
+from vllm.v1.worker.gpu.hisparse import HiSparseRuntime, _expand_source_block_ids
 from vllm.v1.worker.utils import bind_kv_cache, copy_kv_cache_blocks_inplace
 
 
@@ -44,6 +49,64 @@ def test_expand_hisparse_source_blocks_into_kernel_pages():
     expanded = _expand_source_block_ids([3, 7], blocks_per_kv_block=2, count=3)
 
     assert expanded.tolist() == [6, 7, 14]
+
+
+def test_hisparse_runtime_pre_step_invalidates_and_restores(monkeypatch):
+    runtime = object.__new__(HiSparseRuntime)
+    runtime.block_size = 64
+    scheduler_output = SimpleNamespace(
+        scheduled_new_reqs=[SimpleNamespace(block_ids=([2, 3],))],
+        scheduled_cached_reqs=SimpleNamespace(new_block_ids=[([4],), None]),
+    )
+    calls: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(
+        worker_hisparse,
+        "invalidate_blocks",
+        lambda block_ids, block_size: calls.append(
+            ("invalidate", block_ids, block_size)
+        ),
+    )
+    runtime.restore_prefix = lambda output: calls.append(("restore", output))
+
+    runtime.pre_step(scheduler_output)
+
+    assert calls == [
+        ("invalidate", [2, 3, 4], 64),
+        ("restore", scheduler_output),
+    ]
+
+
+def test_hisparse_runtime_post_step_records_writes_and_returns_stats(monkeypatch):
+    runtime = object.__new__(HiSparseRuntime)
+    stats = HiSparseStats(7, 3, 48)
+    recorded = False
+
+    def record_host_writes():
+        nonlocal recorded
+        recorded = True
+
+    monkeypatch.setattr(
+        worker_hisparse, "record_hisparse_host_writes", record_host_writes
+    )
+    monkeypatch.setattr(worker_hisparse, "take_hisparse_stats", lambda: stats)
+
+    assert runtime.post_step() is stats
+    assert recorded
+
+
+def test_hisparse_runtime_shutdown_releases_pinned_state(monkeypatch):
+    runtime = object.__new__(HiSparseRuntime)
+    released = False
+
+    def release_pinned_state():
+        nonlocal released
+        released = True
+
+    monkeypatch.setattr(worker_hisparse, "release_pinned_state", release_pinned_state)
+
+    runtime.shutdown()
+
+    assert released
 
 
 def test_bind_kv_cache(default_vllm_config):

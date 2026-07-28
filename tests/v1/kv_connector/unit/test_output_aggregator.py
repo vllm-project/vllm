@@ -19,12 +19,12 @@ class DummyModelRunnerOutput(ModelRunnerOutput):
         expected_finished_count: int = 0,
         hisparse_stats: HiSparseStats | None = None,
     ):
+        self.hisparse_stats = hisparse_stats
         self.kv_connector_output = KVConnectorOutput(
             finished_sending=finished_sending,
             finished_recving=finished_recving,
             invalid_block_ids=invalid_block_ids or set(),
             expected_finished_count=expected_finished_count,
-            hisparse_stats=hisparse_stats,
         )
 
     def __repr__(self):
@@ -97,7 +97,7 @@ def test_aggregate_hisparse_stats():
 
     output = aggregator.aggregate(outputs)
 
-    assert output.kv_connector_output.hisparse_stats == HiSparseStats(12, 4, 64)
+    assert output.hisparse_stats == HiSparseStats(12, 4, 64)
 
 
 def test_aggregate_workers_output_with_expected_finished_count():

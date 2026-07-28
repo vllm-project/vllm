@@ -226,7 +226,6 @@ class KVConnectorOutput:
     finished_sending: set[str] | None = None
     finished_recving: set[str] | None = None
     kv_connector_stats: KVConnectorStats | None = None
-    hisparse_stats: HiSparseStats | None = None
     kv_cache_events: KVConnectorKVEvents | None = None
     kv_connector_worker_meta: KVConnectorWorkerMetadata | None = None
     # IDs of externally computed KV blocks that failed to load.
@@ -244,7 +243,6 @@ class KVConnectorOutput:
             not self.finished_sending
             and not self.finished_recving
             and not self.kv_connector_stats
-            and not self.hisparse_stats
             and not self.kv_cache_events
             and not self.invalid_block_ids
             and not self.kv_connector_worker_meta
@@ -291,6 +289,8 @@ class ModelRunnerOutput:
 
     kv_connector_output: KVConnectorOutput | None = None
 
+    hisparse_stats: HiSparseStats | None = None
+
     ec_connector_output: ECConnectorOutput | None = None
 
     # req_id -> num_nans_in_logits
@@ -321,6 +321,19 @@ class ModelRunnerOutput:
             return EMPTY_MODEL_RUNNER_OUTPUT
         output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
         output.kv_connector_output = kv_connector_output
+        return output
+
+    @staticmethod
+    def with_worker_output_only(
+        kv_connector_output: KVConnectorOutput | None,
+        hisparse_stats: HiSparseStats | None,
+    ) -> "ModelRunnerOutput":
+        if hisparse_stats is None:
+            return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
+        output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
+        if kv_connector_output is not None and not kv_connector_output.is_empty():
+            output.kv_connector_output = kv_connector_output
+        output.hisparse_stats = hisparse_stats
         return output
 
 

@@ -11,7 +11,11 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.hisparse import (
     bind_indexer_source_slot_mapping,
     get_indexer_source,
+    invalidate_blocks,
+    record_hisparse_host_writes,
     register_indexer_source,
+    release_pinned_state,
+    take_hisparse_stats,
 )
 from vllm.v1.core.kv_cache_utils import (
     HISPARSE_HOT_SUFFIX,
@@ -23,6 +27,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.metrics.stats import HiSparseStats
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -59,6 +64,26 @@ class HiSparseRuntime:
         self.dst_cpu = torch.empty(capacity, dtype=torch.int32, pin_memory=True)
         self.src_gpu = torch.empty(capacity, dtype=torch.int32, device=device)
         self.dst_gpu = torch.empty(capacity, dtype=torch.int32, device=device)
+
+    def pre_step(self, scheduler_output: SchedulerOutput) -> None:
+        block_ids = [
+            block_id
+            for request in scheduler_output.scheduled_new_reqs
+            for block_id in request.block_ids[0]
+        ]
+        for new_block_ids in scheduler_output.scheduled_cached_reqs.new_block_ids:
+            if new_block_ids is not None:
+                block_ids.extend(new_block_ids[0])
+
+        invalidate_blocks(block_ids, self.block_size)
+        self.restore_prefix(scheduler_output)
+
+    def post_step(self) -> HiSparseStats | None:
+        record_hisparse_host_writes()
+        return take_hisparse_stats()
+
+    def shutdown(self) -> None:
+        release_pinned_state()
 
     def restore_prefix(self, scheduler_output: SchedulerOutput) -> None:
         src = self.src_cpu.numpy()

@@ -54,7 +54,8 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import HiSparseHotSpec, KVCacheConfig, MambaSpec
-from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.metrics.stats import HiSparseStats
+from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu import pcp_manager as pcp
 from vllm.v1.worker.gpu.async_utils import AsyncOutput, AsyncPoolingOutput
@@ -77,6 +78,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 )
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.eplb_utils import EPLBController, step_eplb_after
+from vllm.v1.worker.gpu.hisparse import HiSparseRuntime
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
@@ -255,6 +257,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # KV Connector if configured.
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
+
+        # HiSparse state if configured.
+        self.hisparse_runtime: HiSparseRuntime | None = None
 
         # For transferring state from execute_model to subsequent sample_tokens call.
         self.execute_model_state: ExecuteModelState | None = None
@@ -527,9 +532,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for name in group.layer_names
                 if name in kv_caches_dict
             )
-        self.kv_connector = get_kv_connector(
-            self.vllm_config, kv_caches_dict, self.kv_cache_config
-        )
+        self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
@@ -919,8 +922,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     num_blocks,
                     copies,
                 )
-        if self.hisparse_runtime is not None:
-            self.hisparse_runtime.restore_prefix(scheduler_output)
 
     def prepare_inputs(
         self, scheduler_output: SchedulerOutput, batch_desc: BatchExecutionDescriptor
@@ -1215,6 +1216,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.add_requests(scheduler_output)
             self.update_requests(scheduler_output)
             self.block_tables.apply_staged_writes()
+            if self.hisparse_runtime is not None:
+                self.hisparse_runtime.pre_step(scheduler_output)
             if scheduler_output.total_num_scheduled_tokens == 0:
                 # No need to run the model.
                 empty_output = self.kv_connector.no_forward(scheduler_output)
@@ -1472,9 +1475,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # in the immediate next step (rather than in pp_size steps).
                 self.model_state.postprocess_state(input_batch.idx_mapping, 0)
 
-            # Post-step KV connector related operations.
-            kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
-            return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
+            kv_connector_output, hisparse_stats = self._finish_step(finished_req_ids)
+            return ModelRunnerOutput.with_worker_output_only(
+                kv_connector_output, hisparse_stats
+            )
 
         # Last rank: sample tokens
         hidden_states, input_batch = pcp.maybe_restore_pcp_for_sampling(
@@ -1579,9 +1583,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.req_states.draft_tokens[input_batch.idx_mapping],
             )
 
-        # Post-step KV connector related operations.
-        kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
+        kv_connector_output, hisparse_stats = self._finish_step(finished_req_ids)
         model_runner_output.kv_connector_output = kv_connector_output
+        model_runner_output.hisparse_stats = hisparse_stats
 
         return async_output
 
@@ -1600,12 +1604,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         finished_req_ids = self.execute_model_state.finished_req_ids
         self.execute_model_state = None
 
-        # Post-step KV connector related operations.
-        kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
+        kv_connector_output, hisparse_stats = self._finish_step(finished_req_ids)
 
         if not self.is_last_pp_rank:
             self.postprocess_num_computed_tokens(input_batch)
-            return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
+            return ModelRunnerOutput.with_worker_output_only(
+                kv_connector_output, hisparse_stats
+            )
 
         assert self.pooling_runner is not None
         pooler_output, is_valid = self.pooling_runner.pool(
@@ -1617,6 +1622,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_ids=input_batch.req_ids,
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             kv_connector_output=kv_connector_output,
+            hisparse_stats=hisparse_stats,
         )
         async_output = AsyncPoolingOutput(
             model_runner_output=model_runner_output,
@@ -1637,10 +1643,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.query_start_loc,
         )
 
+    def _finish_step(
+        self, finished_req_ids: set[str]
+    ) -> tuple[KVConnectorOutput | None, HiSparseStats | None]:
+        hisparse_stats = (
+            self.hisparse_runtime.post_step()
+            if self.hisparse_runtime is not None
+            else None
+        )
+        return self.kv_connector.post_forward(finished_req_ids), hisparse_stats
+
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
-        self.kv_connector.shutdown()
+        if self.hisparse_runtime is not None:
+            self.hisparse_runtime.shutdown()
         torch.accelerator.synchronize()
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()

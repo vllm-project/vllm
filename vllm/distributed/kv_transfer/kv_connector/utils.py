@@ -96,6 +96,11 @@ class KVOutputAggregator:
         invalid_block_ids = set[int]()
         for model_runner_output in outputs:
             assert model_runner_output is not None
+            if aggregated_hisparse_stats is None:
+                aggregated_hisparse_stats = model_runner_output.hisparse_stats
+            elif hisparse_stats := model_runner_output.hisparse_stats:
+                aggregated_hisparse_stats.aggregate(hisparse_stats)
+
             kv_output = model_runner_output.kv_connector_output
             if not kv_output:
                 continue
@@ -131,11 +136,6 @@ class KVOutputAggregator:
                     kv_connector_stats
                 )
 
-            if aggregated_hisparse_stats is None:
-                aggregated_hisparse_stats = kv_output.hisparse_stats
-            elif hisparse_stats := kv_output.hisparse_stats:
-                aggregated_hisparse_stats.aggregate(hisparse_stats)
-
             # Aggregate kv_connector_worker_meta from all workers.
             if aggregated_kv_connector_worker_meta is None:
                 # Use the first worker's kv_connector_worker_meta as accumulator.
@@ -166,11 +166,11 @@ class KVOutputAggregator:
         output = outputs[output_rank]
 
         assert output is not None
+        output.hisparse_stats = aggregated_hisparse_stats
         output.kv_connector_output = KVConnectorOutput(
             finished_sending=finished_sending or None,
             finished_recving=finished_recving or None,
             kv_connector_stats=aggregated_kv_connector_stats or None,
-            hisparse_stats=aggregated_hisparse_stats,
             kv_cache_events=combined_kv_cache_events or None,
             kv_connector_worker_meta=aggregated_kv_connector_worker_meta or None,
             invalid_block_ids=invalid_block_ids,
