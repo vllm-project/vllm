@@ -375,12 +375,15 @@ class OnlineDerenderer:
         prompt_tokens: list[int] | None = None,
         completion_request: CompletionRequest | None = None,
     ) -> tuple[list[CompletionResponseChoice], int, int]:
-        return await self._derender_completion_async(generate_responses, prompt_tokens)
+        return await self._derender_completion_async(
+            generate_responses, prompt_tokens, completion_request
+        )
 
     def _derender_completion(
         self,
         generate_responses: list[GenerateResponse],
         prompt_tokens: list[int] | None = None,
+        completion_request: CompletionRequest | None = None,
     ) -> tuple[list[CompletionResponseChoice], int, int]:
         n = len(generate_responses)
         prompt_tokens_list: list[int] = (
