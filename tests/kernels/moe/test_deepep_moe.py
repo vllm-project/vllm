@@ -368,19 +368,17 @@ def assert_deepep_close(
     use_fp8_dispatch: bool,
     weights_are_quantized: bool,
 ) -> None:
-    # DeepEP quantizes fp8 dispatch inputs inside its own kernel, so its fp8
-    # codes differ from vLLM's reference per_token_group_quant_fp8 by ~1 ULP
-    # (same 128-element blocks, e4m3 range and non-ue8m0 scales - only the
-    # on-cast rounding/reduction order differs). This rounding noise can push a
-    # small fraction of elements past the strict 6e-2 tolerance, so use a
-    # statistical check for the affected fp8-dispatch cases.
-    relax_fp8_dispatch = use_fp8_dispatch and (
-        # gfx942 (e4m3fnuz): keep the original behavior unchanged.
-        current_platform.is_fp8_fnuz()
-        # gfx950 (e4m3fn): the noise only exceeds 6e-2 for bf16 experts, where
-        # no weight quant masks it (zero-mean, std ~6e-2; <1.9% past 0.15). The
-        # fp8-weight path stays within 6e-2, so keep it strict.
-        or (current_platform.is_rocm() and not weights_are_quantized)
+    # DeepEP quantizes fp8-dispatch inputs inside its own kernel, so its fp8
+    # codes differ from vLLM's reference per_token_group_quant_fp8 by ~1 ULP of
+    # on-cast rounding noise. On ROCm this only exceeds the strict 6e-2 tolerance
+    # for bf16 experts, where no weight quant masks it (zero-mean, std ~6e-2;
+    # <1.9% past 0.15); the fp8-weight path stays within 6e-2. This holds for
+    # both e4m3fnuz (gfx942) and e4m3fn (gfx950), so use a single condition:
+    # relax only the unquantized-weight fp8-dispatch case, keep fp8-weight strict.
+    relax_fp8_dispatch = (
+        use_fp8_dispatch
+        and current_platform.is_rocm()
+        and not weights_are_quantized
     )
     if relax_fp8_dispatch:
         atol = rtol = 1.5e-1
