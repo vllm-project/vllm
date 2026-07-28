@@ -153,12 +153,19 @@ __global__ void reshape_and_cache_nvfp4_kernel(
 #endif
 
       // Write block scale to scale cache.
-      // K (kv==0): linear layout (no swizzle).
-      // V (kv==1): swizzled layout for SM100 trtllm-gen MHA kernel.
+      // SM100 trtllm-gen requires swizzled V scales. SM120 XQA consumes
+      // ordinary tensor strides for both K and V scales, so both must be
+      // linear there.
       if (sf_out_ptr != nullptr) {
         int scale_idx = group_in_head;
         uint8_t* __restrict__ scale_dst;
-        if (kv == 0) {
+#if defined(__CUDA_ARCH__) && \
+    (__CUDA_ARCH__ == 1200 || __CUDA_ARCH__ == 1210)
+        constexpr bool swizzle_v_scale = false;
+#else
+        constexpr bool swizzle_v_scale = true;
+#endif
+        if (kv == 0 || !swizzle_v_scale) {
           scale_dst = scale_block + head * scale_head_stride +
                       block_offset * scale_block_offset_stride + scale_idx;
         } else {
