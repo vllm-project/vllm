@@ -73,9 +73,7 @@ def test_sw_sizes(mock_platform, swa_enabled, expected_sw_sizes):
         pytest.param(False, (0,), 2, False, id="local_tp_greater"),
     ],
 )
-def test_needs_split_local_xfer_handles(
-    use_mla, source_ranks, tp_ratio, expected
-):
+def test_needs_split_local_xfer_handles(use_mla, source_ranks, tp_ratio, expected):
     """Handle creation and selection must use the same TP-mapping predicate.
 
     In pure MLA, DCP can target several physical remote workers even though

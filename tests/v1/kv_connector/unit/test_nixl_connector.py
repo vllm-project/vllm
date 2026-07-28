@@ -411,9 +411,7 @@ def test_kv_transfer_handshake(dist_init):
         # The scheduler connector expects metadata keyed by
         # (pp_rank, pcp_rank, tp_rank).
         scheduler_connector = scheduler.get_kv_connector()
-        scheduler_connector.set_xfer_handshake_metadata_pp_aware(
-            {(0, 0, 0): metadata}
-        )
+        scheduler_connector.set_xfer_handshake_metadata_pp_aware({(0, 0, 0): metadata})
 
         # Simulate a request that finishes prefill, which returns
         # corresponding NixlConnectorMetadata for decode instance.

@@ -147,9 +147,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         ) * self.dcp_size
 
         plan = self.tp_mappings[engine_id]
-        needs_split_local_handles = self._needs_split_local_xfer_handles(
-            tp_ratio, plan
-        )
+        needs_split_local_handles = self._needs_split_local_xfer_handles(tp_ratio, plan)
         launched_read = False
         for remote_worker_key in remote_worker_keys:
             remote_pcp_rank, remote_tp_rank = remote_worker_key

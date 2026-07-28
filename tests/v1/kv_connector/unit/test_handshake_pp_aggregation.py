@@ -36,10 +36,7 @@ class _FakeExecutor:
 
     def get_kv_connector_handshake_metadata(
         self,
-    ) -> (
-        list[dict[tuple[int, int, int], KVConnectorHandshakeMetadata] | None]
-        | None
-    ):
+    ) -> list[dict[tuple[int, int, int], KVConnectorHandshakeMetadata] | None] | None:
         self.handshake_calls += 1
         return self.handshake_metadata
 
@@ -52,8 +49,7 @@ def _run_engine_core_handshake(
     connector: KVConnectorBase_V1,
     *,
     handshake_metadata: (
-        list[dict[tuple[int, int, int], KVConnectorHandshakeMetadata] | None]
-        | None
+        list[dict[tuple[int, int, int], KVConnectorHandshakeMetadata] | None] | None
     ),
 ) -> _FakeExecutor:
     class _FakeScheduler:
