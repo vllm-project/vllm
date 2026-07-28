@@ -798,6 +798,21 @@ class DelegatingParser(Parser):
         )
         return reasoning, content, tool_calls
 
+    def _prompt_ends_reasoning(self, prompt_token_ids: Sequence[int]) -> bool:
+        """Whether the prompt itself leaves reasoning already closed.
+
+        Only the tail of the prompt can close a reasoning block. Scanning the
+        whole prompt returns True whenever the end marker appears anywhere in
+        it -- chat-template instructions, few-shot examples, or an earlier
+        assistant turn -- which silently skips the reasoning phase for the
+        entire generation (see #46042).
+        """
+        if self._reasoning_parser is None:
+            return True
+        end_token_ids = getattr(self._reasoning_parser, "_end_token_ids", None)
+        tail_len = len(end_token_ids) if end_token_ids else 1
+        return self.is_reasoning_end(list(prompt_token_ids)[-tail_len:])
+
     def parse_delta(
         self,
         delta_text: str,
@@ -812,7 +827,7 @@ class DelegatingParser(Parser):
 
         if not state.prompt_reasoning_checked and prompt_token_ids is not None:
             state.prompt_reasoning_checked = True
-            if self._reasoning_parser is None or self.is_reasoning_end(
+            if self._reasoning_parser is None or self._prompt_ends_reasoning(
                 prompt_token_ids
             ):
                 state.reasoning_ended = True
