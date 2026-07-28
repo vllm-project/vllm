@@ -86,12 +86,14 @@ def _run_shape_battery(llm: LLM) -> None:
     )
 
 
-@create_new_process_for_each_test()
-def can_run_without_jit(spec: JitModel, monkeypatch: pytest.MonkeyPatch):
+@create_new_process_for_each_test("spawn")
+def can_run_without_jit(spec: JitModel):
     """Boot ``spec`` with the monitor armed and run the shape battery.
 
     A subprocess per model is required: the monitor's hooks are process-global
-    and, once armed in ``error`` mode, stay armed.
+    and, once armed in ``error`` mode, stay armed. It must be spawned rather
+    than forked, since forking a pytest process that already initialized CUDA
+    poisons the child.
     """
     llm = LLM(
         spec.model,
@@ -128,4 +130,7 @@ def can_run_without_jit(spec: JitModel, monkeypatch: pytest.MonkeyPatch):
 @pytest.mark.parametrize("spec", JIT_MONITOR_MODELS, ids=lambda s: s.model)
 def test_no_runtime_jit(spec: JitModel, monkeypatch: pytest.MonkeyPatch):
     """Assert JIT-heavy backends do not JIT-compile during inference."""
-    can_run_without_jit(spec, monkeypatch)
+    # Set here rather than in the child so the spawned process inherits it:
+    # the engine core must not be forked once the test process has CUDA up.
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    can_run_without_jit(spec)
