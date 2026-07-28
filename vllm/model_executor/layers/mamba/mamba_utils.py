@@ -106,6 +106,21 @@ class MambaStateDtypeCalculator:
         return (*base_dtypes, activation_dtype, torch.float32)
 
     @classmethod
+    def append_replayssm_spec_flashinfer_ring(
+        cls,
+        base_dtypes: tuple[torch.dtype, ...],
+        model_dtype: ModelDType | torch.dtype,
+    ) -> tuple[torch.dtype, ...]:
+        """Append the FlashInfer ReplaySSM spec ring dtypes to a base
+        ``(conv, ssm)`` tuple: ``(x_cache, B_cache, dt_cache)`` =
+        ``(activation, activation, fp32)``. FlashInfer keeps x and B in separate
+        head-major rings rather than the Triton path's fused post_conv_cache;
+        ``dt`` drives the replayed decay and stays fp32 regardless of state dtype.
+        """
+        activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
+        return (*base_dtypes, activation_dtype, activation_dtype, torch.float32)
+
+    @classmethod
     def _mamba_state_dtype(
         cls,
         model_dtype: ModelDType | torch.dtype,
@@ -267,6 +282,53 @@ class MambaStateShapeCalculator:
         return (
             *base_shapes,
             (ring_len, conv_dim_local),
+            (local_nheads, ring_len),
+        )
+
+    @classmethod
+    def replayssm_spec_flashinfer_ring_len(
+        cls, replayssm_buffer_len: int, num_spec: int
+    ) -> int:
+        """Physical ring length for the FlashInfer kernel: exactly ``B + T``.
+
+        FlashInfer derives its logical replay window as
+        ``max_window = x_cache.size(2) - max_seqlen``, so the ring must not be
+        rounded up to a power of two the way the Triton path's
+        ``replayssm_spec_ring_len`` is -- padding it would silently inflate
+        ``max_window`` past ``replayssm_buffer_len``.
+        """
+        return replayssm_buffer_len + 1 + num_spec
+
+    @classmethod
+    def append_replayssm_spec_flashinfer_ring(
+        cls,
+        base_shapes: tuple[tuple[int, ...], ...],
+        n_groups: int,
+        tp_world_size: int,
+        replayssm_buffer_len: int,
+        num_spec: int,
+    ) -> tuple[tuple[int, ...], ...]:
+        """Append the FlashInfer ReplaySSM spec ring shapes to a base
+        ``(conv, ssm)`` tuple as ``(x_cache, B_cache, dt_cache)``, shaped
+        ``(H, R, P)``, ``(G, R, N)`` and ``(H, R)``.
+
+        These are head-major rings sized from the ssm shape directly, not slices
+        of the Triton path's token-major ``post_conv_cache``. ``base_shapes``
+        must already carry the spec conv window
+        (``mamba2_state_shape(..., num_spec=num_spec)``).
+        """
+        local_nheads, head_dim, state_size = base_shapes[1]
+        n_groups_ext = n_groups + cls.extra_groups_for_head_shards(
+            n_groups, tp_world_size
+        )
+        local_ngroups = divide(n_groups_ext, tp_world_size)
+        ring_len = cls.replayssm_spec_flashinfer_ring_len(
+            replayssm_buffer_len, num_spec
+        )
+        return (
+            *base_shapes,
+            (local_nheads, ring_len, head_dim),
+            (local_ngroups, ring_len, state_size),
             (local_nheads, ring_len),
         )
 

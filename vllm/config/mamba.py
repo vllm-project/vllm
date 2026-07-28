@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from enum import Enum, EnumMeta
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import field_validator
 
 from vllm.config.utils import config
+
+ReplaySSMSpecAlgorithm = Literal["auto", "monolith", "two-kernel"]
 
 
 class _MambaBackendEnumMeta(EnumMeta):
@@ -45,6 +47,12 @@ class MambaConfig:
     """Number of Philox PRNG rounds for stochastic rounding random number
     generation. 0 uses the Triton default. Higher values improve randomness
     quality at the cost of compute."""
+
+    replayssm_spec_algorithm: ReplaySSMSpecAlgorithm = "auto"
+    """Kernel selection for the FlashInfer ReplaySSM speculative-decode SSU.
+    'auto' lets FlashInfer pick between the monolithic and two-kernel paths by
+    work size, 'monolith' and 'two-kernel' force one. Only meaningful with
+    `--use-replayssm-spec` on the flashinfer Mamba backend."""
 
     @field_validator("backend", mode="before")
     @classmethod

@@ -6,6 +6,7 @@ import torch
 from torch import nn
 
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
+from vllm.config.mamba import MambaBackendEnum
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -517,6 +518,13 @@ class MambaMixer2(MambaBase, PluggableLayer):
             else None
         )
         self.mamba_config = vllm_config.mamba_config
+        # ReplaySSM-spec runs on either the Triton kernel or the FlashInfer
+        # checkpointing_ssu kernel; the two use different page layouts.
+        self.replayssm_spec_backend = self.mamba_config.backend
+        self.use_replayssm_spec_flashinfer = (
+            self.use_replayssm_spec
+            and self.replayssm_spec_backend == MambaBackendEnum.FLASHINFER
+        )
         if (
             self.use_replayssm or self.use_replayssm_spec
         ) and self.num_heads % self.tp_size != 0:
@@ -525,10 +533,11 @@ class MambaMixer2(MambaBase, PluggableLayer):
             )
         # The tuple is (conv_state, ssm_state); with the cached (ReplaySSM) decode
         # kernel enabled it is (conv_state, ssm_state, x_cache, dt_cache, B_cache),
-        # and with the cached-spec kernel (conv_state, ssm_state, post_conv_cache,
-        # dt_cache).
+        # with the Triton cached-spec kernel (conv_state, ssm_state,
+        # post_conv_cache, dt_cache), and with the FlashInfer cached-spec kernel
+        # (conv_state, ssm_state, x_cache, B_cache, dt_cache).
         if self.use_replayssm_spec:
-            _n_state = 4
+            _n_state = 5 if self.use_replayssm_spec_flashinfer else 4
         elif self.use_replayssm:
             _n_state = 5
         else:
@@ -1169,6 +1178,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
             self.cache_config.mamba_ssm_cache_dtype,
         )
         if self.use_replayssm_spec:
+            if self.use_replayssm_spec_flashinfer:
+                return MambaStateDtypeCalculator.append_replayssm_spec_flashinfer_ring(
+                    base_dtype, self.model_config.dtype
+                )
             return MambaStateDtypeCalculator.append_replayssm_spec_ring(
                 base_dtype, self.model_config.dtype
             )
@@ -1192,6 +1205,14 @@ class MambaMixer2(MambaBase, PluggableLayer):
         )
         if self.use_replayssm_spec:
             assert self.replayssm_buffer_len is not None
+            if self.use_replayssm_spec_flashinfer:
+                return MambaStateShapeCalculator.append_replayssm_spec_flashinfer_ring(
+                    base_shape,
+                    self.n_groups,
+                    tp_world_size,
+                    self.replayssm_buffer_len,
+                    self.num_spec,
+                )
             return MambaStateShapeCalculator.append_replayssm_spec_ring(
                 base_shape,
                 self.intermediate_size,

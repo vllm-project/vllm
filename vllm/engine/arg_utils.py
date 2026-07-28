@@ -77,7 +77,7 @@ from vllm.config.device import Device
 from vllm.config.kernel import IrOpPriorityConfig, LinearBackend, MoEBackend
 from vllm.config.load import SafetensorsLoadStrategy
 from vllm.config.lora import MaxLoRARanks
-from vllm.config.mamba import MambaBackendEnum
+from vllm.config.mamba import MambaBackendEnum, ReplaySSMSpecAlgorithm
 from vllm.config.model import (
     ConvertOption,
     HfOverrides,
@@ -704,6 +704,9 @@ class EngineArgs:
         MambaConfig.enable_stochastic_rounding
     )
     mamba_cache_philox_rounds: int = MambaConfig.stochastic_rounding_philox_rounds
+    replayssm_spec_algorithm: ReplaySSMSpecAlgorithm = (
+        MambaConfig.replayssm_spec_algorithm
+    )
 
     additional_config: dict[str, Any] = get_field(VllmConfig, "additional_config")
 
@@ -960,6 +963,10 @@ class EngineArgs:
         mamba_group.add_argument(
             "--mamba-cache-philox-rounds",
             **mamba_kwargs["stochastic_rounding_philox_rounds"],
+        )
+        mamba_group.add_argument(
+            "--replayssm-spec-algorithm",
+            **mamba_kwargs["replayssm_spec_algorithm"],
         )
 
         # Structured outputs arguments
@@ -2348,6 +2355,8 @@ class EngineArgs:
             mamba_config.stochastic_rounding_philox_rounds = (
                 self.mamba_cache_philox_rounds
             )
+        if self.replayssm_spec_algorithm != MambaConfig.replayssm_spec_algorithm:
+            mamba_config.replayssm_spec_algorithm = self.replayssm_spec_algorithm
 
         # Kernel config overrides
         kernel_config = copy.deepcopy(self.kernel_config)
