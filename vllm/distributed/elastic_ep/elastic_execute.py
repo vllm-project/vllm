@@ -458,7 +458,9 @@ class ElasticEPScalingExecutor:
                 eplb_model_state.logical_to_physical_map,
                 eplb_model_state.logical_replica_count,
             )
-            eplb_state._init_should_record_tensor(model)
+            eplb_state._propagate_shared_tensors(
+                model, eplb_model_state.num_unpadded_tokens_tensors
+            )
             model.update_physical_experts_metadata(
                 num_physical_experts=num_physical_experts,
                 num_local_physical_experts=num_local_experts,

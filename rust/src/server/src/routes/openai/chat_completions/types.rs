@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::HashMap;
 use std::fmt;
 
@@ -6,6 +9,7 @@ use serde_json::Value;
 use serde_with::SerializeDisplay;
 use validator::Validate;
 use vllm_chat::ReasoningEffort;
+use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
@@ -231,12 +235,15 @@ pub struct ChatCompletionRequest {
     /// KV transfer parameters for disaggregated serving
     pub kv_transfer_params: Option<HashMap<String, Value>>,
 
+    /// Encoder cache transfer parameters for disaggregated serving
+    pub ec_transfer_params: Option<HashMap<String, Value>>,
+
     /// Additional request parameters with string or numeric values for custom
     /// extensions
     pub vllm_xargs: Option<HashMap<String, Value>>,
 
     /// Parameters for detecting repetitive N-gram patterns in output tokens
-    pub repetition_detection: Option<Value>,
+    pub repetition_detection: Option<RepetitionDetectionParams>,
 }
 
 impl Default for ChatCompletionRequest {
@@ -298,6 +305,7 @@ impl Default for ChatCompletionRequest {
             return_token_ids: None,
             cache_salt: None,
             kv_transfer_params: None,
+            ec_transfer_params: None,
             vllm_xargs: None,
             repetition_detection: None,
         }
@@ -330,7 +338,9 @@ impl Normalizable for ChatCompletionRequest {
 }
 
 /// Mirrors the Python vLLM `ChatCompletionResponse` class.
-#[serde_with::skip_serializing_none]
+///
+/// Do not skip serializing `None` fields here: non-streaming response types
+/// should serialize `None` as explicit `null`.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct ChatCompletionResponse {
     pub id: String,
@@ -343,10 +353,10 @@ pub(super) struct ChatCompletionResponse {
     pub prompt_logprobs: Option<Vec<Option<HashMap<String, f32>>>>,
     pub prompt_token_ids: Option<Vec<u32>>,
     pub kv_transfer_params: Option<Value>,
+    pub ec_transfer_params: Option<Value>,
 }
 
 /// Mirrors the Python vLLM `ChatCompletionResponseChoice` class.
-#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct ChatCompletionChoice {
     pub index: u32,
@@ -369,12 +379,12 @@ impl fmt::Display for AssistantRole {
 }
 
 /// Mirrors the Python vLLM response `ChatMessage` class.
-#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct ChatCompletionMessage {
     pub role: AssistantRole,
     pub content: Option<String>,
-    pub tool_calls: Option<Vec<ToolCall>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
     pub reasoning: Option<String>,
 }
 

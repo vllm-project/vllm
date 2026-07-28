@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use super::{JsonToolCallConfig, JsonToolCallParser, JsonToolCallWhitespace};
 use crate::tool::{Result, Tool, ToolParser, ToolParserOutput};
 
@@ -335,7 +338,7 @@ mod tests {
         let error = parser.parse_chunk(&input).unwrap_err();
 
         expect![[r#"
-            tool parser parsing failed: invalid InternLM2
+            tool parser parsing failed: near "{\"name\":\"get_weather\",\"params\":{\"location\":\"Tokyo\"}}<|action_end|>": invalid InternLM2
             expected `parameters`, `arguments`"#]]
         .assert_eq(&error.to_report_string());
     }

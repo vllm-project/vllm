@@ -68,8 +68,17 @@ endif()
 # requirements.txt files and should be kept consistent.  The ROCm torch
 # versions are derived from docker/Dockerfile.rocm
 #
-set(TORCH_SUPPORTED_VERSION_CUDA "2.11.0")
-set(TORCH_SUPPORTED_VERSION_ROCM "2.11.0")
+set(TORCH_SUPPORTED_VERSION_CUDA "2.13.0")
+set(TORCH_SUPPORTED_VERSION_ROCM "2.13.0")
+# TORCH_NIGHTLY=1 builds run against unpinned nightly wheels, so the supported-
+# version check would always warn. Only treat it as a nightly build when the
+# value is exactly "1" (the bootstrap exports TORCH_NIGHTLY=0 by default, which
+# must NOT suppress the warning for normal builds).
+if (DEFINED ENV{TORCH_NIGHTLY} AND "$ENV{TORCH_NIGHTLY}" STREQUAL "1")
+  set(TORCH_NIGHTLY_BUILD TRUE)
+else()
+  set(TORCH_NIGHTLY_BUILD FALSE)
+endif()
 
 #
 # Try to find python package with an executable that exactly matches
@@ -105,6 +114,11 @@ find_package(Torch REQUIRED)
 # Supported NVIDIA architectures.
 # This check must happen after find_package(Torch) because that's when CMAKE_CUDA_COMPILER_VERSION gets defined
 if(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
+   CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.4)
+  # Rubin (10.7) can run SM100 family code, but CUDA 13.4 also supports
+  # targeting it directly.
+  set(CUDA_SUPPORTED_ARCHS "7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.7;11.0;12.0")
+elseif(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
    CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0)
    # starting from CUDA 12.9 and Blackwell (10.0), we use family-specific targets (10.0f, 12.0f, etc)
    # to support the whole generation without specifying all sub-architectures
@@ -141,6 +155,21 @@ if(Python_VERSION VERSION_GREATER_EQUAL "3.11")
 endif()
 
 #
+# fs_io extension (pure CXX; must stay above the non-CUDA device branch
+# so CPU builds define the target before the early return).
+# GIL-releasing filesystem helpers for FileSystemTierManager.
+#
+if(Python_VERSION VERSION_GREATER_EQUAL "3.11")
+  define_extension_target(
+    fs_io_C
+    DESTINATION vllm
+    LANGUAGE CXX
+    SOURCES csrc/fs_io.cpp
+    USE_SABI 3.11
+    WITH_SOABI)
+endif()
+
+#
 # Forward the non-CUDA device extensions to external CMake scripts.
 #
 if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND
@@ -160,7 +189,7 @@ endif()
 if (NOT HIP_FOUND AND NOT PYTORCH_FOUND_HIP AND CUDA_FOUND)
   set(VLLM_GPU_LANG "CUDA")
 
-  if (NOT Torch_VERSION VERSION_EQUAL ${TORCH_SUPPORTED_VERSION_CUDA})
+  if (NOT TORCH_NIGHTLY_BUILD AND NOT Torch_VERSION VERSION_EQUAL ${TORCH_SUPPORTED_VERSION_CUDA})
     message(WARNING "Pytorch version ${TORCH_SUPPORTED_VERSION_CUDA} "
       "expected for CUDA build, saw ${Torch_VERSION} instead.")
   endif()
@@ -173,7 +202,7 @@ elseif(HIP_FOUND OR PYTORCH_FOUND_HIP)
   enable_language(HIP)
 
   # ROCm 5.X and 6.X
-  if (ROCM_VERSION_DEV_MAJOR GREATER_EQUAL 5 AND
+  if (NOT TORCH_NIGHTLY_BUILD AND ROCM_VERSION_DEV_MAJOR GREATER_EQUAL 5 AND
       Torch_VERSION VERSION_LESS ${TORCH_SUPPORTED_VERSION_ROCM})
     message(WARNING "Pytorch version >= ${TORCH_SUPPORTED_VERSION_ROCM} "
       "expected for ROCm build, saw ${Torch_VERSION} instead.")
@@ -270,6 +299,16 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   #
   set(CMAKE_${VLLM_GPU_LANG}_FLAGS "${CMAKE_${VLLM_GPU_LANG}_FLAGS} -Wno-unused-result -Wno-unused-value")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-result -Wno-unused-value")
+
+  # When using LTO then *.cpp files must be compiled with same compiler as used linker
+  # So if HIP uses clang linker we also must use it
+  # Otherwise symbols will be missing from .so
+  if (CMAKE_CXX_FLAGS MATCHES "\-flto")
+    if(NOT CMAKE_CXX_COMPILER_ID STREQUAL CMAKE_HIP_COMPILER_ID)
+      message(FATAL_ERROR "LTO is enabled for ROCm build, but the C++ compiler (${CMAKE_CXX_COMPILER_ID}) and HIP compiler (${CMAKE_HIP_COMPILER_ID}) are different which is not supported. "
+                          "Please ensure they are same by setting CXX=${CMAKE_HIP_COMPILER} environment variable. Or alternatively disable LTO.")
+    endif()
+   endif()
 endif()
 
 #
@@ -325,9 +364,7 @@ endif()
 if(VLLM_GPU_LANG STREQUAL "HIP")
   set(VLLM_EXT_SRC
     "csrc/torch_bindings.cpp"
-    "csrc/custom_quickreduce.cu"
-    "csrc/cuda_view.cu"
-    "csrc/libtorch_stable/cuda_utils_kernels.cu")
+    "csrc/custom_quickreduce.cu")
 
   message(STATUS "Enabling C extension.")
   define_extension_target(
@@ -355,7 +392,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   #
   set(VLLM_STABLE_EXT_SRC
     "csrc/libtorch_stable/torch_bindings.cpp"
+    "csrc/libtorch_stable/cuda_view.cu"
+    "csrc/libtorch_stable/cuda_utils_kernels.cu"
     "csrc/libtorch_stable/activation_kernels.cu"
+    "csrc/libtorch_stable/ngram_embedding_kernels.cu"
     "csrc/libtorch_stable/quantization/activation_kernels.cu"
     "csrc/libtorch_stable/quantization/w8a8/int8/scaled_quant.cu"
     "csrc/libtorch_stable/quantization/w8a8/fp8/common.cu"
@@ -374,9 +414,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/libtorch_stable/sampler.cu"
     "csrc/libtorch_stable/topk.cu"
     "csrc/libtorch_stable/mamba/selective_scan_fwd.cu"
-    "csrc/libtorch_stable/attention/paged_attention_v1.cu"
-    "csrc/libtorch_stable/attention/paged_attention_v2.cu"
-    "csrc/libtorch_stable/cache_kernels.cu"
     "csrc/libtorch_stable/cache_kernels.cu"
     "csrc/libtorch_stable/cache_kernels_fused.cu"
     "csrc/libtorch_stable/custom_all_reduce.cu"
@@ -388,7 +425,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
     if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
       cuda_archs_loose_intersection(COOPERATIVE_TOPK_ARCHS
-        "9.0a;10.0f;10.1f;10.3f;11.0f;12.0f;12.1f" "${CUDA_ARCHS}")
+        "9.0a;10.0f;10.1f;10.3f;10.7f;11.0f;12.0f;12.1f" "${CUDA_ARCHS}")
     else()
       cuda_archs_loose_intersection(COOPERATIVE_TOPK_ARCHS
         "9.0a;10.0a;10.1a;10.3a;12.0a;12.1a" "${CUDA_ARCHS}")
@@ -434,8 +471,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     FetchContent_MakeAvailable(cutlass)
 
     list(APPEND VLLM_STABLE_EXT_SRC
-      "csrc/libtorch_stable/cuda_view.cu"
-      "csrc/libtorch_stable/cuda_utils_kernels.cu"
       "csrc/libtorch_stable/cutlass_extensions/common.cpp"
       "csrc/libtorch_stable/quantization/w8a8/cutlass/scaled_mm_entry.cu"
       "csrc/libtorch_stable/quantization/fp4/nvfp4_quant_entry.cu"
@@ -665,7 +700,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
   # DeepSeek V3 fused A GEMM kernel (requires SM 9.0+, Hopper and later)
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(DSV3_FUSED_A_GEMM_ARCHS "9.0a;10.0f;11.0f;12.0f" "${CUDA_ARCHS}")
+    cuda_archs_loose_intersection(DSV3_FUSED_A_GEMM_ARCHS "9.0a;10.0f;10.7f;11.0f;12.0f" "${CUDA_ARCHS}")
   else()
     cuda_archs_loose_intersection(DSV3_FUSED_A_GEMM_ARCHS "9.0a;10.0a;10.1a;10.3a;12.0a;12.1a" "${CUDA_ARCHS}")
   endif()
@@ -785,7 +820,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   # The cutlass_scaled_mm kernels for Blackwell SM100 (c3x, i.e. CUTLASS 3.x)
   # require CUDA 12.8 or later
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0f;11.0f" "${CUDA_ARCHS}")
+    cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0f;10.7f;11.0f" "${CUDA_ARCHS}")
   else()
     cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
   endif()
@@ -869,7 +904,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
 
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0f;11.0f" "${CUDA_ARCHS}")
+    cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0f;10.7f;11.0f" "${CUDA_ARCHS}")
   else()
     cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
   endif()
@@ -894,7 +929,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
   # moe_data.cu is used by all CUTLASS MoE kernels.
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(CUTLASS_MOE_DATA_ARCHS "9.0a;10.0f;11.0f;12.0f" "${CUDA_ARCHS}")
+    cuda_archs_loose_intersection(CUTLASS_MOE_DATA_ARCHS "9.0a;10.0f;10.7f;11.0f;12.0f" "${CUDA_ARCHS}")
   else()
     cuda_archs_loose_intersection(CUTLASS_MOE_DATA_ARCHS "9.0a;10.0a;10.1a;10.3a;12.0a;12.1a" "${CUDA_ARCHS}")
   endif()
@@ -951,7 +986,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   # SM10x/11x FP4 kernels. MXFP4 experts quantization is currently compiled
   # only in this block; SM12x has separate NVFP4 matmul/MoE kernels above.
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(FP4_SM100_ARCHS "10.0f;11.0f" "${CUDA_ARCHS}")
+    cuda_archs_loose_intersection(FP4_SM100_ARCHS "10.0f;10.7f;11.0f" "${CUDA_ARCHS}")
   else()
     cuda_archs_loose_intersection(FP4_SM100_ARCHS "10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
   endif()
@@ -1017,7 +1052,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   # Runtime dispatch is gated in
   # vllm/v1/attention/backends/mla/cutlass_mla.py.
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(MLA_ARCHS "10.0f;11.0f" "${CUDA_ARCHS}")
+    cuda_archs_loose_intersection(MLA_ARCHS "10.0f;10.7f;11.0f" "${CUDA_ARCHS}")
   else()
     cuda_archs_loose_intersection(MLA_ARCHS "10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
   endif()
@@ -1066,14 +1101,15 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     USE_SABI 3
     WITH_SOABI)
 
+  # Set TORCH_TARGET_VERSION for stable ABI compatibility.
+  # This ensures we only use C-shim APIs available in PyTorch 2.11.
+  # _C_stable_libtorch is abi compatible with PyTorch >= TORCH_TARGET_VERSION
+  # which is currently set to 2.11.
+  target_compile_definitions(_C_stable_libtorch PRIVATE
+    TORCH_TARGET_VERSION=0x020B000000000000ULL)
+
   # Needed to use cuda/hip APIs from C-shim
   if(VLLM_GPU_LANG STREQUAL "CUDA")
-    # Set TORCH_TARGET_VERSION for stable ABI compatibility.
-    # This ensures we only use C-shim APIs available in PyTorch 2.11.
-    # _C_stable_libtorch is abi compatible with PyTorch >= TORCH_TARGET_VERSION
-    # which is currently set to 2.11.
-    target_compile_definitions(_C_stable_libtorch PRIVATE
-      TORCH_TARGET_VERSION=0x020B000000000000ULL)
     target_compile_definitions(_C_stable_libtorch PRIVATE USE_CUDA)
     if(COOPERATIVE_TOPK_ARCHS)
       target_compile_definitions(_C_stable_libtorch PRIVATE
@@ -1083,12 +1119,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     target_compile_definitions(_C_stable_libtorch PRIVATE
       CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
   elseif(VLLM_GPU_LANG STREQUAL "HIP")
-    # Set TORCH_TARGET_VERSION for stable ABI compatibility.
-    # This ensures we only use C-shim APIs available in PyTorch 2.10.
-    # _C_stable_libtorch is abi compatible with PyTorch >= TORCH_TARGET_VERSION
-    # which is currently set to 2.10.
-    target_compile_definitions(_C_stable_libtorch PRIVATE
-      TORCH_TARGET_VERSION=0x020A000000000000ULL)
     target_compile_definitions(_C_stable_libtorch PRIVATE USE_ROCM)
   endif()
 
@@ -1296,25 +1326,20 @@ define_extension_target(
   USE_SABI 3
   WITH_SOABI)
 
+# Set TORCH_TARGET_VERSION for stable ABI compatibility.
+# This ensures we only use C-shim APIs available in PyTorch 2.11.
+# _moe_C_stable_libtorch is abi compatible with PyTorch >= TORCH_TARGET_VERSION
+# which is currently set to 2.11.
+target_compile_definitions(_moe_C_stable_libtorch PRIVATE
+  TORCH_TARGET_VERSION=0x020B000000000000ULL)
+
 # Needed to use cuda/hip APIs from C-shim
 if(VLLM_GPU_LANG STREQUAL "CUDA")
-  # Set TORCH_TARGET_VERSION for stable ABI compatibility.
-  # This ensures we only use C-shim APIs available in PyTorch 2.11.
-  # _moe_C_stable_libtorch is abi compatible with PyTorch >= TORCH_TARGET_VERSION
-  # which is currently set to 2.11.
-  target_compile_definitions(_moe_C_stable_libtorch PRIVATE
-    TORCH_TARGET_VERSION=0x020B000000000000ULL)
   target_compile_definitions(_moe_C_stable_libtorch PRIVATE USE_CUDA)
   # Needed by CUTLASS kernels
   target_compile_definitions(_moe_C_stable_libtorch PRIVATE
     CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 elseif(VLLM_GPU_LANG STREQUAL "HIP")
-  # Set TORCH_TARGET_VERSION for stable ABI compatibility.
-  # This ensures we only use C-shim APIs available in PyTorch 2.10.
-  # _moe_C_stable_libtorch is abi compatible with PyTorch >= TORCH_TARGET_VERSION
-  # which is currently set to 2.10.
-  target_compile_definitions(_moe_C_stable_libtorch PRIVATE
-    TORCH_TARGET_VERSION=0x020A000000000000ULL)
   target_compile_definitions(_moe_C_stable_libtorch PRIVATE USE_ROCM)
 endif()
 
@@ -1344,6 +1369,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   set(VLLM_ROCM_EXT_SRC
     "csrc/rocm/torch_bindings.cpp"
     "csrc/rocm/skinny_gemms.cu"
+    "csrc/rocm/skinny_gemms_int4.cu"
     "csrc/rocm/attention.cu")
 
   set(VLLM_ROCM_HAS_GFX1100 OFF)
@@ -1387,6 +1413,7 @@ if (VLLM_GPU_LANG STREQUAL "CUDA")
     include(cmake/external_projects/fmha_sm100.cmake)
     include(cmake/external_projects/flashmla.cmake)
     include(cmake/external_projects/qutlass.cmake)
+    include(cmake/external_projects/tml_fa4.cmake)
 
     # vllm-flash-attn should be last as it overwrites some CMake functions
     include(cmake/external_projects/vllm_flash_attn.cmake)

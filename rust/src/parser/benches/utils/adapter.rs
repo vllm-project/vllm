@@ -1,7 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::sync::Arc;
 
 use vllm_parser::tool::{
-    Result, StructuralTagModel, Tool, ToolParser, ToolParserError, ToolParserOutput,
+    Result, StructuralTagBuilder, Tool, ToolParser, ToolParserError, ToolParserOutput,
 };
 use vllm_parser::unified::{
     UnifiedParser, UnifiedParserError, UnifiedParserEvent, UnifiedParserOutput,
@@ -26,6 +29,10 @@ impl Tokenizer for BenchTokenizer {
 
     fn token_to_id(&self, _token: &str) -> Option<u32> {
         Some(u32::MAX)
+    }
+
+    fn id_to_token(&self, _id: u32) -> Option<String> {
+        Some("\u{FFFD}".to_string())
     }
 }
 
@@ -78,8 +85,8 @@ impl<T: UnifiedParser> ToolParser for UnifiedToolParserAdapter<T> {
         self.inner.preserve_special_tokens()
     }
 
-    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
-        self.inner.structural_tag_model()
+    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
+        self.inner.structural_tag_builder()
     }
 
     fn tool_call_id(&self, tool_index: usize) -> Option<&str> {
