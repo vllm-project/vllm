@@ -592,6 +592,7 @@ _MULTIMODAL_MODELS = {
         "nemotron_parse",
         "NemotronParseForConditionalGeneration",
     ),
+    "ParakeetForTDT": ("parakeet_tdt", "ParakeetForTDT"),
     "WhisperForConditionalGeneration": ("whisper", "WhisperForConditionalGeneration"),
 }
 

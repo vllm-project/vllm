@@ -211,7 +211,9 @@ def warmup_kernels(
     decode_block_deltas = [
         d - p for d, p in zip(decode_block_counts, prefill_block_counts)
     ]
-    max_blocks_per_req = sum(decode_block_counts)
+    # max(1, ...): attention-free models (no KV cache groups, e.g. Parakeet TDT)
+    # have empty decode_block_counts; guard the floor division below against 0.
+    max_blocks_per_req = max(1, sum(decode_block_counts))
 
     num_reqs = min(
         model_runner.scheduler_config.max_num_seqs,
