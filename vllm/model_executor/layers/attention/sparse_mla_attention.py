@@ -546,10 +546,8 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
 
         chunked_context = prefill_metadata.chunked_context
         assert chunked_context is not None
-        output = None
-        output_lse = None
-        merge_output = None
-        merge_output_lse = None
+        output: torch.Tensor | None = None
+        output_lse: torch.Tensor | None = None
         workspace = chunked_context.workspace
 
         for i, toks in enumerate(chunked_context.seq_tot):
@@ -603,20 +601,14 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
                 output_lse = lse
             else:
                 assert output_lse is not None
-                if merge_output is None:
-                    merge_output = torch.empty_like(output)
-                    merge_output_lse = torch.empty_like(output_lse)
-                assert merge_output_lse is not None
                 merge_attn_states(
-                    output=merge_output,
-                    output_lse=merge_output_lse,
+                    output=output,
+                    output_lse=output_lse,
                     prefix_output=output,
                     prefix_lse=output_lse,
                     suffix_output=attn_out,
                     suffix_lse=lse,
                 )
-                output, merge_output = merge_output, output
-                output_lse, merge_output_lse = merge_output_lse, output_lse
 
         assert output is not None and output_lse is not None
         return output, output_lse
