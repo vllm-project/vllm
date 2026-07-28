@@ -98,7 +98,7 @@ GIT_ROOT="${GIT_ROOT:-$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)}"
 SMI_BIN=$(which nvidia-smi || which rocm-smi || echo "")
 
 # Trap the SIGINT signal (triggered by Ctrl+C)
-trap 'kill $(jobs -pr)' SIGINT SIGTERM EXIT
+trap 'kill $(jobs -pr) 2>/dev/null || true' SIGINT SIGTERM EXIT
 
 # Waits for vLLM to start.
 wait_for_server() {
@@ -110,10 +110,20 @@ wait_for_server() {
 }
 
 # Function to clean up previous instances
+wait_for_gpu_memory_release() {
+  if [[ "$SMI_BIN" == *"rocm"* ]]; then
+    PYTHONPATH="${GIT_ROOT}" python3 -c "from tests.utils import wait_for_rocm_memory_to_settle; wait_for_rocm_memory_to_settle()"
+  fi
+}
+
 cleanup_instances() {
   echo "Cleaning up any running vLLM instances..."
-  pkill -f "vllm serve" || true
+  pkill -f "toy_proxy_server.py" || true
+  pkill -TERM -f "vllm serve" || true
+  sleep 3
+  pkill -9 -f "vllm serve" || true
   sleep 2
+  wait_for_gpu_memory_release
 }
 
 get_num_gpus() {
@@ -132,6 +142,7 @@ get_num_gpus() {
 # Function to run tests for a specific model
 run_tests_for_model() {
   local model_name=$1
+  cleanup_instances
   echo "================================"
   echo "Testing model: $model_name"
   echo "================================"
@@ -303,7 +314,6 @@ run_tests_for_model() {
 
   # Clean up before running next model
   cleanup_instances
-  sleep 3
 }
 
 # Run tests for each model
