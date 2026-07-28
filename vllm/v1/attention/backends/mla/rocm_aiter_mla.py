@@ -613,10 +613,13 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 else:
                     qo_indptr = query_start_loc_device[: 1 + num_kernel_reqs]
 
-        # For native MTP verification (qlen>1), pass persistent metadata so
-        # AITER gets explicit causal boundaries for each request.
+        # Pass persistent metadata for every uniform decode we sized buffers for
+        # (normal qlen==1 through MTP verification qlen==K): the fp8 nhead=32 fold
+        # path breaks without it. qlen>K falls back to kernel-internal metadata.
         has_persistent_metadata = False
-        use_persistent_metadata = max_qo_len > 1 and max_qo_len <= self._mtp_decode_qlen
+        use_persistent_metadata = (
+            max_qo_len >= 1 and max_qo_len <= self._mtp_decode_qlen
+        )
         if use_persistent_metadata:
             from aiter import get_mla_metadata_v1
 

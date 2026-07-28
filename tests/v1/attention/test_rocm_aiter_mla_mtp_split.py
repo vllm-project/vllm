@@ -50,13 +50,10 @@ class _ExpandPageIndicesKernel:
             seq_len = int(seq_lens_for_kernel[req_idx].item())
             for token_idx in range(seq_len):
                 block_id = int(
-                    block_table_tensor[
-                        req_idx, token_idx // KERNEL_BLOCK_SIZE
-                    ].item()
+                    block_table_tensor[req_idx, token_idx // KERNEL_BLOCK_SIZE].item()
                 )
                 page_indices[out_start + token_idx] = (
-                    block_id * KERNEL_BLOCK_SIZE
-                    + token_idx % KERNEL_BLOCK_SIZE
+                    block_id * KERNEL_BLOCK_SIZE + token_idx % KERNEL_BLOCK_SIZE
                 )
 
 
@@ -108,8 +105,13 @@ def test_backend_declares_uniform_batch_support():
     )
 
 
-def test_mtp_builder_init_sizes_native_fp8_metadata(monkeypatch):
-    """Aiter init passes real MTP qlen/dtypes to rocm_aiter_mla.py:349-355."""
+@pytest.mark.parametrize("num_heads", [8, 16, 32, 64, 128])
+def test_mtp_builder_init_sizes_native_fp8_metadata(monkeypatch, num_heads):
+    """Aiter init passes real MTP qlen/dtypes to rocm_aiter_mla.py:349-355.
+
+    Sweeping num_heads asserts the max(16, num_heads) clamp is what sizes the
+    metadata, covering the fp8 nhead=32 (TP4) fold path.
+    """
 
     dtypes = SimpleNamespace(fp8="fp8", fp16="fp16", bf16="bf16")
     info_calls = []
@@ -138,7 +140,7 @@ def test_mtp_builder_init_sizes_native_fp8_metadata(monkeypatch):
         return tuple((1, torch.int32) for _ in range(6))
 
     def init_common_builder(self, *args, **kwargs):
-        self.num_heads = 8
+        self.num_heads = num_heads
 
     monkeypatch.setitem(
         sys.modules,
@@ -179,7 +181,7 @@ def test_mtp_builder_init_sizes_native_fp8_metadata(monkeypatch):
         {
             "max_batch_size": config.scheduler_config.max_num_seqs,
             "max_qo_len": config.speculative_config.num_speculative_tokens + 1,
-            "num_attention_heads": 16,
+            "num_attention_heads": max(16, num_heads),
             "q_dtype": dtypes.fp8,
             "kv_dtype": dtypes.fp8,
             "is_sparse": False,
@@ -288,8 +290,13 @@ def test_decode_expands_kernel_block_page_indices(monkeypatch):
     """kernel_block_size>1 expands b -> b*K+offset at rocm_aiter_mla.py:696-704."""
 
     expand_kernel = _ExpandPageIndicesKernel()
-    monkeypatch.setattr(
-        rocm_aiter_mla, "_expand_page_indices_kernel", expand_kernel
+    monkeypatch.setattr(rocm_aiter_mla, "_expand_page_indices_kernel", expand_kernel)
+    # qlen==1 now takes the persistent-metadata path, which imports
+    # get_mla_metadata_v1 from aiter; mock it so this test needs no real kernel.
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter",
+        SimpleNamespace(get_mla_metadata_v1=mock.MagicMock()),
     )
 
     kernel_block_size = 2
@@ -340,3 +347,57 @@ def test_decode_expands_kernel_block_page_indices(monkeypatch):
     )
     assert expand_kernel.grid == (seq_lens.numel(),)
     assert expand_kernel.kernel_block_size == kernel_block_size
+
+
+@pytest.mark.parametrize(
+    "mtp_decode_qlen, qo_len, expect_persistent",
+    [
+        (1, 1, True),  # non-MTP decode
+        (4, 2, True),  # MTP deployment, in-range step
+        (4, 4, True),  # MTP deployment, full-qlen verification step
+        (2, 4, False),  # step demand exceeds provisioned K -> fallback
+    ],
+)
+def test_persistent_metadata_gate(
+    monkeypatch, mtp_decode_qlen, qo_len, expect_persistent
+):
+    """Persistent metadata is passed iff 1 <= max_qo_len <= K.
+
+    K = _mtp_decode_qlen sizes the metadata buffers at init; a decode step gets
+    the pre-built schedule only when its qlen fits those buffers, otherwise it
+    falls back to the kernel computing its own. qlen==1 (non-MTP) must stay
+    in-range -- dropping it is the regression this guards.
+    """
+    get_mla_metadata_v1 = mock.MagicMock()
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter",
+        SimpleNamespace(get_mla_metadata_v1=get_mla_metadata_v1),
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_expand_page_indices_kernel", _NoOpTritonKernel()
+    )
+
+    # Uniform, non-CUDA-graph batch: every request has exactly qo_len tokens, so
+    # num_decode_tokens == sum(qo_len) and no dummy-row padding kicks in.
+    num_reqs = 2
+    query_start_loc = torch.arange(
+        0, (num_reqs + 1) * qo_len, step=qo_len, dtype=torch.int32
+    )
+    metadata = AiterMLAMetadataBuilder._build_decode(
+        _builder(mtp_decode_qlen=mtp_decode_qlen),
+        block_table_tensor=torch.arange(16, dtype=torch.int32).view(2, 8),
+        seq_lens_device=torch.tensor([8, 8], dtype=torch.int32),
+        max_seq_len=8,
+        query_start_loc_cpu=query_start_loc,
+        query_start_loc_device=query_start_loc,
+        num_decode_tokens=num_reqs * qo_len,
+        dcp_tot_seq_lens_device=None,
+    )
+
+    assert metadata.max_qo_len == qo_len
+    assert metadata.has_persistent_metadata is expect_persistent
+    assert get_mla_metadata_v1.called is expect_persistent
+    if expect_persistent:
+        assert get_mla_metadata_v1.call_args.kwargs["max_seqlen_qo"] == qo_len
+        assert get_mla_metadata_v1.call_args.kwargs["uni_seqlen_qo"] == qo_len
