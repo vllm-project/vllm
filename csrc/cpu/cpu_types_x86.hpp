@@ -2,6 +2,7 @@
 #ifndef CPU_TYPES_X86_HPP
 #define CPU_TYPES_X86_HPP
 
+#include <cstring>
 #include <immintrin.h>
 #include <sleef.h>
 #include <torch/all.h>
@@ -925,6 +926,30 @@ struct INT8Vec16 : public Vec<INT8Vec16> {
     AliasReg ar;
     ar.reg = reg;
     for (int i = 0; i < elem_num; ++i) ptr[i] = ar.values[i];
+  }
+};
+
+struct INT8Vec64 : public Vec<INT8Vec64> {
+  constexpr static int VEC_ELEM_NUM = 64;
+
+  __m256i reg_low;
+  __m256i reg_high;
+
+  explicit INT8Vec64(const void* ptr)
+      : reg_low(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr))),
+        reg_high(
+            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr) + 1)) {}
+
+  void save(void* ptr) const {
+    _mm256_storeu_si256(reinterpret_cast<__m256i*>(ptr), reg_low);
+    _mm256_storeu_si256(reinterpret_cast<__m256i*>(ptr) + 1, reg_high);
+  }
+
+  void save(int8_t* ptr, const int elem_num) const {
+    TORCH_CHECK(elem_num > 0 && elem_num <= VEC_ELEM_NUM);
+    int8_t values[VEC_ELEM_NUM];
+    save(values);
+    std::memcpy(ptr, values, elem_num);
   }
 };
 #endif

@@ -404,6 +404,25 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   void save(void* ptr) const { *reinterpret_cast<f32x16_t*>(ptr) = reg; }
 };
 
+// Reference implementation for vector operations missing from some backends.
+struct INT8Vec64 {
+  constexpr static int VEC_ELEM_NUM = 64;
+
+  explicit INT8Vec64(const int8_t* ptr) {
+    std::memcpy(data_, ptr, sizeof(data_));
+  }
+
+  void save(int8_t* ptr) const { std::memcpy(ptr, data_, sizeof(data_)); }
+
+  void save(int8_t* ptr, const int elem_num) const {
+    TORCH_CHECK(elem_num > 0 && elem_num <= VEC_ELEM_NUM);
+    std::memcpy(ptr, data_, elem_num);
+  }
+
+ private:
+  int8_t data_[VEC_ELEM_NUM];
+};
+
 template <typename T>
 struct VecType {
   using vec_type = void;
