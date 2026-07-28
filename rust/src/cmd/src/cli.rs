@@ -445,9 +445,13 @@ impl SharedRuntimeArgs {
         listener_mode: HttpListenerMode,
         session_path: PathBuf,
     ) -> Config {
+        let ready_timeout = self.ready_timeout();
         self.into_standalone_config(
             listener_mode,
-            TransportMode::Reattach { path: session_path },
+            TransportMode::Reattach {
+                path: session_path,
+                ready_timeout,
+            },
         )
     }
 

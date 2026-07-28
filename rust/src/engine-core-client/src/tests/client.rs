@@ -1528,7 +1528,10 @@ async fn reattach_drops_stale_output_and_serves_new_request() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let reattach_task = tokio::spawn(EngineCoreClient::connect(EngineCoreClientConfig {
-        transport_mode: TransportMode::Reattach { path: session_path },
+        transport_mode: TransportMode::Reattach {
+            path: session_path,
+            ready_timeout: Duration::from_secs(2),
+        },
         coordinator_mode: None,
         model_name: "test-model".to_string(),
         client_index: 7,

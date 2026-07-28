@@ -24,8 +24,6 @@ use crate::runtime::{BackgroundShutdownRuntime, build_zmq_runtime};
 use crate::session;
 use crate::transport::{self, ConnectedEngine};
 
-const REATTACH_TIMEOUT: Duration = Duration::from_secs(10);
-
 pub(crate) mod imp;
 mod state;
 mod stream;
@@ -80,6 +78,8 @@ pub enum TransportMode {
     Reattach {
         /// Path written by a handshake-owned frontend from the same running engine.
         path: PathBuf,
+        /// Maximum time to wait for both engine data sockets to reconnect.
+        ready_timeout: Duration,
     },
 }
 
@@ -292,7 +292,10 @@ impl EngineCoreClient {
                 )
                 .await?
             }
-            TransportMode::Reattach { path } => {
+            TransportMode::Reattach {
+                path,
+                ready_timeout,
+            } => {
                 if config.coordinator_mode.is_some() {
                     return Err(Error::EngineSession {
                         path: path.clone(),
@@ -305,7 +308,7 @@ impl EngineCoreClient {
                     &input_address,
                     &output_address,
                     engines,
-                    REATTACH_TIMEOUT,
+                    *ready_timeout,
                 )
                 .await?
             }

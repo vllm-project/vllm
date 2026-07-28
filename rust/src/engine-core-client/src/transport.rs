@@ -155,17 +155,14 @@ pub async fn connect_handshake(
 
     info!(
         engine_count,
-        handshake_address, "waiting for engines to connect"
+        handshake_address,
+        ?ready_timeout,
+        "waiting for engines to connect"
     );
 
     // 1. Bind shared local input/output sockets first so every engine receives the same data-plane
     //    addresses during handshake.
-    debug!(
-        local_host,
-        ?ready_timeout,
-        engine_count,
-        "binding shared transport sockets"
-    );
+    debug!(local_host, engine_count, "binding shared transport sockets");
     let (input_address, mut input_socket, output_address, output_socket) =
         bind_local_sockets(local_host, local_input_address, local_output_address).await?;
     info!(%input_address, %output_address, "bound local transport sockets");
@@ -391,6 +388,15 @@ pub async fn connect_reattach(
         path: session_path.to_path_buf(),
         message: "reattach session does not contain an engine".to_string(),
     })?;
+
+    info!(
+        path = %session_path.display(),
+        %input_address,
+        %output_address,
+        ?ready_timeout,
+        "waiting for engine transport to reattach"
+    );
+
     timeout(ready_timeout, async {
         tokio::try_join!(
             wait_for_accepted_peer(

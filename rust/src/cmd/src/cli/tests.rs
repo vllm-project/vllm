@@ -1534,6 +1534,8 @@ fn serve_engine_session_selects_handshake_then_reattach() {
         "Qwen/Qwen3-0.6B",
         "--engine-session",
         &session_arg,
+        "--engine-ready-timeout-secs",
+        "42",
     ])
     .unwrap();
 
@@ -1547,8 +1549,9 @@ fn serve_engine_session_selects_handshake_then_reattach() {
         initial.transport_mode,
         TransportMode::HandshakeOwner {
             session_path: Some(ref path),
+            ready_timeout,
             ..
-        } if path == &session_path
+        } if path == &session_path && ready_timeout == std::time::Duration::from_secs(42)
     ));
 
     std::fs::write(&session_path, b"{}").unwrap();
@@ -1557,6 +1560,7 @@ fn serve_engine_session_selects_handshake_then_reattach() {
         reattach.transport_mode,
         TransportMode::Reattach {
             path: session_path.clone(),
+            ready_timeout: std::time::Duration::from_secs(42),
         }
     );
     std::fs::remove_file(session_path).unwrap();
