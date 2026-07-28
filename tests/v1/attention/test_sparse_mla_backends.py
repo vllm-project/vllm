@@ -1817,6 +1817,79 @@ def test_hisparse_backup_packed_indexer_pages():
 
 
 @requires_hisparse_ops
+def test_hisparse_backup_layers_from_packed_hma():
+    device = torch.device(DEVICE_TYPE)
+    num_layers, num_blocks, block_size, row_width = 3, 5, 4, 8
+    row_bytes = row_width * torch.float32.itemsize
+    page_bytes = block_size * row_bytes
+    block_stride = num_layers * page_bytes + 64
+    backing = torch.zeros(num_blocks * block_stride, dtype=torch.uint8, device=device)
+
+    hot_caches = [
+        torch.as_strided(
+            backing.view(torch.float32),
+            (num_blocks, block_size, row_width),
+            (block_stride // torch.float32.itemsize, row_width, 1),
+            storage_offset=layer * page_bytes // torch.float32.itemsize,
+        )
+        for layer in range(num_layers)
+    ]
+    source_indices = [
+        torch.tensor(
+            [layer + 1, block_size + layer, 2 * block_size + layer],
+            dtype=torch.int64,
+            device=device,
+        )
+        for layer in range(num_layers)
+    ]
+    host_caches = [
+        torch.full((num_blocks * block_size, row_width), -1.0).pin_memory()
+        for _ in range(num_layers)
+    ]
+    dst_slots = torch.tensor([2, 17, -1], dtype=torch.int64, device=device)
+
+    for layer, (hot_cache, indices) in enumerate(zip(hot_caches, source_indices)):
+        for item, src_slot in enumerate(indices.tolist()):
+            block, offset = divmod(src_slot, block_size)
+            hot_cache[block, offset].fill_(100 * layer + item + 1)
+
+    torch.ops._C_cache_ops.hisparse_backup_layers(
+        backing,
+        torch.tensor(
+            [cache.data_ptr() - backing.data_ptr() for cache in hot_caches],
+            dtype=torch.int64,
+            device=device,
+        ),
+        torch.tensor(
+            [indices.data_ptr() for indices in source_indices],
+            dtype=torch.uint64,
+            device=device,
+        ),
+        host_caches[0],
+        torch.tensor(
+            [cache.data_ptr() for cache in host_caches],
+            dtype=torch.uint64,
+            device=device,
+        ),
+        dst_slots,
+        dst_slots.numel(),
+        block_stride,
+        block_size,
+        num_blocks * block_size,
+    )
+    torch.accelerator.synchronize()
+
+    for layer, host_cache in enumerate(host_caches):
+        torch.testing.assert_close(
+            host_cache[2], torch.full((row_width,), 100 * layer + 1.0)
+        )
+        torch.testing.assert_close(
+            host_cache[17], torch.full((row_width,), 100 * layer + 2.0)
+        )
+        torch.testing.assert_close(host_cache[0], torch.full((row_width,), -1.0))
+
+
+@requires_hisparse_ops
 def test_hisparse_gather_zeroes_unaligned_destination():
     """Invalid host rows are safely zeroed even at a byte-unaligned address."""
     device = torch.device(DEVICE_TYPE)

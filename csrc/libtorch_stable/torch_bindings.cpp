@@ -852,6 +852,18 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                Tensor dst_slots) -> ()");
 
   ops.def(
+      "hisparse_backup_layers(Tensor hot_backing,"
+      "                        Tensor layer_offsets,"
+      "                        Tensor src_indices_ptrs,"
+      "                        Tensor! host_anchor,"
+      "                        Tensor host_cache_ptrs,"
+      "                        Tensor dst_slots,"
+      "                        int num_items,"
+      "                        int src_block_stride,"
+      "                        int src_block_size,"
+      "                        int src_rows) -> ()");
+
+  ops.def(
       "hisparse_backup_indexer(Tensor src_cache,"
       "                        Tensor src_indices,"
       "                        Tensor! host_cache,"
@@ -967,6 +979,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C_cache_ops, CUDA, ops) {
   ops.impl("hisparse_swap_in", TORCH_BOX(&hisparse_swap_in));
   ops.impl("hisparse_gather_plan", TORCH_BOX(&hisparse_gather_plan));
   ops.impl("hisparse_backup", TORCH_BOX(&hisparse_backup));
+  ops.impl("hisparse_backup_layers", TORCH_BOX(&hisparse_backup_layers));
   ops.impl("hisparse_backup_indexer", TORCH_BOX(&hisparse_backup_indexer));
   ops.impl("hisparse_copy_blocks", TORCH_BOX(&hisparse_copy_blocks));
 #endif  // !USE_ROCM

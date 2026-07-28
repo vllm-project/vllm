@@ -55,10 +55,12 @@ def test_hisparse_runtime_pre_step_invalidates_and_restores(monkeypatch):
     runtime = object.__new__(HiSparseRuntime)
     runtime.block_size = 64
     scheduler_output = SimpleNamespace(
+        num_scheduled_tokens={"request-0": 1, "request-1": 1},
         scheduled_new_reqs=[SimpleNamespace(block_ids=([2, 3],))],
         scheduled_cached_reqs=SimpleNamespace(new_block_ids=[([4],), None]),
     )
     calls: list[tuple[Any, ...]] = []
+    runtime._wait_for_pending_backup = lambda: calls.append(("wait",))
     monkeypatch.setattr(
         worker_hisparse,
         "invalidate_blocks",
@@ -71,27 +73,36 @@ def test_hisparse_runtime_pre_step_invalidates_and_restores(monkeypatch):
     runtime.pre_step(scheduler_output)
 
     assert calls == [
+        ("wait",),
         ("invalidate", [2, 3, 4], 64),
         ("restore", scheduler_output),
     ]
+    assert runtime.backup_num_items == 2
 
 
-def test_hisparse_runtime_post_step_records_writes_and_returns_stats(monkeypatch):
+def test_hisparse_runtime_waits_for_backup_on_device_stream(monkeypatch):
+    runtime = object.__new__(HiSparseRuntime)
+    runtime.backup_pending = True
+    runtime.host_write_event = object()
+    runtime.hot_backing = SimpleNamespace(device="cuda:0")
+    waited_events: list[object] = []
+    current_stream = SimpleNamespace(wait_event=waited_events.append)
+    monkeypatch.setattr(
+        torch.accelerator, "current_stream", lambda device: current_stream
+    )
+
+    runtime._wait_for_pending_backup()
+
+    assert waited_events == [runtime.host_write_event]
+    assert not runtime.backup_pending
+
+
+def test_hisparse_runtime_post_step_returns_stats(monkeypatch):
     runtime = object.__new__(HiSparseRuntime)
     stats = HiSparseStats(7, 3, 48)
-    recorded = False
-
-    def record_host_writes():
-        nonlocal recorded
-        recorded = True
-
-    monkeypatch.setattr(
-        worker_hisparse, "record_hisparse_host_writes", record_host_writes
-    )
     monkeypatch.setattr(worker_hisparse, "take_hisparse_stats", lambda: stats)
 
     assert runtime.post_step() is stats
-    assert recorded
 
 
 def test_hisparse_runtime_shutdown_releases_pinned_state(monkeypatch):

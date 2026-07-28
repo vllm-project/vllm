@@ -333,19 +333,6 @@ def invalidate_blocks(block_ids: list[int], block_size: int) -> None:
         coordinator.invalidate_slots(slots)
 
 
-def record_hisparse_host_writes() -> None:
-    """Record completion points for host KV writes from the current step."""
-    recorded_devices: set[torch.device] = set()
-    for coordinator in _COORDINATORS:
-        device = coordinator.device
-        if coordinator._host_cache is None or device in recorded_devices:
-            continue
-        if coordinator._host_write_event is None:
-            coordinator._host_write_event = torch.Event()
-        coordinator._host_write_event.record(torch.accelerator.current_stream(device))
-        recorded_devices.add(device)
-
-
 def wait_for_hisparse_host_writes() -> None:
     """Wait for pending GPU writes before accessing host KV from the CPU."""
     waited_devices: set[torch.device] = set()
@@ -412,6 +399,7 @@ def _has_hisparse_ops() -> bool:
         hasattr(torch.ops._C_cache_ops, "hisparse_swap_in")
         and hasattr(torch.ops._C_cache_ops, "hisparse_gather_plan")
         and hasattr(torch.ops._C_cache_ops, "hisparse_backup")
+        and hasattr(torch.ops._C_cache_ops, "hisparse_backup_layers")
     )
 
 
@@ -495,9 +483,9 @@ class HiSparseCoordinator:
     ) -> None:
         if not _has_hisparse_ops():
             raise RuntimeError(
-                "HiSparse requires the compiled _C_cache_ops.hisparse_swap_in/"
-                "gather_plan/backup CUDA kernels (host-resident decode has no "
-                "Python fallback). Rebuild vLLM from source so "
+                "HiSparse requires its compiled _C_cache_ops CUDA kernels "
+                "(host-resident decode has no Python fallback). Rebuild vLLM "
+                "from source so "
                 "csrc/libtorch_stable/hisparse_kernels.cu is included."
             )
         self.config = config
@@ -567,11 +555,10 @@ class HiSparseCoordinator:
 
         self._host_cache: torch.Tensor | None = None
         self._host_write_event: torch.Event | None = None
-        # The host backup runs inline on the current stream: the decode
-        # KV-update executes inside the FULL_DECODE_ONLY CUDA graph, where a
-        # cross-stream wait raises "dependency created on uncaptured work in
-        # another stream" and aborts capture. The per-step backup is only the
-        # batch's newest rows, so there is no overlap worth reclaiming.
+        # Standalone coordinators retain eager backup behavior. The GPU runtime
+        # switches this off and launches one all-layer backup outside the
+        # captured forward, where it can safely use a dedicated stream.
+        self.defer_newest_backup = False
 
     def set_request_state_indices(self, indices: torch.Tensor) -> None:
         if indices.numel() > self.max_num_reqs:
@@ -763,6 +750,17 @@ class HiSparseCoordinator:
             dst_slots,
         )
 
+    def prepare_deferred_backup(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return the static tensors needed by the all-layer backup plan."""
+        assert self.hot_cache is not None and self._host_cache is not None
+        source_indices = (
+            self._newest_slots if self.leader is None else self.leader._newest_slots
+        )
+        self.defer_newest_backup = True
+        return self.hot_cache, source_indices, self._host_cache
+
     # ------------------------------------------------------- newest-token path
 
     def write_newest_rows(
@@ -822,11 +820,12 @@ class HiSparseCoordinator:
             scale=k_scale,
             **concat_kwargs,
         )
-        self._backup_rows(
-            self.hot_cache,
-            newest_slots,
-            global_slots,
-        )
+        if not self.defer_newest_backup:
+            self._backup_rows(
+                self.hot_cache,
+                newest_slots,
+                global_slots,
+            )
         # Recycled-slot hygiene is handled at block-assignment time. The KV
         # connector invalidates every block (re)assigned to any request
         # (new, resumed, or growing) before the step that first writes it,

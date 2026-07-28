@@ -1414,6 +1414,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     # Eager (NONE): call the raw model directly.
                     model_output = self.model(**model_inputs)
 
+        # Launch the host backup after graph replay so it can use a separate
+        # stream without introducing an uncaptured dependency during capture.
+        if not dummy_run and self.hisparse_runtime is not None:
+            self.hisparse_runtime.post_forward()
+
         if self.is_last_pp_rank:
             if self.use_aux_hidden_state_outputs:
                 assert isinstance(model_output, tuple)

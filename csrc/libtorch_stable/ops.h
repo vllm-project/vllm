@@ -520,6 +520,15 @@ void hisparse_backup(torch::stable::Tensor const& src_cache,
                      torch::stable::Tensor& host_cache,
                      torch::stable::Tensor const& dst_slots);
 
+void hisparse_backup_layers(torch::stable::Tensor const& hot_backing,
+                            torch::stable::Tensor const& layer_offsets,
+                            torch::stable::Tensor const& src_indices_ptrs,
+                            torch::stable::Tensor& host_anchor,
+                            torch::stable::Tensor const& host_cache_ptrs,
+                            torch::stable::Tensor const& dst_slots,
+                            int64_t num_items, int64_t src_block_stride,
+                            int64_t src_block_size, int64_t src_rows);
+
 void hisparse_backup_indexer(torch::stable::Tensor const& src_cache,
                              torch::stable::Tensor const& src_indices,
                              torch::stable::Tensor& host_cache,
