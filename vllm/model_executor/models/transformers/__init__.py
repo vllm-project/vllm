@@ -64,12 +64,15 @@ def vllm_attention_forward(
     head_dim_v = value.shape[-1]
     query, key, value = (x.transpose(1, 2) for x in (query, key, value))
     query, key, value = (x.reshape(hidden, -1) for x in (query, key, value))
-    # Pad `value` up to the query/key head size when they differ (expanded MLA).
-    if head_dim_v != head_dim_qk:
+    # Pad `value` up to the query/key head size when it is smaller (expanded
+    # MLA). A larger last dim just means `value` isn't split per head, e.g.
+    # packed grouped/multi-query projections, and needs no padding.
+    pad_value = head_dim_v < head_dim_qk
+    if pad_value:
         value = F.pad(value.view(-1, head_dim_v), (0, head_dim_qk - head_dim_v))
         value = value.reshape(hidden, -1)
     attn_output = self_attn.forward(query, key, value)
-    if head_dim_v != head_dim_qk:
+    if pad_value:
         attn_output = attn_output.view(-1, head_dim_qk)[..., :head_dim_v]
         attn_output = attn_output.reshape(hidden, -1)
     return attn_output, None
