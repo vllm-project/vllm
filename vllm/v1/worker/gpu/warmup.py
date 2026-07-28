@@ -38,6 +38,16 @@ def run_mixed_prefill_decode_warmup(
     if model_runner.is_pooling_model or model_runner.max_num_reqs < 2 or num_tokens < 3:
         return False
 
+    # Ensure any outstanding async launch errors from kernel registration or
+    # autotune are surfaced before constructing the mixed warmup step. On
+    # GB10 (sm_121) we have observed silent warmup death unless a global
+    # CUDA_LAUNCH_BLOCKING=1 is set. Force a sync boundary here instead.
+    try:
+        torch.accelerator.synchronize()
+    except Exception as e:  # surface device-side failures as Python exceptions
+        logger.error("Warmup pre-sync failed: %s", e)
+        raise
+
     decode_req_id = f"{req_id_prefix}_decode_"
     prefill_req_id = f"{req_id_prefix}_prefill_"
     decode_prompt_len = 2
@@ -142,9 +152,13 @@ def run_mixed_prefill_decode_warmup(
     try:
         worker_execute_model(decode_prefill_output)
         worker_sample_tokens(None)
+        # Synchronize to surface any async errors from the prefill path before decode.
+        torch.accelerator.synchronize()
         with context:
             worker_execute_model(mixed_output)
             worker_sample_tokens(None)
+        # Synchronize again to catch async errors from the mixed step.
+        torch.accelerator.synchronize()
         worker_execute_model(cleanup_output)
     finally:
         model_runner.kv_connector.set_disabled(False)
@@ -276,6 +290,8 @@ def warmup_kernels(
     # Disable KV connector for warmup run.
     model_runner.kv_connector.set_disabled(True)
     worker_execute_model(prefill_output)
+    # Synchronize to surface async kernel failures in the prefill step.
+    torch.accelerator.synchronize()
 
     if not model_runner.is_pooling_model:
         # Warm up sampler and perform a decode step for non-pooling models.
@@ -337,6 +353,8 @@ def warmup_kernels(
 
             worker_execute_model(decode_output)
             worker_sample_tokens(None)
+            # Synchronize to surface async kernel failures in the decode step.
+            torch.accelerator.synchronize()
 
             for i, use_spec in zip(indices, spec_flags):
                 req_computed[i] += decode_query_len if use_spec else 1
@@ -373,4 +391,5 @@ def warmup_kernels(
     cleanup_output.finished_req_ids = set(req_ids)
     worker_execute_model(cleanup_output)
     model_runner.kv_connector.set_disabled(False)
+    # Final sync at end of warmup to ensure stream issues are raised now, not later.
     torch.accelerator.synchronize()
