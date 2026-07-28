@@ -556,8 +556,8 @@ class HiSparseCoordinator:
         self._host_cache: torch.Tensor | None = None
         self._host_write_event: torch.Event | None = None
         # Standalone coordinators retain eager backup behavior. The GPU runtime
-        # switches this off and launches one all-layer backup outside the
-        # captured forward, where it can safely use a dedicated stream.
+        # switches this off and launches one all-layer backup, captured with
+        # uniform decode graphs when possible.
         self.defer_newest_backup = False
 
     def set_request_state_indices(self, indices: torch.Tensor) -> None:

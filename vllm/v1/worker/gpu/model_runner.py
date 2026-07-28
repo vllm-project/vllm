@@ -778,6 +778,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 has_lora=self.lora_config is not None,
                 use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
                 lora_capture_hook=create_lora_capture_hook(self.lora_config, self),
+                decode_post_forward_hook=(
+                    self.hisparse_runtime.backup_decode_rows
+                    if self.hisparse_runtime is not None
+                    else None
+                ),
             )
             if self.speculator is not None:
                 self.speculator.capture()
@@ -1414,10 +1419,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     # Eager (NONE): call the raw model directly.
                     model_output = self.model(**model_inputs)
 
-        # Launch the host backup after graph replay so it can use a separate
-        # stream without introducing an uncaptured dependency during capture.
         if not dummy_run and self.hisparse_runtime is not None:
-            self.hisparse_runtime.post_forward()
+            self.hisparse_runtime.post_forward(
+                backup_in_graph=(
+                    batch_desc.cg_mode == CUDAGraphMode.FULL
+                    and batch_desc.uniform_token_count == 1
+                )
+            )
 
         if self.is_last_pp_rank:
             if self.use_aux_hidden_state_outputs:

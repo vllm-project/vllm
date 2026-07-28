@@ -4,6 +4,7 @@
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 import torch
 
 import vllm.v1.worker.utils as worker_utils
@@ -111,6 +112,25 @@ def test_hisparse_runtime_launches_fused_backup_on_current_stream(monkeypatch):
 
     assert len(calls) == 1
     assert calls[0][6:] == (3, 4, 5, 6)
+    assert recorded_streams == [current_stream]
+
+
+def test_hisparse_runtime_skips_backup_captured_in_graph(monkeypatch):
+    runtime = object.__new__(HiSparseRuntime)
+    runtime.backup_num_items = 3
+    runtime.hot_backing = SimpleNamespace(device="cuda:0")
+    current_stream = object()
+    recorded_streams: list[object] = []
+    runtime.host_write_event = SimpleNamespace(record=recorded_streams.append)
+    runtime.backup_decode_rows = lambda num_items: pytest.fail(
+        "captured backup must not relaunch"
+    )
+    monkeypatch.setattr(
+        torch.accelerator, "current_stream", lambda device: current_stream
+    )
+
+    runtime.post_forward(backup_in_graph=True)
+
     assert recorded_streams == [current_stream]
 
 

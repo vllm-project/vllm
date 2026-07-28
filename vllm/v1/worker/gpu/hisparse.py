@@ -148,21 +148,24 @@ class HiSparseRuntime:
         invalidate_blocks(block_ids, self.block_size)
         self.restore_prefix(scheduler_output)
 
-    def post_forward(self) -> None:
+    def backup_decode_rows(self, num_items: int) -> None:
+        torch.ops._C_cache_ops.hisparse_backup_layers(
+            self.hot_backing,
+            self.backup_layer_offsets,
+            self.backup_src_indices_ptrs,
+            self.backup_host_anchor,
+            self.backup_host_cache_ptrs,
+            self.backup_dst_slots,
+            num_items,
+            self.backup_src_block_stride,
+            self.backup_src_block_size,
+            self.backup_src_rows,
+        )
+
+    def post_forward(self, backup_in_graph: bool = False) -> None:
         current_stream = torch.accelerator.current_stream(self.hot_backing.device)
-        if self.backup_num_items > 0:
-            torch.ops._C_cache_ops.hisparse_backup_layers(
-                self.hot_backing,
-                self.backup_layer_offsets,
-                self.backup_src_indices_ptrs,
-                self.backup_host_anchor,
-                self.backup_host_cache_ptrs,
-                self.backup_dst_slots,
-                self.backup_num_items,
-                self.backup_src_block_stride,
-                self.backup_src_block_size,
-                self.backup_src_rows,
-            )
+        if self.backup_num_items > 0 and not backup_in_graph:
+            self.backup_decode_rows(self.backup_num_items)
         self.host_write_event.record(current_stream)
 
     def post_step(self) -> HiSparseStats | None:
