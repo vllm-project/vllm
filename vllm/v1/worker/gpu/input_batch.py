@@ -22,6 +22,7 @@ class InputBuffers:
 
         self.input_ids = torch.zeros(max_num_tokens, dtype=torch.int32, device=device)
         self.positions = torch.zeros(max_num_tokens, dtype=torch.int64, device=device)
+        self.is_padding = torch.zeros(max_num_tokens, dtype=torch.bool, device=device)
         self.query_start_loc = torch.zeros(
             max_num_reqs + 1, dtype=torch.int32, device=device
         )
@@ -83,6 +84,8 @@ class InputBatch:
     input_ids: torch.Tensor
     # [num_tokens_after_padding]
     positions: torch.Tensor
+    # [num_tokens_after_padding]
+    is_padding: torch.Tensor
 
     # [total_num_logits]
     logits_indices: torch.Tensor
@@ -92,6 +95,9 @@ class InputBatch:
 
     # Whether any requests in batch use structured output.
     has_structured_output_reqs: bool
+
+    # [num_reqs] per-request prompt length, only populated for R-SWA.
+    prompt_lens: torch.Tensor | None
 
     @classmethod
     def make_dummy(
@@ -109,13 +115,18 @@ class InputBatch:
         expanded_idx_mapping = idx_mapping
         expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=device)
 
-        num_scheduled_tokens = np.full(num_reqs, num_tokens // num_reqs, dtype=np.int32)
-        num_scheduled_tokens[-1] += num_tokens % num_reqs
+        # Distribute the remainder evenly so that no dummy request exceeds
+        # ceil(num_tokens / num_reqs) <= max_model_len tokens.
+        base_tokens = num_tokens // num_reqs
+        num_extra = num_tokens % num_reqs
+        num_scheduled_tokens = np.full(num_reqs, base_tokens, dtype=np.int32)
+        if num_extra > 0:
+            num_scheduled_tokens[-num_extra:] += 1
         assert int(num_scheduled_tokens.sum()) == num_tokens
 
         # seq_len equals to query_len
-        input_buffers.seq_lens[:num_reqs] = num_tokens // num_reqs
-        input_buffers.seq_lens[num_reqs - 1] += num_tokens % num_reqs
+        input_buffers.seq_lens[: num_reqs - num_extra] = base_tokens
+        input_buffers.seq_lens[num_reqs - num_extra : num_reqs] = base_tokens + 1
         # Pad for full CUDA graph mode.
         input_buffers.seq_lens[num_reqs:] = 0
         seq_lens = input_buffers.seq_lens[:num_reqs]
@@ -133,6 +144,9 @@ class InputBatch:
 
         input_ids = input_buffers.input_ids[:num_tokens].zero_()
         positions = input_buffers.positions[:num_tokens].zero_()
+
+        input_buffers.is_padding[:num_tokens].fill_(True)
+        is_padding = input_buffers.is_padding[:num_tokens]
 
         logits_indices = query_start_loc[1:] - 1
         cu_num_logits = torch.arange(num_reqs + 1, device=device, dtype=torch.int32)
@@ -164,10 +178,12 @@ class InputBatch:
             max_seq_len_np=None,
             input_ids=input_ids,
             positions=positions,
+            is_padding=is_padding,
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
             has_structured_output_reqs=False,
+            prompt_lens=None,
         )
 
 
@@ -329,10 +345,12 @@ def _combine_sampled_and_draft_tokens_kernel(
         # Handling prefill tokens. No sampled or draft tokens.
         return
 
-    if NUM_NEW_SAMPLED_TOKENS > 0:
+    # Keep prompt-tail slots intact; only rewrite generated-token slots.
+    first_logit_seq_pos = seq_len - num_logits
+    if NUM_NEW_SAMPLED_TOKENS > 0 and first_logit_seq_pos >= prefill_len:
         # Write the last sampled token ID to input_ids.
         last_token_id = tl.load(last_sampled_tokens_ptr + req_state_idx)
-        tl.store(input_ids_ptr + query_end - num_logits, last_token_id)
+        tl.store(input_ids_ptr + logits_start, last_token_id)
 
     # Write the draft tokens (if any) to input_ids.
     if num_draft_tokens > 0:

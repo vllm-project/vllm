@@ -1,6 +1,9 @@
-use vllm_tool_parser::Result;
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use super::{ToolParser, ToolParserFactory, ToolParserOutput, names};
+use vllm_parser::tool::{Result, ToolParserOutput};
+
+use super::{ToolParser, ToolParserFactory, names};
 use crate::Error;
 use crate::request::ChatTool;
 
@@ -158,12 +161,24 @@ fn factory_new_resolves_default_patterns() {
         Some(names::HY_V3)
     );
     assert_eq!(
+        factory.resolve_name_for_model("MiniMax/MiniMax-M3-Text"),
+        Some(names::MINIMAX_M3)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("org/mm-m3-base"),
+        Some(names::MINIMAX_M3)
+    );
+    assert_eq!(
         factory.resolve_name_for_model("MiniMax/MiniMax-M2-01"),
         Some(names::MINIMAX_M2)
     );
     assert_eq!(
         factory.resolve_name_for_model("org/mm-m2-base"),
         Some(names::MINIMAX_M2)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("ByteDance-Seed/Seed-OSS-36B-Instruct"),
+        Some(names::SEED_OSS)
     );
 
     // InternLM2 positive: both dashed and underscored versioned names route.

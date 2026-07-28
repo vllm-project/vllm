@@ -18,6 +18,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
     FP8ScaledMMLinearLayerConfig,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_fp8_min_max,
     kFp8DynamicTokenSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
@@ -309,7 +310,7 @@ def test_hipb_mm_kernel_forward_accuracy(enable_hipb_mm_kernel):
     _check_bpreshuffle_runtime_support(weight_shape, num_tokens=num_tokens)
 
     fp8_dtype = current_platform.fp8_dtype()
-    fp8_max = torch.finfo(fp8_dtype).max
+    fp8_max = get_fp8_min_max()[1]
     device = torch.device("cuda")
 
     # Build a bf16 weight and quantize per output channel (one scale per row).
