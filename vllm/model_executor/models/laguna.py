@@ -193,7 +193,7 @@ class LagunaMoE(nn.Module):
         # Auxiliary-loss-free load-balancing bias (arXiv:2408.15664). The
         # checkpoint stores one [num_experts] tensor per MoE layer at
         # `mlp.experts.e_score_correction_bias`; registering it as a Parameter
-        # on the FusedMoEFactory lets the weight loader pick it up and the router
+        # on the MoERunner lets the weight loader pick it up and the router
         # add it during top-k selection. The fused top-k bias router requires
         # float32 regardless of model dtype.
         e_score_correction_bias = torch.nn.Parameter(
