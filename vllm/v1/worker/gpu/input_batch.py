@@ -115,13 +115,18 @@ class InputBatch:
         expanded_idx_mapping = idx_mapping
         expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=device)
 
-        num_scheduled_tokens = np.full(num_reqs, num_tokens // num_reqs, dtype=np.int32)
-        num_scheduled_tokens[-1] += num_tokens % num_reqs
+        # Distribute the remainder evenly so that no dummy request exceeds
+        # ceil(num_tokens / num_reqs) <= max_model_len tokens.
+        base_tokens = num_tokens // num_reqs
+        num_extra = num_tokens % num_reqs
+        num_scheduled_tokens = np.full(num_reqs, base_tokens, dtype=np.int32)
+        if num_extra > 0:
+            num_scheduled_tokens[-num_extra:] += 1
         assert int(num_scheduled_tokens.sum()) == num_tokens
 
         # seq_len equals to query_len
-        input_buffers.seq_lens[:num_reqs] = num_tokens // num_reqs
-        input_buffers.seq_lens[num_reqs - 1] += num_tokens % num_reqs
+        input_buffers.seq_lens[: num_reqs - num_extra] = base_tokens
+        input_buffers.seq_lens[num_reqs - num_extra : num_reqs] = base_tokens + 1
         # Pad for full CUDA graph mode.
         input_buffers.seq_lens[num_reqs:] = 0
         seq_lens = input_buffers.seq_lens[:num_reqs]
@@ -340,10 +345,12 @@ def _combine_sampled_and_draft_tokens_kernel(
         # Handling prefill tokens. No sampled or draft tokens.
         return
 
-    if NUM_NEW_SAMPLED_TOKENS > 0:
+    # Keep prompt-tail slots intact; only rewrite generated-token slots.
+    first_logit_seq_pos = seq_len - num_logits
+    if NUM_NEW_SAMPLED_TOKENS > 0 and first_logit_seq_pos >= prefill_len:
         # Write the last sampled token ID to input_ids.
         last_token_id = tl.load(last_sampled_tokens_ptr + req_state_idx)
-        tl.store(input_ids_ptr + query_end - num_logits, last_token_id)
+        tl.store(input_ids_ptr + logits_start, last_token_id)
 
     # Write the draft tokens (if any) to input_ids.
     if num_draft_tokens > 0:

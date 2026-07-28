@@ -132,6 +132,12 @@ class GenerateRequest(BaseModel):
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
     )
+    ec_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "ECTransfer parameters used for encoder-cache disaggregated serving."
+        ),
+    )
 
     # Tracks which keys the caller explicitly set inside ``sampling_params``
     # when the request was parsed from a JSON body. Lets the server tell
@@ -190,6 +196,13 @@ class GenerateResponseChoice(BaseModel):
     # or (b) ``enable_return_routed_experts`` is off server-side.
     routed_experts: str | None = None
 
+    @field_validator("token_ids")
+    @classmethod
+    def validate_token_ids(cls, v: list[int] | None) -> list[int] | None:
+        if v is not None and any(t < 0 for t in v):
+            raise ValueError("token_ids must not contain negative values")
+        return v
+
 
 class GenerateResponseStreamChoice(BaseModel):
     index: int
@@ -231,6 +244,12 @@ class GenerateResponse(BaseModel):
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
     )
+    ec_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "ECTransfer parameters used for encoder-cache disaggregated serving."
+        ),
+    )
 
 
 ####### Derender (postprocessing) #######
@@ -247,8 +266,13 @@ class DerenderChatRequest(BaseModel):
     and ``parser.parse_delta()`` instead of ``parser.parse()``.
     """
 
+    # --8<-- [start:derender-chat-request]
     model: str
+    """Served model name."""
+
     generate_response: GenerateResponse
+    """The complete token-in / token-out engine response to derender."""
+
     prompt_tokens: int | None = None
     """Prompt token count for usage; defaults to 0 if omitted.
 
@@ -263,6 +287,7 @@ class DerenderChatRequest(BaseModel):
     request context they expect (request.tools, request.tool_choice,
     request._grammar_from_tool_parser, etc.).
     """
+    # --8<-- [end:derender-chat-request]
 
 
 class DerenderCompletionRequest(BaseModel):
@@ -273,8 +298,14 @@ class DerenderCompletionRequest(BaseModel):
     returned by /v1/completions/render.
     """
 
+    # --8<-- [start:derender-completion-request]
     model: str
+    """Served model name."""
+
     generate_responses: list[GenerateResponse]
+    """One response per prompt, parallel to the list[GenerateRequest]
+    returned by /v1/completions/render."""
+
     prompt_tokens: list[int] | None = None
     """One prompt token count per response; each defaults to 0 if omitted.
 
@@ -287,6 +318,7 @@ class DerenderCompletionRequest(BaseModel):
     Mirrors chat_request on DerenderChatRequest. Required by the parsing
     so parsers receive the full request context.
     """
+    # --8<-- [end:derender-completion-request]
 
     @model_validator(mode="after")
     def _validate_prompt_tokens_length(self) -> "DerenderCompletionRequest":

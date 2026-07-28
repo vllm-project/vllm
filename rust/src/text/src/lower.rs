@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::BTreeSet;
 
 pub(crate) mod logprobs;
@@ -18,7 +21,7 @@ use crate::request::{SamplingParams, TextRequest};
 /// One text request after it has been lowered into the raw generate boundary.
 #[derive(Debug)]
 pub struct PreparedTextRequest {
-    /// The original high-level request, preserved for response-side metadata
+    /// The high-level request fields still needed for response-side metadata
     /// and decoding options.
     pub text_request: TextRequest,
     /// The southbound request ready to be sent to `vllm-llm`.
@@ -28,7 +31,7 @@ pub struct PreparedTextRequest {
 /// Convert a high-level [`TextRequest`] into one lower-level
 /// [`GenerateRequest`] ready for the `llm` crate.
 pub fn lower_text_request(
-    request: TextRequest,
+    mut request: TextRequest,
     prompt_token_ids: Vec<u32>,
     sampling_hints: SamplingHints,
     sampling_limits: SamplingLimits,
@@ -40,7 +43,10 @@ pub fn lower_text_request(
     let generate_request = GenerateRequest {
         request_id: request.request_id.clone(),
         prompt_token_ids,
-        mm_features: request.mm_features.clone(),
+        // Align with Python's response path: decoded output state does not retain
+        // `mm_features`; move them to the engine request to avoid cloning large
+        // multimodal tensor payloads.
+        mm_features: request.mm_features.take(),
         sampling_params: lower_sampling_params(
             request.sampling_params.clone(),
             sampling_hints,
@@ -53,7 +59,7 @@ pub fn lower_text_request(
         data_parallel_rank: request.data_parallel_rank,
         reasoning_parser_kwargs: request.reasoning_parser_kwargs.clone(),
         lora_request: request.lora_request.clone(),
-        arrival_time: None,
+        arrival_time: request.arrival_time,
         trace_headers: None,
     };
 
@@ -307,6 +313,7 @@ mod tests {
     use std::collections::{BTreeSet, HashMap};
 
     use serial_test::file_serial;
+    use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, PlaceholderRange};
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::*;
@@ -572,6 +579,35 @@ mod tests {
             }
         "#]]
         .assert_debug_eq(&params);
+    }
+
+    #[test]
+    fn lower_text_request_moves_multimodal_features_to_generate_request() {
+        let features = vec![MmFeatureSpec {
+            data: None,
+            modality: "image".to_string(),
+            identifier: "image-1".to_string(),
+            mm_position: PlaceholderRange {
+                offset: 2,
+                length: 4,
+                is_embed: None,
+            },
+            mm_hash: Some("hash-1".to_string()),
+        }];
+        let mut request = sample_request();
+        request.mm_features = Some(features.clone());
+
+        let prepared = lower_text_request(
+            request,
+            vec![1, 2, 3],
+            sample_sampling_hints(),
+            sample_sampling_limits(),
+            &stub_tokenizer(),
+        )
+        .unwrap();
+
+        assert_eq!(prepared.generate_request.mm_features, Some(features));
+        assert_eq!(prepared.text_request.mm_features, None);
     }
 
     #[test]
@@ -1108,6 +1144,44 @@ mod tests {
 
         assert!(!prepared.text_request.intermediate);
         assert_eq!(prepared.generate_request.request_id, "text-1");
+    }
+
+    #[test]
+    fn lower_text_request_passes_arrival_time_through() {
+        let request = TextRequest {
+            arrival_time: Some(42.5),
+            ..sample_request()
+        };
+
+        let prepared = lower_text_request(
+            request,
+            vec![1, 2, 3],
+            sample_sampling_hints(),
+            sample_sampling_limits(),
+            &stub_tokenizer(),
+        )
+        .unwrap();
+
+        assert_eq!(prepared.generate_request.arrival_time, Some(42.5));
+    }
+
+    #[test]
+    fn lower_text_request_leaves_arrival_time_unset_when_absent() {
+        let request = TextRequest {
+            arrival_time: None,
+            ..sample_request()
+        };
+
+        let prepared = lower_text_request(
+            request,
+            vec![1, 2, 3],
+            sample_sampling_hints(),
+            sample_sampling_limits(),
+            &stub_tokenizer(),
+        )
+        .unwrap();
+
+        assert_eq!(prepared.generate_request.arrival_time, None);
     }
 
     #[test]

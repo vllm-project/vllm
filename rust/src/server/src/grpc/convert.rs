@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Conversion between gRPC protobuf types and internal `vllm-text`
 //! request/response types.
 
@@ -69,6 +72,11 @@ pub fn to_text_request(
             let map = sampling_params.vllm_xargs.get_or_insert_with(Default::default);
             map.insert("kv_transfer_params".to_string(), kv_json);
         }
+        if let Some(ec_struct) = kv.ec_transfer_params.as_ref() {
+            let ec_json = proto_struct_to_json(ec_struct);
+            let map = sampling_params.vllm_xargs.get_or_insert_with(Default::default);
+            map.insert("ec_transfer_params".to_string(), ec_json);
+        }
         if kv.bypass_prefix_cache {
             sampling_params.skip_reading_prefix_cache = Some(true);
         }
@@ -94,6 +102,7 @@ pub fn to_text_request(
         data_parallel_rank: None,
         reasoning_parser_kwargs: None,
         lora_request: None,
+        arrival_time: None,
     })
 }
 
@@ -342,6 +351,7 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> pb::FinishInfo {
         finish_reason,
         stop_reason,
         kv_transfer_params: finished.kv_transfer_params.as_ref().and_then(json_to_proto_struct),
+        ec_transfer_params: finished.ec_transfer_params.as_ref().and_then(json_to_proto_struct),
     }
 }
 
@@ -585,6 +595,7 @@ mod tests {
             },
             finish_reason: reason,
             kv_transfer_params: None,
+            ec_transfer_params: None,
         }
     }
 

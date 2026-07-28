@@ -1,17 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import importlib.metadata
 import importlib.util
 
 import pytest
 import torch
+from packaging import version
 
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
+
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx950
+else:
+
+    def on_gfx950() -> bool:
+        return False
+
 
 DEVICE_TYPE = current_platform.device_type
 DTYPE = ["bfloat16"]
 
 TORCHAO_AVAILABLE = importlib.util.find_spec("torchao") is not None
+TORCHAO_VERSION_0_18_AVAILABLE = TORCHAO_AVAILABLE and version.parse(
+    importlib.metadata.version("torchao")
+) >= version.parse("0.18.0")
 
 
 @pytest.mark.skipif(
@@ -90,6 +103,10 @@ def test_opt_125m_awq_int4wo_model_loading_with_params(vllm_runner):
 
 
 @pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+@pytest.mark.skipif(
+    on_gfx950() and not TORCHAO_VERSION_0_18_AVAILABLE,
+    reason="requires torchao>=0.18.0 on gfx950",
+)
 def test_online_quant_config_dict_json(vllm_runner, enable_pickle):
     """Testing online quantization, load_weights integration point,
     with config dict serialized to json string
@@ -135,6 +152,10 @@ def test_online_quant_config_dict_json(vllm_runner, enable_pickle):
 
 
 @pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+@pytest.mark.skipif(
+    on_gfx950() and not TORCHAO_VERSION_0_18_AVAILABLE,
+    reason="requires torchao>=0.18.0 on gfx950",
+)
 def test_online_quant_config_file(vllm_runner):
     """Testing on the fly quantization, load_weights integration point,
     with config file
@@ -170,6 +191,10 @@ def test_online_quant_config_file(vllm_runner):
 
 
 @pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+@pytest.mark.skipif(
+    on_gfx950() and not TORCHAO_VERSION_0_18_AVAILABLE,
+    reason="requires torchao>=0.18.0 on gfx950",
+)
 def test_reload_weights():
     import json
 

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::mem::take;
 
 use crate::{Result, Tokenizer};
@@ -155,17 +158,19 @@ impl<T: Tokenizer + ?Sized> IncrementalDecoder for DecodeStream<'_, T> {
     }
 
     fn flush(&mut self, truncate_output_to: Option<usize>) -> Result<(Option<String>, String)> {
-        if !self.ids.is_empty() {
+        // If the prefix was never seeded (no push_token was called), `ids`
+        // holds only prompt context — decoding it would re-emit prompt text.
+        if self.prefix_seeded && !self.ids.is_empty() {
             let string = self.tokenizer.decode(&self.ids, self.skip_special_tokens)?;
             let prefix_len = self.prefix.len();
-            self.ids.clear();
-            self.prefix.clear();
-            self.prefix_index = 0;
-            self.prefix_seeded = true;
             // Ensure we split at a utf-8 char boundary.
             self.cumulative_output
                 .push_str(&string[string.floor_char_boundary(prefix_len)..]);
         }
+        self.ids.clear();
+        self.prefix.clear();
+        self.prefix_index = 0;
+        self.prefix_seeded = true;
         if let Some(truncate_output_to) = truncate_output_to {
             self.cumulative_output.truncate(truncate_output_to);
         }
@@ -485,5 +490,32 @@ mod tests {
         }
         assert_eq!(full_text, "你好A");
         assert_eq!(out, "你好A");
+    }
+
+    #[test]
+    fn flush_without_push_token_does_not_leak_prompt() {
+        let backend = Utf8Backend;
+        let prompt: Vec<u32> = b"The quick brown fox jumps over the lazy dog. "
+            .iter()
+            .cycle()
+            .take(7001)
+            .map(|&b| b as u32)
+            .collect();
+        let mut decoder = backend.create_decode_stream(&prompt, false, 0);
+
+        let (last_chunk, full_text) = decoder.flush(None).unwrap();
+        assert_eq!(last_chunk, None);
+        assert_eq!(full_text, "");
+    }
+
+    #[test]
+    fn flush_without_push_token_does_not_leak_undecodable_prompt_tail() {
+        let backend = Utf8Backend;
+        let prompt = vec![0xe4, 0xbd];
+        let mut decoder = backend.create_decode_stream(&prompt, false, 0);
+
+        let (last_chunk, full_text) = decoder.flush(None).unwrap();
+        assert_eq!(last_chunk, None);
+        assert_eq!(full_text, "");
     }
 }

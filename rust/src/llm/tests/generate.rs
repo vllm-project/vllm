@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::BTreeSet;
 use std::sync::Once;
 use std::time::Duration;
@@ -17,7 +20,7 @@ use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 use vllm_engine_core_client::protocol::stats::PrefillStats;
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
-use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
+use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId};
 use vllm_llm::{
     Error, FinishReason, GenerateOutputStreamExt as _, GeneratePromptInfo, GenerateRequest, Llm,
 };
@@ -51,6 +54,7 @@ fn request_output_with_events(
         stop_reason: None,
         events,
         kv_transfer_params: None,
+        ec_transfer_params: None,
         trace_headers: None,
         prefill_stats: None,
         routed_experts: None,
@@ -75,6 +79,7 @@ fn request_output_with_logprobs(
         stop_reason: None,
         events: None,
         kv_transfer_params: None,
+        ec_transfer_params: None,
         trace_headers: None,
         prefill_stats: None,
         routed_experts: None,
@@ -89,6 +94,7 @@ fn request_output_with_logprobs_and_kv(
     new_logprobs: Option<Logprobs>,
     prompt_logprobs: Option<Logprobs>,
     kv_transfer_params: Option<serde_json::Value>,
+    ec_transfer_params: Option<serde_json::Value>,
 ) -> EngineCoreOutput {
     EngineCoreOutput {
         request_id: request_id.to_string(),
@@ -100,6 +106,7 @@ fn request_output_with_logprobs_and_kv(
         stop_reason: None,
         events: None,
         kv_transfer_params,
+        ec_transfer_params,
         trace_headers: None,
         prefill_stats: None,
         routed_experts: None,
@@ -356,6 +363,7 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
                                 Some(logprobs_for_position(44, -0.3, 1, 88, -0.4)),
                                 None,
                                 Some(serde_json::json!({"connector": "x"})),
+                                None,
                             ),
                         ],
                         ..Default::default()
@@ -699,7 +707,7 @@ async fn abort_by_external_id_aborts_all_internal_requests() {
 async fn generate_records_request_metrics_in_prometheus_output() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_id = b"engine-metrics".to_vec();
+    let engine_id = EngineId::from_engine_index(4);
     let model_name = request_metrics_model_name("metrics-model");
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
@@ -832,7 +840,7 @@ async fn generate_records_request_metrics_in_prometheus_output() {
 async fn dropping_stream_records_abort_terminal_request_metrics() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_id = b"engine-metrics-drop".to_vec();
+    let engine_id = EngineId::from_engine_index(5);
     let model_name = request_metrics_model_name("metrics-drop-model");
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(

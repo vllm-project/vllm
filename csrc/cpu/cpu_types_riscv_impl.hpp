@@ -638,21 +638,20 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     const uint32_t hi = static_cast<uint32_t>(q >> 32);
 
     auto lane_ids = RVVI(__riscv_vid_v_u32, LMUL_256)(HALF);
-    auto shifts =
-        RVVI(__riscv_vsll_vx_u32, LMUL_256)(lane_ids, 2, HALF);
+    auto shifts = RVVI(__riscv_vsll_vx_u32, LMUL_256)(lane_ids, 2, HALF);
 
     auto packed_lo = RVVI(__riscv_vmv_v_x_u32, LMUL_256)(lo, HALF);
     auto idx_lo = RVVI(__riscv_vand_vx_u32, LMUL_256)(
-        RVVI(__riscv_vsrl_vv_u32, LMUL_256)(packed_lo, shifts, HALF),
-        0xF, HALF);
+        RVVI(__riscv_vsrl_vv_u32, LMUL_256)(packed_lo, shifts, HALF), 0xF,
+        HALF);
 
     auto packed_hi = RVVI(__riscv_vmv_v_x_u32, LMUL_256)(hi, HALF);
     auto idx_hi = RVVI(__riscv_vand_vx_u32, LMUL_256)(
-        RVVI(__riscv_vsrl_vv_u32, LMUL_256)(packed_hi, shifts, HALF),
-        0xF, HALF);
+        RVVI(__riscv_vsrl_vv_u32, LMUL_256)(packed_hi, shifts, HALF), 0xF,
+        HALF);
 
-    auto idx = RVVI4(__riscv_vcreate_v_u32, LMUL_256, _u32,
-                     LMUL_512)(idx_lo, idx_hi);
+    auto idx =
+        RVVI4(__riscv_vcreate_v_u32, LMUL_256, _u32, LMUL_512)(idx_lo, idx_hi);
     reg = RVVI(__riscv_vrgather_vv_f32, LMUL_512)(lut.reg, idx, VEC_ELEM_NUM);
   }
   explicit FP32Vec16(const FP16Vec16& v);
