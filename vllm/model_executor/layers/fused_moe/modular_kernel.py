@@ -890,6 +890,8 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         beta: float = 0.0,
         topk_ids: torch.Tensor | None = None,
         expert_map: torch.Tensor | None = None,
+        activation_situ_beta: float | None = None,
+        activation_situ_linear_beta: float | None = None,
     ) -> None:
         apply_moe_activation(
             activation,
@@ -900,6 +902,16 @@ class FusedMoEExpertsModular(FusedMoEExperts):
             beta=beta,
             topk_ids=topk_ids,
             expert_map=expert_map,
+            activation_situ_beta=(
+                self.moe_config.activation_situ_beta
+                if activation_situ_beta is None
+                else activation_situ_beta
+            ),
+            activation_situ_linear_beta=(
+                self.moe_config.activation_situ_linear_beta
+                if activation_situ_linear_beta is None
+                else activation_situ_linear_beta
+            ),
         )
 
     @abstractmethod
