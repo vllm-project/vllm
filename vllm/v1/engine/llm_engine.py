@@ -15,6 +15,7 @@ from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import EngineInput, PromptType
+from vllm.l0_usdt import fire_l0_probe
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -37,6 +38,12 @@ from vllm.v1.metrics.loggers import StatLoggerFactory, StatLoggerManager
 from vllm.v1.metrics.reader import Metric, get_metrics_snapshot
 from vllm.v1.metrics.stats import IterationStats
 from vllm.v1.utils import record_function_or_nullcontext
+from vllm.primary_usdt import (
+    PRIMARY_SEMANTIC_DISPATCH_ENABLED,
+    TransitionInitiator,
+    TransitionReason,
+    engine_instance_id_from_config,
+)
 from vllm.v1.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
@@ -98,6 +105,11 @@ class LLMEngine:
             log_stats=self.log_stats,
             stream_interval=self.vllm_config.scheduler_config.stream_interval,
             tracing_enabled=tracing_endpoint is not None,
+            primary_engine_instance_id=(
+                engine_instance_id_from_config(vllm_config)
+                if PRIMARY_SEMANTIC_DISPATCH_ENABLED
+                else (0, 0)
+            ),
         )
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
@@ -203,8 +215,13 @@ class LLMEngine:
     def abort_request(self, request_ids: list[str], internal: bool = False) -> None:
         """Remove request_ids from EngineCore and Detokenizer."""
 
-        request_ids = self.output_processor.abort_requests(request_ids, internal)
-        self.engine_core.abort_requests(request_ids)
+        actions = self.output_processor.abort_requests(
+            request_ids,
+            internal,
+            reason=TransitionReason.EXPLICIT_ABORT,
+            initiator=TransitionInitiator.API_CALLER,
+        )
+        self.engine_core.abort_requests(actions)
 
     def add_request(
         self,
@@ -217,6 +234,8 @@ class LLMEngine:
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         prompt_text: str | None = None,
+        *,
+        primary_identity_callback: Callable[[str], None] | None = None,
     ) -> str:
         # Validate the request_id type.
         if not isinstance(request_id, str):
@@ -254,9 +273,20 @@ class LLMEngine:
         self.input_processor.assign_request_id(request)
 
         req_id = request.request_id
+        if primary_identity_callback is not None:
+            primary_identity_callback(req_id)
 
         # Use cloned params that may have been updated in process_inputs()
         params = request.params
+
+        def fire_request_engine_admitted(request: EngineCoreRequest) -> None:
+            fire_l0_probe(
+                "request_engine_admitted",
+                request.request_id,
+                path="offline_or_engine",
+                priority=getattr(request, "priority", priority),
+                arrival_time=getattr(request, "arrival_time", arrival_time),
+            )
 
         n = params.n if isinstance(params, SamplingParams) else 1
 
@@ -265,6 +295,7 @@ class LLMEngine:
             self.output_processor.add_request(request, prompt_text, None, 0)
             # Add the request to EngineCore.
             self.engine_core.add_request(request)
+            fire_request_engine_admitted(request)
             return req_id
 
         # Fan out child requests (for n>1).
@@ -281,6 +312,7 @@ class LLMEngine:
             )
             # Add the request to EngineCore.
             self.engine_core.add_request(child_request)
+            fire_request_engine_admitted(child_request)
 
         return req_id
 

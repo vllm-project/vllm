@@ -5,6 +5,7 @@ import copy
 import getpass
 import json
 import os
+import secrets
 import tempfile
 import threading
 import time
@@ -714,6 +715,24 @@ class VllmConfig:
 
         # To give each torch profile run a unique instance name.
         self.instance_id = f"{time.time_ns()}"
+
+        # Primary observability uses a source-owned namespace that is stable
+        # across frontend/core/worker serialization and changes only when a
+        # new VllmConfig (therefore a new logical engine) is constructed.
+        obs = self.observability_config
+        engine_hi = obs.primary_engine_instance_id_hi
+        engine_lo = obs.primary_engine_instance_id_lo
+        if engine_hi == 0 and engine_lo == 0:
+            engine_id = 0
+            while engine_id == 0:
+                engine_id = secrets.randbits(128)
+            obs.primary_engine_instance_id_hi = engine_id >> 64
+            obs.primary_engine_instance_id_lo = engine_id & ((1 << 64) - 1)
+        elif not (
+            0 <= engine_hi <= (1 << 64) - 1
+            and 0 <= engine_lo <= (1 << 64) - 1
+        ):
+            raise ValueError("primary engine identity halves must be uint64")
 
         if self.performance_mode != "balanced":
             logger.info_once("Performance mode set to '%s'.", self.performance_mode)

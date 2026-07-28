@@ -579,15 +579,22 @@ class OpenAIServing:
         self,
         headers: Headers,
     ) -> Mapping[str, str] | None:
+        l0_headers = {
+            key: value
+            for key, value in headers.items()
+            if key.lower().startswith("x-l0-")
+        }
         is_tracing_enabled = await self.engine_client.is_tracing_enabled()
 
         if is_tracing_enabled:
-            return extract_trace_headers(headers)
+            trace_headers = dict(extract_trace_headers(headers))
+            trace_headers.update(l0_headers)
+            return trace_headers
 
         if contains_trace_headers(headers):
             log_tracing_disabled_warning()
 
-        return None
+        return l0_headers or None
 
     @staticmethod
     def _base_request_id(

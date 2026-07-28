@@ -221,6 +221,7 @@ class SingleTypeKVCacheManager(ABC):
         req_blocks.extend([self._null_block] * num_skipped_blocks)
         # Add the remaining computed blocks.
         req_blocks.extend(new_computed_blocks)
+        self.block_pool.add_primary_owner(request_id, new_computed_blocks, 2)
         # All cached hits (including skipped nulls) are already cached; mark
         # them so cache_blocks() will not try to re-cache blocks that already
         # have a block_hash set.
@@ -232,6 +233,7 @@ class SingleTypeKVCacheManager(ABC):
                 cdiv(num_total_computed_tokens, self.block_size) - len(req_blocks)
             )
             req_blocks.extend(allocated_blocks)
+            self.block_pool.add_primary_owner(request_id, allocated_blocks, 1)
             if type(self.kv_cache_spec) in (FullAttentionSpec, TQFullAttentionSpec):
                 self.new_block_ids.extend(b.block_id for b in allocated_blocks)
 
@@ -260,6 +262,7 @@ class SingleTypeKVCacheManager(ABC):
         else:
             new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
             req_blocks.extend(new_blocks)
+            self.block_pool.add_primary_owner(request_id, new_blocks, 1)
             if type(self.kv_cache_spec) in (FullAttentionSpec, TQFullAttentionSpec):
                 self.new_block_ids.extend(b.block_id for b in new_blocks)
             return new_blocks
@@ -296,7 +299,7 @@ class SingleTypeKVCacheManager(ABC):
 
         self.num_cached_block[request.request_id] = num_full_blocks
 
-    def free(self, request_id: str) -> None:
+    def free(self, request_id: str, release_reason: int = 3) -> None:
         """
         Free the blocks for the request.
 
@@ -308,9 +311,10 @@ class SingleTypeKVCacheManager(ABC):
 
         # Free blocks in reverse order so that the tail blocks are
         # freed first.
+        self.block_pool.remove_primary_owner(request_id, req_blocks, release_reason)
         ordered_blocks = reversed(req_blocks)
 
-        self.block_pool.free_blocks(ordered_blocks)
+        self.block_pool.free_blocks(ordered_blocks, release_reason=release_reason)
         self.num_cached_block.pop(request_id, None)
 
     @abstractmethod
@@ -419,7 +423,8 @@ class SingleTypeKVCacheManager(ABC):
                 break
             removed_blocks.append(blocks[i])
             blocks[i] = self._null_block
-        self.block_pool.free_blocks(removed_blocks)
+        self.block_pool.remove_primary_owner(request_id, removed_blocks, 5)
+        self.block_pool.free_blocks(removed_blocks, release_reason=5)
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """
@@ -1026,14 +1031,15 @@ class MambaManager(SingleTypeKVCacheManager):
                     assert num_new_blocks <= self.num_speculative_blocks + 1
                 new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
                 req_blocks.extend(new_blocks)
+                self.block_pool.add_primary_owner(request_id, new_blocks, 1)
                 self._allocated_block_reqs.add(request_id)
                 return req_blocks[prev_block_len:]
 
-    def free(self, request_id: str) -> None:
+    def free(self, request_id: str, release_reason: int = 3) -> None:
         if self.mamba_cache_mode == "align":
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
-        super().free(request_id)
+        super().free(request_id, release_reason)
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """

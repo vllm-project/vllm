@@ -91,30 +91,29 @@ def remove_all(lst: list, items_to_remove: set) -> list:
     return [item for item in lst if item not in items_to_remove]
 
 
-def check_stop(request: Request, max_model_len: int) -> bool:
+def determine_stop_status(
+    request: Request, max_model_len: int
+) -> RequestStatus | None:
     assert not request.pooling_params
 
     sampling_params = request.sampling_params
     assert sampling_params is not None
 
     if request.num_output_tokens < sampling_params.min_tokens:
-        return False
+        return None
 
     last_token_id = request.output_token_ids[-1]
     if last_token_id == sampling_params.eos_token_id:
-        request.status = RequestStatus.FINISHED_STOPPED
-        return True
+        return RequestStatus.FINISHED_STOPPED
 
     if last_token_id in (sampling_params.stop_token_ids or ()):
-        request.status = RequestStatus.FINISHED_STOPPED
         request.stop_reason = last_token_id
-        return True
+        return RequestStatus.FINISHED_STOPPED
     if (
         request.num_tokens >= max_model_len
         or request.num_output_tokens >= request.max_tokens
     ):
-        request.status = RequestStatus.FINISHED_LENGTH_CAPPED
-        return True
+        return RequestStatus.FINISHED_LENGTH_CAPPED
 
     repetition_detection = sampling_params.repetition_detection
     if repetition_detection is not None and (
@@ -123,8 +122,16 @@ def check_stop(request: Request, max_model_len: int) -> bool:
             repetition_detection,
         )
     ):
-        request.status = RequestStatus.FINISHED_REPETITION
         request.stop_reason = "repetition_detected"
-        return True
+        return RequestStatus.FINISHED_REPETITION
 
-    return False
+    return None
+
+
+def check_stop(request: Request, max_model_len: int) -> bool:
+    """Compatibility wrapper; Scheduler uses determine_stop_status for Q2 v3."""
+    status = determine_stop_status(request, max_model_len)
+    if status is None:
+        return False
+    request.status = status
+    return True

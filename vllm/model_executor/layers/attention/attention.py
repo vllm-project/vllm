@@ -44,6 +44,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     get_kv_quant_mode,
 )
+from vllm.v2_trace import v2_range
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention import MLAAttention
@@ -459,45 +460,61 @@ class Attention(nn.Module, AttentionLayerBase):
         if value is not None:
             value = value.view(-1, self.num_kv_heads, self.head_size_v)
         kv_cache_dummy_dep = None
-        if self.use_direct_call:
-            # Skip this if sharing KV cache with an earlier attention layer.
-            if (
-                not self.attn_backend.forward_includes_kv_cache_update
-                and self.kv_sharing_target_layer_name is None
-                and key is not None
-                and value is not None
-            ):
-                kv_cache_dummy_dep = unified_kv_cache_update(
-                    key, value, self.layer_name
+        with v2_range(
+            "semop",
+            "attention",
+            layer_id=self.layer_name,
+            semantic_op_id=f"{self.layer_name}:attention",
+            op_type="attention",
+            num_tokens=query.shape[0],
+        ):
+            if self.use_direct_call:
+                # Skip this if sharing KV cache with an earlier attention layer.
+                if (
+                    not self.attn_backend.forward_includes_kv_cache_update
+                    and self.kv_sharing_target_layer_name is None
+                    and key is not None
+                    and value is not None
+                ):
+                    kv_cache_dummy_dep = unified_kv_cache_update(
+                        key, value, self.layer_name
+                    )
+                unified_attention_with_output(
+                    query,
+                    key,
+                    value,
+                    output,
+                    self.layer_name,
+                    kv_cache_dummy_dep=kv_cache_dummy_dep,
                 )
-            unified_attention_with_output(
-                query,
-                key,
-                value,
-                output,
-                self.layer_name,
-                kv_cache_dummy_dep=kv_cache_dummy_dep,
-            )
-        else:
-            # Skip this if sharing KV cache with an earlier attention layer.
-            encoded = _encode_layer_name(self.layer_name)
-            if (
-                not self.attn_backend.forward_includes_kv_cache_update
-                and self.kv_sharing_target_layer_name is None
-                and key is not None
-                and value is not None
-            ):
-                kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
-                    key, value, encoded
+            else:
+                # Skip this if sharing KV cache with an earlier attention layer.
+                encoded = _encode_layer_name(self.layer_name)
+                if (
+                    not self.attn_backend.forward_includes_kv_cache_update
+                    and self.kv_sharing_target_layer_name is None
+                    and key is not None
+                    and value is not None
+                ):
+                    with v2_range(
+                        "kv",
+                        "block_table_update",
+                        layer_id=self.layer_name,
+                        semantic_op_id=f"{self.layer_name}:kv_cache_update",
+                        op_type="kv_cache_update",
+                        num_tokens=key.shape[0],
+                    ):
+                        kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
+                            key, value, encoded
+                        )
+                torch.ops.vllm.unified_attention_with_output(
+                    query,
+                    key,
+                    value,
+                    output,
+                    encoded,
+                    kv_cache_dummy_dep=kv_cache_dummy_dep,
                 )
-            torch.ops.vllm.unified_attention_with_output(
-                query,
-                key,
-                value,
-                output,
-                encoded,
-                kv_cache_dummy_dep=kv_cache_dummy_dep,
-            )
         return output.view(-1, hidden_size)
 
     def calc_kv_scales(self, query, key, value):
@@ -675,13 +692,21 @@ def unified_kv_cache_update(
         assert hasattr(attn_layer.impl, "do_kv_cache_update"), (
             f"{attn_layer.impl.__class__.__name__} does not support kv cache update"
         )
-        attn_layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]
-            attn_layer,
-            key,
-            value,
-            kv_cache,
-            layer_slot_mapping,
-        )
+        with v2_range(
+            "kv",
+            "block_table_update",
+            layer_id=layer_name,
+            semantic_op_id=f"{layer_name}:kv_cache_update",
+            op_type="kv_cache_update",
+            num_tokens=key.shape[0],
+        ):
+            attn_layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]
+                attn_layer,
+                key,
+                value,
+                kv_cache,
+                layer_slot_mapping,
+            )
 
     return torch.empty(0, device=kv_cache.device, dtype=kv_cache.dtype)
 
@@ -720,17 +745,25 @@ def unified_attention_with_output(
     layer_name = _resolve_layer_name(layer_name)
     attn_metadata, self, kv_cache, _ = get_attention_context(layer_name)
 
-    self.impl.forward(
-        self,
-        query,
-        key,
-        value,
-        kv_cache,
-        attn_metadata,
-        output=output,
-        output_scale=output_scale,
-        output_block_scale=output_block_scale,
-    )
+    with v2_range(
+        "semop",
+        "attention",
+        layer_id=layer_name,
+        semantic_op_id=f"{layer_name}:attention_impl",
+        op_type="attention",
+        num_tokens=query.shape[0],
+    ):
+        self.impl.forward(
+            self,
+            query,
+            key,
+            value,
+            kv_cache,
+            attn_metadata,
+            output=output,
+            output_scale=output_scale,
+            output_block_scale=output_block_scale,
+        )
 
 
 def unified_attention_with_output_fake(

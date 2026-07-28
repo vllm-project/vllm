@@ -11,7 +11,8 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-    from vllm.v1.engine import EngineCoreOutputs
+    from vllm.primary_usdt import TransitionInitiator, TransitionReason
+    from vllm.v1.engine import EngineCoreAbortRequest, EngineCoreOutputs
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.metrics.stats import SchedulerStats
     from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
@@ -136,9 +137,14 @@ class SchedulerInterface(ABC):
     @abstractmethod
     def finish_requests(
         self,
-        request_ids: str | Iterable[str] | None,
+        request_ids: (
+            str | Iterable[str] | Iterable["EngineCoreAbortRequest"] | None
+        ),
         finished_status: "RequestStatus",
-    ) -> list[tuple[str, int]]:
+        *,
+        reason: "TransitionReason | None" = None,
+        initiator: "TransitionInitiator | None" = None,
+    ) -> list[tuple["EngineCoreAbortRequest", int]]:
         """Finish the requests in the scheduler's internal queue. If the request
         is not in the queue, this method will do nothing for that request.
 
@@ -148,12 +154,15 @@ class SchedulerInterface(ABC):
            de-tokenizing its generated tokens.
 
         Args:
-            request_ids: A single or a list of request IDs, or None to finish all.
+            request_ids: A single/list of request IDs, typed transition actions,
+                or None to finish all. Raw IDs require explicit reason/initiator.
             finished_status: The finished status of the given requests.
+            reason: Source-owned reason when actions are allocated locally.
+            initiator: Source-owned initiator when actions are allocated locally.
 
         Returns:
-            Tuple of (req_id, client_index) for requests that were aborted. Will not
-            include any that were already finished.
+            Tuple of (typed action, client_index) for requests that were
+            transitioned. Already-finished requests are excluded.
         """
         raise NotImplementedError
 

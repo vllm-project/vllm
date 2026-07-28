@@ -18,6 +18,20 @@ from vllm.outputs import (
     PoolingRequestOutput,
     RequestOutput,
 )
+from vllm.primary_usdt import (
+    PRIMARY_SEMANTIC_DISPATCH_ENABLED,
+    PrimaryUSDTError,
+    TransitionInitiator,
+    TransitionReason,
+    emit_primary_usdt,
+    mark_frontend_closed_once,
+    mark_terminal_once,
+    new_transition_action_id,
+    next_output_ordinal,
+    primary_request_id_hash,
+    submission_attempt_for_request,
+    terminal_was_marked,
+)
 from vllm.sampling_params import RequestOutputKind
 from vllm.tokenizers import TokenizerLike
 from vllm.tracing import (
@@ -27,7 +41,12 @@ from vllm.tracing import (
     instrument_manual,
 )
 from vllm.utils import length_from_prompt_token_ids_or_embeds
-from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
+from vllm.v1.engine import (
+    EngineCoreAbortRequest,
+    EngineCoreOutput,
+    EngineCoreRequest,
+    FinishReason,
+)
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
@@ -109,7 +128,7 @@ class RequestOutputCollector:
 @dataclass
 class OutputProcessorOutput:
     request_outputs: list[RequestOutput | PoolingRequestOutput]
-    reqs_to_abort: list[str]
+    reqs_to_abort: list[EngineCoreAbortRequest]
 
 
 @dataclass
@@ -184,6 +203,12 @@ class RequestState:
         self.input_chunk_queue: deque[StreamingUpdate] | None = (
             deque() if stream_input else None
         )
+        self.pending_terminal_reason: int | None = None
+        self.pending_terminal_class: int | None = None
+        self.pending_terminal_state: int = 0
+        self.pending_transition_reason: int = 0
+        self.pending_transition_initiator: int = 0
+        self.pending_transition_action_id: tuple[int, int] = (0, 0)
 
     def apply_streaming_update(self, update: StreamingUpdate) -> None:
         # Apply the update to the request state.
@@ -420,6 +445,7 @@ class OutputProcessor:
         log_stats: bool,
         stream_interval: int = 1,
         tracing_enabled: bool = False,
+        primary_engine_instance_id: tuple[int, int] = (0, 0),
     ):
         self.log_stats = log_stats
         self.tokenizer = tokenizer
@@ -429,6 +455,85 @@ class OutputProcessor:
         self.external_req_ids: defaultdict[str, list[str]] = defaultdict(list)
         self.lora_states = LoRARequestStates(log_stats)
         self.tracing_enabled = tracing_enabled
+        self.primary_engine_instance_id = primary_engine_instance_id
+
+    def _emit_primary_terminal(
+        self,
+        request_id: str,
+        terminal_state: int,
+        terminal_reason: int,
+        transition_reason: int,
+        transition_initiator: int,
+        transition_action_id: tuple[int, int],
+    ) -> bool:
+        if not PRIMARY_SEMANTIC_DISPATCH_ENABLED:
+            return True
+        if self.primary_engine_instance_id == (0, 0):
+            return True
+        request_hash = primary_request_id_hash(request_id)
+        if not mark_terminal_once(self.primary_engine_instance_id, request_hash):
+            return False
+        emit_primary_usdt(
+            "request_terminal_v3",
+            engine_instance_id=self.primary_engine_instance_id,
+            request_id_hash=request_hash,
+            terminal_state=terminal_state,
+            terminal_reason=terminal_reason,
+            transition_reason=transition_reason,
+            transition_initiator=transition_initiator,
+            transition_action_id_hi=transition_action_id[0],
+            transition_action_id_lo=transition_action_id[1],
+            cleanup_required=1,
+            submission_attempt_id=submission_attempt_for_request(
+                self.primary_engine_instance_id, request_hash
+            ),
+        )
+        return True
+
+    def _emit_primary_frontend_closure(
+        self, request_id: str, closure_reason: int, closure_status: int
+    ) -> None:
+        if not PRIMARY_SEMANTIC_DISPATCH_ENABLED:
+            return
+        if self.primary_engine_instance_id == (0, 0):
+            return
+        request_hash = primary_request_id_hash(request_id)
+        if not terminal_was_marked(self.primary_engine_instance_id, request_hash):
+            raise PrimaryUSDTError(
+                "frontend lifecycle closure attempted before terminal"
+            )
+        if not mark_frontend_closed_once(
+            self.primary_engine_instance_id, request_hash
+        ):
+            raise PrimaryUSDTError("duplicate frontend lifecycle closure")
+        emit_primary_usdt(
+            "request_cleanup_v3",
+            engine_instance_id=self.primary_engine_instance_id,
+            request_id_hash=request_hash,
+            closure_reason=closure_reason,
+            closure_status=closure_status,
+        )
+
+    def _emit_primary_pre_scheduler_error_terminal(self, request_id: str) -> None:
+        """Close an L0 preprocessing error without inventing a Q2 transition."""
+        if not PRIMARY_SEMANTIC_DISPATCH_ENABLED:
+            return
+        if self.primary_engine_instance_id == (0, 0):
+            return
+        request_hash = primary_request_id_hash(request_id)
+        if not mark_terminal_once(self.primary_engine_instance_id, request_hash):
+            return
+        emit_primary_usdt(
+            "request_terminal_v2",
+            engine_instance_id=self.primary_engine_instance_id,
+            request_id_hash=request_hash,
+            terminal_reason=7,
+            terminal_class=3,
+            cleanup_required=1,
+            submission_attempt_id=submission_attempt_for_request(
+                self.primary_engine_instance_id, request_hash
+            ),
+        )
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
@@ -443,7 +548,14 @@ class OutputProcessor:
             assert state.queue is not None
             state.queue.put(e)
 
-    def abort_requests(self, request_ids: Iterable[str], internal: bool) -> list[str]:
+    def abort_requests(
+        self,
+        request_ids: Iterable[str],
+        internal: bool,
+        *,
+        reason: TransitionReason = TransitionReason.EXPLICIT_ABORT,
+        initiator: TransitionInitiator = TransitionInitiator.API_CALLER,
+    ) -> list[EngineCoreAbortRequest]:
         """Abort a list of requests.
 
         The request_ids may be either external request IDs (those passed to
@@ -463,24 +575,36 @@ class OutputProcessor:
             if internal:
                 # Internal ID - this may be a parent request
                 internal_req_ids.append(request_id)
-
-                # Remove internal ID from the external->internal mapping
-                if req_state := self.request_states.get(request_id):
-                    external_req_id = req_state.external_req_id
-                    internal_ids = self.external_req_ids[external_req_id]
-                    internal_ids.remove(request_id)
-                    if not internal_ids:
-                        del self.external_req_ids[external_req_id]
-            elif internal_ids := self.external_req_ids.pop(request_id, []):
+            elif internal_ids := self.external_req_ids.get(request_id, []):
                 # External ID - abort all requests in the external->internal mapping
-                internal_req_ids.extend(internal_ids)
+                internal_req_ids.extend(list(internal_ids))
 
-        request_ids_to_abort = []
+        actions_to_abort = []
         for request_id in internal_req_ids:
-            req_state = self.request_states.pop(request_id, None)
+            req_state = self.request_states.get(request_id)
             if req_state is not None:
+                action_id = (
+                    new_transition_action_id()
+                    if PRIMARY_SEMANTIC_DISPATCH_ENABLED
+                    else (0, 0)
+                )
+                action = EngineCoreAbortRequest(
+                    request_id,
+                    action_id[0],
+                    action_id[1],
+                    int(reason),
+                    int(initiator),
+                )
+                self._emit_primary_terminal(
+                    request_id,
+                    9,
+                    3,
+                    int(reason),
+                    int(initiator),
+                    action_id,
+                )
                 self.lora_states.request_finished(request_id, req_state.lora_name)
-                request_ids_to_abort.append(request_id)
+                actions_to_abort.append(action)
                 # Produce final abort output.
                 if req_state.queue is not None and (
                     request_output := req_state.make_request_output(
@@ -496,14 +620,24 @@ class OutputProcessor:
                     )
                 ):
                     req_state.queue.put(request_output)
+                self._finish_request(
+                    req_state,
+                    closure_reason=3,
+                    closure_status=1,
+                )
             elif parent := self.parent_requests.get(request_id):
                 # Abort children prior to removing the parent.
                 if parent.child_requests:
                     child_reqs = list(parent.child_requests)
-                    child_reqs = self.abort_requests(child_reqs, internal=True)
-                    request_ids_to_abort.extend(child_reqs)
+                    child_actions = self.abort_requests(
+                        child_reqs,
+                        internal=True,
+                        reason=reason,
+                        initiator=initiator,
+                    )
+                    actions_to_abort.extend(child_actions)
                 self.parent_requests.pop(request_id, None)
-        return request_ids_to_abort
+        return actions_to_abort
 
     def add_request(
         self,
@@ -541,10 +675,29 @@ class OutputProcessor:
     ) -> None:
         """Queue a streaming update instead of immediately applying it."""
         if not request.resumable:
+            action_id = (
+                new_transition_action_id()
+                if PRIMARY_SEMANTIC_DISPATCH_ENABLED
+                else (0, 0)
+            )
+            request.transition_reason = int(TransitionReason.INTERNAL_ABORT)
+            request.transition_initiator = int(TransitionInitiator.OUTPUT_PROCESSOR)
+            request.transition_action_id_hi = action_id[0]
+            request.transition_action_id_lo = action_id[1]
             # Final request - just mark completion, don't add its dummy tokens.
             if req_state.input_chunk_queue is None:
                 # Engine already finished - emit final output and clean up.
-                self._finish_request(req_state)
+                self._emit_primary_terminal(
+                    req_state.request_id,
+                    9,
+                    req_state.pending_terminal_reason or 2,
+                    request.transition_reason,
+                    request.transition_initiator,
+                    action_id,
+                )
+                self._finish_request(
+                    req_state, closure_reason=1, closure_status=1
+                )
                 if req_state.queue is not None:
                     # Emit a final output with finished=True
                     # to unblock the generate() loop.
@@ -598,7 +751,7 @@ class OutputProcessor:
         """
 
         request_outputs: list[RequestOutput | PoolingRequestOutput] = []
-        reqs_to_abort: list[str] = []
+        reqs_to_abort: list[EngineCoreAbortRequest] = []
         for engine_core_output in engine_core_outputs:
             req_id = engine_core_output.request_id
             req_state = self.request_states.get(req_id)
@@ -649,6 +802,31 @@ class OutputProcessor:
                 kv_transfer_params,
                 routed_experts,
             ):
+                if (
+                    PRIMARY_SEMANTIC_DISPATCH_ENABLED
+                    and self.primary_engine_instance_id != (0, 0)
+                ):
+                    request_hash = primary_request_id_hash(req_id)
+                    output_ordinal = next_output_ordinal(
+                        self.primary_engine_instance_id, request_hash
+                    )
+                    output_token_count = (
+                        len(req_state.detokenizer.output_token_ids)
+                        if req_state.detokenizer is not None
+                        else len(new_token_ids)
+                    )
+                    emit_primary_usdt(
+                        "request_output_progress_v2",
+                        engine_instance_id=self.primary_engine_instance_id,
+                        request_id_hash=request_hash,
+                        output_ordinal=output_ordinal,
+                        output_token_count=output_token_count,
+                        first_output=int(output_ordinal == 0),
+                        final_output=int(
+                            finish_reason is not None
+                            and not req_state.streaming_input
+                        ),
+                    )
                 if req_state.streaming_input:
                     request_output.finished = False
 
@@ -661,19 +839,74 @@ class OutputProcessor:
 
             # Free completed requests.
             if finish_reason is not None:
+                reason_text = str(finish_reason).lower()
+                terminal_reason = 1 if "stop" in reason_text else 2
+                if engine_core_output.finished:
+                    terminal_state = engine_core_output.terminal_state
+                    transition_reason = engine_core_output.transition_reason
+                    transition_initiator = engine_core_output.transition_initiator
+                    action_id = (
+                        engine_core_output.transition_action_id_hi,
+                        engine_core_output.transition_action_id_lo,
+                    )
+                else:
+                    action_id = (
+                        new_transition_action_id()
+                        if PRIMARY_SEMANTIC_DISPATCH_ENABLED
+                        else (0, 0)
+                    )
+                    terminal_state = 9
+                    transition_reason = int(TransitionReason.INTERNAL_ABORT)
+                    transition_initiator = int(TransitionInitiator.OUTPUT_PROCESSOR)
+                    reqs_to_abort.append(
+                        EngineCoreAbortRequest(
+                            req_id,
+                            action_id[0],
+                            action_id[1],
+                            transition_reason,
+                            transition_initiator,
+                        )
+                    )
+                pre_scheduler_error = (
+                    engine_core_output.finished
+                    and finish_reason == FinishReason.ERROR
+                    and action_id == (0, 0)
+                )
+                if pre_scheduler_error:
+                    self._emit_primary_pre_scheduler_error_terminal(req_id)
+                elif (
+                    PRIMARY_SEMANTIC_DISPATCH_ENABLED
+                    and not req_state.streaming_input
+                    and (not terminal_state or action_id == (0, 0))
+                ):
+                    raise PrimaryUSDTError(
+                        "request terminal lacks Scheduler transition correlation"
+                    )
                 if req_state.streaming_input:
+                    req_state.pending_terminal_reason = terminal_reason
+                    req_state.pending_terminal_class = 1
+                    req_state.pending_terminal_state = terminal_state
+                    req_state.pending_transition_reason = transition_reason
+                    req_state.pending_transition_initiator = transition_initiator
+                    req_state.pending_transition_action_id = action_id
                     if req_state.input_chunk_queue:
                         update = req_state.input_chunk_queue.popleft()
                         req_state.apply_streaming_update(update)
                     else:
                         req_state.input_chunk_queue = None
                 else:
-                    self._finish_request(req_state)
-                    if not engine_core_output.finished:
-                        # If req not finished in EngineCore, but Detokenizer
-                        # detected stop string, abort needed in EngineCore.
-                        reqs_to_abort.append(req_id)
-
+                    if not pre_scheduler_error:
+                        self._emit_primary_terminal(
+                            req_id,
+                            terminal_state,
+                            terminal_reason,
+                            transition_reason,
+                            transition_initiator,
+                            action_id,
+                        )
+                    self._finish_request(
+                        req_state, closure_reason=1, closure_status=1
+                    )
                     # Track per-request stats
                     self._update_stats_from_finished(
                         req_state, finish_reason, iteration_stats
@@ -686,9 +919,30 @@ class OutputProcessor:
             reqs_to_abort=reqs_to_abort,
         )
 
-    def _finish_request(self, req_state: RequestState) -> None:
+    def _finish_request(
+        self,
+        req_state: RequestState,
+        *,
+        closure_reason: int,
+        closure_status: int,
+    ) -> None:
         req_id = req_state.request_id
-        self.request_states.pop(req_id)
+        if (
+            PRIMARY_SEMANTIC_DISPATCH_ENABLED
+            and self.primary_engine_instance_id != (0, 0)
+        ):
+            request_hash = primary_request_id_hash(req_id)
+            if not terminal_was_marked(
+                self.primary_engine_instance_id, request_hash
+            ):
+                raise PrimaryUSDTError(
+                    "frontend lifecycle closure attempted before terminal"
+                )
+        removed = self.request_states.pop(req_id, None)
+        if removed is not req_state:
+            raise PrimaryUSDTError(
+                "frontend lifecycle closure does not own active request state"
+            )
 
         internal_ids = self.external_req_ids[req_state.external_req_id]
         internal_ids.remove(req_id)
@@ -699,6 +953,9 @@ class OutputProcessor:
         parent_req = req_state.parent_req
         if parent_req and not parent_req.child_requests:
             self.parent_requests.pop(parent_req.request_id, None)
+        self._emit_primary_frontend_closure(
+            req_id, closure_reason=closure_reason, closure_status=closure_status
+        )
 
     def update_scheduler_stats(self, scheduler_stats: SchedulerStats | None):
         self.lora_states.update_scheduler_stats(scheduler_stats)

@@ -118,6 +118,9 @@ class KVCacheBlock:
     block_id: int
     # Reference count.
     ref_cnt: int = 0
+    # Source-owned allocation epoch. Zero means never allocated; the value is
+    # incremented only by BlockPool on a new 0-to-1 allocation epoch.
+    primary_generation: int = 0
     # The hash key (block hash + group id) of the block, only available
     # when the block is full and cached.
     _block_hash: BlockHashWithGroupId | None = None

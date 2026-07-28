@@ -114,6 +114,10 @@ class EngineCoreRequest(
     external_req_id: str | None = None
 
     reasoning_ended: bool | None = None
+    transition_reason: int = 0
+    transition_initiator: int = 0
+    transition_action_id_hi: int = 0
+    transition_action_id_lo: int = 0
 
     @property
     def params(self) -> SamplingParams | PoolingParams:
@@ -122,6 +126,16 @@ class EngineCoreRequest(
             return self.sampling_params
         assert self.pooling_params is not None
         return self.pooling_params
+
+
+class EngineCoreAbortRequest(msgspec.Struct, array_like=True, gc=False):  # type: ignore[call-arg]
+    """Source-owned terminal action propagated from frontend to Scheduler."""
+
+    request_id: str
+    transition_action_id_hi: int
+    transition_action_id_lo: int
+    transition_reason: int
+    transition_initiator: int
 
 
 class EngineCoreEventType(enum.IntEnum):
@@ -178,6 +192,13 @@ class EngineCoreOutput(
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.
     num_nans_in_logits: int = 0
+
+    # Q2 transition v3 correlation returned from Scheduler to frontend.
+    terminal_state: int = 0
+    transition_reason: int = 0
+    transition_initiator: int = 0
+    transition_action_id_hi: int = 0
+    transition_action_id_lo: int = 0
 
     @property
     def finished(self) -> bool:

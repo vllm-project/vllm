@@ -2,9 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import hashlib
+import os
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
+from http import HTTPStatus
 from typing import TYPE_CHECKING, cast
 
 from fastapi import Request
@@ -34,6 +37,7 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EngineInput
+from vllm.l0_usdt import fire_l0_probe
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
@@ -47,6 +51,63 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+_L0_E6_EXPERIMENT_ID = "L0_E6_reject_error_path_validation"
+
+
+def _l0_bool(value: str | None) -> bool | None:
+    if value is None:
+        return None
+    return value.lower() in {"1", "true", "yes"}
+
+
+def _l0_int(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _l0_e6_enabled() -> bool:
+    return os.environ.get("VLLM_L0_EXPERIMENT_ID") == _L0_E6_EXPERIMENT_ID
+
+
+def _l0_digest(value: object) -> str:
+    text = str(value)
+    return hashlib.sha1(text.encode("utf-8", errors="replace")).hexdigest()[:12]
+
+
+def _l0_headers_extra(raw_request: Request | None, request: CompletionRequest) -> dict:
+    headers = {}
+    if raw_request is not None:
+        headers = {str(k).lower(): str(v) for k, v in raw_request.headers.items()}
+    extra = {
+        "path": "online",
+        "endpoint": "completions",
+        "stream": bool(request.stream),
+    }
+    for header_name, extra_name in (
+        ("x-l0-case-name", "case_name"),
+        ("x-l0-failure-mode", "failure_mode"),
+        ("x-l0-prompt-type", "prompt_type"),
+        ("x-l0-benchmark-group", "benchmark_group"),
+    ):
+        value = headers.get(header_name)
+        if value is not None:
+            extra[extra_name] = value
+    stream = _l0_bool(headers.get("x-l0-stream"))
+    if stream is not None:
+        extra["stream"] = stream
+    for header_name, extra_name in (
+        ("x-l0-client-request-index", "client_request_index"),
+        ("x-l0-concurrency", "concurrency"),
+    ):
+        value = _l0_int(headers.get(header_name))
+        if value is not None:
+            extra[extra_name] = value
+    return extra
+
 
 class OpenAIServingCompletion(OpenAIServing):
     def __init__(
@@ -59,6 +120,7 @@ class OpenAIServingCompletion(OpenAIServing):
         return_tokens_as_token_ids: bool = False,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
+        preserve_completion_request_id: bool = False,
     ):
         super().__init__(
             engine_client=engine_client,
@@ -70,6 +132,7 @@ class OpenAIServingCompletion(OpenAIServing):
         self.openai_serving_render = openai_serving_render
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
+        self.preserve_completion_request_id = preserve_completion_request_id
 
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         mc = self.model_config
@@ -77,6 +140,91 @@ class OpenAIServingCompletion(OpenAIServing):
             self.default_sampling_params.get("max_tokens")
             if mc.generation_config not in ("auto", "vllm")
             else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
+        )
+
+    def _l0_e6_request_id(
+        self,
+        raw_request: Request | None,
+        request: CompletionRequest,
+    ) -> str:
+        return f"cmpl-{self._base_request_id(raw_request, request.request_id)}-0"
+
+    @staticmethod
+    def _response_request_id(base_request_id: str, preserve_canonical: bool) -> str:
+        """Select the external completion ID without changing ingress identity.
+
+        The default preserves OpenAI-compatible ``cmpl-`` IDs.  The opt-in
+        branch is deliberately exact: no prefix, suffix, or alternate identity
+        may be introduced between the canonical ingress ID and the response.
+        """
+        return base_request_id if preserve_canonical else f"cmpl-{base_request_id}"
+
+    def _l0_e6_extra(
+        self,
+        raw_request: Request | None,
+        request: CompletionRequest,
+    ) -> dict:
+        return _l0_headers_extra(raw_request, request)
+
+    def _l0_e6_should_trace_failure(
+        self,
+        raw_request: Request | None,
+        request: CompletionRequest,
+    ) -> bool:
+        if not _l0_e6_enabled():
+            return False
+        return bool(self._l0_e6_extra(raw_request, request).get("failure_mode"))
+
+    def _l0_e6_fire_arrival(
+        self,
+        raw_request: Request | None,
+        request: CompletionRequest,
+        request_id_item: str,
+    ) -> None:
+        fire_l0_probe(
+            "request_arrival",
+            request_id_item,
+            **self._l0_e6_extra(raw_request, request),
+        )
+
+    def _l0_e6_fire_reject(
+        self,
+        raw_request: Request | None,
+        request: CompletionRequest,
+        request_id_item: str,
+        error_response: ErrorResponse,
+        reject_reason: str | None = None,
+    ) -> None:
+        extra = self._l0_e6_extra(raw_request, request)
+        reason = reject_reason or str(extra.get("failure_mode") or "request_reject")
+        fire_l0_probe(
+            "request_reject",
+            request_id_item,
+            **extra,
+            finish_reason="reject",
+            reject_reason=reason,
+            http_status=error_response.error.code,
+            error_type=error_response.error.type,
+            error_message_digest=_l0_digest(error_response.error.message),
+        )
+
+    def _l0_e6_fire_error(
+        self,
+        raw_request: Request | None,
+        request: CompletionRequest,
+        request_id_item: str,
+        error_type: str,
+        message: object,
+        http_status: int = 500,
+    ) -> None:
+        fire_l0_probe(
+            "request_error",
+            request_id_item,
+            **self._l0_e6_extra(raw_request, request),
+            finish_reason="error",
+            error_type=error_type,
+            error_message_digest=_l0_digest(message),
+            http_status=http_status,
         )
 
     async def render_completion_request(
@@ -123,14 +271,72 @@ class OpenAIServingCompletion(OpenAIServing):
                 "Streaming is not currently supported with beam search"
             )
 
-        result = await self.render_completion_request(request)
+        l0_e6_trace_failure = self._l0_e6_should_trace_failure(raw_request, request)
+        l0_e6_request_id_item = self._l0_e6_request_id(raw_request, request)
+        if l0_e6_trace_failure:
+            self._l0_e6_fire_arrival(raw_request, request, l0_e6_request_id_item)
+
+        try:
+            result = await self.render_completion_request(request)
+        except VLLMValidationError as exc:
+            if not l0_e6_trace_failure:
+                raise
+            error_response = self.create_error_response(
+                str(exc),
+                err_type=exc.__class__.__name__,
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+            self._l0_e6_fire_reject(
+                raw_request,
+                request,
+                l0_e6_request_id_item,
+                error_response,
+                str(self._l0_e6_extra(raw_request, request).get("failure_mode") or "validation_error"),
+            )
+            return error_response
         if isinstance(result, ErrorResponse):
+            if l0_e6_trace_failure:
+                self._l0_e6_fire_reject(
+                    raw_request,
+                    request,
+                    l0_e6_request_id_item,
+                    result,
+                )
             return result
 
         engine_inputs = result
 
-        request_id = f"cmpl-{self._base_request_id(raw_request, request.request_id)}"
+        request_id = self._response_request_id(
+            self._base_request_id(raw_request, request.request_id),
+            self.preserve_completion_request_id,
+        )
         created_time = int(time.time())
+
+        failure_mode = self._l0_e6_extra(raw_request, request).get("failure_mode")
+        if (
+            failure_mode == "runtime_error_mock"
+            and os.environ.get("VLLM_L0_E6_INJECT_RUNTIME_ERROR") == "1"
+        ):
+            fire_l0_probe(
+                "request_id_assigned",
+                l0_e6_request_id_item,
+                **self._l0_e6_extra(raw_request, request),
+                external_request_id=request_id,
+                internal_request_id=l0_e6_request_id_item,
+            )
+            self._l0_e6_fire_error(
+                raw_request,
+                request,
+                l0_e6_request_id_item,
+                "InjectedRuntimeError",
+                "L0_E6 injected runtime error",
+                HTTPStatus.INTERNAL_SERVER_ERROR.value,
+            )
+            return self.create_error_response(
+                "L0_E6 injected runtime error",
+                err_type="InjectedRuntimeError",
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
@@ -154,15 +360,30 @@ class OpenAIServingCompletion(OpenAIServing):
             )
 
             sampling_params: SamplingParams | BeamSearchParams
-            if request.use_beam_search:
-                sampling_params = request.to_beam_search_params(
-                    max_tokens, self.default_sampling_params
+            try:
+                if request.use_beam_search:
+                    sampling_params = request.to_beam_search_params(
+                        max_tokens, self.default_sampling_params
+                    )
+                else:
+                    sampling_params = request.to_sampling_params(
+                        max_tokens,
+                        self.default_sampling_params,
+                    )
+            except Exception as exc:
+                error_response = self.create_error_response(
+                    str(exc),
+                    err_type=exc.__class__.__name__,
+                    status_code=HTTPStatus.BAD_REQUEST,
                 )
-            else:
-                sampling_params = request.to_sampling_params(
-                    max_tokens,
-                    self.default_sampling_params,
-                )
+                if l0_e6_trace_failure:
+                    self._l0_e6_fire_reject(
+                        raw_request,
+                        request,
+                        l0_e6_request_id_item,
+                        error_response,
+                    )
+                return error_response
 
             request_id_item = f"{request_id}-{i}"
 
@@ -219,6 +440,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 num_prompts=num_prompts,
                 tokenizer=tokenizer,
                 request_metadata=request_metadata,
+                raw_request=raw_request,
             )
 
         # Non-streaming response
@@ -274,6 +496,7 @@ class OpenAIServingCompletion(OpenAIServing):
         num_prompts: int,
         tokenizer: TokenizerLike | None,
         request_metadata: RequestResponseMetadata,
+        raw_request: Request | None = None,
     ) -> AsyncGenerator[str, None]:
         num_choices = 1 if request.n is None else request.n
         previous_text_lens = [0] * num_choices * num_prompts
@@ -452,6 +675,34 @@ class OpenAIServingCompletion(OpenAIServing):
             # report to FastAPI middleware aggregate usage across all choices
             request_metadata.final_usage_info = final_usage_info
 
+        except asyncio.CancelledError:
+            for prompt_idx in range(num_prompts):
+                fire_l0_probe(
+                    "request_terminal",
+                    f"{request_id}-{prompt_idx}",
+                    **self._l0_e6_extra(raw_request, request),
+                    terminal_type="aborted",
+                    terminal_source="openai_completion_stream_cancelled",
+                    terminal_confidence="inferred",
+                    raw_finish_reason="client_disconnected",
+                    raw_terminal_code="asyncio_cancelled",
+                    finish_reason="client_disconnected",
+                )
+            raise
+        except GeneratorExit:
+            for prompt_idx in range(num_prompts):
+                fire_l0_probe(
+                    "request_terminal",
+                    f"{request_id}-{prompt_idx}",
+                    **self._l0_e6_extra(raw_request, request),
+                    terminal_type="aborted",
+                    terminal_source="openai_completion_stream_closed",
+                    terminal_confidence="inferred",
+                    raw_finish_reason="client_disconnected",
+                    raw_terminal_code="generator_exit",
+                    finish_reason="client_disconnected",
+                )
+            raise
         except GenerationError as e:
             yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
         except Exception as e:

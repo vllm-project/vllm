@@ -24,10 +24,20 @@ import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.envs import enable_envs_cache
+from vllm.execution_span import (
+    ExecutionSpanContext,
+    ExecutionSpanManager,
+    TerminalStatus,
+    emit_execution_span_dispatched,
+)
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.primary_usdt import (
+    PRIMARY_SEMANTIC_DISPATCH_ENABLED,
+    prepare_primary_usdt_provider,
+)
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -52,6 +62,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.engine import (
     EEP_NOTIFICATION_CALL_ID,
     EEPNotificationType,
+    EngineCoreAbortRequest,
     EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreReadyResponse,
@@ -63,6 +74,11 @@ from vllm.v1.engine import (
     ReconfigureRankType,
     UtilityOutput,
     UtilityResult,
+)
+from vllm.primary_usdt import (
+    TransitionInitiator,
+    TransitionReason,
+    new_transition_action_id,
 )
 from vllm.v1.engine.tensor_ipc import TensorIpcReceiver
 from vllm.v1.engine.utils import (
@@ -79,6 +95,7 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import compute_iteration_details
+from vllm.v2_trace import v2_range
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -151,6 +168,7 @@ class EngineCore:
             block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
         )
+        self._execution_span_manager = ExecutionSpanManager(vllm_config)
         self.use_spec_decode = vllm_config.speculative_config is not None
         if self.scheduler.connector is not None:  # type: ignore
             self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
@@ -215,7 +233,7 @@ class EngineCore:
         )
         self.async_scheduling = vllm_config.scheduler_config.async_scheduling
 
-        self.aborts_queue = queue.Queue[list[str]]()
+        self.aborts_queue = queue.Queue[list[EngineCoreAbortRequest]]()
 
         self._idle_state_callbacks: list[Callable] = []
 
@@ -345,13 +363,30 @@ class EngineCore:
 
         self.scheduler.add_request(request)
 
-    def abort_requests(self, request_ids: list[str]):
-        """Abort requests from the scheduler."""
+    def abort_requests(self, actions: list[EngineCoreAbortRequest]):
+        """Apply source-owned abort/cancel actions in the Scheduler."""
+        self.scheduler.finish_requests(actions, RequestStatus.FINISHED_ABORTED)
 
-        # TODO: The scheduler doesn't really need to know the
-        # specific finish reason, TBD whether we propagate that
-        # (i.e. client-aborted vs stop criteria met).
-        self.scheduler.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
+    def _control_plane_abort_actions(self) -> list[EngineCoreAbortRequest]:
+        actions = []
+        for request in list(self.scheduler.requests.values()):
+            if request.is_finished():
+                continue
+            action_id = (
+                new_transition_action_id()
+                if PRIMARY_SEMANTIC_DISPATCH_ENABLED
+                else (0, 0)
+            )
+            actions.append(
+                EngineCoreAbortRequest(
+                    request.request_id,
+                    action_id[0],
+                    action_id[1],
+                    int(TransitionReason.CONTROL_PLANE_ABORT),
+                    int(TransitionInitiator.ENGINE_CONTROL_PLANE),
+                )
+            )
+        return actions
 
     @contextmanager
     def log_error_detail(self, scheduler_output: SchedulerOutput):
@@ -411,15 +446,40 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule()
-        future = self.model_executor.execute_model(scheduler_output, non_block=True)
+        execution_span = self._create_execution_span_context_if_executable(
+            scheduler_output
+        )
+        if execution_span is not None:
+            emit_execution_span_dispatched(execution_span)
+        try:
+            future = self.model_executor.execute_model(
+                scheduler_output, non_block=True
+            )
+        except Exception:
+            if execution_span is not None:
+                self._execution_span_manager.terminal_once(
+                    execution_span, TerminalStatus.FAILED_BEFORE_WORKER
+                )
+            raise
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
-        with (
-            self.log_error_detail(scheduler_output),
-            self.log_iteration_details(scheduler_output),
-        ):
-            model_output = future.result()
-            if model_output is None:
-                model_output = self.model_executor.sample_tokens(grammar_output)
+        try:
+            with (
+                self.log_error_detail(scheduler_output),
+                self.log_iteration_details(scheduler_output),
+            ):
+                model_output = future.result()
+                if model_output is None:
+                    model_output = self.model_executor.sample_tokens(grammar_output)
+        except Exception:
+            if execution_span is not None:
+                self._execution_span_manager.terminal_once(
+                    execution_span, TerminalStatus.FAILED_IN_WORKER
+                )
+            raise
+        if execution_span is not None:
+            self._execution_span_manager.terminal_once(
+                execution_span, TerminalStatus.COMPLETED
+            )
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.
@@ -429,6 +489,15 @@ class EngineCore:
         )
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
+
+    def _create_execution_span_context_if_executable(
+        self, scheduler_output: SchedulerOutput
+    ) -> ExecutionSpanContext | None:
+        context = self._execution_span_manager.create_if_executable(
+            scheduler_output
+        )
+        scheduler_output.execution_span_context = context
+        return context
 
     def post_step(self, model_executed: bool) -> None:
         # When using async scheduling we can't get draft token ids in advance,
@@ -469,10 +538,23 @@ class EngineCore:
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule()
+            execution_span = self._create_execution_span_context_if_executable(
+                scheduler_output
+            )
+            if execution_span is not None:
+                emit_execution_span_dispatched(execution_span)
             with self.log_error_detail(scheduler_output):
-                exec_future = self.model_executor.execute_model(
-                    scheduler_output, non_block=True
-                )
+                try:
+                    exec_future = self.model_executor.execute_model(
+                        scheduler_output, non_block=True
+                    )
+                except Exception:
+                    if execution_span is not None:
+                        self._execution_span_manager.terminal_once(
+                            execution_span,
+                            TerminalStatus.FAILED_BEFORE_WORKER,
+                        )
+                    raise
             if self.is_ec_consumer:
                 model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
@@ -514,16 +596,28 @@ class EngineCore:
 
         # Block until the next result is available.
         future, scheduler_output, exec_model_fut = batch_queue.pop()
-        with (
-            self.log_error_detail(scheduler_output),
-            self.log_iteration_details(scheduler_output),
-        ):
-            model_output = future.result()
-            if model_output is None:
-                # None from sample_tokens() implies that the original execute_model()
-                # call failed - raise that exception.
-                exec_model_fut.result()
-                raise RuntimeError("unexpected error")
+        execution_span = scheduler_output.execution_span_context
+        try:
+            with (
+                self.log_error_detail(scheduler_output),
+                self.log_iteration_details(scheduler_output),
+            ):
+                model_output = future.result()
+                if model_output is None:
+                    # None from sample_tokens() implies that the original execute_model()
+                    # call failed - raise that exception.
+                    exec_model_fut.result()
+                    raise RuntimeError("unexpected error")
+        except Exception:
+            if execution_span is not None:
+                self._execution_span_manager.terminal_once(
+                    execution_span, TerminalStatus.FAILED_IN_WORKER
+                )
+            raise
+        if execution_span is not None:
+            self._execution_span_manager.terminal_once(
+                execution_span, TerminalStatus.COMPLETED
+            )
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.
@@ -560,13 +654,11 @@ class EngineCore:
 
     def _process_aborts_queue(self):
         if not self.aborts_queue.empty():
-            request_ids = []
+            actions = []
             while not self.aborts_queue.empty():
-                ids = self.aborts_queue.get_nowait()
-                # Should be a list here, but also handle string just in case.
-                request_ids.extend((ids,) if isinstance(ids, str) else ids)
+                actions.extend(self.aborts_queue.get_nowait())
             # More efficient to abort all as a single batch.
-            self.abort_requests(request_ids)
+            self.abort_requests(actions)
 
     def shutdown(self):
         self.structured_output_manager.clear_backend()
@@ -653,7 +745,10 @@ class EngineCore:
             raise ValueError("'wait' mode can't be used in inproc-engine mode")
 
         if mode == "abort":
-            self.scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
+            self.scheduler.finish_requests(
+                self._control_plane_abort_actions(),
+                RequestStatus.FINISHED_ABORTED,
+            )
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
         self.scheduler.set_pause_state(pause_state)
@@ -1079,6 +1174,8 @@ class EngineCoreProc(EngineCore):
             else:
                 process_title = "EngineCore"
             set_process_title(process_title)
+            if PRIMARY_SEMANTIC_DISPATCH_ENABLED:
+                prepare_primary_usdt_provider("engine_core")
             maybe_init_worker_tracer("vllm.engine_core", "engine_core", process_title)
             decorate_logs()
             if parallel_config.numa_bind:
@@ -1205,13 +1302,19 @@ class EngineCoreProc(EngineCore):
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""
 
-        # Step the engine core.
-        outputs, model_executed = self.step_fn()
-        # Put EngineCoreOutputs into the output queue.
-        for output in outputs.items() if outputs else ():
-            self.output_queue.put_nowait(output)
-        # Post-step hook.
-        self.post_step(model_executed)
+        with v2_range(
+            "sched",
+            "engine_step",
+            source_file="vllm/v1/engine/core.py",
+            source_func="EngineCore._process_engine_step",
+        ):
+            # Step the engine core.
+            outputs, model_executed = self.step_fn()
+            # Put EngineCoreOutputs into the output queue.
+            for output in outputs.items() if outputs else ():
+                self.output_queue.put_nowait(output)
+            # Post-step hook.
+            self.post_step(model_executed)
 
         # If no model execution happened but there are waiting requests
         # (e.g., WAITING_FOR_REMOTE_KVS), yield the GIL briefly to allow
@@ -1242,7 +1345,8 @@ class EngineCoreProc(EngineCore):
                 if num_requests > 0:
                     logger.info("Aborting %d requests", num_requests)
                 aborted_reqs = self.scheduler.finish_requests(
-                    None, RequestStatus.FINISHED_ABORTED
+                    self._control_plane_abort_actions(),
+                    RequestStatus.FINISHED_ABORTED,
                 )
                 self._send_abort_outputs(aborted_reqs)
             else:
@@ -1382,6 +1486,10 @@ class EngineCoreProc(EngineCore):
         add_request_decoder = MsgpackDecoder(
             EngineCoreRequest, oob_tensor_provider=self.tensor_ipc_receiver
         )
+        abort_request_decoder = MsgpackDecoder(
+            list[EngineCoreAbortRequest],
+            oob_tensor_provider=self.tensor_ipc_receiver,
+        )
         generic_decoder = MsgpackDecoder(oob_tensor_provider=self.tensor_ipc_receiver)
 
         with ExitStack() as stack, zmq.Context() as ctx:
@@ -1450,15 +1558,13 @@ class EngineCoreProc(EngineCore):
                         except Exception:
                             self._handle_request_preproc_error(req)
                             continue
+                    elif request_type == EngineCoreRequestType.ABORT:
+                        request = abort_request_decoder.decode(data_frames)
+                        # Aborts are added to *both* queues, allowing eager
+                        # processing while retaining input ordering.
+                        self.aborts_queue.put_nowait(request)
                     else:
                         request = generic_decoder.decode(data_frames)
-
-                        if request_type == EngineCoreRequestType.ABORT:
-                            # Aborts are added to *both* queues, allows us to eagerly
-                            # process aborts while also ensuring ordering in the input
-                            # queue to avoid leaking requests. This is ok because
-                            # aborting in the scheduler is idempotent.
-                            self.aborts_queue.put_nowait(request)
 
                     # Push to input queue for core busy loop.
                     self.input_queue.put_nowait((request_type, request))
@@ -1565,7 +1671,8 @@ class EngineCoreProc(EngineCore):
 
         if mode == "abort":
             aborted_reqs = self.scheduler.finish_requests(
-                None, RequestStatus.FINISHED_ABORTED
+                self._control_plane_abort_actions(),
+                RequestStatus.FINISHED_ABORTED,
             )
             self._send_abort_outputs(aborted_reqs)
 
@@ -1600,15 +1707,35 @@ class EngineCoreProc(EngineCore):
     ) -> None:
         self._send_finish_outputs_to_client(req_ids, client_index, FinishReason.ERROR)
 
-    def _send_abort_outputs(self, aborted_reqs: list[tuple[str, int]]) -> None:
+    def _send_abort_outputs(
+        self, aborted_reqs: list[tuple[EngineCoreAbortRequest, int]]
+    ) -> None:
         # TODO(nick) this will be moved inside the scheduler
         if aborted_reqs:
-            # Map client_index to list of request_ids that belong to that client.
-            by_client = defaultdict[int, set[str]](set)
-            for req_id, client_index in aborted_reqs:
-                by_client[client_index].add(req_id)
-            for client_index, req_ids in by_client.items():
-                self._send_abort_outputs_to_client(list(req_ids), client_index)
+            by_client = defaultdict[int, list[EngineCoreAbortRequest]](list)
+            for action, client_index in aborted_reqs:
+                by_client[client_index].append(action)
+            for client_index, actions in by_client.items():
+                outputs = [
+                    EngineCoreOutput(
+                        action.request_id,
+                        [],
+                        finish_reason=FinishReason.ABORT,
+                        terminal_state=int(RequestStatus.FINISHED_ABORTED.value),
+                        transition_reason=action.transition_reason,
+                        transition_initiator=action.transition_initiator,
+                        transition_action_id_hi=action.transition_action_id_hi,
+                        transition_action_id_lo=action.transition_action_id_lo,
+                    )
+                    for action in actions
+                ]
+                req_ids = [action.request_id for action in actions]
+                self.output_queue.put_nowait(
+                    (
+                        client_index,
+                        EngineCoreOutputs(finished_requests=req_ids, outputs=outputs),
+                    )
+                )
 
 
 class DPEngineCoreProc(EngineCoreProc):

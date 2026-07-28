@@ -36,6 +36,16 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
 )
 from vllm.distributed.weight_transfer import WeightTransferEngineFactory
+from vllm.execution_span import (
+    RankCompletionSemantics,
+    bind_async_execution_span,
+    emit_execution_span_rank_begin,
+    emit_execution_span_rank_end,
+    publish_gpu_uuid_side_table,
+    resolve_full_gpu_uuid,
+    validate_worker_context,
+    worker_instance_id_hash,
+)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
@@ -153,6 +163,7 @@ class Worker(WorkerBase):
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         # pending non-blocking PP send work from the previous iteration
         self._pp_send_work: list[Handle] = []
+        self._execution_span_pending: tuple[Any, int, int, int] | None = None
 
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
@@ -747,7 +758,46 @@ class Worker(WorkerBase):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        return self.model_runner.sample_tokens(grammar_output)
+        try:
+            output = self.model_runner.sample_tokens(grammar_output)
+        except Exception:
+            if self._execution_span_pending is not None:
+                context, worker_hash, worker_rank, gpu_uuid_hash = (
+                    self._execution_span_pending
+                )
+                emit_execution_span_rank_end(
+                    context,
+                    worker_instance_id_hash=worker_hash,
+                    worker_rank=worker_rank,
+                    gpu_uuid_hash=gpu_uuid_hash,
+                    completion_semantics=RankCompletionSemantics.SYNC_OUTPUT_READY,
+                    failed=True,
+                )
+                self._execution_span_pending = None
+            raise
+        if self._execution_span_pending is None:
+            return output
+        context, worker_hash, worker_rank, gpu_uuid_hash = (
+            self._execution_span_pending
+        )
+        self._execution_span_pending = None
+        if isinstance(output, AsyncModelRunnerOutput):
+            bind_async_execution_span(
+                output,
+                context=context,
+                worker_instance_hash=worker_hash,
+                worker_rank=worker_rank,
+                gpu_uuid_hash=gpu_uuid_hash,
+            )
+        else:
+            emit_execution_span_rank_end(
+                context,
+                worker_instance_id_hash=worker_hash,
+                worker_rank=worker_rank,
+                gpu_uuid_hash=gpu_uuid_hash,
+                completion_semantics=RankCompletionSemantics.SYNC_OUTPUT_READY,
+            )
+        return output
 
     @torch.inference_mode()
     def execute_model(
@@ -809,10 +859,48 @@ class Worker(WorkerBase):
                 comm_postprocess=comm_postprocess,
             )
 
-        with self.annotate_profile(scheduler_output):
-            output = self.model_runner.execute_model(
-                scheduler_output, intermediate_tensors
+        execution_span = validate_worker_context(scheduler_output)
+        worker_hash = worker_instance_id_hash(self.rank)
+        gpu_uuid_hash = 0
+        if execution_span is not None:
+            gpu_uuid = resolve_full_gpu_uuid(self.local_rank)
+            gpu_uuid_hash = publish_gpu_uuid_side_table(
+                context=execution_span,
+                worker_rank=self.rank,
+                device_index=self.local_rank,
+                gpu_uuid=gpu_uuid,
             )
+            emit_execution_span_rank_begin(
+                execution_span,
+                worker_instance_id_hash=worker_hash,
+                worker_rank=self.rank,
+                gpu_uuid_hash=gpu_uuid_hash,
+            )
+            self._execution_span_pending = (
+                execution_span,
+                worker_hash,
+                self.rank,
+                gpu_uuid_hash,
+            )
+        with self.annotate_profile(scheduler_output):
+            try:
+                output = self.model_runner.execute_model(
+                    scheduler_output, intermediate_tensors
+                )
+            except Exception:
+                if execution_span is not None:
+                    emit_execution_span_rank_end(
+                        execution_span,
+                        worker_instance_id_hash=worker_hash,
+                        worker_rank=self.rank,
+                        gpu_uuid_hash=gpu_uuid_hash,
+                        completion_semantics=(
+                            RankCompletionSemantics.SYNC_OUTPUT_READY
+                        ),
+                        failed=True,
+                    )
+                    self._execution_span_pending = None
+                raise
             if (
                 self.use_v2_model_runner
                 and self.model_runner.is_pooling_model
@@ -822,6 +910,26 @@ class Worker(WorkerBase):
             if isinstance(
                 output, ModelRunnerOutput | AsyncModelRunnerOutput | NoneType
             ):
+                if execution_span is not None and output is not None:
+                    self._execution_span_pending = None
+                    if isinstance(output, AsyncModelRunnerOutput):
+                        bind_async_execution_span(
+                            output,
+                            context=execution_span,
+                            worker_instance_hash=worker_hash,
+                            worker_rank=self.rank,
+                            gpu_uuid_hash=gpu_uuid_hash,
+                        )
+                    else:
+                        emit_execution_span_rank_end(
+                            execution_span,
+                            worker_instance_id_hash=worker_hash,
+                            worker_rank=self.rank,
+                            gpu_uuid_hash=gpu_uuid_hash,
+                            completion_semantics=(
+                                RankCompletionSemantics.SYNC_OUTPUT_READY
+                            ),
+                        )
                 return output
 
         assert isinstance(output, IntermediateTensors)

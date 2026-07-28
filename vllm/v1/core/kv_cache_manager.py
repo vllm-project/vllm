@@ -14,6 +14,17 @@ from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
+from vllm.obs_probe import obs_emit, obs_request_id_hash
+from vllm.obs10v_probe import (
+    current_scheduler_context,
+    emit_request_state_snapshot,
+    emit_transition,
+    record_allocation,
+    record_free,
+    record_prefix_attach,
+    record_recompute,
+)
+from vllm.v2_trace import v2_instant
 
 logger = init_logger(__name__)
 
@@ -117,6 +128,7 @@ class KVCacheManager:
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
         metrics_collector: KVCacheMetricsCollector | None = None,
+        primary_engine_instance_id: tuple[int, int] = (0, 0),
     ) -> None:
         self.max_model_len = max_model_len
         # When unset, fall back to `max_model_len` so the recycling-aware cap
@@ -145,6 +157,7 @@ class KVCacheManager:
             pcp_world_size=pcp_world_size,
             hash_block_size=hash_block_size,
             metrics_collector=self.metrics_collector,
+            primary_engine_instance_id=primary_engine_instance_id,
         )
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
@@ -211,6 +224,39 @@ class KVCacheManager:
                 request.block_hashes, max_cache_hit_length
             )
         )
+        computed_block_ids = [
+            block.block_id for group in computed_blocks for block in group
+        ]
+        obs_emit(
+            "kv",
+            "prefix_cache_lookup",
+            request_id=request.request_id,
+            prompt_token_count=request.num_tokens,
+            max_cache_hit_length=max_cache_hit_length,
+            prefix_cache_hit=bool(num_new_computed_tokens),
+            num_cached_tokens=num_new_computed_tokens,
+            num_computed_blocks=len(computed_block_ids),
+            physical_block_id=computed_block_ids[0] if computed_block_ids else None,
+            block_ids_head=computed_block_ids[:16],
+        )
+        if num_new_computed_tokens:
+            obs_emit(
+                "kv",
+                "prefix_cache_hit_detail",
+                request_id=request.request_id,
+                num_cached_tokens=num_new_computed_tokens,
+                num_computed_blocks=len(computed_block_ids),
+                physical_block_id=computed_block_ids[0] if computed_block_ids else None,
+                block_ids_head=computed_block_ids[:16],
+            )
+        else:
+            obs_emit(
+                "kv",
+                "prefix_cache_miss_detail",
+                request_id=request.request_id,
+                prompt_token_count=request.num_tokens,
+                miss_reason="no_matching_cached_prefix",
+            )
 
         if self.log_stats:
             assert self.prefix_cache_stats is not None
@@ -395,6 +441,37 @@ class KVCacheManager:
             # Cannot allocate new blocks
             return None
 
+        current_block_ids = self.get_block_ids(request.request_id)
+        flat_current_block_ids = [
+            block_id
+            for group_block_ids in current_block_ids
+            for block_id in group_block_ids
+        ]
+        allocation_candidates = [
+            block.block_id
+            for block in self.block_pool.free_block_queue.get_all_free_blocks()[
+                :num_blocks_to_allocate
+            ]
+        ]
+        computed_candidate_ids = [
+            block.block_id
+            for group in getattr(
+                new_computed_block_list,
+                "blocks",
+                new_computed_block_list,
+            )
+            for block in group
+        ]
+        emit_request_state_snapshot(
+            request_id=request.request_id,
+            snapshot_stage="before_scheduler_allocate",
+            block_table_physical_ids=flat_current_block_ids,
+            slot_mapping_physical_ids=None,
+            free_pool_physical_ids=allocation_candidates,
+            ownership_physical_ids=computed_candidate_ids,
+            num_logical_blocks=len(flat_current_block_ids),
+        )
+
         if (
             new_computed_block_list is not self.empty_kv_cache_blocks.blocks
             or num_external_computed_tokens > 0
@@ -407,6 +484,20 @@ class KVCacheManager:
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_external_computed_tokens=num_external_computed_tokens,
             )
+            computed_block_groups = getattr(
+                new_computed_block_list,
+                "blocks",
+                new_computed_block_list,
+            )
+            for group in computed_block_groups:
+                for logical_block_index, block in enumerate(group):
+                    record_prefix_attach(
+                        request.request_id,
+                        block.block_id,
+                        logical_block_index,
+                        block.ref_cnt,
+                        block.block_hash is not None,
+                    )
 
         new_blocks = self.coordinator.allocate_new_blocks(
             request.request_id,
@@ -415,10 +506,138 @@ class KVCacheManager:
             num_encoder_tokens,
         )
 
+        allocated_blocks = self.create_kv_cache_blocks(new_blocks)
+        allocated_block_ids = allocated_blocks.get_block_ids(allow_none=True)
+        flat_allocated_block_ids = (
+            [
+                block_id
+                for group_block_ids in allocated_block_ids
+                for block_id in group_block_ids
+            ]
+            if allocated_block_ids is not None
+            else []
+        )
+        if flat_allocated_block_ids:
+            v2_instant(
+                "kv",
+                "kv_block_alloc",
+                request_id=request.request_id,
+                kv_block_id=flat_allocated_block_ids[0],
+                physical_block_id=flat_allocated_block_ids[0],
+                num_allocated_blocks=len(flat_allocated_block_ids),
+                num_free_blocks=self.block_pool.get_num_free_blocks(),
+                block_ids_head=flat_allocated_block_ids[:16],
+                event_reason="allocate_slots",
+            )
+            request_id_hash = obs_request_id_hash(request.request_id)
+            flat_allocated_blocks = [
+                block for group in allocated_blocks.blocks for block in group
+            ]
+            for logical_block_id, block in enumerate(flat_allocated_blocks):
+                record_allocation(
+                    request.request_id,
+                    block.block_id,
+                    logical_block_id,
+                    block.ref_cnt,
+                    block.block_hash is not None,
+                )
+            if request.num_preemptions > 0 and flat_allocated_blocks:
+                block = flat_allocated_blocks[0]
+                record_recompute(
+                    request.request_id,
+                    block.block_id,
+                    0,
+                    block.ref_cnt,
+                    block.block_hash is not None,
+                )
+            for logical_block_id, physical_block_id in enumerate(
+                flat_allocated_block_ids
+            ):
+                obs_emit(
+                    "kv",
+                    "kv_block_alloc_detail",
+                    request_id=request.request_id,
+                    request_id_hash=request_id_hash,
+                    logical_block_id=logical_block_id,
+                    physical_block_id=physical_block_id,
+                    ref_count_before=0,
+                    ref_count_after=1,
+                    block_event_type="alloc",
+                    event_reason="allocate_slots",
+                    num_free_blocks=self.block_pool.get_num_free_blocks(),
+                )
+                obs_emit(
+                    "kv",
+                    "kv_block_detail",
+                    request_id=request.request_id,
+                    request_id_hash=request_id_hash,
+                    logical_block_id=logical_block_id,
+                    physical_block_id=physical_block_id,
+                    block_event_type="alloc",
+                    detail_kind="allocated",
+                )
+                obs_emit(
+                    "kv",
+                    "block_table_entry",
+                    request_id=request.request_id,
+                    request_id_hash=request_id_hash,
+                    logical_block_id=logical_block_id,
+                    physical_block_id=physical_block_id,
+                    block_table_source="kv_cache_manager_allocate_slots",
+                )
+                obs_emit(
+                    "kv",
+                    "kv_block_refcount_change",
+                    request_id=request.request_id,
+                    request_id_hash=request_id_hash,
+                    physical_block_id=physical_block_id,
+                    ref_count_before=0,
+                    ref_count_after=1,
+                    refcount_change_reason="allocate_slots",
+                )
+                obs_emit(
+                    "kv",
+                    "block_owner_change",
+                    request_id=request.request_id,
+                    request_id_hash=request_id_hash,
+                    physical_block_id=physical_block_id,
+                    old_owner_request_id_hash=0,
+                    new_owner_request_id_hash=request_id_hash,
+                    owner_change_reason="allocate_slots",
+                )
+            emit_request_state_snapshot(
+                request_id=request.request_id,
+                snapshot_stage="after_scheduler_allocation",
+                block_table_physical_ids=flat_allocated_block_ids,
+                slot_mapping_physical_ids=[],
+                num_logical_blocks=len(flat_allocated_block_ids),
+            )
+        current_block_ids = self.get_block_ids(request.request_id)
+        flat_current_block_ids = [
+            block_id
+            for group_block_ids in current_block_ids
+            for block_id in group_block_ids
+        ]
+        emit_request_state_snapshot(
+            request_id=request.request_id,
+            snapshot_stage="after_block_table_update",
+            block_table_physical_ids=flat_current_block_ids,
+            slot_mapping_physical_ids=[],
+            num_logical_blocks=len(flat_current_block_ids),
+        )
+        if num_new_computed_tokens > 0:
+            v2_instant(
+                "kv",
+                "prefix_cache_hit",
+                request_id=request.request_id,
+                num_tokens=num_new_computed_tokens,
+                event_reason="new_computed_blocks",
+            )
+
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
         if not self.enable_caching or delay_cache_blocks:
-            return self.create_kv_cache_blocks(new_blocks)
+            return allocated_blocks
 
         # NOTE(woosuk): We want to commit (cache) up to num_local_computed_tokens
         # + num_external_computed_tokens + num_new_tokens, but must exclude
@@ -429,11 +648,55 @@ class KVCacheManager:
             total_computed_tokens + num_new_tokens,
             request.num_tokens,
         )
+        cache_candidate_ids = self.get_block_ids(request.request_id)
+        cache_state_before = {
+            block_id: self.block_pool.blocks[block_id].block_hash is not None
+            for group_block_ids in cache_candidate_ids
+            for block_id in group_block_ids
+        }
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
+        obs_emit(
+            "kv",
+            "prefix_cache_insert_detail",
+            request_id=request.request_id,
+            num_tokens_to_cache=num_tokens_to_cache,
+            total_computed_tokens=total_computed_tokens,
+            num_new_tokens=num_new_tokens,
+        )
+        cached_block_ids = self.get_block_ids(request.request_id)
+        flat_cached_block_ids = [
+            block_id
+            for group_block_ids in cached_block_ids
+            for block_id in group_block_ids
+        ]
+        for logical_block_index, physical_block_id in enumerate(
+            flat_cached_block_ids
+        ):
+            block = self.block_pool.blocks[physical_block_id]
+            cached_before = cache_state_before.get(physical_block_id, False)
+            cached_after = block.block_hash is not None
+            if cached_before or not cached_after:
+                continue
+            emit_transition(
+                request_id=request.request_id,
+                physical_block_id=physical_block_id,
+                logical_block_index=logical_block_index,
+                block_action="prefix_cache_insert",
+                block_action_reason="cache_blocks_commit",
+                event_stage="prefix_cache_commit",
+                owner_before_hash=obs_request_id_hash(request.request_id),
+                owner_after_hash=obs_request_id_hash(request.request_id),
+                refcount_before=block.ref_cnt,
+                refcount_after=block.ref_cnt,
+                is_cached_before=cached_before,
+                is_cached_after=cached_after,
+                is_shared_before=block.ref_cnt > 1,
+                is_shared_after=block.ref_cnt > 1,
+            )
 
-        return self.create_kv_cache_blocks(new_blocks)
+        return allocated_blocks
 
-    def free(self, request: Request) -> None:
+    def free(self, request: Request, release_reason: int = 3) -> None:
         """Free the blocks allocated for the request.
         We free the blocks in reverse order so that the tail blocks are evicted
         first when caching is enabled.
@@ -441,7 +704,110 @@ class KVCacheManager:
         Args:
             request: The request to free the blocks.
         """
-        self.coordinator.free(request.request_id)
+        block_ids = self.get_block_ids(request.request_id)
+        flat_block_ids = [
+            block_id for group_block_ids in block_ids for block_id in group_block_ids
+        ]
+        before_states = {
+            block_id: (
+                self.block_pool.blocks[block_id].ref_cnt,
+                self.block_pool.blocks[block_id].block_hash is not None,
+            )
+            for block_id in flat_block_ids
+        }
+        pre_free_stage = (
+            "before_scheduler_free"
+            if current_scheduler_context()
+            else "request_finish_pre_cleanup"
+        )
+        emit_request_state_snapshot(
+            request_id=request.request_id,
+            snapshot_stage=pre_free_stage,
+            block_table_physical_ids=flat_block_ids,
+            slot_mapping_physical_ids=None,
+            num_logical_blocks=len(flat_block_ids),
+        )
+        self.coordinator.free(request.request_id, release_reason)
+        v2_instant(
+            "kv",
+            "kv_block_free",
+            request_id=request.request_id,
+            kv_block_id=flat_block_ids[0] if flat_block_ids else None,
+            physical_block_id=flat_block_ids[0] if flat_block_ids else None,
+            num_touched_blocks=len(flat_block_ids),
+            num_free_blocks=self.block_pool.get_num_free_blocks(),
+            block_ids_head=flat_block_ids[:16],
+            event_reason="free_request",
+        )
+        request_id_hash = obs_request_id_hash(request.request_id)
+        for logical_block_id, physical_block_id in enumerate(flat_block_ids):
+            block = self.block_pool.blocks[physical_block_id]
+            refcount_before, cached_before = before_states[physical_block_id]
+            record_free(
+                request.request_id,
+                physical_block_id,
+                logical_block_id,
+                refcount_before,
+                block.ref_cnt,
+                cached_before,
+                block.block_hash is not None,
+            )
+            obs_emit(
+                "kv",
+                "kv_block_free_detail",
+                request_id=request.request_id,
+                request_id_hash=request_id_hash,
+                logical_block_id=logical_block_id,
+                physical_block_id=physical_block_id,
+                ref_count_before=1,
+                ref_count_after=0,
+                block_event_type="free",
+                event_reason="free_request",
+                num_free_blocks=self.block_pool.get_num_free_blocks(),
+            )
+            obs_emit(
+                "kv",
+                "kv_block_refcount_change",
+                request_id=request.request_id,
+                request_id_hash=request_id_hash,
+                physical_block_id=physical_block_id,
+                ref_count_before=1,
+                ref_count_after=0,
+                refcount_change_reason="free_request",
+            )
+            obs_emit(
+                "kv",
+                "block_owner_change",
+                request_id=request.request_id,
+                request_id_hash=request_id_hash,
+                physical_block_id=physical_block_id,
+                old_owner_request_id_hash=request_id_hash,
+                new_owner_request_id_hash=0,
+                owner_change_reason="free_request",
+            )
+        emit_request_state_snapshot(
+            request_id=request.request_id,
+            snapshot_stage="block_pool_post_free_snapshot",
+            block_table_physical_ids=None,
+            slot_mapping_physical_ids=None,
+            free_pool_physical_ids=[
+                block_id
+                for block_id in flat_block_ids
+                if self.block_pool.blocks[block_id].ref_cnt == 0
+            ],
+            num_logical_blocks=0,
+        )
+        emit_request_state_snapshot(
+            request_id=request.request_id,
+            snapshot_stage=(
+                "after_scheduler_free"
+                if current_scheduler_context()
+                else "request_finish_post_cleanup"
+            ),
+            block_table_physical_ids=None,
+            slot_mapping_physical_ids=None,
+            num_logical_blocks=0,
+        )
 
     def remove_skipped_blocks(
         self, request_id: str, total_computed_tokens: int
@@ -462,6 +828,13 @@ class KVCacheManager:
         Args:
             block_ids: Set of block IDs to evict from cache.
         """
+        for block_id in block_ids:
+            obs_emit(
+                "kv",
+                "kv_block_evict_detail",
+                physical_block_id=block_id,
+                evict_reason="kv_cache_manager_evict_blocks",
+            )
         self.block_pool.evict_blocks(block_ids)
 
     def reset_prefix_cache(self) -> bool:

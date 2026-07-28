@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import os
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
@@ -50,8 +51,13 @@ from vllm.v1.core.sched.request_queue import (
     SchedulingPolicy,
     create_request_queue,
 )
-from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.core.sched.utils import determine_stop_status, remove_all
+from vllm.v1.engine import (
+    EngineCoreAbortRequest,
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
@@ -60,6 +66,21 @@ from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
+from vllm.obs_probe import obs_emit
+from vllm.obs10v_probe import obs10v_scheduler_scope, record_preemption
+from vllm.primary_usdt import (
+    PRIMARY_SEMANTIC_DISPATCH_ENABLED,
+    UINT64_MAX,
+    SourceOwnedCounter,
+    TransitionInitiator,
+    TransitionReason,
+    emit_primary_usdt,
+    engine_instance_id_from_config,
+    new_transition_action_id,
+    primary_request_id_hash,
+    validate_transition_semantics,
+)
+from vllm.v2_trace import v2_instant, v2_range
 
 logger = init_logger(__name__)
 
@@ -101,6 +122,11 @@ class Scheduler(SchedulerInterface):
             defaultdict(set) if include_finished_set else None
         )
         self.prev_step_scheduled_req_ids: set[str] = set()
+        self._v2_scheduler_step_counter = SourceOwnedCounter()
+        self._primary_scheduler_output_counter = SourceOwnedCounter()
+        self._primary_scheduler_batch_counter = SourceOwnedCounter()
+        self._primary_queue_snapshot_counter = SourceOwnedCounter()
+        self._primary_transition_actions: set[tuple[int, int]] = set()
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
@@ -237,6 +263,11 @@ class Scheduler(SchedulerInterface):
             pcp_world_size=self.pcp_world_size,
             hash_block_size=hash_block_size,
             metrics_collector=self.kv_metrics_collector,
+            primary_engine_instance_id=(
+                engine_instance_id_from_config(vllm_config)
+                if PRIMARY_SEMANTIC_DISPATCH_ENABLED
+                else (0, 0)
+            ),
         )
         # Bind GPU block pool to the KV connector. This must happen after
         # kv_cache_manager is constructed so block_pool is available.
@@ -350,6 +381,144 @@ class Scheduler(SchedulerInterface):
         return num_new_tokens
 
     def schedule(self) -> SchedulerOutput:
+        if PRIMARY_SEMANTIC_DISPATCH_ENABLED:
+            scheduler_step_id = self._v2_scheduler_step_counter.next()
+            batch_id = f"sched-{scheduler_step_id}"
+            engine_instance_id = engine_instance_id_from_config(self.vllm_config)
+            emit_primary_usdt(
+                "scheduler_step_begin_v2",
+                engine_instance_id=engine_instance_id,
+                scheduler_step_id=scheduler_step_id,
+                running_queue_size=len(self.running),
+                waiting_queue_size=len(self.waiting),
+            )
+        else:
+            scheduler_step_id = UINT64_MAX
+            batch_id = ""
+        obs_emit(
+            "sched",
+            "scheduler_step_enter",
+            scheduler_step_id=scheduler_step_id,
+            scheduler_output_id=scheduler_step_id,
+            batch_id=batch_id,
+            running_queue_size=len(self.running),
+            waiting_queue_size=len(self.waiting),
+            source_file="vllm/v1/core/sched/scheduler.py",
+            source_func="Scheduler.schedule",
+        )
+        with obs10v_scheduler_scope(
+            scheduler_step_id,
+            scheduler_step_id,
+            batch_id,
+        ):
+            with v2_range(
+                "sched",
+                "scheduler_step",
+                scheduler_step_id=scheduler_step_id,
+                batch_id=batch_id,
+                num_running=len(self.running),
+                num_waiting=len(self.waiting),
+                source_file="vllm/v1/core/sched/scheduler.py",
+                source_func="Scheduler.schedule",
+            ):
+                try:
+                    scheduler_output = self._schedule_impl(scheduler_step_id)
+                except Exception:
+                    if PRIMARY_SEMANTIC_DISPATCH_ENABLED:
+                        emit_primary_usdt(
+                            "scheduler_step_end_v2",
+                            engine_instance_id=engine_instance_id,
+                            scheduler_step_id=scheduler_step_id,
+                            scheduler_output_id=UINT64_MAX,
+                            scheduler_batch_id=UINT64_MAX,
+                            scheduled_request_count=0,
+                            step_status=2,
+                        )
+                    raise
+        scheduler_output_id = scheduler_output.primary_scheduler_output_id
+        scheduler_batch_id = scheduler_output.primary_scheduler_batch_id
+        batch_id = (
+            f"batch-{scheduler_batch_id}"
+            if scheduler_batch_id != UINT64_MAX
+            else ""
+        )
+        setattr(scheduler_output, "obs_scheduler_step_id", scheduler_step_id)
+        setattr(scheduler_output, "obs_scheduler_output_id", scheduler_output_id)
+        setattr(scheduler_output, "obs_batch_id", batch_id)
+        if PRIMARY_SEMANTIC_DISPATCH_ENABLED:
+            emit_primary_usdt(
+                "scheduler_step_end_v2",
+                engine_instance_id=engine_instance_id,
+                scheduler_step_id=scheduler_step_id,
+                scheduler_output_id=scheduler_output_id,
+                scheduler_batch_id=scheduler_batch_id,
+                scheduled_request_count=len(scheduler_output.num_scheduled_tokens),
+                step_status=1,
+            )
+        obs_emit(
+            "sched",
+            "scheduler_step_end",
+            scheduler_step_id=scheduler_step_id,
+            scheduler_output_id=scheduler_output_id,
+            batch_id=batch_id,
+            scheduled_request_count=len(scheduler_output.num_scheduled_tokens),
+            preempted_count=len(scheduler_output.preempted_req_ids or []),
+            finished_count=len(scheduler_output.finished_req_ids),
+            source_file="vllm/v1/core/sched/scheduler.py",
+            source_func="Scheduler.schedule",
+        )
+        return scheduler_output
+
+    def _emit_primary_queue_snapshots(
+        self,
+        *,
+        engine_instance_id: tuple[int, int],
+        scheduler_step_id: int,
+        scheduler_output_id: int,
+        scheduler_batch_id: int,
+    ) -> None:
+        """Emit complete, source-owned post-schedule queue membership sets."""
+        if not PRIMARY_SEMANTIC_DISPATCH_ENABLED:
+            return
+        queue_specs = (
+            (1, self.running),
+            (2, self.waiting),
+            (3, self.skipped_waiting),
+        )
+        for queue_name, queue in queue_specs:
+            queue_snapshot_id = self._primary_queue_snapshot_counter.next()
+            members = list(queue)
+            emitted_member_count = 0
+            for queue_position, request in enumerate(members):
+                result = emit_primary_usdt(
+                    "scheduler_queue_member_v2",
+                    engine_instance_id=engine_instance_id,
+                    request_id_hash=primary_request_id_hash(request.request_id),
+                    scheduler_step_id=scheduler_step_id,
+                    scheduler_output_id=scheduler_output_id,
+                    scheduler_batch_id=scheduler_batch_id,
+                    queue_snapshot_id=queue_snapshot_id,
+                    queue_name=queue_name,
+                    queue_position=queue_position,
+                    member_count=len(members),
+                    request_state=int(request.status.value),
+                )
+                if result.complete:
+                    emitted_member_count += 1
+            emit_primary_usdt(
+                "scheduler_queue_snapshot_v2",
+                engine_instance_id=engine_instance_id,
+                scheduler_step_id=scheduler_step_id,
+                scheduler_output_id=scheduler_output_id,
+                scheduler_batch_id=scheduler_batch_id,
+                queue_snapshot_id=queue_snapshot_id,
+                queue_name=queue_name,
+                expected_member_count=len(members),
+                emitted_member_count=emitted_member_count,
+                membership_complete=int(emitted_member_count == len(members)),
+            )
+
+    def _schedule_impl(self, scheduler_step_id: int) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -361,6 +530,12 @@ class Scheduler(SchedulerInterface):
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
 
+        scheduler_output_id = (
+            self._primary_scheduler_output_counter.next()
+            if PRIMARY_SEMANTIC_DISPATCH_ENABLED
+            else UINT64_MAX
+        )
+        scheduler_batch_id = UINT64_MAX
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
@@ -503,7 +678,13 @@ class Scheduler(SchedulerInterface):
                     else:
                         preempted_req = self.running.pop()
 
-                    self._preempt_request(preempted_req, scheduled_timestamp)
+                    self._preempt_request(
+                        preempted_req,
+                        scheduled_timestamp,
+                        scheduler_step_id,
+                        scheduler_output_id,
+                        scheduler_batch_id,
+                    )
                     preempted_reqs.append(preempted_req)
                     if preempted_req == request:
                         # No more request to preempt. Cannot schedule this request.
@@ -581,7 +762,12 @@ class Scheduler(SchedulerInterface):
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(
                     request.status
-                ) and not self._try_promote_blocked_waiting_request(request):
+                ) and not self._try_promote_blocked_waiting_request(
+                    request,
+                    scheduler_step_id,
+                    scheduler_output_id,
+                    scheduler_batch_id,
+                ):
                     if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                         logger.debug(
                             "%s is still in WAITING_FOR_REMOTE_KVS state.",
@@ -836,7 +1022,18 @@ class Scheduler(SchedulerInterface):
                 )
                 num_scheduled_tokens[request_id] = num_new_tokens
                 token_budget -= num_new_tokens
-                request.status = RequestStatus.RUNNING
+                if request.status == RequestStatus.PREEMPTED:
+                    self._transition_request_state(
+                        request,
+                        RequestStatus.RUNNING,
+                        TransitionReason.SCHEDULE_RESUME,
+                        TransitionInitiator.SCHEDULER_POLICY,
+                        scheduler_step_id=scheduler_step_id,
+                        scheduler_output_id=scheduler_output_id,
+                        scheduler_batch_id=scheduler_batch_id,
+                    )
+                else:
+                    request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
@@ -920,6 +1117,17 @@ class Scheduler(SchedulerInterface):
             else None
         )
 
+        if PRIMARY_SEMANTIC_DISPATCH_ENABLED and total_num_scheduled_tokens > 0:
+            scheduler_batch_id = self._primary_scheduler_batch_counter.next()
+
+        primary_block_generations: dict[int, int] = {}
+        if PRIMARY_SEMANTIC_DISPATCH_ENABLED:
+            for request_id in num_scheduled_tokens:
+                for group in self.kv_cache_manager.get_block_ids(request_id):
+                    for block_id in group:
+                        block = self.kv_cache_manager.block_pool.blocks[block_id]
+                        primary_block_generations[block_id] = block.primary_generation
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -936,6 +1144,273 @@ class Scheduler(SchedulerInterface):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
+            primary_scheduler_step_id=scheduler_step_id,
+            primary_scheduler_output_id=scheduler_output_id,
+            primary_scheduler_batch_id=scheduler_batch_id,
+            primary_block_generations=primary_block_generations,
+        )
+        num_prefill_tokens = 0
+        num_decode_tokens = 0
+        for req in scheduled_new_reqs:
+            num_prefill_tokens += num_scheduled_tokens.get(req.request_id, 0)
+        for req_id in cached_reqs_data.req_ids:
+            num_tokens = num_scheduled_tokens.get(req_id, 0)
+            if cached_reqs_data.is_context_phase(req_id):
+                num_prefill_tokens += num_tokens
+            else:
+                num_decode_tokens += num_tokens
+        if num_prefill_tokens and num_decode_tokens:
+            phase = "mixed"
+        elif num_prefill_tokens:
+            phase = "prefill"
+        elif num_decode_tokens:
+            phase = "decode"
+        else:
+            phase = "unknown"
+
+        request_ids = list(num_scheduled_tokens.keys())
+        batch_id = (
+            f"batch-{scheduler_batch_id}"
+            if scheduler_batch_id != UINT64_MAX
+            else ""
+        )
+        if PRIMARY_SEMANTIC_DISPATCH_ENABLED:
+            engine_instance_id = engine_instance_id_from_config(self.vllm_config)
+            self._emit_primary_queue_snapshots(
+                engine_instance_id=engine_instance_id,
+                scheduler_step_id=scheduler_step_id,
+                scheduler_output_id=scheduler_output_id,
+                scheduler_batch_id=scheduler_batch_id,
+            )
+            emit_primary_usdt(
+                "scheduler_output_v2",
+                engine_instance_id=engine_instance_id,
+                scheduler_step_id=scheduler_step_id,
+                scheduler_output_id=scheduler_output_id,
+                scheduler_batch_id=scheduler_batch_id,
+                request_count=len(request_ids),
+                token_count=total_num_scheduled_tokens,
+                membership_complete=1,
+            )
+            for member_index, request_id in enumerate(request_ids):
+                for kv_cache_group_id, group in enumerate(
+                    self.kv_cache_manager.get_block_ids(request_id)
+                ):
+                    for logical_block_index, physical_block_id in enumerate(group):
+                        emit_primary_usdt(
+                            "kv_block_table_entry_v2",
+                            engine_instance_id=engine_instance_id,
+                            request_id_hash=primary_request_id_hash(request_id),
+                            scheduler_step_id=scheduler_step_id,
+                            scheduler_output_id=scheduler_output_id,
+                            scheduler_batch_id=scheduler_batch_id,
+                            physical_block_id=physical_block_id,
+                            block_generation=primary_block_generations[
+                                physical_block_id
+                            ],
+                            logical_block_index=logical_block_index,
+                            kv_cache_group_id=kv_cache_group_id,
+                        )
+                emit_primary_usdt(
+                    "scheduler_output_member_v2",
+                    engine_instance_id=engine_instance_id,
+                    request_id_hash=primary_request_id_hash(request_id),
+                    scheduler_step_id=scheduler_step_id,
+                    scheduler_output_id=scheduler_output_id,
+                    scheduler_batch_id=scheduler_batch_id,
+                    member_index=member_index,
+                    member_count=len(request_ids),
+                    scheduled_token_count=num_scheduled_tokens[request_id],
+                    request_state=int(self.requests[request_id].status.value),
+                )
+        obs_emit(
+            "sched",
+            "scheduler_queue_snapshot",
+            scheduler_step_id=scheduler_step_id,
+            scheduler_output_id=scheduler_output_id,
+            batch_id=batch_id,
+            running_queue_size=len(self.running),
+            waiting_queue_size=len(self.waiting),
+            preempted_count=len(preempted_reqs),
+            skipped_waiting_count=len(self.skipped_waiting),
+            selected_count=len(request_ids),
+            max_num_batched_tokens=self.max_num_scheduled_tokens,
+            max_num_seqs=self.max_num_running_reqs,
+            token_budget_total=self.max_num_scheduled_tokens,
+            token_budget_remaining=self.max_num_scheduled_tokens - total_num_scheduled_tokens,
+        )
+        obs_emit(
+            "sched",
+            "scheduler_output_snapshot",
+            scheduler_step_id=scheduler_step_id,
+            scheduler_output_id=scheduler_output_id,
+            batch_id=batch_id,
+            request_count=len(request_ids),
+            batch_size=len(request_ids),
+            selected_count=len(request_ids),
+            num_prefill_tokens=num_prefill_tokens,
+            num_decode_tokens=num_decode_tokens,
+            token_budget=total_num_scheduled_tokens,
+            token_budget_total=self.max_num_scheduled_tokens,
+            token_budget_used=total_num_scheduled_tokens,
+            token_budget_remaining=self.max_num_scheduled_tokens - total_num_scheduled_tokens,
+            max_num_batched_tokens=self.max_num_scheduled_tokens,
+            max_num_seqs=self.max_num_running_reqs,
+            phase=phase,
+            preempted_count=len(preempted_reqs),
+        )
+        request_phase_by_id = {
+            req.request_id: "prefill" for req in scheduled_new_reqs
+        }
+        request_phase_by_id.update({
+            req.request_id: "prefill" for req in scheduled_resumed_reqs
+        })
+        for req_id in cached_reqs_data.req_ids:
+            request_phase_by_id[req_id] = (
+                "prefill" if cached_reqs_data.is_context_phase(req_id) else "decode"
+            )
+        try:
+            queue_sample_limit = int(os.environ.get("OBS_SCHEDULER_QUEUE_SAMPLE_LIMIT", "32") or 32)
+        except ValueError:
+            queue_sample_limit = 32
+        queue_sample_limit = max(0, min(queue_sample_limit, 256))
+        queue_specs = (
+            ("waiting", self.waiting),
+            ("running", self.running),
+            ("skipped_waiting", self.skipped_waiting),
+        )
+        if queue_sample_limit:
+            for queue_name, queue in queue_specs:
+                queue_len = len(queue)
+                queue_truncated = queue_len > queue_sample_limit
+                for sample_index, req in enumerate(list(queue)[:queue_sample_limit]):
+                    req_id = getattr(req, "request_id", None)
+                    if req_id is None:
+                        continue
+                    obs_emit(
+                        "sched",
+                        "scheduler_queue_member_sample",
+                        scheduler_step_id=scheduler_step_id,
+                        scheduler_output_id=scheduler_output_id,
+                        batch_id=batch_id,
+                        request_id=req_id,
+                        queue_snapshot_phase="after_schedule",
+                        queue_name=queue_name,
+                        queue_position=sample_index,
+                        sample_index=sample_index,
+                        sample_limit=queue_sample_limit,
+                        queue_snapshot_truncated=queue_truncated,
+                        request_phase=request_phase_by_id.get(req_id, "unknown"),
+                    )
+        for request_order_in_batch, req_id in enumerate(request_ids):
+            request_phase = request_phase_by_id.get(req_id, phase)
+            scheduled_token_count = num_scheduled_tokens.get(req_id, 0)
+            obs_emit(
+                "sched",
+                "scheduler_output_member",
+                scheduler_step_id=scheduler_step_id,
+                scheduler_output_id=scheduler_output_id,
+                batch_id=batch_id,
+                request_id=req_id,
+                request_order_in_batch=request_order_in_batch,
+                request_phase=request_phase,
+                scheduled_token_count_for_request=scheduled_token_count,
+                batch_size=len(request_ids),
+            )
+            obs_emit(
+                "sched",
+                "request_selected",
+                scheduler_step_id=scheduler_step_id,
+                scheduler_output_id=scheduler_output_id,
+                batch_id=batch_id,
+                request_id=req_id,
+                request_order_in_batch=request_order_in_batch,
+                request_phase=request_phase,
+                scheduled_token_count_for_request=scheduled_token_count,
+            )
+            obs_emit(
+                "sched",
+                "batch_member",
+                scheduler_step_id=scheduler_step_id,
+                scheduler_output_id=scheduler_output_id,
+                batch_id=batch_id,
+                request_id=req_id,
+                request_order_in_batch=request_order_in_batch,
+                batch_member_index=request_order_in_batch,
+                request_phase=request_phase,
+                scheduled_token_count_for_request=scheduled_token_count,
+            )
+            obs_emit(
+                "sched",
+                "request_batch_index_mapping",
+                scheduler_step_id=scheduler_step_id,
+                scheduler_output_id=scheduler_output_id,
+                batch_id=batch_id,
+                request_id=req_id,
+                request_order_in_batch=request_order_in_batch,
+                batch_member_index=request_order_in_batch,
+            )
+        v2_instant(
+            "sched",
+            "batch_created",
+            scheduler_step_id=scheduler_step_id,
+            batch_id=batch_id,
+            request_id_list=request_ids[:8],
+            request_count=len(request_ids),
+            selected_count=len(request_ids),
+            num_prefill_tokens=num_prefill_tokens,
+            num_decode_tokens=num_decode_tokens,
+            num_tokens=total_num_scheduled_tokens,
+            phase=phase,
+            preempted_count=len(preempted_reqs),
+        )
+        v2_instant(
+            "sched",
+            "request_selected",
+            scheduler_step_id=scheduler_step_id,
+            batch_id=batch_id,
+            request_id_list=request_ids[:8],
+            request_count=len(request_ids),
+            selected_count=len(request_ids),
+        )
+        if preempted_reqs:
+            v2_instant(
+                "sched",
+                "request_preempted",
+                scheduler_step_id=scheduler_step_id,
+                batch_id=batch_id,
+                request_id_list=[req.request_id for req in preempted_reqs[:8]],
+                preempted_count=len(preempted_reqs),
+            )
+        touched_block_ids: list[int] = []
+        for blocks in req_to_new_blocks.values():
+            block_ids = blocks.get_block_ids(allow_none=True)
+            if block_ids is None:
+                continue
+            for group_block_ids in block_ids:
+                touched_block_ids.extend(group_block_ids)
+        v2_instant(
+            "kv",
+            "kv_state_snapshot",
+            scheduler_step_id=scheduler_step_id,
+            batch_id=batch_id,
+            request_id_list=request_ids[:8],
+            request_count=len(request_ids),
+            num_touched_blocks=len(touched_block_ids),
+            kv_block_id=touched_block_ids[0] if touched_block_ids else None,
+            block_ids_head=touched_block_ids[:16],
+        )
+        obs_emit(
+            "kv",
+            "request_kv_state_snapshot",
+            scheduler_step_id=scheduler_step_id,
+            scheduler_output_id=scheduler_output_id,
+            batch_id=batch_id,
+            request_id_list=request_ids[:8],
+            request_count=len(request_ids),
+            num_touched_blocks=len(touched_block_ids),
+            physical_block_id=touched_block_ids[0] if touched_block_ids else None,
+            block_ids_head=touched_block_ids[:16],
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -962,7 +1437,62 @@ class Scheduler(SchedulerInterface):
     ) -> KVConnectorMetadata:
         return connector.build_connector_meta(scheduler_output)
 
-    def _preempt_request(self, request: Request, timestamp: float) -> None:
+    def _transition_request_state(
+        self,
+        request: Request,
+        next_state: RequestStatus,
+        reason: TransitionReason,
+        initiator: TransitionInitiator,
+        *,
+        transition_action_id: tuple[int, int] | None = None,
+        scheduler_step_id: int = UINT64_MAX,
+        scheduler_output_id: int = UINT64_MAX,
+        scheduler_batch_id: int = UINT64_MAX,
+    ) -> tuple[int, int]:
+        """Own the mutation and emit its unique direct Q2 v3 transition."""
+        previous_state = request.status
+        action_id = transition_action_id or (
+            new_transition_action_id()
+            if PRIMARY_SEMANTIC_DISPATCH_ENABLED
+            else (0, 0)
+        )
+        if PRIMARY_SEMANTIC_DISPATCH_ENABLED:
+            validate_transition_semantics(
+                int(previous_state.value),
+                int(next_state.value),
+                int(reason),
+                int(initiator),
+                action_id,
+            )
+            if action_id in self._primary_transition_actions:
+                raise RuntimeError("Q2_TRANSITION_DUPLICATE_ACTION_ID")
+            self._primary_transition_actions.add(action_id)
+        request.status = next_state
+        if PRIMARY_SEMANTIC_DISPATCH_ENABLED:
+            emit_primary_usdt(
+                "scheduler_state_transition_v3",
+                engine_instance_id=engine_instance_id_from_config(self.vllm_config),
+                request_id_hash=primary_request_id_hash(request.request_id),
+                scheduler_step_id=scheduler_step_id,
+                scheduler_output_id=scheduler_output_id,
+                scheduler_batch_id=scheduler_batch_id,
+                state_before=int(previous_state.value),
+                state_after=int(next_state.value),
+                transition_reason=int(reason),
+                transition_initiator=int(initiator),
+                transition_action_id_hi=action_id[0],
+                transition_action_id_lo=action_id[1],
+            )
+        return action_id
+
+    def _preempt_request(
+        self,
+        request: Request,
+        timestamp: float,
+        scheduler_step_id: int,
+        scheduler_output_id: int,
+        scheduler_batch_id: int,
+    ) -> None:
         """Preempt a request and put it back to the waiting queue.
 
         NOTE: The request should be popped from the running queue outside of this
@@ -971,9 +1501,18 @@ class Scheduler(SchedulerInterface):
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"
         )
-        self.kv_cache_manager.free(request)
+        self._transition_request_state(
+            request,
+            RequestStatus.PREEMPTED,
+            TransitionReason.RESOURCE_PREEMPTION,
+            TransitionInitiator.SCHEDULER_POLICY,
+            scheduler_step_id=scheduler_step_id,
+            scheduler_output_id=scheduler_output_id,
+            scheduler_batch_id=scheduler_batch_id,
+        )
+        record_preemption(request.request_id)
+        self.kv_cache_manager.free(request, release_reason=5)
         self.encoder_cache_manager.free(request)
-        request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
         if request.spec_token_ids:
             request.spec_token_ids = []
@@ -1395,6 +1934,7 @@ class Scheduler(SchedulerInterface):
                 self._free_encoder_inputs(request)
 
             stopped = False
+            stop_status: RequestStatus | None = None
             new_logprobs = None
             new_token_ids = generated_token_ids
             pooler_output = pooler_outputs[req_index] if pooler_outputs else None
@@ -1403,12 +1943,13 @@ class Scheduler(SchedulerInterface):
 
             # Check for stop and update request status.
             if new_token_ids:
-                new_token_ids, stopped = self._update_request_with_output(
+                new_token_ids, stop_status = self._update_request_with_output(
                     request, new_token_ids
                 )
+                stopped = stop_status is not None
             elif request.pooling_params and pooler_output is not None:
                 # Pooling stops as soon as there is output.
-                request.status = RequestStatus.FINISHED_STOPPED
+                stop_status = RequestStatus.FINISHED_STOPPED
                 stopped = True
 
             if new_token_ids and self.structured_output_manager.should_advance(request):
@@ -1424,20 +1965,47 @@ class Scheduler(SchedulerInterface):
                         new_token_ids,
                         req_id,
                     )
-                    request.status = RequestStatus.FINISHED_ERROR
+                    stop_status = RequestStatus.FINISHED_ERROR
                     request.resumable = False
                     stopped = True
 
             routed_experts = None
             finish_reason = None
+            terminal_state = 0
+            transition_reason = 0
+            transition_initiator = 0
+            transition_action_id = (0, 0)
             if stopped:
+                assert stop_status is not None
                 routed_experts = self._get_routed_experts(request)
 
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
                 # reset the status to WAITING for streaming requests that continue.
-                finish_reason = request.get_finished_reason()
+                finish_reason = RequestStatus.get_finished_reason(stop_status)
                 finished = self._handle_stopped_request(request)
                 if finished:
+                    reason = (
+                        TransitionReason.GRAMMAR_VALIDATION_ERROR
+                        if stop_status == RequestStatus.FINISHED_ERROR
+                        else TransitionReason.NORMAL_COMPLETION
+                    )
+                    initiator = (
+                        TransitionInitiator.GRAMMAR_VALIDATOR
+                        if stop_status == RequestStatus.FINISHED_ERROR
+                        else TransitionInitiator.MODEL_EXECUTION
+                    )
+                    transition_action_id = self._transition_request_state(
+                        request,
+                        stop_status,
+                        reason,
+                        initiator,
+                        scheduler_step_id=scheduler_output.primary_scheduler_step_id,
+                        scheduler_output_id=scheduler_output.primary_scheduler_output_id,
+                        scheduler_batch_id=scheduler_output.primary_scheduler_batch_id,
+                    )
+                    terminal_state = int(stop_status.value)
+                    transition_reason = int(reason)
+                    transition_initiator = int(initiator)
                     kv_transfer_params = self._free_request(request)
 
                 if status_before_stop == RequestStatus.RUNNING:
@@ -1480,6 +2048,11 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        terminal_state=terminal_state,
+                        transition_reason=transition_reason,
+                        transition_initiator=transition_initiator,
+                        transition_action_id_hi=transition_action_id[0],
+                        transition_action_id_lo=transition_action_id[1],
                     )
                 )
             else:
@@ -1495,8 +2068,15 @@ class Scheduler(SchedulerInterface):
 
         if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
             requests = [self.requests[req_id] for req_id in failed_kv_load_req_ids]
-            self.finish_requests(failed_kv_load_req_ids, RequestStatus.FINISHED_ERROR)
+            completed_errors = self.finish_requests(
+                failed_kv_load_req_ids,
+                RequestStatus.FINISHED_ERROR,
+                reason=TransitionReason.KV_LOAD_ERROR,
+                initiator=TransitionInitiator.KV_CONNECTOR,
+            )
+            error_actions = {action.request_id: action for action, _ in completed_errors}
             for request in requests:
+                action = error_actions[request.request_id]
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=request.request_id,
@@ -1504,6 +2084,11 @@ class Scheduler(SchedulerInterface):
                         finish_reason=request.get_finished_reason(),
                         events=request.take_events(),
                         trace_headers=request.trace_headers,
+                        terminal_state=int(RequestStatus.FINISHED_ERROR.value),
+                        transition_reason=action.transition_reason,
+                        transition_initiator=action.transition_initiator,
+                        transition_action_id_hi=action.transition_action_id_hi,
+                        transition_action_id_lo=action.transition_action_id_lo,
                     )
                 )
 
@@ -1634,21 +2219,21 @@ class Scheduler(SchedulerInterface):
 
     def _update_request_with_output(
         self, request: Request, new_token_ids: list[int]
-    ) -> tuple[list[int], bool]:
+    ) -> tuple[list[int], RequestStatus | None]:
         # Append generated tokens and check for stop. Note that if
         # a request is still being prefilled, we expect the model runner
         # to return empty token ids for the request.
-        stopped = False
+        stop_status = None
         for num_new, output_token_id in enumerate(new_token_ids, 1):
             request.append_output_token_ids(output_token_id)
 
             # Check for stop and update request state.
             # This must be called before we make the EngineCoreOutput.
-            stopped = check_stop(request, self.max_model_len)
-            if stopped:
+            stop_status = determine_stop_status(request, self.max_model_len)
+            if stop_status is not None:
                 del new_token_ids[num_new:]  # Trim new tokens if needed.
                 break
-        return new_token_ids, stopped
+        return new_token_ids, stop_status
 
     def _free_encoder_inputs(self, request: Request) -> None:
         cached_encoder_input_ids = self.encoder_cache_manager.get_cached_input_ids(
@@ -1751,7 +2336,17 @@ class Scheduler(SchedulerInterface):
                 self._update_request_as_session(existing, update)
             else:
                 # Streaming-input session finished.
-                self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+                action = EngineCoreAbortRequest(
+                    request.request_id,
+                    request.transition_action_id_hi,
+                    request.transition_action_id_lo,
+                    request.transition_reason,
+                    request.transition_initiator,
+                )
+                self.finish_requests(
+                    [action],
+                    RequestStatus.FINISHED_ABORTED,
+                )
         else:
             if request.resumable:
                 request.streaming_queue = deque()
@@ -1761,8 +2356,13 @@ class Scheduler(SchedulerInterface):
                 request.record_event(EngineCoreEventType.QUEUED)
 
     def finish_requests(
-        self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus
-    ) -> list[tuple[str, int]]:
+        self,
+        request_ids: str | Iterable[str] | Iterable[EngineCoreAbortRequest] | None,
+        finished_status: RequestStatus,
+        *,
+        reason: TransitionReason | None = None,
+        initiator: TransitionInitiator | None = None,
+    ) -> list[tuple[EngineCoreAbortRequest, int]]:
         """Handles the finish signal from outside the scheduler.
 
         For example, the API server can abort a request when the client
@@ -1775,19 +2375,28 @@ class Scheduler(SchedulerInterface):
             include any that were already finished.
         """
         assert RequestStatus.is_finished(finished_status)
+        action_by_request: dict[str, EngineCoreAbortRequest] = {}
         if isinstance(request_ids, str):
-            request_ids = (request_ids,)
+            normalized_request_ids: Iterable[str] = (request_ids,)
         elif request_ids is not None:
-            request_ids = set(request_ids)
+            values = list(request_ids)
+            if values and isinstance(values[0], EngineCoreAbortRequest):
+                actions = values
+                action_by_request = {action.request_id: action for action in actions}
+                if len(action_by_request) != len(actions):
+                    raise RuntimeError("Q2_TRANSITION_DUPLICATE_REQUEST_ACTION")
+                normalized_request_ids = action_by_request
+            else:
+                normalized_request_ids = set(values)
         else:
-            request_ids = self.requests.keys()
+            normalized_request_ids = list(self.requests)
 
         running_requests_to_remove = set()
         waiting_requests_to_remove = []
         valid_requests = []
 
         # First pass: collect requests to remove from queues
-        for req_id in request_ids:
+        for req_id in normalized_request_ids:
             request = self.requests.get(req_id)
             if request is None or request.is_finished():
                 # Invalid request ID.
@@ -1809,6 +2418,7 @@ class Scheduler(SchedulerInterface):
             self.skipped_waiting.remove_requests(waiting_requests_to_remove)
 
         # Second pass: set status and free requests
+        completed_actions = []
         for request in valid_requests:
             delay_free_blocks = False
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
@@ -1818,10 +2428,36 @@ class Scheduler(SchedulerInterface):
                 self.finished_recving_kv_req_ids.discard(request.request_id)
                 self.failed_recving_kv_req_ids.discard(request.request_id)
 
-            request.status = finished_status
+            action = action_by_request.get(request.request_id)
+            if action is None:
+                if reason is None or initiator is None:
+                    raise RuntimeError("Q2_TRANSITION_ACTION_SEMANTICS_REQUIRED")
+                action_id = (
+                    new_transition_action_id()
+                    if PRIMARY_SEMANTIC_DISPATCH_ENABLED
+                    else (0, 0)
+                )
+                action = EngineCoreAbortRequest(
+                    request.request_id,
+                    action_id[0],
+                    action_id[1],
+                    int(reason),
+                    int(initiator),
+                )
+            self._transition_request_state(
+                request,
+                finished_status,
+                TransitionReason(action.transition_reason),
+                TransitionInitiator(action.transition_initiator),
+                transition_action_id=(
+                    action.transition_action_id_hi,
+                    action.transition_action_id_lo,
+                ),
+            )
             self._free_request(request, delay_free_blocks=delay_free_blocks)
+            completed_actions.append((action, request.client_index))
 
-        return [(r.request_id, r.client_index) for r in valid_requests]
+        return completed_actions
 
     def _free_request(
         self, request: Request, delay_free_blocks: bool = False
@@ -1843,7 +2479,9 @@ class Scheduler(SchedulerInterface):
 
     def _free_blocks(self, request: Request):
         assert request.is_finished()
-        self.kv_cache_manager.free(request)
+        self.kv_cache_manager.free(
+            request, release_reason=int(request.status.value)
+        )
         del self.requests[request.request_id]
 
     @property
@@ -2056,7 +2694,7 @@ class Scheduler(SchedulerInterface):
             else:
                 # No valid computed tokens, release allocated blocks.
                 # There may be a local cache hit on retry.
-                self.kv_cache_manager.free(request)
+                self.kv_cache_manager.free(request, release_reason=4)
 
             self.failed_recving_kv_req_ids.remove(request.request_id)
         else:
@@ -2071,7 +2709,13 @@ class Scheduler(SchedulerInterface):
 
         self.finished_recving_kv_req_ids.remove(request.request_id)
 
-    def _try_promote_blocked_waiting_request(self, request: Request) -> bool:
+    def _try_promote_blocked_waiting_request(
+        self,
+        request: Request,
+        scheduler_step_id: int,
+        scheduler_output_id: int,
+        scheduler_batch_id: int,
+    ) -> bool:
         """
         Try to promote a blocked waiting request back to schedulable states.
         """
@@ -2081,11 +2725,20 @@ class Scheduler(SchedulerInterface):
             # in KVConnectorOutput.finished_recving
             if request.request_id not in self.finished_recving_kv_req_ids:
                 return False
-            self._update_waiting_for_remote_kv(request)
             if request.num_preemptions:
-                request.status = RequestStatus.PREEMPTED
+                next_state = RequestStatus.PREEMPTED
             else:
-                request.status = RequestStatus.WAITING
+                next_state = RequestStatus.WAITING
+            self._transition_request_state(
+                request,
+                next_state,
+                TransitionReason.SCHEDULE_RESUME,
+                TransitionInitiator.SCHEDULER_POLICY,
+                scheduler_step_id=scheduler_step_id,
+                scheduler_output_id=scheduler_output_id,
+                scheduler_batch_id=scheduler_batch_id,
+            )
+            self._update_waiting_for_remote_kv(request)
             return True
 
         if request.status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR:

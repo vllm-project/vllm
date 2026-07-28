@@ -3,7 +3,10 @@
 
 import functools
 import gc
+import hashlib
 import itertools
+import json
+import os
 import threading
 import time
 from collections import defaultdict
@@ -45,6 +48,7 @@ from vllm.distributed.parallel_state import (
     is_global_first_rank,
     prepare_communication_buffer_for_model,
 )
+from vllm.execution_span import complete_async_execution_span_once
 from vllm.forward_context import (
     BatchDescriptor,
     set_forward_context,
@@ -108,6 +112,17 @@ from vllm.tracing import instrument
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
+from vllm.obs_probe import obs_emit, obs_request_id_hash
+from vllm.obs10v_probe import emit_request_state_snapshot
+from vllm.primary_usdt import (
+    PRIMARY_SEMANTIC_DISPATCH_ENABLED,
+    UINT64_MAX,
+    emit_primary_usdt,
+    engine_instance_id_from_config,
+    mapping_is_complete,
+    prepare_primary_usdt_provider,
+    primary_request_id_hash,
+)
 from vllm.utils.nvtx_pytorch_hooks import PytHooks
 from vllm.utils.platform_utils import is_pin_memory_available, num_compute_units
 from vllm.utils.torch_utils import (
@@ -201,6 +216,7 @@ from vllm.v1.worker.ubatch_utils import (
 )
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.workspace import lock_workspace
+from vllm.v2_trace import v2_range
 
 from .utils import (
     AttentionGroup,
@@ -221,6 +237,20 @@ logger = init_logger(__name__)
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
+
+
+def _complete_execution_span_after_materialization(method: Callable):
+    @functools.wraps(method)
+    def wrapped(output: Any, *args: Any, **kwargs: Any):
+        try:
+            result = method(output, *args, **kwargs)
+        except BaseException:
+            complete_async_execution_span_once(output, failed=True)
+            raise
+        complete_async_execution_span_once(output)
+        return result
+
+    return wrapped
 
 
 # Wrapper for ModelRunnerOutput to support overlapped execution.
@@ -260,6 +290,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
             )
             self.async_copy_ready_event.record()
 
+    @_complete_execution_span_after_materialization
     def get_output(self) -> ModelRunnerOutput:
         """Copy the device tensors to the host and return a ModelRunnerOutput.
 
@@ -364,6 +395,7 @@ class AsyncGPUPoolingModelRunnerOutput(AsyncModelRunnerOutput):
             )
             self.async_copy_ready_event.record()
 
+    @_complete_execution_span_after_materialization
     def get_output(self) -> ModelRunnerOutput:
         """Copy the device tensors to the host and return a ModelRunnerOutput.
         This function blocks until the copy is finished.
@@ -418,6 +450,12 @@ class GPUModelRunner(
         self.device = device
         self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
+        self._v2_execution_step_counter = itertools.count()
+        self._primary_worker_pid = os.getpid()
+        self._primary_worker_rank = int(getattr(self.parallel_config, "rank", 0))
+        self._primary_mapping_counter = itertools.count()
+        if PRIMARY_SEMANTIC_DISPATCH_ENABLED:
+            prepare_primary_usdt_provider(f"worker_rank_{self._primary_worker_rank}")
 
         self.kv_cache_dtype = kv_cache_dtype_str_to_dtype(
             cache_config.cache_dtype, self.model_config
@@ -1773,6 +1811,137 @@ class GPUModelRunner(
 
         return encoder_seq_lens, encoder_seq_lens_cpu
 
+    def _emit_primary_slot_mapping(
+        self,
+        scheduler_output: "SchedulerOutput",
+        positions_np: np.ndarray,
+        num_reqs: int,
+        total_num_scheduled_tokens: int,
+    ) -> None:
+        if not PRIMARY_SEMANTIC_DISPATCH_ENABLED:
+            return
+        if os.environ.get("VLLM_PRIMARY_USDT_ENABLE", "0") != "1":
+            return
+        if os.getpid() != self._primary_worker_pid:
+            raise RuntimeError("primary worker PID changed across fork boundary")
+        engine_instance_id = engine_instance_id_from_config(self.vllm_config)
+        scheduler_step_id = scheduler_output.primary_scheduler_step_id
+        scheduler_output_id = scheduler_output.primary_scheduler_output_id
+        scheduler_batch_id = scheduler_output.primary_scheduler_batch_id
+        block_generations = scheduler_output.primary_block_generations or {}
+        current_req_ids = list(self.input_batch.req_ids[:num_reqs])
+        scheduler_order = list(scheduler_output.num_scheduled_tokens)
+        scheduler_order_index = {
+            request_id: index for index, request_id in enumerate(scheduler_order)
+        }
+
+        for worker_request_index, request_id in enumerate(current_req_ids):
+            emit_primary_usdt(
+                "worker_request_mapping_v2",
+                engine_instance_id=engine_instance_id,
+                request_id_hash=primary_request_id_hash(request_id),
+                scheduler_step_id=scheduler_step_id,
+                scheduler_output_id=scheduler_output_id,
+                scheduler_batch_id=scheduler_batch_id,
+                worker_process_id=self._primary_worker_pid,
+                worker_rank=self._primary_worker_rank,
+                worker_request_index=worker_request_index,
+                request_order_in_batch=scheduler_order_index.get(
+                    request_id, UINT64_MAX
+                ),
+                member_count=len(current_req_ids),
+            )
+
+        entries_per_semantic_fragment = 256
+        for block_table in self.input_batch.block_table.block_tables:
+            mapping_id = next(self._primary_mapping_counter)
+            if mapping_id >= UINT64_MAX:
+                raise OverflowError("worker mapping identity exhausted")
+            expected_entries = total_num_scheduled_tokens
+            fragment_count = (
+                expected_entries + entries_per_semantic_fragment - 1
+            ) // entries_per_semantic_fragment
+            begin = emit_primary_usdt(
+                "worker_slot_mapping_begin_v2",
+                engine_instance_id=engine_instance_id,
+                scheduler_step_id=scheduler_step_id,
+                scheduler_output_id=scheduler_output_id,
+                scheduler_batch_id=scheduler_batch_id,
+                worker_process_id=self._primary_worker_pid,
+                worker_rank=self._primary_worker_rank,
+                mapping_id=mapping_id,
+                expected_total_entries=expected_entries,
+                fragment_count=fragment_count,
+            )
+            emitted_entries = 0
+            failure_reason = 0 if begin.complete else 1
+            slot_mapping_np = (
+                block_table.slot_mapping.gpu[:total_num_scheduled_tokens]
+                .detach()
+                .cpu()
+                .numpy()
+            )
+            request_index = 0
+            request_end = int(self.query_start_loc.np[1])
+            for entry_index in range(expected_entries):
+                while entry_index >= request_end and request_index + 1 < num_reqs:
+                    request_index += 1
+                    request_end = int(self.query_start_loc.np[request_index + 1])
+                request_id = current_req_ids[request_index]
+                slot_index_source = int(slot_mapping_np[entry_index])
+                physical_block_id = UINT64_MAX
+                block_generation = UINT64_MAX
+                slot_index = UINT64_MAX
+                if slot_index_source >= 0:
+                    slot_index = slot_index_source
+                    kernel_block_id = slot_index // block_table.block_size
+                    physical_block_id = (
+                        kernel_block_id // block_table.blocks_per_kv_block
+                        if block_table.blocks_per_kv_block
+                        else kernel_block_id
+                    )
+                    block_generation = block_generations.get(
+                        physical_block_id, UINT64_MAX
+                    )
+                    if block_generation == UINT64_MAX:
+                        failure_reason = 2
+                result = emit_primary_usdt(
+                    "worker_slot_mapping_entry_v2",
+                    engine_instance_id=engine_instance_id,
+                    request_id_hash=primary_request_id_hash(request_id),
+                    scheduler_output_id=scheduler_output_id,
+                    scheduler_batch_id=scheduler_batch_id,
+                    worker_process_id=self._primary_worker_pid,
+                    worker_rank=self._primary_worker_rank,
+                    mapping_id=mapping_id,
+                    fragment_index=entry_index // entries_per_semantic_fragment,
+                    entry_index=entry_index,
+                    worker_request_index=request_index,
+                    token_or_slot_index=int(positions_np[entry_index]),
+                    slot_index=slot_index,
+                    physical_block_id=physical_block_id,
+                    block_generation=block_generation,
+                )
+                if result.complete:
+                    emitted_entries += 1
+                else:
+                    failure_reason = 1
+            mapping_complete = int(
+                mapping_is_complete(
+                    expected_entries, emitted_entries, failure_reason
+                )
+            )
+            emit_primary_usdt(
+                "worker_slot_mapping_end_v2",
+                engine_instance_id=engine_instance_id,
+                scheduler_output_id=scheduler_output_id,
+                mapping_id=mapping_id,
+                expected_total_entries=expected_entries,
+                emitted_total_entries=emitted_entries,
+                mapping_complete=mapping_complete,
+                failure_reason=failure_reason,
+            )
+
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -1999,6 +2168,358 @@ class GPUModelRunner(
             self.query_start_loc.gpu[: num_reqs + 1],
             self.positions[:total_num_scheduled_tokens],
         )
+        self._emit_primary_slot_mapping(
+            scheduler_output,
+            positions_np,
+            num_reqs,
+            total_num_scheduled_tokens,
+        )
+        if os.environ.get("OBS_ENABLE_WORKER_SLOT_MAPPING", "0") == "1":
+            sample_policy = os.environ.get(
+                "OBS_WORKER_SLOT_MAPPING_SAMPLE_POLICY",
+                "per_request_stratified",
+            )
+            min_per_request_rows = max(
+                1,
+                int(os.environ.get(
+                    "OBS_WORKER_SLOT_MAPPING_MIN_PER_REQUEST_ROWS",
+                    "1",
+                )),
+            )
+            per_request_limit = max(
+                min_per_request_rows,
+                int(os.environ.get(
+                    "OBS_WORKER_SLOT_MAPPING_PER_REQUEST_DETAIL_LIMIT",
+                    "32",
+                )),
+            )
+            total_detail_limit = max(
+                0,
+                int(os.environ.get(
+                    "OBS_WORKER_SLOT_MAPPING_TOTAL_DETAIL_LIMIT",
+                    os.environ.get("OBS_SLOT_MAPPING_SAMPLE_LIMIT", "512"),
+                )),
+            )
+            emit_summary = (
+                os.environ.get("OBS_WORKER_SLOT_MAPPING_EMIT_SUMMARY", "1")
+                == "1"
+            )
+            stride_sample = (
+                os.environ.get("OBS_WORKER_SLOT_MAPPING_STRIDE_SAMPLE", "1")
+                == "1"
+            )
+            scheduler_step_id = getattr(scheduler_output, "obs_scheduler_step_id", None)
+            scheduler_output_id = getattr(
+                scheduler_output, "obs_scheduler_output_id", scheduler_step_id
+            )
+            batch_id = getattr(
+                scheduler_output, "obs_batch_id", f"sched-{scheduler_output_id}"
+            )
+            scheduler_order = list(scheduler_output.num_scheduled_tokens.keys())
+            scheduler_order_index = {
+                req_id: idx for idx, req_id in enumerate(scheduler_order)
+            }
+            current_req_ids = list(self.input_batch.req_ids[:num_reqs])
+            batch_reordered = current_req_ids != scheduler_order[:num_reqs]
+            request_contexts = []
+
+            for worker_req_index, req_id in enumerate(current_req_ids):
+                request_order = scheduler_order_index.get(req_id, worker_req_index)
+                token_start = int(self.query_start_loc.np[worker_req_index])
+                token_end = int(self.query_start_loc.np[worker_req_index + 1])
+                request_phase = (
+                    "prefill"
+                    if self.input_batch.num_computed_tokens_cpu[worker_req_index]
+                    == 0
+                    else "decode"
+                )
+                request_contexts.append(
+                    {
+                        "worker_req_index": worker_req_index,
+                        "request_id": req_id,
+                        "request_order": request_order,
+                        "request_phase": request_phase,
+                        "token_start": token_start,
+                        "token_end": token_end,
+                    }
+                )
+                obs_emit(
+                    "worker",
+                    "worker_request_index_mapping",
+                    scheduler_step_id=scheduler_step_id,
+                    scheduler_output_id=scheduler_output_id,
+                    batch_id=batch_id,
+                    worker_batch_id=batch_id,
+                    request_id=req_id,
+                    request_order_in_batch=request_order,
+                    worker_req_index=worker_req_index,
+                    pre_reorder_index=request_order,
+                    post_reorder_index=worker_req_index,
+                    batch_reordered=batch_reordered,
+                    request_phase=request_phase,
+                    token_start_index=token_start,
+                    token_end_index=token_end,
+                )
+
+            def _sample_token_indices(
+                token_start: int,
+                token_end: int,
+            ) -> list[tuple[int, str]]:
+                span = max(0, token_end - token_start)
+                if span <= 0:
+                    return []
+                selected: list[tuple[int, str]] = []
+                seen: set[int] = set()
+
+                def add(token_index: int, reason: str) -> None:
+                    if token_index < token_start or token_index >= token_end:
+                        return
+                    if token_index in seen:
+                        return
+                    seen.add(token_index)
+                    selected.append((token_index, reason))
+
+                if span <= 1:
+                    add(token_start, "decode_single_token")
+                    return selected
+
+                add(token_start, "min_per_request_guarantee")
+                add(token_start, "prefill_first")
+                add(token_start + span // 2, "prefill_middle")
+                add(token_end - 1, "prefill_last")
+
+                if stride_sample and len(selected) < per_request_limit:
+                    remaining_slots = per_request_limit - len(selected)
+                    stride = max(1, span // max(remaining_slots + 1, 1))
+                    token_index = token_start + stride
+                    while token_index < token_end and len(selected) < per_request_limit:
+                        add(token_index, "stride_sample")
+                        token_index += stride
+                return selected[:per_request_limit]
+
+            for kv_cache_group_id, block_table in enumerate(
+                self.input_batch.block_table.block_tables
+            ):
+                emitted = 0
+                slot_mapping_np = (
+                    block_table.slot_mapping.gpu[:total_num_scheduled_tokens]
+                    .detach()
+                    .cpu()
+                    .numpy()
+                )
+                emitted_by_worker_req_index: dict[int, int] = {}
+                summary_by_worker_req_index = {}
+                sample_plan = []
+                for ctx in request_contexts:
+                    token_start = ctx["token_start"]
+                    token_end = ctx["token_end"]
+                    token_span = max(0, token_end - token_start)
+                    physical_ids = []
+                    logical_indices = []
+                    slot_indices = []
+                    for token_index in range(token_start, token_end):
+                        slot_index = int(slot_mapping_np[token_index])
+                        if slot_index < 0:
+                            continue
+                        position = int(positions_np[token_index])
+                        kernel_block_id = slot_index // block_table.block_size
+                        physical_block_id = (
+                            kernel_block_id // block_table.blocks_per_kv_block
+                            if block_table.blocks_per_kv_block
+                            else kernel_block_id
+                        )
+                        physical_ids.append(physical_block_id)
+                        logical_indices.append(position // block_table.block_size)
+                        slot_indices.append(slot_index)
+                    samples = _sample_token_indices(token_start, token_end)
+                    summary_by_worker_req_index[ctx["worker_req_index"]] = {
+                        "token_span": token_span,
+                        "total_entries": len(slot_indices),
+                        "planned_samples": samples,
+                        "physical_ids": sorted(set(physical_ids)),
+                        "logical_indices": sorted(set(logical_indices)),
+                        "slot_indices": sorted(set(slot_indices)),
+                    }
+                    for token_index, sample_reason in samples:
+                        sample_plan.append((ctx, token_index, sample_reason))
+
+                guaranteed_plan = []
+                extra_plan = []
+                guaranteed_seen = set()
+                for item in sample_plan:
+                    ctx, token_index, sample_reason = item
+                    worker_req_index = ctx["worker_req_index"]
+                    if worker_req_index not in guaranteed_seen:
+                        guaranteed_plan.append(item)
+                        guaranteed_seen.add(worker_req_index)
+                    else:
+                        extra_plan.append(item)
+
+                ordered_plan = guaranteed_plan + extra_plan
+                for ctx, token_index, sample_reason in ordered_plan:
+                    worker_req_index = ctx["worker_req_index"]
+                    is_guaranteed = sample_reason in {
+                        "decode_single_token",
+                        "min_per_request_guarantee",
+                        "prefill_first",
+                    } and emitted_by_worker_req_index.get(worker_req_index, 0) == 0
+                    if (
+                        emitted >= total_detail_limit
+                        and not is_guaranteed
+                    ):
+                        continue
+                    if worker_req_index >= len(current_req_ids):
+                        continue
+                    req_id = ctx["request_id"]
+                    slot_index = int(slot_mapping_np[token_index])
+                    if slot_index < 0:
+                        continue
+                    position = int(positions_np[token_index])
+                    kernel_block_id = slot_index // block_table.block_size
+                    logical_block_index = position // block_table.block_size
+                    physical_block_id = (
+                        kernel_block_id // block_table.blocks_per_kv_block
+                        if block_table.blocks_per_kv_block
+                        else kernel_block_id
+                    )
+                    obs_emit(
+                        "worker",
+                        "worker_slot_mapping_entry",
+                        scheduler_step_id=scheduler_step_id,
+                        scheduler_output_id=scheduler_output_id,
+                        batch_id=batch_id,
+                        worker_batch_id=batch_id,
+                        request_id=req_id,
+                        request_id_hash_if_available=obs_request_id_hash(req_id),
+                        request_order_in_batch=scheduler_order_index.get(
+                            req_id, worker_req_index
+                        ),
+                        worker_req_index=worker_req_index,
+                        position=position,
+                        token_index=token_index,
+                        slot_index=slot_index,
+                        logical_block_index=logical_block_index,
+                        physical_block_id=physical_block_id,
+                        kernel_block_id=kernel_block_id,
+                        kv_cache_group_id=kv_cache_group_id,
+                        mapping_source="worker_side",
+                        mapping_confidence="exact",
+                        slot_mapping_truncated=(
+                            summary_by_worker_req_index[worker_req_index]
+                            ["total_entries"]
+                            > len(summary_by_worker_req_index[worker_req_index]
+                                  ["planned_samples"])
+                        ),
+                        slot_mapping_sample_policy=sample_policy,
+                        sample_index_within_request=emitted_by_worker_req_index.get(
+                            worker_req_index, 0
+                        ),
+                        sample_limit_per_request=per_request_limit,
+                        total_entries_for_request=summary_by_worker_req_index[
+                            worker_req_index
+                        ]["total_entries"],
+                        token_start_index=ctx["token_start"],
+                        token_end_index=ctx["token_end"],
+                        num_tokens_for_request=summary_by_worker_req_index[
+                            worker_req_index
+                        ]["token_span"],
+                        sample_reason=(
+                            "min_per_request_guarantee"
+                            if is_guaranteed
+                            else sample_reason
+                        ),
+                    )
+                    emitted_by_worker_req_index[worker_req_index] = (
+                        emitted_by_worker_req_index.get(worker_req_index, 0) + 1
+                    )
+                    emitted += 1
+                if emit_summary:
+                    for ctx in request_contexts:
+                        worker_req_index = ctx["worker_req_index"]
+                        summary = summary_by_worker_req_index[worker_req_index]
+                        sampled = emitted_by_worker_req_index.get(
+                            worker_req_index, 0
+                        )
+                        obs_emit(
+                            "worker",
+                            "worker_slot_mapping_request_summary",
+                            scheduler_step_id=scheduler_step_id,
+                            scheduler_output_id=scheduler_output_id,
+                            batch_id=batch_id,
+                            worker_batch_id=batch_id,
+                            request_id=ctx["request_id"],
+                            request_id_hash_if_available=obs_request_id_hash(
+                                ctx["request_id"]
+                            ),
+                            request_order_in_batch=ctx["request_order"],
+                            worker_req_index=worker_req_index,
+                            request_phase=ctx["request_phase"],
+                            token_start_index=ctx["token_start"],
+                            token_end_index=ctx["token_end"],
+                            num_tokens_for_request=summary["token_span"],
+                            total_slot_mapping_entries=summary["total_entries"],
+                            sampled_slot_mapping_entries=sampled,
+                            slot_mapping_truncated=(
+                                summary["total_entries"] > sampled
+                            ),
+                            slot_mapping_sample_policy=sample_policy,
+                            slot_mapping_min_per_request_rows=min_per_request_rows,
+                            slot_mapping_sample_limit_per_request=per_request_limit,
+                            slot_mapping_total_detail_limit=total_detail_limit,
+                            unique_physical_block_ids_json=json.dumps(
+                                summary["physical_ids"], separators=(",", ":")
+                            ),
+                            unique_logical_block_indices_json=json.dumps(
+                                summary["logical_indices"], separators=(",", ":")
+                            ),
+                            unique_slot_indices_count=len(summary["slot_indices"]),
+                            min_token_index=ctx["token_start"]
+                            if summary["token_span"]
+                            else None,
+                            max_token_index=ctx["token_end"] - 1
+                            if summary["token_span"]
+                            else None,
+                            min_position=int(positions_np[ctx["token_start"]])
+                            if summary["token_span"]
+                            else None,
+                            max_position=int(positions_np[ctx["token_end"] - 1])
+                            if summary["token_span"]
+                            else None,
+                            slot_mapping_hash=hashlib.blake2b(
+                                json.dumps(
+                                    summary["slot_indices"],
+                                    separators=(",", ":"),
+                                ).encode("utf-8", errors="replace"),
+                                digest_size=8,
+                            ).hexdigest(),
+                            kv_cache_group_id=kv_cache_group_id,
+                        )
+                        num_block_table_entries = int(
+                            block_table.num_blocks_per_row[worker_req_index]
+                        )
+                        kernel_block_table_ids = block_table.block_table.np[
+                            worker_req_index, :num_block_table_entries
+                        ].tolist()
+                        block_table_physical_ids = sorted(
+                            {
+                                int(kernel_block_id)
+                                // max(1, block_table.blocks_per_kv_block)
+                                for kernel_block_id in kernel_block_table_ids
+                            }
+                        )
+                        emit_request_state_snapshot(
+                            request_id=ctx["request_id"],
+                            snapshot_stage="after_worker_slot_mapping_build",
+                            block_table_physical_ids=block_table_physical_ids,
+                            slot_mapping_physical_ids=summary["physical_ids"],
+                            num_logical_blocks=len(block_table_physical_ids),
+                            token_start_index=ctx["token_start"],
+                            token_end_index=ctx["token_end"],
+                            worker_req_index=worker_req_index,
+                            scheduler_step_id=scheduler_step_id,
+                            scheduler_output_id=scheduler_output_id,
+                            batch_id=batch_id,
+                        )
 
         # Copy the tensors to the GPU.
         self._prepare_input_ids(
@@ -3789,6 +4310,53 @@ class GPUModelRunner(
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors | None:
+        execution_step_id = next(self._v2_execution_step_counter)
+        num_prefill_tokens = 0
+        num_decode_tokens = 0
+        for new_req in scheduler_output.scheduled_new_reqs:
+            num_prefill_tokens += scheduler_output.num_scheduled_tokens.get(
+                new_req.req_id, 0
+            )
+        cached_reqs = scheduler_output.scheduled_cached_reqs
+        for req_id in cached_reqs.req_ids:
+            num_tokens = scheduler_output.num_scheduled_tokens.get(req_id, 0)
+            if cached_reqs.is_context_phase(req_id):
+                num_prefill_tokens += num_tokens
+            else:
+                num_decode_tokens += num_tokens
+        if num_prefill_tokens and num_decode_tokens:
+            phase = "mixed"
+        elif num_prefill_tokens:
+            phase = "prefill"
+        elif num_decode_tokens:
+            phase = "decode"
+        else:
+            phase = "unknown"
+        with v2_range(
+            "exec",
+            "execute_model",
+            execution_step_id=execution_step_id,
+            batch_id=f"exec-{execution_step_id}",
+            phase=phase,
+            num_requests=(
+                len(scheduler_output.scheduled_new_reqs)
+                + scheduler_output.scheduled_cached_reqs.num_reqs
+            ),
+            num_tokens=scheduler_output.total_num_scheduled_tokens,
+            num_prefill_tokens=num_prefill_tokens,
+            num_decode_tokens=num_decode_tokens,
+            worker_id=getattr(self, "rank", None),
+            source_file="vllm/v1/worker/gpu_model_runner.py",
+            source_func="GPUModelRunner.execute_model",
+        ):
+            return self._execute_model_impl(scheduler_output, intermediate_tensors)
+
+    @torch.inference_mode()
+    def _execute_model_impl(
+        self,
+        scheduler_output: "SchedulerOutput",
+        intermediate_tensors: IntermediateTensors | None = None,
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors | None:
         if self.execute_model_state is not None:
             raise RuntimeError(
                 "State error: sample_tokens() must be called "
@@ -4025,12 +4593,41 @@ class GPUModelRunner(
             self.model_config.is_encoder_decoder and num_encoder_reqs > 0
         )
 
+        num_prefill_tokens = 0
+        num_decode_tokens = 0
+        for new_req in scheduler_output.scheduled_new_reqs:
+            num_prefill_tokens += scheduler_output.num_scheduled_tokens.get(
+                new_req.req_id, 0
+            )
+        cached_reqs = scheduler_output.scheduled_cached_reqs
+        for req_id in cached_reqs.req_ids:
+            num_tokens = scheduler_output.num_scheduled_tokens.get(req_id, 0)
+            if cached_reqs.is_context_phase(req_id):
+                num_prefill_tokens += num_tokens
+            else:
+                num_decode_tokens += num_tokens
+        if num_prefill_tokens and num_decode_tokens:
+            phase = "mixed"
+        elif num_prefill_tokens:
+            phase = "prefill"
+        elif num_decode_tokens:
+            phase = "decode"
+        else:
+            phase = "unknown"
+
         # Run the model.
         # Use persistent buffers for CUDA graphs.
         # When spec decode is enabled, defer connector finalization
         # (wait_for_save + clear metadata) until after draft model runs.
         defer_kv_connector_finalize = self.speculative_config is not None
         with (
+            v2_range(
+                "exec",
+                "execute_phase",
+                phase=phase,
+                num_prefill_tokens=num_prefill_tokens,
+                num_decode_tokens=num_decode_tokens,
+            ),
             set_forward_context(
                 attn_metadata,
                 self.vllm_config,
@@ -4041,6 +4638,15 @@ class GPUModelRunner(
                 ubatch_slices=ubatch_slices_padded,
                 slot_mapping=slot_mappings,
                 skip_compiled=has_encoder_input,
+            ),
+            v2_range(
+                "exec",
+                "model_forward",
+                phase=phase,
+                num_requests=num_reqs,
+                num_tokens=num_tokens_unpadded,
+                batch_size=num_reqs,
+                use_cuda_graph=cudagraph_mode != CUDAGraphMode.NONE,
             ),
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(
@@ -4180,7 +4786,15 @@ class GPUModelRunner(
                 scheduler_output, grammar_output, self.input_batch, logits
             )
 
-        with record_function_or_nullcontext("gpu_model_runner: sample"):
+        with (
+            v2_range(
+                "semop",
+                "sampling",
+                op_type="sampling",
+                num_tokens=scheduler_output.total_num_scheduled_tokens,
+            ),
+            record_function_or_nullcontext("gpu_model_runner: sample"),
+        ):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
         self._update_states_after_model_execute(

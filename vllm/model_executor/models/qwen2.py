@@ -61,6 +61,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import is_interleaved, set_default_rope_theta
 from vllm.v1.attention.backend import AttentionType
+from vllm.v2_trace import v2_range
 
 from .interfaces import (
     EagleModelMixin,
@@ -155,6 +156,7 @@ class Qwen2Attention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.dual_chunk_attention_config = dual_chunk_attention_config
         self.qk_norm = qk_norm
+        self.layer_id = extract_layer_index(prefix)
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -211,7 +213,17 @@ class Qwen2Attention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
+        with v2_range(
+            "semop",
+            "qkv_projection",
+            layer_id=self.layer_id,
+            semantic_op_id=f"qwen2.layer{self.layer_id}.qkv_projection",
+            op_type="qkv_projection",
+            num_tokens=hidden_states.shape[0],
+            hidden_size=hidden_states.shape[-1],
+            num_heads=self.total_num_heads,
+        ):
+            qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         # Apply QK normalization if enabled (before RoPE)
@@ -230,9 +242,25 @@ class Qwen2Attention(nn.Module):
             q = q.view(total_tokens, self.q_size)
             k = k.view(total_tokens, self.kv_size)
 
-        q, k = self.rotary_emb(positions, q, k)
+        with v2_range(
+            "semop",
+            "rope",
+            layer_id=self.layer_id,
+            semantic_op_id=f"qwen2.layer{self.layer_id}.rope",
+            op_type="rope",
+            num_tokens=q.shape[0],
+        ):
+            q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
-        output, _ = self.o_proj(attn_output)
+        with v2_range(
+            "semop",
+            "o_projection",
+            layer_id=self.layer_id,
+            semantic_op_id=f"qwen2.layer{self.layer_id}.o_projection",
+            op_type="o_projection",
+            num_tokens=attn_output.shape[0],
+        ):
+            output, _ = self.o_proj(attn_output)
         return output
 
 
@@ -288,6 +316,7 @@ class Qwen2DecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
+        self.layer_id = extract_layer_index(prefix)
 
     def forward(
         self,
@@ -308,7 +337,16 @@ class Qwen2DecoderLayer(nn.Module):
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
+        with v2_range(
+            "semop",
+            "ffn",
+            layer_id=self.layer_id,
+            semantic_op_id=f"qwen2.layer{self.layer_id}.ffn",
+            op_type="ffn",
+            num_tokens=hidden_states.shape[0],
+            hidden_size=hidden_states.shape[-1],
+        ):
+            hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
 
@@ -589,7 +627,14 @@ class Qwen2ForCausalLM(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        logits = self.logits_processor(self.lm_head, hidden_states)
+        with v2_range(
+            "semop",
+            "compute_logits",
+            semantic_op_id="qwen2.compute_logits",
+            op_type="compute_logits",
+            num_tokens=hidden_states.shape[0],
+        ):
+            logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

@@ -277,6 +277,14 @@ class FrontendArgs(BaseFrontendArgs):
     add it to the server using `app.add_middleware()`."""
     enable_request_id_headers: bool = False
     """If specified, API server will add X-Request-Id header to responses."""
+    preserve_completion_request_id: bool = False
+    """If specified, completion response ``id`` is the supplied canonical
+    request ID rather than the default ``cmpl-``-prefixed API response ID.
+
+    This is intentionally opt-in.  It exists for request-correlated
+    observability clients that require the protocol response ID to be the
+    same canonical request identity carried into the serving path.
+    """
     disable_fastapi_docs: bool = False
     """Disable FastAPI's OpenAPI schema, Swagger UI, and ReDoc endpoint."""
     h11_max_incomplete_event_size: int = H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT

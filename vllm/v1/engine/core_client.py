@@ -34,6 +34,7 @@ from vllm.utils.network_utils import (
 from vllm.v1.engine import (
     EEP_NOTIFICATION_CALL_ID,
     EEPNotificationType,
+    EngineCoreAbortRequest,
     EngineCoreOutputs,
     EngineCoreReadyResponse,
     EngineCoreRequest,
@@ -170,7 +171,7 @@ class EngineCoreClient(ABC):
     async def execute_dummy_batch_async(self) -> None:
         raise NotImplementedError
 
-    def abort_requests(self, request_ids: list[str]) -> None:
+    def abort_requests(self, actions: list[EngineCoreAbortRequest]) -> None:
         raise NotImplementedError
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
@@ -241,7 +242,9 @@ class EngineCoreClient(ABC):
     async def is_sleeping_async(self) -> bool:
         raise NotImplementedError
 
-    async def abort_requests_async(self, request_ids: list[str]) -> None:
+    async def abort_requests_async(
+        self, actions: list[EngineCoreAbortRequest]
+    ) -> None:
         raise NotImplementedError
 
     async def add_lora_async(self, lora_request: LoRARequest) -> bool:
@@ -296,9 +299,9 @@ class InprocClient(EngineCoreClient):
         req, request_wave = self.engine_core.preprocess_add_request(request)
         self.engine_core.add_request(req, request_wave)
 
-    def abort_requests(self, request_ids: list[str]) -> None:
-        if len(request_ids) > 0:
-            self.engine_core.abort_requests(request_ids)
+    def abort_requests(self, actions: list[EngineCoreAbortRequest]) -> None:
+        if actions:
+            self.engine_core.abort_requests(actions)
 
     def shutdown(self, timeout: float | None = None) -> None:
         self.engine_core.shutdown()
@@ -825,9 +828,9 @@ class SyncMPClient(MPClient):
             self.engines_running = True
         self._send_input(EngineCoreRequestType.ADD, request)
 
-    def abort_requests(self, request_ids: list[str]) -> None:
-        if request_ids and not self.resources.engine_dead:
-            self._send_input(EngineCoreRequestType.ABORT, request_ids)
+    def abort_requests(self, actions: list[EngineCoreAbortRequest]) -> None:
+        if actions and not self.resources.engine_dead:
+            self._send_input(EngineCoreRequestType.ABORT, actions)
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
         self.call_utility("profile", is_start, profile_prefix)
@@ -1060,9 +1063,11 @@ class AsyncMPClient(MPClient):
         await self._send_input(EngineCoreRequestType.ADD, request)
         self._ensure_output_queue_task()
 
-    async def abort_requests_async(self, request_ids: list[str]) -> None:
-        if request_ids and not self.resources.engine_dead:
-            await self._send_input(EngineCoreRequestType.ABORT, request_ids)
+    async def abort_requests_async(
+        self, actions: list[EngineCoreAbortRequest]
+    ) -> None:
+        if actions and not self.resources.engine_dead:
+            await self._send_input(EngineCoreRequestType.ABORT, actions)
 
     async def pause_scheduler_async(
         self, mode: PauseMode = "abort", clear_cache: bool = True
@@ -1457,27 +1462,29 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             ]:
                 self.eep_scaling_cache = None
 
-    async def abort_requests_async(self, request_ids: list[str]) -> None:
-        if not request_ids or self.resources.engine_dead:
+    async def abort_requests_async(
+        self, actions: list[EngineCoreAbortRequest]
+    ) -> None:
+        if not actions or self.resources.engine_dead:
             return
 
-        if len(request_ids) == 1:
+        if len(actions) == 1:
             # Fast-path common case.
-            if engine := self.reqs_in_flight.get(request_ids[0]):
-                await self._abort_requests(request_ids, engine)
+            if engine := self.reqs_in_flight.get(actions[0].request_id):
+                await self._abort_requests(actions, engine)
             return
 
-        by_engine = defaultdict[EngineIdentity, list[str]](list)
-        for req_id in request_ids:
-            if engine := self.reqs_in_flight.get(req_id):
-                by_engine[engine].append(req_id)
-        for engine, req_ids in by_engine.items():
-            await self._abort_requests(req_ids, engine)
+        by_engine = defaultdict[EngineIdentity, list[EngineCoreAbortRequest]](list)
+        for action in actions:
+            if engine := self.reqs_in_flight.get(action.request_id):
+                by_engine[engine].append(action)
+        for engine, engine_actions in by_engine.items():
+            await self._abort_requests(engine_actions, engine)
 
     async def _abort_requests(
-        self, request_ids: list[str], engine: EngineIdentity
+        self, actions: list[EngineCoreAbortRequest], engine: EngineIdentity
     ) -> None:
-        await self._send_input(EngineCoreRequestType.ABORT, request_ids, engine)
+        await self._send_input(EngineCoreRequestType.ABORT, actions, engine)
 
     async def scale_elastic_ep(self, new_data_parallel_size: int) -> None:
         """Scale elastic EP data parallel size"""

@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
+import os
+from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -60,6 +62,12 @@ from vllm.inputs import (
     TextPrompt,
     TokensPrompt,
 )
+from vllm.l0_usdt import (
+    fire_l0_probe,
+    fire_request_terminal,
+    l0_finish_reason,
+    l0_output_token_count,
+)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -70,7 +78,18 @@ from vllm.outputs import (
     RequestOutput,
     ScoringRequestOutput,
 )
+from vllm.obs_probe import obs_emit
 from vllm.platforms import current_platform
+from vllm.primary_usdt import (
+    PRIMARY_SEMANTIC_DISPATCH_ENABLED,
+    bind_submission_attempt,
+    emit_primary_usdt,
+    engine_instance_id_from_config,
+    mark_terminal_once,
+    new_submission_attempt,
+    prepare_primary_usdt_provider,
+    primary_request_id_hash,
+)
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import ChatParams, merge_kwargs
 from vllm.renderers.inputs.preprocess import (
@@ -88,6 +107,7 @@ from vllm.utils.tqdm_utils import maybe_tqdm
 from vllm.v1.engine import PauseMode
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
+from vllm.v2_trace import v2_instant, v2_range
 
 if TYPE_CHECKING:
     from vllm.v1.metrics.reader import Metric
@@ -378,6 +398,9 @@ class LLM:
 
         log_non_default_args(engine_args)
 
+        if PRIMARY_SEMANTIC_DISPATCH_ENABLED:
+            prepare_primary_usdt_provider("frontend_driver")
+
         self.llm_engine = LLMEngine.from_engine_args(
             engine_args=engine_args, usage_context=UsageContext.LLM_CLASS
         )
@@ -385,6 +408,11 @@ class LLM:
         self.engine_class = type(self.llm_engine)
 
         self.request_counter = Counter()
+        self._primary_engine_instance_id = (
+            engine_instance_id_from_config(self.llm_engine.vllm_config)
+            if PRIMARY_SEMANTIC_DISPATCH_ENABLED
+            else (0, 0)
+        )
         self.default_sampling_params: dict[str, Any] | None = None
 
         supported_tasks = self.llm_engine.get_supported_tasks()
@@ -497,16 +525,59 @@ class LLM:
         if sampling_params is None:
             sampling_params = self.get_default_sampling_params()
 
-        return self._run_completion(
-            prompts=prompts,
-            params=sampling_params,
-            output_type=RequestOutput,
-            use_tqdm=use_tqdm,
-            lora_request=lora_request,
-            tokenization_kwargs=tokenization_kwargs,
-            priority=priority,
-            mm_processor_kwargs=mm_processor_kwargs,
+        if isinstance(prompts, Sequence) and not isinstance(
+            prompts, (str, bytes, dict)
+        ):
+            num_prompts = len(prompts)
+        else:
+            num_prompts = 1
+        max_tokens = (
+            getattr(sampling_params, "max_tokens", None)
+            if isinstance(sampling_params, SamplingParams)
+            else None
         )
+
+        with v2_range(
+            "req",
+            "generate_total",
+            num_prompts=num_prompts,
+            max_tokens=max_tokens,
+            source_file="vllm/entrypoints/llm.py",
+            source_func="LLM.generate",
+        ):
+            outputs = self._run_completion(
+                prompts=prompts,
+                params=sampling_params,
+                output_type=RequestOutput,
+                use_tqdm=use_tqdm,
+                lora_request=lora_request,
+                tokenization_kwargs=tokenization_kwargs,
+                priority=priority,
+                mm_processor_kwargs=mm_processor_kwargs,
+                trace_request_arrival=True,
+            )
+            for prompt_index, output in enumerate(outputs):
+                obs_emit(
+                    "req",
+                    "request_terminal",
+                    request_id=getattr(output, "request_id", None),
+                    prompt_index=prompt_index,
+                    finished=True,
+                    terminal_type="finished",
+                    terminal_source="offline_generate_total",
+                    terminal_confidence="high",
+                    raw_finish_reason=l0_finish_reason(output),
+                    raw_terminal_code=l0_finish_reason(output),
+                    output_token_count=l0_output_token_count(output),
+                )
+                v2_instant(
+                    "req",
+                    "request_finish",
+                    request_id=getattr(output, "request_id", None),
+                    prompt_index=prompt_index,
+                    finished=True,
+                )
+            return outputs
 
     def enqueue(
         self,
@@ -1598,6 +1669,7 @@ class LLM:
         priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
+        trace_request_arrival: bool = False,
     ) -> list[str]:
         seq_prompts = prompt_to_seq(prompts)
         seq_params = self._params_to_seq(params, len(seq_prompts))
@@ -1620,6 +1692,7 @@ class LLM:
             params=seq_params,
             lora_requests=seq_lora_requests,
             priorities=seq_priority,
+            trace_request_arrival=trace_request_arrival,
         )
 
     def _run_completion(
@@ -1635,6 +1708,7 @@ class LLM:
         priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
+        trace_request_arrival: bool = False,
     ):
         self._add_completion_requests(
             prompts=prompts,
@@ -1644,6 +1718,7 @@ class LLM:
             priority=priority,
             tokenization_kwargs=tokenization_kwargs,
             mm_processor_kwargs=mm_processor_kwargs,
+            trace_request_arrival=trace_request_arrival,
         )
         return self._run_engine(use_tqdm=use_tqdm, output_type=output_type)
 
@@ -1790,11 +1865,39 @@ class LLM:
         *,
         lora_requests: Sequence[LoRARequest | None] | None = None,
         priorities: Sequence[int] | None = None,
+        trace_request_arrival: bool = False,
     ) -> list[str]:
         added_request_ids: list[str] = []
+        active_submission_attempt_id: int | None = None
+        self._primary_active_request_hash = 0
 
         try:
             for i, prompt in enumerate(prompts):
+                submission_attempt_id = (
+                    new_submission_attempt(self._primary_engine_instance_id)
+                    if PRIMARY_SEMANTIC_DISPATCH_ENABLED
+                    else None
+                )
+                active_submission_attempt_id = submission_attempt_id
+                if PRIMARY_SEMANTIC_DISPATCH_ENABLED:
+                    emit_primary_usdt(
+                        "request_arrival_v2",
+                        engine_instance_id=self._primary_engine_instance_id,
+                        request_id_hash=0,
+                        submission_attempt_id=submission_attempt_id,
+                        lifecycle_state=1,
+                    )
+                local_request_id = f"local-{i}"
+                assigned_local_request_id = (
+                    local_request_id if trace_request_arrival else None
+                )
+                if trace_request_arrival:
+                    fire_l0_probe(
+                        "request_arrival",
+                        path="offline",
+                        prompt_index=i,
+                        local_request_id=local_request_id,
+                    )
                 request_id = self._add_request(
                     prompt,
                     params[i],
@@ -1803,9 +1906,39 @@ class LLM:
                         None if lora_requests is None else lora_requests[i],
                     ),
                     priority=0 if priorities is None else priorities[i],
+                    prompt_index=i,
+                    local_request_id=assigned_local_request_id,
+                    submission_attempt_id=submission_attempt_id,
                 )
                 added_request_ids.append(request_id)
+                active_submission_attempt_id = None
+                self._primary_active_request_hash = 0
+                if trace_request_arrival:
+                    v2_instant(
+                        "req",
+                        "request_arrival",
+                        request_id=request_id,
+                        prompt_index=i,
+                    )
         except Exception as e:
+            if (
+                PRIMARY_SEMANTIC_DISPATCH_ENABLED
+                and active_submission_attempt_id is not None
+            ):
+                request_hash = self._primary_active_request_hash
+                should_emit = request_hash == 0 or mark_terminal_once(
+                    self._primary_engine_instance_id, request_hash
+                )
+                if should_emit:
+                    emit_primary_usdt(
+                        "request_terminal_v2",
+                        engine_instance_id=self._primary_engine_instance_id,
+                        request_id_hash=request_hash,
+                        terminal_reason=7,
+                        terminal_class=3,
+                        cleanup_required=0,
+                        submission_attempt_id=active_submission_attempt_id,
+                    )
             if added_request_ids:
                 self.llm_engine.abort_request(added_request_ids, internal=True)
             raise e
@@ -1818,20 +1951,78 @@ class LLM:
         params: SamplingParams | PoolingParams,
         lora_request: LoRARequest | None = None,
         priority: int = 0,
+        prompt_index: int | None = None,
+        local_request_id: str | None = None,
+        submission_attempt_id: int | None = None,
     ) -> str:
         if isinstance(params, SamplingParams):
             # We only care about the final output
-            params.output_kind = RequestOutputKind.FINAL_ONLY
+            params.output_kind = (
+                RequestOutputKind.DELTA
+                if os.environ.get("VLLM_OBS10V_STRICT_L2_ENABLE", "0") == "1"
+                else RequestOutputKind.FINAL_ONLY
+            )
 
         request_id = str(next(self.request_counter))
+        if (
+            PRIMARY_SEMANTIC_DISPATCH_ENABLED
+            and submission_attempt_id is None
+        ):
+            submission_attempt_id = new_submission_attempt(
+                self._primary_engine_instance_id
+            )
+            emit_primary_usdt(
+                "request_arrival_v2",
+                engine_instance_id=self._primary_engine_instance_id,
+                request_id_hash=0,
+                submission_attempt_id=submission_attempt_id,
+                lifecycle_state=1,
+            )
+        def primary_identity_assigned(internal_request_id: str) -> None:
+            if PRIMARY_SEMANTIC_DISPATCH_ENABLED:
+                request_hash = primary_request_id_hash(internal_request_id)
+                self._primary_active_request_hash = request_hash
+                bind_submission_attempt(
+                    self._primary_engine_instance_id,
+                    request_hash,
+                    submission_attempt_id,
+                )
+                emit_primary_usdt(
+                    "request_identity_assigned_v2",
+                    engine_instance_id=self._primary_engine_instance_id,
+                    request_id_hash=request_hash,
+                    submission_attempt_id=submission_attempt_id,
+                    identity_assignment_status=1,
+                )
+            fire_l0_probe(
+                "request_id_assigned",
+                internal_request_id,
+                path="offline",
+                prompt_index=prompt_index,
+                local_request_id=local_request_id,
+                params_type=type(params).__name__,
+                output_kind=getattr(params, "output_kind", None),
+                priority=priority,
+            )
 
-        return self.llm_engine.add_request(
+        admitted_request_id = self.llm_engine.add_request(
             request_id,
             prompt,
             params,
             lora_request=lora_request,
             priority=priority,
+            primary_identity_callback=primary_identity_assigned,
         )
+        if PRIMARY_SEMANTIC_DISPATCH_ENABLED:
+            request_hash = primary_request_id_hash(admitted_request_id)
+            emit_primary_usdt(
+                "request_admitted_v2",
+                engine_instance_id=self._primary_engine_instance_id,
+                request_id_hash=request_hash,
+                submission_attempt_id=submission_attempt_id,
+                lifecycle_state=3,
+            )
+        return admitted_request_id
 
     def _run_engine(
         self,
@@ -1852,13 +2043,69 @@ class LLM:
 
         # Run the engine.
         outputs: list[_O] = []
+        obs10v_first_output_fired: set[str] = set()
+        obs10v_output_ordinals: dict[str, int] = defaultdict(int)
+        obs10v_generated_token_ordinals: dict[str, int] = defaultdict(int)
         total_in_toks = 0
         total_out_toks = 0
         while self.llm_engine.has_unfinished_requests():
             step_outputs = self.llm_engine.step()
             for output in step_outputs:
                 assert isinstance(output, output_type)
+                if (
+                    os.environ.get("VLLM_OBS10V_STRICT_L2_ENABLE", "0") == "1"
+                    and isinstance(output, RequestOutput)
+                ):
+                    output_request_id = str(getattr(output, "request_id", ""))
+                    output_token_count = max(1, l0_output_token_count(output) or 1)
+                    obs10v_output_ordinals[output_request_id] += 1
+                    start_ordinal = obs10v_generated_token_ordinals[output_request_id] + 1
+                    end_ordinal = start_ordinal + output_token_count - 1
+                    obs10v_generated_token_ordinals[output_request_id] = end_ordinal
+                    if output_request_id not in obs10v_first_output_fired:
+                        obs_emit(
+                            "req",
+                            "first_token",
+                            request_id=output_request_id,
+                            output_emission_ordinal=obs10v_output_ordinals[output_request_id],
+                            output_token_count=output_token_count,
+                            generated_token_start_ordinal=start_ordinal,
+                            generated_token_end_ordinal=end_ordinal,
+                            path="offline_engine_step",
+                        )
+                        obs10v_first_output_fired.add(output_request_id)
+                    obs_emit(
+                        "req",
+                        "output_token",
+                        request_id=output_request_id,
+                        output_emission_ordinal=obs10v_output_ordinals[output_request_id],
+                        output_token_count=output_token_count,
+                        generated_token_start_ordinal=start_ordinal,
+                        generated_token_end_ordinal=end_ordinal,
+                        is_final_output=output.finished,
+                        path="offline_engine_step",
+                    )
                 if output.finished:
+                    finish_reason = l0_finish_reason(output)
+                    fire_request_terminal(
+                        getattr(output, "request_id", None),
+                        path="offline",
+                        finished=getattr(output, "finished", None),
+                        terminal_type="finished",
+                        terminal_source="offline_engine_step_finished",
+                        terminal_confidence="high",
+                        output_token_count=l0_output_token_count(output),
+                        raw_finish_reason=finish_reason,
+                        raw_terminal_code=finish_reason,
+                    )
+                    fire_l0_probe(
+                        "request_finish",
+                        getattr(output, "request_id", None),
+                        path="offline",
+                        finished=getattr(output, "finished", None),
+                        output_token_count=l0_output_token_count(output),
+                        finish_reason=finish_reason,
+                    )
                     outputs.append(output)  # type: ignore[arg-type]
                     if use_tqdm:
                         if isinstance(output, RequestOutput):

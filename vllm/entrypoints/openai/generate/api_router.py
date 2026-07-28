@@ -146,6 +146,7 @@ async def init_generate_state(
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
+            preserve_completion_request_id=args.preserve_completion_request_id,
         )
         if "generate" in supported_tasks
         else None

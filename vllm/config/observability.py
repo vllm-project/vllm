@@ -18,6 +18,12 @@ DetailedTraceModules = Literal["model", "worker", "all"]
 class ObservabilityConfig:
     """Configuration for observability - metrics and tracing."""
 
+    primary_engine_instance_id_hi: int = 0
+    """High 64 bits of the immutable source-owned primary engine identity."""
+
+    primary_engine_instance_id_lo: int = 0
+    """Low 64 bits of the immutable source-owned primary engine identity."""
+
     show_hidden_metrics_for_version: str | None = None
     """Enable deprecated Prometheus metrics that have been hidden since the
     specified version. For example, if a previously deprecated metric has been

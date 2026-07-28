@@ -6,6 +6,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from vllm.execution_span import ExecutionSpanContext
     import numpy as np
     import numpy.typing as npt
     import torch
@@ -237,6 +238,20 @@ class SchedulerOutput:
     # The worker zeros the corresponding GPU memory before the blocks are used,
     # preventing stale NaN/data from corrupting attention or SSM computation.
     new_block_ids_to_zero: list[int] | None = None
+
+    # Source-owned primary observability identities. UINT64_MAX means that no
+    # execution batch exists (valid only for an empty scheduler output).
+    primary_scheduler_step_id: int = (1 << 64) - 1
+    primary_scheduler_output_id: int = (1 << 64) - 1
+    primary_scheduler_batch_id: int = (1 << 64) - 1
+
+    # Scheduler-side generation snapshot handed to workers so actual slot
+    # mappings can use (physical_block_id, block_generation) without inference.
+    primary_block_generations: dict[int, int] | None = None
+
+    # Immutable EngineCore-owned execution identity. It is transported with the
+    # canonical scheduler output and is never recomputed by workers or tooling.
+    execution_span_context: "ExecutionSpanContext | None" = None
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections import Counter
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -25,6 +26,15 @@ from vllm.v1.core.kv_cache_utils import (
     get_group_id,
     make_block_hash_with_group_id,
     maybe_convert_block_hash,
+)
+from vllm.primary_usdt import (
+    PRIMARY_SEMANTIC_DISPATCH_ENABLED,
+    PrimaryOwnerLedger,
+    PrimaryUSDTError,
+    emit_primary_usdt,
+    next_block_generation,
+    primary_request_id_hash,
+    validate_refcount_transition,
 )
 from vllm.v1.request import Request
 
@@ -153,6 +163,7 @@ class BlockPool:
         hash_block_size: int,
         enable_kv_cache_events: bool = False,
         metrics_collector: KVCacheMetricsCollector | None = None,
+        primary_engine_instance_id: tuple[int, int] = (0, 0),
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
@@ -180,6 +191,91 @@ class BlockPool:
         self.kv_event_queue: list[KVCacheEvent] = []
 
         self.metrics_collector = metrics_collector
+        self.primary_engine_instance_id = primary_engine_instance_id
+        self._primary_owners = PrimaryOwnerLedger()
+        self.primary_integrity_failures: Counter[str] = Counter()
+
+    def _primary_enabled_for_pool(self) -> bool:
+        return (
+            PRIMARY_SEMANTIC_DISPATCH_ENABLED
+            and self.primary_engine_instance_id != (0, 0)
+        )
+
+    def _emit_refcount(
+        self,
+        block: KVCacheBlock,
+        before: int,
+        after: int,
+        mutation_kind: int,
+    ) -> None:
+        if not self._primary_enabled_for_pool() or block.is_null:
+            return
+        validate_refcount_transition(before, after, mutation_kind)
+        emit_primary_usdt(
+            "kv_block_refcount_change_v2",
+            engine_instance_id=self.primary_engine_instance_id,
+            physical_block_id=block.block_id,
+            block_generation=block.primary_generation,
+            refcount_before=before,
+            refcount_after=after,
+            mutation_kind=mutation_kind,
+        )
+
+    def add_primary_owner(
+        self, request_id: str, blocks: Sequence[KVCacheBlock], reason: int
+    ) -> None:
+        if not self._primary_enabled_for_pool():
+            return
+        for block in blocks:
+            if block.is_null:
+                continue
+            key = (block.block_id, block.primary_generation)
+            try:
+                transition = self._primary_owners.add(key, request_id)
+            except PrimaryUSDTError:
+                self.primary_integrity_failures["duplicate_owner_add"] += 1
+                continue
+            emit_primary_usdt(
+                "kv_block_owner_change_v2",
+                engine_instance_id=self.primary_engine_instance_id,
+                request_id_hash=primary_request_id_hash(request_id),
+                physical_block_id=block.block_id,
+                block_generation=block.primary_generation,
+                owner_present_before=0,
+                owner_present_after=1,
+                owner_count_before=transition.count_before,
+                owner_count_after=transition.count_after,
+                owner_change_reason=reason,
+                refcount_after=block.ref_cnt,
+            )
+
+    def remove_primary_owner(
+        self, request_id: str, blocks: Sequence[KVCacheBlock], reason: int
+    ) -> None:
+        if not self._primary_enabled_for_pool():
+            return
+        for block in blocks:
+            if block.is_null:
+                continue
+            key = (block.block_id, block.primary_generation)
+            try:
+                transition = self._primary_owners.remove(key, request_id)
+            except PrimaryUSDTError:
+                self.primary_integrity_failures["missing_owner_remove"] += 1
+                continue
+            emit_primary_usdt(
+                "kv_block_owner_change_v2",
+                engine_instance_id=self.primary_engine_instance_id,
+                request_id_hash=primary_request_id_hash(request_id),
+                physical_block_id=block.block_id,
+                block_generation=block.primary_generation,
+                owner_present_before=1,
+                owner_present_after=0,
+                owner_count_before=transition.count_before,
+                owner_count_after=transition.count_after,
+                owner_change_reason=reason,
+                refcount_after=block.ref_cnt,
+            )
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -338,15 +434,50 @@ class BlockPool:
         # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:
             for block in ret:
+                cached_before = int(block.block_hash is not None)
                 self._maybe_evict_cached_block(block)
                 assert block.ref_cnt == 0
+                before = block.ref_cnt
+                if self._primary_enabled_for_pool():
+                    block.primary_generation = next_block_generation(
+                        block.primary_generation
+                    )
                 block.ref_cnt += 1
+                if self._primary_enabled_for_pool():
+                    emit_primary_usdt(
+                        "kv_block_alloc_v2",
+                        engine_instance_id=self.primary_engine_instance_id,
+                        physical_block_id=block.block_id,
+                        block_generation=block.primary_generation,
+                        refcount_before=before,
+                        refcount_after=block.ref_cnt,
+                        transition_reason=1,
+                        cached_before=cached_before,
+                    )
+                self._emit_refcount(block, before, block.ref_cnt, 1)
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block)
         else:
             for block in ret:
                 assert block.ref_cnt == 0
+                before = block.ref_cnt
+                if self._primary_enabled_for_pool():
+                    block.primary_generation = next_block_generation(
+                        block.primary_generation
+                    )
                 block.ref_cnt += 1
+                if self._primary_enabled_for_pool():
+                    emit_primary_usdt(
+                        "kv_block_alloc_v2",
+                        engine_instance_id=self.primary_engine_instance_id,
+                        physical_block_id=block.block_id,
+                        block_generation=block.primary_generation,
+                        refcount_before=before,
+                        refcount_after=block.ref_cnt,
+                        transition_reason=1,
+                        cached_before=0,
+                    )
+                self._emit_refcount(block, before, block.ref_cnt, 1)
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block)
         return ret
@@ -401,11 +532,15 @@ class BlockPool:
             # candidate), so remove it.
             if block.ref_cnt == 0 and not block.is_null:
                 self.free_block_queue.remove(block)
+            before = block.ref_cnt
             block.ref_cnt += 1
+            self._emit_refcount(block, before, block.ref_cnt, 2)
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
 
-    def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
+    def free_blocks(
+        self, ordered_blocks: Iterable[KVCacheBlock], release_reason: int = 0
+    ) -> None:
         """Free a list of blocks. The blocks should be ordered by their
         eviction priority, where the first block will be evicted first.
 
@@ -415,11 +550,38 @@ class BlockPool:
         """
         # Materialize the iterable to allow multiple passes.
         blocks_list = list(ordered_blocks)
+        released_blocks: list[KVCacheBlock] = []
         for block in blocks_list:
-            block.ref_cnt -= 1
-        self.free_block_queue.append_n(
-            [block for block in blocks_list if block.ref_cnt == 0 and not block.is_null]
-        )
+            # The null block does not participate in refcount accounting. Some
+            # scheduler unit tests also use detached KVCacheBlock snapshots to
+            # exercise attention-window bookkeeping. Those snapshots are not
+            # authoritative pool state and must not produce primary events or
+            # be inserted into the pool's free queue.
+            if block.is_null or not (
+                0 <= block.block_id < len(self.blocks)
+                and self.blocks[block.block_id] is block
+            ):
+                continue
+            before = block.ref_cnt
+            if before <= 0:
+                self.primary_integrity_failures["refcount_underflow"] += 1
+                raise RuntimeError("KV block refcount became negative")
+            block.ref_cnt = before - 1
+            if self._primary_enabled_for_pool() and not block.is_null:
+                emit_primary_usdt(
+                    "kv_block_free_v2",
+                    engine_instance_id=self.primary_engine_instance_id,
+                    physical_block_id=block.block_id,
+                    block_generation=block.primary_generation,
+                    refcount_before=before,
+                    refcount_after=block.ref_cnt,
+                    release_reason=release_reason,
+                    cached_after=int(block.block_hash is not None),
+                )
+            self._emit_refcount(block, before, block.ref_cnt, 3)
+            if block.ref_cnt == 0:
+                released_blocks.append(block)
+        self.free_block_queue.append_n(released_blocks)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.

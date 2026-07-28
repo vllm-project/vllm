@@ -74,6 +74,10 @@ class Request:
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
         resumable: bool = False,
         reasoning_ended: bool | None = None,
+        transition_reason: int = 0,
+        transition_initiator: int = 0,
+        transition_action_id_hi: int = 0,
+        transition_action_id_lo: int = 0,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -91,6 +95,10 @@ class Request:
         self.status = RequestStatus.WAITING
         self.events: list[EngineCoreEvent] = []
         self.stop_reason: int | str | None = None
+        self.transition_reason = transition_reason
+        self.transition_initiator = transition_initiator
+        self.transition_action_id_hi = transition_action_id_hi
+        self.transition_action_id_lo = transition_action_id_lo
 
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: dict[str, Any] | None = None
@@ -195,6 +203,10 @@ class Request:
             block_hasher=block_hasher,
             resumable=request.resumable,
             reasoning_ended=request.reasoning_ended,
+            transition_reason=request.transition_reason,
+            transition_initiator=request.transition_initiator,
+            transition_action_id_hi=request.transition_action_id_hi,
+            transition_action_id_lo=request.transition_action_id_lo,
         )
 
     def append_output_token_ids(

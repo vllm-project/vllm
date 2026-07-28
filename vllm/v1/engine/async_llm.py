@@ -22,11 +22,33 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient, StreamingInput
 from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
 from vllm.inputs import EngineInput, PromptType
+from vllm.l0_usdt import (
+    fire_first_token,
+    fire_l0_probe,
+    fire_output_token,
+    fire_request_id_mapping,
+    fire_request_terminal,
+    l0_finish_reason,
+    l0_output_token_count,
+)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
+from vllm.primary_usdt import (
+    PRIMARY_SEMANTIC_DISPATCH_ENABLED,
+    TransitionInitiator,
+    TransitionReason,
+    bind_submission_attempt,
+    current_submission_attempt_id,
+    emit_primary_usdt,
+    engine_instance_id_from_config,
+    prepare_primary_usdt_provider,
+    primary_async_submission,
+    primary_request_id_hash,
+    set_current_submission_request_hash,
+)
 from vllm.renderers import renderer_from_config
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -53,6 +75,52 @@ from vllm.v1.metrics.prometheus import shutdown_prometheus
 from vllm.v1.metrics.stats import IterationStats
 
 logger = init_logger(__name__)
+
+
+def _l0_bool(value: str | None) -> bool | None:
+    if value is None:
+        return None
+    return value.lower() in {"1", "true", "yes"}
+
+
+def _l0_int(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _l0_trace_extra_from_headers(
+    trace_headers: Mapping[str, str] | None,
+) -> dict[str, Any]:
+    if not trace_headers:
+        return {}
+    headers = {str(key).lower(): str(value) for key, value in trace_headers.items()}
+    extra: dict[str, Any] = {}
+    for header_name, extra_name in (
+        ("x-l0-endpoint", "endpoint"),
+        ("x-l0-case-name", "case_name"),
+        ("x-l0-prompt-type", "prompt_type"),
+        ("x-l0-abort-mode", "abort_mode"),
+        ("x-l0-failure-mode", "failure_mode"),
+        ("x-l0-benchmark-group", "benchmark_group"),
+    ):
+        value = headers.get(header_name)
+        if value is not None:
+            extra[extra_name] = value
+    stream = _l0_bool(headers.get("x-l0-stream"))
+    if stream is not None:
+        extra["stream"] = stream
+    for header_name, extra_name in (
+        ("x-l0-client-request-index", "client_request_index"),
+        ("x-l0-concurrency", "concurrency"),
+    ):
+        value = _l0_int(headers.get(header_name))
+        if value is not None:
+            extra[extra_name] = value
+    return extra
 
 
 class InputStreamError(Exception):
@@ -106,10 +174,17 @@ class AsyncLLM(EngineClient):
         """
         # Ensure we can serialize custom transformer configs
         maybe_register_config_serialize_by_value()
+        if PRIMARY_SEMANTIC_DISPATCH_ENABLED:
+            prepare_primary_usdt_provider("frontend_driver")
 
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.observability_config = vllm_config.observability_config
+        self._primary_engine_instance_id = (
+            engine_instance_id_from_config(vllm_config)
+            if PRIMARY_SEMANTIC_DISPATCH_ENABLED
+            else (0, 0)
+        )
 
         tracing_endpoint = self.observability_config.otlp_traces_endpoint
         if tracing_endpoint is not None:
@@ -140,6 +215,7 @@ class AsyncLLM(EngineClient):
             log_stats=self.log_stats,
             stream_interval=self.vllm_config.scheduler_config.stream_interval,
             tracing_enabled=tracing_endpoint is not None,
+            primary_engine_instance_id=self._primary_engine_instance_id,
         )
 
         # EngineCore (starts the engine in background process).
@@ -166,6 +242,8 @@ class AsyncLLM(EngineClient):
             self.logger_manager.log_engine_initialized()
 
         self._client_count = client_count
+        self._l0_trace_extra_by_request_id: dict[str, dict[str, Any]] = {}
+        self._primary_submission_by_request: dict[str, int] = {}
 
         self.output_handler: asyncio.Task | None = None
         try:
@@ -277,6 +355,7 @@ class AsyncLLM(EngineClient):
 
         return self._supported_tasks
 
+    @primary_async_submission
     async def add_request(
         self,
         request_id: str,
@@ -298,6 +377,12 @@ class AsyncLLM(EngineClient):
 
         if self.errored:
             raise EngineDeadError()
+
+        submission_attempt_id = (
+            current_submission_attempt_id()
+            if PRIMARY_SEMANTIC_DISPATCH_ENABLED
+            else 0
+        )
 
         is_pooling = isinstance(params, PoolingParams)
 
@@ -362,7 +447,44 @@ class AsyncLLM(EngineClient):
         if reasoning_ended is not None:
             request.reasoning_ended = reasoning_ended
 
+        l0_trace_extra = _l0_trace_extra_from_headers(trace_headers)
         self.input_processor.assign_request_id(request)
+        internal_request_id = request.request_id
+        if PRIMARY_SEMANTIC_DISPATCH_ENABLED:
+            internal_request_hash = primary_request_id_hash(internal_request_id)
+            set_current_submission_request_hash(internal_request_hash)
+            bind_submission_attempt(
+                self._primary_engine_instance_id,
+                internal_request_hash,
+                submission_attempt_id,
+            )
+            self._primary_submission_by_request[internal_request_id] = (
+                submission_attempt_id
+            )
+            emit_primary_usdt(
+                "request_identity_assigned_v2",
+                engine_instance_id=self._primary_engine_instance_id,
+                request_id_hash=internal_request_hash,
+                submission_attempt_id=submission_attempt_id,
+                identity_assignment_status=1,
+            )
+        self._l0_trace_extra_by_request_id[internal_request_id] = l0_trace_extra
+        external_request_id = getattr(request, "external_req_id", request_id)
+        fire_request_id_mapping(
+            external_request_id,
+            internal_request_id,
+            **l0_trace_extra,
+        )
+        fire_l0_probe(
+            "request_id_assigned",
+            internal_request_id,
+            path="online",
+            **l0_trace_extra,
+            external_request_id=external_request_id,
+            internal_request_id=internal_request_id,
+            output_kind=getattr(params, "output_kind", None),
+            priority=priority,
+        )
 
         # We start the output_handler on the first call to add_request() so
         # we can call __init__ before the event loop, which enables us
@@ -388,6 +510,17 @@ class AsyncLLM(EngineClient):
             request_id, child_params = parent_request.get_child_info(idx)
             child_request = request if idx == parent_params.n - 1 else copy(request)
             child_request.request_id = request_id
+            if PRIMARY_SEMANTIC_DISPATCH_ENABLED:
+                child_hash = primary_request_id_hash(request_id)
+                bind_submission_attempt(
+                    self._primary_engine_instance_id,
+                    child_hash,
+                    submission_attempt_id,
+                )
+                self._primary_submission_by_request[request_id] = (
+                    submission_attempt_id
+                )
+            self._l0_trace_extra_by_request_id[request_id] = l0_trace_extra
             child_request.sampling_params = child_params
             await self._add_request(
                 child_request, prompt_text, parent_request, idx, queue
@@ -407,6 +540,31 @@ class AsyncLLM(EngineClient):
 
         # Add the EngineCoreRequest to EngineCore (separate process).
         await self.engine_core.add_request_async(request)
+        if PRIMARY_SEMANTIC_DISPATCH_ENABLED:
+            request_hash = primary_request_id_hash(request.request_id)
+            emit_primary_usdt(
+                "request_admitted_v2",
+                engine_instance_id=self._primary_engine_instance_id,
+                request_id_hash=request_hash,
+                submission_attempt_id=self._primary_submission_by_request.get(
+                    request.request_id, (1 << 64) - 1
+                ),
+                lifecycle_state=3,
+            )
+        l0_trace_extra = self._l0_trace_extra_by_request_id.get(
+            request.request_id, {}
+        )
+        fire_l0_probe(
+            "request_engine_admitted",
+            request.request_id,
+            path="online",
+            **l0_trace_extra,
+            external_request_id=getattr(request, "external_req_id", None),
+            internal_request_id=request.request_id,
+            priority=getattr(request, "priority", None),
+            parent_request_id=getattr(parent_req, "request_id", None),
+            index=index,
+        )
 
         if self.log_requests:
             logger.info("Added request %s.", request.request_id)
@@ -449,6 +607,16 @@ class AsyncLLM(EngineClient):
         )
         self.input_processor.assign_request_id(final_req)
         internal_req_id = final_req.request_id
+        fire_request_id_mapping(request_id, internal_req_id, streaming_input=True)
+        fire_l0_probe(
+            "request_id_assigned",
+            internal_req_id,
+            path="online",
+            external_request_id=request_id,
+            internal_request_id=internal_req_id,
+            output_kind=getattr(sampling_params, "output_kind", None),
+            priority=priority,
+        )
 
         queue = RequestOutputCollector(sampling_params.output_kind, internal_req_id)
 
@@ -550,6 +718,16 @@ class AsyncLLM(EngineClient):
         returning the RequestOutput back to the caller.
         """
 
+        l0_trace_extra = _l0_trace_extra_from_headers(trace_headers)
+        fire_l0_probe(
+            "request_arrival",
+            request_id,
+            path="online",
+            **l0_trace_extra,
+            priority=priority,
+            output_kind=getattr(sampling_params, "output_kind", None),
+        )
+
         q: RequestOutputCollector | None = None
         try:
             q = await self.add_request(
@@ -568,6 +746,9 @@ class AsyncLLM(EngineClient):
             # The output_handler task pushes items into the queue.
             # This task pulls from the queue and yields to caller.
             finished = False
+            first_output_fired = False
+            finish_fired = False
+            output_chunk_index = 0
             while not finished:
                 # Note: drain queue without await if possible (avoids
                 # task switching under load which helps performance).
@@ -577,15 +758,126 @@ class AsyncLLM(EngineClient):
                 # own request cleanup based on finished.
                 assert isinstance(out, RequestOutput)
                 finished = out.finished
+                output_request_id = getattr(out, "request_id", None) or q.request_id
                 if out is not STREAM_FINISHED:
+                    output_token_count = l0_output_token_count(out)
+                    finish_reason = l0_finish_reason(out)
+                    if not first_output_fired:
+                        fire_first_token(
+                            output_request_id,
+                            path="online",
+                            **l0_trace_extra,
+                            finished=finished,
+                            output_token_count=output_token_count,
+                        )
+                        fire_l0_probe(
+                            "request_first_output",
+                            output_request_id,
+                            path="online",
+                            **l0_trace_extra,
+                            finished=finished,
+                            output_token_count=output_token_count,
+                        )
+                        first_output_fired = True
+                    fire_output_token(
+                        output_request_id,
+                        path="online",
+                        **l0_trace_extra,
+                        finished=finished,
+                        output_chunk_index=output_chunk_index,
+                        is_final_output=finished,
+                        output_token_count=output_token_count,
+                    )
+                    fire_l0_probe(
+                        "request_output",
+                        output_request_id,
+                        path="online",
+                        **l0_trace_extra,
+                        finished=finished,
+                        output_chunk_index=output_chunk_index,
+                        is_final_output=finished,
+                        output_token_count=output_token_count,
+                    )
+                    output_chunk_index += 1
+                    if finished and not finish_fired:
+                        fire_request_terminal(
+                            output_request_id,
+                            path="online",
+                            **l0_trace_extra,
+                            finished=True,
+                            terminal_type="finished",
+                            terminal_source="request_output_finished",
+                            terminal_confidence="high",
+                            output_token_count=output_token_count,
+                            raw_finish_reason=finish_reason,
+                            raw_terminal_code=finish_reason,
+                        )
+                        fire_l0_probe(
+                            "request_finish",
+                            output_request_id,
+                            path="online",
+                            **l0_trace_extra,
+                            finished=True,
+                            output_token_count=output_token_count,
+                            finish_reason=finish_reason,
+                        )
+                        finish_fired = True
                     yield out
+                elif not finish_fired:
+                    fire_request_terminal(
+                        output_request_id,
+                        path="online",
+                        **l0_trace_extra,
+                        finished=True,
+                        terminal_type="finished",
+                        terminal_source="stream_finished_sentinel",
+                        terminal_confidence="medium",
+                        output_token_count=None,
+                        raw_finish_reason="stream_finished",
+                        raw_terminal_code="stream_finished",
+                    )
+                    fire_l0_probe(
+                        "request_finish",
+                        output_request_id,
+                        path="online",
+                        **l0_trace_extra,
+                        finished=True,
+                        output_token_count=None,
+                        stream_finished=True,
+                    )
+                    finish_fired = True
 
         # If the request is disconnected by the client, generate()
         # is cancelled or the generator is garbage collected. So,
         # we abort the request if we end up here.
         except (asyncio.CancelledError, GeneratorExit):
             if q is not None:
-                await self.abort(q.request_id, internal=True)
+                await self.abort(
+                    q.request_id,
+                    internal=True,
+                    reason=TransitionReason.CLIENT_CANCEL,
+                    initiator=TransitionInitiator.CLIENT_RUNTIME,
+                )
+            else:
+                fire_request_terminal(
+                    request_id,
+                    path="online",
+                    **l0_trace_extra,
+                    terminal_type="cancelled",
+                    terminal_source="client_disconnect",
+                    terminal_confidence="high",
+                    abort_reason="client_disconnect",
+                    raw_finish_reason="abort",
+                    raw_terminal_code="client_disconnect",
+                )
+                fire_l0_probe(
+                    "request_abort",
+                    request_id,
+                    path="online",
+                    **l0_trace_extra,
+                    abort_reason="client_disconnect",
+                    finish_reason="abort",
+                )
             if self.log_requests:
                 logger.info("Request %s aborted.", request_id)
             raise
@@ -605,7 +897,12 @@ class AsyncLLM(EngineClient):
         # Error from input stream generator - propagate directly.
         except InputStreamError as e:
             if q is not None:
-                await self.abort(q.request_id, internal=True)
+                await self.abort(
+                    q.request_id,
+                    internal=True,
+                    reason=TransitionReason.INTERNAL_ABORT,
+                    initiator=TransitionInitiator.OUTPUT_PROCESSOR,
+                )
             if self.log_requests:
                 logger.info("Request %s failed (input error): %s.", request_id, e)
             raise e.cause from e
@@ -613,7 +910,12 @@ class AsyncLLM(EngineClient):
         # Unexpected error in the generate() task (possibly recoverable).
         except Exception as e:
             if q is not None:
-                await self.abort(q.request_id, internal=True)
+                await self.abort(
+                    q.request_id,
+                    internal=True,
+                    reason=TransitionReason.INTERNAL_ABORT,
+                    initiator=TransitionInitiator.OUTPUT_PROCESSOR,
+                )
             if self.log_requests:
                 try:
                     s = f"{e.__class__.__name__}: {e}"
@@ -627,6 +929,7 @@ class AsyncLLM(EngineClient):
             raise EngineGenerateError() from e
         finally:
             if q is not None:
+                self._l0_trace_extra_by_request_id.pop(q.request_id, None)
                 q.close()
 
     def _run_output_handler(self):
@@ -702,15 +1005,82 @@ class AsyncLLM(EngineClient):
         self.output_handler = asyncio.create_task(output_handler())
 
     async def abort(
-        self, request_id: str | Iterable[str], internal: bool = False
+        self,
+        request_id: str | Iterable[str],
+        internal: bool = False,
+        *,
+        reason: TransitionReason = TransitionReason.EXPLICIT_ABORT,
+        initiator: TransitionInitiator = TransitionInitiator.API_CALLER,
     ) -> None:
-        """Abort RequestId in OutputProcessor and EngineCore."""
+        """Abort RequestId with caller-owned scientific action semantics.
+
+        ``internal`` selects the request-ID namespace only; it never determines
+        whether the action is an explicit abort, client cancel, or internal
+        abort.
+        """
 
         request_ids = (
             (request_id,) if isinstance(request_id, str) else as_list(request_id)
         )
-        all_request_ids = self.output_processor.abort_requests(request_ids, internal)
-        await self.engine_core.abort_requests_async(all_request_ids)
+        actions = self.output_processor.abort_requests(
+            request_ids,
+            internal,
+            reason=reason,
+            initiator=initiator,
+        )
+        await self.engine_core.abort_requests_async(actions)
+        is_cancel = reason == TransitionReason.CLIENT_CANCEL
+        abort_source = "client_disconnect" if is_cancel else reason.name.lower()
+        aborted_request_ids = [
+            action.request_id for action in actions
+        ] or request_ids
+        for aborted_request_id in aborted_request_ids:
+            l0_trace_extra = self._l0_trace_extra_by_request_id.get(
+                aborted_request_id, {}
+            )
+            if l0_trace_extra:
+                fire_request_terminal(
+                    aborted_request_id,
+                    path="online",
+                    **l0_trace_extra,
+                    terminal_type="cancelled" if is_cancel else "aborted",
+                    terminal_source=abort_source,
+                    terminal_confidence="high",
+                    abort_reason=abort_source,
+                    raw_finish_reason="abort",
+                    raw_terminal_code=abort_source,
+                )
+                fire_l0_probe(
+                    "request_abort",
+                    aborted_request_id,
+                    path="online",
+                    **l0_trace_extra,
+                    abort_reason=abort_source,
+                    finish_reason="abort",
+                )
+            else:
+                fire_request_terminal(
+                    aborted_request_id,
+                    path="online",
+                    internal=internal,
+                    terminal_type="cancelled" if internal else "aborted",
+                    terminal_source=abort_source,
+                    terminal_confidence="medium",
+                    abort_source=abort_source,
+                    request_ids=request_ids,
+                    engine_request_ids=request_ids,
+                    raw_finish_reason="abort",
+                    raw_terminal_code=abort_source,
+                )
+                fire_l0_probe(
+                    "request_abort",
+                    aborted_request_id,
+                    path="online",
+                    internal=internal,
+                    abort_source=abort_source,
+                    request_ids=request_ids,
+                    engine_request_ids=request_ids,
+                )
 
         if self.log_requests:
             logger.info("Aborted request(s) %s.", ",".join(request_ids))
@@ -821,7 +1191,12 @@ class AsyncLLM(EngineClient):
         # is cancelled. So, we abort the request if we end up here.
         except asyncio.CancelledError:
             if q is not None:
-                await self.abort(q.request_id, internal=True)
+                await self.abort(
+                    q.request_id,
+                    internal=True,
+                    reason=TransitionReason.CLIENT_CANCEL,
+                    initiator=TransitionInitiator.CLIENT_RUNTIME,
+                )
             if self.log_requests:
                 logger.info("Request %s aborted.", request_id)
             raise
@@ -841,7 +1216,12 @@ class AsyncLLM(EngineClient):
         # Unexpected error in the generate() task (possibly recoverable).
         except Exception as e:
             if q is not None:
-                await self.abort(q.request_id, internal=True)
+                await self.abort(
+                    q.request_id,
+                    internal=True,
+                    reason=TransitionReason.INTERNAL_ABORT,
+                    initiator=TransitionInitiator.OUTPUT_PROCESSOR,
+                )
             if self.log_requests:
                 logger.info("Request %s failed.", request_id)
             raise EngineGenerateError() from e
