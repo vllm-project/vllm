@@ -36,6 +36,7 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.multimodal.parse import (
+    ImageEmbeddingItems,
     ImageProcessorItems,
     MultiModalDataItems,
     MultiModalDataParser,
@@ -91,6 +92,21 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
             if processor.audio_token in vocab:
                 return vocab[processor.audio_token]
         raise ValueError("Cannot find audio_token_id on processor or model config")
+
+    def _get_image_token_id(self) -> int:
+        processor = self.get_hf_processor()
+        if hasattr(processor, "image_token_id"):
+            return processor.image_token_id
+        config = self.get_hf_config()
+        val = getattr_iter(config, ("image_token_id", "image_token_index"))
+        if val is not None:
+            return val
+        if hasattr(processor, "image_token"):
+            tokenizer = self.get_tokenizer()
+            vocab = tokenizer.get_vocab()
+            if processor.image_token in vocab:
+                return vocab[processor.image_token]
+        raise ValueError("Cannot find image_token_id on processor or model config")
 
     def _get_audio_sampling_rate(self) -> float:
         sub = self._get_audio_processor()
@@ -322,47 +338,47 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         processed_data: "BatchFeature",
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        mm_token_type_ids: torch.Tensor | None,
     ) -> dict[str, list[PlaceholderRange]]:
-        if mm_token_type_ids is None:
+        image_token_id = self.info._get_image_token_id()
+        prompt_tensor = torch.tensor(prompt_ids)
+        is_image = prompt_tensor == image_token_id
+
+        if not is_image.any():
             return {}
 
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        padded = torch.cat([torch.tensor([False]), is_image, torch.tensor([False])])
+        transitions = padded.int().diff()
+        starts = torch.where(transitions == 1)[0]
+        ends = torch.where(transitions == -1)[0]
+        lengths = ends - starts
 
-        # We can infer vLLM style placeholder from token type ids, if we split
-        # it for each input `mm_data`.
-        mm_positions = torch.where(mm_token_type_ids == 1)[1]
-        images = mm_items.get_items("image", ImageProcessorItems)
-        image_sizes = []
-        for item_idx in range(len(images)):
-            image_size = images.get_image_size(item_idx)
-            image_sizes.append((image_size.height, image_size.width))
+        ranges = [
+            PlaceholderRange(
+                offset=s.item(),
+                length=ln.item(),
+                is_embed=torch.ones(ln.item(), dtype=torch.bool),
+            )
+            for s, ln in zip(starts, lengths)
+        ]
+        images = mm_items.get_items("image", (ImageProcessorItems, ImageEmbeddingItems))
+        if isinstance(images, ImageEmbeddingItems):
+            # Pre-embedded embeddings are one per image token so lengths are the split
+            processed_data["num_image_patches"] = lengths
+        else:
+            hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+            image_sizes = []
+            for item_idx in range(len(images)):
+                image_size = images.get_image_size(item_idx)
+                image_sizes.append((image_size.height, image_size.width))
 
-        mm_tokens_per_modality = hf_processor._get_num_multimodal_tokens(
-            image_sizes=image_sizes,
-            **self.info.ctx.get_merged_mm_kwargs({}),
-        )
-
-        mm_placeholders: dict[str, list[PlaceholderRange]] = {}
-        split_sizes = mm_tokens_per_modality["num_image_tokens"]
-        if split_sizes:
-            chunked_mm_positions = torch.split(mm_positions, split_sizes)
-            mm_tokens = torch.tensor(prompt_ids)[mm_token_type_ids[0].bool()]
-            chunked_mm_tokens = torch.split(mm_tokens, split_sizes)
-            ranges = [
-                PlaceholderRange(
-                    offset=positions[0].item(),
-                    length=positions.shape[0],
-                    is_embed=(mm_tokens == hf_processor.image_token_id).bool(),
-                )
-                for positions, mm_tokens in zip(chunked_mm_positions, chunked_mm_tokens)
-            ]
-            mm_placeholders = {"image": ranges}
-
-        processed_data["num_image_patches"] = torch.tensor(
-            mm_tokens_per_modality["num_image_patches"]
-        )
-        return mm_placeholders
+            mm_tokens = hf_processor._get_num_multimodal_tokens(
+                image_sizes=image_sizes,
+                **self.info.ctx.get_merged_mm_kwargs({}),
+            )
+            processed_data["num_image_patches"] = torch.tensor(
+                mm_tokens["num_image_patches"]
+            )
+        return {"image": ranges}
 
     def apply(
         self,
@@ -404,9 +420,9 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         with timing_ctx.record("get_mm_hashes"):
             mm_hashes = inputs.get_mm_hashes(self.info.model_id)
 
-        # For gemma3 we check `token_type_ids` as the key
-        mm_token_type_ids = processed_data.pop("token_type_ids", None)
-        mm_token_type_ids = processed_data.pop("mm_token_type_ids", mm_token_type_ids)
+        # Drop token_type_ids (gemma3) and mm_token_type_ids so they aren't mm fields
+        processed_data.pop("token_type_ids", None)
+        processed_data.pop("mm_token_type_ids", None)
 
         mm_placeholders: dict[str, list[PlaceholderRange]] = {}
         if self.info._is_audio_model():
@@ -418,7 +434,6 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                     processed_data,
                     mm_items,
                     hf_processor_mm_kwargs,
-                    mm_token_type_ids,
                 )
             )
 
