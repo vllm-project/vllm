@@ -282,6 +282,13 @@ class AttentionBackend(ABC):
         return True
 
     @classmethod
+    def supports_pcp(cls) -> bool:
+        try:
+            return cls.get_impl_cls().supports_pcp
+        except NotImplementedError:
+            return False
+
+    @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """Check if backend supports a given attention type.
 
@@ -327,6 +334,7 @@ class AttentionBackend(ABC):
         use_non_causal: bool = False,
         use_batch_invariant: bool = False,
         use_kv_connector: bool = False,
+        use_pcp: bool = False,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -367,6 +375,8 @@ class AttentionBackend(ABC):
             invalid_reasons.append("batch invariance not supported")
         if use_kv_connector and not cls.supports_kv_connector():
             invalid_reasons.append("KV connector not supported")
+        if use_pcp and not cls.supports_pcp():
+            invalid_reasons.append("PCP not supported")
         combination_reason = cls.supports_combination(
             head_size,
             dtype,
@@ -469,6 +479,11 @@ class CommonAttentionMetadata:
     this stay globally visible; later (generated) tokens additionally see a
     fixed sliding window. None disables R-SWA. The attention backend copies this
     into its own persistent buffer and reads ``rswa_window`` from model config."""
+
+    replayssm_decode_base_cpu: torch.Tensor | None = None
+    """(batch_size,) CPU ring origin for Mamba2 ReplaySSM decode: num_computed
+    at the current decode run's last full-state write. write_pos counts from
+    here, so a preemption-resumed request re-anchors past the prompt boundary."""
 
     # WARNING: Deprecated fields. Will be removed in a future release (v0.15.0)
     _seq_lens_cpu: torch.Tensor | None = None
@@ -581,6 +596,7 @@ class CommonAttentionMetadata:
             dcp_local_seq_lens_cpu=maybe_slice_reqs(self.dcp_local_seq_lens_cpu),
             is_prefilling=maybe_slice_reqs(self.is_prefilling),
             rswa_prefix_lens=maybe_slice_reqs(self.rswa_prefix_lens),
+            replayssm_decode_base_cpu=maybe_slice_reqs(self.replayssm_decode_base_cpu),
         )
 
 
@@ -787,6 +803,10 @@ class AttentionImplBase(ABC, Generic[T]):
     # route between the dense-MHA prefill and sparse-MQA paths.
     is_sparse: ClassVar[bool] = False
 
+    # Whether this impl provides a dense-MHA prefill path (forward_mha). Sparse
+    # impls without one run the top-k MQA path for all requests.
+    supports_dense_mha_prefill: ClassVar[bool] = True
+
     # Required attributes that all impls should have
     num_heads: int
     head_size: int
@@ -858,8 +878,8 @@ class AttentionImplBase(ABC, Generic[T]):
         except AssertionError:
             self.pcp_world_size = 1
             self.pcp_rank = 0
-        self.total_cp_world_size = self.pcp_world_size * self.dcp_world_size
-        self.total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
+        self.total_cp_world_size = self.dcp_world_size
+        self.total_cp_rank = self.dcp_rank
 
         self.need_to_return_lse_for_decode = (
             self.dcp_world_size > 1 and self.can_return_lse_for_decode
@@ -986,6 +1006,8 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
 
 class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     """MLA attention implementation with forward_mqa and forward_mha methods."""
+
+    supports_pcp: bool = True
 
     @abstractmethod
     def __init__(
