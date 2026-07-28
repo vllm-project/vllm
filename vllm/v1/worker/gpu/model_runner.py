@@ -208,6 +208,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.speculative_config.method in ("eagle3", "dflash", "dspark"):
                 # Drafting may require auxiliary hidden states from target model outputs
                 self.use_aux_hidden_state_outputs = True
+                supports_pp = False
+                if self.speculative_config.method == "dspark":
+                    from vllm.v1.worker.gpu.spec_decode.dspark.utils import (
+                        supports_dspark_pipeline_parallelism,
+                    )
+
+                    supports_pp = supports_dspark_pipeline_parallelism(vllm_config)
+                if self.use_pp and not supports_pp:
+                    raise ValueError(
+                        f"{self.speculative_config.method} with pipeline parallel "
+                        "is not supported."
+                    )
 
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)

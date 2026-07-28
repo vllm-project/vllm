@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections import deque
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import numpy as np
@@ -12,6 +13,25 @@ from vllm.v1.worker.gpu.pp_utils import (
     PPHandler,
     _pad_sampled_token_ids,
 )
+from vllm.v1.worker.gpu.spec_decode.dspark import utils as dspark_utils
+
+
+def test_only_cuda_kimi_k3_enables_dspark_pipeline_parallelism(monkeypatch):
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="kimi_k3")
+        )
+    )
+    monkeypatch.setattr(dspark_utils.current_platform, "is_cuda", lambda: True)
+
+    assert dspark_utils.supports_dspark_pipeline_parallelism(vllm_config)
+
+    vllm_config.model_config.hf_config.model_type = "qwen3"
+    assert not dspark_utils.supports_dspark_pipeline_parallelism(vllm_config)
+
+    vllm_config.model_config.hf_config.model_type = "kimi_k3"
+    monkeypatch.setattr(dspark_utils.current_platform, "is_cuda", lambda: False)
+    assert not dspark_utils.supports_dspark_pipeline_parallelism(vllm_config)
 
 
 def test_pad_sampled_token_ids_to_pp_receive_width():

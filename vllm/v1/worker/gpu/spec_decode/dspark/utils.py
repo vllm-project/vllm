@@ -5,10 +5,20 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig, replace
 from vllm.model_executor.model_loader import get_model
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
     _should_share,
     get_target_lm_head,
 )
+
+
+def supports_dspark_pipeline_parallelism(vllm_config: VllmConfig) -> bool:
+    """Whether this target has the model-specific state transport DSpark needs."""
+    return (
+        current_platform.is_cuda()
+        and getattr(vllm_config.model_config.hf_config, "model_type", None)
+        == "kimi_k3"
+    )
 
 
 def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
