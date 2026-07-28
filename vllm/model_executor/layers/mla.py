@@ -85,6 +85,11 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         self.rotary_emb = mla_modules.rotary_emb
         self.o_proj = mla_modules.o_proj
         self.indexer = mla_modules.indexer
+        self.indexer_side_stream = (
+            getattr(self.indexer, "indexer_side_stream", None)
+            if self.indexer is not None
+            else None
+        )
         self.indexer_rope_emb = mla_modules.indexer_rotary_emb
         self.is_sparse = mla_modules.is_sparse
 
@@ -119,7 +124,6 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             indexer=self.indexer,
             topk_indices_buffer=mla_modules.topk_indices_buffer,
         )
-
         self.prefix = prefix
 
     def forward(
@@ -130,6 +134,8 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
     ) -> torch.Tensor:
         q_c = None
         kv_lora = None
+        run_indexer = self.indexer and self.is_sparse and not self.skip_topk
+        indexer_dummy_dep = None
 
         if self.q_lora_rank is not None:
             assert self.fused_qkv_a_proj is not None, (
@@ -148,6 +154,11 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                 dim=-1,
             )
             q_c = self.q_a_layernorm(q_c)
+            if run_indexer:
+                assert self.indexer is not None
+                indexer_dummy_dep = self.indexer(
+                    hidden_states, q_c, positions, self.indexer_rope_emb
+                )
             q_proj_layer = self.q_b_proj
             q_proj_input = q_c
         else:
@@ -157,6 +168,11 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             assert self.q_proj is not None, (
                 "q_proj is required when q_lora_rank is None"
             )
+            if run_indexer:
+                assert self.indexer is not None
+                indexer_dummy_dep = self.indexer(
+                    hidden_states, q_c, positions, self.indexer_rope_emb
+                )
             kv_lora = self.kv_a_proj_with_mqa(hidden_states)[0]
             q_proj_layer = self.q_proj
             q_proj_input = hidden_states
@@ -177,9 +193,6 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                 positions, q[..., self.qk_nope_head_dim :], k_pe
             )
 
-        if self.indexer and self.is_sparse and not self.skip_topk:
-            self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
-
         if llama_4_scaling is not None:
             q *= llama_4_scaling
 
@@ -187,6 +200,8 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         if self.dcp_q_replicate:
             q_dcp_replicated, q = q, q_proj_layer._local_view(q)
 
+        if indexer_dummy_dep is not None and self.indexer_side_stream is not None:
+            torch.accelerator.current_stream().wait_stream(self.indexer_side_stream)
         attn_out = self.mla_attn(
             q,
             kv_c_normed,

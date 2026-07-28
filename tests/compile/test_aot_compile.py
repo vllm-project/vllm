@@ -20,6 +20,7 @@ from vllm.compilation.caching import (
 )
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
+from vllm.compilation.side_stream import get_side_stream
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
@@ -75,6 +76,22 @@ class CompiledModTuple(torch.nn.Module):
 
     def forward(self, x: torch.Tensor):
         return reference_fn_tuple(x)
+
+
+@support_torch_compile
+class SideStreamCompiledMod(torch.nn.Module):
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.stream = get_side_stream()
+
+    def forward(self, x: torch.Tensor):
+        assert self.stream is not None
+        self.stream.wait_stream(torch.accelerator.current_stream())
+        with self.stream:
+            side = x + 1
+        main = x * 2
+        torch.accelerator.current_stream().wait_stream(self.stream)
+        return main + side
 
 
 def make_vllm_config() -> VllmConfig:
@@ -156,6 +173,34 @@ def test_save_and_load(monkeypatch: pytest.MonkeyPatch):
                 "Expected was_aot_compile_fn_loaded_from_disk to be True"
             )
             assert torch.allclose(ret, expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA-only test")
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.13.0"), reason="requires torch 2.13")
+def test_side_stream_save_and_load(monkeypatch: pytest.MonkeyPatch):
+    from torch._dynamo.graph_bytecode_inputs import reset_user_object_tracking
+
+    with tempfile.TemporaryDirectory() as tmpdirname, monkeypatch.context() as m:
+        m.setenv("VLLM_CACHE_ROOT", tmpdirname)
+        m.setenv("VLLM_USE_AOT_COMPILE", "1")
+        m.setenv("VLLM_USE_MEGA_AOT_ARTIFACT", "1")
+        m.setenv("VLLM_USE_STANDALONE_COMPILE", "1")
+        x = torch.randn(16, device="cuda")
+        expected = 3 * x + 1
+
+        vllm_config = make_vllm_config()
+        with use_vllm_config(vllm_config):
+            compiled_mod = SideStreamCompiledMod(vllm_config=vllm_config)
+            torch.testing.assert_close(compiled_mod(x), expected)
+
+        disable_envs_cache()
+        m.setenv("VLLM_FORCE_AOT_LOAD", "1")
+        reset_user_object_tracking()
+        vllm_config = make_vllm_config()
+        with use_vllm_config(vllm_config):
+            cached_mod = SideStreamCompiledMod(vllm_config=vllm_config)
+            torch.testing.assert_close(cached_mod(x), expected)
+        assert cached_mod.was_aot_compile_fn_loaded_from_disk
 
 
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")

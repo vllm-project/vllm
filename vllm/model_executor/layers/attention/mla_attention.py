@@ -556,7 +556,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             and _vllm_config.parallel_config.decode_context_parallel_size > 1
             and _vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
-
         # Initialize q/k/v range constants.
         self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
         self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
@@ -896,7 +895,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # call decode attn
             if not self.impl.is_sparse:
                 assert attn_metadata.decode is not None
-            attn_out, lse = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)  # type: ignore[attr-defined]
+            attn_out, lse = self.impl.forward_mqa(  # type: ignore[attr-defined]
+                mqa_q,
+                kv_cache,
+                attn_metadata,
+                self,
+            )
 
             # correct dcp attn_out with lse.
             if self.impl.dcp_world_size > 1:

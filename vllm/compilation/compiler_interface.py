@@ -24,6 +24,13 @@ from vllm.utils.torch_utils import is_torch_equal_or_newer
 logger = init_logger(__name__)
 
 
+def _uses_non_default_stream(graph: fx.GraphModule) -> bool:
+    return any(
+        node.meta.get("custom", {}).get("stream") not in (None, 0)
+        for node in graph.graph.nodes
+    )
+
+
 class CompilerInterface:
     """
     The interface for a compiler that can be used by vLLM.
@@ -290,6 +297,8 @@ class InductorStandaloneAdaptor(CompilerInterface):
         current_config = {}
         if compiler_config is not None:
             current_config.update(compiler_config)
+        if _uses_non_default_stream(graph):
+            current_config["triton.autotune_at_compile_time"] = False
         set_inductor_config(current_config, compile_range)
         set_functorch_config()
 
