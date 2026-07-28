@@ -487,9 +487,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.vllm_config.mamba_config, self.kv_cache_config
         )
         initialize_replayssm_spec_flashinfer_backend(
-            self.vllm_config.mamba_config,
+            self.vllm_config,
             self.kv_cache_config,
-            self.cache_config.use_replayssm_spec,
         )
         cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
             attn_cg_support.min_cg_support,

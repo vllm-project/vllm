@@ -14,12 +14,12 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.mamba.ops.replayssm_spec_flashinfer import (
+    _validate_cache_spec,
     _validate_packed_inputs,
-    _validate_ring_caches,
     _validate_tied_weights,
 )
+from vllm.v1.kv_cache_interface import MambaSpec
 
-NUM_BLOCKS = 4
 NHEADS = 8
 HEAD_DIM = 64
 DSTATE = 128
@@ -60,12 +60,27 @@ def _mixer_views(num_tokens: int = NUM_TOKENS):
     return x, dt, a, b, c, out, dt_bias
 
 
-def _ring_caches():
-    state = torch.zeros(NUM_BLOCKS, NHEADS, HEAD_DIM, DSTATE)
-    x_cache = torch.zeros(NUM_BLOCKS, NHEADS, RING_LEN, HEAD_DIM)
-    b_cache = torch.zeros(NUM_BLOCKS, NGROUPS, RING_LEN, DSTATE)
-    dt_cache = torch.zeros(NUM_BLOCKS, NHEADS, RING_LEN, dtype=torch.float32)
-    return state, x_cache, b_cache, dt_cache
+def _cache_spec(
+    ring_len: int = RING_LEN,
+    dt_dtype: torch.dtype = torch.float32,
+) -> MambaSpec:
+    return MambaSpec(
+        block_size=16,
+        shapes=(
+            (NHEADS * HEAD_DIM + 2 * NGROUPS * DSTATE, 3),
+            (NHEADS, HEAD_DIM, DSTATE),
+            (NHEADS, ring_len, HEAD_DIM),
+            (NGROUPS, ring_len, DSTATE),
+            (NHEADS, ring_len),
+        ),
+        dtypes=(
+            torch.float32,
+            torch.float32,
+            torch.bfloat16,
+            torch.bfloat16,
+            dt_dtype,
+        ),
+    )
 
 
 def test_real_mixer_views_satisfy_the_stride_contract():
@@ -130,30 +145,20 @@ def test_rejects_transposed_inner_stride():
         )
 
 
-def test_ring_caches_accepted_at_exactly_b_plus_t():
-    state, x_cache, b_cache, dt_cache = _ring_caches()
-    _validate_ring_caches(state, x_cache, b_cache, dt_cache, BUFFER_LEN, MAX_SPEC_LEN)
+def test_cache_spec_accepted_at_exactly_b_plus_t():
+    _validate_cache_spec(_cache_spec(), BUFFER_LEN, MAX_SPEC_LEN)
 
 
 def test_rejects_power_of_two_padded_ring():
     """A next_pow2 ring (the Triton layout) would inflate FlashInfer's implicit
     max_window past replayssm_buffer_len, so it must be rejected outright.
     """
-    state, _, _, _ = _ring_caches()
-    padded = 32
-    x_cache = torch.zeros(NUM_BLOCKS, NHEADS, padded, HEAD_DIM)
-    b_cache = torch.zeros(NUM_BLOCKS, NGROUPS, padded, DSTATE)
-    dt_cache = torch.zeros(NUM_BLOCKS, NHEADS, padded, dtype=torch.float32)
-    with pytest.raises(AssertionError, match="x_cache"):
-        _validate_ring_caches(
-            state, x_cache, b_cache, dt_cache, BUFFER_LEN, MAX_SPEC_LEN
-        )
+    with pytest.raises(ValueError, match="x_cache"):
+        _validate_cache_spec(_cache_spec(ring_len=32), BUFFER_LEN, MAX_SPEC_LEN)
 
 
 def test_rejects_non_fp32_dt_cache():
-    state, x_cache, b_cache, _ = _ring_caches()
-    dt_cache = torch.zeros(NUM_BLOCKS, NHEADS, RING_LEN, dtype=torch.bfloat16)
-    with pytest.raises(AssertionError, match="dt_cache must be fp32"):
-        _validate_ring_caches(
-            state, x_cache, b_cache, dt_cache, BUFFER_LEN, MAX_SPEC_LEN
+    with pytest.raises(ValueError, match="dt_cache must be fp32"):
+        _validate_cache_spec(
+            _cache_spec(dt_dtype=torch.bfloat16), BUFFER_LEN, MAX_SPEC_LEN
         )

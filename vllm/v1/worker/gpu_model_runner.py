@@ -7662,9 +7662,8 @@ class GPUModelRunner(
             self.vllm_config.mamba_config, self.kv_cache_config
         )
         initialize_replayssm_spec_flashinfer_backend(
-            self.vllm_config.mamba_config,
+            self.vllm_config,
             self.kv_cache_config,
-            self.cache_config.use_replayssm_spec,
         )
         # The kernel block size for all KV cache groups. For example, if
         # kv_cache_manager uses block_size 256 for a given group, but the attention

@@ -11,7 +11,7 @@ things differ from the Triton commit and both are load-bearing:
   (``pnat + seq_len > max_window``), not the maximum ``T``.
 
 The Triton kernels run on GPU, so these tests exercise a CPU reference that is
-kept structurally identical to ``_commit_flashinfer_cursors_kernel``; the GPU
+kept structurally identical to ``_update_flashinfer_cursors_kernel``; the GPU
 kernel itself is covered by the metadata-builder suite.
 """
 
@@ -26,8 +26,19 @@ T = 1 + NUM_SPEC
 R = B + T  # 20 -- deliberately not a power of two
 
 
-def commit_row(history, origin, prev_flushed, accepted, cur_len, max_window, ring_len):
-    """CPU mirror of _commit_flashinfer_cursors_kernel for one valid row."""
+def commit_row(
+    history,
+    origin,
+    prev_flushed,
+    accepted,
+    cur_len,
+    max_window,
+    ring_len,
+    needs_reset=False,
+):
+    """CPU mirror of _update_flashinfer_cursors_kernel for one valid row."""
+    if needs_reset:
+        return 0, 0, cur_len > max_window
     if accepted > 0:
         if prev_flushed:
             origin = origin + history
@@ -126,54 +137,59 @@ def test_history_and_ring_invariants_hold_across_a_long_sequence():
     assert origin != 0, "the sequence should have flushed at least once"
 
 
-def _v2_gather(needs_reset_gpu, idx_mapping, num_reqs, num_reqs_after_padding):
-    """CPU mirror of the V2 gather in MambaHybridModelState.prepare_attn."""
-    out = needs_reset_gpu.new_zeros(num_reqs_after_padding)
-    valid = idx_mapping >= 0
-    gathered = needs_reset_gpu[idx_mapping.clamp_min(0)]
-    out[:num_reqs] = torch.where(valid, gathered, torch.zeros_like(gathered))
-    return out
+def _consume_epoch(admission, consumed, request_slot):
+    """CPU mirror of one builder's V2 admission-epoch decision."""
+    if request_slot < 0:
+        return False
+    if admission[request_slot] == consumed[request_slot]:
+        return False
+    consumed[request_slot] = admission[request_slot]
+    return True
 
 
-def test_v2_gather_maps_batch_rows_to_persistent_slots():
-    slots = torch.tensor([0, 1, 0, 1, 1], dtype=torch.int8)
-    # Batch row 0 -> slot 3, row 1 -> slot 1, row 2 -> slot 4.
-    idx_mapping = torch.tensor([3, 1, 4])
-    out = _v2_gather(slots, idx_mapping, num_reqs=3, num_reqs_after_padding=3)
-    assert out.tolist() == [1, 1, 1]
+def test_v2_epoch_maps_batch_rows_to_persistent_slots():
+    admission = torch.tensor([0, 2, 0, 1, 4], dtype=torch.int64)
+    consumed = torch.zeros_like(admission)
+    idx_mapping = [3, 1, 4]
 
-    slots = torch.tensor([0, 0, 0, 0, 0], dtype=torch.int8)
-    slots[4] = 1
-    out = _v2_gather(slots, idx_mapping, num_reqs=3, num_reqs_after_padding=3)
-    assert out.tolist() == [0, 0, 1]
-
-
-def test_v2_gather_masks_negative_idx_mapping_sentinels():
-    """A -1 sentinel (filtered row under PP) must not read the last slot.
-
-    Plain advanced indexing would wrap -1 onto the final request slot and, on
-    the clear side, would zero a flag belonging to an unrelated request.
-    """
-    slots = torch.tensor([0, 0, 0, 1], dtype=torch.int8)  # last slot is armed
-    idx_mapping = torch.tensor([0, -1, 2])
-
-    out = _v2_gather(slots, idx_mapping, num_reqs=3, num_reqs_after_padding=3)
-    assert out.tolist() == [0, 0, 0], "the -1 row must not pick up slot 3's flag"
-    # What the buggy version would have produced:
-    assert slots[idx_mapping[1]].item() == 1
+    assert [_consume_epoch(admission, consumed, i) for i in idx_mapping] == [
+        True,
+        True,
+        True,
+    ]
+    assert [_consume_epoch(admission, consumed, i) for i in idx_mapping] == [
+        False,
+        False,
+        False,
+    ]
 
 
-def test_v2_gather_leaves_the_cudagraph_padded_tail_zero():
-    """Padding must never reset a ring."""
-    slots = torch.ones(4, dtype=torch.int8)
-    idx_mapping = torch.tensor([0, 1])
-    out = _v2_gather(slots, idx_mapping, num_reqs=2, num_reqs_after_padding=6)
-    assert out.tolist() == [1, 1, 0, 0, 0, 0]
+def test_v2_epoch_masks_negative_idx_mapping_sentinels():
+    admission = torch.tensor([0, 0, 0, 1], dtype=torch.int64)
+    consumed = torch.zeros_like(admission)
+
+    assert _consume_epoch(admission, consumed, -1) is False
+    assert consumed[-1].item() == 0
+
+
+def test_v2_each_builder_consumes_the_admission_independently():
+    admission = torch.tensor([0, 3], dtype=torch.int64)
+    consumed_a = torch.zeros_like(admission)
+    consumed_b = torch.zeros_like(admission)
+
+    assert _consume_epoch(admission, consumed_a, 1) is True
+    assert _consume_epoch(admission, consumed_b, 1) is True
+    assert _consume_epoch(admission, consumed_a, 1) is False
+    assert _consume_epoch(admission, consumed_b, 1) is False
+
+    admission[1] += 1  # readmission after preemption
+    assert _consume_epoch(admission, consumed_a, 1) is True
+    assert _consume_epoch(admission, consumed_b, 1) is True
 
 
 def test_reset_leaves_a_row_that_cannot_flush_on_entry():
     """After a reset the ring is empty, so 0 + cur_len > B is false for any
     admissible row (cur_len <= T <= B)."""
     for cur_len in range(1, T + 1):
-        _, _, is_flush = commit_row(0, 0, False, 0, cur_len, B, R)
+        _, _, is_flush = commit_row(8, 7, True, 4, cur_len, B, R, needs_reset=True)
         assert is_flush is False

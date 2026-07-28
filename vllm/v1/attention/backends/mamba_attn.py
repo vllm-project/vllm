@@ -250,6 +250,13 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self.decode_spec_fi_cb_scaled: torch.Tensor | None = None
         self.decode_spec_fi_cumadt: torch.Tensor | None = None
         self.decode_spec_fi_cb_old: torch.Tensor | None = None
+        self.spec_consumed_admission_epoch: torch.Tensor | None = None
+        if self.use_replayssm_spec_flashinfer and vllm_config.use_v2_model_runner:
+            self.spec_consumed_admission_epoch = torch.zeros(
+                scheduler_config.max_num_seqs,
+                dtype=torch.int64,
+                device=device,
+            )
         if self.use_replayssm_spec_flashinfer:
             self._init_replayssm_spec_flashinfer_scratch(
                 kv_cache_spec,
@@ -569,14 +576,15 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         *,
         num_accepted_tokens: torch.Tensor | None = None,
         prev_last_scheduled_idx: torch.Tensor | None = None,
-        replayssm_needs_reset: torch.Tensor | None = None,
+        replayssm_admission_epoch: torch.Tensor | None = None,
+        replayssm_request_state_indices: torch.Tensor | None = None,
     ) -> M:
         """
         Compute metadata common to both Mamba1 and Mamba2.
 
-        ``replayssm_needs_reset`` is the V2 runner's GPU-resident admission
-        mask, already gathered into batch order; the classic runner supplies the
-        equivalent on ``common_attn_metadata`` instead.
+        V2 passes a persistent admission epoch and its batch-to-request-slot
+        mapping. The classic runner supplies its CPU-staged reset mask on
+        ``common_attn_metadata`` instead.
         """
         num_reqs = common_attn_metadata.num_reqs
 
@@ -815,7 +823,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     state_indices_tensor_d,
                     num_accepted_tokens,
                     num_decodes,
-                    replayssm_needs_reset=replayssm_needs_reset,
+                    replayssm_admission_epoch=replayssm_admission_epoch,
+                    replayssm_request_state_indices=replayssm_request_state_indices,
                 )
             )
             if self.decode_spec_bc_pre is not None:
@@ -871,7 +880,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         state_indices_tensor_d: torch.Tensor,
         num_accepted_tokens: torch.Tensor,
         num_decodes: int,
-        replayssm_needs_reset: torch.Tensor | None = None,
+        replayssm_admission_epoch: torch.Tensor | None = None,
+        replayssm_request_state_indices: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Advance the block-keyed spec ring cursors for this step.
 
@@ -894,7 +904,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 state_indices_tensor_d,
                 num_accepted_tokens,
                 num_decodes,
-                replayssm_needs_reset,
+                replayssm_admission_epoch,
+                replayssm_request_state_indices,
             )
 
         block_ids = state_indices_tensor_d[:, 0]
@@ -972,20 +983,21 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         state_indices_tensor_d: torch.Tensor,
         num_accepted_tokens: torch.Tensor,
         num_decodes: int,
-        replayssm_needs_reset: torch.Tensor | None,
+        replayssm_admission_epoch: torch.Tensor | None,
+        replayssm_request_state_indices: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """FlashInfer variant of the cursor commit.
 
         Differs from the Triton commit in the two places the kernels differ: the
         ring wraps by subtraction (B + T is not a power of two) and this step's
         checkpoint decision uses each row's actual length, matching the
-        kernel's ``pnat + seq_len > max_window``. Entry is driven by the
-        once-per-admission flag rather than a decode_base comparison, so no
-        forced flush is needed -- FlashInfer has no is_flush input to force.
+        kernel's ``pnat + seq_len > max_window``. Entry is driven by either the
+        classic runner's once-per-admission flag or V2's persistent admission
+        epoch, so no forced flush is needed -- FlashInfer has no is_flush input
+        to force.
         """
         from vllm.model_executor.layers.mamba.ops.replayssm_spec_flashinfer_cursors import (  # noqa: E501
-            commit_replayssm_spec_flashinfer,
-            reset_replayssm_spec_flashinfer_cursors,
+            update_replayssm_spec_flashinfer_cursors,
         )
 
         assert self.spec_write_pos is not None
@@ -1001,24 +1013,19 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         block_ids = state_indices_tensor_d[:, 0]
         query_start_loc_d = common_attn_metadata.query_start_loc[: num_decodes + 1]
 
-        # Commit first: acceptance is only known after the previous step's
-        # sampling, so folding it into this build keeps every cursor update
-        # on-device and avoids a device-to-host sync on num_accepted_tokens.
-        commit_replayssm_spec_flashinfer(
-            self.spec_write_pos,
-            self.spec_post_origin,
-            self.spec_is_flush,
-            num_accepted_tokens.to(torch.int32),
-            query_start_loc_d,
-            block_ids,
-            max_window=self.replayssm_buffer_len,
-            ring_len=self.spec_fi_ring_len,
-        )
-
-        if replayssm_needs_reset is not None:
-            # V2 runner: already gathered into batch order on device, with -1
-            # idx_mapping sentinels and the padded tail masked off.
-            needs_reset_d = replayssm_needs_reset[:num_decodes]
+        admission_kwargs: dict[str, torch.Tensor]
+        if replayssm_admission_epoch is not None:
+            if replayssm_request_state_indices is None:
+                raise ValueError(
+                    "V2 FlashInfer ReplaySSM admission epochs require request "
+                    "state indices"
+                )
+            assert self.spec_consumed_admission_epoch is not None
+            admission_kwargs = dict(
+                request_state_indices=replayssm_request_state_indices[:num_decodes],
+                admission_epoch=replayssm_admission_epoch,
+                consumed_admission_epoch=self.spec_consumed_admission_epoch,
+            )
         else:
             needs_reset_cpu = common_attn_metadata.replayssm_needs_reset_cpu
             if needs_reset_cpu is None:
@@ -1032,14 +1039,20 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             needs_reset_d = async_tensor_h2d(
                 needs_reset_cpu[:num_decodes].tolist(), dtype=torch.int8, device=device
             )
-        reset_replayssm_spec_flashinfer_cursors(
+            admission_kwargs = dict(needs_reset_mask=needs_reset_d)
+
+        # Acceptance is known only after the previous step's sampling. Commit
+        # it and reset newly admitted rows in one device launch.
+        update_replayssm_spec_flashinfer_cursors(
             self.spec_write_pos,
             self.spec_post_origin,
             self.spec_is_flush,
-            needs_reset_d,
+            num_accepted_tokens.to(torch.int32),
             query_start_loc_d,
             block_ids,
             max_window=self.replayssm_buffer_len,
+            ring_len=self.spec_fi_ring_len,
+            **admission_kwargs,
         )
         return self.spec_write_pos, self.spec_post_origin, self.spec_is_flush
 

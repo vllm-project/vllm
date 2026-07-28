@@ -10,15 +10,16 @@ state replayed from the wrong origin, and GSM8K 5-shot fell from ~0.87 to 0.368
 against a 0.872 baseline. A generic Nemotron-H engine test passes throughout,
 because MTP and DFlash run on the classic worker.
 
-The V2 half of the FlashInfer admission flag therefore needs coverage that
+The V2 half of the FlashInfer admission epoch therefore needs coverage that
 actually runs on the V2 runner. ``VLLM_USE_V2_MODEL_RUNNER=1`` forces it for any
 config, so these cases exercise the same plumbing (``MambaHybridModelState``
-slots, the ``idx_mapping`` gather, the scatter-clear) without needing a DSpark
-checkpoint; the DSpark case at the bottom confirms it with the real drafter.
+slots, direct ``idx_mapping`` transport, per-builder epoch consumption) without
+needing a DSpark checkpoint; the DSpark case at the bottom confirms it with the
+real drafter.
 
 The conditions that broke DSpark are provoked deliberately:
   * chunked prefill so a request runs several prefill steps before its first
-    decode -- the flag must survive all of them;
+    decode -- the epoch must remain unconsumed through all of them;
   * prompt lengths swept across a chunk boundary so at least one request ends on
     a single-token prompt chunk, the case the Triton path handles with a forced
     flush that FlashInfer cannot express;
@@ -141,9 +142,9 @@ def test_v2_runner_chunked_prefill_churn_and_recycling(
 ):
     """The core gate: chunked prefill, slot churn, block recycling, both modes.
 
-    Eager and CUDA graphs are both covered because the admission flag is
+    Eager and CUDA graphs are both covered because the admission epoch is
     consumed in the metadata builder, which the capture path enters with a
-    synthesised batch and no reset mask at all.
+    synthesised batch and no live admission state.
     """
     _run_v2_parity(vllm_runner, monkeypatch, model_name, enforce_eager=enforce_eager)
 
@@ -152,11 +153,11 @@ def test_v2_runner_chunked_prefill_churn_and_recycling(
 def test_v2_runner_survives_preemption_and_readmission(
     vllm_runner, monkeypatch, model_name
 ):
-    """A readmitted request re-enters add_request, so its flag must be set again.
+    """A readmitted request re-enters add_request, so its epoch must advance.
 
     Starved of blocks, requests are preempted and recomputed. If readmission did
-    not re-arm the reset, the resumed request would append to a ring whose origin
-    belongs to its previous life.
+    not advance the epoch, the resumed request would append to a ring whose
+    origin belongs to its previous life.
     """
     _run_v2_parity(
         vllm_runner,

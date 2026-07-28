@@ -14,6 +14,7 @@ keeps its own call path in ``selective_state_update_replayssm_spec``.
 
 import inspect
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -21,6 +22,9 @@ from vllm.config.mamba import MambaConfig, ReplaySSMSpecAlgorithm
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -119,9 +123,6 @@ class ReplaySSMSpecFlashInferBackend:
         Allocates nothing and copies nothing: ``out`` and the optional scratch
         trio are caller-owned so the call is CUDA-graph safe.
         """
-        _validate_ring_caches(
-            state, x_cache, B_cache, dt_cache, replayssm_buffer_len, max_spec_len
-        )
         _validate_packed_inputs(x, dt, B, C, out)
         _validate_tied_weights(A, dt_bias)
 
@@ -167,40 +168,51 @@ class ReplaySSMSpecFlashInferBackend:
         )
 
 
-def _validate_ring_caches(
-    state: torch.Tensor,
-    x_cache: torch.Tensor,
-    B_cache: torch.Tensor,
-    dt_cache: torch.Tensor,
+def _validate_cache_spec(
+    spec: MambaSpec,
     replayssm_buffer_len: int,
     max_spec_len: int,
 ) -> None:
-    num_blocks, nheads, head_dim, dstate = state.shape
-    ring_len = replayssm_buffer_len + max_spec_len
-    ngroups = B_cache.shape[1]
+    """Validate the fixed FlashInfer page contract before cache allocation."""
+    if len(spec.shapes) != 5 or len(spec.dtypes) != 5:
+        raise ValueError(
+            "the FlashInfer cached-spec kernel requires the 5-tensor Mamba2 "
+            "page (conv, ssm, x_cache, B_cache, dt_cache)"
+        )
 
-    assert x_cache.shape == (num_blocks, nheads, ring_len, head_dim), (
-        f"x_cache {tuple(x_cache.shape)} != {(num_blocks, nheads, ring_len, head_dim)}"
-    )
-    assert B_cache.shape == (num_blocks, ngroups, ring_len, dstate), (
-        f"B_cache {tuple(B_cache.shape)} != {(num_blocks, ngroups, ring_len, dstate)}"
-    )
-    assert dt_cache.shape == (num_blocks, nheads, ring_len), (
-        f"dt_cache {tuple(dt_cache.shape)} != {(num_blocks, nheads, ring_len)}"
-    )
-    assert dt_cache.dtype == torch.float32, (
-        f"dt_cache must be fp32, got {dt_cache.dtype}"
-    )
-    # max_window = ring_len - max_spec_len is what the kernel replays; if the
-    # ring were padded this would silently exceed replayssm_buffer_len.
-    assert x_cache.shape[2] - max_spec_len == replayssm_buffer_len, (
-        f"ring length {x_cache.shape[2]} must be exactly "
-        f"replayssm_buffer_len + max_spec_len = "
-        f"{replayssm_buffer_len} + {max_spec_len}"
-    )
-    assert nheads % ngroups == 0, (
-        f"nheads ({nheads}) must be divisible by ngroups ({ngroups})"
-    )
+    _, state_shape, x_cache_shape, B_cache_shape, dt_cache_shape = spec.shapes
+    if len(state_shape) != 3:
+        raise ValueError(f"SSM state must have shape (H, P, N), got {state_shape}")
+    nheads, head_dim, dstate = state_shape
+    ring_len = replayssm_buffer_len + max_spec_len
+    expected_x = (nheads, ring_len, head_dim)
+    if x_cache_shape != expected_x:
+        raise ValueError(f"x_cache {x_cache_shape} != {expected_x}")
+    if len(B_cache_shape) != 3:
+        raise ValueError(f"B_cache must have shape (G, B + T, N), got {B_cache_shape}")
+    ngroups = B_cache_shape[0]
+    expected_B = (ngroups, ring_len, dstate)
+    if B_cache_shape != expected_B:
+        raise ValueError(f"B_cache {B_cache_shape} != {expected_B}")
+    expected_dt = (nheads, ring_len)
+    if dt_cache_shape != expected_dt:
+        raise ValueError(f"dt_cache {dt_cache_shape} != {expected_dt}")
+    if ngroups <= 0:
+        raise ValueError(f"ngroups must be positive, got {ngroups}")
+    if nheads % ngroups != 0:
+        raise ValueError(f"nheads ({nheads}) must be divisible by ngroups ({ngroups})")
+
+    _, state_dtype, x_dtype, B_dtype, dt_dtype = spec.dtypes
+    supported_dtypes = {torch.float16, torch.bfloat16, torch.float32}
+    if state_dtype not in supported_dtypes:
+        raise ValueError(f"unsupported FlashInfer SSM state dtype {state_dtype}")
+    if x_dtype not in supported_dtypes or B_dtype != x_dtype:
+        raise ValueError(
+            "FlashInfer x_cache and B_cache must share a supported activation "
+            f"dtype, got {x_dtype} and {B_dtype}"
+        )
+    if dt_dtype != torch.float32:
+        raise ValueError(f"dt_cache must be fp32, got {dt_dtype}")
 
 
 def _validate_packed_inputs(
@@ -245,15 +257,14 @@ def _validate_packed_inputs(
 
 
 def _validate_tied_weights(A: torch.Tensor, dt_bias: torch.Tensor | None) -> None:
-    """A and dt_bias reach the kernel as broadcast views over head_dim.
+    """Validate the runtime broadcast views over head_dim.
 
-    `MambaMixer2` builds A by expanding a per-head fp32 parameter, so a dtype
-    change upstream would materialise it and silently drop the tie.
+    `MambaMixer2` fixes A's dtype at construction; only the view strides can
+    vary at runtime.
     """
     assert A.stride(-1) == 0 and A.stride(-2) == 0, (
         f"A must be tied over head_dim and dstate, got strides {A.stride()}"
     )
-    assert A.dtype == torch.float32, f"A must be fp32, got {A.dtype}"
     if dt_bias is not None:
         assert dt_bias.stride(-1) == 0, (
             f"dt_bias must be tied over head_dim, got strides {dt_bias.stride()}"
@@ -264,9 +275,8 @@ _replayssm_spec_flashinfer_backend: ReplaySSMSpecFlashInferBackend | None = None
 
 
 def initialize_replayssm_spec_flashinfer_backend(
-    mamba_config: MambaConfig,
+    vllm_config: "VllmConfig",
     kv_cache_config: KVCacheConfig,
-    use_replayssm_spec: bool,
 ) -> None:
     """Resolve the FlashInfer entry point once, at KV-cache init.
 
@@ -275,13 +285,28 @@ def initialize_replayssm_spec_flashinfer_backend(
     kernel here keeps both out of forward and CUDA-graph capture.
     """
     from vllm.config.mamba import MambaBackendEnum
+    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
+    mamba_config = vllm_config.mamba_config
+    use_replayssm_spec = vllm_config.cache_config.use_replayssm_spec
     if not use_replayssm_spec or mamba_config.backend != MambaBackendEnum.FLASHINFER:
         return
-    if not any(
-        isinstance(g.kv_cache_spec, MambaSpec) for g in kv_cache_config.kv_cache_groups
-    ):
+    mamba_specs = [
+        g.kv_cache_spec
+        for g in kv_cache_config.kv_cache_groups
+        if isinstance(g.kv_cache_spec, MambaSpec)
+        and g.kv_cache_spec.mamba_type == MambaAttentionBackendEnum.MAMBA2
+    ]
+    if not mamba_specs:
         return
+
+    max_spec_len = 1 + vllm_config.num_speculative_tokens
+    for spec in mamba_specs:
+        _validate_cache_spec(
+            spec,
+            vllm_config.cache_config.replayssm_buffer_len,
+            max_spec_len,
+        )
 
     global _replayssm_spec_flashinfer_backend
     if _replayssm_spec_flashinfer_backend is not None:
