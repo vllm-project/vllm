@@ -21,10 +21,6 @@ llm = LLM("meta-llama/Llama-3.1-8B", quantization="fp8_per_block")
 # MXFP8 quantization for weights and activations
 llm = LLM("meta-llama/Llama-3.1-8B", quantization="mxfp8")
 
-# MXFP4 weight quantization (1x32 per-block FP4_E2M1 with E8M0 scale)
-# Activation format depends on the selected linear/MoE backend
-llm = LLM("meta-llama/Llama-3.1-8B", quantization="mxfp4")
-
 # MXFP4 weight; activation quantization depends on the `linear_backend` picked
 llm = LLM("meta-llama/Llama-3.1-8B", quantization="mxfp4")
 
