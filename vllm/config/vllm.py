@@ -1522,6 +1522,8 @@ class VllmConfig:
                 "Remove VLLM_USE_V2_MODEL_RUNNER=0."
             )
 
+        self._validate_batch_sharded_sampling()
+
         # Re-compute compile ranges after platform-specific config updates
         # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
         self._set_compile_ranges()
@@ -2365,6 +2367,42 @@ class VllmConfig:
             unsupported.append("KV sharing fast prefill")
 
         return unsupported
+
+    def _validate_batch_sharded_sampling(self) -> None:
+        """Validate `enable_batch_sharded_sampling` against the rest of the config."""
+        if not self.parallel_config.enable_batch_sharded_sampling:
+            # Default to False if not set.
+            self.parallel_config.enable_batch_sharded_sampling = False
+            return
+
+        blockers: list[str] = []
+        tp_size = self.parallel_config.tensor_parallel_size
+
+        if not self.use_v2_model_runner:
+            blockers.append("it is only implemented by Model Runner V2")
+
+        if tp_size <= 1:
+            blockers.append("tensor_parallel_size is 1, so there is nothing to shard")
+        elif self.scheduler_config.max_num_seqs < tp_size:
+            # Requests are assigned to ranks whole, so fewer slots than ranks
+            # leaves some ranks without work in every step.
+            blockers.append(
+                f"max_num_seqs ({self.scheduler_config.max_num_seqs}) is below "
+                f"tensor_parallel_size ({tp_size})"
+            )
+
+        if self.model_config is not None and self.model_config.max_logprobs < 0:
+            # max_logprobs == -1 allows vocab-size logprob requests, which the
+            # fixed-width logprobs gather cannot reasonably size for.
+            blockers.append("max_logprobs is -1, allowing vocab-size logprob requests")
+
+        if blockers:
+            raise ValueError(
+                "Batch-sharded sampling was explicitly enabled via "
+                "the --enable-batch-sharded-sampling flag, but is not supported "
+                "in this configuration for the following reason(s): "
+                f"{'; '.join(blockers)}."
+            )
 
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""

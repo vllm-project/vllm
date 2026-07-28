@@ -1519,6 +1519,12 @@ class DeepseekV4ForCausalLM(
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
+    def compute_logits_local(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
+
     def forward(
         self,
         input_ids: torch.Tensor,
