@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
@@ -102,7 +103,10 @@ class TestBuildSrcSplitHandles:
         )
 
         worker = _make_mock_worker_for_splits((FullAttentionSpec,))
-        src_blocks_data = [(0x2000 + i * 1024, 1024, 0) for i in range(8)]
+        src_blocks_data = np.array(
+            [(0x2000 + i * 1024, 1024, 0) for i in range(8)],
+            dtype=np.uint64,
+        )
         num_descs = len(src_blocks_data)
         splits = list(
             worker._build_local_splits_from_plan(
@@ -135,11 +139,14 @@ class TestMambaPlanSplitHandles:
 
         worker = _make_mock_worker_for_splits((FullAttentionSpec, MambaSpec))
         # 2 FA descs + 1 SSM desc
-        src_blocks_data = [
-            (1000, 200, 0),  # FA desc 0
-            (2000, 200, 0),  # FA desc 1
-            (3000, 400, 0),  # SSM desc 0
-        ]
+        src_blocks_data = np.array(
+            [
+                (1000, 200, 0),  # FA desc 0
+                (2000, 200, 0),  # FA desc 1
+                (3000, 400, 0),  # SSM desc 0
+            ],
+            dtype=np.uint64,
+        )
 
         splits = list(worker._build_local_splits_from_plan(plan, src_blocks_data, 2))
 

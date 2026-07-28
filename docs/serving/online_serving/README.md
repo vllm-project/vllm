@@ -10,7 +10,7 @@ We currently support the following OpenAI APIs:
     - Only applicable to [text generation models](../../models/generative_models.md).
     - *Note: `suffix` parameter is not supported.*
 - [Chat Completions API](./openai_compatible_server.md#chat-api) (`/v1/chat/completions`)
-    - Only applicable to [text generation models](../../models/generative_models.md) with a [chat template](./openai_compatible_server.md#chat-template).
+    - Only applicable to [text generation models](../../models/generative_models.md) with a [chat template](#chat-template).
     - *Note: `user` parameter is ignored.*
     - *Note:* Setting the `parallel_tool_calls` parameter to `false` ensures vLLM only returns zero or one tool call per request. Setting it to `true` (the default) allows returning more than one tool call per request. There is no guarantee more than one tool call will be returned if this is set to `true`, as that behavior is model dependent and not all models are designed to support parallel tool calls.
 - [Chat Completions batch API](./openai_compatible_server.md#chat-api) (`/v1/chat/completions/batch`)
@@ -32,7 +32,7 @@ We currently support the following OpenAI APIs:
 - [Cohere Embed API](../../models/pooling_models/embed.md#cohere-embed-api) (`/v2/embed`)
     - Compatible with [Cohere's Embed API](https://docs.cohere.com/reference/embed)
     - Works with any [embedding model](../../models/pooling_models/embed.md#supported-models), including multimodal models.
-- [Cohere Rerank API](../../models/pooling_models/scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
+- [Cohere Rerank API](../../models/pooling_models/scoring.md#cohere-rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
     - Implements [Jina AI's v1 rerank API](https://jina.ai/reranker/)
     - compatible with [Cohere's v1 & v2 rerank APIs](https://docs.cohere.com/v2/reference/rerank)
 
@@ -49,7 +49,7 @@ For further details on pooling models, please refer to [this page](../../models/
     - Only applicable to [embedding models](../../models/pooling_models/embed.md).
 - [Scoring Usages](../../models/pooling_models/scoring.md)
     - [Score API](../../models/pooling_models/scoring.md#score-api) (`/score`, `/v1/score`)
-    - [Cohere Rerank API](../../models/pooling_models/scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
+    - [Cohere Rerank API](../../models/pooling_models/scoring.md#cohere-rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
     - Applicable to [score models](../../models/pooling_models/scoring.md) (cross-encoder, bi-encoder, late-interaction).
 - [Pooling API](../../models/pooling_models/README.md#pooling-api) (`/pooling`)
     - Applicable to all [pooling models](../../models/pooling_models/README.md).
@@ -73,7 +73,7 @@ For further details on speech to text, please refer to [this page](speech_to_tex
     - Applicable to [score models](../../models/pooling_models/scoring.md) (cross-encoder, bi-encoder, late-interaction).
 - [Pooling API](../../models/pooling_models/README.md#pooling-api) (`/pooling`)
     - Applicable to all [pooling models](../../models/pooling_models/README.md).
-- [Generative Scoring API](generative_scoring.md#generative-scoring-api) (`/generative_scoring`)
+- [Generative Scoring API](generative_scoring.md) (`/generative_scoring`)
     - Applicable to [CausalLM models](../../models/generative_models.md) (task `"generate"`).
     - Computes next-token probabilities for specified `label_token_ids`.
 
@@ -119,9 +119,9 @@ For further details on profiling vLLM, please refer to [this page](../../contrib
 - `/ping` - SageMaker health check
 - `/invocations` - SageMaker-compatible endpoint (routes to the same inference functions as `/v1` endpoints)
 
-## Disaggregated Everything
+## Scale-Out APIs
 
-### Tokens IN <> Tokens OUT
+### Tokens IN <> Tokens OUT APIs
 
 - `/inference/v1/generate` - Generate completions
 - `/abort_requests` - Abort in-flight requests (only when `--tokens-only` is also set)
@@ -137,8 +137,12 @@ For further details on renderer APIs, please refer to [this page](renderer.md).
 
 ### Derenderer APIs
 
-- `/v1/completions/derender` - Derenderer completion requests
-- `/v1/chat/completions/derender` - Derenderer chat completion requests
+For further details on derenderer APIs, please refer to [this page](derenderer.md).
+
+- [Chat Completions Derender API](derenderer.md) (`/v1/chat/completions/derender`)
+    - Derender chat completion requests
+- [Completions Derender API](derenderer.md) (`/v1/completions/derender`)
+    - Derender completion requests
 
 ## Tokenize APIs
 
@@ -170,6 +174,7 @@ For further details on Weight Transfer, please refer to [this page](../../traini
 - `/pause` - Pause generation (causes denial of service)
 - `/resume` - Resume generation
 - `/is_paused` - Check if generation is paused
+- `/abort_requests` - Abort in-flight requests (all in-flight, or the given `request_ids`) without pausing the scheduler
 - `/init_weight_transfer_engine` - Initialize weight transfer engine for RLHF
 - `/start_weight_update` - Prepares the inference engine for a weight update.
 - `/update_weights` - Update model weights (can alter model behavior)

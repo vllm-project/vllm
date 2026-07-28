@@ -96,15 +96,18 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 )
 
             # Prefer to use the MarlinMoE kernel when it is supported.
+            is_actorder = (
+                weight_quant.strategy == QuantizationStrategy.GROUP
+                and weight_quant.actorder
+                in (ActivationOrdering.GROUP, ActivationOrdering.DYNAMIC)
+            )
             if (
-                not check_moe_marlin_supports_layer(layer, group_size)
+                not check_moe_marlin_supports_layer(
+                    layer, group_size, allow_tile_padding=not is_actorder
+                )
                 or current_platform.is_rocm()
             ):
-                if (
-                    weight_quant.strategy == QuantizationStrategy.GROUP
-                    and weight_quant.actorder
-                    in (ActivationOrdering.GROUP, ActivationOrdering.DYNAMIC)
-                ):
+                if is_actorder:
                     raise ValueError(
                         "WNA16MoE is not supported with actorder=group/dynamic."
                     )
@@ -139,6 +142,23 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                         return CompressedTensorsW4A16FlydslMoEMethod(
                             weight_quant, input_quant, layer.moe_config
                         )
+                    elif moe_backend == "emulation":
+                        # Although this is called 'Marlin', actually it selects
+                        # emulation backend by calling select_wna16_moe_backend.
+                        # TODO: we need to update CompressedTensorsWNA16MoeMethod
+                        # to honor "--moe-backend" option
+                        from .compressed_tensors_moe_wna16_marlin import (
+                            CompressedTensorsWNA16MarlinMoEMethod,
+                        )
+
+                        logger.info_once(
+                            "Using CompressedTensorsWNA16MarlinMoEMethod "
+                            "(emulation backend requested)"
+                        )
+                        return CompressedTensorsWNA16MarlinMoEMethod(
+                            weight_quant, input_quant, layer.moe_config, layer_name
+                        )
+
                 from .compressed_tensors_moe_wna16 import (
                     CompressedTensorsWNA16MoEMethod,
                 )

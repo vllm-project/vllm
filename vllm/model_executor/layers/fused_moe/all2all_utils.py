@@ -19,6 +19,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    BatchedPrepareAndFinalize,
     make_moe_prepare_and_finalize_naive_dp_ep,
     make_moe_prepare_and_finalize_no_dp_ep,
 )
@@ -56,7 +57,7 @@ if current_platform.is_cuda_alike():
         )
 
 
-def _get_ep_all2all_manager(eep_stage: bool = False) -> Any:
+def get_ep_all2all_manager(eep_stage: bool = False) -> Any:
     if eep_stage:
         from vllm.distributed.elastic_ep.standby_state import get_standby_ep_group
 
@@ -140,13 +141,23 @@ def maybe_make_prepare_finalize(
         if not allow_new_interface:
             return None
 
+        # Opt-in XPU batched path: reorganize tokens into E x T x K locally
+        # (no all-to-all) so BatchedTritonExperts (moe_mmk TD) can run.
+        if current_platform.is_xpu() and moe.moe_backend == "batched_triton":
+            return BatchedPrepareAndFinalize(
+                max_num_tokens=moe.max_num_tokens,
+                num_local_experts=moe.num_local_experts,
+                num_dispatchers=1,
+                rank=moe.moe_parallel_config.ep_rank,
+            )
+
         # For DP/TP case, fall back to naive P/F.
         if moe.moe_parallel_config.dp_size > 1:
             logger.info_once(
                 "Detected DP deployment with no --enable-expert-parallel. "
                 "Falling back to AllGather+ReduceScatter dispatch/combine."
             )
-            all2all_manager = _get_ep_all2all_manager(eep_stage)
+            all2all_manager = get_ep_all2all_manager(eep_stage)
             return make_moe_prepare_and_finalize_naive_dp_ep(
                 is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
                 num_dispatchers=all2all_manager.world_size,
@@ -155,7 +166,7 @@ def maybe_make_prepare_finalize(
         else:
             return make_moe_prepare_and_finalize_no_dp_ep(use_monolithic)
 
-    all2all_manager = _get_ep_all2all_manager(eep_stage)
+    all2all_manager = get_ep_all2all_manager(eep_stage)
 
     prepare_finalize: FusedMoEPrepareAndFinalize | None = None
 

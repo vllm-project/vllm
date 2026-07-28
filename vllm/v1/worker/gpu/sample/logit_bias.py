@@ -169,7 +169,7 @@ def _bias_kernel(
     BLOCK_SIZE: tl.constexpr,
     LOGITS_BLOCK_SIZE: tl.constexpr,
 ):
-    token_idx = tl.program_id(0)
+    token_idx = tl.program_id(0).to(tl.int64)
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
 
     block = tl.arange(0, BLOCK_SIZE)
@@ -189,6 +189,8 @@ def _bias_kernel(
             logits_ptr + token_idx * logits_stride + allowed_token_ids, mask=mask
         )
 
+        tl.debug_barrier()  # save must read original logits before the -inf overwrite
+
         # Set logits to -inf for all tokens.
         for i in range(0, vocab_size, LOGITS_BLOCK_SIZE):
             offset = i + tl.arange(0, LOGITS_BLOCK_SIZE)
@@ -197,6 +199,8 @@ def _bias_kernel(
                 -float("inf"),
                 mask=offset < vocab_size,
             )
+
+        tl.debug_barrier()  # -inf overwrite must finish before restoring saved logits
 
         # Restore logits for allowed token IDs.
         tl.store(
