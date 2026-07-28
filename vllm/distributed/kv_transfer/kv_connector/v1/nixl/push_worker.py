@@ -39,7 +39,6 @@ from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any
 
 import msgspec
-import numpy as np
 
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
@@ -299,8 +298,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             reg_data["remote_port"],
             reg_data["remote_tp_size"],
             pp_size=remote_pp_size,
-            # D never addresses P memory in push mode; just load P's agents.
-            notif_agents_only=remote_pp_size > 1,
+            # D only ever sends PUSH_REG notifs to P and never reads or writes
+            # P's memory in push mode, so it never needs the transfer
+            # descriptors set up by the full add_remote_agent path.
+            notif_agents_only=True,
         )
         if fut is None:
             self._do_send_reg_notif(req_id, reg_data)
@@ -551,8 +552,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 req_id,
             )
             if tp_ratio < 0 and not self.use_mla:
-                assert remote_block_size == self.block_size
-                local_xfer_side_handle = self.src_xfer_handles_by_tp_ratio[tp_ratio][i]
+                split_key = (tp_ratio, remote_block_size)
+                local_xfer_side_handle = self.src_xfer_handles_by_tp_ratio[split_key][i]
             else:
                 local_xfer_side_handle = self.src_xfer_handles_by_block_size[
                     remote_block_size
@@ -604,18 +605,11 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             remote_info.remote_block_size
         )
         if block_size_ratio > 1:
-            assert not self._is_hma_required
-            local_block_ids0 = local_block_ids[0] if local_block_ids else []
-            remote_block_ids0 = remote_block_ids[0]
-            local_block_ids_mapped = self.get_mapped_blocks(
-                np.asarray(local_block_ids0), block_size_ratio
-            ).tolist()
-            if len(local_block_ids_mapped) > len(remote_block_ids0):
-                local_block_ids_mapped = local_block_ids_mapped[
-                    : len(remote_block_ids0)
-                ]
-            local_block_ids = [local_block_ids_mapped] if local_block_ids_mapped else []
-            remote_block_ids = [remote_block_ids0]
+            local_block_ids, remote_block_ids = (
+                self._map_block_ids_for_block_size_ratio(
+                    local_block_ids, remote_block_ids, block_size_ratio
+                )
+            )
 
         notif_id = f"{remote_request_id}:{self.world_size}".encode()
 
