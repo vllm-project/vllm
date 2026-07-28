@@ -17,6 +17,7 @@ from tests.utils import (
     multi_gpu_marks,
     multi_gpu_only,
     single_gpu_only,
+    wait_for_rocm_memory_to_settle,
 )
 from vllm import LLM, SamplingParams
 from vllm.assets.base import VLLM_S3_BUCKET_URL
@@ -285,6 +286,73 @@ def test_suffix_decoding_acceptance(
     cleanup_dist_env_and_memory()
 
 
+@pytest.mark.slow_test
+@large_gpu_mark(min_gb=80)
+def test_gemma4_dspark_correctness_and_acceptance_rate(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    E2E test for Gemma4 DSpark speculative decoding: acceptance rate/length
+    regression coverage plus GSM8K correctness, at temperature=1.0 to exercise
+    the probabilistic draft-sampling/rejection-sampling path (not just greedy).
+
+    Uses google/gemma-4-12B-it as target with the dspark_gemma4_12b_block7 draft
+    model. Exercises the full Gemma4 DSpark path (draft build over the reused
+    base classes DFlashQwen3Model / Qwen3DSparkForCausalLM / Gemma4MTP* /
+    DSparkMarkovHead, the fused context-KV precompute, the Markov head, and
+    rejection sampling), so it fails if any base class drifts out of sync.
+
+    gemma-4-12B is instruct-tuned, so GSM8K is run through the chat template
+    (use_chat_completions=True; raw few-shot completion collapses to a few
+    percent). Reference: measured over 5 runs of 200 GSM8K questions at
+    temperature=1.0 (prefix caching disabled):
+      accuracy:        min=0.900 max=0.955 mean=0.937
+      acceptance_rate: min=0.578 max=0.595 mean=0.588
+      acceptance_len:  min=5.044 max=5.167 mean=5.116
+    Thresholds set conservatively to 10% to avoid flaking due to unlucky sampling
+    """
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
+
+    spec_llm = LLM(
+        model="google/gemma-4-12B-it",
+        trust_remote_code=True,
+        speculative_config={
+            "method": "dspark",
+            "model": "deepseek-ai/dspark_gemma4_12b_block7",
+            "num_speculative_tokens": 7,
+            "draft_sample_method": "probabilistic",
+        },
+        max_model_len=8192,
+        max_num_seqs=32,
+        gpu_memory_utilization=0.8,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        disable_log_stats=False,
+    )
+    try:
+        results = evaluate_gsm8k_offline(
+            spec_llm, num_questions=200, temperature=1.0, use_chat_completions=True
+        )
+        gsm8k_accuracy = results["accuracy"]
+
+        metrics = spec_llm.get_metrics()
+        acceptance_rate = compute_acceptance_rate(metrics)
+        acceptance_len = compute_acceptance_len(metrics)
+        print(
+            f"Gemma4 DSpark acceptance_rate={acceptance_rate:.2f}, "
+            f"acceptance_len={acceptance_len:.2f}, "
+            f"gsm8k_accuracy={gsm8k_accuracy:.3f}"
+        )
+
+        assert acceptance_rate >= 0.588 * 0.9
+        assert acceptance_len >= 5.116 * 0.9
+        assert gsm8k_accuracy >= 0.937 * 0.9
+    finally:
+        del spec_llm
+        torch.accelerator.empty_cache()
+        cleanup_dist_env_and_memory()
+
+
 @pytest.mark.parametrize(
     ["model_path", "expected_accuracy_threshold"],
     [
@@ -448,6 +516,9 @@ def _run_eagle_correctness(
         del ref_llm
         torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
+        # ROCm frees VRAM lazily; wait so the spec engine started right after
+        # does not OOM on its startup memory guard.
+        wait_for_rocm_memory_to_settle()
 
         spec_llm = LLM(
             model=model_name,
@@ -485,6 +556,9 @@ def _run_eagle_correctness(
         del spec_llm
         torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
+        # ROCm frees VRAM lazily; wait so the next parametrization's engine does
+        # not OOM on its startup memory guard.
+        wait_for_rocm_memory_to_settle()
 
 
 @single_gpu_only

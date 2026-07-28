@@ -323,7 +323,7 @@ jobs:
             // {users} will be replaced with @mentions
             const ccConfig = {
               rocm: {
-                users: ['hongxiayang', 'tjtanaa', 'vllmellm'],
+                users: ['hongxiayang', 'tjtanaa', 'vllmellm', 'giuseppegrossi'],
                 message: 'CC {users} for ROCm-related issue',
               },
               mistral: {

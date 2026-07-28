@@ -533,6 +533,10 @@ class BailingMoeV25Model(nn.Module):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.word_embeddings(input_ids)
 
+    @property
+    def embed_tokens(self) -> nn.Module:
+        return self.word_embeddings
+
     def forward(
         self,
         input_ids: torch.Tensor | None,

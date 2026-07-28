@@ -40,6 +40,7 @@ import transformers
 from einops import rearrange
 from packaging.version import Version
 from transformers import BatchFeature, Glm4vProcessor
+from transformers.image_processing_base import ImageProcessingMixin
 from transformers.models.glm4v.configuration_glm4v import (
     Glm4vTextConfig,
     Glm4vVisionConfig,
@@ -49,6 +50,7 @@ from transformers.models.glm4v.image_processing_glm4v import (
     smart_resize,
 )
 from transformers.models.glm4v.video_processing_glm4v import Glm4vVideoProcessor
+from transformers.video_processing_utils import BaseVideoProcessor
 from transformers.video_utils import VideoMetadata
 
 from vllm.config import VllmConfig
@@ -94,6 +96,8 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.processor import get_processor_cls_name_from_config
+from vllm.transformers_utils.utils import convert_model_repo_to_path
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
@@ -981,14 +985,37 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
     def get_video_processor(self, **kwargs: object) -> Glm4vVideoProcessor:
         return self.get_hf_processor(**kwargs).video_processor
 
+    def _get_processor_class_name(self) -> str | None:
+        return get_processor_cls_name_from_config(
+            convert_model_repo_to_path(self.ctx.model_config.model),
+            revision=self.ctx.model_config.revision,
+        )
+
+    @staticmethod
+    def _get_longest_edge(size: Any, config_name: str) -> int:
+        if isinstance(size, dict):
+            longest_edge = size.get("longest_edge")
+        else:
+            longest_edge = getattr(size, "longest_edge", None)
+
+        if longest_edge is None:
+            raise ValueError(f"{config_name} must define longest_edge")
+
+        return int(longest_edge)
+
     def get_mm_max_tokens_per_item(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int] | None:
-        processor = self.get_hf_processor()
-        if isinstance(processor, Glm4vProcessor):
+        processor_class_name = self._get_processor_class_name()
+        if processor_class_name == "Glm4vProcessor":
             return None
+
+        if processor_class_name is None:
+            processor = self.get_hf_processor()
+            if isinstance(processor, Glm4vProcessor):
+                return None
 
         result: dict[str, int] = {}
 
@@ -996,8 +1023,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
             result["image"] = self.get_max_image_tokens()
 
         if mm_counts.get("video", 0) > 0:
-            video_processor = self.get_video_processor()
-            max_pixels = video_processor.size["longest_edge"]
+            max_pixels = self._get_video_max_pixels()
 
             vision_config = self.get_hf_config().vision_config
             temporal_patch_size = vision_config.temporal_patch_size
@@ -1076,7 +1102,36 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         ``smart_resize`` as the ``max_pixels`` argument, which constrains
         ``t_bar * h_bar * w_bar <= max_pixels``.
         """
-        return self.get_image_processor().size["longest_edge"]
+        mm_kwargs = self.ctx.get_merged_mm_kwargs({})
+        if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
+            return int(override_max_pixels)
+
+        image_processor_config = self.ctx.get_hf_image_processor_config()
+        if not image_processor_config.get("size"):
+            image_processor_config, _ = ImageProcessingMixin.get_image_processor_dict(
+                self.ctx.model_config.model,
+                revision=self.ctx.model_config.revision,
+            )
+        size = image_processor_config["size"]
+        if override_size := mm_kwargs.get("size"):
+            size = size | override_size
+
+        return self._get_longest_edge(size, "GLM4V image processor size")
+
+    def _get_video_max_pixels(self) -> int:
+        mm_kwargs = self.ctx.get_merged_mm_kwargs({})
+        if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
+            return int(override_max_pixels)
+
+        video_processor_config, _ = BaseVideoProcessor.get_video_processor_dict(
+            self.ctx.model_config.model,
+            revision=self.ctx.model_config.revision,
+        )
+        size = video_processor_config["size"]
+        if override_size := mm_kwargs.get("size"):
+            size = size | override_size
+
+        return self._get_longest_edge(size, "GLM4V video processor size")
 
     def get_image_size_with_most_features(self) -> ImageSize:
         # Use num_frames=1 for single-image budget estimation.
@@ -1115,39 +1170,29 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
             image_height=target_height,
         )
 
-    def get_num_video_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-        num_frames: int,
-    ) -> int:
-        _, num_video_tokens = self._get_vision_info(
-            image_width=image_width,
-            image_height=image_height,
-            num_frames=num_frames,
-            max_image_pixels=28 * 28 * 2 * 30000,
-        )
-        return num_video_tokens
-
     def _get_max_video_frames(self, max_tokens: int) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
 
-        num_frames = 0
+        max_video_pixels = self._get_video_max_pixels()
+        num_frames_with_most_features = 1
+        max_vision_tokens = 0
 
-        while True:
-            next_num_frames = num_frames + 1
-            next_max_tokens = self.get_num_video_tokens(
+        for num_frames in range(1, _MAX_FRAMES_PER_VIDEO + 1):
+            _, num_vision_tokens = self._get_vision_info(
                 image_width=target_width,
                 image_height=target_height,
-                num_frames=next_num_frames,
+                num_frames=num_frames,
+                max_image_pixels=max_video_pixels,
             )
-            if next_max_tokens > max_tokens or next_max_tokens == 0:
-                break
 
-            num_frames = next_num_frames
+            if (
+                0 < num_vision_tokens <= max_tokens
+                and num_vision_tokens > max_vision_tokens
+            ):
+                num_frames_with_most_features = num_frames
+                max_vision_tokens = num_vision_tokens
 
-        return num_frames
+        return num_frames_with_most_features
 
     def get_num_frames_with_most_features(
         self,
@@ -1155,15 +1200,9 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         mm_counts: Mapping[str, int],
     ) -> int:
         max_images = mm_counts.get("image", 0)
-        max_videos = mm_counts.get("video", 0)
 
         max_image_tokens = self.get_max_image_tokens() * max_images
-        max_total_frames = self._get_max_video_frames(seq_len - max_image_tokens)
-        max_frames_per_video = min(
-            max_total_frames // max(max_videos, 1), _MAX_FRAMES_PER_VIDEO
-        )
-
-        return max(max_frames_per_video, 1)
+        return self._get_max_video_frames(seq_len - max_image_tokens)
 
     def _get_video_second_idx_glm4v(
         self, metadata: dict[str, Any], total_frames: int
@@ -1424,13 +1463,12 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
         num_videos = mm_counts.get("video", 0)
 
         hf_config = self.info.get_hf_config()
-        hf_processor = self.info.get_hf_processor()
         tokenizer = self.info.get_tokenizer()
 
-        image_token: str = hf_processor.image_token
+        image_token = tokenizer.decode([hf_config.image_token_id])
         video_token_ids = [
             hf_config.video_start_token_id,
-            hf_processor.video_token_id,
+            hf_config.video_token_id,
             hf_config.video_end_token_id,
         ]
         video_token = tokenizer.decode(video_token_ids)
@@ -1942,15 +1980,7 @@ class Glm4vForConditionalGeneration(
         raise AssertionError("This line should be unreachable.")
 
     def get_max_frames_per_video(self) -> int:
-        mm_registry = MULTIMODAL_REGISTRY
-        info = mm_registry.get_processing_info(self.model_config)
-        max_frames_per_video = info.get_num_frames_with_most_features(
-            seq_len=self.model_config.max_model_len,
-            mm_counts={"video": self.multimodal_config.get_limit_per_prompt("video")},
-        )
-        # Small 'max_frames_per_video' will cause 'tensor mismatch' in PR#43403
-        # 16 is the default 'num_frames' of '_get_vision_info'
-        return max(max_frames_per_video, 16)
+        return _MAX_FRAMES_PER_VIDEO
 
     def get_encoder_cudagraph_budget_range(
         self,

@@ -84,6 +84,12 @@ from .utils import (
 
 logger = init_logger(__name__)
 
+_GEMMA4_EXPERT_PARENT_MAPPER = WeightsMapper(
+    orig_to_new_regex={
+        re.compile(r"(?<!\.moe)\.experts$"): ".moe.experts",
+    }
+)
+
 
 def _remap_gemma4_expert_weight_name(name: str) -> str:
     return re.sub(r"(?<!\.moe)\.experts\.(\d+)\.", r".moe.experts.\1.", name)
@@ -499,6 +505,13 @@ class Gemma4Attention(nn.Module):
             logits_soft_cap=attn_logits_soft_cap,
             per_layer_sliding_window=sliding_window,
             kv_sharing_target_layer_name=kv_sharing_target_layer_name,
+            # Gemma4 vision bidi: on sliding layers the bidirectional image
+            # block must stay within the sliding window, matching HF's
+            # (causal OR blockwise) AND sliding_window. Without this the image
+            # span (~1100 soft tokens at max_soft_tokens=1120) exceeds the 1024
+            # window; the runner keeps the full range and the kernel bounds it
+            # per-query here.
+            mm_prefix_clamp_sliding_window=self.is_sliding,
             prefix=f"{prefix}.attn",
         )
 
@@ -1501,7 +1514,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
 class Gemma4ForCausalLM(
     nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts, SupportsEagle3
 ):
-    hf_to_vllm_mapper = WeightsMapper(
+    hf_to_vllm_mapper = _GEMMA4_EXPERT_PARENT_MAPPER | WeightsMapper(
         orig_to_new_prefix={
             # Gemma4ForConditionalGeneration already loads the text stack
             # from `model.language_model.*`. We reuse that same checkpoint

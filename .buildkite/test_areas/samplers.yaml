@@ -5,7 +5,7 @@ steps:
 - label: Samplers Test
   device: h200_35gb
   key: samplers-test
-  timeout_in_minutes: 75
+  timeout_in_minutes: 40
   source_file_dependencies:
   - vllm/model_executor/layers
   - vllm/sampling_metadata.py
@@ -19,7 +19,7 @@ steps:
     - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
   mirror:
     amd:
-      device: mi250_1
+      device: mi325_1
       depends_on:
       - image-build-amd
       commands:

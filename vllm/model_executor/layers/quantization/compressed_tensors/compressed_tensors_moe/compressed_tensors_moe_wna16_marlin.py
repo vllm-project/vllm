@@ -416,6 +416,27 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Process weights using the shared oracle infrastructure
         is_flashinfer = self.wna16_backend == WNA16MoEBackend.FLASHINFER_TRTLLM
+        converted = convert_to_wna16_moe_kernel_format(
+            backend=self.wna16_backend,
+            layer=layer,
+            quant_config=self.weight_quant,
+            input_dtype=self.marlin_input_dtype,
+            w13=layer.w13_weight_packed,
+            w2=layer.w2_weight_packed,
+            w13_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            w13_g_idx=layer.w13_weight_g_idx,
+            w2_g_idx=layer.w2_weight_g_idx,
+            w13_qzeros=getattr(layer, "w13_weight_zero_point", None),
+            w2_qzeros=getattr(layer, "w2_weight_zero_point", None),
+        )
+        if converted is None:
+            # In-place backends (e.g. Humming) are not wired through this
+            # marlin-only method; fail clearly rather than unpacking None.
+            raise NotImplementedError(
+                f"{type(self).__name__} does not support the "
+                f"{self.wna16_backend.value} MoE backend."
+            )
         (
             w13_qweight,
             w2_qweight,
@@ -431,20 +452,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             w2_input_global_scale,
             _,  # w13_bias
             _,  # w2_bias
-        ) = convert_to_wna16_moe_kernel_format(
-            backend=self.wna16_backend,
-            layer=layer,
-            quant_config=self.weight_quant,
-            input_dtype=self.marlin_input_dtype,
-            w13=layer.w13_weight_packed,
-            w2=layer.w2_weight_packed,
-            w13_scale=layer.w13_weight_scale,
-            w2_scale=layer.w2_weight_scale,
-            w13_g_idx=layer.w13_weight_g_idx,
-            w2_g_idx=layer.w2_weight_g_idx,
-            w13_qzeros=getattr(layer, "w13_weight_zero_point", None),
-            w2_qzeros=getattr(layer, "w2_weight_zero_point", None),
-        )
+        ) = converted
 
         # Replace common parameters
         replace_parameter(layer, "w13_weight_packed", w13_qweight)
@@ -459,10 +467,16 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
 
         # Marlin-specific parameters (not needed for Flashinfer)
         if not is_flashinfer:
-            replace_parameter(layer, "w13_weight_g_idx", w13_g_idx_processed)
-            replace_parameter(layer, "w2_weight_g_idx", w2_g_idx_processed)
-            replace_parameter(layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices)
-            replace_parameter(layer, "w2_g_idx_sort_indices", w2_g_idx_sort_indices)
+            if w13_g_idx_processed is not None:
+                replace_parameter(layer, "w13_weight_g_idx", w13_g_idx_processed)
+            if w2_g_idx_processed is not None:
+                replace_parameter(layer, "w2_weight_g_idx", w2_g_idx_processed)
+            if w13_g_idx_sort_indices is not None:
+                replace_parameter(
+                    layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices
+                )
+            if w2_g_idx_sort_indices is not None:
+                replace_parameter(layer, "w2_g_idx_sort_indices", w2_g_idx_sort_indices)
 
             # Register input global scales if present
             if w13_input_global_scale is not None:
@@ -476,8 +490,11 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
                     torch.nn.Parameter(w2_input_global_scale, requires_grad=False),
                 )
 
-            if self.experts_cls is not None and issubclass(
-                self.experts_cls, FusedMoEExpertsModular
+            # Marlin workspace — only needed for Marlin-family backends, not emulation.
+            if (
+                self.experts_cls is not None
+                and issubclass(self.experts_cls, FusedMoEExpertsModular)
+                and self.wna16_backend != WNA16MoEBackend.EMULATION
             ):
                 layer.workspace = marlin_make_workspace_new(
                     layer.w13_weight_g_idx.device, 4
@@ -520,6 +537,9 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             num_bits=self.num_bits,
             w1_zp=getattr(layer, "w13_weight_zero_point", None),
             w2_zp=getattr(layer, "w2_weight_zero_point", None),
+            gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
+            gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+            gemm1_beta=getattr(layer, "swiglu_beta", None),
         )
 
     def apply_monolithic(

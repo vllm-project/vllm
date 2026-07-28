@@ -137,8 +137,12 @@ For further details on renderer APIs, please refer to [this page](renderer.md).
 
 ### Derenderer APIs
 
-- `/v1/completions/derender` - Derenderer completion requests
-- `/v1/chat/completions/derender` - Derenderer chat completion requests
+For further details on derenderer APIs, please refer to [this page](derenderer.md).
+
+- [Chat Completions Derender API](derenderer.md) (`/v1/chat/completions/derender`)
+    - Derender chat completion requests
+- [Completions Derender API](derenderer.md) (`/v1/completions/derender`)
+    - Derender completion requests
 
 ## Tokenize APIs
 
@@ -170,6 +174,7 @@ For further details on Weight Transfer, please refer to [this page](../../traini
 - `/pause` - Pause generation (causes denial of service)
 - `/resume` - Resume generation
 - `/is_paused` - Check if generation is paused
+- `/abort_requests` - Abort in-flight requests (all in-flight, or the given `request_ids`) without pausing the scheduler
 - `/init_weight_transfer_engine` - Initialize weight transfer engine for RLHF
 - `/start_weight_update` - Prepares the inference engine for a weight update.
 - `/update_weights` - Update model weights (can alter model behavior)

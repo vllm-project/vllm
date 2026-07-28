@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Shared text-generation support used by chat and future raw completions.
 //!
 //! This crate intentionally stays below chat semantics:
@@ -131,6 +134,10 @@ impl TextLlm {
         mut request: TextRequest,
     ) -> Result<(TextRequest, GenerateOutputStream)> {
         request.validate()?;
+
+        if request.arrival_time.is_none() {
+            request.arrival_time = Some(vllm_llm::current_unix_timestamp_secs());
+        }
 
         let tokenizer = self.backend.tokenizer();
         let prompt_token_ids = match take(&mut request.prompt) {

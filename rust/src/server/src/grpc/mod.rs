@@ -1,6 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! gRPC Generate service backed by the shared [`vllm_text::TextLlm`] facade.
 
 mod convert;
+mod health;
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -21,7 +25,10 @@ pub mod pb {
     tonic::include_proto!("vllm");
 }
 
+pub(crate) use health::monitor_health;
 pub use pb::generate_server::GenerateServer;
+
+pub(crate) type GenerateGrpcService = GenerateServer<GenerateServiceImpl>;
 
 #[cfg(test)]
 mod tests;
@@ -71,6 +78,7 @@ impl pb::generate_server::Generate for GenerateServiceImpl {
             usage: collected.usage,
             finish_reason: collected.finish_reason,
             kv_transfer_params: collected.kv_transfer_params,
+            ec_transfer_params: collected.ec_transfer_params,
         };
 
         let outputs = convert::to_sequence_output(

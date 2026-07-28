@@ -15,7 +15,8 @@ void topk_sigmoid(torch::stable::Tensor& topk_weights,
                   torch::stable::Tensor& topk_indices,
                   torch::stable::Tensor& token_expert_indices,
                   torch::stable::Tensor& gating_output, bool renormalize,
-                  std::optional<torch::stable::Tensor> bias);
+                  std::optional<torch::stable::Tensor> bias,
+                  double routed_scaling_factor);
 
 void topk_softplus_sqrt(
     torch::stable::Tensor& topk_weights, torch::stable::Tensor& topk_indices,
@@ -26,7 +27,9 @@ void topk_softplus_sqrt(
     const std::optional<torch::stable::Tensor>& input_ids,
     const std::optional<torch::stable::Tensor>& tid2eid);
 
-void moe_sum(torch::stable::Tensor& input, torch::stable::Tensor& output);
+void moe_sum(torch::stable::Tensor& input, torch::stable::Tensor& output,
+             std::optional<torch::stable::Tensor> topk_ids,
+             std::optional<torch::stable::Tensor> expert_map);
 
 void moe_align_block_size(
     torch::stable::Tensor topk_ids, int64_t num_experts, int64_t block_size,

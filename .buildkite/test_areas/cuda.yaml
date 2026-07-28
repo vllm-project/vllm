@@ -4,7 +4,7 @@ depends_on:
 steps:
 - label: Platform Tests
   key: platform-tests
-  timeout_in_minutes: 15
+  timeout_in_minutes: 20
   device: h200_18gb
   source_file_dependencies:
   - vllm/envs.py
@@ -18,8 +18,9 @@ steps:
     - pytest -v -s cuda/test_platform_no_cuda_init.py
 
 - label: Cudagraph
+  device: h200_35gb
   key: cudagraph
-  timeout_in_minutes: 20
+  timeout_in_minutes: 30
   source_file_dependencies:
   - tests/v1/cudagraph
   - vllm/v1/cudagraph_dispatcher.py

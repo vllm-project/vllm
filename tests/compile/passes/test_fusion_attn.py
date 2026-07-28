@@ -111,7 +111,11 @@ class AttentionQuantPatternModel(torch.nn.Module):
         # Fetch the attention backend and kv cache shape and stride order
         attn_backend = self.attn.attn_backend
         kv_cache_shape = attn_backend.get_kv_cache_shape(
-            num_blocks, self.block_size, self.num_kv_heads, self.head_size
+            num_blocks,
+            self.block_size,
+            self.num_kv_heads,
+            self.head_size,
+            cache_dtype_str=self.attn.kv_cache_dtype,
         )
         try:
             kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
@@ -125,11 +129,10 @@ class AttentionQuantPatternModel(torch.nn.Module):
 
         # Create dummy KV cache
         raw_tensor = torch.zeros(
-            2 * num_blocks * self.block_size * self.num_kv_heads * self.head_size,
+            kv_cache_shape,
             dtype=self.attn.kv_cache_torch_dtype,
             device=self.device,
         )
-        raw_tensor = raw_tensor.view(kv_cache_shape)
         kv_cache = raw_tensor.permute(*inv_order)
 
         self.attn.kv_cache = kv_cache
@@ -306,11 +309,6 @@ def test_attention_quant_pattern(
     torch.manual_seed(42)
 
     backend_cls = backend.get_class()
-
-    # TODO: drop once AITER reenables fp16 unified attention.
-    if dtype not in backend_cls.supported_dtypes:
-        pytest.skip(f"{backend.name} does not support dtype {dtype}")
-
     block_size = backend_cls.get_preferred_block_size(16)
 
     model_config = ModelConfig(
