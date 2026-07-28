@@ -497,7 +497,6 @@ class OpenAIServingResponses(GenerateBaseServing):
                 lora_request=lora_request,
                 priority=request.priority,
                 trace_headers=trace_headers,
-                request_cache_salt=request.cache_salt,
                 reasoning_parser_kwargs=reasoning_parser_kwargs
                 if self.parser and self.parser.reasoning_parser_cls is not None
                 else None,
@@ -619,7 +618,6 @@ class OpenAIServingResponses(GenerateBaseServing):
         lora_request: LoRARequest | None = None,
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
-        request_cache_salt: str | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
     ):
         max_model_len = self.model_config.max_model_len
@@ -668,7 +666,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             if isinstance(context, HarmonyContext):
                 engine_input = self.online_renderer.render_responses_harmony_messages(
                     context.messages,
-                    cache_salt=request_cache_salt,
+                    cache_salt=None,
                 )
 
                 sampling_params.max_tokens = max_model_len - self._extract_prompt_len(

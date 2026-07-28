@@ -3,6 +3,7 @@
 
 """Tests for the /render endpoints that expose prompt preprocessing."""
 
+from http import HTTPStatus
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -44,6 +45,15 @@ def _build_responses_serving_render() -> ServingRender:
 @pytest.mark.skip_global_cleanup
 def test_responses_render_route_is_registered():
     assert any(route.path == "/v1/responses/render" for route in router.routes)
+
+
+@pytest.mark.skip_global_cleanup
+def test_responses_render_route_documents_not_implemented():
+    route = next(
+        route for route in router.routes if route.path == "/v1/responses/render"
+    )
+
+    assert HTTPStatus.NOT_IMPLEMENTED.value in route.responses
 
 
 @pytest.mark.asyncio

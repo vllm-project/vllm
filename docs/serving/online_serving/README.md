@@ -134,6 +134,8 @@ For further details on renderer APIs, please refer to [this page](renderer.md).
     - Render completion requests
 - [Chat Completions Render API](renderer.md) (`/v1/chat/completions/render`)
     - Render chat completions
+- [Responses Render API](renderer.md) (`/v1/responses/render`)
+    - Render self-contained Responses requests
 
 ### Derenderer APIs
 
