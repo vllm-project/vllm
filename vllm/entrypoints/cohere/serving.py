@@ -83,6 +83,7 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.api_utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.parser.abstract_parser import Parser
+from vllm.renderers.cohere import MESSAGES_CITATIONS_KEY
 
 if TYPE_CHECKING:
     from vllm.renderers.online_renderer import OnlineRenderer
@@ -593,8 +594,215 @@ class CohereServingChatV2(OpenAIServingChat):
         # would otherwise surface it as a Jinja variable ``{{ strict_tools }}``
         # that templates have no defined use for.
 
+        # Citations on assistant messages in the request don't fit
+        # OpenAI's ``ChatMessage`` / ``ConversationMessage`` schemas, so
+        # we forward them under the reserved ``MESSAGES_CITATIONS_KEY``
+        # chat_template_kwargs entry keyed by request-message index.
+        # See ``_sdk_citation_to_melody`` for the id-resolution rules.
+        citations_by_index = cls._collect_message_citations(request)
+        if citations_by_index:
+            kwargs.setdefault(MESSAGES_CITATIONS_KEY, citations_by_index)
+
         if kwargs:
             chat_req.chat_template_kwargs = kwargs
+
+    @classmethod
+    def _collect_message_citations(
+        cls, request: CohereChatV2Request
+    ) -> dict[int, list[dict[str, Any]]]:
+        """Extract ``AssistantChatMessageV2.citations`` keyed by message index.
+
+        Returns an empty dict when no assistant message in the request
+        carries any resolvable citations, so callers can use truthiness
+        as the "should I emit the ``MESSAGES_CITATIONS_KEY`` entry?"
+        test. Citations whose sources can't be resolved are dropped
+        individually; messages that end up with zero surviving
+        citations are omitted from the result.
+        """
+        doc_positions = cls._build_doc_id_to_prompt_position(
+            request.messages, request.documents
+        )
+        out: dict[int, list[dict[str, Any]]] = {}
+        for idx, msg in enumerate(request.messages):
+            if not isinstance(msg, AssistantChatMessageV2) or not msg.citations:
+                continue
+            resolved: list[dict[str, Any]] = []
+            for c in msg.citations:
+                converted = cls._sdk_citation_to_melody(c, doc_positions)
+                if converted is not None:
+                    resolved.append(converted)
+            if resolved:
+                out[idx] = resolved
+        return out
+
+    @staticmethod
+    def _build_doc_id_to_prompt_position(
+        messages: list, documents: list | None
+    ) -> dict[str, tuple[int, int]]:
+        """Map every citable document id to its ``(bucket, result_index)``.
+
+        Single source of truth for citation source-id resolution. Two
+        concerns are folded into one walk so numbering matches melody
+        exactly:
+
+        * **Bucket numbering** follows melody's
+          ``PromptRenderIds::from_messages`` (see
+          ``melody/src/templating/util.rs``): bucket ``0`` is reserved
+          for the top-level ``documents`` array when present, and each
+          unique ``tool_call_id`` claims the next integer on first-seen
+          basis -- registered from whichever of the assistant's
+          ``tool_calls[].id`` or the tool message's ``tool_call_id``
+          appears first in the history.
+        * **Doc-id -> position** is derived from the same walk. Top-level
+          docs contribute their explicit ``id`` (plus the ``doc_{idx}``
+          fallback that ``_apply_cohere_template_kwargs`` synthesizes
+          when the client didn't supply one). Tool messages contribute
+          the ``id`` of each ``DocumentToolContent`` entry, indexed by
+          its position in ``ToolMessageV2.content``.
+
+        Per-bucket ``result_index`` slots are consumed by *every*
+        content item, not just documents -- a text block occupies a
+        slot with an empty id (see ``push_tool_message_contents`` /
+        ``extract_content_doc_id`` in melody). Strings and empty
+        contents each consume exactly one slot because the cohere
+        renderer wraps them into a single text block before handing
+        the message off to melody. Multiple tool messages sharing a
+        ``tool_call_id`` accumulate into the same bucket, so later
+        docs' slots are offset by the sum of previous messages'
+        content lengths.
+
+        The returned map keys on document id only -- not source type.
+        This matches Cohere's on-wire semantics: ``ToolSource.id`` and
+        ``DocumentSource.id`` both carry the id of a specific document
+        (a top-level doc for ``document`` sources, a tool-result doc
+        for ``tool`` sources), with ``type`` acting purely as a shape
+        hint for the payload. See ``sourcesFromDocuments`` /
+        ``getCitationIDMap`` in
+        ``blobheart/go/dory/pkg/chat/{v2,templating/templates}.go`` for
+        the canonical reference implementation.
+        """
+        doc_positions: dict[str, tuple[int, int]] = {}
+        tool_call_id_to_bucket: dict[str, int] = {}
+        # Next unassigned ``tool_result_index`` per bucket. Advances
+        # by ``len(content)`` (or 1 for string / missing content) for
+        # every tool message, whether or not the content had any doc
+        # ids in it -- matching melody's per-slot accounting.
+        bucket_result_len: dict[int, int] = {}
+        next_bucket = 0
+
+        if documents:
+            for idx, doc in enumerate(documents):
+                fallback_id = f"doc_{idx}"
+                explicit_id = None if isinstance(doc, str) else doc.id
+                if explicit_id:
+                    doc_positions.setdefault(explicit_id, (0, idx))
+                doc_positions.setdefault(fallback_id, (0, idx))
+            next_bucket = 1
+
+        def register_bucket(tool_call_id: str) -> int:
+            nonlocal next_bucket
+            bucket = tool_call_id_to_bucket.get(tool_call_id)
+            if bucket is None:
+                bucket = next_bucket
+                tool_call_id_to_bucket[tool_call_id] = bucket
+                next_bucket += 1
+            return bucket
+
+        for msg in messages:
+            if isinstance(msg, ToolChatMessageV2):
+                if not msg.tool_call_id:
+                    continue
+                bucket = register_bucket(msg.tool_call_id)
+                base = bucket_result_len.get(bucket, 0)
+                if isinstance(msg.content, list):
+                    for offset, block in enumerate(msg.content):
+                        if getattr(block, "type", None) == "document":
+                            doc = getattr(block, "document", None)
+                            doc_id = getattr(doc, "id", None) if doc else None
+                            if doc_id:
+                                doc_positions.setdefault(
+                                    doc_id, (bucket, base + offset)
+                                )
+                    bucket_result_len[bucket] = base + len(msg.content)
+                else:
+                    # A string or missing content is wrapped by the
+                    # cohere renderer into a single text block before
+                    # melody sees it, so it consumes one slot.
+                    bucket_result_len[bucket] = base + 1
+            elif isinstance(msg, AssistantChatMessageV2) and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    if tc.id:
+                        register_bucket(tc.id)
+
+        return doc_positions
+
+    @staticmethod
+    def _sdk_citation_to_melody(
+        citation: Any,
+        doc_positions: dict[str, tuple[int, int]],
+    ) -> dict[str, Any] | None:
+        """Convert a Cohere SDK ``Citation`` to melody's ``FilterCitation``.
+
+        Melody's ``Source`` uses a two-level numeric address:
+        ``tool_call_index`` picks a bucket (``0`` = top-level
+        ``documents`` when present, ``1..N`` = tool results in history
+        order) and ``tool_result_indices`` picks positions inside that
+        bucket. The Cohere ``Citation.sources`` schema is per-document:
+        each entry's ``id`` is the id of the specific document that
+        grounds the citation (``type`` distinguishes payload shape, not
+        id semantics). We resolve each source id against
+        ``doc_positions`` and aggregate hits sharing a bucket into one
+        melody ``Source`` so the renderer emits compact
+        ``<co>text</co: N:[i,j]>`` markers.
+
+        Returns ``None`` when any source id fails to resolve or when
+        the input has no sources at all: emitting a citation with an
+        empty ``sources=[]`` would render a malformed
+        ``<co>text</co: :>`` marker, and silently attributing a
+        citation to the wrong bucket is worse than dropping the
+        ``<co>`` markup. This matches dory's behavior
+        (``toMelodyCitations`` in
+        ``blobheart/go/dory/pkg/chat/templating/melody.go``).
+
+        ``Source.document_ids`` is intentionally NOT populated: it is a
+        parser-*output* lookup table (see ``PromptRenderIds`` in
+        melody), and melody's deserializer ignores it on input.
+
+        The Cohere ``type`` literal (``TEXT_CONTENT`` / ``THINKING_CONTENT``
+        / ``PLAN``) collapses to melody's boolean ``is_thinking``.
+        ``PLAN`` is treated as a thinking-style citation because cmd3 /
+        cmd4 templates render both inline with the same ``<co>...</co>``
+        markup.
+        """
+        raw_sources = getattr(citation, "sources", None) or []
+        if not raw_sources:
+            return None
+
+        grouped: dict[int, list[int]] = {}
+        for src in raw_sources:
+            src_id = getattr(src, "id", None)
+            if not src_id:
+                return None
+            position = doc_positions.get(src_id)
+            if position is None:
+                return None
+            bucket, result_idx = position
+            grouped.setdefault(bucket, []).append(result_idx)
+
+        sources = [
+            {"tool_call_index": bucket, "tool_result_indices": indices}
+            for bucket, indices in grouped.items()
+        ]
+
+        cite_type = str(getattr(citation, "type", "") or "").upper()
+        is_thinking = cite_type in ("THINKING_CONTENT", "PLAN")
+        return {
+            "start_index": getattr(citation, "start", None) or 0,
+            "end_index": getattr(citation, "end", None) or 0,
+            "text": getattr(citation, "text", None) or "",
+            "sources": sources,
+            "is_thinking": is_thinking,
+        }
 
     # ==================================================================
     # Response conversion: ChatCompletion -> Cohere V2

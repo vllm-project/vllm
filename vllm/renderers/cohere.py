@@ -2,52 +2,89 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Cohere prompt renderer.
 
-Templates the Cohere Command-family prompt formats (cmd3 / cmd4) using the
-``cohere_melody`` Rust bindings instead of Jinja. Selecting this renderer is
-a matter of setting ``--tokenizer-mode cohere`` on the engine; tokenization
-itself still flows through the cached HuggingFace tokenizer.
+Templates the Cohere Command-family prompt formats (cmd3 / cmd4) using
+the ``cohere_melody`` Rust bindings instead of Jinja. Selecting this
+renderer is a matter of setting ``--tokenizer-mode cohere`` on the
+engine; tokenization itself still flows through the cached HuggingFace
+tokenizer.
 
-This renderer intentionally accepts the same ``chat_template_kwargs`` shape
-used by the standard chat completions endpoint, plus a few Cohere-specific
-fields that grounding/citation features require:
+The renderer's client surface is ``chat_template_kwargs`` (vLLM's
+generic passthrough for template-time inputs). It is fed by two
+different code paths, which speak different vocabularies:
 
-* ``documents``: list of document dicts to expose to the model
-* ``available_tools``: list of tool dicts (overrides ``tools``)
-* ``safety_mode``: cmd3-only safety mode (``contextual`` / ``strict`` / ``none``)
-* ``citation_quality``: cmd3 citation toggle (``on`` / ``off``)
-* ``citation_options.mode``: cmd4 grounding (``fast`` / ``accurate`` / ``off``)
-* ``reasoning_type``: ``enabled`` / ``disabled``
-* ``response_prefix``: optional response prefix
-* ``json_schema`` / ``json_mode`` / ``response_format``: structured outputs
-* ``template_id``: select one of melody's built-in template variants
-* ``cohere_format``: ``cmd3`` (default) or ``cmd4``
+1. :class:`vllm.entrypoints.cohere.serving.CohereServingChatV2` --
+   translates a native `Cohere Chat v2 request
+   <https://docs.cohere.com/reference/chat>`__ into
+   ``chat_template_kwargs``.
+2. :class:`OpenAIServingChat` -- forwards whatever the client puts in
+   ``request.chat_template_kwargs`` directly, without translation.
 
-Raw Jinja template source is *not* accepted through
-``chat_template_kwargs``. To override the template body, use the
-standard vLLM ``chat_template`` request field (which must be enabled
-server-side with ``--trust-request-chat-template``); this renderer
-forwards that value to melody as its ``template_jinja`` config field.
-Requests that still set the Cohere-only
-``chat_template_kwargs.template_jinja`` / ``chat_template_kwargs.template``
-inputs (which are valid at Cohere's own API surface but not at vLLM's)
-are rejected with a ``ValueError`` so client misconfiguration
-surfaces loudly.
+Accordingly the renderer accepts keys from both vocabularies.
 
-Any *other* keys in ``chat_template_kwargs`` are forwarded verbatim to
-the melody render config as ``additional_template_fields`` -- i.e. they
-become Jinja variables accessible inside the template. This mirrors
-vLLM's documented contract for ``chat_template_kwargs`` ("kwargs
-accessible by the template"), so e.g.
-``chat_template_kwargs={"reasoning_effort": "low"}`` resolves
-``{{ reasoning_effort }}`` inside cmd3 / cmd4 templates.
+**Cohere Chat v2 request fields** (populated automatically by
+``CohereServingChatV2``; a direct ``chat_template_kwargs`` caller may
+also pass them):
 
-Citations produced by Cohere models are surfaced through the Cohere-scoped
-``CohereChatMessage.citations`` / ``CohereDeltaMessage.citations`` fields
-(see :mod:`vllm.entrypoints.cohere.cohere_chat_message`), populated by the
+* ``documents``: list of documents (v2 ``documents``)
+* ``tools``: list of tools (v2 ``tools``)
+* ``safety_mode``: v2 ``safety_mode`` (``CONTEXTUAL`` / ``STRICT`` /
+  ``NONE``) -- forwarded to melody's cmd3 ``safety_mode`` slot;
+  lowercased.
+* ``citation_options``: v2 ``citation_options``. Its ``.mode``
+  (``ENABLED`` / ``DISABLED`` / ``FAST`` / ``ACCURATE`` / ``OFF``) is
+  normalized into melody's cmd3 ``citation_quality`` (``on`` / ``off``)
+  and cmd4 ``grounding`` (``enabled`` / ``disabled`` / ``unknown``)
+  slots. cmd4 has no fast/accurate distinction at the prompt-template
+  layer -- both mean grounding-on.
+* ``response_format``: v2 ``response_format`` (``json_object`` /
+  ``json_schema``) -- mapped onto melody's ``json_mode`` /
+  ``json_schema`` config slots.
+* ``thinking``: v2 ``thinking``; its ``.type`` (``enabled`` /
+  ``disabled``) becomes melody's ``reasoning_type``.
+
+**Melody template-config knobs** (accepted for direct-passthrough
+callers; not part of the Cohere Chat v2 surface):
+
+* ``cohere_format``: renderer selector, ``cmd3`` or ``cmd4`` (default
+  ``cmd4``).
+* ``template_id``: pick one of melody's built-in template variants.
+* ``available_tools``: melody's own name for tools; takes precedence
+  over ``tools`` when both are set.
+* ``reasoning_type``: direct ``enabled`` / ``disabled`` toggle;
+  overrides derivation from ``thinking.type``.
+* ``dev_instruction``: developer-instruction override.
+* ``json_mode`` / ``json_schema``: direct structured-output toggles;
+  override derivation from ``response_format``.
+* cmd3-only: ``citation_quality`` (``on`` / ``off``), ``skip_preamble``.
+* cmd4-only: ``grounding`` (``enabled`` / ``disabled`` / ``unknown``;
+  overrides derivation from ``citation_options.mode``),
+  ``platform_instruction``.
+
+**Rejected inputs**: ``template_jinja`` and ``template`` are Cohere's
+own inlets for raw Jinja template source. They are valid at Cohere's
+API surface but not at vLLM's -- raw template source must flow through
+the standard ``chat_template`` request field (guarded by
+``--trust-request-chat-template``), which this renderer forwards to
+melody as ``template_jinja``. Setting these keys explicitly in
+``chat_template_kwargs`` raises ``ValueError`` so client
+misconfiguration surfaces loudly.
+
+**Everything else** in ``chat_template_kwargs`` is forwarded verbatim
+to melody as ``additional_template_fields`` and becomes accessible as
+Jinja variables inside the template. This matches vLLM's documented
+contract for ``chat_template_kwargs`` ("kwargs accessible by the
+template"), so e.g. ``chat_template_kwargs={"reasoning_effort":
+"low"}`` resolves ``{{ reasoning_effort }}`` inside cmd3 / cmd4
+templates.
+
+Citations produced by Cohere models are surfaced through the
+Cohere-scoped ``CohereChatMessage.citations`` /
+``CohereDeltaMessage.citations`` fields (see
+:mod:`vllm.entrypoints.cohere.cohere_chat_message`), populated by the
 ``cohere2`` reasoning parser. The base OpenAI ``ChatMessage`` /
 ``DeltaMessage`` keep their declared schemas unchanged; the response
-envelope declares them as ``SerializeAsAny[...]`` so the subclass fields
-survive JSON serialization.
+envelope declares them as ``SerializeAsAny[...]`` so the subclass
+fields survive JSON serialization.
 """
 
 from __future__ import annotations
@@ -95,6 +132,18 @@ class MelodyContentType(str, Enum):
     DOCUMENT = "document"
 
 
+# Reserved ``chat_template_kwargs`` key that carries
+# ``AssistantChatMessageV2.citations`` from a Cohere v2 request through
+# to the renderer, keyed by request-message index. Populated by
+# ``CohereServingChatV2._apply_cohere_template_kwargs`` and consumed by
+# ``_conversation_to_melody_messages``. The value is a
+# ``dict[int, list[dict]]`` of melody-shape ``FilterCitation`` dicts.
+# The leading underscore signals "internal, not part of the public
+# ``chat_template_kwargs`` surface" -- clients should not set this key
+# directly.
+MESSAGES_CITATIONS_KEY = "_messages_citations"
+
+
 # Keys this renderer interprets directly from ``chat_template_kwargs`` and
 # maps onto typed melody render-config fields. Everything *not* in this
 # set is forwarded verbatim to melody as ``additional_template_fields``
@@ -133,6 +182,7 @@ _RENDERER_CONSUMED_KEYS = frozenset(
         "skip_preamble",
         "grounding",
         "platform_instruction",
+        MESSAGES_CITATIONS_KEY,
     }
 )
 
@@ -155,10 +205,11 @@ _MELODY_ROLES = frozenset({"system", "user", "chatbot", "tool"})
 
 
 # Cohere v2 ``citation_options.mode`` -> melody cmd4 ``grounding``.
-# v2 surfaces three modes (``FAST`` / ``ACCURATE`` / ``OFF``) but cmd4's
-# template doesn't differentiate fast vs accurate at the prompt layer --
-# both just turn grounding on. ``unknown`` / ``enabled`` / ``disabled``
-# are the values melody actually accepts.
+# v2 surfaces five modes (``ENABLED`` / ``DISABLED`` / ``FAST`` /
+# ``ACCURATE`` / ``OFF``) but cmd4's template doesn't differentiate
+# fast vs accurate at the prompt layer -- both just turn grounding on,
+# and ``ENABLED`` / ``DISABLED`` are direct aliases. Melody itself
+# accepts ``unknown`` / ``enabled`` / ``disabled``.
 _CMD4_GROUNDING_FROM_MODE = {
     "fast": "enabled",
     "accurate": "enabled",
@@ -173,15 +224,16 @@ _CMD4_GROUNDING_FROM_MODE = {
 def _normalize_cmd4_grounding(value: Any) -> str:
     """Coerce a user-facing grounding/citation mode to melody's vocab.
 
-    Raises ``ValueError`` rather than letting an unrecognized value slip
-    through to ``render_cmd4`` and surface as a generic
+    Raises ``ValueError`` rather than letting an unrecognized value
+    slip through to ``render_cmd4`` and surface as a generic
     ``Invalid config: grounding`` from melody.
     """
     out = _CMD4_GROUNDING_FROM_MODE.get(value.lower())
     if out is None:
         raise ValueError(
-            f"Unrecognized cmd4 grounding value: {value!r}. Expected one of "
-            f"FAST, ACCURATE, OFF (citation_options.mode), or "
+            f"Unrecognized cmd4 grounding value: {value!r}. Expected one "
+            f"of ENABLED / DISABLED / FAST / ACCURATE / OFF (from "
+            f"citation_options.mode), or the direct melody values "
             f"enabled / disabled / unknown."
         )
     return out
@@ -355,9 +407,24 @@ def _tool_to_melody(tool: Any) -> dict[str, Any]:
 
 def _conversation_to_melody_messages(
     conversation: list[ConversationMessage],
+    messages_citations: dict[int, list[dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
+    """Convert vLLM ``ConversationMessage``s into melody's message dict shape.
+
+    ``messages_citations`` is an optional index-keyed lookup of
+    per-message citations from the request, populated by
+    ``CohereServingChatV2`` under the
+    :data:`MESSAGES_CITATIONS_KEY` chat_template_kwargs entry. Values
+    must already be in melody's ``FilterCitation`` dict shape (see
+    ``CohereServingChatV2._sdk_citation_to_melody``). Index is the
+    position in the *input* ``conversation`` list, which currently maps
+    1-to-1 with ``CohereChatV2Request.messages`` for text-only Cohere
+    requests. This mapping breaks silently if ``parse_chat_messages``
+    ever expands a single input message into multiple entries (e.g.
+    multi-modal splitting), which is not the case today.
+    """
     out: list[dict[str, Any]] = []
-    for msg in conversation:
+    for i, msg in enumerate(conversation):
         role = _role_to_melody(msg.get("role", "user"))
         content_blocks = _content_blocks(msg.get("content"))
 
@@ -388,6 +455,8 @@ def _conversation_to_melody_messages(
         tool_call_id = msg.get("tool_call_id")
         if tool_call_id:
             out_msg["tool_call_id"] = tool_call_id
+        if messages_citations and (cites := messages_citations.get(i)):
+            out_msg["citations"] = cites
         out.append(out_msg)
     return out
 
@@ -428,7 +497,10 @@ def _build_render_config(
             )
 
     config: dict[str, Any] = {
-        "messages": _conversation_to_melody_messages(conversation),
+        "messages": _conversation_to_melody_messages(
+            conversation,
+            chat_template_kwargs.get(MESSAGES_CITATIONS_KEY),
+        ),
     }
 
     # ``template_id`` is a selector for one of melody's built-in template

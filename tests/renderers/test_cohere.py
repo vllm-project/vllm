@@ -401,6 +401,46 @@ class TestConversationToMelody:
         out = _conversation_to_melody_messages(conv)  # type: ignore[arg-type]
         assert out[0]["tool_call_id"] == "c1"
 
+    def test_messages_citations_attached_by_index(self):
+        # ``messages_citations`` is a dict keyed by message index. Only
+        # the message at the matching index should receive the
+        # citations; other messages must be unaffected.
+        conv = [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "a"},
+        ]
+        citations = {
+            1: [
+                {
+                    "start_index": 0,
+                    "end_index": 1,
+                    "text": "a",
+                    "sources": [
+                        {
+                            "tool_call_index": 0,
+                            "tool_result_indices": [0],
+                        }
+                    ],
+                    "is_thinking": False,
+                }
+            ]
+        }
+        out = _conversation_to_melody_messages(conv, citations)  # type: ignore[arg-type]
+        assert "citations" not in out[0]
+        assert out[1]["citations"] == citations[1]
+
+    def test_messages_citations_none_is_a_no_op(self):
+        conv = [{"role": "assistant", "content": "a"}]
+        out = _conversation_to_melody_messages(conv, None)  # type: ignore[arg-type]
+        assert "citations" not in out[0]
+
+    def test_messages_citations_missing_index_is_a_no_op(self):
+        # A ``messages_citations`` dict whose key doesn't hit any
+        # message must not attach anything (and must not raise).
+        conv = [{"role": "assistant", "content": "a"}]
+        out = _conversation_to_melody_messages(conv, {5: [{"anything": 1}]})  # type: ignore[arg-type]
+        assert "citations" not in out[0]
+
 
 # ======================================================================
 # _build_render_config
@@ -804,3 +844,197 @@ async def test_async_cohere_renderer_does_not_block_event_loop():
     _, prompt = await task
     assert prompt["prompt"] == expected_prompt, "Mocked blocking render was not called"
     assert blocked_count == 0, "Event loop blocked during rendering"
+
+
+# ======================================================================
+# End-to-end: request-level citations -> rendered prompt markup
+# ======================================================================
+#
+# Ties the whole pipeline together: a Cohere v2 request carrying an
+# assistant message with citations must produce a rendered prompt that
+# contains melody's inline ``<co>...</co: <id>>`` markup around the cited
+# span. This is the invariant the ``_messages_citations``
+# chat_template_kwargs entry was introduced to preserve.
+
+
+class TestRequestCitationsReachRenderedPrompt:
+    """End-to-end verification that assistant-message citations on the
+    request survive the OpenAI-shape round-trip and land in the melody-
+    rendered prompt as inline ``<co>...</co>`` markers.
+
+    The chain covered here:
+
+        CohereChatV2Request
+            -> CohereServingChatV2._convert_v2_to_chat_completion
+                -> ChatCompletionRequest.chat_template_kwargs["_messages_citations"]
+                    -> _build_render_config (reads the entry)
+                        -> cohere_melody.render_cmd4 (renders <co>...</co>)
+
+    A regression that drops the citations or mangles the melody
+    ``FilterCitation`` payload would remove the citation markers from
+    the output, so a text-in / text-out assertion is enough.
+    """
+
+    @staticmethod
+    def _melody():
+        # Import locally so a missing ``cohere_melody`` install skips
+        # this test class rather than failing collection.
+        pytest.importorskip("cohere_melody")
+        import cohere_melody
+
+        return cohere_melody
+
+    @staticmethod
+    def _openai_msgs_to_conversation(
+        openai_messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Cheap stand-in for ``parse_chat_messages`` on text-only inputs.
+
+        ``_convert_v2_to_chat_completion`` emits OpenAI-shape assistant
+        dicts with ``content`` as a plain string. The real chat-utils
+        pipeline calls ``parse_chat_messages`` (which requires a full
+        model config / mm tracker), but for text-only content it's
+        essentially a passthrough -- we normalize ``content`` to the
+        list-of-parts shape ``_conversation_to_melody_messages`` expects
+        and preserve every other key the renderer reads.
+        """
+        conv: list[dict[str, Any]] = []
+        for m in openai_messages:
+            entry: dict[str, Any] = dict(m)
+            content = entry.get("content")
+            if isinstance(content, str):
+                entry["content"] = [{"type": "text", "text": content}]
+            elif content is None:
+                entry["content"] = []
+            conv.append(entry)
+        return conv
+
+    def test_document_citation_survives_to_prompt(self):
+        # Prevent this test from being collected/run when the melody
+        # extension isn't importable.
+        melody = self._melody()
+
+        from vllm.entrypoints.cohere.protocol import CohereChatV2Request
+        from vllm.entrypoints.cohere.serving import CohereServingChatV2
+        from vllm.renderers.cohere import _build_render_config
+
+        request = CohereChatV2Request(
+            model="m",
+            messages=[
+                {"role": "user", "content": "Who wrote Hamlet?"},
+                {
+                    "role": "assistant",
+                    "content": "Shakespeare wrote it around 1600.",
+                    "citations": [
+                        {
+                            "start": 0,
+                            "end": 11,  # "Shakespeare"
+                            "text": "Shakespeare",
+                            "sources": [{"type": "document", "id": "doc_shakespeare"}],
+                            "type": "TEXT_CONTENT",
+                        }
+                    ],
+                },
+                {"role": "user", "content": "and what year exactly?"},
+            ],
+            documents=[
+                {
+                    "id": "doc_shakespeare",
+                    "data": {"text": "Hamlet was written by Shakespeare c. 1600."},
+                }
+            ],
+        )
+
+        # Step 1: v2 -> ChatCompletionRequest. Citations must land in
+        # ``chat_template_kwargs["_messages_citations"]``.
+        chat_req = CohereServingChatV2._convert_v2_to_chat_completion(request)
+        assert chat_req.chat_template_kwargs is not None
+        assert "_messages_citations" in chat_req.chat_template_kwargs
+
+        # Step 2: build the melody render config. The renderer helper
+        # folds the per-message citations onto the melody message
+        # dicts.
+        conversation = self._openai_msgs_to_conversation(chat_req.messages)
+        fmt, config = _build_render_config(conversation, chat_req.chat_template_kwargs)
+
+        assistant_msg = config["messages"][1]
+        assert assistant_msg["role"] == "chatbot"
+        assert "citations" in assistant_msg, (
+            "citations were not attached to the melody assistant message dict"
+        )
+
+        # Step 3: hand the config to melody and check the rendered
+        # prompt actually contains inline citation markup around the
+        # cited span.
+        #
+        # The exact id is deterministic for this input. Melody builds
+        # ``</co: <tool_call_index>:[<tool_result_indices>]>`` where
+        # ``tool_call_index=0`` is the reserved bucket for the top-level
+        # ``documents`` array and ``tool_result_indices`` are positions
+        # inside it (see ``PromptRenderIds`` in melody/src/templating/
+        # util.rs). ``doc_shakespeare`` sits at position 0 in the
+        # request's ``documents`` list, so we expect ``0:[0]``. Two
+        # historical regressions this pins:
+        #   * ``0:[]`` -- the source id was never resolved to an index
+        #     (documents didn't flow through) and melody had nothing to
+        #     anchor the marker on.
+        #   * ``1:[0]`` -- the citation was routed through the wrong
+        #     tool-call bucket while documents were present, so it
+        #     pointed at the wrong prompt slot.
+        #
+        # Note the same rendered prompt also contains an example
+        # ``<co>span</co: 0:[1,2],1:[0]>`` marker baked into melody's
+        # system-prompt boilerplate (placeholder text ``"span"``); the
+        # substring below is specific enough to only match the marker
+        # around the cited text.
+        if fmt == "cmd4":
+            rendered = melody.render_cmd4(config)
+        else:
+            rendered = melody.render_cmd3(config)
+
+        assert "<co>Shakespeare</co: 0:[0]>" in rendered, (
+            f"expected inline citation markup around the cited span; "
+            f"tail of rendered prompt: {rendered[-400:]!r}"
+        )
+
+        # And the cited document's text itself must be in the prompt --
+        # otherwise the model would have no way to satisfy the citation.
+        assert "Hamlet" in rendered
+
+    def test_no_markup_when_no_citations(self):
+        # Control: the same request shape without any citations must
+        # NOT contain ``<co>`` anywhere in the rendered prompt. Guards
+        # against a false-positive where melody injects citation
+        # markers regardless of what we passed in.
+        melody = self._melody()
+
+        from vllm.entrypoints.cohere.protocol import CohereChatV2Request
+        from vllm.entrypoints.cohere.serving import CohereServingChatV2
+        from vllm.renderers.cohere import _build_render_config
+
+        request = CohereChatV2Request(
+            model="m",
+            messages=[
+                {"role": "user", "content": "Who wrote Hamlet?"},
+                {
+                    "role": "assistant",
+                    "content": "Shakespeare wrote it around 1600.",
+                },
+            ],
+        )
+
+        chat_req = CohereServingChatV2._convert_v2_to_chat_completion(request)
+        assert (chat_req.chat_template_kwargs or {}).get("_messages_citations") is None
+
+        conversation = self._openai_msgs_to_conversation(chat_req.messages)
+        fmt, config = _build_render_config(
+            conversation, chat_req.chat_template_kwargs or {}
+        )
+
+        if fmt == "cmd4":
+            rendered = melody.render_cmd4(config)
+        else:
+            rendered = melody.render_cmd3(config)
+
+        assert "<co>" not in rendered
+        assert "</co:" not in rendered

@@ -796,6 +796,678 @@ class TestApplyCohereTemplateKwargs:
 
 
 # ======================================================================
+# Message-citation forwarding (chat_template_kwargs["_messages_citations"])
+# ======================================================================
+
+
+class TestMessageCitations:
+    """Covers the ``_messages_citations`` chat_template_kwargs entry
+    that carries ``AssistantChatMessageV2.citations`` from the request
+    through to the Cohere renderer. Response-shape ``Citation`` ->
+    melody ``FilterCitation`` conversion is best-effort: some
+    melody-side fields have no equivalent on the Cohere wire and get
+    defaulted.
+    """
+
+    def test_absent_when_no_assistant_citations(self):
+        result = _convert(
+            _make_request(
+                messages=[
+                    {"role": "user", "content": "hi"},
+                    {"role": "assistant", "content": "hello"},
+                ]
+            )
+        )
+        assert result.chat_template_kwargs is None or (
+            "_messages_citations" not in (result.chat_template_kwargs or {})
+        )
+
+    def test_document_citation_forwarded_by_index(self):
+        # Assistant at request-index 1 cites the *second* top-level
+        # document (``doc_x``, position 1). Melody addresses documents
+        # as ``tool_call_index=0`` (the reserved documents bucket) with
+        # ``tool_result_indices`` selecting positions inside the
+        # top-level ``documents`` list.
+        result = _convert(
+            _make_request(
+                documents=[
+                    {"id": "doc_a", "data": {"text": "irrelevant"}},
+                    {"id": "doc_x", "data": {"text": "cited doc"}},
+                ],
+                messages=[
+                    {"role": "user", "content": "q"},
+                    {
+                        "role": "assistant",
+                        "content": "a",
+                        "citations": [
+                            {
+                                "start": 0,
+                                "end": 1,
+                                "text": "a",
+                                "sources": [{"type": "document", "id": "doc_x"}],
+                                "type": "TEXT_CONTENT",
+                            }
+                        ],
+                    },
+                ],
+            )
+        )
+        citations_by_index = result.chat_template_kwargs["_messages_citations"]
+        assert list(citations_by_index.keys()) == [1]
+        cite = citations_by_index[1][0]
+        assert cite["start_index"] == 0
+        assert cite["end_index"] == 1
+        assert cite["text"] == "a"
+        assert cite["is_thinking"] is False
+        # ``document_ids`` is a parser-*output* field in melody (see
+        # ``PromptRenderIds`` in src/templating/util.rs); on the input
+        # side melody expects the id resolved into
+        # ``tool_result_indices``. Setting a ``document_ids`` list here
+        # would have no effect at all -- the renderer would still
+        # render ``</co: 0:[]>`` (no anchor).
+        assert cite["sources"] == [{"tool_call_index": 0, "tool_result_indices": [1]}]
+
+    def test_document_citation_with_unresolvable_id_drops_citation(self):
+        # A citation source pointing at an id that doesn't appear in
+        # the request's ``documents`` array leaves the citation with
+        # nothing to anchor to. Emitting it with ``sources=[]`` would
+        # render a malformed ``<co>text</co: :>`` marker, and silently
+        # misattributing to ``documents[0]`` would be worse -- so we
+        # drop the whole citation, matching dory's behavior. Since this
+        # message's only citation was dropped, the message index
+        # shouldn't appear in the forwarded map at all.
+        result = _convert(
+            _make_request(
+                documents=[{"id": "doc_present", "data": {"text": "x"}}],
+                messages=[
+                    {"role": "user", "content": "q"},
+                    {
+                        "role": "assistant",
+                        "content": "a",
+                        "citations": [
+                            {
+                                "start": 0,
+                                "end": 1,
+                                "text": "a",
+                                "sources": [{"type": "document", "id": "doc_ghost"}],
+                                "type": "TEXT_CONTENT",
+                            }
+                        ],
+                    },
+                ],
+            )
+        )
+        forwarded = (result.chat_template_kwargs or {}).get("_messages_citations")
+        assert not forwarded
+
+    def test_document_citation_resolves_auto_assigned_fallback_id(self):
+        # Requests may include documents without an explicit ``id``;
+        # ``_apply_cohere_template_kwargs`` synthesizes ``doc_{idx}``
+        # ids for them. A citation that targets that fallback id must
+        # still resolve to the right position.
+        result = _convert(
+            _make_request(
+                documents=[
+                    {"data": {"text": "unnamed 0"}},
+                    {"data": {"text": "unnamed 1"}},
+                ],
+                messages=[
+                    {"role": "user", "content": "q"},
+                    {
+                        "role": "assistant",
+                        "content": "a",
+                        "citations": [
+                            {
+                                "start": 0,
+                                "end": 1,
+                                "text": "a",
+                                "sources": [{"type": "document", "id": "doc_1"}],
+                                "type": "TEXT_CONTENT",
+                            }
+                        ],
+                    },
+                ],
+            )
+        )
+        (cite,) = result.chat_template_kwargs["_messages_citations"][1]
+        assert cite["sources"] == [{"tool_call_index": 0, "tool_result_indices": [1]}]
+
+    def test_tool_citation_resolves_to_bucket_and_result_index(self):
+        # ``ToolSource.id`` on the wire is the id of a specific document
+        # inside a tool result (NOT the tool_call_id -- ``type`` is a
+        # payload-shape hint, not an id-space discriminator). Here the
+        # citation points at the second doc in the second tool call's
+        # results, which melody addresses as bucket ``1`` (first tool
+        # call, no top-level documents present so it takes bucket 0
+        # ... wait: buckets are per unique tool_call_id, so with no
+        # top-level docs, ``call_a`` = 0 and ``call_b`` = 1) and
+        # ``tool_result_indices=[1]`` (2nd doc inside that bucket).
+        result = _convert(
+            _make_request(
+                messages=[
+                    {"role": "user", "content": "q"},
+                    {
+                        "role": "assistant",
+                        "tool_plan": "plan",
+                        "tool_calls": [
+                            {
+                                "id": "call_a",
+                                "type": "function",
+                                "function": {"name": "f", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call_a",
+                        "content": [
+                            {
+                                "type": "document",
+                                "document": {"id": "res_a0", "data": {"text": "r_a0"}},
+                            },
+                        ],
+                    },
+                    {
+                        "role": "assistant",
+                        "tool_plan": "plan2",
+                        "tool_calls": [
+                            {
+                                "id": "call_b",
+                                "type": "function",
+                                "function": {"name": "g", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call_b",
+                        "content": [
+                            {
+                                "type": "document",
+                                "document": {"id": "res_b0", "data": {"text": "r_b0"}},
+                            },
+                            {
+                                "type": "document",
+                                "document": {"id": "res_b1", "data": {"text": "r_b1"}},
+                            },
+                        ],
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "final",
+                        "citations": [
+                            {
+                                "start": 0,
+                                "end": 5,
+                                "text": "final",
+                                "sources": [{"type": "tool", "id": "res_b1"}],
+                                "type": "TEXT_CONTENT",
+                            }
+                        ],
+                    },
+                ]
+            )
+        )
+        (cite,) = result.chat_template_kwargs["_messages_citations"][5]
+        assert cite["sources"] == [
+            {"tool_call_index": 1, "tool_result_indices": [1]},
+        ]
+
+    def test_tool_citation_shifts_bucket_when_documents_present(self):
+        # When the request has a top-level ``documents`` array, melody
+        # reserves ``tool_call_index=0`` for it (see
+        # ``PromptRenderIds::new`` in src/templating/util.rs), so the
+        # first tool-call bucket becomes 1. A regression that forgets
+        # this shift would silently attribute tool citations to the
+        # documents bucket instead.
+        result = _convert(
+            _make_request(
+                documents=[{"id": "d0", "data": {"text": "x"}}],
+                messages=[
+                    {"role": "user", "content": "q"},
+                    {
+                        "role": "assistant",
+                        "tool_plan": "plan",
+                        "tool_calls": [
+                            {
+                                "id": "call_a",
+                                "type": "function",
+                                "function": {"name": "f", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call_a",
+                        "content": [
+                            {
+                                "type": "document",
+                                "document": {"id": "res_a0", "data": {"text": "r"}},
+                            },
+                        ],
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "a",
+                        "citations": [
+                            {
+                                "start": 0,
+                                "end": 1,
+                                "text": "a",
+                                "sources": [{"type": "tool", "id": "res_a0"}],
+                                "type": "TEXT_CONTENT",
+                            }
+                        ],
+                    },
+                ],
+            )
+        )
+        (cite,) = result.chat_template_kwargs["_messages_citations"][3]
+        assert cite["sources"] == [
+            {"tool_call_index": 1, "tool_result_indices": [0]},
+        ]
+
+    def test_multiple_sources_in_same_bucket_aggregate(self):
+        # Two citation sources both point at docs inside the same tool
+        # result. Melody's ``<co>text</co: N:[i,j]>`` marker packs them
+        # into a single ``Source`` with a list of ``tool_result_indices``
+        # rather than two separate ``Source`` entries; the converter
+        # groups per-bucket to match that. See ``toMelodyCitations`` in
+        # ``blobheart/go/dory/pkg/chat/templating/melody.go``.
+        result = _convert(
+            _make_request(
+                messages=[
+                    {"role": "user", "content": "q"},
+                    {
+                        "role": "assistant",
+                        "tool_plan": "plan",
+                        "tool_calls": [
+                            {
+                                "id": "call_a",
+                                "type": "function",
+                                "function": {"name": "f", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call_a",
+                        "content": [
+                            {
+                                "type": "document",
+                                "document": {"id": "res0", "data": {"text": "0"}},
+                            },
+                            {
+                                "type": "document",
+                                "document": {"id": "res1", "data": {"text": "1"}},
+                            },
+                        ],
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "ans",
+                        "citations": [
+                            {
+                                "start": 0,
+                                "end": 3,
+                                "text": "ans",
+                                "sources": [
+                                    {"type": "tool", "id": "res0"},
+                                    {"type": "tool", "id": "res1"},
+                                ],
+                                "type": "TEXT_CONTENT",
+                            }
+                        ],
+                    },
+                ]
+            )
+        )
+        (cite,) = result.chat_template_kwargs["_messages_citations"][3]
+        assert cite["sources"] == [
+            {"tool_call_index": 0, "tool_result_indices": [0, 1]},
+        ]
+
+    def test_tool_citation_with_unresolvable_id_drops_citation(self):
+        # Same policy as ``test_document_citation_with_unresolvable_id
+        # _drops_citation``: any unresolvable source id drops the whole
+        # citation rather than emitting a malformed
+        # ``<co>text</co: :>`` marker.
+        result = _convert(
+            _make_request(
+                messages=[
+                    {"role": "user", "content": "q"},
+                    {
+                        "role": "assistant",
+                        "content": "a",
+                        "citations": [
+                            {
+                                "start": 0,
+                                "end": 1,
+                                "text": "a",
+                                "sources": [{"type": "tool", "id": "ghost_doc"}],
+                                "type": "TEXT_CONTENT",
+                            }
+                        ],
+                    },
+                ]
+            )
+        )
+        forwarded = (result.chat_template_kwargs or {}).get("_messages_citations")
+        assert not forwarded
+
+    def test_partial_unresolvable_source_drops_whole_citation(self):
+        # If any source in a citation fails to resolve, drop the entire
+        # citation -- mixing resolved and unresolved sources produces a
+        # partially-correct ``<co>`` marker, which is worse than none.
+        # This is dory's behavior in ``getCitationIDMap``.
+        result = _convert(
+            _make_request(
+                documents=[{"id": "doc_real", "data": {"text": "x"}}],
+                messages=[
+                    {"role": "user", "content": "q"},
+                    {
+                        "role": "assistant",
+                        "content": "a",
+                        "citations": [
+                            {
+                                "start": 0,
+                                "end": 1,
+                                "text": "a",
+                                "sources": [
+                                    {"type": "document", "id": "doc_real"},
+                                    {"type": "document", "id": "doc_ghost"},
+                                ],
+                                "type": "TEXT_CONTENT",
+                            }
+                        ],
+                    },
+                ],
+            )
+        )
+        forwarded = (result.chat_template_kwargs or {}).get("_messages_citations")
+        assert not forwarded
+
+    def test_thinking_content_type_maps_to_is_thinking(self):
+        result = _convert(
+            _make_request(
+                documents=[{"id": "d", "data": {"text": "x"}}],
+                messages=[
+                    {"role": "user", "content": "q"},
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "thinking", "thinking": "chain of thought"},
+                            {"type": "text", "text": "answer"},
+                        ],
+                        "citations": [
+                            {
+                                "start": 0,
+                                "end": 5,
+                                "text": "chain",
+                                "sources": [{"type": "document", "id": "d"}],
+                                "type": "THINKING_CONTENT",
+                            }
+                        ],
+                    },
+                ],
+            )
+        )
+        (cite,) = result.chat_template_kwargs["_messages_citations"][1]
+        assert cite["is_thinking"] is True
+        # And the source resolved (sanity: is_thinking is meaningful
+        # only if the citation actually renders).
+        assert cite["sources"] == [{"tool_call_index": 0, "tool_result_indices": [0]}]
+
+    def test_plan_type_maps_to_is_thinking(self):
+        # PLAN citations sit on tool-plan-style non-reasoning assistant
+        # turns; melody treats them like THINKING for template purposes.
+        result = _convert(
+            _make_request(
+                documents=[{"id": "d", "data": {"text": "x"}}],
+                messages=[
+                    {"role": "user", "content": "q"},
+                    {
+                        "role": "assistant",
+                        "tool_plan": "plan",
+                        "citations": [
+                            {
+                                "start": 0,
+                                "end": 4,
+                                "text": "plan",
+                                "sources": [{"type": "document", "id": "d"}],
+                                "type": "PLAN",
+                            }
+                        ],
+                    },
+                ],
+            )
+        )
+        (cite,) = result.chat_template_kwargs["_messages_citations"][1]
+        assert cite["is_thinking"] is True
+
+    def test_tool_content_string_registers_bucket_but_has_no_doc_ids(self):
+        # A string tool result has no citable substructure. The bucket
+        # still gets registered (so a later tool call's bucket doesn't
+        # slide into its slot), but any citation targeting the string
+        # message fails to resolve and the citation is dropped.
+        result = _convert(
+            _make_request(
+                messages=[
+                    {"role": "user", "content": "q"},
+                    {
+                        "role": "assistant",
+                        "tool_plan": "plan",
+                        "tool_calls": [
+                            {
+                                "id": "call_a",
+                                "type": "function",
+                                "function": {"name": "f", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    {"role": "tool", "tool_call_id": "call_a", "content": "plain text"},
+                    {
+                        "role": "assistant",
+                        "content": "a",
+                        "citations": [
+                            {
+                                "start": 0,
+                                "end": 1,
+                                "text": "a",
+                                "sources": [{"type": "tool", "id": "call_a"}],
+                                "type": "TEXT_CONTENT",
+                            }
+                        ],
+                    },
+                ]
+            )
+        )
+        forwarded = (result.chat_template_kwargs or {}).get("_messages_citations")
+        assert not forwarded
+
+    def test_tool_content_all_text_blocks_registers_bucket_but_no_docs(self):
+        # Same as the string case, but with a structured content list
+        # of pure text blocks. No doc ids are exposed, so any citation
+        # targeting the message drops.
+        result = _convert(
+            _make_request(
+                messages=[
+                    {"role": "user", "content": "q"},
+                    {
+                        "role": "assistant",
+                        "tool_plan": "plan",
+                        "tool_calls": [
+                            {
+                                "id": "call_a",
+                                "type": "function",
+                                "function": {"name": "f", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call_a",
+                        "content": [
+                            {"type": "text", "text": "part 1"},
+                            {"type": "text", "text": "part 2"},
+                        ],
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "a",
+                        "citations": [
+                            {
+                                "start": 0,
+                                "end": 1,
+                                "text": "a",
+                                "sources": [{"type": "tool", "id": "part 1"}],
+                                "type": "TEXT_CONTENT",
+                            }
+                        ],
+                    },
+                ]
+            )
+        )
+        forwarded = (result.chat_template_kwargs or {}).get("_messages_citations")
+        assert not forwarded
+
+    def test_tool_content_mixed_text_and_docs_uses_content_array_position(self):
+        # Melody advances ``tool_result_index`` for *every* content
+        # item (text items push an empty id into the row; see
+        # ``push_tool_message_contents`` in melody/src/templating/
+        # util.rs). Docs at positions 1 and 3 in a 4-item mixed
+        # content must resolve to result_indices 1 and 3, not the
+        # "position among documents only" numbering (which would give
+        # 0 and 1).
+        result = _convert(
+            _make_request(
+                messages=[
+                    {"role": "user", "content": "q"},
+                    {
+                        "role": "assistant",
+                        "tool_plan": "plan",
+                        "tool_calls": [
+                            {
+                                "id": "call_a",
+                                "type": "function",
+                                "function": {"name": "f", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call_a",
+                        "content": [
+                            {"type": "text", "text": "before"},
+                            {
+                                "type": "document",
+                                "document": {"id": "doc1", "data": {"text": "d1"}},
+                            },
+                            {"type": "text", "text": "between"},
+                            {
+                                "type": "document",
+                                "document": {"id": "doc2", "data": {"text": "d2"}},
+                            },
+                        ],
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "ans",
+                        "citations": [
+                            {
+                                "start": 0,
+                                "end": 3,
+                                "text": "ans",
+                                "sources": [
+                                    {"type": "tool", "id": "doc1"},
+                                    {"type": "tool", "id": "doc2"},
+                                ],
+                                "type": "TEXT_CONTENT",
+                            }
+                        ],
+                    },
+                ]
+            )
+        )
+        (cite,) = result.chat_template_kwargs["_messages_citations"][3]
+        assert cite["sources"] == [
+            {"tool_call_index": 0, "tool_result_indices": [1, 3]},
+        ]
+
+    def test_same_tool_call_id_across_messages_offsets_result_indices(self):
+        # If a client splits one tool call's outputs across multiple
+        # tool messages with the same ``tool_call_id``, melody
+        # accumulates them into the same bucket (each message's
+        # content array is *appended* to the bucket's slot list). The
+        # second message's docs must therefore be offset by the first
+        # message's content length. Dory's melody adapter relies on
+        # exactly this behavior when it flattens each tool-result
+        # document into its own melody ``Message``.
+        result = _convert(
+            _make_request(
+                messages=[
+                    {"role": "user", "content": "q"},
+                    {
+                        "role": "assistant",
+                        "tool_plan": "plan",
+                        "tool_calls": [
+                            {
+                                "id": "call_a",
+                                "type": "function",
+                                "function": {"name": "f", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call_a",
+                        "content": [
+                            {
+                                "type": "document",
+                                "document": {"id": "d0", "data": {"text": "0"}},
+                            },
+                            {
+                                "type": "document",
+                                "document": {"id": "d1", "data": {"text": "1"}},
+                            },
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call_a",
+                        "content": [
+                            {
+                                "type": "document",
+                                "document": {"id": "d2", "data": {"text": "2"}},
+                            },
+                        ],
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "ans",
+                        "citations": [
+                            {
+                                "start": 0,
+                                "end": 3,
+                                "text": "ans",
+                                "sources": [{"type": "tool", "id": "d2"}],
+                                "type": "TEXT_CONTENT",
+                            }
+                        ],
+                    },
+                ]
+            )
+        )
+        (cite,) = result.chat_template_kwargs["_messages_citations"][4]
+        # ``d2`` is at position 0 within its own message's content,
+        # but the previous tool message contributed 2 slots, so its
+        # result index in bucket 0 is 2.
+        assert cite["sources"] == [
+            {"tool_call_index": 0, "tool_result_indices": [2]},
+        ]
+
+
+# ======================================================================
 # _chat_completion_to_v2 (non-streaming response builder)
 # ======================================================================
 
