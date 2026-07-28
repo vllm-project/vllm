@@ -706,6 +706,47 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         )
 
 
+@dataclass(frozen=True, kw_only=True)
+class KpoolTailSpec(SlidingWindowSpec):
+    """GLM5Next kpool indexer tail cache: a paged circular buffer holding the
+    in-progress (incomplete) kpool's raw K + gate score.
+
+    One block of ``block_size`` (== ``index_kpool``) slots per request,
+    overwritten circularly by ``pos % kpool`` as decode/spec-decode advances.
+    Prefill writes the trailing incomplete pool's raw K+gate here (instead of
+    discarding it) so the boundary pool can be compressed correctly on the
+    decode side, including across PD disaggregation. Raw K is packed as the "K"
+    half of each block and the gate score as the "V" half
+    (``head_size_v == head_size``).
+
+    The SW base is reused only for its ``real_page_size_bytes`` formula and the
+    admission-cap wiring; the manager is swapped to ``KpoolTailManager`` via the
+    registry, because ``SlidingWindowManager``'s mid-pool eviction would destroy
+    the in-progress pool. Admission is fixed at 1 block/req regardless of
+    ``sliding_window``/``max_in_flight_tokens``: the in-progress pool is always
+    <= kpool tokens (completed pools are flushed), so MTP > kpool still fits in
+    one circularly-reused block.
+    """
+
+    def max_admission_blocks_per_request(
+        self, max_in_flight_tokens: int, max_model_len: int
+    ) -> int:
+        # The in-progress pool is <= kpool tokens == 1 block, circularly reused.
+        # No growth, no window sliding -> exactly one block per request, even
+        # under spec-decode (MTP > kpool): completed pools flush mid-step.
+        return 1
+
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        # One block per request for the request's whole lifetime; caps the
+        # per-request block_table buffer the runner sizes via this method.
+        return 1
+
+    def is_uniform_with_collection(
+        self, kv_cache_specs: dict[str, KVCacheSpec]
+    ) -> bool:
+        return all(isinstance(spec, KpoolTailSpec) for spec in kv_cache_specs.values())
+
+
 @dataclass(frozen=True)
 class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]

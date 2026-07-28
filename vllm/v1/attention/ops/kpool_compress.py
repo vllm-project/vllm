@@ -358,30 +358,34 @@ def kpool_compress_and_write_cache(
 def _kpool_decode_update_kernel(
     buf_fp8_ptr,
     buf_fp32_ptr,
-    tail_k_ptr,
-    tail_score_ptr,
+    tail_kv_ptr,
+    tail_slot_mapping_ptr,
     key_ptr,
     slot_score_ptr,
     ape_ptr,
     slot_mapping_ptr,
     positions_ptr,
-    tail_k_stride_0,
-    tail_k_stride_1,
-    tail_score_stride_0,
-    tail_score_stride_1,
     key_stride_0,
     slot_score_stride_0,
     ape_stride_0,
     PAGE_SIZE: tl.constexpr,
     BUF_NUMEL_PER_PAGE: tl.constexpr,
     POOL_SIZE: tl.constexpr,
-    TAIL_SIZE: tl.constexpr,
+    TAIL_BLOCK_ELEMS: tl.constexpr,
+    KPOOL_HEAD: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     S_OFFSET_NBYTES_IN_PAGE: tl.constexpr,
     ROUND_SCALE: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
-    """One program per decode token (row == request for plain decode)."""
+    """One program per decode token (row == request for plain decode).
+
+    The in-progress pool lives in a paged tail cache ``[num_blocks, 2, POOL_SIZE,
+    HEAD_DIM]`` bf16 (K at half 0, gate score at half 1), one block per request,
+    overwritten circularly by ``pos % POOL_SIZE``. ``tail_slot_mapping[row]`` is
+    the current token's tail slot (``block * POOL_SIZE + pos % POOL_SIZE``); the
+    request's tail block (``slot // POOL_SIZE``) is constant for the whole pool.
+    """
     row = tl.program_id(0)
     offs = tl.arange(0, BLOCK_D)
     dim_mask = offs < HEAD_DIM
@@ -392,7 +396,12 @@ def _kpool_decode_update_kernel(
     pos_valid = (cache_loc >= 0) & (pos >= 0)
 
     slot = safe_pos % POOL_SIZE  # position within the current pool
-    phys_slot = safe_pos % TAIL_SIZE  # ring index into the tail buffer
+    phys_slot = safe_pos % POOL_SIZE  # offset within the tail block
+
+    # The request's tail block (1 block/req); constant for the whole pool.
+    tail_slot = tl.load(tail_slot_mapping_ptr + row)
+    block = (tail_slot // POOL_SIZE).to(tl.int64)
+    block_base = block * TAIL_BLOCK_ELEMS
 
     key = tl.load(key_ptr + row * key_stride_0 + offs, mask=dim_mask, other=0.0).to(
         tl.float32
@@ -409,12 +418,9 @@ def _kpool_decode_update_kernel(
         max_score = tl.full((BLOCK_D,), -float("inf"), tl.float32)
         for pool_slot in tl.static_range(0, POOL_SIZE):
             is_current = pool_slot == slot
-            phys = (pool_logical_start + pool_slot) % TAIL_SIZE
+            phys = (pool_logical_start + pool_slot) % POOL_SIZE
             score_buf = tl.load(
-                tail_score_ptr
-                + row * tail_score_stride_0
-                + phys * tail_score_stride_1
-                + offs,
+                tail_kv_ptr + block_base + KPOOL_HEAD + phys * HEAD_DIM + offs,
                 mask=dim_mask,
                 other=0.0,
             ).to(tl.float32)
@@ -431,12 +437,9 @@ def _kpool_decode_update_kernel(
         denom = tl.full((BLOCK_D,), 0.0, tl.float32)
         for pool_slot in tl.static_range(0, POOL_SIZE):
             is_current = pool_slot == slot
-            phys = (pool_logical_start + pool_slot) % TAIL_SIZE
+            phys = (pool_logical_start + pool_slot) % POOL_SIZE
             score_buf = tl.load(
-                tail_score_ptr
-                + row * tail_score_stride_0
-                + phys * tail_score_stride_1
-                + offs,
+                tail_kv_ptr + block_base + KPOOL_HEAD + phys * HEAD_DIM + offs,
                 mask=dim_mask,
                 other=0.0,
             ).to(tl.float32)
@@ -449,7 +452,7 @@ def _kpool_decode_update_kernel(
             prob = tl.exp(score - max_score)
             denom += prob
             k_buf = tl.load(
-                tail_k_ptr + row * tail_k_stride_0 + phys * tail_k_stride_1 + offs,
+                tail_kv_ptr + block_base + phys * HEAD_DIM + offs,
                 mask=dim_mask,
                 other=0.0,
             ).to(tl.float32)
@@ -485,18 +488,15 @@ def _kpool_decode_update_kernel(
         tl.store(buf_fp8_ptr + out_k_offsets, quantized, mask=dim_mask)
         tl.store(buf_fp32_ptr + out_s_offset, scale)
 
-    # Always: stash the current token into the tail ring for future pools.
+    # Always: stash the current token into the paged tail cache for future pools.
     update_mask = dim_mask & pos_valid
     tl.store(
-        tail_k_ptr + row * tail_k_stride_0 + phys_slot * tail_k_stride_1 + offs,
+        tail_kv_ptr + block_base + phys_slot * HEAD_DIM + offs,
         key,
         mask=update_mask,
     )
     tl.store(
-        tail_score_ptr
-        + row * tail_score_stride_0
-        + phys_slot * tail_score_stride_1
-        + offs,
+        tail_kv_ptr + block_base + KPOOL_HEAD + phys_slot * HEAD_DIM + offs,
         score_current,
         mask=update_mask,
     )
@@ -504,8 +504,8 @@ def _kpool_decode_update_kernel(
 
 def kpool_decode_update_and_maybe_write_cache(
     kv_cache: torch.Tensor,
-    tail_k: torch.Tensor,
-    tail_score: torch.Tensor,
+    tail_kv_cache: torch.Tensor,
+    tail_slot_mapping: torch.Tensor,
     key: torch.Tensor,
     slot_score: torch.Tensor,
     ape: torch.Tensor,
@@ -519,27 +519,32 @@ def kpool_decode_update_and_maybe_write_cache(
 
     Args:
         kv_cache: indexer K cache ``[num_blocks, block_size, head_dim+4]`` uint8.
-        tail_k / tail_score: ``[max_reqs, pool_size, head_dim]`` bf16 per-request
-            ring buffers carrying the in-progress pool.
-        key / slot_score: ``[batch, head_dim]`` — current decode token's K / gate.
+        tail_kv_cache: paged tail cache ``[num_blocks, 2, pool_size, head_dim]``
+            bf16 (K at half 0, gate score at half 1), one block per request,
+            overwritten circularly by ``pos % pool_size``.
+        tail_slot_mapping: ``[batch]`` int32 -- each decode token's tail slot
+            (``block * pool_size + pos % pool_size``); ``slot // pool_size`` is
+            the request's tail block.
+        key / slot_score: ``[batch, head_dim]`` -- current decode token's K / gate.
         ape: ``[pool_size, head_dim]`` fp32.
-        slot_mapping: ``[batch]`` — pool slot per token (valid at pool completion).
-        positions: ``[batch]`` — token positions (drives pool phase / ring index).
+        slot_mapping: ``[batch]`` -- pool slot per token (valid at pool completion).
+        positions: ``[batch]`` -- token positions (drives pool phase / tail offset).
 
     Assumes plain decode (one token per request per step, row == request). Spec
-    decode (next_n > 1) needs request-grouped indexing — TODO.
+    decode (next_n > 1) is handled by the caller's per-token sequential loop.
     """
     batch = key.shape[0]
     if batch == 0:
         return
-    assert tail_k.ndim == 3
-    assert tail_score.shape == tail_k.shape
-    assert tail_k.shape[1] >= pool_size
-    assert tail_k.shape[2] == head_dim
+    assert tail_kv_cache.ndim == 4
+    assert tail_kv_cache.shape[1] == 2
+    assert tail_kv_cache.shape[2] == pool_size
+    assert tail_kv_cache.shape[3] == head_dim
+    assert tail_kv_cache.dtype == torch.bfloat16
+    assert tail_slot_mapping.shape == (batch,)
     assert key.ndim == 2 and key.shape[1] == head_dim
     assert slot_score.shape == key.shape
     assert ape.shape == (pool_size, head_dim)
-    assert tail_k.dtype == torch.bfloat16
     assert key.dtype == torch.bfloat16
     assert slot_score.dtype == torch.bfloat16
     assert ape.dtype == torch.float32
@@ -547,31 +552,27 @@ def kpool_decode_update_and_maybe_write_cache(
 
     page_size = kv_cache.shape[1]
     buf = kv_cache
-    tail_size = tail_k.shape[1]
     buf_fp8 = buf.view(torch.float8_e4m3fn)
     buf_fp32 = buf.view(torch.float32)
 
     _kpool_decode_update_kernel[(batch,)](
         buf_fp8,
         buf_fp32,
-        tail_k,
-        tail_score,
+        tail_kv_cache,
+        tail_slot_mapping,
         key,
         slot_score,
         ape,
         slot_mapping,
         positions,
-        tail_k.stride(0),
-        tail_k.stride(1),
-        tail_score.stride(0),
-        tail_score.stride(1),
         key.stride(0),
         slot_score.stride(0),
         ape.stride(0),
         PAGE_SIZE=page_size,
         BUF_NUMEL_PER_PAGE=buf.stride(0),
         POOL_SIZE=pool_size,
-        TAIL_SIZE=tail_size,
+        TAIL_BLOCK_ELEMS=tail_kv_cache.stride(0),
+        KPOOL_HEAD=tail_kv_cache.stride(1),
         HEAD_DIM=head_dim,
         S_OFFSET_NBYTES_IN_PAGE=page_size * head_dim,
         ROUND_SCALE=round_scale,

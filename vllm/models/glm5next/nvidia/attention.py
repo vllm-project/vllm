@@ -38,7 +38,7 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
-from vllm.v1.kv_cache_interface import MLAAttentionSpec
+from vllm.v1.kv_cache_interface import KpoolTailSpec, MLAAttentionSpec
 
 logger = init_logger(__name__)
 
@@ -122,6 +122,57 @@ class Glm5NextIndexerCache(DeepseekV32IndexerCache):
         return spec
 
 
+class Glm5NextTailCache(DeepseekV32IndexerCache):
+    """Paged circular buffer for the kpool indexer's in-progress (tail) pool.
+
+    Holds the trailing incomplete pool's raw K + gate score: one block of
+    ``index_kpool`` slots per request, overwritten in place by ``pos % kpool``
+    as decode/spec-decode advances. Prefill seeds it (instead of discarding the
+    tail raw K+gate); the connector transfers it across PD; decode reads it to
+    compress the boundary pool correctly. ``KpoolTailSpec`` /
+    ``KpoolTailManager`` provide the no-prune, 1-block/req allocation that lets
+    the in-progress pool survive across steps and across transfer.
+
+    Stores raw bf16 K (``head_dim``) as the "K" half of each block and the
+    bf16 gate score (``head_dim``) as the "V" half -- not the fp8-compressed
+    entry, which lives in ``Glm5NextIndexerCache``.
+    """
+
+    def __init__(
+        self,
+        *,
+        head_dim: int,
+        dtype: torch.dtype,
+        prefix: str,
+        cache_config,
+        index_kpool: int,
+    ):
+        super().__init__(
+            head_dim=head_dim, dtype=dtype, prefix=prefix, cache_config=cache_config
+        )
+        assert index_kpool > 1, "Glm5NextTailCache expects index_kpool > 1"
+        self._index_kpool = index_kpool
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig):
+        # K + gate score packed into head_size (== 2*head_dim), head_size_v=0:
+        # KpoolTailBackend.get_kv_cache_shape only consumes head_size and splits
+        # it into [2, kpool, head_dim] (K | score halves), so the connectors'
+        # non-MLA K/V half-split transfers K and score as separate halves.
+        return KpoolTailSpec(
+            block_size=self._index_kpool,
+            num_kv_heads=1,
+            head_size=2 * self.head_dim,
+            head_size_v=0,
+            dtype=torch.bfloat16,
+            sliding_window=self._index_kpool,
+        )
+
+    def get_attn_backend(self):
+        from vllm.v1.attention.backends.mla.indexer import KpoolTailBackend
+
+        return KpoolTailBackend
+
+
 class Indexer(nn.Module):
     def __init__(
         self,
@@ -200,6 +251,17 @@ class Indexer(nn.Module):
             cache_config=cache_config,
             index_kpool=self.index_kpool,
         )
+        # Paged tail cache (in-progress pool's raw K + gate score). Written by
+        # prefill (seeds the boundary pool) and decode (per-step stash); read by
+        # the decode kernel to compress the boundary pool. Transferred across PD
+        # so the decode side sees the prefill tail. See KpoolTailSpec/Manager.
+        self.tail_cache = Glm5NextTailCache(
+            head_dim=self.head_dim,
+            dtype=torch.bfloat16,
+            prefix=f"{prefix}.tail_cache",
+            cache_config=cache_config,
+            index_kpool=self.index_kpool,
+        )
         self.max_model_len = vllm_config.model_config.max_model_len
         self.prefix = prefix
         from vllm.v1.attention.backends.mla.indexer import get_max_prefill_buffer_size
@@ -214,6 +276,7 @@ class Indexer(nn.Module):
             self.max_model_len,
             self.max_total_seq_len,
             self.topk_indices_buffer,
+            tail_cache=self.tail_cache,
         )
 
     def forward(

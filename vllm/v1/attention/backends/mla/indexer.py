@@ -167,6 +167,60 @@ class DeepseekV32IndexerBackend(AttentionBackend):
         return (0, 1, 2)
 
 
+class KpoolTailBackend(DeepseekV32IndexerBackend):
+    """Storage-only backend for the GLM5Next kpool tail cache.
+
+    The tail cache holds the in-progress pool's raw K + gate score packed into
+    one ``[num_blocks, 2, block_size, head_dim]`` bf16 tensor (K at index 0,
+    gate score at index 1) and never runs attention. It reuses the indexer
+    metadata builder (token-granular when ``compress_ratio == 1``) but exposes a
+    4D K||score shape and unrestricted head/block sizes: the indexer backend
+    hard-requires ``head_size in {32,64,128}`` and ``kernel_block_size 64``,
+    which the tail's ``block_size == kpool`` (e.g. 4) violates. The 4D
+    ``[2, block_size, head_dim]`` layout keeps K and score as separate block
+    halves so the connectors' non-MLA K/V half-split transfers them correctly.
+    """
+
+    @staticmethod
+    def get_name() -> str:
+        return "KPOOL_TAIL"
+
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        return []  # supports any (K+score packed into head_size)
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        # block_size == kpool; no sub-block splitting (kernel_block_size ==
+        # block_size), so the tensor stays [num_blocks, 2, kpool, head_dim].
+        return [MultipleOf(1)]
+
+    @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_dtype_str: str = "auto",
+    ) -> tuple[int, ...]:
+        # head_size carries K+score packed (== 2 * head_dim); split into
+        # [2, block_size, head_dim] so K (idx 0) and score (idx 1) are separate
+        # block halves.
+        assert num_kv_heads == 1
+        assert head_size % 2 == 0, "KpoolTailSpec head_size must be 2*head_dim"
+        return (num_blocks, 2, block_size, head_size // 2)
+
+    @staticmethod
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        return (0, 1, 2, 3)
+
+    @staticmethod
+    def get_builder_cls() -> type["KpoolTailMetadataBuilder"]:
+        return KpoolTailMetadataBuilder
+
+
 class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
     @staticmethod
     def get_name() -> str:
@@ -446,6 +500,55 @@ class DeepseekV32IndexerMetadata:
 
     decode: DeepSeekV32IndexerDecodeMetadata | None = None
     prefill: DeepseekV32IndexerPrefillMetadata | None = None
+
+
+class KpoolTailMetadataBuilder(AttentionMetadataBuilder):
+    """Lean metadata builder for the kpool tail cache.
+
+    The tail is storage-only (no attention / MQA-logits), so it skips the
+    DeepseekV32 indexer builder's DeepGEMM paged-MQA path -- which requires
+    ``block_kv in {32,64}`` and asserts on the tail's ``block_size == kpool``.
+    It exports only the group's token-granular ``slot_mapping`` (already built
+    per-group by ``build_attn_metadata``) plus the prefill/decode counts; the
+    indexer op reads ``attn_metadata[tail_prefix].slot_mapping``.
+    """
+
+    _cudagraph_support = AttentionCGSupport.ALWAYS
+    supports_update_block_table = False
+    reorder_batch_threshold = None
+
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ):
+        # No indexer-builder buffers (expanded_block_table / scheduler_metadata /
+        # compressed_slot_mapping) -- the tail is storage-only and exports only
+        # slot_mapping, which is already built per-group by build_attn_metadata.
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> DeepseekV32IndexerMetadata:
+        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+            split_decodes_and_prefills(common_attn_metadata)
+        )
+        return DeepseekV32IndexerMetadata(
+            seq_lens=common_attn_metadata.seq_lens,
+            max_seq_len=common_attn_metadata.max_seq_len,
+            slot_mapping=common_attn_metadata.slot_mapping,
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decode_tokens,
+            num_prefills=num_prefills,
+            num_prefill_tokens=num_prefill_tokens,
+            prefill=None,
+            decode=None,
+        )
 
 
 def get_max_prefill_buffer_size(vllm_config: VllmConfig):

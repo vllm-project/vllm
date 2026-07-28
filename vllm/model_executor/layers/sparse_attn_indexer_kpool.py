@@ -105,34 +105,6 @@ def _kpool_compress_insert(
     )
 
 
-# Per-layer decode tail buffers: ring of the in-progress pool's raw k + gate,
-# carried across decode steps so a pool can be compressed when it fills.
-# Lazily allocated, keyed by resolved layer prefix (eager path only — this op
-# is @eager_break_during_capture so it never runs under CUDA graph capture).
-_DECODE_TAIL: dict[tuple[str, int, int], tuple[torch.Tensor, torch.Tensor]] = {}
-
-
-def _get_decode_tail_buffers(
-    k_cache_prefix: str,
-    kpool: int,
-    head_dim: int,
-    max_batch: int,
-    device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    key = (k_cache_prefix, kpool, head_dim)
-    entry = _DECODE_TAIL.get(key)
-    if entry is None or entry[0].shape[0] < max_batch:
-        tail_k = torch.zeros(
-            max_batch, kpool, head_dim, dtype=torch.bfloat16, device=device
-        )
-        tail_score = torch.zeros(
-            max_batch, kpool, head_dim, dtype=torch.bfloat16, device=device
-        )
-        _DECODE_TAIL[key] = (tail_k, tail_score)
-        return tail_k, tail_score
-    return entry[0][:max_batch], entry[1][:max_batch]
-
-
 def _scatter_decode_tokens_by_request(
     tokens: torch.Tensor,
     decode_lens: torch.Tensor,
@@ -236,6 +208,12 @@ def sparse_attn_indexer_kpool(
     compress_ape: torch.Tensor | None = None,
     index_kpool: int = 1,
     positions: torch.Tensor | None = None,
+    # Paged tail cache (in-progress pool's raw K + gate score), replacing the
+    # transient _DECODE_TAIL ring. tail_prefix resolves attn_metadata[tail_prefix]
+    # for the tail group's token-granular slot_mapping. None on the dummy/profiling
+    # path and when the tail cache is disabled.
+    tail_kv_cache: torch.Tensor | None = None,
+    tail_prefix: str | None = None,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
@@ -346,6 +324,36 @@ def sparse_attn_indexer_kpool(
                     head_dim,
                     round_scale=(scale_fmt is not None),
                 )
+                # Persist the prefill tail (trailing incomplete pool's raw K +
+                # gate score) into the paged tail cache, so the decode side can
+                # compress the boundary pool correctly -- including across PD
+                # transfer, where the connector ships this block. Only the last
+                # r = n_prefill % kpool tokens matter (the in-progress pool);
+                # their tail slots land at offsets 0..r-1 of the request's tail
+                # block (pos % kpool), exactly where the decode reconstruction
+                # reads them. The op is eager, so the host syncs here are safe.
+                if (
+                    tail_kv_cache is not None
+                    and tail_prefix is not None
+                    and os.environ.get("VLLM_KPOOL_SKIP_TAIL_CACHE") != "1"
+                ):
+                    tail_meta = attn_metadata.get(_resolve_layer_name(tail_prefix))
+                    if tail_meta is not None:
+                        r = n_prefill % index_kpool
+                        if r > 0:
+                            t_start = num_tokens - r
+                            tslot = tail_meta.slot_mapping[t_start:num_tokens]
+                            valid = tslot >= 0
+                            if bool(valid.any()):
+                                tslot_v = tslot[valid].to(torch.int64)
+                                block_ids = tslot_v // index_kpool
+                                offsets = tslot_v % index_kpool
+                                tail_kv_cache[block_ids, 0, offsets, :] = k[
+                                    t_start:num_tokens
+                                ][valid]
+                                tail_kv_cache[block_ids, 1, offsets, :] = gate_score[
+                                    t_start:num_tokens
+                                ][valid]
         else:
             # standard: per-token fp8 quant + scatter (all tokens).
             assert scale_fmt is not None
@@ -599,29 +607,44 @@ def sparse_attn_indexer_kpool(
                 dec_gate = gate_score[:num_decode_tokens].view(*shape2, head_dim)
                 dec_slot = slot_mapping[:num_decode_tokens].view(shape2)
                 dec_pos = positions[:num_decode_tokens].to(torch.int32).view(shape2)
-            tail_k, tail_score = _get_decode_tail_buffers(
-                k_cache_prefix,
-                index_kpool,
-                head_dim,
-                num_requests,
-                k.device,
+            tail_meta = (
+                attn_metadata.get(_resolve_layer_name(tail_prefix))
+                if tail_prefix is not None
+                else None
             )
+            # Paged tail cache replaces the transient _DECODE_TAIL ring. Group
+            # the tail group's token-granular slot_mapping per-request, mirroring
+            # dec_slot / dec_pos, so the kernel gets each request's current-token
+            # tail slot (block * kpool + pos % kpool).
+            if tail_meta is None or tail_kv_cache is None:
+                dec_tail_slot = None
+            elif not use_uniform:
+                dec_tail_slot = _scatter_decode_tokens_by_request(
+                    tail_meta.slot_mapping[:num_decode_tokens],
+                    group_lens,
+                    num_requests,
+                    lmax,
+                    -1,
+                )
+            else:
+                dec_tail_slot = tail_meta.slot_mapping[:num_decode_tokens].view(shape2)
             # The compress kernel writes the raw fp8 cache (not the quant view);
             # pass the underlying kv_cache, not kv_cache_quant_view.
-            for t in range(dec_pos.shape[1]):
-                kpool_decode_update_and_maybe_write_cache(
-                    kv_cache_raw,
-                    tail_k,
-                    tail_score,
-                    dec_k[:, t, :].contiguous(),
-                    dec_gate[:, t, :].contiguous(),
-                    compress_ape,
-                    dec_slot[:, t].contiguous(),
-                    dec_pos[:, t].contiguous(),
-                    index_kpool,
-                    head_dim,
-                    round_scale=(scale_fmt is not None),
-                )
+            if dec_tail_slot is not None:
+                for t in range(dec_pos.shape[1]):
+                    kpool_decode_update_and_maybe_write_cache(
+                        kv_cache_raw,
+                        tail_kv_cache,
+                        dec_tail_slot[:, t].contiguous(),
+                        dec_k[:, t, :].contiguous(),
+                        dec_gate[:, t, :].contiguous(),
+                        compress_ape,
+                        dec_slot[:, t].contiguous(),
+                        dec_pos[:, t].contiguous(),
+                        index_kpool,
+                        head_dim,
+                        round_scale=(scale_fmt is not None),
+                    )
         decode_lens = decode_metadata.decode_lens
         if decode_metadata.requires_padding:
             # pad in edge case where we have short chunked prefill length <
@@ -786,6 +809,8 @@ def sparse_attn_indexer_kpool_fake(
     compress_ape: torch.Tensor | None = None,
     index_kpool: int = 1,
     positions: torch.Tensor | None = None,
+    tail_kv_cache: torch.Tensor | None = None,
+    tail_prefix: str | None = None,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -796,8 +821,9 @@ direct_register_custom_op(
     # The indexer writes the index-K cache in place (prefill k-cache insert +
     # kpool decode write), so kv_cache must be declared as mutated — otherwise
     # under full-graph compile dynamo assumes it is unchanged across the
-    # indexer→MLA boundary and the MLA reads stale/misaligned KV.
-    mutates_args=["topk_indices_buffer", "kv_cache"],
+    # indexer→MLA boundary and the MLA reads stale/misaligned KV. The paged tail
+    # cache is likewise written in place (prefill tail scatter + decode stash).
+    mutates_args=["topk_indices_buffer", "kv_cache", "tail_kv_cache"],
     fake_impl=sparse_attn_indexer_kpool_fake,
     dispatch_key=current_platform.dispatch_key,
 )
@@ -828,9 +854,11 @@ class SparseAttnIndexerKpool(CustomOp):
         topk_indices_buffer: torch.Tensor,
         skip_k_cache_insert: bool = False,
         use_fp4_cache: bool = False,
+        tail_cache=None,
     ):
         super().__init__()
         self.k_cache = k_cache
+        self.tail_cache = tail_cache
         self.quant_block_size = quant_block_size
         self.scale_fmt = scale_fmt
         self.topk_tokens = topk_tokens
@@ -915,6 +943,8 @@ class SparseAttnIndexerKpool(CustomOp):
             compress_ape,
             index_kpool,
             positions,
+            self.tail_cache.kv_cache if self.tail_cache is not None else None,
+            self.tail_cache.prefix if self.tail_cache is not None else None,
         )
 
     def forward_hip(
