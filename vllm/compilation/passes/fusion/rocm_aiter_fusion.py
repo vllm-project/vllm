@@ -583,9 +583,6 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
 
         # RDNA4 uses native quant ops and supports only Triton replacements.
         match_aiter_quant_op = not rocm_aiter_ops.is_rdna_aiter_enabled()
-        if rocm_aiter_ops.is_rdna_aiter_enabled():
-            # RDNA4 uses native quant ops and supports only Triton replacements.
-            match_aiter_quant_op = False
 
         # Make sure fused add patterns are before simple rms norm,
         # as the latter is a subset of the former in torch ops.
@@ -737,9 +734,7 @@ class RocmAiterSiluMulFp8GroupQuantFusionPass(VllmFusionPatternMatcherPass):
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config, "rocm_aiter_silu_mul_fp8_group_quant_fusion_pass")
 
-        match_aiter_quant_op = True
-        if rocm_aiter_ops.is_rdna_aiter_enabled():
-            match_aiter_quant_op = False
+        match_aiter_quant_op = not rocm_aiter_ops.is_rdna_aiter_enabled()
 
         self.register(
             AiterSiluMulFp8GroupQuantPattern(match_aiter_quant_op=match_aiter_quant_op)
