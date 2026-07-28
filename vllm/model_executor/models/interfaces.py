@@ -41,6 +41,7 @@ if TYPE_CHECKING:
         SpeechToTextParams,
         VllmConfig,
     )
+    from vllm.config.multimodal import VideoPruningMethod
     from vllm.inputs import PromptType, TokensPrompt
     from vllm.lora.model_manager import LoRAModelManager
     from vllm.model_executor.layers.fused_moe import MoERunner
@@ -423,6 +424,13 @@ class SupportsMultiModalPruning(Protocol):
     """
 
     supports_multimodal_pruning: ClassVar[Literal[True]] = True
+
+    supported_video_pruning_methods: ClassVar[tuple["VideoPruningMethod", ...]] = (
+        "evs",
+    )
+    """Video pruning methods (as reported by
+    `MultiModalConfig.get_video_pruning_spec`) implemented by this model.
+    Models supporting methods beyond EVS should override this."""
 
     def recompute_mrope_positions(
         self,
@@ -982,6 +990,31 @@ def supports_mamba_prefix_caching(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsMambaPrefixCaching]] | TypeIs[SupportsMambaPrefixCaching]:
     return getattr(model, "supports_mamba_prefix_caching", False)
+
+
+@runtime_checkable
+class SupportsReplaySSM(Protocol):
+    """The interface for models whose Mamba2 layers support ReplaySSM cached
+    standard decode.
+
+    This is currently experimental.
+    """
+
+    supports_replayssm: ClassVar[Literal[True]] = True
+
+
+@overload
+def supports_replayssm(model: object) -> TypeIs[SupportsReplaySSM]: ...
+
+
+@overload
+def supports_replayssm(model: type[object]) -> TypeIs[type[SupportsReplaySSM]]: ...
+
+
+def supports_replayssm(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsReplaySSM]] | TypeIs[SupportsReplaySSM]:
+    return getattr(model, "supports_replayssm", False)
 
 
 @runtime_checkable

@@ -44,16 +44,30 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_LL_BF16_WARMUP_MODEL_SHAPES: tuple[tuple[int, int], ...] = (
-    (6144, 264),  # Inkling
-    (7168, 256),  # DSV3
-    (7168, 384),  # DSV4-Pro
-    (14400, 256),  # DSV4-Flash
-)
 _LL_BF16_WARMUP_M_RANGE = range(1, 17)
 
 
-def _warmup_ll_bf16_router_gemm() -> None:
+def _ll_bf16_router_shapes_from_model(
+    model: torch.nn.Module,
+) -> tuple[tuple[int, int], ...]:
+    from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
+
+    shapes: set[tuple[int, int]] = set()
+    for module in model.modules():
+        if not isinstance(module, GateLinear):
+            continue
+        weight = getattr(module, "weight", None)
+        if not isinstance(weight, torch.Tensor):
+            continue
+        if weight.dim() != 2 or weight.dtype != torch.bfloat16:
+            continue
+        n, k = weight.shape
+        if k % 8 == 0:
+            shapes.add((int(k), int(n)))
+    return tuple(sorted(shapes))
+
+
+def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
     from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
         is_available as is_ll_bf16_gemm_available,
     )
@@ -64,24 +78,35 @@ def _warmup_ll_bf16_router_gemm() -> None:
     if not is_ll_bf16_gemm_available():
         return
 
-    logger.info("Warming up ll_bf16 router GEMM kernels.")
+    shapes = _ll_bf16_router_shapes_from_model(model)
+    if not shapes:
+        logger.info(
+            "Skipping ll_bf16 router GEMM warmup: no bf16 GateLinear shapes found."
+        )
+        return
+
+    logger.info("Warming up ll_bf16 router GEMM kernels for shapes: %s.", shapes)
     ll_bf16_gemm_kernel.warmup(
-        shapes=_LL_BF16_WARMUP_MODEL_SHAPES,
+        shapes=shapes,
         m_values=_LL_BF16_WARMUP_M_RANGE,
     )
 
 
-def kernel_warmup(worker: "Worker"):
+def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
         minimax_m3_msa_warmup,
     )
 
-    # Pooling models do not use the generation slot-mapping path.
-    if not worker.use_v2_model_runner and not worker.model_runner.is_pooling_model:
-        warm_v1_block_table_kernels(
-            getattr(worker.model_runner, "device", torch.device("cuda")),
-            worker.scheduler_config.max_num_batched_tokens,
-        )
+    if not worker.use_v2_model_runner:
+        # Pooling models do not use the generation slot-mapping path.
+        if not worker.model_runner.is_pooling_model:
+            warm_v1_block_table_kernels(worker.model_runner)
+        # The KV-block zeroing kernel is driven by the scheduler's
+        # `new_block_ids_to_zero`, so no dummy run ever reaches it.
+        zeroer = getattr(worker.model_runner, "_kv_block_zeroer", None)
+        if zeroer is not None:
+            zeroer.warmup(worker.model_runner.kv_cache_config.num_blocks)
+
     qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
 
     # DSv4 mHC TileLang kernels (hc_pre/hc_post/hc_head_op) run every decoder
@@ -96,6 +121,22 @@ def kernel_warmup(worker: "Worker"):
     )
 
     # Run next so input-prep kernels JIT against pristine runner state.
+    if worker.vllm_config.kernel_config.enable_jit_warmup:
+        fa4_cutedsl_warmup(worker)
+        sparse_mla_triton_warmup(worker)
+
+    if current_platform.has_device_capability(90):
+        _warmup_ll_bf16_router_gemm(worker.get_model())
+
+    if worker.vllm_config.kernel_config.enable_cutedsl_warmup:
+        # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
+        # to the shared JIT warmup infrastructure.
+        # https://github.com/vllm-project/vllm/pull/47451
+        cutedsl_warmup()
+
+    if process_local_only:
+        return
+
     flashinfer_sparse_mla_decode_autotune_warmup(worker)
     deepseek_v4_sparse_mla_attention_warmup(worker)
 
@@ -120,9 +161,6 @@ def kernel_warmup(worker: "Worker"):
         logger.info("Skipping FlashInfer autotune because it is disabled.")
     elif has_flashinfer() and current_platform.has_device_capability(90):
         flashinfer_autotune(worker.model_runner)
-
-    if current_platform.has_device_capability(90):
-        _warmup_ll_bf16_router_gemm()
 
     # FlashInfer attention warmup
     # Only warmup if the model has FlashInfer attention groups
@@ -155,10 +193,6 @@ def kernel_warmup(worker: "Worker"):
             force_attention=True,
             create_mixed_batch=True,
         )
-
-    if worker.vllm_config.kernel_config.enable_jit_warmup:
-        fa4_cutedsl_warmup(worker)
-        sparse_mla_triton_warmup(worker)
 
 
 def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
