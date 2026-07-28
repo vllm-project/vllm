@@ -201,8 +201,10 @@ def benchmark_swap_blocks(
                     _dst_addrs=dst_addrs,
                     _sizes=sizes,
                 ):
-                    with torch.Stream():
+                    stream = torch.Stream()
+                    with stream:
                         ops.swap_blocks_batch(_src_addrs, _dst_addrs, _sizes)
+                    torch.accelerator.current_stream().wait_stream(stream)
 
                 run_copy = run_batch
 
