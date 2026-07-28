@@ -701,33 +701,34 @@ class GPUModelRunner(
         self._init_kernel_block_sizes = [placeholder_block_size]
         self._init_max_num_blocks = [placeholder_max_num_blocks]
         self._init_slot_mapping_modes = [SlotMappingMode.TOKEN_TO_KV_SLOT]
-        self.input_batch = InputBatch(
-            max_num_reqs=self.max_num_reqs,
-            # We need to use the encoder length for encoder-decoder
-            # because of KV cache for cross-attention.
-            max_model_len=max(self.max_model_len, self.max_encoder_len),
-            max_num_batched_tokens=self.max_num_tokens,
-            device=self.device,
-            vocab_size=self.model_config.get_vocab_size(),
-            block_sizes=[placeholder_block_size],
-            kernel_block_sizes=[placeholder_block_size],
-            max_num_blocks_per_req=[placeholder_max_num_blocks],
-            num_spec_tokens=self.num_spec_tokens,
-            logitsprocs=build_logitsprocs(
-                self.vllm_config,
-                self.device,
-                PIN_MEMORY,
-                self.is_pooling_model,
-                custom_logitsprocs,
-            ),
-            # We currently don't know whether a particular custom logits processor
-            # uses output token ids so we set this conservatively. Thinking-budget
-            # tracking is requested dynamically when a budgeted request is in the batch.
-            logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
-            is_pooling_model=self.is_pooling_model,
-            cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
-            reasoning_config=self.vllm_config.reasoning_config,
-        )
+        with self.jit_warmup_registry.activate():
+            self.input_batch = InputBatch(
+                max_num_reqs=self.max_num_reqs,
+                # We need to use the encoder length for encoder-decoder
+                # because of KV cache for cross-attention.
+                max_model_len=max(self.max_model_len, self.max_encoder_len),
+                max_num_batched_tokens=self.max_num_tokens,
+                device=self.device,
+                vocab_size=self.model_config.get_vocab_size(),
+                block_sizes=[placeholder_block_size],
+                kernel_block_sizes=[placeholder_block_size],
+                max_num_blocks_per_req=[placeholder_max_num_blocks],
+                num_spec_tokens=self.num_spec_tokens,
+                logitsprocs=build_logitsprocs(
+                    self.vllm_config,
+                    self.device,
+                    PIN_MEMORY,
+                    self.is_pooling_model,
+                    custom_logitsprocs,
+                ),
+                # We currently don't know whether a particular custom logits processor
+                # uses output token ids so we set this conservatively. Thinking-budget
+                # tracking is requested dynamically when a budgeted request is in the batch.
+                logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
+                is_pooling_model=self.is_pooling_model,
+                cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
+                reasoning_config=self.vllm_config.reasoning_config,
+            )
 
         # Separate cuda stream for overlapping transfer of sampled token ids from
         # GPU to CPU when async scheduling is enabled.
@@ -7209,23 +7210,24 @@ class GPUModelRunner(
             self._init_kernel_block_sizes = kernel_block_sizes
             self._init_max_num_blocks = max_num_blocks
             self._init_slot_mapping_modes = slot_mapping_modes
-            self.input_batch = InputBatch(
-                max_num_reqs=self.max_num_reqs,
-                max_model_len=max_model_len,
-                max_num_batched_tokens=self.max_num_tokens,
-                device=self.device,
-                vocab_size=self.model_config.get_vocab_size(),
-                block_sizes=block_sizes,
-                kernel_block_sizes=kernel_block_sizes,
-                max_num_blocks_per_req=max_num_blocks,
-                num_spec_tokens=self.num_spec_tokens,
-                logitsprocs=self.input_batch.logitsprocs,
-                logitsprocs_need_output_token_ids=self.input_batch.logitsprocs_need_output_token_ids,
-                is_pooling_model=self.is_pooling_model,
-                cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
-                reasoning_config=self.vllm_config.reasoning_config,
-                slot_mapping_modes=slot_mapping_modes,
-            )
+            with self.jit_warmup_registry.activate():
+                self.input_batch = InputBatch(
+                    max_num_reqs=self.max_num_reqs,
+                    max_model_len=max_model_len,
+                    max_num_batched_tokens=self.max_num_tokens,
+                    device=self.device,
+                    vocab_size=self.model_config.get_vocab_size(),
+                    block_sizes=block_sizes,
+                    kernel_block_sizes=kernel_block_sizes,
+                    max_num_blocks_per_req=max_num_blocks,
+                    num_spec_tokens=self.num_spec_tokens,
+                    logitsprocs=self.input_batch.logitsprocs,
+                    logitsprocs_need_output_token_ids=self.input_batch.logitsprocs_need_output_token_ids,
+                    is_pooling_model=self.is_pooling_model,
+                    cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
+                    reasoning_config=self.vllm_config.reasoning_config,
+                    slot_mapping_modes=slot_mapping_modes,
+                )
 
         assert self._init_block_sizes == block_sizes, (
             f"InputBatch block_sizes {self._init_block_sizes} != "
