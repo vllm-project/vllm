@@ -3319,6 +3319,7 @@ steps:
 - label: LM Eval Large Models (8xB200-8xMI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
   agent_pool: mi355_8
   optional: true
   num_gpus: 8
