@@ -9,10 +9,14 @@ from typing import Any, cast
 import pytest
 
 from vllm.model_executor.warmup.jit_warmup import (
+    JitWarmupRegistry,
     VllmJitKernel,
     WarmupIntRange,
     get_ast_full_name,
     zip_inputs,
+)
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    triton_scalar_specialization_rep,
 )
 
 
@@ -92,6 +96,35 @@ class RecordingToyKernel(ToyKernel):
 
     def compile(self, compile_key: ToyKernel.CompileKey) -> None:
         self.compiled.append(compile_key)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (-(1 << 63), 1 << 31),
+        (-(1 << 31) - 1, (1 << 31) + 1),
+        (-(1 << 31), 16),
+        (0, 16),
+        (1, 1),
+        (2, 2),
+        (16, 16),
+        ((1 << 31) - 1, 2),
+        (1 << 31, 1 << 31),
+        ((1 << 31) + 1, (1 << 31) + 1),
+        ((1 << 63) - 1, (1 << 31) + 1),
+        (1 << 63, 1 << 63),
+        ((1 << 63) + 1, (1 << 63) + 1),
+        ((1 << 64) - 1, (1 << 63) + 1),
+    ],
+)
+def test_triton_scalar_specialization_rep(value: int, expected: int) -> None:
+    assert triton_scalar_specialization_rep(value) == expected
+
+
+@pytest.mark.parametrize("value", [-(1 << 63) - 1, 1 << 64])
+def test_triton_scalar_specialization_rep_rejects_out_of_range(value: int) -> None:
+    with pytest.raises(OverflowError, match="outside Triton's scalar range"):
+        triton_scalar_specialization_rep(value)
 
 
 def test_trace_dispatch_expands_ranges_dedupes_and_ignores_unused_inputs() -> None:
@@ -287,6 +320,31 @@ def test_helper_calls_support_keywords_and_reject_star_kwargs() -> None:
         StarKwargsKernel().compile_key({"tokens": 5, "block_size": 4})
 
 
+def test_dispatch_helper_calls_resolve_python_builtins() -> None:
+    class BuiltinKernel(VllmJitKernel["BuiltinKernel.CompileKey"]):
+        @dataclass(frozen=True)
+        class CompileKey:
+            value: int
+
+        def dispatch(  # type: ignore[override]
+            self,
+            *,
+            tokens: int,
+            limit: int,
+        ) -> CompileKey:
+            return self.CompileKey(value=max(1, min(tokens, limit)))
+
+        def get_warmup_keys(self) -> list[CompileKey]:
+            return []
+
+        def compile(self, compile_key: CompileKey) -> None:
+            pass
+
+    assert BuiltinKernel().compile_key({"tokens": 8, "limit": 4}) == (
+        BuiltinKernel.CompileKey(value=4)
+    )
+
+
 def test_dispatch_body_must_be_local_assignments_then_compile_key_return() -> None:
     class BranchKernel(VllmJitKernel["BranchKernel.CompileKey"]):
         @dataclass(frozen=True)
@@ -324,6 +382,32 @@ def test_dispatch_body_must_be_local_assignments_then_compile_key_return() -> No
         KwargsReturnKernel()
 
 
+def test_dispatch_supports_tuple_and_mapping_subscriptions() -> None:
+    class SubscriptKernel(VllmJitKernel["SubscriptKernel.CompileKey"]):
+        @dataclass(frozen=True)
+        class CompileKey:
+            first: int
+            named: int
+
+        def dispatch(  # type: ignore[override]
+            self,
+            *,
+            values: tuple[int, ...],
+            config: dict[str, int],
+        ) -> CompileKey:
+            return self.CompileKey(first=values[0], named=config["named"])
+
+        def get_warmup_keys(self) -> list[CompileKey]:
+            return []
+
+        def compile(self, compile_key: CompileKey) -> None:
+            pass
+
+    assert SubscriptKernel().compile_key(
+        {"values": (3, 5), "config": {"named": 7}}
+    ) == SubscriptKernel.CompileKey(first=3, named=7)
+
+
 def test_dispatch_reports_unsupported_expression_with_context() -> None:
     class UnsupportedKernel(VllmJitKernel["UnsupportedKernel.CompileKey"]):
         @dataclass(frozen=True)
@@ -359,6 +443,102 @@ def test_warmup_compiles_all_returned_keys_in_order() -> None:
         ToyKernel.CompileKey(2, 2, 1, ("base", "default", -2, 2, 4), True),
         ToyKernel.CompileKey(4, 4, 1, ("base", "default", -4, 1, 16), True),
     ]
+
+
+def test_runtime_cache_miss_compiles_and_caches_executor() -> None:
+    class CachedKernel(VllmJitKernel["CachedKernel.CompileKey"]):
+        @dataclass(frozen=True)
+        class CompileKey:
+            value: int
+
+        def __init__(self) -> None:
+            self.compiled: list[CachedKernel.CompileKey] = []
+            super().__init__()
+
+        def dispatch(self, *, value: int) -> CompileKey:  # type: ignore[override]
+            return self.CompileKey(value=value)
+
+        def get_warmup_keys(self) -> list[CompileKey]:
+            return self._trace_dispatch(self.dispatch)(value=1)
+
+        def compile(self, compile_key: CompileKey) -> None:
+            self.compiled.append(compile_key)
+            self._compiled_cache[compile_key] = object()
+
+        def __call__(self, value: int) -> None:
+            compile_key = self.dispatch(value=value)
+            self._get_or_compile(compile_key)
+
+    kernel = CachedKernel()
+    kernel.warmup()
+    kernel(1)
+    kernel(2)
+
+    assert kernel.compiled == [
+        CachedKernel.CompileKey(value=1),
+        CachedKernel.CompileKey(value=2),
+    ]
+
+
+def test_registry_records_only_inside_model_setup_context() -> None:
+    registry = JitWarmupRegistry(_config())
+    kernel = RecordingToyKernel()
+
+    kernel.register_warmup(3, _config())
+    with registry.activate():
+        kernel.register_warmup(3, _config())
+
+    assert len(registry) == 1
+    assert kernel.compiled == []
+
+
+def test_registry_expands_requests_and_deduplicates_owner_keys() -> None:
+    registry = JitWarmupRegistry(_config())
+    kernel = RecordingToyKernel()
+
+    with registry.activate():
+        kernel.register_warmup(3, _config())
+        kernel.register_warmup(5, _config())
+
+    registry.warmup()
+
+    assert kernel.compiled == [
+        ToyKernel.CompileKey(1, 1, 1, ("base", "default", -1, 1, 1), True),
+        ToyKernel.CompileKey(2, 2, 1, ("base", "default", -2, 2, 4), True),
+        ToyKernel.CompileKey(4, 4, 1, ("base", "default", -4, 1, 16), True),
+        ToyKernel.CompileKey(8, 8, 1, ("base", "default", -8, 2, 64), True),
+    ]
+
+
+def test_registry_passes_vllm_config_to_default_requests() -> None:
+    class ConfigKernel(VllmJitKernel["ConfigKernel.CompileKey"]):
+        @dataclass(frozen=True)
+        class CompileKey:
+            value: int
+
+        def __init__(self) -> None:
+            self.compiled: list[ConfigKernel.CompileKey] = []
+            super().__init__()
+
+        def dispatch(self, *, value: int) -> CompileKey:  # type: ignore[override]
+            return self.CompileKey(value=value)
+
+        def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+            return [self.dispatch(value=vllm_config.bias)]
+
+        def compile(self, compile_key: CompileKey) -> None:
+            self.compiled.append(compile_key)
+
+    registry = JitWarmupRegistry(_config(bias=7))
+    kernel = ConfigKernel()
+
+    with registry.activate():
+        kernel.register_warmup()
+        kernel.register_warmup()
+    assert len(registry) == 1
+    registry.warmup()
+
+    assert kernel.compiled == [ConfigKernel.CompileKey(value=7)]
 
 
 def test_get_ast_full_name_handles_names_attributes_and_other_nodes() -> None:

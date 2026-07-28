@@ -6,6 +6,7 @@ This is useful specifically for JIT'ed kernels as we don't want JIT'ing to
 happen during model execution.
 """
 
+import time
 from typing import TYPE_CHECKING
 
 import torch
@@ -34,9 +35,6 @@ from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
 from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
 from vllm.model_executor.warmup.sparse_mla_triton_warmup import (
     sparse_mla_triton_warmup,
-)
-from vllm.model_executor.warmup.v1_block_table_warmup import (
-    warm_v1_block_table_kernels,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
@@ -102,14 +100,27 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     )
 
     if not worker.use_v2_model_runner:
-        # Pooling models do not use the generation slot-mapping path.
-        if not worker.model_runner.is_pooling_model:
-            warm_v1_block_table_kernels(worker.model_runner)
         # The KV-block zeroing kernel is driven by the scheduler's
         # `new_block_ids_to_zero`, so no dummy run ever reaches it.
         zeroer = getattr(worker.model_runner, "_kv_block_zeroer", None)
         if zeroer is not None:
             zeroer.warmup(worker.model_runner.kv_cache_config.num_blocks)
+
+    if worker.vllm_config.kernel_config.enable_jit_warmup:
+        logger.info("JIT kernel warmup starting.")
+        jit_warmup_start = time.perf_counter()
+        try:
+            worker.model_runner.jit_warmup_registry.warmup()
+        except Exception:
+            logger.exception(
+                "JIT kernel warmup failed after %.2fs.",
+                time.perf_counter() - jit_warmup_start,
+            )
+            raise
+        logger.info(
+            "JIT kernel warmup finished in %.2fs.",
+            time.perf_counter() - jit_warmup_start,
+        )
 
     qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
 
