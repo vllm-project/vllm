@@ -86,7 +86,16 @@ pub(super) fn prepare_chat_request(
         &messages,
     )?;
 
-    let template_kwargs = request.chat_template_kwargs.unwrap_or_default();
+    let mut template_kwargs = request.chat_template_kwargs.unwrap_or_default();
+    if let Some(response_format) = request.response_format.as_ref() {
+        let response_format = serde_json::to_value(response_format).map_err(|error| {
+            ApiError::invalid_request(
+                format!("failed to serialize response_format: {error}"),
+                Some("response_format"),
+            )
+        })?;
+        template_kwargs.insert("response_format".to_string(), response_format);
+    }
 
     let include_usage = (request.stream_options.as_ref())
         .and_then(|options| options.include_usage)
@@ -403,8 +412,8 @@ mod tests {
     use serde_json::json;
     use vllm_chat::{
         AssistantContentBlock, AssistantToolCall, ChatContentPart, ChatMessage as VllmChatMessage,
-        ChatTool as VllmChatTool, ChatToolChoice, GenerationPromptMode,
-        SamplingParams as VllmSamplingParams,
+        ChatRenderer, ChatTool as VllmChatTool, ChatToolChoice, GenerationPromptMode,
+        KimiK3ChatRenderer, SamplingParams as VllmSamplingParams,
     };
     use vllm_text::output::TextDecodeOptions;
 
@@ -413,6 +422,7 @@ mod tests {
     use crate::routes::openai::chat_completions::types::{
         AssistantRole, ChatCompletionMessage, ChatCompletionRequest,
     };
+    use crate::routes::openai::utils::structured_outputs::{JsonSchemaFormat, ResponseFormat};
     use crate::routes::openai::utils::types::{
         AudioUrl, ChatMessage, ContentPart, Function, FunctionCallResponse, ImageUrl, InputAudio,
         MessageContent, StreamOptions, Tool, ToolCall, ToolChoice, ToolChoiceValue, VideoUrl,
@@ -467,6 +477,52 @@ mod tests {
         .expect("request is valid");
 
         assert!(prepared.chat_request.parallel_tool_calls);
+    }
+
+    #[test]
+    fn prepare_chat_request_passes_response_format_to_kimi_k3_renderer() {
+        let mut request = base_request();
+        request.model = "moonshotai/Kimi-K3".to_string();
+        let response_format = ResponseFormat::JsonSchema {
+            json_schema: JsonSchemaFormat {
+                name: "answer".to_string(),
+                description: None,
+                schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "answer": {"type": "string"}
+                    },
+                    "required": ["answer"]
+                }),
+                strict: Some(true),
+            },
+        };
+        request.response_format = Some(response_format.clone());
+        request.chat_template_kwargs = Some(HashMap::from([(
+            "response_format".to_string(),
+            json!({"type": "json_object"}),
+        )]));
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["moonshotai/Kimi-K3"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.chat_options.template_kwargs.get("response_format"),
+            Some(&serde_json::to_value(response_format).unwrap())
+        );
+
+        let prompt = KimiK3ChatRenderer::new()
+            .render(&prepared.chat_request)
+            .expect("Kimi K3 rendering succeeds")
+            .prompt
+            .into_text()
+            .expect("Kimi K3 renders a text prompt");
+        assert!(prompt.contains("response_format=json_schema"));
+        assert!(prompt.contains(r#""answer":{"type":"string"}"#));
     }
 
     #[test]
