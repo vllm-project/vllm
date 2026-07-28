@@ -48,3 +48,10 @@ def test_diffusion_accepts_top_k_top_p():
 def test_non_diffusion_models_unaffected():
     params = SamplingParams(temperature=0.7, top_k=10, seed=42)
     params.verify(MockModelConfig(), None, None, None)
+
+
+def test_bad_words_rejects_whitespace_only():
+    # A whitespace-only bad word tokenizes to an empty list, which later crashes
+    # update_from_tokenizer with an IndexError; reject it up front with a clear error.
+    with pytest.raises(ValueError, match="empty or whitespace-only"):
+        SamplingParams(bad_words=[" "])
