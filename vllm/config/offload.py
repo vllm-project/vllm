@@ -9,7 +9,8 @@ from pydantic import Field, model_validator
 
 from vllm.config.utils import config
 
-OffloadBackend = Literal["auto", "uva", "prefetch"]
+OffloadBackend = Literal["auto", "uva", "prefetch", "hierarchical"]
+TierPolicy = Literal["quality", "balanced"]
 
 
 @config
@@ -77,15 +78,82 @@ class PrefetchOffloadConfig:
 
 
 @config
+class HierarchicalOffloadConfig:
+    """Colibri-style 3-tier MoE expert staging (device ↔ RAM ↔ NVMe).
+
+    Routes experts are staged into a fixed device slot pool. Placement only
+    affects speed — never precision or router semantics.
+    """
+
+    tier_device_expert_gb: float = Field(default=0, ge=0)
+    """Max GiB of device memory reserved for expert slots. Default 0 disables
+    hierarchical offloading unless ``offload_backend='hierarchical'`` is set
+    explicitly (then a heuristic budget is used)."""
+
+    tier_ram_gb: float = Field(default=-1)
+    """Pinned RAM expert cache GiB. ``-1`` means auto (MemAvailable heuristic).
+    ``0`` disables the RAM tier (device slots only, experts must fit)."""
+
+    tier_disk_path: str | None = None
+    """Directory for the immutable ExpertStore. Required when experts exceed
+    the RAM cache. ``None`` keeps all experts in pinned RAM (Phase-1 mode)."""
+
+    tier_policy: TierPolicy = "quality"
+    """``quality``: no live repin. ``balanced``: LFRU repin of hot experts."""
+
+    tier_repin_tokens: int = Field(default=64, ge=0)
+    """Repin interval in emitted tokens when ``tier_policy='balanced'``.
+    ``0`` disables live repin even in balanced mode."""
+
+    tier_pilot: bool = False
+    """Enable router-lookahead prefetch of the next MoE layer's experts."""
+
+    tier_pilot_real: bool = False
+    """Move pilot prefetch off the critical path (deeper async pipeline)."""
+
+    tier_io_workers: int = Field(default=8, ge=1)
+    """Disk→RAM worker pool size."""
+
+    tier_direct: bool = True
+    """Prefer O_DIRECT for ExpertStore reads when the filesystem supports it."""
+
+    tier_usage_path: str | None = None
+    """Path for the learned expert-usage heat map. Defaults to
+    ``{tier_disk_path}/.vllm_expert_usage`` or beside the model."""
+
+    tier_dense_prefetch: bool = False
+    """Also apply PrefetchOffloader-style staging to dense (attention) weights
+    when device budget remains tight after expert slots."""
+
+    tier_num_slots: int = Field(default=0, ge=0)
+    """Override device expert slot count per MoE layer. ``0`` = derive from
+    ``tier_device_expert_gb`` and expert row size."""
+
+    tier_allow_cuda_graphs: bool = False
+    """Experimental: allow XPU/CUDA graph capture with hierarchical staging.
+    Default False (eager) because external copy-stream events are hazardous."""
+
+    def is_active(self) -> bool:
+        """Return True when hierarchical fields request activation."""
+        return (
+            self.tier_device_expert_gb > 0
+            or self.tier_disk_path is not None
+            or self.tier_num_slots > 0
+        )
+
+
+@config
 class OffloadConfig:
     """Configuration for model weight offloading to reduce GPU memory usage."""
 
     offload_backend: OffloadBackend = "auto"
     """The backend for weight offloading. Options:
     - "auto": Selects based on which sub-config has non-default values
-      (prefetch if offload_group_size > 0, uva if cpu_offload_gb > 0).
+      (hierarchical if active, else prefetch if offload_group_size > 0,
+      else uva if cpu_offload_gb > 0).
     - "uva": UVA (Unified Virtual Addressing) zero-copy offloading.
     - "prefetch": Async prefetch with group-based layer offloading.
+    - "hierarchical": Colibri-style 3-tier MoE expert staging.
     """
 
     uva: UVAOffloadConfig = Field(default_factory=UVAOffloadConfig)
@@ -93,6 +161,11 @@ class OffloadConfig:
 
     prefetch: PrefetchOffloadConfig = Field(default_factory=PrefetchOffloadConfig)
     """Parameters for prefetch offloading backend."""
+
+    hierarchical: HierarchicalOffloadConfig = Field(
+        default_factory=HierarchicalOffloadConfig
+    )
+    """Parameters for hierarchical (Colibri-style) MoE expert staging."""
 
     @model_validator(mode="after")
     def validate_offload_config(self) -> "OffloadConfig":
@@ -112,26 +185,58 @@ class OffloadConfig:
                     f" (offload_group_size > 0)"
                 )
 
-        # Warn if both backends have non-default values
+        hier = self.hierarchical
+        hier_active = hier.is_active() or self.offload_backend == "hierarchical"
         uva_active = self.uva.cpu_offload_gb > 0
         prefetch_active = self.prefetch.offload_group_size > 0
-        if self.offload_backend == "uva" and prefetch_active:
+
+        if hier_active and uva_active:
+            raise ValueError(
+                "Hierarchical expert staging cannot be combined with UVA "
+                "weight offloading (cpu_offload_gb > 0). Disable one of them."
+            )
+
+        if hier.tier_policy == "balanced" and hier.tier_repin_tokens < 0:
+            raise ValueError("tier_repin_tokens must be >= 0")
+
+        # EPLB mutual exclusion is enforced at runtime when both are enabled;
+        # warn early if hierarchical is selected.
+        if hier_active:
             warnings.warn(
-                "Prefetch offload fields are set but offload_backend='uva'. "
-                "Prefetch settings will be ignored.",
+                "Hierarchical expert staging is mutually exclusive with EPLB "
+                "in v1. Disable enable_eplb / EPLBConfig when using "
+                "--offload-backend hierarchical.",
                 stacklevel=2,
             )
-        elif self.offload_backend == "prefetch" and uva_active:
+
+        if self.offload_backend == "uva" and (prefetch_active or hier_active):
             warnings.warn(
-                "UVA offload fields are set but offload_backend='prefetch'. "
-                "UVA settings will be ignored.",
+                "Non-UVA offload fields are set but offload_backend='uva'. "
+                "Those settings will be ignored.",
                 stacklevel=2,
             )
-        elif self.offload_backend == "auto" and uva_active and prefetch_active:
+        elif self.offload_backend == "prefetch" and (uva_active or hier_active):
             warnings.warn(
-                "Both UVA and prefetch offload fields are set with "
-                "offload_backend='auto'. Prefetch backend will be selected. "
-                "Set offload_backend explicitly to suppress this warning.",
+                "Non-prefetch offload fields are set but "
+                "offload_backend='prefetch'. Those settings will be ignored.",
+                stacklevel=2,
+            )
+        elif self.offload_backend == "hierarchical" and (uva_active or prefetch_active):
+            warnings.warn(
+                "UVA/prefetch offload fields are set but "
+                "offload_backend='hierarchical'. Those settings will be "
+                "ignored (except tier_dense_prefetch).",
+                stacklevel=2,
+            )
+        elif (
+            self.offload_backend == "auto"
+            and sum([uva_active, prefetch_active, hier_active]) > 1
+        ):
+            warnings.warn(
+                "Multiple offload backends have non-default values with "
+                "offload_backend='auto'. Selection priority: hierarchical > "
+                "prefetch > uva. Set offload_backend explicitly to suppress "
+                "this warning.",
                 stacklevel=2,
             )
         return self

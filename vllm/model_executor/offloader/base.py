@@ -127,8 +127,8 @@ def create_offloader(offload_config: "OffloadConfig") -> BaseOffloader:
     """Create an offloader based on the offload configuration.
 
     Uses the explicit ``offload_backend`` selector.  When set to ``"auto"``,
-    selects prefetch if ``offload_group_size > 0``, UVA if
-    ``cpu_offload_gb > 0``, otherwise noop.
+    selects hierarchical if active, else prefetch if ``offload_group_size > 0``,
+    UVA if ``cpu_offload_gb > 0``, otherwise noop.
     """
     from vllm.model_executor.offloader.prefetch import PrefetchOffloader
     from vllm.model_executor.offloader.uva import UVAOffloader
@@ -136,15 +136,24 @@ def create_offloader(offload_config: "OffloadConfig") -> BaseOffloader:
     backend = offload_config.offload_backend
     uva = offload_config.uva
     prefetch = offload_config.prefetch
+    hierarchical = offload_config.hierarchical
 
     if backend == "auto":
-        if prefetch.offload_group_size > 0:
+        if hierarchical.is_active():
+            backend = "hierarchical"
+        elif prefetch.offload_group_size > 0:
             backend = "prefetch"
         elif uva.cpu_offload_gb > 0:
             backend = "uva"
         else:
             return NoopOffloader()
 
+    if backend == "hierarchical":
+        from vllm.model_executor.offloader.hierarchical_offloader import (
+            HierarchicalOffloader,
+        )
+
+        return HierarchicalOffloader(hierarchical)
     if backend == "prefetch":
         return PrefetchOffloader(
             group_size=prefetch.offload_group_size,

@@ -182,6 +182,45 @@ def test_moe_wna16_humming_adapter_repacks_uint8_tensors():
     assert converted["zero_point"].shape == (1, 2, 2)
 
 
+def test_xpu_awq_moe_repack_shapes():
+    """AWQ MoE packs must become XPU int4 [E, 2N, K/2] / [E, K, N/2]."""
+    from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
+        _convert_awq_moe_qweight_to_gptq,
+        _process_weights_xpu,
+    )
+
+    e, k, n, gs = 2, 256, 512, 64
+    w13 = torch.randint(0, 2**31, (e, k, 2 * n // 8), dtype=torch.int32)
+    w2 = torch.randint(0, 2**31, (e, n, k // 8), dtype=torch.int32)
+    w13_s = torch.randn(e, k // gs, 2 * n, dtype=torch.float16)
+    w2_s = torch.randn(e, n // gs, k, dtype=torch.float16)
+
+    gptq_w13 = _convert_awq_moe_qweight_to_gptq(w13)
+    gptq_w2 = _convert_awq_moe_qweight_to_gptq(w2)
+    assert gptq_w13.shape == (e, k // 8, 2 * n)
+    assert gptq_w2.shape == (e, n // 8, k)
+
+    cfg = AutoAWQConfig(
+        weight_bits=4,
+        group_size=gs,
+        zero_point=True,
+        lm_head_quantized=False,
+    )
+    out = _process_weights_xpu(
+        layer=SimpleNamespace(),
+        quant_config=cfg,
+        w13_qweight=w13,
+        w2_qweight=w2,
+        w13_scales=w13_s,
+        w2_scales=w2_s,
+    )
+    w13_xpu, w2_xpu, w13_scales_xpu, w2_scales_xpu, _, _ = out
+    assert w13_xpu.dtype == torch.uint8 and w13_xpu.shape == (e, 2 * n, k // 2)
+    assert w2_xpu.dtype == torch.uint8 and w2_xpu.shape == (e, k, n // 2)
+    assert w13_scales_xpu.shape == (e, 2 * n, k // gs)
+    assert w2_scales_xpu.shape == (e, k, n // gs)
+
+
 def test_moe_wna16_uses_humming_quant_config(monkeypatch):
     from vllm.model_executor.layers.quantization.utils import humming_utils
 

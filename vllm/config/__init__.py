@@ -28,9 +28,11 @@ from vllm.config.model import (
 from vllm.config.multimodal import MultiModalConfig
 from vllm.config.observability import ObservabilityConfig
 from vllm.config.offload import (
+    HierarchicalOffloadConfig,
     OffloadBackend,
     OffloadConfig,
     PrefetchOffloadConfig,
+    TierPolicy,
     UVAOffloadConfig,
 )
 from vllm.config.parallel import EPLBConfig, ParallelConfig
@@ -104,7 +106,9 @@ __all__ = [
     # From vllm.config.offload
     "OffloadBackend",
     "OffloadConfig",
+    "HierarchicalOffloadConfig",
     "PrefetchOffloadConfig",
+    "TierPolicy",
     "UVAOffloadConfig",
     # From vllm.config.parallel
     "EPLBConfig",

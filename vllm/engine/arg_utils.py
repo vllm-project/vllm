@@ -60,6 +60,7 @@ from vllm.config import (
     SchedulerConfig,
     SpeculativeConfig,
     StructuredOutputsConfig,
+    HierarchicalOffloadConfig,
     UVAOffloadConfig,
     VllmConfig,
     WeightTransferConfig,
@@ -523,6 +524,19 @@ class EngineArgs:
     offload_num_in_group: int = PrefetchOffloadConfig.offload_num_in_group
     offload_prefetch_step: int = PrefetchOffloadConfig.offload_prefetch_step
     offload_params: set[str] = get_field(PrefetchOffloadConfig, "offload_params")
+    tier_device_expert_gb: float = HierarchicalOffloadConfig.tier_device_expert_gb
+    tier_ram_gb: float = HierarchicalOffloadConfig.tier_ram_gb
+    tier_disk_path: str | None = HierarchicalOffloadConfig.tier_disk_path
+    tier_policy: str = HierarchicalOffloadConfig.tier_policy
+    tier_repin_tokens: int = HierarchicalOffloadConfig.tier_repin_tokens
+    tier_pilot: bool = HierarchicalOffloadConfig.tier_pilot
+    tier_pilot_real: bool = HierarchicalOffloadConfig.tier_pilot_real
+    tier_io_workers: int = HierarchicalOffloadConfig.tier_io_workers
+    tier_direct: bool = HierarchicalOffloadConfig.tier_direct
+    tier_usage_path: str | None = HierarchicalOffloadConfig.tier_usage_path
+    tier_dense_prefetch: bool = HierarchicalOffloadConfig.tier_dense_prefetch
+    tier_num_slots: int = HierarchicalOffloadConfig.tier_num_slots
+    tier_allow_cuda_graphs: bool = HierarchicalOffloadConfig.tier_allow_cuda_graphs
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
     max_num_batched_tokens: int | None = None
@@ -1218,6 +1232,7 @@ class EngineArgs:
         offload_kwargs = get_kwargs(OffloadConfig)
         uva_kwargs = get_kwargs(UVAOffloadConfig)
         prefetch_kwargs = get_kwargs(PrefetchOffloadConfig)
+        hier_kwargs = get_kwargs(HierarchicalOffloadConfig)
         offload_group = parser.add_argument_group(
             title="OffloadConfig",
             description=OffloadConfig.__doc__,
@@ -1243,6 +1258,37 @@ class EngineArgs:
         )
         offload_group.add_argument(
             "--offload-params", **prefetch_kwargs["offload_params"]
+        )
+        offload_group.add_argument(
+            "--tier-device-expert-gb", **hier_kwargs["tier_device_expert_gb"]
+        )
+        offload_group.add_argument("--tier-ram-gb", **hier_kwargs["tier_ram_gb"])
+        offload_group.add_argument(
+            "--tier-disk-path", **hier_kwargs["tier_disk_path"]
+        )
+        offload_group.add_argument("--tier-policy", **hier_kwargs["tier_policy"])
+        offload_group.add_argument(
+            "--tier-repin-tokens", **hier_kwargs["tier_repin_tokens"]
+        )
+        offload_group.add_argument("--tier-pilot", **hier_kwargs["tier_pilot"])
+        offload_group.add_argument(
+            "--tier-pilot-real", **hier_kwargs["tier_pilot_real"]
+        )
+        offload_group.add_argument(
+            "--tier-io-workers", **hier_kwargs["tier_io_workers"]
+        )
+        offload_group.add_argument("--tier-direct", **hier_kwargs["tier_direct"])
+        offload_group.add_argument(
+            "--tier-usage-path", **hier_kwargs["tier_usage_path"]
+        )
+        offload_group.add_argument(
+            "--tier-dense-prefetch", **hier_kwargs["tier_dense_prefetch"]
+        )
+        offload_group.add_argument(
+            "--tier-num-slots", **hier_kwargs["tier_num_slots"]
+        )
+        offload_group.add_argument(
+            "--tier-allow-cuda-graphs", **hier_kwargs["tier_allow_cuda_graphs"]
         )
 
         # Multimodal related configs
@@ -2390,7 +2436,37 @@ class EngineArgs:
                 offload_prefetch_step=self.offload_prefetch_step,
                 offload_params=self.offload_params,
             ),
+            hierarchical=HierarchicalOffloadConfig(
+                tier_device_expert_gb=self.tier_device_expert_gb,
+                tier_ram_gb=self.tier_ram_gb,
+                tier_disk_path=self.tier_disk_path,
+                tier_policy=self.tier_policy,  # type: ignore[arg-type]
+                tier_repin_tokens=self.tier_repin_tokens,
+                tier_pilot=self.tier_pilot,
+                tier_pilot_real=self.tier_pilot_real,
+                tier_io_workers=self.tier_io_workers,
+                tier_direct=self.tier_direct,
+                tier_usage_path=self.tier_usage_path,
+                tier_dense_prefetch=self.tier_dense_prefetch,
+                tier_num_slots=self.tier_num_slots,
+                tier_allow_cuda_graphs=self.tier_allow_cuda_graphs,
+            ),
         )
+
+        # Hierarchical staging + graphs is experimental; default to eager.
+        hier_on = (
+            self.offload_backend == "hierarchical"
+            or offload_config.hierarchical.is_active()
+        )
+        if hier_on and not self.tier_allow_cuda_graphs and not self.enforce_eager:
+            from vllm.logger import init_logger
+
+            init_logger(__name__).info_once(
+                "Enabling enforce_eager for hierarchical expert staging "
+                "(pass --tier-allow-cuda-graphs to keep graphs)"
+            )
+            self.enforce_eager = True
+            model_config.enforce_eager = True
 
         if self.gdn_prefill_backend is not None:
             self.additional_config["gdn_prefill_backend"] = self.gdn_prefill_backend

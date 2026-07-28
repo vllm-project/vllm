@@ -292,6 +292,19 @@ class MoERunner(MoERunnerInterface):
         # For smuggling this layer into the fused moe custom op
         register_layer_for_moe_forward_op(get_current_vllm_config(), self)
 
+        # Hierarchical expert staging: register RoutedExperts with tier manager.
+        try:
+            from vllm.model_executor.offloader.hierarchical.hooks import (
+                register_routed_experts,
+            )
+            from vllm.model_executor.models.utils import extract_layer_index
+
+            register_routed_experts(
+                extract_layer_index(layer_name), routed_experts
+            )
+        except Exception:
+            pass
+
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
@@ -575,6 +588,15 @@ class MoERunner(MoERunnerInterface):
                 router_logits=router_logits,
                 topk_indices_dtype=self._quant_method.topk_indices_dtype,
                 input_ids=input_ids,
+            )
+
+            # Hierarchical (Colibri-style) expert staging: ensure + remap.
+            from vllm.model_executor.offloader.hierarchical.hooks import (
+                maybe_ensure_and_remap,
+            )
+
+            topk_ids = maybe_ensure_and_remap(
+                self.layer_id, topk_ids, hidden_states
             )
 
             fused_out = self.routed_experts.forward_modular(

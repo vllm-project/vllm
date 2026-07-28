@@ -25,3 +25,30 @@ steps:
       export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       pytest -v -s basic_correctness/test_cpu_offload.py &&
       pytest -v -s basic_correctness/test_mem.py::test_end_to_end'
+
+- label: XPU Hierarchical Expert Offload
+  timeout_in_minutes: 60
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+  - vllm/model_executor/offloader/
+  - vllm/config/offload.py
+  - tests/model_executor/offloader/
+  - tests/basic_correctness/test_hierarchical_offload.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
+      pytest -v -s model_executor/offloader/test_hierarchical_offload.py &&
+      pytest -v -s basic_correctness/test_hierarchical_offload.py'
+

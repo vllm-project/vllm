@@ -991,6 +991,71 @@ def _process_weights_cpu(
     )
 
 
+# AWQ packs nibbles as [0, 2, 4, 6, 1, 3, 5, 7]; this inverse restores
+# sequential order before GPTQ-style repack (same as auto_awq / INC XPU).
+# Keep local — auto_awq imports this module, so do not import from there.
+_REVERSE_AWQ_PACK_ORDER = (0, 4, 1, 5, 2, 6, 3, 7)
+
+
+def _convert_awq_qweight_2d_to_gptq(qw: torch.Tensor) -> torch.Tensor:
+    """AWQ ``[in, out//8]`` → GPTQ ``[in//8, out]`` for a single matrix."""
+    pack_factor = 8
+    size_bits = 4
+    mask = (1 << size_bits) - 1
+    device = qw.device
+    reverse_order = torch.tensor(
+        _REVERSE_AWQ_PACK_ORDER, dtype=torch.long, device=device
+    )
+    shifts = torch.arange(0, 32, size_bits, dtype=torch.int32, device=device)
+
+    in_features, out_packed = qw.shape
+    out_features = out_packed * pack_factor
+    if in_features % pack_factor != 0:
+        raise ValueError(
+            "AWQ→GPTQ repack requires in_features divisible by "
+            f"{pack_factor}, got {in_features}"
+        )
+
+    unpacked = (qw.unsqueeze(-1) >> shifts) & mask  # (in, out_packed, 8)
+    unpacked = unpacked[:, :, reverse_order]
+    unpacked = unpacked.reshape(in_features, out_features)
+    unpacked = unpacked.reshape(in_features // pack_factor, pack_factor, out_features)
+    return (
+        (unpacked.to(torch.int32) << shifts[None, :, None])
+        .sum(dim=1, dtype=torch.int32)
+        .contiguous()
+    )
+
+
+def _convert_awq_moe_qweight_to_gptq(qw: torch.Tensor) -> torch.Tensor:
+    """Lossless AWQ→GPTQ int4 repack for MoE expert packs.
+
+    AWQ stores ``[E, in_features, out_features // 8]`` (pack along output).
+    GPTQ stores ``[E, in_features // 8, out_features]`` (pack along input).
+
+    Converts one expert at a time on CPU when the full expand would exceed
+    ~512 MiB, so Mixtral-scale packs do not OOM Arc-class GPUs during load.
+    """
+    if qw.dtype != torch.int32 or qw.ndim != 3:
+        raise ValueError(
+            "AWQ→GPTQ MoE repack expects int32 [E, in, out//8], "
+            f"got dtype={qw.dtype} shape={tuple(qw.shape)}"
+        )
+
+    e, in_features, out_packed = qw.shape
+    # Expanded nibble tensor is (E, in, out_packed, 8) int32.
+    expand_nbytes = e * in_features * out_packed * 8 * 4
+    src = qw
+    if expand_nbytes > 512 * 1024 * 1024 and qw.device.type != "cpu":
+        src = qw.detach().to("cpu")
+
+    experts = [_convert_awq_qweight_2d_to_gptq(src[i]) for i in range(e)]
+    out = torch.stack(experts, dim=0)
+    if out.device != qw.device:
+        out = out.to(device=qw.device, non_blocking=False)
+    return out
+
+
 def _process_weights_xpu(
     layer: torch.nn.Module,
     quant_config: QuantizationConfig,
@@ -1008,7 +1073,7 @@ def _process_weights_xpu(
     torch.Tensor | None,  # w13_bias
     torch.Tensor | None,  # w2_bias
 ]:
-    """Repack GPTQ-format INT4 MoE weights into the layout
+    """Repack INT4 MoE weights into the layout
     `vllm_xpu_kernels.fused_moe_interface.xpu_fused_moe(is_int4=True)` expects:
 
         w13: [E, 2*N, K] int4 (uint8 storage [E, 2*N, K // 2])
@@ -1022,8 +1087,15 @@ def _process_weights_xpu(
         w2:  [E, N // 8, K] int32
         w2_scales:  [E, N // group_size, K] params_dtype
 
-    Transpose dim 1 ↔ dim 2 then view int32 → uint8 to recover sequential
-    int4-packed bytes along the input dim. Each packed int32 holds 8 nibbles
+    Input AWQ layout (AutoAWQ MoE create_weights):
+        w13: [E, K, 2*N // 8] int32 (pack along output/N)
+        w2:  [E, N, K // 8] int32
+        Scales match the GPTQ scale shapes above.
+
+    AWQ packs are losslessly converted to GPTQ packing first (same approach
+    as INC XPU linear), then both paths transpose dim 1 ↔ dim 2 and view
+    int32 → uint8 to recover sequential int4-packed bytes along the input
+    dim. Each packed int32 holds 8 nibbles
     `(n7<<28)|(n6<<24)|...|(n1<<4)|n0` in ascending K order; on a
     little-endian host the int32→uint8 view exposes them as bytes
     `[n1<<4|n0, n3<<4|n2, n5<<4|n4, n7<<4|n6]`, i.e. two nibbles per byte
@@ -1031,13 +1103,19 @@ def _process_weights_xpu(
     expects this convention; on a big-endian host the byte order reverses
     and the kernel would silently miscompute, so we hard-fail.
     """
-    del layer, quant_config  # unused — kept for parity with the marlin helper
+    del layer  # unused — kept for parity with the marlin helper
 
     if sys.byteorder != "little":
         raise NotImplementedError(
             "_process_weights_xpu requires a little-endian host: the GPTQ "
             "int32 → uint8 nibble repack relies on LE byte ordering."
         )
+
+    from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
+
+    if isinstance(quant_config, AutoAWQConfig):
+        w13_qweight = _convert_awq_moe_qweight_to_gptq(w13_qweight)
+        w2_qweight = _convert_awq_moe_qweight_to_gptq(w2_qweight)
 
     w13_xpu = w13_qweight.transpose(1, 2).contiguous().view(torch.uint8)
     w2_xpu = w2_qweight.transpose(1, 2).contiguous().view(torch.uint8)
