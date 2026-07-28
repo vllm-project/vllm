@@ -4,6 +4,7 @@
 import pytest
 import torch
 
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
 from vllm._custom_ops import (
     cpu_fused_moe,
@@ -12,9 +13,17 @@ from vllm._custom_ops import (
     cpu_prepack_moe_weight_int8,
 )
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.cpu_fused_moe import (
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+    RoutingMethodType,
+    biased_moe_quant_config,
+)
+from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
     _CPU_MOE_ACT_FN,
-    CPUFusedMOE,
+    X86CPUUnquantizedExperts,
+    select_experts,
 )
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.torch_utils import set_random_seed
@@ -356,8 +365,8 @@ UNALIGNED_INTERMEDIATE_DIM = 176
 
 class _StubMoELayer(torch.nn.Module):
     """Minimal stand-in for the real MoE layer module, exposing just what
-    CPUFusedMOE reads/replaces (w13_weight, w2_weight, activation, and
-    optionally w13_bias/w2_bias)."""
+    the unquantized CPU experts read/replace (w13_weight, w2_weight, the
+    router configuration, and optionally w13_bias/w2_bias)."""
 
     def __init__(
         self,
@@ -375,6 +384,35 @@ class _StubMoELayer(torch.nn.Module):
             self.w13_bias = torch.nn.Parameter(w13_bias, requires_grad=False)
         if w2_bias is not None:
             self.w2_bias = torch.nn.Parameter(w2_bias, requires_grad=False)
+        self.use_grouped_topk = False
+        self.renormalize = False
+        self.scoring_func = "softmax"
+        self.custom_routing_function = None
+
+
+def _make_moe_config(
+    expert_num: int,
+    hidden_size: int,
+    intermediate_size: int,
+    topk_num: int,
+    dtype: torch.dtype,
+    act: MoEActivation,
+    has_bias: bool = False,
+) -> FusedMoEConfig:
+    return FusedMoEConfig(
+        num_experts=expert_num,
+        experts_per_token=topk_num,
+        hidden_dim=hidden_size,
+        intermediate_size=intermediate_size,
+        num_local_experts=expert_num,
+        num_logical_experts=expert_num,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation=act,
+        in_dtype=dtype,
+        device="cpu",
+        routing_method=RoutingMethodType.Default,
+        has_bias=has_bias,
+    )
 
 
 @pytest.mark.parametrize("expert_num", EXPERT_NUM)
@@ -423,9 +461,15 @@ def test_cpu_fused_moe_unaligned_intermediate_size(
         w2_bias = torch.randn((expert_num, hidden_size), dtype=dtype) / (
             0.5 * hidden_size**0.5
         )
-    score = torch.softmax(router_logits, dim=-1, dtype=torch.float32)
-    topk_weight, topk_ids = torch.topk(score, topk_num)
-    topk_ids = topk_ids.to(torch.int32)
+    # Route with the same helper apply() uses internally, so the reference
+    # only differs from the kernel in how the experts are evaluated.
+    topk_weight, topk_ids = select_experts(
+        hidden_states=input,
+        router_logits=router_logits,
+        top_k=topk_num,
+        use_grouped_topk=False,
+        renormalize=False,
+    )
 
     ref_output = ref_fused_moe(
         input, w13, w2, w13_bias, w2_bias, topk_weight, topk_ids, act
@@ -439,13 +483,42 @@ def test_cpu_fused_moe_unaligned_intermediate_size(
         w2_bias.clone() if w2_bias is not None else None,
     )
 
-    cpu_moe = CPUFusedMOE(layer)
-    assert cpu_moe.forward_method == cpu_moe.forward_grouped_gemm, (
-        "expected the padded intermediate size to hit the grouped-gemm fast path"
+    moe_config = _make_moe_config(
+        expert_num, hidden_size, intermediate_size, topk_num, dtype, act, use_bias
+    )
+    supported, reason = X86CPUUnquantizedExperts.is_supported_config(
+        X86CPUUnquantizedExperts,
+        moe_config,
+        None,
+        None,
+        mk.FusedMoEActivationFormat.Standard,
+    )
+    assert supported, (
+        f"expected the padded intermediate size to be supported, got {reason}"
     )
 
-    output = cpu_moe.forward_method(
-        layer, input, topk_weight, topk_ids, act, expert_num, False
+    # Mirror UnquantizedFusedMoEMethod._setup_kernel: the quant config is
+    # built from the layer first, then the experts shuffle the layer into the
+    # kernel's runtime format.
+    quant_config = (
+        biased_moe_quant_config(layer.w13_bias, layer.w2_bias)
+        if use_bias
+        else FusedMoEQuantConfig.make()
+    )
+    experts = X86CPUUnquantizedExperts(moe_config, quant_config)
+    assert experts.isa in ("amx", "vec")
+    experts.process_weights_after_loading(layer)
+
+    output = experts.apply(
+        hidden_states=input,
+        w1=layer.w13_weight,
+        w2=layer.w2_weight,
+        router_logits=router_logits,
+        activation=act,
+        global_num_experts=expert_num,
+        expert_map=None,
+        a1q_scale=None,
+        apply_router_weight_on_input=False,
     )
 
     atol, rtol = get_default_atol(output), get_default_rtol(output)
@@ -453,26 +526,27 @@ def test_cpu_fused_moe_unaligned_intermediate_size(
 
 
 def test_cpu_fused_moe_unaligned_intermediate_size_swigluoai(default_vllm_config):
-    """swigluoai's interleaved gate/up layout isn't padded automatically. On
-    AMX-capable CPUs this must raise rather than silently falling back to
-    the (correct but much slower) per-expert torch loop; elsewhere it should
-    fall back exactly as before."""
-    set_random_seed(0)
-    expert_num = 8
-    hidden_size = 128
-    intermediate_size = UNALIGNED_INTERMEDIATE_DIM
-    dtype = torch.bfloat16
-    up_dim = 2 * intermediate_size
+    """swigluoai's interleaved gate/up layout can't be zero-padded, so an
+    unaligned per-partition intermediate size has no usable grouped-gemm
+    kernel. On x86 this must raise rather than silently falling back to the
+    (correct but much slower) per-expert torch loop."""
+    if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
+        pytest.skip("x86 is the only architecture that refuses the torch fallback")
 
-    layer = _StubMoELayer(
-        torch.randn((expert_num, up_dim, hidden_size), dtype=dtype),
-        torch.randn((expert_num, hidden_size, intermediate_size), dtype=dtype),
-        MoEActivation.SWIGLUOAI,
+    moe_config = _make_moe_config(
+        expert_num=8,
+        hidden_size=128,
+        intermediate_size=UNALIGNED_INTERMEDIATE_DIM,
+        topk_num=2,
+        dtype=torch.bfloat16,
+        act=MoEActivation.SWIGLUOAI,
     )
 
-    if torch.cpu._is_amx_tile_supported():
-        with pytest.raises(RuntimeError):
-            CPUFusedMOE(layer)
-    else:
-        cpu_moe = CPUFusedMOE(layer)
-        assert cpu_moe.forward_method == cpu_moe.forward_torch
+    with pytest.raises(RuntimeError):
+        X86CPUUnquantizedExperts.is_supported_config(
+            X86CPUUnquantizedExperts,
+            moe_config,
+            None,
+            None,
+            mk.FusedMoEActivationFormat.Standard,
+        )

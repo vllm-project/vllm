@@ -143,6 +143,21 @@ def backend_to_kernel_cls(
 
         return [XPUExperts]
 
+    elif backend == UnquantizedMoeBackend.CPU:
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            ArmCPUUnquantizedExperts,
+            TorchCPUUnquantizedExperts,
+            X86CPUUnquantizedExperts,
+        )
+
+        # The device checks make the two grouped-gemm kernels mutually
+        # exclusive; on Arm the shape checks decide between NEON and torch.
+        return [
+            X86CPUUnquantizedExperts,
+            ArmCPUUnquantizedExperts,
+            TorchCPUUnquantizedExperts,
+        ]
+
     else:
         raise ValueError(f"Unknown unquantized MoE backend: {backend.value}")
 
@@ -198,10 +213,6 @@ def select_unquantized_moe_backend(
     Select the primary Unquantized MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-
-    if current_platform.is_cpu():
-        # TODO: migrate to MK structure.
-        return UnquantizedMoeBackend.CPU, None
 
     if current_platform.is_tpu():
         return UnquantizedMoeBackend.TPU, None
@@ -344,6 +355,14 @@ def convert_to_unquantized_kernel_format(
             w2_weight,
             is_gated_act_gemm=is_act_and_mul,
         )
+
+    # NOTE: CPU is absent here. Its grouped-gemm kernels pad the MoE
+    # intermediate dim, which the expert bias has to match, and the torch
+    # fallback binds per-expert closures onto the layer -- neither is
+    # reachable from this hook, which deliberately takes only tensors so the
+    # oracle stays decoupled from a `Module` (see MoEKernelOracle.
+    # convert_to_kernel_format). The CPU experts do it all in their own
+    # process_weights_after_loading instead.
 
     if (
         unquantized_backend == UnquantizedMoeBackend.TRITON
