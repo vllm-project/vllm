@@ -43,25 +43,15 @@ def compute_dead_ep_ranks(
     return dead_ep
 
 
-def compute_dead_dp_ranks_from_mask(
-    mask: list[int],
-    tp_size: int,
-    exclude_dp_rank: int,
-) -> list[int]:
-    """Derive dead DP ranks from an all2all active mask."""
-    dead_ep = [i for i, v in enumerate(mask) if v != 0]
-    return sorted(set(r // tp_size for r in dead_ep) - {exclude_dp_rank})
-
-
-def mark_dead_columns_inplace(
+def mark_dead_expert_slots_inplace(
     physical_to_logical_map: torch.Tensor,
     dead_ep_ranks: set[int],
     num_local_experts: int,
 ) -> None:
-    """Mark dead EP ranks' columns as -1 in place.
+    """Mark dead EP ranks' physical expert slots as -1 in place.
 
     physical_to_logical_map is [num_moe_layers, num_physical]; each EP
-    rank owns num_local_experts consecutive columns starting at
+    rank owns num_local_experts consecutive physical slots starting at
     rank * num_local_experts. Shape stays constant (no topology change).
     """
     num_physical = physical_to_logical_map.shape[1]
@@ -102,40 +92,45 @@ def redistribute_expert_placement(
     reassignments: set[tuple[int, int]] = set()
 
     for layer_idx in range(num_layers):
-        layer = physical_to_logical_map[layer_idx]
+        layer_p2l = physical_to_logical_map[layer_idx]
 
+        # Replica count per logical expert across the surviving slots.
         replica_count: dict[int, int] = {}
         for phys_idx in range(num_physical):
-            lid = int(layer[phys_idx].item())
-            if lid >= 0:
-                replica_count[lid] = replica_count.get(lid, 0) + 1
+            logical_id = int(layer_p2l[phys_idx].item())
+            if logical_id >= 0:
+                replica_count[logical_id] = replica_count.get(logical_id, 0) + 1
 
-        missing = sorted(all_logical - set(replica_count.keys()))
-        if not missing:
+        missing_logical = sorted(all_logical - set(replica_count.keys()))
+        if not missing_logical:
             continue
 
-        # Group donors by EP rank, most-redundant first within each
-        rank_donors: dict[int, list[tuple[int, int]]] = {}
+        # Reusable slots grouped by owning EP rank: an over-replicated
+        # (>1) expert can spare a slot without losing coverage. Each entry
+        # is (replica_count, phys_idx).
+        spare_slots_by_rank: dict[int, list[tuple[int, int]]] = {}
         for phys_idx in range(num_physical):
-            lid = int(layer[phys_idx].item())
-            if lid >= 0 and replica_count.get(lid, 0) > 1:
+            logical_id = int(layer_p2l[phys_idx].item())
+            if logical_id >= 0 and replica_count.get(logical_id, 0) > 1:
                 ep_rank = phys_idx // num_local_experts
-                rank_donors.setdefault(ep_rank, []).append(
-                    (replica_count[lid], phys_idx)
+                spare_slots_by_rank.setdefault(ep_rank, []).append(
+                    (replica_count[logical_id], phys_idx)
                 )
-        for bucket in rank_donors.values():
+        for bucket in spare_slots_by_rank.values():
             bucket.sort(reverse=True)
 
         # Interleave across ranks (round-robin) so reassignments
         # spread evenly — each rank loads ~equal new weights.
         interleaved: list[tuple[int, int]] = []
-        for items in zip_longest(*[rank_donors[r] for r in sorted(rank_donors)]):
+        for items in zip_longest(
+            *[spare_slots_by_rank[r] for r in sorted(spare_slots_by_rank)]
+        ):
             for item in items:
                 if item is not None:
                     interleaved.append(item)
         slot_iter = iter(interleaved)
 
-        for logical_id in missing:
+        for logical_id in missing_logical:
             while True:
                 candidate = next(slot_iter, None)
                 if candidate is None:
@@ -144,11 +139,13 @@ def redistribute_expert_placement(
                         f"missing expert {logical_id}. "
                         f"EPLB redundancy insufficient."
                     )
-                _, global_slot = candidate
-                old_lid = int(layer[global_slot].item())
-                if replica_count.get(old_lid, 0) > 1:
-                    layer[global_slot] = logical_id
-                    replica_count[old_lid] -= 1
+                _, spare_slot = candidate
+                prev_logical = int(layer_p2l[spare_slot].item())
+                # Re-check: an earlier reuse may have left prev_logical
+                # with a single replica, making this slot no longer spare.
+                if replica_count.get(prev_logical, 0) > 1:
+                    layer_p2l[spare_slot] = logical_id
+                    replica_count[prev_logical] -= 1
                     reassignments.add((layer_idx, logical_id))
                     break
 
@@ -183,7 +180,7 @@ def rebuild_logical_expert_maps(
 
 
 def _parse_layer_expert(name: str) -> tuple[int, int] | None:
-    """Extract (layer_idx, logical_expert_id) from a tensor name.
+    """Extract (layer_idx, logical_expert_id) from a checkpoint tensor name.
 
     Returns None for non-expert tensors. Expects HF convention:
     model.layers.{L}.mlp.experts.{E}.{shard}.weight
@@ -228,15 +225,27 @@ def reload_experts_from_disk(
 
     all_weights = loader.get_all_weights(vllm_config.model_config, model)
 
+    matched: set[tuple[int, int]] = set()
+
     def filtered_iter() -> Generator[tuple[str, torch.Tensor], None, None]:
         for name, tensor in all_weights:
             parsed = _parse_layer_expert(name)
             if parsed is not None and parsed in reload_set:
+                matched.add(parsed)
                 yield name, tensor
 
     logger.info("[FT] Reloading %d (layer, expert) pair(s) from disk.", len(reload_set))
 
     loaded = model.load_weights(filtered_iter())
+
+    unmatched = reload_set - matched
+    if unmatched:
+        raise RuntimeError(
+            f"[FT] {len(unmatched)} (layer, expert) pair(s) had no matching "
+            f"checkpoint weight, e.g. {sorted(unmatched)[:5]}. The model's "
+            f"expert weights likely use a layout _parse_layer_expert does not "
+            f"support (fused experts or non-'layers'/'experts' tokens)."
+        )
 
     logger.info(
         "[FT] Expert weight reload complete: loaded=%d tensors.",
