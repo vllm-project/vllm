@@ -322,6 +322,8 @@ class StableTopKFromGatheredCandidatesKernel(
             prefix_s: cute.struct.Align[cute.struct.MemRange[Uint64, 1], 8]
             warp_totals: cute.struct.MemRange[Int32, warps_per_block]
 
+        shared_storage = SharedStorage
+
         @cute.jit
         def warp_scan_inclusive_i32(val: Int32, lane: Int32) -> Int32:
             for i in cutlass.range_constexpr(cute.arch.WARP_SIZE.bit_length() - 1):
@@ -500,7 +502,7 @@ class StableTopKFromGatheredCandidatesKernel(
             keys = cute.make_rmem_tensor((keys_per_thread,), Uint64)
 
             smem = cutlass.utils.SmemAllocator()
-            storage = smem.allocate(SharedStorage, 8)
+            storage = smem.allocate(shared_storage, 8)
             committed_count_smem = storage.committed_count.data_ptr()
             prefix_smem = storage.prefix_s.data_ptr()
             for i in range(tid, topk, tb_size):

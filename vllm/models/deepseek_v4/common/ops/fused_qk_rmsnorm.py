@@ -13,8 +13,6 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
 
-
-
 class FusedQKVRMSNormKernel(VllmJitKernel["FusedQKVRMSNormKernel.CompileKey"]):
     @dataclass(frozen=True)
     class CompileKey:
@@ -114,7 +112,7 @@ class FusedQKVRMSNormKernel(VllmJitKernel["FusedQKVRMSNormKernel.CompileKey"]):
             q_out_stride=(input_stride, q_size),
             kv_in_stride=input_stride,
             kv_out_stride=(input_stride, kv_size),
-            eps=float(getattr(hf_config, "rms_norm_eps")),
+            eps=float(hf_config.rms_norm_eps),
         )
 
     def compile(self, compile_key: CompileKey) -> None:

@@ -448,16 +448,20 @@ class BatchedTritonKernel(VllmJitKernel["BatchedTritonKernel.CompileKey"]):
             group_n=group_n,
             group_k=group_k,
         )
-        block_m = runtime_block_m if runtime_block_m is not None else config.BLOCK_SIZE_M
-        block_n = runtime_block_n if runtime_block_n is not None else config.BLOCK_SIZE_N
-        block_k = runtime_block_k if runtime_block_k is not None else config.BLOCK_SIZE_K
+        block_m = (
+            runtime_block_m if runtime_block_m is not None else config.BLOCK_SIZE_M
+        )
+        block_n = (
+            runtime_block_n if runtime_block_n is not None else config.BLOCK_SIZE_N
+        )
+        block_k = (
+            runtime_block_k if runtime_block_k is not None else config.BLOCK_SIZE_K
+        )
         num_warps = (
             runtime_num_warps if runtime_num_warps is not None else config.num_warps
         )
         num_stages = (
-            runtime_num_stages
-            if runtime_num_stages is not None
-            else config.num_stages
+            runtime_num_stages if runtime_num_stages is not None else config.num_stages
         )
         return self.CompileKey(
             dtype=dtype,
@@ -542,9 +546,7 @@ class BatchedTritonKernel(VllmJitKernel["BatchedTritonKernel.CompileKey"]):
     def compile(self, compile_key: CompileKey) -> None:
         warmup = getattr(self.kernel, "warmup", None)
         assert warmup is not None
-        scale_cols = _triton_moe_warmup_scale_stride(
-            compile_key.k, compile_key.group_k
-        )
+        scale_cols = _triton_moe_warmup_scale_stride(compile_key.k, compile_key.group_k)
         a_ptr = TritonWarmupTensor(
             compile_key.dtype,
             shape=(compile_key.e, compile_key.max_num_tokens, compile_key.k),
@@ -720,6 +722,7 @@ class BatchedTritonKernel(VllmJitKernel["BatchedTritonKernel.CompileKey"]):
 
 
 _BATCHED_TRITON_KERNEL = BatchedTritonKernel()
+
 
 def invoke_moe_batched_triton_kernel(
     A: torch.Tensor,  # [E, max_tokens, K]

@@ -97,6 +97,7 @@ class MoeFusedMulSumKernel(VllmJitKernel["MoeFusedMulSumKernel.CompileKey"]):
         is_sm90_plus = current_platform.has_device_capability(90)
         is_sm80_before = not current_platform.has_device_capability(80)
 
+        # SM90/SM100+: prefer small tiles + many CTAs.
         if current_platform.has_device_capability(90):
             if is_fp32:
                 BLOCK_M = 1 if num_tokens <= 4 else 2
@@ -172,17 +173,10 @@ class MoeFusedMulSumKernel(VllmJitKernel["MoeFusedMulSumKernel.CompileKey"]):
             element_size=(2, 4),
             dtype=(torch.bfloat16, torch.float32),
             has_expert_map=(False, True),
-            _when=self._dtype_matches_element_size,
-        )
-
-    def _dtype_matches_element_size(
-        self,
-        *,
-        dtype: torch.dtype,
-        element_size: int,
-    ) -> bool:
-        return (dtype == torch.float32 and element_size == 4) or (
-            dtype != torch.float32 and element_size == 2
+            _when=lambda *, dtype, element_size: (
+                (dtype == torch.float32 and element_size == 4)
+                or (dtype != torch.float32 and element_size == 2)
+            ),
         )
 
     def compile(self, compile_key: CompileKey) -> None:

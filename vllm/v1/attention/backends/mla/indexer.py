@@ -42,8 +42,6 @@ from vllm.v1.worker.cp_utils import get_kv_cache_shard_count
 logger = init_logger(__name__)
 
 
-
-
 class PrepareUniformDecodeKernel(
     VllmJitKernel["PrepareUniformDecodeKernel.CompileKey"]
 ):
@@ -397,12 +395,8 @@ class BuildPrefillChunkMetadataKernel(
             BLOCK_SIZE=self.block_size,
             COMPRESS_RATIO=list(compress_ratios),
             input_variant=(
-                TritonPointerInputVariant.from_alignment(
-                    uncompressed_seq_lens=True
-                ),
-                TritonPointerInputVariant.from_alignment(
-                    uncompressed_seq_lens=False
-                ),
+                TritonPointerInputVariant.from_alignment(uncompressed_seq_lens=True),
+                TritonPointerInputVariant.from_alignment(uncompressed_seq_lens=False),
             ),
         )
 

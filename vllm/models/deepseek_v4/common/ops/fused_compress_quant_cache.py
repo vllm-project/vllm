@@ -1084,8 +1084,8 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
         kv_block_stride: int
 
     @staticmethod
-    def kernel(use_fp4_cache: bool) -> Any:
-        if use_fp4_cache:
+    def kernel(compile_key: CompileKey) -> Any:
+        if compile_key.use_fp4_cache:
             return _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn
         return _fused_kv_compress_norm_rope_insert_indexer_attn
 
@@ -1119,9 +1119,7 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
         )
         default_scale_dim = head_dim // quant_block if use_fp4_cache else 4
         scale_dim = (
-            runtime_scale_dim
-            if runtime_scale_dim is not None
-            else default_scale_dim
+            runtime_scale_dim if runtime_scale_dim is not None else default_scale_dim
         )
         raw_kv_cache_block_size = cache_block_size // compress_ratio
         kv_cache_block_size = (
@@ -1163,11 +1161,8 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
         if hf_config is None:
             return []
 
-        attention_config = getattr(vllm_config, "attention_config", None)
         cache_block_size = vllm_config.cache_config.block_size
-        use_fp4_cache = bool(
-            getattr(attention_config, "use_fp4_indexer_cache", False)
-        )
+        use_fp4_cache = vllm_config.attention_config.use_fp4_indexer_cache
         head_dim = int(getattr(hf_config, "index_head_dim", 0) or 0)
         rope_head_dim = int(getattr(hf_config, "qk_rope_head_dim", 0) or 0)
         if head_dim <= 0 or rope_head_dim <= 0 or cache_block_size <= 0:
@@ -1193,7 +1188,7 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
         )
 
     def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel(compile_key.use_fp4_cache), "warmup", None)
+        warmup = getattr(self.kernel(compile_key), "warmup", None)
         assert warmup is not None
         fp32_ptr = TritonWarmupTensor(torch.float32)
         int32_ptr = TritonWarmupTensor(torch.int32)
@@ -1269,7 +1264,7 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
             runtime_kv_block_stride=kv_cache.stride(0),
         )
         self._guard_warmup_call(compile_key)
-        self.kernel(use_fp4_cache)[(num_actual,)](
+        self.kernel(compile_key)[(num_actual,)](
             state_cache,
             state_cache.stride(0),
             state_cache.stride(1),

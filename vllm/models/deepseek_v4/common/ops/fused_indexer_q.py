@@ -156,7 +156,9 @@ class FusedIndexerQRopeQuantTritonKernel(
         # (e4m3fn) elsewhere -- matches the K cache.
         fp8_dtype = tl.float8e4b8 if USE_FNUZ else tl.float8e4nv
         fp8_base_ptr = (
-            index_q_fp8_ptr + tok_idx * index_q_fp8_stride0 + head_idx * index_q_fp8_stride1
+            index_q_fp8_ptr
+            + tok_idx * index_q_fp8_stride0
+            + head_idx * index_q_fp8_stride1
         )
         if INDEX_Q_NOPE_DIM > 0:
             tl.store(
@@ -177,8 +179,8 @@ class FusedIndexerQRopeQuantTritonKernel(
         #   index_weights_out = index_weights * q_scale * softmax_scale * head_scale
         # The per-token-per-head q_scale (fp32) IS folded into the output weights
         # here because FP8 Q is stored WITHOUT a companion scale tensor — the
-        # downstream fp8_fp4_mqa_logits/fp8_fp4_paged_mqa_logits kernels use `weights` to
-        # apply per-token Q scale inline. See the MXFP4 kernel below for the
+        # downstream fp8_fp4_mqa_logits/fp8_fp4_paged_mqa_logits kernels use
+        # `weights` to apply per-token Q scale inline. See the MXFP4 kernel below for
         # contrasting convention (scales live with the Q values, weights are NOT
         # q-scaled).
         index_weights = tl.load(
@@ -293,7 +295,7 @@ class FusedIndexerQRopeQuantTritonKernel(
             index_weights_out.stride(0),
             FP8_MAX=fp8_max,
             USE_FNUZ=use_fnuz,
-            num_warps=1,
+            num_warps=1,  # TODO: Tune this
         )
 
 
@@ -514,8 +516,9 @@ class FusedIndexerQRopeMxFp4TritonKernel(
             index_weights_head_scale,
             index_weights_out,
             index_weights_out.stride(0),
-            num_warps=1,
+            num_warps=1,  # TODO: Tune this
         )
+
 
 def fused_indexer_q_rope_quant(
     positions: torch.Tensor,

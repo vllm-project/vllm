@@ -74,6 +74,8 @@ def _use_pdl() -> bool:
 
 
 class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
+    # Dot-prod: keyed on (M, K, bs), because M and K are Constexpr.
+    # Split-K: keyed on (split_k, num_stages), fully shape-dynamic.
     @dataclass(frozen=True, slots=True)
     class CompileKey:
         backend: Literal["dotprod", "splitk"]

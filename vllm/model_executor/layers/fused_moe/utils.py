@@ -9,11 +9,6 @@ import torch
 import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
-    WarmupIntRange,
-)
-from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
@@ -38,6 +33,14 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     per_tensor_dequantize,
 )
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+    WarmupIntRange,
+)
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+    triton_scalar_specialization_rep,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
@@ -46,18 +49,18 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 
 
-
-
 class CountExpertNumTokensKernel(
     VllmJitKernel["CountExpertNumTokensKernel.CompileKey"]
 ):
     @dataclass(frozen=True)
     class CompileKey:
+        num_experts: int
+        topk_numel: int
         has_expert_map: bool
         block_size: int
 
     @staticmethod
-    @triton.jit(do_not_specialize=["num_experts", "topk_numel"])
+    @triton.jit
     def kernel(
         topk_ids_ptr,
         expert_num_tokens_ptr,
@@ -91,12 +94,15 @@ class CountExpertNumTokensKernel(
     def dispatch(  # type: ignore[override]
         self,
         *,
+        num_experts: int,
         topk_numel: int,
         has_expert_map: bool,
     ) -> CompileKey:
         block_size = min(topk_numel, 1024)
         block_size = triton.next_power_of_2(block_size)
         return self.CompileKey(
+            num_experts=triton_scalar_specialization_rep(num_experts),
+            topk_numel=triton_scalar_specialization_rep(topk_numel),
             has_expert_map=has_expert_map,
             block_size=block_size,
         )
@@ -107,6 +113,7 @@ class CountExpertNumTokensKernel(
         if top_k <= 0 or max_tokens <= 0:
             return []
         return self._trace_dispatch(self.dispatch)(
+            num_experts=(1, 2, 16),
             topk_numel=WarmupIntRange(1, min(max_tokens * top_k, 4096) + 1),
             has_expert_map=(False, True),
         )
@@ -118,8 +125,8 @@ class CountExpertNumTokensKernel(
         warmup(
             int32_ptr,
             int32_ptr,
-            1,  # do not specialize num_experts
-            1,  # do not specialize topk_numel
+            compile_key.num_experts,
+            compile_key.topk_numel,
             int32_ptr,
             HAS_EXPERT_MAP=compile_key.has_expert_map,
             BLOCK_SIZE=compile_key.block_size,
@@ -136,6 +143,7 @@ class CountExpertNumTokensKernel(
         block_size = min(topk_ids.numel(), 1024)
         block_size = triton.next_power_of_2(block_size)
         compile_key = self.dispatch(
+            num_experts=num_local_experts,
             topk_numel=topk_ids.numel(),
             has_expert_map=expert_map is not None,
         )
@@ -473,9 +481,7 @@ def fi_moe_largest_bucket(moe_config: "FusedMoEConfig") -> int:
     return max(moe_config.max_num_tokens * moe_config.dp_size, 8192)
 
 
-class PackTopkIdsWeightsKernel(
-    VllmJitKernel["PackTopkIdsWeightsKernel.CompileKey"]
-):
+class PackTopkIdsWeightsKernel(VllmJitKernel["PackTopkIdsWeightsKernel.CompileKey"]):
     @dataclass(frozen=True)
     class CompileKey:
         block_size: int
@@ -518,8 +524,7 @@ class PackTopkIdsWeightsKernel(
     ) -> CompileKey:
         return self.CompileKey(block_size=block_size, use_gdc=use_gdc)
 
-    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        del vllm_config
+    def get_warmup_keys(self, _vllm_config: Any) -> list[CompileKey]:
         use_gdc = current_platform.is_cuda() and current_platform.has_device_capability(
             90
         )
@@ -611,13 +616,10 @@ def _swiglu_limit_torch(
     output.copy_(F.silu(gate) * up)
 
 
-
-
-class SwigluLimitPadAwareKernel(
-    VllmJitKernel["SwigluLimitPadAwareKernel.CompileKey"]
-):
+class SwigluLimitPadAwareKernel(VllmJitKernel["SwigluLimitPadAwareKernel.CompileKey"]):
     @dataclass(frozen=True)
     class CompileKey:
+        num_tokens: int
         has_limit: bool
         has_expert_map: bool
         block_size: int
@@ -627,7 +629,6 @@ class SwigluLimitPadAwareKernel(
         do_not_specialize=[
             "hidden_size",
             "input_row_stride",
-            "num_tokens",
             "swiglu_limit",
         ]
     )
@@ -670,7 +671,9 @@ class SwigluLimitPadAwareKernel(
                     tl.float32
                 )
 
-                up = tl.load(input_ptr + up_offsets, mask=mask, other=0.0).to(tl.float32)
+                up = tl.load(input_ptr + up_offsets, mask=mask, other=0.0).to(
+                    tl.float32
+                )
 
                 if HAS_LIMIT:
                     gate = tl.minimum(gate, swiglu_limit)
@@ -688,19 +691,21 @@ class SwigluLimitPadAwareKernel(
     def dispatch(  # type: ignore[override]
         self,
         *,
+        num_tokens: int,
         has_limit: bool,
         has_expert_map: bool,
         block_size: int,
     ) -> CompileKey:
         return self.CompileKey(
+            num_tokens=triton_scalar_specialization_rep(num_tokens),
             has_limit=has_limit,
             has_expert_map=has_expert_map,
             block_size=block_size,
         )
 
-    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        del vllm_config
+    def get_warmup_keys(self, _vllm_config: Any) -> list[CompileKey]:
         return self._trace_dispatch(self.dispatch)(
+            num_tokens=(1, 2, 16),
             has_limit=(False, True),
             has_expert_map=(False, True),
             block_size=1024,
@@ -718,7 +723,7 @@ class SwigluLimitPadAwareKernel(
             int32_ptr,
             1,  # do not specialize hidden_size
             1,  # do not specialize input_row_stride
-            1,  # do not specialize num_tokens
+            compile_key.num_tokens,
             1.0,  # do not specialize swiglu_limit
             HAS_LIMIT=compile_key.has_limit,
             HAS_EXPERT_MAP=compile_key.has_expert_map,
@@ -739,6 +744,7 @@ class SwigluLimitPadAwareKernel(
         hidden_size = gate_up_size // 2
         block_size = 1024
         compile_key = self.dispatch(
+            num_tokens=num_tokens,
             has_limit=swiglu_limit > 0,
             has_expert_map=expert_map is not None,
             block_size=block_size,
@@ -768,8 +774,7 @@ def _swiglu_limit_pad_aware(
     swiglu_limit: float,
     expert_map: torch.Tensor | None = None,
 ) -> None:
-    num_tokens, gate_up_size = input.shape
-    hidden_size = gate_up_size // 2
+    num_tokens = input.shape[0]
     if num_tokens == 0:
         return
 

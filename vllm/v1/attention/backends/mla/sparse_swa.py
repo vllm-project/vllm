@@ -723,8 +723,6 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         return result
 
 
-
-
 # TODO(ben): unify this kernel to reduce duplication
 
 
@@ -1057,6 +1055,4 @@ class ComputeDSparkNoncausalSWAIndicesKernel(
 
 _COMPUTE_PREFILL_METADATA_KERNEL = ComputePrefillMetadataKernel()
 _COMPUTE_SWA_INDICES_AND_LENS_KERNEL = ComputeSWAIndicesAndLensKernel()
-_COMPUTE_DSPARK_NONCAUSAL_SWA_INDICES_KERNEL = (
-    ComputeDSparkNoncausalSWAIndicesKernel()
-)
+_COMPUTE_DSPARK_NONCAUSAL_SWA_INDICES_KERNEL = ComputeDSparkNoncausalSWAIndicesKernel()

@@ -48,10 +48,6 @@ def _rmsnorm_row(
     tl.store(out_row_ptr + block, y.to(out_row_ptr.dtype.element_ty), mask=mask)
 
 
-
-
-
-
 class FusedMTPInputRMSNormKernel(
     VllmJitKernel["FusedMTPInputRMSNormKernel.CompileKey"]
 ):
@@ -139,9 +135,9 @@ class FusedMTPInputRMSNormKernel(
             return []
 
         return self._trace_dispatch(self.dispatch)(
-            hidden=int(getattr(hf_config, "hidden_size")),
-            hc_mult=int(getattr(hf_config, "hc_mult")),
-            eps=float(getattr(hf_config, "rms_norm_eps")),
+            hidden=int(hf_config.hidden_size),
+            hc_mult=int(hf_config.hc_mult),
+            eps=float(hf_config.rms_norm_eps),
         )
 
     def compile(self, compile_key: CompileKey) -> None:
@@ -264,8 +260,8 @@ class MTPSharedHeadRMSNormKernel(
             return []
 
         return self._trace_dispatch(self.dispatch)(
-            hidden=int(getattr(hf_config, "hidden_size")),
-            eps=float(getattr(hf_config, "rms_norm_eps")),
+            hidden=int(hf_config.hidden_size),
+            eps=float(hf_config.rms_norm_eps),
         )
 
     def compile(self, compile_key: CompileKey) -> None:

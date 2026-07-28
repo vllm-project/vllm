@@ -110,7 +110,9 @@ class FusedInvRopeFP8QuantKernel(
         offsets = tl.arange(0, HEAD_DIM)
         x = tl.load(input_base + offsets).to(tl.float32)
 
-        rope_abs_start: tl.constexpr = (CHUNKS_PER_HEAD - 1) * QUANT_GROUP_SIZE + ROPE_START
+        rope_abs_start: tl.constexpr = (
+            CHUNKS_PER_HEAD - 1
+        ) * QUANT_GROUP_SIZE + ROPE_START
         pos = tl.load(positions_ptr + pid_token)
         cache_base = cos_sin_cache_ptr + pos * cache_stride_pos
         is_rope = offsets >= rope_abs_start
@@ -165,7 +167,10 @@ class FusedInvRopeFP8QuantKernel(
             tl.store(scale_addr, packed_val)
         else:
             scale_addrs = (
-                scale_ptr + g * scale_stride_group + pid_token + qb_indices * scale_stride_k
+                scale_ptr
+                + g * scale_stride_group
+                + pid_token
+                + qb_indices * scale_stride_k
             )
             tl.store(scale_addrs, scales)
 
@@ -343,6 +348,7 @@ class FusedInvRopeFP8QuantKernel(
 
 
 _FUSED_INV_ROPE_FP8_QUANT_KERNEL = FusedInvRopeFP8QuantKernel()
+
 
 def fused_inv_rope_fp8_quant(
     o: torch.Tensor,

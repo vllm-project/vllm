@@ -379,8 +379,7 @@ class IndexerQMxFp4Kernel(VllmJitKernel["IndexerQMxFp4Kernel.CompileKey"]):
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
         hf_config = vllm_config.model_config.hf_config
-        attention_config = getattr(vllm_config, "attention_config", None)
-        use_fp4 = bool(getattr(attention_config, "use_fp4_indexer_cache", False))
+        use_fp4 = vllm_config.attention_config.use_fp4_indexer_cache
         if hf_config is None or not use_fp4:
             return []
 
@@ -676,8 +675,7 @@ class IndexerQFp8Kernel(VllmJitKernel["IndexerQFp8Kernel.CompileKey"]):
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
         hf_config = vllm_config.model_config.hf_config
-        attention_config = getattr(vllm_config, "attention_config", None)
-        use_fp4 = bool(getattr(attention_config, "use_fp4_indexer_cache", False))
+        use_fp4 = vllm_config.attention_config.use_fp4_indexer_cache
         if hf_config is None or use_fp4:
             return []
 

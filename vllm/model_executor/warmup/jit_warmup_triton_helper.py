@@ -12,6 +12,13 @@ from vllm.model_executor.warmup.jit_warmup import (
 )
 
 
+def triton_scalar_specialization_rep(value: int) -> int:
+    """Return a representative for Triton's integer specialization class."""
+    if value == 1:
+        return 1
+    return 16 if value % 16 == 0 else 2
+
+
 @dataclass(frozen=True)
 class TritonWarmupTensor:
     # Compile-only tensor descriptor for Triton pointer specialization.

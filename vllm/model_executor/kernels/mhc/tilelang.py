@@ -27,21 +27,18 @@ def _hc_prenorm_gemm_outputs(
     hc_mult: int,
     use_tilelang_fallback: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+        compute_num_split,
+    )
     from vllm.utils.deep_gemm import (
         is_deep_gemm_supported,
         tf32_hc_prenorm_gemm,
     )
 
-    from vllm.model_executor.kernels.mhc.tilelang_kernels import (
-        compute_num_split,
-    )
-
     use_deep_gemm = is_deep_gemm_supported() or not use_tilelang_fallback
     num_tokens = x.shape[0]
     n_splits = (
-        compute_num_split(64, x.shape[1], cdiv(num_tokens, 64))
-        if use_deep_gemm
-        else 1
+        compute_num_split(64, x.shape[1], cdiv(num_tokens, 64)) if use_deep_gemm else 1
     )
     out = torch.empty(
         n_splits,
@@ -116,6 +113,7 @@ def mhc_pre_tilelang(
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
     )
+
     assert residual.dtype == torch.bfloat16
     assert fn.dtype == torch.float32
     assert hc_scale.dtype == torch.float32
@@ -247,6 +245,7 @@ def mhc_pre_broadcast_tilelang(
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
     )
+
     assert norm_weight is not None, "broadcast mHC pre currently requires fused RMSNorm"
     assert residual.dtype == torch.bfloat16
     assert residual.dim() == 2

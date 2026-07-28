@@ -54,10 +54,6 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 
-
-
-
-
 class TrtLlmLoraUnpermuteActivationKernel(
     VllmJitKernel["TrtLlmLoraUnpermuteActivationKernel.CompileKey"]
 ):
@@ -85,7 +81,9 @@ class TrtLlmLoraUnpermuteActivationKernel(
         idx = tl.load(idx_ptr + row)
         out_ptrs = out_ptr + row * stride_or + col_offs
         if idx >= 0:
-            vals = tl.load(act_ptr + idx * stride_ar + col_offs, mask=col_mask, other=0.0)
+            vals = tl.load(
+                act_ptr + idx * stride_ar + col_offs, mask=col_mask, other=0.0
+            )
             tl.store(out_ptrs, vals, mask=col_mask)
         else:
             zeros = tl.zeros((BLOCK_I,), dtype=out_ptr.dtype.element_ty)
@@ -157,9 +155,7 @@ class TrtLlmLoraUnpermuteActivationKernel(
         )
 
 
-class TrtLlmLoraFinalizeKernel(
-    VllmJitKernel["TrtLlmLoraFinalizeKernel.CompileKey"]
-):
+class TrtLlmLoraFinalizeKernel(VllmJitKernel["TrtLlmLoraFinalizeKernel.CompileKey"]):
     @dataclass(frozen=True)
     class CompileKey:
         dtype: torch.dtype
@@ -195,17 +191,21 @@ class TrtLlmLoraFinalizeKernel(
             pidx = tl.load(idx_ptr + eid)
             if pidx >= 0:
                 w = tl.load(weight_ptr + eid).to(tl.float32)
-                base = tl.load(gemm2_ptr + pidx * stride_g0 + col, mask=mask, other=0.0).to(
-                    tl.float32
-                )
+                base = tl.load(
+                    gemm2_ptr + pidx * stride_g0 + col, mask=mask, other=0.0
+                ).to(tl.float32)
                 acc_base += w * base
             acc_delta += tl.load(
-                delta_ptr + token * stride_d0 + k * stride_d1 + col, mask=mask, other=0.0
+                delta_ptr + token * stride_d0 + k * stride_d1 + col,
+                mask=mask,
+                other=0.0,
             ).to(tl.float32)
 
         out = acc_base * scale + acc_delta
         tl.store(
-            out_ptr + token * stride_o0 + col, out.to(out_ptr.dtype.element_ty), mask=mask
+            out_ptr + token * stride_o0 + col,
+            out.to(out_ptr.dtype.element_ty),
+            mask=mask,
         )
 
     def dispatch(  # type: ignore[override]
@@ -296,6 +296,7 @@ class TrtLlmLoraFinalizeKernel(
             TOP_K=compile_key.top_k,
             BLOCK_K=compile_key.block_k,
         )
+
 
 class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
     """LoRA-aware trtllm MoE experts"""

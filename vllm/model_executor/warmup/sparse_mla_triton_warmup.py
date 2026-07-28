@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
     from vllm.v1.worker.gpu_worker import Worker
 
@@ -53,7 +52,6 @@ def _has_attention_backend(
     return False
 
 
-
 def sparse_mla_triton_warmup(worker: "Worker") -> None:
     runner = worker.model_runner
     if runner.is_pooling_model:
@@ -64,12 +62,8 @@ def sparse_mla_triton_warmup(worker: "Worker") -> None:
     if max_tokens <= 0 or max_num_prefills <= 0:
         return
 
-    has_dsv4_backend = _has_attention_backend(
-        runner, _DEEPSEEK_V4_SPARSE_MLA_BACKENDS
-    )
-    has_generic_backend = _has_attention_backend(
-        runner, _GENERIC_SPARSE_MLA_BACKENDS
-    )
+    has_dsv4_backend = _has_attention_backend(runner, _DEEPSEEK_V4_SPARSE_MLA_BACKENDS)
+    has_generic_backend = _has_attention_backend(runner, _GENERIC_SPARSE_MLA_BACKENDS)
     has_indexer_backend = _has_attention_backend(
         runner, _INDEXER_PREFILL_CHUNK_METADATA_BACKENDS
     )

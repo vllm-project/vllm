@@ -433,8 +433,6 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         )
 
 
-
-
 class GlobalizeRecvTopkIdxKernel(
     VllmJitKernel["GlobalizeRecvTopkIdxKernel.CompileKey"]
 ):

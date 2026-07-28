@@ -2305,13 +2305,6 @@ class SparseAttnCompressorCuteDSL:
         self.c128_store = c128_store
         self.c128_store_full = c128_store_full
 
-    def warmup(self, vllm_config: Any) -> None:
-        self.c4_store.warmup(vllm_config)
-        self.c4_store_full.warmup(vllm_config)
-        self.c128_compress.warmup(vllm_config)
-        self.c128_store.warmup(vllm_config)
-        self.c128_store_full.warmup(vllm_config)
-
     def __call__(
         self,
         state_cache: torch.Tensor,

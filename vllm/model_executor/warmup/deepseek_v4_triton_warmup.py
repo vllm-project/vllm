@@ -7,7 +7,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
-
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_cutedsl
 
@@ -17,12 +16,12 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def _is_deepseek_v4_config(worker: "Worker") -> bool:
+def _is_deepseek_v4_config(worker: Worker) -> bool:
     hf_config = worker.vllm_config.model_config.hf_config
     return getattr(hf_config, "model_type", None) == "deepseek_v4"
 
 
-def _warm_prepare_megamoe_inputs(worker: "Worker") -> None:
+def _warm_prepare_megamoe_inputs(worker: Worker) -> None:
     kernel_config = worker.vllm_config.kernel_config
     if getattr(kernel_config, "moe_backend", None) != "deep_gemm_mega_moe":
         return
@@ -34,7 +33,7 @@ def _warm_prepare_megamoe_inputs(worker: "Worker") -> None:
     _PREPARE_MEGAMOE_INPUTS_KERNEL.warmup(worker.vllm_config)
 
 
-def _warm_mtp_rmsnorm_kernels(worker: "Worker") -> None:
+def _warm_mtp_rmsnorm_kernels(worker: Worker) -> None:
     from vllm.models.deepseek_v4.common.ops.fused_mtp_input_rmsnorm import (
         _FUSED_MTP_INPUT_RMSNORM_KERNEL,
         _MTP_SHARED_HEAD_RMSNORM_KERNEL,
@@ -44,7 +43,7 @@ def _warm_mtp_rmsnorm_kernels(worker: "Worker") -> None:
     _MTP_SHARED_HEAD_RMSNORM_KERNEL.warmup(worker.vllm_config)
 
 
-def _warm_attention_rmsnorm_kernel(worker: "Worker") -> None:
+def _warm_attention_rmsnorm_kernel(worker: Worker) -> None:
     from vllm.models.deepseek_v4.common.ops.fused_qk_rmsnorm import (
         _FUSED_Q_KV_RMSNORM_KERNEL,
     )
@@ -52,7 +51,13 @@ def _warm_attention_rmsnorm_kernel(worker: "Worker") -> None:
     _FUSED_Q_KV_RMSNORM_KERNEL.warmup(worker.vllm_config)
 
 
-def _warm_compressor_state_kernel(worker: "Worker") -> None:
+def _warm_context_parallel_attention_kernel(worker: Worker) -> None:
+    from vllm.v1.attention.ops.common import _CORRECT_ATTN_CP_OUT_KERNEL
+
+    _CORRECT_ATTN_CP_OUT_KERNEL.warmup(worker.vllm_config)
+
+
+def _warm_compressor_state_kernel(worker: Worker) -> None:
     from vllm.models.deepseek_v4.common.ops.save_partial_states import (
         _SAVE_PARTIAL_STATES_KERNEL,
     )
@@ -60,23 +65,29 @@ def _warm_compressor_state_kernel(worker: "Worker") -> None:
     _SAVE_PARTIAL_STATES_KERNEL.warmup(worker.vllm_config)
 
 
-def _warm_compressor_store_kernels(worker: "Worker") -> None:
+def _warm_compressor_store_kernels(worker: Worker) -> None:
     from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
         _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL,
     )
 
     if has_cutedsl():
         from vllm.models.deepseek_v4.nvidia.ops.sparse_attn_compress_cutedsl import (
-            _SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL,
+            _SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL,
+            _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_C4_KERNEL,
+            _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_FULL_C4_KERNEL,
+            _SPARSE_ATTN_NORM_ROPE_STORE_FULL_KERNEL,
+            _SPARSE_ATTN_NORM_ROPE_STORE_KERNEL,
         )
 
-        _SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL.warmup(worker.vllm_config)
-    _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL.warmup(
-        worker.vllm_config
-    )
+        _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_C4_KERNEL.warmup(worker.vllm_config)
+        _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_FULL_C4_KERNEL.warmup(worker.vllm_config)
+        _SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL.warmup(worker.vllm_config)
+        _SPARSE_ATTN_NORM_ROPE_STORE_KERNEL.warmup(worker.vllm_config)
+        _SPARSE_ATTN_NORM_ROPE_STORE_FULL_KERNEL.warmup(worker.vllm_config)
+    _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL.warmup(worker.vllm_config)
 
 
-def _warm_router_auxiliary_kernels(worker: "Worker") -> None:
+def _warm_router_auxiliary_kernels(worker: Worker) -> None:
     from vllm.model_executor.layers.fused_moe.router.base_router import (
         _EPLB_MAP_AND_RECORD_KERNEL,
     )
@@ -100,7 +111,7 @@ def _warm_router_auxiliary_kernels(worker: "Worker") -> None:
     _BF16X3_SPLITK_REDUCE_KERNEL.warmup(worker.vllm_config)
 
 
-def _warm_generic_moe_kernels(worker: "Worker") -> None:
+def _warm_generic_moe_kernels(worker: Worker) -> None:
     kernel_config = worker.vllm_config.kernel_config
     if getattr(kernel_config, "moe_backend", None) == "deep_gemm_mega_moe":
         return
@@ -154,21 +165,23 @@ def _warm_generic_moe_kernels(worker: "Worker") -> None:
     _SWIGLU_LIMIT_PAD_AWARE_KERNEL.warmup(worker.vllm_config)
 
 
-def _warm_deep_gemm_moe_helper_kernels(worker: "Worker") -> None:
+def _warm_deep_gemm_moe_helper_kernels(worker: Worker) -> None:
     kernel_config = worker.vllm_config.kernel_config
     if getattr(kernel_config, "moe_backend", None) != "deep_gemm_mega_moe":
         return
 
     from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
         _DEEPGEMM_EP_GATHER_KERNEL,
-        _DEEPGEMM_EP_SCATTER_KERNEL,
+        _DEEPGEMM_EP_SCATTER_COPY_KERNEL,
+        _DEEPGEMM_EP_SCATTER_START_KERNEL,
     )
 
-    _DEEPGEMM_EP_SCATTER_KERNEL.warmup(worker.vllm_config)
+    _DEEPGEMM_EP_SCATTER_START_KERNEL.warmup(worker.vllm_config)
+    _DEEPGEMM_EP_SCATTER_COPY_KERNEL.warmup(worker.vllm_config)
     _DEEPGEMM_EP_GATHER_KERNEL.warmup(worker.vllm_config)
 
 
-def _warm_router_topk_kernel(worker: "Worker") -> None:
+def _warm_router_topk_kernel(worker: Worker) -> None:
     from vllm.model_executor.layers.fused_moe.router.dsv4_topk import (
         _DSV4_TOPK_KERNEL,
     )
@@ -176,7 +189,7 @@ def _warm_router_topk_kernel(worker: "Worker") -> None:
     _DSV4_TOPK_KERNEL.warmup(worker.vllm_config)
 
 
-def _warm_sparse_utility_kernels(worker: "Worker") -> None:
+def _warm_sparse_utility_kernels(worker: Worker) -> None:
     from vllm.models.deepseek_v4.common.ops.cache_utils import (
         _BUILD_FLASHINFER_MIXED_SPARSE_INDICES_KERNEL,
         _COMPUTE_GLOBAL_TOPK_INDICES_AND_LENS_KERNEL,
@@ -194,7 +207,7 @@ def _warm_sparse_utility_kernels(worker: "Worker") -> None:
     _BUILD_FLASHINFER_MIXED_SPARSE_INDICES_KERNEL.warmup(worker.vllm_config)
 
 
-def _warm_output_projection_kernel(worker: "Worker") -> None:
+def _warm_output_projection_kernel(worker: Worker) -> None:
     from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
         _FUSED_INV_ROPE_FP8_QUANT_KERNEL,
     )
@@ -202,7 +215,7 @@ def _warm_output_projection_kernel(worker: "Worker") -> None:
     _FUSED_INV_ROPE_FP8_QUANT_KERNEL.warmup(worker.vllm_config)
 
 
-def _warm_sparse_indexer_helper_kernels(worker: "Worker") -> None:
+def _warm_sparse_indexer_helper_kernels(worker: Worker) -> None:
     from vllm.v1.attention.ops.common import (
         _PACK_SEQ_TRITON_KERNEL,
         _UNPACK_SEQ_TRITON_KERNEL,
@@ -225,7 +238,7 @@ def _warm_sparse_indexer_helper_kernels(worker: "Worker") -> None:
     _STABLE_TOPK_FROM_GATHERED_CANDIDATES_KERNEL.warmup(worker.vllm_config)
 
 
-def _warm_indexer_q_kernel(worker: "Worker") -> None:
+def _warm_indexer_q_kernel(worker: Worker) -> None:
     if has_cutedsl():
         from vllm.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl import (
             _INDEXER_Q_FP8_KERNEL,
@@ -241,14 +254,13 @@ def _warm_indexer_q_kernel(worker: "Worker") -> None:
         _FUSED_INDEXER_Q_ROPE_QUANT_TRITON_KERNEL,
     )
 
-    attention_config = getattr(worker.vllm_config, "attention_config", None)
-    if bool(getattr(attention_config, "use_fp4_indexer_cache", False)):
+    if worker.vllm_config.attention_config.use_fp4_indexer_cache:
         _FUSED_INDEXER_Q_ROPE_MXFP4_TRITON_KERNEL.warmup(worker.vllm_config)
     else:
         _FUSED_INDEXER_Q_ROPE_QUANT_TRITON_KERNEL.warmup(worker.vllm_config)
 
 
-def deepseek_v4_triton_warmup(worker: "Worker") -> None:
+def deepseek_v4_triton_warmup(worker: Worker) -> None:
     if worker.model_runner.is_pooling_model:
         return
     if not current_platform.is_cuda():
@@ -258,6 +270,7 @@ def deepseek_v4_triton_warmup(worker: "Worker") -> None:
 
     try:
         _warm_attention_rmsnorm_kernel(worker)
+        _warm_context_parallel_attention_kernel(worker)
         _warm_compressor_state_kernel(worker)
         _warm_compressor_store_kernels(worker)
         _warm_sparse_utility_kernels(worker)

@@ -4,8 +4,8 @@
 
 import functools
 import json
-from dataclasses import dataclass
 import os
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -298,8 +298,6 @@ def fused_moe_kernel_gptq_awq(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
-
-
 # NOTE(zyongye): we can remove all the wna16 kernel
 # once we drop off sm75 support
 class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
@@ -512,7 +510,9 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
             # channel-wise
             elif per_channel_quant:
                 b_scale_ptrs = (
-                    b_scale_ptr + off_experts * stride_bse + offs_bn[None, :] * stride_bsn
+                    b_scale_ptr
+                    + off_experts * stride_bse
+                    + offs_bn[None, :] * stride_bsn
                 )
                 b_scale = tl.load(b_scale_ptrs)
                 # Load per-token scale for activations
@@ -562,9 +562,13 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
                     )
                     b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
                     if SWAP_AB:
-                        accumulator += tl.dot(b, a) * b_scale[:, None] * a_scale[None, :]
+                        accumulator += (
+                            tl.dot(b, a) * b_scale[:, None] * a_scale[None, :]
+                        )
                     else:
-                        accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
+                        accumulator += (
+                            tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
+                        )
                 else:
                     if use_fp8_w8a8:
                         # acc used to enable fp8_fast_accum
@@ -674,7 +678,11 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
             batch_tokens,
             block_shape=block_shape,
         )
-        a_rows = runtime_a_rows if runtime_a_rows is not None else batch_tokens * routed_multiplier
+        a_rows = (
+            runtime_a_rows
+            if runtime_a_rows is not None
+            else batch_tokens * routed_multiplier
+        )
         config_block_size_k = (
             min(config["BLOCK_SIZE_K"], min(group_n, group_k))
             if group_n > 0 and group_k > 0
@@ -785,42 +793,102 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
         max_tokens = min(max_tokens, 1024)
         return self._trace_dispatch(self.dispatch)(
             zip_inputs(
-                dict(routed_multiplier=1, launch_n=2 * intermediate_size,
-                     launch_k=hidden_size, top_k=top_k, dtype=model_dtype,
-                     use_fp8_w8a8=False, group_n=0, group_k=0,
-                     mul_routed_weight=False, naive_block_assignment=False),
-                dict(routed_multiplier=top_k, launch_n=hidden_size,
-                     launch_k=intermediate_size, top_k=1, dtype=model_dtype,
-                     use_fp8_w8a8=False, group_n=0, group_k=0,
-                     mul_routed_weight=True, naive_block_assignment=False),
-                dict(routed_multiplier=1, launch_n=2 * intermediate_size,
-                     launch_k=hidden_size, top_k=top_k, dtype=model_dtype,
-                     use_fp8_w8a8=False, group_n=0, group_k=0,
-                     mul_routed_weight=False, naive_block_assignment=True),
-                dict(routed_multiplier=top_k, launch_n=hidden_size,
-                     launch_k=intermediate_size, top_k=1, dtype=model_dtype,
-                     use_fp8_w8a8=False, group_n=0, group_k=0,
-                     mul_routed_weight=True, naive_block_assignment=True),
-                dict(routed_multiplier=1, launch_n=2 * intermediate_size,
-                     launch_k=hidden_size, top_k=top_k,
-                     dtype=torch.float8_e4m3fn, use_fp8_w8a8=True,
-                     group_n=128, group_k=128, mul_routed_weight=False,
-                     naive_block_assignment=False),
-                dict(routed_multiplier=top_k, launch_n=hidden_size,
-                     launch_k=intermediate_size, top_k=1,
-                     dtype=torch.float8_e4m3fn, use_fp8_w8a8=True,
-                     group_n=128, group_k=128, mul_routed_weight=True,
-                     naive_block_assignment=False),
-                dict(routed_multiplier=1, launch_n=2 * intermediate_size,
-                     launch_k=hidden_size, top_k=top_k,
-                     dtype=torch.float8_e4m3fn, use_fp8_w8a8=True,
-                     group_n=128, group_k=128, mul_routed_weight=False,
-                     naive_block_assignment=True),
-                dict(routed_multiplier=top_k, launch_n=hidden_size,
-                     launch_k=intermediate_size, top_k=1,
-                     dtype=torch.float8_e4m3fn, use_fp8_w8a8=True,
-                     group_n=128, group_k=128, mul_routed_weight=True,
-                     naive_block_assignment=True),
+                dict(
+                    routed_multiplier=1,
+                    launch_n=2 * intermediate_size,
+                    launch_k=hidden_size,
+                    top_k=top_k,
+                    dtype=model_dtype,
+                    use_fp8_w8a8=False,
+                    group_n=0,
+                    group_k=0,
+                    mul_routed_weight=False,
+                    naive_block_assignment=False,
+                ),
+                dict(
+                    routed_multiplier=top_k,
+                    launch_n=hidden_size,
+                    launch_k=intermediate_size,
+                    top_k=1,
+                    dtype=model_dtype,
+                    use_fp8_w8a8=False,
+                    group_n=0,
+                    group_k=0,
+                    mul_routed_weight=True,
+                    naive_block_assignment=False,
+                ),
+                dict(
+                    routed_multiplier=1,
+                    launch_n=2 * intermediate_size,
+                    launch_k=hidden_size,
+                    top_k=top_k,
+                    dtype=model_dtype,
+                    use_fp8_w8a8=False,
+                    group_n=0,
+                    group_k=0,
+                    mul_routed_weight=False,
+                    naive_block_assignment=True,
+                ),
+                dict(
+                    routed_multiplier=top_k,
+                    launch_n=hidden_size,
+                    launch_k=intermediate_size,
+                    top_k=1,
+                    dtype=model_dtype,
+                    use_fp8_w8a8=False,
+                    group_n=0,
+                    group_k=0,
+                    mul_routed_weight=True,
+                    naive_block_assignment=True,
+                ),
+                dict(
+                    routed_multiplier=1,
+                    launch_n=2 * intermediate_size,
+                    launch_k=hidden_size,
+                    top_k=top_k,
+                    dtype=torch.float8_e4m3fn,
+                    use_fp8_w8a8=True,
+                    group_n=128,
+                    group_k=128,
+                    mul_routed_weight=False,
+                    naive_block_assignment=False,
+                ),
+                dict(
+                    routed_multiplier=top_k,
+                    launch_n=hidden_size,
+                    launch_k=intermediate_size,
+                    top_k=1,
+                    dtype=torch.float8_e4m3fn,
+                    use_fp8_w8a8=True,
+                    group_n=128,
+                    group_k=128,
+                    mul_routed_weight=True,
+                    naive_block_assignment=False,
+                ),
+                dict(
+                    routed_multiplier=1,
+                    launch_n=2 * intermediate_size,
+                    launch_k=hidden_size,
+                    top_k=top_k,
+                    dtype=torch.float8_e4m3fn,
+                    use_fp8_w8a8=True,
+                    group_n=128,
+                    group_k=128,
+                    mul_routed_weight=False,
+                    naive_block_assignment=True,
+                ),
+                dict(
+                    routed_multiplier=top_k,
+                    launch_n=hidden_size,
+                    launch_k=intermediate_size,
+                    top_k=1,
+                    dtype=torch.float8_e4m3fn,
+                    use_fp8_w8a8=True,
+                    group_n=128,
+                    group_k=128,
+                    mul_routed_weight=True,
+                    naive_block_assignment=True,
+                ),
             ),
             batch_tokens=WarmupIntRange(1, max_tokens + 1),
             num_experts=num_experts,
@@ -1066,6 +1134,7 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
             num_stages=num_stages,
         )
 
+
 def invoke_fused_moe_wna16_cuda_kernel(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -1156,6 +1225,10 @@ def invoke_fused_moe_wna16_triton_kernel(
         # so num_valid_experts <= batch_size <= BLOCK_SIZE_M,
         # and we can skip some invalid blocks.
         EM = min(sorted_token_ids.size(0), A.size(0) * top_k * config["BLOCK_SIZE_M"])
+    grid = lambda META: (
+        triton.cdiv(EM, META["BLOCK_SIZE_M"])
+        * triton.cdiv(B.size(1), META["BLOCK_SIZE_N"]),
+    )
     config = config.copy()
     config.update(
         get_moe_wna16_block_config(
@@ -1548,6 +1621,7 @@ class ComputeIdentityKernel(VllmJitKernel["ComputeIdentityKernel.CompileKey"]):
             BLOCK_SIZE=compile_key.block_size,
         )
 
+
 def zero_experts_compute_triton(
     expert_indices: torch.Tensor,
     expert_scales: torch.Tensor,
@@ -1937,11 +2011,6 @@ def try_get_optimal_moe_config(
             # Else use the default config
             config = get_default_config(M, E, N, w1_shape[2], top_k, dtype, block_shape)
     return config
-
-
-
-
-
 
 
 def fused_experts_op(

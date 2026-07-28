@@ -17,7 +17,6 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 )
 from vllm.triton_utils import tl, triton
 
-
 # Kernel with prefill workspace support and valid count tracking
 
 
@@ -283,6 +282,7 @@ class ConvertReqIndexToGlobalIndexKernel(
             DCP_INTERLEAVE=DCP_INTERLEAVE,
         )
         self._guard_warmup_call(compile_key)
+        # Exact 2D grid: tokens × column tiles
         tiles_per_row = token_indices.shape[1] // BLOCK_N
         self.kernel[(req_id.shape[0], tiles_per_row)](
             req_id,
@@ -368,7 +368,6 @@ def triton_convert_req_index_to_global_index(
 
     num_tokens = req_id.shape[0]
     max_num_blocks_per_req = block_table.shape[1]
-    tiles_per_row = NUM_TOPK_TOKENS // BLOCK_N
 
     # Ensure contiguous tensors on the same device
     req_id_c = req_id.contiguous()
@@ -383,17 +382,12 @@ def triton_convert_req_index_to_global_index(
             num_tokens, dtype=torch.int32, device=token_indices.device
         )
 
-    # Strides in elements
-
     # Prepare prefill pointers
     if HAS_PREFILL_WORKSPACE:
         assert prefill_workspace_request_ids is not None  # for mypy
         assert prefill_workspace_starts is not None  # for mypy
         assert prefill_workspace_request_ids.is_contiguous()
         assert prefill_workspace_starts.is_contiguous()
-
-    # Exact 2D grid: tokens × column tiles
-    grid = (num_tokens, tiles_per_row)
 
     _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL(
         req_id_c,
@@ -471,7 +465,6 @@ def triton_filter_and_convert_dcp_index(
 
     num_tokens = req_id.shape[0]
     max_num_blocks_per_req = block_table.shape[1]
-    tiles_per_row = NUM_TOPK_TOKENS // BLOCK_N
 
     req_id_c = req_id.contiguous()
     block_table_c = block_table.contiguous()
@@ -490,7 +483,6 @@ def triton_filter_and_convert_dcp_index(
         valid_counts = torch.zeros(
             num_tokens, dtype=torch.int32, device=token_indices.device
         )
-
 
     _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL(
         req_id_c,

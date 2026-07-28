@@ -248,7 +248,10 @@ class FusedMoeNvfp4EmulationKernel(
                 b_scale_ptr
                 + off_experts * stride_bse
                 + offs_bn[:, None] * stride_bsn
-                + ((offs_k_packed[None, :] + BLOCK_SIZE_K_PACKED * k) // group_size_packed)
+                + (
+                    (offs_k_packed[None, :] + BLOCK_SIZE_K_PACKED * k)
+                    // group_size_packed
+                )
                 * stride_bsk
             )
             if block_k_diviable:
@@ -276,7 +279,9 @@ class FusedMoeNvfp4EmulationKernel(
 
         # Router weight multiplication (in float32 for stability)
         if MUL_ROUTED_WEIGHT:
-            moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0)
+            moe_weight = tl.load(
+                topk_weights_ptr + offs_token, mask=token_mask, other=0
+            )
             accumulator = accumulator * moe_weight[:, None]
 
         accumulator = accumulator.to(compute_type)
@@ -321,7 +326,11 @@ class FusedMoeNvfp4EmulationKernel(
             group_n=0,
             group_k=0,
         )
-        a_rows = runtime_a_rows if runtime_a_rows is not None else batch_tokens * routed_multiplier
+        a_rows = (
+            runtime_a_rows
+            if runtime_a_rows is not None
+            else batch_tokens * routed_multiplier
+        )
         block_size_m = (
             runtime_block_size_m
             if runtime_block_size_m is not None
@@ -566,9 +575,7 @@ class FusedMoeNvfp4EmulationKernel(
             runtime_compute_type=compute_type,
         )
         self._guard_warmup_call(compile_key)
-        grid = (
-            triton.cdiv(EM, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N),
-        )
+        grid = (triton.cdiv(EM, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N),)
         return self.kernel[grid](
             A,
             B,
@@ -657,11 +664,13 @@ def invoke_fused_moe_nvfp4_emulation_kernel(
         num_tokens,
         A.stride(0),
         A.stride(1),
+        # B is [E, N, K//2]: swap N and K strides so kernel indexes [K, N].
         B.stride(0),
         B.stride(2),
         B.stride(1),
         C.stride(1),
         C.stride(2),
+        # B_scale is [E, N, K//group]: swap N and K strides likewise.
         B_scale.stride(0),
         B_scale.stride(2),
         B_scale.stride(1),

@@ -285,6 +285,9 @@ class DequantGatherKCacheKernel(VllmJitKernel["DequantGatherKCacheKernel.Compile
             offset: Int32,
             stream: CUstream,
         ):
+            # Split k_cache into k_data and k_scale. Each [block_size, head_bytes]
+            # block is actually a concat of
+            # [block_size, fp8_dim + bf16_dim * 2] and [block_size, 8].
             k_data = cute.make_tensor(
                 k_cache.iterator,
                 layout=cute.make_layout(
@@ -292,6 +295,8 @@ class DequantGatherKCacheKernel(VllmJitKernel["DequantGatherKCacheKernel.Compile
                     stride=(k_cache.stride[0], data_dim, 1),
                 ),
             )
+            # k_data_slice: [num_blocks, block_size, (16, data_dim/16)]
+            # s_kdata_slice: [(4, data_dim/16), num_stages]
             k_scale = cute.make_tensor(
                 k_cache.iterator + (block_size * data_dim),
                 layout=cute.make_layout(

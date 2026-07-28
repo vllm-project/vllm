@@ -369,6 +369,7 @@ class BF16x3RouterGemmKernel(VllmJitKernel["BF16x3RouterGemmKernel.CompileKey"])
         num_tokens: int,
         K: int,
     ) -> CompileKey:
+        # next power of 2 within 8 and 128
         raw_BN = triton.next_power_of_2(num_tokens)
         BN = 8 if raw_BN < 8 else 128 if raw_BN > 128 else raw_BN
         return self.CompileKey(bn=BN, k=K)

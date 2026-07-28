@@ -43,6 +43,7 @@ def compute_num_split(block_k: int, k: int | None, grid_size: int) -> int:
     split_k = device_props.multi_processor_count // grid_size
     if k is not None:
         num_block_k = cdiv(k, block_k)
+        # avoid split_k for small k
         split_k = min(split_k, num_block_k // 4)
     return max(split_k, 1)
 
@@ -1057,9 +1058,7 @@ class HcPrenormGemmTileLangKernel(
     def compile(self, compile_key: CompileKey) -> None:
         num_tokens = 1
         hc_hidden_size = compile_key.hidden_size * compile_key.hc_mult
-        x = make_tilelang_warmup_tensor(
-            torch.bfloat16, num_tokens, hc_hidden_size
-        )
+        x = make_tilelang_warmup_tensor(torch.bfloat16, num_tokens, hc_hidden_size)
         fn = make_tilelang_warmup_tensor(
             torch.float32, compile_key.n_out, hc_hidden_size
         )
@@ -1073,9 +1072,7 @@ class HcPrenormGemmTileLangKernel(
             torch.float32, compile_key.n_splits, num_tokens
         )
         kernel_arg = (
-            compile_key.block_m
-            if compile_key.use_block_m
-            else compile_key.n_splits
+            compile_key.block_m if compile_key.use_block_m else compile_key.n_splits
         )
         compile_tilelang(
             self.kernel(compile_key),
@@ -1130,9 +1127,7 @@ class HcPrenormGemmTileLangKernel(
             },
         )
         kernel_arg = (
-            compile_key.block_m
-            if compile_key.use_block_m
-            else compile_key.n_splits
+            compile_key.block_m if compile_key.use_block_m else compile_key.n_splits
         )
         return self.kernel(compile_key)(
             x,
@@ -1212,10 +1207,7 @@ class MhcPreBigFuseTileLangKernel(
             middle_args = (*output_args, norm_weight)
         else:
             middle_args = output_args
-        norm_eps_args = (
-            (compile_key.norm_eps,)
-            if compile_key.use_norm_weight else ()
-        )
+        norm_eps_args = (compile_key.norm_eps,) if compile_key.use_norm_weight else ()
         return (
             *common_args,
             *middle_args,
@@ -1578,6 +1570,7 @@ class MhcFusedTileLangKernel(VllmJitKernel["MhcFusedTileLangKernel.CompileKey"])
         hidden_size: int,
         hc_mult: int,
     ) -> CompileKey:
+        # TODO(gnovack): investigate autotuning these heuristics
         tile_n = 2 if num_tokens < 8 else 3
         n_splits = 8 if (num_tokens < 8 and hidden_size <= 4096) else 4
         return self.CompileKey(
@@ -1701,9 +1694,7 @@ class MhcFusedTileLangKernel(VllmJitKernel["MhcFusedTileLangKernel.CompileKey"])
         return yp_out, rp_out, residual_out
 
 
-class HcHeadFusedTileLangKernel(
-    VllmJitKernel["HcHeadFusedTileLangKernel.CompileKey"]
-):
+class HcHeadFusedTileLangKernel(VllmJitKernel["HcHeadFusedTileLangKernel.CompileKey"]):
     @dataclass(frozen=True)
     class CompileKey:
         hidden_size: int
@@ -1756,9 +1747,7 @@ class HcHeadFusedTileLangKernel(
         residual = make_tilelang_warmup_tensor(
             torch.bfloat16, num_tokens, hc_mult, hidden_size
         )
-        fn = make_tilelang_warmup_tensor(
-            torch.float32, hc_mult, hc_mult * hidden_size
-        )
+        fn = make_tilelang_warmup_tensor(torch.float32, hc_mult, hc_mult * hidden_size)
         hc_scale = make_tilelang_warmup_tensor(torch.float32, 1)
         hc_base = make_tilelang_warmup_tensor(torch.float32, hc_mult)
         out = make_tilelang_warmup_tensor(torch.bfloat16, num_tokens, hidden_size)
