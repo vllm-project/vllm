@@ -48,25 +48,93 @@ def override_config(config: AutoGPTQConfig, prefix: str):
     config.quant_type = config.TYPE_MAP[(config.weight_bits, config.is_sym)]
 
 
+def _match_dynamic_override(
+    config: AutoGPTQConfig,
+    layer_name: str,
+    key: str | None,
+    default_value: int | bool | None,
+) -> tuple[bool, dict | int | bool | None]:
+    for pattern, pattern_dict in config.dynamic.items():
+        # Negative match: matched modules are excluded from quantized init
+        if pattern.startswith("-:"):
+            if re.match(pattern.removeprefix("-:"), layer_name):
+                return True, False
+        # Positive match: matched modules have quant properties overrides
+        # base quant config
+        elif re.match(pattern.removeprefix("+:"), layer_name):
+            if key is None:
+                return True, pattern_dict
+            return True, pattern_dict.get(key, default_value)
+    return False, default_value
+
+
+def _format_shard_values(
+    shard_proj_names: list[str],
+    shard_values: list[dict | int | bool | None],
+) -> dict[str, dict | int | bool | None]:
+    return dict(zip(shard_proj_names, shard_values, strict=True))
+
+
 def get_dynamic_override(
     config: AutoGPTQConfig,
     layer_name: str,
     key: str | None = None,
     default_value: int | bool | None = None,
 ) -> dict | int | bool | None:
-    for pattern, pattern_dict in config.dynamic.items():
-        # Negative match: matched modules are excluded from quantized init
-        if pattern.startswith("-:"):
-            if re.match(pattern.removeprefix("-:"), layer_name):
+    matched, value = _match_dynamic_override(
+        config, layer_name, key, default_value
+    )
+    if matched:
+        return value
+
+    proj_name = layer_name.rsplit(".", 1)[-1]
+    shard_proj_names = config.packed_modules_mapping.get(proj_name)
+    if not shard_proj_names:
+        return default_value
+
+    layer_prefix = layer_name.removesuffix(proj_name)
+    shard_matches = [
+        _match_dynamic_override(
+            config,
+            f"{layer_prefix}{shard_proj_name}",
+            key,
+            default_value,
+        )
+        for shard_proj_name in shard_proj_names
+    ]
+
+    if key is None:
+        negative_matches = [
+            matched and value is False for matched, value in shard_matches
+        ]
+        if any(negative_matches):
+            if all(negative_matches):
                 return False
-        # Positive match: matched modules have quant properties overrides
-        # base quant config
-        elif re.match(pattern.removeprefix("+:"), layer_name):
-            if key is None:
-                return pattern_dict
-            else:
-                return pattern_dict.get(key, default_value)
-    return default_value
+            shard_values = [
+                value if matched else default_value
+                for matched, value in shard_matches
+            ]
+            raise ValueError(
+                f"Dynamic quantization config for fused layer {layer_name} "
+                "does not match across shards: "
+                f"{_format_shard_values(shard_proj_names, shard_values)}"
+            )
+
+        for matched, value in shard_matches:
+            if matched:
+                return value
+        return default_value
+
+    shard_values = [
+        value if matched else default_value for matched, value in shard_matches
+    ]
+    if any(value != shard_values[0] for value in shard_values[1:]):
+        raise ValueError(
+            f"Dynamic quantization config for fused layer {layer_name} "
+            f"does not match across shards for {key}: "
+            f"{_format_shard_values(shard_proj_names, shard_values)}"
+        )
+    return shard_values[0]
 
 
 def flatten_list(lst: list[Any]) -> list[Any]:
