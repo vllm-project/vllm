@@ -6,22 +6,20 @@ from collections.abc import Callable
 import torch
 from einops import rearrange
 from torch import nn
+from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
-from vllm.distributed import divide
+from vllm.distributed import divide, get_tensor_model_parallel_rank
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    MergedColumnParallelLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
-from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
-    _KimiGDNMergedColumnParallelLinear,
-    a_log_weight_loader,
-)
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
@@ -38,21 +36,100 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     sharded_weight_loader,
 )
+from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.kimi_k3.nvidia.kda_metadata import (
     KimiK3KDAAttentionBackend,
     KimiK3KDAMetadata,
 )
 from vllm.platforms import current_platform
-from vllm.third_party.flash_linear_attention.ops.fused_norm_gate import (
-    FusedRMSNormGated,
-)
+from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backend import AttentionBackend
 
 logger = init_logger(__name__)
 
 _KDA_GATE_LOGBOUND_MIN = -5.0
+
+
+def a_log_weight_loader(
+    shard_axis: int,
+) -> Callable[[torch.Tensor, torch.Tensor], None]:
+    """Load KDA A_log stored as either old 4D or current 1D weights."""
+
+    def loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+        tp_rank = get_tensor_model_parallel_rank()
+        shard_size = param.data.shape[shard_axis]
+        start_idx = tp_rank * shard_size
+
+        if loaded_weight.dim() == 4:
+            assert loaded_weight.shape[:2] == (1, 1), (
+                f"Expected old A_log shape (1, 1, H, 1), got {loaded_weight.shape}"
+            )
+            assert loaded_weight.shape[-1] == 1, (
+                f"Expected old A_log last dim to be 1, got {loaded_weight.shape}"
+            )
+            loaded_weight = loaded_weight.view(loaded_weight.shape[2])
+
+        loaded_weight = loaded_weight.narrow(shard_axis, start_idx, shard_size)
+        return default_weight_loader(param, loaded_weight)
+
+    return loader
+
+
+class _KimiGDNMergedColumnParallelLinear(MergedColumnParallelLinear):
+    """Merged projection with one output replicated across TP ranks."""
+
+    def __init__(
+        self,
+        input_size: int,
+        output_sizes: list[int],
+        replicated_shard_id: int,
+        tp_size: int,
+        **kwargs,
+    ) -> None:
+        self.replicated_shard_id = replicated_shard_id
+        output_sizes = output_sizes.copy()
+        output_sizes[replicated_shard_id] *= tp_size
+        super().__init__(input_size, output_sizes, **kwargs)
+
+    def weight_loader(
+        self,
+        param: Parameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: tuple[int, ...] | int | None = None,
+    ) -> None:
+        tp_rank = self.tp_rank
+        param_tp_rank = getattr(param, "tp_rank", None)
+        if loaded_shard_id == self.replicated_shard_id:
+            self.tp_rank = 0
+            if param_tp_rank is not None:
+                param.tp_rank = 0
+        try:
+            super().weight_loader(param, loaded_weight, loaded_shard_id)
+        finally:
+            self.tp_rank = tp_rank
+            if param_tp_rank is not None:
+                param.tp_rank = param_tp_rank
+
+    def weight_loader_v2(
+        self,
+        param: BasevLLMParameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: tuple[int, ...] | int | None = None,
+    ) -> None:
+        tp_rank = self.tp_rank
+        param_tp_rank = getattr(param, "tp_rank", None)
+        if loaded_shard_id == self.replicated_shard_id:
+            self.tp_rank = 0
+            if param_tp_rank is not None:
+                param.tp_rank = 0
+        try:
+            super().weight_loader_v2(param, loaded_weight, loaded_shard_id)
+        finally:
+            self.tp_rank = tp_rank
+            if param_tp_rank is not None:
+                param.tp_rank = param_tp_rank
 
 
 def is_fused_kda_decode_supported(
