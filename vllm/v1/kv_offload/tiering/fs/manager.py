@@ -15,7 +15,6 @@ File naming:  <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
               (hash-based subdirectories to limit directory fan-out)
 """
 
-import functools
 import json
 import os
 from collections.abc import Iterable
@@ -50,11 +49,9 @@ from vllm.v1.kv_offload.tiering.base import (
     SecondaryTierManager,
 )
 from vllm.v1.kv_offload.tiering.fs.io import (
-    batch_load_block,
-    batch_store_block,
     probe_o_direct,
 )
-from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
+from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool, Task
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
@@ -203,32 +200,33 @@ class FileSystemTierManager(SecondaryTierManager):
             return LookupResult.RETRY
         return LookupResult.HIT if result else LookupResult.MISS
 
+    def _tasks_from_jobmetadata(self, job_metadata: JobMetadata) -> Iterable[Task]:
+        for key, bid in zip(job_metadata.keys, job_metadata.block_ids):
+            yield Task(
+                path=self.file_mapper.get_file_name(key),
+                view=self._primary_kv_view,
+                offset=int(bid) * self._block_size,
+                block_size=self._block_size,
+                use_o_direct=self._use_o_direct,
+            )
+
     @override
     def submit_store(self, job_metadata: JobMetadata) -> None:
         if self.events is not None:
             self._store_job_keys[job_metadata.job_id] = list(job_metadata.keys)
-        task = functools.partial(
-            batch_store_block,
-            [self.file_mapper.get_file_name(key) for key in job_metadata.keys],
-            self._primary_kv_view,
-            [int(bid) * self._block_size for bid in job_metadata.block_ids],
-            self._block_size,
-            self._use_o_direct,
+        self._pool.enqueue_store(
+            job_metadata.job_id,
+            len(job_metadata.keys),
+            self._tasks_from_jobmetadata(job_metadata),
         )
-        self._pool.enqueue_store(job_metadata.job_id, 1, [task])
 
     @override
     def submit_load(self, job_metadata: JobMetadata) -> None:
-        task = functools.partial(
-            batch_load_block,
-            [self.file_mapper.get_file_name(key) for key in job_metadata.keys],
-            self._primary_kv_view,
-            [int(bid) * self._block_size for bid in job_metadata.block_ids],
-            self._block_size,
-            self._use_o_direct,
+        self._pool.enqueue_load(
+            job_metadata.job_id,
+            len(job_metadata.keys),
+            self._tasks_from_jobmetadata(job_metadata),
         )
-
-        self._pool.enqueue_load(job_metadata.job_id, 1, [task])
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:

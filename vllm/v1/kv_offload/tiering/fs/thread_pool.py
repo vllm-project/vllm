@@ -8,14 +8,30 @@ Thread pool:
     Load jobs are enqueued to the load queue; store jobs to the store queue.
 """
 
+import functools
 import threading
 from collections import deque
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from dataclasses import dataclass
 
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.tiering.base import JobId
+from vllm.v1.kv_offload.tiering.fs.io import batch_load_block, batch_store_block
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class Task:
+    """
+    I/O Task inputs
+    """
+
+    path: str
+    view: memoryview
+    offset: int
+    block_size: int
+    use_o_direct: bool
 
 
 class JobState:
@@ -38,10 +54,10 @@ class JobState:
     def job_id(self) -> JobId:
         return self._job_id
 
-    def task_done(self, success: bool) -> tuple[bool, bool]:
+    def task_done(self, batch_size: int, success: bool) -> tuple[bool, bool]:
         """Returns if job completed and success flag"""
         with self._lock:
-            self._completed += 1
+            self._completed += batch_size
             if not success:
                 self._success = False
             return self._completed == self._n_tasks, self._success
@@ -62,6 +78,8 @@ class DualQueueThreadPool:
         n_write_threads: int,
         thread_name_prefix: str = "fs_secondary_tier",
     ) -> None:
+        self._n_read_threads = n_read_threads
+        self._n_write_threads = n_write_threads
         self._load_q: deque = deque()
         self._store_q: deque = deque()
         self._condition = threading.Condition(threading.Lock())
@@ -70,7 +88,7 @@ class DualQueueThreadPool:
         self._finished_q: deque[tuple[JobId, bool]] = deque()
         self._inflight_jobs = 0  # guarded by _condition
 
-        for i in range(n_read_threads):
+        for i in range(self._n_read_threads):
             t = threading.Thread(
                 target=self._worker,
                 args=(True,),
@@ -80,7 +98,7 @@ class DualQueueThreadPool:
             t.start()
             self._threads.append(t)
 
-        for i in range(n_write_threads):
+        for i in range(self._n_write_threads):
             t = threading.Thread(
                 target=self._worker,
                 args=(False,),
@@ -90,33 +108,101 @@ class DualQueueThreadPool:
             t.start()
             self._threads.append(t)
 
+    def _batch_tasks(
+        self, tasks: Iterable[Task], batch_size: int
+    ) -> Iterator[list[Task]]:
+        """Chunk tasks into lists of at most `batch_size` tasks."""
+        batch: list[Task] = []
+        for task in tasks:
+            batch.append(task)
+            assert batch[0].view is task.view
+            assert batch[0].block_size == task.block_size
+            assert batch[0].use_o_direct == task.use_o_direct
+            if len(batch) >= batch_size:
+                yield batch
+                batch = []
+        if batch:
+            yield batch
+
+    def _enqueue(
+        self,
+        queue: deque,
+        make_fn: Callable[[list[Task]], Callable[[], None]],
+        job_id: JobId,
+        n_tasks: int,
+        tasks: Iterable[Task],
+        batch_size: int,
+    ) -> None:
+        """Batch `tasks` and append (fn, state, batch_size) entries to `queue`."""
+        if n_tasks == 0:
+            self._finished_q.append((job_id, True))
+            return
+        state = JobState(job_id, n_tasks)
+        n_batches = 0
+        with self._condition:
+            self._inflight_jobs += 1
+            for batch in self._batch_tasks(tasks, batch_size):
+                queue.append((make_fn(batch), len(batch), state))
+                n_batches += 1
+            self._condition.notify(n_batches)
+
     def enqueue_load(
         self,
         job_id: JobId,
         n_tasks: int,
-        tasks: Iterable[Callable],
+        tasks: Iterable[Task],
     ) -> None:
         """Enqueue load tasks for a job (high-priority for load-priority threads)."""
-        state = JobState(job_id, n_tasks)
-        with self._condition:
-            self._inflight_jobs += 1
-            for fn in tasks:
-                self._load_q.append((fn, state))
-            self._condition.notify(n_tasks)
+
+        def make_fn(batch: list[Task]) -> Callable[[], None]:
+            t0 = batch[0]
+            view, block_size, use_o_direct = t0.view, t0.block_size, t0.use_o_direct
+            return functools.partial(
+                batch_load_block,
+                paths=[t.path for t in batch],
+                view=view,
+                offsets=[t.offset for t in batch],
+                block_size=block_size,
+                use_o_direct=use_o_direct,
+            )
+
+        self._enqueue(
+            self._load_q,
+            make_fn,
+            job_id,
+            n_tasks,
+            tasks,
+            batch_size=max(1, n_tasks // self._n_read_threads),
+        )
 
     def enqueue_store(
         self,
         job_id: JobId,
         n_tasks: int,
-        tasks: Iterable[Callable],
+        tasks: Iterable[Task],
     ) -> None:
         """Enqueue store tasks for a job (high-priority for store-priority threads)."""
-        state = JobState(job_id, n_tasks)
-        with self._condition:
-            self._inflight_jobs += 1
-            for fn in tasks:
-                self._store_q.append((fn, state))
-            self._condition.notify(n_tasks)
+
+        def make_fn(batch: list[Task]) -> Callable[[], None]:
+            t0 = batch[0]
+            view, block_size, use_o_direct = t0.view, t0.block_size, t0.use_o_direct
+            return functools.partial(
+                batch_store_block,
+                paths=[t.path for t in batch],
+                view=view,
+                offsets=[t.offset for t in batch],
+                block_size=block_size,
+                use_o_direct=use_o_direct,
+            )
+
+        self._enqueue(
+            self._store_q,
+            make_fn,
+            job_id,
+            n_tasks,
+            tasks,
+            batch_size=max(1, n_tasks // self._n_write_threads),
+        )
 
     def get_finished(self) -> list[tuple[JobId, bool]]:
         # No lock needed: deque is thread-safe for concurrent append/popleft,
@@ -161,17 +247,19 @@ class DualQueueThreadPool:
                     return
                 primary = self._load_q if load_priority else self._store_q
                 secondary = self._store_q if load_priority else self._load_q
-                task, state = primary.popleft() if primary else secondary.popleft()
+                fn, batch_size, state = (
+                    primary.popleft() if primary else secondary.popleft()
+                )
             try:
-                task()
-                job_finished, success = state.task_done(True)
+                fn()
+                job_finished, success = state.task_done(batch_size, True)
             except Exception as exc:
                 logger.error(
                     "Job %s block I/O failed: %s",
                     state.job_id,
                     exc,
                 )
-                job_finished, success = state.task_done(False)
+                job_finished, success = state.task_done(batch_size, False)
 
             if job_finished:
                 with self._condition:
