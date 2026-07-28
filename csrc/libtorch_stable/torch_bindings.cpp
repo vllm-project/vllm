@@ -805,7 +805,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                  Tensor slot_mapping,"
       "                  str kv_cache_dtype,"
       "                  Tensor k_scale, Tensor v_scale,"
-      "                  bool interleaved_v) -> ()");
+      "                  bool interleaved_v=False) -> ()");
 
   // Reshape the key and value tensors and cache them.
   ops.def(
