@@ -110,6 +110,22 @@ class XPUPlatform(Platform):
     ray_device_key: str = "GPU"
     dist_backend: str = "xccl"  # xccl only
     device_control_env_var: str = "ZE_AFFINITY_MASK"
+    supported_quantization: list[str] = [
+        "awq",
+        "gptq",
+        "auto_awq",
+        "auto_gptq",
+        "inc",
+        "fp8",
+        "mxfp4",
+        "mxfp8",
+        "fp8_per_tensor",
+        "fp8_per_block",
+        "online",
+        "gpt_oss_mxfp4",
+        "modelopt",
+        "compressed-tensors",
+    ]
 
     @classmethod
     def import_kernels(cls) -> None:
@@ -304,7 +320,6 @@ class XPUPlatform(Platform):
             "fuse_act_padding": "Activation + padding fusion",
             "fuse_rope_kvcache": "RoPE + KV cache fusion",
             "fuse_rope_kvcache_cat_mla": "RoPE + KV cache + MLA fusion",
-            "enable_qk_norm_rope_fusion": "QK Norm + RoPE fusion",
         }
         if compilation_config.mode != CompilationMode.NONE:
             for flag, feature_name in fusion_passes_to_disable.items():
