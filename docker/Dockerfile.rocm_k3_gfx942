@@ -1,0 +1,42 @@
+# Kimi-K3 on gfx942 (MI300/MI325).
+#
+# The published ROCm base images ship AITER v0.1.16.post5, which cannot run
+# Kimi-K3 at all: the vision tower imports aiter.ops.triton.conv.conv2d, and
+# that module first appears in v0.1.19. v0.1.19 also carries the tuned SiTUv2
+# MoE kernels and the tuned Kimi-K3 GEMM configs.
+#
+# Rebuilding the whole base from Dockerfile.rocm_base to move one dependency
+# costs hours and reproduces bit-identical torch, triton, flash-attention and
+# MORI, because those are pinned to the same commits. This layer swaps only
+# AITER on top of an image already built by Dockerfile.rocm.
+#
+# Build:
+#   docker build -f docker/Dockerfile.rocm_k3_gfx942 \
+#     --build-arg BASE_IMAGE=<image built from docker/Dockerfile.rocm> \
+#     -t <tag> .
+#
+# Serving Kimi-K3 on gfx942 additionally needs VLLM_ROCM_USE_AITER_MLA=0. The
+# AITER MLA backend wins selection at TP8 (12 heads per rank) and then asserts
+# inside a Gluon kernel that is gfx950-only.
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ARG AITER_REPO="https://github.com/maeehart/aiter.git"
+ARG AITER_BRANCH="maeehart/kimi-k3-gfx942-tuning"
+# Add gfx950 to serve both MI325 and MI355 from one image, at the cost of
+# roughly double the kernel prebuild time.
+ARG GPU_ARCHS="gfx942"
+
+# aiter cannot be imported here to verify the install: rocminfo needs /dev/kfd
+# and the build container has no GPU. Verification happens at runtime.
+RUN rm -rf /app/aiter \
+    && git clone --recursive --branch ${AITER_BRANCH} ${AITER_REPO} /app/aiter \
+    && cd /app/aiter \
+    && git submodule update --init --recursive \
+    && pip install -r requirements.txt \
+    && pip install pyyaml \
+    && PREBUILD_KERNELS=1 AITER_USE_SYSTEM_TRITON=1 GPU_ARCHS=${GPU_ARCHS} \
+       python3 setup.py bdist_wheel --dist-dir=dist \
+    && pip install --force-reinstall --no-deps dist/*.whl \
+    && rm -rf /app/aiter/build /app/aiter/dist
