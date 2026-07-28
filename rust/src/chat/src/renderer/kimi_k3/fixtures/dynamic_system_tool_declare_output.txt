@@ -1,0 +1,14 @@
+<|open|>message role="system" type="tool-declare"<|sep|># Tools
+Here are the available tools, described in JSONSchema.
+
+```json
+[{"function":{"description":"weather","name":"get_weather","parameters":{"properties":{"city":{"type":"string"},"days":{"type":"number"}},"required":["city"],"type":"object"}},"type":"function"}]
+```<|close|>message<|sep|><|end_of_msg|><|open|>message role="system" type="thinking-effort"<|sep|>`thinking_effort` guides on how much to think in your thinking channel (not including the response channel), supported values include `low`, `medium`, `high`, and `max`.
+Now the system is invoked with `thinking_effort=max`.<|close|>message<|sep|><|end_of_msg|><|open|>message role="user"<|sep|>hi<|close|>message<|sep|><|end_of_msg|><|open|>message role="system" type="tool-declare"<|sep|>## New Tools Available
+The system dynamically extends the toolset via lazy-loading.
+You have access to all existing and extended tools.
+Here are the specs for the extended tools.
+
+```json
+[{"function":{"description":"calculator","name":"calc","parameters":{"properties":{"x":{"type":"number"}},"required":["x"],"type":"object"}},"type":"function"}]
+```<|close|>message<|sep|><|end_of_msg|><|open|>message role="user"<|sep|>use calc<|close|>message<|sep|><|end_of_msg|><|open|>message role="assistant"<|sep|><|open|>think<|sep|>

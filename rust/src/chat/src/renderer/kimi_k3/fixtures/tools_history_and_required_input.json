@@ -1,0 +1,87 @@
+{
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "weather",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string"
+            },
+            "days": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "city"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "calc",
+        "description": "calculator",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "x"
+          ]
+        }
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": "Hangzhou weather and calc"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll check.",
+      "reasoning_content": "Need tools.",
+      "tool_calls": [
+        {
+          "id": "get_weather:0",
+          "type": "function",
+          "function": {
+            "name": "get_weather",
+            "arguments": "{\"city\":\"Hangzhou\",\"days\":1}"
+          }
+        },
+        {
+          "id": "calc:1",
+          "type": "function",
+          "function": {
+            "name": "calc",
+            "arguments": "{\"x\":2}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "calc:1",
+      "content": "2"
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "get_weather:0",
+      "content": "{\"city\":\"Hangzhou\",\"condition\":\"rain\"}"
+    }
+  ],
+  "add_generation_prompt": true,
+  "tool_choice": "required",
+  "template_kwargs": {
+    "thinking": true
+  }
+}
