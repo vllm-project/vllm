@@ -315,6 +315,19 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
     std::optional<torch::stable::Tensor> index_q_out,
     const std::string& kv_cache_dtype, bool skip_index_branch);
 
+#ifdef VLLM_ENABLE_FUSED_KDA_DECODE
+void fused_kda_decode(
+    torch::stable::Tensor const& x, torch::stable::Tensor const& weight,
+    std::optional<torch::stable::Tensor> bias,
+    torch::stable::Tensor& conv_state, torch::stable::Tensor const& raw_g,
+    torch::stable::Tensor const& raw_beta, torch::stable::Tensor const& a_log,
+    torch::stable::Tensor const& dt_bias,
+    torch::stable::Tensor const& state_indices, torch::stable::Tensor& state,
+    torch::stable::Tensor& out, std::optional<double> lower_bound,
+    std::optional<torch::stable::Tensor> output_gate,
+    std::optional<torch::stable::Tensor> norm_weight, double norm_eps);
+#endif
+
 // Sampler kernels (shared CUDA/ROCm)
 void apply_repetition_penalties_(
     torch::stable::Tensor& logits, const torch::stable::Tensor& prompt_mask,

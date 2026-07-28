@@ -2746,6 +2746,52 @@ def concat_and_cache_mla(
     )
 
 
+def fused_kda_decode(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    conv_state: torch.Tensor,
+    raw_g: torch.Tensor,
+    raw_beta: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    state_indices: torch.Tensor,
+    state: torch.Tensor,
+    out: torch.Tensor | None = None,
+    lower_bound: float | None = None,
+    output_gate: torch.Tensor | None = None,
+    norm_weight: torch.Tensor | None = None,
+    norm_eps: float = 1e-5,
+) -> torch.Tensor:
+    if out is None:
+        out = torch.empty(
+            1,
+            x.shape[0],
+            raw_g.shape[2],
+            raw_g.shape[3],
+            dtype=x.dtype,
+            device=x.device,
+        )
+    torch.ops._C.fused_kda_decode(
+        x,
+        weight,
+        bias,
+        conv_state,
+        raw_g,
+        raw_beta,
+        A_log,
+        dt_bias,
+        state_indices,
+        state,
+        out,
+        lower_bound,
+        output_gate,
+        norm_weight,
+        norm_eps,
+    )
+    return out
+
+
 def concat_and_cache_mla_rope_fused(
     positions: torch.Tensor,
     q_pe: torch.Tensor,

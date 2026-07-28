@@ -468,6 +468,16 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "int block_size, Tensor!? q_out, Tensor!? index_q_out, "
       "str kv_cache_dtype, bool skip_index_branch=False) -> ()");
 
+#ifdef VLLM_ENABLE_FUSED_KDA_DECODE
+  ops.def(
+      "fused_kda_decode("
+      "Tensor x, Tensor weight, Tensor? bias, Tensor! conv_state, "
+      "Tensor raw_g, Tensor raw_beta, Tensor A_log, Tensor dt_bias, "
+      "Tensor state_indices, Tensor! state, Tensor! out, "
+      "float? lower_bound=None, Tensor? output_gate=None, "
+      "Tensor? norm_weight=None, float norm_eps=1e-5) -> ()");
+#endif
+
   // Apply repetition penalties to logits in-place.
   ops.def(
       "apply_repetition_penalties_(Tensor! logits, Tensor prompt_mask, "
@@ -693,6 +703,9 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 #endif
   ops.impl("fused_minimax_m3_qknorm_rope_kv_insert",
            TORCH_BOX(&fused_minimax_m3_qknorm_rope_kv_insert));
+#ifdef VLLM_ENABLE_FUSED_KDA_DECODE
+  ops.impl("fused_kda_decode", TORCH_BOX(&fused_kda_decode));
+#endif
 
   // Sampler kernels (shared CUDA/ROCm)
   ops.impl("apply_repetition_penalties_",
