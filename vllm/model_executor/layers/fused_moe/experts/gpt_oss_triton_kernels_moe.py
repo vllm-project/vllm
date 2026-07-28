@@ -465,22 +465,103 @@ def _patch_legacy_routing_for_nonpow2_topk() -> None:
 # `use_legacy_triton_kernels` selects between them at import time based on
 # whether `SparseMatrix` is importable.
 use_legacy_triton_kernels = False
+# True only when triton 3.7+ matmul shim is active; False for triton 3.5/3.6
+# matmul_ogs (which has in-kernel scatter+reduce and different gather semantics).
+_use_triton_37_shim = False
 
 if has_triton_kernels():
     try:
         import triton_kernels.swiglu
-        from triton_kernels.matmul_ogs import (
-            FnSpecs,
-            FusedActivation,
-            GatherIndx,
-            RoutingData,
-            ScatterIndx,
-            matmul_ogs,
-        )
-        from triton_kernels.tensor import (
-            BIT,
-            Bitmatrix,
-        )
+        try:
+            # Three supported triton_kernels API versions:
+            #
+            # triton 3.5.x  matmul_ogs (triton_kernels.matmul_ogs)
+            #   GatherIndx / ScatterIndx / RoutingData are first-class objects.
+            #   scatter_indx has gather-for-output semantics:
+            #     output[j] = result[scatter_indx[j]]
+            #   scatter output shape = M rows (scatter+reduce in-kernel).
+            #
+            # triton 3.6.x  matmul_ogs (triton_kernels.matmul_ogs), same API as 3.5.x.
+            #   GatherIndx / ScatterIndx / RoutingData still exported from matmul_ogs.
+            #   BIT / Bitmatrix still in triton_kernels.tensor.
+            #
+            # triton 3.7+   matmul (triton_kernels.matmul)
+            #   matmul_ogs removed; GatherIndx / ScatterIndx / RoutingData removed.
+            #   scatter_indx has forward-scatter semantics:
+            #     output[scatter_indx[j]] = result[j]
+            #   scatter output shape = M*topk rows (pure permutation, no in-kernel
+            #   reduce); callers must aggregate topk contributions manually.
+            #   BIT moved to triton_kernels.tensor_details.dtype; Bitmatrix removed.
+            #   gather_indx values are row indices into the input tensor (not flat
+            #   slot indices), so callers must divide by topk before passing.
+            from triton_kernels.matmul import (
+                FnSpecs,
+                FusedActivation,
+                matmul as _triton_matmul,
+            )
+            _use_triton_37_shim = True
+
+            class GatherIndx:
+                def __init__(self, src_indx, dst_indx):
+                    self.src_indx = src_indx
+                    self.dst_indx = dst_indx
+
+            class ScatterIndx:
+                def __init__(self, src_indx, dst_indx):
+                    self.src_indx = src_indx
+                    self.dst_indx = dst_indx
+
+            class RoutingData:
+                def __init__(self, gate_scal, expt_hist, n_expts_tot, n_expts_act,
+                             expt_data=None, expected_tokens_per_expt=None):
+                    self.gate_scal = gate_scal
+                    self.expt_hist = expt_hist
+                    self.n_expts_tot = n_expts_tot
+                    self.n_expts_act = n_expts_act
+                    self.expt_data = expt_data
+                    self.expected_tokens_per_expt = expected_tokens_per_expt
+
+            def matmul_ogs(x, w, bias, routing_data=None, gather_indx=None,
+                           scatter_indx=None, precision_config=None, betas=None,
+                           gammas=None, out_alpha=None, y=None, fused_comm=None,
+                           fused_activation=None, epilogue=None, y_acc_in=None,
+                           inner_routing_data=None):
+                _gi = gather_indx.src_indx if gather_indx is not None else None
+                _si = scatter_indx.src_indx if scatter_indx is not None else None
+                return _triton_matmul(
+                    x, w, bias,
+                    a_ragged_metadata=(
+                        routing_data.expt_data if routing_data is not None else None
+                    ),
+                    gather_indx=_gi,
+                    scatter_indx=_si,
+                    precision_config=precision_config,
+                    betas=betas,
+                    gammas=gammas,
+                    out_alpha=out_alpha,
+                    c=y,
+                    fused_comm=fused_comm,
+                    fused_activation=fused_activation,
+                    epilogue=epilogue,
+                    c_acc_in=y_acc_in,
+                )
+
+        except ImportError:
+            # triton 3.5.x / 3.6.x
+            from triton_kernels.matmul_ogs import (
+                FnSpecs,
+                FusedActivation,
+                GatherIndx,
+                RoutingData,
+                ScatterIndx,
+                matmul_ogs,
+            )
+        try:
+            from triton_kernels.tensor import BIT, Bitmatrix
+        except ImportError:
+            # triton 3.7+
+            from triton_kernels.tensor_details.dtype import BIT
+            from triton_kernels.tensor import wrap_torch_tensor as Bitmatrix
 
         try:
             from triton_kernels.tensor import (
@@ -609,6 +690,17 @@ def triton_kernel_moe_forward(
             # expert_map already applied; pass None downstream.
             effective_expert_map = None
             effective_global_num_experts = local_num_experts
+        elif not isinstance(topk_result, tuple):
+            # v3.6+ topk() returns a SparseMatrix whose construction already
+            # computed the bitmatrix and metadata; reuse them directly instead
+            # of re-packing the bitmatrix and recomputing metadata in
+            # make_routing_data (expert-map remapping changes the ids, so that
+            # path cannot reuse the topk SparseMatrix).
+            routing_data, gather_idx, scatter_idx = routing_data_from_sparse_topk(
+                topk_result, gating_output.shape[-1]
+            )
+            effective_expert_map = expert_map
+            effective_global_num_experts = global_num_experts
         else:
             topk_ids = topk_ids_raw.to(torch.long)
             routing_data, gather_idx, scatter_idx = make_routing_data(
@@ -714,28 +806,69 @@ def triton_kernel_fused_experts(
     )
     gammas = routing_data.gate_scal if routing_data else None
 
+    if _use_triton_37_shim:
+        # triton 3.7+: matmul() gather_indx values must be row indices in a
+        # (M-row) input tensor. gather_indx.src_indx = col_sorted_indx has
+        # flat slot indices in [0, M*topk), so divide by topk to get the
+        # token row index in [0, M) for hidden_states.
+        gather_indx_w1 = GatherIndx(
+            gather_indx.src_indx // topk,
+            gather_indx.dst_indx,
+        )
+    else:
+        gather_indx_w1 = gather_indx
+
     matmul_ogs(
         hidden_states,
         w1,
         quant_config.w1_bias,
         routing_data,
-        gather_indx=gather_indx,
+        gather_indx=gather_indx_w1,
         precision_config=quant_config.w1_precision,
         gammas=gammas if apply_router_weight_on_input else None,
         fused_activation=act,
         y=intermediate_cache,
     )
 
-    matmul_ogs(
-        intermediate_cache.view(M * topk, N // 2),
-        w2,
-        quant_config.w2_bias,
-        routing_data,
-        scatter_indx=scatter_indx,
-        precision_config=quant_config.w2_precision,
-        gammas=None if apply_router_weight_on_input else gammas,
-        y=output_tensor,
-    )
+    if _use_triton_37_shim:
+        # triton 3.7+: scatter requires (batch_dim, M*topk, K) output buffer;
+        # the old matmul_ogs reduced topk internally, but the new matmul()
+        # only permutes (scatter), so we allocate a workspace and sum afterward.
+        scatter_output = torch.empty(
+            (batch_dim, M * topk, K),
+            device=hidden_states.device,
+            dtype=hidden_states.dtype,
+        )
+        # triton 3.7 scatter semantics: output[scatter_indx[j]] = result[j].
+        # To get token-major (flat) output, scatter_indx must be combine_indx
+        # (expert-major j → flat position j belongs to), not dispatch_indx.
+        # scatter_indx.dst_indx == combine_indx; swap src/dst to make a new
+        # ScatterIndx whose .src_indx (forwarded by matmul_ogs) = combine_indx.
+        scatter_indx_new = ScatterIndx(scatter_indx.dst_indx, scatter_indx.src_indx)
+        matmul_ogs(
+            intermediate_cache.view(M * topk, N // 2),
+            w2,
+            quant_config.w2_bias,
+            routing_data,
+            scatter_indx=scatter_indx_new,
+            precision_config=quant_config.w2_precision,
+            gammas=None if apply_router_weight_on_input else gammas,
+            y=scatter_output,
+        )
+        # scatter_output is (1, M*topk, K) in flat token-major order where
+        # flat = token * topk + rank.  Sum topk contributions per token.
+        output_tensor[0] = scatter_output.view(M, topk, K).sum(1)
+    else:
+        matmul_ogs(
+            intermediate_cache.view(M * topk, N // 2),
+            w2,
+            quant_config.w2_bias,
+            routing_data,
+            scatter_indx=scatter_indx,
+            precision_config=quant_config.w2_precision,
+            gammas=None if apply_router_weight_on_input else gammas,
+            y=output_tensor,
+        )
     output_tensor = output_tensor.view(M, K)
     return output_tensor
 
@@ -795,18 +928,30 @@ def make_routing_data(
         )
 
     sparse_logits = SparseMatrix(indx=topk_ids, vals=topk_weights, mask=bitmatrix)
-    dispatch_indx = sparse_logits.mask_metadata.row_sorted_indx
-    combine_indx = sparse_logits.mask_metadata.col_sorted_indx
+    return routing_data_from_sparse_topk(sparse_logits, num_local_experts)
+
+
+def routing_data_from_sparse_topk(
+    sparse_topk,  # SparseMatrix
+    n_expts_tot: int,
+) -> tuple["RoutingData", "GatherIndx", "ScatterIndx"]:
+    """Build routing structures from a SparseMatrix, reusing its precomputed
+    bitmatrix metadata.  Called both from make_routing_data (re-packed matrix
+    for the expert-map path) and directly from triton_kernel_moe_forward (the
+    SparseMatrix already returned by topk(), no re-pack needed)."""
+    dispatch_indx = sparse_topk.mask_metadata.row_sorted_indx
+    combine_indx = sparse_topk.mask_metadata.col_sorted_indx
     ragged_batch_metadata = make_ragged_tensor_metadata(
-        sparse_logits.mask_metadata.col_sum,
+        sparse_topk.mask_metadata.col_sum,
         dispatch_indx.shape[0],
     )
-    gate_scal = sparse_logits.vals.flatten()[combine_indx]
+    n_expts_act = sparse_topk.indx.shape[1]
+    gate_scal = sparse_topk.vals.flatten()[combine_indx]
     routing_data = RoutingData(
         gate_scal,
         ragged_batch_metadata.block_sizes,
-        num_local_experts,
-        num_topk,
+        n_expts_tot,
+        n_expts_act,
         ragged_batch_metadata,
     )
     gather_indx = GatherIndx(combine_indx, dispatch_indx)

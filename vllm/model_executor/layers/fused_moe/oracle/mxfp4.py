@@ -51,13 +51,34 @@ logger = init_logger(__name__)
 
 if has_triton_kernels():
     try:
-        from triton_kernels.matmul_ogs import PrecisionConfig
+        try:
+            from triton_kernels.matmul import PrecisionConfig
+        except ImportError:
+            from triton_kernels.matmul_ogs import PrecisionConfig
+        import inspect as _inspect
+        # triton 3.7 renamed weight_scale -> b_mx_scale in PrecisionConfig
+        _precision_config_weight_kwarg = (
+            "weight_scale"
+            if "weight_scale" in _inspect.signature(PrecisionConfig.__init__).parameters
+            else "b_mx_scale"
+        )
+        _triton37_precision_config = _precision_config_weight_kwarg == "b_mx_scale"
     except (ImportError, AttributeError) as e:
         logger.error(
             "Failed to import Triton kernels. Please make sure your triton "
             "version is compatible. Error: %s",
             e,
         )
+        _precision_config_weight_kwarg = "weight_scale"
+        _triton37_precision_config = False
+
+
+def _make_precision_config(weight_scale, **kwargs):
+    """Create PrecisionConfig with backward-compat weight_scale alias for triton 3.7."""
+    pc = PrecisionConfig(**{_precision_config_weight_kwarg: weight_scale}, **kwargs)
+    if _triton37_precision_config:
+        pc.weight_scale = pc.b_mx_scale
+    return pc
 
 
 def _pack_deepgemm_mxfp4_scales(
@@ -1077,7 +1098,10 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
 
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
         # W4A8: MXFP4 weights + static FP8 activations (triton kernel)
-        from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
+        try:
+            from triton_kernels.matmul import FlexCtx, PrecisionConfig
+        except ImportError:
+            from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
         from triton_kernels.numerics import InFlexData
 
         if w13_bias is not None:
@@ -1111,12 +1135,12 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         lhs_data2 = InFlexData(scale=w2_input_scale)
 
         # Create PrecisionConfig with both weight and activation info
-        w13_precision_config = PrecisionConfig(
-            weight_scale=w13_scale,
+        w13_precision_config = _make_precision_config(
+            w13_scale,
             flex_ctx=FlexCtx(rhs_data=w13_flex, lhs_data=lhs_data13),
         )
-        w2_precision_config = PrecisionConfig(
-            weight_scale=w2_scale,
+        w2_precision_config = _make_precision_config(
+            w2_scale,
             flex_ctx=FlexCtx(rhs_data=w2_flex, lhs_data=lhs_data2),
         )
 
@@ -1133,7 +1157,10 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         )
 
     elif mxfp4_backend in TRITON_BACKENDS:
-        from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
+        try:
+            from triton_kernels.matmul import FlexCtx, PrecisionConfig
+        except ImportError:
+            from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 
         if w13_bias is not None:
             w13_bias = w13_bias.to(torch.float32)
@@ -1149,11 +1176,11 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             w2_weight_scale,
         )
 
-        w13_precision_config = PrecisionConfig(
-            weight_scale=w13_scale, flex_ctx=FlexCtx(rhs_data=w13_flex)
+        w13_precision_config = _make_precision_config(
+            w13_scale, flex_ctx=FlexCtx(rhs_data=w13_flex)
         )
-        w2_precision_config = PrecisionConfig(
-            weight_scale=w2_scale, flex_ctx=FlexCtx(rhs_data=w2_flex)
+        w2_precision_config = _make_precision_config(
+            w2_scale, flex_ctx=FlexCtx(rhs_data=w2_flex)
         )
 
         # The original mxfp4 block scales have been swizzled into the
@@ -1498,7 +1525,10 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         )
 
     elif mxfp4_backend in TRITON_BACKENDS:
-        from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
+        try:
+            from triton_kernels.matmul import FlexCtx, PrecisionConfig
+        except ImportError:
+            from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 
         if mxfp4_backend == Mxfp4MoeBackend.TRITON:
 
@@ -1531,11 +1561,11 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w2_weight_scale,
         )
 
-        w13_precision_config = PrecisionConfig(
-            weight_scale=w13_scale, flex_ctx=FlexCtx(rhs_data=w13_flex)
+        w13_precision_config = _make_precision_config(
+            w13_scale, flex_ctx=FlexCtx(rhs_data=w13_flex)
         )
-        w2_precision_config = PrecisionConfig(
-            weight_scale=w2_scale, flex_ctx=FlexCtx(rhs_data=w2_flex)
+        w2_precision_config = _make_precision_config(
+            w2_scale, flex_ctx=FlexCtx(rhs_data=w2_flex)
         )
 
         # The original mxfp4 block scales have been swizzled into the

@@ -24,7 +24,10 @@ logger = init_logger(__name__)
 
 if has_triton_kernels():
     try:
-        from triton_kernels.matmul_ogs import PrecisionConfig
+        try:
+            from triton_kernels.matmul import PrecisionConfig
+        except ImportError:
+            from triton_kernels.matmul_ogs import PrecisionConfig
     except (ImportError, AttributeError) as e:
         logger.error(
             "Failed to import Triton kernels. Please make sure your triton "
