@@ -9,7 +9,7 @@ import pytest
 import zmq
 
 from vllm.config.kv_events import KVEventsConfig
-from vllm.distributed.kv_events import EventPublisherFactory
+from vllm.distributed.kv_events import EventPublisherFactory, ZmqEventPublisher
 
 from .test_events import SampleBatch
 
@@ -135,6 +135,17 @@ class MockSubscriber:
 
         self.replay_sockets[socket_idx].send_multipart(
             [b"", start_seq.to_bytes(8, "big")]
+        )
+
+    def request_snapshot(self, socket_idx: int = 0) -> None:
+        """Request a complete KV cache state snapshot."""
+        if not self.replay_sockets:
+            raise ValueError("Replay sockets not initialized")
+        if socket_idx >= len(self.replay_sockets):
+            raise ValueError(f"Invalid socket index {socket_idx}")
+
+        self.replay_sockets[socket_idx].send_multipart(
+            [b"", ZmqEventPublisher.SNAPSHOT_REQUEST]
         )
 
     def receive_replay(self, socket_idx: int = 0) -> list[tuple[int, SampleBatch]]:
