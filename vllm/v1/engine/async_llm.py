@@ -44,6 +44,7 @@ from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.executor import Executor
+from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
 from vllm.v1.metrics.loggers import (
     StatLoggerFactory,
     StatLoggerManager,
@@ -942,6 +943,12 @@ class AsyncLLM(EngineClient):
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(0, 0)
 
+    async def checkpoint_prepare(self) -> None:
+        await self.collective_rpc("checkpoint_prepare")
+
+    async def checkpoint_restore(self) -> None:
+        await self.collective_rpc("checkpoint_restore")
+
     async def is_sleeping(self) -> bool:
         return await self.engine_core.is_sleeping_async()
 
@@ -1041,6 +1048,15 @@ class AsyncLLM(EngineClient):
         finally:
             set_scaling_elastic_ep(False)
 
+    async def handle_fault(
+        self, fault_tolerance_request: FaultToleranceRequest
+    ) -> FaultToleranceResult:
+        """send fault tolerance instruction to the engine"""
+        return await self.engine_core.handle_fault(fault_tolerance_request)
+
+    async def get_status(self):
+        return await self.engine_core.get_status()
+
     @property
     def is_running(self) -> bool:
         # Is None before the loop is started.
@@ -1090,6 +1106,16 @@ class AsyncLLM(EngineClient):
             "update_weights", kwargs={"update_info": request.update_info}
         )
 
-    async def finish_weight_update(self) -> None:
-        """Finish the current weight update."""
+    async def finish_weight_update(self, weight_version: str | None = None) -> None:
+        """Finish the weight update and set its version if provided."""
         await self.collective_rpc("finish_weight_update")
+        if weight_version is not None:
+            await self.update_weight_version(weight_version)
+
+    async def update_weight_version(self, new_version: str) -> None:
+        """Set the weight version without updating weights."""
+        await self.engine_core.set_weight_version_async(new_version)
+
+    async def get_weight_version(self) -> str:
+        """Return the latest committed weight version."""
+        return await self.engine_core.get_weight_version_async()

@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+import torch
+from transformers import AutoModel
 
 from vllm.config import PoolerConfig
 
@@ -79,6 +81,58 @@ def test_models(
         model, runner="pooling", max_model_len=max_model_len, **vllm_extra_kwargs
     ) as vllm_model:
         vllm_outputs = vllm_model.embed(example_prompts)
+
+    check_embeddings_close(
+        embeddings_0_lst=hf_outputs,
+        embeddings_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+        tol=1e-2,
+    )
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "BAAI/bge-base-en-v1.5",
+        "intfloat/multilingual-e5-small",
+    ],
+)
+@torch.inference_mode()
+def test_encoder_only_model_runner_v2_attention(
+    hf_runner,
+    vllm_runner,
+    monkeypatch,
+    model: str,
+) -> None:
+    prompts = [
+        "short input",
+        "a longer input that exercises mixed sequence lengths",
+    ]
+
+    with hf_runner(model, dtype="float", auto_cls=AutoModel) as hf_model:
+        hf_outputs = []
+        for prompt in prompts:
+            inputs = hf_model.tokenizer(prompt, return_tensors="pt")
+            output = hf_model.model(**hf_model.wrap_device(inputs))
+            embedding = torch.nn.functional.normalize(
+                output.last_hidden_state[0, -1].float(), dim=0
+            )
+            hf_outputs.append(embedding.cpu().tolist())
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    with vllm_runner(
+        model,
+        runner="pooling",
+        dtype="float",
+        max_model_len=64,
+        max_num_seqs=2,
+        gpu_memory_utilization=0.25,
+        pooler_config=PoolerConfig(
+            task="embed", seq_pooling_type="LAST", use_activation=True
+        ),
+    ) as vllm_model:
+        vllm_outputs = vllm_model.embed(prompts)
 
     check_embeddings_close(
         embeddings_0_lst=hf_outputs,
