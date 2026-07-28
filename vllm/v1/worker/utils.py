@@ -73,11 +73,10 @@ def compressed_kernel_block_size(spec: AttentionSpec) -> int:
 @triton.jit(do_not_specialize=["n_blocks"])
 def _zero_kv_blocks_kernel(
     seg_addrs_ptr,
-    seg_page_sizes_ptr,
     block_ids_ptr,
     n_blocks,
     N_SEGS: tl.constexpr,
-    MAX_CHUNKS: tl.constexpr,
+    PAGE_SIZE_EL: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     """Zero KV cache blocks across all segments in a single launch.
@@ -87,33 +86,25 @@ def _zero_kv_blocks_kernel(
     buffer.  For backends where K/V is outermost (block_dim=1) there are
     two segments per buffer (one for K, one for V).
 
-    Segments may have different page sizes (e.g. models with multiple KV
-    cache groups like MLA + DSA indexer).  Each segment's page size is
-    read from seg_page_sizes_ptr; programs whose chunk_index falls beyond
-    their segment's page size early-exit.
-
     seg_addrs_ptr holds absolute byte addresses (int64) for each segment,
     allowing segments to live in different CUDA allocations.
 
     Programs are mapped as (block_index, seg_index, chunk_index).
     """
     pid = tl.program_id(0)
-    work_per_block = N_SEGS * MAX_CHUNKS
+    chunks = PAGE_SIZE_EL // BLOCK_SIZE
+    work_per_block = N_SEGS * chunks
     block_index = pid // work_per_block
     if block_index >= n_blocks:
         return
     remainder = pid % work_per_block
-    seg_index = remainder // MAX_CHUNKS
-    chunk_index = remainder % MAX_CHUNKS
-    page_size_el = tl.load(seg_page_sizes_ptr + seg_index)
-    if chunk_index >= page_size_el // BLOCK_SIZE:
-        return
+    seg_index = remainder // chunks
+    chunk_index = remainder % chunks
     block_id = tl.load(block_ids_ptr + block_index)
     seg_addr = tl.load(seg_addrs_ptr + seg_index)
     ptr = tl.cast(seg_addr, tl.pointer_type(tl.int32))
     offset = (
-        block_id.to(tl.int64) * page_size_el.to(tl.int64)
-        + chunk_index.to(tl.int64) * BLOCK_SIZE
+        block_id.to(tl.int64) * PAGE_SIZE_EL + chunk_index.to(tl.int64) * BLOCK_SIZE
     )
     cols = tl.arange(0, BLOCK_SIZE).to(tl.int64)
     tl.store(ptr + offset + cols, tl.zeros([BLOCK_SIZE], dtype=tl.int32))
