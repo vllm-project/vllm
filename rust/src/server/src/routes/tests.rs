@@ -23,7 +23,7 @@ use serial_test::serial;
 use tower::{Service as _, ServiceExt as _};
 use vllm_chat::{
     ChatBackend, ChatContent, ChatContentPart, ChatLlm, ChatMessage, ChatRenderer, ChatRequest,
-    ChatTextBackend, DefaultChatOutputProcessor, DynChatOutputProcessor, DynChatRenderer,
+    ChatTextBackend, DefaultChatOutputProcessor, DynChatOutputProcessor, DynChatRenderer, Error,
     NewChatOutputProcessorOptions,
 };
 use vllm_engine_core_client::mock_engine::default_ready_response;
@@ -539,7 +539,9 @@ fn render_fake_message_content(
         | ChatMessage::Developer { content, .. }
         | ChatMessage::User { content }
         | ChatMessage::ToolResponse { content, .. } => render_fake_content(content, placeholder),
-        ChatMessage::Assistant { .. } => message.text_content(),
+        ChatMessage::Assistant { .. } => {
+            message.text_content().map_err(Error::UnsupportedMultimodalContent)
+        }
     }
 }
 

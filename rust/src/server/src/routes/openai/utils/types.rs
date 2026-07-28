@@ -4,9 +4,9 @@
 use std::collections::HashMap;
 use std::slice;
 
-use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use vllm_chat::ImageDetail;
 use vllm_llm::TokenUsage;
 
 // ============================================================================
