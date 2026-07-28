@@ -349,7 +349,12 @@ class INCConfig(QuantizationConfig):
         cls, hf_quant_cfg, user_quant, hf_config=None
     ) -> "QuantizationMethods | None":
         """Override the `auto-round` method to `inc`."""
-        is_auto_round_format = hf_quant_cfg.get("quant_method", None) == "auto-round"
-        if is_auto_round_format:
+        quant_method = hf_quant_cfg.get("quant_method", None)
+
+        if quant_method == "auto-round":
             return cls.get_name()
+
+        if quant_method == cls.FP8_BLOCK_PACKING_FORMAT:
+            return cls.get_name()
+
         return None
