@@ -376,9 +376,7 @@ def assert_deepep_close(
     # both e4m3fnuz (gfx942) and e4m3fn (gfx950), so use a single condition:
     # relax only the unquantized-weight fp8-dispatch case, keep fp8-weight strict.
     relax_fp8_dispatch = (
-        use_fp8_dispatch
-        and current_platform.is_rocm()
-        and not weights_are_quantized
+        use_fp8_dispatch and current_platform.is_rocm() and not weights_are_quantized
     )
     if relax_fp8_dispatch:
         atol = rtol = 1.5e-1
