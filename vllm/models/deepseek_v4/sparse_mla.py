@@ -338,11 +338,16 @@ def build_c128a_topk_metadata(
     return global_decode, decode_lens, prefill_local
 
 
-
-
 class BuildC128ATopkMetadataKernel(
     VllmJitKernel["BuildC128ATopkMetadataKernel.CompileKey"]
 ):
+    @dataclass(frozen=True)
+    class CompileKey:
+        compress_ratio: int
+        max_compressed_tokens: int
+        block_size: int
+        triton_block_size: int
+
     @staticmethod
     @triton.jit(
         do_not_specialize=[
@@ -419,13 +424,6 @@ class BuildC128ATopkMetadataKernel(
                     mask=mask,
                 )
 
-    @dataclass(frozen=True)
-    class CompileKey:
-        compress_ratio: int
-        max_compressed_tokens: int
-        block_size: int
-        triton_block_size: int
-
     def dispatch(  # type: ignore[override]
         self,
         *,
@@ -447,13 +445,12 @@ class BuildC128ATopkMetadataKernel(
             return []
 
         compress_ratio = 128
-        max_model_len = int(getattr(model_config, "max_model_len", 0) or 0)
+        max_model_len = vllm_config.model_config.max_model_len
         if max_model_len <= 0:
             return []
         max_compressed_tokens = cdiv(max_model_len, compress_ratio)
         max_compressed_tokens = (
-            cdiv(max_compressed_tokens, _C128A_TOPK_ALIGNMENT)
-            * _C128A_TOPK_ALIGNMENT
+            cdiv(max_compressed_tokens, _C128A_TOPK_ALIGNMENT) * _C128A_TOPK_ALIGNMENT
         )
         return self._trace_dispatch(self.dispatch)(
             compress_ratio=compress_ratio,

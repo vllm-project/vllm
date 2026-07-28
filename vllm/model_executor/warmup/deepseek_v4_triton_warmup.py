@@ -228,10 +228,12 @@ def _warm_sparse_indexer_helper_kernels(worker: "Worker") -> None:
 def _warm_indexer_q_kernel(worker: "Worker") -> None:
     if has_cutedsl():
         from vllm.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl import (
-            _INDEXER_Q_CUTEDSL_KERNEL,
+            _INDEXER_Q_FP8_KERNEL,
+            _INDEXER_Q_MXFP4_KERNEL,
         )
 
-        _INDEXER_Q_CUTEDSL_KERNEL.warmup(worker.vllm_config)
+        _INDEXER_Q_MXFP4_KERNEL.warmup(worker.vllm_config)
+        _INDEXER_Q_FP8_KERNEL.warmup(worker.vllm_config)
         return
 
     from vllm.models.deepseek_v4.common.ops.fused_indexer_q import (

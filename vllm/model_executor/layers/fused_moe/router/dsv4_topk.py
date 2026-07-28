@@ -14,7 +14,6 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
-
 # Adapted from:
 # https://github.com/sgl-project/sglang/blob/main/python/sglang/jit_kernel/moe_fused_gate.py
 
@@ -42,8 +41,11 @@ def can_use_dsv4_topk(
     )
 
 
-
 class DSV4TopKKernel(VllmJitKernel["DSV4TopKKernel.CompileKey"]):
+    def __init__(self) -> None:
+        self.topk = 6
+        super().__init__()
+
     @dataclass(frozen=True)
     class CompileKey:
         num_experts: int
@@ -111,10 +113,6 @@ class DSV4TopKKernel(VllmJitKernel["DSV4TopKKernel.CompileKey"]):
         tl.store(topk_weights_ptr + output_offsets, selected_weights, mask=output_mask)
         tl.store(topk_ids_ptr + output_offsets, selected_ids, mask=output_mask)
 
-    def __init__(self) -> None:
-        self.topk = 6
-        super().__init__()
-
     def dispatch(  # type: ignore[override]
         self,
         *,
@@ -146,10 +144,7 @@ class DSV4TopKKernel(VllmJitKernel["DSV4TopKKernel.CompileKey"]):
         ):
             return []
 
-        use_mega_moe = (
-            vllm_config.kernel_config.moe_backend
-            == "deep_gemm_mega_moe"
-        )
+        use_mega_moe = vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
         indices_dtype = torch.int64 if use_mega_moe else torch.int32
         return self._trace_dispatch(self.dispatch)(
             num_experts=num_experts,

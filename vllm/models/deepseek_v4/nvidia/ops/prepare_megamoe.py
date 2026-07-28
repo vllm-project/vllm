@@ -23,6 +23,18 @@ from vllm.utils.math_utils import next_power_of_2
 class PrepareMegaMoeInputsKernel(
     VllmJitKernel["PrepareMegaMoeInputsKernel.CompileKey"]
 ):
+    def __init__(self) -> None:
+        self.block_k = 128
+        self.group_k = 32
+        super().__init__()
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        hidden_size: int
+        top_k: int
+        block_topk: int
+        has_padding: bool
+
     @staticmethod
     @triton.jit
     def kernel(
@@ -104,7 +116,9 @@ class PrepareMegaMoeInputsKernel(
                 token_is_padding = tl.load(is_padding + token_id * is_padding_stride_m)
 
             ids = tl.load(
-                topk_ids + token_id * topk_ids_stride_m + topk_offsets * topk_ids_stride_k,
+                topk_ids
+                + token_id * topk_ids_stride_m
+                + topk_offsets * topk_ids_stride_k,
                 mask=topk_mask,
                 other=0,
             ).to(tl.int64)
@@ -133,18 +147,6 @@ class PrepareMegaMoeInputsKernel(
                 mask=topk_mask,
             )
 
-    @dataclass(frozen=True)
-    class CompileKey:
-        hidden_size: int
-        top_k: int
-        block_topk: int
-        has_padding: bool
-
-    def __init__(self) -> None:
-        self.block_k = 128
-        self.group_k = 32
-        super().__init__()
-
     def dispatch(  # type: ignore[override]
         self,
         *,
@@ -161,10 +163,7 @@ class PrepareMegaMoeInputsKernel(
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        if (
-            vllm_config.kernel_config.moe_backend
-            != "deep_gemm_mega_moe"
-        ):
+        if vllm_config.kernel_config.moe_backend != "deep_gemm_mega_moe":
             return []
 
         hf_config = vllm_config.model_config.hf_config

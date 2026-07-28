@@ -231,6 +231,10 @@ def quantize_and_insert_k_cache(
 class DequantizeAndGatherKCacheKernel(
     VllmJitKernel["DequantizeAndGatherKCacheKernel.CompileKey"]
 ):
+    def __init__(self) -> None:
+        self.num_workers = 128
+        super().__init__()
+
     @dataclass(frozen=True)
     class CompileKey:
         max_blocks_per_seq: int
@@ -238,10 +242,6 @@ class DequantizeAndGatherKCacheKernel(
         block_stride: int
         use_fnuz: bool
         has_gather_lens: bool
-
-    def __init__(self) -> None:
-        self.num_workers = 128
-        super().__init__()
 
     @staticmethod
     @triton.jit
@@ -294,7 +294,9 @@ class DequantizeAndGatherKCacheKernel(
 
             # int64: physical_block_idx * block_stride can exceed 2^31 with many
             # KV-cache blocks (e.g. >= 57K at block_stride ~37K).
-            cache_block_ptr = k_cache_ptr + physical_block_idx.to(tl.int64) * block_stride
+            cache_block_ptr = (
+                k_cache_ptr + physical_block_idx.to(tl.int64) * block_stride
+            )
 
             # Token data pointer
             token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
@@ -311,7 +313,9 @@ class DequantizeAndGatherKCacheKernel(
             token_bf16_ptr = token_data_ptr + fp8_dim
 
             # Output pointer for this token (flattened)
-            output_row_ptr = out_ptr + batch_idx * out_stride0 + (offset + i) * out_stride1
+            output_row_ptr = (
+                out_ptr + batch_idx * out_stride0 + (offset + i) * out_stride1
+            )
 
             # ========== Dequantize FP8 portion using UE8M0 ==========
             for qblock_idx in tl.static_range(n_quant_blocks):
@@ -343,7 +347,9 @@ class DequantizeAndGatherKCacheKernel(
                     x_dequant = x_float * scale
 
                     # Store as bf16
-                    tl.store(output_row_ptr + offsets, x_dequant.to(tl.bfloat16), mask=mask)
+                    tl.store(
+                        output_row_ptr + offsets, x_dequant.to(tl.bfloat16), mask=mask
+                    )
 
             # ========== Copy BF16 portion directly ==========
             bf16_output_offset = fp8_dim  # After 448 elements in output
@@ -385,9 +391,7 @@ class DequantizeAndGatherKCacheKernel(
             return []
 
         quarter_block_size = block_size // 4
-        quarter_block_size = (
-            quarter_block_size if quarter_block_size >= 1 else 1
-        )
+        quarter_block_size = quarter_block_size if quarter_block_size >= 1 else 1
         tiny_block_size = block_size // 128
         tiny_block_size = tiny_block_size if tiny_block_size >= 1 else 1
         return self._trace_dispatch(self.dispatch)(
@@ -473,6 +477,7 @@ class DequantizeAndGatherKCacheKernel(
             use_fnuz=use_fnuz,
         )
 
+
 def dequantize_and_gather_k_cache(
     # [num_reqs, max_num_tokens, head_size]
     out: torch.Tensor,
@@ -547,11 +552,13 @@ def compute_global_topk_indices_and_lens(
     return global_topk_indices, topk_lens
 
 
-
-
 class ComputeGlobalTopkIndicesAndLensKernel(
     VllmJitKernel["ComputeGlobalTopkIndicesAndLensKernel.CompileKey"]
 ):
+    def __init__(self) -> None:
+        self.triton_block_size = 1024
+        super().__init__()
+
     @dataclass(frozen=True)
     class CompileKey:
         global_topk_indices_stride: int
@@ -559,10 +566,6 @@ class ComputeGlobalTopkIndicesAndLensKernel(
         topk: int
         block_table_stride: int
         block_size: int
-
-    def __init__(self) -> None:
-        self.triton_block_size = 1024
-        super().__init__()
 
     @staticmethod
     @triton.jit
@@ -606,7 +609,9 @@ class ComputeGlobalTopkIndicesAndLensKernel(
             slot_ids = block_numbers * block_size + block_offsets
             slot_ids = tl.where(is_valid, slot_ids, -1)
             tl.store(
-                global_topk_indices_ptr + token_idx * global_topk_indices_stride + offset,
+                global_topk_indices_ptr
+                + token_idx * global_topk_indices_stride
+                + offset,
                 slot_ids,
                 mask=mask,
             )
@@ -748,10 +753,13 @@ def combine_topk_swa_indices(
     return combined_indices, combined_lens
 
 
-
 class CombineTopkSwaIndicesKernel(
     VllmJitKernel["CombineTopkSwaIndicesKernel.CompileKey"]
 ):
+    def __init__(self) -> None:
+        self.num_workers = 128
+        super().__init__()
+
     @dataclass(frozen=True)
     class CompileKey:
         top_k: int
@@ -759,10 +767,6 @@ class CombineTopkSwaIndicesKernel(
         window_size: int
         padded_top_k: int
         input_variant: TritonPointerInputVariant
-
-    def __init__(self) -> None:
-        self.num_workers = 128
-        super().__init__()
 
     @staticmethod
     @triton.jit(
@@ -1128,8 +1132,6 @@ def _remap_flashinfer_index(values, block_size, block_span):
     return tl.where(is_valid, values, -1)
 
 
-
-
 class BuildFlashinferMixedSparseIndicesKernel(
     VllmJitKernel["BuildFlashinferMixedSparseIndicesKernel.CompileKey"]
 ):
@@ -1241,7 +1243,9 @@ class BuildFlashinferMixedSparseIndicesKernel(
                     block_offsets = values % compressed_block_size
                     values = block_numbers * compressed_block_size + block_offsets
                     values = tl.where(is_valid, values, -1)
-                    compressed_len += tl.sum((is_valid & token_valid).to(tl.int32), axis=0)
+                    compressed_len += tl.sum(
+                        (is_valid & token_valid).to(tl.int32), axis=0
+                    )
                 values = _remap_flashinfer_index(
                     values, compressed_block_size, compressed_block_span
                 )
@@ -1258,7 +1262,9 @@ class BuildFlashinferMixedSparseIndicesKernel(
                 compressed_len = tl.zeros((), dtype=tl.int32)
             elif not DECODE_COMPRESSED_INDICES_ARE_LOCAL:
                 if HAS_DECODE_COMPRESSED_LENS:
-                    compressed_len = tl.load(decode_compressed_topk_lens_ptr + token_idx)
+                    compressed_len = tl.load(
+                        decode_compressed_topk_lens_ptr + token_idx
+                    )
                 else:
                     compressed_len = tl.full((), DECODE_COMPRESSED_TOPK, dtype=tl.int32)
 
@@ -1562,9 +1568,7 @@ class BuildFlashinferMixedSparseIndicesKernel(
 
 
 _DEQUANTIZE_AND_GATHER_K_CACHE_KERNEL = DequantizeAndGatherKCacheKernel()
-_COMPUTE_GLOBAL_TOPK_INDICES_AND_LENS_KERNEL = (
-    ComputeGlobalTopkIndicesAndLensKernel()
-)
+_COMPUTE_GLOBAL_TOPK_INDICES_AND_LENS_KERNEL = ComputeGlobalTopkIndicesAndLensKernel()
 _COMBINE_TOPK_SWA_INDICES_KERNEL = CombineTopkSwaIndicesKernel()
 _BUILD_FLASHINFER_MIXED_SPARSE_INDICES_KERNEL = (
     BuildFlashinferMixedSparseIndicesKernel()

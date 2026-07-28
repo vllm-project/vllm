@@ -23,12 +23,16 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 if current_platform.is_cuda_alike():
 
-    class EplbMapAndRecordKernel(
-        VllmJitKernel["EplbMapAndRecordKernel.CompileKey"]
-    ):
+    class EplbMapAndRecordKernel(VllmJitKernel["EplbMapAndRecordKernel.CompileKey"]):
         def __init__(self) -> None:
             self.block_size = 256
             super().__init__()
+
+        @dataclass(frozen=True)
+        class CompileKey:
+            has_num_unpadded: bool
+            num_active_experts: int
+            block_size: int
 
         @staticmethod
         @triton.jit(
@@ -114,12 +118,6 @@ if current_platform.is_cuda_alike():
             )
             safe_physical_id = tl.where(physical_id >= 0, physical_id, 0)
             tl.atomic_add(out_ptr + safe_physical_id, 1, mask=valid)
-
-        @dataclass(frozen=True)
-        class CompileKey:
-            has_num_unpadded: bool
-            num_active_experts: int
-            block_size: int
 
         def dispatch(  # type: ignore[override]
             self,
@@ -211,7 +209,6 @@ if current_platform.is_cuda_alike():
                 HAS_NUM_UNPADDED=compile_key.has_num_unpadded,
                 BLOCK_SIZE=compile_key.block_size,
             )
-
 
     _EPLB_MAP_AND_RECORD_KERNEL = EplbMapAndRecordKernel()
 
