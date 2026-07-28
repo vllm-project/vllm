@@ -50,11 +50,12 @@ from vllm.inputs import (
     EngineInput,
     PromptType,
     SingletonPrompt,
+    TokensPrompt,
     tokens_input,
 )
 from vllm.logger import init_logger
 from vllm.parser import Parser, ParserManager
-from vllm.renderers import BaseRenderer, ChatParams, merge_kwargs
+from vllm.renderers import BaseRenderer, ChatParams, TokenizeParams, merge_kwargs
 from vllm.renderers.inputs.preprocess import (
     parse_model_prompt,
     prompt_to_seq,
@@ -407,6 +408,7 @@ class OnlineRenderer:
             engine_input=self.render_responses_harmony_messages(
                 messages,
                 cache_salt=request.cache_salt,
+                tok_params=request.build_tok_params(self.model_config),
             ),
         )
 
@@ -432,15 +434,21 @@ class OnlineRenderer:
             descriptions[f"{server_name}_description"] = description
         return descriptions
 
-    @staticmethod
     def render_responses_harmony_messages(
+        self,
         messages: list[OpenAIMessage],
         *,
         cache_salt: str | None,
+        tok_params: TokenizeParams | None = None,
     ) -> EngineInput:
         arrival_time = time.time()
-        prompt_token_ids = render_for_completion(messages)
-        engine_input = tokens_input(prompt_token_ids, cache_salt=cache_salt)
+        prompt = TokensPrompt(prompt_token_ids=render_for_completion(messages))
+        if tok_params is not None:
+            tok_params.apply_post_tokenization(
+                self.renderer.tokenizer,
+                prompt,
+            )
+        engine_input = tokens_input(prompt["prompt_token_ids"], cache_salt=cache_salt)
         engine_input["arrival_time"] = arrival_time
         return engine_input
 
