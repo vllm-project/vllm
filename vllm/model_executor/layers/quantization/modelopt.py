@@ -58,9 +58,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    swap_w13_to_w31,
-)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_input_tensor_strategy_moe,
     process_fp8_weight_channel_strategy,
@@ -2013,90 +2010,6 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
                 raise ValueError(
                     f"Expected {name} dtype {expected_dtype}, got {actual}."
                 )
-
-    def _shuffle_weights_for_trtllm(self, layer: torch.nn.Module) -> None:
-        """Shuffle weights and scales into FlashInfer TRTLLM MXFP8 layout."""
-        from flashinfer import (
-            reorder_rows_for_gated_act_gemm,
-            shuffle_matrix_a,
-            shuffle_matrix_sf_a,
-        )
-
-        epilogue_tile_m = 128
-        num_experts = layer.w13_weight.shape[0]
-        is_gated = self.moe.is_act_and_mul
-        intermediate_size_factor = 2 if is_gated else 1
-
-        w13_weight = layer.w13_weight.data
-        w13_scale = layer.w13_weight_scale.data
-        if is_gated:
-            # FI TRTLLM gated kernels use W31 ordering. Model checkpoints store
-            # gated projection as W13, so convert once before shuffling.
-            w13_weight = swap_w13_to_w31(w13_weight)
-            w13_scale = swap_w13_to_w31(w13_scale)
-
-        w13_weight_shuffled = []
-        w2_weight_shuffled = []
-        w13_scale_shuffled = []
-        w2_scale_shuffled = []
-        for i in range(num_experts):
-            w13_i = w13_weight[i].reshape(
-                intermediate_size_factor * layer.intermediate_size_per_partition, -1
-            )
-            w13_sf_i = w13_scale[i].reshape(
-                intermediate_size_factor * layer.intermediate_size_per_partition, -1
-            )
-            if is_gated:
-                # Reorder rows for gated activation layout expected by TRTLLM.
-                w13_i = reorder_rows_for_gated_act_gemm(w13_i.clone())
-                w13_sf_i = reorder_rows_for_gated_act_gemm(w13_sf_i.clone())
-
-            w13_shuffled_i = shuffle_matrix_a(w13_i.view(torch.uint8), epilogue_tile_m)
-            w2_shuffled_i = shuffle_matrix_a(
-                layer.w2_weight.data[i].view(torch.uint8), epilogue_tile_m
-            )
-            w13_weight_shuffled.append(
-                w13_shuffled_i.contiguous().view(MXFP8_VALUE_DTYPE)
-            )
-            w2_weight_shuffled.append(
-                w2_shuffled_i.contiguous().view(MXFP8_VALUE_DTYPE)
-            )
-            w13_sf_shuffled_i = shuffle_matrix_sf_a(
-                w13_sf_i.view(torch.uint8).reshape(
-                    intermediate_size_factor * layer.intermediate_size_per_partition,
-                    -1,
-                ),
-                epilogue_tile_m,
-            )
-            w2_sf_shuffled_i = shuffle_matrix_sf_a(
-                layer.w2_weight_scale.data[i]
-                .view(torch.uint8)
-                .reshape(layer.hidden_size, -1),
-                epilogue_tile_m,
-            )
-            w13_scale_shuffled.append(
-                w13_sf_shuffled_i.contiguous().view(MXFP8_SCALE_DTYPE)
-            )
-            w2_scale_shuffled.append(
-                w2_sf_shuffled_i.contiguous().view(MXFP8_SCALE_DTYPE)
-            )
-
-        replace_parameter(
-            layer, "w13_weight", torch.stack(w13_weight_shuffled).contiguous()
-        )
-        replace_parameter(
-            layer, "w2_weight", torch.stack(w2_weight_shuffled).contiguous()
-        )
-        replace_parameter(
-            layer,
-            "w13_weight_scale",
-            torch.stack(w13_scale_shuffled).contiguous(),
-        )
-        replace_parameter(
-            layer,
-            "w2_weight_scale",
-            torch.stack(w2_scale_shuffled).contiguous(),
-        )
 
     def _dequant_mxfp8_weights_to_bf16(self, layer: RoutedExperts) -> None:
         """One-time MXFP8->BF16 weight dequant for the emulation path.
