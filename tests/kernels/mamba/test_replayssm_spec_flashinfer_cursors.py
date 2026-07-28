@@ -16,6 +16,7 @@ kernel itself is covered by the metadata-builder suite.
 """
 
 import pytest
+import torch
 
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 
@@ -123,6 +124,51 @@ def test_history_and_ring_invariants_hold_across_a_long_sequence():
         assert history + cur_len <= R, f"step {step}: ring overflow"
 
     assert origin != 0, "the sequence should have flushed at least once"
+
+
+def _v2_gather(needs_reset_gpu, idx_mapping, num_reqs, num_reqs_after_padding):
+    """CPU mirror of the V2 gather in MambaHybridModelState.prepare_attn."""
+    out = needs_reset_gpu.new_zeros(num_reqs_after_padding)
+    valid = idx_mapping >= 0
+    gathered = needs_reset_gpu[idx_mapping.clamp_min(0)]
+    out[:num_reqs] = torch.where(valid, gathered, torch.zeros_like(gathered))
+    return out
+
+
+def test_v2_gather_maps_batch_rows_to_persistent_slots():
+    slots = torch.tensor([0, 1, 0, 1, 1], dtype=torch.int8)
+    # Batch row 0 -> slot 3, row 1 -> slot 1, row 2 -> slot 4.
+    idx_mapping = torch.tensor([3, 1, 4])
+    out = _v2_gather(slots, idx_mapping, num_reqs=3, num_reqs_after_padding=3)
+    assert out.tolist() == [1, 1, 1]
+
+    slots = torch.tensor([0, 0, 0, 0, 0], dtype=torch.int8)
+    slots[4] = 1
+    out = _v2_gather(slots, idx_mapping, num_reqs=3, num_reqs_after_padding=3)
+    assert out.tolist() == [0, 0, 1]
+
+
+def test_v2_gather_masks_negative_idx_mapping_sentinels():
+    """A -1 sentinel (filtered row under PP) must not read the last slot.
+
+    Plain advanced indexing would wrap -1 onto the final request slot and, on
+    the clear side, would zero a flag belonging to an unrelated request.
+    """
+    slots = torch.tensor([0, 0, 0, 1], dtype=torch.int8)  # last slot is armed
+    idx_mapping = torch.tensor([0, -1, 2])
+
+    out = _v2_gather(slots, idx_mapping, num_reqs=3, num_reqs_after_padding=3)
+    assert out.tolist() == [0, 0, 0], "the -1 row must not pick up slot 3's flag"
+    # What the buggy version would have produced:
+    assert slots[idx_mapping[1]].item() == 1
+
+
+def test_v2_gather_leaves_the_cudagraph_padded_tail_zero():
+    """Padding must never reset a ring."""
+    slots = torch.ones(4, dtype=torch.int8)
+    idx_mapping = torch.tensor([0, 1])
+    out = _v2_gather(slots, idx_mapping, num_reqs=2, num_reqs_after_padding=6)
+    assert out.tolist() == [1, 1, 0, 0, 0, 0]
 
 
 def test_reset_leaves_a_row_that_cannot_flush_on_entry():

@@ -148,6 +148,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 self.replayssm_buffer_len, self.num_spec_tokens
             )
         )
+        self._replayssm_spec_capturing = False
 
         assert isinstance(kv_cache_spec, MambaSpec)
         scheduler_config = vllm_config.scheduler_config
@@ -372,12 +373,21 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 device=m.query_start_loc.device,
             )
 
-        return self.build(
-            0,
-            m,
-            num_accepted_tokens=num_accepted_tokens,
-            prev_last_scheduled_idx=prev_last_scheduled_idx,
-        )
+        # Capture feeds dummy requests and synthesised acceptance counts. The
+        # metadata still has to carry the real cursor tensors so the captured
+        # graph binds the right pointers, but the commit/reset launches must not
+        # run against live cursors -- and the V2 runner supplies no admission
+        # mask here at all.
+        self._replayssm_spec_capturing = True
+        try:
+            return self.build(
+                0,
+                m,
+                num_accepted_tokens=num_accepted_tokens,
+                prev_last_scheduled_idx=prev_last_scheduled_idx,
+            )
+        finally:
+            self._replayssm_spec_capturing = False
 
     def build(
         self,
@@ -980,6 +990,12 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         assert self.spec_write_pos is not None
         assert self.spec_post_origin is not None and self.spec_is_flush is not None
+
+        if self._replayssm_spec_capturing:
+            # Hand back the live tensors so the graph records their addresses,
+            # but do not advance them: capture runs dummy requests, and the
+            # replayed graph re-runs whatever the real step commits.
+            return self.spec_write_pos, self.spec_post_origin, self.spec_is_flush
 
         device = common_attn_metadata.query_start_loc.device
         block_ids = state_indices_tensor_d[:, 0]
