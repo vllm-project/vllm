@@ -8,7 +8,7 @@
     "return_rendered_prompts": false,
     "temperature": 0,
     "skip_special_tokens": true,
-    "stream": false,
+    "stream": true,
     "messages": [
         {
             "role": "user",

@@ -43,6 +43,14 @@ class IquestCoderToolParser(Qwen3CoderToolParser):
     (``current_tool_index > 0``). Genuine text is preserved in both paths.
     """
 
+    def _reset_streaming_state(self):
+        # The base parser owns ``streamed_args_for_tool`` but never resets it
+        # (it doesn't populate it either). Since we mirror argument fragments
+        # into it, clear it here so a reused parser instance starts each stream
+        # with a clean slate and stays aligned with ``prev_tool_call_arr``.
+        super()._reset_streaming_state()
+        self.streamed_args_for_tool = []
+
     def _get_arguments_config(
         self, func_name: str, tools: list[ChatCompletionToolsParam] | None
     ) -> dict:
@@ -114,6 +122,29 @@ class IquestCoderToolParser(Qwen3CoderToolParser):
             delta_token_ids,
             request,
         )
+
+        # Mirror every streamed argument fragment into
+        # ``streamed_args_for_tool``. The base Qwen3Coder parser emits argument
+        # deltas (``{``, per-parameter JSON, string chunks, the closing ``}``)
+        # but never records them here, leaving the list empty. The serving
+        # layer indexes ``streamed_args_for_tool[len(prev_tool_call_arr) - 1]``
+        # when flushing any unstreamed trailing arguments on the final chunk;
+        # against an empty list that raises ``IndexError``. This surfaces
+        # whenever a tool call is truncated mid-arguments (e.g. hitting
+        # max_tokens before the closing ``</function>``), because the last
+        # delta still carries a non-``None`` ``arguments`` and thus triggers
+        # that flush. Keeping the two lists in lockstep here fixes it.
+        if delta_message is not None and delta_message.tool_calls:
+            for tool_call in delta_message.tool_calls:
+                if tool_call.function is None:
+                    continue
+                args = tool_call.function.arguments
+                if args is None:
+                    continue
+                index = tool_call.index
+                while len(self.streamed_args_for_tool) <= index:
+                    self.streamed_args_for_tool.append("")
+                self.streamed_args_for_tool[index] += args
 
         # Drop whitespace-only content emitted between tool calls. The base
         # class has already advanced its streaming state (e.g. set

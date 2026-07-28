@@ -393,3 +393,94 @@ def test_all_param_types_preserved_streaming(iquest_tokenizer):
         prev_ids = cur_ids
 
     _assert_all_types(json.loads(streamed_args))
+
+
+# streamed_args_for_tool bookkeeping.
+#
+# The serving layer flushes any unstreamed trailing tool arguments on the
+# final chunk by indexing streamed_args_for_tool[len(prev_tool_call_arr) - 1].
+# The base qwen3_coder parser emits argument deltas but never records them
+# there, so the list stays empty and that index raises IndexError. This is
+# only hit when a tool call is truncated mid-arguments (e.g. max_tokens before
+# </function>), because the final delta still carries non-None arguments.
+# IquestCoderToolParser mirrors every argument fragment into the list.
+
+
+def test_streamed_args_tracks_emitted_arguments(iquest_tool_parser, sample_tools):
+    """streamed_args_for_tool accumulates exactly what was streamed."""
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+
+    deltas = [
+        "<tool_call>\n",
+        "<function=get_current_weather>\n",
+        "<parameter=city>\nDallas\n</parameter>\n",
+        "<parameter=state>\nTX\n</parameter>\n",
+        "<parameter=unit>\nfahrenheit\n</parameter>\n",
+        "</function>\n",
+        "</tool_call>",
+    ]
+
+    streamed = ""
+    for delta_message in _feed_deltas(iquest_tool_parser, deltas, request):
+        for tc in delta_message.tool_calls or []:
+            if tc.function and tc.function.arguments:
+                streamed += tc.function.arguments
+
+    # The parser mirrors emitted arguments verbatim into streamed_args_for_tool
+    # so the serving layer's "unstreamed args" flush has an accurate baseline.
+    assert iquest_tool_parser.streamed_args_for_tool == [streamed]
+    # A single tool call produces a single slot.
+    assert len(iquest_tool_parser.streamed_args_for_tool) == 1
+
+
+def test_truncated_tool_call_does_not_desync_streamed_args(
+    iquest_tool_parser, sample_tools
+):
+    """A tool call truncated mid-arguments keeps the two lists aligned.
+
+    Reproduces the IndexError: the model starts a tool call (so the header is
+    detected and prev_tool_call_arr gets an entry) but the stream ends before
+    </function>. The serving layer then indexes
+    streamed_args_for_tool[len(prev_tool_call_arr) - 1]; that must be in range.
+    """
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+
+    # No closing </parameter> / </function> / </tool_call>: truncated output.
+    deltas = [
+        "<tool_call>\n",
+        "<function=get_current_weather>\n",
+        "<parameter=city>\nDall",
+    ]
+
+    for _ in _feed_deltas(iquest_tool_parser, deltas, request):
+        pass
+
+    # prev_tool_call_arr has the (partial) call; streamed_args_for_tool must be
+    # at least as long so the serving-layer index is valid.
+    assert len(iquest_tool_parser.prev_tool_call_arr) >= 1
+    index = len(iquest_tool_parser.prev_tool_call_arr) - 1
+    assert index < len(iquest_tool_parser.streamed_args_for_tool)
+    # This is the exact access that used to raise IndexError.
+    iquest_tool_parser.streamed_args_for_tool[index]
+
+
+def test_reset_clears_streamed_args(iquest_tool_parser, sample_tools):
+    """A fresh stream (previous_text == "") clears prior streamed args."""
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+
+    first = [
+        "<tool_call>\n",
+        "<function=get_current_weather>\n",
+        "<parameter=city>\nDallas\n</parameter>\n",
+        "</function>\n",
+        "</tool_call>",
+    ]
+    for _ in _feed_deltas(iquest_tool_parser, first, request):
+        pass
+    assert iquest_tool_parser.streamed_args_for_tool  # populated
+
+    # Starting a new stream resets state (previous_text == "" on first delta).
+    for _ in _feed_deltas(iquest_tool_parser, first, request):
+        pass
+    # Exactly one tool's worth of args, not accumulated across both streams.
+    assert len(iquest_tool_parser.streamed_args_for_tool) == 1
