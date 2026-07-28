@@ -13,9 +13,10 @@ import torch
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorBase
 from vllm.logger import init_logger
-from vllm.v1.outputs import ECConnectorOutput
+from vllm.v1.outputs import ECConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.v1.core.sched.output import SchedulerOutput
 
 logger = init_logger(__name__)
@@ -33,6 +34,20 @@ class ECConnectorModelRunnerMixin:
             return
         connector = get_ec_transfer()
         connector.save_caches(encoder_cache=encoder_cache, mm_hash=mm_hash)
+
+    @staticmethod
+    def ec_connector_no_forward(
+        scheduler_output: "SchedulerOutput",
+        vllm_config: "VllmConfig",
+        encoder_cache: dict[str, torch.Tensor],
+    ) -> ModelRunnerOutput:
+        # EC send/recv even if no work to do.
+        with ECConnectorModelRunnerMixin._get_ec_connector_output(
+            scheduler_output, encoder_cache=encoder_cache
+        ) as ec_connector_output:
+            pass
+
+        return ModelRunnerOutput.with_ec_conn_output_only(ec_connector_output)
 
     @staticmethod
     def maybe_get_ec_connector_output(

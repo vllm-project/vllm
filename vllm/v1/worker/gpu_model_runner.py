@@ -4221,10 +4221,22 @@ class GPUModelRunner(
                     # dummy run to ensure coordinate_batch_across_dp
                     # is called into to avoid out of sync issues.
                     self._dummy_run(1)
-                if not has_kv_transfer_group():
+                if not has_kv_transfer_group() and not has_ec_transfer():
                     # Return empty ModelRunnerOutput if no work to do.
                     return EMPTY_MODEL_RUNNER_OUTPUT
-                return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
+                if has_kv_transfer_group():
+                    output = self.kv_connector_no_forward(
+                        scheduler_output, self.vllm_config
+                    )
+                    if has_ec_transfer():
+                        ec_output = self.ec_connector_no_forward(
+                            scheduler_output, self.vllm_config, self.encoder_cache
+                        )
+                        output.ec_connector_output = ec_output.ec_connector_output
+                    return output
+                return self.ec_connector_no_forward(
+                    scheduler_output, self.vllm_config, self.encoder_cache
+                )
 
             if self.cache_config.kv_sharing_fast_prefill:
                 assert not self.num_prompt_logprobs, (

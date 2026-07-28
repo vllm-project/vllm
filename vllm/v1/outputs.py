@@ -257,6 +257,13 @@ class ECConnectorOutput:
     finished_recving: set[str] | None = None
     ec_connector_worker_meta: ECConnectorWorkerMetadata | None = None
 
+    def is_empty(self):
+        return (
+            not self.finished_sending
+            and not self.finished_recving
+            and not self.ec_connector_worker_meta
+        )
+
 
 # ModelRunnerOutput is serialized and sent to the scheduler process.
 # This is expensive for torch.Tensor so prefer to use list instead.
@@ -321,6 +328,19 @@ class ModelRunnerOutput:
             return EMPTY_MODEL_RUNNER_OUTPUT
         output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
         output.kv_connector_output = kv_connector_output
+        return output
+
+    @staticmethod
+    def with_ec_conn_output_only(
+        ec_connector_output: ECConnectorOutput | None,
+    ) -> "ModelRunnerOutput":
+        """Return ModelRunnerOutput containing the provided ECConnectorOutput,
+        otherwise empty.
+        """
+        if ec_connector_output is None or ec_connector_output.is_empty():
+            return EMPTY_MODEL_RUNNER_OUTPUT
+        output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
+        output.ec_connector_output = ec_connector_output
         return output
 
 
