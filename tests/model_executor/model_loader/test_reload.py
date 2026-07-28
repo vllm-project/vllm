@@ -721,6 +721,37 @@ def test_non_local_expert_applications_are_absorbed():
     assert torch.equal(layer.w, torch.full((2, 2), 5.0))
 
 
+def test_published_layer_absorbs_without_invoking_the_loader():
+    """A published layer's storage is the live kernel tensors, so a decline
+    must be decided from the contract rather than by running the loader to see
+    what it returns."""
+    layer = _ShardedExpertLayer(local_experts=[0, 1])
+    invocations: list[int] = []
+    inner = layer.w.weight_loader
+
+    def counting_loader(param, loaded_weight, expert_id, return_success=False):
+        invocations.append(expert_id)
+        return inner(param, loaded_weight, expert_id, return_success=return_success)
+
+    layer.w.weight_loader = counting_loader
+    model = torch.nn.Sequential(layer)
+
+    record_metadata_for_reloading(model)
+    _load_experts(layer, [0, 1, 2, 3], 1.0, return_success=True)
+    freeze_load_plan(model)
+
+    initialize_layerwise_reload(model)
+    _load_experts(layer, [0, 1], 5.0, return_success=True)
+    assert not layer.w.is_meta, "layer must publish on its own expected set"
+
+    invocations.clear()
+    assert _load_experts(layer, [2, 3], 5.0, return_success=True) == [False, False]
+    assert invocations == [], "the loader must not run against live storage"
+
+    finalize_layerwise_reload(model, model_config=None)
+    assert torch.equal(layer.w, torch.full((2, 2), 5.0))
+
+
 class _QuietExpertLayer(torch.nn.Module):
     """An expert loader predating `return_success`, which can only ignore a
     non-local expert rather than report it."""
