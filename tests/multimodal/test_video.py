@@ -393,7 +393,7 @@ def test_cosmos3_edge_uses_qwen3_vl_video_backend():
             "MiniMaxAI/MiniMax-M3",
             MiniMaxM3VideoBackend,
             None,
-            id="minimax_m3",
+            id="minimax_m3_vl",
         ),
     ],
 )
