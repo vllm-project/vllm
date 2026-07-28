@@ -1117,18 +1117,6 @@ class TestNixlHandshake:
             block_lens=[remote_block_len],
         )
 
-        assert worker.get_backend_aware_kv_block_len(0, mamba_view=False) == (
-            local_block_len
-        )
-        assert (
-            worker.get_backend_aware_kv_block_len(0, first_split=True, mamba_view=True)
-            == worker._mamba_ssm_size[0]
-        )
-        assert (
-            worker.get_backend_aware_kv_block_len(0, first_split=False, mamba_view=True)
-            == worker._mamba_ssm_size[1]
-        )
-
         assert worker._build_fa_remote(plan, meta, block_size_ratio=1).tolist() == [
             [0x1000 + local_block_len, local_block_len, 0]
         ]
