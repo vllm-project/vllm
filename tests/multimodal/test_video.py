@@ -14,6 +14,7 @@ from transformers import AutoVideoProcessor
 from transformers.video_utils import VideoMetadata
 
 from vllm.assets.base import get_vllm_public_assets
+from vllm.models.minimax_m3.common.mm_preprocess import MiniMaxM3VideoBackend
 from vllm.multimodal.video import (
     PYNVVIDEOCODEC_DECODER_CACHE_SIZE,
     PYNVVIDEOCODEC_VIDEO_BACKEND,
@@ -341,20 +342,6 @@ def test_cosmos3_edge_uses_qwen3_vl_video_backend():
     assert isinstance(VIDEO_LOADER_REGISTRY.load(backend), Qwen3VLVideoBackend)
 
 
-def test_minimax_m3_video_backend_registration():
-    from vllm.models.minimax_m3.common.mm_preprocess import (
-        MiniMaxM3VideoBackend,
-    )
-
-    backend = get_video_loader_backend_for_processor("MiniMaxM3VLVideoProcessor")
-
-    assert backend == "minimax_m3_vl"
-    assert isinstance(
-        VIDEO_LOADER_REGISTRY.load(backend),
-        MiniMaxM3VideoBackend,
-    )
-
-
 @pytest.mark.parametrize(
     "model_repo, expected_loader_cls, hf_sample_kwargs",
     [
@@ -401,6 +388,12 @@ def test_minimax_m3_video_backend_registration():
             Qwen2VLVideoBackend,
             {"fps": 2},
             id="qwen2_5_vl",
+        ),
+        pytest.param(
+            "MiniMaxAI/MiniMax-M3",
+            MiniMaxM3VideoBackend,
+            None,
+            id="minimax_m3",
         ),
     ],
 )
