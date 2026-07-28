@@ -86,6 +86,7 @@ def _run_flashinfer_sparse_mla_decode_autotune(
     worker: "Worker",
     num_tokens: int,
     allowed_backends: frozenset[str],
+    skip_ops: set[str] | None = None,
 ) -> bool:
     """Autotune FlashInfer's SM120 sparse-MLA decode path."""
     runner = worker.model_runner
@@ -111,6 +112,9 @@ def _run_flashinfer_sparse_mla_decode_autotune(
     world = get_world_group()
     is_leader = world.rank_in_group == 0
     cache_path = resolve_flashinfer_autotune_file(runner)
+    autotune_kwargs: dict[str, object] = {"cache": str(cache_path)}
+    if skip_ops:
+        autotune_kwargs["skip_ops"] = skip_ops
 
     dummy_run_kwargs = dict(
         num_tokens=num_tokens,
@@ -137,11 +141,11 @@ def _run_flashinfer_sparse_mla_decode_autotune(
                     worker.execute_model,
                     worker.sample_tokens,
                     num_tokens,
-                    mixed_step_context=flashinfer_autotune(True, cache=str(cache_path)),
+                    mixed_step_context=flashinfer_autotune(True, **autotune_kwargs),
                     req_id_prefix="_sparse_mla_v2_warmup",
                 )
             else:
-                with flashinfer_autotune(True, cache=str(cache_path)):
+                with flashinfer_autotune(True, **autotune_kwargs):
                     runner._dummy_run(**dummy_run_kwargs)
         else:
             if _uses_v2_model_runner(runner) and runner.max_num_reqs >= 2:
@@ -191,22 +195,30 @@ def _run_flashinfer_sparse_mla_decode_autotune(
 def _flashinfer_sparse_mla_decode_autotune(
     worker: "Worker",
     num_tokens: int,
+    skip_ops: set[str] | None = None,
 ) -> bool:
     return _run_flashinfer_sparse_mla_decode_autotune(
-        worker, num_tokens, _FLASHINFER_MLA_SPARSE_BACKENDS
+        worker, num_tokens, _FLASHINFER_MLA_SPARSE_BACKENDS, skip_ops
     )
 
 
 def _deepseek_v4_sparse_mla_decode_autotune(
     worker: "Worker",
     num_tokens: int,
+    skip_ops: set[str] | None = None,
 ) -> bool:
     return _run_flashinfer_sparse_mla_decode_autotune(
-        worker, num_tokens, _DEEPSEEK_V4_FLASHINFER_MLA_SPARSE_BACKENDS
+        worker,
+        num_tokens,
+        _DEEPSEEK_V4_FLASHINFER_MLA_SPARSE_BACKENDS,
+        skip_ops,
     )
 
 
-def flashinfer_sparse_mla_decode_autotune_warmup(worker: "Worker") -> None:
+def flashinfer_sparse_mla_decode_autotune_warmup(
+    worker: "Worker",
+    skip_ops: set[str] | None = None,
+) -> None:
     """Autotune generic FlashInfer sparse MLA decode when selected."""
     runner = worker.model_runner
     if runner.is_pooling_model:
@@ -216,10 +228,13 @@ def flashinfer_sparse_mla_decode_autotune_warmup(worker: "Worker") -> None:
     mixed_tokens = _clamp_warmup_tokens(_SPARSE_MLA_MIXED_WARMUP_TOKENS, max_tokens)
     if mixed_tokens <= 0:
         return
-    _flashinfer_sparse_mla_decode_autotune(worker, mixed_tokens)
+    _flashinfer_sparse_mla_decode_autotune(worker, mixed_tokens, skip_ops)
 
 
-def deepseek_v4_sparse_mla_attention_warmup(worker: "Worker") -> None:
+def deepseek_v4_sparse_mla_attention_warmup(
+    worker: "Worker",
+    skip_ops: set[str] | None = None,
+) -> None:
     """Warm DSv4 sparse-MLA mixed prefill+decode attention."""
     runner = worker.model_runner
     if runner.is_pooling_model or not _has_deepseek_v4_sparse_mla_backend(runner):
@@ -234,7 +249,9 @@ def deepseek_v4_sparse_mla_attention_warmup(worker: "Worker") -> None:
         "Warming up DeepSeek V4 sparse MLA attention for mixed tokens=%s.",
         mixed_tokens,
     )
-    mixed_warmup_done = _deepseek_v4_sparse_mla_decode_autotune(worker, mixed_tokens)
+    mixed_warmup_done = _deepseek_v4_sparse_mla_decode_autotune(
+        worker, mixed_tokens, skip_ops
+    )
     if not mixed_warmup_done:
         if _uses_v2_model_runner(runner) and runner.max_num_reqs >= 2:
             v2_runner = cast("V2GPUModelRunner", runner)
