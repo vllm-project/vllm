@@ -678,6 +678,9 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     return FP32Vec16(
         RVVI(__riscv_vfsub_vv_f32, LMUL_512)(reg, b.reg, VEC_ELEM_NUM));
   }
+  FP32Vec16 operator-() const {
+    return FP32Vec16(RVVI(__riscv_vfneg_v_f32, LMUL_512)(reg, VEC_ELEM_NUM));
+  }
   FP32Vec16 operator*(const FP32Vec16& b) const {
     return FP32Vec16(
         RVVI(__riscv_vfmul_vv_f32, LMUL_512)(reg, b.reg, VEC_ELEM_NUM));

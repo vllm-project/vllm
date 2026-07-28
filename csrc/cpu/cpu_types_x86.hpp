@@ -596,6 +596,8 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
 
   FP32Vec16 tanh() const { return FP32Vec16(Sleef_tanhf16_u10(reg)); }
 
+  FP32Vec16 er() const { return FP32Vec16(Sleef_erff16_u10(reg)); }
+
   float reduce_sum() const { return _mm512_reduce_add_ps(reg); }
 
   float reduce_max() const { return _mm512_reduce_max_ps(reg); }
@@ -797,6 +799,14 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     FP32Vec8 low(reg_low);
     FP32Vec8 high(reg_high);
     return FP32Vec16(low.tanh().reg, high.tanh().reg);
+  }
+
+  FP32Vec16 exp() const {
+    return FP32Vec16(Sleef_expf8_u10(reg_low), Sleef_expf8_u10(reg_high));
+  }
+
+  FP32Vec16 er() const {
+    return FP32Vec16(Sleef_erff8_u10(reg_low), Sleef_erff8_u10(reg_high));
   }
 
   FP32Vec16 min(const FP32Vec16& b) const {
