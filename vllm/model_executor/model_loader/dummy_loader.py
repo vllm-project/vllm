@@ -4,6 +4,7 @@ import torch.nn as nn
 
 from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.reload.layerwise import (
@@ -12,12 +13,19 @@ from vllm.model_executor.model_loader.reload.layerwise import (
     record_dummy_load_manifest,
 )
 from vllm.model_executor.model_loader.reload.meta import materialize_layer
+from vllm.model_executor.model_loader.reload.probe import (
+    probe_model_load,
+    safetensors_meta_weights,
+    validate_probe_receipt_coverage,
+)
 from vllm.model_executor.model_loader.reload.types import LayerReloadingInfo
 from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
 from vllm.model_executor.model_loader.weight_utils import (
     initialize_dummy_weights,
     initialize_single_dummy_weight,
 )
+
+logger = init_logger(__name__)
 
 
 class DummyModelLoader(BaseModelLoader):
@@ -35,16 +43,42 @@ class DummyModelLoader(BaseModelLoader):
         pass  # Nothing to download
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
+        supports_metadata_probe = True
         for layer in model.modules():
             info = get_layerwise_info(layer)
             if info.can_load():
+                # Online quantization has already transformed the layer away
+                # from the checkpoint layout. Its exact baseline must be
+                # learned from the first real transfer instead.
+                supports_metadata_probe = False
                 self._process_online_quant_layer(layer, info)
             else:
                 # NOTE(woosuk): For accurate performance evaluation, we assign
                 # random values to the weights.
                 initialize_dummy_weights(layer, model_config)
 
+        weights = (
+            safetensors_meta_weights(model_config.model)
+            if supports_metadata_probe
+            else []
+        )
+        if weights:
+            report = probe_model_load(model, weights)
+            report.raise_for_error()
+            validate_probe_receipt_coverage(model, report)
+            logger.info(
+                "Probed %d checkpoint sources through dummy model loaders "
+                "without materializing weight data",
+                len(weights),
+            )
+
     def finalize_load_manifest(self, model: nn.Module) -> None:
+        exact_events = sum(
+            len(get_layerwise_info(layer).required_keys or ())
+            for layer in model.modules()
+        )
+        if exact_events:
+            return
         record_dummy_load_manifest(model)
 
     def _process_online_quant_layer(

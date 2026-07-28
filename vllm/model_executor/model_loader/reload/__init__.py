@@ -32,6 +32,14 @@ __all__ = [
     "LoadFragment",
     "LoadReceipt",
     "LoadCollisionPolicy",
+    "probe_dummy_load_manifest",
+    "FullBaseWeightScope",
+    "KernelWeightScope",
+    "LoRAAdapterScope",
+    "PartialBaseWeightScope",
+    "UpdateKind",
+    "UpdateScope",
+    "normalize_update_scope",
 ]
 
 from .layerwise import (
@@ -41,6 +49,16 @@ from .layerwise import (
     initialize_layerwise_reload,
     record_load_consumption,
     record_metadata_for_reloading,
+)
+from .probe import probe_dummy_load_manifest
+from .scope import (
+    FullBaseWeightScope,
+    KernelWeightScope,
+    LoRAAdapterScope,
+    PartialBaseWeightScope,
+    UpdateKind,
+    UpdateScope,
+    normalize_update_scope,
 )
 from .torchao_decorator import (
     set_torchao_reload_attrs,

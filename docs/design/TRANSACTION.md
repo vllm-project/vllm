@@ -130,13 +130,19 @@ Completion criteria for this item are: automatic registration or sound discovery
 
 **Invariant.** Every post-initialization weight mutation, including direct `model.load_weights`, executes inside exactly one reload transaction: restore checkpoint layout, load, run PWAL/finalization, copy results back into stable runtime storage, validate all applicable C1-C4 evidence, and only then commit/resume.
 
-**Mechanism.** PR #42823 proposes wrapping `model.load_weights` after initial model loading so subsequent direct calls run `initialize_layerwise_reload -> original_load_weights -> finalize_layerwise_reload`. That closes the specific bypass and should be integrated as an adapter into `ReloadTransaction`, rather than making the two layerwise functions the public transaction protocol. A layout epoch may still be useful as defense in depth, but it does not establish completeness, storage validation, all-rank commit, cache invalidation, or abort semantics.
+**Mechanism.** PR #42823 proposes wrapping `model.load_weights` after initial model loading so subsequent direct calls run `initialize_layerwise_reload -> original_load_weights -> finalize_layerwise_reload`. That closes the specific bypass. How these functions relate to the eventual `ReloadTransaction` protocol is intentionally left open below. A layout epoch may still be useful as defense in depth, but by itself it does not establish completeness, storage validation, all-rank commit, cache invalidation, or abort semantics.
 
 **Status: To be implemented as a transaction entry-point contract.** The current worker and transfer paths call the layerwise functions explicitly, but raw post-init `model.load_weights` is not universally enrolled in a transaction. PR #42823 is the concrete proposed adapter for that entry point.
 
-#### Why `initialize_layerwise_reload` and `finalize_layerwise_reload` are not the whole protocol
+#### Protocol design question: should `initialize_layerwise_reload` and `finalize_layerwise_reload` become the complete protocol?
 
-Those functions should remain the **layer-format restore/finalize hooks** used by a transaction, not absorb every reload responsibility. Putting all logic into them would create several problems:
+This is **TBD** and should be resolved through design discussion. There are two plausible designs.
+
+**Option A: extend the existing pair into the public transaction boundary.** `initialize_layerwise_reload` would perform transaction BEGIN in addition to restoring loadable layout, and `finalize_layerwise_reload` would perform PWAL, validation, all-rank decision, COMMIT/ABORT, and cleanup. This minimizes the number of APIs and makes PR #42823's wrapper close to the final shape. It may be appropriate if every update entry point can reliably call the pair, both functions receive a transaction/controller context, and `finalize` has explicit success-versus-failure semantics.
+
+**Option B: keep the pair as layer-format hooks under a separate `ReloadTransaction`.** The transaction owns scope, nesting, reports, distributed commit, and abort; it calls the existing pair only for checkpoint-layout restore and PWAL/copy-back. This preserves their current narrow responsibility and lets direct mutation paths participate even when they do not need layerwise restore.
+
+The decision cannot be made only from the current names or implementation. The complete protocol must account for:
 
 - they do not own request draining, dirty-state tracking, transaction ID/generation, or model-role scope;
 - they cannot independently reconcile source manifests or collect all-rank results;
@@ -145,7 +151,7 @@ Those functions should remain the **layer-format restore/finalize hooks** used b
 - loader exceptions require ABORT cleanup and must not accidentally turn a partial load into a successful FINALIZE/COMMIT;
 - direct mutation paths that do not call `model.load_weights` still need to join the same protocol.
 
-The intended layering is therefore:
+Under Option B, the layering would be:
 
 ```text
 public mutation entry point / model.load_weights adapter
@@ -158,7 +164,19 @@ public mutation entry point / model.load_weights adapter
   -> commit() or abort()
 ```
 
-The adapter around `model.load_weights` should enter this protocol only after first-load initialization, preserve the original return value, and use a transaction-depth guard. If it is already inside the same transaction, it should execute only the APPLY callback. On an exception it should run explicit layerwise cleanup/abort logic; using an unconditional `finally: finalize_layerwise_reload(...)` is acceptable only if finalization is defined as cleanup-safe and the transaction is irrevocably marked failed before any commit decision.
+Under Option A, the same responsibilities must be represented by the initialize/finalize pair rather than omitted; in particular, `finalize_layerwise_reload` would need enough context to distinguish successful APPLY from an exception and to participate in the global decision.
+
+Whichever option is chosen, the `model.load_weights` adapter should activate only after first-load initialization, preserve the original return value, and use a transaction-depth guard. If it is already inside the same transaction, it should execute only the APPLY callback. On an exception it needs explicit cleanup/abort semantics. An unconditional `finally: finalize_layerwise_reload(...)` is safe only if `finalize` accepts the failed outcome, performs cleanup without treating a partial load as valid, and irrevocably prevents COMMIT.
+
+The design should choose between A and B after answering these review questions:
+
+1. Can every checkpoint, IPC/NCCL, sparse/direct, and framework-RPC update be represented by the same initialize/finalize pair?
+2. Should worker/controller responsibilities such as request draining and all-rank commit live in model-loader code?
+3. What object carries transaction ID, generation, model role, source manifest, and rank-local findings between initialize and finalize?
+4. How does finalize distinguish success, partial load, loader exception, validation failure, and global timeout?
+5. Can nested calls be proven to produce exactly one BEGIN, one validation, and one COMMIT/ABORT?
+
+Until these questions are answered, neither option is the implementation contract.
 
 ### C3b — CompletionManifestChecker
 
@@ -172,7 +190,7 @@ The adapter around `model.load_weights` should enter this protocol only after fi
 source_key => target_parameter[logical_fragment]
 ```
 
-Reload records `received_keys`; layer completion is driven by `required_keys <= received_keys`, not copied numel. Dummy initialization first establishes a provisional target baseline and promotes the first complete real update to an exact event baseline.
+Reload records `received_keys`; layer completion is driven by `required_keys <= received_keys`, not copied numel. Dummy initialization uses the metadata-only probe in Section 4.1 when a local safetensors schema exists; otherwise it establishes a provisional target baseline and promotes the first complete real update to an exact event baseline.
 
 **Status: Implemented for covered paths.** `load_numel/load_numel_total` have been removed as completion state. Checkpoint loaders, IPC/NCCL transfer hooks, and several external/direct loaders publish manifests. Sparse direct mutation still needs a standard hook.
 
@@ -277,9 +295,85 @@ flowchart TD
     K --> L
 ```
 
-For dummy or first online-quantization loads, no exact source baseline exists. The model records rank-local `required_target_keys`, buffers the first real update until the source stream ends, verifies that all targets were touched, and promotes that update's exact events to permanent `required_keys`. Chunked IPC/NCCL transfers also require an independently declared source manifest so a source that never arrived can be detected.
+### 4.1 Metadata-only baseline for `DummyModelLoader`
+
+**Status: Implemented for local safetensors models.** A dummy-loaded model no longer has to learn its first exact event baseline from the first real transfer when the checkpoint schema is locally available. `DummyModelLoader` reads only safetensors headers, creates one meta tensor per source, and runs the model's real `load_weights` method under `LoadProbeMode`, a `TorchDispatchMode` that suppresses mutable tensor operators. The same model-specific name mapping, QKV/merged routing, MoE expert routing, composed loaders, and `LoadReceipt` wrappers therefore execute without reading checkpoint payloads or copying weight data.
+
+```text
+local safetensors headers
+  -> (source name, shape, dtype) meta tensors
+  -> real model.load_weights
+  -> real weight_loader dispatch and LoadReceipt
+  -> TorchDispatchMode intercepts copy_/index_copy_/other schema writes
+  -> exact rank-local required event manifest
+  -> ordinary dummy PWAL and warmup
+```
+
+The probe is architecture-generic because it does not predict mappings from the model structure; it executes each architecture's actual `load_weights`. Coverage is fail closed:
+
+- every intercepted write is associated with the active source key;
+- every source that writes must produce a `LoadReceipt` event;
+- mutable operators are detected from dispatcher schema alias annotations, not a `copy_` allowlist;
+- factories and source-derived materialization stay on the meta device;
+- unsupported/data-dependent operators raise instead of inventing a default event;
+- Python-side model bindings are restored after the probe, and parameter/buffer/module rebinding is rejected.
+
+This gate found two unobserved GPT-OSS attention-sink writes during validation. Those paths now call the parameter's `weight_loader` instead of copying directly, so they participate in the same receipt protocol.
+
+The following H200 model matrix completed automatic dummy probing, a subsequent real checkpoint reload, exact required/received reconciliation, and inference:
+
+| Model/structure | Probe result | Real reload result |
+|---|---:|---:|
+| Qwen3-0.6B, packed attention QKV | 310 events | 310/310 |
+| Qwen3-30B-A3B 2-layer MoE | 789 events | 789/789 |
+| Qwen3-30B-A3B 2-layer MoE, TP=2 | 789 events per rank | 789/789 per rank |
+| DeepSeek-V3 reduced MoE/MLA | 785 events | 785/785 |
+| GPT-OSS 20B 2-layer MXFP4/MoE | 41 events | 41/41 |
+| TinyLlama GPTQ act-order | 663 events | 663/663 |
+| Qwen3 MoE W4A8 | 2,341 events | 2,341/2,341 |
+
+Unit tests additionally pin ordinary, routed-fragment, composed/double-write, factory-allocation, data-dependent failure, direct-write-without-receipt, metadata-reader, provisional-fallback, and exception-restoration behavior.
+
+If the dummy model does not have a local safetensors schema (for example, an unresolved remote model ID or another checkpoint format), the existing provisional `required_target_keys` path remains active. The first real update must then carry an independently declared source manifest, is buffered until the source stream ends, and promotes its exact observed events only after target/source reconciliation succeeds. First-load online quantization also retains this provisional path where the checkpoint-layout probe cannot run before layer processing.
 
 This implementation answers the category-3 completeness problem. It does not replace storage, state, routing, or cache checkers.
+
+### 4.2 Layerwise staging, PWAL, receipts, and arena storage
+
+The reload path operates on three distinct kinds of storage. They must not be conflated:
+
+1. **Temporary checkpoint/runtime tensors.** `initialize_layerwise_reload` saves the serving tensors in `info.kernel_tensors`, restores the layer's checkpoint-format metadata on the meta device, and `materialize_layer` allocates temporary tensors. Buffered `weight_loader` calls write the new checkpoint values into these temporary tensors.
+2. **Original serving parameter/buffer storage.** CUDA graphs or kernels may retain these addresses. After PWAL converts the temporary tensors into runtime layout, `_copy_and_restore_kernel_tensors` copies their values into the original storage and rebinds the layer to the original objects.
+3. **ReloadArena slots.** These are neither parameters nor buffers and are not handled by `_copy_and_restore_kernel_tensors`. PWAL or a later forward updates/reacquires them through the arena API.
+
+The resulting non-attention lifecycle is:
+
+```text
+save original runtime parameter/buffer storage
+  -> restore checkpoint-layout metadata on meta
+  -> materialize temporary tensors
+  -> replay buffered weight_loader calls into the temporary tensors
+  -> quant_method.process_weights_after_loading(layer)
+  -> PWAL updates/reacquires ReloadArena slots
+  -> copy processed temporary parameters/buffers into original storage
+  -> rebind the layer to the original serving objects
+  -> verify registered arena slot identity
+```
+
+Calling both `param.weight_loader(...)` and `_copy_and_restore_kernel_tensors(...)` is necessary. The loader understands checkpoint layout and must not write directly into storage that may already have a transformed kernel layout. The copy-back occurs only after PWAL has produced the new runtime layout, and publishes that result at the old graph-visible addresses. On first load `info.kernel_tensors` is `None`, so there is no old serving storage to restore and copy-back is a no-op.
+
+Attention and MLA layers are deferred. `_finalize_attention_layer` reloads their scales and calls `layer.process_weights_after_loading(model_config.dtype)` after the other layers have completed. MLA updates derived `W_UV` and `W_UK_T` slots from this path. Ordinary quantized linear and MoE layers enter PWAL through `quant_method.process_weights_after_loading(layer)`.
+
+The arena has two acquisition forms:
+
+- `arena.put(name, value)` publishes an already computed derived value. The first call adopts a private contiguous copy; later calls perform `existing.copy_(value)`. The caller must bind and expose the returned stable tensor.
+- `arena.get_or_alloc(name, shape, dtype, device, init=...)` returns stable workspace or scratch storage whose contents will be produced later by the caller or kernel. Reacquisition returns the same tensor; `ZERO` clears it when reacquired, while `EMPTY`/`PRESERVE` keep the existing contents.
+
+`_verify_layer_arena` is a registered-slot contract assertion, not a complete storage oracle. At reload initialization it snapshots the identity and specification of slots already present in the layer's arena; after PWAL it reports slots that vanished, moved, or changed layout. The public arena APIs already make such drift unlikely by returning existing storage or copying in place, so this check primarily catches arena replacement, direct `_slots` mutation, or a regression in the arena implementation. It cannot prove that every graph-visible tensor was registered, that a backend bound the consumer to the tensor returned by the arena, that newly created slots were captured, or that a stable slot received generation-N+1 values.
+
+`online_process_loader` calls `_wrap_parameters_weight_loader(layer)` on both sides of the original loader invocation. The pre-call scan catches parameters registered or replaced between source events. The post-call scan catches parameters dynamically created or replaced by the current loader and extends the provisional target manifest before completion is evaluated. Wrapping is idempotent, so ordinary static layers only pay a repeated scan and do not accumulate wrapper layers.
+
+Each loader invocation also produces a `LoadReceipt`. `_audit_load_receipt` is intentionally a stateful observer with no return value: it adds the invocation to the layer's `LoadEventAudit`, which compares multiple calls over the whole load. The audit detects event-key collisions, consumed-status conflicts, unique-target alias collisions, declared receipt-schema mismatch, and schema drift. A single first event cannot reveal most of these failures; findings are therefore drained at initial-load or reload finalization. To provide strict transaction semantics, those accumulated findings must be checked before per-layer publish and included in the all-rank commit decision.
 
 ## 5. Report and commit policy
 
@@ -411,6 +505,8 @@ Relevant logs are in the reproduction workspace under `logs/loaders/`, including
 | Source context | `vllm/model_executor/model_loader/reload/source.py` |
 | Manifest lifecycle | `vllm/model_executor/model_loader/reload/layerwise.py` |
 | Collision audit | `vllm/model_executor/model_loader/reload/audit.py` |
+| Metadata-only dummy probe | `vllm/model_executor/model_loader/reload/probe.py` |
+| Automatic dummy baseline | `vllm/model_executor/model_loader/dummy_loader.py` |
 | Scope and report types | `vllm/model_executor/model_loader/reload/types.py` |
 | Transfer source manifest | `vllm/distributed/weight_transfer/base.py` |
 | QKV/merged receipts | `vllm/model_executor/layers/linear.py` |
