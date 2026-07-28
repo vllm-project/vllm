@@ -124,6 +124,9 @@ logger = init_logger(__name__)
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
+    # Out-of-tree model runners can select a registered PCP manager.
+    pcp_manager_name: str = pcp.DEFAULT_PCP_MANAGER_NAME
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -479,6 +482,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.supports_mm_inputs,
             self.req_states,
             self.block_tables,
+            manager_name=self.pcp_manager_name,
         )
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config, self.kv_cache_config
