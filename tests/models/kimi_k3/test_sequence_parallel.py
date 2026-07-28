@@ -108,15 +108,25 @@ def test_sp_padding_mask_marks_added_rows(
     torch.testing.assert_close(actual, torch.tensor(expected))
 
 
-def test_moe_sequence_parallel_is_available_without_data_parallel():
+@pytest.mark.parametrize(
+    ("data_parallel_size", "expected"),
+    [
+        (1, False),
+        (2, True),
+    ],
+)
+def test_moe_sequence_parallel_requires_data_parallel(
+    data_parallel_size: int,
+    expected: bool,
+):
     parallel_config = ParallelConfig(
         tensor_parallel_size=2,
-        data_parallel_size=1,
+        data_parallel_size=data_parallel_size,
         enable_expert_parallel=True,
         all2all_backend="allgather_reducescatter",
     )
 
-    assert parallel_config.use_sequence_parallel_moe
+    assert parallel_config.use_sequence_parallel_moe is expected
 
 
 def test_kimi_decoder_layer_keeps_moe_states_sequence_sharded(monkeypatch):
