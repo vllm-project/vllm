@@ -7,9 +7,16 @@ import msgspec
 import pytest
 
 from vllm.distributed.kv_events import (
+    MEDIUM_CPU,
+    MEDIUM_GPU,
+    AllBlocksCleared,
+    BlockRemoved,
+    BlockStored,
     EventBatch,
     EventPublisherFactory,
+    KVEventBatch,
     NullEventPublisher,
+    ZmqEventPublisher,
 )
 
 DP_RANK = 0
@@ -36,6 +43,25 @@ def create_test_events(count: int) -> SampleBatch:
     """Create a batch of test events"""
     events = [EventSample(id=i, value=f"test-{i}") for i in range(count)]
     return SampleBatch(ts=time.time(), events=events)
+
+
+def create_stored_event(
+    block_hashes: list[int],
+    *,
+    medium: str = MEDIUM_GPU,
+    group_idx: int = 0,
+) -> BlockStored:
+    block_size = 4
+    return BlockStored(
+        block_hashes=block_hashes,
+        parent_block_hash=None,
+        token_ids=list(range(len(block_hashes) * block_size)),
+        block_size=block_size,
+        lora_id=None,
+        medium=medium,
+        lora_name=None,
+        group_idx=group_idx,
+    )
 
 
 def test_basic_publishing(publisher, subscriber):
@@ -112,6 +138,138 @@ def test_replay_includes_topic(publisher, subscriber, publisher_config):
     assert len(replayed) == 5, f"Expected 5 replayed messages, got {len(replayed)}"
     seqs = [seq for seq, _ in replayed]
     assert seqs == list(range(5)), "Replayed sequences should be 0-4"
+
+
+def test_snapshot_recovers_state_after_replay_buffer_expires(publisher_config):
+    publisher_config.buffer_steps = 2
+    publisher = EventPublisherFactory.create(publisher_config, DP_RANK)
+    assert isinstance(publisher, ZmqEventPublisher)
+    publisher.SNAPSHOT_BATCH_SIZE = 2
+
+    from .conftest import MockSubscriber
+
+    subscriber = MockSubscriber(
+        publisher_config.endpoint,
+        publisher_config.replay_endpoint,
+        publisher_config.topic,
+        decode_type=KVEventBatch,
+    )
+
+    try:
+        time.sleep(0.1)
+        batches = [
+            KVEventBatch(
+                ts=time.time(),
+                events=[create_stored_event([101, 102, 103])],
+            ),
+            KVEventBatch(
+                ts=time.time(),
+                events=[
+                    BlockRemoved(
+                        block_hashes=[102],
+                        medium=MEDIUM_GPU,
+                        group_idx=0,
+                    )
+                ],
+            ),
+            KVEventBatch(
+                ts=time.time(),
+                events=[create_stored_event([104])],
+            ),
+            KVEventBatch(ts=time.time(), events=[]),
+            KVEventBatch(ts=time.time(), events=[]),
+        ]
+        for batch in batches:
+            publisher.publish(batch)
+            assert subscriber.receive_one(timeout=1000) is not None
+
+        subscriber.request_replay(0)
+        assert [seq for seq, _ in subscriber.receive_replay()] == [3, 4]
+
+        subscriber.request_snapshot()
+        snapshot = subscriber.receive_replay()
+        assert snapshot
+        assert len(snapshot) == 2
+        assert {seq for seq, _ in snapshot} == {5}
+        assert all(batch.data_parallel_rank == DP_RANK for _, batch in snapshot)
+
+        active_blocks: set[int] = set()
+        snapshot_events = [event for _, batch in snapshot for event in batch.events]
+        assert isinstance(snapshot_events[0], AllBlocksCleared)
+        for event in snapshot_events:
+            if isinstance(event, AllBlocksCleared):
+                active_blocks.clear()
+            elif isinstance(event, BlockStored):
+                active_blocks.update(event.block_hashes)
+            elif isinstance(event, BlockRemoved):
+                active_blocks.difference_update(event.block_hashes)
+        assert active_blocks == {101, 103, 104}
+
+        publisher.publish(KVEventBatch(ts=time.time(), events=[AllBlocksCleared()]))
+        assert subscriber.receive_one(timeout=1000) is not None
+        subscriber.request_snapshot()
+        cleared_snapshot = subscriber.receive_replay()
+        cleared_events = [
+            event for _, batch in cleared_snapshot for event in batch.events
+        ]
+        assert len(cleared_events) == 1
+        assert isinstance(cleared_events[0], AllBlocksCleared)
+    finally:
+        publisher.shutdown()
+        subscriber.close()
+
+
+def test_snapshot_tracks_blocks_by_medium(publisher_config):
+    publisher = EventPublisherFactory.create(publisher_config, DP_RANK)
+    assert isinstance(publisher, ZmqEventPublisher)
+
+    from .conftest import MockSubscriber
+
+    subscriber = MockSubscriber(
+        publisher_config.endpoint,
+        publisher_config.replay_endpoint,
+        publisher_config.topic,
+        decode_type=KVEventBatch,
+    )
+
+    try:
+        time.sleep(0.1)
+        publisher.publish(
+            KVEventBatch(
+                ts=time.time(),
+                events=[
+                    create_stored_event([101], medium=MEDIUM_GPU),
+                    create_stored_event([101], medium=MEDIUM_CPU),
+                ],
+            )
+        )
+        assert subscriber.receive_one(timeout=1000) is not None
+        publisher.publish(
+            KVEventBatch(
+                ts=time.time(),
+                events=[
+                    BlockRemoved(
+                        block_hashes=[101],
+                        medium=MEDIUM_GPU,
+                        group_idx=0,
+                    )
+                ],
+            )
+        )
+        assert subscriber.receive_one(timeout=1000) is not None
+
+        subscriber.request_snapshot()
+        snapshot_events = [
+            event for _, batch in subscriber.receive_replay() for event in batch.events
+        ]
+        stored_events = [
+            event for event in snapshot_events if isinstance(event, BlockStored)
+        ]
+        assert len(stored_events) == 1
+        assert stored_events[0].medium == MEDIUM_CPU
+    finally:
+        publisher.shutdown()
+        subscriber.close()
 
 
 def test_buffer_limit(publisher, subscriber, publisher_config):
