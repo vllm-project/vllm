@@ -19,7 +19,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
-from transformers import AutoConfig, BatchFeature, PretrainedConfig
+from transformers import AutoConfig, AutoImageProcessor, BatchFeature, PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
@@ -423,8 +423,6 @@ class DualVisionTower(nn.Module):
         self.num_register = int(getattr(dino_config, "num_register_tokens", 0) or 0)
 
         self._load_encoder_weights(dino_model, siglip_model)
-        self.eval()
-        self.requires_grad_(False)
 
     def _load_encoder_weights(self, dino_model: str, siglip_model: str) -> None:
         self.dino.load_weights(_iter_safetensors(dino_model))
@@ -446,7 +444,6 @@ class DualVisionTower(nn.Module):
     def device(self) -> torch.device:
         return next(self.parameters()).device
 
-    @torch.inference_mode()
     def forward(
         self, dino_pixels: torch.Tensor, siglip_pixels: torch.Tensor
     ) -> tuple[torch.Tensor, int]:
@@ -713,8 +710,6 @@ class MiniCPMRobotTrackProcessingInfo(BaseProcessingInfo):
         return cached
 
     def get_dino_processor(self) -> Any:
-        from transformers import AutoImageProcessor
-
         return self._get_image_processor(
             "_dino_processor", AutoImageProcessor, self.get_hf_config().dino_model
         )
