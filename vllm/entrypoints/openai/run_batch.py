@@ -28,6 +28,7 @@ from urllib3.util import parse_url
 
 import vllm.envs as envs
 from vllm.config import config
+from vllm.connections import global_http_connection
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.api_server import init_app_state
@@ -51,6 +52,7 @@ from vllm.entrypoints.pooling.scoring.protocol import (
     ScoreRequest,
     ScoreResponse,
 )
+from vllm.entrypoints.serve.utils.error_response import create_error_response
 from vllm.entrypoints.speech_to_text.transcription.protocol import (
     TranscriptionRequest,
     TranscriptionResponse,
@@ -61,7 +63,6 @@ from vllm.entrypoints.speech_to_text.translation.protocol import (
     TranslationResponse,
     TranslationResponseVerbose,
 )
-from vllm.entrypoints.utils import create_error_response
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
@@ -493,18 +494,9 @@ async def download_bytes_from_url(
             # between urllib3 and aiohttp (e.g. backslash-@ attacks).
             url = url_spec.url
 
-        async with (
-            aiohttp.ClientSession() as session,
-            session.get(
-                url,
-                allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
-            ) as resp,
-        ):
-            if resp.status != 200:
-                raise Exception(
-                    f"Failed to download data from URL: {url}. Status: {resp.status}"
-                )
-            return await resp.read()
+        return await global_http_connection.async_get_bytes(
+            url, allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS
+        )
 
     else:
         raise ValueError(

@@ -155,6 +155,8 @@ def verify_harmony_messages(
             assert msg.content[0].text == expected["content"]
         if "content_type" in expected:
             assert msg.content_type == expected["content_type"]
+        if "instructions" in expected:
+            assert msg.content[0].instructions == expected["instructions"]
         if "tool_definitions" in expected:
             # Check that the tool definitions match the expected list of tool names
             actual_tools = [t.name for t in msg.content[0].tools["functions"].tools]

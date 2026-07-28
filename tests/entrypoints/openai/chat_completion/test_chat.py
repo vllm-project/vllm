@@ -27,9 +27,9 @@ MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 @pytest.fixture(scope="module")
 def zephyr_lora_files():
     """Download zephyr LoRA files once per test session."""
-    from huggingface_hub import snapshot_download
+    from vllm.transformers_utils.repo_utils import hf_api
 
-    return snapshot_download(repo_id="typeof/zephyr-7b-beta-lora")
+    return hf_api().snapshot_download(repo_id="typeof/zephyr-7b-beta-lora")
 
 
 @pytest.fixture(scope="module")
@@ -808,17 +808,26 @@ async def test_invocations(server: RemoteOpenAIServer, client: openai.AsyncOpenA
         "logprobs": False,
     }
 
-    chat_completion = await client.chat.completions.create(**request_args)
+    # Use raw HTTP for both endpoints so we compare server responses
+    # directly, without the openai SDK injecting extra fields
+    # (e.g. `moderation` added in newer SDK versions).
+    chat_response = requests.post(
+        server.url_for("v1/chat/completions"), json=request_args
+    )
+    chat_response.raise_for_status()
 
     invocation_response = requests.post(
         server.url_for("invocations"), json=request_args
     )
     invocation_response.raise_for_status()
 
-    chat_output = chat_completion.model_dump()
+    chat_output = chat_response.json()
     invocation_output = invocation_response.json()
 
-    assert chat_output.keys() == invocation_output.keys()
+    extra_keys = invocation_output.keys() - chat_output.keys()
+    missing_keys = chat_output.keys() - invocation_output.keys()
+    assert missing_keys == set()
+    assert extra_keys <= {"moderation"}
     assert chat_output["choices"] == invocation_output["choices"]
 
 
