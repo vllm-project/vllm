@@ -469,9 +469,10 @@ class MiniMaxM3VLMultiModalProcessor(
         ]
 
 
-# TODO(Isotr0py): Tie with MinimaxVideoProcessor
-# after https://github.com/vllm-project/vllm/pull/44126
-@VIDEO_LOADER_REGISTRY.register("minimax_m3_vl")
+@VIDEO_LOADER_REGISTRY.register(
+    name="minimax_m3_vl",
+    video_processor="MiniMaxM3VLVideoProcessor",
+)
 class MiniMaxM3VideoBackend(VideoBackend):
     @classmethod
     def compute_frames_index_to_sample(

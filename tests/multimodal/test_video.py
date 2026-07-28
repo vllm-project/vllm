@@ -341,6 +341,20 @@ def test_cosmos3_edge_uses_qwen3_vl_video_backend():
     assert isinstance(VIDEO_LOADER_REGISTRY.load(backend), Qwen3VLVideoBackend)
 
 
+def test_minimax_m3_video_backend_registration():
+    from vllm.models.minimax_m3.common.mm_preprocess import (
+        MiniMaxM3VideoBackend,
+    )
+
+    backend = get_video_loader_backend_for_processor("MiniMaxM3VLVideoProcessor")
+
+    assert backend == "minimax_m3_vl"
+    assert isinstance(
+        VIDEO_LOADER_REGISTRY.load(backend),
+        MiniMaxM3VideoBackend,
+    )
+
+
 @pytest.mark.parametrize(
     "model_repo, expected_loader_cls, hf_sample_kwargs",
     [
