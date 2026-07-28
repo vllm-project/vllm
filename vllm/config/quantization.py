@@ -16,6 +16,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
     kInt8StaticChannelSym,
+    kLutBStatic,
     kMxfp4Dynamic,
     kMxfp8Dynamic,
     kNvfp4Static,
@@ -32,6 +33,7 @@ QUANT_KEY_NAMES: dict[str, QuantKey] = {
     "mxfp8": kMxfp8Dynamic,
     "mxfp4": kMxfp4Dynamic,
     "int8_per_channel_static": kInt8StaticChannelSym,
+    "lut_b": kLutBStatic,
 }
 
 
@@ -74,6 +76,9 @@ class QuantSpec:
 
     activation: QuantKeyField = None
     """Activation quantization key, or a name from QUANT_KEY_NAMES."""
+
+    algorithm: str | None = None
+    """Optional online fitting algorithm. Currently used by LUT-B."""
 
 
 @config
@@ -139,6 +144,11 @@ _ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
     # FlashInfer TRTLLM only); linear stays unquantized (no `linear` field).
     "nvfp4_per_token": QuantizationConfigArgs(
         moe=QuantSpec(weight=kNvfp4Static),
+    ),
+    # Rubin LUT-B reference: 3-bit weight indices into per-8x64-tile E4M3
+    # codebooks. Activations remain in the model dtype.
+    "lut_b": QuantizationConfigArgs(
+        linear=QuantSpec(weight=kLutBStatic),
     ),
 }
 

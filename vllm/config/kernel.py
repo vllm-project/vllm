@@ -149,6 +149,7 @@ LinearBackend = Literal[
     "flashinfer_b12x",
     "marlin",
     "humming",
+    "lut_b",
     "triton",
     "deep_gemm",
     "torch",
@@ -224,6 +225,7 @@ class KernelConfig:
     - "flashinfer_cudnn": Use FlashInfer with cuDNN kernels
     - "flashinfer_b12x": Use FlashInfer b12x CuteDSL NVFP4 GEMM (SM120+)
     - "marlin": Use Marlin kernels
+    - "lut_b": Repack NVFP4 weights to the experimental Rubin LUT-B format
     - "triton": Use Triton-based kernels
     - "deep_gemm": Use DeepGEMM kernels
     - "torch": Use PyTorch native scaled_mm kernels

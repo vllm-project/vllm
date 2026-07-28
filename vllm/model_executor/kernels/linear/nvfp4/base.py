@@ -41,6 +41,10 @@ class NvFp4LinearKernel(ABC):
         """
         return None
 
+    def supports_per_partition_weight_global_scale(self) -> bool:
+        """Return whether fused logical weights may retain distinct global scales."""
+        return False
+
     @classmethod
     @abstractmethod
     def is_supported(

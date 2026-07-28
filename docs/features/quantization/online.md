@@ -3,7 +3,7 @@
 Online quantization lets you take a BF16/FP16 model and quantize its Linear
 and MoE weights to lower precision (such as FP8) at load time, without needing
 a pre-quantized checkpoint or calibration data. Weights are converted during
-model loading and activations are dynamically scaled during each forward pass.
+model loading. Activation handling depends on the selected scheme.
 
 ## Quick Start
 
@@ -20,6 +20,9 @@ llm = LLM("meta-llama/Llama-3.1-8B", quantization="fp8_per_block")
 
 # MXFP8 quantization for weights and activations
 llm = LLM("meta-llama/Llama-3.1-8B", quantization="mxfp8")
+
+# Rubin LUT-B reference weight quantization
+llm = LLM("Qwen/Qwen3-8B", quantization="lut_b", enforce_eager=True)
 ```
 
 Or with the CLI:
@@ -28,6 +31,7 @@ Or with the CLI:
 vllm serve meta-llama/Llama-3.1-8B --quantization fp8_per_tensor
 vllm serve meta-llama/Llama-3.1-8B --quantization fp8_per_block
 vllm serve meta-llama/Llama-3.1-8B --quantization mxfp8
+vllm serve Qwen/Qwen3-8B --quantization lut_b --enforce-eager
 ```
 
 ## Supported Schemes
@@ -37,6 +41,33 @@ vllm serve meta-llama/Llama-3.1-8B --quantization mxfp8
 | `fp8_per_tensor` | fp8_e4m3 data, fp32 per-tensor scale | fp8_e4m3 data, fp32 per-tensor scale | On some GPUs (Ada, Hopper) linear activations use per-token scaling for better performance |
 | `fp8_per_block` | fp8_e4m3 data, fp32 per-128x128-block scale | fp8_e4m3 data, fp32 per-1x128-block scale | |
 | `mxfp8` | fp8_e4m3 data, e8m0 per-1x32-block scale | fp8_e4m3 data, e8m0 per-1x32-block scale | Requires SM 100+ (Blackwell or newer) for w8a8, other GPUs use a w8a16 fallback |
+| `lut_b` | 3-bit indices, eight E4M3 values per 8x64 tile | Unquantized | Reference accuracy path; fully reconstructs weights before each linear |
+
+### Rubin LUT-B reference
+
+The calibration-free `lut_b` path fits each BF16/FP16 dense linear weight
+during model loading. Its persistent representation is 3.125 bits per weight:
+192 bytes of packed indices and an eight-byte E4M3 codebook for every 8x64
+tile.
+
+This is an accuracy prototype. It fully reconstructs the weight and calls
+`torch.nn.functional.linear` on every forward rather than executing the Rubin
+MMA. MoE weights and the hardware-specific memory layouts are not included.
+
+Calibration-free fitting ablations are available through
+`quantization_config.linear.algorithm`. The supported values are `multistart`,
+`scaled`, `residual_{1,2,4,8}`, and `scaled_residual_{1,2,4,8}`:
+
+```bash
+vllm serve Qwen/Qwen3-8B \
+  --quantization online \
+  --quantization-config.linear.weight lut_b \
+  --quantization-config.linear.algorithm residual_1 \
+  --enforce-eager
+```
+
+The residual algorithms add logical sparse correction sidecars for accuracy
+experiments. These sidecars are not consumed by the Rubin LUT MMA.
 
 ## Advanced Configuration
 
@@ -49,6 +80,7 @@ quantization_config:
   linear:
     weight: <name>      # see QUANT_KEY_NAMES in vllm/config/quantization.py
     activation: <name>
+    algorithm: <name>   # optional online fitting algorithm
   moe:
     weight: <name>
     activation: <name>

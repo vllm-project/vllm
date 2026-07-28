@@ -16,6 +16,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticTensorSym,
     kInt8StaticChannelSym,
+    kLutBStatic,
     kMxfp8Dynamic,
 )
 
@@ -85,6 +86,17 @@ def test_resolve_int8_shorthand_leaves_linear_unset():
     args = resolve_quantization_config("int8_per_channel_weight_only", None)
     assert args.linear is None
     assert args.moe == QuantSpec(weight=kInt8StaticChannelSym)
+
+
+def test_resolve_lut_b_shorthand_is_linear_weight_only():
+    args = resolve_quantization_config("lut_b", None)
+    assert args.linear == QuantSpec(weight=kLutBStatic)
+    assert args.moe is None
+
+
+def test_lut_b_algorithm_config():
+    args = QuantizationConfigArgs(linear={"weight": "lut_b", "algorithm": "residual_1"})
+    assert args.linear == QuantSpec(weight=kLutBStatic, algorithm="residual_1")
 
 
 def test_resolve_quantization_config_only():

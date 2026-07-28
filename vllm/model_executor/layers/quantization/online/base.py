@@ -36,6 +36,9 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
 from vllm.model_executor.layers.quantization.online.int8 import (
     Int8OnlineMoEMethod,
 )
+from vllm.model_executor.layers.quantization.online.lut_b import (
+    LutBOnlineLinearMethod,
+)
 from vllm.model_executor.layers.quantization.online.mxfp8 import (
     Mxfp8OnlineLinearMethod,
     Mxfp8OnlineMoEMethod,
@@ -49,6 +52,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
     kInt8StaticChannelSym,
+    kLutBStatic,
     kMxfp8Dynamic,
     kNvfp4Static,
 )
@@ -64,6 +68,7 @@ _ONLINE_LINEAR_METHODS: dict[QuantKey, type] = {
     kFp8Static128BlockSym: Fp8PerBlockOnlineLinearMethod,
     kFp8StaticChannelSym: Fp8PtpcOnlineLinearMethod,
     kMxfp8Dynamic: Mxfp8OnlineLinearMethod,
+    kLutBStatic: LutBOnlineLinearMethod,
 }
 
 _ONLINE_MOE_METHODS: dict[QuantKey, type] = {
@@ -142,6 +147,13 @@ class OnlineQuantizationConfig(QuantizationConfig):
             raise ValueError(
                 f"activation override (activation={spec.activation}) is not "
                 f"yet supported for online {cls.__name__}"
+            )
+        if cls is LutBOnlineLinearMethod:
+            return cls(algorithm=spec.algorithm)
+        if spec.algorithm is not None:
+            raise ValueError(
+                f"algorithm={spec.algorithm!r} is not supported for "
+                f"online {cls.__name__}"
             )
         if isinstance(layer, RoutedExperts):
             return cls(layer=layer)

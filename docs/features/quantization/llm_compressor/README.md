@@ -29,3 +29,52 @@ Also includes support for QuIP and SpinQuant-style transforms as well as KV cach
 
 - [LLM Compressor examples](https://github.com/vllm-project/llm-compressor/tree/main/examples)
 - [GitHub Repository](https://github.com/vllm-project/llm-compressor)
+
+## Experimental Rubin LUT-B evaluation
+
+The `lut_b` linear backend is a calibration-free accuracy prototype for dense
+NVFP4 linear layers. During checkpoint loading, it dequantizes each NVFP4
+weight, fits an eight-entry E4M3 codebook for every 8x64 tile, and packs one
+3-bit index per weight. The resulting representation uses 3.125 bits per
+weight.
+
+The reference forward fully reconstructs the BF16/FP16 weight before
+`torch.nn.functional.linear`. It does not use the Rubin MMA and is intended
+only for accuracy evaluation:
+
+```bash
+vllm serve RedHatAI/Qwen3-8B-NVFP4 \
+  --linear-backend lut_b \
+  --enforce-eager \
+  --port 8000
+```
+
+For a useful GSM8K comparison, run these four configurations:
+
+| Input checkpoint | Options | Measurement |
+| ---------------- | ------- | ----------- |
+| `Qwen/Qwen3-8B` | `--quantization lut_b --enforce-eager` | Direct BF16-to-LUT-B weight-only loss |
+| `RedHatAI/Qwen3-8B-NVFP4` | Default options | NVFP4 weight-and-activation quantization |
+| `RedHatAI/Qwen3-8B-NVFP4` | `--linear-backend marlin` | Existing NVFP4 weights with unquantized activations |
+| `RedHatAI/Qwen3-8B-NVFP4` | `--linear-backend lut_b --enforce-eager` | NVFP4-to-LUT-B weight-only conversion |
+
+Run the default case on hardware with a native NVFP4 W4A4 backend and confirm
+the selected backend in the server log. On older hardware, automatic selection
+can fall back to Marlin and duplicate the explicit weight-only measurement.
+
+Run the internal GSM8K harness against each server, changing the result
+filename:
+
+```bash
+.venv/bin/python tests/evals/gsm8k/gsm8k_eval.py \
+  --port 8000 \
+  --num-questions 1319 \
+  --num-shots 5 \
+  --temperature 0 \
+  --max-concurrency 32 \
+  --save-results lut-b-qwen3-8b.json
+```
+
+The prototype supports dense NVFP4 linear weights whose sharded K dimension
+is divisible by 64 and whose logical output widths are divisible by 8. MoE
+weights and the hardware-specific GMEM/SMEM/TMEM layouts are not included.
