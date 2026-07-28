@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
 import time
-from collections.abc import Iterable, Sequence
+from abc import ABC, abstractmethod
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from itertools import chain, islice
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
@@ -49,6 +52,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
     ScheduleEndContext,
+    StorePolicy,
     TierFilter,
     TierMatcher,
     make_offload_key,
@@ -61,6 +65,87 @@ logger = init_logger(__name__)
 KV_LOAD_TIERS_KEY = "kv_load_tiers"
 MATCHER_MEDIUM_KEY = "medium"
 MATCHER_LOCALITY_KEY = "locality"
+
+
+if TYPE_CHECKING:
+    # Forward reference defined in the per-candidate admission follow-up
+    # (Decision A of #49413). See
+    # ``RequestOffloadState.iterate_candidates_for_store`` for the seam.
+    _StoreCandidate = Any
+
+
+class StoreStrategy(ABC):
+    """Per-request store policy. Stateful: one instance per request.
+
+    The instance lives on ``RequestOffloadState._store_strategy`` (set
+    in ``__post_init__`` from ``offloading_context.store_policy``).
+    State, counters, and per-request config belong on the strategy
+    instance, not on ``RequestOffloadState`` -- the latter is for KV
+    bookkeeping (cursors, block_ids, in-flight jobs). The strategy only
+    answers the single "what's the per-group store boundary this step?"
+    question; reachability filtering and packing are architectural
+    invariants owned by the scheduler and must remain so.
+
+    Two deliberate choices vs #42050's ``OffloadPolicy``:
+      * progress ownership: #42050 stores cursors on the policy
+        (``self._stored_idx: dict[req_id, list[int]]``); this design
+        keeps cursors in ``RequestOffloadState`` and lets the strategy
+        hold only *non-progress* per-request state, so the scheduler's
+        cursor invariants stay in one place.
+      * strategy lifetime: #42050 uses a scheduler-singleton policy
+        with cross-request dict state; this design uses a per-request
+        instance selected from ``offloading_context.store_policy``, so
+        each request can run a different policy.
+    """
+
+    @abstractmethod
+    def store_extent(
+        self,
+        req_status: RequestOffloadState,
+        num_offloadable_tokens: int,
+    ) -> list[int]:
+        """Per-group exclusive chunk boundary for this step.
+
+        Returned in ``config.kv_group_configs`` order; returning
+        ``group_state.next_stored_chunk_idx`` for a group means "defer this
+        step" (no new chunks offered, cursor stays put). The eager default is
+        the eligible boundary computed by ``req_status.storable_chunks``.
+        """
+        ...
+
+
+class EagerStoreStrategy(StoreStrategy):
+    """Default: every group's eligible chunk boundary."""
+
+    def store_extent(self, req_status, num_offloadable_tokens):
+        return [
+            req_status.storable_chunks(gc, gs, num_offloadable_tokens)
+            for gc, gs in zip(
+                req_status.config.kv_group_configs, req_status.group_states
+            )
+        ]
+
+
+class DeferUntilFinishStoreStrategy(StoreStrategy):
+    """Defer every group until the request reaches a terminal state.
+
+    Related: #42050 introduces ``request_finished`` on
+    ``OffloadingManager``, which lets the manager react when a request
+    ends (e.g. flush a deferred last-block transfer). This strategy is
+    the scheduler-side mirror: deferring all stores until
+    ``req.is_finished()`` so no incremental chunks hit the offload tier
+    during decode. See the #49413 RFC thread for context.
+    """
+
+    def store_extent(self, req_status, num_offloadable_tokens):
+        if req_status.req.is_finished():
+            return [
+                req_status.storable_chunks(gc, gs, num_offloadable_tokens)
+                for gc, gs in zip(
+                    req_status.config.kv_group_configs, req_status.group_states
+                )
+            ]
+        return [gs.next_stored_chunk_idx for gs in req_status.group_states]
 
 
 @dataclass(slots=True)
@@ -140,7 +225,7 @@ def is_store_reachable_swa_chunk(
 
 
 def resolve_mamba_align_size(
-    spec: "OffloadingSpec", kv_cache_config: KVCacheConfig
+    spec: OffloadingSpec, kv_cache_config: KVCacheConfig
 ) -> int | None:
     """Scan all KV cache groups in *spec* and return the single mamba alignment
     size, or None if no group requires mamba alignment.
@@ -171,7 +256,7 @@ class SchedulerOffloadConfig(NamedTuple):
         spec: OffloadingSpec,
         vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
-    ) -> "SchedulerOffloadConfig":
+    ) -> SchedulerOffloadConfig:
         # Determine the alignment token count from the full-attention group(s).
         # This is the tokens_per_chunk of the full-attention group; load
         # hits are always aligned to this boundary, so SWA blocks earlier in
@@ -288,6 +373,12 @@ class RequestOffloadState:
     deferred_lookup_start_time: float | None = None
     # True once on_request_finished has been signaled to the manager.
     finished_signaled: bool = False
+    # Per-request store strategy. Translated from
+    # ``offloading_context.store_policy`` in ``__post_init__``; the
+    # scheduler reads it via ``store_extent`` on every step. The mapping
+    # is a small closed dispatch (see ``__post_init__``) -- new policies
+    # add a branch there, not a registry.
+    _store_strategy: StoreStrategy = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.group_states = tuple(
@@ -308,6 +399,18 @@ class RequestOffloadState:
             logger.warning(
                 "max_offload_tokens must be a non-negative int, got %r; ignoring", raw
             )
+
+        # Translate the tier's ``offloading_context.store_policy`` choice
+        # into a concrete ``StoreStrategy`` instance. The tier does not
+        # know about ``StoreStrategy`` (it returns an enum in its
+        # ``on_new_request`` hook); this dispatch is the only place
+        # external intent becomes a scheduler-internal object. New
+        # ``StorePolicy`` values add a branch here.
+        match self.offloading_context.store_policy:
+            case StorePolicy.ON_COMPUTE:
+                self._store_strategy = EagerStoreStrategy()
+            case StorePolicy.ON_FINISH:
+                self._store_strategy = DeferUntilFinishStoreStrategy()
 
     def update_offload_keys(self) -> None:
         for group_config, group_state in zip(
@@ -337,7 +440,7 @@ class RequestOffloadState:
 
     def storable_chunks(
         self,
-        group_config: "GroupOffloadConfig",
+        group_config: GroupOffloadConfig,
         group_state: RequestGroupState,
         num_offloadable_tokens: int,
     ) -> int:
@@ -363,17 +466,59 @@ class RequestOffloadState:
         )
         return min(num_chunks, num_allocated_chunks)
 
-    def advance_stored_idx(self, num_offloadable_tokens: int) -> None:
-        # max(): at the prefill->decode transition of a chunk-aligned prompt,
-        # storable_chunks drops by one (the eagle exclusion kicks in), and the
-        # index must not move backwards past already-stored chunks.
-        for group_config, group_state in zip(
-            self.config.kv_group_configs, self.group_states
-        ):
+    def store_extent(self, num_offloadable_tokens: int) -> list[int]:
+        """Resolve this step's per-group store boundary from the store policy.
+
+        Delegates to the per-request ``StoreStrategy`` instance set in
+        ``__post_init__`` from ``offloading_context.store_policy``. The
+        strategy is *not* a singleton -- each request holds its own
+        instance so per-request state (counters, accumulators, ...) can
+        live on the strategy itself.
+
+        Each entry is the exclusive end index of the leading chunks to
+        store for that group this step; returning
+        ``group_state.next_stored_chunk_idx`` for a group means "defer"
+        (no new chunks offered, cursor stays put). The eager default is
+        identical to ``storable_chunks`` for every group.
+
+        Call once per step. The returned list is the **single source of
+        truth** for what the store loop should offer -- the per-group loop
+        uses ``ends[group_idx]`` instead of recomputing
+        ``storable_chunks(...)``, and cursor advance uses
+        ``advance_to_extent(ends)`` instead of recomputing
+        ``storable_chunks`` again. This keeps selection and advance
+        consistent so a deferred group's cursor can never jump past
+        chunks that were not offered.
+        """
+        return self._store_strategy.store_extent(self, num_offloadable_tokens)
+
+    def advance_to_extent(self, ends: list[int]) -> None:
+        """Advance each group's store cursor to ``ends[i]``.
+
+        ``ends`` is what ``store_extent`` (or the eager equivalent) just
+        produced for this step. ``max()`` guards the eagle prefill->decode
+        transition where the eligible boundary momentarily drops by one.
+        """
+        assert len(ends) == len(self.group_states)
+        for group_state, end in zip(self.group_states, ends):
             group_state.next_stored_chunk_idx = max(
-                group_state.next_stored_chunk_idx,
-                self.storable_chunks(group_config, group_state, num_offloadable_tokens),
+                group_state.next_stored_chunk_idx, end
             )
+
+    def iterate_candidates_for_store(
+        self, num_offloadable_tokens: int
+    ) -> Iterator[_StoreCandidate] | None:
+        """Seam for the per-candidate admission follow-up (Decision A of #49413).
+
+        Default returns ``None``, opting in to the per-group dispatch in
+        ``_build_store_jobs``. The per-candidate admission follow-up
+        (after #49506 lands) overrides this to return an iterator that
+        yields ``_StoreCandidate`` tuples in cross-group ending-token
+        order; the scheduler's per-candidate dispatch then consumes the
+        iterator to call ``manager.prepare_store`` once per admitted key
+        with prefix-transactional failure semantics.
+        """
+        return None
 
     def update_num_hit_chunks(self, num_cached_tokens: int) -> None:
         for group_config, group_state in zip(
@@ -1049,13 +1194,14 @@ class OffloadingConnectorScheduler:
 
             # Filter out chunks skipped due to sliding window attention / SSM
             # or unreachable by the load path's alignment constraints.
+            # ``ends`` is the policy-adjusted per-group store boundary; see
+            # ``RequestOffloadState.store_extent``.
+            ends = req_status.store_extent(num_offloadable_tokens)
             new_offload_keys: list[OffloadKey] = []
-            for group_config, group_state in zip(
-                self.config.kv_group_configs, req_status.group_states
+            for group_idx, (group_config, group_state) in enumerate(
+                zip(self.config.kv_group_configs, req_status.group_states)
             ):
-                num_chunks = req_status.storable_chunks(
-                    group_config, group_state, num_offloadable_tokens
-                )
+                num_chunks = ends[group_idx]
 
                 start_chunk_idx = group_state.next_stored_chunk_idx
                 if num_chunks <= start_chunk_idx:
@@ -1095,7 +1241,7 @@ class OffloadingConnectorScheduler:
                     new_offload_keys.append(offload_key)
 
             if not new_offload_keys:
-                req_status.advance_stored_idx(num_offloadable_tokens)
+                req_status.advance_to_extent(ends)
                 continue
 
             store_output = self.manager.prepare_store(
@@ -1109,7 +1255,7 @@ class OffloadingConnectorScheduler:
                 continue
 
             if not store_output.keys_to_store:
-                req_status.advance_stored_idx(num_offloadable_tokens)
+                req_status.advance_to_extent(ends)
                 continue
 
             self._touch(req_status)
@@ -1121,15 +1267,13 @@ class OffloadingConnectorScheduler:
             src_block_ids: list[int] = []
             sliding_window_block_ids: list[int] = []
             non_sliding_window_block_ids: list[int] = []
-            for group_config, group_state in zip(
-                self.config.kv_group_configs, req_status.group_states
+            for group_idx, (group_config, group_state) in enumerate(
+                zip(self.config.kv_group_configs, req_status.group_states)
             ):
                 is_sliding_window = (
                     group_config.sliding_window_size_in_chunks is not None
                 )
-                num_chunks = req_status.storable_chunks(
-                    group_config, group_state, num_offloadable_tokens
-                )
+                num_chunks = ends[group_idx]
                 start_chunk_idx = group_state.next_stored_chunk_idx
                 block_ids = group_state.block_ids
                 num_group_blocks = 0
@@ -1162,9 +1306,8 @@ class OffloadingConnectorScheduler:
 
                 group_sizes.append(num_group_blocks)
                 block_indices.append(start_gpu_block_idx or 0)
-                group_state.next_stored_chunk_idx = max(
-                    group_state.next_stored_chunk_idx, num_chunks
-                )
+
+            req_status.advance_to_extent(ends)
 
             src_spec = GPULoadStoreSpec(
                 src_block_ids, group_sizes=group_sizes, block_indices=block_indices

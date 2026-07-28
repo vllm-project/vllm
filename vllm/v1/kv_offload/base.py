@@ -126,9 +126,29 @@ class OffloadPolicy(Enum):
     REQUEST_LEVEL = "request_level"
 
 
+class StorePolicy(Enum):
+    """When eligible offloaded chunks are offered to the offload tier.
+
+    Independent of ``OffloadPolicy`` (which selects *which* blocks to
+    offload); ``StorePolicy`` selects the *timing*. A tier returns
+    ``RequestOffloadingContext(store_policy=...)`` from its
+    ``on_new_request`` hook; the scheduler translates it into a
+    ``StoreStrategy`` instance in ``RequestOffloadState.__post_init__``.
+    """
+
+    # Main behavior: every eligible chunk is offered as soon as it is
+    # allocated. Mirrors the pre-``StoreStrategy`` inline behavior.
+    ON_COMPUTE = "on_compute"
+    # Hold off all stores until the request reaches a terminal state
+    # (e.g. abort, finish). The strategy flushes everything in the
+    # ``req.is_finished()`` step; before that no chunks are offered.
+    ON_FINISH = "on_finish"
+
+
 @dataclass
 class RequestOffloadingContext:
     policy: OffloadPolicy = OffloadPolicy.BLOCK_LEVEL
+    store_policy: StorePolicy = StorePolicy.ON_COMPUTE
 
 
 class ScheduleEndContext(NamedTuple):
