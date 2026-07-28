@@ -271,15 +271,19 @@ class KVCacheManager:
             and self.enable_kv_cache_events
             and getattr(request, "kv_cache_report_mode", "incremental") == "full"
         ):
-            for group_idx, group_blocks in enumerate(computed_blocks):
+            for group_idx, (manager, group_blocks) in enumerate(
+                zip(
+                    self.coordinator.single_type_managers,
+                    computed_blocks,
+                    strict=True,
+                )
+            ):
                 num_blocks = len(group_blocks)
                 if num_blocks > 0:
-                    group = self.kv_cache_config.kv_cache_groups[group_idx]
-                    block_size = group.kv_cache_spec.block_size
                     self.block_pool.emit_cached_block_events(
                         request,
                         num_blocks,
-                        block_size,
+                        manager.block_size,
                         group_idx,
                     )
 
