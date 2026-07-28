@@ -426,10 +426,9 @@ def test_apply_prefix_caching_ssm_prefix_cache_hit(
 
 @pytest.mark.cpu_test
 def test_apply_prefix_caching_ssm_unpairable_slots_rejected():
-    """Local SSM slots can only exceed the remote ones by the single
-    position D recomputes itself. A larger excess means the two lists are
-    not position-aligned, which must fail loudly rather than transfer state
-    into the wrong slots."""
+    """Local SSM slots can only exceed the remote ones by the position D
+    recomputes itself. A larger excess means the lists aren't
+    position-aligned: fail loudly rather than transfer into wrong slots."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
@@ -1429,10 +1428,9 @@ def test_logical_to_kernel_block_ids_with_remote_ratio(
 
 @pytest.mark.cpu_test
 def test_exchange_clipped_blocks_ssm_single_state():
-    """With a single running state ("none"/"align" modes), SSM group lists
-    are reduced to that one state slot: trailing speculative scratch slots,
-    null placeholders and the previous step's superseded state hold no
-    transferable state. Attention groups pass through untouched."""
+    """In single-state cache modes, SSM lists are reduced to the running
+    state slot: speculative scratch slots, null placeholders and the previous
+    step's state carry nothing. Attention groups pass through untouched."""
     sched = make_nixl_scheduler(has_mamba=True, is_hma_required=True)
     sched.blocks_per_sw = [0, 0]
     sched._ssm_spec_blocks = [None, 2]
@@ -1442,16 +1440,13 @@ def test_exchange_clipped_blocks_ssm_single_state():
     clipped = sched.get_exchange_clipped_blocks(([1, 2, 3], [0, 0, 7, 8, 9]))
     assert clipped == ([1, 2, 3], [7])
 
-    # Align-mode list still holding the previous step's state block (freed
-    # one step later): only the running state is transferable.
+    # Same, still holding the previous step's state block (freed a step later).
     assert sched.get_exchange_clipped_blocks(([1], [0, 6, 7, 8, 9]))[1] == [7]
 
-    # Default (mamba_block_size=max_model_len) list with speculative
-    # decoding: state block first, 2 trailing scratch slots.
+    # Default (mamba_block_size=max_model_len): state block, 2 scratch slots.
     assert sched.get_exchange_clipped_blocks(([1], [7, 8, 9]))[1] == [7]
 
-    # No speculative slots allocated: at most len - 1 trailing blocks are
-    # stripped, so the state slot always survives.
+    # Scratch slots not allocated: the state slot still survives.
     assert sched.get_exchange_clipped_blocks(([1], [5]))[1] == [5]
 
     # Non-mamba models pass through unchanged.
@@ -1461,9 +1456,8 @@ def test_exchange_clipped_blocks_ssm_single_state():
 
 @pytest.mark.cpu_test
 def test_exchange_clipped_blocks_ssm_positional_states():
-    """In "all" mode every block position holds a state, so the list keeps
-    all of its slots (including null placeholders, which keep the list
-    position-indexed for the worker's pairing) minus the speculative ones."""
+    """In "all" mode every position holds a state, so only the speculative
+    slots go; placeholders stay to keep the list position-indexed."""
     sched = make_nixl_scheduler(has_mamba=True, is_hma_required=True)
     sched.blocks_per_sw = [0, 0]
     sched._ssm_spec_blocks = [None, 2]

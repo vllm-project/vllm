@@ -135,19 +135,16 @@ class NixlBaseConnectorScheduler:
             for n_tokens, block_size in sw_sizes_tokens
         ]
 
-        # Per-group speculative state slots for SSM (mamba) groups, None for
-        # non-SSM groups. Mamba managers co-allocate `num_speculative_blocks`
-        # trailing scratch slots with a request's state blocks; they hold no
-        # transferable state.
+        # Trailing scratch slots that mamba managers co-allocate per request
+        # for speculative decoding; None for non-SSM groups.
         self._ssm_spec_blocks = [
             g.kv_cache_spec.num_speculative_blocks
             if isinstance(g.kv_cache_spec, MambaSpec)
             else None
             for g in kv_cache_config.kv_cache_groups
         ]
-        # Only "all" mode keeps a state per block position, making SSM block
-        # lists multi-slot and position-indexed. "none"/"align" keep a single
-        # running state, which always sits in the last non-speculative slot.
+        # Only "all" mode keeps a state per block position; the other modes
+        # keep a single running state in the last non-speculative slot.
         self._ssm_state_slots_are_positional = (
             vllm_config.cache_config.mamba_cache_mode == "all"
         )
@@ -241,22 +238,19 @@ class NixlBaseConnectorScheduler:
         """Clip a request's block lists down to the transferable blocks.
 
         Sliding-window groups keep only the in-window tail: the KV cache
-        manager initially allocates blocks for the entire sequence length and
-        only cleans up out-of-window blocks prior to the
-        `request_finished_all_groups` hook.
+        manager allocates blocks for the entire sequence length and cleans up
+        out-of-window blocks only prior to the `request_finished_all_groups`
+        hook.
 
-        SSM groups are reduced to their state-bearing slots. Mamba managers
-        co-allocate ``num_speculative_blocks`` trailing scratch slots for
-        speculative decoding, which hold no transferable state and are
-        always stripped. What is left depends on the cache mode: "none" and
-        "align" keep a single running state, so the list is reduced to that
-        one slot (earlier entries are null placeholders or the previous
-        step's superseded state); "all" keeps a state per block position, so
-        the list stays multi-slot and is paired position-wise by the worker.
+        SSM groups keep only their state-bearing slots: the trailing
+        speculative scratch slots always go, and in single-state cache modes
+        so does everything before the running state (null placeholders and
+        the previous step's superseded state). "all" mode keeps its remaining
+        slots, which the worker pairs position-wise.
 
         Use this at every block-id exchange point. Pass ``clip_ssm=False``
-        for per-step partial lists (host-buffer save), where the SSM
-        trailing-slot strip does not apply.
+        for per-step partial lists (host-buffer save), where the SSM strip
+        does not apply.
         """
         if len(block_ids) == 0 or not self._is_hma_required:
             # No blocks to clip eg Full prefix cache hit or not a hybrid model.
@@ -279,8 +273,7 @@ class NixlBaseConnectorScheduler:
                 if n_spec := min(n_spec_blocks, len(blocks) - 1):
                     blocks = blocks[:-n_spec]
                 if not self._ssm_state_slots_are_positional:
-                    # Single running state: keep only its slot. Never empty,
-                    # since an empty list means "full prefix hit" downstream.
+                    # Never empty: downstream reads that as a full prefix hit.
                     blocks = blocks[-1:]
             clipped.append(blocks)
         return tuple(clipped)
