@@ -75,7 +75,7 @@ mod tests {
     use vllm_engine_core_client::protocol::multimodal::{MmField, MmKwargValue};
     use vllm_tokenizer::test_utils::TestTokenizer;
 
-    use super::super::{MultimodalModelContext, TokenizerResolver};
+    use super::super::{MediaAccessOptions, MultimodalModelContext, TokenizerResolver};
     use super::*;
 
     const AUDIO_PAD_ID: u32 = 151_676;
@@ -107,6 +107,7 @@ mod tests {
             context,
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
+            MediaAccessOptions::default(),
         )
         .unwrap()
         .expect("Inkling multimodal support")
@@ -126,6 +127,7 @@ mod tests {
             context,
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
+            MediaAccessOptions::default(),
         )
         .unwrap()
         .expect("Qwen3-ASR multimodal support")

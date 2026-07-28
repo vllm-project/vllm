@@ -68,6 +68,8 @@ async fn main() -> Result<()> {
         reasoning_parser: ParserSelection::Auto,
         renderer: RendererSelection::Auto,
         language_model_only: false,
+        allowed_local_media_path: None,
+        allowed_media_domains: None,
         chat_template: None,
         default_chat_template_kwargs: None,
         chat_template_content_format: ChatTemplateContentFormatOption::Auto,

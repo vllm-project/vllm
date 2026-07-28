@@ -594,6 +594,7 @@ fn qwen_multimodal_model_info() -> vllm_chat::multimodal::MultimodalModelInfo {
             ..Default::default()
         },
         Arc::new(fake_chat_tokenizer()),
+        Default::default(),
     )
     .expect("load multimodal info")
     .expect("qwen multimodal info is registered");

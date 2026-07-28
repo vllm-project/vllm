@@ -148,6 +148,17 @@ pub struct SharedRuntimeArgs {
     #[arg(long)]
     #[serde(default)]
     pub language_model_only: bool,
+    /// Allowing API requests to read local images or videos from directories
+    /// specified by the server file system. This is a security risk. Should
+    /// only be enabled in trusted environments.
+    #[arg(long)]
+    #[serde(default)]
+    pub allowed_local_media_path: Option<PathBuf>,
+    /// If set, only media URLs that belong to these domains can be used for
+    /// multi-modal inputs.
+    #[arg(long, num_args = 1..)]
+    #[serde(default)]
+    pub allowed_media_domains: Option<Vec<String>>,
     /// Maximum number of log probabilities to return when `logprobs` is
     /// specified in sampling parameters. `-1` means no cap.
     #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
@@ -334,6 +345,16 @@ impl SharedRuntimeArgs {
             .map_or(DEFAULT_KEEP_ALIVE_TIMEOUT, Duration::from_secs)
     }
 
+    /// Return the directory that file-based media inputs must live under.
+    ///
+    /// Python defaults `--allowed-local-media-path` to an empty string, which
+    /// disables local media just like leaving the argument unset.
+    fn local_media_root(&self) -> Option<PathBuf> {
+        self.allowed_local_media_path
+            .clone()
+            .filter(|path| !path.as_os_str().is_empty())
+    }
+
     /// Return the configured profiler mode, when profiling is enabled.
     pub fn profiler(&self) -> Option<String> {
         self.profiler_config.as_ref().and_then(|c| c.profiler.clone())
@@ -377,6 +398,7 @@ impl SharedRuntimeArgs {
         let cors = self.cors_config();
         let tls = self.tls_config();
         let profiler = self.profiler();
+        let allowed_local_media_path = self.local_media_root();
 
         Config {
             transport_mode: TransportMode::Bootstrapped {
@@ -397,6 +419,8 @@ impl SharedRuntimeArgs {
             reasoning_parser: self.reasoning_parser,
             renderer: self.renderer,
             language_model_only: self.language_model_only,
+            allowed_local_media_path,
+            allowed_media_domains: self.allowed_media_domains,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
             chat_template_content_format: self.chat_template_content_format,
@@ -431,6 +455,7 @@ impl SharedRuntimeArgs {
         let cors = self.cors_config();
         let tls = self.tls_config();
         let profiler = self.profiler();
+        let allowed_local_media_path = self.local_media_root();
 
         Config {
             transport_mode: TransportMode::HandshakeOwner {
@@ -449,6 +474,8 @@ impl SharedRuntimeArgs {
             reasoning_parser: self.reasoning_parser,
             renderer: self.renderer,
             language_model_only: self.language_model_only,
+            allowed_local_media_path,
+            allowed_media_domains: self.allowed_media_domains,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
             chat_template_content_format: self.chat_template_content_format,

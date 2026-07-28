@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
@@ -179,6 +180,11 @@ pub struct Config {
     /// Disable frontend-side multimodal preprocessing and render the model as
     /// language-only.
     pub language_model_only: bool,
+    /// Local directory that file media inputs must live under. `None` rejects
+    /// local files entirely.
+    pub allowed_local_media_path: Option<PathBuf>,
+    /// Hosts that remote media URLs must belong to. `None` allows any host.
+    pub allowed_media_domains: Option<Vec<String>>,
     /// Server-default chat template override, as a file path or inline
     /// template.
     pub chat_template: Option<String>,
