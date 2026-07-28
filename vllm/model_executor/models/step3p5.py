@@ -404,7 +404,7 @@ class FusedMoEBlock(nn.Module):
                 hidden_states=hidden_states, router_logits=hidden_states
             )
         else:
-            # TODO(bnell): this gate could be moved into the FusedMoEFactory?
+            # TODO(bnell): this gate could be moved into the MoERunner?
             router_logits, _ = self.gate(hidden_states)
             final_hidden_states = self.experts(
                 hidden_states=hidden_states, router_logits=router_logits
