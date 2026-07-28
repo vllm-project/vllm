@@ -265,6 +265,8 @@ def init_hisparse_runtime(
         for name in group.layer_names
     }
     hot_backing: torch.Tensor | None = None
+    coordinators: list[HiSparseCoordinator] = []
+    seen_coordinators: set[int] = set()
     for cache_name, raw_tensor in raw_tensors.items():
         if cache_name.endswith(HISPARSE_INDEXER_SOURCE_SUFFIX):
             layer_name = cache_name[: -len(HISPARSE_INDEXER_SOURCE_SUFFIX)]
@@ -311,6 +313,10 @@ def init_hisparse_runtime(
             hot_group_id=hot_group_id,
         )
         coordinator.bind_hot_block_table(block_tables.input_block_tables[hot_group_id])
+        if id(coordinator) not in seen_coordinators:
+            coordinator.bind_source_cache(kv_caches[layer_name])
+            coordinators.append(coordinator)
+            seen_coordinators.add(id(coordinator))
 
     source_group_ids = [
         group_id
@@ -344,15 +350,6 @@ def init_hisparse_runtime(
     block_size = kv_cache_config.kv_cache_groups[
         source_group_id
     ].kv_cache_spec.block_size
-    coordinators: list[HiSparseCoordinator] = []
-    seen_coordinators: set[int] = set()
-    for layer_name, context in forward_context.items():
-        coordinator = getattr(context.impl, "hisparse_coordinator", None)
-        if coordinator is None or id(coordinator) in seen_coordinators:
-            continue
-        coordinator.bind_source_cache(kv_caches[layer_name])
-        coordinators.append(coordinator)
-        seen_coordinators.add(id(coordinator))
     if not coordinators or hot_backing is None:
         raise RuntimeError("HiSparse runtime found no hot-cache coordinators.")
     return HiSparseRuntime(
