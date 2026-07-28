@@ -472,6 +472,7 @@ _use_triton_37_shim = False
 if has_triton_kernels():
     try:
         import triton_kernels.swiglu
+
         try:
             # Three supported triton_kernels API versions:
             #
@@ -497,8 +498,11 @@ if has_triton_kernels():
             from triton_kernels.matmul import (
                 FnSpecs,
                 FusedActivation,
+            )
+            from triton_kernels.matmul import (
                 matmul as _triton_matmul,
             )
+
             _use_triton_37_shim = True
 
             class GatherIndx:
@@ -512,8 +516,15 @@ if has_triton_kernels():
                     self.dst_indx = dst_indx
 
             class RoutingData:
-                def __init__(self, gate_scal, expt_hist, n_expts_tot, n_expts_act,
-                             expt_data=None, expected_tokens_per_expt=None):
+                def __init__(
+                    self,
+                    gate_scal,
+                    expt_hist,
+                    n_expts_tot,
+                    n_expts_act,
+                    expt_data=None,
+                    expected_tokens_per_expt=None,
+                ):
                     self.gate_scal = gate_scal
                     self.expt_hist = expt_hist
                     self.n_expts_tot = n_expts_tot
@@ -521,15 +532,30 @@ if has_triton_kernels():
                     self.expt_data = expt_data
                     self.expected_tokens_per_expt = expected_tokens_per_expt
 
-            def matmul_ogs(x, w, bias, routing_data=None, gather_indx=None,
-                           scatter_indx=None, precision_config=None, betas=None,
-                           gammas=None, out_alpha=None, y=None, fused_comm=None,
-                           fused_activation=None, epilogue=None, y_acc_in=None,
-                           inner_routing_data=None):
+            def matmul_ogs(
+                x,
+                w,
+                bias,
+                routing_data=None,
+                gather_indx=None,
+                scatter_indx=None,
+                precision_config=None,
+                betas=None,
+                gammas=None,
+                out_alpha=None,
+                y=None,
+                fused_comm=None,
+                fused_activation=None,
+                epilogue=None,
+                y_acc_in=None,
+                inner_routing_data=None,
+            ):
                 _gi = gather_indx.src_indx if gather_indx is not None else None
                 _si = scatter_indx.src_indx if scatter_indx is not None else None
                 return _triton_matmul(
-                    x, w, bias,
+                    x,
+                    w,
+                    bias,
                     a_ragged_metadata=(
                         routing_data.expt_data if routing_data is not None else None
                     ),
@@ -560,8 +586,8 @@ if has_triton_kernels():
             from triton_kernels.tensor import BIT, Bitmatrix
         except ImportError:
             # triton 3.7+
-            from triton_kernels.tensor_details.dtype import BIT
             from triton_kernels.tensor import wrap_torch_tensor as Bitmatrix
+            from triton_kernels.tensor_details.dtype import BIT
 
         try:
             from triton_kernels.tensor import (

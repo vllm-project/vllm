@@ -56,6 +56,7 @@ if has_triton_kernels():
         except ImportError:
             from triton_kernels.matmul_ogs import PrecisionConfig
         import inspect as _inspect
+
         # triton 3.7 renamed weight_scale -> b_mx_scale in PrecisionConfig
         _precision_config_weight_kwarg = (
             "weight_scale"
@@ -1099,9 +1100,9 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
         # W4A8: MXFP4 weights + static FP8 activations (triton kernel)
         try:
-            from triton_kernels.matmul import FlexCtx, PrecisionConfig
+            from triton_kernels.matmul import FlexCtx
         except ImportError:
-            from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
+            from triton_kernels.matmul_ogs import FlexCtx
         from triton_kernels.numerics import InFlexData
 
         if w13_bias is not None:
@@ -1158,9 +1159,9 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
 
     elif mxfp4_backend in TRITON_BACKENDS:
         try:
-            from triton_kernels.matmul import FlexCtx, PrecisionConfig
+            from triton_kernels.matmul import FlexCtx
         except ImportError:
-            from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
+            from triton_kernels.matmul_ogs import FlexCtx
 
         if w13_bias is not None:
             w13_bias = w13_bias.to(torch.float32)
@@ -1526,9 +1527,9 @@ def convert_weight_to_mxfp4_moe_kernel_format(
 
     elif mxfp4_backend in TRITON_BACKENDS:
         try:
-            from triton_kernels.matmul import FlexCtx, PrecisionConfig
+            from triton_kernels.matmul import FlexCtx
         except ImportError:
-            from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
+            from triton_kernels.matmul_ogs import FlexCtx
 
         if mxfp4_backend == Mxfp4MoeBackend.TRITON:
 
