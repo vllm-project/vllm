@@ -436,7 +436,7 @@ class TestConvertToolMessage:
 
     def test_text_only_list_flattened_to_newline_string(self):
         # Text-only tool results are flattened to a single newline-joined
-        # string for compatibility with vanilla chat templates.
+        # string for compatibility with standard chat templates.
         req = self._request_with_tool_message(
             [
                 {"type": "text", "text": "line 1"},
@@ -873,9 +873,9 @@ class TestMessageCitations:
         # nothing to anchor to. Emitting it with ``sources=[]`` would
         # render a malformed ``<co>text</co: :>`` marker, and silently
         # misattributing to ``documents[0]`` would be worse -- so we
-        # drop the whole citation, matching dory's behavior. Since this
-        # message's only citation was dropped, the message index
-        # shouldn't appear in the forwarded map at all.
+        # drop the whole citation, matching the cohere api's behavior.
+        # Since this message's only citation was dropped, the message
+        # index shouldn't appear in the forwarded map at all.
         result = _convert(
             _make_request(
                 documents=[{"id": "doc_present", "data": {"text": "x"}}],
@@ -1072,8 +1072,8 @@ class TestMessageCitations:
         # result. Melody's ``<co>text</co: N:[i,j]>`` marker packs them
         # into a single ``Source`` with a list of ``tool_result_indices``
         # rather than two separate ``Source`` entries; the converter
-        # groups per-bucket to match that. See ``toMelodyCitations`` in
-        # ``blobheart/go/dory/pkg/chat/templating/melody.go``.
+        # groups per-bucket to match that -- matching the cohere api's
+        # inbound citation shape.
         result = _convert(
             _make_request(
                 messages=[
@@ -1159,7 +1159,7 @@ class TestMessageCitations:
         # If any source in a citation fails to resolve, drop the entire
         # citation -- mixing resolved and unresolved sources produces a
         # partially-correct ``<co>`` marker, which is worse than none.
-        # This is dory's behavior in ``getCitationIDMap``.
+        # This matches the cohere api's behavior.
         result = _convert(
             _make_request(
                 documents=[{"id": "doc_real", "data": {"text": "x"}}],
@@ -1619,113 +1619,85 @@ class TestBuildUsage:
 
 
 class TestExtractCitations:
-    """Test the parser-output -> wire-shape citation resolver.
+    """Test the parser-output -> wire-shape citation coercion.
 
-    Parser produces :class:`VLLMCitation` with unresolved sources
-    (numeric melody coords only). The serving handler resolves each
-    source against the request context so the wire payload carries
-    real document ids, correct ``type`` (``document`` vs ``tool``),
-    and payload attached -- matching dory's ``toCitationsV2`` +
-    ``sourcesFromDocuments`` in ``blobheart/go/dory/pkg/chat/v2.go``.
+    Sources are already fully resolved by the reasoning parser (see
+    ``_melody_sources_to_vllm`` in
+    ``vllm/reasoning/cohere_command_reasoning_parser.py``, which
+    consumes the position map forwarded via ``chat_template_kwargs``).
+    The serving layer's remaining responsibilities on the outbound
+    path are: coerce to :class:`cohere.types.Citation`, apply the
+    ``THINKING_CONTENT`` -> ``PLAN`` rewrite for non-reasoning models,
+    and drop citations whose ``sources`` list is entirely empty
+    (unattributable anchors). Id-less sources with a payload are
+    preserved to match the cohere api's optional-``id`` source shape.
     """
+
+    @staticmethod
+    def _make_citation(**overrides: Any) -> VLLMCitation:
+        base = dict(
+            start=0,
+            end=11,
+            text="Shakespeare",
+            sources=[
+                CitationSource(
+                    type="document",
+                    id="doc_hamlet",
+                    document={"id": "doc_hamlet", "text": "Hamlet."},
+                ),
+            ],
+            type="TEXT_CONTENT",
+        )
+        base.update(overrides)
+        return VLLMCitation(**base)
 
     def test_none_or_empty_returns_none(self):
         serving = _serving()
-        request = _make_request()
         assert (
-            serving._extract_citations_if_any(
-                type("M", (), {"citations": None})(), request
-            )
+            serving._extract_citations_if_any(type("M", (), {"citations": None})())
             is None
         )
         assert (
-            serving._extract_citations_if_any(
-                type("M", (), {"citations": []})(), request
-            )
+            serving._extract_citations_if_any(type("M", (), {"citations": []})())
             is None
         )
-        assert serving._extract_citations_if_any(type("M", (), {})(), request) is None
+        assert serving._extract_citations_if_any(type("M", (), {})()) is None
 
-    def test_document_source_resolves_to_real_id_and_payload(self):
+    def test_resolved_document_source_survives_to_wire(self):
+        # A parser-resolved document source flows through unchanged
+        # (aside from removing ``None`` fields).
         serving = _serving()
-        request = _make_request(
-            documents=[
-                {"id": "doc_hamlet", "data": {"text": "Hamlet by Shakespeare."}}
-            ],
-        )
         msg = type("M", (), {})()
-        msg.citations = [
-            VLLMCitation(
-                start=0,
-                end=11,
-                text="Shakespeare",
-                sources=[
-                    CitationSource(tool_call_index=0, tool_result_indices=[0]),
-                ],
-                type="TEXT_CONTENT",
-            )
-        ]
-        out = serving._extract_citations_if_any(msg, request)
-        assert out is not None
-        assert len(out) == 1
+        msg.citations = [self._make_citation()]
+        out = serving._extract_citations_if_any(msg)
+        assert out is not None and len(out) == 1
         wire = out[0].model_dump(exclude_none=True)
-        assert wire["start"] == 0
-        assert wire["end"] == 11
-        assert wire["text"] == "Shakespeare"
         assert wire["type"] == "TEXT_CONTENT"
-        # Real doc id, correct ``type``, and payload attached. Payload
-        # includes an injected ``id`` (matches ``_apply_cohere_template_
-        # kwargs`` normalization on the inbound side).
         assert wire["sources"] == [
             {
                 "type": "document",
                 "id": "doc_hamlet",
-                "document": {"id": "doc_hamlet", "text": "Hamlet by Shakespeare."},
+                "document": {"id": "doc_hamlet", "text": "Hamlet."},
             }
         ]
 
-    def test_tool_source_resolves_to_type_tool_with_tool_output_payload(self):
+    def test_resolved_tool_source_survives_to_wire(self):
+        # ``type="tool"`` sources carry ``tool_output``; validated by
+        # the SDK's discriminated union.
         serving = _serving()
-        request = _make_request(
-            messages=[
-                {"role": "user", "content": "q"},
-                {
-                    "role": "assistant",
-                    "tool_plan": "plan",
-                    "tool_calls": [
-                        {
-                            "id": "call_a",
-                            "type": "function",
-                            "function": {"name": "f", "arguments": "{}"},
-                        }
-                    ],
-                },
-                {
-                    "role": "tool",
-                    "tool_call_id": "call_a",
-                    "content": [
-                        {
-                            "type": "document",
-                            "document": {"id": "res_a0", "data": {"text": "r"}},
-                        },
-                    ],
-                },
-            ],
-        )
         msg = type("M", (), {})()
-        # No top-level documents so tool buckets start at 0.
         msg.citations = [
-            VLLMCitation(
-                start=0,
-                end=1,
-                text="a",
+            self._make_citation(
                 sources=[
-                    CitationSource(tool_call_index=0, tool_result_indices=[0]),
+                    CitationSource(
+                        type="tool",
+                        id="res_a0",
+                        tool_output={"id": "res_a0", "text": "r"},
+                    ),
                 ],
-                type="TEXT_CONTENT",
             )
         ]
-        out = serving._extract_citations_if_any(msg, request)
+        out = serving._extract_citations_if_any(msg)
         assert out is not None
         wire = out[0].model_dump(exclude_none=True)
         assert wire["sources"] == [
@@ -1736,119 +1708,93 @@ class TestExtractCitations:
             }
         ]
 
-    def test_multi_result_indices_expand_to_multiple_sources(self):
-        # One melody source with multiple ``tool_result_indices`` fans
-        # out to multiple wire sources (one per resolved position).
+    def test_source_without_id_preserved_with_payload(self):
+        # Matches the cohere api: text-only tool results (and top-level
+        # docs without a client-provided id) surface on the wire
+        # without an ``id`` field, but the payload still rides through
+        # so the client can see what was cited.
         serving = _serving()
-        request = _make_request(
-            documents=[
-                {"id": "d0", "data": {"text": "zero"}},
-                {"id": "d1", "data": {"text": "one"}},
-            ],
-        )
         msg = type("M", (), {})()
         msg.citations = [
-            VLLMCitation(
-                start=0,
-                end=3,
-                text="ans",
+            self._make_citation(
                 sources=[
-                    CitationSource(tool_call_index=0, tool_result_indices=[0, 1]),
-                ],
-                type="TEXT_CONTENT",
+                    CitationSource(type="tool", tool_output={"content": "hi"}),
+                ]
             )
         ]
-        out = serving._extract_citations_if_any(msg, request)
+        out = serving._extract_citations_if_any(msg)
+        assert out is not None
+        wire = out[0].model_dump(exclude_none=True)
+        assert wire["sources"] == [{"type": "tool", "tool_output": {"content": "hi"}}]
+        assert "id" not in wire["sources"][0]
+
+    def test_citation_with_no_surviving_sources_dropped(self):
+        # If every source in a citation is empty (e.g. parser produced
+        # a stray citation with no resolvable positions), the whole
+        # citation is dropped so we don't emit unattributed anchors.
+        serving = _serving()
+        msg = type("M", (), {})()
+        msg.citations = [self._make_citation(sources=[])]
+        assert serving._extract_citations_if_any(msg) is None
+
+    def test_multiple_sources_survive(self):
+        serving = _serving()
+        msg = type("M", (), {})()
+        msg.citations = [
+            self._make_citation(
+                sources=[
+                    CitationSource(type="document", id="d0", document={"id": "d0"}),
+                    CitationSource(type="document", id="d1", document={"id": "d1"}),
+                ],
+            )
+        ]
+        out = serving._extract_citations_if_any(msg)
         assert out is not None
         wire = out[0].model_dump(exclude_none=True)
         assert [s["id"] for s in wire["sources"]] == ["d0", "d1"]
 
-    def test_unresolvable_source_drops_whole_citation(self):
-        # A source whose ``(bucket, idx)`` doesn't hit any position in
-        # the map can't be attributed -- drop the whole citation
-        # (matches ``_sdk_citation_to_melody``'s inbound policy).
-        serving = _serving()
-        request = _make_request(documents=[{"id": "d0", "data": {"text": "x"}}])
-        msg = type("M", (), {})()
-        msg.citations = [
-            VLLMCitation(
-                start=0,
-                end=1,
-                text="a",
-                sources=[
-                    CitationSource(tool_call_index=5, tool_result_indices=[0]),
-                ],
-            )
-        ]
-        out = serving._extract_citations_if_any(msg, request)
-        assert out is None
-
     def test_plan_type_on_non_reasoning_model(self):
         # ``is_thinking=True`` melody citations arrive tagged as
         # ``THINKING_CONTENT``; on non-reasoning models the reasoning
-        # block is surfaced as ``tool_plan``, so citations on it are
+        # block is surfaced as ``tool_plan`` (see
+        # ``_chat_completion_to_v2``), so citations on it are
         # ``PLAN`` on the wire.
         serving = _serving(is_reasoning_model=False)
-        request = _make_request(documents=[{"id": "d0", "data": {"text": "x"}}])
         msg = type("M", (), {})()
-        msg.citations = [
-            VLLMCitation(
-                start=0,
-                end=1,
-                text="a",
-                sources=[
-                    CitationSource(tool_call_index=0, tool_result_indices=[0]),
-                ],
-                type="THINKING_CONTENT",
-            )
-        ]
-        out = serving._extract_citations_if_any(msg, request)
+        msg.citations = [self._make_citation(type="THINKING_CONTENT")]
+        out = serving._extract_citations_if_any(msg)
         assert out is not None
         assert out[0].type == "PLAN"
 
     def test_thinking_type_preserved_on_reasoning_model(self):
         serving = _serving(is_reasoning_model=True)
-        request = _make_request(documents=[{"id": "d0", "data": {"text": "x"}}])
         msg = type("M", (), {})()
-        msg.citations = [
-            VLLMCitation(
-                start=0,
-                end=1,
-                text="a",
-                sources=[
-                    CitationSource(tool_call_index=0, tool_result_indices=[0]),
-                ],
-                type="THINKING_CONTENT",
-            )
-        ]
-        out = serving._extract_citations_if_any(msg, request)
+        msg.citations = [self._make_citation(type="THINKING_CONTENT")]
+        out = serving._extract_citations_if_any(msg)
         assert out is not None
         assert out[0].type == "THINKING_CONTENT"
 
-    def test_internal_coords_stripped_from_wire(self):
-        # ``tool_call_index`` / ``tool_result_indices`` are internal
-        # fields used to thread parser output through the resolver;
-        # they must never appear on the outbound wire.
+    def test_dict_shape_from_streaming_pipeline(self):
+        # The streaming path receives citations as dicts (because
+        # ``DeltaMessage.citations`` is an untyped extras field on the
+        # OpenAI wire protocol). ``_to_wire_citation`` must accept
+        # both dict and object shapes -- unary uses objects.
         serving = _serving()
-        request = _make_request(documents=[{"id": "d0", "data": {"text": "x"}}])
         msg = type("M", (), {})()
         msg.citations = [
-            VLLMCitation(
-                start=0,
-                end=1,
-                text="a",
-                sources=[
-                    CitationSource(tool_call_index=0, tool_result_indices=[0]),
+            {
+                "start": 0,
+                "end": 3,
+                "text": "abc",
+                "sources": [
+                    {"type": "document", "id": "d0", "document": {"id": "d0"}},
                 ],
-                type="TEXT_CONTENT",
-            )
+                "type": "TEXT_CONTENT",
+            }
         ]
-        out = serving._extract_citations_if_any(msg, request)
+        out = serving._extract_citations_if_any(msg)
         assert out is not None
-        wire = out[0].model_dump(exclude_none=True)
-        for src in wire["sources"]:
-            assert "tool_call_index" not in src
-            assert "tool_result_indices" not in src
+        assert out[0].sources[0].id == "d0"
 
 
 # ======================================================================
@@ -1916,9 +1862,9 @@ class TestBuildPositionToSource:
         assert result[(1, 0)].tool_output == {"id": "res_a0", "text": "r"}
 
     def test_tool_call_id_registered_from_assistant_message(self):
-        # Bucket assignment must match dory's rule: the first-seen
-        # ``tool_call_id`` (whether on the assistant tool_calls or on
-        # the tool message) claims the next integer.
+        # Bucket assignment must match the cohere api's rule: the
+        # first-seen ``tool_call_id`` (whether on the assistant
+        # tool_calls or on the tool message) claims the next integer.
         request = _make_request(
             messages=[
                 {"role": "user", "content": "q"},
@@ -1967,10 +1913,12 @@ class TestBuildPositionToSource:
         assert result[(0, 0)].id == "res_first"
         assert result[(1, 0)].id == "res_second"
 
-    def test_tool_content_text_blocks_consume_slots_but_have_no_doc_id(self):
-        # A tool message with mixed text and document content: the
-        # text blocks consume slots (matching melody's numbering) but
-        # only the document blocks show up in the map.
+    def test_tool_content_text_and_document_blocks_both_populate_map(self):
+        # Mixed text + document content: text blocks now surface in
+        # the map as id-less ``tool`` sources (matching the cohere
+        # api's handling of text-only tool content) so a model
+        # citation pointing at the text slot still has a payload to
+        # attach.
         request = _make_request(
             messages=[
                 {"role": "user", "content": "q"},
@@ -1999,9 +1947,83 @@ class TestBuildPositionToSource:
             ],
         )
         result = CohereServingChatV2._build_position_to_source(request)
-        # Text block occupies slot 0, document occupies slot 1.
-        assert set(result.keys()) == {(0, 1)}
+        assert set(result.keys()) == {(0, 0), (0, 1)}
+        assert result[(0, 0)].type == "tool"
+        assert result[(0, 0)].id is None
+        assert result[(0, 0)].tool_output == {"content": "prelude"}
         assert result[(0, 1)].id == "res_x"
+
+    def test_tool_content_json_text_parsed_as_tool_output(self):
+        # The cohere api tries JSON first for text tool content; parity
+        # here means a JSON-object text block is spread into
+        # ``tool_output`` directly instead of nested under ``content``.
+        request = _make_request(
+            messages=[
+                {"role": "user", "content": "q"},
+                {
+                    "role": "assistant",
+                    "tool_plan": "plan",
+                    "tool_calls": [
+                        {
+                            "id": "call_a",
+                            "type": "function",
+                            "function": {"name": "f", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_a",
+                    "content": [{"type": "text", "text": '{"title": "hi"}'}],
+                },
+            ],
+        )
+        result = CohereServingChatV2._build_position_to_source(request)
+        assert result[(0, 0)].tool_output == {"title": "hi"}
+
+    def test_top_level_document_without_id_omits_id_but_keeps_payload(self):
+        # Client didn't provide a doc id: match cohere's optional-id
+        # source shape by leaving ``id=None`` on the wire, but keep
+        # the payload so the citation is still meaningful.
+        request = _make_request(
+            documents=[{"data": {"text": "anon"}}],
+        )
+        result = CohereServingChatV2._build_position_to_source(request)
+        assert result[(0, 0)].type == "document"
+        assert result[(0, 0)].id is None
+        assert result[(0, 0)].document == {"text": "anon"}
+
+    def test_top_level_string_document_has_no_wire_id(self):
+        request = _make_request(documents=["raw text"])
+        result = CohereServingChatV2._build_position_to_source(request)
+        assert result[(0, 0)].id is None
+        assert result[(0, 0)].document == {"text": "raw text"}
+
+    def test_tool_content_string_synthesizes_idless_source(self):
+        # ``ToolChatMessageV2.content`` may be a bare string; the
+        # cohere renderer wraps it as a single text block, so we
+        # synthesize a matching id-less source for the slot.
+        request = _make_request(
+            messages=[
+                {"role": "user", "content": "q"},
+                {
+                    "role": "assistant",
+                    "tool_plan": "plan",
+                    "tool_calls": [
+                        {
+                            "id": "call_a",
+                            "type": "function",
+                            "function": {"name": "f", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_a", "content": "just text"},
+            ],
+        )
+        result = CohereServingChatV2._build_position_to_source(request)
+        assert result[(0, 0)].type == "tool"
+        assert result[(0, 0)].id is None
+        assert result[(0, 0)].tool_output == {"content": "just text"}
 
     def test_multiple_tool_messages_same_call_id_offset_slots(self):
         # Tool results streamed across multiple messages accumulate
@@ -2049,7 +2071,7 @@ class TestBuildPositionToSource:
 
 
 # ======================================================================
-# create_error_response sanity
+# create_error_response
 # ======================================================================
 
 

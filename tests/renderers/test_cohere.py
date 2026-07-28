@@ -852,9 +852,9 @@ async def test_async_cohere_renderer_does_not_block_event_loop():
 #
 # Ties the whole pipeline together: a Cohere v2 request carrying an
 # assistant message with citations must produce a rendered prompt that
-# contains melody's inline ``<co>...</co: <id>>`` markup around the cited
-# span. This is the invariant the ``_messages_citations``
-# chat_template_kwargs entry was introduced to preserve.
+# contains melody's inline ``<co>...</co: <id>>`` markup around the
+# cited span. Preserving this invariant is the whole point of the
+# ``_messages_citations`` chat_template_kwargs entry.
 
 
 class TestRequestCitationsReachRenderedPrompt:

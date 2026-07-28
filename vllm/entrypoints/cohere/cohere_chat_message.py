@@ -44,32 +44,22 @@ class CitationSource(OpenAIBaseModel):
     document/tool-output identifier; ``document`` and ``tool_output`` carry
     the original payload that produced the citation.
 
-    ``tool_call_index`` and ``tool_result_indices`` are internal fields
-    populated by the Cohere reasoning parser (which sees only melody's
-    numeric ``(bucket, result_idx)`` addressing). They are consumed by
-    :meth:`vllm.entrypoints.cohere.serving.CohereServingChatV2` to
-    resolve each source against the request's ``documents`` / tool
-    result contents, at which point ``type`` / ``id`` / ``document`` /
-    ``tool_output`` get populated.
-
-    Both flow through the *internal* streaming pipeline (parser ->
-    OpenAI stream chunk -> ``_chat_completion_stream_to_v2``), so they
-    must survive ``model_dump_json`` at that layer -- ``Field(exclude=
-    True)`` would drop them from serialization even when set, breaking
-    the resolver. Suppression from the *outer* Cohere v2 wire is
-    instead enforced by :meth:`_resolve_internal_citation` in serving,
-    which rebuilds wire sources from ``position_to_source`` (whose
-    entries always leave these fields ``None``) and calls
-    ``model_dump(exclude_none=True)`` before handing the payload to
-    :class:`cohere.types.Citation`.
+    Sources are fully resolved by the reasoning parser at emit time
+    (see :func:`_melody_sources_to_vllm` in
+    :mod:`vllm.reasoning.cohere_command_reasoning_parser`) using the
+    ``POSITION_TO_SOURCE_KEY`` map forwarded through
+    ``chat_template_kwargs`` by
+    :meth:`vllm.entrypoints.cohere.serving.CohereServingChatV2._apply_cohere_template_kwargs`.
+    That means every instance that reaches the serving / wire layer
+    already has ``type`` / ``id`` populated; the serving layer only has
+    to coerce to :class:`cohere.types.Citation` and rewrite
+    ``THINKING_CONTENT`` -> ``PLAN`` for non-reasoning models.
     """
 
     type: Literal["document", "tool"] | None = None
     id: str | None = None
     document: dict[str, Any] | None = None
     tool_output: dict[str, Any] | None = None
-    tool_call_index: int | None = None
-    tool_result_indices: list[int] | None = None
 
 
 class Citation(OpenAIBaseModel):

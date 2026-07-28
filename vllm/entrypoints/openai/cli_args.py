@@ -159,9 +159,9 @@ class BaseFrontendArgs:
     endpoints."""
     cohere_format: str = "cmd4"
     """Cohere ``--tokenizer-mode cohere`` only. Which Cohere prompt
-    format to render: ``cmd4`` (current Command A+ models);
-    default) or ``cmd3`` (earlier Cmd-A and Cmd-A reasoning models). Selecting
-    the wrong format silently produces a prompt the model wasn't trained
+    format to render: ``cmd4`` (current Command A+ models; default) or
+    ``cmd3`` (earlier Cmd-A and Cmd-A reasoning models). Selecting the
+    wrong format silently produces a prompt the model wasn't trained
     on, which most commonly manifests as the model emitting text but no
     citations / tool calls / thinking blocks. Equivalent to passing
     ``--default-chat-template-kwargs '{"cohere_format": "..."}'`` -- any

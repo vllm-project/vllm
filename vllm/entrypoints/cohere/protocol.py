@@ -3,8 +3,8 @@
 """Cohere Chat v2 API protocol.
 
 The bulk of the wire types come straight from the official ``cohere``
-Python SDK so we stay in lockstep with the upstream specification and
-avoid hand-mirroring the schema. We only own three things locally:
+Python SDK so we stay in sync with the upstream specification and
+avoid re-declaring the schema. We only own three things locally:
 
 1. The top-level request body model (the SDK doesn't ship one — its
    ``ClientV2.chat`` takes the body as kwargs), with vLLM-specific
@@ -214,10 +214,10 @@ class CohereChatV2Request(BaseModel):
         ``mode="before"`` is required so the rewrite happens before the
         ``list[ChatMessageV2]`` coercion runs the SDK's discriminated
         union; a default-mode validator would never see ``developer``
-        because validation would have already failed. On any structural
-        surprise (non-iterable input, items without a dict-shaped
-        ``role`` field, etc.) we hand ``v`` back unchanged and let
-        Pydantic's normal coercion surface a precise error.
+        because validation would have already failed. On any
+        structural malformation (non-iterable input, items without a
+        dict-shaped ``role`` field, etc.) we hand ``v`` back unchanged
+        and let Pydantic's normal coercion surface a precise error.
         """
         try:
             return [

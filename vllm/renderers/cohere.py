@@ -3,10 +3,9 @@
 """Cohere prompt renderer.
 
 Templates the Cohere Command-family prompt formats (cmd3 / cmd4) using
-the ``cohere_melody`` Rust bindings instead of Jinja. Selecting this
-renderer is a matter of setting ``--tokenizer-mode cohere`` on the
-engine; tokenization itself still flows through the cached HuggingFace
-tokenizer.
+the ``cohere_melody`` Rust bindings instead of Jinja. Enabled by
+passing ``--tokenizer-mode cohere`` on the engine; tokenization itself
+still flows through the cached HuggingFace tokenizer.
 
 The renderer's client surface is ``chat_template_kwargs`` (vLLM's
 generic passthrough for template-time inputs). It is fed by two
@@ -144,14 +143,27 @@ class MelodyContentType(str, Enum):
 MESSAGES_CITATIONS_KEY = "_messages_citations"
 
 
+# Reserved ``chat_template_kwargs`` key carrying a request-side
+# ``dict[tuple[int, int], CitationSource]`` map from melody's numeric
+# ``(tool_call_index, tool_result_index)`` addressing to fully-resolved
+# wire-shape sources (type, id, document/tool_output payload).
+# Populated by :meth:`CohereServingChatV2._apply_cohere_template_kwargs`
+# and consumed by :class:`BaseCohereCommandReasoningParser` at request
+# start so the parser can attach real document ids on each melody source
+# it emits -- eliminating the numeric-coord round-trip through the
+# internal streaming pipeline. Leading underscore signals "internal,
+# not part of the public ``chat_template_kwargs`` surface" -- clients
+# should not set this key directly.
+POSITION_TO_SOURCE_KEY = "_position_to_source"
+
+
 # Keys this renderer interprets directly from ``chat_template_kwargs`` and
 # maps onto typed melody render-config fields. Everything *not* in this
 # set is forwarded verbatim to melody as ``additional_template_fields``
 # (i.e. as Jinja template variables), so callers can write
 # ``chat_template_kwargs = {"my_var": "..."}`` and have ``{{ my_var }}``
-# resolve inside the template -- matching vLLM's documented contract for
-# ``chat_template_kwargs`` and avoiding the older nested-namespace form
-# (``chat_template_kwargs.additional_template_fields.my_var``).
+# resolve inside the template -- matching vLLM's documented contract
+# for ``chat_template_kwargs``.
 _RENDERER_CONSUMED_KEYS = frozenset(
     {
         "cohere_format",
@@ -183,6 +195,7 @@ _RENDERER_CONSUMED_KEYS = frozenset(
         "grounding",
         "platform_instruction",
         MESSAGES_CITATIONS_KEY,
+        POSITION_TO_SOURCE_KEY,
     }
 )
 
@@ -612,8 +625,7 @@ class CohereRenderer(BaseRenderer[HfTokenizer]):
 
     Tokenization is delegated to the standard HF tokenizer; only the
     chat-template step is replaced with ``cohere_melody.render_cmd3`` /
-    ``render_cmd4``. Picking this renderer is opt-in via
-    ``--tokenizer-mode cohere``.
+    ``render_cmd4``. Enabled via ``--tokenizer-mode cohere``.
     """
 
     def __init__(

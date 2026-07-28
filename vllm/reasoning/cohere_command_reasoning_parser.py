@@ -409,40 +409,61 @@ def _schema_dict_from_structured_outputs(
     )
 
 
-def _melody_sources_to_vllm(raw_sources: Any) -> list[CitationSource]:
-    """Convert melody's ``Source`` objects into unresolved :class:`CitationSource`.
+def _melody_sources_to_vllm(
+    raw_sources: Any,
+    position_to_source: Mapping[tuple[int, int], CitationSource] | None,
+) -> list[CitationSource]:
+    """Convert melody's ``Source`` objects into resolved :class:`CitationSource`.
 
-    Melody's ``Source`` shape is ``{tool_call_index, tool_result_indices,
-    document_ids}``. Without :meth:`PyFilterOptions.with_message_history`
-    the ``document_ids`` list is empty, and even with it there's no way
-    at parser time to know whether a bucket is the reserved top-level
-    ``documents`` bucket or a tool call bucket. Rather than guess, we
-    emit each melody source verbatim with just its numeric coordinates;
-    :class:`vllm.entrypoints.cohere.serving.CohereServingChatV2` resolves
-    the coordinates to a fully-populated
-    :class:`~cohere.types.source.DocumentSource` / :class:`ToolSource`
-    using the request context (which knows how it originally assigned
-    the numbering).
+    Melody's ``Source`` shape is
+    ``{tool_call_index, tool_result_indices, document_ids}``. Without
+    :meth:`PyFilterOptions.with_message_history` the ``document_ids``
+    list is empty, so we resolve the numeric address ourselves using
+    ``position_to_source``, which is
+    :meth:`vllm.entrypoints.cohere.serving.CohereServingChatV2._build_position_to_source`
+    applied to the inbound request and forwarded through
+    ``chat_template_kwargs`` at parser-construction time. Each melody
+    source with ``tool_result_indices=[i, j, ...]`` fans out to one
+    :class:`CitationSource` per resolved position, populating the
+    wire-shape ``type`` / ``id`` / ``document`` / ``tool_output``
+    fields; unresolved positions are silently skipped (the calling
+    citation is dropped at wire-coercion time if every source in it
+    ends up unresolved -- see ``_to_wire_citation`` in
+    :mod:`vllm.entrypoints.cohere.serving`).
 
-    One melody source can address multiple positions inside its bucket
-    (``tool_result_indices`` is a list), so we keep them packed here;
-    serving expands them one-per-position when it builds the wire shape.
+    When ``position_to_source`` is ``None`` (parser wired outside of
+    :class:`CohereServingChatV2`, e.g. a plain OpenAI chat completion
+    request that happens to hit a cohere reasoning parser) sources
+    can't be resolved and get dropped; citations then never reach any
+    citation-aware handler downstream.
     """
+    if not position_to_source:
+        return []
     out: list[CitationSource] = []
     for s in raw_sources or []:
-        tool_call_index = getattr(s, "tool_call_index", None)
+        bucket = getattr(s, "tool_call_index", None)
         indices = list(getattr(s, "tool_result_indices", None) or [])
-        out.append(
-            CitationSource(
-                tool_call_index=tool_call_index,
-                tool_result_indices=indices or None,
-            )
-        )
+        if bucket is None or not indices:
+            continue
+        for idx in indices:
+            info = position_to_source.get((bucket, idx))
+            if info is not None:
+                out.append(info)
     return out
 
 
-def _melody_citations_to_vllm(raw_citations: Any) -> list[Citation] | None:
-    """Convert melody's ``FilterCitation`` objects into :class:`Citation`."""
+def _melody_citations_to_vllm(
+    raw_citations: Any,
+    position_to_source: Mapping[tuple[int, int], CitationSource] | None,
+) -> list[Citation] | None:
+    """Convert melody's ``FilterCitation`` objects into :class:`Citation`.
+
+    Resolves each source in-place via ``position_to_source`` (see
+    :func:`_melody_sources_to_vllm`). Citations whose sources all fail
+    to resolve are still emitted here with ``sources=[]``; the serving
+    layer drops them at wire-coercion time so the fail-closed policy
+    lives in exactly one place.
+    """
     if not raw_citations:
         return None
     out: list[Citation] = []
@@ -452,7 +473,9 @@ def _melody_citations_to_vllm(raw_citations: Any) -> list[Citation] | None:
                 start=getattr(c, "start_index", None),
                 end=getattr(c, "end_index", None),
                 text=getattr(c, "text", None),
-                sources=_melody_sources_to_vllm(getattr(c, "sources", None)),
+                sources=_melody_sources_to_vllm(
+                    getattr(c, "sources", None), position_to_source
+                ),
                 type=(
                     "THINKING_CONTENT"
                     if getattr(c, "is_thinking", False)
@@ -486,6 +509,25 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
         # the result to :class:`CohereChatMessage.citations`. ``None`` when
         # the last parse produced no citations.
         self.last_unary_citations: list[Citation] | None = None
+        # Request-scoped ``(tool_call_index, tool_result_idx) -> resolved
+        # CitationSource`` map, forwarded from
+        # :meth:`CohereServingChatV2._apply_cohere_template_kwargs` via
+        # ``chat_template_kwargs``. See :func:`_melody_sources_to_vllm`
+        # for how it's consumed. Absent for parser instances that
+        # weren't created by ``CohereServingChatV2`` (e.g. an OpenAI
+        # chat completion request routed through a cohere reasoning
+        # parser); citations from those requests are dropped since we
+        # have no way to attribute their sources.
+        ctk = kwargs.get("chat_template_kwargs") or {}
+        # Lazy import: ``renderers.cohere`` transitively imports
+        # ``cohere_melody`` and other heavy deps; hoisting the constant
+        # to module scope would tie parser importability to that graph.
+        from vllm.renderers.cohere import POSITION_TO_SOURCE_KEY
+
+        raw_map = ctk.get(POSITION_TO_SOURCE_KEY)
+        self._position_to_source: Mapping[tuple[int, int], CitationSource] | None = (
+            raw_map if isinstance(raw_map, Mapping) else None
+        )
 
     @property
     def reasoning_start_str(self) -> str | None:
@@ -505,7 +547,9 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
         r = self.melody_streaming.write_decoded(delta_text)
-        citations = _melody_citations_to_vllm(getattr(r, "citations", None))
+        citations = _melody_citations_to_vllm(
+            getattr(r, "citations", None), self._position_to_source
+        )
         if (
             r.content is None
             and r.reasoning is None
@@ -541,13 +585,13 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
         self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
     ) -> tuple[str | None, str | None]:
         result = self.melody_unary.process_full_text(model_output)
-        # Cache citations so citation-aware handlers can surface them on
-        # :class:`CohereChatMessage.citations` (the ``parse`` return tuple
-        # is locked to ``(reasoning, content, tool_calls)`` across all
-        # parsers, so we ferry citations via parser-instance state --
-        # safe because the parser is constructed per-request).
+        # Cache citations so citation-aware handlers can surface them
+        # on :class:`CohereChatMessage.citations`. The ``parse`` return
+        # tuple is fixed at ``(reasoning, content, tool_calls)`` across
+        # all parsers, so we pass citations back via parser-instance
+        # state -- safe because the parser is constructed per-request.
         self.last_unary_citations = _melody_citations_to_vllm(
-            getattr(result, "citations", None)
+            getattr(result, "citations", None), self._position_to_source
         )
         return result.reasoning, result.content
 
