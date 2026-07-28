@@ -39,9 +39,7 @@ def test_manager_name():
 
 
 def test_default_manager_is_registered():
-    assert (
-        PCPManagerRegistry.get_manager_class(DEFAULT_PCP_MANAGER_NAME) is PCPManager
-    )
+    assert PCPManagerRegistry.get_manager_class(DEFAULT_PCP_MANAGER_NAME) is PCPManager
 
 
 def test_register_and_resolve_manager(test_manager_name):
