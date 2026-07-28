@@ -60,7 +60,6 @@ def test_hisparse_runtime_pre_step_invalidates_and_restores(monkeypatch):
         scheduled_cached_reqs=SimpleNamespace(new_block_ids=[([4],), None]),
     )
     calls: list[tuple[Any, ...]] = []
-    runtime._wait_for_pending_backup = lambda: calls.append(("wait",))
     monkeypatch.setattr(
         worker_hisparse,
         "invalidate_blocks",
@@ -73,28 +72,46 @@ def test_hisparse_runtime_pre_step_invalidates_and_restores(monkeypatch):
     runtime.pre_step(scheduler_output)
 
     assert calls == [
-        ("wait",),
         ("invalidate", [2, 3, 4], 64),
         ("restore", scheduler_output),
     ]
     assert runtime.backup_num_items == 2
 
 
-def test_hisparse_runtime_waits_for_backup_on_device_stream(monkeypatch):
+def test_hisparse_runtime_launches_fused_backup_on_current_stream(monkeypatch):
     runtime = object.__new__(HiSparseRuntime)
-    runtime.backup_pending = True
-    runtime.host_write_event = object()
+    runtime.backup_num_items = 3
     runtime.hot_backing = SimpleNamespace(device="cuda:0")
-    waited_events: list[object] = []
-    current_stream = SimpleNamespace(wait_event=waited_events.append)
+    runtime.backup_layer_offsets = object()
+    runtime.backup_src_indices_ptrs = object()
+    runtime.backup_host_anchor = object()
+    runtime.backup_host_cache_ptrs = object()
+    runtime.backup_dst_slots = object()
+    runtime.backup_src_block_stride = 4
+    runtime.backup_src_block_size = 5
+    runtime.backup_src_rows = 6
+    current_stream = object()
+    recorded_streams: list[object] = []
+    runtime.host_write_event = SimpleNamespace(record=recorded_streams.append)
+    calls: list[tuple[Any, ...]] = []
     monkeypatch.setattr(
         torch.accelerator, "current_stream", lambda device: current_stream
     )
+    monkeypatch.setattr(
+        worker_hisparse.torch,
+        "ops",
+        SimpleNamespace(
+            _C_cache_ops=SimpleNamespace(
+                hisparse_backup_layers=lambda *args: calls.append(args)
+            )
+        ),
+    )
 
-    runtime._wait_for_pending_backup()
+    runtime.post_forward()
 
-    assert waited_events == [runtime.host_write_event]
-    assert not runtime.backup_pending
+    assert len(calls) == 1
+    assert calls[0][6:] == (3, 4, 5, 6)
+    assert recorded_streams == [current_stream]
 
 
 def test_hisparse_runtime_post_step_returns_stats(monkeypatch):

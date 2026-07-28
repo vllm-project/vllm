@@ -123,24 +123,12 @@ class HiSparseRuntime:
         self.backup_src_block_stride = src_block_stride
         self.backup_src_block_size = src_block_size
         self.backup_src_rows = src_rows
-        self.backup_stream = torch.Stream(device=device)
-        self.forward_done_event = torch.Event()
         self.host_write_event = torch.Event()
         for coordinator in self.coordinators:
             coordinator._host_write_event = self.host_write_event
-        self.backup_pending = False
         self.backup_num_items = 0
 
-    def _wait_for_pending_backup(self) -> None:
-        if not self.backup_pending:
-            return
-        torch.accelerator.current_stream(self.hot_backing.device).wait_event(
-            self.host_write_event
-        )
-        self.backup_pending = False
-
     def pre_step(self, scheduler_output: SchedulerOutput) -> None:
-        self._wait_for_pending_backup()
         scheduled_tokens = scheduler_output.num_scheduled_tokens
         self.backup_num_items = (
             len(scheduled_tokens)
@@ -163,26 +151,19 @@ class HiSparseRuntime:
     def post_forward(self) -> None:
         current_stream = torch.accelerator.current_stream(self.hot_backing.device)
         if self.backup_num_items > 0:
-            self.forward_done_event.record(current_stream)
-            with self.backup_stream:
-                self.backup_stream.wait_event(self.forward_done_event)
-                torch.ops._C_cache_ops.hisparse_backup_layers(
-                    self.hot_backing,
-                    self.backup_layer_offsets,
-                    self.backup_src_indices_ptrs,
-                    self.backup_host_anchor,
-                    self.backup_host_cache_ptrs,
-                    self.backup_dst_slots,
-                    self.backup_num_items,
-                    self.backup_src_block_stride,
-                    self.backup_src_block_size,
-                    self.backup_src_rows,
-                )
-                self.host_write_event.record(self.backup_stream)
-            self.backup_pending = True
-        else:
-            # Mixed and prefill batches still write host rows inside the model.
-            self.host_write_event.record(current_stream)
+            torch.ops._C_cache_ops.hisparse_backup_layers(
+                self.hot_backing,
+                self.backup_layer_offsets,
+                self.backup_src_indices_ptrs,
+                self.backup_host_anchor,
+                self.backup_host_cache_ptrs,
+                self.backup_dst_slots,
+                self.backup_num_items,
+                self.backup_src_block_stride,
+                self.backup_src_block_size,
+                self.backup_src_rows,
+            )
+        self.host_write_event.record(current_stream)
 
     def post_step(self) -> HiSparseStats | None:
         return take_hisparse_stats()
