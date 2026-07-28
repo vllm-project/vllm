@@ -333,7 +333,7 @@ class LongcatMoe(nn.Module):
             hidden_states_padded.to(self.router_params_dtype)
         )
 
-        # FusedMoEFactory handles routing memoization and zero expert computation
+        # MoERunner handles routing memoization and zero expert computation
         # internally. Pass full router_logits (including zero experts) so that
         # zero experts can be properly identified in routing.
         final_hidden_states = self.experts(
