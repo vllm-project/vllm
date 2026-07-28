@@ -43,7 +43,17 @@ from vllm.v1.kv_offload.tiering.obj.manager import ObjectStoreSecondaryTierManag
 # ---------------------------------------------------------------------------
 
 
-def _make_offloading_config(enable_kv_cache_events: bool) -> OffloadingConfig:
+def _make_offloading_config(
+    enable_kv_cache_events: bool,
+    *,
+    tp_size: int = 1,
+    rank: int = 0,
+    world_size: int | None = None,
+    replicated_layout: bool = False,
+    is_parallelism_agnostic: bool = False,
+) -> OffloadingConfig:
+    if world_size is None:
+        world_size = tp_size
     return OffloadingConfig(
         groups=(),
         worker_kv_bytes_per_block=0,
@@ -53,15 +63,16 @@ def _make_offloading_config(enable_kv_cache_events: bool) -> OffloadingConfig:
         model=OffloadingModelConfig(name="test/model", dtype="float16"),
         cache=OffloadingCacheConfig(tokens_per_hash=16, blocks_per_chunk=1),
         parallel=OffloadingParallelConfig(
-            rank=0,
-            world_size=1,
-            tp_size=1,
+            rank=rank,
+            world_size=world_size,
+            tp_size=tp_size,
             pp_size=1,
             pcp_size=1,
             dcp_size=1,
             data_parallel_index=0,
-            is_parallelism_agnostic=False,
+            is_parallelism_agnostic=is_parallelism_agnostic,
         ),
+        replicated_layout=replicated_layout,
     )
 
 
@@ -617,3 +628,37 @@ class TestObjStoreConfig:
         params = cfg.to_nixl_params()
         assert params["ca_bundle"] == "/path/to/ca.pem"
         assert "access_key" not in params
+
+
+def test_obj_tier_replicated_layout_collapses_mapper_identity():
+    """TP=2 and TP=4 replicated configs share the obj FileMapper namespace."""
+    tp2_spec = SimpleNamespace(
+        config=_make_offloading_config(
+            False, tp_size=2, world_size=2, rank=1, replicated_layout=True
+        ),
+        kv_events_config=OffloadingKVEventsConfig(
+            enable_kv_cache_events=False,
+            self_describing_kv_events=False,
+        ),
+    )
+    tp4_spec = SimpleNamespace(
+        config=_make_offloading_config(
+            False, tp_size=4, world_size=4, rank=3, replicated_layout=True
+        ),
+        kv_events_config=OffloadingKVEventsConfig(
+            enable_kv_cache_events=False,
+            self_describing_kv_events=False,
+        ),
+    )
+    tp2_tier, _ = _make_tier(offloading_spec=tp2_spec)
+    tp4_tier, _ = _make_tier(offloading_spec=tp4_spec)
+    try:
+        assert tp2_tier._file_mapper.base_path == tp4_tier._file_mapper.base_path
+        assert tp2_tier._file_mapper.rank == 0
+        assert tp4_tier._file_mapper.rank == 0
+        assert tp2_tier._file_mapper.get_run_config() == (
+            tp4_tier._file_mapper.get_run_config()
+        )
+    finally:
+        tp2_tier.shutdown()
+        tp4_tier.shutdown()
