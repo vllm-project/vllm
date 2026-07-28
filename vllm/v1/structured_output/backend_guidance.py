@@ -260,16 +260,6 @@ def serialize_guidance_grammar(
                 s_tag = json.loads(grammar_spec)
             else:
                 s_tag = grammar_spec
-            if "triggers" not in s_tag or "structures" not in s_tag:
-                # Format-style structural tags (xgrammar >= 0.2 "format" key)
-                # have no guidance translation. Fail with a clear error
-                # instead of a KeyError that surfaces as an opaque 500 when
-                # backend=auto falls back here after an xgrammar rejection.
-                raise ValueError(
-                    "The guidance backend only supports legacy structural "
-                    "tags with 'triggers'/'structures'; this request uses a "
-                    "format-style structural tag (use the xgrammar backend)."
-                )
             triggers: list[str] = s_tag["triggers"]
             tags: list[llguidance.StructTag] = []
             for s in s_tag["structures"]:
