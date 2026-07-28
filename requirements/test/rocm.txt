@@ -47,7 +47,8 @@ apache-tvm-ffi==0.1.10
     #   -c requirements/rocm.txt
     #   tilelang
     #   xgrammar
-    arctic-inference==0.2.0
+arctic-inference==0.2.0
+    # via -r requirements/test/rocm.in
 argcomplete==3.6.3
     # via datamodel-code-generator
 astor==0.8.1
@@ -71,8 +72,7 @@ azure-storage-blob==12.28.0
     # via runai-model-streamer-azure
 backoff==2.2.1
     # via -r requirements/test/rocm.in
-# bitsandbytes 0.49.2 has broken ROCm .so naming; this commit (0.50.0.dev0) fixes it
-bitsandbytes @ git+https://github.com/bitsandbytes-foundation/bitsandbytes.git@672133342089ddd01ae247068d7963ff05bb306d
+bitsandbytes @ git+https://github.com/rasmith/bitsandbytes.git@07fc91bb5ac2a32a50b097c676cff332f90af873
     # via -r requirements/test/rocm.in
 black==26.3.1
     # via datamodel-code-generator
@@ -166,8 +166,7 @@ dataproperty==1.1.0
     # via
     #   pytablewriter
     #   tabledata
-# cp314: pinned to latest cp314 version (was unpinned)
-datasets==5.0.0
+datasets==3.6.0
     # via
     #   -r requirements/test/rocm.in
     #   evaluate
@@ -175,15 +174,13 @@ datasets==5.0.0
     #   mteb
 decorator==5.2.1
     # via librosa
-    # cp314: re-added (was removed: now has wheel)
-    decord==0.6.0
-# TODO: switch back to upstream depyf when Python 3.14 fix PR merges (thuml/depyf)
+decord==0.6.0
+    # via -r requirements/test/rocm.in
 depyf @ git+https://github.com/rasmith/depyf.git@c67f28ddbdb5c4922fb14530743d77cc6468da32
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-# cp314: pinned to latest cp314 version (was unpinned)
-dill==0.4.1
+dill==0.3.8
     # via
     #   datasets
     #   depyf
@@ -394,7 +391,6 @@ inflect==7.5.0
     # via datamodel-code-generator
 iniconfig==2.3.0
     # via pytest
-# cp314: pinned to latest cp314 version (was unpinned)
 instanttensor==0.1.9
     # via -r requirements/test/rocm.in
 interegular==0.3.3
@@ -536,8 +532,7 @@ multidict==6.7.1
     # via
     #   aiohttp
     #   yarl
-# cp314: pinned to latest cp314 version (was unpinned)
-multiprocess==0.70.19
+multiprocess==0.70.16
     # via
     #   -r requirements/test/rocm.in
     #   datasets
@@ -561,8 +556,7 @@ numba==0.65.0
     #   -c requirements/rocm.txt
     #   -r requirements/test/rocm.in
     #   librosa
-# cp314: pinned to latest cp314 version (was unpinned)
-numpy==2.4.2
+numpy==2.3.5
     # via
     #   -r requirements/test/../common.txt
     #   accelerate
@@ -629,8 +623,7 @@ opencensus==0.11.4
     # via ray
 opencensus-context==0.1.3
     # via opencensus
-    # cp314: re-added (was removed: now has abi3 wheel)
-    opencv-python-headless==5.0.0.93
+opencv-python-headless==5.0.0.93
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -719,7 +712,6 @@ packaging==26.0
     #   statsmodels
     #   transformers
     #   typepy
-# cp314: pinned to latest cp314 version (was unpinned)
 pandas==3.0.5
     # via
     #   datasets
@@ -832,7 +824,6 @@ pycountry==26.2.16
     # via pydantic-extra-types
 pycparser==3.0
     # via cffi
-# cp314: pinned to latest cp314 version (was unpinned)
 pycryptodomex==3.23.0
     # via blobfile
 pydantic==2.12.5
@@ -879,7 +870,6 @@ pyparsing==3.3.2
     # via matplotlib
 pyrate-limiter==4.4.0
     # via schemathesis
-# cp314: pinned to latest cp314 version (was unpinned)
 pystemmer==3.1.0
     # via mteb
 pytablewriter==1.2.1
@@ -962,7 +952,6 @@ pyzmq==27.1.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-# cp314: pinned to latest cp314 version (was unpinned)
 rapidfuzz==3.14.5
     # via
     #   -r requirements/test/rocm.in
@@ -1042,7 +1031,6 @@ s3transfer==0.16.0
     # via boto3
 sacrebleu==2.6.0
     # via lm-eval
-# cp314: pinned to latest cp314 version (was unpinned)
 safetensors==0.8.0
     # via
     #   -c requirements/common.txt
@@ -1126,7 +1114,6 @@ soundfile==0.13.1
     #   genai-perf
     #   librosa
     #   mistral-common
-# cp314: pinned to latest cp314 version (was unpinned)
 soxr==1.1.0
     # via
     #   librosa
@@ -1191,7 +1178,6 @@ tiktoken==0.12.0
     #   gpt-oss
     #   lm-eval
     #   mistral-common
-# cp314: pinned to latest cp314 version (was unpinned)
 tilelang==0.1.10
     # via
     #   -c requirements/rocm.txt
@@ -1202,7 +1188,6 @@ timm==1.0.17
     #   -r requirements/test/rocm.in
     #   open-clip-torch
     #   segmentation-models-pytorch
-# cp314: pinned to latest cp314 version (was unpinned)
 tokenizers==0.22.2
     # via
     #   -c requirements/common.txt
@@ -1229,7 +1214,7 @@ tqdm==4.67.3
     #   sentence-transformers
     #   tilelang
     #   transformers
-transformers==5.5.3
+transformers==5.14.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
