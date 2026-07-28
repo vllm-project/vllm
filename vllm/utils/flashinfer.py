@@ -391,7 +391,12 @@ def supports_trtllm_attention(is_prefill: bool = False) -> bool:
         return not is_prefill
 
     # SM100/SM103 has both prefill and decode TRTLLM kernels.
-    return current_platform.is_device_capability_family(100)
+    if current_platform.is_device_capability_family(100):
+        return True
+    # SM120: XQA decode only; prefill uses fa2 (trtllm-gen FMHA is SM100-only).
+    if current_platform.is_device_capability_family(120):
+        return not is_prefill
+    return False
 
 
 def force_use_trtllm_attention() -> bool | None:
