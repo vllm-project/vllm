@@ -7,7 +7,7 @@ import sys
 import uuid
 import weakref
 from abc import ABC, abstractmethod
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
@@ -176,7 +176,19 @@ class EngineCoreClient(ABC):
     def execute_dummy_batch(self) -> None:
         raise NotImplementedError
 
+    def set_weight_version(self, weight_version: str) -> None:
+        raise NotImplementedError
+
+    def get_weight_version(self) -> str:
+        raise NotImplementedError
+
     async def execute_dummy_batch_async(self) -> None:
+        raise NotImplementedError
+
+    async def set_weight_version_async(self, weight_version: str) -> None:
+        raise NotImplementedError
+
+    async def get_weight_version_async(self) -> str:
         raise NotImplementedError
 
     def abort_requests(self, request_ids: list[str]) -> None:
@@ -350,6 +362,12 @@ class InprocClient(EngineCoreClient):
 
     def execute_dummy_batch(self) -> None:
         self.engine_core.execute_dummy_batch()
+
+    def set_weight_version(self, weight_version: str) -> None:
+        self.engine_core.set_weight_version(weight_version)
+
+    def get_weight_version(self) -> str:
+        return self.engine_core.get_weight_version()
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.engine_core.add_lora(lora_request)
@@ -947,6 +965,12 @@ class SyncMPClient(MPClient):
     def execute_dummy_batch(self) -> None:
         self.call_utility("execute_dummy_batch")
 
+    def set_weight_version(self, weight_version: str) -> None:
+        self.call_utility("set_weight_version", weight_version)
+
+    def get_weight_version(self) -> str:
+        return self.call_utility("get_weight_version")
+
     def collective_rpc(
         self,
         method: str | Callable[..., _R],
@@ -1199,6 +1223,12 @@ class AsyncMPClient(MPClient):
     async def execute_dummy_batch_async(self) -> None:
         await self.call_utility_async("execute_dummy_batch")
 
+    async def set_weight_version_async(self, weight_version: str) -> None:
+        await self.call_utility_async("set_weight_version", weight_version)
+
+    async def get_weight_version_async(self) -> str:
+        return await self.call_utility_async("get_weight_version")
+
     async def add_lora_async(self, lora_request: LoRARequest) -> bool:
         return await self.call_utility_async("add_lora", lora_request)
 
@@ -1271,9 +1301,11 @@ class DPAsyncMPClient(AsyncMPClient):
             client_index,
         )
 
-        # List of [waiting, running] pair per engine.
+        # List of [waiting, running, kv_cache_usage] per engine.
         # Used only by DPLBAsyncMPClient subclass.
-        self.lb_engines: list[list[int]] = [[0, 0] for _ in self.core_engines]
+        self.lb_engines: list[list[int | float]] = [
+            [0, 0, 0.0] for _ in self.core_engines
+        ]
 
         self.eep_scaling_cache: ElasticScalingCache | None = None
 
@@ -1351,7 +1383,7 @@ class DPAsyncMPClient(AsyncMPClient):
                             )
                             if len(self.lb_engines) < new_engine_count:
                                 self.lb_engines = self.lb_engines + [
-                                    [0, 0]
+                                    [0, 0, 0.0]
                                     for _ in range(
                                         new_engine_count - len(self.lb_engines)
                                     )
@@ -1445,6 +1477,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # To route aborts to the correct engine.
         self.reqs_in_flight: dict[str, EngineIdentity] = {}
 
+        # Exact per-engine count of this client's unfinished requests.
+        self.engine_inflight: Counter[EngineIdentity] = Counter()
+
         super().__init__(
             vllm_config,
             executor_class,
@@ -1470,14 +1505,30 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             current_counts = self.lb_engines
             # TODO use P2C alg for larger DP sizes
             num_engines = len(current_counts)
-            min_score = sys.maxsize
+            min_score: float = sys.maxsize
             eng_index = 0
             for i in range(num_engines):
                 # Start from client_index to help with balancing when engines
                 # are empty.
                 idx = (self.eng_start_index + i) % num_engines
-                waiting, running = current_counts[idx]
-                score = waiting * 4 + running
+                waiting, running, kv_cache_usage = current_counts[idx]
+                # Estimate engine load as the greater of the coordinator's
+                # latest (waiting + running) snapshot and this client's own
+                # in-flight count (scaled by the number of clients). The
+                # in-flight floor is exact and can't be erased by a snapshot
+                # rebind, so a burst spreads round-robin even when snapshots
+                # race with routing decisions; the snapshot raises the score
+                # when other clients or stale requests load the engine.
+                inflight = self.engine_inflight[self.core_engines[idx]]
+                score: float = max(self.client_count * inflight, waiting + running)
+                if waiting:
+                    # Waiting requests are penalized in proportion to KV cache
+                    # pressure: a queue on a KV-bound engine drains slowly, so
+                    # new requests should strongly prefer other engines. With
+                    # low KV usage the queue is transient (e.g. mid-burst) and
+                    # the penalty stays off, preserving exact round-robin.
+                    # Ramps from 0 at <=50% usage to 3x waiting at 100%.
+                    score += waiting * 6.0 * max(0.0, kv_cache_usage - 0.5)
                 if score < min_score:
                     min_score = score
                     eng_index = idx
@@ -1494,6 +1545,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         chosen_engine = self.core_engines[eng_index]
         # Record which engine is chosen for this request, to handle aborts.
         self.reqs_in_flight[request.request_id] = chosen_engine
+        self.engine_inflight[chosen_engine] += 1
         return chosen_engine
 
     async def call_utility_async(self, method: str, *args) -> Any:
@@ -1513,7 +1565,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
     ):
         if outputs.finished_requests and self.reqs_in_flight:
             for req_id in outputs.finished_requests:
-                self.reqs_in_flight.pop(req_id, None)
+                if (engine := self.reqs_in_flight.pop(req_id, None)) is not None:
+                    self.engine_inflight[engine] -= 1
 
     @staticmethod
     async def eep_process_engine_core_notification(
