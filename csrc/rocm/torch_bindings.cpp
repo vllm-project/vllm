@@ -87,7 +87,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "                Tensor k_scale, Tensor v_scale,"
       "                Tensor? fp8_out_scale,"
       "                str mfma_type,"
-      "                bool use_interleaved_v_cache) -> ()");
+      "                bool use_interleaved_v_cache=False) -> ()");
   rocm_ops.impl("paged_attention", torch::kCUDA, &paged_attention);
 }
 
