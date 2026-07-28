@@ -30,7 +30,12 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     get_conv_copy_spec,
     get_temporal_copy_spec,
 )
-from vllm.model_executor.layers.rwkv7 import rwkv7_recurrent_scan_packed
+from vllm.model_executor.layers.rwkv7 import (
+    RWKV7KernelBackend,
+    diagnose_rwkv7_recurrent_scan_packed,
+    resolve_rwkv7_kernel_backend,
+    rwkv7_recurrent_scan_packed,
+)
 from vllm.model_executor.models.config import MODELS_CONFIG_MAP, MambaModelConfig
 from vllm.model_executor.models.rwkv7 import (
     RWKV7Block,
@@ -102,7 +107,9 @@ def _rwkv7_recurrent_oracle_packed(
     return output, final_state
 
 
-def _test_rwkv7_recurrent_scan_packed(device: str) -> None:
+def _test_rwkv7_recurrent_scan_packed(
+    device: str, *, backend: RWKV7KernelBackend
+) -> None:
     generator = torch.Generator(device=device).manual_seed(123)
     num_tokens, num_heads, key_dim, value_dim = 7, 3, 5, 4
     vectors = [
@@ -135,24 +142,76 @@ def _test_rwkv7_recurrent_scan_packed(device: str) -> None:
     query_start_loc = torch.tensor([0, 2, 7], dtype=torch.int32, device=device)
 
     output, final_state = rwkv7_recurrent_scan_packed(
-        r, w, k, v, kk, a, state, query_start_loc
+        r, w, k, v, kk, a, state, query_start_loc, backend=backend
     )
     expected_output, expected_state = _rwkv7_recurrent_oracle_packed(
         r, w, k, v, kk, a, state, query_start_loc
     )
 
+    auto_output, auto_state = rwkv7_recurrent_scan_packed(
+        r, w, k, v, kk, a, state, query_start_loc, backend="auto"
+    )
+    torch_output, torch_state = rwkv7_recurrent_scan_packed(
+        r, w, k, v, kk, a, state, query_start_loc, backend="torch"
+    )
+    torch.testing.assert_close(auto_output, torch_output, rtol=0, atol=0)
+    torch.testing.assert_close(auto_state, torch_state, rtol=0, atol=0)
+
     torch.testing.assert_close(output, expected_output, rtol=2e-4, atol=1e-4)
     torch.testing.assert_close(final_state, expected_state, rtol=2e-4, atol=1e-4)
 
+    if backend == "triton":
+        report = diagnose_rwkv7_recurrent_scan_packed(
+            r,
+            w,
+            k,
+            v,
+            kk,
+            a,
+            state,
+            query_start_loc,
+            rtol=2e-4,
+            atol=1e-4,
+        )
+        assert report.output_close
+        assert report.state_close
+        assert report.first_output_mismatch_token is None
+        assert report.first_state_mismatch_sequence is None
+
 
 def test_rwkv7_recurrent_scan_packed_matches_oracle():
-    _test_rwkv7_recurrent_scan_packed("cpu")
+    _test_rwkv7_recurrent_scan_packed("cpu", backend="torch")
 
 
 def test_rwkv7_recurrent_scan_packed_matches_oracle_cuda():
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required to exercise the RWKV7 Triton scan.")
-    _test_rwkv7_recurrent_scan_packed("cuda")
+    _test_rwkv7_recurrent_scan_packed("cuda", backend="triton")
+
+
+def test_rwkv7_kernel_auto_is_fail_closed_on_cpu(monkeypatch):
+    monkeypatch.delenv("VLLM_RWKV7_KERNEL", raising=False)
+    tensor = torch.empty(1)
+    assert resolve_rwkv7_kernel_backend() == "torch"
+    assert (
+        resolve_rwkv7_kernel_backend("auto", input_tensor=tensor, state=tensor.float())
+        == "torch"
+    )
+    assert resolve_rwkv7_kernel_backend("torch") == "torch"
+
+
+def test_rwkv7_explicit_triton_rejects_cpu():
+    tensor = torch.empty(1)
+    with pytest.raises(RuntimeError, match="RWKV7 Triton kernel"):
+        resolve_rwkv7_kernel_backend(
+            "triton", input_tensor=tensor, state=tensor.float()
+        )
+
+
+def test_rwkv7_kernel_environment_rejects_invalid_value(monkeypatch):
+    monkeypatch.setenv("VLLM_RWKV7_KERNEL", "invalid")
+    with pytest.raises(ValueError, match="VLLM_RWKV7_KERNEL"):
+        resolve_rwkv7_kernel_backend()
 
 
 def _make_prefill_metadata(
