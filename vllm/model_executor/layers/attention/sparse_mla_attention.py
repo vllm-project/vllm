@@ -255,7 +255,12 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         prefill_qsl_cpu = qsl_cpu[num_decodes:] - qsl_cpu[num_decodes]
         prefill_query_lens = prefill_qsl_cpu[1:] - prefill_qsl_cpu[:-1]
         prefill_max_query_len = int(prefill_query_lens.max().item())
-        return prefill_query_start_loc, prefill_max_query_len, prefill_query_lens
+
+        return (
+            prefill_query_start_loc,
+            prefill_max_query_len,
+            prefill_query_lens,
+        )
 
 
 @triton.jit
@@ -411,6 +416,10 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             v_head_dim,
             kv_b_proj,
         )
+
+        # The indexer carries the shared buffer for normal layers and tests;
+        # the explicitly-passed buffer covers backbone skip layers, whose
+        # indexer is not constructed (see deepseek_v2.py).
         self.topk_indices_buffer: torch.Tensor | None = (
             indexer.topk_indices_buffer  # type: ignore[attr-defined]
             if indexer is not None
@@ -419,9 +428,9 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         self._use_flashinfer_concat_mla_k = (
             has_flashinfer()
             and which("ninja") is not None
-            and self.num_heads == 128
-            and self.qk_nope_head_dim == 128
-            and self.qk_rope_head_dim == 64
+            and (self.num_heads == 128)
+            and (self.qk_nope_head_dim == 128)
+            and (self.qk_rope_head_dim == 64)
         )
         fa_version = get_flash_attn_version(
             head_size=qk_head_dim,
