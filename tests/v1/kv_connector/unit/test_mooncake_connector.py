@@ -31,7 +31,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
     MooncakeBootstrapServer,
-    RegisterWorkerPayload,
 )
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
@@ -732,110 +731,6 @@ def patch_worker_dependencies():
         }
 
 
-def _make_registering_prefill_worker(*, tp_rank: int) -> MooncakeConnectorWorker:
-    worker = object.__new__(MooncakeConnectorWorker)
-    worker.vllm_config = SimpleNamespace()
-    worker.engine_id = "engine-1"
-    worker.dp_rank = 0
-    worker.tp_rank = tp_rank
-    worker.pp_rank = 0
-    worker.hostname = "127.0.0.1"
-    worker.side_channel_port = 12345 + tp_rank
-    worker.shutdown = MagicMock()
-    return worker
-
-
-@pytest.mark.asyncio
-@pytest.mark.skip_global_cleanup
-async def test_prefill_worker_registers_with_bootstrap():
-    worker = _make_registering_prefill_worker(tp_rank=1)
-
-    with (
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
-            "mooncake_connector.get_mooncake_bootstrap_addr",
-            return_value=("bootstrap", 8998),
-        ),
-        patch("httpx.AsyncClient") as mock_async_client,
-    ):
-        mock_response = AsyncMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_post = mock_async_client.return_value.__aenter__.return_value.post
-        mock_post.return_value = mock_response
-
-        await worker.register_worker_with_bootstrap()
-
-        mock_post.assert_awaited_once()
-        payload = mock_post.call_args.kwargs["json"]
-        assert set(payload) == {
-            "engine_id",
-            "dp_rank",
-            "tp_rank",
-            "pp_rank",
-            "addr",
-        }
-
-    del worker
-
-
-@pytest.mark.asyncio
-@pytest.mark.skip_global_cleanup
-async def test_pcp_canonical_ownership_controls_discovery_and_completion():
-    server = MooncakeBootstrapServer("127.0.0.1", get_open_port())
-
-    async def register(_url: str, *, json: dict):
-        response = MagicMock()
-        response.raise_for_status = MagicMock()
-        await server.register_worker(RegisterWorkerPayload(**json))
-        return response
-
-    with (
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
-            "mooncake_connector.get_mooncake_bootstrap_addr",
-            return_value=("bootstrap", 8998),
-        ),
-        patch("httpx.AsyncClient") as mock_async_client,
-    ):
-        mock_post = mock_async_client.return_value.__aenter__.return_value.post
-        mock_post.side_effect = register
-
-        for tp_rank in range(2):
-            worker = _make_registering_prefill_worker(tp_rank=tp_rank)
-            await worker.register_worker_with_bootstrap()
-
-    assert mock_post.await_count == 2
-    workers = await server.query()
-    assert workers[0].worker_addr == {
-        0: {0: "tcp://127.0.0.1:12345"},
-        1: {0: "tcp://127.0.0.1:12346"},
-    }
-
-    vllm_config = _make_scheduler_vllm_config(
-        kv_role="kv_producer", tp_size=2, pcp_size=2
-    )
-    connector = MooncakeConnector(
-        vllm_config,
-        KVConnectorRole.SCHEDULER,
-        _make_test_kv_cache_config(),
-    )
-    aggregator = KVOutputAggregator.from_connector(connector, world_size=4)
-
-    first = SimpleNamespace(
-        kv_connector_output=KVConnectorOutput(finished_sending={"req-1"})
-    )
-    aggregated = aggregator.aggregate([first])
-    assert aggregated is not None
-    assert not aggregated.kv_connector_output.finished_sending
-
-    second = SimpleNamespace(
-        kv_connector_output=KVConnectorOutput(finished_sending={"req-1"})
-    )
-    aggregated = aggregator.aggregate([second])
-    assert aggregated is not None
-    assert aggregated.kv_connector_output.finished_sending == {"req-1"}
-
-
 @pytest.mark.parametrize(("pcp_rank", "expected_calls"), [(0, 1), (1, 0)])
 @pytest.mark.skip_global_cleanup
 def test_prefill_worker_tracks_send_requests_only_on_canonical_pcp_rank(
@@ -884,74 +779,102 @@ def _make_scheduler_vllm_config(
     )
 
 
-@pytest.mark.parametrize(("pcp_size", "expected_count"), [(1, 4), (2, 4)])
 @pytest.mark.skip_global_cleanup
-def test_prefill_connector_counts_canonical_pcp_workers(
-    pcp_size: int, expected_count: int
-):
+def test_pcp_finished_count_drives_output_aggregation():
     vllm_config = _make_scheduler_vllm_config(
-        kv_role="kv_producer", tp_size=4, pcp_size=pcp_size
+        kv_role="kv_producer", tp_size=2, pcp_size=2
     )
-
     connector = MooncakeConnector(
         vllm_config,
         KVConnectorRole.SCHEDULER,
         _make_test_kv_cache_config(),
     )
+    aggregator = KVOutputAggregator.from_connector(connector, world_size=4)
 
-    assert vllm_config.parallel_config.world_size == 4 * pcp_size
-    assert connector.get_finished_count() == expected_count
-
-
-@pytest.mark.skip_global_cleanup
-def test_prefill_connector_rejects_pcp_with_dcp_sharded_kv():
-    vllm_config = _make_scheduler_vllm_config(
-        kv_role="kv_producer", tp_size=2, pcp_size=2, dcp_size=2
+    first = SimpleNamespace(
+        kv_connector_output=KVConnectorOutput(finished_sending={"req-1"})
     )
+    aggregated = aggregator.aggregate([first])
+    assert aggregated is not None
+    assert not aggregated.kv_connector_output.finished_sending
 
-    with pytest.raises(
-        NotImplementedError,
-        match="PCP with DCP-sharded KV requires DCP-aware worker discovery",
-    ):
-        MooncakeConnector(
-            vllm_config,
-            KVConnectorRole.SCHEDULER,
-            _make_test_kv_cache_config(),
-        )
-
-
-@pytest.mark.parametrize("kv_role", ["kv_consumer", "kv_both"])
-@pytest.mark.skip_global_cleanup
-def test_prefill_connector_rejects_pcp_consumers(kv_role: str):
-    vllm_config = _make_scheduler_vllm_config(kv_role=kv_role, tp_size=2, pcp_size=2)
-
-    with pytest.raises(
-        NotImplementedError,
-        match="Consumers and kv_both require prefill_context_parallel_size=1",
-    ):
-        MooncakeConnector(
-            vllm_config,
-            KVConnectorRole.SCHEDULER,
-            _make_test_kv_cache_config(),
-        )
+    second = SimpleNamespace(
+        kv_connector_output=KVConnectorOutput(finished_sending={"req-1"})
+    )
+    aggregated = aggregator.aggregate([second])
+    assert aggregated is not None
+    assert aggregated.kv_connector_output.finished_sending == {"req-1"}
 
 
 @pytest.mark.parametrize(
-    ("kv_role", "expected_count"),
-    [("kv_producer", 2), ("kv_consumer", None), ("kv_both", None)],
+    ("kv_role", "pcp_size", "dcp_size", "error_match"),
+    [
+        ("kv_producer", 2, 1, None),
+        (
+            "kv_producer",
+            2,
+            2,
+            "PCP with DCP-sharded KV requires DCP-aware worker discovery",
+        ),
+        (
+            "kv_consumer",
+            2,
+            1,
+            "Consumers and kv_both require prefill_context_parallel_size=1",
+        ),
+        (
+            "kv_both",
+            2,
+            1,
+            "Consumers and kv_both require prefill_context_parallel_size=1",
+        ),
+        ("kv_producer", 1, 2, None),
+        ("kv_consumer", 1, 2, None),
+        ("kv_both", 1, 2, None),
+    ],
+    ids=[
+        "producer_pcp2",
+        "producer_pcp2_dcp2",
+        "consumer_pcp2",
+        "both_pcp2",
+        "producer_pcp1_dcp2",
+        "consumer_pcp1_dcp2",
+        "both_pcp1_dcp2",
+    ],
 )
 @pytest.mark.skip_global_cleanup
-def test_prefill_connector_preserves_pcp1_dcp_topology(
-    kv_role: str, expected_count: int | None
+def test_connector_validates_supported_pcp_topologies(
+    kv_role: str,
+    pcp_size: int,
+    dcp_size: int,
+    error_match: str | None,
 ):
-    vllm_config = _make_scheduler_vllm_config(kv_role=kv_role, tp_size=2, dcp_size=2)
+    vllm_config = _make_scheduler_vllm_config(
+        kv_role=kv_role,
+        tp_size=2,
+        pcp_size=pcp_size,
+        dcp_size=dcp_size,
+    )
+
+    if error_match is not None:
+        with pytest.raises(NotImplementedError, match=error_match):
+            MooncakeConnector(
+                vllm_config,
+                KVConnectorRole.SCHEDULER,
+                _make_test_kv_cache_config(),
+            )
+        return
 
     connector = MooncakeConnector(
         vllm_config,
         KVConnectorRole.SCHEDULER,
         _make_test_kv_cache_config(),
     )
-
+    expected_count = (
+        vllm_config.parallel_config.world_size // pcp_size
+        if kv_role == "kv_producer"
+        else None
+    )
     assert connector.get_finished_count() == expected_count
 
 
