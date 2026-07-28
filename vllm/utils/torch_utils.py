@@ -215,31 +215,21 @@ def available_cpu_count() -> int:
     return max(1, count)
 
 
-def cap_torch_threads_for_startup(num_local_procs: int = 1) -> None:
-    """Cap torch intra-op threads for startup work (weight loading etc.).
+# Marks OMP_NUM_THREADS as chosen by vLLM for its worker processes rather than
+# set by the user, so a worker knows it may drop the value once startup is done.
+OMP_NUM_THREADS_SET_BY_VLLM = "VLLM_OMP_NUM_THREADS_SET_BY_VLLM"
 
-    Torch defaults its thread pool to the host core count, which ignores both
-    the process affinity and any cgroup CPU quota, and doesn't account for
-    co-located worker processes. The resulting oversubscription causes CFS
-    throttling and spin-wait contention.
-    Respects an externally-set OMP_NUM_THREADS.
 
-    Only ever lowers the count. Raising it could make this process enter an
-    OpenMP parallel region that it otherwise wouldn't, which deadlocks or
-    segfaults if we were forked from a process that had already started
-    torch's OpenMP pool (libgomp is not fork-safe).
+def startup_omp_num_threads(num_local_procs: int) -> int:
+    """Thread count for a worker process's startup work (weight loading).
+
+    Weight loading does CPU-parallel work, so workers benefit from more than
+    one thread, but only a bounded share of the CPUs this node's workers may
+    actually use: torch's default is the host core count, which ignores both
+    scheduling affinity and any cgroup CPU quota, and doesn't account for the
+    other workers sharing the node.
     """
-    if "OMP_NUM_THREADS" in os.environ:
-        return
-    num_threads = max(1, available_cpu_count() // max(1, num_local_procs))
-    current_num_threads = torch.get_num_threads()
-    if num_threads < current_num_threads:
-        logger.info_once(
-            "Reducing Torch threads from %d to %d for startup.",
-            current_num_threads,
-            num_threads,
-        )
-        torch.set_num_threads(num_threads)
+    return max(1, available_cpu_count() // max(1, num_local_procs))
 
 
 def set_torch_threads_for_runtime() -> None:
@@ -251,7 +241,9 @@ def set_torch_threads_for_runtime() -> None:
     steady-state CPU op benefits from intra-op parallelism.
     Respects an externally-set OMP_NUM_THREADS.
     """
-    if (omp_num_threads := os.environ.get("OMP_NUM_THREADS")) is not None:
+    if (
+        omp_num_threads := os.environ.get("OMP_NUM_THREADS")
+    ) is not None and os.environ.get(OMP_NUM_THREADS_SET_BY_VLLM) != "1":
         try:
             if int(omp_num_threads) > 1:
                 logger.warning_once(

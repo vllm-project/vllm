@@ -4,12 +4,13 @@ import pytest
 import torch
 
 from vllm.utils.torch_utils import (
+    OMP_NUM_THREADS_SET_BY_VLLM,
     available_cpu_count,
-    cap_torch_threads_for_startup,
     common_broadcastable_dtype,
     current_stream,
     is_lossless_cast,
     set_torch_threads_for_runtime,
+    startup_omp_num_threads,
 )
 
 
@@ -127,24 +128,15 @@ def restore_torch_threads(monkeypatch: pytest.MonkeyPatch):
     torch.set_num_threads(original)
 
 
-def test_cap_torch_threads_for_startup_never_raises(restore_torch_threads):
-    """Raising the thread count can newly enter an OpenMP parallel region,
-    which deadlocks/segfaults in a process forked from one that already
-    started torch's OpenMP pool (libgomp is not fork-safe)."""
-    torch.set_num_threads(1)
-    cap_torch_threads_for_startup()
-    assert torch.get_num_threads() == 1
-
-
-def test_cap_torch_threads_for_startup_divides_between_local_workers(
-    restore_torch_threads,
-):
+def test_startup_omp_num_threads_divides_between_local_workers():
+    """Workers share the node's usable CPUs rather than each taking them all."""
     available = available_cpu_count()
     if available < 4:
         pytest.skip("needs at least 4 usable CPUs")
-    torch.set_num_threads(available)
-    cap_torch_threads_for_startup(num_local_procs=2)
-    assert torch.get_num_threads() == available // 2
+    assert startup_omp_num_threads(1) == available
+    assert startup_omp_num_threads(2) == available // 2
+    # Never zero, however many workers share the node.
+    assert startup_omp_num_threads(available * 4) == 1
 
 
 def test_set_torch_threads_for_runtime(restore_torch_threads):
@@ -153,11 +145,22 @@ def test_set_torch_threads_for_runtime(restore_torch_threads):
     assert torch.get_num_threads() == 1
 
 
-def test_torch_threads_respect_omp_num_threads(
+def test_runtime_threads_respect_user_omp_num_threads(
     restore_torch_threads, monkeypatch: pytest.MonkeyPatch
 ):
+    """An externally-set OMP_NUM_THREADS is the user's choice; leave it alone."""
     monkeypatch.setenv("OMP_NUM_THREADS", "3")
     torch.set_num_threads(3)
-    cap_torch_threads_for_startup()
     set_torch_threads_for_runtime()
     assert torch.get_num_threads() == 3
+
+
+def test_runtime_threads_override_vllm_set_omp_num_threads(
+    restore_torch_threads, monkeypatch: pytest.MonkeyPatch
+):
+    """The value vLLM picked for worker startup is dropped once serving starts."""
+    monkeypatch.setenv("OMP_NUM_THREADS", "3")
+    monkeypatch.setenv(OMP_NUM_THREADS_SET_BY_VLLM, "1")
+    torch.set_num_threads(3)
+    set_torch_threads_for_runtime()
+    assert torch.get_num_threads() == 1

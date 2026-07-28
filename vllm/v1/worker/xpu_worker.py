@@ -10,7 +10,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.profiler.wrapper import TorchProfilerWrapper
 from vllm.utils.mem_utils import MemorySnapshot, format_gib
-from vllm.utils.torch_utils import cap_torch_threads_for_startup, set_random_seed
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -40,9 +40,6 @@ class XPUWorker(Worker):
         assert current_platform.is_xpu()
 
     def init_device(self):
-        # See Worker.init_device(); dropped to 1 after warmup.
-        cap_torch_threads_for_startup(self.parallel_config.local_world_size)
-
         # In DP mode, XPU workers see all visible devices.
         # Offset local_rank by the local DP shard.
         parallel_config = self.parallel_config

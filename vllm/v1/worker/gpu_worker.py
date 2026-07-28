@@ -63,11 +63,7 @@ from vllm.utils.gc_utils import freeze_gc_heap, maybe_attach_gc_debug_callback
 from vllm.utils.gpu_sync_debug import enable_gpu_sync_check, with_gpu_sync_check
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
-from vllm.utils.torch_utils import (
-    cap_torch_threads_for_startup,
-    set_random_seed,
-    set_torch_threads_for_runtime,
-)
+from vllm.utils.torch_utils import set_random_seed, set_torch_threads_for_runtime
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
@@ -305,11 +301,6 @@ class Worker(WorkerBase):
 
     @instrument(span_name="Init device")
     def init_device(self):
-        # Allow parallel CPU work during startup (e.g. weight loading), but
-        # bound it by the CPUs actually available to this node's workers.
-        # Dropped to 1 once warmup completes in compile_or_warm_up_model().
-        cap_torch_threads_for_startup(self.parallel_config.local_world_size)
-
         if self.device_config.device_type == "cuda":
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
