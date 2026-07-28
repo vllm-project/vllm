@@ -18,7 +18,7 @@ from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
 )
 from vllm.models.deepseek_v4.common.ops.fused_indexer_q import MXFP4_BLOCK_SIZE
 from vllm.models.deepseek_v4.common.ops.save_partial_states import (
-    save_partial_states,
+    _SAVE_PARTIAL_STATES_KERNEL,
 )
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import (
@@ -321,6 +321,42 @@ class DeepseekCompressor(nn.Module):
                 f"Unsupported head_dim for fused quant+cache: {self.head_dim}"
             )
 
+        if vllm_config.kernel_config.enable_jit_warmup:
+
+            _SAVE_PARTIAL_STATES_KERNEL.register_warmup()
+            if current_platform.is_cuda() and self.head_dim == 512:
+                from vllm.models.deepseek_v4.nvidia.ops.sparse_attn_compress_cutedsl import (  # noqa: E501
+                    _SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL,
+                    _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_C4_KERNEL,
+                    _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_FULL_C4_KERNEL,
+                    _SPARSE_ATTN_NORM_ROPE_STORE_FULL_KERNEL,
+                    _SPARSE_ATTN_NORM_ROPE_STORE_KERNEL,
+                )
+
+                store_full_kv = vllm_config.cache_config.cache_dtype != "fp8_ds_mla"
+                if self.compress_ratio == 4:
+                    (
+                        _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_FULL_C4_KERNEL
+                        if store_full_kv
+                        else _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_C4_KERNEL
+                    ).register_warmup()
+                else:
+                    _SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL.register_warmup()
+                    if store_full_kv:
+                        _SPARSE_ATTN_NORM_ROPE_STORE_FULL_KERNEL.register_warmup()
+                    else:
+                        _SPARSE_ATTN_NORM_ROPE_STORE_KERNEL.register_warmup(
+                            vllm_config,
+                            k_cache_prefix=self.k_cache_prefix,
+                            compress_ratio=self.compress_ratio,
+                        )
+            else:
+                from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (  # noqa: E501
+                    _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL,
+                )
+
+                _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL.register_warmup()
+
     def forward(
         self,
         # [num_tokens, 2 * self.coff * self.head_dim]
@@ -366,7 +402,7 @@ class DeepseekCompressor(nn.Module):
         # GEMM; state_cache from this kernel) but neither emits/waits on PDL
         # grid dependency primitives, so launch_pdl=True caused a
         # read-after-write race and non-deterministic output.
-        save_partial_states(
+        _SAVE_PARTIAL_STATES_KERNEL(
             kv=kv,
             score=score,
             ape=self.ape,
@@ -416,13 +452,13 @@ class DeepseekCompressor(nn.Module):
         compress_norm_rope_store_fn: Any
         if current_platform.is_cuda() and self.head_dim == 512:
             from .nvidia.ops.sparse_attn_compress_cutedsl import (
-                compress_norm_rope_store_cutedsl,
+                _SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL,
             )
 
             # head=512 on CUDA always uses cutedsl, for both the fp8_ds_mla
             # layout and the plain full-cache layout. The full-cache flags
             # are consumed only here.
-            compress_norm_rope_store_fn = compress_norm_rope_store_cutedsl
+            compress_norm_rope_store_fn = _SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL
             extra_kwargs: dict[str, Any] = dict(
                 store_full_kv=store_full_kv,
                 store_full_fp8=store_full_fp8,
