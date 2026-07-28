@@ -47,6 +47,14 @@ torch::stable::Tensor permute_cols(torch::stable::Tensor const& A,
                                    torch::stable::Tensor const& perm);
 
 #ifndef USE_ROCM
+  #ifdef VLLM_ENABLE_GDN_CONV_SM103
+torch::stable::Tensor gdn_causal_conv1d_sm103(
+    const torch::stable::Tensor& x, const torch::stable::Tensor& weight,
+    const torch::stable::Tensor& bias, torch::stable::Tensor& states,
+    const torch::stable::Tensor& state_indices,
+    const torch::stable::Tensor& has_initial_state, bool has_bias);
+  #endif
+
 bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
 bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability);
 bool cutlass_group_gemm_supported(int64_t cuda_device_capability);

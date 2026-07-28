@@ -32,9 +32,9 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
     is_conv_state_dim_first,
 )
-from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
+from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
+from vllm.model_executor.layers.mamba.ops.gdn_causal_conv1d import (
     causal_conv1d_fn,
-    causal_conv1d_update,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
