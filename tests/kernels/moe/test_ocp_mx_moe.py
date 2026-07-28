@@ -1,29 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import importlib.metadata
 import types
 from dataclasses import dataclass
-from importlib.util import find_spec
 
 import pytest
 import torch
-from packaging import version
 
 from tests.kernels.moe.utils import check_accuracy
 from vllm._aiter_ops import is_aiter_found, rocm_aiter_ops
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
-
-# MXFP4 via quark requires amd-quark >= 0.12 on torch >= 2.11.
-# Earlier torch releases work with older quark versions. See
-# https://github.com/amd/Quark/issues/34
-# TODO: Remove once amd-quark>=0.12.0
-QUARK_MXFP4_TORCH_COMPATIBLE = find_spec("quark") is not None and (
-    version.parse(importlib.metadata.version("amd-quark")) >= version.parse("0.12.0")
-    if version.parse(torch.__version__.split("+")[0]) >= version.parse("2.11")
-    else True
-)
 
 TRTLLM_GEN_MXFP4_AVAILABLE = (
     current_platform.is_cuda() and current_platform.is_device_capability_family(100)
@@ -96,8 +83,8 @@ def enable_pickle(monkeypatch):
     ],
 )
 @pytest.mark.skipif(
-    not QUARK_MXFP4_TORCH_COMPATIBLE,
-    reason="MXFP4 via quark requires amd-quark >= 0.12 on torch >= 2.11.",
+    not ROCM_AVAILABLE,
+    reason="This test is only enabled on platforms that support amd-quark",
 )
 def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
     if torch.accelerator.device_count() < model_case.tp:
@@ -1525,3 +1512,49 @@ def test_rocm_mxfp4_moe_oracle(
 
     # Check accuracy using per-backend thresholds
     check_accuracy(ref, out, atol=0.1, rtol=config["rtol"], percent=config["percent"])
+
+
+# -----------------------------------------------------------------------------
+# MXFP4 emulation size-rounding tests
+# -----------------------------------------------------------------------------
+# Emulation needs each per-partition dim rounded up to OCP_MX_BLOCK_SIZE (32);
+# a non-block-aligned shard (e.g. GPT-OSS 2880 // 4 = 720) otherwise truncates
+# the scale buffer and fails weight loading.
+# NOTE: gated to ROCm since it is the emulation backend's current target;
+# remove this skip if the backend is enabled on non-ROCm platforms.
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="emulation backend targets ROCm")
+@pytest.mark.parametrize(
+    "hidden_size,intermediate_size,expected_hidden,expected_intermediate",
+    [
+        (2880, 720, 2880, 736),  # GPT-OSS TP=4 shard: 720 -> round_up(720, 32)
+        (2880, 360, 2880, 384),  # GPT-OSS TP=8 shard: 360 -> 384
+        (2880, 2880, 2880, 2880),  # already block-aligned: unchanged
+        (90, 90, 96, 96),  # both dims unaligned
+    ],
+)
+def test_mxfp4_emulation_rounds_up_to_block_size(
+    hidden_size: int,
+    intermediate_size: int,
+    expected_hidden: int,
+    expected_intermediate: int,
+):
+    """Emulation must block-align per-partition dims to OCP_MX_BLOCK_SIZE."""
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        mxfp4_round_up_hidden_size_and_intermediate_size,
+    )
+    from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
+        OCP_MX_BLOCK_SIZE,
+    )
+
+    rounded_hidden, rounded_intermediate = (
+        mxfp4_round_up_hidden_size_and_intermediate_size(
+            Mxfp4MoeBackend.EMULATION, hidden_size, intermediate_size
+        )
+    )
+
+    assert rounded_hidden == expected_hidden
+    assert rounded_intermediate == expected_intermediate
+    # The block-scale buffer (dim // OCP_MX_BLOCK_SIZE) must not floor-truncate.
+    assert rounded_hidden % OCP_MX_BLOCK_SIZE == 0
+    assert rounded_intermediate % OCP_MX_BLOCK_SIZE == 0

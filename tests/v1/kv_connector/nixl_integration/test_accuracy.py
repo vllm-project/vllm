@@ -26,6 +26,7 @@ EXPECTED_VALUES = {
     "Qwen/Qwen3.5-0.8B": 0.33,
     "google/gemma-4-E2B-it": 0.485,
     "ai21labs/AI21-Jamba2-3B": 0.74,
+    "deepseek-ai/DeepSeek-V4-Flash": 0.95,
 }
 
 SIMPLE_PROMPT = (
