@@ -323,12 +323,22 @@ def test_flashinfer_stochastic_rounding_requires_float16_state():
         )
 
 
-def test_flashinfer_stochastic_rounding_accepted_with_float16_state():
-    """Reaches the availability probe, which is the next check after the dtype
-    gate; on a box without flashinfer that surfaces as the package error."""
+def test_flashinfer_stochastic_rounding_accepted_with_float16_state(monkeypatch):
+    """fp16 + SR must validate cleanly.
+
+    Availability is mocked rather than assumed either way: the suite has to pass
+    both on a box with flashinfer installed and on one without.
+    """
+    monkeypatch.setattr("vllm.utils.flashinfer.has_flashinfer", lambda: True)
     stub = _validation_stub(16, ssm_dtype="float16", stochastic_rounding=True)
+    # Returns None on success; any rejection would raise.
+    assert VllmConfig._validate_replayssm_spec_flashinfer(stub, 4) is None
+
+
+def test_flashinfer_requires_the_package(monkeypatch):
+    monkeypatch.setattr("vllm.utils.flashinfer.has_flashinfer", lambda: False)
     with pytest.raises(ValueError, match="flashinfer-python package"):
-        VllmConfig._validate_replayssm_spec_flashinfer(stub, 4)
+        VllmConfig._validate_replayssm_spec_flashinfer(_validation_stub(16), 4)
 
 
 def test_flashinfer_rejects_buffer_len_above_the_kernel_window():
@@ -344,10 +354,14 @@ def test_flashinfer_rejects_spec_window_larger_than_buffer():
 def test_flashinfer_validation_does_not_import_flashinfer():
     """Config validation must stay import-free: importing flashinfer here would
     initialise CUDA during config construction (see has_flashinfer's find_spec).
+
+    Asserts the call does not *add* the import rather than that flashinfer is
+    absent, so this holds whether or not the package is installed and whatever
+    else the test session has already imported.
     """
-    assert "flashinfer" not in sys.modules
+    was_imported = "flashinfer" in sys.modules
     with pytest.raises(ValueError):
         # B > 16 fails before the availability probe; either way nothing may
         # import the package.
         VllmConfig._validate_replayssm_spec_flashinfer(_validation_stub(32), 4)
-    assert "flashinfer" not in sys.modules
+    assert ("flashinfer" in sys.modules) is was_imported

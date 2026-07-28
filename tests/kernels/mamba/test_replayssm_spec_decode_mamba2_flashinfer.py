@@ -21,6 +21,8 @@ Ring contract under test:
     Triton ring which caches raw dt.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -43,6 +45,32 @@ _SMALL = (8, 64, 128, 2)
 # Nemotron-H at TP1/TP4-ish head counts.
 _REAL = (128, 64, 128, 8)
 _REAL_TP4 = (32, 64, 128, 2)
+
+
+def _make_backend(algorithm: str = "monolith", stochastic_rounding: bool = False):
+    """Build the adapter without running its FlashInfer availability probe.
+
+    Bypassing __init__ means every field the call path reads has to be set here;
+    going through a single helper keeps the three fixtures from drifting as the
+    adapter gains state.
+    """
+    from flashinfer.mamba import checkpointing_ssu
+
+    from vllm.model_executor.layers.mamba.ops.replayssm_spec_flashinfer import (
+        ReplaySSMSpecFlashInferBackend,
+        _resolve_rounding_policy,
+    )
+
+    backend = ReplaySSMSpecFlashInferBackend.__new__(ReplaySSMSpecFlashInferBackend)
+    backend._kernel = checkpointing_ssu
+    backend.algorithm = algorithm
+    backend.rounding = _resolve_rounding_policy(
+        SimpleNamespace(
+            enable_stochastic_rounding=stochastic_rounding,
+            stochastic_rounding_philox_rounds=0,
+        )
+    )
+    return backend
 
 
 def _tolerances(act_dtype: torch.dtype) -> tuple[float, float]:
@@ -147,9 +175,6 @@ def _run_step(
     slot: int = 2,
 ):
     """One FlashInfer verify step against the serial oracle for a single row."""
-    from vllm.model_executor.layers.mamba.ops.replayssm_spec_flashinfer import (
-        ReplaySSMSpecFlashInferBackend,
-    )
 
     nheads, head_dim, dstate, ngroups = geom
     ring_len = buffer_len + max_spec_len
@@ -200,11 +225,7 @@ def _run_step(
             ),
         }
 
-    backend = ReplaySSMSpecFlashInferBackend.__new__(ReplaySSMSpecFlashInferBackend)
-    from flashinfer.mamba import checkpointing_ssu
-
-    backend._kernel = checkpointing_ssu
-    backend.algorithm = algorithm
+    backend = _make_backend(algorithm)
 
     state_before = state.clone()
     backend(
@@ -437,13 +458,9 @@ def test_new_tokens_are_appended_after_the_replayed_history():
 
 def test_padded_rows_are_skipped_via_pad_slot_id():
     """CUDA-graph padding rows carry NULL_BLOCK_ID and must not touch a page."""
-    from vllm.model_executor.layers.mamba.ops.replayssm_spec_flashinfer import (
-        ReplaySSMSpecFlashInferBackend,
-    )
     from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
     set_random_seed(6)
-    from flashinfer.mamba import checkpointing_ssu
 
     nheads, head_dim, dstate, ngroups = _TINY
     buffer_len, max_spec_len, seq_len = 16, 4, 4
@@ -473,9 +490,7 @@ def test_padded_rows_are_skipped_via_pad_slot_id():
     a = _tied_A(nheads, head_dim, dstate)
     dt_bias = torch.rand(nheads, device=DEV, dtype=torch.float32) * 0.1
 
-    backend = ReplaySSMSpecFlashInferBackend.__new__(ReplaySSMSpecFlashInferBackend)
-    backend._kernel = checkpointing_ssu
-    backend.algorithm = "monolith"
+    backend = _make_backend("monolith")
     backend(
         state,
         x_cache,
@@ -537,11 +552,6 @@ def test_multi_step_lifecycle_tracks_the_serial_reference():
     Drives the host cursor rules alongside the kernel so a desync between the
     two shows up as an output mismatch rather than only as a cursor assertion.
     """
-    from flashinfer.mamba import checkpointing_ssu
-
-    from vllm.model_executor.layers.mamba.ops.replayssm_spec_flashinfer import (
-        ReplaySSMSpecFlashInferBackend,
-    )
 
     set_random_seed(8)
     nheads, head_dim, dstate, ngroups = _TINY
@@ -565,9 +575,7 @@ def test_multi_step_lifecycle_tracks_the_serial_reference():
     d = torch.randn(nheads, device=DEV, dtype=torch.float32)
     dt_bias = torch.rand(nheads, device=DEV, dtype=torch.float32) * 0.1
 
-    backend = ReplaySSMSpecFlashInferBackend.__new__(ReplaySSMSpecFlashInferBackend)
-    backend._kernel = checkpointing_ssu
-    backend.algorithm = "monolith"
+    backend = _make_backend("monolith")
 
     # Independent ground truth: the accepted token stream fed serially through
     # a state that is never rolled back.
