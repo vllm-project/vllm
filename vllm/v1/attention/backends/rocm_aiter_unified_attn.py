@@ -27,12 +27,14 @@ logger = init_logger(__name__)
 
 
 class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
-    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
+        "float16",
         "bfloat16",
         "fp8",
         "fp8_e4m3",
+        "fp8_e5m2",
     ]
 
     @staticmethod
@@ -85,7 +87,8 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        return (num_blocks, 2, block_size, num_kv_heads, head_size)
+        # K and V are packed into the content dim: logical (B, H, N, 2*hs).
+        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
@@ -148,26 +151,8 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
     def _split_kv_cache(
         self, kv_cache: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.attn_type != AttentionType.ENCODER_DECODER:
-            return kv_cache.unbind(1)
-
-        # NOTE: Encoder-decoder layers can share the same raw KV allocation with
-        # ROCM_ATTN decoder layers, whose physical layout is K/V first. Keep
-        # this cross-attention path on that physical layout so block IDs do not
-        # alias different bytes across the shared allocation.
-        num_blocks, _, block_size, num_kv_heads, head_size = kv_cache.shape
-        block_stride = block_size * num_kv_heads * head_size
-        kv_cache = kv_cache.as_strided(
-            (2, num_blocks, block_size, num_kv_heads, head_size),
-            (
-                num_blocks * block_stride,
-                block_stride,
-                num_kv_heads * head_size,
-                head_size,
-                1,
-            ),
-        )
-        return kv_cache.unbind(0)
+        # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
+        return kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
 
     def forward(
         self,
@@ -242,27 +227,58 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         max_seqlen_k = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
 
-        self.unified_attention(
-            q=query[:num_actual_tokens],
-            k=key_cache,
-            v=value_cache,
-            out=output[:num_actual_tokens],
-            cu_seqlens_q=cu_seqlens_q,
-            max_seqlen_q=max_seqlen_q,
-            seqused_k=seqused_k,
-            max_seqlen_k=max_seqlen_k,
-            softmax_scale=softmax_scale,
-            causal=True,
-            alibi_slopes=self.alibi_slopes,
-            window_size=self.sliding_window,
-            block_table=block_table,
-            softcap=self.logits_soft_cap,
-            q_descale=layer._q_scale if query.dtype == self.fp8_dtype else None,
-            k_descale=layer._k_scale,
-            v_descale=layer._v_scale,
-            sinks=self.sinks,
-            output_scale=output_scale,
-        )
+        if attn_metadata.causal:
+            self.unified_attention(
+                q=query[:num_actual_tokens],
+                k=key_cache,
+                v=value_cache,
+                out=output[:num_actual_tokens],
+                cu_seqlens_q=cu_seqlens_q,
+                max_seqlen_q=max_seqlen_q,
+                seqused_k=seqused_k,
+                max_seqlen_k=max_seqlen_k,
+                softmax_scale=softmax_scale,
+                causal=True,
+                alibi_slopes=self.alibi_slopes,
+                window_size=self.sliding_window,
+                block_table=block_table,
+                softcap=self.logits_soft_cap,
+                q_descale=layer._q_scale if query.dtype == self.fp8_dtype else None,
+                k_descale=layer._k_scale,
+                v_descale=layer._v_scale,
+                sinks=self.sinks,
+                output_scale=output_scale,
+            )
+        else:
+            # The aiter kernel is causal-only. Non-causal cross-attention
+            # (ENCODER_DECODER, e.g. Whisper) falls back to the vLLM Triton
+            # unified kernel, which shares this layout and honors the flag.
+            from vllm.v1.attention.ops.triton_unified_attention import (
+                unified_attention as triton_unified_attention,
+            )
+
+            descale_shape = (cu_seqlens_q.shape[0] - 1, key_cache.shape[2])
+            triton_unified_attention(
+                q=query[:num_actual_tokens],
+                k=key_cache,
+                v=value_cache,
+                out=output[:num_actual_tokens],
+                cu_seqlens_q=cu_seqlens_q,
+                max_seqlen_q=max_seqlen_q,
+                seqused_k=seqused_k,
+                max_seqlen_k=max_seqlen_k,
+                softmax_scale=softmax_scale,
+                causal=attn_metadata.causal,
+                alibi_slopes=self.alibi_slopes,
+                window_size=self.sliding_window,
+                block_table=block_table,
+                softcap=self.logits_soft_cap,
+                q_descale=layer._q_scale if query.dtype == self.fp8_dtype else None,
+                k_descale=layer._k_scale.expand(descale_shape),
+                v_descale=layer._v_scale.expand(descale_shape),
+                sinks=self.sinks,
+                output_scale=output_scale,
+            )
 
         return output
 
@@ -294,6 +310,50 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
 
     def fused_rope_kvcache_supported(self):
         return rocm_aiter_ops.is_enabled()
+
+    def fused_qk_norm_rope_kvcache_supported(self):
+        return rocm_aiter_ops.is_enabled()
+
+    def do_qk_norm_rope_kvcache_update(
+        self,
+        layer: AttentionLayer,
+        qkv: torch.Tensor,
+        q_out: torch.Tensor,
+        k_out: torch.Tensor,
+        positions: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        rms_norm_eps: float,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ):
+        # _split_kv_cache picks the unbind dim per layout (incl. the K/V-first
+        # encoder-decoder path). unified reads NHD, so never write the shuffle
+        # layout here.
+        key_cache, value_cache = self._split_kv_cache(kv_cache)
+        rocm_aiter_ops.do_qk_norm_rope_kvcache_update(
+            qkv=qkv,
+            q_weight=q_weight,
+            k_weight=k_weight,
+            cos_sin_cache=cos_sin_cache,
+            positions=positions,
+            num_heads_q=self.num_heads,
+            num_heads_k=self.num_kv_heads,
+            head_dim=self.head_size,
+            is_neox=is_neox,
+            rms_norm_eps=rms_norm_eps,
+            q_out=q_out,
+            k_out=k_out,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            slot_mapping=layer_slot_mapping,
+            k_scale=layer._k_scale_cpu,
+            v_scale=layer._v_scale_cpu,
+            kv_cache_dtype=self.kv_cache_dtype,
+            use_shuffle_layout=False,
+        )
 
     def do_rope_and_kv_cache_update(
         self,

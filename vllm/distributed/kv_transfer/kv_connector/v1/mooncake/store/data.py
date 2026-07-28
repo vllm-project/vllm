@@ -9,6 +9,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import cast
 
+import numpy as np
 import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -137,6 +138,8 @@ class PoolKey:
         key_metadata: KeyMetadata,
         *,
         tp_rank: int | None = None,
+        pcp_rank: int | None = None,
+        dcp_rank: int | None = None,
         pp_rank: int | None = None,
     ) -> str:
         """Return the stable prefix for a Mooncake pool key."""
@@ -145,8 +148,8 @@ class PoolKey:
             f"{prefix}"
             f"{key_metadata.model_name}"
             f"@tp_rank:{key_metadata.tp_rank if tp_rank is None else tp_rank}"
-            f"@pcp{key_metadata.pcp_rank}"
-            f"@dcp{key_metadata.dcp_rank}"
+            f"@pcp{key_metadata.pcp_rank if pcp_rank is None else pcp_rank}"
+            f"@dcp{key_metadata.dcp_rank if dcp_rank is None else dcp_rank}"
             f"@pp_rank:{key_metadata.pp_rank if pp_rank is None else pp_rank}"
             f"@group:{key_metadata.group_id}"
         )
@@ -194,22 +197,58 @@ class ChunkedTokenDatabase:
     def prepare_value(
         self, start: int, end: int, block_ids: list[int]
     ) -> tuple[list[int], list[int], int]:
-        """Compute memory addresses and sizes for a token range.
+        """Compute memory addresses and sizes for a single token range.
 
         Returns:
             (addr_list, size_list, block_id)
         """
+        addr_lists, size_lists, chunk_block_ids = self.prepare_values(
+            ((start, end),), block_ids
+        )
+        return addr_lists[0], size_lists[0], chunk_block_ids[0]
+
+    def prepare_values(
+        self,
+        chunks: Sequence[tuple[int, int]],
+        block_ids: list[int],
+    ) -> tuple[list[list[int]], list[list[int]], list[int]]:
+        """Compute memory addresses and sizes for multiple token ranges.
+
+        Returns:
+            (addr_lists, size_lists, chunk_block_ids), one entry per chunk.
+        """
+        if not chunks:
+            return [], [], []
+        base = np.asarray(self.kv_caches_base_addr, dtype=np.int64)
+        length = len(self.block_len)
+        blen = np.asarray(
+            [self.block_len[i % length] for i in range(base.shape[0])],
+            dtype=np.int64,
+        )
+        n = len(chunks)
+        starts = np.fromiter((c[0] for c in chunks), dtype=np.int64, count=n)
+        spans = np.fromiter((c[1] for c in chunks), dtype=np.int64, count=n) - starts
+        assert not (spans % self.hash_block_size).any()
+        bids = np.fromiter(
+            (block_ids[i] for i in (starts // self.block_size).tolist()),
+            dtype=np.int64,
+            count=n,
+        )
+        addrs = base[None, :] + bids[:, None] * blen[None, :]
+        block_counts = (spans + self.block_size - 1) // self.block_size
+        sizes = blen[None, :] * block_counts[:, None]
+        return addrs.tolist(), sizes.tolist(), bids.tolist()
+
+    def prepare_value_for_block(self, block_id: int) -> tuple[list[int], list[int]]:
+        """Return addresses and sizes for one physical block slot."""
         addr_list = []
         size_list = []
-        block_id = block_ids[start // self.block_size]
         length = len(self.block_len)
         for index, base_addr in enumerate(self.kv_caches_base_addr):
             addr = base_addr + block_id * self.block_len[index % length]
-            assert (end - start) % self.block_size == 0
-            size = self.block_len[index % length] * cdiv(end - start, self.block_size)
             addr_list.append(addr)
-            size_list.append(size)
-        return addr_list, size_list, block_id
+            size_list.append(self.block_len[index % length])
+        return addr_list, size_list
 
     def process_tokens(
         self,
@@ -229,7 +268,8 @@ class ChunkedTokenDatabase:
         rank regardless of where the processed suffix begins.
 
         Args:
-            token_len: Total number of tokens.
+            token_len: Total number of tokens. Must be hash-block aligned and
+                covered by ``block_hashes`` when hashes are present.
             block_hashes: Block hashes computed at ``hash_block_size`` granularity.
                 When ``block_size > hash_block_size`` each group's ``block_size`` chunk
                 is keyed by its last sub-hash via ``chunk_hashes_for_block_size``.
@@ -242,11 +282,10 @@ class ChunkedTokenDatabase:
         assert put_step > 0
         if not block_hashes:
             return
-        chunk_hashes: Sequence[BlockHash] = chunk_hashes_for_block_size(
-            block_hashes, self.hash_block_size, self.block_size
-        )
+        assert token_len % self.hash_block_size == 0
+        assert token_len // self.hash_block_size <= len(block_hashes)
         start_chunk = max(0, cdiv(mask_num, self.block_size))
-        max_chunks = min(len(chunk_hashes), cdiv(token_len, self.block_size))
+        max_chunks = cdiv(token_len, self.block_size)
         if chunk_mask is not None:
             max_chunks = min(max_chunks, start_chunk + len(chunk_mask))
         for chunk_id in range(start_chunk, max_chunks):
@@ -254,9 +293,9 @@ class ChunkedTokenDatabase:
                 continue
             if chunk_id % put_step != put_step_rank:
                 continue
-            h = chunk_hashes[chunk_id]
             start_idx = chunk_id * self.block_size
             end_idx = min(start_idx + self.block_size, token_len)
+            h = block_hashes[end_idx // self.hash_block_size - 1]
             yield start_idx, end_idx, h
 
 
@@ -279,6 +318,7 @@ class RequestTracker:
     allocated_block_ids: tuple[list[int], ...]
     num_saved_tokens: int = 0
     token_ids: list[int] | None = None
+    has_pending_offload: bool = False
     # Snapshot of the prefill range length at tracker creation time.
     # For a fresh request this is len(prompt). For a resumed-from-preemption
     # request it includes previously-generated tokens, which are re-prefilled.
@@ -289,6 +329,7 @@ class RequestTracker:
         self.allocated_block_ids = ()
         self.num_saved_tokens = 0
         self.token_ids = None
+        self.has_pending_offload = False
         self.prefill_end_tokens = 0
 
     def update(
@@ -325,6 +366,11 @@ class ReqMeta:
 
     token_ids: list[int] | None = None
     num_prompt_tokens: int | None = None
+    # Core-provided per-mamba-group
+    # (group_id, cow_block_id, boundary_tokens) for this request's partial tail.
+    # Present only on the producer's CoW step; drives the connector's offload
+    # (the FA group's block is derived from block_ids and boundary_tokens).
+    partial_tail_offloads: list[tuple[int, int, int]] | None = None
 
     @staticmethod
     def from_request_tracker(

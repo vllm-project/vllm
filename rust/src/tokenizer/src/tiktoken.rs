@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Mutex;
@@ -459,6 +462,13 @@ impl Tokenizer for TiktokenTokenizer {
         })
     }
 
+    fn encode_ordinary(&self, text: &str) -> Result<Vec<u32>> {
+        Ok(match &self.backend {
+            Backend::Riptoken(backend) => backend.inner.encode_ordinary(text),
+            Backend::TiktokenRs(backend) => backend.inner.encode_ordinary(text),
+        })
+    }
+
     fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<String> {
         // Filter passes:
         //
@@ -746,6 +756,39 @@ mod tests {
             // (259) are dropped; the non-special added token (258) survives.
             let stripped = backend.decode(&ids, true).unwrap();
             assert_eq!(stripped, "Hi<|tool_call_begin|>");
+        }
+    }
+
+    #[test]
+    fn tiktoken_ordinary_bypasses_every_registered_added_token() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let bpe_path = write_synthetic_bpe_file(dir.path());
+        fs::write(
+            dir.path().join("tokenizer_config.json"),
+            r#"{
+                "added_tokens_decoder": {
+                    "257": { "content": "<|im_end|>", "special": true },
+                    "258": { "content": "<|tool_call_begin|>", "special": false }
+                }
+            }"#,
+        )
+        .expect("write tokenizer_config.json");
+        fs::write(dir.path().join("config.json"), r#"{"vocab_size": 260}"#)
+            .expect("write config.json");
+
+        let input = "<|im_end|><|tool_call_begin|><|reserved_token_259|>";
+        let expected: Vec<u32> = input.as_bytes().iter().copied().map(u32::from).collect();
+        for backend in explicit_backends(&bpe_path) {
+            assert_eq!(backend.encode("<|im_end|>", false).unwrap(), vec![257]);
+            assert_eq!(
+                backend.encode("<|tool_call_begin|>", false).unwrap(),
+                vec![258]
+            );
+            assert_eq!(
+                backend.encode("<|reserved_token_259|>", false).unwrap(),
+                vec![259]
+            );
+            assert_eq!(backend.encode_ordinary(input).unwrap(), expected);
         }
     }
 
