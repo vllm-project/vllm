@@ -257,7 +257,7 @@ def _run_vllm_dp_server(child_args: argparse.Namespace) -> None:
     name = f"APIServer_DP{child_args.data_parallel_rank}"
     set_process_title(name)
     decorate_logs(name)
-    if envs.VLLM_RUST_FRONTEND_PATH:
+    if envs.VLLM_USE_RUST_FRONTEND and envs.VLLM_RUST_FRONTEND_PATH:
         _run_rust_vllm_dp_server(child_args)
     else:
         _run_python_vllm_dp_server(child_args)
