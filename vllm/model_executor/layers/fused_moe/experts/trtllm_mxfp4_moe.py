@@ -142,6 +142,7 @@ class TrtLlmMxfp4ExpertsMonolithic(
         activation_key: QuantKey | None,
     ) -> bool:
         return routing_method in [
+            RoutingMethodType.DeepSeekV3,
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
         ]
@@ -192,8 +193,8 @@ class TrtLlmMxfp4ExpertsMonolithic(
             device=hidden_states.device,
         )
         trtllm_fp4_block_scale_moe(
-            routing_logits=router_logits.to(torch.bfloat16),
-            routing_bias=None,
+            routing_logits=router_logits,
+            routing_bias=e_score_correction_bias,
             hidden_states=x_quant,
             hidden_states_scale=x_scale,
             gemm1_weights=w1,
@@ -210,12 +211,12 @@ class TrtLlmMxfp4ExpertsMonolithic(
             output2_scale_scalar=None,
             num_experts=global_num_experts,
             top_k=self.topk,
-            n_group=None,
-            topk_group=None,
+            n_group=(num_expert_group or 0),
+            topk_group=(topk_group or 0),
             intermediate_size=self.intermediate_size_per_partition,
             local_expert_offset=self.ep_rank * self.local_num_experts,
             local_num_experts=self.local_num_experts,
-            routed_scaling_factor=None,
+            routed_scaling_factor=routed_scaling_factor,
             routing_method_type=self.routing_method_type,
             do_finalize=True,
             tune_max_num_tokens=max(self.max_capture_size, 1),
