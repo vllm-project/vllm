@@ -398,7 +398,6 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             routing_method_type=1,  # not used
             do_finalize=True,
             activation_type=activation_to_flashinfer_int(activation),
-            is_private=True,
             per_token_scale=per_token_scale,
             output=output,
             tune_max_num_tokens=min(
@@ -580,7 +579,6 @@ class TrtLlmNvFp4ExpertsMonolithic(
             routing_method_type=self.routing_method_type,
             do_finalize=True,
             activation_type=activation_to_flashinfer_int(activation),
-            is_private=True,
             per_token_scale=per_token_scale,
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
             routing_replay_out=routing_replay_out,

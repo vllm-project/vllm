@@ -262,7 +262,6 @@ class TrtLlmMxfp4ExpertsMonolithic(
             routing_method_type=self.routing_method_type,
             do_finalize=True,
             activation_type=self._flashinfer_activation_type(activation),
-            is_private=True,
             tune_max_num_tokens=max(self.max_capture_size, 1),
             output=output,
             routing_replay_out=routing_replay_out,
@@ -384,7 +383,6 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
             "do_finalize": True,
             "enable_pdl": True,
             "activation_type": self._flashinfer_activation_type(activation),
-            "is_private": True,
             "output": output,
             "tune_max_num_tokens": max(self.max_capture_size, 1),
         }
