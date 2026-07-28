@@ -28,12 +28,17 @@ from vllm.model_executor.kernels.mhc.tilelang import (
     hc_head_fused_kernel_tilelang,
     mhc_post_tilelang,
 )
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
+)
+from vllm.model_executor.model_loader.mtp_validation import (
+    is_mtp_completeness_check_enabled,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_mtp import SharedHead
@@ -47,6 +52,7 @@ from vllm.sequence import IntermediateTensors
 
 from .model import (
     DeepseekV4DecoderLayer,
+    DeepseekV4Model,
     make_deepseek_v4_expert_params_mapping,
 )
 
@@ -90,6 +96,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             bias=False,
             return_bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.e_proj",
         )
         self.h_proj = ReplicatedLinear(
             config.hidden_size,
@@ -97,6 +104,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             bias=False,
             return_bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.h_proj",
         )
 
         self.hc_eps = config.hc_eps
@@ -258,6 +266,10 @@ class DeepSeekV4MTP(nn.Module):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
+        self.pad_shared_expert = (
+            getattr(self.quant_config, "weight_block_size", None) is not None
+            and not vllm_config.parallel_config.use_sequence_parallel_moe
+        )
         self.model = DeepSeekV4MultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
@@ -337,7 +349,7 @@ class DeepSeekV4MTP(nn.Module):
                 self.config.n_routed_experts
             )
         else:
-            expert_mapping = FusedMoE.make_expert_params_mapping(
+            expert_mapping = fused_moe_make_expert_params_mapping(
                 self,
                 ckpt_gate_proj_name="w1",
                 ckpt_down_proj_name="w2",
@@ -380,6 +392,12 @@ class DeepSeekV4MTP(nn.Module):
                     else ".weight_scale_inv"
                 )
                 name = name.removesuffix(".scale") + suffix
+            if ".shared_experts.w2" in name:
+                name = name.replace(".shared_experts.w2", ".shared_experts.down_proj")
+            if self.pad_shared_expert and ".shared_experts." in name:
+                loaded_weight = DeepseekV4Model._pad_shared_expert_weight(
+                    self.quant_config, name, loaded_weight
+                )
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if ".experts." in name:
@@ -435,10 +453,6 @@ class DeepSeekV4MTP(nn.Module):
                     loaded_params.add(name)
                     continue
                 else:
-                    if ".shared_experts.w2" in name:
-                        name = name.replace(
-                            ".shared_experts.w2", ".shared_experts.down_proj"
-                        )
                     if name.endswith(".ffn.gate.bias"):
                         # ``e_score_correction_bias`` lives on the gate
                         # under a different attribute name.
@@ -463,7 +477,7 @@ class DeepSeekV4MTP(nn.Module):
             self.model.mtp_start_layer_idx,
             self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
         ):
-            if layer_idx not in loaded_layers:
+            if layer_idx not in loaded_layers and is_mtp_completeness_check_enabled():
                 raise ValueError(
                     f"MTP speculative decoding layer {layer_idx} weights "
                     f"missing from checkpoint. The checkpoint may have "

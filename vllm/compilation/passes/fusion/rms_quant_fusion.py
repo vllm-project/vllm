@@ -39,6 +39,7 @@ FP4_DTYPE = torch.uint8
 
 
 _RMS_NORM_OP = torch.ops.vllm_ir.rms_norm.default
+_FUSED_ADD_RMS_NORM_OP = torch.ops.vllm_ir.fused_add_rms_norm.default
 
 
 # TODO: extend rmsnorm quant kernels to support mixed input/weight dtypes,
@@ -49,8 +50,13 @@ def _rms_input_weight_dtype_match(match: pm.Match) -> bool:
         if node.target == _RMS_NORM_OP:
             # rms_norm(x, weight, epsilon, variance_size)
             x, weight = node.args[0], node.args[1]
-            if isinstance(x, fx.Node) and isinstance(weight, fx.Node):
-                return x.meta["val"].dtype == weight.meta["val"].dtype
+        elif node.target == _FUSED_ADD_RMS_NORM_OP:
+            # fused_add_rms_norm(x, residual, weight, epsilon, variance_size)
+            x, weight = node.args[0], node.args[2]
+        else:
+            continue
+        if isinstance(x, fx.Node) and isinstance(weight, fx.Node):
+            return x.meta["val"].dtype == weight.meta["val"].dtype
     return True
 
 
@@ -122,19 +128,14 @@ FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {
     FusedRMSQuantKey(
         kFp8DynamicTokenSym, True
     ): torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
-    FusedRMSQuantKey(
-        kFp8Dynamic128Sym, False
-    ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
-    FusedRMSQuantKey(
-        kFp8Dynamic128Sym, True
-    ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
-    FusedRMSQuantKey(
-        kFp8Dynamic64Sym, False
-    ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
-    FusedRMSQuantKey(
-        kFp8Dynamic64Sym, True
-    ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
 }
+# rms_norm_per_block_quant is CUDA-only; guard it like per_token_group_fp8_quant above.
+if hasattr(torch.ops._C, "rms_norm_per_block_quant"):
+    _rms_norm_per_block_quant = torch.ops._C.rms_norm_per_block_quant.default
+    FUSED_OPS[FusedRMSQuantKey(kFp8Dynamic128Sym, False)] = _rms_norm_per_block_quant  # noqa: E501
+    FUSED_OPS[FusedRMSQuantKey(kFp8Dynamic128Sym, True)] = _rms_norm_per_block_quant  # noqa: E501
+    FUSED_OPS[FusedRMSQuantKey(kFp8Dynamic64Sym, False)] = _rms_norm_per_block_quant  # noqa: E501
+    FUSED_OPS[FusedRMSQuantKey(kFp8Dynamic64Sym, True)] = _rms_norm_per_block_quant  # noqa: E501
 
 
 class RMSNormQuantPattern:

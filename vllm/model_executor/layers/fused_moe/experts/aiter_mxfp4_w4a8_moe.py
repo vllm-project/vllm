@@ -113,6 +113,12 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
     from aiter.ops.triton.moe_op_gemm_a8w4 import moe_gemm_a8w4
     from aiter.ops.triton.quant_moe import downcast_to_static_fp8
 
+    from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+        should_use_cdna4_mx_scale_swizzle,
+    )
+
+    _swizzle_mx_scale = "CDNA4_SCALE" if should_use_cdna4_mx_scale_swizzle() else None
+
     assert quant_config.w1_precision is not None, (
         "w1_precision in quant config can't be None"
     )
@@ -135,7 +141,7 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
         routing_data,
         gather_indx=gather_indx,
         gammas=gammas if apply_router_weight_on_input else None,
-        swizzle_mx_scale="CDNA4_SCALE",
+        swizzle_mx_scale=_swizzle_mx_scale,
         out_dtype=torch.float8_e4m3fn,
         apply_swiglu=True,
         alpha=swiglu_alpha,
@@ -155,7 +161,7 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
         routing_data,
         scatter_indx=scatter_indx,
         gammas=None if apply_router_weight_on_input else gammas,
-        swizzle_mx_scale="CDNA4_SCALE",
+        swizzle_mx_scale=_swizzle_mx_scale,
         unpadded_N=unpadded_N_w2,
         unpadded_K=unpadded_K_w2,
     )

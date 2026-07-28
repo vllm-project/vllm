@@ -109,7 +109,9 @@ run_nodes() {
         if [ "$node" -ne 0 ]; then
             docker exec -d "node$node" /bin/bash -c "cd $WORKING_DIR ; ${COMMANDS[$node]}"
         else
-            docker exec "node$node" /bin/bash -c "cd $WORKING_DIR ; ${COMMANDS[$node]}"
+            # Allocate a TTY (-t -i) for the foreground head node so its output
+            # keeps ANSI color in the Buildkite log (see run-amd-test.sh).
+            docker exec -t -i "node$node" /bin/bash -c "cd $WORKING_DIR ; ${COMMANDS[$node]}"
         fi
     done
 }
