@@ -7,7 +7,10 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
+from vllm.logger import init_logger
 from vllm.utils import is_moe_layer
+
+logger = init_logger(__name__)
 
 
 class Cache:
@@ -105,10 +108,30 @@ class All2AllManagerBase:
         raise NotImplementedError
 
     def query_active_mask(self) -> torch.Tensor:
+        """Return the all2all liveness mask for the EP ranks.
+
+        Returns:
+            An int32 device tensor where 0 marks a live rank and 1 marks a
+            masked (dead/unreachable) rank.
+        """
         raise NotImplementedError
 
     def query_fault(self) -> torch.Tensor:
-        """Returns has_fault scalar."""
+        """Return a scalar bool tensor, True if a new fault appeared.
+
+        Compares the current mask against the baseline recorded at the last
+        recovery point.
+        """
+        raise NotImplementedError
+
+    def clean_buffers(self) -> None:
+        """Reset this rank's RDMA buffers and all2all mask state (rank-local).
+
+        Post-fault cleanup: a dispatch/combine that hit a dead peer or timed
+        out can leave partially-written or stale tokens in the RDMA receive
+        buffer, so it is zeroed to stop the next forward from reading that
+        contaminated data.
+        """
         raise NotImplementedError
 
     def set_num_sms(self, num_sms: int):
@@ -116,6 +139,18 @@ class All2AllManagerBase:
 
     def max_sms_used(self) -> int | None:
         return None  # None means it could use the whole GPU
+
+    def checkpoint_prepare(self) -> None:
+        logger.warning_once(
+            "%s.checkpoint_prepare is not implemented; skipping.",
+            type(self).__name__,
+        )
+
+    def checkpoint_restore(self) -> None:
+        logger.warning_once(
+            "%s.checkpoint_restore is not implemented; skipping.",
+            type(self).__name__,
+        )
 
     def combine(self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False):
         raise NotImplementedError
@@ -195,6 +230,12 @@ class DeviceCommunicatorBase:
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         dist.all_reduce(input_, group=self.device_group)
         return input_
+
+    def checkpoint_prepare(self) -> None:
+        """Prepare reclaimable communicator state for checkpoint (default: no-op)."""
+
+    def checkpoint_restore(self) -> None:
+        """Restore communicator state after checkpoint (default: no-op)."""
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         if dim < 0:
