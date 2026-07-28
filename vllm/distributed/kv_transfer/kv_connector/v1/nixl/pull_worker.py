@@ -5,8 +5,6 @@
 import time
 from typing import TYPE_CHECKING
 
-import numpy as np
-
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
@@ -178,10 +176,10 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             )
             # Get side handles.
             if tp_ratio < 0 and (not self.use_mla or len(read_specs) > 1):
-                assert remote_block_size == self.block_size
                 # Remote tp_size > local tp_size: we must perform multiple
                 # reads. Get the memory chunk onto which we will write to.
-                local_xfer_side_handle = self.src_xfer_handles_by_tp_ratio[tp_ratio][i]
+                split_key = (tp_ratio, remote_block_size)
+                local_xfer_side_handle = self.src_xfer_handles_by_tp_ratio[split_key][i]
             else:
                 # Single read from remote, we write to the whole memory region.
                 # Also handle remote block size different from local block size.
@@ -235,30 +233,11 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             remote_info.remote_block_size
         )
         if block_size_ratio > 1:
-            # TODO (NickLucche) assume HMA is off. Change to handle multiple KV groups.
-            assert not self._is_hma_required
-            local_block_ids0 = local_block_ids[0] if local_block_ids else []
-            remote_block_ids0 = remote_block_ids[0]
-            local_block_ids_mapped = self.get_mapped_blocks(
-                np.asarray(local_block_ids0), block_size_ratio
-            ).tolist()
-            if len(local_block_ids_mapped) > len(remote_block_ids0):
-                # NOTE:
-                # get_mapped_blocks will always expand block_ids for n times.
-                # ex:
-                # prefill block_ids with block_size as 4:
-                # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-                # Local decode block_ids with block_size as 16: [1, 2, 3]
-                # expanded decode block_ids with get_mapped_blocks from [1, 2, 3] to
-                # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-                # Then we clip local to align with prefill
-                # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] to
-                # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-                local_block_ids_mapped = local_block_ids_mapped[
-                    : len(remote_block_ids0)
-                ]
-            local_block_ids = [local_block_ids_mapped] if local_block_ids_mapped else []
-            remote_block_ids = [remote_block_ids0]
+            local_block_ids, remote_block_ids = (
+                self._map_block_ids_for_block_size_ratio(
+                    local_block_ids, remote_block_ids, block_size_ratio
+                )
+            )
         # NOTE(rob): having the staging blocks be on the READER side is
         # not going to work well (since we will have to call rearrange tensors).
         # after we detect the txn is complete (which means we cannot make the
