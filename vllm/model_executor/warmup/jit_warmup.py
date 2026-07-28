@@ -518,57 +518,9 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
     def __init__(self) -> None:
         self.compile_key_dispatch_trace = _trace_compile_key_dispatch(self.dispatch)
         self._compiled_cache: dict[Any, Any] = {}
-        self._warmed_compile_keys: set[CompileKeyT] = set()
-        self._warmup_ran = False
 
     def compile_key(self, kwargs: Mapping[str, Any]) -> CompileKeyT:
         return self.compile_key_dispatch_trace.compile_key(self.CompileKey, kwargs)
-
-    def _missing_compile_key_error(
-        self,
-        compile_key: CompileKeyT,
-        *,
-        cache_key: Any | None = None,
-        runtime_context: Mapping[str, Any] | None = None,
-    ) -> RuntimeError:
-        details: list[str] = [f"compile_key={compile_key!r}"]
-        if cache_key is not None:
-            details.append(f"cache_key={cache_key!r}")
-        if runtime_context:
-            details.append(f"runtime_context={dict(runtime_context)!r}")
-        return RuntimeError(
-            f"{type(self).__name__} was called with an unwarmed JIT compile key "
-            f"({', '.join(details)}). This usually means get_warmup_keys(...) "
-            "does not cover a runtime dispatch point, or dispatch(...) is "
-            "mapping runtime arguments to the wrong specialization. Fix the "
-            "warmup search space or dispatch mapping; __call__(...) must not "
-            "silently compile on cache miss."
-        )
-
-    def _assert_compile_key_warmed(
-        self,
-        compile_key: CompileKeyT,
-        *,
-        runtime_context: Mapping[str, Any] | None = None,
-    ) -> None:
-        if not self._warmup_ran:
-            return
-        if compile_key not in self._warmed_compile_keys:
-            raise self._missing_compile_key_error(
-                compile_key,
-                runtime_context=runtime_context,
-            )
-
-    def _guard_warmup_call(
-        self,
-        compile_key: CompileKeyT | None,
-        *,
-        runtime_context: Mapping[str, Any] | None = None,
-    ) -> None:
-        if compile_key is not None:
-            self._assert_compile_key_warmed(
-                compile_key, runtime_context=runtime_context
-            )
 
     def _cache_key(
         self,
@@ -587,7 +539,7 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
         resolved_cache = self._compiled_cache if cache is None else cache
         return self._cache_key(compile_key, cache_key) in resolved_cache
 
-    def _get_compiled_from_cache(
+    def _get_or_compile(
         self,
         compile_key: CompileKeyT,
         *,
@@ -595,15 +547,25 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
         cache: Mapping[Any, Any] | None = None,
         runtime_context: Mapping[str, Any] | None = None,
     ) -> Any:
+        """Return a cached executor, compiling it on a monitored cache miss."""
         resolved_cache = self._compiled_cache if cache is None else cache
         resolved_cache_key = self._cache_key(compile_key, cache_key)
         try:
             return resolved_cache[resolved_cache_key]
+        except KeyError:
+            self.compile(compile_key)
+        try:
+            return resolved_cache[resolved_cache_key]
         except KeyError as exc:
-            raise self._missing_compile_key_error(
-                compile_key,
-                cache_key=resolved_cache_key,
-                runtime_context=runtime_context,
+            details = [
+                f"compile_key={compile_key!r}",
+                f"cache_key={resolved_cache_key!r}",
+            ]
+            if runtime_context:
+                details.append(f"runtime_context={dict(runtime_context)!r}")
+            raise RuntimeError(
+                f"{type(self).__name__}.compile(...) did not cache its JIT "
+                f"executor ({', '.join(details)})"
             ) from exc
 
     def _trace_dispatch(
@@ -665,11 +627,9 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
         raise NotImplementedError
 
     def warmup_keys(self, compile_keys: Iterable[CompileKeyT]) -> None:
-        """Compile and record an explicit set of warmup keys."""
+        """Compile an explicit set of warmup keys."""
         for compile_key in compile_keys:
             self.compile(compile_key)
-            self._warmed_compile_keys.add(compile_key)
-        self._warmup_ran = True
 
     def warmup(self, *args: Any, **kwargs: Any) -> None:
         """Compile this kernel's warmup keys."""

@@ -212,7 +212,6 @@ class MoeFusedMulSumKernel(VllmJitKernel["MoeFusedMulSumKernel.CompileKey"]):
             dtype=inputs.dtype,
             has_expert_map=expert_map is not None,
         )
-        self._guard_warmup_call(compile_key)
         grid = (
             triton.cdiv(size, compile_key.block_k),
             triton.cdiv(num_tokens, compile_key.block_m),

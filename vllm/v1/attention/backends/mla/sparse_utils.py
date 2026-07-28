@@ -271,17 +271,6 @@ class ConvertReqIndexToGlobalIndexKernel(
         DCP_RANK: int,
         DCP_INTERLEAVE: int,
     ) -> None:
-        compile_key = self.dispatch(
-            BLOCK_SIZE=BLOCK_SIZE,
-            BLOCK_N=BLOCK_N,
-            HAS_PREFILL_WORKSPACE=HAS_PREFILL_WORKSPACE,
-            COUNT_VALID=COUNT_VALID,
-            COMPACT_TO_FRONT=COMPACT_TO_FRONT,
-            DCP_SIZE=DCP_SIZE,
-            DCP_RANK=DCP_RANK,
-            DCP_INTERLEAVE=DCP_INTERLEAVE,
-        )
-        self._guard_warmup_call(compile_key)
         # Exact 2D grid: tokens × column tiles
         tiles_per_row = token_indices.shape[1] // BLOCK_N
         self.kernel[(req_id.shape[0], tiles_per_row)](

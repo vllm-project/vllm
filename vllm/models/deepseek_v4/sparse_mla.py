@@ -500,13 +500,6 @@ class BuildC128ATopkMetadataKernel(
         block_size: int,
         slot_mapping: torch.Tensor,
     ) -> None:
-        compile_key = self.dispatch(
-            compress_ratio=compress_ratio,
-            max_compressed_tokens=max_compressed_tokens,
-            block_size=block_size,
-            triton_block_size=1024,
-        )
-        self._guard_warmup_call(compile_key)
         self.kernel[(positions.shape[0],)](
             global_decode_buffer,
             global_decode_buffer.stride(0),

@@ -244,23 +244,6 @@ class CorrectAttnCPOutKernel(VllmJitKernel["CorrectAttnCPOutKernel.CompileKey"])
         n_rounded = lses.shape[0]
         outputs_stride_b, outputs_stride_h, outputs_stride_d = outputs.stride()
         lses_stride_n, lses_stride_b, lses_stride_h = lses.stride()
-        compile_key = self.dispatch(
-            output_dtype=outputs.dtype,
-            lse_dtype=lses.dtype,
-            num_tokens=num_tokens,
-            num_heads=num_heads,
-            head_dim=head_dim,
-            n_rounded=n_rounded,
-            lse_idx=lse_idx,
-            is_base_e=is_base_e,
-            runtime_outputs_stride_b=outputs_stride_b,
-            runtime_outputs_stride_h=outputs_stride_h,
-            runtime_outputs_stride_d=outputs_stride_d,
-            runtime_lses_stride_n=lses_stride_n,
-            runtime_lses_stride_b=lses_stride_b,
-            runtime_lses_stride_h=lses_stride_h,
-        )
-        self._guard_warmup_call(compile_key)
         grid = (num_tokens, num_heads, 1)
         ctx.call_kernel(
             self.kernel,
@@ -563,13 +546,6 @@ class PackSeqTritonKernel(VllmJitKernel["PackSeqTritonKernel.CompileKey"]):
         block_t: int,
         block_d: int,
     ) -> None:
-        compile_key = self.dispatch(
-            dtype=x_reshaped.dtype,
-            pad_value=pad_value,
-            block_t=block_t,
-            block_d=block_d,
-        )
-        self._guard_warmup_call(compile_key)
         grid = (lengths.numel(), triton.cdiv(Lmax, block_t), triton.cdiv(D, block_d))
         self.kernel[grid](
             x_reshaped,
@@ -754,12 +730,6 @@ class UnpackSeqTritonKernel(VllmJitKernel["UnpackSeqTritonKernel.CompileKey"]):
         block_t: int,
         block_d: int,
     ) -> None:
-        compile_key = self.dispatch(
-            dtype=packed_reshaped.dtype,
-            block_t=block_t,
-            block_d=block_d,
-        )
-        self._guard_warmup_call(compile_key)
         grid = (B, triton.cdiv(Lmax, block_t), triton.cdiv(D, block_d))
         self.kernel[grid](
             packed_reshaped,

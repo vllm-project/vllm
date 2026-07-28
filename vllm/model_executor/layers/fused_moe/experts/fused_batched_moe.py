@@ -653,35 +653,6 @@ class BatchedTritonKernel(VllmJitKernel["BatchedTritonKernel.CompileKey"]):
         num_warps: int,
         num_stages: int,
     ) -> Any:
-        compile_key = self.dispatch(
-            max_num_tokens=max_num_tokens,
-            num_experts=A.size(0),
-            hidden_size=K,
-            intermediate_size=N,
-            config_top_k=1,
-            launch_n=N,
-            launch_k=K,
-            dtype=A.dtype,
-            use_fp8_w8a8=use_fp8_w8a8,
-            use_int8_w8a16=use_int8_w8a16,
-            group_n=group_n,
-            group_k=group_k,
-            per_act_token_quant=per_act_token_quant,
-            runtime_block_m=BLOCK_M,
-            runtime_block_n=BLOCK_N,
-            runtime_block_k=BLOCK_K,
-            runtime_num_warps=num_warps,
-            runtime_num_stages=num_stages,
-        )
-        self._guard_warmup_call(
-            compile_key,
-            runtime_context={
-                "experts": A.size(0),
-                "max_num_tokens": max_num_tokens,
-                "N": N,
-                "K": K,
-            },
-        )
         grid = (
             expert_num_tokens.size(0),
             triton.cdiv(max_num_tokens, BLOCK_M) * triton.cdiv(B.size(1), BLOCK_N),

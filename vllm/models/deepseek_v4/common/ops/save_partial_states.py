@@ -218,7 +218,6 @@ class SavePartialStatesKernel(VllmJitKernel["SavePartialStatesKernel.CompileKey"
             block_size=block_size,
             launch_pdl=bool((pdl_kwargs or {}).get("launch_pdl", False)),
         )
-        self._guard_warmup_call(compile_key)
         self.kernel[(num_actual,)](
             kv,
             compile_key.kv_stride,

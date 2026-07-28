@@ -192,7 +192,6 @@ class DSV4TopKKernel(VllmJitKernel["DSV4TopKKernel.CompileKey"]):
             routed_scaling_factor=routed_scaling_factor,
             launch_pdl=current_platform.is_arch_support_pdl(),
         )
-        self._guard_warmup_call(compile_key)
         self.kernel[(num_tokens,)](
             gating_output,
             correction_bias,

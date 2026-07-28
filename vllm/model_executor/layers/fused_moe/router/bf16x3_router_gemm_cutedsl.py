@@ -412,7 +412,6 @@ class BF16x3RouterGemmKernel(VllmJitKernel["BF16x3RouterGemmKernel.CompileKey"])
         M, _ = W.shape
         num_sms = torch.cuda.get_device_properties(X.device).multi_processor_count
         compile_key = self.dispatch(num_tokens=N, K=K)
-        self._guard_warmup_call(compile_key)
 
         k_tiles = math_utils.cdiv(K, self.block_k)
         grid_m = math_utils.cdiv(M, self.block_m)
@@ -420,7 +419,7 @@ class BF16x3RouterGemmKernel(VllmJitKernel["BF16x3RouterGemmKernel.CompileKey"])
         base_ctas = grid_m * grid_n
         split_k = min(k_tiles, max(1, num_sms // base_ctas))
 
-        compiled = self._get_compiled_from_cache(
+        compiled = self._get_or_compile(
             compile_key,
             runtime_context={
                 "X_shape": tuple(X.shape),
@@ -540,7 +539,6 @@ class BF16x3SplitKReduceKernel(VllmJitKernel["BF16x3SplitKReduceKernel.CompileKe
         split_k, N, M = partials.shape
         split_stride = partials.stride(0)
         compile_key = self.dispatch(M=M, split_k=split_k, USE_PDL=True)
-        self._guard_warmup_call(compile_key)
         grid = (triton.cdiv(N, compile_key.bn), triton.cdiv(M, compile_key.bm))
         self.kernel[grid](
             partials,

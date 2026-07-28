@@ -1115,17 +1115,6 @@ class HcPrenormGemmTileLangKernel(
             tile_n=tile_n,
             n_splits=n_splits,
         )
-        self._guard_warmup_call(
-            compile_key,
-            runtime_context={
-                "num_tokens": x.shape[0],
-                "hc_hidden_size": x.shape[1],
-                "hidden_size": hidden_size,
-                "hc_mult": hc_mult,
-                "n_out": fn.shape[0],
-                "n_splits": n_splits,
-            },
-        )
         kernel_arg = (
             compile_key.block_m if compile_key.use_block_m else compile_key.n_splits
         )
@@ -1431,16 +1420,6 @@ class MhcPreBigFuseTileLangKernel(
             norm_eps=norm_eps,
             broadcast_norm_eps=norm_eps,
         )
-        self._guard_warmup_call(
-            compile_key,
-            runtime_context={
-                "hidden_size": hidden_size,
-                "hc_mult": hc_mult,
-                "n_splits": n_splits,
-                "is_broadcast": is_broadcast,
-                "use_norm_weight": use_norm_weight,
-            },
-        )
         return self.kernel(compile_key)(
             *self._kernel_args(
                 compile_key,
@@ -1529,19 +1508,6 @@ class MhcPostTileLangKernel(VllmJitKernel["MhcPostTileLangKernel.CompileKey"]):
         hc_mult: int,
         hidden_size: int,
     ) -> Any:
-        compile_key = self.dispatch(
-            num_tokens=residual.shape[0],
-            hidden_size=hidden_size,
-            hc_mult=hc_mult,
-        )
-        self._guard_warmup_call(
-            compile_key,
-            runtime_context={
-                "num_tokens": residual.shape[0],
-                "hidden_size": hidden_size,
-                "hc_mult": hc_mult,
-            },
-        )
         return self.kernel()(
             comb_mix,
             residual,
@@ -1655,14 +1621,6 @@ class MhcFusedTileLangKernel(VllmJitKernel["MhcFusedTileLangKernel.CompileKey"])
             num_tokens=num_tokens,
             hidden_size=hidden_size,
             hc_mult=hc_mult,
-        )
-        self._guard_warmup_call(
-            compile_key,
-            runtime_context={
-                "hidden_size": hidden_size,
-                "hc_mult": hc_mult,
-                "num_tokens": num_tokens,
-            },
         )
         yp_out = torch.empty(
             compile_key.n_splits,
@@ -1778,23 +1736,6 @@ class HcHeadFusedTileLangKernel(VllmJitKernel["HcHeadFusedTileLangKernel.Compile
         hc_eps: float,
         hc_mult: int,
     ) -> Any:
-        compile_key = self.dispatch(
-            num_tokens=residual.shape[0],
-            hidden_size=hidden_size,
-            hc_mult=hc_mult,
-            rms_eps=rms_eps,
-            hc_eps=hc_eps,
-        )
-        self._guard_warmup_call(
-            compile_key,
-            runtime_context={
-                "num_tokens": residual.shape[0],
-                "hidden_size": hidden_size,
-                "hc_mult": hc_mult,
-                "rms_eps": rms_eps,
-                "hc_eps": hc_eps,
-            },
-        )
         return self.kernel()(
             residual,
             fn,

@@ -142,12 +142,6 @@ class CountExpertNumTokensKernel(
     ) -> None:
         block_size = min(topk_ids.numel(), 1024)
         block_size = triton.next_power_of_2(block_size)
-        compile_key = self.dispatch(
-            num_experts=num_local_experts,
-            topk_numel=topk_ids.numel(),
-            has_expert_map=expert_map is not None,
-        )
-        self._guard_warmup_call(compile_key)
         self.kernel[(num_local_experts,)](
             topk_ids,
             expert_num_tokens,
@@ -556,11 +550,6 @@ class PackTopkIdsWeightsKernel(VllmJitKernel["PackTopkIdsWeightsKernel.CompileKe
         block_size: int,
         use_gdc: bool,
     ) -> None:
-        compile_key = self.dispatch(
-            block_size=block_size,
-            use_gdc=use_gdc,
-        )
-        self._guard_warmup_call(compile_key)
         grid = (triton.cdiv(ids_flat.numel(), block_size),)
         self.kernel[grid](
             ids_flat,
@@ -743,13 +732,6 @@ class SwigluLimitPadAwareKernel(VllmJitKernel["SwigluLimitPadAwareKernel.Compile
         num_tokens, gate_up_size = input.shape
         hidden_size = gate_up_size // 2
         block_size = 1024
-        compile_key = self.dispatch(
-            num_tokens=num_tokens,
-            has_limit=swiglu_limit > 0,
-            has_expert_map=expert_map is not None,
-            block_size=block_size,
-        )
-        self._guard_warmup_call(compile_key)
         grid = (min(num_tokens, 256), triton.cdiv(hidden_size, block_size))
         self.kernel[grid](
             input,

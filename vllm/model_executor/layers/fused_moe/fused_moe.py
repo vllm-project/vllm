@@ -1026,49 +1026,6 @@ class FusedMoeTritonKernel(VllmJitKernel["FusedMoeTritonKernel.CompileKey"]):
         num_warps: int,
         num_stages: int,
     ) -> Any:
-        compile_key = self.dispatch(
-            batch_tokens=A_ROWS,
-            routed_multiplier=1,
-            num_experts=B.size(0),
-            hidden_size=K,
-            intermediate_size=N,
-            config_top_k=top_k,
-            launch_n=N,
-            launch_k=K,
-            top_k=top_k,
-            dtype=dtype,
-            use_fp8_w8a8=use_fp8_w8a8,
-            use_int8_w8a8=use_int8_w8a8,
-            use_int8_w8a16=use_int8_w8a16,
-            use_int4_w4a16=False,
-            per_channel_quant=per_channel_quant,
-            group_n=group_n,
-            group_k=group_k,
-            mul_routed_weight=MUL_ROUTED_WEIGHT,
-            has_bias=HAS_BIAS,
-            naive_block_assignment=naive_block_assignment,
-            runtime_a_rows=A_ROWS,
-            runtime_em=EM,
-            runtime_num_valid_tokens=num_valid_tokens,
-            runtime_block_size_m=BLOCK_SIZE_M,
-            runtime_block_size_n=BLOCK_SIZE_N,
-            runtime_block_size_k=BLOCK_SIZE_K,
-            runtime_group_size_m=GROUP_SIZE_M,
-            runtime_split_k=SPLIT_K,
-            runtime_compute_type=compute_type,
-            runtime_swap_ab=SWAP_AB,
-            runtime_num_warps=num_warps,
-            runtime_num_stages=num_stages,
-        )
-        self._guard_warmup_call(
-            compile_key,
-            runtime_context={
-                "A_shape": tuple(A.shape),
-                "B_shape": tuple(B.shape),
-                "EM": EM,
-                "top_k": top_k,
-            },
-        )
         grid = lambda META: (
             triton.cdiv(EM, META["BLOCK_SIZE_M"])
             * triton.cdiv(B.size(1), META["BLOCK_SIZE_N"]),
@@ -1590,14 +1547,6 @@ class ComputeIdentityKernel(VllmJitKernel["ComputeIdentityKernel.CompileKey"]):
         scales_stride: int,
     ) -> Any:
         compile_key = self.dispatch(top_k=top_k, hidden_dim=hidden_dim)
-        self._guard_warmup_call(
-            compile_key,
-            runtime_context={
-                "num_tokens": num_tokens,
-                "top_k": top_k,
-                "hidden_dim": hidden_dim,
-            },
-        )
         grid = lambda meta: (num_tokens * (hidden_dim // meta["BLOCK_SIZE"]),)
         return self.kernel[grid](
             top_k,

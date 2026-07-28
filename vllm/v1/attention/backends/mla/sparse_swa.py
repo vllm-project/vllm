@@ -371,7 +371,6 @@ class ComputePrefillMetadataKernel(
         window_size: int,
     ) -> None:
         compile_key = self.dispatch(num_prefills=num_prefills)
-        self._guard_warmup_call(compile_key)
         self.kernel[(1,)](
             prefill_gather_lens,
             seq_lens,
@@ -858,11 +857,6 @@ class ComputeSWAIndicesAndLensKernel(
         num_tokens: int,
         token_offset: int,
     ) -> None:
-        compile_key = self.dispatch(
-            window_size=window_size,
-            block_size=block_size,
-        )
-        self._guard_warmup_call(compile_key)
         self.kernel[(num_tokens,)](
             swa_indices,
             swa_indices.stride(0),
@@ -1029,12 +1023,6 @@ class ComputeDSparkNoncausalSWAIndicesKernel(
         num_tokens: int,
         token_offset: int,
     ) -> None:
-        compile_key = self.dispatch(
-            window_size=window_size,
-            num_speculative_tokens=index_width,
-            block_size=block_size,
-        )
-        self._guard_warmup_call(compile_key)
         self.kernel[(num_tokens,)](
             swa_indices,
             swa_indices.stride(0),

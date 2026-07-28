@@ -374,8 +374,7 @@ class DequantGatherKCacheKernel(VllmJitKernel["DequantGatherKCacheKernel.Compile
             block_size=block_size,
             has_gather_lens=has_gather_lens,
         )
-        self._guard_warmup_call(compile_key)
-        kernel = self._get_compiled_from_cache(
+        kernel = self._get_or_compile(
             compile_key,
             runtime_context={
                 "block_size": block_size,

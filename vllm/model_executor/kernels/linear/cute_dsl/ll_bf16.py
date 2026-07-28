@@ -244,9 +244,8 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
         M, K = hidden_states.shape
         N = router_weight.shape[0]
         compile_key = self.dispatch(M=M, K=K, N=N)
-        self._guard_warmup_call(compile_key)
         runtime_context = {"M": M, "K": K, "N": N}
-        compiled = self._get_compiled_from_cache(
+        compiled = self._get_or_compile(
             compile_key,
             runtime_context={**runtime_context, "backend": compile_key.backend},
         )

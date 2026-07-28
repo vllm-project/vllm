@@ -192,7 +192,6 @@ class FusedMTPInputRMSNormKernel(
             return enorm_out, hnorm_out
 
         compile_key = self.dispatch(hidden=hidden, hc_mult=hc_mult, eps=eps)
-        self._guard_warmup_call(compile_key)
         self.kernel[(num_tokens, hc_mult + 1)](
             inputs_embeds,
             positions,
@@ -293,7 +292,6 @@ class MTPSharedHeadRMSNormKernel(
             return out
 
         compile_key = self.dispatch(hidden=hidden, eps=eps)
-        self._guard_warmup_call(compile_key)
         self.kernel[(num_tokens,)](
             hidden_states,
             weight,

@@ -263,12 +263,6 @@ class PrepareMegaMoeInputsKernel(
 
         block_k = self.block_k
         block_topk = triton.next_power_of_2(top_k)
-        compile_key = self.dispatch(
-            hidden_size=hidden_size,
-            top_k=top_k,
-            has_padding=is_padding is not None,
-        )
-        self._guard_warmup_call(compile_key)
         grid = (num_tokens, triton.cdiv(hidden_size, block_k))
         padding_stride_m = is_padding.stride(0) if is_padding is not None else 0
         self.kernel[grid](

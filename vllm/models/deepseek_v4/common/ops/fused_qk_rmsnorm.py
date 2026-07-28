@@ -170,7 +170,6 @@ class FusedQKVRMSNormKernel(VllmJitKernel["FusedQKVRMSNormKernel.CompileKey"]):
             kv_out_stride=kv_out.stride(0),
             eps=eps,
         )
-        self._guard_warmup_call(compile_key)
         self.kernel[(num_tokens, 2)](
             qr,
             qr_out,

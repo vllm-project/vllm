@@ -184,14 +184,6 @@ if current_platform.is_cuda_alike():
                 has_num_unpadded=num_unpadded_tokens is not None,
                 num_active_experts=num_active_experts,
             )
-            self._guard_warmup_call(
-                compile_key,
-                runtime_context={
-                    "numel": numel,
-                    "num_logical_experts": num_logical_experts,
-                    "map_slots": map_slots,
-                },
-            )
             grid = (triton.cdiv(numel, compile_key.block_size),)
             self.kernel[grid](
                 topk_ids,

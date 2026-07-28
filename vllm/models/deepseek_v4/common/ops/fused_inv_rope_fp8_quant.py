@@ -304,20 +304,6 @@ class FusedInvRopeFP8QuantKernel(
         use_gdc: bool,
         grid: tuple[int, int],
     ) -> None:
-        compile_key = self.dispatch(
-            heads_per_group=heads_per_group,
-            head_dim=chunks_per_head * quant_group_size,
-            nope_dim=rope_start,
-            rope_dim=half_rope * 2,
-            quant_group_size=quant_group_size,
-            tma_aligned_scales=tma_aligned_scales,
-            use_gdc=use_gdc,
-            runtime_fp8_max=fp8_max,
-            runtime_chunks_per_head=chunks_per_head,
-            runtime_rope_start=rope_start,
-            runtime_half_rope=half_rope,
-        )
-        self._guard_warmup_call(compile_key)
         self.kernel[grid](
             o,
             positions,

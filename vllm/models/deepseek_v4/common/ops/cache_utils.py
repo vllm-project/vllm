@@ -447,13 +447,6 @@ class DequantizeAndGatherKCacheKernel(
         use_fnuz: bool = False,
     ) -> None:
         num_reqs = seq_lens.shape[0]
-        compile_key = self.dispatch(
-            max_model_len=block_table.shape[-1] * block_size,
-            cache_block_size=block_size,
-            use_fnuz=use_fnuz,
-            has_gather_lens=gather_lens is not None,
-        )
-        self._guard_warmup_call(compile_key)
         self.kernel[(num_reqs, self.num_workers)](
             out,
             out.stride(0),
@@ -686,12 +679,6 @@ class ComputeGlobalTopkIndicesAndLensKernel(
         is_valid_token: torch.Tensor,
     ) -> None:
         num_tokens = topk_indices.shape[0]
-        compile_key = self.dispatch(
-            topk_width=topk_indices.shape[-1],
-            block_size=block_size,
-            max_model_len=block_table.shape[-1] * block_size,
-        )
-        self._guard_warmup_call(compile_key)
         self.kernel[(num_tokens,)](
             global_topk_indices,
             global_topk_indices.stride(0),
@@ -962,17 +949,6 @@ class CombineTopkSwaIndicesKernel(
         WINDOW_SIZE: int,
     ) -> None:
         num_reqs = seq_lens.shape[0]
-        compile_key = self.dispatch(
-            topk_width=topk_indices.shape[-1],
-            topk_indices=topk_indices is not None,
-            query_start_loc=query_start_loc is not None,
-            seq_lens=seq_lens is not None,
-            gather_lens=gather_lens is not None,
-            topk=TOP_K,
-            compress_ratio=COMPRESS_RATIO,
-            WINDOW_SIZE=WINDOW_SIZE,
-        )
-        self._guard_warmup_call(compile_key)
         self.kernel[(num_reqs, self.num_workers)](
             combined_indices,
             combined_indices.stride(0),
@@ -1525,16 +1501,6 @@ class BuildFlashinferMixedSparseIndicesKernel(
         num_warps: int,
     ) -> None:
         num_tokens = sparse_indices.shape[0]
-        compile_key = self.dispatch(
-            window_size=window_size,
-            compress_ratio=compress_ratio,
-            topk=topk,
-            topk_width=padded_topk,
-            decode_compressed_topk=decode_compressed_topk,
-            decode_compressed_indices_are_local=decode_compressed_indices_are_local,
-            has_decode_compressed_lens=has_decode_compressed_lens,
-        )
-        self._guard_warmup_call(compile_key)
         self.kernel[(num_tokens,)](
             sparse_indices,
             sparse_indices.stride(0),

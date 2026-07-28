@@ -117,10 +117,6 @@ class CompressedSlotMappingKernel(
         block_size: int,
         compress_ratio: int,
     ) -> None:
-        compile_key = self.dispatch(
-            compress_ratio=compress_ratio,
-        )
-        self._guard_warmup_call(compile_key)
         self.kernel[(block_table.shape[0],)](
             slot_mapping,
             query_start_loc,

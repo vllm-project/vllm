@@ -57,8 +57,6 @@ class MyKernel(VllmJitKernel["MyKernel.CompileKey"]):
         ...
 
     def __call__(self, ...):
-        compile_key = self.dispatch(...)
-        self._guard_warmup_call(compile_key)
         return self.kernel(...)
 
 
@@ -79,14 +77,18 @@ path. This keeps dispatch behavior shared instead of duplicated.
   `CompileKey` objects.
 - `compile_key(kwargs)` builds one `CompileKey` from one concrete dispatch input
   dictionary.
-- `_guard_warmup_call(compile_key)` raises when runtime dispatch reaches a key
-  outside the completed warmup search space.
-- `_get_compiled_from_cache(compile_key)` returns a prepared backend executor,
-  or raises when compile-only warmup did not materialize that exact key.
+- `_get_or_compile(compile_key)` returns an owner-cached executor. On a miss,
+  it invokes the owner's monitored `compile(...)` path and then returns the
+  executor populated by that method.
 
-Runtime should not call `compile(...)` on a cache miss. A missing key indicates
-that `get_warmup_keys(...)` does not cover the runtime dispatch space, or that
-`dispatch(...)` maps runtime inputs to the wrong specialization.
+Runtime miss handling follows the backend's cache model:
+
+- Triton and TileLang call their native JIT entry points normally. Their native
+  cache handles hits, and `jit_monitor` reports unexpected runtime compilation.
+- CuTeDSL compile-only warmup stores the returned JIT Executor in the owner
+  cache. Runtime derives the same key and calls `_get_or_compile(...)`; monitor
+  mode determines whether a miss is rejected, warned and compiled, or silently
+  compiled.
 
 ### Kernel Activation
 

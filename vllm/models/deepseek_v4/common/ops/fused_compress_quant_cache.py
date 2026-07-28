@@ -1263,7 +1263,6 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
             runtime_scale_dim=scale_dim,
             runtime_kv_block_stride=kv_cache.stride(0),
         )
-        self._guard_warmup_call(compile_key)
         self.kernel(compile_key)[(num_actual,)](
             state_cache,
             state_cache.stride(0),

@@ -243,15 +243,6 @@ class PackDCPTopkCandidatesKernel(
         topk: int,
         block_size: int,
     ) -> None:
-        compile_key = self.dispatch(
-            dcp_rank=dcp_rank,
-            dcp_world_size=dcp_world_size,
-            cp_interleave=cp_interleave,
-            has_row_starts=has_row_starts,
-            topk=topk,
-            block_size=block_size,
-        )
-        self._guard_warmup_call(compile_key)
         grid = (topk_indices.shape[0], triton.cdiv(topk, block_size))
         self.kernel[grid](
             logits,
@@ -607,9 +598,8 @@ class StableTopKFromGatheredCandidatesKernel(
 
     def __call__(self, gathered: torch.Tensor, out: torch.Tensor, *, topk: int) -> Any:
         compile_key = self.dispatch(topk=topk, num_candidates=gathered.shape[1])
-        self._guard_warmup_call(compile_key)
         cache_key = (compile_key.topk, compile_key.num_candidates)
-        compiled = self._get_compiled_from_cache(
+        compiled = self._get_or_compile(
             compile_key,
             cache_key=cache_key,
             runtime_context={

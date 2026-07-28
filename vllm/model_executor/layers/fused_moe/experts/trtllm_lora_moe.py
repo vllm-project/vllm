@@ -139,7 +139,6 @@ class TrtLlmLoraUnpermuteActivationKernel(
             dtype=act_permuted.dtype,
             intermediate_size=intermediate_size,
         )
-        self._guard_warmup_call(compile_key)
         grid = (
             out.shape[0],
             triton.cdiv(intermediate_size, compile_key.block_i),
@@ -276,7 +275,6 @@ class TrtLlmLoraFinalizeKernel(VllmJitKernel["TrtLlmLoraFinalizeKernel.CompileKe
             hidden_size=hidden_size,
             top_k=top_k,
         )
-        self._guard_warmup_call(compile_key)
         grid = (
             output.shape[0],
             triton.cdiv(hidden_size, compile_key.block_k),

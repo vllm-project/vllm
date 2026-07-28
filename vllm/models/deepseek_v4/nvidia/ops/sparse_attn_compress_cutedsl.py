@@ -572,8 +572,7 @@ class SparseAttnCompressNormRopeStoreC4Kernel(
             "kv_cache_stride": tuple(kv_cache.stride()),
             "compress_ratio": compress_ratio,
         }
-        self._guard_warmup_call(compile_key, runtime_context=runtime_context)
-        kernel = self._get_compiled_from_cache(
+        kernel = self._get_or_compile(
             compile_key,
             runtime_context=runtime_context,
         )
@@ -1079,8 +1078,7 @@ class SparseAttnCompressNormRopeStoreFullC4Kernel(
             "compress_ratio": compress_ratio,
             "store_full_fp8": store_full_fp8,
         }
-        self._guard_warmup_call(compile_key, runtime_context=runtime_context)
-        kernel = self._get_compiled_from_cache(
+        kernel = self._get_or_compile(
             compile_key,
             runtime_context=runtime_context,
         )
@@ -1464,8 +1462,7 @@ class SparseAttnCompressC128Block8Kernel(
             "state_cache_shape": tuple(state_cache.shape),
             "head_dim": head_dim,
         }
-        self._guard_warmup_call(compile_key, runtime_context=runtime_context)
-        kernel = self._get_compiled_from_cache(
+        kernel = self._get_or_compile(
             compile_key,
             runtime_context=runtime_context,
         )
@@ -1844,8 +1841,7 @@ class SparseAttnNormRopeStoreKernel(
             "kv_cache_stride": tuple(kv_cache.stride()),
             "compress_ratio": compress_ratio,
         }
-        self._guard_warmup_call(compile_key, runtime_context=runtime_context)
-        kernel = self._get_compiled_from_cache(
+        kernel = self._get_or_compile(
             compile_key,
             runtime_context=runtime_context,
         )
@@ -2171,8 +2167,7 @@ class SparseAttnNormRopeStoreFullKernel(
             "compress_ratio": compress_ratio,
             "store_full_fp8": store_full_fp8,
         }
-        self._guard_warmup_call(compile_key, runtime_context=runtime_context)
-        kernel = self._get_compiled_from_cache(
+        kernel = self._get_or_compile(
             compile_key,
             runtime_context=runtime_context,
         )

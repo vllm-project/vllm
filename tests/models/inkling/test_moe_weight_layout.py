@@ -53,7 +53,7 @@ def test_gate_uses_ll_bf16_gemm_through_token_limit(
         moe.current_platform, "has_device_capability", lambda capability: True
     )
     monkeypatch.setattr(moe.ll_bf16, "is_available", lambda: True)
-    monkeypatch.setattr(moe.ll_bf16, "ll_bf16_gemm", fake_ll_bf16_gemm)
+    monkeypatch.setattr(moe.ll_bf16, "LL_BF16_GEMM_KERNEL", fake_ll_bf16_gemm)
 
     logits = gate.compute_logits(hidden_states)
 

@@ -13,7 +13,9 @@ from __future__ import annotations
 import pytest
 import torch
 
-from vllm.models.deepseek_v4.common.ops import fused_q_kv_rmsnorm
+from vllm.models.deepseek_v4.common.ops.fused_qk_rmsnorm import (
+    _FUSED_Q_KV_RMSNORM_KERNEL,
+)
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
@@ -41,7 +43,7 @@ def test_fused_q_kv_rmsnorm_correctness(num_tokens: int, dtype: torch.dtype):
     kvw = torch.randn(kv_size, dtype=dtype, device=device)
     eps = 1e-6
 
-    qr_out, kv_out = fused_q_kv_rmsnorm(qr, kv, qw, kvw, eps)
+    qr_out, kv_out = _FUSED_Q_KV_RMSNORM_KERNEL(qr, kv, qw, kvw, eps)
 
     qr_ref = _ref_rmsnorm(qr, qw, eps)
     kv_ref = _ref_rmsnorm(kv, kvw, eps)
@@ -64,7 +66,7 @@ def test_fused_q_kv_rmsnorm_launches_past_grid_y_cap(num_tokens: int):
     qw = torch.randn(q_size, dtype=dtype, device=device)
     kvw = torch.randn(kv_size, dtype=dtype, device=device)
 
-    qr_out, kv_out = fused_q_kv_rmsnorm(qr, kv, qw, kvw, 1e-6)
+    qr_out, kv_out = _FUSED_Q_KV_RMSNORM_KERNEL(qr, kv, qw, kvw, 1e-6)
     # spot-check a couple of rows against the torch reference
     for row in (0, num_tokens // 2, num_tokens - 1):
         torch.testing.assert_close(

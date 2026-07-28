@@ -470,8 +470,7 @@ class IndexerQMxFp4Kernel(VllmJitKernel["IndexerQMxFp4Kernel.CompileKey"]):
             cos_sin_dtype=cos_sin_dtype,
             coarsen=coarsen,
         )
-        self._guard_warmup_call(compile_key)
-        kernel = self._get_compiled_from_cache(
+        kernel = self._get_or_compile(
             compile_key,
             runtime_context={
                 "head_dim": head_dim,
@@ -755,8 +754,7 @@ class IndexerQFp8Kernel(VllmJitKernel["IndexerQFp8Kernel.CompileKey"]):
             cos_sin_dtype=cos_sin_dtype,
             coarsen=coarsen,
         )
-        self._guard_warmup_call(compile_key)
-        kernel = self._get_compiled_from_cache(
+        kernel = self._get_or_compile(
             compile_key,
             runtime_context={
                 "head_dim": head_dim,

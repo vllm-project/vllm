@@ -120,8 +120,6 @@ class PrepareUniformDecodeKernel(
         max_decode_len: int,
     ) -> None:
         num_decode_tokens = decode_seq_lens.shape[0]
-        compile_key = self.dispatch(block_size=self.block_size)
-        self._guard_warmup_call(compile_key)
         self.kernel[(num_decode_tokens,)](
             seq_lens,
             decode_seq_lens,
@@ -440,19 +438,6 @@ class BuildPrefillChunkMetadataKernel(
         num_reqs: int,
         COMPRESS_RATIO: int,
     ) -> None:
-        compile_key = self.dispatch(
-            query_slice_start=query_slice_start,
-            query_slice_stop=query_slice_stop,
-            DCP_RANK=DCP_RANK,
-            DCP_WORLD=DCP_WORLD,
-            DCP_INTERLEAVE=DCP_INTERLEAVE,
-            BLOCK_SIZE=self.block_size,
-            COMPRESS_RATIO=COMPRESS_RATIO,
-            input_variant=TritonPointerInputVariant.from_alignment(
-                uncompressed_seq_lens=uncompressed_seq_lens.data_ptr() % 16 == 0,
-            ),
-        )
-        self._guard_warmup_call(compile_key)
         self.kernel[(num_reqs,)](
             query_start_loc,
             uncompressed_seq_lens,

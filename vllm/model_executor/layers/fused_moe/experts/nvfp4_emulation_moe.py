@@ -552,29 +552,6 @@ class FusedMoeNvfp4EmulationKernel(
         BLOCK_SIZE_K: int,
         GROUP_SIZE_M: int,
     ) -> Any:
-        compile_key = self.dispatch(
-            batch_tokens=A.size(0),
-            routed_multiplier=1,
-            num_experts=B.size(0),
-            hidden_size=K,
-            intermediate_size=N,
-            config_top_k=top_k,
-            launch_n=N,
-            launch_k=K,
-            top_k=top_k,
-            dtype=A.dtype,
-            mul_routed_weight=MUL_ROUTED_WEIGHT,
-            runtime_a_rows=A.size(0),
-            runtime_em=EM,
-            runtime_num_valid_tokens=num_valid_tokens,
-            runtime_block_size_m=BLOCK_SIZE_M,
-            runtime_block_size_n=BLOCK_SIZE_N,
-            runtime_block_size_k=BLOCK_SIZE_K,
-            runtime_group_size_m=GROUP_SIZE_M,
-            runtime_block_k_divisible=block_k_diviable,
-            runtime_compute_type=compute_type,
-        )
-        self._guard_warmup_call(compile_key)
         grid = (triton.cdiv(EM, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N),)
         return self.kernel[grid](
             A,

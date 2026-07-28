@@ -10,7 +10,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
 )
-from vllm.model_executor.layers.fused_moe.router.dsv4_topk import dsv4_topk
+from vllm.model_executor.layers.fused_moe.router.dsv4_topk import (
+    _DSV4_TOPK_KERNEL,
+)
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
 )
@@ -219,7 +221,7 @@ def test_dsv4_fast_topk(
         routed_scaling_factor=1.5,
         e_score_correction_bias=correction_bias,
     )
-    topk_weights, topk_ids = dsv4_topk(
+    topk_weights, topk_ids = _DSV4_TOPK_KERNEL(
         gating_output, correction_bias, indices_type, 1.5
     )
 

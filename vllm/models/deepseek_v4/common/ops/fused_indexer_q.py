@@ -269,12 +269,6 @@ class FusedIndexerQRopeQuantTritonKernel(
     ) -> None:
         num_tokens = positions.shape[0]
         num_index_q_heads = index_q.shape[1]
-        compile_key = self.dispatch(
-            head_dim=index_q.shape[2],
-            rope_dim=index_q_cos_sin_cache.shape[-1],
-            use_fnuz=use_fnuz,
-        )
-        self._guard_warmup_call(compile_key)
         self.kernel[(num_tokens, num_index_q_heads)](
             positions,
             index_q,
@@ -489,11 +483,6 @@ class FusedIndexerQRopeMxFp4TritonKernel(
     ) -> None:
         num_tokens = positions.shape[0]
         num_index_q_heads = index_q.shape[1]
-        compile_key = self.dispatch(
-            head_dim=index_q.shape[2],
-            rope_dim=index_q_cos_sin_cache.shape[-1],
-        )
-        self._guard_warmup_call(compile_key)
         self.kernel[(num_tokens, num_index_q_heads)](
             positions,
             index_q,

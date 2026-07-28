@@ -538,15 +538,6 @@ class GlobalizeRecvTopkIdxKernel(
             rank_expert_offset=rank_expert_offset,
             num_experts=num_experts,
         )
-        self._guard_warmup_call(
-            compile_key,
-            runtime_context={
-                "num_tokens": num_tokens,
-                "topk": topk,
-                "rank_expert_offset": rank_expert_offset,
-                "num_experts": num_experts,
-            },
-        )
         grid = (triton.cdiv(compile_key.n_elements, compile_key.block),)
         return self.kernel[grid](
             recv_topk_idx,

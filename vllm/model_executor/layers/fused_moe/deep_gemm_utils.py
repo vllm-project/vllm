@@ -247,13 +247,6 @@ class DeepGemmEPScatterStartKernel(
             num_experts=num_experts,
             align_m=align_m,
         )
-        self._guard_warmup_call(
-            compile_key,
-            runtime_context={
-                "num_experts": num_experts,
-                "align_m": align_m,
-            },
-        )
         self.kernel[(num_experts,)](
             num_recv_tokens_per_expert,
             expert_start_loc,
@@ -515,16 +508,6 @@ class DeepGemmEPScatterCopyKernel(
             block_size=block_size,
             pack_ue8m0=pack_ue8m0,
         )
-        self._guard_warmup_call(
-            compile_key,
-            runtime_context={
-                "hidden_size": hidden_size,
-                "topk_num": recv_topk.shape[1],
-                "has_expert_map": expert_map is not None,
-                "block_size": block_size,
-                "pack_ue8m0": pack_ue8m0,
-            },
-        )
         self.kernel[(min(recv_topk.shape[0], 1024 * 8),)](
             recv_topk.shape[0],
             expert_start_loc,
@@ -755,13 +738,6 @@ class DeepGemmEPGatherKernel(VllmJitKernel["DeepGemmEPGatherKernel.CompileKey"])
         hidden_size = input_tensor.shape[1]
         block_d = min(hidden_size, 1024)
         assert hidden_size % block_d == 0
-        compile_key = self.dispatch(
-            dtype=input_tensor.dtype,
-            hidden_size=hidden_size,
-            topk_num=recv_topk_ids.shape[1],
-            has_expert_map=expert_map is not None,
-        )
-        self._guard_warmup_call(compile_key)
         grid = (triton.cdiv(hidden_size, block_d), min(num_tokens, 1024))
 
         self.kernel[grid](
