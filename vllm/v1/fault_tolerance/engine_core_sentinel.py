@@ -11,9 +11,6 @@ import msgspec
 
 from vllm.config import set_current_vllm_config
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
-from vllm.distributed.elastic_ep.ft_eplb_redistribute import (
-    compute_dead_dp_ranks_from_mask,
-)
 from vllm.distributed.utils import stateless_init_torch_distributed_process_group
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_open_port
@@ -160,7 +157,8 @@ class EngineCoreSentinel:
         parallel_config = self.engine.vllm_config.parallel_config
         tp_size = parallel_config.tensor_parallel_size
         my_dp_rank = parallel_config.data_parallel_rank
-        dead_dp_ranks = compute_dead_dp_ranks_from_mask(mask, tp_size, my_dp_rank)
+        dead_ep = [i for i, v in enumerate(mask) if v != 0]
+        dead_dp_ranks = sorted(set(r // tp_size for r in dead_ep) - {my_dp_rank})
 
         logger.info("[FT] Auto-recovery: dead_dp_ranks=%s, scaling down", dead_dp_ranks)
         ft_request = FaultToleranceRequest(
