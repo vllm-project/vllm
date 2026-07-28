@@ -478,12 +478,28 @@ def test_attention_config():
         engine_args.create_engine_config()
 
 
-def test_mamba_ssu_algorithm_defaults_to_auto():
+def _save_minimal_opt_config(path: Path) -> None:
+    OPTConfig(
+        architectures=["OPTForCausalLM"],
+        hidden_size=32,
+        ffn_dim=64,
+        num_attention_heads=4,
+        num_hidden_layers=1,
+        max_position_embeddings=128,
+        vocab_size=128,
+    ).save_pretrained(path)
+
+
+def test_mamba_ssu_algorithm_defaults_to_auto(tmp_path: Path):
+    _save_minimal_opt_config(tmp_path)
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
 
-    args = parser.parse_args([])
+    args = parser.parse_args(["--model", str(tmp_path)])
     engine_args = EngineArgs.from_cli_args(args)
-    assert engine_args.mamba_ssu_algorithm == "auto"
+    vllm_config = engine_args.create_engine_config()
+
+    assert engine_args.mamba_ssu_algorithm is None
+    assert vllm_config.mamba_config.ssu_algorithm == "auto"
 
 
 def test_mamba_ssu_algorithm_preserves_positional_config_compatibility():
@@ -495,15 +511,7 @@ def test_mamba_ssu_algorithm_preserves_positional_config_compatibility():
 
 
 def test_mamba_ssu_algorithm_cli_reaches_config(tmp_path: Path):
-    OPTConfig(
-        architectures=["OPTForCausalLM"],
-        hidden_size=32,
-        ffn_dim=64,
-        num_attention_heads=4,
-        num_hidden_layers=1,
-        max_position_embeddings=128,
-        vocab_size=128,
-    ).save_pretrained(tmp_path)
+    _save_minimal_opt_config(tmp_path)
 
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args(
@@ -522,21 +530,30 @@ def test_mamba_ssu_algorithm_cli_reaches_config(tmp_path: Path):
     assert vllm_config.mamba_config.ssu_algorithm == "horizontal"
 
 
+def test_mamba_ssu_algorithm_preserves_explicit_config(tmp_path: Path):
+    _save_minimal_opt_config(tmp_path)
+    mamba_config = MambaConfig(
+        backend=MambaBackendEnum.FLASHINFER,
+        ssu_algorithm="horizontal",
+    )
+    engine_args = EngineArgs(
+        model=str(tmp_path),
+        mamba_backend=MambaBackendEnum.FLASHINFER,
+        mamba_config=mamba_config,
+    )
+
+    vllm_config = engine_args.create_engine_config()
+
+    assert vllm_config.mamba_config.ssu_algorithm == "horizontal"
+
+
 def test_mamba_ssu_algorithm_requires_flashinfer():
     with pytest.raises(ValueError, match="only supported.*FlashInfer"):
         MambaConfig(ssu_algorithm="horizontal")
 
 
 def test_mamba_ssu_algorithm_cli_requires_flashinfer(tmp_path: Path):
-    OPTConfig(
-        architectures=["OPTForCausalLM"],
-        hidden_size=32,
-        ffn_dim=64,
-        num_attention_heads=4,
-        num_hidden_layers=1,
-        max_position_embeddings=128,
-        vocab_size=128,
-    ).save_pretrained(tmp_path)
+    _save_minimal_opt_config(tmp_path)
 
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args(

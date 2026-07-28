@@ -127,14 +127,7 @@ class FlashInferSSUBackend(MambaSSUBackend):
                 "Please install flashinfer (>= 0.6.4): "
                 "pip install flashinfer-python"
             ) from e
-        # Keep the default call identical to the pre-selector path, including
-        # compatibility with manually installed FlashInfer 0.6.4. Bind an
-        # explicit selection once instead of adding work to every SSU call.
-        self._kernel = (
-            partial(_fi_ssu, algorithm=mamba_config.ssu_algorithm)
-            if mamba_config.ssu_algorithm != "auto"
-            else _fi_ssu
-        )
+        self._kernel = partial(_fi_ssu, algorithm=mamba_config.ssu_algorithm)
 
     @property
     def name(self) -> str:

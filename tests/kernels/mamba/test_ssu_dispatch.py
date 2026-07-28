@@ -97,11 +97,7 @@ def test_flashinfer_forwards_ssu_algorithm(algorithm: str, monkeypatch):
         tensor,
     )
 
-    kwargs = kernel.call_args.kwargs
-    if algorithm == "auto":
-        assert "algorithm" not in kwargs
-    else:
-        assert kwargs["algorithm"] == algorithm
+    assert kernel.call_args.kwargs["algorithm"] == algorithm
 
 
 def test_uninitialized_backend_raises():
