@@ -35,7 +35,6 @@ from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
 )
-from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
@@ -61,7 +60,7 @@ from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
-from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
@@ -202,6 +201,10 @@ class Scheduler(SchedulerInterface):
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
 
+        # Grammar compilation failures to finish as per-request errors in
+        # update_from_output.
+        self.grammar_compile_error_reqs: set[str] = set()
+
         # Encoder-related.
         # Calculate encoder cache size if applicable
         supports_mm_inputs = mm_registry.supports_multimodal_inputs(
@@ -224,12 +227,15 @@ class Scheduler(SchedulerInterface):
             mm_budget.encoder_compute_budget if mm_budget else 0
         )
         encoder_cache_size = mm_budget.encoder_cache_size if mm_budget else 0
-        self.encoder_cache_manager = (
-            EncoderDecoderCacheManager(cache_size=encoder_cache_size)
-            if self.is_encoder_decoder
-            else EncoderCacheManager(cache_size=encoder_cache_size)
-        )
-
+        manager_cls_obj = vllm_config.ec_manager_config.get_encoder_cache_manager_obj()
+        if manager_cls_obj is not None:
+            self.encoder_cache_manager = manager_cls_obj(cache_size=encoder_cache_size)
+        else:
+            self.encoder_cache_manager = (
+                EncoderDecoderCacheManager(cache_size=encoder_cache_size)
+                if self.is_encoder_decoder
+                else EncoderCacheManager(cache_size=encoder_cache_size)
+            )
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
@@ -711,58 +717,39 @@ class Scheduler(SchedulerInterface):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     did_prefix_cache_lookup = True
+                    hit_diverged = False
                     # Get locally-cached tokens.
-                    if (
-                        self.connector is not None
-                        and self.has_mamba_layers
-                        and isinstance(
-                            self.kv_cache_manager.coordinator, HybridKVCacheCoordinator
+                    if self.connector is not None:
+                        # A KV connector transfers the missing suffix, which needs a
+                        # hybrid-aware lookup that can diverge across groups.
+                        (
+                            new_computed_blocks,
+                            num_new_local_computed_tokens,
+                            request.shared_prefix_boundary,
+                            hit_diverged,
+                        ) = self.kv_cache_manager.get_computed_blocks_for_connector(
+                            request
                         )
-                    ):
-                        # The per-group lookup does not detect an uncached shared
-                        # prefix, so there is no junction to pin in this path.
-                        request.shared_prefix_boundary = 0
-                        kv_cache_manager = self.kv_cache_manager
-                        if not kv_cache_manager.prefix_cache_lookup_enabled(request):
-                            # Mirror the get_computed_blocks() early-out: the
-                            # request must recompute its prompt.
-                            new_computed_blocks = kv_cache_manager.empty_kv_cache_blocks
-                            num_new_local_computed_tokens = 0
-                        else:
-                            computed, per_group_hits = (
-                                self.kv_cache_manager.coordinator.find_longest_cache_hit_per_group(
-                                    request.block_hashes, request.num_tokens - 1
-                                )
-                            )
-                            new_computed_blocks = (
-                                self.kv_cache_manager.create_kv_cache_blocks(computed)
-                            )
-                            # NOTE(ZhanqiuHu): For Mamba hybrid models,
-                            # num_new_local_computed_tokens should be the FA hit
-                            # length. This value is passed to the connector's
-                            # get_num_new_matched_tokens which computes:
-                            # external = total - local_computed.
-                            # Using the FA hit skips re-transferring FA blocks
-                            # already cached on D-side. The Mamba state (always
-                            # the last block) is transferred unconditionally by
-                            # _apply_prefix_caching in nixl/worker.py.
-                            num_new_local_computed_tokens = max(per_group_hits)
                     else:
                         (
                             new_computed_blocks,
                             num_new_local_computed_tokens,
-                            # Junction to pin (Marconi-style APC) so its
-                            # sparse-retention state (Mamba block / sliding-window
-                            # tail) survives retention and serves a later hit; 0
-                            # if no uncached shared prefix was detected.
+                            # Marconi shared-prefix junction to pin; 0 if none.
                             request.shared_prefix_boundary,
                         ) = self.kv_cache_manager.get_computed_blocks(request)
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
+                        # Present a block-aligned local hit to the connector so
+                        # a strictly longer remote hit can supersede a local
+                        # sub-block tail without racing its copy-on-write.
+                        partial_tail = num_new_local_computed_tokens % self.block_size
+                        block_aligned_local = (
+                            num_new_local_computed_tokens - partial_tail
+                        )
                         ext_tokens, load_kv_async = (
                             self.connector.get_num_new_matched_tokens(
-                                request, num_new_local_computed_tokens
+                                request, block_aligned_local
                             )
                         )
 
@@ -774,7 +761,37 @@ class Scheduler(SchedulerInterface):
                             step_skipped_waiting.prepend_request(request)
                             continue
 
-                        num_external_computed_tokens = ext_tokens
+                        if partial_tail and ext_tokens > partial_tail:
+                            # Remote strictly exceeds the full local hit: drop the
+                            # sub-block tail so no CoW is needed, and let the load
+                            # cover it. Trim the partial block out of the local
+                            # computed blocks so it is not adopted from the cache.
+                            new_computed_blocks = (
+                                self.kv_cache_manager.truncate_computed_blocks(
+                                    new_computed_blocks, block_aligned_local
+                                )
+                            )
+                            num_new_local_computed_tokens = block_aligned_local
+                            num_external_computed_tokens = ext_tokens
+                        elif partial_tail:
+                            # Remote does not exceed the full local hit: keep the
+                            # local sub-block tail and load nothing external.
+                            num_external_computed_tokens = 0
+                            # Nothing to load remotely -> not an async-load step;
+                            # clearing avoids the `load_kv_async` assert below.
+                            load_kv_async = False
+                        else:
+                            num_external_computed_tokens = ext_tokens
+
+                        if hit_diverged and num_external_computed_tokens == 0:
+                            # No external tokens back the deeper local hit, so its
+                            # resume boundary would have no valid Mamba state.
+                            # Reconcile to the boundary every group agrees on.
+                            (
+                                new_computed_blocks,
+                                num_new_local_computed_tokens,
+                                request.shared_prefix_boundary,
+                            ) = self.kv_cache_manager.get_computed_blocks(request)
 
                         connector_prefix_cache_queries = (
                             request.num_tokens - num_new_local_computed_tokens
@@ -1118,6 +1135,22 @@ class Scheduler(SchedulerInterface):
             self.prev_step_scheduled_req_ids.clear()
             self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
+        # Producer partial-tail hand-off for external KV connectors. Drained
+        # before the CoW retentions are released below, so the pin lands while
+        # the cow block still holds a retention ref. Without a producer-side
+        # connector nothing consumes the hand-off, so skip the drain (and its
+        # pin); the manager drops stale entries when the request's blocks are
+        # popped for free.
+        pending_partial_tail_offloads = None
+        if (
+            self.connector is not None
+            and self.vllm_config.kv_transfer_config is not None
+            and self.vllm_config.kv_transfer_config.is_kv_producer
+        ):
+            pending_partial_tail_offloads = (
+                self.kv_cache_manager.take_partial_tail_offloads() or None
+            )
+
         kv_cache_block_copies, cow_retained_blocks = (
             self.kv_cache_manager.take_kv_cache_block_copies()
         )
@@ -1163,7 +1196,9 @@ class Scheduler(SchedulerInterface):
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             kv_cache_block_copies=pending_kv_cache_block_copies,
+            partial_tail_offloads=pending_partial_tail_offloads,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
+            ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -1729,11 +1764,13 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
 
-            if new_token_ids and self.structured_output_manager.should_advance(request):
+            if new_token_ids and self.structured_output_manager.should_advance(
+                request, new_token_ids=new_token_ids
+            ):
                 struct_output_request = request.structured_output_request
                 assert struct_output_request is not None
                 grammar = struct_output_request.grammar
-                assert grammar is not None
+                assert isinstance(grammar, StructuredOutputGrammar)
                 # new_token_ids can be a mixed block of reasoning content, then
                 # the reasoning end marker, then the start of the grammar content.
                 # Trim the reasoning content so the grammar only sees grammar content.
@@ -1863,10 +1900,16 @@ class Scheduler(SchedulerInterface):
             # This is a rare case and unlikely to impact performance.
             self.waiting.remove_requests(stopped_preempted_reqs)
 
+        error_req_ids = set(self.grammar_compile_error_reqs)
+        self.grammar_compile_error_reqs.clear()
         if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
-            requests = [self.requests[req_id] for req_id in failed_kv_load_req_ids]
-            self.finish_requests(failed_kv_load_req_ids, RequestStatus.FINISHED_ERROR)
-            for request in requests:
+            error_req_ids.update(failed_kv_load_req_ids)
+
+        if error_req_ids:
+            error_reqs = self.finish_requests(
+                error_req_ids, RequestStatus.FINISHED_ERROR
+            )
+            for request in error_reqs:
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=request.request_id,
@@ -2096,8 +2139,7 @@ class Scheduler(SchedulerInterface):
             # Filter out spec tokens which do not adhere to the grammar.
             if self.structured_output_manager.should_advance(request):
                 metadata = request.structured_output_request
-                assert metadata is not None and metadata.grammar is not None
-                spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)
+                spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)  # type: ignore[union-attr]
             # Pad to original number of spec tokens.
             num_invalid_tokens = orig_num_spec_tokens - len(spec_token_ids)
             if num_invalid_tokens:
@@ -2111,6 +2153,10 @@ class Scheduler(SchedulerInterface):
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
         return len(self.running), len(self.waiting) + len(self.skipped_waiting)
+
+    def get_kv_cache_usage(self) -> float:
+        """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
+        return self.kv_cache_manager.usage
 
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)
@@ -2138,7 +2184,7 @@ class Scheduler(SchedulerInterface):
 
     def finish_requests(
         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus
-    ) -> list[tuple[str, int]]:
+    ) -> list[Request]:
         """Handles the finish signal from outside the scheduler.
 
         For example, the API server can abort a request when the client
@@ -2147,8 +2193,8 @@ class Scheduler(SchedulerInterface):
         If request_ids is None, all requests will be finished.
 
         Returns:
-            Tuple of (req_id, client_index) for requests that were aborted. Will not
-            include any that were already finished.
+            List of requests that were aborted. Will not include any that were
+            already finished.
         """
         assert RequestStatus.is_finished(finished_status)
         if isinstance(request_ids, str):
@@ -2197,7 +2243,7 @@ class Scheduler(SchedulerInterface):
             request.status = finished_status
             self._free_request(request, delay_free_blocks=delay_free_blocks)
 
-        return [(r.request_id, r.client_index) for r in valid_requests]
+        return valid_requests
 
     def _free_request(
         self, request: Request, delay_free_blocks: bool = False
@@ -2597,7 +2643,10 @@ class Scheduler(SchedulerInterface):
 
         if request.status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR:
             structured_output_req = request.structured_output_request
-            if not (structured_output_req and structured_output_req.grammar):
+            if not structured_output_req or structured_output_req.grammar is None:
+                return False
+            if isinstance(structured_output_req.grammar, Exception):
+                self.grammar_compile_error_reqs.add(request.request_id)
                 return False
             request.status = RequestStatus.WAITING
             return True

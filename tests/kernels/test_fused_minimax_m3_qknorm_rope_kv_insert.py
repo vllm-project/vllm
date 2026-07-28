@@ -84,6 +84,22 @@ def norm_rope_ref(x, weight, positions, cos_sin_cache, eps):
     return roped
 
 
+def assert_fp8_cache_close(kv_cache, expected_kv_cache):
+    """Compare two e4m3 caches allowing 1 ulp.
+
+    On CUDA the fused kernel quantizes K from its fp32 intermediate, while the
+    reshape_and_cache_flash reference quantizes the bf16-materialized value, so
+    rounding-boundary values may differ by one e4m3 code.
+    """
+    byte_diff = (kv_cache.int() - expected_kv_cache.int()).abs()
+    got = kv_cache.view(torch.float8_e4m3fn).float()
+    exp = expected_kv_cache.view(torch.float8_e4m3fn).float()
+    ok = (byte_diff <= 1) | ((got == 0) & (exp == 0))
+    assert bool(ok.all()), (
+        f"fp8 cache differs by more than 1 ulp in {int((~ok).sum())} elements"
+    )
+
+
 # ── Test 1: dense mode (norm+rope only, no index, no insert) ─────────────────
 
 
@@ -265,7 +281,7 @@ def test_sparse_full(num_tokens, block_size, kv_cache_dtype):
             scale,
             scale,
         )
-        torch.testing.assert_close(kv_cache, expected_kv_cache, rtol=0, atol=0)
+        assert_fp8_cache_close(kv_cache, expected_kv_cache)
     else:
         for t in range(num_tokens):
             s = slot_mapping[t].item()
@@ -383,7 +399,7 @@ def test_sparse_skip_index_branch(num_tokens, block_size, kv_cache_dtype):
             scale,
             scale,
         )
-        torch.testing.assert_close(kv_cache, expected_kv_cache, rtol=0, atol=0)
+        assert_fp8_cache_close(kv_cache, expected_kv_cache)
     else:
         k_ref_h = k_ref.view(num_tokens, num_kv_heads, HEAD_DIM)
         v_ref_h = v_in.view(num_tokens, num_kv_heads, HEAD_DIM)
