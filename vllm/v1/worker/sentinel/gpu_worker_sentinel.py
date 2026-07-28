@@ -12,19 +12,19 @@ from vllm.distributed import (
     stateless_destroy_torch_distributed_process_group,
     stateless_init_torch_distributed_process_group,
 )
-from vllm.distributed.elastic_ep.ft_eplb_redistribute import (
+from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
+from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
+from vllm.v1.serial_utils import run_method
+from vllm.v1.worker.sentinel.eplb_redistribute import (
     compute_dead_ep_ranks,
-    mark_dead_columns_inplace,
+    mark_dead_expert_slots_inplace,
     rebuild_logical_expert_maps,
     redistribute_expert_placement,
     refresh_eplb_communicator_group,
     reinit_eplb_gloo_groups,
     reload_experts_from_disk,
 )
-from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
-from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
-from vllm.v1.serial_utils import run_method
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
@@ -156,7 +156,7 @@ class WorkerSentinel:
                 f"< {num_logical} logical experts. "
             )
 
-        mark_dead_columns_inplace(p2l, dead_ep_ranks, num_local_experts)
+        mark_dead_expert_slots_inplace(p2l, dead_ep_ranks, num_local_experts)
         reassignments = redistribute_expert_placement(
             p2l, num_logical, num_local_experts
         )
