@@ -652,7 +652,8 @@ class Qwen3ASRForConditionalGeneration(
 
           [system: {context}]                         # only when prompt given
           user: {audio}
-          assistant: [language {Lang}<asr_text>]      # when language is forced
+          assistant: [language {Lang}<asr_text>]{response_prefix}
+                                              # language tag only when forced
         """
         audio = stt_params.audio
         model_config = stt_params.model_config
@@ -660,6 +661,7 @@ class Qwen3ASRForConditionalGeneration(
         task_type = stt_params.task_type
         request_prompt = stt_params.request_prompt
         to_language = stt_params.to_language
+        response_prefix = stt_params.response_prefix
 
         tokenizer = cached_tokenizer_from_config(model_config)
         audio_placeholder = cls.get_placeholder_str("audio", 0)
@@ -673,6 +675,8 @@ class Qwen3ASRForConditionalGeneration(
         context = _sanitize_transcription_user_text(request_prompt)
         system_turn = f"<|im_start|>system\n{context}<|im_end|>\n" if context else ""
 
+        prefix = _sanitize_transcription_user_text(response_prefix)
+
         prompt = (
             f"{system_turn}"
             f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n"
@@ -682,7 +686,9 @@ class Qwen3ASRForConditionalGeneration(
         lang_code = to_language if task_type == "translate" else language
         if lang_code is not None:
             full_lang_name = cls.supported_languages.get(lang_code, lang_code)
-            prompt += f"language {full_lang_name}{_ASR_TEXT_TAG}"
+            prompt += f"language {full_lang_name}{_ASR_TEXT_TAG}{prefix}"
+        else:
+            prompt += prefix
 
         prompt_token_ids = tokenizer.encode(prompt)
 

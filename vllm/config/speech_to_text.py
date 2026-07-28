@@ -50,6 +50,13 @@ class SpeechToTextParams:
     to_language: str | None = None
     """Target language for translation (model-dependent)."""
 
+    response_prefix: str = ""
+    """Optional text to prepend to the model's response, as if it had already
+    been generated. For models that support it (e.g. Qwen3-ASR), this is
+    injected into the assistant turn so the model continues from the given
+    text. Models that do not support a response prefix should ignore this
+    field."""
+
 
 @config
 class SpeechToTextConfig:
