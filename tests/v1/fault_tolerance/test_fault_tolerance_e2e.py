@@ -19,7 +19,7 @@ import requests
 from tests.utils import RemoteOpenAIServer, multi_gpu_test
 from vllm.utils.import_utils import has_nixl_ep
 
-MODEL_NAME = os.getenv("MODEL_NAME", "ibm-research/PowerMoE-3b")
+MODEL_NAME = os.getenv("MODEL_NAME", "deepseek-ai/DeepSeek-V2-Lite-Chat")
 DP_SIZE = 2
 
 # Fault-detection timeout budget:
@@ -29,10 +29,10 @@ DP_SIZE = 2
 CPU_DISTRIBUTED_TIMEOUT_S = 30
 FAULT_DETECTION_DEADLINE_S = 45
 
-# PowerMoE-3b has 40 logical experts per MoE layer. Shrinking EP 2 -> 1
-# requires the surviving rank to host all of them, so each rank must carry 40
-# redundant expert slots.
-NUM_REDUNDANT_EXPERTS = 40
+# DeepSeek-V2-Lite-Chat has 64 logical experts per MoE layer. Shrinking EP
+# 2 -> 1 requires the surviving rank to host all of them, so each rank must
+# carry 64 redundant expert slots ((64 + 64) / 2 = 64 local slots >= 64).
+NUM_REDUNDANT_EXPERTS = 64
 
 # scale_down reloads reassigned expert weights from disk before signaling
 # recovery; the busy-loop wrapper only waits engine_recovery_timeout_sec (120s).
