@@ -542,6 +542,49 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         self.use_sparse = use_sparse
 
+        if vllm_config.kernel_config.enable_jit_warmup:
+            from vllm.model_executor.warmup.jit_warmup import register_jit_warmup
+
+            if (
+                self.prefill_backend is not None
+                and type(self.prefill_backend).get_name() == "FLASH_ATTN"
+            ):
+                from vllm.v1.attention.backends.mla.prefill.flash_attn import (
+                    FA4_MLA_PREFILL_KERNEL,
+                )
+
+                register_jit_warmup(FA4_MLA_PREFILL_KERNEL)
+
+            backend_name = self.attn_backend.get_name()
+            if backend_name in (
+                "FLASHMLA_SPARSE",
+                "FLASHINFER_MLA_SPARSE",
+                "FLASHINFER_MLA_SPARSE_SM120",
+                "DEEPSEEK_V32_INDEXER",
+            ):
+                from vllm.v1.attention.backends.mla.compressor_utils import (
+                    _COMPRESSED_SLOT_MAPPING_KERNEL,
+                )
+                from vllm.v1.attention.backends.mla.indexer import (
+                    _BUILD_PREFILL_CHUNK_METADATA_KERNEL,
+                    _PREPARE_UNIFORM_DECODE_KERNEL,
+                )
+                from vllm.v1.attention.backends.mla.sparse_utils import (
+                    _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL,
+                )
+
+                register_jit_warmup(_COMPRESSED_SLOT_MAPPING_KERNEL)
+                register_jit_warmup(_CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL)
+                register_jit_warmup(_PREPARE_UNIFORM_DECODE_KERNEL)
+                register_jit_warmup(_BUILD_PREFILL_CHUNK_METADATA_KERNEL)
+
+                if backend_name != "DEEPSEEK_V32_INDEXER":
+                    from vllm.v1.attention.backends.mla.sparse_swa import (
+                        _COMPUTE_PREFILL_METADATA_KERNEL,
+                    )
+
+                    register_jit_warmup(_COMPUTE_PREFILL_METADATA_KERNEL)
+
         _vllm_config = get_current_vllm_config_or_none()
         self.dcp_a2a = (
             _vllm_config is not None

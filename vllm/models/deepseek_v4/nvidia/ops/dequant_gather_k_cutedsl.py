@@ -20,26 +20,6 @@ from vllm.model_executor.warmup.jit_warmup import (
 from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import compile_cutedsl
 
 
-def dequantize_and_gather_k_cache_cutedsl(
-    out: torch.Tensor,
-    k_cache: torch.Tensor,
-    seq_lens: torch.Tensor,
-    gather_lens: torch.Tensor | None,
-    block_table: torch.Tensor,
-    block_size: int,
-    offset: int,
-) -> None:
-    _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL(
-        out=out,
-        k_cache=k_cache,
-        seq_lens=seq_lens,
-        gather_lens=gather_lens,
-        block_table=block_table,
-        block_size=block_size,
-        offset=offset,
-    )
-
-
 class DequantGatherKCacheKernel(VllmJitKernel["DequantGatherKCacheKernel.CompileKey"]):
     # Hard-coded for DSv4.
     head_dim = 512
@@ -412,4 +392,4 @@ class DequantGatherKCacheKernel(VllmJitKernel["DequantGatherKCacheKernel.Compile
         )
 
 
-_DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL = DequantGatherKCacheKernel()
+DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL = DequantGatherKCacheKernel()

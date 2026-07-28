@@ -10,15 +10,20 @@ import itertools
 import operator
 import textwrap
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar
 
 __all__ = [
+    "JitWarmupRegistry",
     "VllmJitKernel",
     "WarmupIntRange",
     "get_ast_full_name",
     "get_function_source_node",
+    "register_jit_warmup",
+    "use_jit_warmup_registry",
     "zip_inputs",
 ]
 
@@ -659,9 +664,94 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
         """Compile one warmup key."""
         raise NotImplementedError
 
-    def warmup(self, *args: Any, **kwargs: Any) -> None:
-        """Compile this kernel's warmup keys."""
-        for compile_key in self.get_warmup_keys(*args, **kwargs):
+    def warmup_keys(self, compile_keys: Iterable[CompileKeyT]) -> None:
+        """Compile and record an explicit set of warmup keys."""
+        for compile_key in compile_keys:
             self.compile(compile_key)
             self._warmed_compile_keys.add(compile_key)
         self._warmup_ran = True
+
+    def warmup(self, *args: Any, **kwargs: Any) -> None:
+        """Compile this kernel's warmup keys."""
+        self.warmup_keys(self.get_warmup_keys(*args, **kwargs))
+
+
+@dataclass(frozen=True)
+class _JitWarmupRequest:
+    kernel: VllmJitKernel[Any]
+    args: tuple[Any, ...]
+    kwargs: tuple[tuple[str, Any], ...]
+
+
+class JitWarmupRegistry:
+    """Per-runner collection of JIT kernels selected during model setup."""
+
+    def __init__(self, vllm_config: Any) -> None:
+        self.vllm_config = vllm_config
+        self._requests: list[_JitWarmupRequest] = []
+
+    def register(
+        self,
+        kernel: VllmJitKernel[Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Record a kernel warmup request without compiling it."""
+        if (
+            not args
+            and not kwargs
+            and any(
+                request.kernel is kernel and not request.args and not request.kwargs
+                for request in self._requests
+            )
+        ):
+            return
+        self._requests.append(_JitWarmupRequest(kernel, args, tuple(kwargs.items())))
+
+    def __len__(self) -> int:
+        return len(self._requests)
+
+    def warmup(self) -> None:
+        """Expand registered requests and compile each owner/key pair once."""
+        keys_by_kernel: dict[VllmJitKernel[Any], dict[Any, None]] = {}
+        for request in self._requests:
+            args = request.args
+            kwargs = dict(request.kwargs)
+            if not args and not kwargs:
+                args = (self.vllm_config,)
+            compile_keys = request.kernel.get_warmup_keys(*args, **kwargs)
+            kernel_keys = keys_by_kernel.setdefault(request.kernel, {})
+            for compile_key in compile_keys:
+                kernel_keys[compile_key] = None
+
+        for kernel, kernel_compile_keys in keys_by_kernel.items():
+            kernel.warmup_keys(kernel_compile_keys)
+
+
+_current_jit_warmup_registry: ContextVar[JitWarmupRegistry | None] = ContextVar(
+    "current_jit_warmup_registry",
+    default=None,
+)
+
+
+@contextmanager
+def use_jit_warmup_registry(
+    registry: JitWarmupRegistry,
+) -> Iterator[None]:
+    """Expose one runner's registry while its model is being constructed."""
+    token = _current_jit_warmup_registry.set(registry)
+    try:
+        yield
+    finally:
+        _current_jit_warmup_registry.reset(token)
+
+
+def register_jit_warmup(
+    kernel: VllmJitKernel[Any],
+    *args: Any,
+    **kwargs: Any,
+) -> None:
+    """Register with the active runner, or do nothing outside model setup."""
+    registry = _current_jit_warmup_registry.get()
+    if registry is not None:
+        registry.register(kernel, *args, **kwargs)

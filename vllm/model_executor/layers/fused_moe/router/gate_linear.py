@@ -8,6 +8,7 @@ from vllm.config import get_current_vllm_config_or_none
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.warmup.jit_warmup import register_jit_warmup
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -136,6 +137,26 @@ class GateLinear(ReplicatedLinear):
                 and is_available()
             )
 
+        if self.allow_bf16x3_router_gemm:
+            from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_cutedsl import (  # noqa: E501
+                _BF16X3_ROUTER_GEMM_KERNEL,
+                _BF16X3_SPLITK_REDUCE_KERNEL,
+            )
+
+            register_jit_warmup(_BF16X3_ROUTER_GEMM_KERNEL)
+            register_jit_warmup(_BF16X3_SPLITK_REDUCE_KERNEL)
+
+        if self.allow_ll_bf16_gemm:
+            from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
+                LL_BF16_GEMM_KERNEL,
+            )
+
+            register_jit_warmup(
+                LL_BF16_GEMM_KERNEL,
+                shapes=((input_size, output_size),),
+                m_values=range(1, 17),
+            )
+
     def set_out_dtype(self, out_dtype: torch.dtype) -> None:
         """Set output dtype for the router logits after init.
 
@@ -164,6 +185,16 @@ class GateLinear(ReplicatedLinear):
                 and out_dtype == torch.float32
                 and is_available()
             )
+            if self.allow_ll_bf16_gemm:
+                from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
+                    LL_BF16_GEMM_KERNEL,
+                )
+
+                register_jit_warmup(
+                    LL_BF16_GEMM_KERNEL,
+                    shapes=((self.weight.shape[1], self.weight.shape[0]),),
+                    m_values=range(1, 17),
+                )
 
     def forward(
         self, x: torch.Tensor
@@ -171,10 +202,10 @@ class GateLinear(ReplicatedLinear):
         # Tier 1: cuteDSL ll_bf16_gemm (SM90+, any dims)
         if self.allow_ll_bf16_gemm and x.shape[0] <= 16 and x.dtype == torch.bfloat16:
             from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
-                ll_bf16_gemm,
+                LL_BF16_GEMM_KERNEL,
             )
 
-            output = ll_bf16_gemm(x, self.weight)
+            output = LL_BF16_GEMM_KERNEL(x, self.weight)
             return output, None
 
         # Tier 2: DSV3 specialized kernel (fallback for when cuteDSL unavailable)

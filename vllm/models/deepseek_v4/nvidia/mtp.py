@@ -129,6 +129,12 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             aux_stream_list=aux_stream_list,
         )
 
+        if vllm_config.kernel_config.enable_jit_warmup:
+            from vllm.model_executor.warmup.jit_warmup import register_jit_warmup
+
+            register_jit_warmup(_FUSED_MTP_INPUT_RMSNORM_KERNEL)
+            register_jit_warmup(_MTP_SHARED_HEAD_RMSNORM_KERNEL)
+
     def forward(
         self,
         input_ids: torch.Tensor,

@@ -50,6 +50,7 @@ from vllm.distributed.weight_transfer import (
 )
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.warmup.jit_warmup import use_jit_warmup_registry
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.multimodal.video import (
     PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES,
@@ -425,6 +426,7 @@ class Worker(WorkerBase):
         with (
             self._maybe_get_memory_pool_context(tag="weights"),
             set_current_vllm_config(self.vllm_config),
+            use_jit_warmup_registry(self.model_runner.jit_warmup_registry),
             # 20 MiB is the minimum PyTorch allows for max_split_size_mb.
             self._scoped_allocator_max_split(max_split_size_mb=20),
         ):

@@ -57,6 +57,8 @@ class MyKernel(VllmJitKernel["MyKernel.CompileKey"]):
         ...
 
     def __call__(self, ...):
+        compile_key = self.dispatch(...)
+        self._guard_warmup_call(compile_key)
         return self.kernel(...)
 
 
@@ -77,6 +79,48 @@ path. This keeps dispatch behavior shared instead of duplicated.
   `CompileKey` objects.
 - `compile_key(kwargs)` builds one `CompileKey` from one concrete dispatch input
   dictionary.
+- `_guard_warmup_call(compile_key)` raises when runtime dispatch reaches a key
+  outside the completed warmup search space.
+- `_get_compiled_from_cache(compile_key)` returns a prepared backend executor,
+  or raises when compile-only warmup did not materialize that exact key.
+
+Runtime should not call `compile(...)` on a cache miss. A missing key indicates
+that `get_warmup_keys(...)` does not cover the runtime dispatch space, or that
+`dispatch(...)` maps runtime inputs to the wrong specialization.
+
+### Kernel Activation
+
+The kernel contract defines which compile keys an owner needs. The per-runner
+`JitWarmupRegistry` separately records which owners were actually selected by
+the current engine configuration.
+
+Register an owner from the component or backend construction path where its
+runtime implementation is selected:
+
+```python
+register_jit_warmup(MY_KERNEL)
+```
+
+Registration stores metadata only; it does not compile or launch the kernel.
+No dummy forward run is needed. Later, `kernel_warmup()` consumes the registry,
+calls `get_warmup_keys(vllm_config)` for default registrations, deduplicates
+keys across repeated registrations, and compiles each owner/key pair once.
+
+Register at the narrowest stable selection point. Shared components should
+register their own owners rather than relying on a global model-name list.
+Repeated registration from equivalent layers is allowed and is
+deduplicated by the registry.
+
+If an owner uses a nonstandard `get_warmup_keys(...)` signature, pass those
+arguments explicitly:
+
+```python
+register_jit_warmup(
+    MY_KERNEL,
+    shapes=((hidden_size, num_experts),),
+    m_values=range(1, 17),
+)
+```
 
 ### Compile Key
 
@@ -149,10 +193,11 @@ assignments and `CompileKey(...)` fields:
 | Names | Read dispatch inputs, local assignments, defaults, and module globals. |
 | Constants | Use literals such as integers, strings, booleans, and `None`. |
 | Attributes | Read structured config values such as `cfg.block_size` or `mla_dims.v_head_dim`. |
+| Subscriptions | Read tuple/list positions or mapping values such as `config[0]` and `config["block_size"]`. |
 | Tuple/list literals | Build structured compile-key fields such as shapes, strides, and small descriptors. |
 | Conditional expressions | Select fields with `x if condition else y` without statement-level branching. |
 | Boolean expressions | Combine predicates with `and`, `or`, and `not`. |
-| Comparisons | Use `==`, `!=`, `<`, `<=`, `>`, and `>=`. |
+| Comparisons | Use equality, ordering, identity, and membership comparisons. |
 | Arithmetic | Use `+`, `-`, `*`, `//`, `%`, and `**` for bucket and tile calculations. |
 | Unary minus | Build negative sentinel values or signed descriptors. |
 | Helper calls | Call small helper functions with positional arguments and explicit keyword arguments. |
@@ -170,10 +215,9 @@ Helper calls cannot use `**kwargs`, and `CompileKey(...)` cannot be constructed
 from `**kwargs`. This keeps traced fields explicit.
 
 Unsupported constructs currently include loops, statement-level `if`,
-comprehensions, lambda expressions, mutation, subscripting, dict/set literals,
-`in`/`not in` comparisons, and star-argument calls. If a dispatch rule needs
-those features, move that logic into a small helper function and call it from a
-supported expression.
+comprehensions, lambda expressions, mutation, slices, dict/set literals, and
+star-argument calls. If a dispatch rule needs those features, move that logic
+into a small helper function and call it from a supported expression.
 
 ### Input Discovery
 

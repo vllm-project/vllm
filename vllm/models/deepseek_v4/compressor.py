@@ -301,6 +301,35 @@ class DeepseekCompressor(nn.Module):
                 f"Unsupported head_dim for fused quant+cache: {self.head_dim}"
             )
 
+        if vllm_config.kernel_config.enable_jit_warmup:
+            from vllm.model_executor.warmup.jit_warmup import register_jit_warmup
+
+            register_jit_warmup(_SAVE_PARTIAL_STATES_KERNEL)
+            if current_platform.is_cuda() and self.head_dim == 512:
+                from vllm.models.deepseek_v4.nvidia.ops.sparse_attn_compress_cutedsl import (  # noqa: E501
+                    _SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL,
+                    _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_C4_KERNEL,
+                    _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_FULL_C4_KERNEL,
+                    _SPARSE_ATTN_NORM_ROPE_STORE_FULL_KERNEL,
+                    _SPARSE_ATTN_NORM_ROPE_STORE_KERNEL,
+                )
+
+                register_jit_warmup(_SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_C4_KERNEL)
+                register_jit_warmup(
+                    _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_FULL_C4_KERNEL
+                )
+                register_jit_warmup(_SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL)
+                register_jit_warmup(_SPARSE_ATTN_NORM_ROPE_STORE_KERNEL)
+                register_jit_warmup(_SPARSE_ATTN_NORM_ROPE_STORE_FULL_KERNEL)
+            else:
+                from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (  # noqa: E501
+                    _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL,
+                )
+
+                register_jit_warmup(
+                    _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL
+                )
+
     def forward(
         self,
         # [num_tokens, 2 * self.coff * self.head_dim]

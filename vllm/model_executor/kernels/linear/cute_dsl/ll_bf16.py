@@ -259,12 +259,4 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
         return output
 
 
-def ll_bf16_gemm(
-    hidden_states: torch.Tensor,
-    router_weight: torch.Tensor,
-    output_dtype: torch.dtype = torch.float32,
-) -> torch.Tensor:
-    return ll_bf16_gemm_kernel(hidden_states, router_weight, output_dtype)
-
-
-ll_bf16_gemm_kernel = LLBf16Gemm()
+LL_BF16_GEMM_KERNEL = LLBf16Gemm()

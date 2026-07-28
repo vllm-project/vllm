@@ -16,15 +16,6 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
-from vllm.model_executor.warmup.deepseek_v4_mhc_warmup import (
-    deepseek_v4_mhc_warmup,
-)
-from vllm.model_executor.warmup.deepseek_v4_triton_warmup import (
-    deepseek_v4_triton_warmup,
-)
-from vllm.model_executor.warmup.fa4_cutedsl_warmup import (
-    fa4_cutedsl_warmup,
-)
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     resolve_flashinfer_autotune_file,
     write_flashinfer_autotune_cache,
@@ -34,9 +25,6 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
     flashinfer_sparse_mla_decode_autotune_warmup,
 )
 from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
-from vllm.model_executor.warmup.sparse_mla_triton_warmup import (
-    sparse_mla_triton_warmup,
-)
 from vllm.model_executor.warmup.v1_block_table_warmup import (
     warm_v1_block_table_kernels,
 )
@@ -49,31 +37,6 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
-
-_LL_BF16_WARMUP_MODEL_SHAPES: tuple[tuple[int, int], ...] = (
-    (6144, 264),  # Inkling
-    (7168, 256),  # DSV3
-    (7168, 384),  # DSV4-Pro
-    (14400, 256),  # DSV4-Flash
-)
-_LL_BF16_WARMUP_M_RANGE = range(1, 17)
-
-
-def _warmup_ll_bf16_router_gemm() -> None:
-    from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
-        is_available as is_ll_bf16_gemm_available,
-    )
-    from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
-        ll_bf16_gemm_kernel,
-    )
-
-    if not is_ll_bf16_gemm_available():
-        return
-
-    ll_bf16_gemm_kernel.warmup(
-        shapes=_LL_BF16_WARMUP_MODEL_SHAPES,
-        m_values=_LL_BF16_WARMUP_M_RANGE,
-    )
 
 
 _JitWarmupStep = tuple[str, Callable[[], None]]
@@ -188,24 +151,10 @@ def kernel_warmup(worker: "Worker"):
     if worker.vllm_config.kernel_config.enable_jit_warmup:
         jit_warmup_steps: list[_JitWarmupStep] = [
             (
-                "DeepSeek V4 mHC TileLang",
-                lambda: deepseek_v4_mhc_warmup(
-                    worker.get_model(),
-                    vllm_config=worker.vllm_config,
-                ),
+                "Registered JIT kernels",
+                worker.model_runner.jit_warmup_registry.warmup,
             ),
         ]
-        if current_platform.has_device_capability(90):
-            jit_warmup_steps.append(
-                ("ll_bf16 router GEMM CuTeDSL", _warmup_ll_bf16_router_gemm)
-            )
-        jit_warmup_steps.extend(
-            [
-                ("FA4 CuTeDSL", lambda: fa4_cutedsl_warmup(worker)),
-                ("Sparse MLA Triton", lambda: sparse_mla_triton_warmup(worker)),
-                ("DeepSeek V4 Triton", lambda: deepseek_v4_triton_warmup(worker)),
-            ]
-        )
 
         logger.info(
             "JIT kernel warmup starting with %d step(s).",
