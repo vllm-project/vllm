@@ -1,68 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Output-correctness regression tests for hybrid-Mamba prefix caching.
+"""Output-correctness regression tests for hybrid-Mamba prefix caching (#43559).
 
-Reproduces issue #43559: with prefix caching (``mamba_cache_mode="align"``)
-and MTP speculative decoding, a cached Mamba block can hold a recurrent
-state that does not correspond to the block boundary its hash describes.
-Every request that later hits that block resumes from a wrong state and
-silently produces corrupted output until the cache is reset. Two trigger
-mechanisms are covered, each with its own test:
+With prefix caching (``mamba_cache_mode="align"``) and MTP speculative
+decoding, a cached Mamba block can hold a recurrent state that does not match
+the block boundary its hash describes. Requests that later hit that block
+resume from the wrong state and silently produce corrupted output. Two
+triggers are covered, one per test: concurrent cold prefills fragmented mid
+block (#45477 / #47861), and multi-turn reuse of blocks written during
+speculative decode (#47861 / #45614 / #46281).
 
-1. Concurrent cold prefills under a small token budget fragment a prefill
-   chunk mid Mamba block; the chunk-end state is cached as the boundary
-   snapshot (scheduler ``_mamba_block_aligned_split`` fall-through; fixes
-   proposed in #45477 / #47861).
-2. Multi-turn reuse of blocks written during (speculative) decode, where
-   the eagle-lookahead cache lookup lets the Mamba hit length overrun the
-   attention-verified hit by one block (``find_longest_cache_hit``; fixes
-   proposed in #47861 / #45614 / #46281).
+Each test grades a prefix-caching engine against an
+``enable_prefix_caching=False`` control rather than against fixed
+expectations. vLLM forces ``mamba_cache_mode`` back to ``"none"`` when prefix
+caching is off, so the arms schedule different chunk boundaries and differ
+numerically; benign nondeterminism flips recall symmetrically, while #43559
+corruption is one-sided.
 
-Each test compares a trigger engine against a control engine with
-``enable_prefix_caching=False``, using deterministic greedy needle
-recall. The arms necessarily differ in TWO knobs: vLLM forces
-``mamba_cache_mode`` back to ``"none"`` whenever prefix caching is off
-(``MambaModelConfig.verify_and_update_config``), and align mode rewrites
-chunked-prefill boundaries on its own — so the control also schedules
-different chunk boundaries and hence different numerics. Together with
-vLLM not promising batch-shape-invariant numerics
-(``VLLM_BATCH_INVARIANT`` is off), this is why grading is relative to
-the control everywhere rather than zero-tolerance: benign
-nondeterminism flips recall symmetrically in both directions, while
-#43559 corruption is one-sided (wrong only with caching). Both tests print prefix-cache
-and spec-decode counters from ``llm.get_metrics()`` and fail loudly if
-the run never engaged the prefix cache or the speculator; the cold-race
-test additionally proves cache liveness with a >=3-block probe prompt,
-because its sub-2-block trigger geometry is legitimately uncacheable on
-a fixed tree: with EAGLE/MTP the last cacheable Mamba boundary is pulled
-back one block, so prompts shorter than 2 * mamba_block_size (thousands
-of tokens on these models) get zero prefix-cache reuse and non-final
-chunks must end on a block boundary or defer. That geometry cliff is a
-documented cost of correctness (the pre-fix "hits" at this geometry WERE
-the corruption); recovering reuse there needs boundary-state retention
-plus attention-only eagle re-verification, left as follow-up work.
+Geometry drift and a too-weak control hard-fail rather than calling
+``pytest.skip``: the fork-based per-test runner reports an in-body skip as
+PASS, which would silently green the CI step.
 
-Corruption is a hard red: the fix for both mechanisms ships together
-with these tests, so no xfail marker is carried. Corruption checks
-raise ``CorruptionDetected`` so a bug red stays distinguishable from
-engagement, control-quality, geometry, or environment failures, which
-raise plain assertions or dedicated ``Exception`` subclasses. Geometry
-and control-quality guards hard-fail (``GeometryUnsupported`` /
-``ControlQualityFailure``) rather than ``pytest.skip``/``pytest.fail``:
-the fork-based per-test runner reports in-body skips as PASS, so
-geometry drift would silently green the CI step and be
-indistinguishable from a healthy run. Measured status: RED on unfixed main
-and GREEN on the fixed tree for both arms (large-memory GPUs,
-Nemotron-3 Super). The multi-turn Qwen parametrization is likewise a
-graded arm: it was observed red once on an unfixed tree (14/32
-one-sided wave-2 recall flips — the first reproduction on the issue's
-own model family; an earlier batch-1 community harness on the issue
-thread could not reproduce on this checkpoint) and green on the fixed
-tree, though it was not re-baselined red at this fix's exact base
-commit.
-
-These are end-to-end output-level tests and intentionally do not overlap
-with the scheduler-level unit tests shipped in #45477/#47861.
+These are end-to-end output-level tests and do not overlap with the
+scheduler-level unit tests in #45477 / #47861.
 """
 
 import random
@@ -79,9 +39,8 @@ from ...utils import (
     multi_gpu_marks,
 )
 
-# Hybrid (full-attention + Mamba/GDN) models with MTP weights — the same
-# configuration class as issue #43559, which reports Qwen3.6-35B-A3B; the
-# smaller 27B-FP8 sibling keeps the single-GPU parametrization affordable.
+# Hybrid (full-attention + Mamba/GDN) models with MTP weights. #43559 reports
+# Qwen3.6-35B-A3B; the 27B-FP8 sibling keeps this affordable on one GPU.
 _QWEN_PARAM = pytest.param(
     "Qwen/Qwen3.6-27B-FP8",
     1,
@@ -91,18 +50,14 @@ _QWEN_PARAM = pytest.param(
 _NEMOTRON_PARAM = pytest.param(
     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
     4,
-    # ~240 GB of BF16 weights across TP4 need H200/GB200-class capacity;
-    # min_gb=140 separates H200 (~150 decimal GB) from H100-80GB (~85),
-    # which would OOM at engine boot under gpu_memory_utilization=0.8.
+    # min_gb=140 separates H200 (~150 decimal GB) from H100-80GB, which OOMs
+    # at boot under gpu_memory_utilization=0.8.
     marks=[large_gpu_mark(min_gb=140)] + multi_gpu_marks(num_gpus=4),
     id="nemotron-super-120b-bf16",
 )
 HYBRID_MTP_MODELS = [_QWEN_PARAM, _NEMOTRON_PARAM]
-# Qwen is excluded from the cold-race test: under its trigger geometry the
-# APC-off control arm itself loses needle recall (measured wave-1 misses
-# 16/16 with prefix caching disabled — an APC-independent misbehavior), so
-# the control-quality gate fires and the test cannot grade the prefix
-# cache on that model.
+# Qwen is excluded from the cold-race test: its control arm loses needle
+# recall even with prefix caching off, so the run cannot grade the cache.
 COLD_RACE_MODELS = [_NEMOTRON_PARAM]
 
 NUM_SPEC_TOKENS = 2
@@ -112,55 +67,31 @@ NUM_IDENTICAL_COLD_PROMPTS = 16
 RACE_MAX_BATCHED_TOKENS = 4096
 RACE_MAX_NUM_SEQS = 8
 NUM_MULTI_TURN_PROMPTS = 32
-# Benign (non-bug) recall flips from batch-shape nondeterminism are
-# symmetric across arms; corruption is one-sided. Allow this many forward
-# flips beyond the observed reverse-direction (control-only) flips.
+# Allow this many forward recall flips beyond the observed reverse-direction
+# flips, which calibrate the run's own nondeterminism.
 FLIP_MARGIN = 2
 
-# Prefix for GeometryUnsupported hard failures. These paths deliberately
-# do NOT use pytest.skip: under the fork-based per-test runner a Skipped
-# raised in the test body is converted to child exit code 0, which the
-# parent reports as PASS — geometry drift would silently green the
-# CI step and be indistinguishable from a healthy run.
+# Prefix for GeometryUnsupported hard failures (see module docstring).
 GEOMETRY_UNSUPPORTED = "#43559 geometry unsupported, coverage lost: "
 
 
 class CorruptionDetected(AssertionError):
     """Raised only by the #43559 corruption checks.
 
-    A failed engagement guard, control-quality gate, geometry assert, or
-    an environment/boot fault raises a different type, so triage can never
-    mistake it for the corruption signature.
-
-    Exception identity survives ``create_new_process_for_each_test``: the
-    fork-based runner used on CUDA cloudpickles the child's exception
-    object and re-raises it in the parent. (The spawn-based runner used on
-    ROCm/XPU re-wraps failures as ``RuntimeError`` — acceptable, since
-    these parametrizations are CUDA-targeted.)
+    Every other failure mode raises a different type, so a bug red stays
+    distinguishable from an engagement, geometry, or environment failure.
     """
 
 
 class GeometryUnsupported(Exception):
-    """Raised when the resolved geometry cannot express a trigger.
-
-    A hard failure by design (see ``GEOMETRY_UNSUPPORTED``): the fork
-    runner reports in-body skips as PASS, and a plain ``Exception`` is
-    both fork-wrapper-safe and distinct from ``CorruptionDetected``, so
-    lost coverage shows up red with its full diagnostic instead of
-    greening the CI step.
-    """
+    """Raised when the resolved geometry cannot express a trigger."""
 
 
 class ControlQualityFailure(Exception):
     """Raised when the APC-off control cannot support the probe.
 
-    Not raised via ``pytest.fail``: ``Failed`` derives from
-    ``BaseException`` and escapes the fork wrapper's ``except Exception``
-    child handler, losing the diagnostic and letting the forked pytest
-    session run on. A plain ``Exception`` subclass is cloudpickled and
-    re-raised verbatim in the parent, and — not being
-    ``CorruptionDetected`` — is never mistaken for the corruption
-    signature.
+    A plain ``Exception`` rather than ``pytest.fail``: ``Failed`` derives from
+    ``BaseException`` and escapes the fork wrapper's child handler.
     """
 
 
@@ -190,17 +121,13 @@ def _engine_kwargs(tp_size: int) -> dict:
         tensor_parallel_size=tp_size,
         max_model_len=10240,
         gpu_memory_utilization=0.8,
-        # Let vLLM resolve the hybrid (Mamba-aligned) block size instead of
-        # the VllmRunner default of 16.
+        # Let vLLM resolve the Mamba-aligned block size, not VllmRunner's 16.
         block_size=None,
         enforce_eager=True,
         enable_chunked_prefill=True,
         # Required for llm.get_metrics().
         disable_log_stats=False,
-        # Passed to both arms, but effective only with prefix caching on:
-        # MambaModelConfig.verify_and_update_config forces the mode back to
-        # "none" when enable_prefix_caching=False, so the control arm also
-        # loses align-mode chunk-boundary splitting (see module docstring).
+        # Effective only with prefix caching on; forced to "none" otherwise.
         mamba_cache_mode="align",
         speculative_config={
             "method": "mtp",
@@ -213,12 +140,8 @@ def _mamba_block_size(llm: LLM) -> int:
     """Resolved Mamba state-checkpoint granularity in tokens.
 
     Requires the in-process engine (``VLLM_ENABLE_V1_MULTIPROCESSING=0``).
-    In ``mamba_cache_mode="align"`` the scheduler aligns prefill chunks to
-    ``cache_config.block_size`` (the engine core's MIN over all kv-cache
-    groups, attention included), so the trigger geometry is only sound if
-    that value equals the MambaSpec block size — verified below,
-    hard-failing with a coverage-lost signal on mismatch rather than
-    silently mistargeting.
+    Align mode splits chunks on ``cache_config.block_size``, so the trigger
+    geometry is only sound while that equals the MambaSpec block size.
     """
     scheduler = llm.llm_engine.engine_core.engine_core.scheduler
     mamba_block_sizes = {
@@ -250,13 +173,7 @@ def _counter(llm: LLM, name: str) -> int:
 
 
 def _settled_delta(llm: LLM, name: str, baseline: int, timeout_s: float = 30.0) -> int:
-    """Counter delta vs ``baseline``, waiting out aggregation lag.
-
-    Metric aggregation can lag ``generate()`` returning, so an immediate
-    post-generate read may transiently be zero even though the engine did
-    the work. Poll until the counter moves or ``timeout_s`` elapses; a
-    delta that is still zero after the wait is a real zero.
-    """
+    """Counter delta vs ``baseline``, polling out metric aggregation lag."""
     deadline = time.monotonic() + timeout_s
     delta = _counter(llm, name) - baseline
     while delta <= 0 and time.monotonic() < deadline:
@@ -268,15 +185,11 @@ def _settled_delta(llm: LLM, name: str, baseline: int, timeout_s: float = 30.0) 
 def _assert_cache_and_spec_engaged(
     hits: int, queries: int, drafts: int, arm: str, require_hits: bool
 ) -> None:
-    """An APC+MTP run that exercised nothing would pass vacuously.
+    """Guard against an APC+MTP run that exercised nothing passing vacuously.
 
-    ``require_hits=False`` is for the cold-race trigger waves: with spec
-    decode the scheduler reserves the last aligned Mamba boundary for the
-    eagle block drop, so prompts shorter than two blocks are expected to
-    be legitimately uncacheable once a fix lands. The cold-race test
-    separately proves the cache read/write path is live with a >=3-block
-    liveness probe, so a regression that silently disables caching still
-    cannot pass.
+    ``require_hits=False`` for the cold-race waves: spec decode reserves the
+    last aligned boundary, so sub-2-block prompts are legitimately
+    uncacheable once fixed. That test proves cache liveness separately.
     """
     assert queries > 0, (
         f"[{arm}] prefix cache never consulted (queries={queries}); the "
@@ -297,11 +210,8 @@ def _build_needle_manual(
 ) -> tuple[str, list[str], int, int]:
     """Build a facility manual with recallable access codes ("needles").
 
-    Pads with filler sentences so the manual lands as close as possible to
-    ``target_tokens``, at single-filler (~30 token) granularity for any
-    Mamba block size: the total filler count is binary-searched and spread
-    across needle slots, instead of padding every slot uniformly. Returns
-    (text, codes, num_tokens, num_needles).
+    Binary-searches filler count so the manual lands near ``target_tokens``.
+    Returns (text, codes, num_tokens, num_needles).
     """
     num_needles = max(8, min(40, target_tokens // 70))
     rng = random.Random(20260709)
@@ -372,8 +282,7 @@ def _one_sided_flips(
 ) -> tuple[list[int], list[int]]:
     """(forward, reverse) recall flips between the APC arm and the control.
 
-    Forward = recalled by the control but missed with caching on (the
-    #43559 signature); reverse = the benign opposite direction, which
+    Forward (control recalled, APC missed) is the #43559 signature; reverse
     calibrates the run's own nondeterminism rate.
     """
     return sorted(apc_missed - ctl_missed), sorted(ctl_missed - apc_missed)
@@ -384,26 +293,17 @@ def _one_sided_flips(
 def test_cold_concurrent_prefill_mamba_prefix_cache(
     vllm_runner, monkeypatch, model_name, tp_size
 ):
-    """Cold-race arm of #43559 (mechanism addressed by #45477/#47861).
+    """Cold-race arm of #43559 (mechanism addressed by #45477 / #47861).
 
-    N identical cold prompts sized between 1 and 2 Mamba blocks are
-    prefilled concurrently under a small token budget with APC + MTP. The
-    budget fragments some prefills mid block; on an unfixed scheduler the
-    fragment-end recurrent state is cached as the block-boundary snapshot,
-    so requests hitting the shared prefix diverge and lose needle recall.
+    Identical cold prompts sized between 1 and 2 Mamba blocks are prefilled
+    concurrently under a small token budget, fragmenting some prefills mid
+    block. On an unfixed scheduler the fragment-end state is cached as the
+    boundary snapshot, so requests hitting the shared prefix lose recall.
 
-    Asserts, all relative to a prefix-caching-off control: (a) the
-    identical greedy requests produce no more distinct outputs than the
-    control's plus one, (b) needle-recall parity within FLIP_MARGIN, and (c)
-    engagement validity — nonzero prefix-cache queries and MTP drafts,
-    plus nonzero hits for a >=3-block liveness probe prompt (trigger-wave
-    hits themselves may legitimately be zero on a fixed tree, where the
-    eagle boundary reservation makes sub-2-block prompts uncacheable).
-
-    Corruption raises ``CorruptionDetected``; engagement and environment
-    failures raise plain assertions, geometry drift raises
-    ``GeometryUnsupported``, and a weak control raises
-    ``ControlQualityFailure``, so triage stays unambiguous.
+    Grades distinct-output count and needle recall against a
+    prefix-caching-off control, plus engagement: nonzero queries and drafts,
+    and nonzero hits for a >=3-block liveness probe (trigger-wave hits are
+    legitimately zero once fixed).
     """
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     kwargs = _engine_kwargs(tp_size)
@@ -443,10 +343,9 @@ def test_cold_concurrent_prefill_mamba_prefix_cache(
                 f"({block_size=})"
             )
 
-        # Wave 1: identical cold prompts, prefilled concurrently, no warmup.
-        # Probe a needle near the prefix end: recall there is reliable even
-        # for models whose recall of distant needles is weak, while state
-        # corruption garbles the answer regardless of needle position.
+        # Wave 1: identical cold prompts, prefilled concurrently. Probe a
+        # needle near the prefix end, where recall is reliable even on models
+        # that forget distant needles.
         wave1_vault = num_needles - 2
         wave1 = [manual + _needle_question(wave1_vault)]
         wave1 *= NUM_IDENTICAL_COLD_PROMPTS
@@ -458,18 +357,13 @@ def test_cold_concurrent_prefill_mamba_prefix_cache(
         wave2_texts = [out.outputs[0].text for out in llm.generate(wave2, sampling)]
         hits = _counter(llm, "vllm:prefix_cache_hits")
         queries = _counter(llm, "vllm:prefix_cache_queries")
-        # Cache-liveness probe: the sub-2-block trigger geometry is expected
-        # to be uncacheable on a fixed tree, so prove the cache read/write
-        # path is live in this configuration with a >=3-block prompt
-        # submitted twice; without this, "zero hits" could also mean the
-        # cache was silently disabled and the test would pass vacuously.
+        # Cache-liveness probe: the trigger geometry is uncacheable once
+        # fixed, so prove the cache path is live with a repeated >=3-block
+        # prompt. Without it, "zero hits" could mean a disabled cache.
         liveness_hits = None
         probe_hits = None
         if 3 * block_size + 512 > kwargs["max_model_len"]:
-            # The anti-vacuity gate MUST run: if the >=3-block probe cannot
-            # fit, a clean cold-race result would be vacuous (a
-            # silently-disabled cache is indistinguishable from a cured one).
-            # Hard-fail rather than silently skip.
+            # Without the probe a clean result is vacuous, so hard-fail.
             raise GeometryUnsupported(
                 GEOMETRY_UNSUPPORTED + f"cache-liveness probe "
                 f"({3 * block_size + 512} tokens) exceeds "
@@ -482,15 +376,9 @@ def test_cold_concurrent_prefill_mamba_prefix_cache(
         llm.generate([probe_text + _needle_question(0)], probe_sampling)
         probe_hits = _counter(llm, "vllm:prefix_cache_hits")
         llm.generate([probe_text + _needle_question(1)], probe_sampling)
-        # The trigger waves' short stop-bounded decodes may legitimately
-        # draft zero tokens on some models; a short unconstrained decode
-        # proves the MTP speculator is live in this engine configuration.
-        # It also shares the cached manual prefix, and its longer decode
-        # forces metric flushes: counters only publish during generation
-        # steps, so a short probe's stats may never surface if it is the
-        # last generate — the liveness delta is therefore read only after
-        # this generate (any post-baseline hit proves the cache read path
-        # is live).
+        # A longer unconstrained decode proves the speculator is live and
+        # flushes metrics: counters only publish during generation steps, so
+        # the liveness delta is read after this generate.
         llm.generate(
             [manual + _needle_question(0)] * 4,
             SamplingParams(temperature=0.0, max_tokens=128),
@@ -506,18 +394,13 @@ def test_cold_concurrent_prefill_mamba_prefix_cache(
         )
 
     # Control: same budgets and batch composition, prefix caching off.
-    # NOTE: vLLM forces mamba_cache_mode back to "none" when caching is
-    # off, so the control also loses align-mode chunk splitting — chunk
-    # boundaries (and numerics) differ between arms, hence the relative,
-    # flip-budgeted grading below instead of zero tolerance.
     with vllm_runner(model_name, enable_prefix_caching=False, **kwargs) as runner:
         llm = runner.get_llm()
         ctl1_texts = [out.outputs[0].text for out in llm.generate(wave1, sampling)]
         ctl2_texts = [out.outputs[0].text for out in llm.generate(wave2, sampling)]
 
-    # Recall is graded as parity against the APC-off control: models may
-    # legitimately fail distant needles (the control fails them too), but
-    # any vault the control recalls must also be recalled with APC on.
+    # Models may legitimately fail distant needles, but any vault the
+    # control recalls must also be recalled with caching on.
     ctl1_miss = len(_recall(ctl1_texts, codes, [wave1_vault] * len(ctl1_texts)))
     ctl2_missed = set(_recall(ctl2_texts, codes, wave2_vaults))
     if ctl1_miss == len(ctl1_texts) or len(ctl2_missed) > num_needles // 2:
@@ -528,21 +411,15 @@ def test_cold_concurrent_prefill_mamba_prefix_cache(
             f"so the APC arm result is not interpretable"
         )
 
-    # Engagement is asserted BEFORE the corruption checks, so a run that
-    # never engaged APC+MTP fails as an engagement problem instead of
-    # reaching a corruption check it had no standing to make.
+    # Asserted before the corruption checks: a run that never engaged
+    # APC+MTP has no standing to make them.
     _assert_cache_and_spec_engaged(
         hits, queries, drafts, "cold-race", require_hits=False
     )
 
-    # Identical greedy requests are graded against the control's own
-    # distinct-output count: batch-shape nondeterminism (not guaranteed
-    # invariant by vLLM) may benignly split either arm, but on the unfixed
-    # scheduler only the caching arm diverges (asymmetrically). The +1
-    # tolerance absorbs a single benign arm-asymmetric split (the arms
-    # schedule different chunk boundaries by design); divergence without
-    # recall loss is not the #43559 harm, so the margin-protected recall
-    # checks below carry the pass/fail weight.
+    # Batch-shape nondeterminism may benignly split either arm, so grade
+    # against the control's own distinct-output count; the +1 absorbs one
+    # arm-asymmetric split. The recall checks carry the pass/fail weight.
     distinct = set(wave1_texts)
     ctl_distinct = set(ctl1_texts)
     print(
@@ -572,12 +449,9 @@ def test_cold_concurrent_prefill_mamba_prefix_cache(
         f"only {len(reverse)} benign reverse flips {reverse} (#43559)",
     )
 
-    # Vacuous-pass guard, checked AFTER the corruption gates: on a
-    # bug-live tree the trigger mechanics themselves can suppress the
-    # probe's hits (fragmented cold prefill caching the wrong state plus the
-    # spec-decode boundary reservation), so a zero here is only
-    # meaningful — a silently-disabled cache — when no corruption fired
-    # above. On a fixed tree the >=3-block probe must hit.
+    # Checked after the corruption gates: on a bug-live tree the trigger
+    # mechanics can suppress probe hits, so a zero here only means a
+    # disabled cache when no corruption fired above.
     if liveness_hits is not None:
         assert liveness_hits > 0, (
             f"[cold-race] no corruption detected, but zero prefix-cache "
@@ -592,24 +466,16 @@ def test_cold_concurrent_prefill_mamba_prefix_cache(
 def test_multi_turn_decode_written_mamba_prefix_cache(
     vllm_runner, monkeypatch, model_name, tp_size
 ):
-    """Multi-turn arm of #43559 (mechanism addressed by #47861/#45614/#46281).
+    """Multi-turn arm of #43559 (mechanism addressed by #47861 / #45614 / #46281).
 
-    Wave-1 prompts end just below a Mamba block boundary and decode past
-    it under MTP, so the boundary state snapshot is written during
-    speculative decode. Wave-2 re-asks with prompt = wave-1 prompt +
-    output + follow-up, hitting the decode-written blocks at a high hit
-    ratio. On an unfixed tree the Mamba hit length can overrun the
-    attention-verified hit (eagle-lookahead peek), corrupting recall.
+    Wave-1 prompts end just below a Mamba block boundary and decode past it
+    under MTP, so the boundary snapshot is written during speculative decode.
+    Wave-2 re-asks with wave-1 prompt + output + follow-up, hitting those
+    blocks. On an unfixed tree the Mamba hit length can overrun the
+    attention-verified hit, corrupting recall.
 
-    Asserts needle-recall parity (within FLIP_MARGIN of the benign
-    reverse-flip rate) between the APC engine and an APC-off control
-    replaying the exact wave-2 strings, plus nonzero wave-2 prefix-cache
-    hits and MTP drafts.
-
-    Corruption raises ``CorruptionDetected``; engagement and environment
-    failures raise plain assertions, geometry drift raises
-    ``GeometryUnsupported``, and a weak control raises
-    ``ControlQualityFailure``, so triage stays unambiguous.
+    Grades needle recall against an APC-off control replaying the same wave-2
+    strings, plus nonzero prefix-cache hits and MTP drafts.
     """
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     kwargs = _engine_kwargs(tp_size)
@@ -622,8 +488,8 @@ def test_multi_turn_decode_written_mamba_prefix_cache(
         llm = runner.get_llm()
         block_size = _mamba_block_size(llm)
         tokenizer = llm.get_tokenizer()
-        # Prompts end just below the second block boundary; decode crosses
-        # it, so its snapshot embeds decode-time (speculative) state.
+        # Decode crosses the second block boundary, so its snapshot embeds
+        # decode-time (speculative) state.
         manual, codes, manual_tokens, num_needles = _build_needle_manual(
             tokenizer, target_tokens=2 * block_size - 192
         )
@@ -659,8 +525,7 @@ def test_multi_turn_decode_written_mamba_prefix_cache(
         hits_before = _counter(llm, "vllm:prefix_cache_hits")
         queries_before = _counter(llm, "vllm:prefix_cache_queries")
 
-        # Wave 2 resumes from wave-1 prompt + output: the prefix-cache hit
-        # covers blocks whose boundary snapshot was written during decode.
+        # Wave 2 hits blocks whose boundary snapshot was written during decode.
         wave2_vaults = [
             (i * 7 + 3) % num_needles for i in range(NUM_MULTI_TURN_PROMPTS)
         ]
@@ -674,10 +539,7 @@ def test_multi_turn_decode_written_mamba_prefix_cache(
         ]
         wave2_hits = _settled_delta(llm, "vllm:prefix_cache_hits", hits_before)
         wave2_queries = _settled_delta(llm, "vllm:prefix_cache_queries", queries_before)
-        # Engagement is gated on the cumulative (whole-flow) counters:
-        # wave-1 shares the manual prefix and wave-2 resumes wave-1
-        # prompts, so any zero here means APC/MTP never engaged at all.
-        # The wave-2 deltas are diagnostics, not gates.
+        # Gated on cumulative counters; the wave-2 deltas are diagnostics.
         hits = _counter(llm, "vllm:prefix_cache_hits")
         queries = _counter(llm, "vllm:prefix_cache_queries")
         drafts = _counter(llm, "spec_decode_num_drafts")
@@ -692,19 +554,14 @@ def test_multi_turn_decode_written_mamba_prefix_cache(
         )
 
     # Control replays the exact wave-2 strings with prefix caching off.
-    # NOTE: vLLM forces mamba_cache_mode back to "none" when caching is
-    # off, so chunk boundaries (and numerics) differ between arms, hence
-    # the flip-budgeted parity grading below instead of zero tolerance.
     with vllm_runner(model_name, enable_prefix_caching=False, **kwargs) as runner:
         llm = runner.get_llm()
         ctl2_texts = [
             out.outputs[0].text for out in llm.generate(wave2, wave2_sampling)
         ]
 
-    # Parity grading: wave-2 strings embed wave-1 outputs, so a weak or
-    # corrupted first turn can legitimately cost the control some recalls;
-    # what may not happen (beyond the benign symmetric flip rate) is
-    # APC-on missing an answer the control got.
+    # Wave-2 strings embed wave-1 outputs, so the control may legitimately
+    # lose some recalls; what may not happen is APC-on missing one it got.
     ctl_missed = set(_recall(ctl2_texts, codes, wave2_vaults))
     if len(ctl_missed) > NUM_MULTI_TURN_PROMPTS // 2:
         raise ControlQualityFailure(
@@ -712,13 +569,9 @@ def test_multi_turn_decode_written_mamba_prefix_cache(
             f"{sorted(ctl_missed)}); the model cannot support this probe, "
             f"so the APC arm result is not interpretable"
         )
-    # Engagement is asserted BEFORE the corruption check, so a run that
-    # never engaged APC+MTP fails as an engagement problem instead of
-    # reaching a corruption check it had no standing to make. The gate
-    # uses the cumulative counters (see above); the wave-2 hit ratio is
-    # printed rather than asserted (~0.43-0.48 across calibration runs:
-    # 0.477 Nemotron-Super TP4 and ~0.43 Qwen TP1 on GB200 — not calibrated
-    # as stable across hardware).
+    # Asserted before the corruption check (see the cold-race arm). The
+    # wave-2 hit ratio is printed, not asserted: measured ~0.43-0.48, not
+    # calibrated as stable across hardware.
     _assert_cache_and_spec_engaged(
         hits, queries, drafts, "multi-turn", require_hits=True
     )
