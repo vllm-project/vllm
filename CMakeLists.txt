@@ -1410,8 +1410,10 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   list(FILTER VLLM_SKINNY_ARCHES EXCLUDE REGEX "gfx1250")
   if(VLLM_SKINNY_ARCHES)
     message(STATUS "Building skinny_gemms for archs: ${VLLM_SKINNY_ARCHES}")
-    hipify_sources_target(VLLM_SKINNY_HIP_SRCS _rocm_C_skinny
-      "csrc/rocm/skinny_gemms.cu" "csrc/rocm/skinny_gemms_int4.cu")
+    set(VLLM_SKINNY_SRC
+      "csrc/rocm/skinny_gemms.cu"
+      "csrc/rocm/skinny_gemms_int4.cu")
+    hipify_sources_target(VLLM_SKINNY_HIP_SRCS _rocm_C_skinny "${VLLM_SKINNY_SRC}")
     unset(_VLLM_LAST_HIPIFY_TARGET)
     add_library(_rocm_C_skinny OBJECT ${VLLM_SKINNY_HIP_SRCS})
     add_dependencies(_rocm_C_skinny hipify_all)
