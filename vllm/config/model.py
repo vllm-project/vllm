@@ -376,6 +376,7 @@ class ModelConfig:
     interleave_mm_strings: InitVar[bool | None] = None
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
+    video_pruning_method: InitVar[str | None] = None
     mm_tensor_ipc: InitVar[MMTensorIPC] = None
     mm_ipc_gpu_memory_gb: InitVar[float | None] = None
 
@@ -504,6 +505,7 @@ class ModelConfig:
         interleave_mm_strings: bool | None,
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
+        video_pruning_method: str | None,
         mm_tensor_ipc: MMTensorIPC,
         mm_ipc_gpu_memory_gb: float | None,
     ) -> None:
@@ -579,9 +581,9 @@ class ModelConfig:
             self.hf_text_config, "attention_chunk_size", None
         )
         self.encoder_config = self._get_encoder_config()
-        self.hf_image_processor_config = get_hf_image_processor_config(
-            self.model, hf_token=self.hf_token, revision=self.revision
-        )
+        # Image-processor metadata is only consumed by multimodal models.
+        # Probing it for text-only models causes avoidable Hub requests.
+        self.hf_image_processor_config: dict[str, Any] = {}
 
         architectures = self.architectures
         registry = self.registry
@@ -703,6 +705,9 @@ class ModelConfig:
 
         # Init multimodal config if needed
         if self._model_info.supports_multimodal:
+            self.hf_image_processor_config = get_hf_image_processor_config(
+                self.model, hf_token=self.hf_token, revision=self.revision
+            )
             if (
                 mm_encoder_tp_mode == "data"
                 and not self._model_info.supports_multimodal_encoder_tp_data
@@ -732,6 +737,7 @@ class ModelConfig:
                 interleave_mm_strings=interleave_mm_strings,
                 skip_mm_profiling=skip_mm_profiling,
                 video_pruning_rate=video_pruning_rate,
+                video_pruning_method=video_pruning_method,
                 mm_tensor_ipc=mm_tensor_ipc,
                 mm_ipc_gpu_memory_gb=mm_ipc_gpu_memory_gb,
             )
@@ -742,18 +748,36 @@ class ModelConfig:
 
             self.multimodal_config = MultiModalConfig(**mm_config_kwargs)  # type: ignore[arg-type]
 
+            pruning_spec = self.multimodal_config.get_video_pruning_spec()
+            supported_pruning = self._model_info.supported_video_pruning_methods
+            if (
+                pruning_spec is not None
+                and supported_pruning
+                and pruning_spec[0] not in supported_pruning
+            ):
+                raise ValueError(
+                    f"Video pruning method '{pruning_spec[0]}' is not "
+                    f"supported by {self._model_info.architecture} "
+                    f"(supported methods: {supported_pruning})."
+                )
+
             if (
                 self.renderer_num_workers > 1
                 and self.multimodal_config.mm_processor_cache_gb > 0
+                and self.runner_type == "pooling"
             ):
                 raise ValueError(
                     "Cannot use --renderer-num-workers > 1 with the "
-                    "multimodal processor cache enabled. The cache is "
-                    "not thread-safe and does not support concurrent "
-                    "renderer workers. Please set "
+                    "multimodal processor cache enabled for pooling models. "
+                    "Pooling preprocessing runs on the renderer workers, and "
+                    "the cache is not thread-safe. Please set "
                     "--renderer-num-workers 1 (the default), or "
                     "disable the cache with --mm-processor-cache-gb 0."
                 )
+
+            # Rebuild after multimodal_config exists so text-only mm_prefix
+            # clearing is applied (and cached for later with_hf_config calls).
+            self.model_arch_config = self.get_model_arch_config()
 
         if self.disable_sliding_window:
             # Set after get_and_verify_max_len to ensure that max_model_len
@@ -767,6 +791,42 @@ class ModelConfig:
         self._verify_cuda_graph()
         self._verify_bnb_config()
 
+    def _supports_multimodal_for_mm_prefix(self) -> bool:
+        """Whether multimodal inputs can still appear for this deployment.
+
+        This runs more than once per config: once early in ``__post_init__``
+        (before ``multimodal_config`` exists), again after it is created, and
+        then for every ``get_model_arch_config`` regeneration -- notably
+        ``with_hf_config``, which deep-copies this ``ModelConfig`` and swaps
+        ``hf_config`` for a text-only submodule (e.g. ``Gemma4ForCausalLM``).
+
+        The result is cached for correctness, not just to save work: on the
+        ``with_hf_config`` copy the submodule architecture has no registered
+        multimodal processor, so re-querying the registry would raise and be
+        treated as text-only, wrongly clearing ``is_mm_prefix_lm`` even when a
+        vision modality is still enabled (e.g. ``image=0`` but video allowed).
+        The deep-copied cache preserves the top-level decision instead.
+        """
+        cached = getattr(self, "_supports_multimodal_inputs_cached", None)
+        if cached is not None:
+            return cached
+
+        if self.multimodal_config is None:
+            # Early call before multimodal init — do not clear mm_prefix yet.
+            return True
+
+        from vllm.multimodal import MULTIMODAL_REGISTRY
+
+        supports_mm = MULTIMODAL_REGISTRY.supports_multimodal_inputs(self)
+        self._supports_multimodal_inputs_cached = supports_mm
+        if not supports_mm:
+            logger.info_once(
+                "Disabled mm_prefix attention mode because multimodal inputs "
+                "are configuration-disabled. Attention backends without "
+                "mm_prefix support may now be selected."
+            )
+        return supports_mm
+
     def get_model_arch_config(
         self,
     ) -> ModelArchitectureConfig:
@@ -774,7 +834,9 @@ class ModelConfig:
             self.hf_config.model_type, ModelArchConfigConvertorBase
         )
         convertor = convertor_cls(self.hf_config, self.hf_text_config)
-        return convertor.convert()
+        return convertor.convert(
+            supports_multimodal=self._supports_multimodal_for_mm_prefix()
+        )
 
     @field_validator("tokenizer", "max_model_len", mode="wrap")
     @classmethod
@@ -1253,27 +1315,33 @@ class ModelConfig:
         decode_context_parallel_size = parallel_config.decode_context_parallel_size
         if decode_context_parallel_size > 1 and not self.use_mla:
             total_num_kv_heads = self.get_total_num_kv_heads()
-            assert tensor_parallel_size > total_num_kv_heads, (
-                f"tensor parallel size {tensor_parallel_size} must be greater "
-                f"than total num kv heads {total_num_kv_heads} when enable "
-                f"decode context parallel for GQA/MQA"
-            )
+            if tensor_parallel_size <= total_num_kv_heads:
+                raise ValueError(
+                    "Decode context parallelism for GQA/MQA requires "
+                    f"`--tensor-parallel-size` ({tensor_parallel_size}) to be "
+                    "greater than the model's total number of KV heads "
+                    f"({total_num_kv_heads}). Increase `--tensor-parallel-size` "
+                    "or set `--decode-context-parallel-size 1`."
+                )
 
             max_dcp_size = tensor_parallel_size // total_num_kv_heads
-            assert decode_context_parallel_size <= max_dcp_size, (
-                f"decode context parallel size must less than or equal to "
-                f"(tensor parallel size {tensor_parallel_size} // total "
-                f"num kv heads {total_num_kv_heads}) = {max_dcp_size}, "
-                f"but got {decode_context_parallel_size}"
-            )
+            if decode_context_parallel_size > max_dcp_size:
+                raise ValueError(
+                    "`--decode-context-parallel-size` "
+                    f"({decode_context_parallel_size}) exceeds the maximum "
+                    f"supported value ({max_dcp_size}) for "
+                    f"`--tensor-parallel-size` ({tensor_parallel_size}) and "
+                    f"{total_num_kv_heads} model KV heads."
+                )
 
             num_q_per_kv = total_num_attention_heads // total_num_kv_heads
-            assert num_q_per_kv % decode_context_parallel_size == 0, (
-                f"Total number of q per kv attn heads ({num_q_per_kv})"
-                " must be divisible by dcp world size when enable "
-                "decode context parallel for GQA "
-                f"({parallel_config.decode_context_parallel_size})."
-            )
+            if num_q_per_kv % decode_context_parallel_size != 0:
+                raise ValueError(
+                    "The model's number of query heads per KV head "
+                    f"({num_q_per_kv}) must be divisible by "
+                    "`--decode-context-parallel-size` "
+                    f"({decode_context_parallel_size}) for GQA/MQA."
+                )
 
         # torch_shm uses a single IPC queue to rank 0; DP>1 is
         # incompatible because API servers can't know which
@@ -1445,7 +1513,7 @@ class ModelConfig:
         """
         Returns the mamba chunk size if it exists
         """
-        # used by e.g. Bamba, FalconH1, Granite, PLaMo2
+        # used by e.g. Bamba, FalconH1, Granite
         chunk_size = getattr(self.hf_text_config, "mamba_chunk_size", None)
         if chunk_size is None:
             # used by e.g. Mamba2, NemotronH, Zamba
@@ -2019,7 +2087,6 @@ _FLOAT16_NOT_SUPPORTED_MODELS = {
     "gemma2": "Numerical instability. Please use bfloat16 or float32 instead.",
     "gemma3": "Numerical instability. Please use bfloat16 or float32 instead.",
     "gemma3_text": "Numerical instability. Please use bfloat16 or float32 instead.",
-    "plamo2": "Numerical instability. Please use bfloat16 or float32 instead.",
     "glm4": "Numerical instability. Please use bfloat16 or float32 instead.",
 }
 
