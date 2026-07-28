@@ -8,7 +8,6 @@ Thread pool:
     Load jobs are enqueued to the load queue; store jobs to the store queue.
 """
 
-import functools
 import threading
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator
@@ -16,7 +15,6 @@ from dataclasses import dataclass
 
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.tiering.base import JobId
-from vllm.v1.kv_offload.tiering.fs.io import batch_load_block, batch_store_block
 
 logger = init_logger(__name__)
 
@@ -28,10 +26,7 @@ class Task:
     """
 
     path: str
-    view: memoryview
     offset: int
-    block_size: int
-    use_o_direct: bool
 
 
 class JobState:
@@ -115,9 +110,6 @@ class DualQueueThreadPool:
         batch: list[Task] = []
         for task in tasks:
             batch.append(task)
-            assert batch[0].view is task.view
-            assert batch[0].block_size == task.block_size
-            assert batch[0].use_o_direct == task.use_o_direct
             if len(batch) >= batch_size:
                 yield batch
                 batch = []
@@ -127,7 +119,7 @@ class DualQueueThreadPool:
     def _enqueue(
         self,
         queue: deque,
-        make_fn: Callable[[list[Task]], Callable[[], None]],
+        make_batch_fn: Callable[[list[Task]], Callable[[], None]],
         job_id: JobId,
         n_tasks: int,
         tasks: Iterable[Task],
@@ -142,7 +134,7 @@ class DualQueueThreadPool:
         with self._condition:
             self._inflight_jobs += 1
             for batch in self._batch_tasks(tasks, batch_size):
-                queue.append((make_fn(batch), len(batch), state))
+                queue.append((make_batch_fn(batch), len(batch), state))
                 n_batches += 1
             self._condition.notify(n_batches)
 
@@ -151,24 +143,13 @@ class DualQueueThreadPool:
         job_id: JobId,
         n_tasks: int,
         tasks: Iterable[Task],
+        make_batch_fn: Callable[[list[Task]], Callable[[], None]],
     ) -> None:
         """Enqueue load tasks for a job (high-priority for load-priority threads)."""
 
-        def make_fn(batch: list[Task]) -> Callable[[], None]:
-            t0 = batch[0]
-            view, block_size, use_o_direct = t0.view, t0.block_size, t0.use_o_direct
-            return functools.partial(
-                batch_load_block,
-                paths=[t.path for t in batch],
-                view=view,
-                offsets=[t.offset for t in batch],
-                block_size=block_size,
-                use_o_direct=use_o_direct,
-            )
-
         self._enqueue(
             self._load_q,
-            make_fn,
+            make_batch_fn,
             job_id,
             n_tasks,
             tasks,
@@ -180,24 +161,13 @@ class DualQueueThreadPool:
         job_id: JobId,
         n_tasks: int,
         tasks: Iterable[Task],
+        make_batch_fn: Callable[[list[Task]], Callable[[], None]],
     ) -> None:
         """Enqueue store tasks for a job (high-priority for store-priority threads)."""
 
-        def make_fn(batch: list[Task]) -> Callable[[], None]:
-            t0 = batch[0]
-            view, block_size, use_o_direct = t0.view, t0.block_size, t0.use_o_direct
-            return functools.partial(
-                batch_store_block,
-                paths=[t.path for t in batch],
-                view=view,
-                offsets=[t.offset for t in batch],
-                block_size=block_size,
-                use_o_direct=use_o_direct,
-            )
-
         self._enqueue(
             self._store_q,
-            make_fn,
+            make_batch_fn,
             job_id,
             n_tasks,
             tasks,
