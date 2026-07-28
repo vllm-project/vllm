@@ -316,8 +316,12 @@ class GraniteMoeHybridAttention(nn.Module):
 
 
 ALL_DECODER_LAYER_TYPES = {
+    # Transformers < 5.13.0
     "attention": GraniteMoeHybridAttentionDecoderLayer,
     "mamba": GraniteMoeHybridMambaDecoderLayer,
+    # Transformers >= 5.13.0
+    "full_attention": GraniteMoeHybridAttentionDecoderLayer,
+    "linear_attention": GraniteMoeHybridMambaDecoderLayer,
 }
 
 
@@ -455,6 +459,8 @@ class GraniteMoeHybridModel(nn.Module):
                 loaded_params.add(n)
 
         def _load_expert(n, p, name, shard_id, expert_id):
+            if n not in params_dict:
+                return
             param = params_dict[n]
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, p, name, shard_id=shard_id, expert_id=expert_id)
@@ -518,14 +524,14 @@ class GraniteMoeHybridModel(nn.Module):
                     )
                     w1_param, w3_param = p[e].chunk(2, dim=0)
                     _load_expert(
-                        n.replace(".input_linear.", ".experts.w13_"),
+                        n.replace(".input_linear.", ".experts.routed_experts.w13_"),
                         w1_param,
                         w1_name,
                         shard_id="w1",
                         expert_id=e,
                     )
                     _load_expert(
-                        n.replace(".input_linear.", ".experts.w13_"),
+                        n.replace(".input_linear.", ".experts.routed_experts.w13_"),
                         w3_param,
                         w3_name,
                         shard_id="w3",
@@ -541,7 +547,7 @@ class GraniteMoeHybridModel(nn.Module):
                     )
                     w2_param = p[e]
                     _load_expert(
-                        n.replace(".output_linear.", ".experts.w2_"),
+                        n.replace(".output_linear.", ".experts.routed_experts.w2_"),
                         w2_param,
                         w2_name,
                         shard_id="w2",

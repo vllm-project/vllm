@@ -10,12 +10,12 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from vllm.model_executor.layers.fla.ops.kda import (
+from vllm.third_party.flash_linear_attention.ops.kda import (
     chunk_kda,
     chunk_kda_with_fused_gate,
     fused_kda_gate,
 )
-from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
+from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 
 DEVICE = "cuda"
 

@@ -27,9 +27,9 @@ MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 @pytest.fixture(scope="module")
 def zephyr_lora_files():
     """Download zephyr LoRA files once per test session."""
-    from huggingface_hub import snapshot_download
+    from vllm.transformers_utils.repo_utils import hf_api
 
-    return snapshot_download(repo_id="typeof/zephyr-7b-beta-lora")
+    return hf_api().snapshot_download(repo_id="typeof/zephyr-7b-beta-lora")
 
 
 @pytest.fixture(scope="module")
@@ -824,7 +824,10 @@ async def test_invocations(server: RemoteOpenAIServer, client: openai.AsyncOpenA
     chat_output = chat_response.json()
     invocation_output = invocation_response.json()
 
-    assert chat_output.keys() == invocation_output.keys()
+    extra_keys = invocation_output.keys() - chat_output.keys()
+    missing_keys = chat_output.keys() - invocation_output.keys()
+    assert missing_keys == set()
+    assert extra_keys <= {"moderation"}
     assert chat_output["choices"] == invocation_output["choices"]
 
 

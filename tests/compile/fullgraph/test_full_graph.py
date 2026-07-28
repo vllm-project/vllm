@@ -39,12 +39,6 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
             ]
         )
 
-        # TODO: figure out why this fails.
-        if False and is_quant_method_supported("gguf"):  # noqa: SIM223
-            TEST_MODELS.append(
-                ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF", {"quantization": "gguf"})
-            )
-
         if is_quant_method_supported("gptq"):
             TEST_MODELS.append(
                 ("TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ", {"quantization": "gptq"})

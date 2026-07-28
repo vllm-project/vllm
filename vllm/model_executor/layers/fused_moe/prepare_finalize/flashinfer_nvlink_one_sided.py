@@ -161,8 +161,8 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
             ep_size, self.runtime_max_tokens_per_rank, hidden_size
         )
 
-        combined_output = self.all2all_manager.moe_alltoall.combine(  # type: ignore[attr-defined]
+        self.all2all_manager.combine_into(  # type: ignore[attr-defined]
             payload=fused_expert_output,
             runtime_max_tokens_per_rank=self.runtime_max_tokens_per_rank,
+            output=output,
         )
-        output.copy_(combined_output)

@@ -6,7 +6,11 @@ vLLM maintains a per-commit wheel repository (commonly referred to as "nightly")
 
 ### Wheel Building
 
-Wheels are built in the `Release` pipeline (`.buildkite/release-pipeline.yaml`) after a PR is merged into the main branch, with multiple variants:
+Wheels are built in the `Release` pipeline
+(`.buildkite/release-pipeline.yaml`) after a PR is merged into the main branch.
+Regular builds produce the CUDA 13.0 wheels for x86_64 and aarch64. Additional
+wheel variants and ROCm builds can be unblocked on demand and run automatically
+when `NIGHTLY=1`:
 
 - **Backend variants**: `cpu` and `cuXXX` (e.g., `cu129`, `cu130`).
 - **Architecture variants**: `x86_64` and `aarch64`.
@@ -14,7 +18,7 @@ Wheels are built in the `Release` pipeline (`.buildkite/release-pipeline.yaml`) 
 Each build step:
 
 1. Builds the wheel in a Docker container.
-2. Renames the wheel filename to use the correct manylinux tag (currently `manylinux_2_31`) for PEP 600 compliance.
+2. Renames the wheel filename to use the correct manylinux tag (currently `manylinux_2_28`) for PEP 600 compliance.
 3. Uploads the wheel to S3 bucket `vllm-wheels` under `/{commit_hash}/`.
 
 ### Index Generation

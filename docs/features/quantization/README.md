@@ -9,7 +9,6 @@ The following are the supported quantization formats for vLLM:
 
 - [AutoAWQ](auto_awq.md)
 - [BitsAndBytes (plugin)](bnb.md)
-- [GGUF](gguf.md)
 - [GPTQModel](gptqmodel.md)
 - [Intel Neural Compressor](inc.md)
 - [LLM Compressor](llm_compressor/README.md)
@@ -77,9 +76,6 @@ th:not(:first-child) {
 ## Out-of-Tree Quantization Plugins
 
 vLLM supports registering custom, out-of-tree quantization methods using the `@register_quantization_config` decorator. This allows you to implement and use your own quantization schemes without modifying the vLLM codebase.
-
-The official BitsAndBytes support now ships as the out-of-tree
-[`vllm-bnb-plugin`](https://github.com/vllm-project/vllm-bnb-plugin).
 
 ### Registering a Custom Quantization Method
 

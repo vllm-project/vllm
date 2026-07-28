@@ -61,6 +61,12 @@ class SequencePooler(Pooler):
         self.pooling = pooling
         self.head = head
 
+    def extra_repr(self) -> str:
+        return (
+            f"pooling={self.pooling.__class__.__name__}, "
+            f"head={self.head.__class__.__name__}"
+        )
+
     def get_supported_tasks(self) -> Set[PoolingTask]:
         tasks = set(POOLING_TASKS)
 

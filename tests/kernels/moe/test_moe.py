@@ -406,7 +406,7 @@ def test_fused_moe_int64_overflow(workspace_init):
     Reproduces the scenario from PR #34279.
     """
     # ~12 GB GPU memory needed for intermediate caches
-    free_mem = torch.cuda.mem_get_info()[0]
+    free_mem = torch.accelerator.get_memory_info()[0]
     if free_mem < 12 * 1024**3:
         pytest.skip("Insufficient GPU memory for overflow test")
 
@@ -1165,6 +1165,102 @@ def test_fused_marlin_moe_non_gated(
     torch.testing.assert_close(marlin_output, torch_output, atol=1e-1, rtol=0)
 
 
+@pytest.mark.parametrize(
+    "activation",
+    [
+        MoEActivation.SILU,
+        MoEActivation.RELU2_NO_MUL,
+    ],
+    ids=["gated", "non_gated"],
+)
+def test_humming_gated_non_gated_shape_contract(activation: MoEActivation):
+    pytest.importorskip("humming")
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        HummingIndexedExperts,
+    )
+    from vllm.model_executor.layers.quantization.utils import humming_utils
+    from vllm.utils import humming
+
+    top_k, num_experts = 6, 12
+    hidden_size, intermediate_size = 2688, 1856
+    gate_up_size = intermediate_size * 2 if activation.is_gated else intermediate_size
+    num_w13_stacks = 2 if activation.is_gated else 1
+    moe_config = make_dummy_moe_config(
+        num_experts=num_experts,
+        experts_per_token=top_k,
+        hidden_dim=hidden_size,
+        intermediate_size=intermediate_size,
+        activation=activation,
+    )
+
+    layer = torch.nn.Module()
+    layer.moe_config = moe_config
+    layer.params_dtype = torch.bfloat16
+
+    weight_schema = humming.ModeloptNvfp4WeightSchema()
+    for sublayer_name, shape_n, shape_k, stack_size in (
+        ("w13", gate_up_size, hidden_size, num_w13_stacks),
+        ("w2", hidden_size, intermediate_size, 1),
+    ):
+        tensor_attrs = weight_schema.get_tensors_attrs(
+            shape_n=shape_n,
+            shape_k=shape_k,
+            param_dtype=layer.params_dtype,
+            num_experts=num_experts,
+            stack_size=stack_size,
+        )
+        for tensor_name, attrs in tensor_attrs.items():
+            layer.register_parameter(
+                f"{sublayer_name}_{tensor_name}",
+                Parameter(
+                    torch.ones(
+                        attrs["shape"],
+                        dtype=attrs["dtype"],
+                        device="cuda",
+                    ),
+                    requires_grad=False,
+                ),
+            )
+
+    humming_utils.convert_to_humming_moe_kernel_format(
+        layer,
+        weight_schema=weight_schema,
+        input_schema=humming.HummingInputSchema(a_dtype=humming.dtypes.bfloat16),
+    )
+
+    w13_meta, w2_meta = (layer.humming_metas[name] for name in ("w13", "w2"))
+    for meta in (w13_meta, w2_meta):
+        assert meta.a_dtype == humming.dtypes.bfloat16
+        assert meta.b_dtype == humming.dtypes.float4e2m1
+
+    assert w13_meta.shape_n - w13_meta.pad_shape_n == gate_up_size
+    assert w2_meta.shape_k - w2_meta.pad_shape_k == intermediate_size
+
+    layer.local_num_experts = layer.global_num_experts = num_experts
+    layer.hidden_size = hidden_size
+    layer.intermediate_size_per_partition = intermediate_size
+    quant_config = humming_utils.get_humming_moe_quant_config(layer)
+    experts = HummingIndexedExperts(
+        layer,
+        moe_config,
+        quant_config,
+    )
+
+    buffer_metas, _ = experts.get_buffer_metas(
+        M=1,
+        topk=top_k,
+        activation=moe_config.activation,
+    )
+    assert buffer_metas["gate_up_output"]["shape"][-1] == gate_up_size
+    assert buffer_metas["activation_output"]["shape"][-1] == intermediate_size
+    assert experts.moe_problem_size(
+        a1=torch.empty(1, hidden_size),
+        w1=torch.empty(num_experts, 1),
+        w2=torch.empty(num_experts, 1),
+        topk_ids=torch.empty(1, top_k, dtype=torch.long),
+    ) == (num_experts, 1, intermediate_size, hidden_size, top_k)
+
+
 @pytest.mark.parametrize("ep_size", [1, 2])
 def test_moe_align_block_size_opcheck(ep_size):
     num_experts = 4
@@ -1243,20 +1339,58 @@ def test_batched_moe_align_block_size_opcheck():
     )
 
 
+# topk=8 covers topk > 4; k=511 covers the non-vectorized scalar path. The
+# layouts exercise contiguous input plus the two non-contiguous cases: a
+# transpose (strided hidden -> scalar gather) and a topk-slice (hidden still
+# contiguous -> vectorized).
 @pytest.mark.parametrize("m", [1, 33, 222])
-@pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize("topk", [*TOP_KS, 8])
 @pytest.mark.parametrize("k", [128, 511, 1024])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_moe_sum(m: int, topk: int, k: int, dtype: torch.dtype):
-    input = torch.randn((m, topk, k), device="cuda", dtype=dtype)
+@pytest.mark.parametrize("layout", ["contig", "transpose", "slice"])
+def test_moe_sum(m: int, topk: int, k: int, dtype: torch.dtype, layout: str):
+    if layout == "transpose":
+        input = torch.randn((m, k, topk), device="cuda", dtype=dtype).transpose(1, 2)
+    elif layout == "slice":
+        input = torch.randn((m, 2 * topk, k), device="cuda", dtype=dtype)[:, ::2, :]
+    else:
+        input = torch.randn((m, topk, k), device="cuda", dtype=dtype)
+    assert input.is_contiguous() == (layout == "contig")
     actual = torch.empty((m, k), device="cuda", dtype=dtype)
 
-    expected = input.sum(dim=1)
+    # Reduction accumulates in fp32.
+    expected = input.float().sum(dim=1).to(dtype)
     torch.ops._moe_C.moe_sum(input, actual)
 
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=0)
 
     opcheck(torch.ops._moe_C.moe_sum, (input, actual))
+
+
+@pytest.mark.parametrize("topk", [2, 8])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("topk_ids_dtype", [torch.int32, torch.int64])
+def test_moe_sum_pad_aware(topk: int, dtype: torch.dtype, topk_ids_dtype: torch.dtype):
+    m, k = 17, 128
+    input = torch.randn((m, topk, k), device="cuda", dtype=dtype)
+
+    topk_ids = torch.randint(0, 4, (m, topk), device="cuda", dtype=topk_ids_dtype)
+    # Force some slots unrouted, independent of expert parallelism.
+    topk_ids[0, :] = -1
+    topk_ids[1, 0] = -1
+
+    expert_map = torch.tensor([0, -1, 1, -1], device="cuda", dtype=torch.int32)
+
+    actual = torch.empty((m, k), device="cuda", dtype=dtype)
+    torch.ops._moe_C.moe_sum(input, actual, topk_ids, expert_map)
+
+    routed = expert_map[topk_ids.clamp(min=0).long()] >= 0
+    routed &= topk_ids >= 0
+    expected = (input.float() * routed.unsqueeze(-1)).sum(dim=1).to(dtype)
+
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=0)
+
+    opcheck(torch.ops._moe_C.moe_sum, (input, actual, topk_ids, expert_map))
 
 
 @pytest.mark.usefixtures("default_vllm_config")
@@ -1585,15 +1719,12 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
     e: int,
     topk: int,
     dtype: torch.dtype,
-    monkeypatch,
     workspace_init,
 ):
     """
     Test BF16 unquantized MoE with FlashInfer TRTLLM backend.
     """
     set_random_seed(7)
-
-    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP16", "1")
 
     from vllm.model_executor.layers.fused_moe.config import (
         FusedMoEConfig,
@@ -1617,16 +1748,16 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
         num_experts=e,
         experts_per_token=topk,
         hidden_dim=k,
-        intermediate_size_per_partition=n,
+        intermediate_size=n,
         num_local_experts=e,
         num_logical_experts=e,
         activation=MoEActivation.SILU,
         device="cuda",
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
         in_dtype=dtype,
-        is_act_and_mul=True,
         routing_method=RoutingMethodType.Renormalize,
         max_num_tokens=next_power_of_2(m),
+        moe_backend="flashinfer_trtllm",
     )
 
     with set_current_vllm_config(vllm_config):

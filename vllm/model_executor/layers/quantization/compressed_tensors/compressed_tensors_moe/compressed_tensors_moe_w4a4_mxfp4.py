@@ -21,6 +21,9 @@ from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
 from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     MarlinExperts,
 )
+from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
+    XPUExpertsMxFp4,
+)
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
     make_mxfp4_moe_kernel,
@@ -33,6 +36,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_moe_fp4_layer_for_marlin,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -48,6 +52,10 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         if self.use_cutlass_mxfp4:
             logger.info_once("Using CutlassExpertsMxfp4 for MXFP4 MoE")
             self.experts_cls = CutlassExpertsMxfp4
+        elif current_platform.is_xpu():
+            self.mxfp4_backend = Mxfp4MoeBackend.XPU
+            self.experts_cls = XPUExpertsMxFp4
+            logger.info_once("Using XPUExpertsMxFp4 for MXFP4 MoE on XPU platform")
         else:
             logger.info_once("Using MarlinExperts for MXFP4 MoE")
             self.experts_cls = MarlinExperts
@@ -135,6 +143,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
                 mxfp4_backend=self.mxfp4_backend,
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
+                layer=layer,
             )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
@@ -179,6 +188,8 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_weight_scale = torch.nn.Parameter(
                 torch.stack(swizzled_w2), requires_grad=False
             )
+        elif current_platform.is_xpu():
+            pass
         else:
             logger.warning_once(
                 "Your GPU does not have native support for FP4 computation "
