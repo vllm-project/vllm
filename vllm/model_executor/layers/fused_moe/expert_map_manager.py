@@ -380,7 +380,8 @@ class ExpertMapManager:
         if requested_strategy != "round_robin":
             return requested_strategy
 
-        if not self.moe_parallel_config.use_ep:
+        # Round-robin requires specific conditions
+        if self.ep_size == 1:
             return "linear"
 
         round_robin_supported = (
