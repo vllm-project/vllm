@@ -71,7 +71,7 @@ def _linear_with_fp32_out(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor
         and current_platform.has_device_capability(90)
         and ll_bf16.is_available()
     ):
-        out = ll_bf16.ll_bf16_gemm(flat, weight)
+        out = ll_bf16.LL_BF16_GEMM_KERNEL(flat, weight)
     else:
         out = torch.mm(flat, weight.T, out_dtype=torch.float32)
     return out.view(*leading, weight.shape[0])

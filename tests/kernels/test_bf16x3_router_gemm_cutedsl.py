@@ -36,7 +36,7 @@ def test_bf16x3_router_gemm_matches_reference(
 ):
     _requires_sm100_cutedsl()
     from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_cutedsl import (  # noqa: E501
-        bf16x3_router_gemm,
+        _BF16X3_ROUTER_GEMM_KERNEL,
     )
 
     torch.manual_seed(42)
@@ -44,9 +44,8 @@ def test_bf16x3_router_gemm_matches_reference(
     w = torch.randn(num_experts, hidden_dim, dtype=torch.float32, device="cuda")
     # Match the observed router weight scale
     w *= 0.053
-    out = bf16x3_router_gemm(x, w)
-    # FP64 reference: the FP32 reference itself drifts by ~5e-6 at N=2048
-    ref = torch.nn.functional.linear(x.double(), w.double())
+    out = _BF16X3_ROUTER_GEMM_KERNEL(x, w)
+    ref = torch.nn.functional.linear(x.float(), w)
 
     assert out.shape == (num_tokens, num_experts)
     assert out.dtype == torch.float32
