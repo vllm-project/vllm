@@ -1095,6 +1095,7 @@ def make_fake_moe_layer(
     activation: str = "silu",
     indices_type: torch.dtype | None = None,
     expert_map: torch.Tensor | None = None,
+    post_topk_drop_mask: torch.Tensor | None = None,
     expert_load_view: torch.Tensor | None = None,
     logical_to_physical_map: torch.Tensor | None = None,
     logical_replica_count: torch.Tensor | None = None,
@@ -1124,6 +1125,7 @@ def make_fake_moe_layer(
         e_score_correction_bias=e_score_correction_bias,
         num_fused_shared_experts=0,  # TODO
     )
+    router.post_topk_drop_mask = post_topk_drop_mask
 
     if quant_dtype is not None:
         w1, w1_s, _ = moe_quantize_weights(w1, None, quant_dtype, False, None)
@@ -1202,6 +1204,73 @@ def make_fake_moe_layer(
         return output
 
     return _moe
+
+
+def test_post_topk_drop_matches_zero_weight_reference():
+    torch.manual_seed(0)
+    device = "cuda"
+    num_experts = 6
+    top_k = 3
+    hidden_size = 8
+    intermediate_size = 16
+    pruned_ids = [0, 1, 2]
+    kept_ids = [3, 4, 5]
+
+    w1 = torch.randn(
+        num_experts,
+        2 * intermediate_size,
+        hidden_size,
+        device=device,
+        dtype=torch.float32,
+    )
+    w2 = torch.randn(
+        num_experts,
+        hidden_size,
+        intermediate_size,
+        device=device,
+        dtype=torch.float32,
+    )
+    zeroed_w1 = w1.clone()
+    zeroed_w2 = w2.clone()
+    zeroed_w1[pruned_ids] = 0
+    zeroed_w2[pruned_ids] = 0
+
+    expert_map = torch.tensor([-1, -1, -1, 0, 1, 2], dtype=torch.int32)
+    drop_mask = torch.tensor([True, True, True, False, False, False], device=device)
+    reference = make_fake_moe_layer(
+        zeroed_w1,
+        zeroed_w2,
+        top_k=top_k,
+        global_num_experts=num_experts,
+        in_dtype=torch.float32,
+        quantization=None,
+    )
+    candidate = make_fake_moe_layer(
+        w1[kept_ids].contiguous(),
+        w2[kept_ids].contiguous(),
+        top_k=top_k,
+        global_num_experts=num_experts,
+        in_dtype=torch.float32,
+        quantization=None,
+        expert_map=expert_map,
+        post_topk_drop_mask=drop_mask,
+    )
+
+    hidden_states = torch.randn(4, hidden_size, device=device)
+    router_logits = torch.tensor(
+        [
+            [9.0, 8.0, 7.0, 1.0, 0.0, -1.0],
+            [0.0, -1.0, -2.0, 9.0, 8.0, 7.0],
+            [9.0, 0.0, -1.0, 8.0, 7.0, -2.0],
+            [9.0, 8.0, 0.0, 7.0, -1.0, -2.0],
+        ],
+        device=device,
+    )
+
+    reference_output = reference(hidden_states, router_logits)
+    candidate_output = candidate(hidden_states, router_logits)
+
+    torch.testing.assert_close(candidate_output, reference_output)
 
 
 def _test_body_regular(

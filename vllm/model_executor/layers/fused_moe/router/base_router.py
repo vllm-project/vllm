@@ -208,6 +208,10 @@ class BaseRouter(FusedMoERouter):
         self.riy_weight_view: torch.Tensor | None = None
         self.riy_collecting_flag: torch.Tensor | None = None
         self.prune_logit_mask: torch.Tensor | None = None
+        self.post_topk_drop_mask: torch.Tensor | None = None
+        self.riy_original_topk_slots_view: torch.Tensor | None = None
+        self.riy_surviving_topk_slots_view: torch.Tensor | None = None
+        self.riy_effective_count_histogram_view: torch.Tensor | None = None
 
     def set_capture_fn(self, capture_fn: Callable[[torch.Tensor], None] | None) -> None:
         """Set a capture callback for logical routed expert IDs."""
@@ -334,6 +338,32 @@ class BaseRouter(FusedMoERouter):
             )
             weights = topk_weights.reshape(-1).to(self.riy_weight_view.dtype)
             self.riy_weight_view.scatter_add_(0, ids, weights * collecting.float())
+
+        if self.post_topk_drop_mask is not None:
+            logical_ids = topk_ids.long()
+            valid_ids = (logical_ids >= 0) & (
+                logical_ids < self.post_topk_drop_mask.numel()
+            )
+            safe_ids = logical_ids.clamp(
+                min=0, max=self.post_topk_drop_mask.numel() - 1
+            )
+            dropped_slots = valid_ids & self.post_topk_drop_mask[safe_ids]
+            if self.riy_original_topk_slots_view is not None:
+                assert self.riy_surviving_topk_slots_view is not None
+                assert self.riy_effective_count_histogram_view is not None
+                assert self.riy_collecting_flag is not None
+                collecting = self.riy_collecting_flag.long()
+                surviving_per_token = (~dropped_slots).sum(dim=-1).long()
+                self.riy_original_topk_slots_view.add_(collecting * topk_ids.numel())
+                self.riy_surviving_topk_slots_view.add_(
+                    collecting * surviving_per_token.sum()
+                )
+                self.riy_effective_count_histogram_view.scatter_add_(
+                    0,
+                    surviving_per_token,
+                    collecting.expand_as(surviving_per_token),
+                )
+            topk_weights = topk_weights.masked_fill(dropped_slots, 0.0)
 
         if _riy_monitor_enabled and not _is_capturing():
             riy = get_riy_state()

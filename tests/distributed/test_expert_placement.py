@@ -10,6 +10,7 @@ from vllm.model_executor.layers.fused_moe.expert_map_manager import (
     determine_expert_map,
 )
 from vllm.model_executor.layers.fused_moe.riy import (
+    RiyState,
     build_riy_layer_prune_plan,
     load_riy_profile,
 )
@@ -249,6 +250,25 @@ def test_pre_topk_mask_still_requires_at_least_topk_experts(tmp_path):
 
     with pytest.raises(ValueError, match="top_k"):
         build_riy_layer_prune_plan(profile, layer_idx=0, top_k=3)
+
+
+def test_post_topk_metrics_report_compute_reduction():
+    state = RiyState()
+    state.register_layer(layer_idx=0, num_experts=4, top_k=2)
+    state.initialize_tensors(torch.device("cpu"), num_layers=1)
+    state.get_original_topk_slots_view(0).fill_(8)
+    state.get_surviving_topk_slots_view(0).fill_(5)
+    state.get_effective_count_histogram_view(0).copy_(torch.tensor([1, 1, 2]))
+
+    metrics = state.get_stats()["post_topk_drop"]
+
+    assert metrics["original_topk_slots"] == 8
+    assert metrics["surviving_topk_slots"] == 5
+    assert metrics["dropped_topk_slots"] == 3
+    assert metrics["average_surviving_experts_per_token"] == 1.25
+    assert metrics["average_dropped_experts_per_token"] == 0.75
+    assert metrics["expert_compute_reduction_ratio"] == 0.375
+    assert metrics["effective_expert_count_distribution"] == [1, 1, 2]
 
 
 def test_expert_filter_compacts_kept_experts_without_ep():

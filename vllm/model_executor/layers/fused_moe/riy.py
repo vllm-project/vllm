@@ -78,11 +78,15 @@ class RiyState:
         self._hidden_size = 0
         self._intermediate_size = 0
         self._quantization = ""
+        self._max_top_k = 0
         # Pre-allocated GPU tensors for compiled stats (R2)
         # Addresses must be stable — used by @torch.compile'd function
         self._freq_pass: torch.Tensor | None = None  # (num_layers, num_experts)
         self._weight_pass: torch.Tensor | None = None  # (num_layers, num_experts)
         self._collecting_flag: torch.Tensor | None = None  # scalar, 0 or 1
+        self._original_topk_slots: torch.Tensor | None = None
+        self._surviving_topk_slots: torch.Tensor | None = None
+        self._effective_count_histogram: torch.Tensor | None = None
         self._tensors_initialized = False
 
     def initialize(self, num_layers: int, num_experts: int):
@@ -103,6 +107,7 @@ class RiyState:
         hidden_size: int = 0,
         intermediate_size: int = 0,
         quantization: str = "",
+        top_k: int = 0,
     ):
         """Register a MoE layer. Called from FusedMoE.__init__."""
         with self._lock:
@@ -112,6 +117,8 @@ class RiyState:
                 self._quantization = quantization
             if num_experts > self._num_experts:
                 self._num_experts = num_experts
+            if top_k > self._max_top_k:
+                self._max_top_k = top_k
             if layer_idx >= self._num_layers:
                 # Grow stats list
                 while len(self._layer_stats) <= layer_idx:
@@ -149,6 +156,18 @@ class RiyState:
                 n_layers, self._num_experts, dtype=torch.float32, device=device
             )
             self._collecting_flag = torch.zeros((), dtype=torch.int32, device=device)
+            self._original_topk_slots = torch.zeros(
+                n_layers, dtype=torch.int64, device=device
+            )
+            self._surviving_topk_slots = torch.zeros(
+                n_layers, dtype=torch.int64, device=device
+            )
+            self._effective_count_histogram = torch.zeros(
+                n_layers,
+                self._max_top_k + 1,
+                dtype=torch.int64,
+                device=device,
+            )
             self._tensors_initialized = True
             # Update num_layers if we got a better count
             if n_layers > self._num_layers:
@@ -172,6 +191,21 @@ class RiyState:
             return self._weight_pass[layer_idx]
         return None
 
+    def get_original_topk_slots_view(self, layer_idx: int) -> torch.Tensor | None:
+        if self._original_topk_slots is None:
+            return None
+        return self._original_topk_slots[layer_idx]
+
+    def get_surviving_topk_slots_view(self, layer_idx: int) -> torch.Tensor | None:
+        if self._surviving_topk_slots is None:
+            return None
+        return self._surviving_topk_slots[layer_idx]
+
+    def get_effective_count_histogram_view(self, layer_idx: int) -> torch.Tensor | None:
+        if self._effective_count_histogram is None:
+            return None
+        return self._effective_count_histogram[layer_idx]
+
     def start_collection(self):
         with self._lock:
             self._collecting = True
@@ -193,6 +227,12 @@ class RiyState:
                 self._freq_pass.zero_()
             if self._weight_pass is not None:
                 self._weight_pass.zero_()
+            if self._original_topk_slots is not None:
+                self._original_topk_slots.zero_()
+            if self._surviving_topk_slots is not None:
+                self._surviving_topk_slots.zero_()
+            if self._effective_count_histogram is not None:
+                self._effective_count_histogram.zero_()
             # Also reset legacy per-layer stats
             for s in self._layer_stats:
                 s.reset()
@@ -222,12 +262,55 @@ class RiyState:
                         "weight_sum": wsum,
                     }
                 )
-            return {
+            result = {
                 "num_layers": self._num_layers,
                 "num_experts": self._num_experts,
                 "collecting": self._collecting,
                 "layers": layers,
             }
+            if (
+                self._original_topk_slots is not None
+                and self._surviving_topk_slots is not None
+                and self._effective_count_histogram is not None
+            ):
+                original = self._original_topk_slots.detach().cpu()
+                surviving = self._surviving_topk_slots.detach().cpu()
+                histogram = self._effective_count_histogram.detach().cpu()
+                original_total = int(original.sum().item())
+                surviving_total = int(surviving.sum().item())
+                dropped_total = original_total - surviving_total
+                token_total = int(histogram.sum().item())
+                result["post_topk_drop"] = {
+                    "original_topk_slots": original_total,
+                    "surviving_topk_slots": surviving_total,
+                    "dropped_topk_slots": dropped_total,
+                    "average_surviving_experts_per_token": (
+                        surviving_total / token_total if token_total else 0.0
+                    ),
+                    "average_dropped_experts_per_token": (
+                        dropped_total / token_total if token_total else 0.0
+                    ),
+                    "expert_compute_reduction_ratio": (
+                        1.0 - surviving_total / original_total
+                        if original_total
+                        else 0.0
+                    ),
+                    "effective_expert_count_distribution": histogram.sum(
+                        dim=0
+                    ).tolist(),
+                    "per_layer": [
+                        {
+                            "layer": layer_idx,
+                            "original_topk_slots": int(original[layer_idx]),
+                            "surviving_topk_slots": int(surviving[layer_idx]),
+                            "effective_expert_count_distribution": histogram[
+                                layer_idx
+                            ].tolist(),
+                        }
+                        for layer_idx in range(self._num_layers)
+                    ],
+                }
+            return result
 
     def on_forward(self):
         """Called on every MoE forward pass (Python-level, not in graph).
@@ -404,84 +487,6 @@ def build_riy_layer_prune_plan(
         pre_topk_logit_mask=pre_topk_logit_mask,
         post_topk_drop_mask=post_topk_drop_mask,
     )
-
-
-_riy_profile_cache: dict[str, dict] = {}
-
-
-def _load_riy_profile(profile_path: str) -> dict:
-    """Load and cache RIY profile."""
-    if profile_path not in _riy_profile_cache:
-        with open(profile_path) as file:
-            _riy_profile_cache[profile_path] = json.load(file)
-    return _riy_profile_cache[profile_path]
-
-
-def build_riy_prune_map(
-    layer_idx: int,
-    original_num_experts: int,
-    profile_path: str,
-) -> tuple[int, torch.Tensor, torch.Tensor]:
-    """Build per-layer expert map from RIY profile.
-
-    Each MoE layer gets its own map — different experts can be pruned
-    in different layers. This is the correct approach because each
-    expert in each layer is a unique FFN with unique weights.
-
-    Args:
-        layer_idx: The layer index in the model
-        original_num_experts: Total experts in the original model
-        profile_path: Path to RIY profile JSON
-
-    Returns:
-        (num_kept, expert_map, logit_mask)
-        - num_kept: number of kept experts for this layer
-        - expert_map: (original_num_experts,) int32, -1 for pruned
-        - logit_mask: (original_num_experts,) float32, 0.0 kept / -inf pruned
-    """
-    profile = _load_riy_profile(profile_path)
-
-    pruned_experts = profile.get("pruned_experts")
-    if not isinstance(pruned_experts, list):
-        raise ValueError("RIY profile must contain a pruned_experts list")
-
-    pruned_ids: set[int] = set()
-    for entry in pruned_experts:
-        if not (
-            isinstance(entry, list)
-            and len(entry) == 2
-            and all(isinstance(value, int) for value in entry)
-        ):
-            raise ValueError("Each pruned_experts entry must be a [layer, expert] pair")
-        entry_layer, expert_idx = entry
-        if entry_layer < 0 or expert_idx < 0:
-            raise ValueError("Layer and expert indices must be non-negative")
-        if expert_idx >= original_num_experts:
-            raise ValueError(
-                f"Expert index {expert_idx} is out of range for "
-                f"{original_num_experts} experts"
-            )
-        if entry_layer == layer_idx:
-            pruned_ids.add(expert_idx)
-
-    expert_map = torch.full((original_num_experts,), -1, dtype=torch.int32)
-    logit_mask = torch.zeros(original_num_experts, dtype=torch.float32)
-    compact_idx = 0
-    for i in range(original_num_experts):
-        if i not in pruned_ids:
-            expert_map[i] = compact_idx
-            compact_idx += 1
-        else:
-            logit_mask[i] = float("-inf")
-
-    logger.info(
-        "RIY layer %d: %d/%d experts kept (%d pruned)",
-        layer_idx,
-        compact_idx,
-        original_num_experts,
-        len(pruned_ids),
-    )
-    return compact_idx, expert_map, logit_mask
 
 
 # Global singleton
