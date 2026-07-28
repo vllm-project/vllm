@@ -877,8 +877,14 @@ class TestRequestCitationsReachRenderedPrompt:
 
     @staticmethod
     def _melody():
-        # Import locally so a missing ``cohere_melody`` install skips
-        # this test class rather than failing collection.
+        # Import locally so missing optional deps skip this test class
+        # rather than failing collection. Two guards:
+        # * ``cohere_melody`` -- the Rust binding this test drives.
+        # * ``cohere`` -- required transitively by
+        #   ``vllm.entrypoints.cohere.{protocol,serving}`` (both
+        #   unconditionally ``from cohere.types import ...`` at module
+        #   scope) which every test in this class imports locally.
+        pytest.importorskip("cohere")
         pytest.importorskip("cohere_melody")
         import cohere_melody
 
