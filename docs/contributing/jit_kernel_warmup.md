@@ -100,7 +100,7 @@ Register an owner from the component or backend construction path where its
 runtime implementation is selected:
 
 ```python
-register_jit_warmup(MY_KERNEL)
+MY_KERNEL.register_warmup()
 ```
 
 Registration stores metadata only; it does not compile or launch the kernel.
@@ -117,8 +117,7 @@ If an owner uses a nonstandard `get_warmup_keys(...)` signature, pass those
 arguments explicitly:
 
 ```python
-register_jit_warmup(
-    MY_KERNEL,
+MY_KERNEL.register_warmup(
     shapes=((hidden_size, num_experts),),
     m_values=range(1, 17),
 )

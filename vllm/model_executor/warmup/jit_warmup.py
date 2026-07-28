@@ -23,8 +23,6 @@ __all__ = [
     "WarmupIntRange",
     "get_ast_full_name",
     "get_function_source_node",
-    "register_jit_warmup",
-    "use_jit_warmup_registry",
     "zip_inputs",
 ]
 
@@ -525,45 +523,23 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
     def compile_key(self, kwargs: Mapping[str, Any]) -> CompileKeyT:
         return self.compile_key_dispatch_trace.compile_key(self.CompileKey, kwargs)
 
-    def _cache_key(
-        self,
-        compile_key: CompileKeyT,
-        cache_key: Any | None = None,
-    ) -> Any:
-        return compile_key if cache_key is None else cache_key
-
-    def _compiled_cache_contains(
-        self,
-        compile_key: CompileKeyT,
-        *,
-        cache_key: Any | None = None,
-        cache: Mapping[Any, Any] | None = None,
-    ) -> bool:
-        resolved_cache = self._compiled_cache if cache is None else cache
-        return self._cache_key(compile_key, cache_key) in resolved_cache
+    def _compiled_cache_contains(self, compile_key: CompileKeyT) -> bool:
+        return compile_key in self._compiled_cache
 
     def _get_or_compile(
         self,
         compile_key: CompileKeyT,
         *,
-        cache_key: Any | None = None,
-        cache: Mapping[Any, Any] | None = None,
         runtime_context: Mapping[str, Any] | None = None,
     ) -> Any:
         """Return a cached executor, compiling it on a monitored cache miss."""
-        resolved_cache = self._compiled_cache if cache is None else cache
-        resolved_cache_key = self._cache_key(compile_key, cache_key)
-        try:
-            return resolved_cache[resolved_cache_key]
-        except KeyError:
+        if not self._compiled_cache_contains(compile_key):
             self.compile(compile_key)
+
         try:
-            return resolved_cache[resolved_cache_key]
+            return self._compiled_cache[compile_key]
         except KeyError as exc:
-            details = [
-                f"compile_key={compile_key!r}",
-                f"cache_key={resolved_cache_key!r}",
-            ]
+            details = [f"compile_key={compile_key!r}"]
             if runtime_context:
                 details.append(f"runtime_context={dict(runtime_context)!r}")
             raise RuntimeError(
@@ -629,73 +605,93 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
         """Compile one warmup key."""
         raise NotImplementedError
 
-    def warmup_keys(self, compile_keys: Iterable[CompileKeyT]) -> None:
-        """Compile an explicit set of warmup keys."""
-        for compile_key in compile_keys:
-            self.compile(compile_key)
+    def register_warmup(self, *args: Any, **kwargs: Any) -> None:
+        """Register this kernel with the active runner's warmup registry."""
+        JitWarmupRegistry.register(self, *args, **kwargs)
 
     def warmup(self, *args: Any, **kwargs: Any) -> None:
         """Compile this kernel's warmup keys."""
-        self.warmup_keys(self.get_warmup_keys(*args, **kwargs))
-
-
-@dataclass(frozen=True)
-class _JitWarmupRequest:
-    kernel: VllmJitKernel[Any]
-    args: tuple[Any, ...]
-    kwargs: tuple[tuple[str, Any], ...]
+        for compile_key in self.get_warmup_keys(*args, **kwargs):
+            self.compile(compile_key)
 
 
 class JitWarmupRegistry:
-    """Per-runner collection of JIT kernels selected during model setup."""
+    """Collect and compile JIT kernels selected during runner setup."""
+
+    _active: ContextVar[JitWarmupRegistry | None] = ContextVar(
+        "active_jit_warmup_registry",
+        default=None,
+    )
 
     def __init__(self, vllm_config: Any) -> None:
         self.vllm_config = vllm_config
-        self._requests: list[_JitWarmupRequest] = []
+        self._registrations: dict[
+            VllmJitKernel[Any],
+            list[tuple[tuple[Any, ...], dict[str, Any]]],
+        ] = {}
 
+    @contextmanager
+    def activate(self) -> Iterator[None]:
+        """Collect registrations made in this context."""
+        token = self._active.set(self)
+        try:
+            yield
+        finally:
+            self._active.reset(token)
+
+    @classmethod
     def register(
-        self,
+        cls,
         kernel: VllmJitKernel[Any],
         *args: Any,
         **kwargs: Any,
     ) -> None:
-        """Record a kernel warmup request without compiling it."""
+        """Register a kernel with the active registry, if one exists."""
+        registry = cls._active.get()
+        if registry is not None:
+            registry._add(kernel, args, kwargs)
+
+    def _add(
+        self,
+        kernel: VllmJitKernel[Any],
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> None:
+        registrations = self._registrations.setdefault(kernel, [])
         if (
             not args
             and not kwargs
             and any(
-                request.kernel is kernel and not request.args and not request.kwargs
-                for request in self._requests
+                not registered_args and not registered_kwargs
+                for registered_args, registered_kwargs in registrations
             )
         ):
             return
-        self._requests.append(_JitWarmupRequest(kernel, args, tuple(kwargs.items())))
+        registrations.append((args, kwargs))
 
     def __len__(self) -> int:
-        return len(self._requests)
+        return sum(
+            len(registrations)
+            for registrations in self._registrations.values()
+        )
 
     def warmup(self) -> None:
-        """Expand registered requests and compile each owner/key pair once."""
+        """Expand registrations and compile each owner/key pair once."""
         from tqdm import tqdm
 
         from vllm.distributed import is_global_first_rank
 
-        keys_by_kernel: dict[VllmJitKernel[Any], dict[Any, None]] = {}
-        for request in self._requests:
-            args = request.args
-            kwargs = dict(request.kwargs)
-            if not args and not kwargs:
-                args = (self.vllm_config,)
-            compile_keys = request.kernel.get_warmup_keys(*args, **kwargs)
-            kernel_keys = keys_by_kernel.setdefault(request.kernel, {})
-            for compile_key in compile_keys:
-                kernel_keys[compile_key] = None
+        kernel_items: list[tuple[VllmJitKernel[Any], dict[Any, None]]] = []
+        for kernel, registrations in self._registrations.items():
+            compile_keys: dict[Any, None] = {}
+            for args, kwargs in registrations:
+                if not args and not kwargs:
+                    args = (self.vllm_config,)
+                for compile_key in kernel.get_warmup_keys(*args, **kwargs):
+                    compile_keys[compile_key] = None
+            if compile_keys:
+                kernel_items.append((kernel, compile_keys))
 
-        kernel_items = [
-            (kernel, compile_keys)
-            for kernel, compile_keys in keys_by_kernel.items()
-            if compile_keys
-        ]
         if not kernel_items:
             return
 
@@ -707,38 +703,10 @@ class JitWarmupRegistry:
             dynamic_ncols=True,
             unit="kernel",
         ) as progress:
-            for kernel, kernel_compile_keys in progress:
+            for kernel, compile_keys in progress:
                 progress.set_postfix_str(
-                    f"{kernel.__class__.__name__} ({len(kernel_compile_keys)} keys)",
+                    f"{kernel.__class__.__name__} ({len(compile_keys)} keys)",
                     refresh=False,
                 )
-                kernel.warmup_keys(kernel_compile_keys)
-
-
-_current_jit_warmup_registry: ContextVar[JitWarmupRegistry | None] = ContextVar(
-    "current_jit_warmup_registry",
-    default=None,
-)
-
-
-@contextmanager
-def use_jit_warmup_registry(
-    registry: JitWarmupRegistry,
-) -> Iterator[None]:
-    """Expose one runner's registry while its model is being constructed."""
-    token = _current_jit_warmup_registry.set(registry)
-    try:
-        yield
-    finally:
-        _current_jit_warmup_registry.reset(token)
-
-
-def register_jit_warmup(
-    kernel: VllmJitKernel[Any],
-    *args: Any,
-    **kwargs: Any,
-) -> None:
-    """Register with the active runner, or do nothing outside model setup."""
-    registry = _current_jit_warmup_registry.get()
-    if registry is not None:
-        registry.register(kernel, *args, **kwargs)
+                for compile_key in compile_keys:
+                    kernel.compile(compile_key)

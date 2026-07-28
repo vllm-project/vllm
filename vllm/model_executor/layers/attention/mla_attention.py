@@ -543,7 +543,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.use_sparse = use_sparse
 
         if vllm_config.kernel_config.enable_jit_warmup:
-            from vllm.model_executor.warmup.jit_warmup import register_jit_warmup
 
             if (
                 self.prefill_backend is not None
@@ -553,7 +552,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     FA4_MLA_PREFILL_KERNEL,
                 )
 
-                register_jit_warmup(FA4_MLA_PREFILL_KERNEL)
+                FA4_MLA_PREFILL_KERNEL.register_warmup()
 
             backend_name = self.attn_backend.get_name()
             if backend_name in (
@@ -573,17 +572,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL,
                 )
 
-                register_jit_warmup(_COMPRESSED_SLOT_MAPPING_KERNEL)
-                register_jit_warmup(_CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL)
-                register_jit_warmup(_PREPARE_UNIFORM_DECODE_KERNEL)
-                register_jit_warmup(_BUILD_PREFILL_CHUNK_METADATA_KERNEL)
+                _COMPRESSED_SLOT_MAPPING_KERNEL.register_warmup()
+                _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL.register_warmup()
+                _PREPARE_UNIFORM_DECODE_KERNEL.register_warmup()
+                _BUILD_PREFILL_CHUNK_METADATA_KERNEL.register_warmup()
 
                 if backend_name != "DEEPSEEK_V32_INDEXER":
                     from vllm.v1.attention.backends.mla.sparse_swa import (
                         _COMPUTE_PREFILL_METADATA_KERNEL,
                     )
 
-                    register_jit_warmup(_COMPUTE_PREFILL_METADATA_KERNEL)
+                    _COMPUTE_PREFILL_METADATA_KERNEL.register_warmup()
 
         _vllm_config = get_current_vllm_config_or_none()
         self.dcp_a2a = (

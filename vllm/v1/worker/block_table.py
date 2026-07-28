@@ -11,7 +11,6 @@ from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup import (
     VllmJitKernel,
-    register_jit_warmup,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
@@ -120,8 +119,7 @@ class BlockTable:
         self.cp_kv_cache_interleave_size = cp_kv_cache_interleave_size
         self.slot_mapping_mode = slot_mapping_mode
         if self.slot_mapping_mode == SlotMappingMode.TOKEN_TO_KV_SLOT:
-            register_jit_warmup(
-                _COMPUTE_SLOT_MAPPING_KERNEL,
+            _COMPUTE_SLOT_MAPPING_KERNEL.register_warmup(
                 kv_cache_block_size=self.kv_cache_block_size,
                 blocks_per_kv_block=self.blocks_per_kv_block,
                 total_cp_world_size=self.dcp_world_size,

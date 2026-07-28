@@ -8,7 +8,6 @@ from vllm.config import get_current_vllm_config_or_none
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.linear import ReplicatedLinear
-from vllm.model_executor.warmup.jit_warmup import register_jit_warmup
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -143,16 +142,15 @@ class GateLinear(ReplicatedLinear):
                 _BF16X3_SPLITK_REDUCE_KERNEL,
             )
 
-            register_jit_warmup(_BF16X3_ROUTER_GEMM_KERNEL)
-            register_jit_warmup(_BF16X3_SPLITK_REDUCE_KERNEL)
+            _BF16X3_ROUTER_GEMM_KERNEL.register_warmup()
+            _BF16X3_SPLITK_REDUCE_KERNEL.register_warmup()
 
         if self.allow_ll_bf16_gemm:
             from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
                 LL_BF16_GEMM_KERNEL,
             )
 
-            register_jit_warmup(
-                LL_BF16_GEMM_KERNEL,
+            LL_BF16_GEMM_KERNEL.register_warmup(
                 shapes=((input_size, output_size),),
                 m_values=range(1, 17),
             )
@@ -190,8 +188,7 @@ class GateLinear(ReplicatedLinear):
                     LL_BF16_GEMM_KERNEL,
                 )
 
-                register_jit_warmup(
-                    LL_BF16_GEMM_KERNEL,
+                LL_BF16_GEMM_KERNEL.register_warmup(
                     shapes=((self.weight.shape[1], self.weight.shape[0]),),
                     m_values=range(1, 17),
                 )

@@ -13,9 +13,10 @@ from vllm.model_executor.warmup.jit_warmup import (
     VllmJitKernel,
     WarmupIntRange,
     get_ast_full_name,
-    register_jit_warmup,
-    use_jit_warmup_registry,
     zip_inputs,
+)
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    triton_scalar_specialization_rep,
 )
 
 
@@ -95,6 +96,35 @@ class RecordingToyKernel(ToyKernel):
 
     def compile(self, compile_key: ToyKernel.CompileKey) -> None:
         self.compiled.append(compile_key)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (-(1 << 63), 1 << 31),
+        (-(1 << 31) - 1, (1 << 31) + 1),
+        (-(1 << 31), 16),
+        (0, 16),
+        (1, 1),
+        (2, 2),
+        (16, 16),
+        ((1 << 31) - 1, 2),
+        (1 << 31, 1 << 31),
+        ((1 << 31) + 1, (1 << 31) + 1),
+        ((1 << 63) - 1, (1 << 31) + 1),
+        (1 << 63, 1 << 63),
+        ((1 << 63) + 1, (1 << 63) + 1),
+        ((1 << 64) - 1, (1 << 63) + 1),
+    ],
+)
+def test_triton_scalar_specialization_rep(value: int, expected: int) -> None:
+    assert triton_scalar_specialization_rep(value) == expected
+
+
+@pytest.mark.parametrize("value", [-(1 << 63) - 1, 1 << 64])
+def test_triton_scalar_specialization_rep_rejects_out_of_range(value: int) -> None:
+    with pytest.raises(OverflowError, match="outside Triton's scalar range"):
+        triton_scalar_specialization_rep(value)
 
 
 def test_trace_dispatch_expands_ranges_dedupes_and_ignores_unused_inputs() -> None:
@@ -421,9 +451,9 @@ def test_registry_records_only_inside_model_setup_context() -> None:
     registry = JitWarmupRegistry(_config())
     kernel = RecordingToyKernel()
 
-    register_jit_warmup(kernel, 3, _config())
-    with use_jit_warmup_registry(registry):
-        register_jit_warmup(kernel, 3, _config())
+    kernel.register_warmup(3, _config())
+    with registry.activate():
+        kernel.register_warmup(3, _config())
 
     assert len(registry) == 1
     assert kernel.compiled == []
@@ -433,9 +463,9 @@ def test_registry_expands_requests_and_deduplicates_owner_keys() -> None:
     registry = JitWarmupRegistry(_config())
     kernel = RecordingToyKernel()
 
-    with use_jit_warmup_registry(registry):
-        register_jit_warmup(kernel, 3, _config())
-        register_jit_warmup(kernel, 5, _config())
+    with registry.activate():
+        kernel.register_warmup(3, _config())
+        kernel.register_warmup(5, _config())
 
     registry.warmup()
 
@@ -469,9 +499,9 @@ def test_registry_passes_vllm_config_to_default_requests() -> None:
     registry = JitWarmupRegistry(_config(bias=7))
     kernel = ConfigKernel()
 
-    with use_jit_warmup_registry(registry):
-        register_jit_warmup(kernel)
-        register_jit_warmup(kernel)
+    with registry.activate():
+        kernel.register_warmup()
+        kernel.register_warmup()
     assert len(registry) == 1
     registry.warmup()
 

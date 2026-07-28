@@ -13,10 +13,39 @@ from vllm.model_executor.warmup.jit_warmup import (
 
 
 def triton_scalar_specialization_rep(value: int) -> int:
-    """Return a representative for Triton's integer specialization class."""
+    """Return an integer with the same default Triton JIT specialization.
+
+    For an ordinary integer argument, Triton's cache key contains its inferred
+    type (``i32``, ``i64``, or ``u64``) and one of three value classes:
+
+    * ``1`` is specialized as the exact constant ``1``.
+    * Multiples of 16 receive a ``tt.divisibility = 16`` attribute.
+    * All other values have no value specialization.
+
+    Warmup only needs one concrete value for each cache-key class. This helper
+    returns ``1`` for the exact-one class and otherwise returns a divisible or
+    generic representative while preserving the inferred integer type.
+
+    This applies only to non-``constexpr`` integer arguments using Triton's
+    default specialization. Do not use it for arguments listed in
+    ``do_not_specialize`` or ``do_not_specialize_on_alignment``.
+    """
     if value == 1:
         return 1
-    return 16 if value % 16 == 0 else 2
+
+    if -(1 << 31) <= value < (1 << 31):
+        divisible_rep = 16
+        generic_rep = 2
+    elif -(1 << 63) <= value < (1 << 63):
+        divisible_rep = 1 << 31
+        generic_rep = (1 << 31) + 1
+    elif 0 <= value < (1 << 64):
+        divisible_rep = 1 << 63
+        generic_rep = (1 << 63) + 1
+    else:
+        raise OverflowError(f"Integer {value} is outside Triton's scalar range")
+
+    return divisible_rep if value % 16 == 0 else generic_rep
 
 
 @dataclass(frozen=True)

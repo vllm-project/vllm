@@ -608,15 +608,14 @@ class DeepseekV4MoE(nn.Module):
             from vllm.model_executor.layers.fused_moe.router.dsv4_topk import (
                 _DSV4_TOPK_KERNEL,
             )
-            from vllm.model_executor.warmup.jit_warmup import register_jit_warmup
 
             if vllm_config.parallel_config.enable_eplb:
                 from vllm.model_executor.layers.fused_moe.router.base_router import (
                     _EPLB_MAP_AND_RECORD_KERNEL,
                 )
 
-                register_jit_warmup(_EPLB_MAP_AND_RECORD_KERNEL)
-            register_jit_warmup(_DSV4_TOPK_KERNEL)
+                _EPLB_MAP_AND_RECORD_KERNEL.register_warmup()
+            _DSV4_TOPK_KERNEL.register_warmup()
             if self.use_mega_moe:
                 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
                     _DEEPGEMM_EP_GATHER_KERNEL,
@@ -624,10 +623,10 @@ class DeepseekV4MoE(nn.Module):
                     _DEEPGEMM_EP_SCATTER_START_KERNEL,
                 )
 
-                register_jit_warmup(_PREPARE_MEGAMOE_INPUTS_KERNEL)
-                register_jit_warmup(_DEEPGEMM_EP_SCATTER_START_KERNEL)
-                register_jit_warmup(_DEEPGEMM_EP_SCATTER_COPY_KERNEL)
-                register_jit_warmup(_DEEPGEMM_EP_GATHER_KERNEL)
+                _PREPARE_MEGAMOE_INPUTS_KERNEL.register_warmup()
+                _DEEPGEMM_EP_SCATTER_START_KERNEL.register_warmup()
+                _DEEPGEMM_EP_SCATTER_COPY_KERNEL.register_warmup()
+                _DEEPGEMM_EP_GATHER_KERNEL.register_warmup()
             else:
                 from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (  # noqa: E501
                     DeepGemmExperts,
@@ -661,11 +660,11 @@ class DeepseekV4MoE(nn.Module):
                 if not isinstance(experts_cls, type) or issubclass(
                     experts_cls, TritonExperts
                 ):
-                    register_jit_warmup(_FUSED_MOE_TRITON_KERNEL)
+                    _FUSED_MOE_TRITON_KERNEL.register_warmup()
                 if not isinstance(experts_cls, type) or issubclass(
                     experts_cls, BatchedTritonExperts
                 ):
-                    register_jit_warmup(_BATCHED_TRITON_KERNEL)
+                    _BATCHED_TRITON_KERNEL.register_warmup()
                 if isinstance(experts_cls, type) and issubclass(
                     experts_cls, (DeepGemmExperts, DeepGemmFP4Experts)
                 ):
@@ -675,21 +674,21 @@ class DeepseekV4MoE(nn.Module):
                         _DEEPGEMM_EP_SCATTER_START_KERNEL,
                     )
 
-                    register_jit_warmup(_DEEPGEMM_EP_SCATTER_START_KERNEL)
-                    register_jit_warmup(_DEEPGEMM_EP_SCATTER_COPY_KERNEL)
-                    register_jit_warmup(_DEEPGEMM_EP_GATHER_KERNEL)
-                register_jit_warmup(_COMPUTE_IDENTITY_KERNEL)
-                register_jit_warmup(_MOE_FUSED_MUL_SUM_KERNEL)
-                register_jit_warmup(_COUNT_EXPERT_NUM_TOKENS_KERNEL)
-                register_jit_warmup(_PACK_TOPK_IDS_WEIGHTS_KERNEL)
-                register_jit_warmup(_SWIGLU_LIMIT_PAD_AWARE_KERNEL)
+                    _DEEPGEMM_EP_SCATTER_START_KERNEL.register_warmup()
+                    _DEEPGEMM_EP_SCATTER_COPY_KERNEL.register_warmup()
+                    _DEEPGEMM_EP_GATHER_KERNEL.register_warmup()
+                _COMPUTE_IDENTITY_KERNEL.register_warmup()
+                _MOE_FUSED_MUL_SUM_KERNEL.register_warmup()
+                _COUNT_EXPERT_NUM_TOKENS_KERNEL.register_warmup()
+                _PACK_TOPK_IDS_WEIGHTS_KERNEL.register_warmup()
+                _SWIGLU_LIMIT_PAD_AWARE_KERNEL.register_warmup()
 
                 if vllm_config.kernel_config.moe_backend == "emulation":
                     from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (  # noqa: E501
                         _FUSED_MOE_NVFP4_EMULATION_KERNEL,
                     )
 
-                    register_jit_warmup(_FUSED_MOE_NVFP4_EMULATION_KERNEL)
+                    _FUSED_MOE_NVFP4_EMULATION_KERNEL.register_warmup()
 
                 if vllm_config.lora_config is not None:
                     from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (  # noqa: E501
@@ -697,15 +696,15 @@ class DeepseekV4MoE(nn.Module):
                         _TRTLLM_LORA_UNPERMUTE_ACTIVATION_KERNEL,
                     )
 
-                    register_jit_warmup(_TRTLLM_LORA_UNPERMUTE_ACTIVATION_KERNEL)
-                    register_jit_warmup(_TRTLLM_LORA_FINALIZE_KERNEL)
+                    _TRTLLM_LORA_UNPERMUTE_ACTIVATION_KERNEL.register_warmup()
+                    _TRTLLM_LORA_FINALIZE_KERNEL.register_warmup()
 
                 if vllm_config.parallel_config.all2all_backend == "deepep_v2":
                     from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_v2 import (  # noqa: E501
                         _GLOBALIZE_RECV_TOPK_IDX_KERNEL,
                     )
 
-                    register_jit_warmup(_GLOBALIZE_RECV_TOPK_IDX_KERNEL)
+                    _GLOBALIZE_RECV_TOPK_IDX_KERNEL.register_warmup()
 
     def _init_mega_moe_experts(
         self,
@@ -977,12 +976,10 @@ class DeepseekV4DecoderLayer(nn.Module):
                 MHC_POST_TILELANG_KERNEL,
                 MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
             )
-            from vllm.model_executor.warmup.jit_warmup import register_jit_warmup
             from vllm.utils.deep_gemm import is_deep_gemm_supported
 
             include_pre_gemm_splits = is_deep_gemm_supported()
-            register_jit_warmup(
-                MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
+            MHC_PRE_BIG_FUSE_TILELANG_KERNEL.register_warmup(
                 vllm_config,
                 hidden_size=self.hidden_size,
                 hc_mult=self.hc_mult,
@@ -1003,21 +1000,18 @@ class DeepseekV4DecoderLayer(nn.Module):
                 broadcast_norm_eps=float(self.attn_norm.variance_epsilon),
             )
             if not include_pre_gemm_splits:
-                register_jit_warmup(
-                    HC_PRENORM_GEMM_TILELANG_KERNEL,
+                HC_PRENORM_GEMM_TILELANG_KERNEL.register_warmup(
                     vllm_config,
                     hidden_size=self.hidden_size,
                     hc_mult=self.hc_mult,
                     n_out=self.hc_mult * (2 + self.hc_mult),
                 )
-            register_jit_warmup(
-                MHC_POST_TILELANG_KERNEL,
+            MHC_POST_TILELANG_KERNEL.register_warmup(
                 vllm_config,
                 hidden_size=self.hidden_size,
                 hc_mult=self.hc_mult,
             )
-            register_jit_warmup(
-                MHC_FUSED_TILELANG_KERNEL,
+            MHC_FUSED_TILELANG_KERNEL.register_warmup(
                 vllm_config,
                 hidden_size=self.hidden_size,
                 hc_mult=self.hc_mult,
@@ -1216,10 +1210,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             from vllm.model_executor.kernels.mhc.tilelang_kernels import (
                 HC_HEAD_FUSED_TILELANG_KERNEL,
             )
-            from vllm.model_executor.warmup.jit_warmup import register_jit_warmup
 
-            register_jit_warmup(
-                HC_HEAD_FUSED_TILELANG_KERNEL,
+            HC_HEAD_FUSED_TILELANG_KERNEL.register_warmup(
                 vllm_config,
                 hidden_size=int(config.hidden_size),
                 hc_mult=int(self.hc_mult),

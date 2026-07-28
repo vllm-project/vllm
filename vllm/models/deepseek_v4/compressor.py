@@ -302,9 +302,8 @@ class DeepseekCompressor(nn.Module):
             )
 
         if vllm_config.kernel_config.enable_jit_warmup:
-            from vllm.model_executor.warmup.jit_warmup import register_jit_warmup
 
-            register_jit_warmup(_SAVE_PARTIAL_STATES_KERNEL)
+            _SAVE_PARTIAL_STATES_KERNEL.register_warmup()
             if current_platform.is_cuda() and self.head_dim == 512:
                 from vllm.models.deepseek_v4.nvidia.ops.sparse_attn_compress_cutedsl import (  # noqa: E501
                     _SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL,
@@ -316,18 +315,17 @@ class DeepseekCompressor(nn.Module):
 
                 store_full_kv = vllm_config.cache_config.cache_dtype != "fp8_ds_mla"
                 if self.compress_ratio == 4:
-                    register_jit_warmup(
+                    (
                         _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_FULL_C4_KERNEL
                         if store_full_kv
                         else _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_C4_KERNEL
-                    )
+                    ).register_warmup()
                 else:
-                    register_jit_warmup(_SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL)
+                    _SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL.register_warmup()
                     if store_full_kv:
-                        register_jit_warmup(_SPARSE_ATTN_NORM_ROPE_STORE_FULL_KERNEL)
+                        _SPARSE_ATTN_NORM_ROPE_STORE_FULL_KERNEL.register_warmup()
                     else:
-                        register_jit_warmup(
-                            _SPARSE_ATTN_NORM_ROPE_STORE_KERNEL,
+                        _SPARSE_ATTN_NORM_ROPE_STORE_KERNEL.register_warmup(
                             vllm_config,
                             k_cache_prefix=self.k_cache_prefix,
                             compress_ratio=self.compress_ratio,
@@ -337,9 +335,7 @@ class DeepseekCompressor(nn.Module):
                     _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL,
                 )
 
-                register_jit_warmup(
-                    _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL
-                )
+                _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL.register_warmup()
 
     def forward(
         self,

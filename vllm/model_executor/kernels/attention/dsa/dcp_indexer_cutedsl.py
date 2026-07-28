@@ -571,11 +571,7 @@ class StableTopKFromGatheredCandidatesKernel(
         )
 
     def compile(self, compile_key: CompileKey) -> None:
-        cache_key = (compile_key.topk, compile_key.num_candidates)
-        if self._compiled_cache_contains(
-            compile_key,
-            cache_key=cache_key,
-        ):
+        if self._compiled_cache_contains(compile_key):
             return
 
         num_rows = cute.sym_int()
@@ -590,7 +586,7 @@ class StableTopKFromGatheredCandidatesKernel(
             (num_rows, compile_key.topk),
             divisibility=1,
         )
-        self._compiled_cache[cache_key] = compile_cutedsl(
+        self._compiled_cache[compile_key] = compile_cutedsl(
             self.kernel(compile_key),
             gathered,
             out,
@@ -598,10 +594,8 @@ class StableTopKFromGatheredCandidatesKernel(
 
     def __call__(self, gathered: torch.Tensor, out: torch.Tensor, *, topk: int) -> Any:
         compile_key = self.dispatch(topk=topk, num_candidates=gathered.shape[1])
-        cache_key = (compile_key.topk, compile_key.num_candidates)
         compiled = self._get_or_compile(
             compile_key,
-            cache_key=cache_key,
             runtime_context={
                 "gathered_shape": tuple(gathered.shape),
                 "out_shape": tuple(out.shape),
