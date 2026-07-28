@@ -270,7 +270,10 @@ class PackedQKVAttention(nn.Module):
             .unsqueeze(1)
             .split((self.embed_dim, self.kv_dim, self.kv_dim), dim=3)
         )
-        q = q.view(*input_shape, -1, self.head_dim).transpose(1, 2)
+        q, k, v = (
+            tensor.view(*input_shape, -1, self.head_dim).transpose(1, 2)
+            for tensor in (q, k, v)
+        )
         if past_key_values is not None:
             k, v = past_key_values.update(k, v, self.layer_idx)
         attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
