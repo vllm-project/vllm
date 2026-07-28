@@ -472,10 +472,12 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         ]
         if (weight_key, activation_key) not in SUPPORTED_W_A:
             return False
+        # CK MXFP4 MoE kernels are gfx950-only, but Kimi-K3's SiTU path runs
+        # via FlyDSL on gfx942 (MI325X) as well, so allow gfx942 here too.
         if weight_key == kMxfp4Static:
-            from vllm.platforms.rocm import on_gfx950, on_gfx1250
+            from vllm.platforms.rocm import on_gfx942, on_gfx950, on_gfx1250
 
-            if not on_gfx950() or on_gfx1250():
+            if not (on_gfx950() or on_gfx942()) or on_gfx1250():
                 return False
         return True
 
@@ -486,6 +488,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             MoEActivation.GELU,
             MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            MoEActivation.SITU,
         ]
 
     @staticmethod

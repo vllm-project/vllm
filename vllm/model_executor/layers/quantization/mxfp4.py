@@ -504,6 +504,50 @@ def _use_k3_situ_aiter(moe: FusedMoEConfig) -> bool:
     )
 
 
+def _use_k3_situ_int4_gfx942(moe: FusedMoEConfig) -> bool:
+    """Whether Kimi-K3's SiTU MXFP4 experts should be requantized to int4 on gfx942.
+
+    gfx942 has no scaled MXFP4 MFMA, so the native MXFP4 kernels do not compile
+    there. Requantizing to groupwise int4 lets AITER's bf16 x int4 FlyDSL path
+    serve the model, at the cost of a lossy weight conversion. That trade is the
+    user's to make, so it is opt-in through
+    ``--quantization-config.moe.weight int4`` rather than inferred from the
+    hardware.
+    """
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_rocm():
+        return False
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.platforms.rocm import on_gfx942
+
+    return (
+        rocm_aiter_ops.is_fused_moe_enabled()
+        and on_gfx942()
+        and moe.activation == MoEActivation.SITU
+        and moe.activation_situ_linear_beta is not None
+        and _moe_weight_override_is_int4()
+    )
+
+
+def _moe_weight_override_is_int4() -> bool:
+    """True when the user asked for int4 MoE weights on the command line.
+
+    Set with ``--quantization-config.moe.weight int4``. The requantization is
+    lossy, so it never happens unless it was requested.
+    """
+    from vllm.config import get_current_vllm_config
+
+    vllm_config = get_current_vllm_config()
+    if vllm_config is None:
+        return False
+    quant_args = getattr(vllm_config.model_config, "quantization_config", None)
+    moe_spec = getattr(quant_args, "moe", None)
+    weight = getattr(moe_spec, "weight", None)
+    return str(weight) == "int4"
+
+
 class Mxfp4MoEMethod(FusedMoEMethodBase):
     """MXFP4 MoE quantization method."""
 
@@ -511,8 +555,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         super().__init__(moe)
         self.weight_dtype = "mxfp4"
         self.is_k3_situ_aiter = _use_k3_situ_aiter(moe)
+        self.is_k3_situ_int4_gfx942 = _use_k3_situ_int4_gfx942(moe)
         self.experts_cls: type[mk.FusedMoEExperts] | None
-        if self.is_k3_situ_aiter:
+        if self.is_k3_situ_aiter or self.is_k3_situ_int4_gfx942:
             self.mxfp4_backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
             self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
             logger.info_once("Using AITER_MXFP4_BF16 for Kimi-K3 SiTU MXFP4 MoE.")
@@ -818,7 +863,99 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         w2_scale = e8m0_shuffle(w2_scale_raw.view(-1, w2_scale_raw.shape[-1]))
         return w13, w2, w13_scale, w2_scale
 
+    def _setup_kernel_k3_situ_gfx942(self, layer: RoutedExperts) -> None:
+        # gfx942 has no native MXFP4 matmul. Convert the weights to groupwise
+        # int4 once at load time for AITER's existing bf16 x int4 FlyDSL path.
+        import inspect
+
+        from aiter.ops.flydsl.kernels.moe_gemm_2stage import compile_moe_gemm1
+
+        # Before ROCm/aiter#4471 the packed-int4 stage1 dropped the requested
+        # activation and hardcoded SiLU, so K3 served fluent text while
+        # computing the wrong function. Refuse instead of repeating that.
+        if "act" not in inspect.signature(compile_moe_gemm1).parameters:
+            raise RuntimeError(
+                "This AITER build ignores the SiTUv2 activation on the "
+                "packed-int4 MoE path and would silently compute SiLU. "
+                "Rebuild with an AITER that includes ROCm/aiter#4471."
+            )
+
+        from aiter import dtypes as aiter_dtypes
+        from aiter.ops.quant import per_1x32_i4_quant
+        from aiter.ops.shuffle import (
+            pack_int8_to_packed_int4,
+            shuffle_scale_for_int4,
+            shuffle_weight,
+        )
+        from aiter.utility import fp4_utils
+
+        fp4_dtype = torch.float4_e2m1fn_x2
+        e8m0_dtype = torch.float8_e8m0fnu
+
+        def convert(
+            weight: torch.nn.Parameter,
+            scale: torch.nn.Parameter,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            weight_f32 = fp4_utils.mxfp4_to_f32(weight.data.view(fp4_dtype))
+            scale_f32 = fp4_utils.e8m0_to_f32(scale.data.view(e8m0_dtype))
+            num_experts, output_size, input_size = weight_f32.shape
+            weight_bf16 = (
+                (
+                    weight_f32.view(
+                        num_experts, output_size, input_size // 32, 32
+                    )
+                    * scale_f32.view(
+                        num_experts, output_size, input_size // 32, 1
+                    )
+                )
+                .view(num_experts, output_size, input_size)
+                .to(torch.bfloat16)
+            )
+            del weight_f32, scale_f32
+
+            weight_int4, weight_scale = per_1x32_i4_quant(weight_bf16)
+            del weight_bf16
+            weight_int4 = weight_int4.view(aiter_dtypes.i4x2).view(
+                num_experts, output_size, input_size
+            )
+            weight_packed = pack_int8_to_packed_int4(
+                shuffle_weight(weight_int4.view(aiter_dtypes.i8), (16, 16))
+            )
+            weight_packed = weight_packed.view(
+                num_experts, output_size, input_size // 2
+            ).view(aiter_dtypes.i4x2)
+            weight_scale = (
+                shuffle_scale_for_int4(weight_scale, group_size=32)
+                .view(-1)
+                .contiguous()
+            )
+            return weight_packed, weight_scale
+
+        w13, w13_scale = convert(layer.w13_weight, layer.w13_weight_scale)
+        w2, w2_scale = convert(layer.w2_weight, layer.w2_weight_scale)
+        replace_parameter(layer, "w13_weight", w13)
+        replace_parameter(layer, "w2_weight", w2)
+        replace_parameter(layer, "w13_weight_scale", w13_scale)
+        replace_parameter(layer, "w2_weight_scale", w2_scale)
+        layer.w13_weight.is_shuffled = True
+        layer.w2_weight.is_shuffled = True
+
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        if self.moe_quant_config is not None and self.experts_cls is not None:
+            self.moe_kernel = make_mxfp4_moe_kernel(
+                moe_quant_config=self.moe_quant_config,
+                moe_config=self.moe,
+                mxfp4_backend=self.mxfp4_backend,
+                experts_cls=self.experts_cls,
+                routing_tables=layer._expert_routing_tables(),
+                layer=layer,
+            )
+
     def process_weights_after_loading(self, layer):
+        if self.is_k3_situ_int4_gfx942:
+            self._setup_kernel_k3_situ_gfx942(layer)
+            return
+
         w13 = layer.w13_weight
         w2 = layer.w2_weight
         w13_scale = layer.w13_weight_scale
