@@ -18,7 +18,8 @@ File naming:  <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
 import functools
 import json
 import os
-from collections.abc import Iterable
+from queue import SimpleQueue
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, ClassVar
 
 try:
@@ -54,7 +55,7 @@ from vllm.v1.kv_offload.tiering.fs.io import (
     batch_store_block,
     probe_o_direct,
 )
-from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
+from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool, Task
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
@@ -151,13 +152,11 @@ class FileSystemTierManager(SecondaryTierManager):
         # Keys of in-flight load (promotion) jobs, so a failed load can mark
         # its own cached lookup verdicts False (see get_finished_jobs).
         self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
-        # Per load job: how many blocks loaded before a failure (partial keep).
+        # Per load job: Set of keys that failed the load.
         # Written by the pool worker inside the load task before it raises (so
-        # before task_done publishes the job); read on the scheduler thread in
-        # get_finished_jobs only for job ids the finished queue returned. Under
-        # the GIL that read cannot observe the finished job without the prior
-        # write, so no extra lock is needed (get_finished is itself lock-free).
-        self._load_progress: dict[JobId, int] = {}
+        # before task_done publishes the job); Need a thread-safe SimpleQueue
+        # as multiple threads can finish parts of a job simultaneously.
+        self._load_job_failed_keys: dict[JobId, SimpleQueue] = {}
 
         # Extract block size from primary view
         assert primary_kv_view.strides is not None, (
@@ -213,59 +212,78 @@ class FileSystemTierManager(SecondaryTierManager):
             return LookupResult.RETRY
         return LookupResult.HIT if result else LookupResult.MISS
 
+    def _tasks_from_jobmetadata(self, job_metadata: TransferJob) -> Iterable[Task]:
+        for key, bid in zip(job_metadata.keys, job_metadata.block_ids):
+            yield Task(
+                key=key,
+                offset=int(bid) * self._block_size,
+            )
+
     @override
     def submit_store(self, job_metadata: TransferJob) -> None:
         keys = list(job_metadata.keys)
         if self.events is not None:
             self._store_job_keys[job_metadata.job_id] = keys
-        task = functools.partial(
-            batch_store_block,
-            [self.file_mapper.get_file_name(key) for key in keys],
-            self._primary_kv_view,
-            [int(bid) * self._block_size for bid in job_metadata.block_ids],
-            self._block_size,
-            self._use_o_direct,
+
+        def make_batch_fn(batch: list[Task]) -> Callable[[], None]:
+            return functools.partial(
+                batch_store_block,
+                paths=[self.file_mapper.get_file_name(t.key) for t in batch],
+                offsets=[t.offset for t in batch],
+                view=self._primary_kv_view,
+                block_size=self._block_size,
+                use_o_direct=self._use_o_direct,
+            )
+
+        self._pool.enqueue_store(
+            job_metadata.job_id,
+            len(job_metadata.keys),
+            self._tasks_from_jobmetadata(job_metadata),
+            make_batch_fn=make_batch_fn,
         )
-        self._pool.enqueue_store(job_metadata.job_id, 1, [task])
 
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
         job_id = job_metadata.job_id
-        # Track this load's keys so a failed promotion can mark only its failed
-        # keys as a miss (see get_finished_jobs).
         keys = list(job_metadata.keys)
-        self._load_job_keys[job_id] = keys
-        paths = [self.file_mapper.get_file_name(key) for key in keys]
-        offsets = [int(bid) * self._block_size for bid in job_metadata.block_ids]
+        self._load_job_keys[job_metadata.job_id] = keys
+        self._load_job_failed_keys[job_metadata.job_id] = SimpleQueue()
 
-        def load_task() -> None:
-            try:
-                batch_load_block(
-                    paths,
-                    self._primary_kv_view,
-                    offsets,
-                    self._block_size,
-                    self._use_o_direct,
-                )
-            except OSError as exc:
-                # Runs on the pool worker thread. Record how many blocks loaded
-                # before the failure so get_finished_jobs can keep them; this
-                # write precedes task_done, so the scheduler reads it safely
-                # under the GIL once the finished queue hands back this job.
-                num_succeeded = getattr(exc, "num_succeeded", 0)
-                self._load_progress[job_id] = num_succeeded
-                # Surfaces errno (e.g. EMFILE "Too many open files") for both
-                # the C and Python load paths.
-                logger.debug(
-                    "Load of %d blocks for job %s failed at block %d: %s",
-                    len(paths),
-                    job_id,
-                    num_succeeded,
-                    exc,
-                )
-                raise
+        def make_batch_fn(batch: list[Task]) -> Callable[[], None]:
+            def load_task() -> None:
+                try:
+                    batch_load_block(
+                        paths=[self.file_mapper.get_file_name(t.key) for t in batch],
+                        offsets=[t.offset for t in batch],
+                        view=self._primary_kv_view,
+                        block_size=self._block_size,
+                        use_o_direct=self._use_o_direct,
+                    )
+                except OSError as exc:
+                    # Record number of successful loads.
+                    num_succeeded = getattr(exc, "num_succeeded", 0)
+                    failed_q = self._load_job_failed_keys[job_id]
+                    for t in batch[num_succeeded:]:
+                        failed_q.put(t.key)
+                    # Surfaces errno (e.g. EMFILE "Too many open files") for both
+                    # the C and Python load paths.
+                    logger.debug(
+                        "Load of %d blocks for job %s failed at block %d: %s",
+                        len(batch),
+                        job_id,
+                        num_succeeded,
+                        exc,
+                    )
+                    raise
 
-        self._pool.enqueue_load(job_id, 1, [load_task])
+            return load_task
+
+        self._pool.enqueue_load(
+            job_metadata.job_id,
+            len(job_metadata.keys),
+            self._tasks_from_jobmetadata(job_metadata),
+            make_batch_fn=make_batch_fn,
+        )
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:
@@ -285,14 +303,13 @@ class FileSystemTierManager(SecondaryTierManager):
                         )
                     )
             load_keys = self._load_job_keys.pop(job_id, None)
-            num_succeeded = self._load_progress.pop(job_id, 0)
+            failed_q = self._load_job_failed_keys.pop(job_id, None)
             if load_keys is not None and not success:
-                # A batched load stops at the first bad block and reports how
-                # many loaded before it. Those earlier blocks are kept in the
-                # primary tier (reported via successful_keys); only this block
-                # and the ones after it are marked a miss and recomputed.
-                successful = load_keys[:num_succeeded]
-                failed = load_keys[num_succeeded:]
+                failed: list[OffloadKey] = []
+                if failed_q is not None:
+                    while not failed_q.empty():
+                        failed.append(failed_q.get_nowait())
+                successful = set(load_keys) - set(failed)
                 self._lookup_manager.mark_miss(failed)
                 results.append(
                     JobResult(
