@@ -2,7 +2,7 @@ group: JIT Monitor
 depends_on:
   - image-build
 steps:
-- label: No Runtime JIT (curated models)
+- label: No Runtime JITs e2e tests
   key: jit-monitor-no-runtime-jit
   device: h200_35gb
   timeout_in_minutes: 45
@@ -15,7 +15,7 @@ steps:
   - tests/models/registry.py
   commands:
     # Boot a curated JIT-heavy model set with the JIT monitor in "error" mode
-    # and run generation; any post-warmup JIT compilation fails the build.
+    # and run generation; any post-warmup JIT compilation fails the test.
     # Per-test watchdog so a wedged engine/CUDA init fails with a traceback
     # instead of running until the build timeout.
     - export PYTHONFAULTHANDLER=1
