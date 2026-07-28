@@ -376,12 +376,8 @@ def convert_tool_responses_to_completions_format(
     """
     return ChatCompletionToolsParam(
         type="function",
-        function=FunctionDefinition(
-            name=tool["name"],
-            description=tool.get("description"),
-            parameters=tool.get("parameters"),
-            strict=tool.get("strict"),
-            defer_loading=tool.get("defer_loading"),
+        function=FunctionDefinition.model_validate(
+            {k: v for k, v in tool.items() if k != "type"}
         ),
     )
 

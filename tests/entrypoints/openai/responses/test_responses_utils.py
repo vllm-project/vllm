@@ -121,33 +121,45 @@ def make_function_call_output(
 class TestResponsesUtils:
     """Tests for Responses API utils."""
 
-    def test_convert_tool_responses_to_completions_format(self):
-        """Test basic conversion of a flat tool schema to nested format."""
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            pytest.param({}, id="basic"),
+            pytest.param({"strict": True}, id="strict_true"),
+            pytest.param({"strict": False}, id="strict_false"),
+            pytest.param({"defer_loading": True}, id="defer_loading_true"),
+            pytest.param({"defer_loading": False}, id="defer_loading_false"),
+            pytest.param(
+                {"unrelated_extra": "should_be_ignored"},
+                id="unrelated_extra_ignored",
+            ),
+        ],
+    )
+    def test_convert_tool_responses_to_completions_format(self, overrides: dict):
+        """Flat Responses tools convert to nested Completions tool_dicts."""
         parameters = {
             "type": "object",
             "properties": {"location": {"type": "string"}},
             "required": ["location"],
         }
-        assert construct_tool_dicts(
-            [
-                FunctionTool(
-                    type="function",
-                    name="get_weather",
-                    description="Get weather",
-                    parameters=parameters,
-                )
-            ],
+        function_data = {
+            "name": "get_weather",
+            "description": "Get weather",
+            "parameters": parameters,
+            **overrides,
+        }
+
+        result = construct_tool_dicts(
+            [FunctionTool.model_validate({"type": "function", **function_data})],
             tool_choice="auto",
-        ) == [
+        )
+        assert result == [
             ChatCompletionToolsParam(
                 type="function",
-                function=FunctionDefinition(
-                    name="get_weather",
-                    description="Get weather",
-                    parameters=parameters,
-                ),
+                function=FunctionDefinition(**function_data),
             ).model_dump()
         ]
+        assert "unrelated_extra" not in result[0]["function"]
 
     def test_construct_chat_messages_with_tool_call(self):
         """Test construction of chat messages with tool calls."""
