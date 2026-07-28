@@ -1,0 +1,48 @@
+name: Run CI from PR comment
+
+on:
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: run-ci-comment-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  run-ci-command:
+    if: >-
+      github.event.issue.pull_request &&
+      (github.event.comment.body == '/runci' ||
+      github.event.comment.body == '/rerun-ci-failed')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Authorize and run CI command
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          BUILDKITE_API_TOKEN: ${{ secrets.BUILDKITE_API_TOKEN }}
+          BUILDKITE_ORGANIZATION: vllm
+          BUILDKITE_PIPELINE: ci
+          CI_TRUSTED_USERS: ${{ vars.CI_TRUSTED_USERS }}
+        with:
+          script: |
+            const { run } = require(
+              './.github/workflows/scripts/run_ci_command.js'
+            );
+            await run({
+              github,
+              context,
+              core,
+              buildkiteToken: process.env.BUILDKITE_API_TOKEN,
+              organization: process.env.BUILDKITE_ORGANIZATION,
+              pipeline: process.env.BUILDKITE_PIPELINE,
+              trustedUsers: process.env.CI_TRUSTED_USERS,
+            });
