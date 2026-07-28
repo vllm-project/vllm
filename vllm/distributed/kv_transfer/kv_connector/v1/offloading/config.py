@@ -5,7 +5,11 @@
 from typing import TYPE_CHECKING
 
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    FullAttentionSpec,
+    MLAAttentionSpec,
+)
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
     OffloadingConfig,
@@ -40,7 +44,11 @@ def build_offloading_config(
         OffloadingGroupConfig(
             tokens_per_block=(
                 group.kv_cache_spec.block_size
-                * parallel_config.decode_context_parallel_size
+                * (
+                    parallel_config.decode_context_parallel_size
+                    if isinstance(group.kv_cache_spec, AttentionSpec)
+                    else 1
+                )
             ),
             layer_names=tuple(group.layer_names),
         )
@@ -102,22 +110,48 @@ def build_offloading_config(
         )
         worker_kv_bytes_per_block = total_gpu_kv_bytes // kv_cache_config.num_blocks
 
-    # Only a single non-MLA full-attention group is parallelism-invariant:
-    # MLA latent KV is replicated per rank (never head-sharded), and the V2
-    # model runner's KV layout is not known to be parallelism-invariant.
-    single_group = (
+    single_group_spec = (
         kv_cache_config.kv_cache_groups[0].kv_cache_spec
         if len(kv_cache_config.kv_cache_groups) == 1
         else None
     )
+    replicated_layout = (
+        vllm_config.model_config.use_mla
+        # Exact type: fail closed on wrappers and sliding-window variants.
+        and type(single_group_spec) is MLAAttentionSpec
+        # Page accounting: one MLA page per layer, no packed/mixed rows.
+        and worker_kv_bytes_per_block > 0
+        and worker_kv_bytes_per_block
+        == single_group_spec.page_size_bytes
+        * len(kv_cache_config.kv_cache_groups[0].layer_names)
+        # Safe MVP boundary: TP-only, no other parallel axes.
+        and parallel_config.tensor_parallel_size > 1
+        and parallel_config.pipeline_parallel_size == 1
+        and parallel_config.prefill_context_parallel_size == 1
+        and parallel_config.decode_context_parallel_size == 1
+        and parallel_config.world_size == parallel_config.tensor_parallel_size
+        # Shared /dev/shm mmap layout is single-node mp only.
+        and parallel_config.distributed_executor_backend == "mp"
+        and parallel_config.nnodes_within_dp == 1
+    )
+
+    # Only a single non-MLA full-attention group is parallelism-invariant:
+    # MLA latent KV is replicated per rank (never head-sharded), and the V2
+    # model runner's KV layout is not known to be parallelism-invariant.
     is_parallelism_agnostic = (
         not vllm_config.use_v2_model_runner
-        and single_group is not None
-        and isinstance(single_group, FullAttentionSpec)
-        and not isinstance(single_group, MLAAttentionSpec)
+        and single_group_spec is not None
+        and isinstance(single_group_spec, FullAttentionSpec)
+        and not isinstance(single_group_spec, MLAAttentionSpec)
     )
 
     kv_events_config = vllm_config.kv_events_config
+    cache_dtype = (
+        vllm_config.model_config.dtype
+        if vllm_config.cache_config.cache_dtype == "auto"
+        else vllm_config.cache_config.cache_dtype
+    )
+
     return OffloadingConfig(
         groups=groups,
         worker_kv_bytes_per_block=worker_kv_bytes_per_block,
@@ -128,7 +162,7 @@ def build_offloading_config(
         engine_id=engine_id,
         model=OffloadingModelConfig(
             name=vllm_config.model_config.model,
-            dtype=str(vllm_config.cache_config.cache_dtype).replace("torch.", ""),
+            dtype=str(cache_dtype).removeprefix("torch."),
         ),
         cache=OffloadingCacheConfig(
             tokens_per_hash=tokens_per_hash,
@@ -144,4 +178,5 @@ def build_offloading_config(
             data_parallel_index=parallel_config.data_parallel_index,
             is_parallelism_agnostic=is_parallelism_agnostic,
         ),
+        replicated_layout=replicated_layout,
     )
