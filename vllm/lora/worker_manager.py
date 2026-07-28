@@ -17,7 +17,11 @@ from vllm.lora.model_manager import (
     create_lora_manager,
 )
 from vllm.lora.peft_helper import PEFTHelper
-from vllm.lora.request import LoRARequest
+from vllm.lora.request import LoRARequest, TensorLoRARequest
+from vllm.lora.update import (
+    validate_complete_lora_weights,
+    validate_lora_update_scope,
+)
 from vllm.lora.utils import get_adapter_absolute_path
 
 logger = init_logger(__name__)
@@ -102,8 +106,12 @@ class WorkerLoRAManager:
         self._adapter_manager = lora_manager
         return lora_manager.model
 
-    def _load_adapter(self, lora_request: LoRARequest) -> LoRAModel:
+    def _load_adapter(
+        self,
+        lora_request: LoRARequest | TensorLoRARequest,
+    ) -> LoRAModel:
         try:
+            validate_lora_update_scope(lora_request)
             supported_lora_modules = self._adapter_manager.supported_lora_modules
             packed_modules_mapping = self._adapter_manager.packed_modules_mapping
             expected_lora_lst: list[str] = []
@@ -115,13 +123,19 @@ class WorkerLoRAManager:
                 if module == "experts":
                     expected_lora_lst.append(module)
             expected_lora_modules = set(expected_lora_lst)
-            lora_path = get_adapter_absolute_path(lora_request.lora_path)
-
-            peft_helper = PEFTHelper.from_local_dir(
-                lora_path,
-                self.max_position_embeddings,
-                lora_request.tensorizer_config_dict,
-            )
+            if isinstance(lora_request, TensorLoRARequest):
+                lora_path = None
+                peft_helper = PEFTHelper.from_dict(lora_request.peft_config)
+                peft_helper.vllm_max_position_embeddings = (
+                    self.max_position_embeddings
+                )
+            else:
+                lora_path = get_adapter_absolute_path(lora_request.lora_path)
+                peft_helper = PEFTHelper.from_local_dir(
+                    lora_path,
+                    self.max_position_embeddings,
+                    lora_request.tensorizer_config_dict,
+                )
 
             # Validates the LoRA configuration against requirements before
             # loading weights, throwing an exception if validation fails.
@@ -139,19 +153,33 @@ class WorkerLoRAManager:
             # Get model-defined prefixes to skip during LoRA loading.
             lora_skip_prefixes = getattr(model, "lora_skip_prefixes", None)
 
-            lora = self._lora_model_cls.from_local_checkpoint(
-                lora_path,
-                expected_lora_modules,
-                peft_helper=peft_helper,
-                lora_model_id=lora_request.lora_int_id,
-                device="cpu",
-                dtype=self.lora_config.lora_dtype,
-                model_vocab_size=self.vocab_size,
-                tensorizer_config_dict=lora_request.tensorizer_config_dict,
-                weights_mapper=hf_to_vllm_mapper,
-                skip_prefixes=lora_skip_prefixes,
-                moe_ep_spec=self._adapter_manager.moe_ep_load_spec,
-            )
+            if isinstance(lora_request, TensorLoRARequest):
+                lora = self._lora_model_cls.from_lora_tensors(
+                    lora_model_id=lora_request.lora_int_id,
+                    tensors=lora_request.lora_tensors,
+                    peft_helper=peft_helper,
+                    device="cpu",
+                    dtype=self.lora_config.lora_dtype,
+                    model_vocab_size=self.vocab_size,
+                    weights_mapper=hf_to_vllm_mapper,
+                    skip_prefixes=lora_skip_prefixes,
+                )
+            else:
+                assert lora_path is not None
+                lora = self._lora_model_cls.from_local_checkpoint(
+                    lora_path,
+                    expected_lora_modules,
+                    peft_helper=peft_helper,
+                    lora_model_id=lora_request.lora_int_id,
+                    device="cpu",
+                    dtype=self.lora_config.lora_dtype,
+                    model_vocab_size=self.vocab_size,
+                    tensorizer_config_dict=lora_request.tensorizer_config_dict,
+                    weights_mapper=hf_to_vllm_mapper,
+                    skip_prefixes=lora_skip_prefixes,
+                    moe_ep_spec=self._adapter_manager.moe_ep_load_spec,
+                )
+            validate_complete_lora_weights(lora.loras)
             # Stamp the on-disk MoE layout onto the loaded model so the
             # adapter manager can route 3D-format checkpoints through the
             # 3D->2D conversion when running under the universal 2D wrapper.
@@ -282,6 +310,43 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
         for lora in loras_map.values():
             self.add_adapter(lora)
 
+    def prepare_adapter(self, lora_request: LoRARequest) -> bool:
+        """Load and validate an adapter without publishing it to live slots."""
+        if not lora_request.load_inplace and (
+            lora_request.lora_int_id in self.list_adapters()
+        ):
+            return True
+        pending = getattr(self, "_pending_adapters", None)
+        if pending is None:
+            pending = {}
+            self._pending_adapters = pending
+        pending[lora_request.lora_int_id] = (
+            lora_request,
+            self._load_adapter(lora_request),
+        )
+        return True
+
+    def abort_adapter(self, lora_id: int) -> None:
+        pending = getattr(self, "_pending_adapters", None)
+        if pending is not None:
+            pending.pop(lora_id, None)
+
+    def commit_adapter(self, lora_id: int) -> bool:
+        pending = getattr(self, "_pending_adapters", None)
+        if pending is None or lora_id not in pending:
+            return self._adapter_manager.get_adapter(lora_id) is not None
+        lora_request, lora = pending.pop(lora_id)
+        return self._install_adapter(lora_request, lora)
+
+    def _install_adapter(self, lora_request, lora) -> bool:
+        self._adapter_manager.remove_adapter(lora.id)
+        if len(self._adapter_manager) + 1 > self._adapter_manager.capacity:
+            assert isinstance(self._adapter_manager, LRUCacheLoRAModelManager)
+            self._adapter_manager.remove_oldest_adapter()
+        loaded = self._adapter_manager.add_adapter(lora)
+        self._adapter_manager.activate_adapter(lora_request.lora_int_id)
+        return loaded
+
     def add_adapter(self, lora_request: LoRARequest) -> bool:
         # Note that this method is not thread-safe. It may be invoked multiple
         # times for the same adapter when using multiple API servers.
@@ -298,17 +363,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             # exceed `--max-cpu-loras`.
             lora = self._load_adapter(lora_request)
 
-            # Remove the existing adapter if it exists
-            # Use case for LoRA inplace
-            self._adapter_manager.remove_adapter(lora.id)
-
-            # Loading succeeded, now check if we will exceed cache capacity and
-            # evict if the oldest adapter if so
-            if len(self._adapter_manager) + 1 > self._adapter_manager.capacity:
-                assert isinstance(self._adapter_manager, LRUCacheLoRAModelManager)
-                self._adapter_manager.remove_oldest_adapter()
-            # Then add the new adapter to the cache
-            loaded = self._adapter_manager.add_adapter(lora)
+            return self._install_adapter(lora_request, lora)
         else:
             # If the lora is already loaded, just touch it to
             # update its position in the caches

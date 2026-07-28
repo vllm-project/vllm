@@ -1103,7 +1103,31 @@ class Worker(WorkerBase):
         self.model_runner._dummy_run(num_tokens, uniform_decode=True)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
+        self._check_lora_update_base(lora_request)
         return self.model_runner.add_lora(lora_request)
+
+    def prepare_lora_update(self, lora_request: LoRARequest) -> bool:
+        self._check_lora_update_base(lora_request)
+        return self.model_runner.prepare_lora_update(lora_request)
+
+    def commit_lora_update(self, lora_id: int) -> bool:
+        return self.model_runner.commit_lora_update(lora_id)
+
+    def abort_lora_update(self, lora_id: int) -> None:
+        self.model_runner.abort_lora_update(lora_id)
+
+    def _check_lora_update_base(self, lora_request: LoRARequest) -> None:
+        if getattr(lora_request, "update_scope", None) is None:
+            return
+        from vllm.model_executor.model_loader.reload.layerwise import (
+            has_dummy_load_manifest,
+        )
+
+        if has_dummy_load_manifest(self.model_runner.get_model()):
+            raise RuntimeError(
+                "A LoRA-only update cannot be applied before a dummy "
+                "model receives one complete real base-weight update"
+            )
 
     def remove_lora(self, lora_id: int) -> bool:
         return self.model_runner.remove_lora(lora_id)
@@ -1161,7 +1185,7 @@ class Worker(WorkerBase):
         typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
         self.weight_transfer_engine.init_transfer_engine(typed_init_info)
 
-    def start_weight_update(self) -> None:
+    def start_weight_update(self, update_scope: dict | None = None) -> None:
         """
         Start a new weight update session.
 
@@ -1178,7 +1202,10 @@ class Worker(WorkerBase):
                 "active. Call finish_weight_update first."
             )
 
-        self.weight_transfer_engine.start_weight_update()
+        if update_scope is None:
+            self.weight_transfer_engine.start_weight_update()
+        else:
+            self.weight_transfer_engine.start_weight_update(update_scope)
         self._weight_update_active = True
 
     def update_weights(self, update_info: dict) -> None:
@@ -1205,7 +1232,7 @@ class Worker(WorkerBase):
             self._weight_update_active = False
             raise
 
-    def finish_weight_update(self) -> None:
+    def finish_weight_update(self):
         """Finish the current weight update session."""
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
@@ -1215,8 +1242,10 @@ class Worker(WorkerBase):
                 "finish_weight_update called without a matching start_weight_update."
             )
 
-        self.weight_transfer_engine.finish_weight_update()
-        self._weight_update_active = False
+        try:
+            return self.weight_transfer_engine.finish_weight_update()
+        finally:
+            self._weight_update_active = False
 
     def shutdown(self) -> None:
         gc.unfreeze()

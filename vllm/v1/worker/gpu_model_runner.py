@@ -4,6 +4,7 @@
 import functools
 import gc
 import itertools
+import os
 import threading
 import time
 from collections import defaultdict
@@ -5441,6 +5442,7 @@ class GPUModelRunner(
         weights_iterator: Iterable[tuple[str, torch.Tensor]] | None = None,
         weights_path: str | None = None,
         is_checkpoint_format: bool = True,
+        update_scope: dict | None = None,
     ) -> None:
         """
         Reload weights from a weights iterator or from disk
@@ -5460,6 +5462,25 @@ class GPUModelRunner(
                 "Please use `is_checkpoint_format=True` "
                 "to avoid weight reloading errors"
             )
+
+        from vllm.model_executor.model_loader.reload.scope import (
+            FullBaseWeightScope,
+            KernelWeightScope,
+            PartialBaseWeightScope,
+            normalize_update_scope,
+        )
+
+        scope = normalize_update_scope(update_scope)
+        if is_checkpoint_format and not isinstance(
+            scope, (FullBaseWeightScope, PartialBaseWeightScope)
+        ):
+            raise ValueError("Checkpoint reload requires a base_checkpoint scope")
+        if not is_checkpoint_format and update_scope is None:
+            scope = KernelWeightScope(
+                tuple(name for name, _ in self.get_model().named_parameters())
+            )
+        if not is_checkpoint_format and not isinstance(scope, KernelWeightScope):
+            raise ValueError("Kernel-format reload requires a base_kernel scope")
 
         model = self.get_model()
         weights_to_load = {name for name, _ in model.named_parameters()}
@@ -5482,23 +5503,72 @@ class GPUModelRunner(
 
         # begin loading weights
         logger.info_once("Reloading weights inplace...")
-        if is_checkpoint_format:
-            # load weights from checkpoint/ original model format
-            initialize_layerwise_reload(model)
-            loaded_weights = model.load_weights(weights_iterator)
-            finalize_layerwise_reload(model, self.model_config)
+        # The config context must span post-load processing: PWAL rebuild
+        # paths (e.g. QuantFP8 CustomOp construction) read the global config,
+        # and reload runs outside the startup context that initial loading
+        # had. Boundary-wide context rather than per-field snapshots so new
+        # config consumers stay covered.
+        with set_current_vllm_config(self.vllm_config):
+            if is_checkpoint_format:
+                # load weights from checkpoint/ original model format
+                initialize_layerwise_reload(model, scope)
+                loaded_weights = model.load_weights(weights_iterator)
+                finalize_layerwise_reload(model, self.model_config)
+                if isinstance(scope, PartialBaseWeightScope):
+                    from vllm.model_executor.model_loader.reload.layerwise import (
+                        get_layer_completion_findings,
+                    )
 
-        else:
-            # load weights from kernel format
-            logger.warning_once(
-                "Reloading with `is_checkpoint_format=True` requires that "
-                "weights be in kernel format and already sharded",
-            )
-            loaded_weights = set()
-            for name, loaded_weight in weights_iterator:
-                param = model.get_parameter(name)  # TODO: buffers?
-                param.copy_(loaded_weight)
-                loaded_weights.add(name)
+                    completion_findings = get_layer_completion_findings()
+                    if completion_findings:
+                        raise RuntimeError(
+                            "Partial checkpoint update did not satisfy its "
+                            "explicit scope:\n  "
+                            + "\n  ".join(completion_findings[:20])
+                        )
+
+            else:
+                # load weights from kernel format
+                logger.warning_once(
+                    "Reloading with `is_checkpoint_format=True` requires that "
+                    "weights be in kernel format and already sharded",
+                )
+                loaded_weights = set()
+                if isinstance(scope, KernelWeightScope):
+                    weights_iterator = list(weights_iterator)
+                    received_names = [name for name, _ in weights_iterator]
+                    received = set(received_names)
+                    expected = set(scope.target_names)
+                    if len(received) != len(received_names):
+                        raise ValueError(
+                            "Kernel-format update contains duplicate target names"
+                        )
+                    missing = expected - received
+                    unexpected = received - expected
+                    if missing or unexpected:
+                        raise ValueError(
+                            "Kernel-format update scope mismatch: "
+                            f"missing={sorted(missing)[:20]}, "
+                            f"unexpected={sorted(unexpected)[:20]}"
+                        )
+                kernel_weights = []
+                for name, loaded_weight in weights_iterator:
+                    param = model.get_parameter(name)  # TODO: buffers?
+                    if param.shape != loaded_weight.shape:
+                        raise ValueError(
+                            f"Kernel weight {name} shape mismatch: "
+                            f"expected={tuple(param.shape)}, "
+                            f"received={tuple(loaded_weight.shape)}"
+                        )
+                    if param.dtype != loaded_weight.dtype:
+                        raise ValueError(
+                            f"Kernel weight {name} dtype mismatch: "
+                            f"expected={param.dtype}, received={loaded_weight.dtype}"
+                        )
+                    kernel_weights.append((name, param, loaded_weight))
+                for name, param, loaded_weight in kernel_weights:
+                    param.copy_(loaded_weight)
+                    loaded_weights.add(name)
 
         # logging and validation
         counter_after_reloading = time.perf_counter()
@@ -6709,6 +6779,16 @@ class GPUModelRunner(
             elapsed_time,
             cuda_graph_size / (1 << 30),
         )
+
+        # Record module-level tensor storage as the graphs just captured it.
+        # These have no owning layer, so neither copy-back nor the reload
+        # arena covers them; the manifest is what lets a reload notice if a
+        # global cache rebinds an address a graph baked in.
+        if os.environ.get("VLLM_RELOAD_GLOBAL_MANIFEST", "warn") != "off":
+            from vllm.model_executor.reload_manifest import (
+                record_global_storage)
+            record_global_storage()
+
         return cuda_graph_size
 
     def _warmup_and_capture(

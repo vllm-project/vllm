@@ -136,23 +136,37 @@ class NCCLWeightTransferEngine(
             init_info, self.parallel_config
         )
 
-    def start_weight_update(self) -> None:
+    def start_weight_update(self, update_scope=None) -> None:
         """Initialize layerwise reloading for the incoming checkpoint weights."""
         from vllm.model_executor.model_loader.reload import (
             initialize_layerwise_reload,
         )
+        from vllm.model_executor.model_loader.reload.scope import (
+            FullBaseWeightScope,
+            PartialBaseWeightScope,
+            normalize_update_scope,
+        )
 
-        self.start_source_manifest_validation()
-        initialize_layerwise_reload(self.model)
+        scope = normalize_update_scope(update_scope)
+        if not isinstance(scope, (FullBaseWeightScope, PartialBaseWeightScope)):
+            raise ValueError(
+                "NCCL checkpoint transfer only supports base checkpoint scopes"
+            )
+        self.start_source_manifest_validation(scope)
+        initialize_layerwise_reload(self.model, scope)
 
-    def finish_weight_update(self) -> None:
+    def finish_weight_update(self):
         """Finalize layerwise reloading after all weights have been received."""
         from vllm.model_executor.model_loader.reload import (
             finalize_layerwise_reload,
         )
+        from vllm.model_executor.model_loader.reload.layerwise import (
+            get_load_manifest_report,
+        )
 
         self.finish_source_manifest_validation()
         finalize_layerwise_reload(self.model, self.model_config)
+        return get_load_manifest_report(self.model)
 
     def receive_weights(self, update_info: NCCLWeightTransferUpdateInfo) -> None:
         """

@@ -23,6 +23,10 @@ from vllm.exceptions import LoRAAdapterNotFoundError
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
+from vllm.model_executor.model_loader.reload.scope import (
+    LoRAAdapterScope,
+    normalize_update_scope,
+)
 from vllm.utils.counter import AtomicCounter
 
 logger = init_logger(__name__)
@@ -187,6 +191,7 @@ class OpenAIServingModels:
                 lora_path=lora_path,
                 load_inplace=request.load_inplace,
                 is_3d_lora_weight=request.is_3d_lora_weight,
+                update_scope=request.update_scope,
             )
             if base_model_name is not None and self.is_base_model(base_model_name):
                 lora_request.base_model_name = base_model_name
@@ -228,6 +233,47 @@ class OpenAIServingModels:
             error_check_ret = await self._check_unload_lora_adapter_request(request)
             if error_check_ret is not None:
                 return error_check_ret
+
+            loaded_request = self.lora_requests[lora_name]
+            if request.update_scope is not None:
+                scope = normalize_update_scope(request.update_scope)
+                if (
+                    not isinstance(scope, LoRAAdapterScope)
+                    or scope.operation != "remove"
+                ):
+                    return create_error_response(
+                        message="LoRA unload requires a matching remove scope.",
+                        err_type="InvalidUserInput",
+                        status_code=HTTPStatus.BAD_REQUEST,
+                    )
+                if (scope.adapter_id, scope.adapter_name) != (
+                    loaded_request.lora_int_id,
+                    loaded_request.lora_name,
+                ):
+                    return create_error_response(
+                        message="LoRA remove scope does not match the loaded adapter.",
+                        err_type="InvalidUserInput",
+                        status_code=HTTPStatus.BAD_REQUEST,
+                    )
+                removed = await self.engine_client.remove_lora(
+                    loaded_request.lora_int_id
+                )
+                if not removed:
+                    return create_error_response(
+                        message="Not every worker removed the scoped LoRA adapter.",
+                        err_type="InternalServerError",
+                        status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    )
+                if not await self.engine_client.reset_prefix_cache(
+                    reset_connector=True
+                ):
+                    return create_error_response(
+                        message="Failed to invalidate prefix cache after LoRA removal.",
+                        err_type="InternalServerError",
+                        status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    )
+                await self.engine_client.reset_mm_cache()
+                await self.engine_client.reset_encoder_cache()
 
             # Safe to delete now since we hold the lock
             del self.lora_requests[lora_name]

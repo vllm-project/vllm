@@ -275,6 +275,18 @@ class LoRAModelRunnerMixin:
         self._ensure_lora_enabled()
         return self.lora_manager.add_adapter(lora_request)
 
+    def prepare_lora_update(self, lora_request: LoRARequest) -> bool:
+        self._ensure_lora_enabled()
+        return self.lora_manager.prepare_adapter(lora_request)
+
+    def commit_lora_update(self, lora_id: int) -> bool:
+        self._ensure_lora_enabled()
+        return self.lora_manager.commit_adapter(lora_id)
+
+    def abort_lora_update(self, lora_id: int) -> None:
+        self._ensure_lora_enabled()
+        self.lora_manager.abort_adapter(lora_id)
+
     def remove_lora(self, lora_id: int) -> bool:
         self._ensure_lora_enabled()
         return self.lora_manager.remove_adapter(lora_id)

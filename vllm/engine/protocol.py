@@ -181,6 +181,11 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def remove_lora(self, lora_id: int) -> bool:
+        """Remove one LoRA adapter from the engine."""
+        ...
+
+    @abstractmethod
     async def pause_generation(
         self,
         *,
@@ -244,7 +249,7 @@ class EngineClient(ABC):
         """Initialize weight transfer for RL training."""
         raise NotImplementedError
 
-    async def start_weight_update(self) -> None:
+    async def start_weight_update(self, update_scope: dict | None = None) -> None:
         """Start a new weight update."""
         raise NotImplementedError
 

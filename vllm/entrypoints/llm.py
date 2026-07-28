@@ -873,9 +873,11 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
         )
 
-    def start_weight_update(self) -> None:
+    def start_weight_update(self, update_scope: dict | None = None) -> None:
         """Start a new weight update."""
-        self.llm_engine.collective_rpc("start_weight_update")
+        self.llm_engine.collective_rpc(
+            "start_weight_update", kwargs={"update_scope": update_scope}
+        )
 
     def update_weights(self, request: WeightTransferUpdateRequest | dict) -> None:
         """
@@ -894,7 +896,42 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
 
     def finish_weight_update(self) -> None:
         """Finish the current weight update."""
-        self.llm_engine.collective_rpc("finish_weight_update")
+        reports = self.llm_engine.collective_rpc("finish_weight_update")
+        failed = [report for report in reports if not getattr(report, "ok", True)]
+        if failed:
+            raise RuntimeError(
+                "Weight update failed rank-local completion on "
+                f"{len(failed)} worker(s): {failed[:4]}"
+            )
+        scoped_reports = [
+            report
+            for report in reports
+            if getattr(report, "declared_source_names", ())
+        ]
+        if scoped_reports:
+            declarations = {
+                frozenset(report.declared_source_names)
+                for report in scoped_reports
+            }
+            if len(declarations) != 1:
+                raise RuntimeError(
+                    "Workers disagreed on the explicit weight update scope"
+                )
+            declared = set(next(iter(declarations)))
+            resolved = {
+                name
+                for report in scoped_reports
+                for name in report.resolved_source_names
+            }
+            if missing := declared - resolved:
+                raise RuntimeError(
+                    "Explicit weight update scope contains source names not "
+                    f"resolved by any worker: {sorted(missing)[:20]}"
+                )
+        if not self.reset_prefix_cache(reset_connector=True):
+            raise RuntimeError("Failed to invalidate prefix cache after weight update")
+        self.reset_mm_cache()
+        self.llm_engine.reset_encoder_cache()
 
     def __repr__(self) -> str:
         """Return a transformers-style hierarchical view of the model."""

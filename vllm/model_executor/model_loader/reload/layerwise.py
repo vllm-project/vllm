@@ -23,9 +23,16 @@ from .meta import (
     materialize_layer,
     restore_layer_on_meta,
 )
+from .scope import (
+    FullBaseWeightScope,
+    PartialBaseWeightScope,
+    UpdateScope,
+    normalize_update_scope,
+)
 from .source import get_current_source_key
 from .types import (
     LayerReloadingInfo,
+    LoadEventIdentity,
     LoadManifestGroupScope,
     LoadManifestReport,
     LoadManifestScope,
@@ -81,6 +88,15 @@ _DUMMY_BASELINE_FAILURES: list[str] = []
 _LAST_RELOAD_RECEIVED_EVENT_COUNTS: WeakKeyDictionary[torch.nn.Module, int] = (
     WeakKeyDictionary()
 )
+_LAST_RELOAD_REQUIRED_EVENT_COUNTS: WeakKeyDictionary[torch.nn.Module, int] = (
+    WeakKeyDictionary()
+)
+_LAST_RELOAD_SCOPES: WeakKeyDictionary[torch.nn.Module, UpdateScope] = (
+    WeakKeyDictionary()
+)
+_LAST_RELOAD_RESOLVED_SOURCES: WeakKeyDictionary[
+    torch.nn.Module, set[str]
+] = WeakKeyDictionary()
 
 
 def get_layer_completion_findings() -> list[str]:
@@ -142,10 +158,17 @@ def get_load_manifest_report(
         if model is not None
         else list(LAYERWISE_INFO.values())
     )
+    update_scope = (
+        _LAST_RELOAD_SCOPES.get(model, FullBaseWeightScope())
+        if model is not None
+        else FullBaseWeightScope()
+    )
     return LoadManifestReport(
         scope=_get_load_manifest_scope(),
-        required_event_count=sum(
-            len(info.required_keys or ()) for info in infos
+        required_event_count=(
+            _LAST_RELOAD_REQUIRED_EVENT_COUNTS.get(model, 0)
+            if model is not None
+            else sum(len(info.required_keys or ()) for info in infos)
         ),
         received_event_count=(
             _LAST_RELOAD_RECEIVED_EVENT_COUNTS.get(model, 0)
@@ -153,6 +176,16 @@ def get_load_manifest_report(
             else sum(_LAST_RELOAD_RECEIVED_EVENT_COUNTS.values())
         ),
         completion_findings=tuple(_LAYER_COMPLETION_FINDINGS),
+        update_kind=update_scope.kind.value,
+        update_mode=getattr(update_scope, "mode", "full"),
+        declared_source_names=(
+            tuple(sorted(update_scope.source_names))
+            if isinstance(update_scope, PartialBaseWeightScope)
+            else ()
+        ),
+        resolved_source_names=tuple(
+            sorted(_LAST_RELOAD_RESOLVED_SOURCES.get(model, set()))
+        ),
     )
 
 
@@ -182,6 +215,8 @@ def record_load_consumption(model: torch.nn.Module) -> None:
         info.load_event_audit = LoadEventAudit()
         if info.required_keys is None:
             info.required_keys = set()
+        if info.required_events is None:
+            info.required_events = set()
         for name, tensor in get_layer_tensors(layer).items():
             # Wrap the effective loader (falling back to default_weight_loader,
             # same as the reload path), so params that rely on the default are
@@ -242,13 +277,26 @@ def record_direct_load_consumption(
         layer, param_name = model, target_name
     info = get_layerwise_info(layer)
     event = f"{source_key}=>{param_name}"
+    identity = LoadEventIdentity(source_key, param_name)
+    if (
+        info.active_required_events is not None
+        and identity not in info.active_required_events
+    ):
+        raise ValueError(
+            "Direct weight load targeted state outside the explicit update "
+            f"scope: {identity.format()}"
+        )
     if info.can_load():
         info.received_keys.add(event)
+        info.received_events.add(identity)
         info.received_target_keys.add(param_name)
     else:
         if info.required_keys is None:
             info.required_keys = set()
+        if info.required_events is None:
+            info.required_events = set()
         info.required_keys.add(event)
+        info.required_events.add(identity)
 
 
 def record_external_tensor_manifest(
@@ -277,9 +325,12 @@ def record_external_tensor_manifest(
         info = get_layerwise_info(layer)
         if info.required_keys is None:
             info.required_keys = set()
-        info.required_keys.add(
-            f"{source_scheme}://{source_name}=>{local_name}"
-        )
+        if info.required_events is None:
+            info.required_events = set()
+        source_key = f"{source_scheme}://{source_name}"
+        identity = LoadEventIdentity(source_key, local_name)
+        info.required_keys.add(identity.format())
+        info.required_events.add(identity)
         recorded_names.add(source_name)
 
     # External registries may use aliases that are not resolvable as module
@@ -299,10 +350,15 @@ def record_external_tensor_manifest(
             seen.add(storage_ptr)
             if info.required_keys is None:
                 info.required_keys = set()
+            if info.required_events is None:
+                info.required_events = set()
             source_name = names_by_storage[storage_ptr]
-            info.required_keys.add(
-                f"{source_scheme}://{source_name}=>{local_name}"
+            identity = LoadEventIdentity(
+                f"{source_scheme}://{source_name}",
+                local_name,
             )
+            info.required_keys.add(identity.format())
+            info.required_events.add(identity)
 
 
 def _make_recording_loader(info: LayerReloadingInfo, name: str,
@@ -324,7 +380,10 @@ def _make_recording_loader(info: LayerReloadingInfo, name: str,
             original,
         )
         if receipt.consumed:
-            info.required_keys.add(_load_event_key(name, receipt))
+            event = _load_event_identity(name, receipt)
+            info.required_keys.add(event.format())
+            assert info.required_events is not None
+            info.required_events.add(event)
         return result
 
     # A distinct __name__ so _get_original_loader (which unwraps only
@@ -384,12 +443,18 @@ def _load_event_key(param_name: str, receipt: LoadReceipt) -> str:
     Keeping the no-fragment representation equal to ``param_name`` preserves
     compatibility for ordinary parameters and existing diagnostics.
     """
-    fragment = receipt.fragment.format()
-    target = param_name if not fragment else f"{param_name}[{fragment}]"
-    source_key = get_current_source_key()
-    if source_key is None:
-        return target
-    return f"{source_key}=>{target}"
+    return _load_event_identity(param_name, receipt).format()
+
+
+def _load_event_identity(
+    param_name: str,
+    receipt: LoadReceipt,
+) -> LoadEventIdentity:
+    return LoadEventIdentity(
+        source_name=get_current_source_key(),
+        target_name=param_name,
+        fragment=receipt.fragment,
+    )
 
 
 def _audit_load_receipt(
@@ -448,6 +513,17 @@ def _check_set_completion(layer: torch.nn.Module,
     checkpoint-backed tensor excluded from meta restoration can legitimately
     arrive later. Numel stays authoritative; this only records discrepancies.
     """
+    if info.active_required_events is not None:
+        missing_events = info.active_required_events - info.received_events
+        unexpected_events = info.received_events - info.active_required_events
+        if missing_events or unexpected_events:
+            _LAYER_COMPLETION_FINDINGS.append(
+                f"{layer.__class__.__name__}: explicit update scope mismatch: "
+                f"missing={sorted(e.format() for e in missing_events)[:8]}, "
+                f"unexpected={sorted(e.format() for e in unexpected_events)[:8]}"
+            )
+        return
+
     if info.required_keys is None:
         return  # no observed baseline (first-load recording did not run)
     missing_targets = (
@@ -471,6 +547,7 @@ def _check_set_completion(layer: torch.nn.Module,
         # The first complete real transfer turns the provisional dummy target
         # baseline into the exact source/fragment manifest.
         info.required_keys = set(info.received_keys)
+        info.required_events = set(info.received_events)
         info.required_target_keys = None
 
 
@@ -482,10 +559,17 @@ def _has_exact_manifest(info: LayerReloadingInfo) -> bool:
     transfer.  Such a transfer still uses the legacy completion path while it
     learns the rank-local exact event set.
     """
+    if info.active_required_events is not None:
+        return bool(info.active_required_events)
     return bool(info.required_keys) and info.required_target_keys is None
 
 
 def _manifest_complete(info: LayerReloadingInfo) -> bool:
+    if info.active_required_events is not None:
+        return (
+            bool(info.active_required_events)
+            and info.active_required_events <= info.received_events
+        )
     return (
         _has_exact_manifest(info)
         and info.required_keys is not None
@@ -520,8 +604,51 @@ def record_metadata_for_reloading(model: torch.nn.Module):
         info.restore_device = torch.get_default_device()
 
 
+def _resolve_partial_checkpoint_scope(
+    model: torch.nn.Module,
+    scope: PartialBaseWeightScope,
+) -> dict[torch.nn.Module, set[LoadEventIdentity]]:
+    """Resolve source names and reject scopes that split one processing unit."""
+    declared = set(scope.source_names)
+    resolved: dict[torch.nn.Module, set[LoadEventIdentity]] = {}
+
+    for layer in model.modules():
+        info = get_layerwise_info(layer)
+        if info.required_target_keys is not None:
+            raise RuntimeError(
+                "Partial checkpoint updates are not allowed before a dummy "
+                "model has received one complete real base-weight update"
+            )
+        baseline = info.required_events
+        if baseline is None:
+            if info.required_keys:
+                raise RuntimeError(
+                    "Partial checkpoint updates require a structured initial-load "
+                    f"manifest; {layer.__class__.__name__} only has legacy keys"
+                )
+            resolved[layer] = set()
+            continue
+
+        selected = {
+            event for event in baseline if event.source_name in declared
+        }
+        if selected and selected != baseline:
+            missing = sorted(event.format() for event in baseline - selected)
+            raise ValueError(
+                "Partial checkpoint update splits a layerwise processing unit "
+                f"{layer.__class__.__name__}: selected={len(selected)}, "
+                f"required={len(baseline)}, missing={missing[:8]}"
+            )
+        resolved[layer] = selected
+
+    return resolved
+
+
 @torch.no_grad()
-def initialize_layerwise_reload(model: torch.nn.Module):
+def initialize_layerwise_reload(
+    model: torch.nn.Module,
+    update_scope: UpdateScope | dict | None = None,
+):
     """
     Set up layerwise weight loading with deferred processing.
 
@@ -536,6 +663,24 @@ def initialize_layerwise_reload(model: torch.nn.Module):
     3. Run quantization processing if applicable
     4. Copy processed values back to original tensor storage
     """
+    scope = normalize_update_scope(update_scope)
+    _LAST_RELOAD_SCOPES[model] = scope
+    partial = (
+        _resolve_partial_checkpoint_scope(model, scope)
+        if isinstance(scope, PartialBaseWeightScope)
+        else None
+    )
+    _LAST_RELOAD_RESOLVED_SOURCES[model] = (
+        {
+            event.source_name
+            for events in partial.values()
+            for event in events
+            if event.source_name is not None
+        }
+        if partial is not None
+        else set()
+    )
+
     # disable torchao reloading to avoid infinite recursion
     model._original_do_torchao_reload = getattr(model, "_do_torchao_reload", False)
     model._do_torchao_reload = False
@@ -544,9 +689,15 @@ def initialize_layerwise_reload(model: torch.nn.Module):
         _LAYER_COMPLETION_FINDINGS.clear()
         _DUMMY_BASELINE_FAILURES.clear()
         _LAST_RELOAD_RECEIVED_EVENT_COUNTS[model] = 0
+        _LAST_RELOAD_REQUIRED_EVENT_COUNTS[model] = 0
 
     for layer in model.modules():
         info = get_layerwise_info(layer)
+
+        if partial is not None:
+            info.active_required_events = partial[layer]
+            if not info.active_required_events:
+                continue
 
         # Skip if the layer has already been initialized
         if info.can_load():
@@ -575,6 +726,7 @@ def initialize_online_processing(layer: torch.nn.Module):
 
     # Track loading progress to determine when to process/copy
     info.received_keys.clear()
+    info.received_events.clear()
     info.received_target_keys.clear()
     info.load_event_audit = LoadEventAudit()
     info.is_loading = True
@@ -644,7 +796,9 @@ def _make_receipt_observer(info: LayerReloadingInfo, param_name: str,
             original_loader,
         )
         if receipt.consumed:
-            info.received_keys.add(_load_event_key(param_name, receipt))
+            event = _load_event_identity(param_name, receipt)
+            info.received_keys.add(event.format())
+            info.received_events.add(event)
             info.received_target_keys.add(param_name)
         return result
 
@@ -695,7 +849,9 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
             original_loader,
         )
         if receipt.consumed:
-            info.received_keys.add(_load_event_key(param_name, receipt))
+            event = _load_event_identity(param_name, receipt)
+            info.received_keys.add(event.format())
+            info.received_events.add(event)
             info.received_target_keys.add(param_name)
 
         logger.debug(
@@ -756,11 +912,17 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
     if hasattr(model, "_original_do_torchao_reload"):
         model._do_torchao_reload = model._original_do_torchao_reload
 
+    required_event_count = 0
     received_event_count = 0
     deferred_attn: list[tuple[torch.nn.Module, LayerReloadingInfo]] = []
 
     for layer in model.modules():
         info = get_layerwise_info(layer)
+        required_event_count += (
+            len(info.active_required_events)
+            if info.active_required_events is not None
+            else len(info.required_keys or ())
+        )
         if not info.can_load():
             received_event_count += len(info.received_keys)
             _check_set_completion(layer, info)
@@ -812,6 +974,7 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
         info.reset()
 
     LOADING_LAYERS.clear()
+    _LAST_RELOAD_REQUIRED_EVENT_COUNTS[model] = required_event_count
     _LAST_RELOAD_RECEIVED_EVENT_COUNTS[model] = received_event_count
     if _DUMMY_BASELINE_FAILURES:
         raise RuntimeError(

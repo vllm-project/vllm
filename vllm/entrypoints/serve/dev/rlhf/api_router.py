@@ -129,7 +129,13 @@ async def init_weight_transfer_engine(raw_request: Request):
 
 @router.post("/start_weight_update")
 async def start_weight_update(raw_request: Request):
-    await engine_client(raw_request).start_weight_update()
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError:
+        body = {}
+    await engine_client(raw_request).start_weight_update(
+        update_scope=body.get("update_scope")
+    )
     return JSONResponse(content={"message": "Weight update started"})
 
 

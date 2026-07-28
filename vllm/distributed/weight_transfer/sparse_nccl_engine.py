@@ -116,19 +116,38 @@ class SparseNCCLWeightTransferEngine(
             init_info, self.parallel_config
         )
 
-    def start_weight_update(self) -> None:
+    def start_weight_update(self, update_scope=None) -> None:
         """No-op: sparse patches are applied in place, no layerwise reload."""
+        from vllm.model_executor.model_loader.reload.scope import (
+            KernelWeightScope,
+            normalize_update_scope,
+        )
+
         if self.parallel_config.world_size != 1:
             raise NotImplementedError(
                 "Sparse weight updates currently require TP=1 and PP=1"
             )
+        if update_scope is None:
+            self._update_scope = None
+            self._expected_source_names = None
+            self._received_source_names.clear()
+            return
+        scope = normalize_update_scope(update_scope)
+        if not isinstance(scope, KernelWeightScope):
+            raise ValueError(
+                "Sparse NCCL updates require an explicit base_kernel scope"
+            )
+        self._update_scope = scope
+        self._expected_source_names = set(scope.target_names)
+        self._received_source_names.clear()
 
     def finish_weight_update(self) -> None:
         """No-op: sparse patches are applied in place, no layerwise reload."""
-        pass
+        self.finish_source_manifest_validation()
 
     def receive_weights(self, update_info: SparseNCCLWeightTransferUpdateInfo) -> None:
         """Receive sparse flat-index patches from the trainer and apply them."""
+        self.observe_source_manifest(update_info.names, None)
         if self.model_update_group is None:
             raise RuntimeError(
                 "NCCL weight transfer not initialized. "

@@ -4,12 +4,15 @@ from dataclasses import dataclass, field
 from inspect import BoundArguments
 import torch
 
+from vllm.model_executor.load_receipt import LoadFragment
+
 from .audit import LoadEventAudit
 
 __all__ = [
     "LayerTensors",
     "LayerRestoreMetadata",
     "LayerReloadingInfo",
+    "LoadEventIdentity",
     "LoadManifestGroupScope",
     "LoadManifestScope",
     "LoadManifestReport",
@@ -23,6 +26,26 @@ LayerRestoreMetadata = tuple[
     dict[str, torch.Tensor | None],
     dict[str, torch.Tensor | None],
 ]
+
+
+@dataclass(frozen=True)
+class LoadEventIdentity:
+    """Structured identity of one consumed checkpoint fragment."""
+
+    source_name: str | None
+    target_name: str
+    fragment: LoadFragment = LoadFragment()
+
+    def format(self) -> str:
+        fragment = self.fragment.format()
+        target = (
+            self.target_name
+            if not fragment
+            else f"{self.target_name}[{fragment}]"
+        )
+        if self.source_name is None:
+            return target
+        return f"{self.source_name}=>{target}"
 
 
 @dataclass(frozen=True)
@@ -59,6 +82,10 @@ class LoadManifestReport:
     required_event_count: int
     received_event_count: int
     completion_findings: tuple[str, ...]
+    update_kind: str = "base_checkpoint"
+    update_mode: str = "full"
+    declared_source_names: tuple[str, ...] = ()
+    resolved_source_names: tuple[str, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -93,10 +120,20 @@ class LayerReloadingInfo:
     # needed. It is a BASELINE -- survives reset(), like restore_metadata.
     required_keys: "set[str] | None" = None
 
+    # Structured form of required_keys used for scope resolution. Kept next to
+    # the display-key set while callers migrate to structured reports.
+    required_events: set[LoadEventIdentity] | None = None
+
     # Keys received during the current reload, accumulated by the online
     # loader wrapper. Transient: cleared by reset() each reload. Completion
     # by set reconciliation is received_keys >= required_keys.
     received_keys: set[str] = field(default_factory=set)
+    received_events: set[LoadEventIdentity] = field(default_factory=set)
+
+    # Effective completion contract for the active update. None means use the
+    # full baseline. An empty set means this layer is outside an explicit
+    # partial scope and must not be initialized or processed.
+    active_required_events: set[LoadEventIdentity] | None = None
 
     # Dummy loading has no checkpoint source stream, but it still has to
     # protect the first real RL weight transfer. This rank-local target
@@ -120,6 +157,7 @@ class LayerReloadingInfo:
         received_target_keys = (
             self.received_target_keys if preserve_received_keys else set()
         )
+        received_events = self.received_events if preserve_received_keys else set()
         load_event_audit = (
             self.load_event_audit
             if preserve_received_keys
@@ -129,7 +167,12 @@ class LayerReloadingInfo:
             restore_metadata=self.restore_metadata,
             restore_device=self.restore_device,
             required_keys=self.required_keys,
+            required_events=self.required_events,
             received_keys=received_keys,
+            received_events=received_events,
+            active_required_events=(
+                self.active_required_events if preserve_received_keys else None
+            ),
             required_target_keys=self.required_target_keys,
             received_target_keys=received_target_keys,
             load_event_audit=load_event_audit,

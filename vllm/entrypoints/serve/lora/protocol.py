@@ -9,8 +9,10 @@ class LoadLoRAAdapterRequest(BaseModel):
     lora_path: str
     load_inplace: bool = False
     is_3d_lora_weight: bool = False
+    update_scope: dict | None = None
 
 
 class UnloadLoRAAdapterRequest(BaseModel):
     lora_name: str
     lora_int_id: int | None = Field(default=None)
+    update_scope: dict | None = None

@@ -2,7 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from dataclasses import dataclass
+
 import msgspec
+import torch
 
 
 class LoRARequest(
@@ -29,6 +32,7 @@ class LoRARequest(
     tensorizer_config_dict: dict | None = None
     load_inplace: bool = False
     is_3d_lora_weight: bool = False
+    update_scope: dict | None = None
     """Whether this adapter's MoE weights are stored in the 3D fused
     `gate_up_proj` / `down_proj` layout (one fused tensor per layer) or the
     2D per-expert split layout (separate `gate_proj` / `up_proj` / `down_proj`
@@ -71,3 +75,39 @@ class LoRARequest(
         identified by their names across engines.
         """
         return hash(self.lora_name)
+
+
+@dataclass
+class TensorLoRARequest:
+    """In-memory complete LoRA replacement used by training integrations."""
+
+    lora_name: str
+    lora_int_id: int
+    lora_tensors: dict[str, torch.Tensor]
+    peft_config: dict
+    load_inplace: bool = True
+    base_model_name: str | None = None
+    is_3d_lora_weight: bool = False
+    update_scope: dict | None = None
+    lora_path: str = "<in-memory>"
+    tensorizer_config_dict: dict | None = None
+
+    def __post_init__(self) -> None:
+        if self.lora_int_id < 1:
+            raise ValueError(f"id must be > 0, got {self.lora_int_id}")
+        if not self.lora_name:
+            raise ValueError("lora_name must not be empty")
+        if not self.lora_tensors:
+            raise ValueError("lora_tensors must not be empty")
+
+    @property
+    def adapter_id(self) -> int:
+        return self.lora_int_id
+
+    @property
+    def name(self) -> str:
+        return self.lora_name
+
+    @property
+    def path(self) -> str:
+        return self.lora_path

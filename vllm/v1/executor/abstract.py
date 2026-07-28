@@ -291,6 +291,25 @@ class Executor(ABC):
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."
+        if getattr(lora_request, "update_scope", None) is not None:
+            try:
+                prepared = self.collective_rpc(
+                    "prepare_lora_update", args=(lora_request,)
+                )
+                if not all(prepared):
+                    raise RuntimeError("Not every worker staged the LoRA update")
+                return all(
+                    self.collective_rpc(
+                        "commit_lora_update",
+                        args=(lora_request.lora_int_id,),
+                    )
+                )
+            except BaseException:
+                self.collective_rpc(
+                    "abort_lora_update",
+                    args=(lora_request.lora_int_id,),
+                )
+                raise
         return all(self.collective_rpc("add_lora", args=(lora_request,)))
 
     def remove_lora(self, lora_id: int) -> bool:

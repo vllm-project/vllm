@@ -947,7 +947,15 @@ class AsyncLLM(EngineClient):
 
     async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
-        return await self.engine_core.add_lora_async(lora_request)
+        loaded = await self.engine_core.add_lora_async(lora_request)
+        if getattr(lora_request, "update_scope", None) is not None:
+            if not await self.reset_prefix_cache(reset_connector=True):
+                raise RuntimeError(
+                    "Failed to invalidate prefix cache after LoRA update"
+                )
+            await self.reset_mm_cache()
+            await self.reset_encoder_cache()
+        return loaded
 
     async def remove_lora(self, lora_id: int) -> bool:
         """Remove an already loaded LoRA adapter."""
@@ -1080,9 +1088,11 @@ class AsyncLLM(EngineClient):
             "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
         )
 
-    async def start_weight_update(self) -> None:
+    async def start_weight_update(self, update_scope: dict | None = None) -> None:
         """Start a new weight update."""
-        await self.collective_rpc("start_weight_update")
+        await self.collective_rpc(
+            "start_weight_update", kwargs={"update_scope": update_scope}
+        )
 
     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
         """
@@ -1105,4 +1115,39 @@ class AsyncLLM(EngineClient):
 
     async def finish_weight_update(self) -> None:
         """Finish the current weight update."""
-        await self.collective_rpc("finish_weight_update")
+        reports = await self.collective_rpc("finish_weight_update")
+        failed = [report for report in reports if not getattr(report, "ok", True)]
+        if failed:
+            raise RuntimeError(
+                "Weight update failed rank-local completion on "
+                f"{len(failed)} worker(s): {failed[:4]}"
+            )
+        scoped_reports = [
+            report
+            for report in reports
+            if getattr(report, "declared_source_names", ())
+        ]
+        if scoped_reports:
+            declarations = {
+                frozenset(report.declared_source_names)
+                for report in scoped_reports
+            }
+            if len(declarations) != 1:
+                raise RuntimeError(
+                    "Workers disagreed on the explicit weight update scope"
+                )
+            declared = set(next(iter(declarations)))
+            resolved = {
+                name
+                for report in scoped_reports
+                for name in report.resolved_source_names
+            }
+            if missing := declared - resolved:
+                raise RuntimeError(
+                    "Explicit weight update scope contains source names not "
+                    f"resolved by any worker: {sorted(missing)[:20]}"
+                )
+        if not await self.reset_prefix_cache(reset_connector=True):
+            raise RuntimeError("Failed to invalidate prefix cache after weight update")
+        await self.reset_mm_cache()
+        await self.reset_encoder_cache()

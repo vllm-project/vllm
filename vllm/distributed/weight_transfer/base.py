@@ -3,6 +3,7 @@
 """Base class for weight transfer engines."""
 
 from abc import ABC, abstractmethod
+from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
@@ -11,6 +12,7 @@ import torch
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.model_executor.model_loader.reload.scope import UpdateScope
 
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
@@ -98,8 +100,12 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         self._expected_source_names: set[str] | None = None
         self._received_source_names: set[str] = set()
         self._requires_declared_source_manifest = False
+        self._update_scope: UpdateScope | None = None
 
-    def start_source_manifest_validation(self) -> None:
+    def start_source_manifest_validation(
+        self,
+        update_scope: "UpdateScope | dict[str, Any] | None" = None,
+    ) -> None:
         """Start transport-level source reconciliation for one transaction.
 
         A model created with ``load_format=dummy`` has no checkpoint source
@@ -111,8 +117,13 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         from vllm.model_executor.model_loader.reload.layerwise import (
             has_dummy_load_manifest,
         )
+        from vllm.model_executor.model_loader.reload.scope import (
+            normalize_update_scope,
+            scope_source_names,
+        )
 
-        self._expected_source_names = None
+        self._update_scope = normalize_update_scope(update_scope)
+        self._expected_source_names = scope_source_names(self._update_scope)
         self._received_source_names.clear()
         self._requires_declared_source_manifest = has_dummy_load_manifest(self.model)
 
@@ -122,6 +133,21 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         expected_names: list[str] | None,
     ) -> None:
         """Record one received chunk and its transaction declaration."""
+        if self._expected_source_names is not None:
+            duplicate_names = {
+                name for name, count in Counter(names).items() if count > 1
+            } | (set(names) & self._received_source_names)
+            if duplicate_names:
+                raise ValueError(
+                    "Explicit weight update scope received duplicate names: "
+                    f"{sorted(duplicate_names)[:20]}"
+                )
+            unexpected_chunk = set(names) - self._expected_source_names
+            if unexpected_chunk:
+                raise ValueError(
+                    "Weight update chunk contains names outside its explicit "
+                    f"scope: {sorted(unexpected_chunk)[:20]}"
+                )
         if expected_names is not None:
             declared = set(expected_names)
             if len(declared) != len(expected_names):
@@ -213,7 +239,10 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         raise NotImplementedError
 
     @abstractmethod
-    def start_weight_update(self) -> None:
+    def start_weight_update(
+        self,
+        update_scope: "UpdateScope | dict[str, Any] | None" = None,
+    ) -> None:
         """
         Prepare the engine for a new weight update.
 
