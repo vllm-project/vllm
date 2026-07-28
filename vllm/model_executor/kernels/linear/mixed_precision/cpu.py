@@ -168,11 +168,13 @@ class CPUWNA16LinearKernel(MPLinearKernel):
             if zp.output_dim == 0:
                 zp.data = zp.t().contiguous()
 
+        supports_amx = torch.cpu._is_amx_tile_supported()
+        supports_riscv = current_platform.get_cpu_architecture() == CpuArchEnum.RISCV
         layer.use_w4a8 = (
             envs.VLLM_CPU_INT4_W4A8
             and not self.config.has_g_idx
             and self.config.act_type == torch.bfloat16
-            and torch.cpu._is_amx_tile_supported()
+            and (supports_amx or supports_riscv)
         )
         # layer.use_w4a8 = False
         # AWQ format will be converted to GPTQ format in `AutoAWQMarlinLinearMethod`

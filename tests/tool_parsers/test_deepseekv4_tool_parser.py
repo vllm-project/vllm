@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Unit tests for DeepSeekV4ToolParser."""
+"""Unit tests for DeepSeekV4EngineToolParser."""
 
 import json
 from unittest.mock import MagicMock
@@ -17,7 +17,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     FunctionDefinition,
 )
 from vllm.tool_parsers import ToolParserManager
-from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser
+from vllm.tool_parsers.deepseekv4_engine_tool_parser import (
+    DeepSeekV4EngineToolParser,
+)
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 MOCK_TOKENIZER = MagicMock()
 MOCK_TOKENIZER.get_vocab.return_value = {}
@@ -67,8 +71,8 @@ def sample_tools() -> list[ChatCompletionToolsParam]:
     ]
 
 
-def make_parser(tools=None) -> DeepSeekV4ToolParser:
-    return DeepSeekV4ToolParser(MOCK_TOKENIZER, tools=tools)
+def make_parser(tools=None) -> DeepSeekV4EngineToolParser:
+    return DeepSeekV4EngineToolParser(MOCK_TOKENIZER, tools=tools)
 
 
 def make_request(tools=None) -> MagicMock:
@@ -84,7 +88,7 @@ def build_tool_call(func_name: str, params: dict[str, str]) -> str:
     return f'{TC_START}\n{INV_START}{func_name}">\n{param_strs}{INV_END}\n{TC_END}'
 
 
-def stream(parser: DeepSeekV4ToolParser, full_text: str, chunk_size: int = 7):
+def stream(parser: DeepSeekV4EngineToolParser, full_text: str, chunk_size: int = 7):
     deltas = []
     previous_text = ""
     for start in range(0, len(full_text), chunk_size):
@@ -120,7 +124,9 @@ def reconstruct_args(deltas, tool_index: int = 0) -> str:
 
 
 def test_registered():
-    assert ToolParserManager.get_tool_parser("deepseek_v4") is DeepSeekV4ToolParser
+    assert (
+        ToolParserManager.get_tool_parser("deepseek_v4") is DeepSeekV4EngineToolParser
+    )
 
 
 def test_extract_tool_calls():
@@ -285,7 +291,7 @@ def test_extract_tool_calls_arguments_wrapper():
         },
     )
 
-    parser = DeepSeekV4ToolParser(mock_tokenizer, tools=[tool])
+    parser = DeepSeekV4EngineToolParser(mock_tokenizer, tools=[tool])
     request = MagicMock()
     request.tools = [tool]
 
@@ -303,7 +309,64 @@ def test_extract_tool_calls_arguments_wrapper():
     assert args == {"location": "Beijing"}
 
 
-@pytest.mark.skip_global_cleanup
+_ANGLE_BRACKET_TOOL = ChatCompletionToolsParam(
+    function=FunctionDefinition(
+        name="run_command",
+        parameters={
+            "type": "object",
+            "properties": {
+                "command": {"type": "string"},
+            },
+        },
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    "tools",
+    [[_ANGLE_BRACKET_TOOL], None],
+    ids=["with_tools", "without_tools"],
+)
+def test_no_dsml_closing_tag_leak_in_streamed_args(tools):
+    """Streaming must not leak </｜DSML｜parameter> into argument values.
+
+    When a parameter value contains '>' (e.g. shell redirects like
+    '2>&1'), certain chunk boundaries cause the incremental lexer to
+    emit the closing delimiter text as part of the content token.  The
+    partial regex then captures it as part of the value, violating the
+    prefix invariant and corrupting the streamed JSON.
+    """
+    full_text = build_tool_call("run_command", {"command": "git --version 2>&1"})
+    expected = {"command": "git --version 2>&1"}
+
+    for chunk_size in range(1, len(full_text) + 1):
+        parser = make_parser(tools=tools)
+        deltas = stream(parser, full_text, chunk_size=chunk_size)
+        args_str = reconstruct_args(deltas)
+        assert args_str, f"No args emitted at chunk_size={chunk_size}"
+        assert "DSML" not in args_str, (
+            f"DSML marker leaked into args at chunk_size={chunk_size}: {args_str!r}"
+        )
+        parsed = json.loads(args_str)
+        assert parsed == expected, (
+            f"Args mismatch at chunk_size={chunk_size}: "
+            f"got {parsed!r}, expected {expected!r}"
+        )
+
+
+def test_non_streaming_extract_with_angle_brackets():
+    """Non-streaming extraction must correctly handle '>' in values."""
+    parser = make_parser()
+    full_text = build_tool_call("run_command", {"command": "git --version 2>&1"})
+    result = parser.extract_tool_calls(full_text, make_request())
+
+    assert result.tools_called
+    assert len(result.tool_calls) == 1
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert args == {"command": "git --version 2>&1"}
+    assert "DSML" not in result.tool_calls[0].function.arguments
+
+
 def test_composed_schema_converts_object_and_array_params():
     tool = ChatCompletionToolsParam(
         type="function",

@@ -9,6 +9,8 @@ needing full VllmConfig integration.
 """
 
 import statistics
+import tempfile
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -17,7 +19,6 @@ from common import (
     BenchmarkResult,
     MockHfConfig,
     MockIndexer,
-    MockKVBProj,
     MockLayer,
     run_do_bench,
     run_ncu_profile,
@@ -33,7 +34,58 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
+
+
+def _safe_profile_name(value: str) -> str:
+    return "".join(c if c.isalnum() or c in "._-" else "_" for c in value)
+
+
+def _create_kv_b_proj(
+    mla_dims: dict,
+    device: torch.device,
+):
+    kv_b_proj = ColumnParallelLinear(
+        mla_dims["kv_lora_rank"],
+        mla_dims["num_q_heads"]
+        * (mla_dims["qk_nope_head_dim"] + mla_dims["v_head_dim"]),
+        bias=False,
+        params_dtype=torch.bfloat16,
+        quant_config=None,
+        prefix="benchmark.kv_b_proj",
+    ).to(device)
+    with torch.no_grad():
+        kv_b_proj.weight.copy_(torch.randn_like(kv_b_proj.weight))
+    return kv_b_proj
+
+
+def _ensure_single_rank_model_parallel() -> None:
+    import torch.distributed as dist
+
+    from vllm.distributed import (
+        ensure_model_parallel_initialized,
+        init_distributed_environment,
+        model_parallel_is_initialized,
+    )
+
+    if not dist.is_available():
+        return
+    if not dist.is_initialized():
+        with tempfile.NamedTemporaryFile(
+            prefix="vllm_bench_dist_", delete=False
+        ) as init_file:
+            distributed_init_method = f"file://{init_file.name}"
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            distributed_init_method=distributed_init_method,
+            local_rank=0,
+            backend="nccl",
+        )
+    if not model_parallel_is_initialized():
+        ensure_model_parallel_initialized(1, 1)
+
 
 # ============================================================================
 # VllmConfig Creation
@@ -66,10 +118,12 @@ def create_minimal_vllm_config(
     block_size: int = 128,
     max_num_seqs: int = 256,
     max_num_batched_tokens: int = 8192,
+    max_model_len: int = 32768,
     mla_dims: dict | None = None,
     index_topk: int | None = None,
     prefill_backend: str | None = None,
     kv_cache_dtype: str = "auto",
+    sparse_mla_force_mqa: bool = False,
 ) -> VllmConfig:
     """
     Create minimal VllmConfig for MLA benchmarks.
@@ -86,6 +140,8 @@ def create_minimal_vllm_config(
         prefill_backend: Prefill backend name (e.g., "fa3", "fa4", "flashinfer",
                         "trtllm"). Configures the attention config to force
                         the specified prefill backend.
+        sparse_mla_force_mqa: If True, forces all sparse MLA tokens through
+                    forward_mqa (even prefill tokens).
 
     Returns:
         VllmConfig for benchmarking
@@ -131,7 +187,7 @@ def create_minimal_vllm_config(
             trust_remote_code=True,
             dtype="bfloat16",
             seed=0,
-            max_model_len=32768,
+            max_model_len=max_model_len,
             quantization=None,
             enforce_eager=False,
             max_logprobs=20,
@@ -163,7 +219,7 @@ def create_minimal_vllm_config(
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max(max_num_batched_tokens, max_num_seqs),
-        max_model_len=32768,
+        max_model_len=max_model_len,
         is_encoder_decoder=False,
         enable_chunked_prefill=True,
     )
@@ -191,6 +247,9 @@ def create_minimal_vllm_config(
             vllm_config.attention_config.flash_attn_version = prefill_cfg[
                 "flash_attn_version"
             ]
+
+    if sparse_mla_force_mqa:
+        vllm_config.attention_config.sparse_mla_force_mqa = True
 
     return vllm_config
 
@@ -548,12 +607,7 @@ def _create_backend_impl(
     # Calculate scale
     scale = 1.0 / np.sqrt(mla_dims["qk_nope_head_dim"] + mla_dims["qk_rope_head_dim"])
 
-    # Create mock kv_b_proj layer for prefill mode
-    mock_kv_b_proj = MockKVBProj(
-        num_heads=mla_dims["num_q_heads"],
-        qk_nope_head_dim=mla_dims["qk_nope_head_dim"],
-        v_head_dim=mla_dims["v_head_dim"],
-    )
+    kv_b_proj = _create_kv_b_proj(mla_dims, device)
 
     # Create indexer for sparse backends
     indexer = None
@@ -584,7 +638,7 @@ def _create_backend_impl(
         "qk_rope_head_dim": mla_dims["qk_rope_head_dim"],
         "qk_head_dim": mla_dims["qk_nope_head_dim"] + mla_dims["qk_rope_head_dim"],
         "v_head_dim": mla_dims["v_head_dim"],
-        "kv_b_proj": mock_kv_b_proj,
+        "kv_b_proj": kv_b_proj,
     }
 
     # Add indexer for sparse backends
@@ -785,14 +839,35 @@ def _run_single_benchmark(
     # Fill indexer with random indices for sparse backends
     is_sparse = backend_cfg.get("is_sparse", False)
     if is_sparse and indexer is not None:
-        indexer.fill_random_indices(total_q, max_kv_len)
+        indexer.fill_indices(
+            total_q,
+            max_kv_len,
+            getattr(config, "sparse_mla_topk_pattern", "random"),
+        )
 
     # Determine which forward methods to use based on metadata.
-    # Sparse MLA backends always use forward_mqa
-    has_decode = is_sparse or getattr(metadata, "decode", None) is not None
-    has_prefill = not is_sparse and getattr(metadata, "prefill", None) is not None
+    # Non-sparse backends use .decode/.prefill sub-objects.
+    # Sparse backends use num_decode_tokens/num_prefills directly.
+    #
+    # sparse_mla_force_mqa overrides: even for prefill metadata, use MQA.
+    force_mqa = getattr(config, "sparse_mla_force_mqa", False)
+    force_dense_mha = getattr(config, "sparse_mla_mha_mode", "auto") == "dense"
+    if force_mqa:
+        has_decode = True
+        has_prefill = False
+    elif is_sparse:
+        has_decode = metadata.num_decode_tokens > 0
+        has_prefill = metadata.num_prefills > 0
+    else:
+        has_decode = metadata.decode is not None
+        has_prefill = metadata.prefill is not None
     if not has_decode and not has_prefill:
         raise RuntimeError("Metadata has neither decode nor prefill metadata")
+    if is_sparse and force_dense_mha and not has_prefill:
+        raise RuntimeError(
+            "Sparse MLA dense_mha benchmark did not produce prefill metadata. "
+            "Check reorder_batch_threshold/path forcing."
+        )
 
     num_decode = (
         metadata.num_decode_tokens
@@ -871,7 +946,6 @@ def _run_single_benchmark(
                 metadata,
                 prefill_inputs["k_scale"],
                 prefill_fp8_output if fused_output else prefill_inputs["output"],
-                prefill_output_scale if fused_output else None,
             )
             if fused_output:
                 out = prefill_fp8_output
@@ -888,6 +962,48 @@ def _run_single_benchmark(
 
     if config.ncu_profile:
         run_ncu_profile(benchmark_fn)
+        return BenchmarkResult(
+            config=config,
+            mean_time=0.0,
+            median_time=0.0,
+            std_time=0.0,
+            min_time=0.0,
+            max_time=0.0,
+            throughput_tokens_per_sec=0.0,
+        )
+
+    if config.torch_profile:
+        profile_dir = Path(
+            config.torch_profile_dir or "benchmark_outputs/torch_profiles"
+        )
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        trace_name = _safe_profile_name(f"{config.backend}_{config.batch_spec}")
+        trace_path = profile_dir / f"{trace_name}.json"
+        iters = max(config.torch_profile_iters, 1)
+
+        forward_fn()
+        torch.accelerator.synchronize()
+        with torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=False,
+        ) as prof:
+            for _ in range(iters):
+                forward_fn()
+                torch.accelerator.synchronize()
+                prof.step()
+        prof.export_chrome_trace(str(trace_path))
+        print(f"Saved PyTorch profiler trace to {trace_path}")
+        print(
+            prof.key_averages().table(
+                sort_by="cuda_time_total",
+                row_limit=25,
+            )
+        )
         return BenchmarkResult(
             config=config,
             mean_time=0.0,
@@ -920,6 +1036,7 @@ def _run_mla_benchmark_batched(
     configs_with_params: list[tuple],  # [(config, threshold, num_splits), ...]
     index_topk: int = 2048,
     prefill_backend: str | None = None,
+    sparse_mla_force_mqa: bool = False,
     output_scale: float | None = None,
     fuse_quant_op: bool = False,
 ) -> list[BenchmarkResult]:
@@ -940,6 +1057,8 @@ def _run_mla_benchmark_batched(
         index_topk: Topk value for sparse MLA backends (default 2048)
         prefill_backend: Prefill backend name (e.g., "fa3", "fa4").
             When set, forces the specified FlashAttention version for prefill.
+        sparse_mla_force_mqa: If True, forces all sparse MLA tokens through
+            forward_mqa (even prefill tokens).
 
     Returns:
         List of BenchmarkResult objects
@@ -980,21 +1099,41 @@ def _run_mla_benchmark_batched(
         sum(r.q_len for r in parse_batch_spec(cfg.batch_spec))
         for cfg, *_ in configs_with_params
     )
+    max_model_len = max(
+        max_total_q,
+        max(
+            getattr(cfg, "max_model_len", None) or 32768
+            for cfg, *_ in configs_with_params
+        ),
+    )
 
     # Create and set vLLM config for MLA (reused across all benchmarks)
     vllm_config = create_minimal_vllm_config(
         model_name="deepseek-v3",  # Used only for model path
         block_size=block_size,
         max_num_batched_tokens=max_total_q,
+        max_model_len=max_model_len,
         mla_dims=mla_dims,  # Use custom dims from config or default
         index_topk=index_topk if is_sparse else None,
         prefill_backend=prefill_backend,
         kv_cache_dtype=kv_cache_dtype,
+        sparse_mla_force_mqa=sparse_mla_force_mqa,
     )
 
     results = []
 
+    # Initialize workspace manager (needed by metadata builders)
+    from vllm.v1.worker.workspace import (
+        init_workspace_manager,
+        is_workspace_manager_initialized,
+    )
+
+    if not is_workspace_manager_initialized():
+        init_workspace_manager(device)
+
     with set_current_vllm_config(vllm_config):
+        _ensure_single_rank_model_parallel()
+
         # Create backend impl, layer, builder, and indexer (reused across benchmarks)
         impl, layer, builder_instance, indexer = _create_backend_impl(
             backend_cfg,
@@ -1040,9 +1179,20 @@ def _run_mla_benchmark_batched(
         for config, threshold, num_splits in configs_with_params:
             # Set threshold for this benchmark (FlashAttn/FlashMLA only)
             original_threshold = None
-            if threshold is not None and builder_instance:
+            effective_threshold = threshold
+            force_dense_mha = (
+                is_sparse
+                and getattr(config, "sparse_mla_mha_mode", "auto") == "dense"
+                and not getattr(config, "sparse_mla_force_mqa", False)
+            )
+            if force_dense_mha:
+                # Sparse MLA normally treats q_len <= 1 as decode. Use an
+                # impossible threshold so dense_mha benchmarks actually run
+                # the prefill/MHA path, including q_len=1 short extends.
+                effective_threshold = -1
+            if effective_threshold is not None and builder_instance:
                 original_threshold = builder_instance.reorder_batch_threshold
-                builder_instance.reorder_batch_threshold = threshold
+                builder_instance.reorder_batch_threshold = effective_threshold
 
             # Set num_splits for CUTLASS
             original_num_splits = None
@@ -1090,6 +1240,7 @@ def run_mla_benchmark(
     num_kv_splits: int | None = None,
     index_topk: int = 2048,
     prefill_backend: str | None = None,
+    sparse_mla_force_mqa: bool = False,
     output_scale: float | None = None,
     fuse_quant_op: bool = False,
 ) -> BenchmarkResult | list[BenchmarkResult]:
@@ -1111,6 +1262,8 @@ def run_mla_benchmark(
         index_topk: Topk value for sparse MLA backends (default 2048)
         prefill_backend: Prefill backend name (e.g., "fa3", "fa4").
             When set, forces the specified FlashAttention version for prefill.
+        sparse_mla_force_mqa: If True, forces all sparse MLA tokens through
+            forward_mqa (even prefill tokens).
         output_scale: Static per-tensor FP8 scale for prefill output (None = bf16).
         fuse_quant_op: With output_scale set, fuse the FP8 write into the prefill
             kernel vs a standalone post-quant kernel. See _run_single_benchmark.
@@ -1142,6 +1295,7 @@ def run_mla_benchmark(
         configs_with_params,
         index_topk,
         prefill_backend=prefill_backend,
+        sparse_mla_force_mqa=sparse_mla_force_mqa,
         output_scale=output_scale,
         fuse_quant_op=fuse_quant_op,
     )

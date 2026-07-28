@@ -210,7 +210,7 @@ def persistent_masked_m_silu_mul_quant(
         DeepGemmQuantScaleFMT.UE8M0,
     ]
 
-    device_capability = current_platform.get_device_capability(device_id=y.device.index)
+    device_capability = current_platform.get_device_capability()
     assert device_capability is not None
     cuda_arch = device_capability.to_int()
 

@@ -5,7 +5,7 @@ from collections.abc import Iterable
 
 from typing_extensions import override
 
-from vllm.v1.kv_offload.base import OffloadKey
+from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
 
 
@@ -39,7 +39,7 @@ class LRUCachePolicy(CachePolicy):
         self.evictable_blocks.pop(key, None)
 
     @override
-    def touch(self, keys: Iterable[OffloadKey]) -> None:
+    def touch(self, keys: Iterable[OffloadKey], req_context: ReqContext) -> None:
         for key in reversed(list(keys)):
             if key in self.evictable_blocks:
                 self.evictable_blocks.move_to_end(key)
