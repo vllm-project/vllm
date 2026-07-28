@@ -66,8 +66,14 @@ def make_weights(
 
     # per-out-channel weight quantization
     assert dtype == current_platform.fp8_dtype()
-    w1 = torch.empty((e, 2 * n, k), device="cuda", dtype=torch.float16)
-    w2 = torch.empty((e, k, n), device="cuda", dtype=torch.float16)
+    # Keep FP8 inputs finite and bounded. torch.empty made this test depend on
+    # allocator contents, while larger values exceed its fixed W8A8 tolerance.
+    w1 = torch.randn(
+        (e, 2 * n, k), device=current_platform.device_type, dtype=torch.float16
+    ).div_(100)
+    w2 = torch.randn(
+        (e, k, n), device=current_platform.device_type, dtype=torch.float16
+    ).div_(100)
 
     n_b_scales = 2 * n
     k_b_scales = k
