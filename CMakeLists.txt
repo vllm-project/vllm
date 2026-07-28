@@ -416,8 +416,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/libtorch_stable/mamba/selective_scan_fwd.cu"
     "csrc/libtorch_stable/cache_kernels.cu"
     "csrc/libtorch_stable/cache_kernels_fused.cu"
+    "csrc/libtorch_stable/custom_all_gather_reduce_scatter.cu"
+    "csrc/libtorch_stable/custom_all_gather_reduce_scatter_ops.cpp"
     "csrc/libtorch_stable/custom_all_reduce.cu"
-    "csrc/libtorch_stable/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu")
+    "csrc/libtorch_stable/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu"
+    "csrc/libtorch_stable/fused_kimi_k3_mla_key_concat_kv_cache_kernel.cu")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA" AND
      DEFINED CMAKE_CUDA_COMPILER_VERSION AND

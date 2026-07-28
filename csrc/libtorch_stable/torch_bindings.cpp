@@ -324,7 +324,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // DeepSeek V3 fused A GEMM (SM 9.0+, bf16 only, 1-16 tokens).
   // conditionally compiled so impl registration is in source file
   ops.def(
-      "dsv3_fused_a_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
+      "dsv3_fused_a_gemm(Tensor! output, Tensor mat_a, Tensor mat_b, "
+      "bool enable_pdl=False) -> ()");
 
   // BF16/FP32 x FP32 -> FP32 router GEMM for H=3072, E=256, M<=32 (SM90+).
   // conditionally compiled so impl registration is in source file
@@ -447,6 +448,48 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor fp8_scale, Tensor q_fp8_scale_inv, float eps, "
       "int cache_block_size) -> ()");
 
+  // Kimi-K3 MLA epilogues: optional RoPE followed by concat/cache insertion.
+  ops.def(
+      "fused_kimi_k3_mla_key_concat_kv_cache_insert("
+      "Tensor! q, Tensor k_nope, Tensor k_pe, Tensor kv_c_normed, "
+      "Tensor! k_out, Tensor! k_cache, Tensor slot_mapping, "
+      "int cache_block_size, Tensor? position_ids=None, "
+      "Tensor? cos_sin_cache=None) -> ()");
+  ops.def(
+      "fused_kimi_k3_mla_key_concat_ds_mla_insert("
+      "Tensor! q, Tensor k_nope, Tensor k_pe, Tensor kv_c_normed, "
+      "Tensor! k_out, Tensor! k_cache, Tensor slot_mapping, "
+      "int cache_block_size, Tensor? position_ids=None, "
+      "Tensor? cos_sin_cache=None) -> ()");
+  ops.def(
+      "fused_kimi_k3_mla_qkv_quant_kv_cache_fp8_insert("
+      "Tensor q, Tensor k_nope, Tensor k_pe, Tensor kv_c_normed, Tensor v, "
+      "Tensor! q_fp8, Tensor! k_fp8, Tensor! v_fp8, Tensor! k_cache, "
+      "Tensor slot_mapping, Tensor q_scale_inv, Tensor k_scale_inv, "
+      "Tensor v_scale_inv, Tensor cache_scale_inv, int cache_block_size, "
+      "Tensor? position_ids=None, Tensor? cos_sin_cache=None) -> ()");
+
+  // Kimi-K3 MLA decode epilogue: concat mqa_q = [ql_nope | q_pe] and insert the
+  // latent [kv_c_normed | k_pe] into the paged cache (bf16 / fp8 / fp8_ds_mla).
+  ops.def(
+      "fused_kimi_k3_mla_decode_q_concat_kv_cache_insert("
+      "Tensor ql_nope, Tensor q_pe, Tensor kv_c_normed, Tensor k_pe, "
+      "Tensor! mqa_q, Tensor! k_cache, Tensor slot_mapping, "
+      "int cache_block_size, Tensor? position_ids=None, "
+      "Tensor? cos_sin_cache=None) -> ()");
+  ops.def(
+      "fused_kimi_k3_mla_decode_q_concat_kv_cache_fp8_insert("
+      "Tensor ql_nope, Tensor q_pe, Tensor kv_c_normed, Tensor k_pe, "
+      "Tensor! mqa_q, Tensor! k_cache, Tensor slot_mapping, "
+      "Tensor q_scale_inv, Tensor cache_scale_inv, int cache_block_size, "
+      "Tensor? position_ids=None, Tensor? cos_sin_cache=None) -> ()");
+  ops.def(
+      "fused_kimi_k3_mla_decode_q_concat_ds_mla_insert("
+      "Tensor ql_nope, Tensor q_pe, Tensor kv_c_normed, Tensor k_pe, "
+      "Tensor! mqa_q, Tensor! k_cache, Tensor slot_mapping, "
+      "int cache_block_size, Tensor? position_ids=None, "
+      "Tensor? cos_sin_cache=None) -> ()");
+
 #ifndef USE_ROCM
   ops.def(
       "minimax_allreduce_rms_qk("
@@ -547,6 +590,11 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "swigluoai_and_mul(Tensor! out, Tensor input, float alpha=1.702, float "
       "limit=7.0) "
       "-> ()");
+
+  // Kimi SITU (SituGLU) gated activation. linear_beta<=0 means unset.
+  ops.def(
+      "situ_and_mul(Tensor! out, Tensor input, float beta=1.0, float "
+      "linear_beta=-1.0) -> ()");
 
   // GELU implementation used in GPT-2.
   ops.def("gelu_new(Tensor! out, Tensor input) -> ()");
@@ -706,6 +754,18 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl(
       "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert",
       TORCH_BOX(&fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert));
+  ops.impl("fused_kimi_k3_mla_key_concat_kv_cache_insert",
+           TORCH_BOX(&fused_kimi_k3_mla_key_concat_kv_cache_insert));
+  ops.impl("fused_kimi_k3_mla_key_concat_ds_mla_insert",
+           TORCH_BOX(&fused_kimi_k3_mla_key_concat_ds_mla_insert));
+  ops.impl("fused_kimi_k3_mla_qkv_quant_kv_cache_fp8_insert",
+           TORCH_BOX(&fused_kimi_k3_mla_qkv_quant_kv_cache_fp8_insert));
+  ops.impl("fused_kimi_k3_mla_decode_q_concat_kv_cache_insert",
+           TORCH_BOX(&fused_kimi_k3_mla_decode_q_concat_kv_cache_insert));
+  ops.impl("fused_kimi_k3_mla_decode_q_concat_kv_cache_fp8_insert",
+           TORCH_BOX(&fused_kimi_k3_mla_decode_q_concat_kv_cache_fp8_insert));
+  ops.impl("fused_kimi_k3_mla_decode_q_concat_ds_mla_insert",
+           TORCH_BOX(&fused_kimi_k3_mla_decode_q_concat_ds_mla_insert));
 #ifndef USE_ROCM
   ops.impl("minimax_allreduce_rms_qk", TORCH_BOX(&minimax_allreduce_rms_qk));
 #endif
@@ -740,6 +800,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("gelu_tanh_and_mul", TORCH_BOX(&gelu_tanh_and_mul));
   ops.impl("fatrelu_and_mul", TORCH_BOX(&fatrelu_and_mul));
   ops.impl("swigluoai_and_mul", TORCH_BOX(&swigluoai_and_mul));
+  ops.impl("situ_and_mul", TORCH_BOX(&situ_and_mul));
   ops.impl("gelu_new", TORCH_BOX(&gelu_new));
   ops.impl("gelu_fast", TORCH_BOX(&gelu_fast));
   ops.impl("gelu_quick", TORCH_BOX(&gelu_quick));
@@ -836,6 +897,15 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                     Tensor slot_mapping,"
       "                     str kv_cache_dtype,"
       "                     Tensor scale) -> ()");
+
+  // Grouped concat_and_cache_mla across all layers (bf16 only). Each
+  // layer's cache base pointer is read from kv_cache_ptrs.
+  ops.def(
+      "concat_and_cache_mla_grouped(Tensor kv_c, Tensor k_pe,"
+      "                             Tensor kv_cache_ptrs,"
+      "                             Tensor slot_mapping,"
+      "                             int block_size, int block_stride,"
+      "                             int entry_stride) -> ()");
 
   // Rotate Q and K, then write to kv cache for MLA
   ops.def(
@@ -935,6 +1005,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C_cache_ops, CUDA, ops) {
   ops.impl("reshape_and_cache", TORCH_BOX(&reshape_and_cache));
   ops.impl("reshape_and_cache_flash", TORCH_BOX(&reshape_and_cache_flash));
   ops.impl("concat_and_cache_mla", TORCH_BOX(&concat_and_cache_mla));
+  ops.impl("concat_and_cache_mla_grouped",
+           TORCH_BOX(&concat_and_cache_mla_grouped));
   ops.impl("concat_and_cache_mla_rope_fused",
            TORCH_BOX(&concat_and_cache_mla_rope_fused));
   ops.impl("convert_fp8", TORCH_BOX(&convert_fp8));

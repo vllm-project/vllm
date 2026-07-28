@@ -276,6 +276,61 @@ void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
     torch::stable::Tensor const& cos_sin_cache, double eps,
     int64_t cache_block_size);
 
+void fused_kimi_k3_mla_key_concat_kv_cache_insert(
+    torch::stable::Tensor& q, torch::stable::Tensor const& k_nope,
+    torch::stable::Tensor const& k_pe, torch::stable::Tensor const& kv_c_normed,
+    torch::stable::Tensor& k_out, torch::stable::Tensor& k_cache,
+    torch::stable::Tensor const& slot_mapping, int64_t cache_block_size,
+    std::optional<torch::stable::Tensor> position_ids,
+    std::optional<torch::stable::Tensor> cos_sin_cache);
+
+void fused_kimi_k3_mla_key_concat_ds_mla_insert(
+    torch::stable::Tensor& q, torch::stable::Tensor const& k_nope,
+    torch::stable::Tensor const& k_pe, torch::stable::Tensor const& kv_c_normed,
+    torch::stable::Tensor& k_out, torch::stable::Tensor& k_cache,
+    torch::stable::Tensor const& slot_mapping, int64_t cache_block_size,
+    std::optional<torch::stable::Tensor> position_ids,
+    std::optional<torch::stable::Tensor> cos_sin_cache);
+
+void fused_kimi_k3_mla_qkv_quant_kv_cache_fp8_insert(
+    torch::stable::Tensor const& q, torch::stable::Tensor const& k_nope,
+    torch::stable::Tensor const& k_pe, torch::stable::Tensor const& kv_c_normed,
+    torch::stable::Tensor const& v, torch::stable::Tensor& q_fp8,
+    torch::stable::Tensor& k_fp8, torch::stable::Tensor& v_fp8,
+    torch::stable::Tensor& k_cache, torch::stable::Tensor const& slot_mapping,
+    torch::stable::Tensor const& q_scale_inv,
+    torch::stable::Tensor const& k_scale_inv,
+    torch::stable::Tensor const& v_scale_inv,
+    torch::stable::Tensor const& cache_scale_inv, int64_t cache_block_size,
+    std::optional<torch::stable::Tensor> position_ids,
+    std::optional<torch::stable::Tensor> cos_sin_cache);
+
+void fused_kimi_k3_mla_decode_q_concat_kv_cache_insert(
+    torch::stable::Tensor const& ql_nope, torch::stable::Tensor const& q_pe,
+    torch::stable::Tensor const& kv_c_normed, torch::stable::Tensor const& k_pe,
+    torch::stable::Tensor& mqa_q, torch::stable::Tensor& k_cache,
+    torch::stable::Tensor const& slot_mapping, int64_t cache_block_size,
+    std::optional<torch::stable::Tensor> position_ids,
+    std::optional<torch::stable::Tensor> cos_sin_cache);
+
+void fused_kimi_k3_mla_decode_q_concat_kv_cache_fp8_insert(
+    torch::stable::Tensor const& ql_nope, torch::stable::Tensor const& q_pe,
+    torch::stable::Tensor const& kv_c_normed, torch::stable::Tensor const& k_pe,
+    torch::stable::Tensor& mqa_q, torch::stable::Tensor& k_cache,
+    torch::stable::Tensor const& slot_mapping,
+    torch::stable::Tensor const& q_scale_inv,
+    torch::stable::Tensor const& cache_scale_inv, int64_t cache_block_size,
+    std::optional<torch::stable::Tensor> position_ids,
+    std::optional<torch::stable::Tensor> cos_sin_cache);
+
+void fused_kimi_k3_mla_decode_q_concat_ds_mla_insert(
+    torch::stable::Tensor const& ql_nope, torch::stable::Tensor const& q_pe,
+    torch::stable::Tensor const& kv_c_normed, torch::stable::Tensor const& k_pe,
+    torch::stable::Tensor& mqa_q, torch::stable::Tensor& k_cache,
+    torch::stable::Tensor const& slot_mapping, int64_t cache_block_size,
+    std::optional<torch::stable::Tensor> position_ids,
+    std::optional<torch::stable::Tensor> cos_sin_cache);
+
 void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
     torch::stable::Tensor const& q, torch::stable::Tensor const& kv,
     torch::stable::Tensor& q_fp8, torch::stable::Tensor& k_cache,
@@ -396,6 +451,20 @@ fptr_t init_custom_ar(const std::vector<int64_t>& fake_ipc_ptrs,
 void all_reduce(fptr_t _fa, torch::stable::Tensor& inp,
                 torch::stable::Tensor& out, fptr_t reg_buffer,
                 int64_t reg_buffer_sz_bytes);
+void custom_all_gather(fptr_t _fa, torch::stable::Tensor& inp,
+                       torch::stable::Tensor& out, fptr_t reg_buffer,
+                       int64_t reg_buffer_sz_bytes);
+void mnnvl_lamport_all_gather(fptr_t _fa, torch::stable::Tensor& inp,
+                              torch::stable::Tensor& out, fptr_t local_buffer,
+                              fptr_t multicast_buffer, fptr_t epoch_buffer,
+                              int64_t stage_sz_bytes);
+void custom_reduce_scatter(fptr_t _fa, torch::stable::Tensor& inp,
+                           torch::stable::Tensor& out, fptr_t reg_buffer,
+                           int64_t reg_buffer_sz_bytes);
+void mnnvl_lamport_reduce_scatter(fptr_t _fa, torch::stable::Tensor& inp,
+                                  torch::stable::Tensor& out,
+                                  fptr_t local_buffer, fptr_t epoch_buffer,
+                                  int64_t stage_sz_bytes);
 void dispose(fptr_t _fa);
 int64_t meta_size();
 void register_buffer(fptr_t _fa, const std::vector<int64_t>& fake_ipc_ptrs);
@@ -434,6 +503,8 @@ void fatrelu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
                      double threshold);
 void swigluoai_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
                        double alpha = 1.702, double limit = 7.0);
+void situ_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
+                  double beta = 1.0, double linear_beta = -1.0);
 void gelu_new(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_fast(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_quick(torch::stable::Tensor& out, torch::stable::Tensor& input);
@@ -509,6 +580,13 @@ void concat_and_cache_mla(torch::stable::Tensor& kv_c,
                           torch::stable::Tensor& slot_mapping,
                           const std::string& kv_cache_dtype,
                           torch::stable::Tensor& scale);
+
+void concat_and_cache_mla_grouped(torch::stable::Tensor& kv_c,
+                                  torch::stable::Tensor& k_pe,
+                                  torch::stable::Tensor& kv_cache_ptrs,
+                                  torch::stable::Tensor& slot_mapping,
+                                  int64_t block_size, int64_t block_stride,
+                                  int64_t entry_stride);
 
 // NOTE: k_pe and kv_c order is flipped compared to concat_and_cache_mla
 void concat_and_cache_mla_rope_fused(
