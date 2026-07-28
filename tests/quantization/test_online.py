@@ -223,7 +223,7 @@ def test_online_quant_load_format_dummy(
 )
 @pytest.mark.parametrize("gated", [True, False])
 def test_online_moe_fp8_per_block_end_to_end(
-    gated: bool, workspace_init, monkeypatch
+    gated: bool, dist_init, workspace_init, monkeypatch
 ) -> None:
     """Online fp8 MoE: weight creation, weight loading, post-loading
     processing and a kernel run, for gated and non-gated layouts.
@@ -240,11 +240,6 @@ def test_online_moe_fp8_per_block_end_to_end(
     from tests.kernels.utils import torch_experts
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.config.quantization import QuantizationConfigArgs
-    from vllm.distributed.parallel_state import (
-        init_distributed_environment,
-        initialize_model_parallel,
-        model_parallel_is_initialized,
-    )
     from vllm.forward_context import set_forward_context
     from vllm.model_executor.layers.fused_moe import fused_topk
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -258,20 +253,9 @@ def test_online_moe_fp8_per_block_end_to_end(
     device = torch.device("cuda")
     activation = MoEActivation.SILU if gated else MoEActivation.RELU2_NO_MUL
 
-    quant_config = OnlineQuantizationConfig(
-        QuantizationConfigArgs(moe="fp8_per_block")
-    )
+    quant_config = OnlineQuantizationConfig(QuantizationConfigArgs(moe="fp8_per_block"))
     vllm_config = VllmConfig()
     with set_current_vllm_config(vllm_config):
-        if not model_parallel_is_initialized():
-            init_distributed_environment(
-                world_size=1,
-                rank=0,
-                local_rank=0,
-                distributed_init_method="tcp://127.0.0.1:29537",
-                backend="nccl",
-            )
-            initialize_model_parallel(tensor_model_parallel_size=1)
         layer = FusedMoE(
             num_experts=e,
             top_k=top_k,
@@ -316,7 +300,19 @@ def test_online_moe_fp8_per_block_end_to_end(
         )
 
         # Post-loading processing: zero the pad rows and quantize to fp8.
-        layer._quant_method.process_weights_after_loading(experts)
+        # Check the zeroing directly rather than through the kernel: w2's pad
+        # columns are zeroed unconditionally, so a non-zeroed w13 pad row is
+        # multiplied by zero and would not show up in the output, but it does
+        # contaminate the shared per-block weight scale.
+        quant_method = layer._quant_method
+        quant_method._zero_padding(experts)
+        w13_shard = experts.w13_weight.shape[1] // num_shards
+        for s in range(num_shards):
+            pad_rows = experts.w13_weight[:, s * w13_shard + n : (s + 1) * w13_shard]
+            assert pad_rows.abs().max().item() == 0.0, (
+                f"w13 shard {s} pad rows were not zeroed"
+            )
+        quant_method.process_weights_after_loading(experts)
 
         # Kernel run against a bf16 reference over the unpadded weights.
         x = torch.randn(m, k, dtype=dtype, device=device) / 10
@@ -328,4 +324,8 @@ def test_online_moe_fp8_per_block_end_to_end(
             x, router_logits.float(), top_k, renormalize=False
         )
         ref = torch_experts(x, w13, w2, topk_weights, topk_ids, activation=activation)
-        torch.testing.assert_close(out, ref, atol=5e-2, rtol=5e-2)
+        # Keep the comparison non-vacuous: the tolerance must stay well below
+        # the signal, so a zeroed or dropped w13 shard cannot pass. Measured
+        # fp8 error here is ~1.4e-3 against a ~1.2e-2 signal.
+        assert ref.float().abs().max() > 1e-2
+        torch.testing.assert_close(out, ref, atol=5e-3, rtol=5e-2)
