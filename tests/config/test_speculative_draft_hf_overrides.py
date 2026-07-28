@@ -86,7 +86,7 @@ def test_arch_mapping_applies_before_callable_override():
 
 
 @pytest.mark.cpu_test
-def test_inkling_override_exposes_only_first_mtp_depth():
+def test_inkling_override_exposes_all_mtp_depths():
     text_config = _make_hf_config(
         architectures=["InklingForCausalLM"],
         model_type="inkling_model",
@@ -107,7 +107,9 @@ def test_inkling_override_exposes_only_first_mtp_depth():
     assert out is text_config
     assert out.model_type == "inkling_mtp"
     assert out.architectures == ["InklingMTPModel"]
-    assert out.n_predict == 1
+    # Multi-module MTP: every checkpoint depth is exposed (module i drafts
+    # speculative token i), no longer clamped to the first depth.
+    assert out.n_predict == 8
     assert out.num_nextn_predict_layers == 8
     assert out.chain_hidden_post_norm is False
     assert out.local_layer_ids == [0, 2, 4]
