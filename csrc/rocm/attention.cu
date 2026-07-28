@@ -564,6 +564,11 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
     // head_dim, x] Address for v[block][head][token t][dim d]:
     //   chunk = t / x,  sub = t % x
     //   addr = base + chunk * head_dim * x + d * x + sub
+    // Each 16B fetch reads KX_V contiguous elements within a single chunk, so
+    // a lane's token offset must land on a chunk boundary. This holds only
+    // when BLOCK_SIZE is a multiple of KX_V.
+    static_assert(BLOCK_SIZE % KX_V == 0,
+                  "Interleaved V-cache read requires BLOCK_SIZE % KX_V == 0");
     const cache_t* v_ptr_head = v_cache + wg_start_kv_head_idx * kv_head_stride;
     for (int vhe_depth = 0; vhe_depth < VHELOOP; vhe_depth++) {
       const int vhead_elem = vhe_depth * NWARPS * 16 + warpid * 16 + lane16id;

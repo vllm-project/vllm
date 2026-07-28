@@ -392,6 +392,12 @@ def triton_reshape_and_cache_flash(
     head_size = key.shape[2]
 
     use_head_major_layout = key_cache.ndim == 5
+    if interleaved_v_pack_factor and not use_head_major_layout:
+        raise NotImplementedError(
+            "Interleaved V-cache write is only implemented for the head-major "
+            "(5D) cache layout; got a non-head-major cache with "
+            f"interleaved_v_pack_factor={interleaved_v_pack_factor}."
+        )
     if use_head_major_layout:
         block_size = key_cache.shape[3]
         x = key_cache.shape[4]
