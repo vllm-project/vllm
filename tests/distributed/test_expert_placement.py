@@ -9,7 +9,10 @@ import torch
 from vllm.model_executor.layers.fused_moe.expert_map_manager import (
     determine_expert_map,
 )
-from vllm.model_executor.layers.fused_moe.riy import build_riy_prune_map
+from vllm.model_executor.layers.fused_moe.riy import (
+    build_riy_layer_prune_plan,
+    load_riy_profile,
+)
 
 
 def verify_round_robin_pattern(expert_map, ep_rank, ep_size, global_num_experts):
@@ -141,31 +144,111 @@ def test_expert_placement_edge_cases(expert_placement_strategy, world_size):
         )
 
 
-def test_riy_profile_builds_per_layer_prune_map(tmp_path):
+def test_riy_v1_profile_defaults_to_pre_topk_mask(tmp_path):
     profile_path = tmp_path / "profile.json"
-    profile_path.write_text(json.dumps({"pruned_experts": [[0, 1], [1, 2]]}))
-
-    num_kept, expert_map, logit_mask = build_riy_prune_map(
-        layer_idx=0,
-        original_num_experts=4,
-        profile_path=str(profile_path),
+    profile_path.write_text(
+        json.dumps({"version": 1, "pruned_experts": [[0, 1], [1, 2]]})
     )
 
-    assert num_kept == 3
-    assert expert_map.tolist() == [0, -1, 1, 2]
-    assert logit_mask.tolist() == [0.0, float("-inf"), 0.0, 0.0]
+    profile = load_riy_profile(str(profile_path), num_layers=2, num_experts=4)
+    plan = build_riy_layer_prune_plan(profile, layer_idx=0, top_k=2)
+
+    assert profile.routing_mode == "pre_topk_mask"
+    assert plan.routing_mode == "pre_topk_mask"
+    assert plan.num_kept == 3
+    assert plan.expert_map.tolist() == [0, -1, 1, 2]
+    assert plan.pre_topk_logit_mask.tolist() == [
+        0.0,
+        float("-inf"),
+        0.0,
+        0.0,
+    ]
+    assert plan.post_topk_drop_mask is None
+
+
+def test_riy_v2_profile_requires_routing_mode(tmp_path):
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(json.dumps({"version": 2, "pruned_experts": []}))
+
+    with pytest.raises(ValueError, match="routing_mode"):
+        load_riy_profile(str(profile_path), num_layers=2, num_experts=4)
+
+
+@pytest.mark.parametrize("version", [0, 3])
+def test_riy_profile_rejects_unknown_version(tmp_path, version):
+    profile_path = tmp_path / f"profile-{version}.json"
+    profile_path.write_text(json.dumps({"version": version, "pruned_experts": []}))
+
+    with pytest.raises(ValueError, match="Unsupported RIY profile version"):
+        load_riy_profile(str(profile_path), num_layers=2, num_experts=4)
+
+
+def test_riy_profile_rejects_unknown_routing_mode(tmp_path):
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "routing_mode": "replace_with_next_expert",
+                "pruned_experts": [],
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="Unsupported RIY routing_mode"):
+        load_riy_profile(str(profile_path), num_layers=2, num_experts=4)
 
 
 def test_riy_profile_rejects_out_of_range_expert(tmp_path):
     profile_path = tmp_path / "profile.json"
-    profile_path.write_text(json.dumps({"pruned_experts": [[0, 4]]}))
+    profile_path.write_text(json.dumps({"version": 1, "pruned_experts": [[0, 4]]}))
 
     with pytest.raises(ValueError, match="out of range"):
-        build_riy_prune_map(
-            layer_idx=0,
-            original_num_experts=4,
-            profile_path=str(profile_path),
+        load_riy_profile(str(profile_path), num_layers=2, num_experts=4)
+
+
+def test_riy_profile_rejects_duplicate_entries(tmp_path):
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(
+        json.dumps({"version": 1, "pruned_experts": [[0, 1], [0, 1]]})
+    )
+
+    with pytest.raises(ValueError, match="Duplicate pruned expert"):
+        load_riy_profile(str(profile_path), num_layers=2, num_experts=4)
+
+
+def test_post_topk_drop_plan_permits_fewer_kept_experts_than_topk(tmp_path):
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "routing_mode": "post_topk_drop",
+                "pruned_experts": [[0, 1], [0, 2]],
+            }
         )
+    )
+    profile = load_riy_profile(str(profile_path), num_layers=1, num_experts=4)
+
+    plan = build_riy_layer_prune_plan(profile, layer_idx=0, top_k=3)
+
+    assert plan.routing_mode == "post_topk_drop"
+    assert plan.num_kept == 2
+    assert plan.expert_filter.tolist() == [True, False, False, True]
+    assert plan.expert_map.tolist() == [0, -1, -1, 1]
+    assert plan.pre_topk_logit_mask is None
+    assert plan.post_topk_drop_mask.tolist() == [False, True, True, False]
+
+
+def test_pre_topk_mask_still_requires_at_least_topk_experts(tmp_path):
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(
+        json.dumps({"version": 1, "pruned_experts": [[0, 1], [0, 2]]})
+    )
+    profile = load_riy_profile(str(profile_path), num_layers=1, num_experts=4)
+
+    with pytest.raises(ValueError, match="top_k"):
+        build_riy_layer_prune_plan(profile, layer_idx=0, top_k=3)
 
 
 def test_expert_filter_compacts_kept_experts_without_ep():

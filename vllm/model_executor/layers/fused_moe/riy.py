@@ -14,6 +14,7 @@ import json
 import os
 import threading
 from dataclasses import dataclass, field
+from typing import Literal
 
 import torch
 
@@ -254,6 +255,155 @@ class RiyState:
         )
         # Weight magnitude: sum of routing weights per expert (on GPU)
         stats.weight_sum.scatter_add_(0, ids_flat, topk_weights.flatten().float())
+
+
+RiyRoutingMode = Literal["pre_topk_mask", "post_topk_drop"]
+_SUPPORTED_RIY_ROUTING_MODES = {"pre_topk_mask", "post_topk_drop"}
+
+
+@dataclass(frozen=True)
+class RiyProfile:
+    """Validated RIY profile contract."""
+
+    version: int
+    routing_mode: RiyRoutingMode
+    pruned_experts: frozenset[tuple[int, int]]
+    num_layers: int
+    num_experts: int
+    model: str | None = None
+    model_revision: str | None = None
+
+
+@dataclass(frozen=True)
+class RiyLayerPrunePlan:
+    """Allocation and routing plan for one MoE layer."""
+
+    routing_mode: RiyRoutingMode
+    num_kept: int
+    expert_filter: torch.Tensor
+    expert_map: torch.Tensor
+    pre_topk_logit_mask: torch.Tensor | None
+    post_topk_drop_mask: torch.Tensor | None
+
+
+_parsed_riy_profile_cache: dict[tuple[str, int, int], RiyProfile] = {}
+
+
+def load_riy_profile(
+    profile_path: str, num_layers: int, num_experts: int
+) -> RiyProfile:
+    """Load and validate a RIY profile before expert allocation."""
+    cache_key = (profile_path, num_layers, num_experts)
+    if cache_key in _parsed_riy_profile_cache:
+        return _parsed_riy_profile_cache[cache_key]
+
+    with open(profile_path) as file:
+        raw_profile = json.load(file)
+    if not isinstance(raw_profile, dict):
+        raise ValueError("RIY profile must be a JSON object")
+
+    version = raw_profile.get("version")
+    if type(version) is not int or version not in (1, 2):
+        raise ValueError(f"Unsupported RIY profile version: {version!r}")
+
+    raw_routing_mode = raw_profile.get("routing_mode")
+    if version == 1:
+        if raw_routing_mode is not None:
+            raise ValueError("RIY version-1 profiles must not define routing_mode")
+        routing_mode: RiyRoutingMode = "pre_topk_mask"
+    else:
+        if raw_routing_mode is None:
+            raise ValueError("RIY version-2 profiles require routing_mode")
+        if raw_routing_mode not in _SUPPORTED_RIY_ROUTING_MODES:
+            raise ValueError(f"Unsupported RIY routing_mode: {raw_routing_mode!r}")
+        routing_mode = raw_routing_mode
+
+    raw_pruned_experts = raw_profile.get("pruned_experts")
+    if not isinstance(raw_pruned_experts, list):
+        raise ValueError("RIY profile must contain a pruned_experts list")
+
+    pruned_experts: set[tuple[int, int]] = set()
+    for entry in raw_pruned_experts:
+        if not (
+            isinstance(entry, list)
+            and len(entry) == 2
+            and all(type(value) is int for value in entry)
+        ):
+            raise ValueError("Each pruned_experts entry must be a [layer, expert] pair")
+        layer_idx, expert_idx = entry
+        if not 0 <= layer_idx < num_layers:
+            raise ValueError(f"Layer index {layer_idx} is out of range")
+        if not 0 <= expert_idx < num_experts:
+            raise ValueError(f"Expert index {expert_idx} is out of range")
+        pair = (layer_idx, expert_idx)
+        if pair in pruned_experts:
+            raise ValueError(f"Duplicate pruned expert entry: {list(pair)}")
+        pruned_experts.add(pair)
+
+    model = raw_profile.get("model")
+    model_revision = raw_profile.get("model_revision")
+    if model is not None and not isinstance(model, str):
+        raise ValueError("RIY profile model must be a string")
+    if model_revision is not None and not isinstance(model_revision, str):
+        raise ValueError("RIY profile model_revision must be a string")
+
+    profile = RiyProfile(
+        version=version,
+        routing_mode=routing_mode,
+        pruned_experts=frozenset(pruned_experts),
+        num_layers=num_layers,
+        num_experts=num_experts,
+        model=model,
+        model_revision=model_revision,
+    )
+    _parsed_riy_profile_cache[cache_key] = profile
+    return profile
+
+
+def build_riy_layer_prune_plan(
+    profile: RiyProfile,
+    layer_idx: int,
+    top_k: int,
+) -> RiyLayerPrunePlan:
+    """Build a mode-explicit allocation and routing plan for one layer."""
+    if not 0 <= layer_idx < profile.num_layers:
+        raise ValueError(f"Layer index {layer_idx} is out of range")
+    num_experts = profile.num_experts
+    pruned_ids = {
+        expert_idx
+        for entry_layer, expert_idx in profile.pruned_experts
+        if entry_layer == layer_idx
+    }
+    expert_filter = torch.ones(num_experts, dtype=torch.bool)
+    if pruned_ids:
+        expert_filter[list(pruned_ids)] = False
+    num_kept = int(expert_filter.sum().item())
+    if num_kept == 0:
+        raise ValueError(f"RIY profile prunes every expert in layer {layer_idx}")
+    if profile.routing_mode == "pre_topk_mask" and num_kept < top_k:
+        raise ValueError(
+            f"RIY profile keeps {num_kept} experts in layer {layer_idx}, "
+            f"but top_k is {top_k}"
+        )
+
+    expert_map = torch.full((num_experts,), -1, dtype=torch.int32)
+    expert_map[expert_filter] = torch.arange(num_kept, dtype=torch.int32)
+    pre_topk_logit_mask = None
+    post_topk_drop_mask = None
+    if profile.routing_mode == "pre_topk_mask":
+        pre_topk_logit_mask = torch.zeros(num_experts, dtype=torch.float32)
+        pre_topk_logit_mask[~expert_filter] = float("-inf")
+    else:
+        post_topk_drop_mask = ~expert_filter
+
+    return RiyLayerPrunePlan(
+        routing_mode=profile.routing_mode,
+        num_kept=num_kept,
+        expert_filter=expert_filter,
+        expert_map=expert_map,
+        pre_topk_logit_mask=pre_topk_logit_mask,
+        post_topk_drop_mask=post_topk_drop_mask,
+    )
 
 
 _riy_profile_cache: dict[str, dict] = {}
