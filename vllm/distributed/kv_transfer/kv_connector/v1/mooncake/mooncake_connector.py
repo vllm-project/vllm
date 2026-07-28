@@ -1679,7 +1679,15 @@ class MooncakeConnectorWorker:
 
         try:
             while True:
-                identity, metadata_bytes = await sock.recv_multipart()
+                frames = await sock.recv_multipart()
+                if len(frames) != 2:
+                    logger.warning(
+                        "Dropped malformed ZMQ envelope with %d frame(s) "
+                        "(expected 2). Possible malicious peer.",
+                        len(frames),
+                    )
+                    continue
+                identity, metadata_bytes = frames
                 # Renew here, not in a sender worker: those can all be
                 # waiting for prefills, and the renewal must not wait.
                 heartbeat = self._decode_heartbeat(metadata_bytes)
@@ -1695,7 +1703,6 @@ class MooncakeConnectorWorker:
         except Exception as e:
             logger.error("Error in Mooncake sender thread: %s. Exiting thread.", str(e))
         finally:
-            # Clean up worker tasks
             for task in sender_tasks:
                 task.cancel()
             await asyncio.gather(*sender_tasks, return_exceptions=True)
