@@ -67,7 +67,13 @@ from .qwen2_5_vl import (
     Qwen2_5_VLVideoPixelInputs,
 )
 from .qwen2_vl import _create_qwen2vl_field_factory
-from .utils import AutoWeightsLoader, IntermediateTensors, WeightsMapper, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    IntermediateTensors,
+    WeightsMapper,
+    get_padded_num_video_frames,
+    maybe_prefix,
+)
 
 
 class MiMoVisionMLP(Qwen2_5_VisionMLP):
@@ -715,7 +721,9 @@ class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
             effective_frames = num_frames * tokens_per_second
         else:
             effective_frames = num_frames
-        padded_num_frames = effective_frames + effective_frames % temporal_patch_size
+        padded_num_frames = get_padded_num_video_frames(
+            effective_frames, temporal_patch_size
+        )
         grid_t = max(padded_num_frames // temporal_patch_size, 1)
         grid_h = preprocessed_size.height // patch_size
         grid_w = preprocessed_size.width // patch_size

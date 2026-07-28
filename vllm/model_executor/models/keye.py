@@ -71,6 +71,7 @@ from .siglip import SiglipMLP
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
+    get_padded_num_video_frames,
     init_vllm_registered_model,
     maybe_prefix,
 )
@@ -983,7 +984,7 @@ class KeyeProcessingInfo(BaseProcessingInfo):
         else:
             preprocessed_size = ImageSize(width=image_width, height=image_height)
 
-        padded_num_frames = num_frames + num_frames % temporal_patch_size
+        padded_num_frames = get_padded_num_video_frames(num_frames, temporal_patch_size)
 
         grid_t = max(padded_num_frames // temporal_patch_size, 1)
         grid_h = preprocessed_size.height // patch_size
