@@ -831,16 +831,23 @@ def test_mm_prompt_tokens_details():
     assert counts == {"image": 600, "video": 1200}
 
     # Gated off, or nothing to report -> no details.
-    assert _make_prompt_tokens_details(False, 5, counts) is None
-    assert _make_prompt_tokens_details(True, None, None) is None
+    assert _make_prompt_tokens_details(False, 5, 0, counts) is None
+    assert _make_prompt_tokens_details(True, None, None, None) is None
 
     # Zero cached_tokens is still reported (not None), matching the cached-only
     # behavior; multimodal counts ride alongside even when cached_tokens is None.
-    assert _make_prompt_tokens_details(True, 0, None).cached_tokens == 0
-    details = _make_prompt_tokens_details(True, None, counts)
+    details = _make_prompt_tokens_details(True, 0, 0, None)
+    assert details.cached_tokens == 0
+    assert details.created_cache_tokens == 0
+    assert details.multimodal_tokens is None
+    details = _make_prompt_tokens_details(True, None, None, counts)
     assert details.cached_tokens is None
+    assert details.created_cache_tokens is None
     assert details.multimodal_tokens == {"image": 600, "video": 1200}
-    assert _make_prompt_tokens_details(True, 3, counts).cached_tokens == 3
+    details = _make_prompt_tokens_details(True, 3, 0, counts)
+    assert details.cached_tokens == 3
+    assert details.created_cache_tokens == 0
+    assert details.multimodal_tokens == {"image": 600, "video": 1200}
 
 
 @pytest.mark.asyncio
@@ -2124,6 +2131,13 @@ async def test_tool_choice_validation_without_parser():
     assert isinstance(response_named, ErrorResponse)
     assert "tool_choice" in response_named.error.message
     assert "--tool-call-parser" in response_named.error.message
+    # The function name should appear in a clean, readable form -
+    # guards against leaking Pydantic's internal repr of the
+    # ChatCompletionNamedToolChoiceParam/ChatCompletionNamedFunction
+    # objects directly into the client-facing error message.
+    assert "get_weather" in response_named.error.message
+    assert "ChatCompletionNamedFunction" not in response_named.error.message
+    assert "ChatCompletionNamedToolChoiceParam" not in response_named.error.message
 
 
 @pytest.mark.asyncio

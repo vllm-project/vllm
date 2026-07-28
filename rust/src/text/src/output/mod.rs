@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Output processing helpers shared by text and chat layers.
 
 pub use decoded::{DecodedTextEvent, Finished, TextDecodeOptions, decoded_text_event_stream};
@@ -26,6 +29,9 @@ pub struct CollectedTextOutput {
     pub usage: vllm_llm::TokenUsage,
     /// Connector-specific KV transfer parameters for disaggregated serving.
     pub kv_transfer_params: Option<serde_json::Value>,
+    /// Connector-specific encoder cache transfer parameters for disaggregated
+    /// serving.
+    pub ec_transfer_params: Option<serde_json::Value>,
 }
 
 #[allow(clippy::manual_async_fn, reason = "specify `Send` bound")]
@@ -77,6 +83,7 @@ impl<T: TextOutputStream> T {
                                 finish_reason: FinishReason::Error,
                                 usage: vllm_llm::TokenUsage::default(),
                                 kv_transfer_params: None,
+                                ec_transfer_params: None,
                             })
                         };
 
@@ -85,6 +92,7 @@ impl<T: TextOutputStream> T {
                             collected.finish_reason = finished.finish_reason;
                             collected.usage = finished.usage;
                             collected.kv_transfer_params = finished.kv_transfer_params;
+                            collected.ec_transfer_params = finished.ec_transfer_params;
                             return Ok(collected);
                         }
                     }
@@ -156,6 +164,7 @@ mod tests {
                     },
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 }),
             }),
         ]);
@@ -273,6 +282,7 @@ mod tests {
                     },
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 }),
             }),
         ]);

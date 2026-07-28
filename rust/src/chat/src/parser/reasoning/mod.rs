@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Reasoning parser registration and selection boundary for `vllm-chat`.
 
 use std::sync::{Arc, LazyLock};
@@ -20,6 +23,7 @@ pub mod names {
     pub const DEEPSEEK_V3: &str = "deepseek_v3";
     pub const DEEPSEEK_V4: &str = "deepseek_v4";
     pub const GEMMA4: &str = "gemma4";
+    pub const INKLING: &str = "inkling";
     pub const GLM45: &str = "glm45";
     pub const KIMI: &str = "kimi";
     pub const KIMI_K2: &str = "kimi_k2";
@@ -60,6 +64,7 @@ impl ReasoningParserFactory {
             .register_parser::<DeepSeekV3ReasoningParser>(names::DEEPSEEK_V3)
             .register_parser::<DeepSeekV4ReasoningParser>(names::DEEPSEEK_V4)
             .register_unified_dummy(names::GEMMA4)
+            .register_unified_dummy(names::INKLING)
             .register_parser::<Glm45ReasoningParser>(names::GLM45)
             .register_parser::<KimiReasoningParser>(names::KIMI)
             .register_parser::<KimiK2ReasoningParser>(names::KIMI_K2)

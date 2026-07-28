@@ -499,7 +499,7 @@ class LlamaBidirectionalConfig(VerifyAndUpdateConfig):
             "last": "LAST",
         }
 
-        pooling_type = pooling_type_map.get(hf_config.pooling, None)
+        pooling_type = pooling_type_map.get(hf_config.pooling)
         if pooling_type is None:
             raise ValueError(f"pool_type {hf_config.pooling!r} not supported")
 
@@ -769,17 +769,41 @@ class Qwen3_5ForConditionalGenerationConfig(VerifyAndUpdateConfig):
 
 
 class ColQwen3_5Config(Qwen3_5ForConditionalGenerationConfig):
-    """ColQwen3.5 (late-interaction retrieval) inherits Qwen3.5's mamba cache
-    handling and additionally serves BIDIRECTIONAL attention: ColPali-style
-    document/query encoding attends over the whole sequence, not causally. Set
-    is_causal=False so Qwen3NextAttention builds its full_attention layers with
-    AttentionType.ENCODER_ONLY (the linear_attention GatedDeltaNet layers are
-    unaffected). Generation arches keep the parent (causal) and are untouched.
-    """
+    """Apply the attention contract declared by a ColQwen3.5 checkpoint."""
 
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
-        model_config.hf_config.is_causal = False
+        configs = {
+            id(config): config
+            for config in (
+                model_config.hf_config,
+                model_config.hf_text_config,
+            )
+        }
+        declarations = [
+            contract
+            for config in configs.values()
+            if (contract := getattr(config, "retrieval_attention_contract", None))
+            is not None
+        ]
+        supported = {"causal", "bidirectional"}
+        if not declarations:
+            raise ValueError(
+                "ColQwen3.5 checkpoints must declare "
+                "retrieval_attention_contract as 'causal' or 'bidirectional'"
+            )
+        if (
+            any(not isinstance(contract, str) for contract in declarations)
+            or any(contract not in supported for contract in declarations)
+            or len(set(declarations)) != 1
+        ):
+            raise ValueError(
+                "unsupported or conflicting ColQwen3.5 "
+                f"retrieval_attention_contract declarations: {declarations!r}"
+            )
+        is_causal = declarations[0] == "causal"
+        for config in configs.values():
+            config.is_causal = is_causal
 
 
 class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
@@ -809,6 +833,23 @@ class VoyageQwen3BidirectionalEmbedModelConfig(VerifyAndUpdateConfig):
         model_config.hf_config.embedding_size = model_config.hf_config.num_labels
 
 
+class LongcatFlashNgramForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        # LongCat-Flash-Lite's zero-expert MoE trips a data-dependent assert
+        # under torch.compile, and its n-gram inputs_embeds are only wired for
+        # FULL cudagraph capture (PIECEWISE prefill drops them). Default to
+        # no-compile + FULL cudagraph (prefill runs eager) unless the user
+        # configured compilation explicitly.
+        from vllm.config.compilation import CompilationMode, CUDAGraphMode
+
+        compilation_config = vllm_config.compilation_config
+        if compilation_config.mode is None:
+            compilation_config.mode = CompilationMode.NONE
+        if compilation_config.cudagraph_mode is None:
+            compilation_config.cudagraph_mode = CUDAGraphMode.FULL
+
+
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "ColBERTJinaRobertaModel": JinaRobertaModelConfig,
     "ColQwen3_5": ColQwen3_5Config,
@@ -822,6 +863,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Gemma4ForConditionalGeneration": Gemma4Config,
     "Gemma4UnifiedForConditionalGeneration": Gemma4Config,
     "GptOssForCausalLM": GptOssForCausalLMConfig,
+    "LongcatFlashNgramForCausalLM": LongcatFlashNgramForCausalLMConfig,
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewForSequenceClassification": GteNewModelConfig,
     "GteNewModel": GteNewModelConfig,

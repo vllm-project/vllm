@@ -31,7 +31,7 @@ def test_python_error():
         x = torch.empty(alloc_bytes, dtype=torch.uint8, device=DEVICE_TYPE)
         tensors.append(x)
     # release the memory
-    allocator.sleep()
+    allocator.sleep(offload_tags=())
 
     # allocate more memory than the total memory
     y = torch.empty(alloc_bytes, dtype=torch.uint8, device=DEVICE_TYPE)

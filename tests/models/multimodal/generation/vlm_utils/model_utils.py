@@ -52,15 +52,6 @@ def blip2_vllm_to_hf_output(vllm_output: RunnerOutput, model: str) -> RunnerOutp
     return hf_output_ids, hf_output_str, out_logprobs
 
 
-def fuyu_vllm_to_hf_output(vllm_output: RunnerOutput, model: str) -> RunnerOutput:
-    """Sanitize vllm output [fuyu models] to be comparable with hf output."""
-    output_ids, output_str, out_logprobs = vllm_output
-
-    hf_output_str = output_str.lstrip() + "|ENDOFTEXT|"
-
-    return output_ids, hf_output_str, out_logprobs
-
-
 def qwen_vllm_to_hf_output(
     vllm_output: RunnerOutput, model: str
 ) -> tuple[list[int], str, SampleLogprobs | None]:
