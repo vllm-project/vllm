@@ -16,8 +16,8 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 from vllm.model_executor.layers.fused_moe.router.dsv4_topk import (
+    _DSV4_TOPK_KERNEL,
     can_use_dsv4_topk,
-    dsv4_topk,
 )
 
 
@@ -206,7 +206,7 @@ def fused_topk_bias(
             output_indices_dtype,
         ):
             assert e_score_correction_bias is not None
-            return dsv4_topk(
+            return _DSV4_TOPK_KERNEL(
                 gating_output,
                 e_score_correction_bias,
                 output_indices_dtype,
