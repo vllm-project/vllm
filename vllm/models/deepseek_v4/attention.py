@@ -342,6 +342,46 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 k_cache_prefix=self.prefix,
             )
 
+        if vllm_config.kernel_config.enable_jit_warmup:
+            from vllm.v1.attention.backends.mla.sparse_swa import (
+                _COMPUTE_PREFILL_METADATA_KERNEL,
+                _COMPUTE_SWA_INDICES_AND_LENS_KERNEL,
+            )
+
+            _COMPUTE_PREFILL_METADATA_KERNEL.register_warmup()
+            _COMPUTE_SWA_INDICES_AND_LENS_KERNEL.register_warmup()
+
+            if self.compress_ratio > 1:
+                from vllm.v1.attention.backends.mla.compressor_utils import (
+                    _COMPRESSED_SLOT_MAPPING_KERNEL,
+                )
+
+                _COMPRESSED_SLOT_MAPPING_KERNEL.register_warmup()
+
+            if self.indexer is not None:
+                from vllm.v1.attention.backends.mla.indexer import (
+                    _BUILD_PREFILL_CHUNK_METADATA_KERNEL,
+                    _PREPARE_UNIFORM_DECODE_KERNEL,
+                )
+
+                _PREPARE_UNIFORM_DECODE_KERNEL.register_warmup()
+                _BUILD_PREFILL_CHUNK_METADATA_KERNEL.register_warmup()
+
+            spec_config = vllm_config.speculative_config
+            if spec_config is not None and spec_config.use_dspark():
+                from vllm.v1.attention.backends.mla.sparse_swa import (
+                    _COMPUTE_DSPARK_NONCAUSAL_SWA_INDICES_KERNEL,
+                )
+
+                _COMPUTE_DSPARK_NONCAUSAL_SWA_INDICES_KERNEL.register_warmup()
+
+            if vllm_config.parallel_config.decode_context_parallel_size > 1:
+                from vllm.v1.attention.ops.common import (
+                    _CORRECT_ATTN_CP_OUT_KERNEL,
+                )
+
+                _CORRECT_ATTN_CP_OUT_KERNEL.register_warmup()
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -795,6 +835,28 @@ class DeepseekV4Indexer(nn.Module):
             torch.cuda.Event(),
             torch.cuda.Event(),
         ]
+
+        if vllm_config.kernel_config.enable_jit_warmup:
+            from vllm.utils.import_utils import has_cutedsl
+            from vllm.v1.attention.ops.common import (
+                _PACK_SEQ_TRITON_KERNEL,
+                _UNPACK_SEQ_TRITON_KERNEL,
+            )
+
+            _PACK_SEQ_TRITON_KERNEL.register_warmup()
+            _UNPACK_SEQ_TRITON_KERNEL.register_warmup()
+
+            if (
+                vllm_config.parallel_config.decode_context_parallel_size > 1
+                and has_cutedsl()
+            ):
+                from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (  # noqa: E501
+                    _PACK_DCP_TOPK_CANDIDATES_KERNEL,
+                    _STABLE_TOPK_FROM_GATHERED_CANDIDATES_KERNEL,
+                )
+
+                _PACK_DCP_TOPK_CANDIDATES_KERNEL.register_warmup()
+                _STABLE_TOPK_FROM_GATHERED_CANDIDATES_KERNEL.register_warmup()
 
     def forward(
         self,

@@ -174,6 +174,10 @@ class InklingAttention(nn.Module, AttentionLayerBase):
         compilation_config.static_forward_context[prefix] = self
         self.kv_cache = torch.tensor([])  # replaced by bind_kv_cache
 
+        if vllm_config.kernel_config.enable_jit_warmup:
+
+            INKLING_FA4_REL_ATTENTION_KERNEL.register_warmup()
+
     def get_attn_backend(self) -> type[AttentionBackend]:
         return FlashAttentionBackend
 

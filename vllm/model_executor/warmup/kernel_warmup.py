@@ -16,9 +16,6 @@ from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.deepseek_v4_mhc_warmup import (
     deepseek_v4_mhc_warmup,
 )
-from vllm.model_executor.warmup.fa4_cutedsl_warmup import (
-    fa4_cutedsl_warmup,
-)
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     resolve_flashinfer_autotune_file,
     write_flashinfer_autotune_cache,
@@ -28,9 +25,6 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
     flashinfer_sparse_mla_decode_autotune_warmup,
 )
 from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
-from vllm.model_executor.warmup.sparse_mla_triton_warmup import (
-    sparse_mla_triton_warmup,
-)
 from vllm.model_executor.warmup.v1_block_table_warmup import (
     warm_v1_block_table_kernels,
 )
@@ -119,11 +113,6 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
             worker.vllm_config.compilation_config.cudagraph_capture_sizes or []
         ),
     )
-
-    # Run next so input-prep kernels JIT against pristine runner state.
-    if worker.vllm_config.kernel_config.enable_jit_warmup:
-        fa4_cutedsl_warmup(worker)
-        sparse_mla_triton_warmup(worker)
 
     if current_platform.has_device_capability(90):
         _warmup_ll_bf16_router_gemm(worker.get_model())
