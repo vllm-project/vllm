@@ -169,20 +169,6 @@ steps:
   - pip install helion==1.1.0
   - pytest -v -s kernels/helion/
 
-- label: Kernels Mamba Test # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - csrc/mamba/
-  - tests/kernels/mamba
-  - vllm/model_executor/layers/mamba/ops
-  - vllm/platforms/rocm.py
-  commands:
-  - pytest -v -s kernels/mamba
-
 #------------------------------------------------------  mi250 · models / basic  -------------------------------------------------------#
 
 - label: Basic Models Test (Other CPU) # TBD
@@ -1594,6 +1580,21 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s kernels/test_kda.py
+
+- label: Kernels Mamba Test # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/mamba/
+  - tests/kernels/mamba
+  - vllm/model_executor/layers/mamba/ops
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s kernels/mamba
 
 - label: Kernels MoE Test %N # TBD
   timeout_in_minutes: 180
