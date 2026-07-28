@@ -190,7 +190,7 @@ Until these questions are answered, neither option is the implementation contrac
 source_key => target_parameter[logical_fragment]
 ```
 
-Reload records `received_keys`; layer completion is driven by `required_keys <= received_keys`, not copied numel. Dummy initialization uses the metadata-only probe in Section 4.1 when a local safetensors schema exists; otherwise it establishes a provisional target baseline and promotes the first complete real update to an exact event baseline.
+Reload records `received_keys`; layer completion is driven by `required_keys <= received_keys`, not copied numel. Dummy initialization can use the metadata-only probe in Section 4.1 when `model_loader_extra_config={"enable_load_probe": true}` is set; otherwise it establishes a provisional target baseline and promotes the first complete real update to an exact event baseline.
 
 **Status: Implemented for covered paths.** `load_numel/load_numel_total` have been removed as completion state. Checkpoint loaders, IPC/NCCL transfer hooks, and several external/direct loaders publish manifests. Sparse direct mutation still needs a standard hook.
 
@@ -297,7 +297,7 @@ flowchart TD
 
 ### 4.1 Metadata-only baseline for `DummyModelLoader`
 
-**Status: Implemented for local safetensors models.** A dummy-loaded model no longer has to learn its first exact event baseline from the first real transfer when the checkpoint schema is locally available. `DummyModelLoader` reads only safetensors headers, creates one meta tensor per source, and runs the model's real `load_weights` method under `LoadProbeMode`, a `TorchDispatchMode` that suppresses mutable tensor operators. The same model-specific name mapping, QKV/merged routing, MoE expert routing, composed loaders, and `LoadReceipt` wrappers therefore execute without reading checkpoint payloads or copying weight data.
+**Status: Implemented for safetensors models when explicitly enabled.** A dummy-loaded model no longer has to learn its first exact event baseline from the first real transfer when `model_loader_extra_config={"enable_load_probe": true}` is set and a safetensors checkpoint schema is available. `DummyModelLoader` resolves local paths, Hugging Face repo IDs, and ModelScope repo IDs through the same download/cache helpers used by ordinary loaders, reads only safetensors headers, creates one meta tensor per source, and runs the model's real `load_weights` method under `LoadProbeMode`, a `TorchDispatchMode` that suppresses mutable tensor operators. The same model-specific name mapping, QKV/merged routing, MoE expert routing, composed loaders, and `LoadReceipt` wrappers therefore execute without reading checkpoint payloads into tensors or copying weight data.
 
 ```text
 local safetensors headers
@@ -334,7 +334,7 @@ The following H200 model matrix completed automatic dummy probing, a subsequent 
 
 Unit tests additionally pin ordinary, routed-fragment, composed/double-write, factory-allocation, data-dependent failure, direct-write-without-receipt, metadata-reader, provisional-fallback, and exception-restoration behavior.
 
-If the dummy model does not have a local safetensors schema (for example, an unresolved remote model ID or another checkpoint format), the existing provisional `required_target_keys` path remains active. The first real update must then carry an independently declared source manifest, is buffered until the source stream ends, and promotes its exact observed events only after target/source reconciliation succeeds. First-load online quantization also retains this provisional path where the checkpoint-layout probe cannot run before layer processing.
+If dummy load probing is disabled or the dummy model does not have a safetensors schema, the existing provisional `required_target_keys` path remains active. The first real update must then carry an independently declared source manifest, is buffered until the source stream ends, and promotes its exact observed events only after target/source reconciliation succeeds. First-load online quantization also retains this provisional path where the checkpoint-layout probe cannot run before layer processing.
 
 This implementation answers the category-3 completeness problem. It does not replace storage, state, routing, or cache checkers.
 

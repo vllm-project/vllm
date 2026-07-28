@@ -5,6 +5,7 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
+from vllm.config.load import LoadConfig
 from vllm.model_executor.load_receipt import returns_load_receipt
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.model_loader.reload.layerwise import (
@@ -260,3 +261,102 @@ def test_dummy_finalize_keeps_exact_probe_manifest():
 
     assert info.required_keys == {"layer.weight=>weight"}
     assert info.required_target_keys is None
+
+
+def test_dummy_loader_probe_is_explicitly_configured():
+    default_loader = DummyModelLoader(LoadConfig(load_format="dummy"))
+    enabled_loader = DummyModelLoader(
+        LoadConfig(
+            load_format="dummy",
+            model_loader_extra_config={"enable_load_probe": True},
+        )
+    )
+
+    assert not default_loader.enable_load_probe
+    assert enabled_loader.enable_load_probe
+
+
+@pytest.mark.parametrize(
+    "extra_config, match",
+    [
+        ({"enable_load_probe": "yes"}, "enable_load_probe must be a bool"),
+        ({"unknown": True}, "Unexpected extra config keys"),
+    ],
+)
+def test_dummy_loader_rejects_invalid_probe_config(extra_config, match):
+    with pytest.raises(ValueError, match=match):
+        DummyModelLoader(
+            LoadConfig(
+                load_format="dummy",
+                model_loader_extra_config=extra_config,
+            )
+        )
+
+
+def test_dummy_loader_probe_resolves_remote_safetensors(monkeypatch, tmp_path):
+    save_file({"layer.weight": torch.ones(8)}, tmp_path / "model.safetensors")
+    calls = []
+
+    def fake_download_weights_from_hf(
+        model_name_or_path,
+        cache_dir,
+        allow_patterns,
+        revision=None,
+        subfolder=None,
+        ignore_patterns=None,
+    ):
+        calls.append(
+            (
+                model_name_or_path,
+                cache_dir,
+                allow_patterns,
+                revision,
+                subfolder,
+                ignore_patterns,
+            )
+        )
+        return str(tmp_path)
+
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.dummy_loader.download_weights_from_hf",
+        fake_download_weights_from_hf,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.dummy_loader."
+        "download_safetensors_index_file_from_hf",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.dummy_loader."
+        "maybe_download_from_modelscope",
+        lambda *args, **kwargs: None,
+    )
+
+    loader = DummyModelLoader(
+        LoadConfig(
+            load_format="dummy",
+            download_dir="/tmp/vllm-test-cache",
+            ignore_patterns=["original/**/*"],
+            model_loader_extra_config={"enable_load_probe": True},
+        )
+    )
+    model_config = type(
+        "ModelConfigStub",
+        (),
+        {"model": "org/model", "revision": "main"},
+    )()
+
+    weights = dict(loader._probe_meta_weights(model_config))
+
+    assert calls == [
+        (
+            "org/model",
+            "/tmp/vllm-test-cache",
+            ["*.safetensors"],
+            "main",
+            None,
+            ["original/**/*"],
+        )
+    ]
+    assert weights["layer.weight"].is_meta
+    assert weights["layer.weight"].shape == (8,)

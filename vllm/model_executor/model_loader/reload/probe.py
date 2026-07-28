@@ -26,6 +26,7 @@ __all__ = [
     "probe_dummy_load_manifest",
     "probe_model_load",
     "safetensors_meta_weights",
+    "safetensors_meta_weights_from_files",
     "validate_probe_receipt_coverage",
 ]
 
@@ -135,19 +136,10 @@ _SAFETENSORS_DTYPES = {
 }
 
 
-def safetensors_meta_weights(
-    model_path: str,
+def safetensors_meta_weights_from_files(
+    filenames: Iterable[str],
 ) -> list[tuple[str, torch.Tensor]]:
-    """Read a local safetensors schema without materializing tensor data."""
-    from pathlib import Path
-
-    path = Path(model_path)
-    if not path.is_dir():
-        return []
-    filenames = sorted(path.glob("*.safetensors"))
-    if not filenames:
-        return []
-
+    """Read safetensors schemas without materializing tensor data."""
     weights = []
     seen = set()
     for filename in filenames:
@@ -176,6 +168,21 @@ def safetensors_meta_weights(
                     )
                 )
     return weights
+
+
+def safetensors_meta_weights(
+    model_path: str,
+) -> list[tuple[str, torch.Tensor]]:
+    """Read a local safetensors schema without materializing tensor data."""
+    from pathlib import Path
+
+    path = Path(model_path)
+    if not path.is_dir():
+        return []
+    filenames = sorted(str(filename) for filename in path.glob("*.safetensors"))
+    if not filenames:
+        return []
+    return safetensors_meta_weights_from_files(filenames)
 
 
 class LoadProbeMode(TorchDispatchMode):
