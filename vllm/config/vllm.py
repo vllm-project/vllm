@@ -2340,8 +2340,8 @@ class VllmConfig:
             ):
                 unsupported.append("EAGLE3 with pipeline parallelism")
 
-        if self.parallel_config.enable_dbo:
-            unsupported.append("dual batch overlap")
+        if self.parallel_config.use_ubatching:
+            unsupported.extend(self._get_dbo_unsupported_features())
 
         if self.parallel_config.enable_elastic_ep:
             unsupported.append("elastic expert parallelism")
@@ -2365,6 +2365,45 @@ class VllmConfig:
             unsupported.append("KV sharing fast prefill")
 
         return unsupported
+
+    def _get_dbo_unsupported_features(self) -> list[str]:
+        """Collect what the V2 model runner cannot combine with DBO.
+
+        The V2 runner microbatches a plain decoder forward pass. Anything that
+        slices or replays the batch differently (drafting, adapters, pipeline
+        stages, context parallelism, encoders) is not handled yet.
+        """
+        unsupported: list[str] = []
+        model_config = self.model_config
+        parallel_config = self.parallel_config
+
+        if self.lora_config is not None:
+            unsupported.append("dual batch overlap with LoRA")
+        if self.speculative_config is not None:
+            unsupported.append("dual batch overlap with speculative decoding")
+        if parallel_config.pipeline_parallel_size > 1:
+            unsupported.append("dual batch overlap with pipeline parallelism")
+        if (
+            parallel_config.decode_context_parallel_size > 1
+            or parallel_config.prefill_context_parallel_size > 1
+        ):
+            unsupported.append("dual batch overlap with context parallelism")
+        if model_config is not None and (
+            model_config.is_multimodal_model or model_config.is_encoder_decoder
+        ):
+            unsupported.append("dual batch overlap with multimodal models")
+        if model_config is not None and model_config.is_hybrid:
+            unsupported.append("dual batch overlap with hybrid models")
+
+        if unsupported:
+            return unsupported
+
+        if envs.VLLM_USE_V2_MODEL_RUNNER is None:
+            # Microbatched steps do not use CUDA graphs on V2 yet, so the V1
+            # runner stays the default for DBO. Setting VLLM_USE_V2_MODEL_RUNNER
+            # explicitly opts in to the V2 implementation.
+            return ["dual batch overlap"]
+        return []
 
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""

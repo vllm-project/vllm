@@ -15,10 +15,12 @@ class InputBuffers:
         max_num_reqs: int,
         max_num_tokens: int,
         device: torch.device,
+        num_ubatches: int = 1,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_num_tokens = max_num_tokens
         self.device = device
+        self.num_ubatches = num_ubatches
 
         self.input_ids = torch.zeros(max_num_tokens, dtype=torch.int32, device=device)
         self.positions = torch.zeros(max_num_tokens, dtype=torch.int64, device=device)
@@ -31,6 +33,20 @@ class InputBuffers:
         self.dcp_local_seq_lens = torch.zeros(
             max_num_reqs, dtype=torch.int32, device=device
         )
+
+        # DBO: query_start_loc and seq_lens have to be rebased and clamped per
+        # microbatch, so unlike the other inputs they cannot be plain views of
+        # the buffers above. Give each microbatch its own persistent buffer to
+        # keep the addresses stable across CUDA graph replays.
+        num_buffers = num_ubatches if num_ubatches > 1 else 0
+        self.ubatch_query_start_loc = [
+            torch.zeros(max_num_reqs + 1, dtype=torch.int32, device=device)
+            for _ in range(num_buffers)
+        ]
+        self.ubatch_seq_lens = [
+            torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
+            for _ in range(num_buffers)
+        ]
 
 
 @dataclass

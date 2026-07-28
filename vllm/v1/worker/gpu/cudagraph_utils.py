@@ -55,6 +55,8 @@ class BatchExecutionDescriptor:
     num_reqs: int | None  # None means no request padding is needed (PIECEWISE graphs)
     uniform_token_count: int | None = None
     num_active_loras: int = 0
+    # Number of microbatches the batch is split into (DBO). 1 means no splitting.
+    num_ubatches: int = 1
 
 
 class CreateForwardFn(Protocol):
@@ -75,9 +77,11 @@ def _is_compatible(
     num_tokens: int,
     uniform_token_count: int | None,
     num_active_loras: int,
+    num_ubatches: int,
 ) -> bool:
     # desc.uniform_token_count=None (PIECEWISE) can handle any uniform_token_count
     # desc.num_reqs=None means no request padding needed (PIECEWISE)
+    # A graph captured for N microbatches can only serve a batch split N ways.
     return (
         (
             desc.uniform_token_count is None
@@ -86,6 +90,7 @@ def _is_compatible(
         and (desc.num_reqs is None or desc.num_reqs >= num_reqs)
         and desc.num_tokens >= num_tokens
         and desc.num_active_loras == num_active_loras
+        and desc.num_ubatches == num_ubatches
     )
 
 
@@ -368,6 +373,7 @@ class CudaGraphManager:
         num_tokens: int,
         uniform_token_count: int | None,
         num_active_loras: int,
+        num_ubatches: int = 1,
     ) -> BatchExecutionDescriptor:
         """Find matching cudagraph descriptor from priority-ordered candidates."""
 
@@ -381,6 +387,7 @@ class CudaGraphManager:
                     num_tokens,
                     uniform_token_count,
                     effective_loras,
+                    num_ubatches,
                 ):
                     return desc
         return BatchExecutionDescriptor(
@@ -388,6 +395,7 @@ class CudaGraphManager:
             num_tokens=num_tokens,
             num_reqs=num_reqs,
             num_active_loras=effective_loras,
+            num_ubatches=num_ubatches,
         )
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor):

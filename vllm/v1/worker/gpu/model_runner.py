@@ -127,7 +127,9 @@ from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
+from vllm.v1.worker.gpu.ubatch_utils import UBatchRunner, slice_input_batch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.worker.ubatch_utils import UBatchSlices, maybe_create_ubatch_slices
 from vllm.v1.worker.utils import KVBlockZeroer, copy_kv_cache_blocks_inplace
 
 logger = init_logger(__name__)
@@ -186,6 +188,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Data parallelism.
         self.dp_size = self.parallel_config.data_parallel_size
         self.dp_rank = self.parallel_config.data_parallel_rank
+
+        # Dual batch overlap. Created in load_model(), once the expert-parallel
+        # communicator it reserves SMs on exists.
+        self.ubatch_runner: UBatchRunner | None = None
 
         # Detect EP all2all peer faults to prevent emitting corrupted output.
         # Only meaningful for MoE + DP with an FT-capable all2all backend.
@@ -258,6 +264,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_reqs=self.max_num_reqs,
             max_num_tokens=self.max_num_tokens,
             device=self.device,
+            num_ubatches=(
+                self.parallel_config.num_ubatches
+                if self.parallel_config.use_ubatching
+                else 1
+            ),
         )
         if self.use_pp:
             self.pp_handler = PPHandler(
@@ -410,6 +421,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 batch_size=self.max_num_tokens,
                 dtype=self.model_config.dtype,
                 device=self.device,
+            )
+
+        if self.parallel_config.use_ubatching and self.dp_size > 1:
+            self.ubatch_runner = UBatchRunner(self.vllm_config, self.device)
+            logger.info_once(
+                "Dual batch overlap is enabled. Microbatched steps run without "
+                "CUDA graphs on the V2 model runner."
             )
 
     def get_model(self) -> nn.Module:
@@ -1160,6 +1178,59 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         return block_tables, slot_mappings
 
+    def _prepare_ubatches(
+        self,
+        input_batch: InputBatch,
+        block_tables: tuple[torch.Tensor, ...],
+        slot_mappings: torch.Tensor,
+        num_ubatches: int,
+    ) -> "UBatchState":
+        """Split the batch and build attention metadata per microbatch.
+
+        The split point is the midpoint of the (DP-padded) token count, which
+        all ranks agree on because they run the same number of tokens whenever
+        microbatching is active.
+        """
+        _, ubatch_slices = maybe_create_ubatch_slices(
+            True,
+            input_batch.num_scheduled_tokens,
+            input_batch.num_tokens_after_padding,
+            input_batch.num_reqs_after_padding,
+            num_ubatches,
+        )
+        assert ubatch_slices is not None
+
+        attn_metadata = []
+        slot_mappings_by_layer = []
+        is_padding = []
+        for i, ubatch_slice in enumerate(ubatch_slices):
+            ubatch = slice_input_batch(input_batch, ubatch_slice, i, self.input_buffers)
+            ubatch_slot_mappings = slot_mappings[:, ubatch_slice.token_slice]
+            ubatch_block_tables = tuple(
+                block_table[ubatch_slice.request_slice] for block_table in block_tables
+            )
+            attn_metadata.append(
+                self.model_state.prepare_attn(
+                    ubatch,
+                    CUDAGraphMode.NONE,
+                    ubatch_block_tables,
+                    ubatch_slot_mappings,
+                    self.attn_groups,
+                    self.kv_cache_config,
+                )
+            )
+            slot_mappings_by_layer.append(
+                build_slot_mappings_by_layer(ubatch_slot_mappings, self.kv_cache_config)
+            )
+            is_padding.append(ubatch.is_padding)
+
+        return UBatchState(
+            slices=ubatch_slices,
+            attn_metadata=attn_metadata,
+            slot_mappings_by_layer=slot_mappings_by_layer,
+            is_padding=is_padding,
+        )
+
     def prepare_dummy_attn(
         self, input_batch: InputBatch
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
@@ -1276,6 +1347,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # cross-attention cache with dynamic encoder outputs.
             skip_compiled = True
 
+        wants_ubatch = False
+        if self.ubatch_runner is not None and not dummy_run:
+            wants_ubatch = self.ubatch_runner.wants_ubatch(
+                num_toks, uniform_decode=uniform_tok_count == self.decode_query_len
+            )
+
         batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,
             num_reqs,
@@ -1285,6 +1362,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.dp_rank,
             need_eager=is_profile or skip_compiled,
             num_active_loras=num_active_loras,
+            wants_ubatch=wants_ubatch,
+            num_ubatches=self.parallel_config.num_ubatches,
         )
 
         if batch_desc.num_tokens == 0:
@@ -1335,7 +1414,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         attn_metadata = None
         slot_mappings_by_layer = None
-        if not (dummy_run and skip_attn_for_dummy_run):
+        ubatch_state: UBatchState | None = None
+        if batch_desc.num_ubatches > 1:
+            assert slot_mappings is not None and block_tables is not None
+            ubatch_state = self._prepare_ubatches(
+                input_batch, block_tables, slot_mappings, batch_desc.num_ubatches
+            )
+        elif not (dummy_run and skip_attn_for_dummy_run):
             assert slot_mappings is not None
             slot_mappings_by_layer = build_slot_mappings_by_layer(
                 slot_mappings, self.kv_cache_config
@@ -1418,10 +1503,37 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             del intermediate_tensors
 
         # Update the EPLB meta.
-        self.eplb.prepare_forward(self.model_config, input_batch.num_tokens)
+        self.eplb.prepare_forward(
+            self.model_config,
+            input_batch.num_tokens,
+            ubatch_state.slices if ubatch_state is not None else None,
+        )
 
         # Run model.
-        if batch_desc.cg_mode == CUDAGraphMode.FULL:
+        if ubatch_state is not None:
+            assert self.ubatch_runner is not None
+            forward_contexts = self.ubatch_runner.make_forward_contexts(
+                ubatch_state.attn_metadata,
+                ubatch_state.slot_mappings_by_layer,
+                ubatch_state.slices,
+                ubatch_state.is_padding,
+            )
+            # The microbatch threads install their own forward contexts; this
+            # outer one covers the KV connector and anything else that reads the
+            # context around the forward.
+            with set_forward_context(
+                None,
+                self.vllm_config,
+                num_tokens=input_batch.num_tokens_after_padding,
+                cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                num_tokens_across_dp=num_tokens_across_dp,
+                ubatch_slices=ubatch_state.slices,
+            ):
+                self.kv_connector.pre_forward(scheduler_output)
+                model_output = self.ubatch_runner.run(
+                    self.model, model_inputs, forward_contexts, ubatch_state.slices
+                )
+        elif batch_desc.cg_mode == CUDAGraphMode.FULL:
             # Use explicit cudagraph replay for FULL mode.
             # NOTE(woosuk): Here, we don't need to pass the input tensors,
             # because they are already copied to the CUDA graph input buffers.
@@ -1764,6 +1876,15 @@ class ExecuteModelState(NamedTuple):
     aux_hidden_states: list[torch.Tensor] | None
     finished_req_ids: set[str]
     routed_experts: RoutedExpertsTensors | None
+
+
+class UBatchState(NamedTuple):
+    """Per-microbatch inputs for one dual-batch-overlap step."""
+
+    slices: UBatchSlices
+    attn_metadata: list[dict[str, Any]]
+    slot_mappings_by_layer: list[dict[str, torch.Tensor]]
+    is_padding: list[torch.Tensor | None]
 
 
 def sort_batch_req_ids(
