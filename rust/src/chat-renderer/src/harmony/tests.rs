@@ -10,15 +10,15 @@ use super::HarmonyChatRenderer;
 use super::encoding::harmony_encoding;
 use crate::ChatRenderer;
 use crate::error::Error;
-use crate::event::{AssistantContentBlock, AssistantToolCall};
-use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
-use crate::request::{
-    ChatContentPart, ChatMessage, ChatRequest, GenerationPromptMode, ReasoningEffort,
+use crate::test_utils::{FixtureRequestOptions, fixture_chat_request};
+use crate::{AssistantContentBlock, AssistantToolCall};
+use crate::{
+    ChatContentPart, ChatMessage, GenerationPromptMode, ReasoningEffort, TestRenderRequest,
 };
 
 const PINNED_DATE: &str = "2025-06-28";
 
-fn fixture_request(input_name: &str) -> ChatRequest {
+fn fixture_request(input_name: &str) -> TestRenderRequest {
     fixture_chat_request(
         &fixture_path(input_name),
         FixtureRequestOptions {
@@ -30,7 +30,7 @@ fn fixture_request(input_name: &str) -> ChatRequest {
 
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src/renderer/harmony")
+        .join("src/harmony")
         .join("fixtures")
         .join(name)
 }
@@ -39,24 +39,24 @@ fn test_renderer(use_system_instructions: bool) -> HarmonyChatRenderer {
     HarmonyChatRenderer::with_options(PINNED_DATE, use_system_instructions).unwrap()
 }
 
-fn render_token_ids(request: &ChatRequest) -> Vec<u32> {
+fn render_token_ids(request: &TestRenderRequest) -> Vec<u32> {
     render_token_ids_with(&test_renderer(false), request)
 }
 
-fn render_token_ids_with(renderer: &HarmonyChatRenderer, request: &ChatRequest) -> Vec<u32> {
+fn render_token_ids_with(renderer: &HarmonyChatRenderer, request: &TestRenderRequest) -> Vec<u32> {
     renderer
-        .render(request)
+        .render(request.as_request())
         .unwrap()
-        .prompt
+        .content
         .into_token_ids()
         .expect("Harmony renderer returns token IDs")
 }
 
-fn render_prompt_text(request: &ChatRequest) -> String {
+fn render_prompt_text(request: &TestRenderRequest) -> String {
     render_prompt_text_with(&test_renderer(false), request)
 }
 
-fn render_prompt_text_with(renderer: &HarmonyChatRenderer, request: &ChatRequest) -> String {
+fn render_prompt_text_with(renderer: &HarmonyChatRenderer, request: &TestRenderRequest) -> String {
     let token_ids = render_token_ids_with(renderer, request);
     harmony_encoding().unwrap().tokenizer().decode_utf8(&token_ids).unwrap()
 }
@@ -137,10 +137,10 @@ fn drops_stale_analysis_fixture() {
 
 #[test]
 fn rejects_invalid_reasoning_effort() {
-    let mut request = ChatRequest::for_test();
+    let mut request = TestRenderRequest::for_test();
     request.chat_options.reasoning_effort = Some(ReasoningEffort::None);
 
-    let error = test_renderer(false).render(&request).unwrap_err();
+    let error = test_renderer(false).render(request.as_request()).unwrap_err();
 
     expect![[r#"chat template error: reasoning_effort="none" is not supported by Harmony. Supported values are: low, medium, high."#]]
         .assert_eq(&error.to_report_string());
@@ -148,7 +148,7 @@ fn rejects_invalid_reasoning_effort() {
 
 #[test]
 fn rejects_unknown_tool_response_id() {
-    let request = ChatRequest {
+    let request = TestRenderRequest {
         messages: vec![
             ChatMessage::assistant_blocks(vec![AssistantContentBlock::ToolCall(
                 AssistantToolCall {
@@ -159,10 +159,10 @@ fn rejects_unknown_tool_response_id() {
             )]),
             ChatMessage::tool_response("{}", "call-unknown"),
         ],
-        ..ChatRequest::for_test()
+        ..TestRenderRequest::for_test()
     };
 
-    let error = test_renderer(false).render(&request).unwrap_err();
+    let error = test_renderer(false).render(request.as_request()).unwrap_err();
 
     expect![
         "chat template error: invalid Harmony tool message: unknown tool_call_id `call-unknown`"
@@ -172,14 +172,14 @@ fn rejects_unknown_tool_response_id() {
 
 #[test]
 fn rejects_multimodal_input() {
-    let request = ChatRequest {
+    let request = TestRenderRequest {
         messages: vec![ChatMessage::user(vec![ChatContentPart::image_url(
             "data:image/png;base64,test",
         )])],
-        ..ChatRequest::for_test()
+        ..TestRenderRequest::for_test()
     };
 
-    let error = test_renderer(false).render(&request).unwrap_err();
+    let error = test_renderer(false).render(request.as_request()).unwrap_err();
 
     assert!(matches!(
         error,
@@ -189,16 +189,16 @@ fn rejects_multimodal_input() {
 
 #[test]
 fn rejects_continue_final_assistant() {
-    let mut request = ChatRequest {
+    let mut request = TestRenderRequest {
         messages: vec![
             ChatMessage::user("write"),
             ChatMessage::assistant_text("partial"),
         ],
-        ..ChatRequest::for_test()
+        ..TestRenderRequest::for_test()
     };
     request.chat_options.generation_prompt_mode = GenerationPromptMode::ContinueFinalAssistant;
 
-    let error = test_renderer(false).render(&request).unwrap_err();
+    let error = test_renderer(false).render(request.as_request()).unwrap_err();
 
     expect!["chat template error: Harmony renderer does not support continue_final_message"]
         .assert_eq(&error.to_report_string());

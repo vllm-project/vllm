@@ -14,8 +14,10 @@ use serde_json::Value;
 use serde_json_fmt::JsonFormat;
 
 use crate::error::{Error, Result};
-use crate::request::{ChatContent, ChatMessage, ChatRequest, ChatTool, ReasoningEffort};
-use crate::{AssistantContentBlock, AssistantMessageExt, AssistantToolCall};
+use crate::{
+    AssistantContentBlock, AssistantMessageExt, AssistantToolCall, ChatContent, ChatMessage,
+    ReasoningEffort, RenderRequest, Tool,
+};
 
 const BOS_TOKEN: &str = "<｜begin▁of▁sentence｜>";
 const EOS_TOKEN: &str = "<｜end▁of▁sentence｜>";
@@ -46,14 +48,14 @@ struct RenderedToolSchema<'a> {
 }
 
 /// Render one chat request into the final prompt string.
-pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
+pub(super) fn render_request(request: &RenderRequest<'_>) -> Result<String> {
     let (thinking_mode, max_reasoning_effort) = resolve_thinking_options(request)?;
     let request_tools = request_tools(request);
     let synthetic_tool_system = needs_synthetic_tool_system(request, request_tools);
     let drop_thinking = request.parse_template_bool("drop_thinking")?.unwrap_or(true)
         && !rendered_tools_present(request, request_tools);
     let last_user_render_index =
-        find_last_user_render_index(request.messages.as_slice(), synthetic_tool_system);
+        find_last_user_render_index(request.messages, synthetic_tool_system);
     let mut out = String::from(BOS_TOKEN);
     if thinking_mode == ThinkingMode::Thinking && max_reasoning_effort {
         out.push_str(REASONING_EFFORT_MAX);
@@ -68,7 +70,7 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
     }
 
     for (message_index, message) in request.messages.iter().enumerate() {
-        if is_following_tool_response(request.messages.as_slice(), message_index) {
+        if is_following_tool_response(request.messages, message_index) {
             continue;
         }
 
@@ -101,12 +103,12 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
                 render_assistant_message(&mut out, emit_thinking_block, append_eos, content)?;
             }
             ChatMessage::ToolResponse { .. } => {
-                render_tool_response_block(&mut out, request.messages.as_slice(), message_index)?;
+                render_tool_response_block(&mut out, request.messages, message_index)?;
             }
         }
 
         if is_user_like_entry(message)
-            && next_rendered_entry_is_assistant_or_end(request.messages.as_slice(), message_index)
+            && next_rendered_entry_is_assistant_or_end(request.messages, message_index)
         {
             write_assistant_transition(
                 &mut out,
@@ -124,7 +126,7 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
 /// wrapper, the Rust renderer only consumes the typed top-level
 /// `reasoning_effort`; the generic template-kwargs map is left for HF
 /// templates.
-fn resolve_thinking_options(request: &ChatRequest) -> Result<(ThinkingMode, bool)> {
+fn resolve_thinking_options(request: &RenderRequest<'_>) -> Result<(ThinkingMode, bool)> {
     let mut thinking_mode = match request.enable_thinking()?.unwrap_or(false) {
         true => ThinkingMode::Thinking,
         false => ThinkingMode::Chat,
@@ -141,16 +143,16 @@ fn resolve_thinking_options(request: &ChatRequest) -> Result<(ThinkingMode, bool
 }
 
 /// Return request-level tools only when native tool parsing is enabled.
-fn request_tools(request: &ChatRequest) -> &[ChatTool] {
+fn request_tools<'a>(request: &RenderRequest<'a>) -> &'a [Tool] {
     if request.tool_parsing_enabled() {
-        request.tools.as_slice()
+        request.tools
     } else {
         &[]
     }
 }
 
 /// Return whether request tools need a synthetic leading system entry.
-fn needs_synthetic_tool_system(request: &ChatRequest, request_tools: &[ChatTool]) -> bool {
+fn needs_synthetic_tool_system(request: &RenderRequest<'_>, request_tools: &[Tool]) -> bool {
     !request_tools.is_empty()
         && !request
             .messages
@@ -159,7 +161,7 @@ fn needs_synthetic_tool_system(request: &ChatRequest, request_tools: &[ChatTool]
 }
 
 /// Return whether any rendered message carries tool schemas.
-fn rendered_tools_present(request: &ChatRequest, request_tools: &[ChatTool]) -> bool {
+fn rendered_tools_present(request: &RenderRequest<'_>, request_tools: &[Tool]) -> bool {
     !request_tools.is_empty()
         || request.messages.iter().any(|message| {
             matches!(
@@ -228,7 +230,7 @@ fn next_rendered_entry_is_assistant_or_end(messages: &[ChatMessage], message_ind
 }
 
 /// Render the tool preamble shown to the model, V4 flavor.
-fn render_tools(out: &mut String, tools: &[ChatTool]) -> Result<()> {
+fn render_tools(out: &mut String, tools: &[Tool]) -> Result<()> {
     out.push_str(
         r#"## Tools
 
@@ -269,7 +271,7 @@ Otherwise, output directly after </think> with tool calls or final response.
 }
 
 /// Serialize one typed tool schema into the JSON shape embedded in the prompt.
-fn render_tool_schema(out: &mut String, tool: &ChatTool) -> Result<()> {
+fn render_tool_schema(out: &mut String, tool: &Tool) -> Result<()> {
     out.push_str(&json_dumps(&RenderedToolSchema {
         name: &tool.name,
         description: tool.description.as_deref(),
@@ -283,7 +285,7 @@ fn render_tool_schema(out: &mut String, tool: &ChatTool) -> Result<()> {
 fn render_system_message(
     out: &mut String,
     content: Option<&ChatContent>,
-    tools: &[ChatTool],
+    tools: &[Tool],
 ) -> Result<()> {
     if let Some(content) = content {
         write_chat_content(out, content)?;
@@ -296,11 +298,7 @@ fn render_system_message(
 }
 
 /// Developer messages are rendered as user-like turns with optional tools.
-fn render_developer_message(
-    out: &mut String,
-    content: &ChatContent,
-    tools: &[ChatTool],
-) -> Result<()> {
+fn render_developer_message(out: &mut String, content: &ChatContent, tools: &[Tool]) -> Result<()> {
     if content.is_empty() {
         return Err(Error::ChatTemplate(
             "invalid DeepSeek V4 developer message: empty content".to_string(),

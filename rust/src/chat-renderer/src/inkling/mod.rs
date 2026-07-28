@@ -5,13 +5,15 @@ use std::collections::HashMap;
 
 use serde_json::{Map, Value, json};
 use thiserror_ext::AsReport as _;
-use vllm_text::Prompt;
-use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
+use vllm_tokenizer::{DynTokenizer, Tokenizer};
 
-use super::{ChatRenderer, RenderedPrompt, request_template_kwargs};
+use super::{
+    ChatRenderer, RenderRequest, RenderedPrompt, RenderedPromptContent, request_template_kwargs,
+};
 use crate::error::{Error, Result};
-use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatTool};
-use crate::{AssistantContentBlock, AssistantToolCall};
+use crate::{
+    AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart, ChatMessage, Tool,
+};
 
 const MESSAGE_USER: &str = "<|message_user|>";
 const MESSAGE_MODEL: &str = "<|message_model|>";
@@ -170,7 +172,7 @@ impl InklingChatRenderer {
         )
     }
 
-    fn write_tool_declarations(&self, out: &mut Vec<u32>, tools: &[&ChatTool]) -> Result<()> {
+    fn write_tool_declarations(&self, out: &mut Vec<u32>, tools: &[&Tool]) -> Result<()> {
         if tools.is_empty() {
             return Ok(());
         }
@@ -284,7 +286,7 @@ impl InklingChatRenderer {
 }
 
 impl ChatRenderer for InklingChatRenderer {
-    fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
+    fn render(&self, request: RenderRequest<'_>) -> Result<RenderedPrompt> {
         request.validate()?;
         if request.chat_options.continue_final_message() {
             return Err(Error::ChatTemplate(
@@ -294,13 +296,13 @@ impl ChatRenderer for InklingChatRenderer {
 
         let mut out = Vec::new();
         let mut tool_call_id_to_name = HashMap::new();
-        let effective_template_kwargs = request_template_kwargs(request);
-        let tools = rendered_tools(request);
+        let effective_template_kwargs = request_template_kwargs(&request);
+        let tools = rendered_tools(&request);
         self.write_tool_declarations(&mut out, &tools)?;
         let mut reasoning_effort =
             resolve_reasoning_effort(effective_template_kwargs.get("reasoning_effort"));
 
-        for message in &request.messages {
+        for message in request.messages {
             if !matches!(
                 message,
                 ChatMessage::System { .. } | ChatMessage::Developer { .. }
@@ -345,7 +347,7 @@ impl ChatRenderer for InklingChatRenderer {
         }
 
         Ok(RenderedPrompt {
-            prompt: Prompt::TokenIds(out),
+            content: RenderedPromptContent::TokenIds(out),
             effective_template_kwargs,
         })
     }
@@ -378,14 +380,14 @@ fn resolve_special_token(tokenizer: &dyn Tokenizer, token: &str) -> Result<u32> 
     })
 }
 
-fn rendered_tools(request: &ChatRequest) -> Vec<&ChatTool> {
+fn rendered_tools<'a>(request: &RenderRequest<'a>) -> Vec<&'a Tool> {
     if !request.tool_parsing_enabled() {
         return Vec::new();
     }
 
     let mut tools = Vec::with_capacity(request.tools.len());
     tools.extend(request.tools.iter());
-    for message in &request.messages {
+    for message in request.messages {
         if let ChatMessage::Developer {
             tools: Some(local_tools),
             ..

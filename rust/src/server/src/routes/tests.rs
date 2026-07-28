@@ -23,8 +23,9 @@ use serial_test::serial;
 use tower::{Service as _, ServiceExt as _};
 use vllm_chat::{
     ChatBackend, ChatContent, ChatContentPart, ChatLlm, ChatMessage, ChatRenderer, ChatRequest,
-    ChatTextBackend, DefaultChatOutputProcessor, DynChatOutputProcessor, DynChatRenderer, Error,
-    NewChatOutputProcessorOptions,
+    ChatTextBackend, DefaultChatOutputProcessor, DynChatOutputProcessor, DynChatRenderer,
+    NewChatOutputProcessorOptions, RenderRequest, RenderedPromptContent, RendererError,
+    RendererResult,
 };
 use vllm_engine_core_client::mock_engine::default_ready_response;
 use vllm_engine_core_client::protocol::decode_value;
@@ -45,8 +46,8 @@ use vllm_engine_core_client::{
 };
 use vllm_llm::Llm;
 use vllm_metrics::METRICS;
+use vllm_text::TextBackend;
 use vllm_text::tokenizer::DynTokenizer;
-use vllm_text::{Prompt, TextBackend};
 use vllm_tokenizer::test_utils::TestTokenizer;
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
@@ -507,14 +508,14 @@ impl ChatBackend for FakeChatBackend {
 }
 
 impl ChatRenderer for FakeChatBackend {
-    fn render(&self, request: &ChatRequest) -> vllm_chat::Result<vllm_chat::RenderedPrompt> {
+    fn render(&self, request: RenderRequest<'_>) -> RendererResult<vllm_chat::RenderedPrompt> {
         let placeholder = self
             .multimodal_model_info
             .as_ref()
             .and_then(|info| info.placeholder_token(llm_multimodal::Modality::Image))
             .unwrap_or("<image>");
         let mut prompt = String::new();
-        for message in &request.messages {
+        for message in request.messages {
             prompt.push_str(message.role().as_str());
             prompt.push_str(": ");
             prompt.push_str(&render_fake_message_content(message, placeholder)?);
@@ -524,28 +525,25 @@ impl ChatRenderer for FakeChatBackend {
             prompt.push_str("assistant:");
         }
         Ok(vllm_chat::RenderedPrompt {
-            prompt: Prompt::Text(prompt),
+            content: RenderedPromptContent::Text(prompt),
             effective_template_kwargs: Default::default(),
         })
     }
 }
 
-fn render_fake_message_content(
-    message: &ChatMessage,
-    placeholder: &str,
-) -> vllm_chat::Result<String> {
+fn render_fake_message_content(message: &ChatMessage, placeholder: &str) -> RendererResult<String> {
     match message {
         ChatMessage::System { content }
         | ChatMessage::Developer { content, .. }
         | ChatMessage::User { content }
         | ChatMessage::ToolResponse { content, .. } => render_fake_content(content, placeholder),
         ChatMessage::Assistant { .. } => {
-            message.text_content().map_err(Error::UnsupportedMultimodalContent)
+            message.text_content().map_err(RendererError::UnsupportedMultimodalContent)
         }
     }
 }
 
-fn render_fake_content(content: &ChatContent, placeholder: &str) -> vllm_chat::Result<String> {
+fn render_fake_content(content: &ChatContent, placeholder: &str) -> RendererResult<String> {
     Ok(match content {
         ChatContent::Text(text) => text.clone(),
         ChatContent::Parts(parts) => {

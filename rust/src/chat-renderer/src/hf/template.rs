@@ -5,7 +5,7 @@
 //!
 //! This module is inlined from SMG's tokenizer crate with local adaptations:
 //! - thinking-related detection/state is removed
-//! - special tokens are wired to `vllm_text::backends::hf::HfSpecialTokens`
+//! - special tokens are wired to `vllm_tokenizer::HfSpecialTokens`
 
 use std::collections::HashMap;
 use std::fs;
@@ -14,14 +14,14 @@ use std::path::Path;
 use minijinja::Environment;
 use serde::{Deserialize, Serialize};
 use serde_json::{self};
-use vllm_text::backend::hf::HfSpecialTokens;
+use vllm_tokenizer::HfSpecialTokens;
 
 use super::error::TemplateError;
 use super::format::{
     ChatTemplateContentFormat, ChatTemplateContentFormatOption, detect_chat_template_content_format,
 };
 use super::tojson::hf_tojson_filter;
-use crate::renderer::hf::{TemplateMessage, TemplateTool};
+use crate::hf::{TemplateMessage, TemplateTool};
 
 type Result<T> = std::result::Result<T, TemplateError>;
 
@@ -55,7 +55,7 @@ pub(super) struct TemplateContext<'a> {
 }
 
 /// Load chat template from a file (`.jinja` or `.json` containing Jinja).
-pub fn load_chat_template(template_path: &Path) -> Result<Option<String>> {
+pub(crate) fn load_chat_template(template_path: &Path) -> Result<Option<String>> {
     let content = fs::read_to_string(template_path).map_err(TemplateError::ReadTemplateFile)?;
 
     if template_path.extension().is_some_and(|ext| ext == "json") {
@@ -82,7 +82,7 @@ pub fn load_chat_template(template_path: &Path) -> Result<Option<String>> {
 }
 
 /// Resolve a configured chat template value into a template string.
-pub fn resolve_chat_template(chat_template: &str) -> Result<String> {
+pub(crate) fn resolve_chat_template(chat_template: &str) -> Result<String> {
     let path = Path::new(chat_template);
     if path.exists() {
         return load_chat_template(path).map(|template| template.unwrap_or_default());
@@ -136,7 +136,7 @@ mod tests {
     use std::fs;
 
     use tempfile::TempDir;
-    use vllm_text::backend::hf::{HfSpecialTokens, NamedSpecialToken};
+    use vllm_tokenizer::{HfSpecialTokens, NamedSpecialToken};
 
     use super::*;
 

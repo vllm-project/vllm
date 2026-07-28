@@ -33,8 +33,11 @@ pub enum ChatTemplateContentFormatOption {
 }
 
 impl ChatTemplateContentFormatOption {
+    /// CLI/config literal for automatic content-format detection.
     pub const AUTO_LITERAL: &str = "auto";
+    /// CLI/config literal for OpenAI-compatible structured content.
     pub const OPENAI_LITERAL: &str = "openai";
+    /// CLI/config literal for flattened string content.
     pub const STRING_LITERAL: &str = "string";
 }
 

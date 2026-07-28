@@ -7,13 +7,45 @@ use std::path::Path;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::event::{AssistantContentBlock, AssistantToolCall};
-use crate::request::{
-    ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatTool, ChatToolChoice,
-    GenerationPromptMode, ReasoningEffort,
+use crate::{
+    AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart, ChatMessage,
+    ChatOptions, ChatRole, ChatToolChoice, GenerationPromptMode, ReasoningEffort, RenderRequest,
+    Tool,
 };
 
-/// Options for constructing a [`ChatRequest`] from a fixture file.
+/// Owned test input used to construct borrowed [`RenderRequest`] values.
+#[derive(Debug, Clone)]
+pub(crate) struct TestRenderRequest {
+    pub messages: Vec<ChatMessage>,
+    pub chat_options: ChatOptions,
+    pub tools: Vec<Tool>,
+    pub tool_choice: ChatToolChoice,
+    pub documents: Option<Vec<Value>>,
+}
+
+impl TestRenderRequest {
+    pub(crate) fn for_test() -> Self {
+        Self {
+            messages: vec![ChatMessage::text(ChatRole::User, "test")],
+            chat_options: ChatOptions::default(),
+            tools: Vec::new(),
+            tool_choice: ChatToolChoice::None,
+            documents: None,
+        }
+    }
+
+    pub(crate) fn as_request(&self) -> RenderRequest<'_> {
+        RenderRequest {
+            messages: &self.messages,
+            chat_options: &self.chat_options,
+            tools: &self.tools,
+            tool_choice: &self.tool_choice,
+            documents: self.documents.as_deref(),
+        }
+    }
+}
+
+/// Options for constructing a [`TestRenderRequest`] from a fixture file.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FixtureRequestOptions {
     /// Whether to set the template kwarg `[enable_]thinking=true`.
@@ -23,9 +55,11 @@ pub(crate) struct FixtureRequestOptions {
     pub no_generation_prompt_when_last_assistant: bool,
 }
 
-/// Read a fixture file from the given path and convert it into a [`ChatRequest`]
-/// using the provided options.
-pub(crate) fn fixture_chat_request(path: &Path, options: FixtureRequestOptions) -> ChatRequest {
+/// Read a fixture file and convert it into an owned renderer test request.
+pub(crate) fn fixture_chat_request(
+    path: &Path,
+    options: FixtureRequestOptions,
+) -> TestRenderRequest {
     let fixture = fs::read_to_string(path).unwrap();
     let fixture: FixtureFile = serde_json::from_str(&fixture).unwrap();
     fixture.into_request().into_chat_request(options)
@@ -135,9 +169,8 @@ struct FixtureToolCallFunction {
 }
 
 impl FixtureRequest {
-    fn into_chat_request(self, options: FixtureRequestOptions) -> ChatRequest {
-        let mut request = ChatRequest {
-            request_id: "renderer-fixture".to_string(),
+    fn into_chat_request(self, options: FixtureRequestOptions) -> TestRenderRequest {
+        let mut request = TestRenderRequest {
             messages: self
                 .messages
                 .into_iter()
@@ -150,7 +183,7 @@ impl FixtureRequest {
             } else {
                 ChatToolChoice::Auto
             },
-            ..ChatRequest::for_test()
+            ..TestRenderRequest::for_test()
         };
 
         if options.no_generation_prompt_when_last_assistant
@@ -243,10 +276,10 @@ fn to_chat_content(content: FixtureContent) -> ChatContent {
     }
 }
 
-fn to_chat_tools(tools: &[FixtureTool]) -> Vec<ChatTool> {
+fn to_chat_tools(tools: &[FixtureTool]) -> Vec<Tool> {
     tools
         .iter()
-        .map(|tool| ChatTool {
+        .map(|tool| Tool {
             name: tool.function.name.clone(),
             description: tool.function.description.clone(),
             parameters: tool.function.parameters.clone(),

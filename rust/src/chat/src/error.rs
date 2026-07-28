@@ -9,18 +9,8 @@ type BoxedError = Box<dyn std::error::Error + Send + Sync>;
 #[derive(Debug, Error, Macro)]
 #[thiserror_ext(macro(path = "crate::error"))]
 pub enum Error {
-    #[error("chat request must contain at least one message")]
-    EmptyMessages,
-    #[error("cannot continue the final message when the last message is not from the assistant")]
-    ContinueFinalAssistantWithoutFinalAssistant,
-    #[error("chat template is required but none was configured")]
-    MissingChatTemplate,
-    #[error("chat template error: {0}")]
-    ChatTemplate(String),
     #[error("multimodal input is not supported by this chat renderer")]
     UnsupportedMultimodalRenderer,
-    #[error("unsupported multimodal content: {0}")]
-    UnsupportedMultimodalContent(&'static str),
     #[error("`{modality}` input is not supported by this model")]
     UnsupportedModality { modality: String },
     #[error("multimodal preprocessing error: {0}")]
@@ -74,6 +64,8 @@ pub enum Error {
     #[error(transparent)]
     Text(#[from] vllm_text::Error),
     #[error(transparent)]
+    Renderer(#[from] vllm_chat_renderer::Error),
+    #[error(transparent)]
     Tokenizer(#[from] vllm_tokenizer::TokenizerError),
 }
 
@@ -85,10 +77,8 @@ impl Error {
         match self {
             Self::PromptTooLong { .. } => true,
             Self::Text(error) => error.is_request_validation_error(),
-            Self::UnsupportedMultimodalRenderer
-            | Self::UnsupportedMultimodalContent(_)
-            | Self::UnsupportedModality { .. } => true,
-
+            Self::Renderer(error) => error.is_request_validation_error(),
+            Self::UnsupportedMultimodalRenderer | Self::UnsupportedModality { .. } => true,
             _ => false,
         }
     }

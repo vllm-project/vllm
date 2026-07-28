@@ -5,80 +5,15 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use thiserror_ext::AsReport as _;
+pub use vllm_tokenizer::{HfSpecialTokens, HfTokenizerConfig, NamedSpecialToken};
 
 use crate::error::{Error, Result};
 
-/// Minimal subset of `tokenizer_config.json` needed by chat/EOS handling.
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-pub struct HfTokenizerConfig {
-    #[serde(flatten)]
-    pub special_tokens: HfSpecialTokens,
-    pub chat_template: Option<String>,
-    /// The `tokenizer_class` field from HuggingFace tokenizer configs. Some
-    /// tiktoken-based models (e.g. DeepSeek, Kimi K2) set this to a value
-    /// containing "Tiktoken" which can be used as a hint for backend
-    /// selection.
-    pub tokenizer_class: Option<String>,
-}
-
-/// Hugging Face named special tokens may be serialized as a string or an
-/// object carrying the token content.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-pub enum NamedSpecialToken {
-    Text(String),
-    WithContent { content: String },
-}
-
-impl Serialize for NamedSpecialToken {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl From<NamedSpecialToken> for String {
-    fn from(value: NamedSpecialToken) -> Self {
-        match value {
-            NamedSpecialToken::Text(string) => string,
-            NamedSpecialToken::WithContent { content } => content,
-        }
-    }
-}
-
-impl NamedSpecialToken {
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::Text(value) => value,
-            Self::WithContent { content } => content,
-        }
-    }
-}
-
-/// Minimal set of special-token entries needed by chat/EOS handling.
-#[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(default)]
-pub struct HfSpecialTokens {
-    pub bos_token: Option<NamedSpecialToken>,
-    pub eos_token: Option<NamedSpecialToken>,
-    pub unk_token: Option<NamedSpecialToken>,
-    pub pad_token: Option<NamedSpecialToken>,
-}
-
-impl HfSpecialTokens {
-    /// Returns true if we don't discover any special tokens in the config.
-    pub fn is_empty(&self) -> bool {
-        self.bos_token.is_none()
-            && self.eos_token.is_none()
-            && self.unk_token.is_none()
-            && self.pad_token.is_none()
-    }
+/// Load tokenizer-side metadata while preserving the text backend's error API.
+pub fn load_tokenizer_config(path: Option<&Path>) -> Result<HfTokenizerConfig> {
+    vllm_tokenizer::load_tokenizer_config(path).map_err(Error::from)
 }
 
 /// Minimal subset of `config.json` (the model's main HF config).
@@ -252,11 +187,6 @@ impl ModelConfig {
     pub(super) fn is_moe(&self) -> bool {
         self.num_experts() > 0
     }
-}
-
-/// Load the tokenizer-side EOS metadata if a config file is present.
-pub fn load_tokenizer_config(path: Option<&Path>) -> Result<HfTokenizerConfig> {
-    read_json_file(path)
 }
 
 /// Load the generation-side EOS metadata if a config file is present.

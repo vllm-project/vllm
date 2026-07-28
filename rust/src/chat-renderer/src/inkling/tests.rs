@@ -7,27 +7,23 @@ use std::sync::Arc;
 use expect_test::{ExpectFile, expect_file};
 use serde_json::json;
 use thiserror_ext::AsReport;
-use vllm_text::tokenizer::Tokenizer;
+use vllm_tokenizer::Tokenizer;
 
-use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
+use crate::test_utils::{FixtureRequestOptions, fixture_chat_request};
 
 use super::{
     AUDIO_END, CONTENT_AUDIO_INPUT, CONTENT_IMAGE, CONTENT_INVOKE_TOOL_JSON, CONTENT_TEXT,
     CONTENT_THINKING, CONTENT_XML, END_MESSAGE, InklingChatRenderer, MESSAGE_MODEL, MESSAGE_SYSTEM,
     MESSAGE_TOOL, MESSAGE_USER,
 };
-use crate::event::{AssistantContentBlock, AssistantToolCall};
-use crate::request::{ChatMessage, ChatRequest, GenerationPromptMode, ReasoningEffort};
+use crate::{AssistantContentBlock, AssistantToolCall};
+use crate::{ChatMessage, GenerationPromptMode, ReasoningEffort, TestRenderRequest};
 use crate::{ChatRenderer, Error};
 
 struct FixtureTokenizer;
 
 impl Tokenizer for FixtureTokenizer {
-    fn encode(
-        &self,
-        text: &str,
-        _add_special_tokens: bool,
-    ) -> vllm_text::tokenizer::Result<Vec<u32>> {
+    fn encode(&self, text: &str, _add_special_tokens: bool) -> vllm_tokenizer::Result<Vec<u32>> {
         Ok(text.bytes().map(u32::from).collect())
     }
 
@@ -35,7 +31,7 @@ impl Tokenizer for FixtureTokenizer {
         &self,
         token_ids: &[u32],
         _skip_special_tokens: bool,
-    ) -> vllm_text::tokenizer::Result<String> {
+    ) -> vllm_tokenizer::Result<String> {
         Ok(token_ids
             .iter()
             .map(|token_id| char::from_u32(*token_id).unwrap_or('\u{FFFD}'))
@@ -86,16 +82,16 @@ fn renderer() -> InklingChatRenderer {
     InklingChatRenderer::new(Arc::new(FixtureTokenizer)).unwrap()
 }
 
-fn render_token_ids(request: &ChatRequest) -> Vec<u32> {
+fn render_token_ids(request: &TestRenderRequest) -> Vec<u32> {
     renderer()
-        .render(request)
+        .render(request.as_request())
         .unwrap()
-        .prompt
+        .content
         .into_token_ids()
         .expect("Inkling renderer returns token IDs")
 }
 
-fn fixture_request(name: &str) -> ChatRequest {
+fn fixture_request(name: &str) -> TestRenderRequest {
     fixture_chat_request(&fixture_path(name), inkling_fixture_options())
 }
 
@@ -108,7 +104,7 @@ fn inkling_fixture_options() -> FixtureRequestOptions {
 
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src/renderer/inkling")
+        .join("src/inkling")
         .join("fixtures")
         .join(name)
 }
@@ -229,14 +225,14 @@ fn renders_named_reasoning_effort_after_tool_declarations() {
 
 #[test]
 fn emits_one_reasoning_effort_for_multi_turn_conversation() {
-    let request = ChatRequest {
+    let request = TestRenderRequest {
         messages: vec![
             ChatMessage::system("rules"),
             ChatMessage::user("user1"),
             ChatMessage::assistant_text("assistant1"),
             ChatMessage::user("user2"),
         ],
-        ..ChatRequest::for_test()
+        ..TestRenderRequest::for_test()
     };
 
     let rendered = render_symbolic_tokens(&render_token_ids(&request));
@@ -253,7 +249,7 @@ fn emits_one_reasoning_effort_for_multi_turn_conversation() {
 #[test]
 fn canonicalizes_numeric_zero_reasoning_effort() {
     for value in [0.0, -0.0] {
-        let mut request = ChatRequest::for_test();
+        let mut request = TestRenderRequest::for_test();
         request
             .chat_options
             .template_kwargs
@@ -270,7 +266,7 @@ fn canonicalizes_numeric_zero_reasoning_effort() {
 
 #[test]
 fn defaults_reasoning_effort_to_high() {
-    let request = ChatRequest::for_test();
+    let request = TestRenderRequest::for_test();
 
     assert!(
         render_symbolic_tokens(&render_token_ids(&request)).starts_with(
@@ -282,7 +278,7 @@ fn defaults_reasoning_effort_to_high() {
 
 #[test]
 fn renders_numeric_reasoning_effort_template_kwarg() {
-    let mut request = ChatRequest::for_test();
+    let mut request = TestRenderRequest::for_test();
     request
         .chat_options
         .template_kwargs
@@ -299,7 +295,7 @@ fn renders_numeric_reasoning_effort_template_kwarg() {
 #[test]
 fn ignores_unsupported_reasoning_effort_values() {
     for value in [json!(true), json!("invalid"), json!(null)] {
-        let mut request = ChatRequest::for_test();
+        let mut request = TestRenderRequest::for_test();
         request
             .chat_options
             .template_kwargs
@@ -315,38 +311,38 @@ fn ignores_unsupported_reasoning_effort_values() {
 #[test]
 fn rejects_out_of_range_reasoning_effort() {
     for value in [0.990_000_1, 1.0, 1.5, -0.1] {
-        let mut request = ChatRequest::for_test();
+        let mut request = TestRenderRequest::for_test();
         request
             .chat_options
             .template_kwargs
             .insert("reasoning_effort".to_string(), json!(value));
 
-        let error = renderer().render(&request).unwrap_err();
+        let error = renderer().render(request.as_request()).unwrap_err();
         assert!(error.as_report().to_string().contains("must be in [0.0, 0.99]"));
     }
 }
 
 #[test]
 fn rejects_continue_final_message() {
-    let request = ChatRequest {
+    let request = TestRenderRequest {
         messages: vec![ChatMessage::assistant_text("partial")],
         chat_options: crate::ChatOptions {
             generation_prompt_mode: GenerationPromptMode::ContinueFinalAssistant,
             ..Default::default()
         },
-        ..ChatRequest::for_test()
+        ..TestRenderRequest::for_test()
     };
 
-    let error = renderer().render(&request).unwrap_err();
+    let error = renderer().render(request.as_request()).unwrap_err();
     assert!(matches!(error, Error::ChatTemplate(_)));
     assert!(error.as_report().to_string().contains("continue_final_message"));
 }
 
 #[test]
 fn renders_developer_messages_as_system() {
-    let request = ChatRequest {
+    let request = TestRenderRequest {
         messages: vec![ChatMessage::developer("rules", None)],
-        ..ChatRequest::for_test()
+        ..TestRenderRequest::for_test()
     };
 
     assert_eq!(
@@ -359,7 +355,7 @@ fn renders_developer_messages_as_system() {
 
 #[test]
 fn rejects_non_object_tool_call_arguments() {
-    let request = ChatRequest {
+    let request = TestRenderRequest {
         messages: vec![ChatMessage::assistant_blocks(vec![
             AssistantContentBlock::ToolCall(AssistantToolCall {
                 id: "call_1".to_string(),
@@ -367,9 +363,9 @@ fn rejects_non_object_tool_call_arguments() {
                 arguments: "[]".to_string(),
             }),
         ])],
-        ..ChatRequest::for_test()
+        ..TestRenderRequest::for_test()
     };
 
-    let error = renderer().render(&request).unwrap_err();
+    let error = renderer().render(request.as_request()).unwrap_err();
     assert!(error.as_report().to_string().contains("JSON object"));
 }

@@ -21,8 +21,8 @@ use crate::output::{
     generate_tool_call_id,
 };
 use crate::parser::ParserSelection;
-use crate::renderer::harmony::encoding::harmony_encoding;
 use crate::request::ChatRequest;
+use vllm_chat_renderer::harmony::harmony_encoding;
 
 /// Request-scoped Harmony output processor used for `model_type == "gpt_oss"`.
 ///

@@ -8,20 +8,20 @@ use serde_json::Value;
 
 use super::DeepSeekV4ChatRenderer;
 use crate::ChatRenderer;
-use crate::event::{AssistantContentBlock, AssistantToolCall};
-use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
-use crate::request::{ChatMessage, ChatRequest, GenerationPromptMode, ReasoningEffort};
+use crate::test_utils::{FixtureRequestOptions, fixture_chat_request};
+use crate::{AssistantContentBlock, AssistantToolCall};
+use crate::{ChatMessage, GenerationPromptMode, ReasoningEffort, TestRenderRequest};
 
-fn render_request(request: &ChatRequest) -> String {
+fn render_request(request: &TestRenderRequest) -> String {
     DeepSeekV4ChatRenderer::new()
-        .render(request)
+        .render(request.as_request())
         .unwrap()
-        .prompt
+        .content
         .into_text()
         .expect("deepseek v4 renderer should return text prompt")
 }
 
-fn fixture_request(input_name: &str) -> ChatRequest {
+fn fixture_request(input_name: &str) -> TestRenderRequest {
     fixture_chat_request(&fixture_path(input_name), deepseek_fixture_options())
 }
 
@@ -34,7 +34,7 @@ fn deepseek_fixture_options() -> FixtureRequestOptions {
 
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src/renderer/deepseek_v4")
+        .join("src/deepseek_v4")
         .join("fixtures")
         .join(name)
 }
@@ -63,9 +63,9 @@ fn renders_v4_fixture_2_multi_turn_drop_thinking() {
 
 #[test]
 fn reasoning_effort_max_adds_prefix_when_thinking_is_enabled() {
-    let mut request = ChatRequest {
+    let mut request = TestRenderRequest {
         messages: vec![ChatMessage::user("solve it")],
-        ..ChatRequest::for_test()
+        ..TestRenderRequest::for_test()
     };
     request
         .chat_options
@@ -86,9 +86,9 @@ fn reasoning_effort_max_adds_prefix_when_thinking_is_enabled() {
 
 #[test]
 fn reasoning_effort_none_disables_thinking() {
-    let mut request = ChatRequest {
+    let mut request = TestRenderRequest {
         messages: vec![ChatMessage::user("answer directly")],
-        ..ChatRequest::for_test()
+        ..TestRenderRequest::for_test()
     };
     request
         .chat_options
@@ -104,9 +104,9 @@ fn reasoning_effort_none_disables_thinking() {
 
 #[test]
 fn reasoning_effort_template_kwarg_is_ignored() {
-    let mut request = ChatRequest {
+    let mut request = TestRenderRequest {
         messages: vec![ChatMessage::user("solve it")],
-        ..ChatRequest::for_test()
+        ..TestRenderRequest::for_test()
     };
     request
         .chat_options
@@ -124,7 +124,7 @@ fn reasoning_effort_template_kwarg_is_ignored() {
 
 #[test]
 fn tool_results_are_sorted_by_previous_assistant_tool_call_order() {
-    let request = ChatRequest {
+    let request = TestRenderRequest {
         messages: vec![
             ChatMessage::assistant_blocks(vec![
                 AssistantContentBlock::ToolCall(AssistantToolCall {
@@ -141,7 +141,7 @@ fn tool_results_are_sorted_by_previous_assistant_tool_call_order() {
             ChatMessage::tool_response("first result", "first"),
             ChatMessage::tool_response("second result", "second"),
         ],
-        ..ChatRequest::for_test()
+        ..TestRenderRequest::for_test()
     };
 
     let rendered = render_request(&request);
@@ -164,7 +164,7 @@ fn tool_results_are_sorted_by_previous_assistant_tool_call_order() {
 
 #[test]
 fn drop_thinking_false_keeps_prior_assistant_reasoning() {
-    let mut request = ChatRequest {
+    let mut request = TestRenderRequest {
         messages: vec![
             ChatMessage::assistant_blocks(vec![
                 AssistantContentBlock::Reasoning {
@@ -176,7 +176,7 @@ fn drop_thinking_false_keeps_prior_assistant_reasoning() {
             ]),
             ChatMessage::user("next"),
         ],
-        ..ChatRequest::for_test()
+        ..TestRenderRequest::for_test()
     };
     request
         .chat_options
@@ -197,16 +197,16 @@ fn drop_thinking_false_keeps_prior_assistant_reasoning() {
 
 #[test]
 fn continue_final_assistant_omits_final_eos() {
-    let request = ChatRequest {
+    let request = TestRenderRequest {
         messages: vec![
             ChatMessage::user("write"),
             ChatMessage::assistant_text("partial answer"),
         ],
-        chat_options: crate::request::ChatOptions {
+        chat_options: crate::ChatOptions {
             generation_prompt_mode: GenerationPromptMode::ContinueFinalAssistant,
             ..Default::default()
         },
-        ..ChatRequest::for_test()
+        ..TestRenderRequest::for_test()
     };
 
     let rendered = render_request(&request);

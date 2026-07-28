@@ -11,10 +11,11 @@ use tokio::time::timeout;
 use vllm_chat::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessageExt as _, ChatBackend, ChatEvent,
     ChatLlm, ChatMessage, ChatRenderer, ChatRequest, ChatRole, ChatTextBackend, ChatTool,
-    ChatToolChoice, DefaultChatOutputProcessor, DynChatOutputProcessor, DynChatRenderer, Error,
+    ChatToolChoice, DefaultChatOutputProcessor, DynChatOutputProcessor, DynChatRenderer,
     FinishReason, GenerationPromptMode, NewChatOutputProcessorOptions, ParserSelection,
-    RenderedPrompt, SamplingParams,
+    RenderRequest, RenderedPrompt, RenderedPromptContent, SamplingParams,
 };
+use vllm_chat_renderer::{Error as RendererError, Result as RendererResult};
 use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
 };
@@ -27,7 +28,7 @@ use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{
-    DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, DecodedTokenLogprob, Prompt,
+    DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, DecodedTokenLogprob,
     TextBackend,
 };
 use vllm_tokenizer::test_utils::TestTokenizer;
@@ -248,16 +249,18 @@ impl ChatBackend for FakeChatBackend {
 }
 
 impl ChatRenderer for FakeChatBackend {
-    fn render(&self, request: &ChatRequest) -> vllm_chat::Result<RenderedPrompt> {
+    fn render(&self, request: RenderRequest<'_>) -> RendererResult<RenderedPrompt> {
         if !self.has_template {
-            return Err(vllm_chat::Error::MissingChatTemplate);
+            return Err(RendererError::MissingChatTemplate);
         }
 
         let mut prompt = String::new();
-        for message in &request.messages {
+        for message in request.messages {
             prompt.push_str(message.role().as_str());
             prompt.push_str(": ");
-            prompt.push_str(&message.text_content().map_err(Error::UnsupportedMultimodalContent)?);
+            prompt.push_str(
+                &message.text_content().map_err(RendererError::UnsupportedMultimodalContent)?,
+            );
             prompt.push('\n');
         }
         if request.chat_options.add_generation_prompt() {
@@ -265,7 +268,7 @@ impl ChatRenderer for FakeChatBackend {
         }
 
         Ok(RenderedPrompt {
-            prompt: Prompt::Text(prompt),
+            content: RenderedPromptContent::Text(prompt),
             effective_template_kwargs: request.chat_options.template_kwargs.clone(),
         })
     }
@@ -635,7 +638,7 @@ fn chat_request_rejects_conflicting_generation_modes() {
 
     assert!(matches!(
         error,
-        vllm_chat::Error::ContinueFinalAssistantWithoutFinalAssistant
+        vllm_chat::Error::Renderer(RendererError::ContinueFinalAssistantWithoutFinalAssistant)
     ));
 }
 
@@ -652,8 +655,8 @@ fn chat_request_accepts_continue_final_assistant_mode_with_final_assistant() {
 fn backend_requires_a_template() {
     let request = sample_request("chat-3");
     let backend = FakeChatBackend::without_template();
-    let error = backend.chat_renderer().render(&request).unwrap_err();
-    assert!(matches!(error, vllm_chat::Error::MissingChatTemplate));
+    let error = backend.chat_renderer().render(request.as_render_request()).unwrap_err();
+    assert!(matches!(error, RendererError::MissingChatTemplate));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

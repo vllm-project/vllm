@@ -10,9 +10,8 @@ use vllm_text::{DynTextBackend, TextBackend};
 use crate::error::Result;
 use crate::multimodal::MultimodalModelInfo;
 use crate::output::DynChatOutputProcessor;
-use crate::renderer::DynChatRenderer;
 use crate::request::ChatRequest;
-use crate::{ChatTemplateContentFormatOption, ParserSelection, RendererSelection};
+use crate::{ChatTemplateContentFormatOption, DynChatRenderer, ParserSelection, RendererSelection};
 
 pub mod hf;
 

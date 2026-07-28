@@ -3,11 +3,10 @@
 
 mod encoding;
 
-use vllm_text::Prompt;
-
-use super::{ChatRenderer, RenderedPrompt, request_template_kwargs};
+use super::{
+    ChatRenderer, RenderRequest, RenderedPrompt, RenderedPromptContent, request_template_kwargs,
+};
 use crate::Result;
-use crate::request::ChatRequest;
 
 /// Dedicated DeepSeek V3.2 renderer.
 #[derive(Debug, Clone, Copy, Default)]
@@ -21,12 +20,12 @@ impl DeepSeekV32ChatRenderer {
 }
 
 impl ChatRenderer for DeepSeekV32ChatRenderer {
-    fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
+    fn render(&self, request: RenderRequest<'_>) -> Result<RenderedPrompt> {
         request.validate()?;
 
         Ok(RenderedPrompt {
-            prompt: Prompt::Text(encoding::render_request(request)?),
-            effective_template_kwargs: request_template_kwargs(request),
+            content: RenderedPromptContent::Text(encoding::render_request(&request)?),
+            effective_template_kwargs: request_template_kwargs(&request),
         })
     }
 }

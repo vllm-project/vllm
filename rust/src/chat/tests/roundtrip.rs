@@ -18,7 +18,7 @@ use vllm_chat::{
     AssistantContentBlock, AssistantMessage, AssistantMessageExt as _, AssistantToolCall,
     ChatEvent, ChatMessage, ChatRequest, ChatRole, ChatTool, ChatToolChoice, FinishReason,
     GenerationPromptMode, LoadModelBackendsOptions, NewChatOutputProcessorOptions, ParserSelection,
-    RendererSelection, load_model_backends,
+    RenderedPromptContent, RendererSelection, load_model_backends,
 };
 use vllm_text::{DecodedTextEvent, Finished, Prompt};
 use vllm_tokenizer::Tokenizer;
@@ -562,12 +562,22 @@ fn render_closed_completion(
 ) -> Result<RenderedTurn> {
     let mut prompt_request = base_request.clone();
     prompt_request.chat_options.generation_prompt_mode = GenerationPromptMode::StartNewAssistant;
-    let prompt = renderer.render(&prompt_request).context("failed to render prompt")?.prompt;
+    let prompt = lower_rendered_content(
+        renderer
+            .render(prompt_request.as_render_request())
+            .context("failed to render prompt")?
+            .content,
+    );
 
     let mut full_request = base_request.clone();
     full_request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
     full_request.messages.push(ChatMessage::from(assistant.clone()));
-    let full = renderer.render(&full_request).context("failed to render full prompt")?.prompt;
+    let full = lower_rendered_content(
+        renderer
+            .render(full_request.as_render_request())
+            .context("failed to render full prompt")?
+            .content,
+    );
 
     let completion = match (&prompt, full) {
         (Prompt::Text(prompt), Prompt::Text(full)) => {
@@ -588,6 +598,13 @@ fn render_closed_completion(
     };
 
     Ok(RenderedTurn { prompt, completion })
+}
+
+fn lower_rendered_content(content: RenderedPromptContent) -> Prompt {
+    match content {
+        RenderedPromptContent::Text(text) => Prompt::Text(text),
+        RenderedPromptContent::TokenIds(token_ids) => Prompt::TokenIds(token_ids),
+    }
 }
 
 /// Feed one rendered assistant completion body into the real output processor

@@ -1,45 +1,70 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+//! Engine-independent chat prompt renderers.
+//!
+//! The crate accepts borrowed chat-domain inputs and produces text or token-ID
+//! prompt artifacts. Serving requests, sampling policy, multimodal
+//! preprocessing, parser state, and engine transport remain in consumer
+//! crates.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use enum_as_inner::EnumAsInner;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use vllm_text::Prompt;
 
-use crate::error::Result;
-use crate::request::{ChatRequest, ReasoningEffort};
-
-pub mod deepseek_v32;
-pub mod deepseek_v4;
+mod deepseek_v32;
+mod deepseek_v4;
+mod error;
 pub mod harmony;
 pub mod hf;
 mod inkling;
+mod request;
 mod selection;
 #[cfg(test)]
 mod test_utils;
+#[cfg(test)]
+pub(crate) use test_utils::TestRenderRequest;
 
 pub use deepseek_v4::DeepSeekV4ChatRenderer;
 pub use deepseek_v32::DeepSeekV32ChatRenderer;
+pub use error::{Error, Result};
 pub use harmony::HarmonyChatRenderer;
 pub use inkling::InklingChatRenderer;
+pub use request::RenderRequest;
 pub use selection::RendererSelection;
+pub use vllm_chat_types::{
+    AssistantBlockKind, AssistantContentBlock, AssistantMessage, AssistantMessageExt,
+    AssistantToolCall, ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRole,
+    ChatToolChoice, GenerationPromptMode, ImageDetail, ReasoningEffort, Tool,
+};
 
-/// Rendered chat prompt submitted to the text backend.
-#[derive(Debug, Clone, PartialEq)]
+/// Engine-independent prompt content produced by a chat renderer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, EnumAsInner)]
+#[serde(untagged)]
+pub enum RenderedPromptContent {
+    /// Untokenized prompt text.
+    Text(String),
+    /// Prompt token IDs produced by a format-specific renderer.
+    TokenIds(Vec<u32>),
+}
+
+/// Rendered chat prompt plus effective template metadata.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RenderedPrompt {
-    /// The rendered prompt, either as text or already tokenized.
-    pub prompt: Prompt,
+    /// Engine-independent prompt content.
+    pub content: RenderedPromptContent,
     /// Effective chat-template kwargs visible to the renderer after applying
     /// server defaults, request overrides, and typed reasoning controls.
     pub effective_template_kwargs: HashMap<String, Value>,
 }
 
-/// Minimal chat-prompt renderer used by `vllm-chat`.
+/// Synchronous chat-prompt renderer.
 pub trait ChatRenderer: Send + Sync {
-    /// Render one chat request into the text prompt submitted to the text
-    /// backend.
-    fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt>;
+    /// Render one borrowed chat request into text or token IDs.
+    fn render(&self, request: RenderRequest<'_>) -> Result<RenderedPrompt>;
 }
 
 /// Shared trait-object form of [`ChatRenderer`].
@@ -49,7 +74,7 @@ pub type DynChatRenderer = Arc<dyn ChatRenderer>;
 /// using the provided defaults as the base.
 pub(crate) fn effective_template_kwargs(
     default_template_kwargs: &HashMap<String, Value>,
-    request: &ChatRequest,
+    request: &RenderRequest<'_>,
 ) -> HashMap<String, Value> {
     let mut kwargs = default_template_kwargs.clone();
     kwargs.extend(request.chat_options.template_kwargs.clone());
@@ -71,6 +96,6 @@ pub(crate) fn effective_template_kwargs(
 }
 
 /// Extract the effective chat-template kwargs visible to the renderer from the request.
-pub(crate) fn request_template_kwargs(request: &ChatRequest) -> HashMap<String, Value> {
+pub(crate) fn request_template_kwargs(request: &RenderRequest<'_>) -> HashMap<String, Value> {
     effective_template_kwargs(&HashMap::new(), request)
 }

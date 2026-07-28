@@ -32,8 +32,8 @@ use vllm_text::Prompt;
 use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
 
 use crate::error::{Error, Result, bail_multimodal, multimodal};
-use crate::renderer::RenderedPrompt;
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest, ImageDetail};
+use crate::{RenderedPrompt, RenderedPromptContent};
 
 mod audio;
 mod expand;
@@ -486,21 +486,29 @@ pub(crate) async fn finalize_rendered_prompt(
     model_dtype: ModelDtype,
 ) -> Result<(Prompt, Option<MmFeatures>)> {
     if !request.has_multimodal() {
-        return Ok((rendered.prompt, None));
+        return Ok((to_text_prompt(rendered.content), None));
     }
     let info = info.ok_or(Error::UnsupportedMultimodalRenderer)?;
-    let mut prompt_token_ids = match rendered.prompt {
-        Prompt::Text(prompt) => info
+    let mut prompt_token_ids = match rendered.content {
+        RenderedPromptContent::Text(prompt) => info
             .context
             .tokenizer()
             .encode(&prompt, request.add_special_tokens)
             .map_err(|error| multimodal!("{error}"))?,
-        Prompt::TokenIds(token_ids) => token_ids,
+        RenderedPromptContent::TokenIds(token_ids) => token_ids,
     };
     let media_parts = extract_media_parts(request)?;
     let prepared = info.prepare_multimodal(media_parts, &mut prompt_token_ids, model_dtype).await?;
 
     Ok((Prompt::TokenIds(prompt_token_ids), Some(prepared)))
+}
+
+/// Lower an engine-independent renderer artifact into a text-backend prompt.
+pub(crate) fn to_text_prompt(content: RenderedPromptContent) -> Prompt {
+    match content {
+        RenderedPromptContent::Text(text) => Prompt::Text(text),
+        RenderedPromptContent::TokenIds(token_ids) => Prompt::TokenIds(token_ids),
+    }
 }
 
 /// Extract media parts from chat messages in message/content order.
