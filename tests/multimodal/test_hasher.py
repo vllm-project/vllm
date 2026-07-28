@@ -11,6 +11,8 @@ from PIL import Image, ImageDraw
 
 from vllm.config.multimodal import MMHasherAlgorithm
 from vllm.multimodal.hasher import MultiModalHasher
+from vllm.multimodal.media.base import MediaWithBytes
+from vllm.multimodal.parse import MultiModalDataParser
 
 pytestmark = pytest.mark.cpu_test
 
@@ -107,6 +109,29 @@ def test_hash_collision_array_shape():
     hasher = MultiModalHasher
     assert hasher.hash_kwargs("blake3", data=arr1) != hasher.hash_kwargs(
         "blake3", data=arr2
+    )
+
+
+def test_hash_collision_video_num_frames():
+    source = b"x" * 100
+
+    def item_for_hash(num_frames: int):
+        frames: np.ndarray = np.zeros((num_frames, 8, 8, 3), dtype=np.uint8)
+        metadata = {
+            "total_num_frames": 16,
+            "fps": 2.0,
+            "duration": 8.0,
+            "video_backend": "opencv",
+            "frames_indices": list(range(num_frames)),
+            "do_sample_frames": False,
+        }
+        video = MediaWithBytes((frames, metadata), source)
+        items = MultiModalDataParser()._parse_video_data([video])
+        return items.get_all_items_for_hash()[0]
+
+    hasher = MultiModalHasher
+    assert hasher.hash_kwargs(video=item_for_hash(2)) != hasher.hash_kwargs(
+        video=item_for_hash(4)
     )
 
 

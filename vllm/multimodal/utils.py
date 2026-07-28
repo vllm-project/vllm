@@ -24,7 +24,13 @@ from .inputs import (
     MultiModalSharedField,
     nested_tensors_equal,
 )
-from .media import AudioMediaIO, ImageMediaIO, MediaConnector, VideoMediaIO
+from .media import (
+    AudioMediaIO,
+    ImageMediaIO,
+    MediaConnector,
+    MediaWithBytes,
+    VideoMediaIO,
+)
 
 if TYPE_CHECKING:
     import torch.types
@@ -344,7 +350,7 @@ def fetch_image(
 def fetch_video(
     video_url: str,
     video_io_kwargs: dict[str, Any] | None = None,
-) -> tuple[npt.NDArray, dict[str, Any]]:
+) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
     """
     Args:
         video_url: URL of the video file to fetch.
