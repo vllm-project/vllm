@@ -594,6 +594,7 @@ class EngineArgs:
     renderer_num_workers: int = 1
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float | None = MultiModalConfig.video_pruning_rate
+    video_pruning_method: str = MultiModalConfig.video_pruning_method
     mm_tensor_ipc: MMTensorIPC = MultiModalConfig.mm_tensor_ipc
     mm_ipc_gpu_memory_gb: float = MultiModalConfig.mm_ipc_gpu_memory_gb
     # LoRA fields
@@ -1345,6 +1346,10 @@ class EngineArgs:
             "--video-pruning-rate", **multimodal_kwargs["video_pruning_rate"]
         )
         multimodal_group.add_argument(
+            "--video-pruning-method",
+            **multimodal_kwargs["video_pruning_method"],
+        )
+        multimodal_group.add_argument(
             "--mm-tensor-ipc", **multimodal_kwargs["mm_tensor_ipc"]
         )
         multimodal_group.add_argument(
@@ -1710,6 +1715,7 @@ class EngineArgs:
             mm_processor_cache_gb=self.mm_processor_cache_gb,
             mm_processor_cache_type=self.mm_processor_cache_type,
             mm_shm_cache_max_object_size_mb=self.mm_shm_cache_max_object_size_mb,
+            mm_hasher_algorithm=self.mm_hasher_algorithm,
             mm_encoder_only=self.mm_encoder_only,
             mm_encoder_tp_mode=self.mm_encoder_tp_mode,
             mm_encoder_attn_backend=self.mm_encoder_attn_backend,
@@ -1726,7 +1732,7 @@ class EngineArgs:
             override_attention_dtype=self.override_attention_dtype,
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
-            mm_hasher_algorithm=self.mm_hasher_algorithm,
+            video_pruning_method=self.video_pruning_method,
             mm_tensor_ipc=self.mm_tensor_ipc,
             mm_ipc_gpu_memory_gb=self.mm_ipc_gpu_memory_gb,
             io_processor_plugin=self.io_processor_plugin,
