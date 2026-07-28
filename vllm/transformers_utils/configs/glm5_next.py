@@ -51,7 +51,7 @@ class Glm5NextTextConfig(PretrainedConfig):
         v_head_dim: int | None = 256,
         mla_nope: bool | None = True,
         num_nextn_predict_layers: int = 1,
-        # Per-layer layout (new schema): "linear_attention" | "deepseek_sparse_attention"
+        # Per-layer layout: "linear_attention" | "deepseek_sparse_attention"
         layer_types: list[str] | None = None,
         # Per-layer MLP: "dense" | "sparse"
         mlp_layer_types: list[str] | None = None,
@@ -143,9 +143,9 @@ class Glm5NextTextConfig(PretrainedConfig):
         if mlp_layer_types is None:
             n = self.num_hidden_layers
             if first_k_dense_replace is not None:
-                mlp_layer_types = ["dense"] * first_k_dense_replace + [
-                    "sparse"
-                ] * (n - first_k_dense_replace)
+                mlp_layer_types = ["dense"] * first_k_dense_replace + ["sparse"] * (
+                    n - first_k_dense_replace
+                )
             else:
                 mlp_layer_types = ["sparse"] * n
         self.mlp_layer_types = mlp_layer_types

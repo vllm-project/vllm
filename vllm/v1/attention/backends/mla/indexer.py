@@ -217,7 +217,7 @@ class KpoolTailBackend(DeepseekV32IndexerBackend):
         return (0, 1, 2, 3)
 
     @staticmethod
-    def get_builder_cls() -> type["KpoolTailMetadataBuilder"]:
+    def get_builder_cls() -> type["KpoolTailMetadataBuilder"]:  # type: ignore[override]
         return KpoolTailMetadataBuilder
 
 

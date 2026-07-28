@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 import math
 from functools import cache
 from typing import TYPE_CHECKING, Any
@@ -23,10 +24,8 @@ if TYPE_CHECKING or current_platform.is_cuda_alike():
     # which otherwise maps at a lower address and shadows the real libcudart,
     # breaking flashinfer all-reduce on sm100. Import order is load-bearing;
     # this must run before `import tilelang`.
-    try:
+    with contextlib.suppress(Exception):
         import flashinfer.comm  # noqa: F401
-    except Exception:
-        pass
     import tilelang
     import tilelang.language as T
 else:

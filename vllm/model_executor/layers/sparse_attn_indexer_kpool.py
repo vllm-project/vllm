@@ -339,6 +339,7 @@ def sparse_attn_indexer_kpool(
                 ):
                     tail_meta = attn_metadata.get(_resolve_layer_name(tail_prefix))
                     if tail_meta is not None:
+                        assert isinstance(tail_meta, DeepseekV32IndexerMetadata)
                         r = n_prefill % index_kpool
                         if r > 0:
                             t_start = num_tokens - r
@@ -616,6 +617,8 @@ def sparse_attn_indexer_kpool(
             # the tail group's token-granular slot_mapping per-request, mirroring
             # dec_slot / dec_pos, so the kernel gets each request's current-token
             # tail slot (block * kpool + pos % kpool).
+            if tail_meta is not None:
+                assert isinstance(tail_meta, DeepseekV32IndexerMetadata)
             if tail_meta is None or tail_kv_cache is None:
                 dec_tail_slot = None
             elif not use_uniform:
