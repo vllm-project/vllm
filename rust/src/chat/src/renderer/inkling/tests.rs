@@ -31,6 +31,10 @@ impl Tokenizer for FixtureTokenizer {
         Ok(text.bytes().map(u32::from).collect())
     }
 
+    fn encode_ordinary(&self, text: &str) -> vllm_tokenizer::Result<Vec<u32>> {
+        self.encode(text, false)
+    }
+
     fn decode(
         &self,
         token_ids: &[u32],
