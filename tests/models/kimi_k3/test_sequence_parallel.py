@@ -12,6 +12,7 @@ from vllm.config import ParallelConfig
 from vllm.models.kimi_k3.nvidia import model as kimi_model
 from vllm.models.kimi_k3.nvidia import mtp as kimi_mtp
 from vllm.models.kimi_k3.nvidia.ops import sequence_parallel as sp_ops
+from vllm.platforms import current_platform
 
 
 class _IdentityNorm(nn.Module):
@@ -116,9 +117,11 @@ def test_sp_padding_mask_marks_added_rows(
     ],
 )
 def test_moe_sequence_parallel_requires_data_parallel(
+    monkeypatch,
     data_parallel_size: int,
     expected: bool,
 ):
+    monkeypatch.setattr(current_platform, "device_count", lambda: 2)
     parallel_config = ParallelConfig(
         tensor_parallel_size=2,
         data_parallel_size=data_parallel_size,
