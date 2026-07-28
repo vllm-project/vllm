@@ -145,6 +145,15 @@ def test_precompiled_install_flags_are_orthogonal() -> None:
         assert environment_variables["VLLM_USE_PRECOMPILED_RUST"]() is True
 
 
+def test_rust_bench_auto_path_missing_fails_fast() -> None:
+    with (
+        patch.dict(os.environ, {"VLLM_USE_RUST_BENCH": "1"}, clear=True),
+        patch("vllm.envs.os.path.isfile", return_value=False),
+        pytest.raises(FileNotFoundError, match="vllm-rs binary was not found"),
+    ):
+        environment_variables["VLLM_RUST_FRONTEND_PATH"]()
+
+
 class TestEnvWithChoices:
     """Test cases for env_with_choices function."""
 
