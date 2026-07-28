@@ -640,6 +640,35 @@ class EngineCore:
             if draft_token_ids is not None:
                 self.scheduler.update_draft_token_ids(draft_token_ids)
 
+    def _pop_and_process_batch(
+        self,
+        batch_queue: (
+            "deque[tuple[Future[ModelRunnerOutput], SchedulerOutput, Future[Any]]]"
+        ),
+    ) -> dict[int, EngineCoreOutputs]:
+        """Pop the oldest in-flight batch, wait for its result, and update
+        the scheduler from it."""
+        future, scheduler_output, exec_model_fut = batch_queue.pop()
+        with (
+            self.capture_iteration_details(scheduler_output) as iteration_details,
+            self.log_error_detail(scheduler_output),
+        ):
+            model_output = future.result()
+            if model_output is None:
+                # None from sample_tokens() implies that the original execute_model()
+                # call failed - raise that exception.
+                exec_model_fut.result()
+                raise RuntimeError("unexpected error")
+
+        # Before processing the model output, process any aborts that happened
+        # during the model execution.
+        self._process_aborts_queue()
+        engine_core_outputs = self.scheduler.update_from_output(
+            scheduler_output, model_output
+        )
+        self._attach_iteration_details(engine_core_outputs, iteration_details)
+        return engine_core_outputs
+
     def step_with_batch_queue(
         self,
     ) -> tuple[dict[int, EngineCoreOutputs] | None, bool]:
@@ -711,25 +740,7 @@ class EngineCore:
             return None, False
 
         # Block until the next result is available.
-        future, scheduler_output, exec_model_fut = batch_queue.pop()
-        with (
-            self.capture_iteration_details(scheduler_output) as iteration_details,
-            self.log_error_detail(scheduler_output),
-        ):
-            model_output = future.result()
-            if model_output is None:
-                # None from sample_tokens() implies that the original execute_model()
-                # call failed - raise that exception.
-                exec_model_fut.result()
-                raise RuntimeError("unexpected error")
-
-        # Before processing the model output, process any aborts that happened
-        # during the model execution.
-        self._process_aborts_queue()
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, model_output
-        )
-        self._attach_iteration_details(engine_core_outputs, iteration_details)
+        engine_core_outputs = self._pop_and_process_batch(batch_queue)
 
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
@@ -744,19 +755,13 @@ class EngineCore:
             while batch_queue and self.scheduler.has_structured_output_in_flight(
                 deferred_scheduler_output
             ):
-                d_future, d_scheduler_output, d_exec_fut = batch_queue.pop()
-                with (
-                    self.log_error_detail(d_scheduler_output),
-                    self.log_iteration_details(d_scheduler_output),
-                ):
-                    d_output = d_future.result()
-                    if d_output is None:
-                        d_exec_fut.result()
-                        raise RuntimeError("unexpected error")
                 _merge_engine_core_outputs(
                     engine_core_outputs,
-                    self.scheduler.update_from_output(d_scheduler_output, d_output),
+                    self._pop_and_process_batch(batch_queue),
                 )
+            assert not self.scheduler.has_structured_output_in_flight(
+                deferred_scheduler_output
+            )
             # When draft tokens are used with structured output, validate them
             # before computing the grammar bitmask for the deferred request.
             if self.check_for_draft_tokens:
