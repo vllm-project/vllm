@@ -5503,9 +5503,9 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
- "tracing-subscriber",
  "url",
  "uuid",
+ "vllm-tracing",
 ]
 
 [[package]]
@@ -5570,17 +5570,16 @@ dependencies = [
  "serde_json",
  "serde_with",
  "thiserror-ext",
- "time",
  "tokio",
  "tokio-util",
  "tracing",
- "tracing-subscriber",
  "uuid",
  "vllm-bench",
  "vllm-chat",
  "vllm-engine-core-client",
  "vllm-managed-engine",
  "vllm-server",
+ "vllm-tracing",
 ]
 
 [[package]]
@@ -5825,6 +5824,15 @@ dependencies = [
  "serde_json",
  "thiserror-ext",
  "vllm-parser",
+]
+
+[[package]]
+name = "vllm-tracing"
+version = "0.1.0"
+dependencies = [
+ "time",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

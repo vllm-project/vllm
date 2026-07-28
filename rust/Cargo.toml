@@ -13,6 +13,7 @@ members = [
     "src/server",
     "src/text",
     "src/tokenizer",
+    "src/tracing",
 ]
 resolver = "3"
 
@@ -143,6 +144,7 @@ vllm-parser = { path = "src/parser" }
 vllm-server = { path = "src/server" }
 vllm-text = { path = "src/text" }
 vllm-tokenizer = { path = "src/tokenizer" }
+vllm-tracing = { path = "src/tracing" }
 winnow = { version = "1.0.2", features = ["simd"] }
 xgrammar-structural-tag = "0.2.0"
 zeromq = { version = "0.6.0", default-features = false, features = [
