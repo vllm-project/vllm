@@ -439,7 +439,8 @@ class SiglipMLP(nn.Module):
         use_data_parallel = is_vit_use_data_parallel()
         self.activation_fn = get_act_fn(config.hidden_act)
 
-        if quant_config and quant_config.supports_unaligned_mlp():
+        # Special handling for BNB and torchao quantization
+        if quant_config and quant_config.get_name() in ["bitsandbytes", "torchao"]:
             quantizable = True
         else:
             # For other quantization, we require the hidden size to be a

@@ -789,7 +789,6 @@ class ModelConfig:
         self._try_verify_and_update_model_config()
         self._verify_quantization()
         self._verify_cuda_graph()
-        self._verify_quant_config()
 
     def _supports_multimodal_for_mm_prefix(self) -> bool:
         """Whether multimodal inputs can still appear for this deployment.
@@ -1211,13 +1210,6 @@ class ModelConfig:
                 self.model_arch_config.model_type,
             )
             self.enforce_eager = True
-
-    def _verify_quant_config(self) -> None:
-        if self.quantization is None:
-            return
-
-        quant_cls = me_quant.get_quantization_config(self.quantization)
-        quant_cls.verify_model_config(self)
 
     def _verify_with_expert_parallelism(self) -> None:
         if not self.is_moe:
