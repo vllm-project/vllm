@@ -10,15 +10,12 @@ from typing import Any
 
 import torch
 
-import vllm.envs as envs
 from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import tl, triton, use_tensor_descriptor
 from vllm.triton_utils.allocation import set_triton_allocator
 from vllm.utils.platform_utils import get_device_name_as_file_name
 
 logger = logging.getLogger(__name__)
-
-_TD_ALLOCATOR_DEVICES: set[torch.device] = set()
 
 
 def block_dequant(
@@ -445,12 +442,9 @@ def w8a8_block_int8_matmul(
             triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
         )
 
-
     bm, bn, bk = config["BLOCK_SIZE_M"], config["BLOCK_SIZE_N"], config["BLOCK_SIZE_K"]
-    td_override = use_td if use_td is not None else envs.VLLM_TRITON_USE_TD
-    use_td = current_platform.is_xpu() if td_override is None else td_override
     use_td = (
-        use_td
+        use_tensor_descriptor(use_td)
         and A.stride(-1) == 1
         and B.stride(1) == 1
         and (K * A.element_size()) % 16 == 0
@@ -458,9 +452,8 @@ def w8a8_block_int8_matmul(
         and (bn & (bn - 1)) == 0
         and (bk & (bk - 1)) == 0
     )
-    if use_td and A.device not in _TD_ALLOCATOR_DEVICES:
+    if use_td:
         set_triton_allocator(A.device)
-        _TD_ALLOCATOR_DEVICES.add(A.device)
 
     _w8a8_block_int8_matmul[grid](
         A,

@@ -67,6 +67,7 @@ def test_w8a8_block_int8_matmul(M, N, K, block_size, out_dtype, seed):
     ) / torch.mean(torch.abs(ref_out.to(torch.float32)))
     assert rel_diff < 0.001
 
+
 @pytest.mark.skipif(
     not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
     reason="No GPU device available",
