@@ -219,10 +219,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # the set of architectures we want to compile for and remove the from the
   # CMAKE_CUDA_FLAGS so that they are not applied globally.
   #
-  # `+PTX` in TORCH_CUDA_ARCH_LIST is not preserved here. It is emitted by torch
-  # as `code=compute_*`, while extract_unique_cuda_archs_ascending() records only
-  # `arch=compute_*`. If a kernel really needs PTX, add `+PTX` to that kernel's
-  # component-specific arch list below.
+  # `+PTX` in TORCH_CUDA_ARCH_LIST is not preserved here. If a kernel really
+  # needs PTX, add `+PTX` to that kernel's component-specific arch list below.
   #
   clear_cuda_arches(CUDA_ARCH_FLAGS)
   extract_unique_cuda_archs_ascending(CUDA_ARCHS "${CUDA_ARCH_FLAGS}")
@@ -232,6 +230,13 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   cuda_archs_loose_intersection(CUDA_ARCHS
     "${CUDA_SUPPORTED_ARCHS}" "${CUDA_ARCHS}")
   message(STATUS "CUDA supported target architectures: ${CUDA_ARCHS}")
+  if(NOT CUDA_ARCHS)
+    message(FATAL_ERROR
+      "No supported CUDA architectures; the build would produce a binary "
+      "with no usable kernels. Detected gencode flags: ${CUDA_ARCH_FLAGS}; "
+      "supported: ${CUDA_SUPPORTED_ARCHS}. "
+      "Set TORCH_CUDA_ARCH_LIST for your GPU (e.g. 12.0).")
+  endif()
 else()
   #
   # For other GPU targets override the GPU architectures detected by cmake/torch
