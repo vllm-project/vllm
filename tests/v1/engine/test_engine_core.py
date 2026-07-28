@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
-import re
 import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from unittest.mock import PropertyMock, patch
 
 import pytest
+import regex as re
 from transformers import AutoTokenizer
 
 from vllm import SamplingParams
