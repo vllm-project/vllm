@@ -2422,13 +2422,19 @@ class NixlBaseConnectorWorker:
                 if _is_ssm_spec(self._group_spec_types[i]):
                     if num_local_blocks == num_remote_blocks:
                         continue
-                    # SSM lists end at the state-bearing slot: placeholder and
-                    # speculative slots are stripped scheduler-side (see
-                    # get_exchange_clipped_blocks). A longer remote list carries
-                    # earlier-slot entries the local side has covered (e.g. a
+                    # SSM lists hold only state-bearing slots: speculative
+                    # slots are stripped scheduler-side, and single-state cache
+                    # modes are reduced to one slot there too (see
+                    # get_exchange_clipped_blocks), so differing counts mean
+                    # position-indexed "all"-mode lists. A longer remote list
+                    # carries earlier positions the local side already has (a
                     # local prefix hit), so read its tail; a longer local list
-                    # has trailing slots beyond the transferred tokens, which
-                    # receive no remote state.
+                    # can only hold the one trailing position for the final
+                    # token D recomputes itself, which gets no remote state.
+                    assert num_local_blocks - num_remote_blocks <= 1, (
+                        f"Group {i}: unpairable SSM state slots, "
+                        f"local={num_local_blocks} remote={num_remote_blocks}"
+                    )
                     num_blocks = min(num_local_blocks, num_remote_blocks)
                     if num_local_blocks < num_remote_blocks:
                         remote_block_ids[i] = remote_group[-num_blocks:]

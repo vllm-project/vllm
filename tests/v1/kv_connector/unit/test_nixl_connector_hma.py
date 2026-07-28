@@ -365,7 +365,7 @@ def test_apply_prefix_caching_mamba_hybrid(
             [[6, 7, 8, 9], [99]],
             id="fa_prefix_hit_and_ssm_trim",
         ),
-        # Multi-slot SSM (align mode): a local prefix hit leaves fewer local
+        # Multi-slot SSM ("all" mode): a local prefix hit leaves fewer local
         # slots; the earlier remote slots are covered locally → remote tail.
         pytest.param(
             10,
@@ -376,8 +376,8 @@ def test_apply_prefix_caching_mamba_hybrid(
             [list(range(10)), [2, 3]],
             id="ssm_multi_block_local_hit_tail",
         ),
-        # Multi-slot SSM: trailing local slots beyond the transferred tokens
-        # receive no remote state → local head-clip.
+        # Multi-slot SSM ("all" mode): the one trailing local position holds
+        # the token D recomputes itself → local head-clip.
         pytest.param(
             10,
             10,
@@ -422,6 +422,29 @@ def test_apply_prefix_caching_ssm_prefix_cache_hit(
     assert aligned_remote == expected_remote, (
         f"Expected remote {expected_remote}, got {aligned_remote}"
     )
+
+
+@pytest.mark.cpu_test
+def test_apply_prefix_caching_ssm_unpairable_slots_rejected():
+    """Local SSM slots can only exceed the remote ones by the single
+    position D recomputes itself. A larger excess means the two lists are
+    not position-aligned, which must fail loudly rather than transfer state
+    into the wrong slots."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._has_mamba = True
+    worker._physical_blocks_per_logical_kv_block = 10
+    worker._group_spec_types = (FullAttentionSpec, MambaSpec)
+    worker.kv_cache_config = make_kv_cache_config(block_size=16, mamba_enabled=True)
+
+    with pytest.raises(AssertionError, match="unpairable SSM state slots"):
+        worker._apply_prefix_caching(
+            [list(range(10)), [4, 5, 6, 7]], [list(range(10)), [8, 9]], 10
+        )
 
 
 @pytest.mark.cpu_test
@@ -1405,31 +1428,46 @@ def test_logical_to_kernel_block_ids_with_remote_ratio(
 
 
 @pytest.mark.cpu_test
-def test_exchange_clipped_blocks_ssm():
-    """SSM group lists are reduced to end at the state-bearing slot:
-    trailing speculative scratch slots and null-block placeholders hold no
-    transferable state and must be stripped before P/D pairing. Attention
-    groups pass through untouched."""
+def test_exchange_clipped_blocks_ssm_single_state():
+    """With a single running state ("none"/"align" modes), SSM group lists
+    are reduced to that one state slot: trailing speculative scratch slots,
+    null placeholders and the previous step's superseded state hold no
+    transferable state. Attention groups pass through untouched."""
     sched = make_nixl_scheduler(has_mamba=True, is_hma_required=True)
     sched.blocks_per_sw = [0, 0]
     sched._ssm_spec_blocks = [None, 2]
+    sched._ssm_state_slots_are_positional = False
 
     # Align-mode list: null placeholders, state block, 2 speculative slots.
     clipped = sched.get_exchange_clipped_blocks(([1, 2, 3], [0, 0, 7, 8, 9]))
     assert clipped == ([1, 2, 3], [7])
 
+    # Align-mode list still holding the previous step's state block (freed
+    # one step later): only the running state is transferable.
+    assert sched.get_exchange_clipped_blocks(([1], [0, 6, 7, 8, 9]))[1] == [7]
+
     # Default (mamba_block_size=max_model_len) list with speculative
     # decoding: state block first, 2 trailing scratch slots.
     assert sched.get_exchange_clipped_blocks(([1], [7, 8, 9]))[1] == [7]
 
-    # No placeholders and no speculative slots allocated: at most
-    # len - 1 trailing blocks are stripped.
+    # No speculative slots allocated: at most len - 1 trailing blocks are
+    # stripped, so the state slot always survives.
     assert sched.get_exchange_clipped_blocks(([1], [5]))[1] == [5]
-
-    # All placeholders: keep one entry — an empty SSM list would read as a
-    # full prefix hit downstream.
-    assert sched.get_exchange_clipped_blocks(([1], [0, 0, 0]))[1] == [0]
 
     # Non-mamba models pass through unchanged.
     fa_sched = make_nixl_scheduler(has_mamba=False)
     assert fa_sched.get_exchange_clipped_blocks(([1, 2],)) == ([1, 2],)
+
+
+@pytest.mark.cpu_test
+def test_exchange_clipped_blocks_ssm_positional_states():
+    """In "all" mode every block position holds a state, so the list keeps
+    all of its slots (including null placeholders, which keep the list
+    position-indexed for the worker's pairing) minus the speculative ones."""
+    sched = make_nixl_scheduler(has_mamba=True, is_hma_required=True)
+    sched.blocks_per_sw = [0, 0]
+    sched._ssm_spec_blocks = [None, 2]
+    sched._ssm_state_slots_are_positional = True
+
+    clipped = sched.get_exchange_clipped_blocks(([1, 2, 3], [0, 5, 6, 7, 8, 9]))
+    assert clipped == ([1, 2, 3], [0, 5, 6, 7])

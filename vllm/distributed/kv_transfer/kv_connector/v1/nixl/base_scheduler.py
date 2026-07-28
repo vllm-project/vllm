@@ -145,6 +145,12 @@ class NixlBaseConnectorScheduler:
             else None
             for g in kv_cache_config.kv_cache_groups
         ]
+        # Only "all" mode keeps a state per block position, making SSM block
+        # lists multi-slot and position-indexed. "none"/"align" keep a single
+        # running state, which always sits in the last non-speculative slot.
+        self._ssm_state_slots_are_positional = (
+            vllm_config.cache_config.mamba_cache_mode == "all"
+        )
 
         # Threshold to decide whether to compute kv cache locally
         # or pull from a remote node: minimum number of remote
@@ -239,14 +245,14 @@ class NixlBaseConnectorScheduler:
         only cleans up out-of-window blocks prior to the
         `request_finished_all_groups` hook.
 
-        SSM groups are reduced to end at the state-bearing slot: mamba
-        managers co-allocate ``num_speculative_blocks`` trailing scratch
-        slots for speculative decoding, and with mamba prefix caching
-        ("align" mode) the block list may also contain null-block
-        placeholders for slots whose state has migrated forward. Neither
-        holds transferable state: strip both so the SSM lists exchanged by
-        P and D end at the state-bearing slot and can be paired tail-aligned
-        by the worker.
+        SSM groups are reduced to their state-bearing slots. Mamba managers
+        co-allocate ``num_speculative_blocks`` trailing scratch slots for
+        speculative decoding, which hold no transferable state and are
+        always stripped. What is left depends on the cache mode: "none" and
+        "align" keep a single running state, so the list is reduced to that
+        one slot (earlier entries are null placeholders or the previous
+        step's superseded state); "all" keeps a state per block position, so
+        the list stays multi-slot and is paired position-wise by the worker.
 
         Use this at every block-id exchange point. Pass ``clip_ssm=False``
         for per-step partial lists (host-buffer save), where the SSM
@@ -272,9 +278,10 @@ class NixlBaseConnectorScheduler:
             ):
                 if n_spec := min(n_spec_blocks, len(blocks) - 1):
                     blocks = blocks[:-n_spec]
-                # Drop null placeholders (block id 0), but keep at least one
-                # entry: an empty list means "full prefix hit" downstream.
-                blocks = [b for b in blocks if b != 0] or blocks[-1:]
+                if not self._ssm_state_slots_are_positional:
+                    # Single running state: keep only its slot. Never empty,
+                    # since an empty list means "full prefix hit" downstream.
+                    blocks = blocks[-1:]
             clipped.append(blocks)
         return tuple(clipped)
 
