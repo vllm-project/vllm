@@ -1446,13 +1446,15 @@ CONFIGS = {(16, 8, 1): {'atomic_indexing': [],
                   'range_unroll_factors': [1],
                   'range_warp_specializes': []}}
 
+PRESERVES_SPECIALIZATIONS = True
+
 PROVENANCE = {'config_path': 'vllm/kernels/helion/configs/fused_qk_norm_rope/nvidia_h100.json',
  'config_sha256': '15f22e1212b057681bf5612a53ec917a88bffaf31e0a72a4fd2fe3eb73c611ad',
  'generator': 'scripts/generate_helion_kernels.py',
- 'helion_version': '1.0.1.dev395+g1631eb1c7',
+ 'helion_version': '1.1.0',
  'kernel': 'fused_qk_norm_rope',
  'platform': 'nvidia_h100',
  'source_path': 'vllm/kernels/helion/ops/fused_qk_norm_rope.py',
  'source_sha256': '57461f9568cc6457e8913dbe5d2065bd4a80066fced268a20ef63ff2eb901cbe',
- 'torch_version': '2.14.0a0+git7e63a83',
- 'triton_version': '3.7.0'}
+ 'torch_version': '2.11.0+cu130',
+ 'triton_version': '3.6.0'}

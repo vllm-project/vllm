@@ -44,7 +44,7 @@ def _eligible_module(
         or not is_scale_transposed
         or scales.dtype != torch.float32
         or scales.device != input.device
-        or group_size < 1
+        or group_size not in (64, 128)
         or out.shape[1] % group_size != 0
         or scales.shape != (input.shape[0], out.shape[1] // group_size)
         or scales.stride() != (1, input.shape[0])

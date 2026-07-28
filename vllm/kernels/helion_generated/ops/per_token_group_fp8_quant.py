@@ -73,7 +73,7 @@ def _eligible_module(
         return None
 
     num_tokens, hidden_size = input.shape
-    if group_size < 1 or hidden_size % group_size != 0:
+    if group_size < 1 or group_size & (group_size - 1) or hidden_size % group_size != 0:
         return None
     groups_per_row = hidden_size // group_size
     if output_s.shape != (num_tokens, groups_per_row):

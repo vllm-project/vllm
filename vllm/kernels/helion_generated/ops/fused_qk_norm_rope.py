@@ -35,13 +35,18 @@ def _eligible_module(
     forced_token_heads_per_warp: int,
 ) -> str | None:
     num_tokens = qkv.shape[0] if qkv.ndim == 2 else 0
+    rotary_dim = cos_sin_cache.shape[1] if cos_sin_cache.ndim == 2 else 0
+    embed_dim = rotary_dim // 2
     if (
         qkv.ndim != 2
         or qkv.dtype != torch.bfloat16
         or not qkv.is_cuda
         or not qkv.is_contiguous()
+        or num_heads_q < 1
+        or num_heads_k < 1
         or num_heads_v != num_heads_k
-        or head_dim != 128
+        or head_dim < 1
+        or head_dim & (head_dim - 1)
         or qkv.shape[1] != (num_heads_q + num_heads_k + num_heads_v) * head_dim
         or q_weight.shape != (head_dim,)
         or q_weight.dtype != qkv.dtype
@@ -51,11 +56,15 @@ def _eligible_module(
         or k_weight.dtype != qkv.dtype
         or k_weight.device != qkv.device
         or not k_weight.is_contiguous()
-        or cos_sin_cache.shape != (40960, head_dim)
+        or cos_sin_cache.ndim != 2
+        or cos_sin_cache.shape[0] < 1
+        or rotary_dim < 2
+        or rotary_dim % 2 != 0
+        or rotary_dim > head_dim
+        or embed_dim & (embed_dim - 1)
         or cos_sin_cache.dtype != qkv.dtype
         or cos_sin_cache.device != qkv.device
         or not cos_sin_cache.is_contiguous()
-        or not is_neox
         or position_ids.shape != (num_tokens,)
         or position_ids.dtype != torch.int64
         or position_ids.device != qkv.device

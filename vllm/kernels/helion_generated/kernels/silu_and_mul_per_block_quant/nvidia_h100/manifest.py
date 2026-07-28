@@ -862,6 +862,8 @@ CONFIGS = {(6144, 128, 1): {'atomic_indexing': [],
                        'range_unroll_factors': [0],
                        'range_warp_specializes': []}}
 
+PRESERVES_SPECIALIZATIONS = True
+
 PROVENANCE = {'config_path': 'vllm/kernels/helion/configs/silu_and_mul_per_block_quant/nvidia_h100.json',
  'config_sha256': '41ee998c474b68c4667717c7ddeae420fc6036aca565e454eb885f84cd5a3980',
  'generator': 'scripts/generate_helion_kernels.py',

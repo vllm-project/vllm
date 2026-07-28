@@ -434,6 +434,7 @@ def _manifest(
         "# fmt: off\n"
         f"KERNELS = {pformat(kernels, sort_dicts=True, width=88)}\n\n"
         f"CONFIGS = {pformat(serialized_configs, sort_dicts=True, width=88)}\n\n"
+        "PRESERVES_SPECIALIZATIONS = True\n\n"
         f"PROVENANCE = {pformat(provenance, sort_dicts=True, width=88)}\n"
     )
 
@@ -519,6 +520,11 @@ def generate(kernel_name: str, platform: str, check: bool) -> None:
     expected = {"__init__.py", "manifest.py"}
     configured_op = op.get_configured_op()
     configured = configured_op._decorated_kernel
+    if "preserve_specializations" not in inspect.signature(configured.bind).parameters:
+        raise RuntimeError(
+            "Kernel generation requires a Helion version whose Kernel.bind() "
+            "supports preserve_specializations=True"
+        )
     expected_args = list(inspect.signature(configured_op.raw_kernel_func).parameters)
     action = "Check" if check else "Generate"
     hardware = platform.removeprefix("nvidia_").upper()
@@ -538,7 +544,10 @@ def generate(kernel_name: str, platform: str, check: bool) -> None:
         if args is None:
             args = spec.input_factory(case)
         with _suppress_helion_output():
-            code = configured.bind(args).to_code(concrete_configs[case])
+            code = configured.bind(
+                args,
+                preserve_specializations=True,
+            ).to_code(concrete_configs[case])
         content = _postprocess(code, spec, case, expected_args)
         _write_or_check(output_dir / filename, content, check, errors)
 

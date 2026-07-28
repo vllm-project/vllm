@@ -2115,6 +2115,8 @@ CONFIGS = {(2048, 64, 1): {'block_sizes': [2048, 32],
                      'range_unroll_factors': [0, 0, 2],
                      'range_warp_specializes': []}}
 
+PRESERVES_SPECIALIZATIONS = True
+
 PROVENANCE = {'config_path': 'vllm/kernels/helion/configs/rms_norm_per_block_quant/nvidia_h100.json',
  'config_sha256': '0979229db77cc98271eebd847d0872b3aef932edd488b45201febdfecca2aaef',
  'generator': 'scripts/generate_helion_kernels.py',

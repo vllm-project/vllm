@@ -656,6 +656,8 @@ CONFIGS = {(2048, 128, 1): {'atomic_indexing': [],
                      'range_unroll_factors': [0],
                      'range_warp_specializes': []}}
 
+PRESERVES_SPECIALIZATIONS = True
+
 PROVENANCE = {'config_path': 'vllm/kernels/helion/configs/per_token_group_fp8_quant/nvidia_h100.json',
  'config_sha256': 'be1995831d0c1934901918c46edc1f9020eddf1f488030734d1790e7dadcce31',
  'generator': 'scripts/generate_helion_kernels.py',

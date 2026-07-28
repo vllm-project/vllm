@@ -55,14 +55,14 @@ def _get_int8_min_scaling_factor() -> float:
     return torch.finfo(torch.float32).eps
 
 _BLOCK_SIZE_1 = tl.constexpr(4)
-_BLOCK_SIZE_2 = tl.constexpr(128)
+_BLOCK_SIZE_0 = tl.constexpr(1)
 
 @triton.jit
-def _triton_silu_and_mul_per_block_quant(input_1, scales, out, input_1_stride_0, input_1_stride_1, input_1_stride_2, out_stride_0, out_stride_1, out_stride_2, scales_stride_0, scales_stride_1):
-    num_blocks_0 = tl.cdiv(48, _BLOCK_SIZE_1)
-    num_blocks_1 = tl.cdiv(128, _BLOCK_SIZE_2)
-    num_pid_m = tl.cdiv(48, _BLOCK_SIZE_1)
-    num_pid_n = tl.cdiv(128, _BLOCK_SIZE_2)
+def _triton_silu_and_mul_per_block_quant(input_1, scales, out, input_1_stride_0, input_1_stride_1, input_1_stride_2, out_stride_0, out_stride_1, out_stride_2, scales_stride_0, scales_stride_1, groups_per_row: tl.constexpr, _BLOCK_SIZE_2: tl.constexpr, group_size: tl.constexpr):
+    num_blocks_0 = tl.cdiv(groups_per_row, _BLOCK_SIZE_1)
+    num_blocks_1 = tl.cdiv(group_size, _BLOCK_SIZE_2)
+    num_pid_m = tl.cdiv(groups_per_row, _BLOCK_SIZE_1)
+    num_pid_n = tl.cdiv(group_size, _BLOCK_SIZE_2)
     inner_2d_size = num_pid_m * num_pid_n
     inner_2d_pid = tl.program_id(0) % inner_2d_size
     num_pid_in_group = 2 * num_pid_n
@@ -74,32 +74,36 @@ def _triton_silu_and_mul_per_block_quant(input_1, scales, out, input_1_stride_0,
     pid_2 = tl.program_id(0) // (num_blocks_0 * num_blocks_1)
     offset_1 = pid_0 * _BLOCK_SIZE_1
     indices_1 = (offset_1 + tl.arange(0, _BLOCK_SIZE_1)).to(tl.int32)
+    mask_1 = indices_1 < groups_per_row
     offset_2 = pid_1 * _BLOCK_SIZE_2
     indices_2 = (offset_2 + tl.arange(0, _BLOCK_SIZE_2)).to(tl.int32)
+    mask_2 = indices_2 < group_size
     offset_0 = pid_2
     indices_0 = offset_0 + tl.zeros([1], tl.int32)
-    load = tl.load(input_1 + (indices_0[:, None, None] * input_1_stride_0 + indices_1[None, :, None] * input_1_stride_1 + indices_2[None, None, :] * input_1_stride_2), None, eviction_policy='evict_first')
+    load = tl.load(input_1 + (indices_0[:, None, None] * input_1_stride_0 + indices_1[None, :, None] * input_1_stride_1 + indices_2[None, None, :] * input_1_stride_2), mask_1[None, :, None] & mask_2[None, None, :], other=0, eviction_policy='evict_first')
     v_0 = tl.cast(load, tl.float32)
-    v_1 = tl.full([], 48, tl.int32)
+    v_1 = tl.cast(groups_per_row, tl.int32)
     v_2 = indices_1 + v_1
-    v_3 = tl.full([], 48, tl.int32)
+    v_3 = tl.cast(groups_per_row, tl.int32)
     v_4 = indices_1 + v_3
-    v_5 = tl.full([], 96, tl.int32)
+    mul = 2 * groups_per_row
+    v_5 = tl.cast(mul, tl.int32)
     v_6 = v_4 < v_5
     subscript = v_6[None, :, None]
-    load_1 = tl.load(input_1 + (indices_0[:, None, None] * input_1_stride_0 + (indices_1 + 48)[None, :, None] * input_1_stride_1 + indices_2[None, None, :] * input_1_stride_2), subscript, other=0)
+    load_1 = tl.load(input_1 + (indices_0[:, None, None] * input_1_stride_0 + (indices_1 + groups_per_row)[None, :, None] * input_1_stride_1 + indices_2[None, None, :] * input_1_stride_2), mask_1[None, :, None] & mask_2[None, None, :] & subscript, other=0)
     v_7 = tl.cast(load_1, tl.float32)
     v_8 = tl.cast(v_0, tl.float32)
     v_9 = tl.sigmoid(v_8)
     v_10 = v_0 * v_9
     v_11 = v_10 * v_7
     v_12 = tl.abs(v_11)
-    s_blk = tl.cast(tl.max(v_12, 2), tl.float32)
+    _mask_to = tl.where(tl.broadcast_to(mask_1[None, :, None] & mask_2[None, None, :], [_BLOCK_SIZE_0, _BLOCK_SIZE_1, _BLOCK_SIZE_2]), v_12, tl.full([], float('-inf'), tl.float32))
+    s_blk = tl.cast(tl.max(_mask_to, 2), tl.float32)
     v_13 = tl.full([], 0.002232142857142857, tl.float32)
     v_14 = s_blk * v_13
     v_15 = tl.full([], 4.359654017857143e-06, tl.float32)
     v_16 = tl.maximum(v_14, v_15, tl.PropagateNan.ALL)
-    tl.store(scales + (indices_0[:, None] * scales_stride_0 + indices_1[None, :] * scales_stride_1), v_16, None)
+    tl.store(scales + (indices_0[:, None] * scales_stride_0 + indices_1[None, :] * scales_stride_1), v_16, mask_1[None, :])
     subscript_1 = v_16[:, :, None]
     v_17 = v_11 / subscript_1
     v_18 = tl.full([], -448.0, tl.float32)
@@ -107,7 +111,7 @@ def _triton_silu_and_mul_per_block_quant(input_1, scales, out, input_1_stride_0,
     v_20 = tl.full([], 448.0, tl.float32)
     v_21 = tl.minimum(v_19, v_20, tl.PropagateNan.ALL)
     v_22 = tl.cast(v_21, tl.float8e4nv)
-    tl.store(out + (indices_0[:, None, None] * out_stride_0 + indices_1[None, :, None] * out_stride_1 + indices_2[None, None, :] * out_stride_2), v_22, None)
+    tl.store(out + (indices_0[:, None, None] * out_stride_0 + indices_1[None, :, None] * out_stride_1 + indices_2[None, None, :] * out_stride_2), v_22, mask_1[None, :, None] & mask_2[None, None, :])
 
 def call(out: torch.Tensor, input: torch.Tensor, scales: torch.Tensor, group_size: int, scale_ub: torch.Tensor | None=None, is_scale_transposed: bool=False, *, _launcher=_default_launcher):
     assert input.ndim == 2
@@ -141,5 +145,5 @@ def call(out: torch.Tensor, input: torch.Tensor, scales: torch.Tensor, group_siz
     input = input.view(num_tokens, -1, group_size)
     out = out.view(num_tokens, -1, group_size)
     _BLOCK_SIZE_1 = 4
-    _BLOCK_SIZE_2 = 128
-    _launcher(_triton_silu_and_mul_per_block_quant, ((48 + _BLOCK_SIZE_1 - 1) // _BLOCK_SIZE_1 * ((128 + _BLOCK_SIZE_2 - 1) // _BLOCK_SIZE_2) * num_tokens,), input, scales, out, input.stride(0), input.stride(1), input.stride(2), out.stride(0), out.stride(1), out.stride(2), scales.stride(0), scales.stride(1), num_warps=4, num_stages=3)
+    _BLOCK_SIZE_2 = group_size
+    _launcher(_triton_silu_and_mul_per_block_quant, ((groups_per_row + _BLOCK_SIZE_1 - 1) // _BLOCK_SIZE_1 * ((group_size + _BLOCK_SIZE_2 - 1) // _BLOCK_SIZE_2) * num_tokens,), input, scales, out, input.stride(0), input.stride(1), input.stride(2), out.stride(0), out.stride(1), out.stride(2), scales.stride(0), scales.stride(1), groups_per_row, _BLOCK_SIZE_2, group_size, num_warps=4, num_stages=3)

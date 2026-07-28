@@ -36,15 +36,14 @@ def _default_launcher(
         run_kwargs["ptx_options"] = ptx_options
     return triton_kernel.run(*args, **run_kwargs)
 
-_BLOCK_SIZE_2 = tl.constexpr(128)
 _BLOCK_SIZE_0 = tl.constexpr(1)
 _BLOCK_SIZE_1 = tl.constexpr(1)
 
 @triton.jit
-def _triton_per_token_group_fp8_quant(input_1, output_s, output_q, input_1_stride_1, input_1_stride_2, output_q_stride_1, output_q_stride_2, output_s_stride_0, output_s_stride_1, eps, fp8_max, scale_ue8m0, fp8_min):
-    num_blocks_0 = 32
+def _triton_per_token_group_fp8_quant(input_1, output_s, output_q, input_1_stride_1, input_1_stride_2, output_q_stride_1, output_q_stride_2, output_s_stride_0, output_s_stride_1, eps, fp8_max, scale_ue8m0, fp8_min, _BLOCK_SIZE_2: tl.constexpr, group_size: tl.constexpr, groups_per_row: tl.constexpr):
+    num_blocks_0 = groups_per_row
     num_blocks_1 = 1
-    num_pid_m = 32
+    num_pid_m = groups_per_row
     num_pid_n = 1
     inner_2d_size = num_pid_m * num_pid_n
     inner_2d_pid = tl.program_id(0) % inner_2d_size
@@ -61,9 +60,11 @@ def _triton_per_token_group_fp8_quant(input_1, output_s, output_q, input_1_strid
     indices_0 = offset_0 + tl.zeros([1], tl.int32)
     offset_2 = pid_2 * _BLOCK_SIZE_2
     indices_2 = (offset_2 + tl.arange(0, _BLOCK_SIZE_2)).to(tl.int32)
-    x_blk = tl.broadcast_to(tl.load(input_1 + (indices_1[None, :, None] * input_1_stride_1 + indices_2[None, None, :] * input_1_stride_2), None, eviction_policy='evict_first'), [_BLOCK_SIZE_0, _BLOCK_SIZE_1, _BLOCK_SIZE_2])
+    mask_2 = indices_2 < group_size
+    x_blk = tl.broadcast_to(tl.load(input_1 + (indices_1[None, :, None] * input_1_stride_1 + indices_2[None, None, :] * input_1_stride_2), mask_2[None, None, :], other=0, eviction_policy='evict_first'), [_BLOCK_SIZE_0, _BLOCK_SIZE_1, _BLOCK_SIZE_2])
     v_0 = tl.abs(x_blk)
-    amax = tl.cast(tl.max(v_0, 2), tl.bfloat16)
+    _mask_to = tl.where(tl.broadcast_to(mask_2[None, None, :], [_BLOCK_SIZE_0, _BLOCK_SIZE_1, _BLOCK_SIZE_2]), v_0, tl.full([], float('-inf'), tl.bfloat16))
+    amax = tl.cast(tl.max(_mask_to, 2), tl.bfloat16)
     v_1 = tl.cast(amax, tl.float32)
     v_2 = tl.maximum(v_1, eps, tl.PropagateNan.ALL)
     v_3 = tl.cast(v_2, tl.bfloat16)
@@ -86,7 +87,7 @@ def _triton_per_token_group_fp8_quant(input_1, output_s, output_q, input_1_strid
     v_14 = tl.cast(v_13, tl.float8e4nv)
     v_15 = tl.cast(v_5, tl.float32)
     tl.store(output_s + (indices_0[:, None] * output_s_stride_0 + indices_1[None, :] * output_s_stride_1), v_15, None)
-    tl.store(output_q + tl.broadcast_to(indices_1[None, :, None] * output_q_stride_1 + indices_2[None, None, :] * output_q_stride_2, [_BLOCK_SIZE_0, _BLOCK_SIZE_1, _BLOCK_SIZE_2]), v_14, None)
+    tl.store(output_q + tl.broadcast_to(indices_1[None, :, None] * output_q_stride_1 + indices_2[None, None, :] * output_q_stride_2, [_BLOCK_SIZE_0, _BLOCK_SIZE_1, _BLOCK_SIZE_2]), v_14, mask_2[None, None, :])
 
 def call(input: torch.Tensor, output_q: torch.Tensor, output_s: torch.Tensor, group_size: int, eps: float, fp8_min: float, fp8_max: float, scale_ue8m0: bool, dummy_is_scale_transposed: bool=False, dummy_is_tma_aligned: bool=False, *, _launcher=_default_launcher):
     assert input.ndim == 2
@@ -96,5 +97,5 @@ def call(input: torch.Tensor, output_q: torch.Tensor, output_s: torch.Tensor, gr
     assert output_s.ndim == 2 and output_s.dtype == torch.float32
     input = input.view(num_tokens, -1, group_size)
     output_q = output_q.view(num_tokens, -1, group_size)
-    _BLOCK_SIZE_2 = 128
-    _launcher(_triton_per_token_group_fp8_quant, (32 * 1 * ((128 + _BLOCK_SIZE_2 - 1) // _BLOCK_SIZE_2),), input, output_s, output_q, input.stride(1), input.stride(2), output_q.stride(1), output_q.stride(2), output_s.stride(0), output_s.stride(1), eps, fp8_max, scale_ue8m0, fp8_min, num_warps=1, num_stages=4)
+    _BLOCK_SIZE_2 = group_size
+    _launcher(_triton_per_token_group_fp8_quant, (groups_per_row * 1 * ((group_size + _BLOCK_SIZE_2 - 1) // _BLOCK_SIZE_2),), input, output_s, output_q, input.stride(1), input.stride(2), output_q.stride(1), output_q.stride(2), output_s.stride(0), output_s.stride(1), eps, fp8_max, scale_ue8m0, fp8_min, _BLOCK_SIZE_2, group_size, groups_per_row, num_warps=1, num_stages=4)

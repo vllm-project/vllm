@@ -36,16 +36,15 @@ def _default_launcher(
         run_kwargs["ptx_options"] = ptx_options
     return triton_kernel.run(*args, **run_kwargs)
 
-_BLOCK_SIZE_2 = tl.constexpr(128)
 _BLOCK_SIZE_0 = tl.constexpr(1)
 _BLOCK_SIZE_1 = tl.constexpr(1)
 
 @triton.jit
-def _triton_fused_qk_norm_rope(qkv, q_weight, k_weight, position_ids, cos_sin_cache, cos_sin_cache_stride_0, cos_sin_cache_stride_1, k_weight_stride_0, q_weight_stride_0, qkv_stride_1, qkv_stride_2, eps, is_neox):
+def _triton_fused_qk_norm_rope(qkv, q_weight, k_weight, position_ids, cos_sin_cache, cos_sin_cache_stride_0, cos_sin_cache_stride_1, k_weight_stride_0, q_weight_stride_0, qkv_stride_1, qkv_stride_2, eps, is_neox, _BLOCK_SIZE_2: tl.constexpr, head_dim: tl.constexpr, num_heads_q: tl.constexpr, embed_dim: tl.constexpr):
     num_blocks_0 = 1
-    num_blocks_1 = tl.cdiv(128, _BLOCK_SIZE_2)
+    num_blocks_1 = tl.cdiv(head_dim, _BLOCK_SIZE_2)
     num_pid_m = 1
-    num_pid_n = tl.cdiv(128, _BLOCK_SIZE_2)
+    num_pid_n = tl.cdiv(head_dim, _BLOCK_SIZE_2)
     inner_2d_size = num_pid_m * num_pid_n
     inner_2d_pid = tl.program_id(0) % inner_2d_size
     num_pid_in_group = 64 * num_pid_n
@@ -56,72 +55,79 @@ def _triton_fused_qk_norm_rope(qkv, q_weight, k_weight, position_ids, cos_sin_ca
     pid_2 = tl.program_id(0) // (num_blocks_0 * num_blocks_1)
     offset_2 = pid_1 * _BLOCK_SIZE_2
     indices_2 = (offset_2 + tl.arange(0, _BLOCK_SIZE_2)).to(tl.int32)
+    mask_2 = indices_2 < head_dim
     offset_1 = pid_2
     indices_1 = offset_1 + tl.zeros([1], tl.int32)
-    load = tl.broadcast_to(tl.load(qkv + (indices_1[None, :, None] * qkv_stride_1 + indices_2[None, None, :] * qkv_stride_2), None), [_BLOCK_SIZE_0, _BLOCK_SIZE_1, _BLOCK_SIZE_2])
+    load = tl.broadcast_to(tl.load(qkv + (indices_1[None, :, None] * qkv_stride_1 + indices_2[None, None, :] * qkv_stride_2), mask_2[None, None, :], other=0), [_BLOCK_SIZE_0, _BLOCK_SIZE_1, _BLOCK_SIZE_2])
     v_0 = tl.cast(load, tl.float32)
     v_1 = v_0 * v_0
     rms = tl.cast(tl.sum(v_1, 2), tl.float32)
-    v_2 = tl.full([], 0.0078125, tl.float32)
-    v_3 = rms * v_2
-    v_4 = v_3 + eps
-    v_5 = tl.rsqrt(v_4)
-    v_6 = tl.full([], 32, tl.int32)
-    v_7 = indices_1 < v_6
-    use_q_weight = v_7[None, :, None]
-    load_1 = tl.load(q_weight + indices_2[None, None, :] * q_weight_stride_0, None)
-    load_2 = tl.load(k_weight + indices_2[None, None, :] * k_weight_stride_0, None, eviction_policy='evict_first')
+    sym_float = _BLOCK_SIZE_2 + 0.0
+    truediv = 1.0 / (_BLOCK_SIZE_2 + 0.0)
+    v_2 = rms * truediv
+    v_3 = v_2 + eps
+    v_4 = tl.rsqrt(v_3)
+    v_5 = tl.cast(num_heads_q, tl.int32)
+    v_6 = indices_1 < v_5
+    use_q_weight = v_6[None, :, None]
+    load_1 = tl.load(q_weight + indices_2[None, None, :] * q_weight_stride_0, mask_2[None, None, :], other=0)
+    load_2 = tl.load(k_weight + indices_2[None, None, :] * k_weight_stride_0, mask_2[None, None, :], other=0, eviction_policy='evict_first')
     w_blk = tl.where(use_q_weight, load_1, load_2)
-    subscript_1 = v_5[:, :, None]
-    v_8 = v_0 * subscript_1
-    v_9 = tl.cast(v_8, tl.bfloat16)
-    v_10 = v_9 * w_blk
-    tl.store(qkv + tl.broadcast_to(indices_1[None, :, None] * qkv_stride_1 + indices_2[None, None, :] * qkv_stride_2, [_BLOCK_SIZE_0, _BLOCK_SIZE_1, _BLOCK_SIZE_2]), v_10, None)
+    subscript_1 = v_4[:, :, None]
+    v_7 = v_0 * subscript_1
+    v_8 = tl.cast(v_7, tl.bfloat16)
+    v_9 = v_8 * w_blk
+    tl.store(qkv + tl.broadcast_to(indices_1[None, :, None] * qkv_stride_1 + indices_2[None, None, :] * qkv_stride_2, [_BLOCK_SIZE_0, _BLOCK_SIZE_1, _BLOCK_SIZE_2]), v_9, mask_2[None, None, :])
     pos_id = tl.broadcast_to(tl.load(position_ids + tl.zeros([_BLOCK_SIZE_0], tl.int32), None, eviction_policy='evict_first'), [_BLOCK_SIZE_0])
-    iota = tl.arange(0, 64)
+    iota = tl.arange(0, embed_dim)
     cos_blk = tl.load(cos_sin_cache + (pos_id[:, None] * cos_sin_cache_stride_0 + iota[None, :] * cos_sin_cache_stride_1), None, eviction_policy='evict_last')
-    iota_1 = tl.arange(0, 64)
-    v_11 = tl.full([], 64, tl.int32)
-    v_12 = iota_1 + v_11
-    sin_blk = tl.load(cos_sin_cache + (pos_id[:, None] * cos_sin_cache_stride_0 + v_12[None, :] * cos_sin_cache_stride_1), None)
+    iota_1 = tl.arange(0, embed_dim)
+    v_10 = tl.cast(embed_dim, tl.int32)
+    v_11 = iota_1 + v_10
+    sin_blk = tl.load(cos_sin_cache + (pos_id[:, None] * cos_sin_cache_stride_0 + v_11[None, :] * cos_sin_cache_stride_1), None)
     if is_neox:
-        x1_offset = tl.arange(0, 64)
-        v_13 = tl.full([], 64, tl.int32)
-        v_14 = x1_offset + v_13
+        x1_offset = tl.arange(0, embed_dim)
+        v_12 = tl.cast(embed_dim, tl.int32)
+        v_13 = x1_offset + v_12
     else:
-        iota_2 = tl.arange(0, 64)
-        v_15 = tl.full([], 2, tl.int32)
-        x1_offset = tl.cast(iota_2 * v_15, tl.int32)
-        v_17 = tl.full([], 1, tl.int32)
-        v_14 = x1_offset + v_17
+        iota_2 = tl.arange(0, embed_dim)
+        v_14 = tl.full([], 2, tl.int32)
+        x1_offset = tl.cast(iota_2 * v_14, tl.int32)
+        v_16 = tl.full([], 1, tl.int32)
+        v_13 = x1_offset + v_16
     tl.debug_barrier()
-    x1_blk = tl.broadcast_to(tl.load(qkv + (indices_1[None, :, None] * qkv_stride_1 + x1_offset[None, None, :] * qkv_stride_2), None, eviction_policy='evict_last'), [_BLOCK_SIZE_0, _BLOCK_SIZE_1, 64])
-    x2_blk = tl.broadcast_to(tl.load(qkv + (indices_1[None, :, None] * qkv_stride_1 + v_14[None, None, :] * qkv_stride_2), None), [_BLOCK_SIZE_0, _BLOCK_SIZE_1, 64])
+    x1_blk = tl.broadcast_to(tl.load(qkv + (indices_1[None, :, None] * qkv_stride_1 + x1_offset[None, None, :] * qkv_stride_2), None, eviction_policy='evict_last'), [_BLOCK_SIZE_0, _BLOCK_SIZE_1, embed_dim])
+    x2_blk = tl.broadcast_to(tl.load(qkv + (indices_1[None, :, None] * qkv_stride_1 + v_13[None, None, :] * qkv_stride_2), None), [_BLOCK_SIZE_0, _BLOCK_SIZE_1, embed_dim])
     subscript_2 = cos_blk[:, None, :]
-    v_19 = x1_blk * subscript_2
+    v_18 = x1_blk * subscript_2
     subscript_3 = sin_blk[:, None, :]
-    v_20 = x2_blk * subscript_3
-    v_21 = v_19 - v_20
+    v_19 = x2_blk * subscript_3
+    v_20 = v_18 - v_19
     subscript_4 = cos_blk[:, None, :]
-    v_22 = x2_blk * subscript_4
+    v_21 = x2_blk * subscript_4
     subscript_5 = sin_blk[:, None, :]
-    v_23 = x1_blk * subscript_5
-    v_24 = v_22 + v_23
-    tl.store(qkv + tl.broadcast_to(indices_1[None, :, None] * qkv_stride_1 + x1_offset[None, None, :] * qkv_stride_2, [_BLOCK_SIZE_0, _BLOCK_SIZE_1, 64]), v_21, None)
-    tl.store(qkv + tl.broadcast_to(indices_1[None, :, None] * qkv_stride_1 + v_14[None, None, :] * qkv_stride_2, [_BLOCK_SIZE_0, _BLOCK_SIZE_1, 64]), v_24, None)
+    v_22 = x1_blk * subscript_5
+    v_23 = v_21 + v_22
+    tl.store(qkv + tl.broadcast_to(indices_1[None, :, None] * qkv_stride_1 + x1_offset[None, None, :] * qkv_stride_2, [_BLOCK_SIZE_0, _BLOCK_SIZE_1, embed_dim]), v_20, None)
+    tl.store(qkv + tl.broadcast_to(indices_1[None, :, None] * qkv_stride_1 + v_13[None, None, :] * qkv_stride_2, [_BLOCK_SIZE_0, _BLOCK_SIZE_1, embed_dim]), v_23, None)
 
 def call(qkv: torch.Tensor, num_heads_q: int, num_heads_k: int, num_heads_v: int, head_dim: int, eps: float, q_weight: torch.Tensor, k_weight: torch.Tensor, cos_sin_cache: torch.Tensor, is_neox: bool, position_ids: torch.Tensor, forced_token_heads_per_warp: int=-1, *, _launcher=_default_launcher):
     assert qkv.ndim == 2
     num_tokens = qkv.shape[0]
     total_heads = num_heads_q + num_heads_k + num_heads_v
     assert qkv.shape[1] == total_heads * head_dim
+    qkv.shape[1]
     assert cos_sin_cache.ndim == 2
     max_position, rotary_dim = cos_sin_cache.shape
     assert rotary_dim % 2 == 0
     assert rotary_dim <= head_dim
+    embed_dim = rotary_dim // 2
     assert position_ids.ndim == 1 and position_ids.shape[0] == num_tokens
+    position_ids.shape[0]
     assert q_weight.ndim == 1 and q_weight.shape[0] == head_dim
+    q_weight.shape[0]
     assert k_weight.ndim == 1 and k_weight.shape[0] == head_dim
+    k_weight.shape[0]
     assert qkv.dtype == q_weight.dtype and q_weight.dtype == k_weight.dtype
     assert position_ids.dtype == torch.int64
     assert qkv.is_contiguous()
@@ -129,6 +135,7 @@ def call(qkv: torch.Tensor, num_heads_q: int, num_heads_k: int, num_heads_v: int
     assert q_weight.is_contiguous()
     assert k_weight.is_contiguous()
     assert cos_sin_cache.is_contiguous()
+    qk_heads = num_heads_q + num_heads_k
     qkv = qkv.view(num_tokens, -1, head_dim)
-    _BLOCK_SIZE_2 = 128
-    _launcher(_triton_fused_qk_norm_rope, (1 * ((128 + _BLOCK_SIZE_2 - 1) // _BLOCK_SIZE_2) * 40,), qkv, q_weight, k_weight, position_ids, cos_sin_cache, cos_sin_cache.stride(0), cos_sin_cache.stride(1), k_weight.stride(0), q_weight.stride(0), qkv.stride(1), qkv.stride(2), eps, is_neox, num_warps=1, num_stages=1)
+    _BLOCK_SIZE_2 = head_dim
+    _launcher(_triton_fused_qk_norm_rope, (1 * ((head_dim + _BLOCK_SIZE_2 - 1) // _BLOCK_SIZE_2) * qk_heads,), qkv, q_weight, k_weight, position_ids, cos_sin_cache, cos_sin_cache.stride(0), cos_sin_cache.stride(1), k_weight.stride(0), q_weight.stride(0), qkv.stride(1), qkv.stride(2), eps, is_neox, _BLOCK_SIZE_2, head_dim, num_heads_q, embed_dim, num_warps=1, num_stages=1)

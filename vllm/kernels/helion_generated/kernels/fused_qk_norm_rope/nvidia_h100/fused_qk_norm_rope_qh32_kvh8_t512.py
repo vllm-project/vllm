@@ -37,21 +37,20 @@ def _default_launcher(
     return triton_kernel.run(*args, **run_kwargs)
 
 _BLOCK_SIZE_1 = tl.constexpr(2)
-_BLOCK_SIZE_2 = tl.constexpr(128)
 
 @triton.jit
-def _triton_fused_qk_norm_rope(qkv, q_weight, k_weight, position_ids, cos_sin_cache, cos_sin_cache_stride_0, cos_sin_cache_stride_1, k_weight_stride_0, position_ids_stride_0, q_weight_stride_0, qkv_stride_0, qkv_stride_1, qkv_stride_2, num_tokens, eps, is_neox, _NUM_SM: tl.constexpr):
-    total_pids = tl.cdiv(40, _BLOCK_SIZE_1) * tl.cdiv(128, _BLOCK_SIZE_2) * num_tokens
+def _triton_fused_qk_norm_rope(qkv, q_weight, k_weight, position_ids, cos_sin_cache, cos_sin_cache_stride_0, cos_sin_cache_stride_1, k_weight_stride_0, position_ids_stride_0, q_weight_stride_0, qkv_stride_0, qkv_stride_1, qkv_stride_2, num_tokens, eps, is_neox, _NUM_SM: tl.constexpr, qk_heads: tl.constexpr, _BLOCK_SIZE_2: tl.constexpr, head_dim: tl.constexpr, num_heads_q: tl.constexpr, embed_dim: tl.constexpr):
+    total_pids = tl.cdiv(qk_heads, _BLOCK_SIZE_1) * tl.cdiv(head_dim, _BLOCK_SIZE_2) * num_tokens
     block_size = tl.cdiv(total_pids, _NUM_SM * 32)
     start_pid = tl.program_id(0) * block_size
     end_pid = start_pid + block_size
     if end_pid > total_pids:
         end_pid = total_pids
     for virtual_pid in tl.range(start_pid, end_pid):
-        num_blocks_0 = tl.cdiv(40, _BLOCK_SIZE_1)
-        num_blocks_1 = tl.cdiv(128, _BLOCK_SIZE_2)
-        num_pid_m = tl.cdiv(40, _BLOCK_SIZE_1)
-        num_pid_n = tl.cdiv(128, _BLOCK_SIZE_2)
+        num_blocks_0 = tl.cdiv(qk_heads, _BLOCK_SIZE_1)
+        num_blocks_1 = tl.cdiv(head_dim, _BLOCK_SIZE_2)
+        num_pid_m = tl.cdiv(qk_heads, _BLOCK_SIZE_1)
+        num_pid_n = tl.cdiv(head_dim, _BLOCK_SIZE_2)
         inner_2d_size = num_pid_m * num_pid_n
         inner_2d_pid = virtual_pid % inner_2d_size
         num_pid_in_group = 64 * num_pid_n
@@ -63,74 +62,82 @@ def _triton_fused_qk_norm_rope(qkv, q_weight, k_weight, position_ids, cos_sin_ca
         pid_2 = virtual_pid // (num_blocks_0 * num_blocks_1)
         offset_1 = pid_0 * _BLOCK_SIZE_1
         indices_1 = (offset_1 + tl.arange(0, _BLOCK_SIZE_1)).to(tl.int32)
+        mask_1 = indices_1 < qk_heads
         offset_2 = pid_1 * _BLOCK_SIZE_2
         indices_2 = (offset_2 + tl.arange(0, _BLOCK_SIZE_2)).to(tl.int32)
+        mask_2 = indices_2 < head_dim
         offset_0 = pid_2
         indices_0 = offset_0 + tl.zeros([1], tl.int32)
-        load = tl.load(qkv + (indices_0[:, None, None] * qkv_stride_0 + indices_1[None, :, None] * qkv_stride_1 + indices_2[None, None, :] * qkv_stride_2), None)
+        load = tl.load(qkv + (indices_0[:, None, None] * qkv_stride_0 + indices_1[None, :, None] * qkv_stride_1 + indices_2[None, None, :] * qkv_stride_2), mask_1[None, :, None] & mask_2[None, None, :], other=0)
         v_0 = tl.cast(load, tl.float32)
         v_1 = v_0 * v_0
         rms = tl.cast(tl.sum(v_1, 2), tl.float32)
-        v_2 = tl.full([], 0.0078125, tl.float32)
-        v_3 = rms * v_2
-        v_4 = v_3 + eps
-        v_5 = tl.rsqrt(v_4)
-        v_6 = tl.full([], 32, tl.int32)
-        v_7 = indices_1 < v_6
-        use_q_weight = v_7[None, :, None]
-        load_1 = tl.load(q_weight + indices_2[None, None, :] * q_weight_stride_0, None, eviction_policy='evict_last')
-        load_2 = tl.load(k_weight + indices_2[None, None, :] * k_weight_stride_0, None)
+        sym_float = _BLOCK_SIZE_2 + 0.0
+        truediv = 1.0 / (_BLOCK_SIZE_2 + 0.0)
+        v_2 = rms * truediv
+        v_3 = v_2 + eps
+        v_4 = tl.rsqrt(v_3)
+        v_5 = tl.cast(num_heads_q, tl.int32)
+        v_6 = indices_1 < v_5
+        use_q_weight = v_6[None, :, None]
+        load_1 = tl.load(q_weight + indices_2[None, None, :] * q_weight_stride_0, mask_2[None, None, :], other=0, eviction_policy='evict_last')
+        load_2 = tl.load(k_weight + indices_2[None, None, :] * k_weight_stride_0, mask_2[None, None, :], other=0)
         w_blk = tl.where(use_q_weight, load_1, load_2)
-        subscript_1 = v_5[:, :, None]
-        v_8 = v_0 * subscript_1
-        v_9 = tl.cast(v_8, tl.bfloat16)
-        v_10 = v_9 * w_blk
-        tl.store(qkv + (indices_0[:, None, None] * qkv_stride_0 + indices_1[None, :, None] * qkv_stride_1 + indices_2[None, None, :] * qkv_stride_2), v_10, None)
+        subscript_1 = v_4[:, :, None]
+        v_7 = v_0 * subscript_1
+        v_8 = tl.cast(v_7, tl.bfloat16)
+        v_9 = v_8 * w_blk
+        tl.store(qkv + (indices_0[:, None, None] * qkv_stride_0 + indices_1[None, :, None] * qkv_stride_1 + indices_2[None, None, :] * qkv_stride_2), v_9, mask_1[None, :, None] & mask_2[None, None, :])
         pos_id = tl.load(position_ids + indices_0 * position_ids_stride_0, None, eviction_policy='evict_last')
-        iota = tl.arange(0, 64)
+        iota = tl.arange(0, embed_dim)
         cos_blk = tl.load(cos_sin_cache + (pos_id[:, None] * cos_sin_cache_stride_0 + iota[None, :] * cos_sin_cache_stride_1), None, eviction_policy='evict_first')
-        iota_1 = tl.arange(0, 64)
-        v_11 = tl.full([], 64, tl.int32)
-        v_12 = iota_1 + v_11
-        sin_blk = tl.load(cos_sin_cache + (pos_id[:, None] * cos_sin_cache_stride_0 + v_12[None, :] * cos_sin_cache_stride_1), None, eviction_policy='evict_first')
+        iota_1 = tl.arange(0, embed_dim)
+        v_10 = tl.cast(embed_dim, tl.int32)
+        v_11 = iota_1 + v_10
+        sin_blk = tl.load(cos_sin_cache + (pos_id[:, None] * cos_sin_cache_stride_0 + v_11[None, :] * cos_sin_cache_stride_1), None, eviction_policy='evict_first')
         if is_neox:
-            x1_offset = tl.arange(0, 64)
-            v_13 = tl.full([], 64, tl.int32)
-            v_14 = x1_offset + v_13
+            x1_offset = tl.arange(0, embed_dim)
+            v_12 = tl.cast(embed_dim, tl.int32)
+            v_13 = x1_offset + v_12
         else:
-            iota_2 = tl.arange(0, 64)
-            v_15 = tl.full([], 2, tl.int32)
-            x1_offset = tl.cast(iota_2 * v_15, tl.int32)
-            v_17 = tl.full([], 1, tl.int32)
-            v_14 = x1_offset + v_17
+            iota_2 = tl.arange(0, embed_dim)
+            v_14 = tl.full([], 2, tl.int32)
+            x1_offset = tl.cast(iota_2 * v_14, tl.int32)
+            v_16 = tl.full([], 1, tl.int32)
+            v_13 = x1_offset + v_16
         tl.debug_barrier()
-        x1_blk = tl.load(qkv + (indices_0[:, None, None] * qkv_stride_0 + indices_1[None, :, None] * qkv_stride_1 + x1_offset[None, None, :] * qkv_stride_2), None, eviction_policy='evict_last')
-        x2_blk = tl.load(qkv + (indices_0[:, None, None] * qkv_stride_0 + indices_1[None, :, None] * qkv_stride_1 + v_14[None, None, :] * qkv_stride_2), None, eviction_policy='evict_first')
+        x1_blk = tl.load(qkv + (indices_0[:, None, None] * qkv_stride_0 + indices_1[None, :, None] * qkv_stride_1 + x1_offset[None, None, :] * qkv_stride_2), mask_1[None, :, None], other=0, eviction_policy='evict_last')
+        x2_blk = tl.load(qkv + (indices_0[:, None, None] * qkv_stride_0 + indices_1[None, :, None] * qkv_stride_1 + v_13[None, None, :] * qkv_stride_2), mask_1[None, :, None], other=0, eviction_policy='evict_first')
         subscript_2 = cos_blk[:, None, :]
-        v_19 = x1_blk * subscript_2
+        v_18 = x1_blk * subscript_2
         subscript_3 = sin_blk[:, None, :]
-        v_20 = x2_blk * subscript_3
-        v_21 = v_19 - v_20
+        v_19 = x2_blk * subscript_3
+        v_20 = v_18 - v_19
         subscript_4 = cos_blk[:, None, :]
-        v_22 = x2_blk * subscript_4
+        v_21 = x2_blk * subscript_4
         subscript_5 = sin_blk[:, None, :]
-        v_23 = x1_blk * subscript_5
-        v_24 = v_22 + v_23
-        tl.store(qkv + (indices_0[:, None, None] * qkv_stride_0 + indices_1[None, :, None] * qkv_stride_1 + x1_offset[None, None, :] * qkv_stride_2), v_21, None)
-        tl.store(qkv + (indices_0[:, None, None] * qkv_stride_0 + indices_1[None, :, None] * qkv_stride_1 + v_14[None, None, :] * qkv_stride_2), v_24, None)
+        v_22 = x1_blk * subscript_5
+        v_23 = v_21 + v_22
+        tl.store(qkv + (indices_0[:, None, None] * qkv_stride_0 + indices_1[None, :, None] * qkv_stride_1 + x1_offset[None, None, :] * qkv_stride_2), v_20, mask_1[None, :, None])
+        tl.store(qkv + (indices_0[:, None, None] * qkv_stride_0 + indices_1[None, :, None] * qkv_stride_1 + v_13[None, None, :] * qkv_stride_2), v_23, mask_1[None, :, None])
 
 def call(qkv: torch.Tensor, num_heads_q: int, num_heads_k: int, num_heads_v: int, head_dim: int, eps: float, q_weight: torch.Tensor, k_weight: torch.Tensor, cos_sin_cache: torch.Tensor, is_neox: bool, position_ids: torch.Tensor, forced_token_heads_per_warp: int=-1, *, _launcher=_default_launcher):
     assert qkv.ndim == 2
     num_tokens = qkv.shape[0]
     total_heads = num_heads_q + num_heads_k + num_heads_v
     assert qkv.shape[1] == total_heads * head_dim
+    qkv.shape[1]
     assert cos_sin_cache.ndim == 2
     max_position, rotary_dim = cos_sin_cache.shape
     assert rotary_dim % 2 == 0
     assert rotary_dim <= head_dim
+    embed_dim = rotary_dim // 2
     assert position_ids.ndim == 1 and position_ids.shape[0] == num_tokens
+    position_ids.shape[0]
     assert q_weight.ndim == 1 and q_weight.shape[0] == head_dim
+    q_weight.shape[0]
     assert k_weight.ndim == 1 and k_weight.shape[0] == head_dim
+    k_weight.shape[0]
     assert qkv.dtype == q_weight.dtype and q_weight.dtype == k_weight.dtype
     assert position_ids.dtype == torch.int64
     assert qkv.is_contiguous()
@@ -138,6 +145,8 @@ def call(qkv: torch.Tensor, num_heads_q: int, num_heads_k: int, num_heads_v: int
     assert q_weight.is_contiguous()
     assert k_weight.is_contiguous()
     assert cos_sin_cache.is_contiguous()
+    qk_heads = num_heads_q + num_heads_k
     qkv = qkv.view(num_tokens, -1, head_dim)
     _NUM_SM = _get_num_sm(qkv.device)
-    _launcher(_triton_fused_qk_norm_rope, (_NUM_SM * 32,), qkv, q_weight, k_weight, position_ids, cos_sin_cache, cos_sin_cache.stride(0), cos_sin_cache.stride(1), k_weight.stride(0), position_ids.stride(0), q_weight.stride(0), qkv.stride(0), qkv.stride(1), qkv.stride(2), num_tokens, eps, is_neox, _NUM_SM, num_warps=1, num_stages=5, maxnreg=64)
+    _BLOCK_SIZE_2 = head_dim
+    _launcher(_triton_fused_qk_norm_rope, (_NUM_SM * 32,), qkv, q_weight, k_weight, position_ids, cos_sin_cache, cos_sin_cache.stride(0), cos_sin_cache.stride(1), k_weight.stride(0), position_ids.stride(0), q_weight.stride(0), qkv.stride(0), qkv.stride(1), qkv.stride(2), num_tokens, eps, is_neox, _NUM_SM, qk_heads, _BLOCK_SIZE_2, head_dim, num_heads_q, embed_dim, num_warps=1, num_stages=5, maxnreg=64)

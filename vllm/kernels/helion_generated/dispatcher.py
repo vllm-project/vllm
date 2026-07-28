@@ -12,7 +12,10 @@ from typing import Any
 import torch
 from torch.library import Library
 
-from vllm.kernels.helion_generated.manifests import GENERATED_KERNEL_MANIFESTS
+from vllm.kernels.helion_generated.manifests import (
+    GENERATED_KERNEL_MANIFESTS,
+    PRESERVED_SPECIALIZATION_MANIFESTS,
+)
 from vllm.platforms import current_platform
 
 _SUPPORTED_PLATFORM_NAMES = {
@@ -50,11 +53,33 @@ def _select_bucketed_module(
     kernels = GENERATED_KERNEL_MANIFESTS.get(kernel_name, {}).get(platform)
     if kernels is None:
         return None
-    buckets = sorted(case[-1] for case in kernels if case[:-1] == static_key)
+    available_static_keys = {case[:-1] for case in kernels}
+    if (kernel_name, platform) in PRESERVED_SPECIALIZATION_MANIFESTS:
+        matching_arity = {
+            candidate
+            for candidate in available_static_keys
+            if len(candidate) == len(static_key)
+        }
+        if not matching_arity:
+            return None
+        selected_static_key = min(
+            matching_arity,
+            key=lambda candidate: (
+                tuple(
+                    abs(actual - tuned) for actual, tuned in zip(static_key, candidate)
+                ),
+                candidate,
+            ),
+        )
+    elif static_key in available_static_keys:
+        selected_static_key = static_key
+    else:
+        return None
+    buckets = sorted(case[-1] for case in kernels if case[:-1] == selected_static_key)
     if not buckets:
         return None
     token_bucket = next((size for size in buckets if size >= num_tokens), buckets[-1])
-    selected_case = (*static_key, token_bucket)
+    selected_case = (*selected_static_key, token_bucket)
     return next(
         (module_path for case, module_path in kernels.items() if case == selected_case),
         None,

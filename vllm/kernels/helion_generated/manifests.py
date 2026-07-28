@@ -5,17 +5,29 @@
 from vllm.kernels.helion_generated.kernels.fused_qk_norm_rope.nvidia_h100.manifest import (  # noqa: E501
     KERNELS as H100_FUSED_QK_NORM_ROPE_KERNELS,
 )
+from vllm.kernels.helion_generated.kernels.fused_qk_norm_rope.nvidia_h100.manifest import (  # noqa: E501
+    PRESERVES_SPECIALIZATIONS as H100_FUSED_QK_NORM_ROPE_PRESERVED,
+)
 from vllm.kernels.helion_generated.kernels.per_token_group_fp8_quant.nvidia_b200.manifest import (  # noqa: E501
     KERNELS as B200_PER_TOKEN_GROUP_FP8_QUANT_KERNELS,
 )
 from vllm.kernels.helion_generated.kernels.per_token_group_fp8_quant.nvidia_h100.manifest import (  # noqa: E501
     KERNELS as H100_PER_TOKEN_GROUP_FP8_QUANT_KERNELS,
 )
+from vllm.kernels.helion_generated.kernels.per_token_group_fp8_quant.nvidia_h100.manifest import (  # noqa: E501
+    PRESERVES_SPECIALIZATIONS as H100_PER_TOKEN_GROUP_FP8_QUANT_PRESERVED,
+)
 from vllm.kernels.helion_generated.kernels.rms_norm_per_block_quant.nvidia_h100.manifest import (  # noqa: E501
     KERNELS as H100_RMS_NORM_PER_BLOCK_QUANT_KERNELS,
 )
+from vllm.kernels.helion_generated.kernels.rms_norm_per_block_quant.nvidia_h100.manifest import (  # noqa: E501
+    PRESERVES_SPECIALIZATIONS as H100_RMS_NORM_PER_BLOCK_QUANT_PRESERVED,
+)
 from vllm.kernels.helion_generated.kernels.silu_and_mul_per_block_quant.nvidia_h100.manifest import (  # noqa: E501
     KERNELS as H100_SILU_AND_MUL_PER_BLOCK_QUANT_KERNELS,
+)
+from vllm.kernels.helion_generated.kernels.silu_and_mul_per_block_quant.nvidia_h100.manifest import (  # noqa: E501
+    PRESERVES_SPECIALIZATIONS as H100_SILU_AND_MUL_PER_BLOCK_QUANT_PRESERVED,
 )
 
 GENERATED_KERNEL_MANIFESTS = {
@@ -33,5 +45,28 @@ GENERATED_KERNEL_MANIFESTS = {
         "nvidia_h100": H100_SILU_AND_MUL_PER_BLOCK_QUANT_KERNELS,
     },
 }
+
+_PRESERVES_SPECIALIZATIONS = {
+    (
+        "fused_qk_norm_rope",
+        "nvidia_h100",
+    ): H100_FUSED_QK_NORM_ROPE_PRESERVED,
+    (
+        "per_token_group_fp8_quant",
+        "nvidia_h100",
+    ): H100_PER_TOKEN_GROUP_FP8_QUANT_PRESERVED,
+    (
+        "rms_norm_per_block_quant",
+        "nvidia_h100",
+    ): H100_RMS_NORM_PER_BLOCK_QUANT_PRESERVED,
+    (
+        "silu_and_mul_per_block_quant",
+        "nvidia_h100",
+    ): H100_SILU_AND_MUL_PER_BLOCK_QUANT_PRESERVED,
+}
+
+PRESERVED_SPECIALIZATION_MANIFESTS = frozenset(
+    key for key, preserves in _PRESERVES_SPECIALIZATIONS.items() if preserves
+)
 
 MANIFESTS = GENERATED_KERNEL_MANIFESTS["per_token_group_fp8_quant"]
