@@ -9,6 +9,7 @@ import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, triton
@@ -132,9 +133,15 @@ def pin_mmap_region(region: SharedOffloadRegion) -> None:
 
     rank = region.rank
 
+    cudart_lib = CudaRTLibrary()
     base_ptr = region._base.data_ptr()
-    result = torch.cuda.cudart().cudaHostRegister(base_ptr, region.total_size_bytes, 0)
-    if result.value != 0:
+    result = cudart_lib.cudaHostRegister(base_ptr, region.total_size_bytes, 0)
+    if result != 0:
+        # Drain the thread-local pending CUDA runtime error left by
+        # the failed cudaHostRegister.  Without this explicit drain the
+        # stale error code causes the *next* unrelated CUDA runtime API
+        # call to fail with cudaErrorInvalidValue.
+        cudart_lib.drain_pending_error()
         logger.warning(
             "cudaHostRegister failed for rank=%d (code=%d) — "
             "transfers will still work but may be slower (unpinned DMA)",
@@ -148,6 +155,7 @@ def pin_mmap_region(region: SharedOffloadRegion) -> None:
             region.total_size_bytes / 1e9,
         )
         region.is_pinned = True
+        region._cudart_lib = cudart_lib
 
 
 def _new_descriptor_buffers(

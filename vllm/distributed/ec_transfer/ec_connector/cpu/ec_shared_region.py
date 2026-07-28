@@ -13,6 +13,7 @@ import time
 
 import torch
 
+from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -61,6 +62,9 @@ class ECSharedRegion:
         self._is_creator = False
         # True after successful cudaHostRegister (cleanup must unregister).
         self._is_pinned = False
+        # Retained CudaRTLibrary handle; set by pin_memory on success, None
+        # on failure.  cleanup reads this exact instance for unregister.
+        self._cudart_lib: CudaRTLibrary | None = None
 
         # File descriptor for the shared memory backing file.
         try:
@@ -113,18 +117,21 @@ class ECSharedRegion:
         """
         if self._is_pinned or not torch.cuda.is_available():
             return
-        result = torch.cuda.cudart().cudaHostRegister(
-            self._blocks_ptr, self._blocks_nbytes, 0
-        )
-        if result.value != 0:
+        cudart_lib = CudaRTLibrary()
+        result = cudart_lib.cudaHostRegister(self._blocks_ptr, self._blocks_nbytes, 0)
+        if result != 0:
+            # Drain the thread-local pending CUDA error so subsequent
+            # API calls are not poisoned by this stale error.
+            cudart_lib.drain_pending_error()
             logger.warning(
                 "cudaHostRegister failed (code=%d) — "
                 "transfers will still work but may be slower (unpinned DMA)",
-                result.value,
+                result,
             )
         else:
             logger.debug("cudaHostRegister %.2f MB", self._blocks_nbytes / 1e6)
             self._is_pinned = True
+            self._cudart_lib = cudart_lib
 
     def cleanup(self) -> None:
         """Tear down the region. Lifecycle method; no concurrent access."""
@@ -139,10 +146,17 @@ class ECSharedRegion:
                 )
             self._is_creator = False
         if self._is_pinned:
-            result = torch.cuda.cudart().cudaHostUnregister(self._blocks_ptr)
-            if result.value != 0:
-                logger.warning("cudaHostUnregister failed (code=%d)", result)
+            if self._cudart_lib is None:
+                logger.warning(
+                    "cudaHostUnregister: _is_pinned=True but no retained "
+                    "CudaRTLibrary handle; skipping unregister"
+                )
+            else:
+                result = self._cudart_lib.cudaHostUnregister(self._blocks_ptr)
+                if result != 0:
+                    logger.warning("cudaHostUnregister failed (code=%d)", result)
             self._is_pinned = False
+            self._cudart_lib = None
         if hasattr(self, "blocks"):
             del self.blocks
         if self._mmap_obj:

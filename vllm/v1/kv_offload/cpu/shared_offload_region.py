@@ -6,6 +6,7 @@ import time
 
 import torch
 
+from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -116,6 +117,7 @@ class SharedOffloadRegion:
         self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
         self._views: list[torch.Tensor] = []
         self.is_pinned: bool = False
+        self._cudart_lib: CudaRTLibrary | None = None
 
     def create_next_view(self, tensor_page_size: int) -> torch.Tensor:
         """Allocate a strided int8 view for this worker, one canonical tensor.
@@ -173,15 +175,22 @@ class SharedOffloadRegion:
     def cleanup(self) -> None:
         if self.is_pinned and self._base is not None:
             if current_platform.is_cuda_alike():
-                base_ptr = self._base.data_ptr()
-                result = torch.cuda.cudart().cudaHostUnregister(base_ptr)
-                if result.value != 0:
+                if self._cudart_lib is None:
                     logger.warning(
-                        "cudaHostUnregister failed for rank=%d (code=%d)",
-                        self.rank,
-                        result,
+                        "cudaHostUnregister: is_pinned=True but no retained "
+                        "CudaRTLibrary handle; skipping unregister"
                     )
+                else:
+                    base_ptr = self._base.data_ptr()
+                    result = self._cudart_lib.cudaHostUnregister(base_ptr)
+                    if result != 0:
+                        logger.warning(
+                            "cudaHostUnregister failed for rank=%d (code=%d)",
+                            self.rank,
+                            result,
+                        )
             self.is_pinned = False
+            self._cudart_lib = None
         # Release views before _base: each view holds a _base reference and a
         # direct StorageImpl reference.  Freeing views first lets both refcounts
         # drop so the storage (which holds the mmap_obj buffer export) is freed
