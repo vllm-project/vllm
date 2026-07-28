@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from vllm.lora.utils import get_supported_lora_modules
+from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
 from vllm.models.inkling.nvidia import moe
 from vllm.models.inkling.nvidia.model import _TmlForCausalLMBase
 from vllm.platforms import current_platform
@@ -87,6 +88,54 @@ def test_custom_embedding_is_not_a_lora_target() -> None:
     assert "lm_head" in supported
 
 
+def test_inkling_mapper_maps_modelopt_exclusions() -> None:
+    quant_config = ModelOptNvFp4Config.from_config(
+        {
+            "quantization": {
+                "quant_algo": "NVFP4",
+                "group_size": 16,
+                "kv_cache_quant_algo": None,
+                "exclude_modules": [
+                    "model.llm.layers.2.mlp.experts",
+                    "model.llm.layers.2.mlp.shared_experts",
+                ],
+            }
+        }
+    )
+
+    quant_config.apply_vllm_mapper(
+        _TmlForCausalLMBase.hf_to_vllm_mapper.get_unstacked_mapper()
+    )
+
+    assert quant_config.is_layer_excluded("model.layers.2.mlp.experts")
+    assert quant_config.is_layer_excluded("model.layers.2.mlp.shared_experts")
+    assert not quant_config.is_layer_excluded("model.layers.3.mlp.experts")
+
+
+@pytest.mark.parametrize("projection", ["w13", "w2"])
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "input_global_scale",
+        "weight_global_scale",
+        "weight_packed",
+        "weight_scale",
+    ],
+)
+def test_inkling_mapper_maps_compressed_tensors_expert_params(
+    projection: str, suffix: str, nested: bool
+) -> None:
+    projection_param = (
+        f"{projection}_weight.{suffix}" if nested else f"{projection}_{suffix}"
+    )
+    source = f"model.llm.layers.2.mlp.experts.{projection_param}"
+
+    mapped = _TmlForCausalLMBase.hf_to_vllm_mapper.apply_list([source])
+
+    assert mapped == [f"model.layers.2.mlp.experts.{projection}_{suffix}"]
+
+
 @pytest.mark.parametrize(("projection", "amax"), [("w13", 4.375), ("w2", 2960.0)])
 def test_moe_loads_calibrated_input_scale(projection: str, amax: float) -> None:
     experts = SimpleNamespace(
@@ -105,6 +154,37 @@ def test_moe_loads_calibrated_input_scale(projection: str, amax: float) -> None:
     expected = torch.full_like(scale, amax / (448.0 * 6.0))
     torch.testing.assert_close(scale, expected)
     assert loaded == [f"experts.routed_experts.{projection}_input_scale"]
+
+
+@pytest.mark.parametrize("projection", ["w13", "w2"])
+@pytest.mark.parametrize("scale_kind", ["input", "weight"])
+def test_moe_loads_compressed_tensors_global_scale(
+    projection: str, scale_kind: str
+) -> None:
+    param = torch.nn.Parameter(torch.empty(3, 2 if projection == "w13" else 1))
+    if projection == "w2":
+        param = torch.nn.Parameter(param.squeeze(1))
+    experts = SimpleNamespace(
+        **{f"{projection}_{scale_kind}_global_scale": param},
+        moe_config=SimpleNamespace(moe_parallel_config=SimpleNamespace(tp_rank=0)),
+    )
+    layer = SimpleNamespace(
+        experts=SimpleNamespace(routed_experts=experts),
+        _local_expert_slots=lambda: {0: 0, 1: 1, 2: 2},
+    )
+    checkpoint_scale = torch.tensor([[1.0], [2.0], [3.0]])
+
+    loaded = moe.InklingMoE.load_expert_weight(
+        layer,
+        f"experts.{projection}_{scale_kind}_global_scale",
+        checkpoint_scale,
+    )
+
+    expected = (
+        checkpoint_scale.expand_as(param) if param.ndim == 2 else checkpoint_scale[:, 0]
+    )
+    torch.testing.assert_close(param, expected)
+    assert loaded == [f"experts.routed_experts.{projection}_{scale_kind}_global_scale"]
 
 
 def test_sink_down_projection_is_packed_during_load(monkeypatch) -> None:

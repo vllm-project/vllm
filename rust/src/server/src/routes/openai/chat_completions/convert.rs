@@ -54,6 +54,8 @@ pub(super) struct ResponseOptions {
     pub return_token_ids: bool,
     /// Whether to format logprob tokens as `token_id:{id}`.
     pub return_tokens_as_token_ids: bool,
+    /// Whether the request forces one named function tool.
+    pub is_named_tool_choice: bool,
 }
 
 /// Validate and lower one OpenAI chat completion request into the internal chat
@@ -98,6 +100,7 @@ pub(super) fn prepare_chat_request(
             .and_then(|options| options.continuous_usage_stats)
             .unwrap_or(false);
     let requested_logprobs = request.logprobs;
+    let is_named_tool_choice = matches!(&request.tool_choice, Some(ToolChoice::Function { .. }));
 
     // Auto-enable prompt logprobs for non-streaming echo, matching Python vLLM's
     // behavior.
@@ -180,6 +183,7 @@ pub(super) fn prepare_chat_request(
             echo,
             return_token_ids: request.return_token_ids.unwrap_or(false),
             return_tokens_as_token_ids: request.return_tokens_as_token_ids.unwrap_or(false),
+            is_named_tool_choice,
         },
         chat_request,
     })
@@ -1068,6 +1072,7 @@ mod tests {
         .expect("request is valid");
 
         assert_eq!(prepared.chat_request.tool_choice, ChatToolChoice::Required);
+        assert!(!prepared.options.is_named_tool_choice);
     }
 
     #[test]
@@ -1107,6 +1112,7 @@ mod tests {
                 name: "get_weather".to_string(),
             }
         );
+        assert!(prepared.options.is_named_tool_choice);
     }
 
     #[test]
