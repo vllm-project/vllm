@@ -90,9 +90,10 @@ class SharedRoutingRegion:
             )
 
 
-def shared_routing_mmap_path(instance_id: str, dp_rank: int) -> str:
-    """Stable per-instance, per-DP-rank path so DP ranks never collide."""
-    return f"/dev/shm/vllm_routed_experts_{instance_id}_dp{dp_rank}.mmap"
+def shared_routing_mmap_path(instance_id: str) -> str:
+    """Per-instance mmap path. instance_id already carries the DP rank
+    suffix under DP (see _apply_dp_identity_suffix), so ranks never collide."""
+    return f"/dev/shm/vllm_routed_experts_{instance_id}.mmap"
 
 
 class RoutedExpertsWorkerWriter:
@@ -101,11 +102,10 @@ class RoutedExpertsWorkerWriter:
     def __init__(
         self,
         instance_id: str,
-        dp_rank: int,
         slot_shape: tuple[int, ...],
         dtype: npt.DTypeLike,
     ) -> None:
-        self._path = shared_routing_mmap_path(instance_id, dp_rank)
+        self._path = shared_routing_mmap_path(instance_id)
         self._slot_shape = slot_shape
         self._dtype = np.dtype(dtype)
         self._nbytes = int(np.prod(slot_shape)) * self._dtype.itemsize

@@ -7694,7 +7694,6 @@ class GPUModelRunner(
         )
         self.routed_experts_writer = RoutedExpertsWorkerWriter(
             instance_id=self.vllm_config.instance_id,
-            dp_rank=parallel_config.data_parallel_rank,
             slot_shape=slot_shape,
             dtype=slot_dtype,
         )

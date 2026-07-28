@@ -153,6 +153,15 @@ class Scheduler(SchedulerInterface):
             if multiple_inflight_batches and kv_transfer_config.is_kv_consumer:
                 self.defer_block_free = True
 
+        # Routed-experts capture writes routing into the shared slot mmap,
+        # likewise unordered against block reuse under overlapping batches;
+        # fence it the same way even without a KV connector.
+        if (
+            self.vllm_config.max_concurrent_batches > 1
+            and self.vllm_config.model_config.enable_return_routed_experts
+        ):
+            self.defer_block_free = True
+
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
             self.parallel_config.data_parallel_index,
