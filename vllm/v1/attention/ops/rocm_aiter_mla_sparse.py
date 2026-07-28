@@ -964,6 +964,7 @@ def _fused_inverse_rope_gptj(
         HALF=rope_head_dim // 2,
         BLOCK_NOPE=triton.next_power_of_2(head_dim - rope_head_dim),
         BLOCK_HALF=triton.next_power_of_2(rope_head_dim // 2),
+        num_warps=1,
     )
     return out
 
@@ -1141,6 +1142,7 @@ def _sparse_attn_prefill_ragged_kernel(
     kv_ptr,
     kv_indices_ptr,
     kv_indptr_ptr,
+    kv_lengths_ptr,
     attn_sink_ptr,
     out_ptr,
     q_stride_t,
@@ -1154,11 +1156,13 @@ def _sparse_attn_prefill_ragged_kernel(
     num_heads,
     head_dim,
     num_kv,
+    kv_indices_row_stride,
     scale,
     HAS_ATTN_SINK: tl.constexpr,
     BLOCK_H: tl.constexpr,
     BLOCK_D: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    DENSE_INDICES: tl.constexpr,
 ):
     query_idx = tl.program_id(0)
     pid_h = tl.program_id(1)
@@ -1182,9 +1186,13 @@ def _sparse_attn_prefill_ragged_kernel(
     l_i = tl.zeros((BLOCK_H,), dtype=tl.float32)
     acc = tl.zeros((BLOCK_H, BLOCK_D), dtype=tl.float32)
 
-    kv_start = tl.load(kv_indptr_ptr + query_idx)
-    kv_end = tl.load(kv_indptr_ptr + query_idx + 1)
-    kv_len = kv_end - kv_start
+    if DENSE_INDICES:
+        kv_start = query_idx * kv_indices_row_stride
+        kv_len = tl.minimum(tl.load(kv_lengths_ptr + query_idx), kv_indices_row_stride)
+    else:
+        kv_start = tl.load(kv_indptr_ptr + query_idx)
+        kv_end = tl.load(kv_indptr_ptr + query_idx + 1)
+        kv_len = kv_end - kv_start
 
     k_offsets = tl.arange(0, BLOCK_K)
     slot = tl.load(
@@ -1833,39 +1841,77 @@ def _sparse_attn_decode_reduce_kernel(
     )
 
 
-def _rocm_sparse_attn_prefill_ragged_triton(
+def _rocm_sparse_attn_prefill_triton_impl(
     q: torch.Tensor,
     kv: torch.Tensor,
     indices: torch.Tensor,
-    indptr: torch.Tensor,
+    indptr: torch.Tensor | None,
     scale: float,
     attn_sink: torch.Tensor | None,
     nope_head_dim: int,
     rope_head_dim: int,
+    kv_lengths: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    """Launch sparse-attn prefill for either a ragged or dense topk index layout
+
+    Ragged (kv_lengths is None): indices is a flat [nnz] buffer sliced by
+    indptr of shape [sq+1]
+
+    Dense (kv_lengths not None): indices is [sq, width] and kv_lengths is [sq],
+    the kernel reads each row's valid prefix directly
+    """
+    dense = kv_lengths is not None
     assert q.ndim == 3, f"expected q=[sq,h,d], got {q.shape}"
     assert kv.ndim == 2, f"expected kv=[skv,d], got {kv.shape}"
-    assert indices.ndim == 1, f"expected indices=[nnz], got {indices.shape}"
-    assert indptr.ndim == 1, f"expected indptr=[sq+1], got {indptr.shape}"
-    assert not q.is_cpu and not kv.is_cpu and not indices.is_cpu and not indptr.is_cpu
+    assert not q.is_cpu and not kv.is_cpu and not indices.is_cpu
 
-    indices = _as_int32_contiguous_1d(indices)
-    indptr = _as_int32_contiguous_1d(indptr)
+    num_queries, num_heads, head_dim = q.shape
+
+    if dense:
+        assert indices.ndim == 2, (
+            f"expected dense indices=[sq,width], got {indices.shape}"
+        )
+        assert kv_lengths is not None
+        assert not kv_lengths.is_cpu
+        if indices.dtype != torch.int32 or not indices.is_contiguous():
+            indices = indices.to(torch.int32).contiguous()
+        kv_lengths = _as_int32_contiguous_1d(kv_lengths)
+        assert indices.shape[0] == num_queries, (
+            f"expected dense indices rows={num_queries}, got {indices.shape[0]}"
+        )
+        assert kv_lengths.numel() == num_queries, (
+            f"expected lengths shape [{num_queries}], got {kv_lengths.shape}"
+        )
+        # kv_indptr_ptr is unused when dense, pass a valid pointer
+        kv_indptr = kv_lengths
+        kv_indices_row_stride = indices.stride(0)
+    else:
+        assert indices.ndim == 1, f"expected indices=[nnz], got {indices.shape}"
+        assert indptr is not None and indptr.ndim == 1, (
+            f"expected indptr=[sq+1], got {indptr}"
+        )
+        assert not indptr.is_cpu
+        indices = _as_int32_contiguous_1d(indices)
+        indptr = _as_int32_contiguous_1d(indptr)
+        assert indptr.numel() == num_queries + 1, (
+            f"expected indptr shape [{num_queries + 1}], got {indptr.shape}"
+        )
+        # kv_lengths_ptr is unused when ragged, pass a valid pointer
+        kv_indptr = indptr
+        kv_lengths = indptr
+        kv_indices_row_stride = 0
+
     has_attn_sink = attn_sink is not None
     if attn_sink is None:
         attn_sink = torch.empty(1, device=q.device, dtype=torch.float32)
     else:
         attn_sink = attn_sink.contiguous()
 
-    num_queries, num_heads, head_dim = q.shape
-    assert indptr.numel() == num_queries + 1, (
-        f"expected indptr shape [{num_queries + 1}], got {indptr.shape}"
-    )
     _validate_dsv4_sparse_dims(
         head_dim,
         nope_head_dim,
         rope_head_dim,
-        "_rocm_sparse_attn_prefill_ragged_triton",
+        "_rocm_sparse_attn_prefill_triton_impl",
     )
 
     block_h = 16
@@ -1877,7 +1923,8 @@ def _rocm_sparse_attn_prefill_ragged_triton(
         q,
         kv,
         indices,
-        indptr,
+        kv_indptr,
+        kv_lengths,
         attn_sink,
         out,
         q.stride(0),
@@ -1891,11 +1938,13 @@ def _rocm_sparse_attn_prefill_ragged_triton(
         num_heads,
         head_dim,
         kv.shape[0],
+        kv_indices_row_stride,
         float(scale),
         HAS_ATTN_SINK=has_attn_sink,
         BLOCK_H=block_h,
         BLOCK_D=block_d,
         BLOCK_K=block_k,
+        DENSE_INDICES=dense,
         num_warps=num_warps,
     )
     return out
@@ -1911,22 +1960,21 @@ def _rocm_sparse_attn_prefill_triton(
     rope_head_dim: int,
     topk_length: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    ragged_indices, ragged_indptr = build_ragged_indices_from_dense(
-        indices,
+    lengths = (
         topk_length
         if topk_length is not None
-        else (indices >= 0).sum(dim=-1, dtype=torch.int32),
-        num_rows=kv.shape[0],
+        else (indices >= 0).sum(dim=-1, dtype=torch.int32)
     )
-    return _rocm_sparse_attn_prefill_ragged_triton(
+    return _rocm_sparse_attn_prefill_triton_impl(
         q=q,
         kv=kv,
-        indices=ragged_indices,
-        indptr=ragged_indptr,
+        indices=indices,
+        indptr=None,
         scale=scale,
         attn_sink=attn_sink,
         nope_head_dim=nope_head_dim,
         rope_head_dim=rope_head_dim,
+        kv_lengths=lengths,
     )
 
 
@@ -2307,7 +2355,7 @@ def rocm_sparse_attn_prefill(
         "rocm_sparse_attn_prefill",
     )
     if ragged_indices is not None and ragged_indptr is not None:
-        output_chunk = _rocm_sparse_attn_prefill_ragged_triton(
+        output_chunk = _rocm_sparse_attn_prefill_triton_impl(
             q=q,
             kv=kv.squeeze(1),
             indices=ragged_indices,

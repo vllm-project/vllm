@@ -251,7 +251,7 @@ def test_compute_global_topk_ragged_indices_and_indptr() -> None:
 @torch.inference_mode()
 def test_sparse_attn_prefill_ragged_kernel() -> None:
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
-        _rocm_sparse_attn_prefill_ragged_triton,
+        _rocm_sparse_attn_prefill_triton_impl,
     )
 
     device = torch.device("cuda")
@@ -263,7 +263,7 @@ def test_sparse_attn_prefill_ragged_kernel() -> None:
     attn_sink = torch.tensor([-0.25, 0.0, 0.25], dtype=torch.float32, device=device)
     scale = HEAD_DIM**-0.5
 
-    actual = _rocm_sparse_attn_prefill_ragged_triton(
+    actual = _rocm_sparse_attn_prefill_triton_impl(
         q=q,
         kv=kv,
         indices=indices,
