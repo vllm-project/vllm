@@ -79,6 +79,36 @@ class TrtLlmMxfp4ExpertsBase:
         else:
             self.gemm1_clamp_limit = None
 
+        # SITU (SituGLU) TRTLLM-Gen kernel computes
+        #   left  = alpha * tanh(x0 / alpha) * sigmoid(x0)   # gate (x0)
+        #   right = beta  * tanh(x1 / beta)                  # up   (x1)
+        # which matches vLLM's situ_and_mul with (beta, linear_beta), so map
+        # situ beta -> gatedActAlpha (gemm1_alpha) and situ linear_beta ->
+        # gatedActBeta (gemm1_beta). Both must be > 0.
+        if moe_config.activation == MoEActivation.SITU:
+            situ_beta = moe_config.activation_situ_beta
+            situ_linear_beta = moe_config.activation_situ_linear_beta
+            assert situ_beta is not None and situ_beta > 0, (
+                "SITU requires activation_situ_beta > 0"
+            )
+            assert situ_linear_beta is not None and situ_linear_beta > 0, (
+                "TRTLLM SiTuGlu requires activation_situ_linear_beta > 0 "
+                "(the private cubin has no up-passthrough path)"
+            )
+            self.gemm1_alpha = torch.full(
+                (self.local_num_experts,),
+                float(situ_beta),
+                dtype=torch.float32,
+                device=device,
+            )
+            self.gemm1_beta = torch.full(
+                (self.local_num_experts,),
+                float(situ_linear_beta),
+                dtype=torch.float32,
+                device=device,
+            )
+            self.gemm1_clamp_limit = None
+
         self.max_capture_size = moe_config.max_capture_size
 
     @staticmethod
@@ -103,7 +133,19 @@ class TrtLlmMxfp4ExpertsBase:
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in (MoEActivation.SWIGLUOAI, MoEActivation.SILU)
+        return activation in (
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SILU,
+            MoEActivation.SITU,
+        )
+
+    @staticmethod
+    def _flashinfer_activation_type(activation: MoEActivation) -> int:
+        from flashinfer.fused_moe.core import ActivationType
+
+        if activation == MoEActivation.SITU:
+            return ActivationType.Situ.value
+        return ActivationType.Swiglu.value
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -219,6 +261,8 @@ class TrtLlmMxfp4ExpertsMonolithic(
             routed_scaling_factor=routed_scaling_factor,
             routing_method_type=self.routing_method_type,
             do_finalize=True,
+            activation_type=self._flashinfer_activation_type(activation),
+            is_private=True,
             tune_max_num_tokens=max(self.max_capture_size, 1),
             output=output,
             routing_replay_out=routing_replay_out,
@@ -339,6 +383,8 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
             "routing_method_type": RoutingMethodType.Renormalize,
             "do_finalize": True,
             "enable_pdl": True,
+            "activation_type": self._flashinfer_activation_type(activation),
+            "is_private": True,
             "output": output,
             "tune_max_num_tokens": max(self.max_capture_size, 1),
         }
