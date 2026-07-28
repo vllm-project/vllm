@@ -24,6 +24,7 @@ from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.deepseek_eagle3 import Eagle3DeepseekV2ForCausalLM
@@ -38,8 +39,13 @@ from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
+from vllm.v1.attention.backends.utils import mamba_get_block_table_tensor
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
-from vllm.v1.kv_cache_interface import KVCacheConfig, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    MambaSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import (
     empty_exponential_noise_like,
@@ -151,6 +157,29 @@ class SpecDecodeBaseProposer:
 
         self.draft_attn_groups: list[AttentionGroup] = []
         self.kv_cache_gid: int = -1
+        # Per-group block tables and slot mappings for draft models whose
+        # layers span more than one KV cache group (e.g. a hybrid attention +
+        # short_conv draft). The model runner populates these via
+        # set_per_group_attn_metadata; they stay empty for single-group
+        # drafters, so the per-group swap below is a no-op for them.
+        self._per_group_block_tables: dict[int, torch.Tensor] = {}
+        self._per_group_slot_mappings: dict[int, torch.Tensor] = {}
+        # Per-group slot-mapping buffers for the non-primary groups. The
+        # primary group reuses self._slot_mapping_buffer.
+        self._per_group_slot_mapping_buffers: dict[int, torch.Tensor] = {}
+        # Drafter short_conv (Mamba) layers and their KV cache spec, populated
+        # in initialize_attn_backend. A hybrid draft advances these recurrent
+        # conv-state buffers in place across the multi-step draft loop with no
+        # rollback, so propose() snapshots the touched blocks after step 0 and
+        # restores them after the loop. Empty for non-Mamba drafters (EAGLE,
+        # plain draft models), which skip the snapshot/restore entirely.
+        self._draft_mamba_layers: dict[str, MambaBase] = {}
+        self._draft_mamba_spec: MambaSpec | None = None
+        self._draft_mamba_gid: int = -1
+        # Reused across propose() calls to hold the post-step-0 conv-state
+        # snapshot; keyed by layer name. Lazily sized to the touched-block
+        # count so we never clone the whole cache.
+        self._mamba_state_snapshot: dict[str, torch.Tensor] = {}
         self.eagle3_use_aux_hidden_state: bool = (
             self._get_eagle3_use_aux_hidden_state_from_config()
         )
@@ -679,6 +708,13 @@ class SpecDecodeBaseProposer:
 
         block_size = self.block_size
         assert block_size > 0, "block_size has not been initialized."
+
+        # Snapshot the drafter's short_conv recurrent state before the draft
+        # loop advances it in place. The loop has no rollback, so without this
+        # the next iteration's step 0 would read a state corrupted by rejected
+        # draft tokens. No-op for non-Mamba drafters (empty layer set).
+        mamba_snapshot_blocks = self._snapshot_draft_mamba_state(common_attn_metadata)
+
         for token_index in range(self.num_speculative_tokens - 1):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
@@ -759,6 +795,12 @@ class SpecDecodeBaseProposer:
                 assert draft_probs_list is not None
                 draft_probs_list.append(draft_probs)
             draft_token_ids_list.append(draft_token_ids)
+
+        # Restore the drafter's short_conv state to the post-step-0 (committed)
+        # snapshot, undoing the in-place advance the draft loop applied with
+        # speculative tokens. The next iteration's step 0 then reads the correct
+        # anchor. No-op for non-Mamba drafters.
+        self._restore_draft_mamba_state(mamba_snapshot_blocks)
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
@@ -1020,6 +1062,78 @@ class SpecDecodeBaseProposer:
             for layer_name in attn_group.layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
         return per_group_attn_metadata, per_layer_attn_metadata
+
+    def _snapshot_draft_mamba_state(
+        self, common_attn_metadata: CommonAttentionMetadata
+    ) -> torch.Tensor | None:
+        """Snapshot the drafter's short_conv conv-state blocks the draft loop
+        overwrites in place.
+
+        Each short_conv layer advances its recurrent conv state one token per
+        draft step with no rollback, so without this snapshot the next
+        propose() iteration's step 0 would read a state corrupted by rejected
+        draft tokens. Returns the gathered block indices for
+        _restore_draft_mamba_state, or None when there is nothing to snapshot
+        (non-Mamba drafter, or the group's block table is unset).
+
+        Args:
+            common_attn_metadata: The drafter's metadata after the rejected-
+                token correction, so seq_lens reflects the committed length.
+
+        Returns:
+            The int64 block indices captured, or None to skip the restore.
+        """
+        if not self._draft_mamba_layers:
+            return None
+        assert self._draft_mamba_spec is not None
+        block_table = self._per_group_block_tables.get(self._draft_mamba_gid)
+        if block_table is None:
+            return None
+        num_reqs = common_attn_metadata.num_reqs
+        mode = self.vllm_config.cache_config.mamba_cache_mode
+        seq_lens = common_attn_metadata.seq_lens[:num_reqs]
+        bt = block_table[:num_reqs]
+        # The metadata builder selects each step's blocks from
+        # mamba_get_block_table_tensor(block_table, seq_lens, ...). The loop
+        # grows seq_lens by one per step, so its window can slide forward by a
+        # block when the committed length is within num_speculative_tokens of a
+        # block boundary. Snapshot the union of the committed window and the
+        # forward-most window (seq_lens + num_speculative_tokens - 1) so the
+        # captured set is a superset of every block any step can write. The
+        # windows overlap heavily, but the union keeps a fixed shape (so the
+        # snapshot buffer is reused) and the restore is idempotent where they do.
+        ahead = max(self.num_speculative_tokens - 1, 0)
+        committed = mamba_get_block_table_tensor(
+            bt, seq_lens, self._draft_mamba_spec, mode
+        )
+        forward = mamba_get_block_table_tensor(
+            bt, seq_lens + ahead, self._draft_mamba_spec, mode
+        )
+        block_ids = torch.cat([committed.reshape(-1), forward.reshape(-1)])
+        for layer_name, layer in self._draft_mamba_layers.items():
+            gathered = layer.kv_cache[0][block_ids]
+            snap = self._mamba_state_snapshot.get(layer_name)
+            if snap is None or snap.shape != gathered.shape:
+                self._mamba_state_snapshot[layer_name] = gathered.clone()
+            else:
+                snap.copy_(gathered)
+        return block_ids
+
+    def _restore_draft_mamba_state(self, block_ids: torch.Tensor | None) -> None:
+        """Restore the conv-state blocks captured by
+        _snapshot_draft_mamba_state, undoing the draft loop's in-place advance
+        so the next iteration starts from the committed (post-step-0) state.
+
+        Args:
+            block_ids: The indices returned by _snapshot_draft_mamba_state, or
+                None to skip.
+        """
+        if block_ids is None:
+            return
+        for layer_name, layer in self._draft_mamba_layers.items():
+            snap = self._mamba_state_snapshot.get(layer_name)
+            if snap is not None:
+                layer.kv_cache[0][block_ids] = snap
 
     def model_returns_tuple(self) -> bool:
         if self.method == "mtp":
@@ -1795,6 +1909,28 @@ class SpecDecodeBaseProposer:
             self.draft_attn_groups[0].get_metadata_builder().kv_cache_spec.block_size
         )
         logger.debug("Using block size %d for drafting layers", self.block_size)
+
+        # Collect the drafter's short_conv (Mamba) layers so propose() can
+        # snapshot and restore their recurrent conv-state across the draft loop.
+        # These layers advance their state in place with no rollback, so a
+        # partially-rejected iteration would leave the next iteration's step 0
+        # reading a corrupted anchor. Empty for non-Mamba drafters.
+        self._draft_mamba_layers = {}
+        self._draft_mamba_spec = None
+        self._draft_mamba_gid = -1
+        all_layers = get_layers_from_vllm_config(
+            self.vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+        )
+        for attn_group in self.draft_attn_groups:
+            if not isinstance(attn_group.kv_cache_spec, MambaSpec):
+                continue
+            self._draft_mamba_spec = attn_group.kv_cache_spec
+            self._draft_mamba_gid = attn_group.kv_cache_group_id
+            for layer_name in attn_group.layer_names:
+                layer = all_layers.get(layer_name)
+                if isinstance(layer, MambaBase):
+                    self._draft_mamba_layers[layer_name] = layer
 
     def _determine_batch_execution_and_padding(
         self,
