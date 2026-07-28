@@ -119,6 +119,11 @@ void dispose(fptr_t _fa) {
   delete reinterpret_cast<vllm::CustomAllreduce*>(_fa);
 }
 
+void custom_ar_close(fptr_t _fa) {
+  auto fa = reinterpret_cast<vllm::CustomAllreduce*>(_fa);
+  fa->close();
+}
+
 int64_t meta_size() { return sizeof(vllm::Signal); }
 
 void register_buffer(fptr_t _fa, const std::vector<fptr_t>& fake_ipc_ptrs) {
@@ -140,6 +145,14 @@ get_graph_buffer_ipc_meta(fptr_t _fa) {
   return std::make_tuple(bytes, offsets);
 }
 
+std::tuple<std::vector<int64_t>, std::vector<int64_t>>
+get_graph_buffer_ipc_meta_for_reinit(fptr_t _fa) {
+  auto fa = reinterpret_cast<vllm::CustomAllreduce*>(_fa);
+  auto [handle, offsets] = fa->get_graph_buffer_ipc_meta_for_reinit();
+  std::vector<int64_t> bytes(handle.begin(), handle.end());
+  return std::make_tuple(bytes, offsets);
+}
+
 // Use vector<int64_t> to represent byte data for python binding compatibility.
 void register_graph_buffers(fptr_t _fa,
                             const std::vector<std::vector<int64_t>>& handles,
@@ -152,6 +165,33 @@ void register_graph_buffers(fptr_t _fa,
   }
   bytes.reserve(handles.size());
   fa->register_graph_buffers(bytes, offsets);
+}
+
+void custom_ar_prepare_for_suspend(fptr_t _fa) {
+  auto fa = reinterpret_cast<vllm::CustomAllreduce*>(_fa);
+  fa->prepare_for_suspend();
+}
+
+void custom_ar_reinit_after_resume(
+    fptr_t _fa, const std::vector<std::vector<int64_t>>& handles,
+    const std::vector<std::vector<int64_t>>& offsets,
+    const std::vector<fptr_t>& fake_signal_ptrs,
+    const std::vector<fptr_t>& fake_buffer_ptrs) {
+  auto fa = reinterpret_cast<vllm::CustomAllreduce*>(_fa);
+  STD_TORCH_CHECK(fake_signal_ptrs.size() == fa->world_size_);
+  STD_TORCH_CHECK(fake_buffer_ptrs.size() == fa->world_size_);
+  std::vector<std::string> bytes;
+  bytes.reserve(handles.size());
+  for (const auto& handle : handles) {
+    bytes.emplace_back(handle.begin(), handle.end());
+  }
+  vllm::Signal* signal_ptrs[8];
+  void* buffer_ptrs[8];
+  for (int i = 0; i < fa->world_size_; i++) {
+    signal_ptrs[i] = reinterpret_cast<vllm::Signal*>(fake_signal_ptrs[i]);
+    buffer_ptrs[i] = reinterpret_cast<void*>(fake_buffer_ptrs[i]);
+  }
+  fa->reinit_after_resume(bytes, offsets, signal_ptrs, buffer_ptrs);
 }
 
 std::tuple<fptr_t, torch::stable::Tensor> allocate_shared_buffer_and_handle(
@@ -195,6 +235,21 @@ fptr_t open_mem_handle(torch::stable::Tensor& mem_handle) {
       *((const cudaIpcMemHandle_t*)mem_handle.const_data_ptr()),
       cudaIpcMemLazyEnablePeerAccess));
   return reinterpret_cast<fptr_t>(ipc_ptr);
+}
+
+torch::stable::Tensor get_mem_handle(fptr_t buffer) {
+  auto handle = torch::stable::empty(
+      {static_cast<int64_t>(sizeof(cudaIpcMemHandle_t))},
+      torch::headeronly::ScalarType::Byte, std::nullopt,
+      torch::stable::Device(torch::stable::DeviceType::CPU));
+  STD_CUDA_CHECK(cudaIpcGetMemHandle(
+      reinterpret_cast<cudaIpcMemHandle_t*>(handle.mutable_data_ptr()),
+      reinterpret_cast<void*>(buffer)));
+  return handle;
+}
+
+void close_mem_handle(fptr_t ptr) {
+  STD_CUDA_CHECK(cudaIpcCloseMemHandle(reinterpret_cast<void*>(ptr)));
 }
 
 void free_shared_buffer(fptr_t buffer) {
