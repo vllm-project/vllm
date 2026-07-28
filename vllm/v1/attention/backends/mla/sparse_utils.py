@@ -2,8 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility functions for sparse MLA backends."""
 
+from dataclasses import dataclass
+
 import torch
 
+from vllm.config import VllmConfig
+from vllm.distributed import get_dcp_group
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+    zip_inputs,
+)
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+)
 from vllm.triton_utils import tl, triton
 
 
@@ -28,150 +39,330 @@ def flat_kv_row_view(
     rows = kv_cache.as_strided((num_rows, head_dim), (head_dim, 1))
     return rows, block_stride_rows
 
-
 # Kernel with prefill workspace support and valid count tracking
-@triton.jit
-def _convert_req_index_to_global_index_kernel(
-    req_id_ptr,  # int32 [num_tokens]
-    block_table_ptr,  # int32 [num_requests, max_num_blocks_per_req]
-    token_indices_ptr,  # int32 [num_tokens, NUM_TOPK_TOKENS]
-    out_ptr,  # int32 [num_tokens, NUM_TOPK_TOKENS]
-    valid_count_ptr,  # int32 [num_tokens] - output valid count per row
-    prefill_request_id_ptr,  # int32 [num_tokens], -1 for decode, >=0 for prefill
-    workspace_starts_ptr,  # int32 [num_prefill_reqs+1] or nullptr
-    # shapes (compile-time where possible)
-    max_num_blocks_per_req: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    BLOCK_STRIDE_ROWS: tl.constexpr,
-    BLOCK_N: tl.constexpr,  # tile width along columns
-    HAS_PREFILL: tl.constexpr,
-    COUNT_VALID: tl.constexpr,  # whether to count valid indices
-    # BLOCK_N == NUM_TOPK_TOKENS: one program owns the row, so the valid count
-    # is an in-register reduction and needs no atomic.
-    SINGLE_TILE: tl.constexpr,
-    # When set, scatter valid slots to a contiguous prefix [0, valid_count) using
-    # valid_count_ptr as an atomic slot allocator (DCP filtering leaves interior
-    # -1 gaps; the trtllm-gen sparse kernel reads the first valid_count entries).
-    # Requires COUNT_VALID and an out buffer pre-filled with -1. Order within the
-    # prefix is unspecified (only the selected set matters).
-    COMPACT_TO_FRONT: tl.constexpr,
-    # DCP de-interleave: with DCP_SIZE == 1 these are an exact no-op
-    DCP_SIZE: tl.constexpr,
-    DCP_RANK: tl.constexpr,
-    DCP_INTERLEAVE: tl.constexpr,
-    # strides (in elements)
-    bt_stride0,
-    bt_stride1,
-    ti_stride0,
-    ti_stride1,
-    out_stride0,
-    out_stride1,
+
+
+class ConvertReqIndexToGlobalIndexKernel(
+    VllmJitKernel["ConvertReqIndexToGlobalIndexKernel.CompileKey"]
 ):
-    # program_id(0) -> token_id (row)
-    # program_id(1) -> tile index along columns
-    token_id = tl.program_id(0)
-    tile_id = tl.program_id(1)
+    @dataclass(frozen=True)
+    class CompileKey:
+        block_size: int
+        block_stride_rows: int
+        block_n: int
+        has_prefill_workspace: bool
+        count_valid: bool
+        single_tile: bool
+        compact_to_front: bool
+        dcp_size: int
+        dcp_rank: int
+        dcp_interleave: int
+        num_warps: int
 
-    # Each program covers BLOCK_N consecutive columns
-    indice_id = tile_id * BLOCK_N + tl.arange(0, BLOCK_N)
+    @staticmethod
+    @triton.jit
+    def kernel(
+        req_id_ptr,  # int32 [num_tokens]
+        block_table_ptr,  # int32 [num_requests, max_num_blocks_per_req]
+        token_indices_ptr,  # int32 [num_tokens, NUM_TOPK_TOKENS]
+        out_ptr,  # int32 [num_tokens, NUM_TOPK_TOKENS]
+        valid_count_ptr,  # int32 [num_tokens] - output valid count per row
+        prefill_request_id_ptr,  # int32 [num_tokens], -1 for decode, >=0 for prefill
+        workspace_starts_ptr,  # int32 [num_prefill_reqs+1] or nullptr
+        # shapes (compile-time where possible)
+        max_num_blocks_per_req: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,
+        BLOCK_STRIDE_ROWS: tl.constexpr,
+        BLOCK_N: tl.constexpr,  # tile width along columns
+        HAS_PREFILL: tl.constexpr,
+        COUNT_VALID: tl.constexpr,  # whether to count valid indices
+        # With one program per row, the valid count needs no atomic.
+        SINGLE_TILE: tl.constexpr,
+        # When set, scatter valid slots to a contiguous prefix [0, valid_count) using
+        # valid_count_ptr as an atomic slot allocator (DCP filtering leaves interior
+        # -1 gaps; the trtllm-gen sparse kernel reads the first valid_count entries).
+        # Requires COUNT_VALID and an out buffer pre-filled with -1. Order within the
+        # prefix is unspecified (only the selected set matters).
+        COMPACT_TO_FRONT: tl.constexpr,
+        # DCP de-interleave: with DCP_SIZE == 1 these are an exact no-op
+        DCP_SIZE: tl.constexpr,
+        DCP_RANK: tl.constexpr,
+        DCP_INTERLEAVE: tl.constexpr,
+        # strides (in elements)
+        bt_stride0,
+        bt_stride1,
+        ti_stride0,
+        ti_stride1,
+        out_stride0,
+        out_stride1,
+    ):
+        # program_id(0) -> token_id (row)
+        # program_id(1) -> tile index along columns
+        token_id = tl.program_id(0)
+        tile_id = tl.program_id(1)
 
-    # Load request id for this token (no mask: grid is exact)
-    req = tl.load(req_id_ptr + token_id)
+        # Each program covers BLOCK_N consecutive columns
+        indice_id = tile_id * BLOCK_N + tl.arange(0, BLOCK_N)
 
-    # Load token indices for this tile
-    ti_ptr = token_indices_ptr + token_id * ti_stride0 + indice_id * ti_stride1
-    tok = tl.load(ti_ptr)  # int32
+        # Load request id for this token (no mask: grid is exact)
+        req = tl.load(req_id_ptr + token_id)
 
-    # Only token == -1 should propagate as -1
-    is_invalid_tok = tok < 0
-    is_prefill = False
-    if HAS_PREFILL:
-        prefill_req_id = tl.load(prefill_request_id_ptr + token_id)
-        is_prefill = prefill_req_id >= 0
+        # Load token indices for this tile
+        ti_ptr = token_indices_ptr + token_id * ti_stride0 + indice_id * ti_stride1
+        tok = tl.load(ti_ptr)  # int32
 
-    # DCP de-interleave the global token id into this rank's local slot.
-    # Tokens are interleaved in groups of DCP_INTERLEAVE across ranks. With
-    # DCP_SIZE == 1 (and any interleave) owning_rank == 0 == DCP_RANK (never
-    # remote) and local_idx == tok, so this reduces to the non-DCP path; with
-    # DCP_INTERLEAVE == 1 it reduces to plain round-robin (tok % / // DCP_SIZE).
-    owning_rank = (tok // DCP_INTERLEAVE) % DCP_SIZE
-    is_remote = owning_rank != DCP_RANK
-    local_idx = (
-        tok // (DCP_SIZE * DCP_INTERLEAVE)
-    ) * DCP_INTERLEAVE + tok % DCP_INTERLEAVE
+        # Only token == -1 should propagate as -1
+        is_invalid_tok = tok < 0
+        is_prefill = False
+        if HAS_PREFILL:
+            prefill_req_id = tl.load(prefill_request_id_ptr + token_id)
+            is_prefill = prefill_req_id >= 0
 
-    # Compute block id and in-block offset
-    block_id = local_idx // BLOCK_SIZE
-    inblock_off = local_idx % BLOCK_SIZE
+        # DCP de-interleave the global token id into this rank's local slot.
+        # Tokens are interleaved in groups of DCP_INTERLEAVE across ranks. With
+        # DCP_SIZE == 1 (and any interleave) owning_rank == 0 == DCP_RANK (never
+        # remote) and local_idx == tok, so this reduces to the non-DCP path; with
+        # DCP_INTERLEAVE == 1 it reduces to plain round-robin (tok % / // DCP_SIZE).
+        owning_rank = (tok // DCP_INTERLEAVE) % DCP_SIZE
+        is_remote = owning_rank != DCP_RANK
+        local_idx = (
+            tok // (DCP_SIZE * DCP_INTERLEAVE)
+        ) * DCP_INTERLEAVE + tok % DCP_INTERLEAVE
 
-    # Guard block_table access
-    valid_block = (block_id < max_num_blocks_per_req) & (block_id >= 0)
-    bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
-    is_invalid_tok |= ~valid_block | is_remote
-    base = tl.load(bt_ptr, mask=valid_block & ~is_prefill & ~is_remote, other=0)
-    out_val = base * BLOCK_STRIDE_ROWS + inblock_off
+        # Compute block id and in-block offset
+        block_id = local_idx // BLOCK_SIZE
+        inblock_off = local_idx % BLOCK_SIZE
 
-    # Override with prefill output if prefill is enabled
-    if HAS_PREFILL:
-        workspace_start = tl.load(
-            workspace_starts_ptr + prefill_req_id, mask=is_prefill, other=0
-        )
-        prefill_out = workspace_start + tok
-        out_val = tl.where(is_prefill, prefill_out, out_val)
-    out_val = tl.where(is_invalid_tok, -1, out_val)
+        # Guard block_table access
+        valid_block = (block_id < max_num_blocks_per_req) & (block_id >= 0)
+        bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
+        is_invalid_tok |= ~valid_block | is_remote
+        base = tl.load(bt_ptr, mask=valid_block & ~is_prefill & ~is_remote, other=0)
+        out_val = base * BLOCK_STRIDE_ROWS + inblock_off
 
-    if COMPACT_TO_FRONT:
-        # Scatter valid slots to a contiguous prefix. A per-tile exclusive prefix
-        # sum gives each valid lane a distinct local offset; one atomic add of the
-        # tile's valid count reserves a contiguous base across racing tiles. The
-        # out buffer is pre-filled with -1, so unwritten tail slots stay -1.
-        # With no racing tiles the base is 0 and the allocator becomes a store.
-        is_valid = (~is_invalid_tok).to(tl.int32)
-        local_offset = tl.cumsum(is_valid) - is_valid
-        tile_valid_count = tl.sum(is_valid)
-        if SINGLE_TILE:
-            base = 0
-            tl.store(valid_count_ptr + token_id, tile_valid_count)
-        else:
-            base = tl.atomic_add(valid_count_ptr + token_id, tile_valid_count)
-        dest = base + local_offset
-        out_ptr_dest = out_ptr + token_id * out_stride0 + dest * out_stride1
-        tl.store(out_ptr_dest, out_val, mask=is_valid == 1)
-    else:
-        # Store results in place (input column == output column).
-        out_ptr_ij = out_ptr + token_id * out_stride0 + indice_id * out_stride1
-        tl.store(out_ptr_ij, out_val)
+        # Override with prefill output if prefill is enabled
+        if HAS_PREFILL:
+            workspace_start = tl.load(
+                workspace_starts_ptr + prefill_req_id, mask=is_prefill, other=0
+            )
+            prefill_out = workspace_start + tok
+            out_val = tl.where(is_prefill, prefill_out, out_val)
+        out_val = tl.where(is_invalid_tok, -1, out_val)
 
-        # Accumulate the tile's valid count into the row total; a single tile's
-        # reduction *is* the total.
-        if COUNT_VALID:
-            tile_valid_count = tl.sum((~is_invalid_tok).to(tl.int32))
+        if COMPACT_TO_FRONT:
+            # Scatter valid slots to a contiguous prefix. A per-tile exclusive prefix
+            # sum gives each valid lane a distinct local offset; one atomic add of the
+            # tile's valid count reserves a contiguous base across racing tiles. The
+            # out buffer is pre-filled with -1, so unwritten tail slots stay -1.
+            # With no racing tiles the base is 0 and the allocator becomes a store.
+            is_valid = (~is_invalid_tok).to(tl.int32)
+            local_offset = tl.cumsum(is_valid) - is_valid
+            tile_valid_count = tl.sum(is_valid)
             if SINGLE_TILE:
+                base = 0
                 tl.store(valid_count_ptr + token_id, tile_valid_count)
             else:
-                tl.atomic_add(valid_count_ptr + token_id, tile_valid_count)
+                base = tl.atomic_add(valid_count_ptr + token_id, tile_valid_count)
+            dest = base + local_offset
+            out_ptr_dest = out_ptr + token_id * out_stride0 + dest * out_stride1
+            tl.store(out_ptr_dest, out_val, mask=is_valid == 1)
+        else:
+            # Store results in place (input column == output column).
+            out_ptr_ij = out_ptr + token_id * out_stride0 + indice_id * out_stride1
+            tl.store(out_ptr_ij, out_val)
 
+            # Accumulate the tile's valid count into the row total.
+            if COUNT_VALID:
+                tile_valid_count = tl.sum((~is_invalid_tok).to(tl.int32))
+                if SINGLE_TILE:
+                    tl.store(valid_count_ptr + token_id, tile_valid_count)
+                else:
+                    tl.atomic_add(valid_count_ptr + token_id, tile_valid_count)
 
-def _remap_tiling(
-    NUM_TOPK_TOKENS: int, BLOCK_N: int, count_valid: bool
-) -> tuple[bool, int, int, int]:
-    """Pick the column tiling for the index remap kernel.
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        BLOCK_SIZE: int,
+        BLOCK_STRIDE_ROWS: int,
+        BLOCK_N: int,
+        NUM_TOPK_TOKENS: int,
+        HAS_PREFILL_WORKSPACE: bool,
+        COUNT_VALID: bool,
+        COMPACT_TO_FRONT: bool,
+        DCP_SIZE: int,
+        DCP_RANK: int,
+        DCP_INTERLEAVE: int,
+    ) -> CompileKey:
+        single_tile = (
+            COUNT_VALID
+            and triton.next_power_of_2(NUM_TOPK_TOKENS) == NUM_TOPK_TOKENS
+        )
+        return self.CompileKey(
+            block_size=BLOCK_SIZE,
+            block_stride_rows=BLOCK_STRIDE_ROWS,
+            block_n=NUM_TOPK_TOKENS if single_tile else BLOCK_N,
+            has_prefill_workspace=HAS_PREFILL_WORKSPACE,
+            count_valid=COUNT_VALID,
+            single_tile=single_tile,
+            compact_to_front=COMPACT_TO_FRONT,
+            dcp_size=DCP_SIZE,
+            dcp_rank=DCP_RANK,
+            dcp_interleave=DCP_INTERLEAVE,
+            num_warps=8 if single_tile else 4,
+        )
 
-    Counting the valid slots per row is the only reason the column tiles have to
-    talk to each other, so when counting give one program the whole row: the
-    count becomes an in-register reduction plus a plain store, needing neither
-    atomics nor a zero-initialized counter. The row is one ``tl.arange``, so this
-    needs a power-of-two width; other top-k sizes stay tiled and atomic.
+    def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
+        block_size = vllm_config.cache_config.block_size
+        dcp_size = vllm_config.parallel_config.decode_context_parallel_size
+        dcp_interleave = vllm_config.parallel_config.cp_kv_cache_interleave_size
+        dcp_rank = get_dcp_group().rank_in_group if dcp_size > 1 else 0
+        return self._trace_dispatch(self.dispatch)(
+            zip_inputs(
+                dict(
+                    HAS_PREFILL_WORKSPACE=False,
+                    COUNT_VALID=False,
+                    COMPACT_TO_FRONT=False,
+                    DCP_SIZE=1,
+                    DCP_RANK=0,
+                    DCP_INTERLEAVE=1,
+                ),
+                dict(
+                    HAS_PREFILL_WORKSPACE=False,
+                    COUNT_VALID=True,
+                    COMPACT_TO_FRONT=False,
+                    DCP_SIZE=1,
+                    DCP_RANK=0,
+                    DCP_INTERLEAVE=1,
+                ),
+                dict(
+                    HAS_PREFILL_WORKSPACE=True,
+                    COUNT_VALID=True,
+                    COMPACT_TO_FRONT=False,
+                    DCP_SIZE=1,
+                    DCP_RANK=0,
+                    DCP_INTERLEAVE=1,
+                ),
+                dict(
+                    HAS_PREFILL_WORKSPACE=False,
+                    COUNT_VALID=True,
+                    COMPACT_TO_FRONT=False,
+                    DCP_SIZE=dcp_size,
+                    DCP_RANK=dcp_rank,
+                    DCP_INTERLEAVE=dcp_interleave,
+                ),
+                dict(
+                    HAS_PREFILL_WORKSPACE=False,
+                    COUNT_VALID=True,
+                    COMPACT_TO_FRONT=dcp_size > 1,
+                    DCP_SIZE=dcp_size,
+                    DCP_RANK=dcp_rank,
+                    DCP_INTERLEAVE=dcp_interleave,
+                ),
+            ),
+            BLOCK_SIZE=block_size,
+            BLOCK_STRIDE_ROWS=block_size,
+            BLOCK_N=128,
+            NUM_TOPK_TOKENS=2048,
+        )
 
-    Returns:
-        (single_tile, block_n, tiles_per_row, num_warps)
-    """
-    single_tile = (
-        count_valid and triton.next_power_of_2(NUM_TOPK_TOKENS) == NUM_TOPK_TOKENS
-    )
-    if single_tile:
-        return True, NUM_TOPK_TOKENS, 1, 8
-    return False, BLOCK_N, NUM_TOPK_TOKENS // BLOCK_N, 4
+    def compile(self, compile_key: CompileKey) -> None:
+        warmup = getattr(self.kernel, "warmup", None)
+        assert warmup is not None
+        int32_ptr = TritonWarmupTensor(torch.int32)
+        valid_count_ptr = int32_ptr if compile_key.count_valid else None
+        prefill_req_ptr = int32_ptr if compile_key.has_prefill_workspace else None
+        prefill_start_ptr = int32_ptr if compile_key.has_prefill_workspace else None
+        warmup(
+            int32_ptr,
+            int32_ptr,
+            int32_ptr,
+            int32_ptr,
+            valid_count_ptr,
+            prefill_req_ptr,
+            prefill_start_ptr,
+            1,
+            compile_key.block_size,
+            compile_key.block_stride_rows,
+            compile_key.block_n,
+            compile_key.has_prefill_workspace,
+            compile_key.count_valid,
+            compile_key.single_tile,
+            compile_key.compact_to_front,
+            compile_key.dcp_size,
+            compile_key.dcp_rank,
+            compile_key.dcp_interleave,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            grid=(1, 1),
+            num_warps=compile_key.num_warps,
+        )
+
+    def __call__(
+        self,
+        req_id: torch.Tensor,
+        block_table: torch.Tensor,
+        token_indices: torch.Tensor,
+        out: torch.Tensor,
+        valid_counts: torch.Tensor | None,
+        prefill_workspace_request_ids: torch.Tensor | None,
+        prefill_workspace_starts: torch.Tensor | None,
+        *,
+        max_num_blocks_per_req: int,
+        BLOCK_SIZE: int,
+        BLOCK_STRIDE_ROWS: int,
+        BLOCK_N: int,
+        NUM_TOPK_TOKENS: int,
+        HAS_PREFILL_WORKSPACE: bool,
+        COUNT_VALID: bool,
+        COMPACT_TO_FRONT: bool,
+        DCP_SIZE: int,
+        DCP_RANK: int,
+        DCP_INTERLEAVE: int,
+    ) -> None:
+        compile_key = self.dispatch(
+            BLOCK_SIZE=BLOCK_SIZE,
+            BLOCK_STRIDE_ROWS=BLOCK_STRIDE_ROWS,
+            BLOCK_N=BLOCK_N,
+            NUM_TOPK_TOKENS=NUM_TOPK_TOKENS,
+            HAS_PREFILL_WORKSPACE=HAS_PREFILL_WORKSPACE,
+            COUNT_VALID=COUNT_VALID,
+            COMPACT_TO_FRONT=COMPACT_TO_FRONT,
+            DCP_SIZE=DCP_SIZE,
+            DCP_RANK=DCP_RANK,
+            DCP_INTERLEAVE=DCP_INTERLEAVE,
+        )
+        tiles_per_row = token_indices.shape[1] // compile_key.block_n
+        self.kernel[(req_id.shape[0], tiles_per_row)](
+            req_id,
+            block_table,
+            token_indices,
+            out,
+            valid_counts,
+            prefill_workspace_request_ids,
+            prefill_workspace_starts,
+            max_num_blocks_per_req,
+            compile_key.block_size,
+            compile_key.block_stride_rows,
+            compile_key.block_n,
+            compile_key.has_prefill_workspace,
+            compile_key.count_valid,
+            compile_key.single_tile,
+            compile_key.compact_to_front,
+            compile_key.dcp_size,
+            compile_key.dcp_rank,
+            compile_key.dcp_interleave,
+            block_table.stride(0),
+            block_table.stride(1),
+            token_indices.stride(0),
+            token_indices.stride(1),
+            out.stride(0),
+            out.stride(1),
+            num_warps=compile_key.num_warps,
+        )
 
 
 def triton_convert_req_index_to_global_index(
@@ -231,26 +422,18 @@ def triton_convert_req_index_to_global_index(
     num_tokens = req_id.shape[0]
     max_num_blocks_per_req = block_table.shape[1]
 
-    single_tile, block_n, tiles_per_row, num_warps = _remap_tiling(
-        NUM_TOPK_TOKENS, BLOCK_N, return_valid_counts
-    )
-
     # Ensure contiguous tensors on the same device
     req_id_c = req_id.contiguous()
     block_table_c = block_table.contiguous()
     token_indices_c = token_indices.contiguous()
     out = torch.empty_like(token_indices_c)
 
+    # Allocate valid count buffer if needed (must be zero-initialized for atomics)
     valid_counts: torch.Tensor | None = None
     if return_valid_counts:
-        # Zero-init only matters for the atomic accumulation path.
-        alloc = torch.empty if single_tile else torch.zeros
-        valid_counts = alloc(num_tokens, dtype=torch.int32, device=token_indices.device)
-
-    # Strides in elements
-    bt_stride0, bt_stride1 = block_table_c.stride()
-    ti_stride0, ti_stride1 = token_indices_c.stride()
-    out_stride0, out_stride1 = out.stride()
+        valid_counts = torch.zeros(
+            num_tokens, dtype=torch.int32, device=token_indices.device
+        )
 
     # Prepare prefill pointers
     if HAS_PREFILL_WORKSPACE:
@@ -259,10 +442,7 @@ def triton_convert_req_index_to_global_index(
         assert prefill_workspace_request_ids.is_contiguous()
         assert prefill_workspace_starts.is_contiguous()
 
-    # Exact 2D grid: tokens × column tiles
-    grid = (num_tokens, tiles_per_row)
-
-    _convert_req_index_to_global_index_kernel[grid](
+    _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL(
         req_id_c,
         block_table_c,
         token_indices_c,
@@ -270,27 +450,19 @@ def triton_convert_req_index_to_global_index(
         valid_counts,
         prefill_workspace_request_ids,
         prefill_workspace_starts,
-        # shapes / constexprs
-        max_num_blocks_per_req,
-        BLOCK_SIZE,
-        BLOCK_STRIDE_ROWS if BLOCK_STRIDE_ROWS is not None else BLOCK_SIZE,
-        block_n,
-        HAS_PREFILL_WORKSPACE,
-        return_valid_counts,
-        single_tile,
-        False,  # COMPACT_TO_FRONT: keep input column == output column
-        # DCP disabled (no-op de-interleave)
-        1,
-        0,
-        1,
-        # strides
-        bt_stride0,
-        bt_stride1,
-        ti_stride0,
-        ti_stride1,
-        out_stride0,
-        out_stride1,
-        num_warps=num_warps,
+        max_num_blocks_per_req=max_num_blocks_per_req,
+        BLOCK_SIZE=BLOCK_SIZE,
+        BLOCK_STRIDE_ROWS=(
+            BLOCK_STRIDE_ROWS if BLOCK_STRIDE_ROWS is not None else BLOCK_SIZE
+        ),
+        BLOCK_N=BLOCK_N,
+        NUM_TOPK_TOKENS=NUM_TOPK_TOKENS,
+        HAS_PREFILL_WORKSPACE=HAS_PREFILL_WORKSPACE,
+        COUNT_VALID=return_valid_counts,
+        COMPACT_TO_FRONT=False,
+        DCP_SIZE=1,
+        DCP_RANK=0,
+        DCP_INTERLEAVE=1,
     )
 
     if return_valid_counts:
@@ -355,15 +527,9 @@ def triton_filter_and_convert_dcp_index(
     block_table_c = block_table.contiguous()
     token_indices_c = token_indices.contiguous()
 
-    # The compaction uses the valid-count buffer as a slot allocator, so it
-    # requires counting. Pre-fill out with -1 so the unwritten tail stays -1.
+    # The compaction uses the valid-count buffer as an atomic slot allocator, so
+    # it requires counting. Pre-fill out with -1 so the unwritten tail stays -1.
     count_valid = return_valid_counts or compact_valid_to_front
-
-    # The compaction builds on the counting, so it shares the tiling.
-    single_tile, block_n, tiles_per_row, num_warps = _remap_tiling(
-        NUM_TOPK_TOKENS, BLOCK_N, count_valid
-    )
-
     if compact_valid_to_front:
         out = torch.full_like(token_indices_c, -1)
     else:
@@ -371,44 +537,35 @@ def triton_filter_and_convert_dcp_index(
 
     valid_counts: torch.Tensor | None = None
     if count_valid:
-        # Zero-init only matters for the atomic accumulation path.
-        alloc = torch.empty if single_tile else torch.zeros
-        valid_counts = alloc(num_tokens, dtype=torch.int32, device=token_indices.device)
+        valid_counts = torch.zeros(
+            num_tokens, dtype=torch.int32, device=token_indices.device
+        )
 
-    bt_stride0, bt_stride1 = block_table_c.stride()
-    ti_stride0, ti_stride1 = token_indices_c.stride()
-    out_stride0, out_stride1 = out.stride()
-
-    _convert_req_index_to_global_index_kernel[(num_tokens, tiles_per_row)](
+    _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL(
         req_id_c,
         block_table_c,
         token_indices_c,
         out,
         valid_counts,
-        # No prefill workspace on the DCP decode path.
         None,
         None,
-        max_num_blocks_per_req,
-        BLOCK_SIZE,
-        BLOCK_SIZE,  # dense caches on the DCP path
-        block_n,
-        False,  # HAS_PREFILL
-        count_valid,
-        single_tile,
-        compact_valid_to_front,
-        dcp_size,
-        dcp_rank,
-        cp_kv_cache_interleave_size,
-        bt_stride0,
-        bt_stride1,
-        ti_stride0,
-        ti_stride1,
-        out_stride0,
-        out_stride1,
-        num_warps=num_warps,
+        max_num_blocks_per_req=max_num_blocks_per_req,
+        BLOCK_SIZE=BLOCK_SIZE,
+        BLOCK_STRIDE_ROWS=BLOCK_SIZE,  # dense caches on the DCP path
+        BLOCK_N=BLOCK_N,
+        NUM_TOPK_TOKENS=NUM_TOPK_TOKENS,
+        HAS_PREFILL_WORKSPACE=False,
+        COUNT_VALID=count_valid,
+        COMPACT_TO_FRONT=compact_valid_to_front,
+        DCP_SIZE=dcp_size,
+        DCP_RANK=dcp_rank,
+        DCP_INTERLEAVE=cp_kv_cache_interleave_size,
     )
 
     if return_valid_counts:
         assert valid_counts is not None
         return out, valid_counts
     return out
+
+
+_CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL = ConvertReqIndexToGlobalIndexKernel()
