@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, ClassVar
 import torch
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
@@ -26,7 +27,13 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.v1.attention.backends.mla.owner_compute import (
+    get_owner_prefill_mode,
+    validate_owner_compute_scope,
+)
 from vllm.v1.attention.backends.mla.sparse_utils import (
+    build_rotated_dcp_peer_block_table,
+    filter_peer_slots_to_owner_local,
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.attention.backends.utils import (
@@ -204,6 +211,8 @@ class FlashMLASparseMetadata(AttentionMetadata):
                 req_start_idx: int
                 workspace_starts: torch.Tensor
                 chunk_tot_seqlen: int
+                pcp_peer_block_table: torch.Tensor | None = None
+                pcp_peer_block_table_key: tuple[int, int, int] | None = None
 
             chunks: list[Chunk]
 
@@ -268,6 +277,10 @@ class FlashMLASparseMetadataBuilder(
         )
 
         self.use_fp8_kv_cache = cache_config.cache_dtype == "fp8_ds_mla"
+        self.use_peer_pcp_fp8 = (
+            envs.VLLM_USE_PCP_OWNER_HISTORY
+            and parallel_config.prefill_context_parallel_size > 1
+        )
         max_num_seqs = vllm_config.scheduler_config.max_num_seqs
         # Shape: [max_num_seqs], all elements = topk_tokens (constant for full-CG)
         self.topk_tokens_tensor = torch.full(
@@ -496,7 +509,16 @@ class FlashMLASparseMetadataBuilder(
     ) -> FlashMLASparseMetadata:
         metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
 
-        fp8_use_mixed_batch = self.num_heads < MIN_HEADS_FOR_BF16_PREFILL
+        materialize_owner_prefill = (
+            self.use_peer_pcp_fp8
+            and get_owner_prefill_mode() == "materialize"
+            and metadata.num_prefills > 0
+            and metadata.num_decodes == 0
+        )
+        fp8_use_mixed_batch = not materialize_owner_prefill and (
+            self.num_heads < MIN_HEADS_FOR_BF16_PREFILL
+            or (self.use_peer_pcp_fp8 and metadata.num_prefills > 0)
+        )
         metadata.fp8_use_mixed_batch = fp8_use_mixed_batch
         if self.use_fp8_kv_cache:
             if fp8_use_mixed_batch:
@@ -512,6 +534,9 @@ class FlashMLASparseMetadataBuilder(
 
 
 class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
+    owner_compute_returns_projected_values: bool = True
+    supports_owner_history_prefill_materialization: bool = True
+
     @staticmethod
     def _compute_fp8_decode_padded_heads(num_heads: int) -> int:
         # FP8 decode kernel only supports h_q = 64 or 128
@@ -555,6 +580,13 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         self.prefill_padding = (
             128 if current_platform.is_device_capability_family(100) else 64
         )
+        # FlashMLA V3.2 accepts per-row top-k lengths only on SM100. Hopper's
+        # sparse FP8 kernel rejects topk_length, so retain direct peer reads
+        # there instead of selecting an unsupported owner-compute path.
+        self.supports_owner_compute = (
+            kv_cache_dtype == "fp8_ds_mla"
+            and current_platform.is_device_capability_family(100)
+        )
         self.fp8_decode_padded_heads = self._compute_fp8_decode_padded_heads(num_heads)
 
         vllm_config = get_current_vllm_config()
@@ -573,16 +605,276 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 vllm_config.model_config.max_model_len
             )
             self.prefill_workspace_shape = (prefill_workspace_size, head_size)
-            self.q_concat_buffer, self.prefill_bf16_workspace = (
+            reserve_owner_materialization_padded_q = (
+                envs.VLLM_USE_PCP_OWNER_HISTORY
+                and vllm_config.parallel_config.prefill_context_parallel_size > 1
+                and get_owner_prefill_mode() == "materialize"
+                and num_heads % self.prefill_padding != 0
+            )
+            q_workspace_shape = (
+                (max_tokens, self.prefill_padding, head_size)
+                if reserve_owner_materialization_padded_q
+                else q_concat_shape
+            )
+            q_workspace, self.prefill_bf16_workspace = (
                 current_workspace_manager().get_simultaneous(
-                    (q_concat_shape, torch.bfloat16),
+                    (q_workspace_shape, torch.bfloat16),
                     (self.prefill_workspace_shape, torch.bfloat16),
                 )
             )
+            if reserve_owner_materialization_padded_q:
+                self.q_padded_buffer = q_workspace
+                # These aliases intentionally overlap but are never live
+                # together: direct FP8 writes the contiguous packed view,
+                # while materialized prefill writes the padded view. Flattening
+                # before reshaping keeps the direct view contiguous.
+                self.q_concat_buffer = q_workspace.view(-1)[
+                    : max_tokens * num_heads * head_size
+                ].view(q_concat_shape)
+            else:
+                self.q_padded_buffer = None
+                self.q_concat_buffer = q_workspace
         else:
+            self.q_padded_buffer = None
             (self.q_concat_buffer,) = current_workspace_manager().get_simultaneous(
                 (q_concat_shape, torch.bfloat16),
             )
+
+    def _forward_owner_compute(
+        self,
+        q: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: FlashMLASparseMetadata,
+        layer: AttentionLayer,
+    ) -> tuple[torch.Tensor, None]:
+        """Run packed FP8 FlashMLA against one owner-local history shard."""
+        if not current_platform.is_device_capability_family(100):
+            raise RuntimeError(
+                "Owner-local FlashMLA requires SM100 per-row top-k length support."
+            )
+        if attn_metadata.num_decodes != 0:
+            raise RuntimeError(
+                "Owner-local FlashMLA supports pure-prefill batches only."
+            )
+
+        from vllm.distributed import get_dcp_group, get_pcp_group
+
+        dcp_group = get_dcp_group()
+        pcp_group = get_pcp_group()
+        validate_owner_compute_scope(
+            pcp_world_size=pcp_group.world_size,
+            dcp_world_size=dcp_group.world_size,
+            pcp_rank=pcp_group.rank_in_group,
+            dcp_rank=dcp_group.rank_in_group,
+            cp_kv_cache_interleave_size=(attn_metadata.cp_kv_cache_interleave_size),
+            block_size=attn_metadata.block_size,
+        )
+        source_stride = getattr(layer, "pcp_owner_compute_source_stride", None)
+        if not isinstance(source_stride, int) or source_stride <= 0:
+            raise RuntimeError(
+                "Owner-local FlashMLA requires a validated padded source stride."
+            )
+        if q.shape[0] != source_stride:
+            raise RuntimeError(
+                "Owner-local FlashMLA Q rows do not match the fixed source "
+                f"stride: q_rows={q.shape[0]}, stride={source_stride}."
+            )
+        w_uv, v_head_dim = self._validate_owner_value_projection(q, layer)
+        assert self.topk_indices_buffer is not None
+        if self.topk_indices_buffer.shape[0] < source_stride:
+            raise RuntimeError(
+                "Owner-local FlashMLA top-k buffer is shorter than the fixed "
+                f"source stride: rows={self.topk_indices_buffer.shape[0]}, "
+                f"stride={source_stride}."
+            )
+
+        num_actual = attn_metadata.num_actual_tokens
+        if not 0 <= num_actual <= source_stride:
+            raise RuntimeError(
+                "Owner-local FlashMLA actual-token count exceeds the padded "
+                f"source stride: actual={num_actual}, stride={source_stride}."
+            )
+        if attn_metadata.req_id_per_token.shape[0] != num_actual:
+            raise RuntimeError(
+                "Owner-local FlashMLA request IDs do not match actual Q rows."
+            )
+
+        peer_block_stride = getattr(layer, "pcp_peer_block_stride", None)
+        if not isinstance(peer_block_stride, int) or peer_block_stride <= 0:
+            raise RuntimeError(
+                "Owner-local FlashMLA requires a peer-cache block stride."
+            )
+        topk = self.topk_indices_buffer.shape[1]
+        if topk != attn_metadata.topk_tokens:
+            raise RuntimeError(
+                "Owner-local FlashMLA top-k width does not match attention "
+                f"metadata: buffer={topk}, metadata={attn_metadata.topk_tokens}."
+            )
+        owner_peer_slot_cache = getattr(layer, "owner_peer_slot_cache", None)
+        if owner_peer_slot_cache is None:
+            raise RuntimeError(
+                "Owner-local FlashMLA requires the shared peer-slot cache."
+            )
+
+        routed_q = dcp_group.all_gather(q, dim=0)
+        expected_rows = dcp_group.world_size * source_stride
+        if routed_q.shape[0] != expected_rows:
+            raise RuntimeError(
+                "Owner-local FlashMLA gathered queries do not have fixed "
+                "rank-major source shape."
+            )
+
+        def build_owner_local_slots(
+            padded_peer_slots: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            routed_peer_slots = dcp_group.all_gather(padded_peer_slots, dim=0)
+            if routed_peer_slots.shape[0] != expected_rows:
+                raise RuntimeError(
+                    "Owner-local FlashMLA gathered slots do not have fixed "
+                    "rank-major source shape."
+                )
+            return filter_peer_slots_to_owner_local(
+                routed_peer_slots,
+                owner_rank=dcp_group.rank_in_group,
+                dcp_world_size=dcp_group.world_size,
+                blocks_per_peer=peer_block_stride,
+                block_size=attn_metadata.block_size,
+            )
+
+        local_slots, local_selected_counts = (
+            owner_peer_slot_cache.get_or_build_owner_local(
+                num_actual,
+                attn_metadata.block_table,
+                source_stride=source_stride,
+                owner_rank=dcp_group.rank_in_group,
+                dcp_world_size=dcp_group.world_size,
+                blocks_per_peer=peer_block_stride,
+                cp_kv_cache_interleave_size=(attn_metadata.cp_kv_cache_interleave_size),
+                block_size=attn_metadata.block_size,
+                build=build_owner_local_slots,
+            )
+        )
+
+        fp8_metadata = attn_metadata.fp8_extra_metadata
+        if not isinstance(fp8_metadata, FlashMLASparseMetadata.FP8KernelMetadata):
+            raise RuntimeError(
+                "Owner-local FlashMLA requires mixed FP8 kernel metadata."
+            )
+        # FlashMLA scheduling depends on the per-owner valid counts. Reuse it
+        # only across shared attention layers consuming this exact Indexer
+        # epoch; OwnerPeerSlotCache invalidates it on the next top-k refresh.
+        scheduler_metadata = owner_peer_slot_cache.get_or_build_owner_local_metadata(
+            (
+                "flashmla",
+                expected_rows,
+                self.fp8_decode_padded_heads,
+                topk,
+            ),
+            lambda: get_mla_metadata()[0],
+        )
+        assert isinstance(scheduler_metadata, FlashMLASchedMeta)
+        owner_kernel_metadata = FlashMLASparseMetadata.FP8KernelMetadata(
+            scheduler_metadata=scheduler_metadata,
+            dummy_block_table=fp8_metadata.dummy_block_table,
+            cache_lens=fp8_metadata.cache_lens,
+        )
+        output, lse = self._fp8_flash_mla_kernel(
+            q=routed_q.unsqueeze(1),
+            kv_c_and_k_pe_cache=kv_cache,
+            topk_indices=local_slots.unsqueeze(1),
+            kernel_metadata=owner_kernel_metadata,
+            topk_length=local_selected_counts,
+        )
+        output = output.reshape(expected_rows, self.num_heads, self.kv_lora_rank)
+        # W_UV is head-local and linear, so it commutes with the cross-owner
+        # LSE-weighted sum. Projecting each partial first reduces GLM-5.2's
+        # correction and reduce-scatter width from 512 to 256. This changes
+        # BF16 rounding order, so the path is guarded by the explicit output
+        # contract and covered by engine-level numerical qualification.
+        projected_output = output.new_empty((expected_rows, self.num_heads, v_head_dim))
+        torch.bmm(
+            output.transpose(0, 1),
+            w_uv,
+            out=projected_output.transpose(0, 1),
+        )
+        output = projected_output
+        lse = self._normalize_owner_lse(
+            lse,
+            batch_size=expected_rows,
+            seq_len=1,
+            num_heads=self.num_heads,
+        )
+        empty_rows = local_selected_counts == 0
+        lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
+
+        from vllm.v1.attention.ops.common import cp_lse_ag_out_rs_batch
+
+        local_output = cp_lse_ag_out_rs_batch(
+            output,
+            lse,
+            dcp_group,
+            is_lse_base_on_e=True,
+        )
+        if local_output.shape[0] != source_stride:
+            raise RuntimeError(
+                "Owner-local FlashMLA reduce-scatter returned an invalid source "
+                f"stride: {local_output.shape[0]} != {source_stride}."
+            )
+        return local_output[:num_actual], None
+
+    def _validate_owner_value_projection(
+        self,
+        q: torch.Tensor,
+        layer: AttentionLayer,
+    ) -> tuple[torch.Tensor, int]:
+        """Validate the replicated MLA value projection used by each owner."""
+        w_uv = getattr(layer, "W_UV", None)
+        v_head_dim = getattr(layer, "v_head_dim", None)
+        expected_prefix = (self.num_heads, self.kv_lora_rank)
+        if (
+            not isinstance(w_uv, torch.Tensor)
+            or w_uv.ndim != 3
+            or tuple(w_uv.shape[:2]) != expected_prefix
+            or not isinstance(v_head_dim, int)
+            or v_head_dim <= 0
+            or w_uv.shape[2] != v_head_dim
+        ):
+            actual_shape = tuple(w_uv.shape) if isinstance(w_uv, torch.Tensor) else None
+            raise RuntimeError(
+                "Owner-local FlashMLA requires W_UV with shape "
+                f"({self.num_heads}, {self.kv_lora_rank}, v_head_dim), got "
+                f"W_UV={actual_shape} and v_head_dim={v_head_dim}."
+            )
+        if w_uv.device != q.device or w_uv.dtype != q.dtype:
+            raise RuntimeError(
+                "Owner-local FlashMLA requires W_UV to match the query device "
+                f"and dtype, got W_UV=({w_uv.device}, {w_uv.dtype}) and "
+                f"query=({q.device}, {q.dtype})."
+            )
+        return w_uv, v_head_dim
+
+    @staticmethod
+    def _normalize_owner_lse(
+        lse: torch.Tensor,
+        *,
+        batch_size: int,
+        seq_len: int,
+        num_heads: int,
+    ) -> torch.Tensor:
+        """Normalize FlashMLA variants to the DCP reducer's [rows, heads]."""
+        if lse.shape[:2] == (batch_size, seq_len) and lse.shape[2] >= num_heads:
+            return lse[:, :, :num_heads].reshape(-1, num_heads)
+        if (
+            lse.shape[0] == batch_size
+            and lse.shape[1] >= num_heads
+            and lse.shape[2] == seq_len
+        ):
+            return lse[:, :num_heads, :].transpose(1, 2).reshape(-1, num_heads)
+        raise RuntimeError(
+            "Unexpected owner-local FlashMLA LSE shape: "
+            f"{tuple(lse.shape)}, expected ({batch_size}, {seq_len}, H) or "
+            f"({batch_size}, H, {seq_len}) with H >= {num_heads}."
+        )
 
     def _forward_bf16_kv(
         self,
@@ -616,6 +908,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         kv_c_and_k_pe_cache: torch.Tensor,
         topk_indices: torch.Tensor,
         attn_metadata: FlashMLASparseMetadata,
+        layer: AttentionLayer,
     ) -> torch.Tensor:
         fp8_metadata = attn_metadata.fp8_extra_metadata
         assert isinstance(fp8_metadata, FlashMLASparseMetadata.FP8SeparatePrefillDecode)
@@ -636,23 +929,42 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             prefill_workspace_starts = fp8_metadata.prefill.workspace_starts
             has_prefill_workspace = True
 
-        # Convert per-request indices to global slots (decode) or workspace
-        # offsets (prefill).
-        # For FP8 cache: prefill uses workspace mapping (upconverted to BF16)
-        # For BF16 cache: always use global cache slots (no workspace)
-        # prefill_workspace_starts has been adjusted in-place per chunk so
-        # prefill indices automatically come out chunk-local
-        topk_indices, topk_length = triton_convert_req_index_to_global_index(
-            attn_metadata.req_id_per_token[: topk_indices.shape[0]],
-            attn_metadata.block_table,
-            topk_indices,
-            BLOCK_SIZE=attn_metadata.block_size,
-            NUM_TOPK_TOKENS=topk_indices.shape[1],
-            HAS_PREFILL_WORKSPACE=has_prefill_workspace,
-            prefill_workspace_request_ids=prefill_request_ids,
-            prefill_workspace_starts=prefill_workspace_starts,
-            return_valid_counts=True,
-        )
+        use_owner_history = getattr(layer, "pcp_owner_history_direct", False)
+        if use_owner_history:
+            peer_block_stride = getattr(layer, "pcp_peer_block_stride", None)
+            if not isinstance(peer_block_stride, int) or peer_block_stride <= 0:
+                raise RuntimeError(
+                    "Owner-sharded FlashMLA requires a peer-cache block stride."
+                )
+            owner_peer_slot_cache = getattr(layer, "owner_peer_slot_cache", None)
+            if owner_peer_slot_cache is None:
+                raise RuntimeError(
+                    "Owner-sharded FlashMLA requires the shared peer-slot cache."
+                )
+
+        if not use_owner_history or num_prefill_tokens > 0:
+            # Convert per-request indices to global slots (decode) or workspace
+            # offsets (prefill). Prefill workspace starts are chunk-relative.
+            topk_indices, topk_length = triton_convert_req_index_to_global_index(
+                attn_metadata.req_id_per_token[: topk_indices.shape[0]],
+                attn_metadata.block_table,
+                topk_indices,
+                BLOCK_SIZE=attn_metadata.block_size,
+                NUM_TOPK_TOKENS=topk_indices.shape[1],
+                HAS_PREFILL_WORKSPACE=has_prefill_workspace,
+                prefill_workspace_request_ids=prefill_request_ids,
+                prefill_workspace_starts=prefill_workspace_starts,
+                return_valid_counts=True,
+            )
+        else:
+            topk_indices, topk_length = owner_peer_slot_cache.get(
+                topk_indices.shape[0],
+                attn_metadata.block_table,
+                dcp_size=self.dcp_world_size,
+                blocks_per_peer=peer_block_stride,
+                cp_kv_cache_interleave_size=(attn_metadata.cp_kv_cache_interleave_size),
+                block_size=attn_metadata.block_size,
+            )
 
         fp8_metadata = attn_metadata.fp8_extra_metadata
         assert isinstance(fp8_metadata, FlashMLASparseMetadata.FP8SeparatePrefillDecode)
@@ -700,10 +1012,42 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             assert fp8_metadata.prefill is not None
             for chunk in fp8_metadata.prefill.chunks:
                 chunk_workspace = self.prefill_bf16_workspace[: chunk.chunk_tot_seqlen]
+                read_block_table = chunk.block_table
+                if use_owner_history:
+                    peer_block_stride = getattr(layer, "pcp_peer_block_stride", None)
+                    if not isinstance(peer_block_stride, int) or peer_block_stride <= 0:
+                        raise RuntimeError(
+                            "Owner-sharded FlashMLA materialization requires a "
+                            "positive peer-cache block stride."
+                        )
+                    peer_block_table_key = (
+                        peer_block_stride,
+                        attn_metadata.cp_kv_cache_interleave_size,
+                        attn_metadata.block_size,
+                    )
+                    read_block_table = chunk.pcp_peer_block_table
+                    if (
+                        read_block_table is None
+                        or chunk.pcp_peer_block_table_key != peer_block_table_key
+                    ):
+                        owner_block_tables = chunk.block_table.unsqueeze(0).expand(
+                            self.dcp_world_size, -1, -1
+                        )
+                        read_block_table = build_rotated_dcp_peer_block_table(
+                            owner_block_tables,
+                            local_rank=0,
+                            peer_block_stride=peer_block_stride,
+                            cp_kv_cache_interleave_size=(
+                                attn_metadata.cp_kv_cache_interleave_size
+                            ),
+                            block_size=attn_metadata.block_size,
+                        )
+                        chunk.pcp_peer_block_table = read_block_table
+                        chunk.pcp_peer_block_table_key = peer_block_table_key
                 ops.cp_gather_and_upconvert_fp8_kv_cache(
                     kv_c_and_k_pe_cache,
                     chunk_workspace,
-                    chunk.block_table,
+                    read_block_table,
                     chunk.workspace_starts,
                     len(chunk.block_table),
                 )
@@ -727,6 +1071,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         kv_c_and_k_pe_cache: torch.Tensor,
         topk_indices: torch.Tensor,
         attn_metadata: FlashMLASparseMetadata,
+        layer: AttentionLayer,
     ) -> torch.Tensor:
         """Mixed batch FP8 forward path that treats all tokens as one batch.
 
@@ -736,13 +1081,33 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         """
         # Convert per-request indices to global slots (decode) or workspace
         # offsets (prefill).
-        topk_indices = triton_convert_req_index_to_global_index(
-            attn_metadata.req_id_per_token[: topk_indices.shape[0]],
-            attn_metadata.block_table,
-            topk_indices,
-            BLOCK_SIZE=attn_metadata.block_size,
-            NUM_TOPK_TOKENS=topk_indices.shape[1],
-        )
+        if getattr(layer, "pcp_owner_history_direct", False):
+            peer_block_stride = getattr(layer, "pcp_peer_block_stride", None)
+            if not isinstance(peer_block_stride, int) or peer_block_stride <= 0:
+                raise RuntimeError(
+                    "Owner-sharded FlashMLA requires a peer-cache block stride."
+                )
+            owner_peer_slot_cache = getattr(layer, "owner_peer_slot_cache", None)
+            if owner_peer_slot_cache is None:
+                raise RuntimeError(
+                    "Owner-sharded FlashMLA requires the shared peer-slot cache."
+                )
+            topk_indices, _ = owner_peer_slot_cache.get(
+                topk_indices.shape[0],
+                attn_metadata.block_table,
+                dcp_size=self.dcp_world_size,
+                blocks_per_peer=peer_block_stride,
+                cp_kv_cache_interleave_size=(attn_metadata.cp_kv_cache_interleave_size),
+                block_size=attn_metadata.block_size,
+            )
+        else:
+            topk_indices = triton_convert_req_index_to_global_index(
+                attn_metadata.req_id_per_token[: topk_indices.shape[0]],
+                attn_metadata.block_table,
+                topk_indices,
+                BLOCK_SIZE=attn_metadata.block_size,
+                NUM_TOPK_TOKENS=topk_indices.shape[1],
+            )
 
         assert attn_metadata.fp8_extra_metadata is not None
         assert isinstance(
@@ -766,6 +1131,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         kv_c_and_k_pe_cache: torch.Tensor,
         topk_indices: torch.Tensor,
         kernel_metadata: FlashMLASparseMetadata.FP8KernelMetadata,
+        topk_length: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # q shape: (batch, seq_len, num_heads, head_dim)
         actual_num_heads = q.size(2)
@@ -790,6 +1156,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             tile_scheduler_metadata=kernel_metadata.scheduler_metadata,
             is_fp8_kvcache=True,
             indices=topk_indices,
+            topk_length=topk_length,
             softmax_scale=self.softmax_scale,
         )
 
@@ -819,8 +1186,44 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 f"Padding num_heads from {self.num_heads} to "
                 f"{self.prefill_padding} for BF16 sparse prefill kernel"
             )
-            q_padded = q.new_empty((q.shape[0], self.prefill_padding, q.shape[2]))
-            q_padded[:, : self.num_heads, :] = q
+            reserved_q_padded = getattr(self, "q_padded_buffer", None)
+            reserved_q_start = None
+            if (
+                reserved_q_padded is not None
+                and reserved_q_padded.shape[0] >= q.shape[0]
+                and reserved_q_padded.shape[1:]
+                == (
+                    self.prefill_padding,
+                    q.shape[2],
+                )
+                and q.stride()
+                == reserved_q_padded[: q.shape[0], : self.num_heads].stride()
+                and q.untyped_storage().data_ptr()
+                == reserved_q_padded.untyped_storage().data_ptr()
+            ):
+                storage_delta = q.storage_offset() - reserved_q_padded.storage_offset()
+                row_stride = reserved_q_padded.stride(0)
+                if storage_delta >= 0 and storage_delta % row_stride == 0:
+                    candidate_start = storage_delta // row_stride
+                    if (
+                        candidate_start + q.shape[0] <= reserved_q_padded.shape[0]
+                        and q.data_ptr()
+                        == reserved_q_padded[
+                            candidate_start, : self.num_heads
+                        ].data_ptr()
+                    ):
+                        reserved_q_start = candidate_start
+            if reserved_q_start is not None:
+                q_padded = reserved_q_padded[
+                    reserved_q_start : reserved_q_start + q.shape[0]
+                ]
+                q_padded[:, self.num_heads :, :].zero_()
+            else:
+                # Non-owner callers may provide an external query. Keep that
+                # fallback correct while owner-history materialization uses the
+                # bounded initialization-time workspace above.
+                q_padded = q.new_zeros((q.shape[0], self.prefill_padding, q.shape[2]))
+                q_padded[:, : self.num_heads, :] = q
             q = q_padded
 
         topk_indices = topk_indices.view(num_tokens, 1, -1)
@@ -848,10 +1251,36 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         # Concatenate q if it's a tuple (ql_nope, q_pe)
         if isinstance(q, tuple):
             ql_nope, q_pe = q
-            q = self.q_concat_buffer[: ql_nope.shape[0]]
+            use_reserved_padded_q = (
+                getattr(layer, "pcp_owner_history_direct", False)
+                and self.kv_cache_dtype == "fp8_ds_mla"
+                and not attn_metadata.fp8_use_mixed_batch
+                and attn_metadata.num_decodes == 0
+                and self.num_heads % self.prefill_padding != 0
+            )
+            if use_reserved_padded_q:
+                assert self.q_padded_buffer is not None
+                q_padded = self.q_padded_buffer[: ql_nope.shape[0]]
+                q = q_padded[:, : self.num_heads, :]
+            else:
+                q = self.q_concat_buffer[: ql_nope.shape[0]]
             ops.concat_mla_q(ql_nope, q_pe, q)
 
         num_actual_toks = q.shape[0]
+
+        if getattr(layer, "pcp_owner_compute", False):
+            return self._forward_owner_compute(
+                q,
+                kv_c_and_k_pe_cache,
+                attn_metadata,
+                layer,
+            )
+
+        # PCP can assign no local query tokens to a rank for short prefills.
+        # FlashMLA rejects a zero sequence dimension, while the specialized
+        # DeepSeek-V3.2 layer can safely continue with an empty local output.
+        if num_actual_toks == 0:
+            return q.new_empty((0, self.num_heads, self.kv_lora_rank)), None
 
         # Get topk indices
         assert self.topk_indices_buffer is not None
@@ -865,11 +1294,19 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             )
         elif attn_metadata.fp8_use_mixed_batch:
             attn_out = self._forward_fp8_kv_mixed_batch(
-                q, kv_c_and_k_pe_cache, topk_indices, attn_metadata
+                q,
+                kv_c_and_k_pe_cache,
+                topk_indices,
+                attn_metadata,
+                layer,
             )
         else:
             attn_out = self._forward_fp8_kv_separate_prefill_decode(
-                q, kv_c_and_k_pe_cache, topk_indices, attn_metadata
+                q,
+                kv_c_and_k_pe_cache,
+                topk_indices,
+                attn_metadata,
+                layer,
             )
 
         return attn_out, None

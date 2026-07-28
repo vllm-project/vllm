@@ -130,3 +130,124 @@ def test_block_tables_apply_staged_writes_single_group():
         block_tables.block_tables[0].gpu[0, :2],
         torch.tensor([1, 2], dtype=torch.int32, device=device),
     )
+
+
+def test_compute_slot_mappings_emits_owner_slots() -> None:
+    device = torch.device("cuda")
+    block_tables = BlockTables(
+        block_sizes=[64, 64],
+        max_num_reqs=2,
+        max_num_batched_tokens=16,
+        max_num_blocks_per_group=[4, 4],
+        device=device,
+        kernel_block_sizes=[64, 64],
+        cp_size=4,
+        cp_rank=0,
+        cp_interleave=64,
+    )
+    block_tables.append_block_ids(
+        req_index=0,
+        new_block_ids=([5, 7], [50, 70]),
+        overwrite=True,
+    )
+    block_tables.append_block_ids(
+        req_index=1,
+        new_block_ids=([11, 13], [110, 130]),
+        overwrite=True,
+    )
+    block_tables.apply_staged_writes()
+
+    idx_mapping = torch.tensor([0, 1], dtype=torch.int32, device=device)
+    query_start_loc = torch.tensor([0, 7, 12], dtype=torch.int32, device=device)
+    positions = torch.tensor(
+        [0, 63, 64, 127, 255, 256, 319, 32, 95, 191, 256, 511],
+        dtype=torch.int64,
+        device=device,
+    )
+    owner_slots_by_rank = []
+    rank_local_slots = []
+    for rank in range(4):
+        block_tables.cp_rank = rank
+        local_out = torch.empty((2, 16), dtype=torch.int64, device=device)
+        owner_out = torch.empty((2, 16, 2), dtype=torch.int64, device=device)
+        local = block_tables.compute_slot_mappings(
+            idx_mapping,
+            query_start_loc,
+            positions,
+            num_tokens_padded=16,
+            out=local_out,
+            owner_slot_mappings_out=owner_out,
+        )
+        rank_local_slots.append(local.clone())
+        owner_slots_by_rank.append(owner_out.clone())
+
+    torch.accelerator.synchronize()
+    expected_owner_slots = torch.tensor(
+        [
+            [
+                [0, 320],
+                [0, 383],
+                [1, 320],
+                [1, 383],
+                [3, 383],
+                [0, 448],
+                [0, 511],
+                [0, 736],
+                [1, 735],
+                [2, 767],
+                [0, 832],
+                [3, 895],
+                [-1, -1],
+                [-1, -1],
+                [-1, -1],
+                [-1, -1],
+            ],
+            [
+                [0, 3200],
+                [0, 3263],
+                [1, 3200],
+                [1, 3263],
+                [3, 3263],
+                [0, 4480],
+                [0, 4543],
+                [0, 7072],
+                [1, 7071],
+                [2, 7103],
+                [0, 8320],
+                [3, 8383],
+                [-1, -1],
+                [-1, -1],
+                [-1, -1],
+                [-1, -1],
+            ],
+        ],
+        dtype=torch.int64,
+        device=device,
+    )
+    for owner_slots in owner_slots_by_rank:
+        torch.testing.assert_close(owner_slots, expected_owner_slots)
+    for rank, local_slots in enumerate(rank_local_slots):
+        expected_local_slots = torch.where(
+            expected_owner_slots[..., 0] == rank,
+            expected_owner_slots[..., 1],
+            -1,
+        )
+        torch.testing.assert_close(local_slots, expected_local_slots)
+
+    noncontiguous_pairs = torch.empty(
+        (2, 2, 16), dtype=torch.int64, device=device
+    ).permute(0, 2, 1)
+    with pytest.raises(ValueError, match="contiguous in their last dimension"):
+        block_tables.compute_slot_mappings(
+            idx_mapping,
+            query_start_loc,
+            positions,
+            num_tokens_padded=16,
+            out=torch.empty((2, 16), dtype=torch.int64, device=device),
+            owner_slot_mappings_out=noncontiguous_pairs,
+        )
+
+    # The kernel pads both ordinary and owner metadata to the persistent
+    # buffer boundary, including both fields in the owner pair.
+    assert torch.all(expected_owner_slots[:, 12:] == -1)
+    assert torch.all(torch.stack(rank_local_slots)[:, :, 12:] == -1)

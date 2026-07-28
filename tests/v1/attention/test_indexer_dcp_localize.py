@@ -807,10 +807,17 @@ def test_dcp_global_topk_physical_attention_matches_non_dcp(interleave: int):
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @pytest.mark.parametrize("is_lse_base_on_e", [True, False])
-def test_correct_attn_out_zeroes_empty_nan_partial(is_lse_base_on_e: bool):
+@pytest.mark.parametrize("all_owners_empty", [False, True])
+def test_correct_attn_out_zeroes_empty_nan_partial(
+    is_lse_base_on_e: bool,
+    all_owners_empty: bool,
+):
     out = torch.full((1, 1, 4), float("nan"), device="cuda")
     lses = torch.tensor(
-        [[[0.0]], [[float("-inf")]]],
+        [
+            [[float("-inf") if all_owners_empty else 0.0]],
+            [[float("-inf")]],
+        ],
         dtype=torch.float32,
         device="cuda",
     )
@@ -825,7 +832,11 @@ def test_correct_attn_out_zeroes_empty_nan_partial(is_lse_base_on_e: bool):
     torch.accelerator.synchronize()
 
     torch.testing.assert_close(corrected, torch.zeros_like(corrected))
-    torch.testing.assert_close(final_lse, torch.zeros_like(final_lse))
+    expected_lse = torch.full_like(
+        final_lse,
+        float("-inf") if all_owners_empty else 0.0,
+    )
+    torch.testing.assert_close(final_lse, expected_lse)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")

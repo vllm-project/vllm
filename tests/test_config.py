@@ -68,6 +68,17 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
     assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
 
 
+def test_owner_sharded_pcp_history_rejects_legacy_model_runner(monkeypatch):
+    monkeypatch.setenv("VLLM_USE_PCP_OWNER_HISTORY", "1")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+
+    with pytest.raises(
+        ValueError,
+        match=("requires VLLM_USE_V2_MODEL_RUNNER=1"),
+    ):
+        VllmConfig()
+
+
 @pytest.mark.parametrize(
     ("use_v2_model_runner", "expected_capture_sizes"),
     [
