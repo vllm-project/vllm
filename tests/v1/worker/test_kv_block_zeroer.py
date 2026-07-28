@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from vllm.v1.worker.utils import KVBlockZeroer
+from vllm.v1.worker.utils import KVBlockZeroer, _zero_kv_blocks_kernel
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -86,3 +86,67 @@ def test_non_uniform_page_sizes():
         assert torch.all(storage[1] == 0)
         assert torch.all(storage[2] == 0)
         assert torch.all(storage[3] == 1)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_warmup_compiles_every_n_blocks_specialization():
+    """After warmup, no launch should trigger a first-request JIT compile.
+
+    ``n_blocks`` is ``do_not_specialize``, so a single warmup launch must
+    cover every block count.
+    """
+    device = torch.device("cuda")
+    num_blocks = 64
+    page_size_el = 4
+    storage = torch.ones((num_blocks, page_size_el), dtype=torch.int32, device=device)
+
+    zeroer = KVBlockZeroer.__new__(KVBlockZeroer)
+    zeroer.device = device
+    zeroer._meta = (
+        torch.tensor([storage.data_ptr()], dtype=torch.uint64, device=device),
+        torch.tensor([page_size_el], dtype=torch.int64, device=device),
+        1,  # max_chunks
+        page_size_el,  # blk_size
+        1,  # n_segs
+    )
+
+    def compiled_variants() -> set:
+        return {
+            key
+            for caches in _zero_kv_blocks_kernel.device_caches.values()
+            for key in caches[0]
+        }
+
+    zeroer.warmup(num_blocks)
+    torch.accelerator.synchronize()
+    warmed = compiled_variants()
+    assert warmed
+
+    for n_blocks in (1, 2, 3, 16, 32):
+        zeroer.zero_block_ids(list(range(n_blocks)))
+    torch.accelerator.synchronize()
+
+    assert compiled_variants() == warmed
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_warmup_respects_available_block_count():
+    """An empty KV cache must not be warmed with out-of-range block IDs."""
+    device = torch.device("cuda")
+    page_size_el = 4
+    storage = torch.ones((1, page_size_el), dtype=torch.int32, device=device)
+
+    zeroer = KVBlockZeroer.__new__(KVBlockZeroer)
+    zeroer.device = device
+    zeroer._meta = (
+        torch.tensor([storage.data_ptr()], dtype=torch.uint64, device=device),
+        torch.tensor([page_size_el], dtype=torch.int64, device=device),
+        1,
+        page_size_el,
+        1,
+    )
+
+    zeroer.warmup(0)
+    torch.accelerator.synchronize()
+
+    assert torch.all(storage == 1)

@@ -150,7 +150,7 @@ def _copy_mamba_state_block(
     tl.store(tail_dst + tail_off, tail_data, mask=tail_mask)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_reqs"])
 def postprocess_mamba_fused_kernel(
     # Decision inputs (per-request)
     num_accepted_tokens_ptr,
@@ -280,7 +280,7 @@ def postprocess_mamba_fused_kernel(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_reqs"])
 def preprocess_mamba_align_fused_kernel(
     idx_mapping_ptr,
     state_idx_ptr,
@@ -326,7 +326,7 @@ def preprocess_mamba_align_fused_kernel(
     tl.store(num_accepted_tokens_ptr + req_indices, 1, mask=mask & should_reset)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_reqs"])
 def precopy_mamba_align_fused_kernel(
     # Per-request-slot inputs (indexed by req_idx via idx_mapping), produced by
     # the V2 fused align preprocess kernel for the current step:
