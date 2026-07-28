@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -56,11 +57,14 @@ class RequestOutputCollector:
         self.request_id = request_id
         self.output: RequestOutput | PoolingRequestOutput | Exception | None = None
         self.ready = asyncio.Event()
+        self.created_at: float = time.monotonic()
+        self.last_put_at: float = self.created_at
 
         self._input_stream_task: asyncio.Task | None = None
 
     def put(self, output: RequestOutput | PoolingRequestOutput | Exception) -> None:
         """Non-blocking put operation."""
+        self.last_put_at = time.monotonic()
         if self.output is None or isinstance(output, Exception):
             self.output = output
             self.ready.set()
@@ -79,6 +83,26 @@ class RequestOutputCollector:
         """Get operation blocks on put event."""
         while (output := self.output) is None:
             await self.ready.wait()
+        self.output = None
+        self.ready.clear()
+        if isinstance(output, Exception):
+            raise output
+        return output
+
+    async def get_with_timeout(
+        self, timeout_s: float
+    ) -> RequestOutput | PoolingRequestOutput:
+        """Like get(), but raises asyncio.TimeoutError if nothing arrives
+        within *timeout_s* seconds.
+
+        Uses asyncio.wait_for directly on self.ready.wait() — no shield needed.
+        asyncio.Event.wait() handles CancelledError correctly (removes itself
+        from the Event's waiter list in a finally block), so the Event is
+        left in a clean state after each timeout and subsequent calls work
+        correctly.
+        """
+        while (output := self.output) is None:
+            await asyncio.wait_for(self.ready.wait(), timeout=timeout_s)
         self.output = None
         self.ready.clear()
         if isinstance(output, Exception):
