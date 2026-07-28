@@ -45,54 +45,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_LL_BF16_WARMUP_M_RANGE = range(1, 17)
-
-
-def _ll_bf16_router_shapes_from_model(
-    model: torch.nn.Module,
-) -> tuple[tuple[int, int], ...]:
-    from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
-
-    shapes: set[tuple[int, int]] = set()
-    for module in model.modules():
-        if not isinstance(module, GateLinear):
-            continue
-        weight = getattr(module, "weight", None)
-        if not isinstance(weight, torch.Tensor):
-            continue
-        if weight.dim() != 2 or weight.dtype != torch.bfloat16:
-            continue
-        n, k = weight.shape
-        if k % 8 == 0:
-            shapes.add((int(k), int(n)))
-    return tuple(sorted(shapes))
-
-
-def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
-    from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
-        is_available as is_ll_bf16_gemm_available,
-    )
-    from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
-        ll_bf16_gemm_kernel,
-    )
-
-    if not is_ll_bf16_gemm_available():
-        return
-
-    shapes = _ll_bf16_router_shapes_from_model(model)
-    if not shapes:
-        logger.debug_once(
-            "Skipping ll_bf16 router GEMM warmup: no bf16 GateLinear shapes found."
-        )
-        return
-
-    logger.info_once("Warming up ll_bf16 router GEMM kernels for shapes: %s.", shapes)
-    ll_bf16_gemm_kernel.warmup(
-        shapes=shapes,
-        m_values=_LL_BF16_WARMUP_M_RANGE,
-    )
-
-
 def _warmup_kimi_k3_gemm_rs_ar() -> None:
     # Kimi-K3 model construction imports this module only when GEMM-RS/AR is
     # enabled and initializes its singleton before kernel_warmup runs. Avoid
@@ -150,9 +102,6 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     # Run next so input-prep kernels JIT against pristine runner state.
     if worker.vllm_config.kernel_config.enable_jit_warmup:
         kimi_k3_triton_warmup(worker)
-
-    if current_platform.has_device_capability(90):
-        _warmup_ll_bf16_router_gemm(worker.get_model())
 
     _warmup_kimi_k3_gemm_rs_ar()
 
