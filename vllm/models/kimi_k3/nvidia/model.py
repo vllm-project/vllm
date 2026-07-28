@@ -938,7 +938,23 @@ class KimiDecoderLayer(nn.Module):
         return hidden_states, prefix_sum, residual
 
 
+def _should_create_kimi_embedding(vllm_config: VllmConfig) -> bool:
+    pp_group = get_pp_group()
+    if pp_group.is_first_rank:
+        return True
+
+    speculative_config = vllm_config.speculative_config
+    return (
+        pp_group.is_last_rank
+        and vllm_config.parallel_config.pipeline_parallel_size > 1
+        and speculative_config is not None
+        and speculative_config.method == "dspark"
+    )
+
+
 class KimiLinearModel(nn.Module, EagleModelMixin):
+    _AUX_HIDDEN_STATE_PREFIX = "aux_hidden_states."
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -957,7 +973,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
 
         self.vocab_size = config.vocab_size
 
-        if get_pp_group().is_first_rank:
+        if _should_create_kimi_embedding(vllm_config):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
@@ -1028,14 +1044,24 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
                 cdiv(self.start_layer, self.attn_res_block_size),
                 self.config.hidden_size,
             )
-        return IntermediateTensors(
-            {
-                "hidden_states": torch.zeros(
+        tensors = {
+            "hidden_states": torch.zeros(
+                (batch_size, self.config.hidden_size), dtype=dtype, device=device
+            ),
+            "residual": torch.zeros(residual_shape, dtype=dtype, device=device),
+        }
+        # The draft model lives on the last PP rank, so selected hidden states
+        # from earlier stages must travel with the regular intermediate tensors.
+        for layer_idx in self.aux_hidden_state_layers:
+            if layer_idx <= self.start_layer:
+                tensors[self._aux_hidden_state_key(layer_idx)] = torch.zeros(
                     (batch_size, self.config.hidden_size), dtype=dtype, device=device
-                ),
-                "residual": torch.zeros(residual_shape, dtype=dtype, device=device),
-            }
-        )
+                )
+        return IntermediateTensors(tensors)
+
+    @classmethod
+    def _aux_hidden_state_key(cls, layer_idx: int) -> str:
+        return f"{cls._AUX_HIDDEN_STATE_PREFIX}{layer_idx}"
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -1060,12 +1086,21 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             residual = intermediate_tensors["residual"]
         assert hidden_states is not None
 
-        aux_hidden_states: list[torch.Tensor] = []
-        if self.start_layer in self.aux_hidden_state_layers:
+        aux_hidden_states: dict[int, torch.Tensor] = {}
+        if intermediate_tensors is not None:
+            for layer_idx in self.aux_hidden_state_layers:
+                key = self._aux_hidden_state_key(layer_idx)
+                if key in intermediate_tensors.tensors:
+                    aux_hidden_states[layer_idx] = intermediate_tensors[key]
+
+        if (
+            self.start_layer in self.aux_hidden_state_layers
+            and self.start_layer not in aux_hidden_states
+        ):
             if self.use_attn_res or residual is None:
-                aux_hidden_states.append(hidden_states)
+                aux_hidden_states[self.start_layer] = hidden_states
             else:
-                aux_hidden_states.append(hidden_states + residual)
+                aux_hidden_states[self.start_layer] = hidden_states + residual
 
         full_num_tokens = positions.shape[0]
         if self.use_sequence_parallel:
@@ -1113,7 +1148,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
                     # TODO: Optimize this.
                     aux_hidden_state = sp_all_gather(aux_hidden_state)
                     aux_hidden_state = aux_hidden_state[:full_num_tokens]
-                aux_hidden_states.append(aux_hidden_state)
+                aux_hidden_states[layer_idx + 1] = aux_hidden_state
 
         assert hidden_states is not None
         assert residual is not None
@@ -1123,9 +1158,14 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             )
             if prefix_sum is not None:
                 hidden_states = hidden_states + prefix_sum
-            return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
-            )
+            tensors = {"hidden_states": hidden_states, "residual": residual}
+            for layer_idx in self.aux_hidden_state_layers:
+                if layer_idx <= self.end_layer:
+                    assert layer_idx in aux_hidden_states
+                    tensors[self._aux_hidden_state_key(layer_idx)] = aux_hidden_states[
+                        layer_idx
+                    ]
+            return IntermediateTensors(tensors)
 
         if self.use_attn_res:
             assert prefix_sum is not None
@@ -1152,7 +1192,10 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         # NOTE: the final norm is applied in compute_logits instead of here, so
         # the MTP draft model receives the pre-norm hidden states.
         if aux_hidden_states:
-            return hidden_states, aux_hidden_states
+            return hidden_states, [
+                aux_hidden_states[layer_idx]
+                for layer_idx in self.aux_hidden_state_layers
+            ]
         return hidden_states
 
     def load_weights(

@@ -9,6 +9,7 @@ import torch.nn as nn
 
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.models.interfaces import supports_pp
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.model_executor.models.registry import ModelRegistry
 from vllm.models.kimi_k3.nvidia import dspark_mla
@@ -22,6 +23,38 @@ from vllm.models.kimi_k3.nvidia.dspark_mla import (
 def test_dspark_mla_uses_compile_free_model_entrypoint():
     assert ModelRegistry._try_load_model_cls("K3DSparkModel") is K3DSparkForCausalLM
     assert not issubclass(K3DSparkModel, TorchCompileWithNoGuardsWrapper)
+
+
+def test_k3_dspark_advertises_pipeline_parallel_support():
+    assert supports_pp(K3DSparkForCausalLM)
+
+
+def test_k3_dspark_layer_names_follow_all_target_layers(monkeypatch):
+    model_calls = []
+
+    class DummyModel(nn.Module):
+        def __init__(self, **kwargs):
+            super().__init__()
+            model_calls.append(kwargs)
+
+    monkeypatch.setattr(dspark_mla, "K3DSparkModel", DummyModel)
+    monkeypatch.setattr(dspark_mla, "LogitsProcessor", lambda *args, **kwargs: None)
+
+    draft_config = SimpleNamespace(
+        draft_vocab_size=128, hidden_size=16, logit_scale=1.0
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            draft_model_config=SimpleNamespace(hf_config=draft_config)
+        ),
+        model_config=SimpleNamespace(
+            get_total_num_hidden_layers=lambda: 93,
+        ),
+    )
+
+    K3DSparkForCausalLM(vllm_config=vllm_config)
+
+    assert model_calls[0]["start_layer_id"] == 93
 
 
 @pytest.mark.parametrize(

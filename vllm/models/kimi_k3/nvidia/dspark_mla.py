@@ -13,11 +13,13 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
     get_draft_quant_config,
+    make_empty_intermediate_tensors_factory,
     maybe_prefix,
 )
 from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
@@ -433,7 +435,7 @@ class K3DSparkModel(nn.Module):
         return hidden_states
 
 
-class K3DSparkForCausalLM(nn.Module):
+class K3DSparkForCausalLM(nn.Module, SupportsPP):
     has_own_embed_tokens = False
     has_own_lm_head = False
     draft_id_to_target_id = None
@@ -454,13 +456,24 @@ class K3DSparkForCausalLM(nn.Module):
         assert vllm_config.speculative_config is not None
         self.draft_model_config = vllm_config.speculative_config.draft_model_config
         self.config = self.draft_model_config.hf_config
-        target_layer_num = vllm_config.model_config.get_num_layers(
-            vllm_config.parallel_config
+        # The complete draft is hosted on the last PP rank. Keep its attention
+        # layer names after all target layers, not merely after that rank's
+        # local target-layer shard.
+        target_layer_num = (
+            vllm_config.model_config.get_total_num_hidden_layers()
         )
         self.model = K3DSparkModel(
             vllm_config=vllm_config,
             start_layer_id=target_layer_num,
             prefix=maybe_prefix(prefix, "model"),
+        )
+        # The complete draft model is hosted on the last target PP rank and
+        # never exchanges its own intermediate tensors. The factory satisfies
+        # the model-interface validation performed with the target PP config.
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states"], self.config.hidden_size
+            )
         )
 
         # Assigned by load_dspark_model from the target. Keeping no placeholder
