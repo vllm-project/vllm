@@ -92,11 +92,6 @@ pub(super) fn validate_request_compat(
         "media_io_kwargs",
         "media_io_kwargs is not supported.",
     )?;
-    reject_non_default(
-        request.mm_processor_kwargs.as_ref(),
-        "mm_processor_kwargs",
-        "mm_processor_kwargs is not supported.",
-    )?;
 
     Ok(())
 }

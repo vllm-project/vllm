@@ -176,6 +176,7 @@ pub(super) fn prepare_chat_request(
         documents: request.documents,
         cache_salt: request.cache_salt,
         add_special_tokens: request.add_special_tokens,
+        mm_processor_kwargs: request.mm_processor_kwargs,
         data_parallel_rank: ctx.data_parallel_rank,
         lora_request: lora_resolution.lora_request.clone(),
     };
@@ -711,6 +712,29 @@ mod tests {
             ..VllmSamplingParams::default()
         };
         assert_eq!(prepared.chat_request.sampling_params, expected);
+    }
+
+    #[test]
+    fn prepare_chat_request_forwards_mm_processor_kwargs() {
+        let prepared = prepare_chat_request(
+            ChatCompletionRequest {
+                mm_processor_kwargs: Some(HashMap::from([(
+                    "max_pixels".to_string(),
+                    serde_json::json!(4096),
+                )])),
+                ..base_request()
+            },
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid")
+        .chat_request;
+
+        // The merge onto the model's preprocessor config happens in vllm-chat.
+        assert_eq!(
+            prepared.mm_processor_kwargs.as_ref().and_then(|k| k.get("max_pixels")),
+            Some(&serde_json::json!(4096))
+        );
     }
 
     #[test]

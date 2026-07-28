@@ -94,6 +94,10 @@ impl TokenizeChatRequest {
             documents: None,
             cache_salt: None,
             add_special_tokens: self.add_special_tokens,
+            // `/tokenize` mirrors Python's request schema, which has no
+            // `mm_processor_kwargs` field. A caller overriding the processor at
+            // generation time can therefore get a different count here.
+            mm_processor_kwargs: None,
             data_parallel_rank: None,
             lora_request: None,
         })

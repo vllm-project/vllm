@@ -488,6 +488,11 @@ pub struct ChatRequest {
     pub cache_salt: Option<String>,
     /// Whether to add special tokens (e.g. BOS) during prompt tokenization.
     pub add_special_tokens: bool,
+    /// Per-request overrides merged onto the model's resolved multimodal
+    /// preprocessor config. Keys the config does not name are forwarded to the
+    /// processor through its catch-all `extra` map.
+    #[serde(default)]
+    pub mm_processor_kwargs: Option<HashMap<String, Value>>,
     /// Override data parallel rank.
     #[serde(default)]
     pub data_parallel_rank: Option<u32>,
@@ -513,6 +518,7 @@ impl ChatRequest {
             documents: None,
             cache_salt: None,
             add_special_tokens: false,
+            mm_processor_kwargs: None,
             data_parallel_rank: None,
             lora_request: None,
         }

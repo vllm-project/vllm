@@ -4,9 +4,11 @@
 //! Image-modality preparation: batch preprocessing and per-item feature
 //! build.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use llm_multimodal::{ImageFrame, Modality, PreprocessedEncoderInputs};
+use serde_json::Value;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
 use super::{ModalitySupport, MultimodalModelInfo, PreparedMedia, item};
@@ -23,11 +25,12 @@ impl MultimodalModelInfo {
         frames: Vec<Arc<ImageFrame>>,
         uuids: Vec<Option<String>>,
         model_dtype: ModelDtype,
+        mm_processor_kwargs: Option<&HashMap<String, Value>>,
     ) -> Result<PreparedMedia> {
         let support = self.image.as_ref().ok_or_else(|| Error::UnsupportedModality {
             modality: Modality::Image.to_string(),
         })?;
-        let preprocessed = self.preprocess_images(support, &frames).await?;
+        let preprocessed = self.preprocess_images(support, &frames, mm_processor_kwargs).await?;
         let replacements = support.spec.prompt_replacements_for(&self.context, &preprocessed)?;
         if replacements.len() != frames.len() {
             bail_multimodal!(
@@ -36,7 +39,12 @@ impl MultimodalModelInfo {
                 frames.len()
             );
         }
-        let hashes = frames.iter().map(|frame| frame.hash.clone()).collect();
+        // Overrides change the tensors, so they must change the cache key too.
+        let tag = super::mm_processor_kwargs_tag(mm_processor_kwargs);
+        let hashes = frames
+            .iter()
+            .map(|frame| super::tag_media_hash(&frame.hash, tag.as_ref()))
+            .collect();
         let items =
             item::build_batched_items(&support.spec, preprocessed, hashes, uuids, model_dtype)?;
 
@@ -58,8 +66,9 @@ impl MultimodalModelInfo {
         &self,
         support: &ModalitySupport,
         image_frames: &[Arc<ImageFrame>],
+        mm_processor_kwargs: Option<&HashMap<String, Value>>,
     ) -> Result<PreprocessedEncoderInputs> {
-        let config = support.config.clone();
+        let config = super::merge_mm_processor_kwargs(support.config.clone(), mm_processor_kwargs)?;
         let processor = support.processor;
         let images = image_frames.iter().map(|frame| frame.data().clone()).collect::<Vec<_>>();
 
