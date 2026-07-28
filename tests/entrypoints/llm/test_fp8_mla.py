@@ -14,7 +14,7 @@ import pytest
 from vllm import LLM, SamplingParams
 from vllm.platforms import current_platform
 
-MODEL = "deepseek-ai/DeepSeek-V2-Lite-Chat"
+MODEL = "RedHatAI/DeepSeek-Coder-V2-Instruct-FP8"
 
 
 @pytest.mark.skipif(
@@ -26,15 +26,28 @@ def test_fp8_marlin_mla_generation(monkeypatch):
 
     llm = LLM(
         model=MODEL,
-        quantization="fp8",
+        tensor_parallel_size=2,
         enforce_eager=True,
-        max_model_len=2048,
-        max_num_batched_tokens=512,
+        max_model_len=4096,
+        max_num_batched_tokens=2048,
         gpu_memory_utilization=0.90,
     )
 
-    # Prompt longer than max_num_batched_tokens (512) to trigger chunked prefill.
-    prompt = "Hello world, this is a test. " * 100
+    # Verify chunked prefill is actually enabled.
+    sched_config = llm.llm_engine.vllm_config.scheduler_config
+    assert sched_config.enable_chunked_prefill, (
+        "Chunked prefill must be enabled for this test"
+    )
+
+    # Prompt longer than max_num_batched_tokens to trigger chunked prefill.
+    prompt = "Hello world, this is a test. " * 500
+    tokenizer = llm.get_tokenizer()
+    num_tokens = len(tokenizer.encode(prompt))
+    assert num_tokens > sched_config.max_num_batched_tokens, (
+        f"Prompt ({num_tokens} tokens) must exceed "
+        f"max_num_batched_tokens ({sched_config.max_num_batched_tokens}) "
+        f"to trigger chunked prefill"
+    )
 
     outputs = llm.generate(
         [prompt],
