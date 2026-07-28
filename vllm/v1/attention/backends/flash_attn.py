@@ -808,42 +808,19 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 
         num_reqs = metadata.num_decode_reqs or metadata.seq_lens.shape[0]
 
-        if metadata.use_cascade:
-            assert metadata.cu_prefix_query_lens is not None
-            assert metadata.prefix_kv_lens is not None
-            assert metadata.suffix_kv_lens is not None
-            prefix_scheduler_metadata = self._get_scheduler_metadata(
-                aot_schedule=True,
-                batch_size=1,
-                cu_query_lens=metadata.cu_prefix_query_lens,
-                max_query_len=metadata.num_actual_tokens,
-                seqlens=metadata.prefix_kv_lens,
-                max_seq_len=metadata.common_prefix_len,
-                causal=False,
-                max_num_splits=metadata.max_num_splits,
-            )
-            metadata.prefix_scheduler_metadata = prefix_scheduler_metadata
-            scheduler_metadata = self._get_scheduler_metadata(
-                aot_schedule=True,
-                batch_size=num_reqs,
-                cu_query_lens=metadata.query_start_loc,
-                max_query_len=metadata.max_query_len,
-                seqlens=metadata.suffix_kv_lens,
-                max_seq_len=metadata.max_seq_len - metadata.common_prefix_len,
-                causal=True,
-                max_num_splits=metadata.max_num_splits,
-            )
-        else:
-            scheduler_metadata = self._get_scheduler_metadata(
-                aot_schedule=True,
-                batch_size=num_reqs,
-                cu_query_lens=metadata.query_start_loc,
-                max_query_len=metadata.max_query_len,
-                seqlens=metadata.seq_lens,
-                max_seq_len=metadata.max_seq_len,
-                causal=metadata.causal,
-                max_num_splits=metadata.max_num_splits,
-            )
+        assert self.dcp_world_size == 1
+        assert not metadata.use_cascade
+
+        scheduler_metadata = self._get_scheduler_metadata(
+            aot_schedule=True,
+            batch_size=num_reqs,
+            cu_query_lens=metadata.query_start_loc,
+            max_query_len=metadata.max_query_len,
+            seqlens=metadata.seq_lens,
+            max_seq_len=metadata.max_seq_len,
+            causal=metadata.causal,
+            max_num_splits=metadata.max_num_splits,
+        )
 
         metadata.scheduler_metadata = self._store_scheduler_metadata(scheduler_metadata)
 
