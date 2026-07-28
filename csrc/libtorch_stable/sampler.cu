@@ -43,6 +43,11 @@ __global__ void apply_repetition_penalties_kernel(
   }
 }
 
+// Bit-pattern NaN test: robust regardless of --use_fast_math semantics.
+__device__ __forceinline__ bool isNaNLogit(float x) {
+  return (__float_as_uint(x) & 0x7fffffffu) > 0x7f800000u;
+}
+
 __device__ __forceinline__ auto convert_to_uint32(float x) -> uint32_t {
   uint32_t bits = __float_as_uint(x);
   return (bits & 0x80000000) ? bits : ~bits & 0x7fffffff;
@@ -165,6 +170,16 @@ __device__ bool processHistogramStep(
     smemFinal.histo.data[idx] = 0;
   }
 
+  // Reset the per-step threshold state. If fewer than topK candidates match
+  // the pattern (e.g. NaN-dominated rows, where NaN logits are excluded from
+  // selection below), no threshold bin exists: default to kNumBins so that
+  // every matching element is emitted directly and the remaining output slots
+  // keep the -1 padding pre-filled by topKPerRowJob.
+  if (threadIdx.x == 0) {
+    smemThresholdBinIdx[0] = kNumBins;
+    smemFinalBinSize[0] = 0;
+  }
+
   // Make sure the histogram is ready.
   __syncthreads();
 
@@ -179,6 +194,11 @@ __device__ bool processHistogramStep(
   }
 
   auto distributeToBins = [&](float logit, int /* idx */ = 0) {
+    // NaN logits are never candidates: their bit patterns would otherwise be
+    // binned above +inf and poison the selection (see issue #49896).
+    if (isNaNLogit(logit)) {
+      return;
+    }
     if (isPartialMatch<patternShift>(logit, logitPattern)) {
       uint32_t binIdx = extractBinIdx<step>(logit);
       atomicAdd(&smemFinal.histo.data[binIdx], 1);
@@ -254,6 +274,11 @@ __device__ bool processHistogramStep(
   thresholdBinIdx = smemThresholdBinIdx[0];
 
   auto processBins = [&](float logit, int idx) {
+    // Keep in sync with the NaN exclusion in distributeToBins: the histogram
+    // counts and the prefix sums must describe the same candidate set.
+    if (isNaNLogit(logit)) {
+      return;
+    }
     if (isPartialMatch<patternShift>(logit, logitPattern)) {
       uint32_t binIdx = extractBinIdx<step>(logit);
       // Only write elements with binIdx < thresholdBinIdx when:
@@ -410,6 +435,16 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
     smemFinalDstIdx[0] = 0;
     smemFoundTopKValues[0] = 0;
   }
+  // Pre-fill the output slots with -1 (and the logits, when present, with
+  // -FLT_MAX) so that rows with fewer than topK selectable candidates (e.g.
+  // NaN-dominated logits) produce -1 padding like the short-row path above
+  // instead of leaking uninitialized shared memory as indices.
+  for (int i = threadIdx.x; i < topK; i += kNumThreadsPerBlock) {
+    smemOutput[i] = -1;
+    if constexpr (multipleBlocksPerRow) {
+      reinterpret_cast<float*>(smemOutput + topK)[i] = -FLT_MAX;
+    }
+  }
   __syncthreads();
   int thresholdBinIdx = -1;
   uint32_t logitPattern = 0;
@@ -464,6 +499,9 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
 #pragma unroll
       for (int ii = 0; ii < kNumFinalItemsPerThread; ++ii) {
         finalLogits[ii] = -FLT_MAX;
+        // Padding slots must carry the -1 sentinel: when fewer than topK
+        // candidates exist they may be copied to smemOutput below.
+        finalIndices[ii] = -1;
       }
 
       // Read the elements from SMEM.
@@ -535,7 +573,9 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
         // the rowStart.
         outIndices[i] = smemOutput[i];
       } else {
-        outIndices[i] = smemOutput[i] - rowStart;
+        // Keep the -1 padding intact; only real indices are rebased.
+        int idx = smemOutput[i];
+        outIndices[i] = idx < 0 ? idx : idx - rowStart;
       }
     }
   }
