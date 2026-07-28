@@ -24,6 +24,8 @@ logger = init_logger(__name__)
 # to see the normalized name, then add a mapping here if it contains variant
 # suffixes that should be stripped (e.g. Blackwell/Rubin variants).
 _GPU_NAME_ALIASES: dict[str, str] = {
+    # Grace Blackwell reports the superchip name for its B200 GPU.
+    "nvidia_gb200": "nvidia_b200",
     # H100 variants
     "nvidia_h100_pcie": "nvidia_h100",
     "nvidia_h100_sxm5": "nvidia_h100",

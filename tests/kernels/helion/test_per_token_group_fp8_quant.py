@@ -220,6 +220,48 @@ class TestPerTokenGroupFp8QuantCorrectness:
 
 
 class TestPerTokenGroupFp8QuantIntegration:
+    def test_eager_route_without_legacy_callsite_router(self, monkeypatch):
+        from unittest.mock import Mock
+
+        from vllm.kernels.helion import routing
+
+        eager_kernel = Mock()
+        monkeypatch.setattr(routing, "_PTG_ROUTER", None)
+        monkeypatch.setattr(
+            routing, "use_helion_per_token_group_fp8_quant", lambda: True
+        )
+        monkeypatch.setattr(routing, "_checked_eager_kernel", lambda _: eager_kernel)
+
+        input = torch.empty((4, 128))
+        output_q = torch.empty_like(input)
+        output_s = torch.empty((4, 1))
+        launched = routing.try_launch_per_token_group_fp8_quant(
+            input,
+            output_q,
+            output_s,
+            128,
+            1e-10,
+            -448.0,
+            448.0,
+            False,
+            False,
+            False,
+        )
+
+        assert launched
+        eager_kernel.assert_called_once_with(
+            input,
+            output_q,
+            output_s,
+            128,
+            1e-10,
+            -448.0,
+            448.0,
+            False,
+            False,
+            False,
+        )
+
     def test_kernel_registration_integration(self):
         from vllm.kernels.helion.register import get_registered_kernels
 

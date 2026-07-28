@@ -38,7 +38,7 @@ Key Classes
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 import torch
@@ -80,6 +80,9 @@ logger = init_logger(__name__)
 vllm_helion_lib = Library("vllm_helion", "FRAGMENT")  # noqa
 
 ConfigPicker = Callable[[tuple[Any, ...], list[CaseKey]], CaseKey | None]
+WarmupInputGenerator = Callable[
+    [list[CaseKey], int | None, list[int] | None], Iterable[tuple[Any, ...]]
+]
 
 
 def validate_helion_settings(
@@ -263,6 +266,7 @@ class HelionKernelWrapper:
         mutates_args: list[str] | None = None,
         helion_settings: helion.Settings | None = None,
         input_generator: (Callable[[], dict[CaseKey, tuple[Any, ...]]] | None) = None,
+        warmup_input_generator: WarmupInputGenerator | None = None,
     ):
         # Validate helion_settings doesn't conflict with our custom autotuner
         validate_helion_settings(helion_settings, op_name)
@@ -273,6 +277,7 @@ class HelionKernelWrapper:
         self.helion_settings = helion_settings
         self._config_picker = config_picker
         self._input_generator = input_generator
+        self._warmup_input_generator = warmup_input_generator
         self._mutates_args = mutates_args
         self._configured_kernel: ConfiguredHelionKernel | None = None
         # TODO(@gmagogsfm): Remove this disable flag once integrated with vLLM IR,
@@ -349,6 +354,46 @@ class HelionKernelWrapper:
             )
         return self._configured_kernel
 
+    def eager_callable(self) -> Callable[..., Any]:
+        """Return the configured Helion kernel for eager/capture routing.
+
+        This bypasses the torch custom-op schema dispatch boundary, which is only
+        needed for compiled FX-swap paths and otherwise adds pure host overhead.
+        """
+        return self.get_configured_op()._decorated_kernel
+
+    def warmup_eager(
+        self,
+        *,
+        max_num_batched_tokens: int | None = None,
+        hidden_sizes: list[int] | None = None,
+    ) -> int:
+        """Compile and prime the eager launch path for representative inputs.
+
+        Kernels opt in by registering ``warmup_input_generator``. Warmup runs the
+        eager callable twice per input so the first iteration covers compilation
+        and the second primes Helion's fused-launch cache for repeat calls.
+        """
+        if self._disabled or self._warmup_input_generator is None:
+            return 0
+
+        configured_kernel = self.get_configured_op()
+        eager_kernel = configured_kernel._decorated_kernel
+        warmup_inputs = self._warmup_input_generator(
+            list(configured_kernel.configs.keys()),
+            max_num_batched_tokens,
+            hidden_sizes,
+        )
+
+        warmed = 0
+        with torch.inference_mode():
+            for args in warmup_inputs:
+                eager_kernel(*args)
+                eager_kernel(*args)
+                warmed += 1
+        torch.cuda.synchronize()
+        return warmed
+
     def _get_or_register_custom_op(self) -> Any:
         if hasattr(torch.ops.vllm_helion, self.op_name):
             return getattr(torch.ops.vllm_helion, self.op_name)
@@ -376,6 +421,28 @@ def get_registered_kernels() -> dict[str, HelionKernelWrapper]:
 
 def get_kernel_by_name(kernel_name: str) -> HelionKernelWrapper | None:
     return _REGISTERED_KERNELS.get(kernel_name)
+
+
+def warmup_registered_kernels(
+    *,
+    max_num_batched_tokens: int | None = None,
+    hidden_sizes: list[int] | None = None,
+) -> int:
+    """Warm registered Helion kernels that opt into eager startup warmup."""
+    warmed = 0
+    for kernel in _REGISTERED_KERNELS.values():
+        try:
+            warmed += kernel.warmup_eager(
+                max_num_batched_tokens=max_num_batched_tokens,
+                hidden_sizes=hidden_sizes,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Skipping Helion eager warmup for '%s': %s",
+                kernel.op_name,
+                exc,
+            )
+    return warmed
 
 
 def infer_fake_impl(
@@ -407,6 +474,7 @@ def register_kernel(
     mutates_args: list[str] | None = None,
     helion_settings: helion.Settings | None = None,
     input_generator: (Callable[[], dict[CaseKey, tuple[Any, ...]]] | None) = None,
+    warmup_input_generator: WarmupInputGenerator | None = None,
 ) -> Callable[[Callable], HelionKernelWrapper]:
     """Register a Helion kernel with pre-tuned config selection.
 
@@ -461,6 +529,7 @@ def register_kernel(
             mutates_args=mutates_args,
             helion_settings=helion_settings,
             input_generator=input_generator,
+            warmup_input_generator=warmup_input_generator,
         )
 
         _REGISTERED_KERNELS[final_op_name] = kernel_wrapper
