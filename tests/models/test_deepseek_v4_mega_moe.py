@@ -10,7 +10,9 @@ from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4MegaMoEExperts,
     make_deepseek_v4_expert_params_mapping,
 )
-from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
+from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import (
+    _PREPARE_MEGAMOE_INPUTS_KERNEL,
+)
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
@@ -165,7 +167,7 @@ def test_deepseek_v4_mega_moe_fused_input_staging_is_bitwise_exact():
     fused_topk_idx = torch.empty_like(ref_topk_idx)
     fused_topk_weights = torch.empty_like(ref_topk_weights)
 
-    prepare_megamoe_inputs(
+    _PREPARE_MEGAMOE_INPUTS_KERNEL(
         hidden_states,
         topk_weights,
         topk_ids,
@@ -242,7 +244,7 @@ def test_deepseek_v4_mega_moe_fused_input_staging_masks_padding():
     fused_topk_idx = torch.empty_like(ref_topk_idx)
     fused_topk_weights = torch.empty_like(ref_topk_weights)
 
-    prepare_megamoe_inputs(
+    _PREPARE_MEGAMOE_INPUTS_KERNEL(
         hidden_states,
         topk_weights,
         topk_ids,
