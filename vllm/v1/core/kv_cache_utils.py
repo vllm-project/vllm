@@ -961,14 +961,11 @@ def _pool_bytes_per_block(
         return kv_cache_groups[0].kv_cache_spec.page_size_bytes
     if (glm5 := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
         # GLM-5-Next hybrid slot sharing: mamba layers co-own the MLA slot
-        # tensors, so a block costs one MLA page per slot plus the per-layer
-        # indexer pages and per-layer tail pages.
-        _, _, mla_names, idx_names, mla_page, idx_page, tail_names, tail_page = glm5
-        return (
-            len(mla_names) * mla_page
-            + len(idx_names) * idx_page
-            + len(tail_names) * tail_page
-        )
+        # tensors, and tail layers co-own the indexer slot tensors, so a block
+        # costs one MLA page per MLA slot plus one indexer page per indexer
+        # slot (the tail rides inside the indexer page via slot-sharing).
+        _, _, mla_names, idx_names, mla_page, idx_page, _, _ = glm5
+        return len(mla_names) * mla_page + len(idx_names) * idx_page
     if _use_packed_kv_cache_config(vllm_config, kv_cache_groups):
         # buckets = {page_size: [[layer_names], [layer_names], ...]}
         buckets = _bucket_layers_by_page_size(kv_cache_groups)
@@ -1419,12 +1416,22 @@ def _get_kv_cache_groups_glm5_next(
 
     # Tail cache: one paged circular-buffer group for all indexer tail layers
     # (each layer's in-progress pool). Separate group so the connector's SWA
-    # clipping and the no-prune KpoolTailManager apply at the group level.
+    # clipping and the no-prune KpoolTailManager apply at the group level. The
+    # tail co-owns the indexer tensor (slot-sharing, like mamba co-owns MLA):
+    # its page is padded to idx_page so the runner's page_size_padded strided
+    # view (vllm/v1/worker/gpu/attn_utils.py) carves the tail's [num_blocks, 2,
+    # kpool, head_dim] bf16 view out of the indexer storage at disjoint
+    # block-ids. Eliminates the 11 standalone tail tensors (~2.25 GB/GPU).
     tail_group = None
     if tail_specs:
-        tail_uniform = UniformTypeKVCacheSpecs.from_specs(tail_specs)
+        idx_page = next(iter(idx_pages))
+        padded_tail_specs: dict[str, KVCacheSpec] = {
+            name: replace(s, page_size_padded=idx_page)
+            for name, s in tail_specs.items()
+        }
+        tail_uniform = UniformTypeKVCacheSpecs.from_specs(padded_tail_specs)
         assert tail_uniform is not None
-        tail_group = KVCacheGroupSpec(list(tail_specs), tail_uniform)
+        tail_group = KVCacheGroupSpec(list(padded_tail_specs), tail_uniform)
 
     any_mamba = next(iter(mamba_specs.values()))
     assert all(spec == any_mamba for spec in mamba_specs.values())
@@ -1492,21 +1499,22 @@ def _glm5_next_tensor_layout(
     attn_group: KVCacheGroupSpec | None = None
     tail_group: KVCacheGroupSpec | None = None
     for g in uniform_groups:
-        inner = g.kv_cache_spec.kv_cache_specs
-        if all(type(s) is MLAAttentionSpec for s in inner.values()):
+        group_inner = cast(UniformTypeKVCacheSpecs, g.kv_cache_spec).kv_cache_specs
+        if all(type(s) is MLAAttentionSpec for s in group_inner.values()):
             attn_group = g
-        elif all(isinstance(s, KpoolTailSpec) for s in inner.values()):
+        elif all(isinstance(s, KpoolTailSpec) for s in group_inner.values()):
             tail_group = g
     if attn_group is None or not mamba_groups:
         return None
     if len(uniform_groups) + len(mamba_groups) != len(kv_cache_groups):
         return None
+    attn_uniform = cast(UniformTypeKVCacheSpecs, attn_group.kv_cache_spec)
     if not all(
         type(s) is MLAAttentionSpec and s.page_size_padded is None
-        for s in attn_group.kv_cache_spec.kv_cache_specs.values()
+        for s in attn_uniform.kv_cache_specs.values()
     ):
         return None
-    inner = cast(dict[str, MLAAttentionSpec], attn_group.kv_cache_spec.kv_cache_specs)
+    inner = cast(dict[str, MLAAttentionSpec], attn_uniform.kv_cache_specs)
     mla_names = [n for n in attn_group.layer_names if inner[n].compress_ratio == 1]
     idx_names = [n for n in attn_group.layer_names if inner[n].compress_ratio > 1]
     mla_pages = {inner[n].page_size_bytes for n in mla_names}
@@ -1520,8 +1528,14 @@ def _glm5_next_tensor_layout(
     tail_page = 0
     if tail_group is not None:
         tail_names = list(tail_group.layer_names)
+        # The tail spec is padded to idx_page (co-owns the indexer tensor), so
+        # page_size_bytes returns idx_page. Callers need the *logical* tail page
+        # (2048 B) for transfer sizing and accounting; use unpadded.
         tail_pages = {
-            s.page_size_bytes for s in tail_group.kv_cache_spec.kv_cache_specs.values()
+            cast(KpoolTailSpec, s).unpadded_page_size_bytes
+            for s in cast(
+                UniformTypeKVCacheSpecs, tail_group.kv_cache_spec
+            ).kv_cache_specs.values()
         }
         if len(tail_pages) != 1:
             return None
@@ -1585,9 +1599,11 @@ def get_kv_cache_config_from_groups(
     elif (glm5n := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
         # GLM-5-Next hybrid slot sharing: one tensor per MLA layer, co-owned
         # by that MLA layer and one mamba layer from each mamba group; kpool
-        # indexer layers get plain per-layer tensors; kpool tail layers get
-        # plain per-layer tensors (one paged circular buffer each). Must precede
-        # the packed layout, which would break the MLA contiguous virtual split.
+        # indexer layers get per-layer tensors that are ALSO co-owned by their
+        # sibling tail layer (the tail parasitizes the indexer tensor at
+        # disjoint block-ids, like mamba parasitizes MLA, so no standalone tail
+        # tensors are needed). Must precede the packed layout, which would break
+        # the MLA contiguous virtual split.
         (
             _,
             mamba_groups,
@@ -1596,33 +1612,38 @@ def get_kv_cache_config_from_groups(
             mla_page,
             idx_page,
             tail_names,
-            tail_page,
+            _tail_page,
         ) = glm5n
-        per_block = len(mla_names) * mla_page + len(idx_names) * idx_page
+        # The logical tail page (2048 B) is unused for sizing: the tail rides
+        # inside idx_page via slot-sharing. It is retained in the layout tuple
+        # only for downstream transfer-sizing (connectors).
         if tail_names:
-            per_block += len(tail_names) * tail_page
+            assert len(idx_names) == len(tail_names), (
+                "indexer/tail layer count mismatch: cannot pair for slot-sharing"
+            )
+        per_block = len(mla_names) * mla_page + len(idx_names) * idx_page
         num_blocks = available_memory // per_block
         num_blocks = may_override_num_blocks(vllm_config, num_blocks)
-        kv_cache_tensors = (
-            [
-                KVCacheTensor(
-                    size=mla_page * num_blocks,
-                    shared_by=[mla_name]
-                    + [
-                        g.layer_names[i] for g in mamba_groups if i < len(g.layer_names)
-                    ],
-                )
-                for i, mla_name in enumerate(mla_names)
-            ]
-            + [
-                KVCacheTensor(size=idx_page * num_blocks, shared_by=[idx_name])
-                for idx_name in idx_names
-            ]
-            + [
-                KVCacheTensor(size=tail_page * num_blocks, shared_by=[tail_name])
-                for tail_name in tail_names
-            ]
-        )
+        kv_cache_tensors = [
+            KVCacheTensor(
+                size=mla_page * num_blocks,
+                shared_by=[mla_name]
+                + [g.layer_names[i] for g in mamba_groups if i < len(g.layer_names)],
+            )
+            for i, mla_name in enumerate(mla_names)
+        ] + [
+            # Each indexer tensor is co-owned by its sibling tail layer (paired
+            # by model-layer order; both lists derive from the layer-ordered
+            # kv_cache_spec dict). The tail's page_size_padded=idx_page makes
+            # the runner carve a strided bf16 tail view out of this storage.
+            KVCacheTensor(
+                size=idx_page * num_blocks,
+                shared_by=(
+                    [idx_names[i], tail_names[i]] if tail_names else [idx_names[i]]
+                ),
+            )
+            for i in range(len(idx_names))
+        ]
     elif _use_packed_kv_cache_config(vllm_config, kv_cache_groups):
         # DeepSeek V4 uses the packed layout by default. Other multi-group
         # layouts can opt in with --enable-cross-layers.
@@ -2138,10 +2159,11 @@ def _max_memory_usage_bytes_from_groups(
         return total_max_mem_usage_bytes
 
     elif (glm5n := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
-        # GLM-5-Next hybrid slot sharing: every block id — attention- or
-        # mamba-owned — is charged the full per-block byte sum. The kpool tail
-        # cache is separate: 1 block/req per tail layer (independent of seq
-        # length), charged at its own page size.
+        # GLM-5-Next hybrid slot sharing: every block id — attention-, mamba-,
+        # or tail-owned — is charged the full per-block byte sum (mla + idx).
+        # The tail co-owns the indexer tensor (1 block/req via KpoolTailManager),
+        # so it adds to the shared block-id demand like mamba, not as a separate
+        # tensor.
         (
             attn_group,
             mamba_groups,
@@ -2150,7 +2172,7 @@ def _max_memory_usage_bytes_from_groups(
             mla_page,
             idx_page,
             tail_names,
-            tail_page,
+            _tail_page,
         ) = glm5n
         uniform_spec = attn_group.kv_cache_spec
         assert isinstance(uniform_spec, UniformTypeKVCacheSpecs)
@@ -2160,10 +2182,11 @@ def _max_memory_usage_bytes_from_groups(
             blocks_needed += cdiv(
                 spec.max_memory_usage_bytes(vllm_config), spec.page_size_bytes
             )
-        return (
-            blocks_needed * (len(mla_names) * mla_page + len(idx_names) * idx_page)
-            + len(tail_names) * tail_page
-        )
+        if tail_names:
+            # Tail: 1 block/req (KpoolTailSpec.max_admission_blocks_per_request
+            # == 1), drawn from the shared pool.
+            blocks_needed += 1
+        return blocks_needed * (len(mla_names) * mla_page + len(idx_names) * idx_page)
 
     # General case: group_size pools, each shared by one layer per group
     # Memory = group_size * page_size * blocks_for_max_len

@@ -54,6 +54,7 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    KpoolTailSpec,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
@@ -1698,7 +1699,16 @@ class MooncakeConnectorWorker:
                 block_len = cache.stride(0) * cache.element_size()
                 region_base_addresses.append(base_addr)
 
-                if isinstance(layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)):
+                if isinstance(layer_spec, KpoolTailSpec):
+                    # The tail co-owns the indexer tensor: its bound view is a
+                    # strided bf16 [num_blocks, 2, kpool, head_dim] slice whose
+                    # stride(0) is the padded idx_page. Only the logical 2048 B
+                    # (K half | score half) carry data, so transfer the logical
+                    # page, not the padded stride, and split K (1024 B) / score
+                    # (1024 B) halves.
+                    block_len = layer_spec.unpadded_page_size_bytes
+                    kv_block_len = block_len // 2
+                elif isinstance(layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)):
                     kv_block_len = layer_spec.page_size_bytes
                 elif self.transfer_topo.virtually_split_kv_in_blocks and not isinstance(
                     layer_spec, MambaSpec
