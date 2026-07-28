@@ -1106,6 +1106,11 @@ class OffloadingConnectorScheduler:
                     _ConnectorMetricName.ALLOCATION_FAILURE
                 )
                 logger.warning("Request %s: cannot store chunks", req_id)
+                # Mark currently eligible range as handled so the same
+                # range is not retried without newly-eligible progress.
+                # Correctness falls back to recompute; later progress
+                # still gets one attempt.
+                req_status.advance_stored_idx(num_offloadable_tokens)
                 continue
 
             if not store_output.keys_to_store:

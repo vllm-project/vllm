@@ -71,9 +71,76 @@ def test_scheduler_reports_allocation_failure(request_runner):
     runner.run(decoded_tokens=[EOS_TOKEN_ID])
 
     reduced = _reduce_kv_connector_stats(runner)
-    # Two attempts: once while running (block becomes full during prefill),
-    # once from finished_req_ids on the next step.
-    assert reduced[_ConnectorMetricName.ALLOCATION_FAILURE] == 2
+    # One attempt during prefill; the stored-index advance prevents
+    # the same range from being retried via finished_req_ids.
+    assert reduced[_ConnectorMetricName.ALLOCATION_FAILURE] == 1
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_allocation_failure_skips_failed_range_without_retrying_each_step(
+    request_runner, async_scheduling: bool
+):
+    """A full best-effort CPU tier must not throttle every decode step.
+
+    The failed range is abandoned for this request, while a newly completed
+    chunk remains eligible for one later store attempt.
+    """
+    block_size = 4
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=20,
+        async_scheduling=async_scheduling,
+    )
+    runner.new_request(token_ids=[0] * block_size)
+    attempted_ranges: list[tuple] = []
+
+    def fail_store(keys, req_context):
+        attempted_ranges.append(tuple(keys))
+        return None
+
+    runner.manager.prepare_store.side_effect = fail_store
+
+    runner.run(decoded_tokens=[0])
+    assert len(attempted_ranges) == 1
+
+    # No new complete chunk: do not replay the impossible allocation.
+    runner.run(decoded_tokens=[0])
+    assert len(attempted_ranges) == 1
+    runner.run(decoded_tokens=[0])
+    assert len(attempted_ranges) == 1
+
+    # Completing a new chunk permits one attempt for only the new range. One
+    # extra scheduler step observes the chunk completed by the prior output.
+    runner.run(decoded_tokens=[0])
+    assert len(attempted_ranges) == 1
+    runner.run(decoded_tokens=[0])
+    assert len(attempted_ranges) == 2
+    assert attempted_ranges[1] != attempted_ranges[0]
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_finished_request_allocation_failure_cleans_up(
+    request_runner, async_scheduling
+):
+    """A failed final store is terminal cache loss, not immortal push work."""
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=10,
+        async_scheduling=async_scheduling,
+    )
+    # EOS completes the first chunk. request_finished intentionally leaves the
+    # state for the next scheduler pass, where the final store is attempted.
+    runner.new_request(token_ids=[0] * 3)
+    request_id = str(runner.req_id)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: None
+    runner.manager.has_pending_work.return_value = False
+
+    runner.run(decoded_tokens=[EOS_TOKEN_ID])
+
+    assert request_id not in runner.connector_scheduler._req_status
+    assert not runner.connector_scheduler.has_pending_push_work()
+    assert runner.manager.prepare_store.call_count == 1
+    runner.manager.on_request_finished.assert_called_once()
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
@@ -2083,14 +2150,12 @@ def test_swa_alignment_skip(request_runner, async_scheduling: bool):
 def test_stale_sliding_window_block_after_prepare_store_failure(
     request_runner, async_scheduling: bool
 ):
-    """Regression test: when prepare_store fails (returns None), offloading is
-    delayed. Meanwhile, sliding window blocks get freed and reallocated to the
-    same request. On retry, the stale block_id must be detected and skipped.
+    """A failed SWA store range is abandoned before its blocks become stale.
 
-    Without the fix, the stale block_id would either:
-    - Cause a KeyError in _remove_pending_job (duplicate in
-      _block_id_to_pending_jobs)
-    - Silently offload wrong data under a wrong key
+    Sliding-window blocks may be freed and reused by later decode steps. Once a
+    best-effort store allocation fails, advancing past that eligible range both
+    prevents critical-path retries and guarantees those old block IDs are never
+    read under stale offload keys. Newly eligible ranges still get one attempt.
     """
     block_size = 4
     # sliding_window = 8 -> window of 2 blocks
@@ -2122,36 +2187,32 @@ def test_stale_sliding_window_block_after_prepare_store_failure(
     # Request with 3 blocks of prompt. Window = 2 blocks, so block 0 is
     # outside the window but won't be freed until the next allocate_slots.
     runner.new_request(token_ids=[0] * block_size * 3)
+    attempted_ranges: list[tuple] = []
 
-    # First step: prepare_store FAILS -> offloading delayed.
-    # next_stored_chunk_idx stays at 0, block_ids[0] still holds the
-    # original block_id for position 0.
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: None
+    def fail_store(keys, req_context):
+        attempted_ranges.append(tuple(keys))
+        return None
+
+    # First step abandons the initial eligible range after one failed attempt.
+    runner.manager.prepare_store.side_effect = fail_store
     runner.run(decoded_tokens=[0])
-    runner.manager.prepare_store.assert_called()
+    assert len(attempted_ranges) == 1
 
-    # Second step: decode more tokens -> block 3 allocated.
-    # allocate_slots calls remove_skipped_blocks which frees block 0
-    # (it's now outside the sliding window). With num_gpu_blocks=4,
-    # the freed block is immediately reused for the new allocation.
-    # prepare_store still fails so offloading is still delayed.
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: None
+    # Block 0 is freed/reused. Depending on async output lag, the newly complete
+    # chunk is observed in this pass or the next one. Any new attempt must be
+    # disjoint from the abandoned initial range.
     runner.run(decoded_tokens=[0] * block_size)
+    if len(attempted_ranges) == 1:
+        runner.run(decoded_tokens=[0])
+    assert len(attempted_ranges) == 2
+    assert set(attempted_ranges[0]).isdisjoint(attempted_ranges[1])
 
-    # Now prepare_store succeeds.
-    # Without the fix, the request would try to offload the stale block_id
-    # at position 0 (now reused at position 3), causing a duplicate in
-    # sliding_window_block_ids and eventually a KeyError.
+    # A later successful backend must not resurrect either abandoned range or
+    # read a reused SWA block under its stale key.
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
-    # block_ids=[0, ?, 3, 1]: positions 0 and 1 are zeroed (stale blocks that
-    # were freed by the sliding window and reallocated). Only blocks at
-    # positions 2 and 3 (request offsets 2, 3) are stored.
-    runner.run(
-        decoded_tokens=[EOS_TOKEN_ID],
-        expected_stored=(2, 3),
-    )
+    runner.run(decoded_tokens=[EOS_TOKEN_ID])
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
