@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -22,6 +23,7 @@ from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import 
     FlashInferExperts,
 )
 from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
+    TrtLlmFp8ExpertsModular,
     TrtLlmFp8ExpertsMonolithic,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
@@ -422,3 +424,103 @@ def test_convert_moe_weights_to_flashinfer_trtllm_block_layout(
 
     assert w13_converted.shape[0] == num_experts
     assert w2_converted.shape[0] == num_experts
+
+
+@pytest.mark.parametrize("block_shape,is_mxfp8", [([1, 32], True), ([128, 128], False)])
+def test_trtllm_fp8_moe_forwards_swiglu_params_only_for_mxfp8(
+    block_shape, is_mxfp8, monkeypatch
+):
+    """gemm1_alpha/beta/clamp_limit are MXFP8 + SwiGLU per-expert params.
+
+    They must reach flashinfer only on the MXFP8 path: newer flashinfer rejects
+    them on the DeepSeekFp8 path. Verified for both the modular (pre-routed)
+    and monolithic block-scale entry points by capturing the forwarded kwargs.
+    """
+    import flashinfer
+
+    e, m, k, intermediate, topk = 4, 8, 128, 16, 2
+
+    def make_quant_config():
+        gemm1 = 1.0 if is_mxfp8 else None
+        return SimpleNamespace(
+            block_shape=block_shape,
+            is_per_tensor=False,
+            w1_scale=torch.ones(e, device="cuda"),
+            w2_scale=torch.ones(e, device="cuda"),
+            gemm1_alpha=gemm1,
+            gemm1_beta=gemm1,
+            gemm1_clamp_limit=gemm1,
+        )
+
+    def make_moe_config():
+        return SimpleNamespace(
+            routing_method=None,
+            experts_per_token=topk,
+            intermediate_size_per_partition=intermediate,
+            hidden_dim=k,
+            num_local_experts=e,
+            max_num_tokens=128,
+            dp_size=1,
+            is_act_and_mul=True,
+            moe_parallel_config=SimpleNamespace(ep_rank=0),
+        )
+
+    captured: dict = {}
+
+    def capture(**kwargs):
+        captured.update(kwargs)
+        return torch.zeros(1)
+
+    swiglu_keys = ("gemm1_alpha", "gemm1_beta", "gemm1_clamp_limit")
+    expected = list(swiglu_keys) if is_mxfp8 else []
+    a1q_scale = torch.ones(k // 128, m, device="cuda")
+    w1 = torch.zeros(e, 2 * intermediate, k, dtype=torch.float8_e4m3fn, device="cuda")
+    w2 = torch.zeros(e, k, intermediate, dtype=torch.float8_e4m3fn, device="cuda")
+
+    # Modular (pre-routed) path.
+    captured.clear()
+    monkeypatch.setattr(
+        flashinfer.fused_moe, "trtllm_fp8_block_scale_routed_moe", capture
+    )
+    TrtLlmFp8ExpertsModular(make_moe_config(), make_quant_config()).apply(
+        output=torch.zeros(m, k, device="cuda"),
+        hidden_states=torch.randn(m, k, device="cuda"),
+        w1=w1,
+        w2=w2,
+        topk_weights=torch.zeros(m, topk, device="cuda"),
+        topk_ids=torch.zeros(m, topk, dtype=torch.int32, device="cuda"),
+        activation=MoEActivation.SILU,
+        global_num_experts=e,
+        expert_map=None,
+        a1q_scale=a1q_scale,
+        a2_scale=None,
+        workspace13=None,
+        workspace2=None,
+        expert_tokens_meta=None,
+        apply_router_weight_on_input=False,
+    )
+    forwarded = [key for key in swiglu_keys if key in captured]
+    assert forwarded == expected, (
+        f"modular path: expected {expected} gemm1 kwargs, got {forwarded}"
+    )
+
+    # Monolithic block-scale path.
+    captured.clear()
+    monkeypatch.setattr(flashinfer.fused_moe, "trtllm_fp8_block_scale_moe", capture)
+    TrtLlmFp8ExpertsMonolithic(
+        make_moe_config(), make_quant_config()
+    )._apply_block_scale(
+        hidden_states=torch.randn(m, k, device="cuda"),
+        w1=w1,
+        w2=w2,
+        router_logits=torch.randn(m, e, device="cuda"),
+        activation=MoEActivation.SILU,
+        global_num_experts=e,
+        expert_map=None,
+        a1q_scale=a1q_scale,
+        apply_router_weight_on_input=False,
+    )
+    forwarded = [key for key in swiglu_keys if key in captured]
+    assert forwarded == expected, (
+        f"monolithic path: expected {expected} gemm1 kwargs, got {forwarded}"
+    )
