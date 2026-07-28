@@ -30,6 +30,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.repo_utils import hf_api
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx942, on_gfx950
@@ -59,7 +60,7 @@ if QUARK_MXFP4_AVAILABLE:
     from quark.torch.quantization.config.config import FP4PerGroupSpec
 
 try:
-    huggingface_hub.list_repo_refs(
+    hf_api().list_repo_refs(
         "amd/Llama-3.3-70B-Instruct-WMXFP4-AMXFP4-KVFP8-Scale-UINT8-SQ"
     )
     HF_HUB_AMD_ORG_ACCESS = True
@@ -149,7 +150,7 @@ def test_quark_int8_w_per_tensor_a_per_tensor(vllm_runner, tp):
 @pytest.mark.parametrize("tp", [1])
 def test_quark_int8_w8a8_moe(vllm_runner, tp):
     """Test W8A8 INT8 MoE quantization with a tiny Qwen3 MoE model."""
-    model_path = "nameistoken/tiny-qwen3-moe-w8a8-int8-quark"
+    model_path = "amd/tiny-qwen3-moe-w8a8-int8"
     with vllm_runner(
         model_path,
         enforce_eager=True,
@@ -278,7 +279,7 @@ WIKITEXT_ACCURACY_CONFIGS = [
         excepted_value=10.6,
     ),
     AccuracyTestConfig(
-        model_name="fxmarty/qwen_1.5-moe-a2.7b-mxfp4", excepted_value=12.4
+        model_name="fxmarty/qwen_1.5-moe-a2.7b-mxfp4", excepted_value=12.45
     ),
 ]
 

@@ -176,6 +176,29 @@ def test_vllm_c_rms_norm_accepts_nd_input():
     assert_close(ir.ops.rms_norm, output, ref_output)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="ROCm vllm_c RMSNorm needs a contiguous output for strided inputs",
+)
+def test_vllm_c_rms_norm_accepts_transposed_input():
+    impl = ir.ops.rms_norm.impls["vllm_c"]
+    if not impl.supported:
+        pytest.skip("vllm_c impl not supported on this platform")
+
+    x = torch.randn(
+        1, 320, 120, dtype=torch.float16, device=current_platform.device_type
+    ).transpose(1, 2)
+    assert x.reshape(-1, x.shape[-1]).stride(-1) != 1
+    weight = torch.randn(320, dtype=torch.float16, device=current_platform.device_type)
+    epsilon = 1e-5
+
+    output = impl.impl_fn(x, weight, epsilon)
+    ref_output = rms_norm_native(x, weight, epsilon)
+
+    assert output.shape == x.shape
+    assert_close(ir.ops.rms_norm, output, ref_output)
+
+
 fused_add_rms_norm_native = ir.ops.fused_add_rms_norm.impls["native"].impl_fn
 
 
