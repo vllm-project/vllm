@@ -71,10 +71,9 @@ def _build_builder(vllm_config, kv_cache_spec):
 def _make_specs(vllm_config):
     """Both specs a chunked-local layer can reach a builder with.
 
-    With the hybrid KV cache manager enabled the builder sees a
-    `ChunkedLocalAttentionSpec`; by default vLLM disables it for chunked local
-    attention, which promotes the spec to a `FullAttentionSpec` that keeps
-    `attention_chunk_size` set.
+    With the hybrid KV cache manager enabled (the default on CUDA) the builder
+    sees a `ChunkedLocalAttentionSpec`. When it is disabled, the spec is promoted
+    to a `FullAttentionSpec` that keeps `attention_chunk_size` set.
     """
     common = dict(
         block_size=BLOCK_SIZE,
