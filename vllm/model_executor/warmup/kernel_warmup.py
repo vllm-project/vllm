@@ -93,6 +93,14 @@ def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
     )
 
 
+def _warmup_kv_block_zeroer(model_runner: object) -> None:
+    kv_block_zeroer = getattr(model_runner, "_kv_block_zeroer", None)
+    if kv_block_zeroer is None:
+        kv_block_zeroer = getattr(model_runner, "kv_block_zeroer", None)
+    if kv_block_zeroer is not None:
+        kv_block_zeroer.warmup()
+
+
 def kernel_warmup(worker: "Worker"):
     from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
         minimax_m3_msa_warmup,
@@ -132,11 +140,7 @@ def kernel_warmup(worker: "Worker"):
         max_tokens = worker.scheduler_config.max_num_batched_tokens
         deep_gemm_warmup(model, max_tokens)
 
-    kv_block_zeroer = getattr(worker.model_runner, "_kv_block_zeroer", None)
-    if kv_block_zeroer is None:
-        kv_block_zeroer = getattr(worker.model_runner, "kv_block_zeroer", None)
-    if kv_block_zeroer is not None:
-        kv_block_zeroer.warmup()
+    _warmup_kv_block_zeroer(worker.model_runner)
 
     minimax_m3_msa_warmup(worker)
 
