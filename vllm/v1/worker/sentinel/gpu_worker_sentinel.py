@@ -98,6 +98,7 @@ class WorkerSentinel:
             mgr.update_mask(ep_rank, masked=True)
 
         self._redistribute_experts(dead_ep_ranks)
+        self._sync_num_dispatchers_for_nixl_ep(dead_ep_ranks)
 
         world_size = self.worker.parallel_config.world_size
         port = params["new_stateless_dp_group_ports"][self.worker.rank % world_size]
@@ -204,6 +205,78 @@ class WorkerSentinel:
                 if 0 <= lid < new_map.shape[0]:
                     new_map[lid] = local_idx
             expert_map.copy_(new_map)
+
+    def _sync_num_dispatchers_for_nixl_ep(self, dead_ep_ranks: set[int]) -> None:
+        """Realign vLLM's cached dispatch count with the nixl_ep kernel after
+        dead EP ranks are masked during scale_down.
+
+        Both sides of the all2all cache how many ranks still take part:
+
+        - The kernel caches `active_rank_bound` = highest surviving EP rank
+          index + 1, refreshed only when the rank mask changes. Masking the
+          highest rank shrinks it; masking a lower rank just leaves a hole and
+          keeps it unchanged.
+        - Each MoE layer caches `num_dispatchers` (set to the original EP
+          world size) and uses it to size the expert output it hands back:
+          width `max_tokens * num_dispatchers`. When those results are
+          combined back across ranks, the kernel asserts the width equals
+          `active_rank_bound * max_tokens` and aborts on mismatch.
+
+        So masking the highest EP rank makes the two cached values disagree.
+        This method rewrites each layer's `num_dispatchers` to the kernel's
+        new bound so the shapes agree again.
+
+        nixl_ep only: DeepEP low-latency keeps a fixed num_ranks-wide layout
+        and skips masked ranks in-kernel, so its num_dispatchers must stay at
+        num_ranks.
+
+        NOTE: this hardcodes nixl_ep's "bound = highest surviving rank + 1"
+        convention. If nixl changes it, update here (better: expose a getter
+        and read it).
+        """
+        if self.worker.parallel_config.all2all_backend != "nixl_ep":
+            return
+
+        ep_world_size = get_ep_group().world_size
+        surviving = sorted(set(range(ep_world_size)) - dead_ep_ranks)
+        if not surviving:
+            return
+        active_rank_bound = surviving[-1] + 1
+
+        moe_layers = getattr(self.worker.model_runner.model, "moe_layers", None)
+        if moe_layers is None:
+            return
+
+        patched = 0
+        old_vals = set()
+        for layer in moe_layers:
+            # moe_layers holds MoERunner objects whose quant_method lives on
+            # routed_experts (exposed via the private _quant_method property);
+            # plain FusedMoE layers carry it directly.
+            routed = getattr(layer, "routed_experts", layer)
+            quant_method = getattr(routed, "quant_method", None)
+            moe_kernel = getattr(quant_method, "moe_kernel", None)
+            if moe_kernel is None or moe_kernel.is_monolithic:
+                continue
+            pf = moe_kernel.prepare_finalize
+            experts = moe_kernel.fused_experts
+            if hasattr(pf, "num_dispatchers_"):
+                old_vals.add(pf.num_dispatchers_)
+                pf.num_dispatchers_ = active_rank_bound
+            if getattr(experts, "num_dispatchers", None) is not None:
+                old_vals.add(experts.num_dispatchers)
+                experts.num_dispatchers = active_rank_bound
+            patched += 1
+
+        logger.info(
+            "[FT] Synced num_dispatchers to active_rank_bound=%d across %d layers "
+            "(old=%s, ep_world_size=%d, dead_ep_ranks=%s)",
+            active_rank_bound,
+            patched,
+            sorted(old_vals),
+            ep_world_size,
+            sorted(dead_ep_ranks),
+        )
 
     def _reset_eplb_async_state(self) -> None:
         """Clear stale EPLB async state after fault or scale-down."""
