@@ -3,7 +3,10 @@
 
 import pytest
 
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
+    ChatCompletionRequest,
+)
 
 
 def test_chat_completion_request_with_no_tools():
@@ -61,6 +64,63 @@ def test_chat_completion_request_with_tool_choice_but_no_tools(tool_choice):
                 "tools": None,
             }
         )
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        # MCP-style flat tool with no top-level "function" key.
+        {"type": "mcp", "name": "get_weather"},
+        # Empty tool object.
+        {},
+        # "function" present but not a dict.
+        {"type": "function", "function": None},
+    ],
+)
+def test_named_tool_choice_with_tool_missing_function_raises_clean_error(tool):
+    # A named tool_choice combined with a tool entry that lacks the expected
+    # ``{"function": {"name": ...}}`` structure must surface as a clean
+    # validation error (400-class), not a ``KeyError`` (which would become a
+    # 500). The invalid tool simply fails to match the requested name.
+    with pytest.raises(ValueError, match="does not match any of the specified `tools`"):
+        ChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "Hello"}],
+                "model": "facebook/opt-125m",
+                "tools": [tool],
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "get_weather"},
+                },
+            }
+        )
+
+
+def test_named_tool_choice_with_matching_valid_tool_validates():
+    # Regression guard: a valid tool plus a matching named tool_choice must
+    # still validate successfully (the defensive lookup must not change
+    # behavior for well-formed tools).
+    request = ChatCompletionRequest.model_validate(
+        {
+            "messages": [{"role": "user", "content": "Hello"}],
+            "model": "facebook/opt-125m",
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "get_weather"},
+            },
+        }
+    )
+    assert isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
+    assert request.tool_choice.function.name == "get_weather"
 
 
 def test_reasoning_content_normalized_to_reasoning():
