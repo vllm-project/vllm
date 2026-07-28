@@ -20,7 +20,7 @@ REQ = ReqContext(req_id="test")
 
 
 @pytest.mark.parametrize("policy", ["lru", "arc", "sae"])
-def test_stats_emit_four_counters_with_policy_label(policy: str):
+def test_stats_emit_four_counters(policy: str):
     mgr = CPUOffloadingManager(num_blocks=4, cache_policy=policy)
     # Two misses
     assert mgr.lookup(key(1), REQ) == LookupResult.MISS
@@ -29,10 +29,10 @@ def test_stats_emit_four_counters_with_policy_label(policy: str):
     stats = mgr.get_stats()
     assert stats is not None
     data = stats.data["data"]
-    assert data.get(CPUOffloadingMetrics.CPU_BLOCK_LOOKUP, {}).get((policy,)) == 2
-    assert data.get(CPUOffloadingMetrics.CPU_BLOCK_HIT, {}).get((policy,)) == 0
-    assert data.get(CPUOffloadingMetrics.CPU_BLOCK_MISS, {}).get((policy,)) == 2
-    assert data.get(CPUOffloadingMetrics.BLOCK_EVICTION, {}).get((policy,)) == 0
+    assert data.get(CPUOffloadingMetrics.CPU_BLOCK_LOOKUP, {}).get(()) == 2
+    assert data.get(CPUOffloadingMetrics.CPU_BLOCK_HIT, {}).get(()) == 0
+    assert data.get(CPUOffloadingMetrics.CPU_BLOCK_MISS, {}).get(()) == 2
+    assert data.get(CPUOffloadingMetrics.BLOCK_EVICTION, {}).get(()) == 0
 
 
 @pytest.mark.parametrize("policy", ["lru", "arc", "sae"])
@@ -50,9 +50,9 @@ def test_stats_hits_plus_misses_equals_lookups(policy: str):
     stats = mgr.get_stats()
     assert stats is not None
     data = stats.data["data"]
-    lookups = data.get(CPUOffloadingMetrics.CPU_BLOCK_LOOKUP, {}).get((policy,), 0)
-    hits = data.get(CPUOffloadingMetrics.CPU_BLOCK_HIT, {}).get((policy,), 0)
-    misses = data.get(CPUOffloadingMetrics.CPU_BLOCK_MISS, {}).get((policy,), 0)
+    lookups = data.get(CPUOffloadingMetrics.CPU_BLOCK_LOOKUP, {}).get((), 0)
+    hits = data.get(CPUOffloadingMetrics.CPU_BLOCK_HIT, {}).get((), 0)
+    misses = data.get(CPUOffloadingMetrics.CPU_BLOCK_MISS, {}).get((), 0)
     assert lookups == hits + misses
     assert hits == 1
     assert misses == 2
@@ -66,11 +66,11 @@ def test_stats_deltas_reset_each_call(policy: str):
     stats = mgr.get_stats()
     assert stats is not None
     data = stats.data["data"]
-    # No new activity → counter for this policy label should be 0
-    assert data.get(CPUOffloadingMetrics.CPU_BLOCK_LOOKUP, {}).get((policy,), 0) == 0
-    assert data.get(CPUOffloadingMetrics.CPU_BLOCK_HIT, {}).get((policy,), 0) == 0
-    assert data.get(CPUOffloadingMetrics.CPU_BLOCK_MISS, {}).get((policy,), 0) == 0
-    assert data.get(CPUOffloadingMetrics.BLOCK_EVICTION, {}).get((policy,), 0) == 0
+    # No new activity → counters should be 0
+    assert data.get(CPUOffloadingMetrics.CPU_BLOCK_LOOKUP, {}).get((), 0) == 0
+    assert data.get(CPUOffloadingMetrics.CPU_BLOCK_HIT, {}).get((), 0) == 0
+    assert data.get(CPUOffloadingMetrics.CPU_BLOCK_MISS, {}).get((), 0) == 0
+    assert data.get(CPUOffloadingMetrics.BLOCK_EVICTION, {}).get((), 0) == 0
 
 
 @pytest.mark.parametrize("policy", ["lru", "arc", "sae"])
@@ -88,4 +88,4 @@ def test_stats_eviction_counter_matches_evicted_key_count(policy: str):
     stats = mgr.get_stats()
     assert stats is not None
     data = stats.data["data"]
-    assert data.get(CPUOffloadingMetrics.BLOCK_EVICTION, {}).get((policy,)) == 2
+    assert data.get(CPUOffloadingMetrics.BLOCK_EVICTION, {}).get(()) == 2

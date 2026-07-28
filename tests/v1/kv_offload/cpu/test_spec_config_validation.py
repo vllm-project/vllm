@@ -176,7 +176,7 @@ def test_default_policy_still_lru_when_not_specified():
     assert spec._sae_policy_kwargs == {}
 
 
-def test_build_metric_definitions_includes_four_labelled_counters():
+def test_build_metric_definitions_includes_four_counters():
     definitions = CPUOffloadingSpec.build_metric_definitions({})
     from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
 
@@ -187,4 +187,4 @@ def test_build_metric_definitions_includes_four_labelled_counters():
         CPUOffloadingMetrics.BLOCK_EVICTION,
     ):
         assert name in definitions
-        assert definitions[name].labelnames == ("policy",)
+        assert definitions[name].labelnames == ()
