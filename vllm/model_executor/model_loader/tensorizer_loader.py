@@ -11,6 +11,7 @@ from vllm.config import ModelConfig, ParallelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.reload import freeze_load_plan
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig,
     deserialize_tensorizer_model,
@@ -84,6 +85,7 @@ class TensorizerLoader(BaseModelLoader):
                 model = initialize_model(vllm_config=vllm_config, prefix=prefix)
 
             model.load_weights(self._get_weights_iterator())
+            freeze_load_plan(model)
         return model.eval()
 
     def download_model(self, model_config: ModelConfig) -> None:
@@ -135,6 +137,7 @@ class TensorizerLoader(BaseModelLoader):
                         tensorizer_config=tensorizer_config, vllm_config=vllm_config
                     )
             self.load_weights(model, model_config)
+            freeze_load_plan(model)
             return model
         return self._load_model_serialized_cpu(vllm_config=vllm_config, prefix=prefix)
 

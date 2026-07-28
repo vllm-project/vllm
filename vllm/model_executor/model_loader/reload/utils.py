@@ -10,7 +10,7 @@ from .types import LayerReloadingInfo, LayerTensors
 __all__ = [
     "get_layer_tensors",
     "get_layer_params_buffers",
-    "get_layer_size",
+    "get_loadable_layer_tensors",
     "has_device_tensors",
     "get_info_size",
 ]
@@ -30,19 +30,27 @@ def get_layer_params_buffers(layer: torch.nn.Module) -> LayerTensors:
     )
 
 
-def get_layer_size(layer: torch.nn.Module) -> int:
-    """Calculate total number of elements across loadable tensors in a layer.
+def get_loadable_layer_tensors(layer: torch.nn.Module) -> dict[str, torch.Tensor]:
+    """Get the tensors of a layer that a weight loader may write to, excluding
+    SKIP_TENSORS (e.g. _expert_map), which reload never moves to meta."""
+    from .meta import SKIP_TENSORS
 
-    Excludes SKIP_LOAD_TENSORS (e.g. _expert_map) which are never loaded via
-    weight_loader during layerwise reload.
-    """
-    from .meta import SKIP_LOAD_TENSORS
+    params, buffers = get_layer_params_buffers(layer)
+    non_persistent = getattr(layer, "_non_persistent_buffers_set", set())
 
-    return sum(
-        tensor.numel()
-        for name, tensor in get_layer_tensors(layer).items()
-        if name not in SKIP_LOAD_TENSORS
-    )
+    # A non-persistent buffer is absent from ``state_dict`` and so is derived
+    # state, not a checkpoint destination, unless it carries its own loader.
+    loadable_buffers = {
+        name: buffer
+        for name, buffer in buffers.items()
+        if name not in non_persistent
+        or getattr(buffer, "weight_loader", None) is not None
+    }
+    return {
+        name: tensor
+        for name, tensor in (params | loadable_buffers).items()
+        if name not in SKIP_TENSORS
+    }
 
 
 def has_device_tensors(bound_args: BoundArguments) -> bool:
