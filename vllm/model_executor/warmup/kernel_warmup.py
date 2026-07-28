@@ -7,7 +7,6 @@ happen during model execution.
 """
 
 import time
-from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import torch
@@ -25,9 +24,6 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
     flashinfer_sparse_mla_decode_autotune_warmup,
 )
 from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
-from vllm.model_executor.warmup.v1_block_table_warmup import (
-    warm_v1_block_table_kernels,
-)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer
@@ -39,49 +35,11 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-_JitWarmupStep = tuple[str, Callable[[], None]]
-
-
-def _run_jit_warmup_step(
-    step: _JitWarmupStep,
-    *,
-    index: int,
-    total: int,
-) -> None:
-    name, fn = step
-    logger.info("JIT kernel warmup [%d/%d] starting: %s", index, total, name)
-    start = time.perf_counter()
-    try:
-        fn()
-    except Exception:
-        logger.exception(
-            "JIT kernel warmup [%d/%d] failed after %.2fs: %s",
-            index,
-            total,
-            time.perf_counter() - start,
-            name,
-        )
-        raise
-    logger.info(
-        "JIT kernel warmup [%d/%d] finished in %.2fs: %s",
-        index,
-        total,
-        time.perf_counter() - start,
-        name,
-    )
-
-
 def kernel_warmup(worker: "Worker"):
     from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
         minimax_m3_msa_warmup,
     )
 
-    # Pooling models do not use the generation slot-mapping path.
-    if not worker.use_v2_model_runner and not worker.model_runner.is_pooling_model:
-        warm_v1_block_table_kernels(
-            getattr(worker.model_runner, "device", torch.device("cuda")),
-            worker.scheduler_config.max_num_batched_tokens,
-        )
     qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
 
     # Run next so input-prep kernels JIT against pristine runner state.
@@ -149,24 +107,16 @@ def kernel_warmup(worker: "Worker"):
         cutedsl_warmup()
 
     if worker.vllm_config.kernel_config.enable_jit_warmup:
-        jit_warmup_steps: list[_JitWarmupStep] = [
-            (
-                "Registered JIT kernels",
-                worker.model_runner.jit_warmup_registry.warmup,
-            ),
-        ]
-
-        logger.info(
-            "JIT kernel warmup starting with %d step(s).",
-            len(jit_warmup_steps),
-        )
+        logger.info("JIT kernel warmup starting.")
         jit_warmup_start = time.perf_counter()
-        for index, step in enumerate(jit_warmup_steps, start=1):
-            _run_jit_warmup_step(
-                step,
-                index=index,
-                total=len(jit_warmup_steps),
+        try:
+            worker.model_runner.jit_warmup_registry.warmup()
+        except Exception:
+            logger.exception(
+                "JIT kernel warmup failed after %.2fs.",
+                time.perf_counter() - jit_warmup_start,
             )
+            raise
         logger.info(
             "JIT kernel warmup finished in %.2fs.",
             time.perf_counter() - jit_warmup_start,

@@ -102,7 +102,6 @@ def cutedsl_warmup() -> None:
 
     compile_units = _collect_unique_compile_units(_iter_cutedsl_warmup_compile_units())
     if not compile_units:
-        logger.info("Skipping CuTeDSL warmup because no compile units were requested.")
         return
 
     unit_names = list(dict.fromkeys(unit.name for unit in compile_units))

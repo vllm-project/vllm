@@ -605,15 +605,17 @@ class DeepseekV4MoE(nn.Module):
             self._init_fused_moe_experts(vllm_config, config, quant_config, prefix)
 
         if vllm_config.kernel_config.enable_jit_warmup:
-            from vllm.model_executor.layers.fused_moe.router.base_router import (
-                _EPLB_MAP_AND_RECORD_KERNEL,
-            )
             from vllm.model_executor.layers.fused_moe.router.dsv4_topk import (
                 _DSV4_TOPK_KERNEL,
             )
             from vllm.model_executor.warmup.jit_warmup import register_jit_warmup
 
-            register_jit_warmup(_EPLB_MAP_AND_RECORD_KERNEL)
+            if vllm_config.parallel_config.enable_eplb:
+                from vllm.model_executor.layers.fused_moe.router.base_router import (
+                    _EPLB_MAP_AND_RECORD_KERNEL,
+                )
+
+                register_jit_warmup(_EPLB_MAP_AND_RECORD_KERNEL)
             register_jit_warmup(_DSV4_TOPK_KERNEL)
             if self.use_mega_moe:
                 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
@@ -627,8 +629,16 @@ class DeepseekV4MoE(nn.Module):
                 register_jit_warmup(_DEEPGEMM_EP_SCATTER_COPY_KERNEL)
                 register_jit_warmup(_DEEPGEMM_EP_GATHER_KERNEL)
             else:
+                from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (  # noqa: E501
+                    DeepGemmExperts,
+                    DeepGemmFP4Experts,
+                )
                 from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (  # noqa: E501
                     _BATCHED_TRITON_KERNEL,
+                    BatchedTritonExperts,
+                )
+                from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
+                    TritonExperts,
                 )
                 from vllm.model_executor.layers.fused_moe.fused_moe import (
                     _COMPUTE_IDENTITY_KERNEL,
@@ -643,8 +653,31 @@ class DeepseekV4MoE(nn.Module):
                     _SWIGLU_LIMIT_PAD_AWARE_KERNEL,
                 )
 
-                register_jit_warmup(_FUSED_MOE_TRITON_KERNEL)
-                register_jit_warmup(_BATCHED_TRITON_KERNEL)
+                experts_cls = getattr(
+                    self.experts.routed_experts.quant_method,
+                    "experts_cls",
+                    None,
+                )
+                if not isinstance(experts_cls, type) or issubclass(
+                    experts_cls, TritonExperts
+                ):
+                    register_jit_warmup(_FUSED_MOE_TRITON_KERNEL)
+                if not isinstance(experts_cls, type) or issubclass(
+                    experts_cls, BatchedTritonExperts
+                ):
+                    register_jit_warmup(_BATCHED_TRITON_KERNEL)
+                if isinstance(experts_cls, type) and issubclass(
+                    experts_cls, (DeepGemmExperts, DeepGemmFP4Experts)
+                ):
+                    from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (  # noqa: E501
+                        _DEEPGEMM_EP_GATHER_KERNEL,
+                        _DEEPGEMM_EP_SCATTER_COPY_KERNEL,
+                        _DEEPGEMM_EP_SCATTER_START_KERNEL,
+                    )
+
+                    register_jit_warmup(_DEEPGEMM_EP_SCATTER_START_KERNEL)
+                    register_jit_warmup(_DEEPGEMM_EP_SCATTER_COPY_KERNEL)
+                    register_jit_warmup(_DEEPGEMM_EP_GATHER_KERNEL)
                 register_jit_warmup(_COMPUTE_IDENTITY_KERNEL)
                 register_jit_warmup(_MOE_FUSED_MUL_SUM_KERNEL)
                 register_jit_warmup(_COUNT_EXPERT_NUM_TOKENS_KERNEL)

@@ -163,9 +163,6 @@ class PrepareMegaMoeInputsKernel(
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        if vllm_config.kernel_config.moe_backend != "deep_gemm_mega_moe":
-            return []
-
         hf_config = vllm_config.model_config.hf_config
         if getattr(hf_config, "model_type", None) != "deepseek_v4":
             return []

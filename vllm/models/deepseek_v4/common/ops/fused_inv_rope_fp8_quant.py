@@ -15,7 +15,10 @@ import torch
 from vllm.model_executor.warmup.jit_warmup import (
     VllmJitKernel,
 )
-from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+    triton_scalar_specialization_rep,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -264,13 +267,18 @@ class FusedInvRopeFP8QuantKernel(
             TritonWarmupTensor(scale_dtype),
             1,  # do not specialize num_tokens
             heads_per_group=compile_key.heads_per_group,
-            o_stride_token=head_dim * compile_key.heads_per_group,
-            o_stride_head=head_dim,
-            cache_stride_pos=compile_key.half_rope * 2,
-            fp8_stride_group=fp8_dim,
-            fp8_stride_token=fp8_dim,
-            scale_stride_group=1,
-            scale_stride_k=1,
+            o_stride_token=triton_scalar_specialization_rep(
+                head_dim * compile_key.heads_per_group
+            ),
+            o_stride_head=triton_scalar_specialization_rep(head_dim),
+            cache_stride_pos=triton_scalar_specialization_rep(
+                compile_key.half_rope * 2
+            ),
+            fp8_stride_group=triton_scalar_specialization_rep(fp8_dim),
+            fp8_stride_token=triton_scalar_specialization_rep(fp8_dim),
+            # Both scale strides are TMA aligned at runtime.
+            scale_stride_group=triton_scalar_specialization_rep(16),
+            scale_stride_k=triton_scalar_specialization_rep(16),
             fp8_max=compile_key.fp8_max,
             eps=1e-10,
             QUANT_GROUP_SIZE=compile_key.quant_group_size,

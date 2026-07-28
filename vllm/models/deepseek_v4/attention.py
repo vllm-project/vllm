@@ -325,43 +325,52 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             from vllm.model_executor.warmup.jit_warmup import register_jit_warmup
             from vllm.platforms import current_platform
             from vllm.utils.import_utils import has_cutedsl
-            from vllm.v1.attention.backends.mla.compressor_utils import (
-                _COMPRESSED_SLOT_MAPPING_KERNEL,
-            )
-            from vllm.v1.attention.backends.mla.indexer import (
-                _BUILD_PREFILL_CHUNK_METADATA_KERNEL,
-                _PREPARE_UNIFORM_DECODE_KERNEL,
-            )
             from vllm.v1.attention.backends.mla.sparse_swa import (
-                _COMPUTE_DSPARK_NONCAUSAL_SWA_INDICES_KERNEL,
                 _COMPUTE_PREFILL_METADATA_KERNEL,
                 _COMPUTE_SWA_INDICES_AND_LENS_KERNEL,
             )
-            from vllm.v1.attention.backends.mla.sparse_utils import (
-                _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL,
-            )
-            from vllm.v1.attention.ops.common import _CORRECT_ATTN_CP_OUT_KERNEL
 
             register_jit_warmup(_FUSED_Q_KV_RMSNORM_KERNEL)
-            register_jit_warmup(_CORRECT_ATTN_CP_OUT_KERNEL)
-            register_jit_warmup(_COMPRESSED_SLOT_MAPPING_KERNEL)
-            register_jit_warmup(_CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL)
-            register_jit_warmup(_PREPARE_UNIFORM_DECODE_KERNEL)
-            register_jit_warmup(_BUILD_PREFILL_CHUNK_METADATA_KERNEL)
             register_jit_warmup(_COMPUTE_PREFILL_METADATA_KERNEL)
             register_jit_warmup(_COMPUTE_SWA_INDICES_AND_LENS_KERNEL)
-            register_jit_warmup(_COMPUTE_DSPARK_NONCAUSAL_SWA_INDICES_KERNEL)
+
+            if self.compress_ratio > 1:
+                from vllm.v1.attention.backends.mla.compressor_utils import (
+                    _COMPRESSED_SLOT_MAPPING_KERNEL,
+                )
+
+                register_jit_warmup(_COMPRESSED_SLOT_MAPPING_KERNEL)
+
+            if self.indexer is not None:
+                from vllm.v1.attention.backends.mla.indexer import (
+                    _BUILD_PREFILL_CHUNK_METADATA_KERNEL,
+                    _PREPARE_UNIFORM_DECODE_KERNEL,
+                )
+
+                register_jit_warmup(_PREPARE_UNIFORM_DECODE_KERNEL)
+                register_jit_warmup(_BUILD_PREFILL_CHUNK_METADATA_KERNEL)
+
+            spec_config = vllm_config.speculative_config
+            if spec_config is not None and spec_config.use_dspark():
+                from vllm.v1.attention.backends.mla.sparse_swa import (
+                    _COMPUTE_DSPARK_NONCAUSAL_SWA_INDICES_KERNEL,
+                )
+
+                register_jit_warmup(_COMPUTE_DSPARK_NONCAUSAL_SWA_INDICES_KERNEL)
 
             if current_platform.is_cuda():
                 from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (  # noqa: E501
                     _FUSED_INV_ROPE_FP8_QUANT_KERNEL,
                 )
-                from vllm.models.deepseek_v4.sparse_mla import (
-                    _BUILD_C128A_TOPK_METADATA_KERNEL,
-                )
 
                 register_jit_warmup(_FUSED_INV_ROPE_FP8_QUANT_KERNEL)
-                register_jit_warmup(_BUILD_C128A_TOPK_METADATA_KERNEL)
+
+                if self.compress_ratio == 128:
+                    from vllm.models.deepseek_v4.sparse_mla import (
+                        _BUILD_C128A_TOPK_METADATA_KERNEL,
+                    )
+
+                    register_jit_warmup(_BUILD_C128A_TOPK_METADATA_KERNEL)
 
                 backend_name = self.backend_cls.get_name()
                 if backend_name == "FLASHMLA_SPARSE_DSV4":
@@ -371,14 +380,17 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                         _DEQUANTIZE_AND_GATHER_K_CACHE_KERNEL,
                     )
 
-                    register_jit_warmup(_COMPUTE_GLOBAL_TOPK_INDICES_AND_LENS_KERNEL)
+                    if self.compress_ratio == 4:
+                        register_jit_warmup(
+                            _COMPUTE_GLOBAL_TOPK_INDICES_AND_LENS_KERNEL
+                        )
                     register_jit_warmup(_COMBINE_TOPK_SWA_INDICES_KERNEL)
                     if has_cutedsl():
                         from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (  # noqa: E501
-                            _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL,
+                            DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL,
                         )
 
-                        register_jit_warmup(_DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL)
+                        register_jit_warmup(DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL)
                     else:
                         register_jit_warmup(_DEQUANTIZE_AND_GATHER_K_CACHE_KERNEL)
                 elif backend_name == "FLASHINFER_MLA_SPARSE_DSV4":
@@ -387,7 +399,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                         _COMPUTE_GLOBAL_TOPK_INDICES_AND_LENS_KERNEL,
                     )
 
-                    register_jit_warmup(_COMPUTE_GLOBAL_TOPK_INDICES_AND_LENS_KERNEL)
+                    if self.compress_ratio == 4:
+                        register_jit_warmup(
+                            _COMPUTE_GLOBAL_TOPK_INDICES_AND_LENS_KERNEL
+                        )
                     register_jit_warmup(_BUILD_FLASHINFER_MIXED_SPARSE_INDICES_KERNEL)
 
     def forward(

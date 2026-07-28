@@ -1695,6 +1695,7 @@ class SparseAttnNormRopeStoreKernel(
         norm_weight_dtype: type[cutlass.Numeric],
         head_size: int,
         rope_head_dim: int,
+        runtime_kv_block_stride: int | None = None,
     ) -> CompileKey:
         raw_kv_cache_block_size = cache_block_size // compress_ratio
         kv_cache_block_size = (
@@ -1709,28 +1710,44 @@ class SparseAttnNormRopeStoreKernel(
             quant_block=64,
             token_stride=token_stride,
             scale_dim=scale_dim,
-            kv_block_stride=round_up(
-                kv_cache_block_size * (token_stride + scale_dim),
-                cache_alignment,
+            kv_block_stride=(
+                runtime_kv_block_stride
+                if runtime_kv_block_stride is not None
+                else round_up(
+                    kv_cache_block_size * (token_stride + scale_dim),
+                    cache_alignment,
+                )
             ),
             compress_ratio=compress_ratio,
             norm_weight_dtype=norm_weight_dtype,
             kv_cache_block_size=kv_cache_block_size,
         )
 
-    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+    def get_warmup_keys(
+        self,
+        vllm_config: Any,
+        *,
+        k_cache_prefix: str,
+        compress_ratio: int,
+    ) -> list[CompileKey]:
         hf_config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
+        k_cache_layer = vllm_config.compilation_config.static_forward_context[
+            k_cache_prefix
+        ]
+        kv_cache = k_cache_layer.kv_cache
         return self._trace_dispatch(self.dispatch)(
-            compress_ratio=128,
+            compress_ratio=compress_ratio,
             cache_block_size=cache_config.block_size,
             cache_alignment=576,
             norm_weight_dtype=torch_to_cute_dtype(vllm_config.model_config.dtype),
             head_size=hf_config.head_dim,
             rope_head_dim=hf_config.qk_rope_head_dim,
+            runtime_kv_block_stride=kv_cache.stride(0),
             enabled=(
                 cache_config.block_size > 0
-                and 128 in hf_config.compress_ratios
+                and compress_ratio == 128
+                and kv_cache.ndim == 3
                 and cache_config.cache_dtype == "fp8_ds_mla"
             ),
             _when=lambda *, enabled: enabled,
@@ -1835,6 +1852,7 @@ class SparseAttnNormRopeStoreKernel(
             norm_weight_dtype=torch_to_cute_dtype(rms_norm_weight.dtype),
             head_size=head_dim,
             rope_head_dim=rope_head_dim,
+            runtime_kv_block_stride=kv_cache.stride(0),
         )
         runtime_context = {
             "kv_cache_shape": tuple(kv_cache.shape),

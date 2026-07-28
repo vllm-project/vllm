@@ -18,6 +18,7 @@ from vllm.utils.import_utils import has_cutedsl
 if not current_platform.is_cuda_alike():
     pytest.skip("NVIDIA DSv4 dispatch tests require CUDA", allow_module_level=True)
 
+import vllm.model_executor.layers.fused_moe.deep_gemm_utils as deep_gemm_utils_module
 import vllm.model_executor.layers.fused_moe.moe_fused_mul_sum as mul_sum_module
 from vllm.model_executor.kernels.mhc.tilelang_kernels import (
     HcPrenormGemmTileLangKernel,
@@ -25,6 +26,7 @@ from vllm.model_executor.kernels.mhc.tilelang_kernels import (
     MhcPreBigFuseTileLangKernel,
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
+    DeepGemmEPGatherKernel,
     DeepGemmEPScatterCopyKernel,
     DeepGemmEPScatterStartKernel,
 )
@@ -43,8 +45,12 @@ from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_cutedsl impo
     BF16x3SplitKReduceKernel,
 )
 from vllm.model_executor.layers.fused_moe.router.dsv4_topk import DSV4TopKKernel
+from vllm.model_executor.layers.fused_moe.utils import CountExpertNumTokensKernel
 from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
     FusedKVCompressNormRopeInsertIndexerTritonKernel,
+)
+from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
+    FusedInvRopeFP8QuantKernel,
 )
 from vllm.models.deepseek_v4.common.ops.fused_mtp_input_rmsnorm import (
     FusedMTPInputRMSNormKernel,
@@ -60,6 +66,8 @@ from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import (
     _PREPARE_MEGAMOE_INPUTS_KERNEL,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import ComputePrefillMetadataKernel
+from vllm.v1.attention.ops.common import CorrectAttnCPOutKernel
+from vllm.v1.worker.block_table import ComputeSlotMappingKernel
 
 _HAS_CUTEDSL = has_cutedsl()
 requires_cutedsl = pytest.mark.skipif(
@@ -68,7 +76,7 @@ requires_cutedsl = pytest.mark.skipif(
 )
 
 if _HAS_CUTEDSL:
-    from cutlass import Float32
+    from cutlass import BFloat16, Float32
 
     from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
         StableTopKFromGatheredCandidatesKernel,
@@ -78,6 +86,7 @@ if _HAS_CUTEDSL:
         BF16x3RouterGemmKernel,
     )
     from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (
+        DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL,
         DequantGatherKCacheKernel,
     )
     from vllm.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl import (
@@ -102,7 +111,7 @@ def test_deepseek_v4_mega_moe_prepare_inputs_warmup_keys() -> None:
                 num_experts_per_tok=6,
             )
         ),
-        kernel_config=SimpleNamespace(moe_backend="deep_gemm_mega_moe"),
+        kernel_config=SimpleNamespace(moe_backend="auto"),
     )
 
     assert _PREPARE_MEGAMOE_INPUTS_KERNEL.get_warmup_keys(vllm_config) == [
@@ -141,6 +150,75 @@ def test_deepseek_v4_c128a_topk_metadata_warmup_keys() -> None:
             triton_block_size=1024,
         )
     ]
+
+
+@pytest.mark.parametrize(
+    ("kv_cache_block_size", "blocks_per_kv_block", "block_size", "block_size_rep"),
+    [
+        (256, 1, 256, 16),
+        (256, 4, 64, 16),
+        (64, 1, 64, 16),
+        (8, 1, 8, 2),
+        (4, 1, 4, 2),
+    ],
+)
+def test_compute_slot_mapping_warmup_matches_runtime_specializations(
+    kv_cache_block_size: int,
+    blocks_per_kv_block: int,
+    block_size: int,
+    block_size_rep: int,
+) -> None:
+    kernel = ComputeSlotMappingKernel()
+    kwargs = dict(
+        kv_cache_block_size=kv_cache_block_size,
+        blocks_per_kv_block=blocks_per_kv_block,
+        total_cp_world_size=1,
+        total_cp_rank=0,
+        cp_kv_cache_interleave_size=1,
+        block_table_stride=32768,
+        block_size=block_size,
+    )
+    expected = kernel.CompileKey(
+        kv_cache_block_size=kv_cache_block_size,
+        blocks_per_kv_block=blocks_per_kv_block,
+        total_cp_world_size=1,
+        total_cp_rank=0,
+        cp_kv_cache_interleave_size=1,
+        block_table_stride=16,
+        block_size=block_size_rep,
+        pad_id=-1,
+        triton_block_size=1024,
+    )
+
+    assert kernel.dispatch(**kwargs) == expected
+    assert kernel.get_warmup_keys(**kwargs) == [expected]
+
+
+def test_correct_attn_cp_out_warmup_uses_dsv4_head_dim() -> None:
+    hf_config = SimpleNamespace(
+        compress_ratios=(1, 4, 128),
+        head_dim=512,
+        num_attention_heads=128,
+        q_lora_rank=1536,
+        qk_rope_head_dim=64,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            hf_config=hf_config,
+            hf_text_config=hf_config,
+        ),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=2,
+            tensor_parallel_size=4,
+        ),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=1),
+    )
+
+    warmup_keys = CorrectAttnCPOutKernel().get_warmup_keys(vllm_config)
+
+    assert len(warmup_keys) == 4
+    assert {key.head_dim for key in warmup_keys} == {512}
 
 
 @pytest.mark.parametrize(
@@ -269,6 +347,76 @@ def test_deep_gemm_scatter_start_dispatch_matches_legacy_meta() -> None:
     )
 
 
+def test_deep_gemm_scatter_start_warmup_covers_dynamic_alignment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        deep_gemm_utils_module,
+        "get_mk_alignment_for_contiguous_layout",
+        lambda: (128, 128),
+    )
+    monkeypatch.setattr(
+        deep_gemm_utils_module,
+        "get_theoretical_mk_alignment_for_contiguous_layout",
+        lambda *, expected_m, num_groups: 32 if expected_m <= 8 else 48,
+    )
+    vllm_config = SimpleNamespace(
+        kernel_config=SimpleNamespace(moe_backend="auto"),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                model_type="deepseek_v4",
+                n_routed_experts=256,
+                num_experts_per_tok=8,
+            )
+        ),
+        parallel_config=SimpleNamespace(
+            data_parallel_size=1,
+            enable_expert_parallel=False,
+            eplb_config=SimpleNamespace(num_redundant_experts=0),
+        ),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
+    )
+
+    assert DeepGemmEPScatterStartKernel().get_warmup_keys(vllm_config) == [
+        DeepGemmEPScatterStartKernel.CompileKey(
+            num_experts=256,
+            block_e=128,
+            block_expert_num=256,
+            align_m=32,
+        ),
+        DeepGemmEPScatterStartKernel.CompileKey(
+            num_experts=256,
+            block_e=128,
+            block_expert_num=256,
+            align_m=48,
+        ),
+    ]
+
+
+@pytest.mark.parametrize("has_expert_map", [False, True])
+def test_count_expert_num_tokens_compile_matches_optional_pointer(
+    monkeypatch: pytest.MonkeyPatch,
+    has_expert_map: bool,
+) -> None:
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    kernel = CountExpertNumTokensKernel()
+    monkeypatch.setattr(
+        kernel,
+        "kernel",
+        SimpleNamespace(warmup=lambda *args, **kwargs: calls.append((args, kwargs))),
+    )
+    compile_key = kernel.CompileKey(
+        num_experts=16,
+        topk_numel=16,
+        has_expert_map=has_expert_map,
+        block_size=16,
+    )
+
+    kernel.compile(compile_key)
+
+    assert (calls[0][0][4] is not None) is has_expert_map
+
+
 @pytest.mark.parametrize(
     ("pack_ue8m0", "expected_packed", "expected_packed_pad"),
     [(False, 1, 1), (True, 14, 16)],
@@ -281,12 +429,14 @@ def test_deep_gemm_scatter_copy_dispatch_matches_legacy_meta(
     kernel = DeepGemmEPScatterCopyKernel()
 
     assert kernel.dispatch(
+        total_token_num=17,
         hidden_size=7168,
         topk_num=8,
         has_expert_map=True,
         block_size=128,
         pack_ue8m0=pack_ue8m0,
     ) == kernel.CompileKey(
+        total_token_num=2,
         topk_num=8,
         has_expert_map=True,
         hidden_size=7168,
@@ -296,6 +446,26 @@ def test_deep_gemm_scatter_copy_dispatch_matches_legacy_meta(
         pack_ue8m0=pack_ue8m0,
         scale_packed_size=expected_packed,
         scale_packed_size_pad=expected_packed_pad,
+    )
+
+
+def test_deep_gemm_gather_dispatch_matches_runtime_layout() -> None:
+    kernel = DeepGemmEPGatherKernel()
+
+    assert kernel.dispatch(
+        dtype=torch.bfloat16,
+        total_token_num=16,
+        hidden_size=7168,
+        topk_num=8,
+        has_expert_map=False,
+    ) == kernel.CompileKey(
+        dtype=torch.bfloat16,
+        total_token_num=16,
+        topk_num=8,
+        has_expert_map=False,
+        block_d=1024,
+        hidden_stride=16,
+        topk_stride=2,
     )
 
 
@@ -574,6 +744,41 @@ def test_fused_qkv_rmsnorm_dispatch_matches_legacy_meta() -> None:
     )
 
 
+def test_fused_inv_rope_warmup_uses_runtime_stride_classes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel = FusedInvRopeFP8QuantKernel()
+    warmup_kwargs: dict[str, Any] = {}
+
+    def capture_warmup(*args: Any, **kwargs: Any) -> None:
+        warmup_kwargs.update(kwargs)
+
+    monkeypatch.setattr(kernel.kernel, "warmup", capture_warmup)
+    kernel.compile(
+        kernel.CompileKey(
+            heads_per_group=16,
+            fp8_max=448.0,
+            quant_group_size=128,
+            chunks_per_head=4,
+            rope_start=64,
+            half_rope=32,
+            tma_aligned_scales=True,
+            use_gdc=True,
+        )
+    )
+
+    stride_names = (
+        "o_stride_token",
+        "o_stride_head",
+        "cache_stride_pos",
+        "fp8_stride_group",
+        "fp8_stride_token",
+        "scale_stride_group",
+        "scale_stride_k",
+    )
+    assert {warmup_kwargs[name] for name in stride_names} == {16}
+
+
 def test_save_partial_states_dispatch_matches_legacy_meta() -> None:
     kernel = SavePartialStatesKernel()
 
@@ -601,6 +806,22 @@ def test_save_partial_states_dispatch_matches_legacy_meta() -> None:
         block_size=16,
         launch_pdl=True,
     )
+
+
+def test_save_partial_states_warmup_filters_zipped_compression_cases() -> None:
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                head_dim=512,
+                compress_ratios=(128,),
+            )
+        )
+    )
+
+    warmup_keys = SavePartialStatesKernel().get_warmup_keys(vllm_config)
+
+    assert len(warmup_keys) == 1
+    assert warmup_keys[0].compress_ratio == 128
 
 
 @pytest.mark.parametrize(
@@ -681,7 +902,8 @@ def test_bf16x3_dispatch_matches_legacy_bn(
 def test_dequant_gather_dispatch_matches_legacy_compile_args(
     has_gather_lens: bool,
 ) -> None:
-    kernel = DequantGatherKCacheKernel()
+    kernel = DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL
+    assert isinstance(kernel, DequantGatherKCacheKernel)
 
     assert kernel.dispatch(
         block_size=64,
@@ -781,11 +1003,17 @@ def test_sparse_c128_compress_dispatch_matches_legacy_constructor_args() -> None
 
 @requires_cutedsl
 @pytest.mark.parametrize(
-    ("cache_block_size", "kv_cache_block_size", "kv_block_stride"),
-    [(64, 1, 1152), (256, 2, 1728)],
+    (
+        "cache_block_size",
+        "runtime_kv_block_stride",
+        "kv_cache_block_size",
+        "kv_block_stride",
+    ),
+    [(64, None, 1, 1152), (256, None, 2, 1728), (256, 39168, 2, 39168)],
 )
 def test_sparse_c128_store_dispatch_matches_legacy_constructor_args(
     cache_block_size: int,
+    runtime_kv_block_stride: int | None,
     kv_cache_block_size: int,
     kv_block_stride: int,
 ) -> None:
@@ -798,6 +1026,7 @@ def test_sparse_c128_store_dispatch_matches_legacy_constructor_args(
         norm_weight_dtype=Float32,
         head_size=512,
         rope_head_dim=64,
+        runtime_kv_block_stride=runtime_kv_block_stride,
     ) == kernel.CompileKey(
         head_size=512,
         rope_head_dim=64,
@@ -810,6 +1039,55 @@ def test_sparse_c128_store_dispatch_matches_legacy_constructor_args(
         norm_weight_dtype=Float32,
         kv_cache_block_size=kv_cache_block_size,
     )
+
+
+@requires_cutedsl
+def test_sparse_c128_store_warmup_uses_bound_packed_cache_stride() -> None:
+    kernel = SparseAttnNormRopeStoreKernel()
+    packed_stride = 39168
+    storage = torch.empty(packed_stride + 1168, dtype=torch.uint8)
+    kv_cache = torch.as_strided(
+        storage,
+        size=(2, 2, 584),
+        stride=(packed_stride, 584, 1),
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            hf_config=SimpleNamespace(
+                head_dim=512,
+                qk_rope_head_dim=64,
+            ),
+        ),
+        cache_config=SimpleNamespace(
+            block_size=256,
+            cache_dtype="fp8_ds_mla",
+        ),
+        compilation_config=SimpleNamespace(
+            static_forward_context={
+                "model.layers.0.self_attn": SimpleNamespace(kv_cache=kv_cache)
+            }
+        ),
+    )
+
+    assert kernel.get_warmup_keys(
+        vllm_config,
+        k_cache_prefix="model.layers.0.self_attn",
+        compress_ratio=128,
+    ) == [
+        kernel.CompileKey(
+            head_size=512,
+            rope_head_dim=64,
+            fp8_max=448.0,
+            quant_block=64,
+            token_stride=576,
+            scale_dim=8,
+            kv_block_stride=packed_stride,
+            compress_ratio=128,
+            norm_weight_dtype=BFloat16,
+            kv_cache_block_size=2,
+        )
+    ]
 
 
 @requires_cutedsl

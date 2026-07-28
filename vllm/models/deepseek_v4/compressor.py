@@ -314,13 +314,24 @@ class DeepseekCompressor(nn.Module):
                     _SPARSE_ATTN_NORM_ROPE_STORE_KERNEL,
                 )
 
-                register_jit_warmup(_SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_C4_KERNEL)
-                register_jit_warmup(
-                    _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_FULL_C4_KERNEL
-                )
-                register_jit_warmup(_SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL)
-                register_jit_warmup(_SPARSE_ATTN_NORM_ROPE_STORE_KERNEL)
-                register_jit_warmup(_SPARSE_ATTN_NORM_ROPE_STORE_FULL_KERNEL)
+                store_full_kv = vllm_config.cache_config.cache_dtype != "fp8_ds_mla"
+                if self.compress_ratio == 4:
+                    register_jit_warmup(
+                        _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_FULL_C4_KERNEL
+                        if store_full_kv
+                        else _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_C4_KERNEL
+                    )
+                else:
+                    register_jit_warmup(_SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL)
+                    if store_full_kv:
+                        register_jit_warmup(_SPARSE_ATTN_NORM_ROPE_STORE_FULL_KERNEL)
+                    else:
+                        register_jit_warmup(
+                            _SPARSE_ATTN_NORM_ROPE_STORE_KERNEL,
+                            vllm_config,
+                            k_cache_prefix=self.k_cache_prefix,
+                            compress_ratio=self.compress_ratio,
+                        )
             else:
                 from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (  # noqa: E501
                     _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL,

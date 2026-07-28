@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import ast
+import builtins
 import inspect
 import itertools
 import operator
@@ -233,6 +234,8 @@ class _DispatchExprEvaluator(ast.NodeVisitor):
             return self.values[node.id]
         if node.id in self.globals:
             return self.globals[node.id]
+        if hasattr(builtins, node.id):
+            return getattr(builtins, node.id)
         raise _dispatch_expr_error(node, f"Unknown dispatch name '{node.id}'")
 
     def visit_Constant(self, node: ast.Constant) -> Any:
@@ -673,6 +676,10 @@ class JitWarmupRegistry:
 
     def warmup(self) -> None:
         """Expand registered requests and compile each owner/key pair once."""
+        from tqdm import tqdm
+
+        from vllm.distributed import is_global_first_rank
+
         keys_by_kernel: dict[VllmJitKernel[Any], dict[Any, None]] = {}
         for request in self._requests:
             args = request.args
@@ -684,8 +691,28 @@ class JitWarmupRegistry:
             for compile_key in compile_keys:
                 kernel_keys[compile_key] = None
 
-        for kernel, kernel_compile_keys in keys_by_kernel.items():
-            kernel.warmup_keys(kernel_compile_keys)
+        kernel_items = [
+            (kernel, compile_keys)
+            for kernel, compile_keys in keys_by_kernel.items()
+            if compile_keys
+        ]
+        if not kernel_items:
+            return
+
+        total_keys = sum(len(compile_keys) for _, compile_keys in kernel_items)
+        with tqdm(
+            kernel_items,
+            desc=f"JIT kernel warmup ({total_keys} compile keys)",
+            disable=not is_global_first_rank(),
+            dynamic_ncols=True,
+            unit="kernel",
+        ) as progress:
+            for kernel, kernel_compile_keys in progress:
+                progress.set_postfix_str(
+                    f"{kernel.__class__.__name__} ({len(kernel_compile_keys)} keys)",
+                    refresh=False,
+                )
+                kernel.warmup_keys(kernel_compile_keys)
 
 
 _current_jit_warmup_registry: ContextVar[JitWarmupRegistry | None] = ContextVar(

@@ -182,6 +182,10 @@ class CorrectAttnCPOutKernel(VllmJitKernel["CorrectAttnCPOutKernel.CompileKey"])
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        from vllm.model_executor.layers.attention.mla_attention import (
+            get_mla_dims,
+        )
+
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         max_tokens = min(
             16,
@@ -192,7 +196,7 @@ class CorrectAttnCPOutKernel(VllmJitKernel["CorrectAttnCPOutKernel.CompileKey"])
             hf_config.num_attention_heads
             // vllm_config.parallel_config.tensor_parallel_size
         )
-        head_dim = hf_config.v_head_dim
+        head_dim = get_mla_dims(vllm_config.model_config).v_head_dim
         if dcp_world_size <= 1 or max_tokens <= 0 or num_heads <= 0:
             return []
         return self._trace_dispatch(self.dispatch)(

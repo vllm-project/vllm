@@ -257,6 +257,31 @@ def test_helper_calls_support_keywords_and_reject_star_kwargs() -> None:
         StarKwargsKernel().compile_key({"tokens": 5, "block_size": 4})
 
 
+def test_dispatch_helper_calls_resolve_python_builtins() -> None:
+    class BuiltinKernel(VllmJitKernel["BuiltinKernel.CompileKey"]):
+        @dataclass(frozen=True)
+        class CompileKey:
+            value: int
+
+        def dispatch(  # type: ignore[override]
+            self,
+            *,
+            tokens: int,
+            limit: int,
+        ) -> CompileKey:
+            return self.CompileKey(value=max(1, min(tokens, limit)))
+
+        def get_warmup_keys(self) -> list[CompileKey]:
+            return []
+
+        def compile(self, compile_key: CompileKey) -> None:
+            pass
+
+    assert BuiltinKernel().compile_key({"tokens": 8, "limit": 4}) == (
+        BuiltinKernel.CompileKey(value=4)
+    )
+
+
 def test_dispatch_body_must_be_local_assignments_then_compile_key_return() -> None:
     class BranchKernel(VllmJitKernel["BranchKernel.CompileKey"]):
         @dataclass(frozen=True)

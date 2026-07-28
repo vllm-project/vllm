@@ -142,6 +142,7 @@ class SavePartialStatesKernel(VllmJitKernel["SavePartialStatesKernel.CompileKey"
                     state_cache_stride1=4 * head_dim,
                     block_size=4,
                     launch_pdl=False,
+                    enabled=4 in compress_ratios,
                 ),
                 dict(
                     head_size=head_dim,
@@ -154,12 +155,10 @@ class SavePartialStatesKernel(VllmJitKernel["SavePartialStatesKernel.CompileKey"
                     state_cache_stride1=2 * head_dim,
                     block_size=8,
                     launch_pdl=False,
+                    enabled=128 in compress_ratios,
                 ),
             ),
-            compress_ratios=compress_ratios,
-            _when=lambda *, compress_ratio, compress_ratios: (
-                compress_ratio in compress_ratios
-            ),
+            _when=lambda *, enabled: enabled,
         )
 
     def compile(self, compile_key: CompileKey) -> None:

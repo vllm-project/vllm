@@ -122,12 +122,13 @@ class CountExpertNumTokensKernel(
         warmup = getattr(self.kernel, "warmup", None)
         assert warmup is not None
         int32_ptr = TritonWarmupTensor(torch.int32)
+        expert_map = int32_ptr if compile_key.has_expert_map else None
         warmup(
             int32_ptr,
             int32_ptr,
             compile_key.num_experts,
             compile_key.topk_numel,
-            int32_ptr,
+            expert_map,
             HAS_EXPERT_MAP=compile_key.has_expert_map,
             BLOCK_SIZE=compile_key.block_size,
             grid=(1,),

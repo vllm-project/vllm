@@ -14,13 +14,18 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.utils import count_expert_num_tokens
 from vllm.model_executor.warmup.jit_warmup import (
     VllmJitKernel,
+    WarmupIntRange,
     zip_inputs,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
+    triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import tl, triton
-from vllm.utils.deep_gemm import get_mk_alignment_for_contiguous_layout
+from vllm.utils.deep_gemm import (
+    get_mk_alignment_for_contiguous_layout,
+    get_theoretical_mk_alignment_for_contiguous_layout,
+)
 from vllm.utils.math_utils import round_up
 
 
@@ -179,20 +184,32 @@ class DeepGemmEPScatterStartKernel(
         self,
         *,
         num_experts: int,
-        align_m: int,
+        align_m: int | None,
+        num_tokens: int = 0,
+        top_k: int = 0,
+        max_align_m: int = 0,
     ) -> CompileKey:
+        resolved_align_m = (
+            align_m
+            if align_m is not None
+            else min(
+                get_theoretical_mk_alignment_for_contiguous_layout(
+                    expected_m=num_tokens * top_k,
+                    num_groups=num_experts,
+                )
+                or max_align_m,
+                max_align_m,
+            )
+        )
         return self.CompileKey(
             num_experts=num_experts,
             # BLOCK_E is the m_indices fill-loop tile (masked), independent of align_m.
             block_e=128,
             block_expert_num=triton.next_power_of_2(num_experts),
-            align_m=align_m,
+            align_m=resolved_align_m,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        if vllm_config.kernel_config.moe_backend != "deep_gemm_mega_moe":
-            return []
-
         hf_config = vllm_config.model_config.hf_config
         if getattr(hf_config, "model_type", None) != "deepseek_v4":
             return []
@@ -201,7 +218,7 @@ class DeepGemmEPScatterStartKernel(
         parallel_config = vllm_config.parallel_config
         eplb_config = getattr(parallel_config, "eplb_config", None)
         num_experts += int(getattr(eplb_config, "num_redundant_experts", 0) or 0)
-        if num_experts > 0:
+        if num_experts > 0 and parallel_config.enable_expert_parallel:
             try:
                 from vllm.distributed.parallel_state import get_ep_group
 
@@ -212,10 +229,18 @@ class DeepGemmEPScatterStartKernel(
         if num_experts <= 0:
             return []
 
-        align_m, _ = get_mk_alignment_for_contiguous_layout()
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        top_k = hf_config.num_experts_per_tok
+        if max_tokens <= 0 or top_k <= 0:
+            return []
+
+        max_align_m, _ = get_mk_alignment_for_contiguous_layout()
         return self._trace_dispatch(self.dispatch)(
             num_experts=num_experts,
-            align_m=align_m,
+            align_m=None,
+            num_tokens=WarmupIntRange(1, max_tokens + 1),
+            top_k=top_k,
+            max_align_m=max_align_m,
         )
 
     def compile(self, compile_key: CompileKey) -> None:
@@ -264,6 +289,7 @@ class DeepGemmEPScatterCopyKernel(
 ):
     @dataclass(frozen=True)
     class CompileKey:
+        total_token_num: int
         topk_num: int
         has_expert_map: bool
         hidden_size: int
@@ -397,6 +423,7 @@ class DeepGemmEPScatterCopyKernel(
     def dispatch(  # type: ignore[override]
         self,
         *,
+        total_token_num: int,
         hidden_size: int,
         topk_num: int,
         has_expert_map: bool,
@@ -407,6 +434,7 @@ class DeepGemmEPScatterCopyKernel(
         # pack_ue8m0: scatter packs 4 UE8M0 bytes per int32; else copies scales as-is.
         scale_packed_size = (scale_hidden_size + 3) // 4 if pack_ue8m0 else 1
         return self.CompileKey(
+            total_token_num=triton_scalar_specialization_rep(total_token_num),
             topk_num=topk_num,
             has_expert_map=has_expert_map,
             hidden_size=hidden_size,
@@ -419,16 +447,14 @@ class DeepGemmEPScatterCopyKernel(
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        if vllm_config.kernel_config.moe_backend != "deep_gemm_mega_moe":
-            return []
-
         hf_config = vllm_config.model_config.hf_config
         if getattr(hf_config, "model_type", None) != "deepseek_v4":
             return []
 
         hidden_size = hf_config.hidden_size
         topk_num = hf_config.num_experts_per_tok
-        if hidden_size <= 0 or topk_num <= 0:
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        if hidden_size <= 0 or topk_num <= 0 or max_tokens <= 0:
             return []
 
         _, block_k = get_mk_alignment_for_contiguous_layout()
@@ -437,6 +463,7 @@ class DeepGemmEPScatterCopyKernel(
                 dict(block_size=block_k, pack_ue8m0=False),
                 dict(block_size=32, pack_ue8m0=True),
             ),
+            total_token_num=WarmupIntRange(1, max_tokens + 1),
             hidden_size=hidden_size,
             topk_num=topk_num,
             has_expert_map=(False, True),
@@ -451,26 +478,34 @@ class DeepGemmEPScatterCopyKernel(
             torch.int32 if compile_key.pack_ue8m0 else torch.float32
         )
         expert_map = int32_ptr if compile_key.has_expert_map else None
+        hidden_stride = triton_scalar_specialization_rep(compile_key.hidden_size)
+        scale_stride = triton_scalar_specialization_rep(
+            compile_key.scale_hidden_size
+        )
+        topk_stride = triton_scalar_specialization_rep(compile_key.topk_num)
+        output_scale_stride0, output_scale_stride1 = (
+            (1, 16) if compile_key.pack_ue8m0 else (scale_stride, 1)
+        )
         warmup(
-            1,
+            compile_key.total_token_num,
             int32_ptr,
             fp8_ptr,
-            1,
+            hidden_stride,
             1,
             scale_ptr,
-            1,
+            scale_stride,
             1,
             int32_ptr,
-            1,
+            topk_stride,
             1,
             fp8_ptr,
-            1,
+            hidden_stride,
             1,
             scale_ptr,
-            1,
-            1,
+            output_scale_stride0,
+            output_scale_stride1,
             int32_ptr,
-            1,
+            topk_stride,
             1,
             topk_num=compile_key.topk_num,
             expert_map=expert_map,
@@ -502,6 +537,7 @@ class DeepGemmEPScatterCopyKernel(
     ) -> None:
         hidden_size = recv_x.shape[1]
         compile_key = self.dispatch(
+            total_token_num=recv_x.shape[0],
             hidden_size=hidden_size,
             topk_num=recv_topk.shape[1],
             has_expert_map=expert_map is not None,
@@ -593,9 +629,12 @@ class DeepGemmEPGatherKernel(VllmJitKernel["DeepGemmEPGatherKernel.CompileKey"])
     @dataclass(frozen=True)
     class CompileKey:
         dtype: torch.dtype
+        total_token_num: int
         topk_num: int
         has_expert_map: bool
         block_d: int
+        hidden_stride: int
+        topk_stride: int
 
     @staticmethod
     @triton.jit
@@ -665,29 +704,32 @@ class DeepGemmEPGatherKernel(VllmJitKernel["DeepGemmEPGatherKernel.CompileKey"])
         self,
         *,
         dtype: torch.dtype,
+        total_token_num: int,
         hidden_size: int,
         topk_num: int,
         has_expert_map: bool,
     ) -> CompileKey:
         return self.CompileKey(
             dtype=dtype,
+            total_token_num=triton_scalar_specialization_rep(total_token_num),
             topk_num=topk_num,
             has_expert_map=has_expert_map,
             block_d=min(hidden_size, 1024),
+            hidden_stride=triton_scalar_specialization_rep(hidden_size),
+            topk_stride=triton_scalar_specialization_rep(topk_num),
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        if vllm_config.kernel_config.moe_backend != "deep_gemm_mega_moe":
-            return []
-
         hidden_size = vllm_config.model_config.hf_config.hidden_size
         topk_num = vllm_config.model_config.hf_config.num_experts_per_tok
         dtype = vllm_config.model_config.dtype
-        if hidden_size <= 0 or topk_num <= 0:
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        if hidden_size <= 0 or topk_num <= 0 or max_tokens <= 0:
             return []
 
         return self._trace_dispatch(self.dispatch)(
             dtype=dtype,
+            total_token_num=WarmupIntRange(1, max_tokens + 1),
             hidden_size=hidden_size,
             topk_num=topk_num,
             has_expert_map=(False, True),
@@ -700,21 +742,21 @@ class DeepGemmEPGatherKernel(VllmJitKernel["DeepGemmEPGatherKernel.CompileKey"])
         value_ptr = TritonWarmupTensor(compile_key.dtype)
         int32_ptr = TritonWarmupTensor(torch.int32)
         warmup(
-            1,
+            compile_key.total_token_num,
             value_ptr,
-            1,
+            compile_key.hidden_stride,
             1,
             int32_ptr,
-            1,
+            compile_key.topk_stride,
             1,
             TritonWarmupTensor(torch.float32),
-            1,
+            compile_key.topk_stride,
             1,
             int32_ptr,
-            1,
+            compile_key.topk_stride,
             1,
             value_ptr,
-            1,
+            compile_key.hidden_stride,
             1,
             topk_num=compile_key.topk_num,
             expert_map=(int32_ptr if compile_key.has_expert_map else None),
