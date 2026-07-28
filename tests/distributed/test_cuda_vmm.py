@@ -257,7 +257,7 @@ def test_close_is_idempotent_and_keeps_dlpack_callbacks_alive(monkeypatch) -> No
     driver = _FakeDriver()
     monkeypatch.setattr(cuda_vmm, "_driver", driver)
     synchronize = MagicMock()
-    monkeypatch.setattr(cuda_vmm.torch.cuda, "synchronize", synchronize)
+    monkeypatch.setattr(cuda_vmm.torch.accelerator, "synchronize", synchronize)
     refs = [object()]
     retired_count = len(cuda_vmm._RETIRED_DLPACK_REFS)
     view = RankMajorPeerView(
