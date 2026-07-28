@@ -557,6 +557,7 @@ class EngineArgs:
         MultiModalConfig, "limit_per_prompt"
     )
     enable_mm_embeds: bool = MultiModalConfig.enable_mm_embeds
+    enable_mm_processor_outputs: bool = MultiModalConfig.enable_mm_processor_outputs
     interleave_mm_strings: bool = MultiModalConfig.interleave_mm_strings
     media_io_kwargs: dict[str, dict[str, Any]] = get_field(
         MultiModalConfig, "media_io_kwargs"
@@ -1283,6 +1284,10 @@ class EngineArgs:
             "--enable-mm-embeds", **multimodal_kwargs["enable_mm_embeds"]
         )
         multimodal_group.add_argument(
+            "--enable-mm-processor-outputs",
+            **multimodal_kwargs["enable_mm_processor_outputs"],
+        )
+        multimodal_group.add_argument(
             "--media-io-kwargs", **multimodal_kwargs["media_io_kwargs"]
         )
         multimodal_group.add_argument(
@@ -1696,6 +1701,7 @@ class EngineArgs:
             language_model_only=self.language_model_only,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
             enable_mm_embeds=self.enable_mm_embeds,
+            enable_mm_processor_outputs=self.enable_mm_processor_outputs,
             interleave_mm_strings=self.interleave_mm_strings,
             media_io_kwargs=self.media_io_kwargs,
             skip_mm_profiling=self.skip_mm_profiling,

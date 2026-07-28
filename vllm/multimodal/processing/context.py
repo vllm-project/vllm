@@ -16,6 +16,7 @@ from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.multimodal.parse import (
     DictEmbeddingItems,
+    DictProcessorOutputItems,
     EmbeddingItems,
     MultiModalDataItems,
     MultiModalDataParser,
@@ -445,7 +446,23 @@ class BaseProcessingInfo:
             mm_config = self.ctx.get_mm_config()
 
             for modality, items in mm_items.items():
-                if isinstance(items, (EmbeddingItems, DictEmbeddingItems)):
+                if isinstance(items, DictProcessorOutputItems):
+                    # Note: subclass of DictEmbeddingItems, so this check
+                    # must come first.
+                    if not mm_config.enable_mm_processor_outputs:
+                        raise ValueError(
+                            f"You must set `--enable-mm-processor-outputs` "
+                            f"to input pre-computed processor outputs for "
+                            f"modality {modality!r}"
+                        )
+                    if mm_config.get_limit_per_prompt(modality) == 0:
+                        logger.debug(
+                            "Skipping count validation for modality "
+                            "'%s' (processor outputs with limit=0)",
+                            modality,
+                        )
+                        continue
+                elif isinstance(items, (EmbeddingItems, DictEmbeddingItems)):
                     if not mm_config.enable_mm_embeds:
                         raise ValueError(
                             f"You must set `--enable-mm-embeds` to input "
