@@ -356,14 +356,6 @@ def convert_to_unquantized_kernel_format(
             is_gated_act_gemm=is_act_and_mul,
         )
 
-    # NOTE: CPU is absent here. Its grouped-gemm kernels pad the MoE
-    # intermediate dim, which the expert bias has to match, and the torch
-    # fallback binds per-expert closures onto the layer -- neither is
-    # reachable from this hook, which deliberately takes only tensors so the
-    # oracle stays decoupled from a `Module` (see MoEKernelOracle.
-    # convert_to_kernel_format). The CPU experts do it all in their own
-    # process_weights_after_loading instead.
-
     if (
         unquantized_backend == UnquantizedMoeBackend.TRITON
         and current_platform.is_rocm()
