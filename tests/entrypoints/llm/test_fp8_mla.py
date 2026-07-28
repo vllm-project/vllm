@@ -14,7 +14,7 @@ import pytest
 from vllm import LLM, SamplingParams
 from vllm.platforms import current_platform
 
-MODEL = "RedHatAI/DeepSeek-Coder-V2-Instruct-FP8"
+MODEL = "deepseek-ai/DeepSeek-V2-Lite-Chat"
 
 
 @pytest.mark.skipif(
@@ -26,7 +26,7 @@ def test_fp8_marlin_mla_generation(monkeypatch):
 
     llm = LLM(
         model=MODEL,
-        tensor_parallel_size=2,
+        quantization="fp8",
         enforce_eager=True,
         max_model_len=4096,
         max_num_batched_tokens=2048,
