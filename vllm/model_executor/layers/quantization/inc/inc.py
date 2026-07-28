@@ -52,7 +52,7 @@ class INCConfig(QuantizationConfig):
         "awq:marlin",
         "marlin",
     }
-    
+
     FP8_BLOCK_BITS = 8
     FP8_BLOCK_DATA_TYPE = "fp"
     FP8_BLOCK_PACKING_FORMAT = "auto_round:fp8"
@@ -140,7 +140,7 @@ class INCConfig(QuantizationConfig):
                 f"packing_format={self.packing_format!r} is incompatible "
                 "with data_type='int'."
             )
-            
+
         elif self.data_type == self.FP8_BLOCK_DATA_TYPE:
             assert self.weight_bits == self.FP8_BLOCK_BITS, (
                 "INC block-wise FP8 only supports bits=8, "
@@ -160,7 +160,7 @@ class INCConfig(QuantizationConfig):
                 "INC block-wise FP8 only supports backend='auto', "
                 f"but found backend={self.backend!r}."
             )
-            
+
         elif self.data_type == self.MXFP8_DATA_TYPE:
             assert self.weight_bits == self.MXFP8_BITS, (
                 f"INC MXFP8 only supports bits=8, but found bits={self.weight_bits}."
@@ -191,10 +191,11 @@ class INCConfig(QuantizationConfig):
                 f"data_type={self.MXFP8_DATA_TYPE!r}."
             )
 
-
     def _validate_raw_config(self, config: dict[str, Any]) -> None:
         if self.data_type == self.FP8_BLOCK_DATA_TYPE:
-            assert isinstance(self.group_size, tuple), "INC block-wise FP8 group_size must be a tuple."
+            assert isinstance(self.group_size, tuple), (
+                "INC block-wise FP8 group_size must be a tuple."
+            )
 
             expected_fields = {
                 "act_bits": self.FP8_BLOCK_BITS,
@@ -207,7 +208,9 @@ class INCConfig(QuantizationConfig):
                 "enable_quanted_input": False,
             }
             for field_name, expected_value in expected_fields.items():
-                actual_value = self.get_from_keys_or(config, [field_name], expected_value)
+                actual_value = self.get_from_keys_or(
+                    config, [field_name], expected_value
+                )
                 assert actual_value == expected_value, (
                     "INC block-wise FP8 only supports "
                     f"{field_name}={expected_value!r}, "
@@ -238,7 +241,9 @@ class INCConfig(QuantizationConfig):
                 "enable_quanted_input": False,
             }
             for field_name, expected_value in expected_fields.items():
-                actual_value = self.get_from_keys_or(config, [field_name], expected_value)
+                actual_value = self.get_from_keys_or(
+                    config, [field_name], expected_value
+                )
                 assert actual_value == expected_value, (
                     "INC MXFP8 only supports "
                     f"{field_name}={expected_value!r}, "

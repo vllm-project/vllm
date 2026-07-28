@@ -43,12 +43,10 @@ class INCWNA16LinearScheme(INCLinearScheme):
         )
 
     def _build_gptq_method(self):
-        group_size = self.layer_config.group_size
-        if not isinstance(group_size, int):
-            raise ValueError(
-                "INC WNA16 linear requires scalar group_size, "
-                f"but found {group_size!r}."
-            )
+        assert isinstance(self.layer_config.group_size, int), (
+            "WNA16 only supports integer group_size."
+        )
+
         gptq_type_map = {
             (4, True): scalar_types.uint4b8,
             (8, True): scalar_types.uint8b128,
@@ -59,7 +57,7 @@ class INCWNA16LinearScheme(INCLinearScheme):
         if use_marlin:
             use_marlin = check_marlin_supported(
                 gptq_type_map[(self.layer_config.bits, self.layer_config.sym)],
-                group_size,
+                self.layer_config.group_size,
                 has_zp=not self.layer_config.sym,
             )
 
@@ -71,7 +69,7 @@ class INCWNA16LinearScheme(INCLinearScheme):
             return AutoGPTQLinearMethod(
                 AutoGPTQConfig(
                     weight_bits=self.layer_config.bits,
-                    group_size=group_size,
+                    group_size=self.layer_config.group_size,
                     desc_act=False,
                     is_sym=self.layer_config.sym,
                     lm_head_quantized=False,
@@ -88,12 +86,9 @@ class INCWNA16LinearScheme(INCLinearScheme):
         )
 
     def _build_awq_method(self):
-        group_size = self.layer_config.group_size
-        if not isinstance(group_size, int):
-            raise ValueError(
-                "INC WNA16 linear requires scalar group_size, "
-                f"but found {group_size!r}."
-            )
+        assert isinstance(self.layer_config.group_size, int), (
+            "WNA16 only supports integer group_size."
+        )
 
         awq_type_map = {
             4: scalar_types.uint4,
@@ -105,7 +100,7 @@ class INCWNA16LinearScheme(INCLinearScheme):
         if use_marlin:
             use_marlin = check_marlin_supported(
                 awq_type_map[self.layer_config.bits],
-                group_size,
+                self.layer_config.group_size,
                 not self.layer_config.sym,
             )
 
@@ -117,7 +112,7 @@ class INCWNA16LinearScheme(INCLinearScheme):
             return AutoAWQMarlinLinearMethod(
                 AutoAWQConfig(
                     weight_bits=self.layer_config.bits,
-                    group_size=group_size,
+                    group_size=self.layer_config.group_size,
                     zero_point=not self.layer_config.sym,
                     lm_head_quantized=False,
                     modules_to_not_convert=[],
@@ -132,7 +127,7 @@ class INCWNA16LinearScheme(INCLinearScheme):
         return AutoAWQLinearMethod(
             AutoAWQConfig(
                 weight_bits=self.layer_config.bits,
-                group_size=group_size,
+                group_size=self.layer_config.group_size,
                 zero_point=not self.layer_config.sym,
                 lm_head_quantized=False,
             )
@@ -178,6 +173,9 @@ class INCXPULinearBase(INCLinearScheme):
 
     def __init__(self, layer_config: "INCLayerConfig") -> None:
         self.weight_bits = layer_config.bits
+        assert isinstance(layer_config.group_size, int), (
+            "INCXPULinearBase requires integer group_size."
+        )
         self.group_size = layer_config.group_size
 
         self.sym = layer_config.sym

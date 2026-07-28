@@ -18,16 +18,16 @@ from vllm.model_executor.layers.quantization.inc import INCConfig
 from vllm.model_executor.layers.quantization.inc.config_parser import INCLayerConfig
 from vllm.model_executor.layers.quantization.inc.inc_linear import INCLinearMethod
 from vllm.model_executor.layers.quantization.inc.schemes import (
-    INCFp8LinearScheme,
+    INCFp8Scheme,
     INCMxfp8Scheme,
     INCWna16Scheme,
     resolve_scheme,
 )
-from vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp8_linear import (
-    INCMxfp8LinearScheme,
-)
 from vllm.model_executor.layers.quantization.inc.schemes.inc_fp8_linear import (
     INCFp8LinearScheme,
+)
+from vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp8_linear import (
+    INCMxfp8LinearScheme,
 )
 from vllm.model_executor.layers.quantization.inc.schemes.inc_scheme import (
     INCLinearScheme,
@@ -73,6 +73,14 @@ MODELS = [
         ),
         id="auto_round:llm_compressor_mxfp8",
     ),
+    pytest.param(
+        "INC4AI/Llama-3.1-8B-fp-w8g128x128-for-ut",
+        marks=pytest.mark.skipif(
+            not (current_platform.is_cuda() or current_platform.is_xpu()),
+            reason="Block-wise AutoRound model only supports CUDA backend for now.",
+        ),
+        id="auto_round:block_wise_fp8_on_cuda",
+    ),
 ]
 
 MODEL_RUNNER_KWARGS = {
@@ -85,6 +93,10 @@ MODEL_RUNNER_KWARGS = {
         "block_size": 64,
         "gpu_memory_utilization": 0.8,
         "max_model_len": 512,
+    },
+    "INC4AI/Llama-3.1-8B-fp-w8g128x128-for-ut": {
+        "gpu_memory_utilization": 0.8,
+        "enforce_eager": True,
     },
 }
 
