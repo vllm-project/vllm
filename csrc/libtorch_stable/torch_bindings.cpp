@@ -330,10 +330,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // conditionally compiled so impl registration is in source file
   ops.def("fp32_router_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
 
-  // BF16 skinny GEMM (M<=32, weight-BW-bound shapes, e.g. MTP eh_proj).
-  // conditionally compiled so impl registration is in source file
-  ops.def("bf16_skinny_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
-
   // reorder weight for AllSpark Ampere W8A16 Fused Gemm kernel
   ops.def(
       "rearrange_kn_weight_as_n32k16_order(Tensor b_qweight, Tensor b_scales, "
@@ -471,6 +467,14 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor!? kv_cache, Tensor!? index_cache, "
       "int block_size, Tensor!? q_out, Tensor!? index_q_out, "
       "str kv_cache_dtype, bool skip_index_branch=False) -> ()");
+
+#ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
+  ops.def(
+      "kimi_k3_attn_res("
+      "Tensor! prefix, Tensor delta, Tensor blocks, Tensor norm_weight, "
+      "Tensor qk_weight, Tensor output_norm_weight, Tensor! output, "
+      "int num_blocks, float eps, float output_norm_eps) -> ()");
+#endif
 
   // Apply repetition penalties to logits in-place.
   ops.def(
@@ -697,6 +701,9 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 #endif
   ops.impl("fused_minimax_m3_qknorm_rope_kv_insert",
            TORCH_BOX(&fused_minimax_m3_qknorm_rope_kv_insert));
+#ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
+  ops.impl("kimi_k3_attn_res", TORCH_BOX(&kimi_k3_attn_res));
+#endif
 
   // Sampler kernels (shared CUDA/ROCm)
   ops.impl("apply_repetition_penalties_",
