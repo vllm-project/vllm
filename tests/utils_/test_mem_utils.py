@@ -67,6 +67,23 @@ def test_memory_profiling():
     non_torch_ratio = result.non_torch_increase / (256 * 1024 * 1024)  # noqa
     assert abs(non_torch_ratio - 1) <= 0.05
     assert result.torch_peak_increase == 1024 * 1024 * 1024
+
+    expected_total_consumed = (256 + 512) * 1024 * 1024
+    total_consumed_ratio = result.total_consumed / expected_total_consumed
+    assert abs(total_consumed_ratio - 1) <= 0.05, (
+        f"total_consumed={result.total_consumed}, "
+        f"expected={expected_total_consumed}, "
+        f"ratio={total_consumed_ratio}"
+    )
+
+    expected_non_kv = expected_total_consumed + 1024 * 1024 * 1024
+    non_kv_ratio = result.non_kv_cache_memory / expected_non_kv
+    assert abs(non_kv_ratio - 1) <= 0.05, (
+        f"non_kv_cache_memory={result.non_kv_cache_memory}, "
+        f"expected={expected_non_kv}, "
+        f"ratio={non_kv_ratio}"
+    )
+
     del weights
     lib.cudaFree(handle1)
     lib.cudaFree(handle2)

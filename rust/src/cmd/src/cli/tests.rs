@@ -5,7 +5,27 @@ use expect_test::expect;
 use vllm_engine_core_client::TransportMode;
 use vllm_server::{Config, HttpListenerMode, ParserSelection, RendererSelection};
 
-use super::{Cli, Command};
+use super::{BenchCommand, Cli, Command};
+
+#[test]
+fn bench_serve_args_parse_without_managed_engine_repartition() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "bench",
+        "serve",
+        "--backend",
+        "openai-chat",
+        "--request-rate",
+        "inf",
+    ])
+    .unwrap();
+
+    let Command::Bench(BenchCommand::Serve(args)) = cli.command else {
+        panic!("expected bench serve args");
+    };
+    assert_eq!(args.backend, vllm_bench::BackendKind::OpenaiChat);
+    assert!(args.request_rate.is_infinite());
+}
 
 #[test]
 fn serve_args_forward_python_flags_with_separator() {
@@ -38,9 +58,6 @@ fn serve_args_forward_python_flags_with_separator() {
                         reasoning_parser: Auto,
                         renderer: Auto,
                         language_model_only: false,
-                        max_model_len: Some(
-                            512,
-                        ),
                         max_logprobs: None,
                         grpc_port: None,
                         shutdown_timeout: 0,
@@ -82,6 +99,9 @@ fn serve_args_forward_python_flags_with_separator() {
                         handshake_port: None,
                         data_parallel_size: 1,
                         data_parallel_size_local: None,
+                        max_model_len: Some(
+                            "512",
+                        ),
                         python_args: [
                             "--dtype",
                             "float16",
@@ -736,7 +756,6 @@ fn frontend_args_accept_json() {
                         reasoning_parser: None,
                         renderer: Auto,
                         language_model_only: false,
-                        max_model_len: None,
                         max_logprobs: None,
                         grpc_port: None,
                         shutdown_timeout: 0,
@@ -803,9 +822,30 @@ fn frontend_args_json_applies_defaults() {
     assert_eq!(args.runtime.tool_call_parser, ParserSelection::None);
     assert_eq!(args.runtime.reasoning_parser, ParserSelection::None);
     assert_eq!(args.runtime.renderer, RendererSelection::Auto);
-    assert_eq!(args.runtime.max_model_len, None);
     assert_eq!(args.runtime.max_logprobs, None);
     assert_eq!(args.runtime.shutdown_timeout, 0);
+}
+
+#[test]
+fn frontend_args_json_ignores_engine_owned_max_model_len() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-address",
+        "ipc:///tmp/input.sock",
+        "--output-address",
+        "ipc:///tmp/output.sock",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","max_model_len":-1}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    assert_eq!(args.runtime.model, "Qwen/Qwen3-0.6B");
 }
 
 #[test]
@@ -820,7 +860,7 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
         "--output-address",
         "ipc:///tmp/output.sock",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","language_model_only":true,"max_model_len":8192,"max_logprobs":-1,"shutdown_timeout":3}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","language_model_only":true,"max_logprobs":-1,"shutdown_timeout":3}"#,
     ])
     .unwrap();
 
@@ -838,9 +878,36 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
     );
     assert_eq!(args.runtime.renderer, RendererSelection::DeepSeekV32);
     assert!(args.runtime.language_model_only);
-    assert_eq!(args.runtime.max_model_len, Some(8192));
     assert_eq!(args.runtime.max_logprobs, Some(-1));
     assert_eq!(args.runtime.shutdown_timeout, 3);
+}
+
+#[test]
+fn serve_args_forward_auto_max_model_len_to_managed_engine() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--max-model-len",
+        "auto",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.managed_engine.max_model_len.as_deref(), Some("auto"));
+
+    let config = args.to_managed_engine_config(5555);
+    expect![[r#"
+        [
+            "--max-model-len",
+            "auto",
+            "--reasoning-parser",
+            "qwen3",
+        ]
+    "#]]
+    .assert_debug_eq(&config.python_args);
 }
 
 #[test]
@@ -1258,7 +1325,6 @@ fn serve_args_accept_handshake_aliases() {
                         reasoning_parser: Auto,
                         renderer: Auto,
                         language_model_only: false,
-                        max_model_len: None,
                         max_logprobs: None,
                         grpc_port: None,
                         shutdown_timeout: 0,
@@ -1302,6 +1368,7 @@ fn serve_args_accept_handshake_aliases() {
                         ),
                         data_parallel_size: 4,
                         data_parallel_size_local: None,
+                        max_model_len: None,
                         python_args: [],
                     },
                 },
