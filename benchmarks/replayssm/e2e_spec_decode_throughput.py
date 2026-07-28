@@ -7,9 +7,20 @@ ignore_eos so every mode emits exactly --max-tokens tokens per sequence, making
 tokens/s directly comparable. Reports throughput, mean acceptance length, and
 the ReplaySSM-spec speedup over both baselines.
 
-  standard : no speculative decoding
-  spec     : vLLM native spec decoding (one recurrent state per draft token)
-  cache    : ReplaySSM cached spec decoding (use_replayssm_spec)
+  standard            : no speculative decoding
+  spec                : vLLM native spec decoding (one state per draft token)
+  cache               : ReplaySSM cached spec decoding, Triton kernel
+  cache-fi-monolith   : ReplaySSM on FlashInfer, monolithic kernel forced
+  cache-fi-two-kernel : ReplaySSM on FlashInfer, precompute+main split forced
+  cache-fi-auto       : ReplaySSM on FlashInfer, kernel chosen by work size
+
+FlashInfer returns only the output, so the kernel 'auto' picked is not directly
+observable; infer it from batch * nheads vs the device SM count (and remember
+CUDA-graph padding inflates the batch), or force a path to be certain.
+
+Expect ReplaySSM to be at parity with 'standard' at batch 1 -- the ring fills
+and flushes every few steps at that scale, so the HBM saving is eroded. The
+benefit is at high concurrency.
 
 Each mode runs in its own subprocess for a clean CUDA context.
 
@@ -28,7 +39,14 @@ import subprocess
 import sys
 import time
 
-MODE_LABEL = {"standard": "standard", "spec": "native-spec", "cache": "ReplaySSM-spec"}
+MODE_LABEL = {
+    "standard": "standard",
+    "spec": "native-spec",
+    "cache": "ReplaySSM-triton",
+    "cache-fi-monolith": "ReplaySSM-fi-mono",
+    "cache-fi-two-kernel": "ReplaySSM-fi-2k",
+    "cache-fi-auto": "ReplaySSM-fi-auto",
+}
 
 
 def parse_args():
@@ -82,7 +100,11 @@ def parse_args():
     p.add_argument(
         "--modes",
         default="standard,spec,cache",
-        help="Comma-separated subset of {standard,spec,cache}.",
+        help="Comma-separated subset of {standard,spec,cache,cache-fi-monolith,"
+        "cache-fi-two-kernel,cache-fi-auto}. Benchmark the forced FlashInfer "
+        "algorithms before trusting cache-fi-auto: its crossover is on "
+        "batch * nheads vs the device SM count, and CUDA-graph padding inflates "
+        "the batch it sees.",
     )
     p.add_argument(
         "--moe-backend",
@@ -93,7 +115,14 @@ def parse_args():
     )
     p.add_argument(
         "--worker",
-        choices=["standard", "spec", "cache"],
+        choices=[
+            "standard",
+            "spec",
+            "cache",
+            "cache-fi-monolith",
+            "cache-fi-two-kernel",
+            "cache-fi-auto",
+        ],
         default=None,
         help=argparse.SUPPRESS,
     )
@@ -183,9 +212,12 @@ def run_worker(args):
         if args.moe_backend:
             spec_cfg["moe_backend"] = args.moe_backend
         llm_kwargs["speculative_config"] = spec_cfg
-    if mode == "cache":
+    if mode.startswith("cache"):
         llm_kwargs["use_replayssm_spec"] = True
         llm_kwargs["replayssm_buffer_len"] = args.buffer_len
+    if mode.startswith("cache-fi-"):
+        llm_kwargs["mamba_backend"] = "flashinfer"
+        llm_kwargs["replayssm_spec_algorithm"] = mode[len("cache-fi-") :]
 
     llm = LLM(**llm_kwargs)
     messages = gsm8k_messages(args.batch_size)
