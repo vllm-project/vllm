@@ -9,6 +9,7 @@ import torch.nn as nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -328,6 +329,13 @@ class IquestMoeV13MTP(nn.Module):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        expert_params_mapping = FusedMoE.make_expert_params_mapping(
+            self,
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.num_experts,
+        )
         enable_sink_attention = getattr(self.config, "enable_sink_attention", False)
 
         def _load_into(param_name: str, weight: torch.Tensor) -> None:
@@ -365,6 +373,29 @@ class IquestMoeV13MTP(nn.Module):
                 loaded_params.add(mapped)
                 break
             else:
+                expert_weight_matched = False
+                for mapping in expert_params_mapping:
+                    param_name, weight_name, expert_id, shard_id = mapping
+                    if weight_name not in name:
+                        continue
+                    expert_weight_matched = True
+                    mapped = name.replace(weight_name, param_name)
+                    if not is_pp_missing_parameter(mapped, self):
+                        param = params_dict[mapped]
+                        weight_loader = param.weight_loader
+                        weight_loader(
+                            param,
+                            loaded_weight,
+                            mapped,
+                            shard_id=shard_id,
+                            expert_id=expert_id,
+                        )
+                        loaded_params.add(mapped)
+                    break
+
+                if expert_weight_matched:
+                    continue
+
                 # Sonic-MoE fused expert tensors: match exact ".experts.fc" /
                 # ".experts.proj" component suffixes.
                 if name.endswith(".mlp.experts.fc"):
