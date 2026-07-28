@@ -132,8 +132,8 @@ test("only exact CI commands are accepted", () => {
     parseCommand(COMMAND_RETRY_FAILED),
     COMMAND_RETRY_FAILED
   );
-  assert.equal(parseCommand("/runci please"), null);
-  assert.equal(parseCommand(" /runci"), null);
+  assert.equal(parseCommand("/ci run please"), null);
+  assert.equal(parseCommand(" /ci run"), null);
 });
 
 test("write access authorizes reviewers and authors at any time", () => {
@@ -295,7 +295,7 @@ test("build payload preserves current pull request context", () => {
   assert.deepEqual(payload, {
     commit: "0123456789abcdef",
     branch: "feature",
-    message: "PR #42 /runci by @reviewer",
+    message: "PR #42 /ci run by @reviewer",
     pull_request_id: 42,
     pull_request_base_branch: "main",
     pull_request_repository: "https://github.com/contributor/vllm.git",
@@ -312,7 +312,7 @@ test("build payload preserves current pull request context", () => {
   });
 });
 
-test("/runci dispatches one build with current PR metadata", async () => {
+test("/ci run dispatches one build with current PR metadata", async () => {
   const github = makeGithub();
   const requests = [];
   const responses = [
@@ -341,7 +341,7 @@ test("/runci dispatches one build with current PR metadata", async () => {
   assert.deepEqual(JSON.parse(requests[2].options.body), {
     commit: "0123456789abcdef",
     branch: "feature",
-    message: "PR #42 /runci by @reviewer",
+    message: "PR #42 /ci run by @reviewer",
     pull_request_id: 42,
     pull_request_base_branch: "main",
     pull_request_repository: "https://github.com/contributor/vllm.git",
@@ -385,7 +385,7 @@ test("unapproved authors are denied without contacting Buildkite", async () => {
   assert.match(github.comments[0], /approve the PR/);
 });
 
-test("/rerun-ci-failed retries only the latest current-SHA build", async () => {
+test("/ci retry retries only the latest current-SHA build", async () => {
   const github = makeGithub({
     permission: "read",
     pr: makePr({ labels: [{ name: "ready" }] }),

@@ -17,8 +17,8 @@ jobs:
   run-ci-command:
     if: >-
       github.event.issue.pull_request &&
-      (github.event.comment.body == '/runci' ||
-      github.event.comment.body == '/rerun-ci-failed')
+      (github.event.comment.body == '/ci run' ||
+      github.event.comment.body == '/ci retry')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

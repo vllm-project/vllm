@@ -2,8 +2,8 @@
 
 "use strict";
 
-const COMMAND_RUN_CI = "/runci";
-const COMMAND_RETRY_FAILED = "/rerun-ci-failed";
+const COMMAND_RUN_CI = "/ci run";
+const COMMAND_RETRY_FAILED = "/ci retry";
 const READY_LABELS = new Set(["ready", "ready-run-all-tests"]);
 const TRUSTED_PERMISSIONS = new Set(["admin", "maintain", "write"]);
 const ACTIVE_BUILD_STATES = new Set([
@@ -83,7 +83,7 @@ function authorize({
   return {
     allowed: false,
     reason:
-      "A reviewer with write access must run `/runci`, approve the PR, or " +
+      "A reviewer with write access must run `/ci run`, approve the PR, or " +
       "add the `ready` label first.",
   };
 }
@@ -354,7 +354,7 @@ async function handleRunCi({
     pull_number: pr.number,
   });
   if (currentPr.state !== "open" || currentPr.head.sha !== pr.head.sha) {
-    return "The PR head changed while processing the command. Comment `/runci` again.";
+    return "The PR head changed while processing the command. Comment `/ci run` again.";
   }
 
   const build = await buildkiteRequest({
@@ -385,7 +385,7 @@ async function handleRetryFailed({
   });
   const build = selectLatestBuild(builds, pr.number);
   if (!build) {
-    return "No CI build exists for the current PR commit. Use `/runci` first.";
+    return "No CI build exists for the current PR commit. Use `/ci run` first.";
   }
   if (!build.finished_at || isActiveBuild(build)) {
     return `CI is still running for this commit: ${build.web_url}`;
