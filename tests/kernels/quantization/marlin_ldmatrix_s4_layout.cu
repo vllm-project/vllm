@@ -218,12 +218,13 @@ bool validate_pattern() {
   return validate_layout<NumMatrices>(values);
 }
 
+template <int NumMatrices>
 bool validate_every_source_element() {
-  constexpr int num_values = kMaxMatrices * kMatrixRows * kMatrixColumns;
+  constexpr int num_values = NumMatrices * kMatrixRows * kMatrixColumns;
   std::vector<uint8_t> values(num_values, 8);
   for (int index = 0; index < num_values; ++index) {
     values[index] = 15;
-    if (!validate_layout<kMaxMatrices>(values)) {
+    if (!validate_layout<NumMatrices>(values)) {
       std::fprintf(stderr, "source element %d failed\n", index);
       return false;
     }
@@ -299,8 +300,9 @@ int main() {
   }
 
   if (!validate_pattern<1>() || !validate_pattern<2>() ||
-      !validate_pattern<4>() || !validate_every_source_element() ||
-      !validate_mma()) {
+      !validate_pattern<4>() || !validate_every_source_element<1>() ||
+      !validate_every_source_element<2>() ||
+      !validate_every_source_element<4>() || !validate_mma()) {
     return EXIT_FAILURE;
   }
 
