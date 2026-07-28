@@ -38,15 +38,6 @@ class DFlashProposer(SpecDecodeBaseProposer):
 
         # Only next_token_ids and mask tokens are query tokens, all other context is K/V
         self.max_query_tokens = self.max_batch_size * (1 + self.num_speculative_tokens)
-        # The cudagraph dispatcher pads query batches up to the next capture
-        # size, which exceeds max_query_tokens whenever max_query_tokens is not
-        # itself a capture size (e.g. max_num_seqs=33, k=3 gives 33 * 4 = 132
-        # query tokens, padded up to the capture size 136). Slicing
-        # exactly-sized buffers at the padded size would silently return short
-        # tensors. Capture sizes may still be adjusted after this point
-        # (resolve_cudagraph_mode_and_sizes), but never above
-        # max_cudagraph_capture_size and dispatch never pads batches larger
-        # than that, so it is a safe upper bound for the buffer capacity.
         self.max_padded_query_tokens = max(
             self.max_query_tokens,
             vllm_config.compilation_config.max_cudagraph_capture_size or 0,
