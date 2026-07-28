@@ -96,7 +96,6 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
-from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -411,12 +410,6 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        capability = current_platform.get_device_capability()
-        if capability is not None and 80 <= capability.to_int() < 89:
-            logger.warning_once(
-                "This GPU does not support FP8 natively. vLLM will use FP8 "
-                "emulation for this model; some models may run more slowly."
-            )
         return 80
 
     @classmethod
