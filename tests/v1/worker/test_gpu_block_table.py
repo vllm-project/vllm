@@ -19,7 +19,7 @@ def test_block_tables_apply_staged_writes_fuses_kv_groups(monkeypatch):
         block_sizes=[16, 32, 8],
         max_num_reqs=4,
         max_num_batched_tokens=64,
-        max_num_blocks_per_group=[8, 8, 8],
+        block_table_widths=[8, 16, 8],
         device=device,
         kernel_block_sizes=[16, 16, 8],
     )
@@ -113,7 +113,7 @@ def test_block_tables_apply_staged_writes_single_group():
         block_sizes=[16],
         max_num_reqs=2,
         max_num_batched_tokens=16,
-        max_num_blocks_per_group=[4],
+        block_table_widths=[4],
         device=device,
         kernel_block_sizes=[16],
     )

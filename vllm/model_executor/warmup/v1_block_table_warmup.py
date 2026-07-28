@@ -29,7 +29,7 @@ def warm_v1_block_table_kernels(
         block_table = BlockTable(
             block_size=block_size,
             max_num_reqs=1,
-            max_num_blocks_per_req=max_num_blocks_per_req,
+            block_table_width=max_num_blocks_per_req,
             max_num_batched_tokens=max(num_tokens, max_tokens),
             pin_memory=False,
             device=device,

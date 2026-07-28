@@ -226,7 +226,7 @@ def _warm_compute_slot_mapping_kernel(device: torch.device) -> None:
         block_table = BlockTable(
             block_size=_SLOT_MAPPING_KV_BLOCK_SIZE,
             max_num_reqs=1,
-            max_num_blocks_per_req=block_table_stride,
+            block_table_width=block_table_stride,
             max_num_batched_tokens=num_tokens,
             pin_memory=False,
             device=device,

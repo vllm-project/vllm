@@ -1329,6 +1329,7 @@ def test_hybrid_attention_mamba_tensor_shapes():
 def test_hybrid_block_table_initialization():
     """Test hybrid block table with different kernel and kvcache_manager block
     sizes."""
+    from vllm.v1.kv_cache_interface import get_block_table_width
     from vllm.v1.worker.block_table import BlockTable
 
     # Test configuration: kvcache_manager block size = 32,
@@ -1343,7 +1344,9 @@ def test_hybrid_block_table_initialization():
     block_table = BlockTable(
         block_size=block_size,
         max_num_reqs=max_num_reqs,
-        max_num_blocks_per_req=max_num_blocks_per_req,
+        block_table_width=get_block_table_width(
+            max_num_blocks_per_req, block_size, kernel_block_sizes[0]
+        ),
         max_num_batched_tokens=max_num_batched_tokens,
         pin_memory=False,
         device=torch.device(DEVICE_TYPE),

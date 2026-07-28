@@ -58,6 +58,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
     align_block_table_width,
+    get_block_table_width,
 )
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
@@ -448,9 +449,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_blocks = cdiv(
                 block_table_max_model_len, spec.block_size * self.dcp_size
             )
-            max_num_blocks = align_block_table_width(max_num_blocks, spec.block_size)
             # For Mamba/Hybrid Model, KVCaches need extra blocks for speculative tokens
             if isinstance(spec, MambaSpec):
+                max_num_blocks = align_block_table_width(
+                    max_num_blocks, spec.block_size
+                )
                 max_num_blocks = (
                     max_num_blocks if self.cache_config.enable_prefix_caching else 1
                 ) + spec.num_speculative_blocks
@@ -459,11 +462,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.attn_groups, attn_cg_support, self.kernel_block_sizes = init_attn_backend(
             self.kv_cache_config, self.vllm_config, self.device
         )
+        block_table_widths = []
+        for group_id, (kv_cache_group, max_num_blocks) in enumerate(
+            zip(kv_cache_config.kv_cache_groups, max_num_blocks_per_group)
+        ):
+            spec = kv_cache_group.kv_cache_spec
+            if not isinstance(spec, MambaSpec):
+                max_num_blocks = get_block_table_width(
+                    max_num_blocks,
+                    spec.block_size,
+                    self.kernel_block_sizes[group_id],
+                )
+            block_table_widths.append(max_num_blocks)
+
         self.block_tables = BlockTables(
             block_sizes=block_sizes,
             max_num_reqs=self.max_num_reqs,
             max_num_batched_tokens=self.max_num_tokens,
-            max_num_blocks_per_group=max_num_blocks_per_group,
+            block_table_widths=block_table_widths,
             device=self.device,
             kernel_block_sizes=self.kernel_block_sizes,
             cp_size=self.dcp_size,

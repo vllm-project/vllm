@@ -20,7 +20,7 @@ class BlockTables:
         block_sizes: list[int],
         max_num_reqs: int,
         max_num_batched_tokens: int,
-        max_num_blocks_per_group: list[int],
+        block_table_widths: list[int],
         device: torch.device,
         kernel_block_sizes: list[int],
         cp_size: int = 1,
@@ -38,7 +38,7 @@ class BlockTables:
         self.cp_interleave = cp_interleave
 
         self.num_kv_cache_groups = len(self.block_sizes)
-        assert len(max_num_blocks_per_group) == self.num_kv_cache_groups
+        assert len(block_table_widths) == self.num_kv_cache_groups
 
         self.blocks_per_kv_block = [
             bs // kbs for bs, kbs in zip(block_sizes, kernel_block_sizes)
@@ -47,9 +47,10 @@ class BlockTables:
         # num_kv_cache_groups x [max_num_reqs, max_num_blocks]
         self.block_tables: list[StagedWriteTensor] = []
         for i in range(self.num_kv_cache_groups):
-            max_num_blocks = max_num_blocks_per_group[i] * self.blocks_per_kv_block[i]
             block_table = StagedWriteTensor(
-                (self.max_num_reqs, max_num_blocks), dtype=torch.int32, device=device
+                (self.max_num_reqs, block_table_widths[i]),
+                dtype=torch.int32,
+                device=device,
             )
             self.block_tables.append(block_table)
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import copy
 from collections import Counter
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 from enum import Enum, IntEnum
 from math import prod
 from typing import TYPE_CHECKING
@@ -89,6 +89,19 @@ def align_block_table_width(max_num_blocks: int, block_size: int) -> int:
         return max_num_blocks
     alignment = 128 // block_size
     return cdiv(max_num_blocks, alignment) * alignment
+
+
+def get_block_table_width(
+    max_num_blocks: int, block_size: int, kernel_block_size: int
+) -> int:
+    """Return the block-table width after alignment and block splitting."""
+    if block_size % kernel_block_size != 0:
+        raise ValueError(
+            f"kernel_block_size {kernel_block_size} must divide "
+            f"block_size {block_size} evenly"
+        )
+    max_num_blocks = align_block_table_width(max_num_blocks, block_size)
+    return max_num_blocks * block_size // kernel_block_size
 
 
 class KVCacheSpecKind(str, Enum):
@@ -185,6 +198,7 @@ class AttentionSpec(KVCacheSpec):
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype
+    kv_cache_block_size: int | None = field(default=None, compare=False, repr=False)
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
     indexes_kv_by_block_stride: bool = False
@@ -228,7 +242,18 @@ class AttentionSpec(KVCacheSpec):
     def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
         parallel_config = vllm_config.parallel_config
         kv_shard_count = parallel_config.decode_context_parallel_size
-        return cdiv(max_len, self.block_size * kv_shard_count)
+        return cdiv(max_len, self.block_table_block_size * kv_shard_count)
+
+    @property
+    def block_table_block_size(self) -> int:
+        return self.kv_cache_block_size or self.block_size
+
+    def copy_with_new_block_size(self, block_size: int) -> Self:
+        return replace(
+            self,
+            block_size=block_size,
+            kv_cache_block_size=self.block_table_block_size,
+        )
 
 
 @dataclass(frozen=True, kw_only=True)
