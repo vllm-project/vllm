@@ -26,14 +26,12 @@ Block Transfer Flow (happy path)
 
 1. Client sends FetchMsg with a kv_request_id and lists of
    block keys + remote indexes where it wants the data written.
-   In p2p mode FetchMsg is also the server-side "request finished"
-   signal for the id: no further ``cb.create_store_job`` will fire
-   (parked LookupMsg batches are popped, so pending-key resolution
-   cannot promote a HIT after this point), all server-side lookup
-   state for the id is released, and ``cb.finish_request`` fires on
-   each dropped batch. The client emits exactly one FetchMsg per
-   lookup-touched request, including an empty one when no blocks
-   end up being fetched.
+   A request may run several lookup→fetch rounds; symmetric-P2P
+   messages carry ROUND_SEQ so each round's supply, demand, and
+   completion stay isolated. The terminal empty FetchMsg is the
+   server-side "request finished" signal for the id: parked
+   LookupMsg batches are popped and ``cb.finish_request`` fires on
+   each.
 2. Server matches requested blocks against locally stored blocks:
    - Blocks already available are transferred immediately via RDMA.
    - Blocks not yet available are recorded as "demanded" and
@@ -178,33 +176,32 @@ class DisconnectMsg:
 
 
 class FetchMsg:
-    """Client → Server: request blocks by key and close the lookup phase.
+    """Client → Server: request blocks for one lookup round.
 
-    In p2p mode FetchMsg is also the server-side "request finished"
-    signal for ``kv_request_id``: on receipt the server (a) fires no
-    further ``cb.create_store_job`` for this id — parked LookupMsg
-    batches are popped, so ``_resolve_pending_lookups`` cannot promote
-    a HIT_PENDING / RETRY key into a fresh pin after this point — and
-    (b) calls ``cb.finish_request(batch.ctx)`` on each dropped batch
-    so the TieringManager can release per-batch bookkeeping. In the
-    all-miss case the client emits an empty FetchMsg (``KEYS``
-    and ``BLOCK_INDEXES`` both empty) purely to fire this signal.
+    A non-empty fetch closes only its round. The terminal empty FetchMsg
+    (``KEYS`` and ``BLOCK_INDEXES`` both empty) is the "request
+    finished" signal: the server pops parked LookupMsg batches, calls
+    ``cb.finish_request`` on each, and drains any leftover supply.
 
     Fields:
         KV_REQUEST_ID: Identifies this block transfer request.
         KEYS: List of block keys (OffloadKey bytes). May be empty.
         BLOCK_INDEXES: List of remote block indexes (same length as KEYS).
+        ROUND_SEQ: Lookup round this fetch closes. PD clients never probe
+            and stay on their single round 0.
     """
 
     TYPE = "fetch"
     KV_REQUEST_ID = "kv_request_id"
     KEYS = "keys"
     BLOCK_INDEXES = "block_indexes"
+    ROUND_SEQ = "round_seq"
 
     @staticmethod
     def validate(msg: dict) -> None:
         """Raise ValueError if any field has an invalid type or value."""
         _require(msg, FetchMsg.KV_REQUEST_ID, str)
+        _require_non_neg_int(msg, FetchMsg.ROUND_SEQ)
         _require_list(msg, FetchMsg.KEYS)
         _require_list(msg, FetchMsg.BLOCK_INDEXES)
         keys = msg[FetchMsg.KEYS]
@@ -229,17 +226,21 @@ class LookupMsg:
     Fields:
         KV_REQUEST_ID: Identifies this lookup transaction.
         KEYS: List of block keys (OffloadKey bytes) to probe.
+        ROUND_SEQ: Lookup round these probes belong to; pinned supply is
+            parked under it for that round's fetch.
     """
 
     TYPE = "lookup"
     KV_REQUEST_ID = "kv_request_id"
     KEYS = "keys"
+    ROUND_SEQ = "round_seq"
 
     @staticmethod
     def validate(msg: dict) -> None:
         """Raise ValueError if any field has an invalid type or value."""
         _require(msg, LookupMsg.KV_REQUEST_ID, str)
         _require_list(msg, LookupMsg.KEYS)
+        _require_non_neg_int(msg, LookupMsg.ROUND_SEQ)
 
 
 class LookupRespMsg:
@@ -284,17 +285,22 @@ class TransferDoneMsg:
     Fields:
         KV_REQUEST_ID: The request that completed.
         SUCCESS: Whether the transfer completed successfully.
+        ROUND_SEQ: The fetch round that completed. Several loads can be
+            in flight per id (the scheduler submits loads incrementally),
+            so completions are matched by round.
     """
 
     TYPE = "transfer_done"
     KV_REQUEST_ID = "kv_request_id"
     SUCCESS = "success"
+    ROUND_SEQ = "round_seq"
 
     @staticmethod
     def validate(msg: dict) -> None:
         """Raise ValueError if any field has an invalid type or value."""
         _require(msg, TransferDoneMsg.KV_REQUEST_ID, str)
         _require(msg, TransferDoneMsg.SUCCESS, bool)
+        _require_non_neg_int(msg, TransferDoneMsg.ROUND_SEQ)
 
 
 class AbortFetchMsg:
@@ -302,15 +308,18 @@ class AbortFetchMsg:
 
     Fields:
         KV_REQUEST_ID: The request to cancel.
+        ROUND_SEQ: The fetch round to cancel.
     """
 
     TYPE = "abort_fetch"
     KV_REQUEST_ID = "kv_request_id"
+    ROUND_SEQ = "round_seq"
 
     @staticmethod
     def validate(msg: dict) -> None:
         """Raise ValueError if any field has an invalid type or value."""
         _require(msg, AbortFetchMsg.KV_REQUEST_ID, str)
+        _require_non_neg_int(msg, AbortFetchMsg.ROUND_SEQ)
 
 
 class AbortAckMsg:
@@ -318,12 +327,15 @@ class AbortAckMsg:
 
     Fields:
         KV_REQUEST_ID: The request that was cancelled.
+        ROUND_SEQ: The round that was cancelled; echoes AbortFetchMsg.
     """
 
     TYPE = "abort_ack"
     KV_REQUEST_ID = "kv_request_id"
+    ROUND_SEQ = "round_seq"
 
     @staticmethod
     def validate(msg: dict) -> None:
         """Raise ValueError if any field has an invalid type or value."""
         _require(msg, AbortAckMsg.KV_REQUEST_ID, str)
+        _require_non_neg_int(msg, AbortAckMsg.ROUND_SEQ)
