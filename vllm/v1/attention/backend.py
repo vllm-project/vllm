@@ -480,6 +480,11 @@ class CommonAttentionMetadata:
     fixed sliding window. None disables R-SWA. The attention backend copies this
     into its own persistent buffer and reads ``rswa_window`` from model config."""
 
+    replayssm_decode_base_cpu: torch.Tensor | None = None
+    """(batch_size,) CPU ring origin for Mamba2 ReplaySSM decode: num_computed
+    at the current decode run's last full-state write. write_pos counts from
+    here, so a preemption-resumed request re-anchors past the prompt boundary."""
+
     # WARNING: Deprecated fields. Will be removed in a future release (v0.15.0)
     _seq_lens_cpu: torch.Tensor | None = None
     _num_computed_tokens_cpu: torch.Tensor | None = None
@@ -591,6 +596,7 @@ class CommonAttentionMetadata:
             dcp_local_seq_lens_cpu=maybe_slice_reqs(self.dcp_local_seq_lens_cpu),
             is_prefilling=maybe_slice_reqs(self.is_prefilling),
             rswa_prefix_lens=maybe_slice_reqs(self.rswa_prefix_lens),
+            replayssm_decode_base_cpu=maybe_slice_reqs(self.replayssm_decode_base_cpu),
         )
 
 
@@ -855,6 +861,10 @@ class AttentionImplBase(ABC, Generic[T]):
     # Whether this impl uses a sparse (top-k) attention path. Used by MLA to
     # route between the dense-MHA prefill and sparse-MQA paths.
     is_sparse: ClassVar[bool] = False
+
+    # Whether this impl provides a dense-MHA prefill path (forward_mha). Sparse
+    # impls without one run the top-k MQA path for all requests.
+    supports_dense_mha_prefill: ClassVar[bool] = True
 
     # Required attributes that all impls should have
     num_heads: int
