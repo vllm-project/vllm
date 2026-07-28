@@ -436,13 +436,11 @@ class DelegatingParser(Parser):
             (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
         )
         is_required_tool_choice = request.tool_choice == "required"
+        is_forced_to_tool_parser = not supports_required_and_named and (
+            is_named_tool_choice or is_required_tool_choice
+        )
         is_auto_tool_choice = enable_auto_tools and (
-            request.tool_choice == "auto"
-            or request.tool_choice is None
-            or (
-                not supports_required_and_named
-                and (is_named_tool_choice or is_required_tool_choice)
-            )
+            request.tool_choice == "auto" or request.tool_choice is None
         )
 
         tool_calls = list[FunctionCall]()
@@ -475,7 +473,7 @@ class DelegatingParser(Parser):
                     )
                 )
             content = None
-        elif is_auto_tool_choice:
+        elif is_auto_tool_choice or is_forced_to_tool_parser:
             # Automatic Tool Call Parsing (also used as fallback for
             # required/named when supports_required_and_named=False)
             tool_call_info = self.extract_tool_calls(
@@ -495,11 +493,11 @@ class DelegatingParser(Parser):
                 if content and content.strip() == "":
                     content = None
             else:
-                # No tool calls.
-                # For required/named tool choice (when falling back to auto
-                # parsing), if content is empty or whitespace-only, return
-                # empty list with None content.
-                if (is_required_tool_choice or is_named_tool_choice) and (
+                # Preserve any content the parser unwrapped even when it
+                # found no tool calls (for example, an XTML response).
+                if tool_call_info is not None:
+                    content = tool_call_info.content
+                elif (is_required_tool_choice or is_named_tool_choice) and (
                     content is None
                     or (isinstance(content, str) and not content.strip())
                 ):
@@ -827,6 +825,7 @@ class DelegatingParser(Parser):
         current_text, current_token_ids = state.advance(delta_text, delta_token_ids)
         delta_message: DeltaMessage | None = None
         reasoning_transitioned = False
+        tool_choice = getattr(request, "tool_choice", None)
 
         # Reasoning extraction
         if self._in_reasoning_phase(state):
@@ -863,14 +862,27 @@ class DelegatingParser(Parser):
                 current_text = (
                     (delta_message.content if delta_message else None) or ""
                 ) + ((flush_delta.content if flush_delta else None) or "")
+                # Strip XTML wrappers on a reasoning boundary when no
+                # tool parser will consume the post-reasoning content.
+                if (
+                    (self._tool_parser is None or tool_choice == "none")
+                    and reasoning_parser is not None
+                    and hasattr(reasoning_parser, "_content_ready_to_emit")
+                    and delta_message is not None
+                    and delta_message.content
+                ):
+                    delta_message.content = (
+                        reasoning_parser._content_ready_to_emit(delta_message.content)
+                        or None
+                    )
                 if self._engine_based:
                     if delta_message and self._tool_parser is not None:
                         delta_message.content = None
                 else:
                     delta_text = current_text
 
-        # Tool call extraction
-        if self._in_tool_call_phase(state):
+        # Tool call extraction (skip when tool_choice="none")
+        if self._in_tool_call_phase(state) and tool_choice != "none":
             if not state.tool_call_text_started:
                 state.tool_call_text_started = True
                 state.previous_text = ""
@@ -910,17 +922,25 @@ class DelegatingParser(Parser):
             ):
                 state.history_tool_call_cnt += 1
 
-        # No phase active: pass through as content.
-        # Skip when reasoning just ended in this delta — the engine already
-        # consumed the end-of-reasoning marker (e.g. </think>) and
-        # delta_text still contains the raw marker text.
+        # No phase active: pass through as content. Skip a reasoning
+        # transition because the engine already consumed its end marker.
+        # Model-specific reasoning parsers may also strip content wrappers
+        # here when no tool parser is handling the text.
         if (
             delta_message is None
             and not reasoning_transitioned
             and not self._in_reasoning_phase(state)
-            and not self._in_tool_call_phase(state)
+            and (not self._in_tool_call_phase(state) or tool_choice == "none")
         ):
-            delta_message = DeltaMessage(content=delta_text)
+            if self._reasoning_parser is not None and hasattr(
+                self._reasoning_parser, "strip_content_streaming"
+            ):
+                delta_message = self._reasoning_parser.strip_content_streaming(
+                    previous_text=state.previous_text,
+                    current_text=current_text,
+                )
+            else:
+                delta_message = DeltaMessage(content=delta_text)
 
         state.commit(current_text, current_token_ids)
 

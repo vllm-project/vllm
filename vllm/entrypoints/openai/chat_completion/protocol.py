@@ -10,7 +10,7 @@ from openai.types.chat.chat_completion_audio import (
     ChatCompletionAudio as OpenAIChatCompletionAudio,
 )
 from openai.types.chat.chat_completion_message import Annotation as OpenAIAnnotation
-from pydantic import Field, PrivateAttr, model_serializer, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, model_serializer, model_validator
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
@@ -546,6 +546,30 @@ class ChatCompletionRequest(OpenAIBaseModel):
             continue_final_message=self.continue_final_message,
             documents=self.documents,
             reasoning_effort=self.reasoning_effort,
+            # Without tools the protocol default tool_choice="none" is
+            # meaningless; passing it makes templates that render tool-choice
+            # directives (e.g. Kimi K3's encoding_k3) inject a "you MUST NOT
+            # call tools" note into every plain chat prompt.
+            # Dump non-string tool choices (named) to plain dicts: template
+            # kwargs are serialized across processes.
+            tool_choice=(
+                (
+                    self.tool_choice.model_dump(exclude_none=True)
+                    if isinstance(self.tool_choice, BaseModel)
+                    else self.tool_choice
+                )
+                if self.tools
+                else None
+            ),
+            # Templates that render the response-format schema into the prompt
+            # (encoding_k3) need the request's response_format; templates that
+            # don't declare the variable filter it out harmlessly. Dump to a
+            # plain dict: template kwargs are serialized across processes.
+            response_format=(
+                self.response_format.model_dump(exclude_none=True)
+                if self.response_format is not None
+                else None
+            ),
         )
 
         # When reasoning is requested, activate thinking for models whose

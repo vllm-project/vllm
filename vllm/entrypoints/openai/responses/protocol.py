@@ -319,6 +319,7 @@ class ResponsesRequest(OpenAIBaseModel):
             add_generation_prompt=not continue_final,
             continue_final_message=continue_final,
             reasoning_effort=reasoning_effort,
+            tool_choice=self.tool_choice,
         )
 
         # When reasoning is requested, activate thinking for models whose
