@@ -1,18 +1,22 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Unified parser interface for reasoning and tool-call deltas.
 
 mod combined;
 mod gemma4;
+mod inkling;
 
+pub use combined::CombinedParser;
+pub use gemma4::Gemma4UnifiedParser;
+pub use inkling::InklingUnifiedParser;
 use thiserror::Error;
 use thiserror_ext::Macro;
 use vllm_tokenizer::DynTokenizer;
 
-pub use combined::CombinedParser;
-pub use gemma4::Gemma4UnifiedParser;
-
 use crate::reasoning::ReasoningError;
 use crate::tool::{
-    StructuralTagModel, Tool, ToolCallDelta, ToolParserError, ToolParserEvent, ToolParserOutput,
+    StructuralTagBuilder, Tool, ToolCallDelta, ToolParserError, ToolParserEvent, ToolParserOutput,
 };
 
 /// Result alias for unified parser operations.
@@ -167,8 +171,8 @@ pub trait UnifiedParser: Send {
         false
     }
 
-    /// Return the xgrammar structural-tag model used for strict tool calling.
-    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
+    /// Return the xgrammar structural-tag builder used for strict tool calling.
+    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
         None
     }
 
@@ -205,4 +209,11 @@ pub enum UnifiedParserError {
     Reasoning(#[from] ReasoningError),
     #[error(transparent)]
     Tool(#[from] ToolParserError),
+}
+
+/// Returns the ID for the given token, or an error if it's not found.
+fn token_id(tokenizer: &dyn vllm_tokenizer::Tokenizer, token: &str) -> Result<u32> {
+    tokenizer.token_to_id(token).ok_or_else(|| UnifiedParserError::MissingToken {
+        token: token.to_string(),
+    })
 }

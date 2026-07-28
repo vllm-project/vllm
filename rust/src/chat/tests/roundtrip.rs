@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Roundtrip tests for the real chat-template and output-processor pairing.
 //!
 //! The invariant under test is that a structured assistant message rendered as history can be
@@ -117,6 +120,19 @@ impl RoundtripCase {
         }
     }
 
+    /// MiniMax M3 invoke format with `<mm:think>` reasoning tags.
+    fn minimax_m3() -> Self {
+        Self {
+            model_id: "MiniMaxAI/MiniMax-M3",
+            assistant_stop_suffix: "[e~[\n",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Always { value: true },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+        }
+    }
+
     /// DeepSeek V4 DSML tool-call format.
     fn deepseek_v4() -> Self {
         Self {
@@ -125,6 +141,32 @@ impl RoundtripCase {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Toggleable { default: false },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+        }
+    }
+
+    /// DeepSeek V3.2 DSML tool-call format.
+    fn deepseek_v32() -> Self {
+        Self {
+            model_id: "deepseek-ai/DeepSeek-V3.2-Exp",
+            assistant_stop_suffix: "<｜end▁of▁sentence｜>",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Toggleable { default: false },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+        }
+    }
+
+    /// GLM-4.5 XML-like argument format with `<think>` reasoning tags.
+    fn glm45() -> Self {
+        Self {
+            model_id: "zai-org/GLM-4.5",
+            assistant_stop_suffix: "",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
         }
@@ -196,6 +238,19 @@ impl RoundtripCase {
         }
     }
 
+    /// Nemotron V3 with `<think>` / `</think>` reasoning tags.
+    fn nemotron_v3() -> Self {
+        Self {
+            model_id: "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+            assistant_stop_suffix: "<|im_end|>\n",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Always { value: true },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+        }
+    }
+
     /// GPT-OSS Harmony token-id renderer and native Harmony output processor.
     fn gpt_oss() -> Self {
         Self {
@@ -208,20 +263,36 @@ impl RoundtripCase {
             sort_json_keys: false,
         }
     }
+
+    /// Inkling typed content blocks with native token-id rendering.
+    fn inkling() -> Self {
+        Self {
+            model_id: "thinkingmachines/Inkling",
+            assistant_stop_suffix: "",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Always { value: true },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: true,
+        }
+    }
 }
 
 macro_rules! roundtrip_tests {
-    ($($case:ident => [$($(#[$fixture_attr:meta])* $fixture:ident),* $(,)?]),+ $(,)?) => {
+    ($($case:ident => $(#[$case_attr:meta])* [$($fixture:ident),* $(,)?]),+ $(,)?) => {
         paste::paste! {
             $(
-                $(
-                    #[tokio::test]
-                    $(#[$fixture_attr])*
-                    #[file_serial([<hf_ $case>])]
-                    async fn [<roundtrip_ $case _ $fixture>]() -> Result<()> {
-                        [<run_roundtrip_ $fixture>](RoundtripCase::$case()).await
-                    }
-                )*
+                #[tokio::test]
+                #[file_serial([<hf_ $case>])]
+                $(#[$case_attr])*
+                async fn [<roundtrip_ $case>]() -> Result<()> {
+                    let case = RoundtripCase::$case();
+                    let backends = load_roundtrip_backends(&case).await?;
+                    $(
+                        [<run_roundtrip_ $fixture>](&case, &backends).await?;
+                    )*
+                    Ok(())
+                }
             )+
         }
     };
@@ -231,28 +302,36 @@ roundtrip_tests! {
     qwen3 => [reasoning_and_content, tool_call_mix],
     qwen35 => [reasoning_and_content, tool_call_mix],
     minimax_m25 => [reasoning_and_content, tool_call_mix],
+    minimax_m3 => [reasoning_and_content, tool_call_mix],
     deepseek_v4 => [reasoning_and_content, tool_call_mix],
+    deepseek_v32 => [tool_call_mix],
+    glm45 => [reasoning_and_content, tool_call_mix],
     glm47 => [reasoning_and_content, tool_call_mix],
-    seed_oss => [reasoning_and_content],
+    seed_oss => [reasoning_and_content, tool_call_mix],
     step3p5 => [reasoning_and_content],
+    nemotron_v3 => [reasoning_and_content],
     gemma4 => [tool_call_mix], // Gemma4 strips reasoning in history if there's no tool call
     kimi_k25 => [tool_call_mix], // Kimi K2.5 strips reasoning in history
     gpt_oss => [tool_call_mix], // Harmony strips reasoning in history if there's no tool call
+    inkling => [reasoning_and_content, tool_call_mix],
 }
 
 /// Run the fixed reasoning+content fixture for one model/parser case.
-async fn run_roundtrip_reasoning_and_content(case: RoundtripCase) -> Result<()> {
+async fn run_roundtrip_reasoning_and_content(
+    case: &RoundtripCase,
+    backends: &vllm_chat::LoadedModelBackends,
+) -> Result<()> {
     for thinking in case.thinking_behavior.fixtures() {
-        run_roundtrip_reasoning_and_content_inner(case.clone(), thinking).await?;
+        run_roundtrip_reasoning_and_content_inner(case, backends, thinking).await?;
     }
     Ok(())
 }
 
 async fn run_roundtrip_reasoning_and_content_inner(
-    case: RoundtripCase,
+    case: &RoundtripCase,
+    backends: &vllm_chat::LoadedModelBackends,
     thinking: Option<bool>,
 ) -> Result<()> {
-    let backends = load_roundtrip_backends(&case).await?;
     let request = roundtrip_request(
         "roundtrip-reasoning-content",
         vec![ChatMessage::text(ChatRole::User, "What is 2 + 2?")],
@@ -275,7 +354,7 @@ async fn run_roundtrip_reasoning_and_content_inner(
         });
         AssistantMessage { content }
     };
-    let result = run_roundtrip(&case, &backends, &request, assistant).await?;
+    let result = run_roundtrip(case, backends, &request, assistant).await?;
 
     assert_eq!(
         result.parsed_message.reasoning().as_deref().map(str::trim),
@@ -293,8 +372,10 @@ async fn run_roundtrip_reasoning_and_content_inner(
 }
 
 /// Run the fixed reasoning+multiple-tools fixture for one model/parser case.
-async fn run_roundtrip_tool_call_mix(case: RoundtripCase) -> Result<()> {
-    let backends = load_roundtrip_backends(&case).await?;
+async fn run_roundtrip_tool_call_mix(
+    case: &RoundtripCase,
+    backends: &vllm_chat::LoadedModelBackends,
+) -> Result<()> {
     let request = roundtrip_request(
         "roundtrip-reasoning-tools",
         vec![ChatMessage::text(
@@ -308,8 +389,8 @@ async fn run_roundtrip_tool_call_mix(case: RoundtripCase) -> Result<()> {
     let expected_text = "I will call the tools.";
 
     let result = run_roundtrip(
-        &case,
-        &backends,
+        case,
+        backends,
         &request,
         AssistantMessage {
             content: vec![
@@ -353,12 +434,12 @@ async fn run_roundtrip_tool_call_mix(case: RoundtripCase) -> Result<()> {
     assert_eq!(tool_calls[0].name, "get_weather");
     assert_eq!(
         tool_calls[0].arguments,
-        expected_arguments(&case, r#"{"location": "Shanghai"}"#)?,
+        expected_arguments(case, r#"{"location": "Shanghai"}"#)?,
     );
     assert_eq!(tool_calls[1].name, "add");
     assert_eq!(
         tool_calls[1].arguments,
-        expected_arguments(&case, r#"{"y": 1.0, "x": 2, "items": ["left", "right"]}"#)?,
+        expected_arguments(case, r#"{"y": 1.0, "x": 2, "items": ["left", "right"]}"#)?,
     );
 
     assert_eq!(
@@ -612,6 +693,7 @@ fn decoded_completion_stream(
                     usage: Default::default(),
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 }),
             }
         });
@@ -622,6 +704,7 @@ fn decoded_completion_stream(
                 usage: Default::default(),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             });
             events.push(DecodedTextEvent::TextDelta {
                 delta: chunk.delta,

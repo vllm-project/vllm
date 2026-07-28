@@ -202,7 +202,7 @@ ray.get([train_handle, inference_handle])
 names, dtype_names, shapes = ray.get(train_model.get_weight_metadata.remote())
 
 # Start weight update
-ray.get(llm.start_weight_update.remote(is_checkpoint_format=True))
+ray.get(llm.start_weight_update.remote())
 
 # Issue update_weights call with NCCL-specific update info
 # packed=True enables efficient batched tensor broadcasting

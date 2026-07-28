@@ -272,7 +272,7 @@ def test_multi_example_connector_consistency():
         "set_xfer_handshake_metadata_pp_aware",
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[0] 0",
+        "update_state_after_alloc num_blocks=[7] 0",
         "build_connector_meta",
     ]
     # First three events are from initialization (register_kv_caches,
@@ -292,7 +292,7 @@ def test_multi_example_connector_consistency():
         "set_xfer_handshake_metadata_pp_aware",
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[0] 0",
+        "update_state_after_alloc num_blocks=[7] 0",
         "build_connector_meta",
     ]
     assert events["storage2-WORKER"][:8] == [
@@ -315,11 +315,15 @@ def test_multi_example_connector_consistency():
 
     events = get_connector_events()
     # get_num_new_matched_tokens will return new tokens from the first
-    # connector so update_state_after_alloc will be with allocated blocks
-    # on that one but with zero blocks for others (first nonzero match is
-    # chosen).
-    storage1_scheduler_events = _ignore_event_collection(events["storage1-SCHEDULER"])
-    storage2_scheduler_events = _ignore_event_collection(events["storage2-SCHEDULER"])
+    # connector (first nonzero match is chosen), so update_state_after_alloc
+    # will report those external tokens on that one. Other connectors still
+    # receive the request's real blocks but with 0 external tokens.
+    storage1_scheduler_events = _events_from_request(
+        _ignore_event_collection(events["storage1-SCHEDULER"])
+    )
+    storage2_scheduler_events = _events_from_request(
+        _ignore_event_collection(events["storage2-SCHEDULER"])
+    )
     assert storage1_scheduler_events[:4] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
@@ -329,7 +333,7 @@ def test_multi_example_connector_consistency():
     assert storage2_scheduler_events[:4] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[0] 0",
+        "update_state_after_alloc num_blocks=[7] 0",
         "build_connector_meta",
     ]
 
@@ -345,15 +349,19 @@ def test_multi_example_connector_consistency():
 
     events = get_connector_events()
     # get_num_new_matched_tokens will be called for both connectors but will
-    # return 0 from the first connector, but the second connector should have
-    # a hit, so update_state_after_alloc will only be called with allocated
-    # blocks for the second connector.
-    storage1_scheduler_events = _ignore_event_collection(events["storage1-SCHEDULER"])
-    storage2_scheduler_events = _ignore_event_collection(events["storage2-SCHEDULER"])
+    # return 0 from the first connector, while the second connector has a hit.
+    # Both connectors receive the request's real blocks, but only the chosen
+    # (second) connector reports external tokens.
+    storage1_scheduler_events = _events_from_request(
+        _ignore_event_collection(events["storage1-SCHEDULER"])
+    )
+    storage2_scheduler_events = _events_from_request(
+        _ignore_event_collection(events["storage2-SCHEDULER"])
+    )
     assert storage1_scheduler_events[:4] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[0] 0",
+        "update_state_after_alloc num_blocks=[7] 0",
         "build_connector_meta",
     ]
     assert storage2_scheduler_events[:4] == [
@@ -373,6 +381,16 @@ def _ignore_event_collection(events: list[str]) -> list[str]:
     # and which are not meaningful state transitions for these assertions.
     ignored = {"get_kv_connector_stats", "has_pending_push_work", "take_events"}
     return [event for event in events if event not in ignored]
+
+
+def _events_from_request(events: list[str]) -> list[str]:
+    # The async engine-core can emit a trailing build_connector_meta from the
+    # previous generation's final (idle) scheduler step. Depending on timing it
+    # may be flushed into this window ahead of on_new_request, so anchor the
+    # comparison on the new request's first event to avoid a flaky ordering.
+    if "on_new_request" in events:
+        return events[events.index("on_new_request") :]
+    return events
 
 
 def get_connector_events() -> dict[str, list[str]]:

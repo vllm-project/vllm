@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -7,9 +10,9 @@ use tracing::trace;
 use crate::EngineId;
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::error::{Error, Result};
+use crate::protocol::output::{EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput};
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::UtilityOutput;
-use crate::protocol::{EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput};
 use crate::transport::ConnectedEngine;
 
 pub type OutputSender = mpsc::UnboundedSender<Result<EngineCoreStreamOutput>>;
@@ -71,17 +74,13 @@ impl EngineRoutingState {
     ///
     /// Scheduler stats can raise the load estimate above the frontend-local
     /// view, but they should not lower it below requests this frontend has
-    /// already admitted. Waiting requests still get the same extra penalty
-    /// as the original `waiting * 4 + running` score.
+    /// already admitted.
     fn routing_score(&self) -> usize {
-        const WAITING_WEIGHT: usize = 4;
-
         let Some(stats) = self.last_scheduler_stats else {
             return self.inflight;
         };
 
-        let scheduler_total = stats.running + stats.waiting;
-        self.inflight.max(scheduler_total) + stats.waiting * (WAITING_WEIGHT - 1)
+        self.inflight.max(stats.running + stats.waiting)
     }
 
     /// Replace the local routing view with a fresh real scheduler snapshot.
@@ -452,7 +451,7 @@ mod tests {
         EngineLoadSnapshot, EngineRoutingState, RequestRegistry, UtilityRegistry,
     };
     use crate::mock_engine::default_ready_response;
-    use crate::protocol::{
+    use crate::protocol::output::{
         EngineCoreEvent, EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput,
     };
     use crate::transport::ConnectedEngine;
@@ -747,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn routing_score_keeps_extra_waiting_penalty() {
+    fn routing_score_counts_waiting_without_extra_penalty() {
         let state = EngineRoutingState {
             inflight: 1,
             last_scheduler_stats: Some(EngineLoadSnapshot {
@@ -756,7 +755,7 @@ mod tests {
             }),
         };
 
-        assert_eq!(state.routing_score(), 14);
+        assert_eq!(state.routing_score(), 5);
     }
 
     #[test]
