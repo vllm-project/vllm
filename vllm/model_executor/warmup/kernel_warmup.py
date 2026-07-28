@@ -76,6 +76,9 @@ def kernel_warmup(worker: "Worker"):
     from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
         minimax_m3_msa_warmup,
     )
+    from vllm.model_executor.warmup.replayssm_spec_flashinfer_warmup import (
+        replayssm_spec_flashinfer_warmup,
+    )
 
     # Pooling models do not use the generation slot-mapping path.
     if not worker.use_v2_model_runner and not worker.model_runner.is_pooling_model:
@@ -112,6 +115,11 @@ def kernel_warmup(worker: "Worker"):
         deep_gemm_warmup(model, max_tokens)
 
     minimax_m3_msa_warmup(worker)
+
+    # Must run here rather than in the V2 runner's own warmup_kernels, which
+    # executes after capture_model() and so cannot keep the FlashInfer JIT out
+    # of CUDA-graph capture. No-op unless ReplaySSM-spec is on flashinfer.
+    replayssm_spec_flashinfer_warmup(worker)
 
     enable_flashinfer_autotune = (
         worker.vllm_config.kernel_config.enable_flashinfer_autotune

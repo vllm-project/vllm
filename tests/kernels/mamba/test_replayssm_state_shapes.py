@@ -169,6 +169,93 @@ def test_flashinfer_page_strides_match_the_kernel_contract():
     assert dt.stride(-1) == 1
 
 
+def _alloc_scratch(algorithm: str, buffer_len: int = 16, scratch_bs: int = 8):
+    """Run the builder's scratch allocator against a stub Mamba page."""
+    from vllm.v1.attention.backends.mamba_attn import (
+        BaseMambaAttentionMetadataBuilder,
+    )
+
+    spec = SimpleNamespace(
+        shapes=_fi_shapes(buffer_len=buffer_len, num_spec=3),
+        dtypes=(
+            torch.float32,
+            torch.float32,
+            torch.bfloat16,
+            torch.bfloat16,
+            torch.float32,
+        ),
+    )
+    # The real builder seeds these to None before allocating.
+    stub = SimpleNamespace(
+        replayssm_buffer_len=buffer_len,
+        decode_spec_fi_cb_scaled=None,
+        decode_spec_fi_cumadt=None,
+        decode_spec_fi_cb_old=None,
+    )
+    BaseMambaAttentionMetadataBuilder._init_replayssm_spec_flashinfer_scratch(
+        stub, spec, scratch_bs, algorithm, torch.device("cpu")
+    )
+    return stub
+
+
+@pytest.mark.parametrize("algorithm", ["auto", "two-kernel"])
+def test_two_kernel_scratch_shapes_match_the_mma_fragment_layout(algorithm):
+    from vllm.v1.attention.backends.mamba_attn import (
+        _MMA_FRAG_SIZE,
+        _MMA_M_TILE,
+        _MMA_WARP_SIZE,
+    )
+
+    stub = _alloc_scratch(algorithm)
+    scratch_bs, buffer_len = 8, 16
+    k_old = ((buffer_len + 7) // 8) * 8
+
+    assert stub.decode_spec_fi_cb_scaled.shape == (
+        scratch_bs,
+        NUM_HEADS,
+        _MMA_WARP_SIZE,
+        _MMA_FRAG_SIZE,
+    )
+    assert stub.decode_spec_fi_cumadt.shape == (scratch_bs, NUM_HEADS, _MMA_M_TILE)
+    assert stub.decode_spec_fi_cb_old.shape == (
+        scratch_bs,
+        NUM_HEADS,
+        _MMA_WARP_SIZE,
+        k_old // 2,
+    )
+    # cb_scaled/cb_old ride the activation dtype; cumAdt_vec is always fp32.
+    assert stub.decode_spec_fi_cb_scaled.dtype == torch.bfloat16
+    assert stub.decode_spec_fi_cb_old.dtype == torch.bfloat16
+    assert stub.decode_spec_fi_cumadt.dtype == torch.float32
+
+
+def test_monolith_allocates_no_scratch():
+    """FlashInfer routes on cb_scaled != nullptr, so 'monolith' must pass none."""
+    stub = _alloc_scratch("monolith")
+    assert stub.decode_spec_fi_cb_scaled is None
+    assert stub.decode_spec_fi_cumadt is None
+    assert stub.decode_spec_fi_cb_old is None
+
+
+def test_scratch_allocator_rejects_the_triton_four_tensor_page():
+    from vllm.v1.attention.backends.mamba_attn import (
+        BaseMambaAttentionMetadataBuilder,
+    )
+
+    triton_page = SimpleNamespace(
+        shapes=((64, 3), (NUM_HEADS, HEAD_DIM, STATE_SIZE), (32, 640), (NUM_HEADS, 32)),
+        dtypes=(torch.float32,) * 4,
+    )
+    with pytest.raises(ValueError, match="5-tensor Mamba2"):
+        BaseMambaAttentionMetadataBuilder._init_replayssm_spec_flashinfer_scratch(
+            SimpleNamespace(replayssm_buffer_len=16),
+            triton_page,
+            8,
+            "auto",
+            torch.device("cpu"),
+        )
+
+
 def _validation_stub(buffer_len: int, algorithm: str = "auto"):
     """Minimal stand-in for the fields _validate_replayssm_spec_flashinfer reads.
 

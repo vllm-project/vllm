@@ -1125,8 +1125,11 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     query_start_loc=query_start_loc_d,
                     max_spec_len=self.max_spec_len,
                     replayssm_buffer_len=self.replayssm_buffer_len,
-                    # Scratch (and with it the two-kernel path) is wired up
-                    # separately; leaving it unset runs the monolithic kernel.
+                    # None under algorithm="monolith"; otherwise all three,
+                    # which is what makes the two-kernel path available.
+                    cb_scaled=attn_metadata.spec_fi_cb_scaled_scratch,
+                    cumAdt_vec=attn_metadata.spec_fi_cumadt_scratch,
+                    cb_old=attn_metadata.spec_fi_cb_old_scratch,
                 )
             elif self.use_replayssm_spec:
                 assert self.replayssm_buffer_len is not None

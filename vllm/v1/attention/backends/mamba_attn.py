@@ -27,6 +27,12 @@ from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
 M = TypeVar("M", bound="BaseMambaAttentionMetadata")
 
+# FlashInfer's two-kernel scratch is laid out as MMA fragments rather than
+# logical matrices, so these are the kernel's tile constants, not tunables.
+_MMA_WARP_SIZE = 32
+_MMA_FRAG_SIZE = 8  # m16n8k16 A-fragment registers per lane
+_MMA_M_TILE = 16  # cumAdt_vec is padded to the MMA M tile
+
 
 @dataclass
 class BaseMambaAttentionMetadata:
@@ -91,6 +97,12 @@ class BaseMambaAttentionMetadata:
     spec_post_origin_d: torch.Tensor | None = None
     spec_is_flush_d: torch.Tensor | None = None
     spec_bc_pre_scratch: torch.Tensor | None = None
+    # FlashInfer two-kernel scratch. All three or none: FlashInfer routes on
+    # cb_scaled != nullptr and rejects a partial set. None under
+    # algorithm="monolith", which then always runs the monolithic kernel.
+    spec_fi_cb_scaled_scratch: torch.Tensor | None = None
+    spec_fi_cumadt_scratch: torch.Tensor | None = None
+    spec_fi_cb_old_scratch: torch.Tensor | None = None
 
 
 class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
@@ -234,7 +246,17 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self.spec_post_origin: torch.Tensor | None = None
         self.spec_is_flush: torch.Tensor | None = None
         self.decode_spec_bc_pre: torch.Tensor | None = None
-        if self.use_replayssm_spec:
+        self.decode_spec_fi_cb_scaled: torch.Tensor | None = None
+        self.decode_spec_fi_cumadt: torch.Tensor | None = None
+        self.decode_spec_fi_cb_old: torch.Tensor | None = None
+        if self.use_replayssm_spec_flashinfer:
+            self._init_replayssm_spec_flashinfer_scratch(
+                kv_cache_spec,
+                max(self.decode_cudagraph_max_bs, scheduler_config.max_num_seqs),
+                vllm_config.mamba_config.replayssm_spec_algorithm,
+                device,
+            )
+        elif self.use_replayssm_spec:
             if len(kv_cache_spec.shapes) != 4:
                 raise ValueError(
                     "the cached-spec kernel requires the 4-tensor Mamba2 page "
@@ -267,6 +289,54 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
         if self.use_spec_decode:
             self.supports_update_block_table = False
+
+    def _init_replayssm_spec_flashinfer_scratch(
+        self,
+        kv_cache_spec: MambaSpec,
+        scratch_bs: int,
+        algorithm: str,
+        device: torch.device,
+    ) -> None:
+        """Preallocate the two-kernel scratch trio, or nothing for 'monolith'.
+
+        FlashInfer routes on ``cb_scaled != nullptr``, so the three must be
+        provided together or not at all. Caller-allocated like ``out`` to keep
+        the call CUDA-graph safe, and shared across the model's Mamba layers,
+        which run sequentially.
+        """
+        if len(kv_cache_spec.shapes) != 5:
+            raise ValueError(
+                "the FlashInfer cached-spec kernel requires the 5-tensor Mamba2 "
+                "page (conv, ssm, x_cache, B_cache, dt_cache)"
+            )
+        if algorithm == "monolith":
+            return
+
+        local_nheads = kv_cache_spec.shapes[1][0]
+        # MambaSpec.dtypes is annotated as a 1-tuple but is really per-tensor
+        # (page_size_bytes zips it with shapes).
+        page_dtypes: tuple[torch.dtype, ...] = kv_cache_spec.dtypes
+        activation_dtype = page_dtypes[2]
+        # Fragment-native MMA layouts: cb_scaled is one m16n8k16 A-fragment per
+        # (row, head) laid out as [lane, register]; cb_old is the m16n8k{K_old}
+        # fragment consumed on the replay path, K_old = round_up(max_window, 8).
+        k_old = ((self.replayssm_buffer_len + 7) // 8) * 8
+        self.decode_spec_fi_cb_scaled = torch.empty(
+            (scratch_bs, local_nheads, _MMA_WARP_SIZE, _MMA_FRAG_SIZE),
+            dtype=activation_dtype,
+            device=device,
+        )
+        # Padded to the MMA M tile (16), which covers every T we accept.
+        self.decode_spec_fi_cumadt = torch.empty(
+            (scratch_bs, local_nheads, _MMA_M_TILE),
+            dtype=torch.float32,
+            device=device,
+        )
+        self.decode_spec_fi_cb_old = torch.empty(
+            (scratch_bs, local_nheads, _MMA_WARP_SIZE, k_old // 2),
+            dtype=activation_dtype,
+            device=device,
+        )
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
@@ -721,6 +791,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         spec_post_origin_d = None
         spec_is_flush_d = None
         spec_bc_pre_scratch = None
+        spec_fi_cb_scaled_scratch = None
+        spec_fi_cumadt_scratch = None
+        spec_fi_cb_old_scratch = None
         if (
             self.use_replayssm_spec
             and num_decodes > 0
@@ -737,6 +810,13 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             )
             if self.decode_spec_bc_pre is not None:
                 spec_bc_pre_scratch = self.decode_spec_bc_pre[:num_decodes]
+            if self.decode_spec_fi_cb_scaled is not None:
+                # Allocated as a set, so the other two are non-None with it.
+                assert self.decode_spec_fi_cumadt is not None
+                assert self.decode_spec_fi_cb_old is not None
+                spec_fi_cb_scaled_scratch = self.decode_spec_fi_cb_scaled[:num_decodes]
+                spec_fi_cumadt_scratch = self.decode_spec_fi_cumadt[:num_decodes]
+                spec_fi_cb_old_scratch = self.decode_spec_fi_cb_old[:num_decodes]
 
         metadata = self.metadata_cls(
             num_prefills=num_prefills,
@@ -754,6 +834,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             spec_post_origin_d=spec_post_origin_d,
             spec_is_flush_d=spec_is_flush_d,
             spec_bc_pre_scratch=spec_bc_pre_scratch,
+            spec_fi_cb_scaled_scratch=spec_fi_cb_scaled_scratch,
+            spec_fi_cumadt_scratch=spec_fi_cumadt_scratch,
+            spec_fi_cb_old_scratch=spec_fi_cb_old_scratch,
             num_accepted_tokens=num_accepted_tokens,
             query_start_loc_d=query_start_loc_d,
             block_idx_last_scheduled_token=block_idx_last_scheduled_token,
@@ -964,6 +1047,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         is_flush_d = metadata.is_flush_d
         bc_pre_scratch = metadata.bc_pre_scratch
         spec_bc_pre_scratch = metadata.spec_bc_pre_scratch
+        spec_fi_cb_scaled_scratch = metadata.spec_fi_cb_scaled_scratch
+        spec_fi_cumadt_scratch = metadata.spec_fi_cumadt_scratch
+        spec_fi_cb_old_scratch = metadata.spec_fi_cb_old_scratch
         if (
             metadata.num_prefills == 0
             and metadata.num_decodes <= self.decode_cudagraph_max_bs
@@ -1049,6 +1135,12 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             # dense per-row scratch needs widening to the padded batch.
             if self.use_replayssm_spec and self.decode_spec_bc_pre is not None:
                 spec_bc_pre_scratch = self.decode_spec_bc_pre[:padded_bs]
+            if self.decode_spec_fi_cb_scaled is not None:
+                assert self.decode_spec_fi_cumadt is not None
+                assert self.decode_spec_fi_cb_old is not None
+                spec_fi_cb_scaled_scratch = self.decode_spec_fi_cb_scaled[:padded_bs]
+                spec_fi_cumadt_scratch = self.decode_spec_fi_cumadt[:padded_bs]
+                spec_fi_cb_old_scratch = self.decode_spec_fi_cb_old[:padded_bs]
 
         return replace(
             metadata,
@@ -1059,6 +1151,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             is_flush_d=is_flush_d,
             bc_pre_scratch=bc_pre_scratch,
             spec_bc_pre_scratch=spec_bc_pre_scratch,
+            spec_fi_cb_scaled_scratch=spec_fi_cb_scaled_scratch,
+            spec_fi_cumadt_scratch=spec_fi_cumadt_scratch,
+            spec_fi_cb_old_scratch=spec_fi_cb_old_scratch,
             block_idx_last_scheduled_token=block_idx_last_scheduled_token,
             block_idx_last_computed_token=block_idx_last_computed_token,
             block_idx_last_scheduled_token_prev_step=(
