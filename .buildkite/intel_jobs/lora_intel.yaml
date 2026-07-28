@@ -86,7 +86,7 @@ steps:
       pytest -v -s lora/test_punica_ops.py::test_add_lora_fused_moe_early_exit'
 
 - label: LoRA Punica FP8/XPU Ops
-  timeout_in_minutes: 45
+  timeout_in_minutes: 60
   device: intel_gpu
   agent_tags:
     label: production

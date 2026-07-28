@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Output processing helpers shared by text and chat layers.
 
 pub use decoded::{DecodedTextEvent, Finished, TextDecodeOptions, decoded_text_event_stream};

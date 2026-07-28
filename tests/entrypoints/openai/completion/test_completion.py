@@ -176,6 +176,61 @@ async def test_some_logprobs(client: openai.AsyncOpenAI, model_name: str):
 
 
 @pytest.mark.asyncio
+async def test_logprob_token_ids(client: openai.AsyncOpenAI):
+    completion = await client.completions.create(
+        model=MODEL_NAME,
+        prompt="Hello",
+        max_tokens=1,
+        temperature=0.0,
+        logprobs=5,
+        extra_body={
+            "logprob_token_ids": [5000],
+            "allowed_token_ids": [42],
+            "return_tokens_as_token_ids": True,
+        },
+    )
+
+    choice = completion.choices[0]
+    assert choice.logprobs is not None
+    assert choice.logprobs.tokens == ["token_id:42"]
+    assert choice.logprobs.top_logprobs is not None
+    assert set(choice.logprobs.top_logprobs[0]) == {
+        "token_id:42",
+        "token_id:5000",
+    }
+
+
+@pytest.mark.asyncio
+async def test_logprob_token_ids_stream(client: openai.AsyncOpenAI):
+    stream = await client.completions.create(
+        model=MODEL_NAME,
+        prompt="Hello",
+        max_tokens=1,
+        temperature=0.0,
+        logprobs=5,
+        stream=True,
+        extra_body={
+            "logprob_token_ids": [5000],
+            "allowed_token_ids": [42],
+            "return_tokens_as_token_ids": True,
+        },
+    )
+
+    returned_top_logprobs: list[dict[str, float]] = []
+    async for chunk in stream:
+        logprobs = chunk.choices[0].logprobs
+        if logprobs is not None and logprobs.top_logprobs is not None:
+            returned_top_logprobs.extend(
+                top_logprobs
+                for top_logprobs in logprobs.top_logprobs
+                if top_logprobs is not None
+            )
+
+    assert len(returned_top_logprobs) == 1
+    assert set(returned_top_logprobs[0]) == {"token_id:42", "token_id:5000"}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME],
