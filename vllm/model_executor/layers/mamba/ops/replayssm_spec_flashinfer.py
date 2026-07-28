@@ -13,6 +13,7 @@ keeps its own call path in ``selective_state_update_replayssm_spec``.
 """
 
 import inspect
+from dataclasses import dataclass
 
 import torch
 
@@ -27,6 +28,29 @@ logger = init_logger(__name__)
 # in flashinfer-ai/flashinfer#3975; earlier builds export a same-named symbol
 # with a double-buffer signature that would silently misinterpret our cursors.
 _RING_API_PARAM = "prev_num_accepted_tokens"
+
+
+@dataclass(frozen=True)
+class ReplaySSMRoundingPolicy:
+    """Rounding decisions resolved once, at backend construction.
+
+    The decode path must not inspect CLI strings, query device capability, or
+    import FlashInfer, so everything the kernel call needs is settled here.
+    """
+
+    enabled: bool
+    # 0 when disabled -- FlashInfer forces philox_rounds to 0 without a seed and
+    # asserts it is positive with one. Part of the JIT specialisation key.
+    philox_rounds: int
+
+
+def _resolve_rounding_policy(mamba_config: MambaConfig) -> ReplaySSMRoundingPolicy:
+    if not mamba_config.enable_stochastic_rounding:
+        return ReplaySSMRoundingPolicy(enabled=False, philox_rounds=0)
+    # `or 10` matches the existing spelling in ops/ssu_dispatch.py: 0 means
+    # "backend default", and FlashInfer's default is 10.
+    rounds = mamba_config.stochastic_rounding_philox_rounds or 10
+    return ReplaySSMRoundingPolicy(enabled=True, philox_rounds=rounds)
 
 
 class ReplaySSMSpecFlashInferBackend:
@@ -55,6 +79,7 @@ class ReplaySSMSpecFlashInferBackend:
 
         self._kernel = checkpointing_ssu
         self.algorithm: ReplaySSMSpecAlgorithm = mamba_config.replayssm_spec_algorithm
+        self.rounding = _resolve_rounding_policy(mamba_config)
 
     @property
     def name(self) -> str:
@@ -100,6 +125,17 @@ class ReplaySSMSpecFlashInferBackend:
         _validate_packed_inputs(x, dt, B, C, out)
         _validate_tied_weights(A, dt_bias)
 
+        # Same pattern as the ordinary FlashInfer SSU backend in ssu_dispatch.py:
+        # a fresh per-call seed. torch's CUDA-graph capture tracks RNG state, so
+        # each replay draws different bits without any host-side plumbing.
+        # Without a seed FlashInfer forces philox_rounds to 0, which silently
+        # degrades to round-to-nearest rather than erroring.
+        rand_seed = (
+            torch.randint(0, 2**32, (1,), device=state.device)
+            if self.rounding.enabled
+            else None
+        )
+
         return self._kernel(
             state,
             x_cache,
@@ -119,6 +155,8 @@ class ReplaySSMSpecFlashInferBackend:
             dt_softplus=dt_softplus,
             state_batch_indices=state_batch_indices,
             pad_slot_id=NULL_BLOCK_ID,
+            rand_seed=rand_seed,
+            philox_rounds=self.rounding.philox_rounds,
             cu_seqlens=query_start_loc,
             max_seqlen=max_spec_len,
             cb_scaled=cb_scaled,

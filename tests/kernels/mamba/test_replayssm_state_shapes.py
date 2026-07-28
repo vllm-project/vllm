@@ -256,7 +256,46 @@ def test_scratch_allocator_rejects_the_triton_four_tensor_page():
         )
 
 
-def _validation_stub(buffer_len: int, algorithm: str = "auto"):
+@pytest.mark.parametrize(
+    "enabled,configured,expected_enabled,expected_rounds",
+    [
+        (False, 0, False, 0),
+        (False, 5, False, 0),  # rounds are ignored when SR is off
+        (True, 0, True, 10),  # 0 means "backend default"
+        (True, 5, True, 5),
+        (True, 10, True, 10),
+    ],
+)
+def test_rounding_policy_resolution(
+    enabled, configured, expected_enabled, expected_rounds
+):
+    """philox_rounds must be settled once, at backend construction.
+
+    It is a kernel template parameter, so the value the decode path passes and
+    the value the warmup compiles must agree or the first real request JITs a
+    second specialisation. FlashInfer also forces it to 0 without a seed and
+    asserts it is positive with one.
+    """
+    from vllm.model_executor.layers.mamba.ops.replayssm_spec_flashinfer import (
+        _resolve_rounding_policy,
+    )
+
+    policy = _resolve_rounding_policy(
+        SimpleNamespace(
+            enable_stochastic_rounding=enabled,
+            stochastic_rounding_philox_rounds=configured,
+        )
+    )
+    assert policy.enabled is expected_enabled
+    assert policy.philox_rounds == expected_rounds
+
+
+def _validation_stub(
+    buffer_len: int,
+    algorithm: str = "auto",
+    ssm_dtype: str = "float32",
+    stochastic_rounding: bool = False,
+):
     """Minimal stand-in for the fields _validate_replayssm_spec_flashinfer reads.
 
     Building a real VllmConfig needs model inspection, which is not available in
@@ -266,10 +305,30 @@ def _validation_stub(buffer_len: int, algorithm: str = "auto"):
     return SimpleNamespace(
         cache_config=SimpleNamespace(
             replayssm_buffer_len=buffer_len,
-            mamba_ssm_cache_dtype="float32",
+            mamba_ssm_cache_dtype=ssm_dtype,
         ),
-        mamba_config=SimpleNamespace(replayssm_spec_algorithm=algorithm),
+        mamba_config=SimpleNamespace(
+            replayssm_spec_algorithm=algorithm,
+            enable_stochastic_rounding=stochastic_rounding,
+        ),
     )
+
+
+def test_flashinfer_stochastic_rounding_requires_float16_state():
+    """The kernel's Philox path is gated on state_t == __half, so SR is only
+    meaningful with an fp16 SSM checkpoint."""
+    with pytest.raises(ValueError, match="float16"):
+        VllmConfig._validate_replayssm_spec_flashinfer(
+            _validation_stub(16, ssm_dtype="bfloat16", stochastic_rounding=True), 4
+        )
+
+
+def test_flashinfer_stochastic_rounding_accepted_with_float16_state():
+    """Reaches the availability probe, which is the next check after the dtype
+    gate; on a box without flashinfer that surfaces as the package error."""
+    stub = _validation_stub(16, ssm_dtype="float16", stochastic_rounding=True)
+    with pytest.raises(ValueError, match="flashinfer-python package"):
+        VllmConfig._validate_replayssm_spec_flashinfer(stub, 4)
 
 
 def test_flashinfer_rejects_buffer_len_above_the_kernel_window():

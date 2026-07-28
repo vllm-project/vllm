@@ -38,7 +38,7 @@ _MMA_FRAG_SIZE = 8
 _MMA_M_TILE = 16
 
 
-def _jit_key(mixer: MambaMixer2) -> tuple[Any, ...]:
+def _jit_key(mixer: MambaMixer2, philox_rounds: int) -> tuple[Any, ...]:
     """The tuple FlashInfer's _get_module specialises on.
 
     Kept explicit even where components coincide in this configuration, so a
@@ -66,7 +66,9 @@ def _jit_key(mixer: MambaMixer2) -> tuple[Any, ...]:
         mixer.replayssm_buffer_len,
         local_nheads // local_ngroups,  # heads_per_group
         local_ngroups,
-        0,  # philox_rounds: stochastic rounding is rejected in config
+        # PHILOX_ROUNDS is a kernel template parameter, so a mismatch here would
+        # JIT a second specialisation on the first real request.
+        philox_rounds,
         False,  # enable_pdl
     )
 
@@ -211,10 +213,13 @@ def replayssm_spec_flashinfer_warmup(worker: "Worker") -> None:
         return
 
     algorithm = vllm_config.mamba_config.replayssm_spec_algorithm
+    # Take the resolved rounds from the backend rather than re-deriving them, so
+    # the warmup cannot drift from what the decode path actually passes.
+    philox_rounds = get_replayssm_spec_flashinfer_backend().rounding.philox_rounds
     # A uniform Mamba2 stack collapses to one key, but mixed head/group
     # sharding across layers would not, so deduplicate rather than assume.
     keys = {
-        _jit_key(module)
+        _jit_key(module, philox_rounds)
         for module in worker.get_model().modules()
         if isinstance(module, MambaMixer2)
     }

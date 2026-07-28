@@ -2376,9 +2376,14 @@ class VllmConfig:
                 "--use-replayssm-spec requires --mamba-backend triton or "
                 f"flashinfer (got {self.mamba_config.backend.value})"
             )
-        if self.mamba_config.enable_stochastic_rounding:
+        if (
+            self.mamba_config.enable_stochastic_rounding
+            and self.mamba_config.backend != MambaBackendEnum.FLASHINFER
+        ):
             raise ValueError(
-                "--use-replayssm-spec does not support Mamba cache stochastic rounding"
+                "--use-replayssm-spec supports Mamba cache stochastic rounding "
+                "only on --mamba-backend flashinfer (got "
+                f"{self.mamba_config.backend.value})"
             )
         if (
             self.kv_transfer_config is not None
@@ -2430,9 +2435,24 @@ class VllmConfig:
                 f"1 + num_speculative_tokens ({max_spec_len}) <= "
                 f"--replayssm-buffer-len ({buffer_len})"
             )
+        # The global gate already requires float16 whenever stochastic rounding
+        # is on; restate it here so the ReplaySSM path fails with its own
+        # wording if that gate is ever widened for another backend. The kernel's
+        # Philox path is compiled only for state_t == __half.
+        if (
+            self.mamba_config.enable_stochastic_rounding
+            and self.cache_config.mamba_ssm_cache_dtype != "float16"
+        ):
+            raise ValueError(
+                "--use-replayssm-spec on --mamba-backend flashinfer supports "
+                "Mamba cache stochastic rounding only with "
+                "--mamba-ssm-cache-dtype float16 (got "
+                f"{self.cache_config.mamba_ssm_cache_dtype})"
+            )
         # find_spec only -- importing flashinfer here would initialise CUDA
-        # during config validation. The ring-API symbol is checked when the
-        # backend is constructed in initialize_kv_cache.
+        # during config validation. The ring-API symbol, and the cvt.rs hardware
+        # support stochastic rounding needs, are checked when the backend is
+        # constructed in initialize_kv_cache.
         from vllm.utils.flashinfer import has_flashinfer
 
         if not has_flashinfer():
@@ -2442,12 +2462,13 @@ class VllmConfig:
             )
         logger.info_once(
             "Using FlashInfer ReplaySSM speculative SSU: B=%d, T=%d, "
-            "ring_len=%d, algorithm=%s, state_dtype=%s",
+            "ring_len=%d, algorithm=%s, state_dtype=%s, stochastic_rounding=%s",
             buffer_len,
             max_spec_len,
             buffer_len + max_spec_len,
             self.mamba_config.replayssm_spec_algorithm,
             self.cache_config.mamba_ssm_cache_dtype,
+            self.mamba_config.enable_stochastic_rounding,
         )
 
 
