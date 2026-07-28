@@ -312,7 +312,7 @@ class Gemma4MoE(nn.Module):
 
     Gemma4 routing: softmax over ALL experts → top-k → renormalize.
     per_expert_scale is folded into routing weights for mathematical
-    correctness with FusedMoEFactory's fused kernel.
+    correctness with MoERunner's fused kernel.
     """
 
     def __init__(
