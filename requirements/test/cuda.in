@@ -44,7 +44,7 @@ tokenizers==0.22.2
 schemathesis>=4.0.0 # Required for openai schema test.
 # quantization
 buildkite-test-collector==0.1.9
-
+torch-abi-audit # CI check for PyTorch stable ABI compliance
 
 genai_perf>=0.0.8
 tritonclient>=2.51.0
