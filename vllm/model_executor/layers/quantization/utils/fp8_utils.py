@@ -34,7 +34,6 @@ from vllm.utils.deep_gemm import (
     transform_sf_into_required_layout,
 )
 from vllm.utils.platform_utils import get_device_name_as_file_name
-from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -43,39 +42,6 @@ def is_fp8(x: torch.dtype | torch.Tensor) -> bool:
     if isinstance(x, torch.Tensor):
         x = x.dtype
     return x == torch.float8_e4m3fn or x == torch.float8_e4m3fnuz
-
-
-def _triton_per_token_group_quant_fp8_impl(
-    x: torch.Tensor,
-    group_size: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return per_token_group_quant_fp8(
-        x, group_size, column_major_scales=False, use_ue8m0=False
-    )
-
-
-def _triton_per_token_group_quant_fp8_fake(
-    x: torch.Tensor,
-    group_size: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    M, N = x.shape
-    x_fp8 = torch.empty((M, N), dtype=current_platform.fp8_dtype(), device=x.device)
-    out_bs = torch.empty(
-        (
-            M,
-            (N + group_size - 1) // group_size,
-        ),
-        dtype=torch.float32,
-        device=x.device,
-    )
-    return x_fp8, out_bs
-
-
-direct_register_custom_op(
-    "triton_per_token_group_quant_fp8",
-    _triton_per_token_group_quant_fp8_impl,
-    fake_impl=_triton_per_token_group_quant_fp8_fake,
-)
 
 
 def input_to_float8(
