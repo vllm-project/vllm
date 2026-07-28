@@ -2389,7 +2389,19 @@ def topk_softmax(
     gating_output: torch.Tensor,
     renormalize: bool = False,
     e_score_correction_bias: torch.Tensor | None = None,
+    is_padding: torch.Tensor | None = None,
 ) -> None:
+    if current_platform.is_xpu():
+        # TODO: Remove after vllm-xpu-kernels supports is_padding.
+        torch.ops._moe_C.topk_softmax(
+            topk_weights,
+            topk_ids,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            e_score_correction_bias,
+        )
+        return
     torch.ops._moe_C.topk_softmax(
         topk_weights,
         topk_ids,
@@ -2397,6 +2409,7 @@ def topk_softmax(
         gating_output,
         renormalize,
         e_score_correction_bias,
+        is_padding,
     )
 
 
@@ -2408,6 +2421,7 @@ def topk_sigmoid(
     renormalize: bool = False,
     e_score_correction_bias: torch.Tensor | None = None,
     routed_scaling_factor: float = 1.0,
+    is_padding: torch.Tensor | None = None,
 ) -> None:
     torch.ops._moe_C.topk_sigmoid(
         topk_weights,
@@ -2417,6 +2431,7 @@ def topk_sigmoid(
         renormalize,
         e_score_correction_bias,
         routed_scaling_factor,
+        is_padding,
     )
 
 
@@ -2430,7 +2445,23 @@ def topk_hash_softplus_sqrt(
     e_score_correction_bias: torch.Tensor | None = None,
     input_tokens: torch.Tensor | None = None,
     hash_indices_table: torch.Tensor | None = None,
+    is_padding: torch.Tensor | None = None,
 ) -> None:
+    if current_platform.is_xpu():
+        # TODO: Remove after vllm-xpu-kernels supports is_padding.
+        torch.ops._moe_C.topk_softplus_sqrt(
+            topk_weights,
+            topk_indices,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            routed_scaling_factor,
+            e_score_correction_bias,
+            input_tokens,
+            hash_indices_table,
+        )
+        return
+
     torch.ops._moe_C.topk_softplus_sqrt(
         topk_weights,
         topk_indices,
@@ -2441,6 +2472,7 @@ def topk_hash_softplus_sqrt(
         e_score_correction_bias,
         input_tokens,
         hash_indices_table,
+        is_padding,
     )
 
 
@@ -3473,6 +3505,7 @@ def causal_conv1d_update_cpu(
     silu_activation: bool,
     conv_state_indices: torch.Tensor | None,
     is_vnni: bool,
+    num_accepted_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.ops._C.causal_conv1d_update_cpu(
         x,
@@ -3480,7 +3513,7 @@ def causal_conv1d_update_cpu(
         weight,
         bias,
         silu_activation,
-        None,
+        num_accepted_tokens,
         conv_state_indices,
         -1,
         is_vnni,
@@ -3755,6 +3788,15 @@ def cpu_prepack_moe_weight(
     return output
 
 
+def cpu_prepack_moe_weight_int8(
+    weight: torch.Tensor,
+    isa: str,
+) -> torch.Tensor:
+    output = torch.empty_like(weight)
+    torch.ops._C.prepack_moe_weight_int8(weight, output, isa)
+    return output
+
+
 def cpu_fused_moe(
     input: torch.Tensor,
     w13: torch.Tensor,
@@ -3773,6 +3815,39 @@ def cpu_fused_moe(
         input,
         w13,
         w2,
+        w13_bias,
+        w2_bias,
+        topk_weights,
+        topk_ids,
+        skip_weighted,
+        act,
+        isa,
+    )
+    return output
+
+
+def cpu_fused_moe_int8(
+    input: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w13_bias: torch.Tensor | None,
+    w2_bias: torch.Tensor | None,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    act: str,
+    isa: str,
+    skip_weighted: bool = False,
+) -> torch.Tensor:
+    output = torch.empty_like(input)
+    torch.ops._C.cpu_fused_moe_int8(
+        output,
+        input,
+        w13,
+        w2,
+        w13_scale,
+        w2_scale,
         w13_bias,
         w2_bias,
         topk_weights,
