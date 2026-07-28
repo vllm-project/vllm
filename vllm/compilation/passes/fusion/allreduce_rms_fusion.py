@@ -235,7 +235,7 @@ if flashinfer_comm is not None:
             max_token_num=max_token_num,
             hidden_dim=hidden_size,
             dtype=allreduce_in.dtype,
-            group=get_tp_group().device_group,
+            group=get_tp_group().cpu_group,
         )
         assert workspace is not None, (
             "Flashinfer allreduce workspace must be initialized when using flashinfer"
@@ -1006,7 +1006,7 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
             )
             return
         self.hidden_dim = config.model_config.get_hidden_size()
-        self.group = get_tp_group().device_group
+        self.group = get_tp_group().cpu_group
         rank = get_tensor_model_parallel_rank()
         if flashinfer_comm is None:
             logger.warning(
@@ -1426,8 +1426,7 @@ class AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
     The trailing FP8 group-quant is matched via ``MatcherQuantFP8`` (consistent
     with the sibling patterns above), which traces both ``QuantFP8.forward_hip``
     and ``forward_native`` paths and so matches whichever op the call site
-    lowers to (``vllm.triton_per_token_group_quant_fp8`` or
-    ``vllm.rocm_aiter_group_fp8_quant``).
+    lowers to (``vllm.rocm_aiter_group_fp8_quant``).
     """
 
     def __init__(
