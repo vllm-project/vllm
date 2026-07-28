@@ -273,6 +273,7 @@ def test_qwen2vl_multiple_lora_types(
     qwen2vl_language_lora_files,
     qwen2vl_vision_tower_connector_lora_files,
     qwen2vl_vision_tower_lora_files,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """
     Test multiple LoRA adapter types (language, vision tower + connector,
@@ -283,6 +284,10 @@ def test_qwen2vl_multiple_lora_types(
     the multimodal encoder cache correctly manages state transitions between
     language-only and vision-enabled LoRA adapters.
     """
+    # Exact greedy outputs require deterministic LoRA shrink reductions rather
+    # than the default split-K atomic reduction.
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+
     config = TestConfig(
         model_path=QWEN2VL_MODEL_PATH,
         # We'll override the lora_path for each specific test, but need to provide
