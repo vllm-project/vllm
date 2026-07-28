@@ -177,9 +177,17 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         bound_args.apply_defaults()
 
         if info.applied:
-            # A declined application writes nothing, so a published layer can
-            # still absorb one; anything that would apply is an error.
-            if _declines(original_loader, loader_signature, bound_args):
+            # A published layer can still absorb an application the loader
+            # would decline, e.g. an expert this rank does not own: it is
+            # absent from the contract, which holds only applications that
+            # wrote. Decided from the signature and the contract, never by
+            # probing the loader, whose storage is now live kernel tensors.
+            key = make_load_key(param_name, bound_args)
+            if (
+                "return_success" in loader_signature.parameters
+                and key is not None
+                and key not in info.expected_loads
+            ):
                 return False
             raise RuntimeError(
                 f"{layer.__class__.__name__}.{param_name} received a weight "
@@ -207,6 +215,16 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         info.loaded_weights.append((param_name, bound_args))
         if (key := make_load_key(param_name, bound_args)) is not None:
             info.observed_loads[key] += 1
+            # Absorbed rather than rejected, since an update may legitimately
+            # offer a target the startup checkpoint never did, but a misrouted
+            # tensor name arrives the same way and would otherwise be silent.
+            if info.expected_loads and key not in info.expected_loads:
+                logger.warning_once(
+                    "%s.%s: applying %s, which the startup checkpoint did not",
+                    layer.__class__.__name__,
+                    param_name,
+                    key[0],
+                )
 
         # Do not online process attention layers, must wait until finalize
         if isinstance(layer, (Attention, MLAAttention)):
@@ -236,21 +254,6 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         return ret
 
     return online_process_loader
-
-
-def _declines(
-    original_loader: Callable,
-    signature: inspect.Signature,
-    bound_args: inspect.BoundArguments,
-) -> bool:
-    """Whether a loader implementing `return_success` refuses this application,
-    which it decides before touching storage and so is safe to probe."""
-    if "return_success" not in signature.parameters:
-        return False
-    arguments = dict(bound_args.arguments)
-    arguments["return_success"] = True
-    probe = inspect.BoundArguments(signature, arguments)  # type: ignore[arg-type]
-    return original_loader(*probe.args, **probe.kwargs) is False
 
 
 def validate_layerwise_reload(model: torch.nn.Module) -> None:
