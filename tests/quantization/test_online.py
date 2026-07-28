@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests online quantization."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -21,6 +23,51 @@ from vllm.model_executor.layers.quantization.online.nvfp4 import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
+
+
+def test_nvfp4_per_token_backend_contract() -> None:
+    from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_moe import (
+        FlashInferCuteDSLExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
+        FlashInferExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.marlin_moe import MarlinExperts
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
+        TrtLlmNvFp4ExpertsModular,
+        TrtLlmNvFp4ExpertsMonolithic,
+    )
+    from vllm.model_executor.layers.fused_moe.modular_kernel import (
+        FusedMoEActivationFormat,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kNvfp4DynamicToken,
+        kNvfp4Static,
+    )
+
+    scheme = (kNvfp4Static, kNvfp4DynamicToken)
+    assert TrtLlmNvFp4ExpertsMonolithic._supports_quant_scheme(*scheme)
+    assert TrtLlmNvFp4ExpertsModular._supports_quant_scheme(*scheme)
+    assert FlashInferCuteDSLExperts._supports_quant_scheme(*scheme)
+    assert FlashInferCuteDSLExperts._supports_no_act_and_mul()
+    assert not FlashInferExperts._supports_quant_scheme(*scheme)
+    assert not MarlinExperts._supports_quant_scheme(*scheme)
+
+    for experts_cls in (
+        TrtLlmNvFp4ExpertsMonolithic,
+        TrtLlmNvFp4ExpertsModular,
+    ):
+        supported, reason = experts_cls.is_supported_config(
+            experts_cls,
+            SimpleNamespace(is_act_and_mul=False),
+            *scheme,
+            FusedMoEActivationFormat.Standard,
+        )
+        assert not supported
+        assert reason == (
+            "kernel does not support per-token NVFP4 activation scaling "
+            "for non-gated MoE"
+        )
 
 
 @pytest.mark.skipif(

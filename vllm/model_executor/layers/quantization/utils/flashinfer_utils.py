@@ -13,6 +13,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+NVFP4_PER_TOKEN_BASE_GLOBAL_SCALE = 1.0 / (448.0 * 6.0)
+
 
 def activation_to_flashinfer_int(activation: MoEActivation) -> int:
     return activation_to_flashinfer_type(activation).value
@@ -34,6 +36,20 @@ def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType"
         MoEActivation.SWIGLUOAI_UNINTERLEAVE: ActivationType.Swiglu,
     }
     return ACTIVATION_TO_FI_ACTIVATION[activation]
+
+
+def quantize_nvfp4_per_token_input(
+    hidden_states: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Quantize NVFP4 activations with one FP32 decode scale per token."""
+    from flashinfer import SfLayout, nvfp4_quantize
+
+    return nvfp4_quantize(
+        hidden_states,
+        NVFP4_PER_TOKEN_BASE_GLOBAL_SCALE,
+        sfLayout=SfLayout.layout_linear,
+        per_token_activation=True,
+    )
 
 
 def swap_w13_to_w31(x: torch.Tensor) -> torch.Tensor:

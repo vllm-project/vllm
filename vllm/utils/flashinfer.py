@@ -9,6 +9,7 @@ import contextlib
 import functools
 import importlib
 import importlib.util
+import inspect
 import os
 import shutil
 from collections.abc import Callable
@@ -307,6 +308,18 @@ def has_flashinfer_cutedsl_moe_nvfp4() -> bool:
         return False
     mod = _get_submodule("flashinfer")
     return mod is not None and hasattr(mod, "cute_dsl_fused_moe_nvfp4")
+
+
+@functools.cache
+def has_flashinfer_cutedsl_moe_nvfp4_per_token() -> bool:
+    """Return whether the CuTe-DSL MoE API supports per-token NVFP4."""
+    if not has_flashinfer_cutedsl_moe_nvfp4():
+        return False
+    mod = _get_submodule("flashinfer")
+    if mod is None:
+        return False
+    fn = mod.cute_dsl_fused_moe_nvfp4
+    return "per_token_scale" in inspect.signature(fn).parameters
 
 
 @functools.cache
