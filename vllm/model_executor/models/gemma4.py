@@ -307,7 +307,7 @@ class Gemma4Router(nn.Module):
 class Gemma4MoE(nn.Module):
     """Mixture of Experts for Gemma4 using vLLM's FusedMoEFactory.
 
-    Wraps FusedMoEFactory with custom routing. The router projection is
+    Wraps MoERunner with custom routing. The router projection is
     external (Gemma4Router) — this class only handles expert dispatch.
 
     Gemma4 routing: softmax over ALL experts → top-k → renormalize.
