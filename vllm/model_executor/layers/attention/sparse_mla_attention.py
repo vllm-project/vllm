@@ -475,6 +475,41 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         return self._concat_k_nope_k_pe(k_nope, k_pe), v
 
+    def _try_build_global_mask(
+        self,
+        topk_per_req: list[torch.Tensor],
+        q_lens: list[int],
+        max_query_len: int,
+        max_seq_len: int,
+        workspace: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Build a full-sequence top-k mask if it fits in the workspace.
+
+        When the mask fits, it is reused across the suffix and all context
+        chunks, avoiding per-chunk mask rebuilds.  Returns None when the
+        mask is too large, signalling the caller to fall back to per-chunk
+        index remapping.
+        """
+        tile_m = 128 if max_query_len <= 128 else 256
+        padded_q_len = triton.cdiv(max_query_len, tile_m) * tile_m
+        global_mask_bytes = (
+            len(q_lens)
+            * padded_q_len
+            * (triton.cdiv(max_seq_len, 32) + 1)
+            * torch.int32.itemsize
+        )
+        workspace_bytes = workspace.numel() * workspace.element_size()
+        if global_mask_bytes > workspace_bytes:
+            return None
+        dense_mask = _build_topk_mask(
+            topk_per_req,
+            q_lens,
+            padded_q_len,
+            max_seq_len,
+            workspace.device,
+        )
+        return torch.nn.functional.pad(dense_mask, (0, 1))
+
     def _run_masked_mha(
         self,
         q: torch.Tensor,
@@ -546,6 +581,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
 
         chunked_context = prefill_metadata.chunked_context
         assert chunked_context is not None
+        use_global_mask = dense_mask is not None
         output: torch.Tensor | None = None
         output_lse: torch.Tensor | None = None
         workspace = chunked_context.workspace
@@ -571,7 +607,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             chunk_lens = chunked_context.seq_lens[i].tolist()
             chunk_topk = (
                 topk_per_req
-                if dense_mask is not None
+                if use_global_mask
                 else self._remap_topk_to_ranges(
                     topk_per_req,
                     chunked_context.starts[i],
@@ -591,9 +627,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
                 causal=False,
                 return_softmax_lse=True,
                 dense_mask=dense_mask,
-                key_starts=(
-                    chunked_context.starts[i] if dense_mask is not None else None
-                ),
+                key_starts=(chunked_context.starts[i] if use_global_mask else None),
             )
 
             if output is None:
@@ -674,27 +708,14 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             return
 
         context_lens = chunked_context.seq_lens.sum(dim=0).tolist()
-        dense_mask = None
-        tile_m = 128 if prefill_metadata.max_query_len <= 128 else 256
-        padded_q_len = triton.cdiv(prefill_metadata.max_query_len, tile_m) * tile_m
-        global_mask_bytes = (
-            len(q_lens)
-            * padded_q_len
-            * (triton.cdiv(prefill_max_seq_len, 32) + 1)
-            * torch.int32.itemsize
+        dense_mask = self._try_build_global_mask(
+            topk_per_req,
+            q_lens,
+            prefill_metadata.max_query_len,
+            prefill_max_seq_len,
+            chunked_context.workspace,
         )
-        workspace_bytes = (
-            chunked_context.workspace.numel() * chunked_context.workspace.element_size()
-        )
-        if global_mask_bytes <= workspace_bytes:
-            dense_mask = _build_topk_mask(
-                topk_per_req,
-                q_lens,
-                padded_q_len,
-                prefill_max_seq_len,
-                q.device,
-            )
-            dense_mask = torch.nn.functional.pad(dense_mask, (0, 1))
+        if dense_mask is not None:
             suffix_topk = topk_per_req
         else:
             suffix_topk = self._remap_topk_to_ranges(topk_per_req, context_lens, q_lens)
