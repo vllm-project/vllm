@@ -447,7 +447,7 @@ fn write_text_with_images(out: &mut String, text: &str) -> Result<()> {
 }
 
 fn write_response_format(out: &mut String, request: &ChatRequest) -> Result<()> {
-    let Some(rf) = request.chat_options.template_kwargs.get("response_format") else {
+    let Some(rf) = request.chat_options.response_format.as_ref() else {
         return Ok(());
     };
 

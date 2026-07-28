@@ -86,16 +86,16 @@ pub(super) fn prepare_chat_request(
         &messages,
     )?;
 
-    let mut template_kwargs = request.chat_template_kwargs.unwrap_or_default();
-    if let Some(response_format) = request.response_format.as_ref() {
-        let response_format = serde_json::to_value(response_format).map_err(|error| {
-            ApiError::invalid_request(
-                format!("failed to serialize response_format: {error}"),
-                Some("response_format"),
-            )
-        })?;
-        template_kwargs.insert("response_format".to_string(), response_format);
-    }
+    let template_kwargs = request.chat_template_kwargs.unwrap_or_default();
+    let response_format =
+        request.response_format.as_ref().map(serde_json::to_value).transpose().map_err(
+            |error| {
+                ApiError::invalid_request(
+                    format!("failed to serialize response_format: {error}"),
+                    Some("response_format"),
+                )
+            },
+        )?;
 
     let include_usage = (request.stream_options.as_ref())
         .and_then(|options| options.include_usage)
@@ -156,6 +156,7 @@ pub(super) fn prepare_chat_request(
             generation_prompt_mode,
             chat_template: request.chat_template,
             reasoning_effort: request.reasoning_effort,
+            response_format,
             template_kwargs,
         },
         tools: convert_tools(request.tools)?,
@@ -498,9 +499,10 @@ mod tests {
             },
         };
         request.response_format = Some(response_format.clone());
+        let template_response_format = json!({"type": "json_object"});
         request.chat_template_kwargs = Some(HashMap::from([(
             "response_format".to_string(),
-            json!({"type": "json_object"}),
+            template_response_format.clone(),
         )]));
 
         let prepared = prepare_chat_request(
@@ -511,8 +513,12 @@ mod tests {
         .expect("request is valid");
 
         assert_eq!(
-            prepared.chat_request.chat_options.template_kwargs.get("response_format"),
+            prepared.chat_request.chat_options.response_format.as_ref(),
             Some(&serde_json::to_value(response_format).unwrap())
+        );
+        assert_eq!(
+            prepared.chat_request.chat_options.template_kwargs.get("response_format"),
+            Some(&template_response_format)
         );
 
         let prompt = KimiK3ChatRenderer::new()

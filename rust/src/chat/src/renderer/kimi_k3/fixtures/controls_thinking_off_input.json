@@ -6,10 +6,10 @@
     }
   ],
   "add_generation_prompt": true,
+  "response_format": {
+    "type": "json_object"
+  },
   "template_kwargs": {
-    "thinking": false,
-    "response_format": {
-      "type": "json_object"
-    }
+    "thinking": false
   }
 }
