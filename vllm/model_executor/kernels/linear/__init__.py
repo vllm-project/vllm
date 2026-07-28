@@ -304,6 +304,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     "emulation": {
         EmulationMxfp8LinearKernel,
         EmulationNvFp4LinearKernel,
+        EmulationMxfp6LinearKernel,
         EmulationMxfp4LinearKernel,
     },
     "xpu": {

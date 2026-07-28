@@ -7,7 +7,7 @@ import sys
 import uuid
 import weakref
 from abc import ABC, abstractmethod
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
@@ -16,6 +16,7 @@ from multiprocessing.queues import Queue
 from threading import Thread
 from typing import Any, TypeAlias, TypeVar
 
+import msgspec
 import msgspec.msgpack
 import zmq
 import zmq.asyncio
@@ -35,6 +36,7 @@ from vllm.utils.network_utils import (
 )
 from vllm.v1.engine import (
     EEP_NOTIFICATION_CALL_ID,
+    FT_STATUS_CALL_ID,
     EEPNotificationType,
     EngineCoreOutputs,
     EngineCoreReadyResponse,
@@ -56,6 +58,11 @@ from vllm.v1.engine.utils import (
     launch_core_engines,
 )
 from vllm.v1.executor import Executor
+from vllm.v1.fault_tolerance.engine_core_sentinel import FT_UTILITY_METHOD
+from vllm.v1.fault_tolerance.utils import (
+    FaultToleranceRequest,
+    FaultToleranceResult,
+)
 from vllm.v1.pool.late_interaction import get_late_interaction_engine_index
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 
@@ -169,7 +176,19 @@ class EngineCoreClient(ABC):
     def execute_dummy_batch(self) -> None:
         raise NotImplementedError
 
+    def set_weight_version(self, weight_version: str) -> None:
+        raise NotImplementedError
+
+    def get_weight_version(self) -> str:
+        raise NotImplementedError
+
     async def execute_dummy_batch_async(self) -> None:
+        raise NotImplementedError
+
+    async def set_weight_version_async(self, weight_version: str) -> None:
+        raise NotImplementedError
+
+    async def get_weight_version_async(self) -> str:
         raise NotImplementedError
 
     def abort_requests(self, request_ids: list[str]) -> None:
@@ -272,6 +291,14 @@ class EngineCoreClient(ABC):
     ) -> list[_R]:
         raise NotImplementedError
 
+    async def handle_fault(
+        self, fault_tolerance_request: FaultToleranceRequest
+    ) -> FaultToleranceResult:
+        raise NotImplementedError
+
+    async def get_status(self):
+        raise NotImplementedError
+
 
 class InprocClient(EngineCoreClient):
     """
@@ -335,6 +362,12 @@ class InprocClient(EngineCoreClient):
 
     def execute_dummy_batch(self) -> None:
         self.engine_core.execute_dummy_batch()
+
+    def set_weight_version(self, weight_version: str) -> None:
+        self.engine_core.set_weight_version(weight_version)
+
+    def get_weight_version(self) -> str:
+        return self.engine_core.get_weight_version()
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.engine_core.add_lora(lora_request)
@@ -932,6 +965,12 @@ class SyncMPClient(MPClient):
     def execute_dummy_batch(self) -> None:
         self.call_utility("execute_dummy_batch")
 
+    def set_weight_version(self, weight_version: str) -> None:
+        self.call_utility("set_weight_version", weight_version)
+
+    def get_weight_version(self) -> str:
+        return self.call_utility("get_weight_version")
+
     def collective_rpc(
         self,
         method: str | Callable[..., _R],
@@ -971,6 +1010,14 @@ class AsyncMPClient(MPClient):
         self.client_count = client_count
         self.client_index = client_index
         self.outputs_queue = asyncio.Queue[EngineCoreOutputs | Exception]()
+
+        # locally-cached engine status
+        self._engine_status: dict[int, dict] = {}
+        if self.vllm_config.parallel_config.enable_fault_tolerance:
+            self._engine_status = {
+                rank: {"id": rank, "status": "healthy"}
+                for rank in self.engine_ranks_managed
+            }
         try:
             # If we are running in an asyncio event loop, start the queue task.
             # Otherwise, it will be started lazily. If it is not started here,
@@ -994,7 +1041,7 @@ class AsyncMPClient(MPClient):
         output_handler: (
             Callable[[AsyncMPClient, EngineCoreOutputs], Awaitable[None]] | None
         ) = getattr(self.__class__, "process_engine_outputs", None)
-        _self_ref = weakref.ref(self) if output_handler else None
+        _self_ref = weakref.ref(self)
         output_socket = resources.output_socket
         assert output_socket is not None
 
@@ -1025,6 +1072,14 @@ class AsyncMPClient(MPClient):
                             asyncio.create_task(
                                 notification_callback_handler(_self, notification_data)
                             )
+                        elif outputs.utility_output.call_id == FT_STATUS_CALL_ID:
+                            _self = _self_ref()
+                            if not _self:
+                                return
+                            if outputs.utility_output.result is not None:
+                                _self._engine_status[outputs.engine_index] = (
+                                    outputs.utility_output.result.result
+                                )
                         else:
                             _process_utility_output(
                                 outputs.utility_output, utility_results
@@ -1168,6 +1223,12 @@ class AsyncMPClient(MPClient):
     async def execute_dummy_batch_async(self) -> None:
         await self.call_utility_async("execute_dummy_batch")
 
+    async def set_weight_version_async(self, weight_version: str) -> None:
+        await self.call_utility_async("set_weight_version", weight_version)
+
+    async def get_weight_version_async(self) -> str:
+        return await self.call_utility_async("get_weight_version")
+
     async def add_lora_async(self, lora_request: LoRARequest) -> bool:
         return await self.call_utility_async("add_lora", lora_request)
 
@@ -1196,6 +1257,25 @@ class AsyncMPClient(MPClient):
             "collective_rpc", method, timeout, args, kwargs
         )
 
+    async def handle_fault(
+        self, ft_request: FaultToleranceRequest
+    ) -> FaultToleranceResult:
+        res = await self.call_utility_async(FT_UTILITY_METHOD, ft_request)
+        result = msgspec.convert(res, FaultToleranceResult)
+        if not result.success:
+            status = self._engine_status.get(self.engine_ranks_managed[0])
+            if status is not None:
+                status["last_ft_request_id"] = result.request_id
+                status["ft_error"] = result.reason
+        return result
+
+    async def get_status(self):
+        return {
+            "schema_version": 1,
+            "total_engines": len(self.engine_ranks_managed),
+            "engines": list(self._engine_status.values()),
+        }
+
 
 class DPAsyncMPClient(AsyncMPClient):
     """Asyncio-compatible client for multi-proc, multi-engine (data parallel)
@@ -1221,9 +1301,11 @@ class DPAsyncMPClient(AsyncMPClient):
             client_index,
         )
 
-        # List of [waiting, running] pair per engine.
+        # List of [waiting, running, kv_cache_usage] per engine.
         # Used only by DPLBAsyncMPClient subclass.
-        self.lb_engines: list[list[int]] = [[0, 0] for _ in self.core_engines]
+        self.lb_engines: list[list[int | float]] = [
+            [0, 0, 0.0] for _ in self.core_engines
+        ]
 
         self.eep_scaling_cache: ElasticScalingCache | None = None
 
@@ -1301,7 +1383,7 @@ class DPAsyncMPClient(AsyncMPClient):
                             )
                             if len(self.lb_engines) < new_engine_count:
                                 self.lb_engines = self.lb_engines + [
-                                    [0, 0]
+                                    [0, 0, 0.0]
                                     for _ in range(
                                         new_engine_count - len(self.lb_engines)
                                     )
@@ -1395,6 +1477,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # To route aborts to the correct engine.
         self.reqs_in_flight: dict[str, EngineIdentity] = {}
 
+        # Exact per-engine count of this client's unfinished requests.
+        self.engine_inflight: Counter[EngineIdentity] = Counter()
+
         super().__init__(
             vllm_config,
             executor_class,
@@ -1420,14 +1505,30 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             current_counts = self.lb_engines
             # TODO use P2C alg for larger DP sizes
             num_engines = len(current_counts)
-            min_score = sys.maxsize
+            min_score: float = sys.maxsize
             eng_index = 0
             for i in range(num_engines):
                 # Start from client_index to help with balancing when engines
                 # are empty.
                 idx = (self.eng_start_index + i) % num_engines
-                waiting, running = current_counts[idx]
-                score = waiting * 4 + running
+                waiting, running, kv_cache_usage = current_counts[idx]
+                # Estimate engine load as the greater of the coordinator's
+                # latest (waiting + running) snapshot and this client's own
+                # in-flight count (scaled by the number of clients). The
+                # in-flight floor is exact and can't be erased by a snapshot
+                # rebind, so a burst spreads round-robin even when snapshots
+                # race with routing decisions; the snapshot raises the score
+                # when other clients or stale requests load the engine.
+                inflight = self.engine_inflight[self.core_engines[idx]]
+                score: float = max(self.client_count * inflight, waiting + running)
+                if waiting:
+                    # Waiting requests are penalized in proportion to KV cache
+                    # pressure: a queue on a KV-bound engine drains slowly, so
+                    # new requests should strongly prefer other engines. With
+                    # low KV usage the queue is transient (e.g. mid-burst) and
+                    # the penalty stays off, preserving exact round-robin.
+                    # Ramps from 0 at <=50% usage to 3x waiting at 100%.
+                    score += waiting * 6.0 * max(0.0, kv_cache_usage - 0.5)
                 if score < min_score:
                     min_score = score
                     eng_index = idx
@@ -1444,6 +1545,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         chosen_engine = self.core_engines[eng_index]
         # Record which engine is chosen for this request, to handle aborts.
         self.reqs_in_flight[request.request_id] = chosen_engine
+        self.engine_inflight[chosen_engine] += 1
         return chosen_engine
 
     async def call_utility_async(self, method: str, *args) -> Any:
@@ -1463,7 +1565,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
     ):
         if outputs.finished_requests and self.reqs_in_flight:
             for req_id in outputs.finished_requests:
-                self.reqs_in_flight.pop(req_id, None)
+                if (engine := self.reqs_in_flight.pop(req_id, None)) is not None:
+                    self.engine_inflight[engine] -= 1
 
     @staticmethod
     async def eep_process_engine_core_notification(

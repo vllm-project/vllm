@@ -180,8 +180,7 @@ class OOTMxFp4LinearKernel(MxFp4LinearKernel):
 @patch("vllm.model_executor.kernels.linear.current_platform")
 def test_init_mxfp4_linear_kernel_dispatches_to_registered_kernel(platform_mock):
     """init_mxfp4_linear_kernel should select a registered kernel that
-    reports itself as supported/able to implement the given config, and
-    construct it with that exact config."""
+    reports itself as supported, and construct it with a fresh config."""
     platform_mock._enum = PlatformEnum.OOT
     register_linear_kernel(OOTMxFp4LinearKernel, PlatformEnum.OOT, "mxfp4")
 
