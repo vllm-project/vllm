@@ -1035,7 +1035,7 @@ def test_non_local_expert_applications_are_absorbed():
     model = torch.nn.Sequential(layer)
 
     record_metadata_for_reloading(model)
-    _load_experts(layer, [0, 1], 1.0)  # rank-filtered, as from disk
+    _load_experts(layer, [0, 1, 2, 3], 1.0, return_success=True)
     freeze_load_plan(model)
 
     initialize_layerwise_reload(model)
@@ -1082,6 +1082,27 @@ def test_extra_applications_before_publish_do_not_fail_validation():
     _load_experts(layer, [0, 2, 1], 5.0)
     assert not layer.w.is_meta, "the expected set alone must publish the layer"
 
+    finalize_layerwise_reload(model, model_config=None)
+    assert torch.equal(layer.w, torch.full((2, 2), 5.0))
+
+
+def test_declined_startup_application_stays_off_the_contract():
+    """The startup load is offered every expert, not a rank-filtered subset.
+
+    Recording an expert this rank declines would demand it on every reload,
+    where the same loader declines it again and it is never observed.
+    """
+    layer = _ShardedExpertLayer(local_experts=[0, 1])
+    model = torch.nn.Sequential(layer)
+
+    record_metadata_for_reloading(model)
+    _load_experts(layer, [0, 1, 2, 3], 1.0, return_success=True)
+    freeze_load_plan(model)
+
+    assert sum(get_load_plan(layer).values()) == 2, "only local experts wrote"
+
+    initialize_layerwise_reload(model)
+    _load_experts(layer, [0, 1, 2, 3], 5.0, return_success=True)
     finalize_layerwise_reload(model, model_config=None)
     assert torch.equal(layer.w, torch.full((2, 2), 5.0))
 

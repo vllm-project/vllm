@@ -230,7 +230,7 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
 
         # Process and copy when every expected application has arrived
         if info.is_complete():
-            _layerwise_process(layer, info, keep_transaction=True)
+            _layerwise_process(layer, info, mid_update=True)
             LOADING_LAYERS.discard(layer)
 
         return ret
@@ -254,8 +254,8 @@ def _declines(
 
 
 def validate_layerwise_reload(model: torch.nn.Module) -> None:
-    """Fail closed on a missing application, but not an extra one, because an
-    EP rank loads a filtered set from disk yet is offered every expert."""
+    """Fail closed on a missing application, but not an extra one: an update
+    may offer a target the startup checkpoint never did."""
     missing: list[str] = []
     for layer in model.modules():
         info = get_layerwise_info(layer)
@@ -328,6 +328,7 @@ def finalize_layerwise_processing(
             # first load: checkpoint did not contain weights for this layer
             if info.kernel_tensors is None:
                 _layerwise_process(layer, info)
+                info.reset()
                 continue
 
             # reloading: place kernel tensors back as a fallback. Always place, even
@@ -403,7 +404,7 @@ def _layerwise_process(
     layer: torch.nn.Module,
     info: LayerReloadingInfo,
     *,
-    keep_transaction: bool = False,
+    mid_update: bool = False,
 ):
     """
     Finalize layer loading after all weights have been buffered.
@@ -447,12 +448,14 @@ def _layerwise_process(
     if info.kernel_tensors is not None:
         _copy_and_restore_kernel_tensors(layer, info)
 
-    if keep_transaction and info.kernel_tensors is not None:
-        info.loaded_weights.clear()
+    # The staging buffers have been consumed either way.
+    info.loaded_weights.clear()
+
+    # Publishing before the update ends leaves the layer live: its progress must
+    # survive for validation, and further applications may still arrive.
+    if mid_update and info.kernel_tensors is not None:
         info.applied = True
         _wrap_parameters_weight_loader(layer)
-    else:
-        info.reset()
     logger.debug("%s: Processed", layer.__class__.__name__)
 
 

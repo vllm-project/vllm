@@ -76,23 +76,11 @@ def make_load_key(
         return None
 
     selectors = tuple(
-        (name, _freeze_selector(value))
+        (name, value)
         for name, value in bound_args.arguments.items()
         if name not in _NON_SELECTOR_ARGS and not isinstance(value, torch.Tensor)
     )
     return source_name, tensor_name, selectors
-
-
-def _freeze_selector(value: object) -> Hashable:
-    """Reject a selector that cannot key the contract, with a clear reason."""
-    try:
-        hash(value)
-    except TypeError:
-        raise TypeError(
-            f"weight_loader argument of type {type(value).__qualname__} is not "
-            "hashable and cannot identify a load"
-        ) from None
-    return value  # type: ignore[return-value]
 
 
 def get_load_plan(layer: torch.nn.Module) -> LoadPlan | None:
@@ -126,11 +114,17 @@ def _make_recorder(
         # Wrap parameters registered mid-load, e.g. a quant method adding `bias`.
         _record_layer(layer)
 
+        ret = inner(*args, **kwargs)
+        if ret is False:
+            # Declined, e.g. an expert this rank does not own, so it wrote
+            # nothing and has not earned a place on the contract.
+            return ret
+
         bound_args = signature.bind(*args, **kwargs)
         bound_args.apply_defaults()
         if (key := make_load_key(tensor_name, bound_args)) is not None:
             _RECORDING.setdefault(layer, Counter())[key] += 1
-        return inner(*args, **kwargs)
+        return ret
 
     load_recorder._is_load_recorder = True  # type: ignore[attr-defined]
     # `None` where the tensor had no loader, so unwrapping restores the absence
