@@ -386,7 +386,7 @@ def triton_reshape_and_cache_flash(
     kv_cache_dtype: str,  # "auto", "fp8"
     k_scale: torch.Tensor,  # float32
     v_scale: torch.Tensor,  # float32
-    interleaved_v_pack_factor: int,  # >0: interleave V (head-major); 0: standard
+    interleaved_v_pack_factor: int = 0,  # >0: interleave V (head-major); 0: standard
 ):
     num_heads = key.shape[1]
     head_size = key.shape[2]
