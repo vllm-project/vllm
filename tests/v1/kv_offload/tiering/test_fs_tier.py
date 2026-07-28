@@ -52,8 +52,18 @@ _DTYPE: torch.dtype = torch.float32
 _CTX = ReqContext(req_id="test")
 
 
-def _make_offloading_spec(enable_kv_cache_events: bool) -> MagicMock:
+def _make_offloading_spec(
+    enable_kv_cache_events: bool = False,
+    *,
+    tp_size: int = 1,
+    rank: int = 0,
+    world_size: int | None = None,
+    replicated_layout: bool = False,
+    is_parallelism_agnostic: bool = False,
+) -> MagicMock:
     """Mock spec with an explicit global KV events flag."""
+    if world_size is None:
+        world_size = tp_size
     spec = MagicMock()
     spec.config = OffloadingConfig(
         groups=(),
@@ -64,15 +74,16 @@ def _make_offloading_spec(enable_kv_cache_events: bool) -> MagicMock:
         model=OffloadingModelConfig(name="test-model", dtype="float32"),
         cache=OffloadingCacheConfig(tokens_per_hash=16, blocks_per_chunk=1),
         parallel=OffloadingParallelConfig(
-            rank=0,
-            world_size=1,
-            tp_size=1,
+            rank=rank,
+            world_size=world_size,
+            tp_size=tp_size,
             pp_size=1,
             pcp_size=1,
             dcp_size=1,
             data_parallel_index=0,
-            is_parallelism_agnostic=False,
+            is_parallelism_agnostic=is_parallelism_agnostic,
         ),
+        replicated_layout=replicated_layout,
     )
     spec.blocks_per_chunk = 1
     spec.kv_events_config = OffloadingKVEventsConfig(
@@ -725,3 +736,48 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
         assert not fs_events[0].removed
     finally:
         tier.shutdown()
+
+
+def test_fs_tier_cross_tp_round_trip(tmp_path):
+    """TP=2 replicated writer and TP=4 reader share namespace and bytes."""
+    root = str(tmp_path)
+    writer_tensor = _page_aligned_rand_tensor(4, _BLOCK_ELEMENTS)
+    expected = writer_tensor[0].clone()
+    writer = FileSystemTierManager(
+        offloading_spec=_make_offloading_spec(
+            tp_size=2, world_size=2, rank=0, replicated_layout=True
+        ),
+        primary_kv_view=memoryview(writer_tensor.numpy()),
+        tier_type="fs",
+        root_dir=root,
+        n_read_threads=2,
+        n_write_threads=2,
+    )
+    try:
+        writer.submit_store(make_job(1, [key(7)], [0]))
+        assert all(r.success for r in drain(writer))
+        writer_base = writer.file_mapper.base_path
+        writer_path = writer.file_mapper.get_file_name(key(7))
+    finally:
+        writer.shutdown()
+
+    reader_tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
+    reader = FileSystemTierManager(
+        offloading_spec=_make_offloading_spec(
+            tp_size=4, world_size=4, rank=3, replicated_layout=True
+        ),
+        primary_kv_view=memoryview(reader_tensor.numpy()),
+        tier_type="fs",
+        root_dir=root,
+        n_read_threads=2,
+        n_write_threads=2,
+    )
+    try:
+        assert reader.file_mapper.base_path == writer_base
+        assert reader.file_mapper.get_file_name(key(7)) == writer_path
+        assert lookup_and_wait(reader, [key(7)]) == [LookupResult.HIT]
+        reader.submit_load(make_job(2, [key(7)], [1], is_promotion=True))
+        assert all(r.success for r in drain(reader))
+        assert torch.allclose(reader_tensor[1], expected)
+    finally:
+        reader.shutdown()
