@@ -37,6 +37,8 @@ logger = init_logger(__name__)
 
 T = TypeVar("T", bound=AttentionMetadata)
 
+GLOBAL_TOPK_MASK_MAX_BYTES = 64 * 1024 * 1024  # 64 MB
+
 
 class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
     metadata_cls: type[T]
@@ -86,6 +88,11 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         self.chunked_prefill_workspace = torch.empty(
             (workspace_rows, workspace_head_size),
             dtype=self.model_config.dtype,
+            device=device,
+        )
+        self.topk_mask_workspace = torch.zeros(
+            GLOBAL_TOPK_MASK_MAX_BYTES // torch.int32.itemsize,
+            dtype=torch.int32,
             device=device,
         )
         layer_prefill_backend = vllm_config.compilation_config.static_forward_context[
@@ -210,6 +217,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                     prefill_max_seq_len <= self.topk_tokens
                     and not self.vllm_config.attention_config.sparse_mla_force_mqa
                 ),
+                topk_mask_workspace=self.topk_mask_workspace,
             )
             self._prefill_backend.prepare_metadata(prefill)
 
@@ -325,18 +333,12 @@ def _build_topk_mask(
     q_lens: list[int],
     max_q_len: int,
     max_seq_len: int,
-    device: torch.device,
+    out: torch.Tensor,
 ) -> torch.Tensor:
-    """Build a bit-packed ``[B, max_Q, ceil(max_S / 32)]`` top-k mask."""
+    """Build a bit-packed top-k mask into ``out[:B, :max_Q, :num_words]``."""
     batch_size = len(q_lens)
     num_words = (max_seq_len + 31) // 32
-    mask = torch.zeros(
-        batch_size,
-        max_q_len,
-        num_words,
-        dtype=torch.int32,
-        device=device,
-    )
+    mask = out[:batch_size, :max_q_len, :num_words]
     total_q = sum(q_lens)
     if total_q == 0:
         return mask
@@ -357,9 +359,9 @@ def _build_topk_mask(
     topk_packed = torch.cat(topk_indices_per_req, dim=0)
     num_topk = topk_packed.shape[1]
     q_lens_tensor = np_to_pinned_tensor(np.asarray(q_lens, dtype=np.int32)).to(
-        device, non_blocking=True
+        mask.device, non_blocking=True
     )
-    cu_q_lens = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
+    cu_q_lens = mask.new_zeros(batch_size + 1)
     torch.cumsum(q_lens_tensor, dim=0, out=cu_q_lens[1:])
     _scatter_topk_kernel[(total_q,)](
         mask,
@@ -475,40 +477,41 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         return self._concat_k_nope_k_pe(k_nope, k_pe), v
 
+    @staticmethod
     def _try_build_global_mask(
-        self,
         topk_per_req: list[torch.Tensor],
         q_lens: list[int],
         max_query_len: int,
         max_seq_len: int,
-        workspace: torch.Tensor,
+        topk_mask_workspace: torch.Tensor,
     ) -> torch.Tensor | None:
-        """Build a full-sequence top-k mask if it fits in the workspace.
+        """Build a full-sequence top-k mask if it fits within the budget.
 
         When the mask fits, it is reused across the suffix and all context
         chunks, avoiding per-chunk mask rebuilds.  Returns None when the
         mask is too large, signalling the caller to fall back to per-chunk
         index remapping.
         """
+        batch_size = len(q_lens)
         tile_m = 128 if max_query_len <= 128 else 256
         padded_q_len = triton.cdiv(max_query_len, tile_m) * tile_m
-        global_mask_bytes = (
-            len(q_lens)
-            * padded_q_len
-            * (triton.cdiv(max_seq_len, 32) + 1)
-            * torch.int32.itemsize
-        )
-        workspace_bytes = workspace.numel() * workspace.element_size()
-        if global_mask_bytes > workspace_bytes:
+        num_words_padded = (max_seq_len + 31) // 32 + 1
+        needed = batch_size * padded_q_len * num_words_padded
+        if needed * torch.int32.itemsize > GLOBAL_TOPK_MASK_MAX_BYTES:
             return None
-        dense_mask = _build_topk_mask(
+
+        mask = topk_mask_workspace[:needed].view(
+            batch_size, padded_q_len, num_words_padded
+        )
+        mask.zero_()
+        _build_topk_mask(
             topk_per_req,
             q_lens,
             padded_q_len,
             max_seq_len,
-            workspace.device,
+            mask,
         )
-        return torch.nn.functional.pad(dense_mask, (0, 1))
+        return mask
 
     def _run_masked_mha(
         self,
@@ -525,6 +528,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         return_softmax_lse: bool = False,
         dense_mask: torch.Tensor | None = None,
         key_starts: torch.Tensor | None = None,
+        topk_mask_workspace: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         from vllm.model_executor.layers.attention.sparse_mla_mask import (
             dense_mask_mod,
@@ -540,7 +544,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
                 q_lens,
                 padded_q_len,
                 max_seqlen_k,
-                q.device,
+                topk_mask_workspace,
             )
         if key_starts is not None:
             dense_mask[:, 0, -1].copy_(key_starts)
@@ -628,6 +632,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
                 return_softmax_lse=True,
                 dense_mask=dense_mask,
                 key_starts=(chunked_context.starts[i] if use_global_mask else None),
+                topk_mask_workspace=prefill_metadata.topk_mask_workspace,
             )
 
             if output is None:
@@ -702,6 +707,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
                 topk_per_req=topk_per_req,
                 q_lens=q_lens,
                 causal=True,
+                topk_mask_workspace=prefill_metadata.topk_mask_workspace,
             )
             assert isinstance(attn_out, torch.Tensor)
             output.copy_(attn_out[..., : self.v_head_dim].flatten(start_dim=-2))
@@ -713,7 +719,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             q_lens,
             prefill_metadata.max_query_len,
             prefill_max_seq_len,
-            chunked_context.workspace,
+            prefill_metadata.topk_mask_workspace,
         )
         if dense_mask is not None:
             suffix_topk = topk_per_req
@@ -735,6 +741,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             key_starts=(
                 chunked_context.context_lens if dense_mask is not None else None
             ),
+            topk_mask_workspace=prefill_metadata.topk_mask_workspace,
         )
         context_output, context_lse = self._compute_context_mha(
             q=q,

@@ -1438,6 +1438,7 @@ class MLACommonPrefillMetadata:
     prefill_backend: MLAPrefillBackend | None = None
     query_lens_cpu: torch.Tensor | None = None
     use_dense_mha: bool = False
+    topk_mask_workspace: torch.Tensor | None = None
 
 
 @dataclass
