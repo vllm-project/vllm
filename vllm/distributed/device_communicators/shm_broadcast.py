@@ -380,6 +380,7 @@ def _rebuild_tensor(buf: Any, shape: tuple[int, ...], dtype_str: str) -> torch.T
     # semantics.
     raw = bytearray(buf)
     if not raw:
+        assert 0 in shape
         return torch.empty(shape, dtype=dtype)
     return torch.frombuffer(raw, dtype=torch.uint8).view(dtype).view(shape)
 
@@ -395,25 +396,25 @@ def _reduce_tensor(tensor: torch.Tensor):
     without being copied into and back out of the pickled message.
     """
     if (
-        tensor.device.type != "cpu"
-        or tensor.layout != torch.strided
-        or tensor.requires_grad
+        tensor.device.type == "cpu"
+        and tensor.layout == torch.strided
+        and not tensor.requires_grad
     ):
-        # Fall back to torch's default (copying) reduction.
-        return tensor.__reduce_ex__(pickle.HIGHEST_PROTOCOL)
-    if not tensor.is_contiguous():
-        tensor = tensor.contiguous()
-    try:
-        # The uint8 view exposes the raw bytes via the buffer protocol,
-        # including for dtypes numpy doesn't recognize (bfloat16, fp8, ...).
-        # reshape(-1) first so that 0-dim tensors can be viewed as well.
-        raw = tensor.reshape(-1).view(torch.uint8).numpy()
-    except RuntimeError:
-        # Exotic tensors (e.g. with the conjugate bit set) that don't
-        # support aliasing views; let torch handle them.
-        return tensor.__reduce_ex__(pickle.HIGHEST_PROTOCOL)
-    dtype_str = str(tensor.dtype).removeprefix("torch.")
-    return _rebuild_tensor, (PickleBuffer(raw), tuple(tensor.shape), dtype_str)
+        try:
+            # The uint8 view exposes the raw bytes via the buffer protocol,
+            # including for dtypes numpy doesn't recognize (bfloat16, fp8, ...).
+            # reshape(-1) first so that 0-dim tensors can be viewed as well.
+            raw = tensor.contiguous().reshape(-1).view(torch.uint8).numpy()
+        except RuntimeError:
+            # Exotic tensors (e.g. with the conjugate bit set) that don't
+            # support aliasing views; let torch handle them.
+            pass
+        else:
+            dtype_str = str(tensor.dtype).removeprefix("torch.")
+            return _rebuild_tensor, (PickleBuffer(raw), tuple(tensor.shape), dtype_str)
+
+    # Fall back to torch's default (copying) reduction.
+    return tensor.__reduce_ex__(pickle.HIGHEST_PROTOCOL)
 
 
 @dataclass
