@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import torch
@@ -26,6 +27,7 @@ from vllm.distributed.parallel_state import (
     init_distributed_environment,
 )
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.mamba.mamba_utils import (
     get_conv_copy_spec,
     get_temporal_copy_spec,
@@ -38,6 +40,7 @@ from vllm.model_executor.layers.rwkv7 import (
 )
 from vllm.model_executor.models.config import MODELS_CONFIG_MAP, MambaModelConfig
 from vllm.model_executor.models.rwkv7 import (
+    RWKV7Attention,
     RWKV7Block,
     RWKV7ForCausalLM,
 )
@@ -865,6 +868,115 @@ def test_rwkv7_uses_base_mamba_model_config():
 
 def test_rwkv7_does_not_declare_mamba_prefix_caching_support():
     assert getattr(RWKV7ForCausalLM, "supports_mamba_prefix_caching", False) is False
+
+
+def test_rwkv7_declares_bitsandbytes_weight_mapping_contract():
+    # BitsAndBytes requires the model class to declare how checkpoint linear
+    # names map to packed vLLM modules. RWKV7 does not pack its projections.
+    assert RWKV7ForCausalLM.packed_modules_mapping == {}
+
+
+def test_rwkv7_keeps_recurrent_state_update_projections_unquantized():
+    class RecordingQuantConfig:
+        def __init__(self) -> None:
+            self.prefixes: list[str] = []
+
+        def get_quant_method(self, layer, prefix: str):
+            del layer
+            self.prefixes.append(prefix)
+            return UnquantizedLinearMethod()
+
+    config = _make_config()
+    quant_config = RecordingQuantConfig()
+    vllm_config = VllmConfig(device_config=DeviceConfig("cpu"))
+    with set_current_vllm_config(vllm_config):
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            local_rank=0,
+            distributed_init_method=_local_distributed_init_method(),
+            backend="gloo",
+        )
+        ensure_model_parallel_initialized(1, 1, backend="gloo")
+        try:
+            attention = RWKV7Attention(
+                config=config,
+                layer_idx=1,
+                quant_config=quant_config,
+                prefix="model.layers.1.attn",
+            )
+            for projection in (
+                attention.r_proj,
+                attention.o_proj,
+            ):
+                assert projection.quant_config is quant_config
+            for projection in (attention.k_proj, attention.v_proj):
+                assert projection.quant_config is None
+            for low_rank in (
+                attention.w_lora,
+                attention.a_lora,
+                attention.v_lora,
+                attention.g_lora,
+            ):
+                assert low_rank.lora[0].quant_config is None
+                assert low_rank.lora[2].quant_config is None
+            assert set(quant_config.prefixes) == {
+                "model.layers.1.attn.r_proj",
+                "model.layers.1.attn.o_proj",
+            }
+        finally:
+            cleanup_dist_env_and_memory()
+
+
+def test_rwkv7_quantizes_untied_lm_head(tmp_path: Path):
+    class RecordingQuantConfig:
+        def __init__(self) -> None:
+            self.prefixes: list[str] = []
+
+        def get_quant_method(self, layer, prefix: str):
+            del layer
+            self.prefixes.append(prefix)
+            return UnquantizedLinearMethod()
+
+    model_path = _write_test_model_config(tmp_path)
+    quant_config = RecordingQuantConfig()
+    vllm_config = _make_vllm_config(model_path, device="cpu")
+    vllm_config.quant_config = quant_config
+
+    with set_current_vllm_config(vllm_config):
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            local_rank=0,
+            distributed_init_method=_local_distributed_init_method(),
+            backend="gloo",
+        )
+        ensure_model_parallel_initialized(1, 1, backend="gloo")
+        try:
+            model = RWKV7ForCausalLM(vllm_config=vllm_config)
+            assert model.lm_head.quant_config is quant_config
+            assert "lm_head" in quant_config.prefixes
+        finally:
+            cleanup_dist_env_and_memory()
+
+
+@pytest.mark.parametrize(
+    ("weight_dtype", "expected_hidden_dtype"),
+    [(torch.float32, torch.float32), (torch.int8, torch.float16)],
+)
+def test_rwkv7_compute_logits_preserves_activation_dtype_for_quantized_head(
+    weight_dtype: torch.dtype, expected_hidden_dtype: torch.dtype
+):
+    lm_head = SimpleNamespace(weight=torch.empty(1, dtype=weight_dtype))
+    model = SimpleNamespace(
+        lm_head=lm_head,
+        logits_processor=lambda _head, hidden_states: hidden_states,
+    )
+    hidden_states = torch.ones(1, dtype=torch.float16)
+
+    output = RWKV7ForCausalLM.compute_logits(model, hidden_states)
+
+    assert output.dtype == expected_hidden_dtype
 
 
 def test_rwkv7_prefix_caching_defaults_to_align(tmp_path: Path, monkeypatch):

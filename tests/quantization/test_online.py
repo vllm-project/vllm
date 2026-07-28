@@ -9,18 +9,76 @@ from tests.quantization.utils import (
     _test_online_quant_peak_mem_impl,
     is_quant_method_supported,
 )
-from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.config.quantization import QuantizationConfigArgs
+from vllm.model_executor.layers.linear import (
+    ReplicatedLinear,
+    UnquantizedLinearMethod,
+)
+from vllm.model_executor.layers.quantization.online.base import (
+    OnlineQuantizationConfig,
+)
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineLinearMethod,
     Fp8PerBlockOnlineMoEMethod,
     Fp8PerTensorOnlineLinearMethod,
     Fp8PerTensorOnlineMoEMethod,
 )
+from vllm.model_executor.layers.quantization.online.int8 import (
+    Int8OnlineLinearMethod,
+)
 from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
+
+
+def test_online_int8_linear_quantizes_per_output_channel() -> None:
+    class RecordingKernel:
+        def __init__(self) -> None:
+            self.processed = 0
+
+        def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+            self.processed += 1
+            assert layer.weight.dtype == torch.int8
+
+    layer = torch.nn.Module()
+    original = torch.tensor(
+        [[-2.0, -0.25, 1.0, 2.0], [-0.1, 0.0, 0.05, 0.1]],
+        dtype=torch.float16,
+    )
+    layer.register_parameter(
+        "weight", torch.nn.Parameter(original.clone(), requires_grad=False)
+    )
+
+    method = Int8OnlineLinearMethod()
+    method.kernel = RecordingKernel()
+    method.process_weights_after_loading(layer)
+    method.process_weights_after_loading(layer)
+
+    assert method.kernel.processed == 1
+    assert layer.weight_scale.shape == (2, 1)
+    reconstructed = layer.weight.float() * layer.weight_scale
+    assert torch.allclose(reconstructed, original.float(), atol=0.01, rtol=0)
+    assert layer.input_scale is None
+    assert layer.input_zero_point is None
+    assert layer.azp_adj is None
+
+
+def test_online_int8_dispatches_dense_linear_and_lm_head() -> None:
+    from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+
+    config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(linear="int8_per_channel_static")
+    )
+    layers = [
+        object.__new__(ReplicatedLinear),
+        object.__new__(ParallelLMHead),
+    ]
+
+    for layer in layers:
+        method = config.get_quant_method(layer, "linear")
+        assert isinstance(method, Int8OnlineLinearMethod)
 
 
 @pytest.mark.skipif(

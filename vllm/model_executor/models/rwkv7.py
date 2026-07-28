@@ -338,6 +338,12 @@ class RWKV7LoRA(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        # These low-rank projections generate decay, gate, and interpolation
+        # parameters. Quantizing them saves little memory, is numerically
+        # sensitive, and dispatches poorly on common weight-only kernels when
+        # the rank is 32/64/128. Keep them in the model dtype while the large
+        # recurrent and FFN projections use ``quant_config``.
+        del quant_config
         if activation is None:
             act = nn.Identity()
         elif activation == "sigmoid":
@@ -354,7 +360,7 @@ class RWKV7LoRA(nn.Module):
                 input_dim,
                 low_rank_dim,
                 bias=False,
-                quant_config=quant_config,
+                quant_config=None,
                 prefix=f"{prefix}.lora.0",
             ),
             act,
@@ -362,7 +368,7 @@ class RWKV7LoRA(nn.Module):
                 low_rank_dim,
                 output_dim,
                 bias=bias,
-                quant_config=quant_config,
+                quant_config=None,
                 prefix=f"{prefix}.lora.2",
             ),
         )
@@ -536,14 +542,19 @@ class RWKV7Attention(nn.Module):
             self.hidden_size,
             self.hidden_size,
             bias=False,
-            quant_config=quant_config,
+            # Quantization error in the key/value projections is written into
+            # the recurrent state at every token. On larger RWKV7 checkpoints
+            # this error compounds into non-finite logits. Keep the two state
+            # update projections in the model dtype; the read-only receptance
+            # and output projections, FFN, and LM head remain quantizable.
+            quant_config=None,
             prefix=f"{prefix}.k_proj",
         )
         self.v_proj = ColumnParallelLinear(
             self.hidden_size,
             self.value_dim,
             bias=False,
-            quant_config=quant_config,
+            quant_config=None,
             prefix=f"{prefix}.v_proj",
         )
         self.o_proj = RowParallelLinear(
@@ -1419,6 +1430,12 @@ class RWKV7ForCausalLM(
     IsAttentionFree,
     SupportsPP,
 ):
+    # RWKV7 keeps the checkpoint's linear projections separate, so there are
+    # no packed-module rewrites to describe.  The attribute is still required
+    # by weight-rewriting loaders such as BitsAndBytes; an explicit empty map
+    # declares that checkpoint and vLLM module names match one-to-one.
+    packed_modules_mapping: dict[str, list[str]] = {}
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -1434,6 +1451,7 @@ class RWKV7ForCausalLM(
                 self.lm_head = ParallelLMHead(
                     config.vocab_size,
                     config.hidden_size,
+                    quant_config=vllm_config.quant_config,
                     prefix=maybe_prefix(prefix, "lm_head"),
                 )
             self.logits_processor = LogitsProcessor(config.vocab_size)
@@ -1470,8 +1488,10 @@ class RWKV7ForCausalLM(
         )
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        logits_dtype = getattr(self.lm_head, "weight", hidden_states).dtype
-        return self.logits_processor(self.lm_head, hidden_states.to(logits_dtype))
+        weight = getattr(self.lm_head, "weight", None)
+        if weight is not None and weight.is_floating_point():
+            hidden_states = hidden_states.to(weight.dtype)
+        return self.logits_processor(self.lm_head, hidden_states)
 
     @classmethod
     def get_mamba_state_dtype_from_config(

@@ -34,6 +34,7 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PtpcOnlineMoEMethod,
 )
 from vllm.model_executor.layers.quantization.online.int8 import (
+    Int8OnlineLinearMethod,
     Int8OnlineMoEMethod,
 )
 from vllm.model_executor.layers.quantization.online.mxfp8 import (
@@ -64,6 +65,7 @@ _ONLINE_LINEAR_METHODS: dict[QuantKey, type] = {
     kFp8Static128BlockSym: Fp8PerBlockOnlineLinearMethod,
     kFp8StaticChannelSym: Fp8PtpcOnlineLinearMethod,
     kMxfp8Dynamic: Mxfp8OnlineLinearMethod,
+    kInt8StaticChannelSym: Int8OnlineLinearMethod,
 }
 
 _ONLINE_MOE_METHODS: dict[QuantKey, type] = {
@@ -150,7 +152,11 @@ class OnlineQuantizationConfig(QuantizationConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
-        if isinstance(layer, LinearBase):
+        from vllm.model_executor.layers.vocab_parallel_embedding import (
+            ParallelLMHead,
+        )
+
+        if isinstance(layer, (LinearBase, ParallelLMHead)):
             if should_ignore_layer(
                 prefix,
                 ignore=self.ignored_layers,

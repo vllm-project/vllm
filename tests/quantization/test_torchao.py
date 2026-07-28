@@ -27,6 +27,23 @@ TORCHAO_VERSION_0_18_AVAILABLE = TORCHAO_AVAILABLE and version.parse(
 ) >= version.parse("0.18.0")
 
 
+@pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+def test_torchao_quantizes_parallel_lm_head():
+    from torchao.quantization import Int8WeightOnlyConfig
+
+    from vllm.model_executor.layers.quantization.torchao import (
+        TorchAOConfig,
+        TorchAOLinearMethod,
+    )
+    from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+
+    # get_quant_method only dispatches on the module type, so construction of
+    # the sharded weights and a distributed environment is unnecessary here.
+    lm_head = object.__new__(ParallelLMHead)
+    method = TorchAOConfig(Int8WeightOnlyConfig()).get_quant_method(lm_head, "lm_head")
+    assert isinstance(method, TorchAOLinearMethod)
+
+
 @pytest.mark.skipif(
     current_platform.is_rocm() and current_platform.is_fp8_fnuz(),
     reason="Only fp8_fnuz supported on CDNA3 architecture",

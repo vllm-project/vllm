@@ -37,6 +37,36 @@ vllm serve meta-llama/Llama-3.1-8B --quantization mxfp8
 | `fp8_per_tensor` | fp8_e4m3 data, fp32 per-tensor scale | fp8_e4m3 data, fp32 per-tensor scale | On some GPUs (Ada, Hopper) linear activations use per-token scaling for better performance |
 | `fp8_per_block` | fp8_e4m3 data, fp32 per-128x128-block scale | fp8_e4m3 data, fp32 per-1x128-block scale | |
 | `mxfp8` | fp8_e4m3 data, e8m0 per-1x32-block scale | fp8_e4m3 data, e8m0 per-1x32-block scale | Requires SM 100+ (Blackwell or newer) for w8a8, other GPUs use a w8a16 fallback |
+| `int8_per_channel_static` | int8 data, fp32 per-output-channel scale | int8 data, fp32 dynamic per-token scale | Configure explicitly through `quantization_config.linear`; requires compute capability 7.5 or newer |
+
+### Dense INT8
+
+Dense linear layers can be quantized from an FP16/BF16 checkpoint at load time.
+The checkpoint itself does not need to be converted:
+
+```python
+from vllm import LLM
+
+llm = LLM(
+    "RWKV/RWKV7-Goose-World2.8-1.5B-HF",
+    quantization="online",
+    quantization_config={"linear": "int8_per_channel_static"},
+)
+```
+
+The same configuration can be supplied to `vllm serve`:
+
+```bash
+vllm serve RWKV/RWKV7-Goose-World2.8-1.5B-HF \
+  --quantization online \
+  --quantization-config.linear int8_per_channel_static
+```
+
+RWKV7 keeps its recurrent key/value and low-rank control projections in the
+requested model dtype. The larger receptance, output, feed-forward, and untied
+LM-head projections use the configured quantization method. This avoids
+compounding quantization error in the recurrent state while retaining most of
+the weight-memory reduction.
 
 ## Advanced Configuration
 
