@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 mod abort_requests;
 mod cache;
 mod collective_rpc;
@@ -8,6 +11,7 @@ mod lora;
 mod metrics;
 pub(crate) mod openai;
 mod pause;
+mod profile;
 mod server_info;
 mod sleep;
 mod tokenize;
@@ -21,6 +25,7 @@ use axum::extract::DefaultBodyLimit;
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{get, post};
 use tower_http::trace::TraceLayer;
+use tracing::warn;
 
 use crate::middleware;
 use crate::state::AppState;
@@ -105,6 +110,17 @@ fn build_router_with_options(
             .route("/is_paused", get(pause::is_paused))
             .route("/server_info", get(server_info::server_info))
             .route("/get_world_size", get(world_size::get_world_size))
+    }
+
+    if let Some(profiler) = &state.profiler {
+        warn!(
+            mode = profiler,
+            "profiler is enabled in the API server; \
+             this should only be used for local development",
+        );
+        router = router
+            .route("/start_profile", post(profile::start_profile))
+            .route("/stop_profile", post(profile::stop_profile));
     }
 
     let enable_request_id_headers = state.api_server_options.enable_request_id_headers;

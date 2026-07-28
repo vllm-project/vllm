@@ -55,11 +55,10 @@ def get_chunked_local_attention_manager(
 
 
 def test_sink_full_attention_manager_accepts_scheduler_block_size():
-    # Regression test: SinkFullAttentionManager.__init__ must accept the
-    # scheduler_block_size kwarg threaded through every manager by #44165.
-    # Before the fix it took fixed positional args and no **kwargs, so the
-    # coordinator's get_manager_for_kv_cache_spec(... scheduler_block_size=...)
-    # call raised TypeError at engine startup for any sink-attention model.
+    # Regression test: nothing instantiates SinkFullAttentionManager in the
+    # test suite, so its constructor silently drifted out of sync with the
+    # base one when #44165 added scheduler_block_size, and every
+    # sink-attention model failed to start with a TypeError.
     block_size = 16
     spec = SinkFullAttentionSpec(
         block_size=block_size,
@@ -74,7 +73,7 @@ def test_sink_full_attention_manager_accepts_scheduler_block_size():
     # Build via the factory exactly as KVCacheCoordinator does at startup.
     manager = get_manager_for_kv_cache_spec(
         kv_cache_spec=spec,
-        max_num_batched_tokens=2048,
+        max_in_flight_tokens=2048,
         max_model_len=2048,
         block_pool=block_pool,
         enable_caching=True,
@@ -129,7 +128,7 @@ def test_chunked_local_attention_possible_cached_prefix():
             kv_cache_spec=chunked_local_attention_spec,
             drop_eagle_block=False,
             alignment_tokens=block_size,
-        )[0]
+        )[0][0]
         assert len(computed_blocks) == expect_length
 
         assert all(
@@ -200,7 +199,7 @@ def test_sliding_window_possible_cached_prefix():
             kv_cache_spec=sliding_window_spec,
             drop_eagle_block=False,
             alignment_tokens=block_size,
-        )[0]
+        )[0][0]
         assert len(computed_blocks) == expect_length
 
         assert all(
@@ -434,13 +433,13 @@ def test_get_num_blocks_to_allocate():
 
     assert (
         manager.get_num_blocks_to_allocate(
-            "1", 20 * block_size, cached_blocks_1, 0, 20 * block_size
+            "1", 20 * block_size, cached_blocks_1, 0, 0, 20 * block_size
         )
         == 20
     )
     assert (
         manager.get_num_blocks_to_allocate(
-            "2", 20 * block_size, cached_blocks_2, 0, 20 * block_size
+            "2", 20 * block_size, cached_blocks_2, 0, 0, 20 * block_size
         )
         == 15
     )
@@ -470,6 +469,7 @@ def test_evictable_cached_blocks_not_double_allocated():
         num_tokens=2 * block_size,
         new_computed_blocks=[evictable_block],
         total_computed_tokens=block_size,
+        num_local_computed_tokens=block_size,
         num_tokens_main_model=2 * block_size,
     )
     # Free capacity check should count evictable cached blocks, but allocation
@@ -510,13 +510,13 @@ def test_chunked_local_attention_get_num_blocks_to_allocate():
 
     assert (
         manager.get_num_blocks_to_allocate(
-            "1", 20 * block_size, cached_blocks_1, 0, 20 * block_size
+            "1", 20 * block_size, cached_blocks_1, 0, 0, 20 * block_size
         )
         == 20
     )
     assert (
         manager.get_num_blocks_to_allocate(
-            "2", 20 * block_size, cached_blocks_2, 0, 20 * block_size
+            "2", 20 * block_size, cached_blocks_2, 0, 0, 20 * block_size
         )
         == 15
     )
@@ -560,6 +560,7 @@ def test_predictor_matches_allocator_blocks_calculation_with_admission_cap():
             num_tokens=num_tokens,
             new_computed_blocks=[],
             total_computed_tokens=total_computed,
+            num_local_computed_tokens=0,
             num_tokens_main_model=num_tokens,
         )
         new_blocks = manager.allocate_new_blocks(

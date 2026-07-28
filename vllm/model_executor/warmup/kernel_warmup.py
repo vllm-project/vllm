@@ -12,9 +12,13 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.deepseek_v4_mhc_warmup import (
     deepseek_v4_mhc_warmup,
+)
+from vllm.model_executor.warmup.fa4_cutedsl_warmup import (
+    fa4_cutedsl_warmup,
 )
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     resolve_flashinfer_autotune_file,
@@ -23,6 +27,13 @@ from vllm.model_executor.warmup.flashinfer_autotune_cache import (
 from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
     deepseek_v4_sparse_mla_attention_warmup,
     flashinfer_sparse_mla_decode_autotune_warmup,
+)
+from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
+from vllm.model_executor.warmup.sparse_mla_triton_warmup import (
+    sparse_mla_triton_warmup,
+)
+from vllm.model_executor.warmup.v1_block_table_warmup import (
+    warm_v1_block_table_kernels,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
@@ -34,11 +45,70 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+_LL_BF16_WARMUP_M_RANGE = range(1, 17)
 
-def kernel_warmup(worker: "Worker"):
+
+def _ll_bf16_router_shapes_from_model(
+    model: torch.nn.Module,
+) -> tuple[tuple[int, int], ...]:
+    from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
+
+    shapes: set[tuple[int, int]] = set()
+    for module in model.modules():
+        if not isinstance(module, GateLinear):
+            continue
+        weight = getattr(module, "weight", None)
+        if not isinstance(weight, torch.Tensor):
+            continue
+        if weight.dim() != 2 or weight.dtype != torch.bfloat16:
+            continue
+        n, k = weight.shape
+        if k % 8 == 0:
+            shapes.add((int(k), int(n)))
+    return tuple(sorted(shapes))
+
+
+def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
+    from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
+        is_available as is_ll_bf16_gemm_available,
+    )
+    from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
+        ll_bf16_gemm_kernel,
+    )
+
+    if not is_ll_bf16_gemm_available():
+        return
+
+    shapes = _ll_bf16_router_shapes_from_model(model)
+    if not shapes:
+        logger.info(
+            "Skipping ll_bf16 router GEMM warmup: no bf16 GateLinear shapes found."
+        )
+        return
+
+    logger.info("Warming up ll_bf16 router GEMM kernels for shapes: %s.", shapes)
+    ll_bf16_gemm_kernel.warmup(
+        shapes=shapes,
+        m_values=_LL_BF16_WARMUP_M_RANGE,
+    )
+
+
+def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
         minimax_m3_msa_warmup,
     )
+
+    if not worker.use_v2_model_runner:
+        # Pooling models do not use the generation slot-mapping path.
+        if not worker.model_runner.is_pooling_model:
+            warm_v1_block_table_kernels(worker.model_runner)
+        # The KV-block zeroing kernel is driven by the scheduler's
+        # `new_block_ids_to_zero`, so no dummy run ever reaches it.
+        zeroer = getattr(worker.model_runner, "_kv_block_zeroer", None)
+        if zeroer is not None:
+            zeroer.warmup(worker.model_runner.kv_cache_config.num_blocks)
+
+    qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
 
     # DSv4 mHC TileLang kernels (hc_pre/hc_post/hc_head_op) run every decoder
     # layer per token; warm them across token sizes first so the first real
@@ -52,6 +122,22 @@ def kernel_warmup(worker: "Worker"):
     )
 
     # Run next so input-prep kernels JIT against pristine runner state.
+    if worker.vllm_config.kernel_config.enable_jit_warmup:
+        fa4_cutedsl_warmup(worker)
+        sparse_mla_triton_warmup(worker)
+
+    if current_platform.has_device_capability(90):
+        _warmup_ll_bf16_router_gemm(worker.get_model())
+
+    if worker.vllm_config.kernel_config.enable_cutedsl_warmup:
+        # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
+        # to the shared JIT warmup infrastructure.
+        # https://github.com/vllm-project/vllm/pull/47451
+        cutedsl_warmup()
+
+    if process_local_only:
+        return
+
     flashinfer_sparse_mla_decode_autotune_warmup(worker)
     deepseek_v4_sparse_mla_attention_warmup(worker)
 
@@ -110,10 +196,23 @@ def kernel_warmup(worker: "Worker"):
         )
 
 
-# TODO: remove once FlashInfer upstream fixes the persistent file cache
-# to resolve collisions like `use_8x4_sf_layout=True/False`, which causes
-# invalid tactics to be chosen
-_FLASHINFER_USE_PERSISTENT_CACHE = False
+def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
+    if envs.VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS is not None:
+        return set(envs.VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS) or None
+
+    from vllm.model_executor.kernels.linear import (
+        FlashInferCuteDslNvFp4LinearKernel,
+    )
+
+    for module in runner.get_model().modules():
+        for holder_name in ("quant_method", "scheme"):
+            kernel = getattr(getattr(module, holder_name, None), "kernel", None)
+            # CuTe-DSL mm_fp4 tuning JIT-compiles every tactic and its
+            # fallback is already the heuristic; all mm_fp4 backends share
+            # the "fp4_gemm" op name, so skip only when cute-dsl is selected.
+            if isinstance(kernel, FlashInferCuteDslNvFp4LinearKernel):
+                return {"fp4_gemm"}
+    return None
 
 
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
@@ -132,8 +231,23 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     import vllm.utils.flashinfer as fi_utils
     from vllm.distributed.parallel_state import get_world_group
 
-    if not _FLASHINFER_USE_PERSISTENT_CACHE:
-        with torch.inference_mode(), fi_utils.autotune():
+    autotune_kwargs: dict = {}
+    skip_ops = _flashinfer_autotune_skip_ops(runner)
+    if skip_ops:
+        logger.info(
+            "Skipping FlashInfer autotuning for ops %s",
+            sorted(skip_ops),
+        )
+        autotune_kwargs["skip_ops"] = skip_ops
+
+    use_persistent_cache = True
+
+    # When distributed, tune on every rank so the collectives stay synchronized.
+    if get_world_group().world_size > 1:
+        use_persistent_cache = False
+
+    if not use_persistent_cache:
+        with torch.inference_mode(), fi_utils.autotune(**autotune_kwargs):
             runner._dummy_run(
                 num_tokens=runner.scheduler_config.max_num_batched_tokens,
                 skip_eplb=True,
@@ -161,7 +275,9 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
 
     with torch.inference_mode():
         if is_leader:
-            with fi_utils.autotune(tune_mode=True, cache=str(cache_path)):
+            with fi_utils.autotune(
+                tune_mode=True, cache=str(cache_path), **autotune_kwargs
+            ):
                 runner._dummy_run(**dummy_run_kwargs)
         else:
             runner._dummy_run(**dummy_run_kwargs)

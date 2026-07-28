@@ -9,6 +9,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.tasks import GenerationTask
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -95,8 +96,32 @@ class ModelState(ABC):
     def apply_staged_writes(self) -> None:
         return None
 
+    def get_additional_cg_support(self) -> tuple[AttentionCGSupport, str | None]:
+        """Cudagraph support of attention groups this ModelState builds outside
+        ``init_attn_backend`` (e.g. encoder-only layers).
+
+        Returns the minimum support level and its backend name. The default of
+        ``ALWAYS`` imposes no extra constraint on the runner's cudagraph mode.
+        """
+        return AttentionCGSupport.ALWAYS, None
+
+    def preprocess_state(
+        self,
+        input_batch: InputBatch,
+        block_tables: tuple[torch.Tensor, ...],
+        kv_cache_config: KVCacheConfig,
+        num_computed_tokens: torch.Tensor,
+    ) -> None:
+        """Hook run on real batches before the forward pass (after block tables
+        are gathered). Used by mamba "align" prefix caching to pre-copy state
+        across block boundaries. No-op by default."""
+        return None
+
     def postprocess_state(
-        self, idx_mapping: torch.Tensor, num_sampled: torch.Tensor
+        self,
+        idx_mapping: torch.Tensor,
+        num_sampled: torch.Tensor,
+        num_computed_tokens: torch.Tensor | None = None,
     ) -> None:
         return None
 

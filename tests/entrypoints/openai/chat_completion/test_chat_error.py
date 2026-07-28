@@ -17,10 +17,9 @@ from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.render.serving import ServingRender
+from vllm.entrypoints.scale_out.render.serving import ServingRender
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
-from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -206,15 +205,8 @@ def _build_serving_render(engine: AsyncLLM) -> ServingRender:
         chat_template=None,
         chat_template_content_format="auto",
     )
-    online_derenderer = OnlineDerenderer(
-        model_config=engine.model_config,
-        renderer=engine.renderer,
-        request_logger=None,
-        chat_template=None,
-        chat_template_content_format="auto",
-    )
 
-    serving_render = ServingRender(models, online_renderer, online_derenderer)
+    serving_render = ServingRender(models, online_renderer)
 
     async def _fake_preprocess_chat(*args, **kwargs):
         # return conversation, engine_inputs
@@ -522,4 +514,16 @@ def test_structured_outputs_structural_tag_invalid(structural_tag):
             model=MODEL_NAME,
             messages=[{"role": "user", "content": "hello"}],
             structured_outputs={"structural_tag": structural_tag},
+        )
+
+
+@pytest.mark.parametrize("field_name", ["prompt_logprobs", "top_logprobs"])
+def test_non_numeric_logprobs_rejected(field_name):
+    """A non-numeric logprobs value must be a clean 400 validation error, not a
+    TypeError from the mode='before' comparison (which surfaces as HTTP 500)."""
+    with pytest.raises(ValidationError, match=f"`{field_name}` must be an integer"):
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "hello"}],
+            **{field_name: "2"},
         )

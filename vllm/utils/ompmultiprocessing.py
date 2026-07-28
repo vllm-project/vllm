@@ -204,6 +204,14 @@ class OMPProcessManager:
         logical_cpu_list = cr_utils.get_allowed_cpu_list()
 
         local_world_size = self.local_world_size
+
+        # On s390x, numa_node is remapped to book IDs (the best CPU
+        # partitioning level). Derive topology domains from the CPU list
+        # since they no longer correspond to physical memory nodes.
+        cpu_arch = current_platform.get_cpu_architecture()
+        if cpu_arch == CpuArchEnum.S390X:
+            allowed_numa_nodes = sorted(set(cpu.numa_node for cpu in logical_cpu_list))
+
         assert (
             len(allowed_numa_nodes) >= local_world_size or self.simulate_multi_node
         ), (
