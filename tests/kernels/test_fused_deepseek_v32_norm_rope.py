@@ -445,6 +445,24 @@ def test_fused_q(num_tokens: int, index_interleave: bool):
     head_scale = INDEX_HEADS**-0.5
     q_cos_sin = make_cos_sin(max_pos, ROPE_DIM, dev)  # q_pe: interleaved
     idx_cos_sin = make_cos_sin(max_pos, ROPE_DIM, dev)
+    preallocated_mqa = None
+    if num_tokens == 17 and index_interleave:
+        query_dim = KV_LORA + ROPE_DIM
+        destinations = 4
+        total_heads = destinations * NUM_HEADS
+        preallocated_storage = torch.empty(
+            destinations,
+            num_tokens,
+            total_heads,
+            query_dim,
+            dtype=FP8,
+            device=dev,
+        )
+        preallocated_mqa = preallocated_storage[
+            :,
+            :,
+            NUM_HEADS : 2 * NUM_HEADS,
+        ]
 
     iq_fp8, iw_out, mqa = K.fused_q(
         pos,
@@ -459,7 +477,17 @@ def test_fused_q(num_tokens: int, index_interleave: bool):
         head_scale,
         has_indexer=True,
         index_rope_interleave=index_interleave,
+        mqa_q_out=preallocated_mqa,
     )
+    if preallocated_mqa is not None:
+        assert mqa.data_ptr() == preallocated_mqa[0].data_ptr()
+        for destination in range(preallocated_mqa.shape[0]):
+            torch.testing.assert_close(
+                preallocated_mqa[destination].view(torch.uint8),
+                mqa.view(torch.uint8),
+                rtol=0,
+                atol=0,
+            )
 
     s = q_scale.item()
     # MQA query: [ql_nope | q_pe RoPE'd (interleaved)], per-tensor fp8.

@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
     VLLM_DCP_OUTPUT_VMM: bool = False
     VLLM_DCP_TOPK_VMM: bool = False
+    VLLM_DCP_QUERY_VMM: bool = False
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
@@ -1054,6 +1055,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DCP_OUTPUT_VMM": lambda: bool(int(os.getenv("VLLM_DCP_OUTPUT_VMM", "0"))),
     # Experimental owner-local VMM merge for bounded DCP sparse-indexer decode.
     "VLLM_DCP_TOPK_VMM": lambda: bool(int(os.getenv("VLLM_DCP_TOPK_VMM", "0"))),
+    # Experimental owner-local VMM compute-gather for DCP MLA query heads.
+    "VLLM_DCP_QUERY_VMM": lambda: bool(int(os.getenv("VLLM_DCP_QUERY_VMM", "0"))),
     # If set, the OpenAI API server will stay alive even after the underlying
     # AsyncLLMEngine errors and stops serving requests
     "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH": lambda: bool(

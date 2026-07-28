@@ -569,6 +569,7 @@ def _fused_q_kernel(
     mqa_q_fp8_ptr,
     mqa_q_fp8_stride0,
     mqa_q_fp8_stride1,
+    mqa_q_fp8_destination_stride,
     q_scale_ptr,
     QL_NOPE_DIM: tl.constexpr,
     QL_NOPE_BLOCK: tl.constexpr,
@@ -587,6 +588,7 @@ def _fused_q_kernel(
     HAS_INDEXER: tl.constexpr,
     INDEX_ROPE_INTERLEAVE: tl.constexpr,
     QUANTIZE_MQA: tl.constexpr,
+    NUM_MQA_DESTINATIONS: tl.constexpr,
 ):
     pid = tl.program_id(0)
     tok_idx = tl.program_id(1)
@@ -614,14 +616,16 @@ def _fused_q_kernel(
                     mask=ql_nope_mask,
                 ).to(tl.float32)
                 ql_nope_fp8 = (ql_nope / scale).to(tl.float8e4nv)
-                tl.store(
-                    mqa_q_fp8_ptr
-                    + tok_idx * mqa_q_fp8_stride0
-                    + q_head_idx * mqa_q_fp8_stride1
-                    + ql_nope_off,
-                    ql_nope_fp8,
-                    mask=ql_nope_mask,
-                )
+                for destination in range(NUM_MQA_DESTINATIONS):
+                    tl.store(
+                        mqa_q_fp8_ptr
+                        + destination * mqa_q_fp8_destination_stride
+                        + tok_idx * mqa_q_fp8_stride0
+                        + q_head_idx * mqa_q_fp8_stride1
+                        + ql_nope_off,
+                        ql_nope_fp8,
+                        mask=ql_nope_mask,
+                    )
         return
     elif pid == 0:
         # q_pe RoPE + quantize + pack into the tail of mqa_q_fp8.
@@ -657,23 +661,22 @@ def _fused_q_kernel(
                 r1 = x1 * cos - x2 * sin
                 r2 = x2 * cos + x1 * sin
                 if QUANTIZE_MQA:
-                    tl.store(
-                        mqa_q_fp8_ptr
-                        + tok_idx * mqa_q_fp8_stride0
-                        + q_head_idx * mqa_q_fp8_stride1
-                        + QL_NOPE_DIM
-                        + rot_off * 2,
-                        (r1 / scale).to(tl.float8e4nv),
-                    )
-                    tl.store(
-                        mqa_q_fp8_ptr
-                        + tok_idx * mqa_q_fp8_stride0
-                        + q_head_idx * mqa_q_fp8_stride1
-                        + QL_NOPE_DIM
-                        + rot_off * 2
-                        + 1,
-                        (r2 / scale).to(tl.float8e4nv),
-                    )
+                    for destination in range(NUM_MQA_DESTINATIONS):
+                        destination_base = (
+                            mqa_q_fp8_ptr
+                            + destination * mqa_q_fp8_destination_stride
+                            + tok_idx * mqa_q_fp8_stride0
+                            + q_head_idx * mqa_q_fp8_stride1
+                            + QL_NOPE_DIM
+                        )
+                        tl.store(
+                            destination_base + rot_off * 2,
+                            (r1 / scale).to(tl.float8e4nv),
+                        )
+                        tl.store(
+                            destination_base + rot_off * 2 + 1,
+                            (r2 / scale).to(tl.float8e4nv),
+                        )
                 else:
                     # bf16 query: write the RoPE'd q_pe unquantized.
                     out_ty = q_pe_out_ptr.dtype.element_ty
@@ -768,6 +771,7 @@ def fused_q(
     has_indexer: bool = True,
     index_rope_interleave: bool = False,
     quantize_mqa: bool = True,
+    mqa_q_out: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fuse the MQA-query and indexer-query RoPE/quantization.
 
@@ -800,19 +804,57 @@ def fused_q(
     num_index_q_heads = index_q.shape[1]
     index_q_head_dim = index_q.shape[2]
     grid_heads = max(mqa_grid_heads, num_index_q_heads)
+    mqa_q_destination_stride = 0
+    num_mqa_destinations = 1
     if quantize_mqa:
         # fp8 path: pack [ql_nope; q_pe] into a single fp8 tensor.
-        mqa_q_fp8 = torch.empty(
+        expected_mqa_shape = (
             q_pe.shape[0],
             q_pe.shape[1],
             ql_nope.shape[2] + q_pe.shape[2],
-            dtype=torch.float8_e4m3fn,
-            device=q_pe.device,
         )
+        if mqa_q_out is None:
+            mqa_q_fp8 = torch.empty(
+                expected_mqa_shape,
+                dtype=torch.float8_e4m3fn,
+                device=q_pe.device,
+            )
+        else:
+            if mqa_q_out.ndim == 4:
+                num_mqa_destinations = mqa_q_out.shape[0]
+                actual_mqa_shape = tuple(mqa_q_out.shape[1:])
+                mqa_q_destination_stride = mqa_q_out.stride(0)
+                mqa_q_fp8 = mqa_q_out[0]
+            else:
+                actual_mqa_shape = tuple(mqa_q_out.shape)
+                mqa_q_fp8 = mqa_q_out
+            if (
+                mqa_q_out.ndim not in (3, 4)
+                or num_mqa_destinations <= 0
+                or actual_mqa_shape != expected_mqa_shape
+                or mqa_q_out.dtype != torch.float8_e4m3fn
+                or mqa_q_out.device != q_pe.device
+                or mqa_q_out.stride(-1) != 1
+            ):
+                raise RuntimeError(
+                    "fused_q owner-local MQA output does not match the FP8 "
+                    "producer/fanout contract: expected shape="
+                    f"{expected_mqa_shape} or [destinations, "
+                    f"{', '.join(str(v) for v in expected_mqa_shape)}], "
+                    f"dtype={torch.float8_e4m3fn}, device={q_pe.device}, "
+                    "last_stride=1; got "
+                    f"shape={tuple(mqa_q_out.shape)}, dtype={mqa_q_out.dtype}, "
+                    f"device={mqa_q_out.device}, strides={mqa_q_out.stride()}."
+                )
         # Placeholder; pid 0 packs q_pe into mqa_q_fp8 instead.
         q_pe_out = mqa_q_fp8
         mqa_q = mqa_q_fp8
     else:
+        if mqa_q_out is not None:
+            raise RuntimeError(
+                "fused_q owner-local MQA output currently supports only the "
+                "quantized FP8 query path."
+            )
         # bf16 path: only the RoPE'd q_pe is produced; ql_nope used directly.
         q_pe_out = torch.empty_like(q_pe)
         mqa_q_fp8 = q_pe_out  # unused placeholder for the fp8 pack pointer
@@ -846,6 +888,7 @@ def fused_q(
         mqa_q_fp8,
         mqa_q_fp8.stride(0),
         mqa_q_fp8.stride(1),
+        mqa_q_destination_stride,
         q_scale,
         ql_nope.shape[2],
         triton.next_power_of_2(ql_nope.shape[2]),
@@ -861,6 +904,7 @@ def fused_q(
         HAS_INDEXER=has_indexer,
         INDEX_ROPE_INTERLEAVE=index_rope_interleave,
         QUANTIZE_MQA=quantize_mqa,
+        NUM_MQA_DESTINATIONS=num_mqa_destinations,
         # num_warps=1 is optimal here: each program is a single 128-element
         # rope+quant, so the kernel is program-count/occupancy bound, not
         # per-program compute bound (swept 1/2/4/8 — 1 wins or ties everywhere).
