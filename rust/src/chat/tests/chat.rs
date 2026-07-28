@@ -11,7 +11,7 @@ use tokio::time::timeout;
 use vllm_chat::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessageExt as _, ChatBackend, ChatEvent,
     ChatLlm, ChatMessage, ChatRenderer, ChatRequest, ChatRole, ChatTextBackend, ChatTool,
-    ChatToolChoice, DefaultChatOutputProcessor, DynChatOutputProcessor, DynChatRenderer,
+    ChatToolChoice, DefaultChatOutputProcessor, DynChatOutputProcessor, DynChatRenderer, Error,
     FinishReason, GenerationPromptMode, NewChatOutputProcessorOptions, ParserSelection,
     RenderedPrompt, SamplingParams,
 };
@@ -257,7 +257,7 @@ impl ChatRenderer for FakeChatBackend {
         for message in &request.messages {
             prompt.push_str(message.role().as_str());
             prompt.push_str(": ");
-            prompt.push_str(&message.text_content()?);
+            prompt.push_str(&message.text_content().map_err(Error::UnsupportedMultimodalContent)?);
             prompt.push('\n');
         }
         if request.chat_options.add_generation_prompt() {

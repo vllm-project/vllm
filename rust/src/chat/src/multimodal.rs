@@ -33,7 +33,7 @@ use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
 
 use crate::error::{Error, Result, bail_multimodal, multimodal};
 use crate::renderer::RenderedPrompt;
-use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
+use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest, ImageDetail};
 
 mod audio;
 mod expand;
@@ -529,7 +529,7 @@ fn extract_media_parts(request: &ChatRequest) -> Result<Vec<MediaContentPart>> {
                     uuid,
                 } => all_parts.push(MediaContentPart::ImageUrl {
                     url: image_url.clone(),
-                    detail: *detail,
+                    detail: detail.map(to_multimodal_image_detail),
                     uuid: uuid.clone(),
                 }),
                 ChatContentPart::VideoUrl { video_url, uuid } => {
@@ -554,6 +554,15 @@ fn extract_media_parts(request: &ChatRequest) -> Result<Vec<MediaContentPart>> {
         }
     }
     Ok(all_parts)
+}
+
+/// Convert the protocol-level image detail into the multimodal processor type.
+fn to_multimodal_image_detail(detail: ImageDetail) -> llm_multimodal::ImageDetail {
+    match detail {
+        ImageDetail::Auto => llm_multimodal::ImageDetail::Auto,
+        ImageDetail::Low => llm_multimodal::ImageDetail::Low,
+        ImageDetail::High => llm_multimodal::ImageDetail::High,
+    }
 }
 
 /// Wrap OpenAI base64 audio in a data URL consumed by `MediaConnector`.

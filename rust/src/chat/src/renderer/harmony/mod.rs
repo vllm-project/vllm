@@ -427,7 +427,7 @@ fn auto_drop_analysis_messages(messages: Vec<Message>) -> Vec<Message> {
 
 /// Flatten vLLM text content and reject unsupported multimodal parts.
 fn flatten_text(content: &ChatContent) -> Result<String> {
-    content.try_flatten_to_text()
+    content.try_flatten_to_text().map_err(Error::UnsupportedMultimodalContent)
 }
 
 /// Convert vLLM function tool definitions to Harmony tool descriptions.

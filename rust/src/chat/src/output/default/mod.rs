@@ -178,8 +178,8 @@ impl ChatOutputProcessor for DefaultChatOutputProcessor {
     /// events through two sequential stages once text decoding has
     /// already happened:
     ///
-    /// 1. [`unified_event_stream`] — reasoning and tool-call parsing
-    /// 2. [`structured_chat_event_stream`] — final block assembly
+    /// 1. `unified_event_stream` — reasoning and tool-call parsing
+    /// 2. `structured_chat_event_stream` — final block assembly
     fn process(self: Box<Self>, decoded: DynDecodedTextEventStream) -> Result<DynChatEventStream> {
         let parsed = unified_event_stream(decoded, self.parser);
         let structured = structured_chat_event_stream(parsed, self.parallel_tool_calls);
