@@ -125,6 +125,8 @@ class EngineCore:
             )
 
         self.log_stats = log_stats
+        # Opaque weight version supplied by the caller.
+        self._weight_version = "default"
 
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
@@ -956,6 +958,13 @@ class EngineCore:
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
         return self.model_executor.collective_rpc(method, timeout, args, kwargs)
+
+    def set_weight_version(self, weight_version: str) -> None:
+        self._weight_version = weight_version
+
+    def get_weight_version(self) -> str:
+        """Return the latest committed weight version."""
+        return self._weight_version
 
     def preprocess_add_request(self, request: EngineCoreRequest) -> tuple[Request, int]:
         """Preprocess the request.

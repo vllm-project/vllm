@@ -176,7 +176,19 @@ class EngineCoreClient(ABC):
     def execute_dummy_batch(self) -> None:
         raise NotImplementedError
 
+    def set_weight_version(self, weight_version: str) -> None:
+        raise NotImplementedError
+
+    def get_weight_version(self) -> str:
+        raise NotImplementedError
+
     async def execute_dummy_batch_async(self) -> None:
+        raise NotImplementedError
+
+    async def set_weight_version_async(self, weight_version: str) -> None:
+        raise NotImplementedError
+
+    async def get_weight_version_async(self) -> str:
         raise NotImplementedError
 
     def abort_requests(self, request_ids: list[str]) -> None:
@@ -353,6 +365,12 @@ class InprocClient(EngineCoreClient):
 
     def execute_dummy_batch(self) -> None:
         self.engine_core.execute_dummy_batch()
+
+    def set_weight_version(self, weight_version: str) -> None:
+        self.engine_core.set_weight_version(weight_version)
+
+    def get_weight_version(self) -> str:
+        return self.engine_core.get_weight_version()
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.engine_core.add_lora(lora_request)
@@ -950,6 +968,12 @@ class SyncMPClient(MPClient):
     def execute_dummy_batch(self) -> None:
         self.call_utility("execute_dummy_batch")
 
+    def set_weight_version(self, weight_version: str) -> None:
+        self.call_utility("set_weight_version", weight_version)
+
+    def get_weight_version(self) -> str:
+        return self.call_utility("get_weight_version")
+
     def collective_rpc(
         self,
         method: str | Callable[..., _R],
@@ -1201,6 +1225,12 @@ class AsyncMPClient(MPClient):
 
     async def execute_dummy_batch_async(self) -> None:
         await self.call_utility_async("execute_dummy_batch")
+
+    async def set_weight_version_async(self, weight_version: str) -> None:
+        await self.call_utility_async("set_weight_version", weight_version)
+
+    async def get_weight_version_async(self) -> str:
+        return await self.call_utility_async("get_weight_version")
 
     async def add_lora_async(self, lora_request: LoRARequest) -> bool:
         return await self.call_utility_async("add_lora", lora_request)
