@@ -272,7 +272,7 @@ impl RoundtripCase {
     fn gpt_oss() -> Self {
         Self {
             model_id: "openai/gpt-oss-20b",
-            assistant_stop_suffix: "", // not applicable for token-id cases
+            assistant_stop_suffix: "",
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Always { value: true },
@@ -285,7 +285,7 @@ impl RoundtripCase {
     fn inkling() -> Self {
         Self {
             model_id: "thinkingmachines/Inkling",
-            assistant_stop_suffix: "",
+            assistant_stop_suffix: "<|content_model_end_sampling|>",
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Always { value: true },
@@ -689,14 +689,23 @@ fn decoded_completion_stream(
                 .collect()
         }
         Prompt::TokenIds(token_ids) => {
-            ensure!(
-                assistant_stop_suffix.is_empty(),
-                "token-id roundtrip cases do not support text stop suffixes"
-            );
+            let body = if assistant_stop_suffix.is_empty() {
+                token_ids.as_slice()
+            } else {
+                let stop_token_ids = tokenizer
+                    .encode(assistant_stop_suffix, false)
+                    .context("failed to encode token-id completion stop suffix")?;
+                token_ids.strip_suffix(stop_token_ids.as_slice()).with_context(|| {
+                    format!(
+                        "token-id completion did not end with {:?}: {:?}",
+                        assistant_stop_suffix, token_ids
+                    )
+                })?
+            };
             incremental_decode_chunks(
                 tokenizer,
                 &prompt_token_ids,
-                token_ids,
+                body,
                 TOKEN_COMPLETION_CHUNK_TOKENS,
             )?
         }

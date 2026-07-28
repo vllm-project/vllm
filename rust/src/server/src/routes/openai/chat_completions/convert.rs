@@ -406,6 +406,7 @@ fn convert_tool_choice(tool_choice: Option<&ToolChoice>) -> Result<ChatToolChoic
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     use axum::http::HeaderMap;
     use expect_test::expect;
@@ -416,7 +417,8 @@ mod tests {
         ChatRenderer, ChatTool as VllmChatTool, ChatToolChoice, GenerationPromptMode,
         KimiK3ChatRenderer, SamplingParams as VllmSamplingParams,
     };
-    use vllm_text::output::TextDecodeOptions;
+    use vllm_text::{Prompt, output::TextDecodeOptions};
+    use vllm_tokenizer::{Tokenizer, test_utils::TestTokenizer};
 
     use super::prepare_chat_request;
     use crate::lora::LoraModelResolution;
@@ -521,12 +523,15 @@ mod tests {
             Some(&template_response_format)
         );
 
-        let prompt = KimiK3ChatRenderer::new()
+        let tokenizer = Arc::new(TestTokenizer::new());
+        let prompt = KimiK3ChatRenderer::new(tokenizer.clone())
             .render(&prepared.chat_request)
             .expect("Kimi K3 rendering succeeds")
-            .prompt
-            .into_text()
-            .expect("Kimi K3 renders a text prompt");
+            .prompt;
+        let Prompt::TokenIds(prompt_token_ids) = prompt else {
+            panic!("Kimi K3 renders token IDs");
+        };
+        let prompt = tokenizer.decode(&prompt_token_ids, false).expect("Kimi K3 prompt decodes");
         assert!(prompt.contains("response_format=json_schema"));
         assert!(prompt.contains(r#""answer":{"type":"string"}"#));
     }

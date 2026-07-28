@@ -73,7 +73,7 @@ impl HfChatBackend {
             RendererSelection::DeepSeekV4 => Arc::new(DeepSeekV4ChatRenderer::new()),
             RendererSelection::Harmony => Arc::new(HarmonyChatRenderer::new()?),
             RendererSelection::Inkling => Arc::new(InklingChatRenderer::new(tokenizer.clone())?),
-            RendererSelection::KimiK3 => Arc::new(KimiK3ChatRenderer::new()),
+            RendererSelection::KimiK3 => Arc::new(KimiK3ChatRenderer::new(tokenizer.clone())),
         };
 
         info!(

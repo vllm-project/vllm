@@ -6,9 +6,9 @@
 //! Port of Moonshot remote-code `encoding_k3.py::build_chat_segments()`.
 
 use std::collections::HashMap;
-use std::fmt::Write as _;
 
 use serde_json::{Map, Value, json};
+use vllm_tokenizer::Tokenizer;
 
 use crate::error::{Error, Result};
 use crate::request::{
@@ -25,12 +25,47 @@ pub(super) const IMAGE_PLACEHOLDER: &str = "<|media_pad|>";
 const DEFAULT_THINKING_EFFORT: &str = "max";
 const VALID_THINKING_EFFORTS: &[&str] = &["low", "high", "max"];
 
-/// Render one chat request into the K3 XTML prompt string.
-pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
+/// K3 prompt encoder preserving Python's per-segment tokenization boundaries.
+pub(super) struct K3TokenWriter<'a> {
+    tokenizer: &'a dyn Tokenizer,
+    token_ids: Vec<u32>,
+}
+
+impl<'a> K3TokenWriter<'a> {
+    pub(super) fn new(tokenizer: &'a dyn Tokenizer) -> Self {
+        Self {
+            tokenizer,
+            token_ids: Vec::new(),
+        }
+    }
+
+    /// Encode one trusted segment with normal added-token recognition.
+    pub(super) fn control(&mut self, text: &str) -> Result<()> {
+        if !text.is_empty() {
+            self.token_ids.extend(self.tokenizer.encode(text, false)?);
+        }
+        Ok(())
+    }
+
+    /// Encode one literal segment while bypassing every added-token matcher.
+    pub(super) fn ordinary(&mut self, text: &str) -> Result<()> {
+        if !text.is_empty() {
+            self.token_ids.extend(self.tokenizer.encode_ordinary(text)?);
+        }
+        Ok(())
+    }
+
+    pub(super) fn finish(self) -> Vec<u32> {
+        self.token_ids
+    }
+}
+
+/// Render and tokenize one chat request using K3's segment-aware contract.
+pub(super) fn render_request(request: &ChatRequest, tokenizer: &dyn Tokenizer) -> Result<Vec<u32>> {
     let thinking = thinking_enabled(request)?;
     let thinking_effort = thinking.then(|| thinking_effort(request)).transpose()?;
     let tools = request_tools(request);
-    let mut out = String::new();
+    let mut out = K3TokenWriter::new(tokenizer);
 
     if !tools.is_empty() {
         write_tool_declare(&mut out, tools, false)?;
@@ -48,14 +83,14 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
                  supported values include `low`, `medium`, `high`, and `max`.\n\
                  Now the system is invoked with `thinking_effort={effort}`."
             ),
-        );
+        )?;
     }
 
     // Track prior assistant tool-call ids for tool-result reordering / naming.
     let mut tool_call_id_index: HashMap<String, (usize, String)> = HashMap::new();
     let mut pending_tool_run: Vec<(usize, ChatMessage)> = Vec::new();
 
-    let flush_tool_run = |out: &mut String,
+    let flush_tool_run = |out: &mut K3TokenWriter<'_>,
                           run: &mut Vec<(usize, ChatMessage)>,
                           id_index: &HashMap<String, (usize, String)>|
      -> Result<()> {
@@ -163,7 +198,7 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
                 "tool-choice",
                 "The system is invoked with `tool_choice=required`.\n\
                  You MUST call tools in the next message.",
-            );
+            )?;
         }
         // Emit only when tools are present: Rust defaults tool_choice to None
         // for tool-free requests, which must not inject a tool-choice message.
@@ -173,7 +208,7 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
                 "tool-choice",
                 "The system is invoked with `tool_choice=none`.\n\
                  You MUST NOT call any tools in the next message.",
-            );
+            )?;
         }
         ChatToolChoice::None | ChatToolChoice::Auto | ChatToolChoice::Function { .. } => {}
     }
@@ -181,11 +216,11 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
     write_response_format(&mut out, request)?;
 
     if request.chat_options.add_generation_prompt() {
-        write_open_tag(&mut out, "message", &[("role", "assistant")]);
-        write_open_tag(&mut out, if thinking { "think" } else { "response" }, &[]);
+        write_open_tag(&mut out, "message", &[("role", "assistant")])?;
+        write_open_tag(&mut out, if thinking { "think" } else { "response" }, &[])?;
     }
 
-    Ok(out)
+    Ok(out.finish())
 }
 
 fn request_tools(request: &ChatRequest) -> &[ChatTool] {
@@ -248,7 +283,11 @@ fn content_is_empty(content: &ChatContent) -> bool {
     }
 }
 
-fn write_tool_declare(out: &mut String, tools: &[ChatTool], dynamic: bool) -> Result<()> {
+fn write_tool_declare(
+    out: &mut K3TokenWriter<'_>,
+    tools: &[ChatTool],
+    dynamic: bool,
+) -> Result<()> {
     let mut specs = Vec::with_capacity(tools.len());
     for tool in tools {
         let mut function = Map::new();
@@ -285,23 +324,26 @@ fn write_tool_declare(out: &mut String, tools: &[ChatTool], dynamic: bool) -> Re
         )
     };
 
-    write_internal_system(out, "tool-declare", &body);
-    Ok(())
+    write_internal_system(out, "tool-declare", &body)
 }
 
-fn write_internal_system(out: &mut String, message_type: &str, body: &str) {
+fn write_internal_system(
+    out: &mut K3TokenWriter<'_>,
+    message_type: &str,
+    body: &str,
+) -> Result<()> {
     write_open_tag(
         out,
         "message",
         &[("role", "system"), ("type", message_type)],
-    );
-    out.push_str(body.trim());
-    write_close_tag(out, "message");
-    out.push_str(END_OF_MSG);
+    )?;
+    out.ordinary(body.trim())?;
+    write_close_tag(out, "message")?;
+    out.control(END_OF_MSG)
 }
 
 fn write_role_message(
-    out: &mut String,
+    out: &mut K3TokenWriter<'_>,
     role: &str,
     name: Option<&str>,
     content: &ChatContent,
@@ -311,15 +353,14 @@ fn write_role_message(
         attrs.push(("name", name.to_string()));
     }
     let attr_refs: Vec<(&str, &str)> = attrs.iter().map(|(k, v)| (*k, v.as_str())).collect();
-    write_open_tag(out, "message", &attr_refs);
+    write_open_tag(out, "message", &attr_refs)?;
     write_content(out, content)?;
-    write_close_tag(out, "message");
-    out.push_str(END_OF_MSG);
-    Ok(())
+    write_close_tag(out, "message")?;
+    out.control(END_OF_MSG)
 }
 
 fn write_tool_message(
-    out: &mut String,
+    out: &mut K3TokenWriter<'_>,
     tool_name: &str,
     index: usize,
     content: &ChatContent,
@@ -329,19 +370,18 @@ fn write_tool_message(
         out,
         "message",
         &[("role", "tool"), ("tool", tool_name), ("index", &index_str)],
-    );
+    )?;
     write_content(out, content)?;
-    write_close_tag(out, "message");
-    out.push_str(END_OF_MSG);
-    Ok(())
+    write_close_tag(out, "message")?;
+    out.control(END_OF_MSG)
 }
 
 fn write_assistant_message(
-    out: &mut String,
+    out: &mut K3TokenWriter<'_>,
     content: &[AssistantContentBlock],
     thinking: bool,
 ) -> Result<()> {
-    write_open_tag(out, "message", &[("role", "assistant")]);
+    write_open_tag(out, "message", &[("role", "assistant")])?;
 
     let mut reasoning = String::new();
     let mut response = String::new();
@@ -358,32 +398,31 @@ fn write_assistant_message(
     // message carries open/close tags even when there is no reasoning content.
     // In non-thinking mode the channel is dropped entirely.
     if thinking {
-        write_open_tag(out, "think", &[]);
+        write_open_tag(out, "think", &[])?;
         if !reasoning.trim().is_empty() {
-            out.push_str(&reasoning);
+            out.ordinary(&reasoning)?;
         }
-        write_close_tag(out, "think");
+        write_close_tag(out, "think")?;
     }
 
-    write_open_tag(out, "response", &[]);
-    out.push_str(&response);
-    write_close_tag(out, "response");
+    write_open_tag(out, "response", &[])?;
+    out.ordinary(&response)?;
+    write_close_tag(out, "response")?;
 
     if !tool_calls.is_empty() {
-        write_open_tag(out, "tools", &[]);
+        write_open_tag(out, "tools", &[])?;
         for (index, tool_call) in tool_calls.into_iter().enumerate() {
             write_assistant_tool_call(out, tool_call, index + 1)?;
         }
-        write_close_tag(out, "tools");
+        write_close_tag(out, "tools")?;
     }
 
-    write_close_tag(out, "message");
-    out.push_str(END_OF_MSG);
-    Ok(())
+    write_close_tag(out, "message")?;
+    out.control(END_OF_MSG)
 }
 
 fn write_assistant_tool_call(
-    out: &mut String,
+    out: &mut K3TokenWriter<'_>,
     tool_call: &AssistantToolCall,
     index: usize,
 ) -> Result<()> {
@@ -395,34 +434,33 @@ fn write_assistant_tool_call(
             ("tool", tool_call.name.as_str()),
             ("index", index_str.as_str()),
         ],
-    );
+    )?;
 
     let (args, json_block) = normalize_tool_arguments(&tool_call.arguments)?;
     if let Some(raw) = json_block {
-        write_open_tag(out, "json", &[("type", "object")]);
-        out.push_str(&raw);
-        write_close_tag(out, "json");
+        write_open_tag(out, "json", &[("type", "object")])?;
+        out.ordinary(&raw)?;
+        write_close_tag(out, "json")?;
     } else {
         for (key, value) in args {
             let typ = xtml_type(&value);
-            write_open_tag(out, "argument", &[("key", key.as_str()), ("type", typ)]);
-            out.push_str(&xtml_value(&value));
-            write_close_tag(out, "argument");
+            write_open_tag(out, "argument", &[("key", key.as_str()), ("type", typ)])?;
+            out.ordinary(&xtml_value(&value))?;
+            write_close_tag(out, "argument")?;
         }
     }
 
-    write_close_tag(out, "call");
-    Ok(())
+    write_close_tag(out, "call")
 }
 
-fn write_content(out: &mut String, content: &ChatContent) -> Result<()> {
+fn write_content(out: &mut K3TokenWriter<'_>, content: &ChatContent) -> Result<()> {
     match content {
         ChatContent::Text(text) => write_text_with_images(out, text),
         ChatContent::Parts(parts) => {
             for part in parts {
                 match part {
                     ChatContentPart::Text { text } => write_text_with_images(out, text)?,
-                    ChatContentPart::ImageUrl { .. } => out.push_str(IMAGE_PLACEHOLDER),
+                    ChatContentPart::ImageUrl { .. } => out.control(IMAGE_PLACEHOLDER)?,
                     ChatContentPart::VideoUrl { .. } => {
                         return Err(Error::UnsupportedMultimodalContent("video_url"));
                     }
@@ -439,14 +477,13 @@ fn write_content(out: &mut String, content: &ChatContent) -> Result<()> {
     }
 }
 
-fn write_text_with_images(out: &mut String, text: &str) -> Result<()> {
+fn write_text_with_images(out: &mut K3TokenWriter<'_>, text: &str) -> Result<()> {
     // Placeholder expansion is left as the literal K3 image token; multimodal
     // preprocessing can replace it once image prompts are known.
-    out.push_str(text);
-    Ok(())
+    out.ordinary(text)
 }
 
-fn write_response_format(out: &mut String, request: &ChatRequest) -> Result<()> {
+fn write_response_format(out: &mut K3TokenWriter<'_>, request: &ChatRequest) -> Result<()> {
     let Some(rf) = request.chat_options.response_format.as_ref() else {
         return Ok(());
     };
@@ -461,7 +498,7 @@ fn write_response_format(out: &mut String, request: &ChatRequest) -> Result<()> 
                 "The system is invoked with `response_format=json_object`.\n\
                  Your response must be raw JSON data without markdown code \
                  blocks (```json) or any additional formatting.",
-            );
+            )?;
         }
         "json_schema" => {
             let schema = extract_response_schema(rf);
@@ -478,7 +515,7 @@ fn write_response_format(out: &mut String, request: &ChatRequest) -> Result<()> 
                      {schema_json}\n\
                      ```"
                 ),
-            );
+            )?;
         }
         _ => {}
     }
@@ -528,19 +565,22 @@ fn xtml_value(value: &Value) -> String {
     }
 }
 
-fn write_open_tag(out: &mut String, tag: &str, attrs: &[(&str, &str)]) {
-    out.push_str(OPEN);
-    out.push_str(tag);
+fn write_open_tag(out: &mut K3TokenWriter<'_>, tag: &str, attrs: &[(&str, &str)]) -> Result<()> {
+    out.control(OPEN)?;
+    out.ordinary(tag)?;
     for (key, value) in attrs {
-        let _ = write!(out, " {key}=\"{}\"", escape_attr_value(value));
+        out.ordinary(&format!(" {key}"))?;
+        out.ordinary("=\"")?;
+        out.ordinary(&escape_attr_value(value))?;
+        out.ordinary("\"")?;
     }
-    out.push_str(SEP);
+    out.control(SEP)
 }
 
-fn write_close_tag(out: &mut String, tag: &str) {
-    out.push_str(CLOSE);
-    out.push_str(tag);
-    out.push_str(SEP);
+fn write_close_tag(out: &mut K3TokenWriter<'_>, tag: &str) -> Result<()> {
+    out.control(CLOSE)?;
+    out.ordinary(tag)?;
+    out.control(SEP)
 }
 
 fn escape_attr_value(value: &str) -> String {
