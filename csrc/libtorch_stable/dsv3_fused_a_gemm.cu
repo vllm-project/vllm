@@ -697,8 +697,8 @@ void invokeFusedAGemm(T* output, T const* mat_a, T const* mat_b, int num_tokens,
 
 template <typename T, int kHdIn, int kHdOut, int kTileK = 256>
 void invokeFusedAGemmForTokens(T* output, T const* mat_a, T const* mat_b,
-                              int num_tokens, cudaStream_t const stream,
-                              bool enable_pdl) {
+                               int num_tokens, cudaStream_t const stream,
+                               bool enable_pdl) {
   if (num_tokens <= 8) {
     invokeFusedAGemm<T, kHdIn, kHdOut, 8, kTileK>(
         output, mat_a, mat_b, num_tokens, stream, enable_pdl);
@@ -731,10 +731,12 @@ void dsv3_fused_a_gemm(torch::stable::Tensor& output,
 
   // The kernels index global memory with raw pointers and packed strides, so
   // reject any padded or transposed view rather than reading out of bounds.
-  STD_TORCH_CHECK(mat_a.stride(0) == hd_in && mat_a.stride(1) == 1,
-                  "mat_a must be a packed row-major [num_tokens, hd_in] tensor");
-  STD_TORCH_CHECK(output.stride(0) == hd_out && output.stride(1) == 1,
-                  "output must be a packed row-major [num_tokens, hd_out] tensor");
+  STD_TORCH_CHECK(
+      mat_a.stride(0) == hd_in && mat_a.stride(1) == 1,
+      "mat_a must be a packed row-major [num_tokens, hd_in] tensor");
+  STD_TORCH_CHECK(
+      output.stride(0) == hd_out && output.stride(1) == 1,
+      "output must be a packed row-major [num_tokens, hd_out] tensor");
   STD_TORCH_CHECK(mat_b.stride(0) == 1 && mat_b.stride(1) == hd_in,
                   "mat_b must be a packed column-major [hd_in, hd_out] tensor");
 
@@ -758,12 +760,11 @@ void dsv3_fused_a_gemm(torch::stable::Tensor& output,
   auto const* mat_b_ptr =
       reinterpret_cast<__nv_bfloat16 const*>(mat_b.data_ptr());
 
-#define DISPATCH_DSV3_SHAPE(HD_IN, HD_OUT)                       \
-  if (hd_in == HD_IN && hd_out == HD_OUT) {                      \
-    invokeFusedAGemmForTokens<__nv_bfloat16, HD_IN, HD_OUT>(     \
-        output_ptr, mat_a_ptr, mat_b_ptr, num_tokens, stream,    \
-        enable_pdl);                                             \
-    return;                                                      \
+#define DISPATCH_DSV3_SHAPE(HD_IN, HD_OUT)                                 \
+  if (hd_in == HD_IN && hd_out == HD_OUT) {                                \
+    invokeFusedAGemmForTokens<__nv_bfloat16, HD_IN, HD_OUT>(               \
+        output_ptr, mat_a_ptr, mat_b_ptr, num_tokens, stream, enable_pdl); \
+    return;                                                                \
   }
 
   // Shapes the Kimi-K3 selector routes to dsv3_fused_a (see the dsv3 winners

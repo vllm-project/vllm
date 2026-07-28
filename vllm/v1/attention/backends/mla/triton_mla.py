@@ -290,9 +290,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             # Each row attends to the same committed KV prefix (per-row seq_lens)
             # and never to sibling block tokens = non-causal block semantics.
             # Mirrors FlashInferMLA's non-causal path.
-            query_len = (
-                attn_metadata.num_decode_tokens // attn_metadata.num_decodes
-            )
+            query_len = attn_metadata.num_decode_tokens // attn_metadata.num_decodes
             if query_len > 1:
                 block_table = block_table.repeat_interleave(query_len, dim=0)
                 seq_lens = seq_lens.repeat_interleave(query_len)

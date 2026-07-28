@@ -65,8 +65,9 @@ DINLINE LamportPack<P> load_lamport_pack(const P* ptr) {
                : "l"(ptr)
                : "memory");
 #else
-  const volatile uint32_t* src = reinterpret_cast<const volatile uint32_t*>(ptr);
-#pragma unroll
+  const volatile uint32_t* src =
+      reinterpret_cast<const volatile uint32_t*>(ptr);
+  #pragma unroll
   for (int i = 0; i < sizeof(P) / sizeof(uint32_t); ++i) {
     value.words[i] = src[i];
   }

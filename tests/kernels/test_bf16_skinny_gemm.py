@@ -2,14 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the Kimi-K3 SM103 decode GEMM selector (shape-only dispatch)."""
 
-import re
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
+import regex as re
 import torch
 from torch import nn
 
+from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import SkinnyGemmConfig
 from vllm.models.kimi_k3.nvidia import low_latency_gemm as k3_gemm
 from vllm.models.kimi_k3.nvidia.low_latency_gemm import KIMI_K3_PROJECTIONS
 
@@ -162,9 +164,7 @@ def test_every_dsv3_routed_shape_is_instantiated() -> None:
         )
     } | {
         (int(hd_in), int(hd_out))
-        for hd_in, hd_out in re.findall(
-            r"hd_in == (\d+) && hd_out == (\d+)", explicit
-        )
+        for hd_in, hd_out in re.findall(r"hd_in == (\d+) && hd_out == (\d+)", explicit)
     }
     assert compiled, "failed to parse the dispatch list"
 
@@ -239,9 +239,7 @@ def test_unlisted_shape_and_unselected_tokens_fall_back() -> None:
 
 @pytest.mark.parametrize("num_tokens", range(1, 17))
 def test_sm103_residual_selector_table(num_tokens: int) -> None:
-    backend = k3_gemm.select_kimi_k3_backend(
-        num_tokens, 7168, 3584, has_residual=True
-    )
+    backend = k3_gemm.select_kimi_k3_backend(num_tokens, 7168, 3584, has_residual=True)
     assert backend == ("cute" if num_tokens <= 4 else None)
 
 
@@ -288,11 +286,9 @@ def test_installation_is_shape_specific_and_unquantized(
     monkeypatch.setattr(k3_gemm, "LinearBase", FakeLinear)
     monkeypatch.setattr(k3_gemm, "ParallelLMHead", FakeHead)
     monkeypatch.setattr(k3_gemm, "_is_sm103", lambda: True)
-    warmup_configs = set()
-    residual_warmup_configs = set()
-    monkeypatch.setattr(
-        k3_gemm.shape_dynamic_skinny_gemm, "is_available", lambda: True
-    )
+    warmup_configs: set[SkinnyGemmConfig] = set()
+    residual_warmup_configs: set[SkinnyGemmConfig] = set()
+    monkeypatch.setattr(k3_gemm.shape_dynamic_skinny_gemm, "is_available", lambda: True)
 
     def request_warmup_configs(dtype, configs, *, has_residual=False):
         target = residual_warmup_configs if has_residual else warmup_configs
@@ -306,13 +302,9 @@ def test_installation_is_shape_specific_and_unquantized(
 
     k3_gemm.enable_kimi_k3_low_latency_gemm(root, torch.bfloat16)
 
-    assert isinstance(
-        root.dsv3_only.quant_method, k3_gemm.KimiK3LowLatencyLinearMethod
-    )
+    assert isinstance(root.dsv3_only.quant_method, k3_gemm.KimiK3LowLatencyLinearMethod)
     assert isinstance(root.cute.quant_method, k3_gemm.KimiK3LowLatencyLinearMethod)
-    assert isinstance(
-        root.residual.quant_method, k3_gemm.KimiK3LowLatencyLinearMethod
-    )
+    assert isinstance(root.residual.quant_method, k3_gemm.KimiK3LowLatencyLinearMethod)
     assert root.quantized.quant_method is quantized_method
     assert type(root.unlisted.quant_method) is k3_gemm.UnquantizedLinearMethod
     assert isinstance(
@@ -456,14 +448,14 @@ def test_selected_kernels_cuda_graph_capture() -> None:
     )
     k3_gemm.try_low_latency_gemm(cute_x, cute_weight)
     k3_gemm.try_low_latency_gemm(dsv3_x, dsv3_weight)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         cute_output = k3_gemm.try_low_latency_gemm(cute_x, cute_weight)
         dsv3_output = k3_gemm.try_low_latency_gemm(dsv3_x, dsv3_weight)
     graph.replay()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     assert cute_output is not None
     assert dsv3_output is not None
@@ -486,13 +478,13 @@ def test_dsv3_cuda_graph_capture_tile_branches(num_tokens: int) -> None:
     x = torch.randn(num_tokens, spec.k, dtype=torch.bfloat16, device="cuda")
     weight = torch.randn(spec.n, spec.k, dtype=torch.bfloat16, device="cuda")
     k3_gemm.try_low_latency_gemm(x, weight)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         output = k3_gemm.try_low_latency_gemm(x, weight)
     graph.replay()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     assert output is not None
     reference = torch.nn.functional.linear(x, weight)
@@ -551,13 +543,13 @@ def test_cute_residual_epilogue_cuda_graph_capture(num_tokens: int) -> None:
     weight = torch.randn(spec.n, spec.k, dtype=torch.bfloat16, device="cuda")
     residual = torch.randn(num_tokens, spec.n, dtype=torch.bfloat16, device="cuda")
     k3_gemm.shape_dynamic_skinny_gemm(x, weight, config, residual)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         output = k3_gemm.shape_dynamic_skinny_gemm(x, weight, config, residual)
     graph.replay()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     reference = x.float() @ weight.float().t() + residual.float()
     cosine = torch.nn.functional.cosine_similarity(
@@ -569,7 +561,7 @@ def test_cute_residual_epilogue_cuda_graph_capture(num_tokens: int) -> None:
 class _SkinnyGemmSpy:
     """Wraps the skinny-GEMM singleton to record whether CuTe was invoked."""
 
-    def __init__(self, real: object) -> None:
+    def __init__(self, real: Any) -> None:
         self._real = real
         self.calls: list[int] = []
 

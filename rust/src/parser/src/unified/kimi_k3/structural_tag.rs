@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Structural-tag grammar for Kimi K3 XTML tool calls.
 
 use serde_json::{Map, Value};

@@ -960,9 +960,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
-        assert attn_metadata.decode.max_qo_len is not None
 
         decode = attn_metadata.decode
+        assert decode.max_qo_len is not None
+        assert decode.paged_kv_indptr is not None
+        assert decode.paged_kv_indices is not None
         if decode.use_gluon_decode:
             if type(q) is tuple:
                 q_nope, q_pe = q
@@ -1027,18 +1029,20 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             old_indptr = decode.paged_kv_indptr
             per_req_len = old_indptr[1:] - old_indptr[:-1]
             dev = q_nope.device
-            row_req = torch.arange(
-                per_req_len.shape[0], device=dev
-            ).repeat_interleave(qlen)
+            row_req = torch.arange(per_req_len.shape[0], device=dev).repeat_interleave(
+                qlen
+            )
             row_len = per_req_len[row_req]
-            new_indptr = torch.cat(
-                [old_indptr.new_zeros(1), row_len.cumsum(0)]
-            ).to(torch.int32)
+            new_indptr = torch.cat([old_indptr.new_zeros(1), row_len.cumsum(0)]).to(
+                torch.int32
+            )
             total = int(new_indptr[-1].item())
-            within = torch.arange(
-                total, device=dev, dtype=torch.int64
-            ) - new_indptr[:-1].to(torch.int64).repeat_interleave(row_len)
-            src = old_indptr[row_req].to(torch.int64).repeat_interleave(row_len) + within
+            within = torch.arange(total, device=dev, dtype=torch.int64) - new_indptr[
+                :-1
+            ].to(torch.int64).repeat_interleave(row_len)
+            src = (
+                old_indptr[row_req].to(torch.int64).repeat_interleave(row_len) + within
+            )
             new_indices = decode.paged_kv_indices[src]
             mla_gluon = _get_mla_gluon()
             mla_gluon(
@@ -1098,11 +1102,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             kv_buffer,
             o,
             self.scale,
-            attn_metadata.decode.qo_indptr,
-            attn_metadata.decode.max_qo_len,
-            attn_metadata.decode.paged_kv_indptr,
-            attn_metadata.decode.paged_kv_indices,
-            attn_metadata.decode.paged_kv_last_page_len,
+            decode.qo_indptr,
+            decode.max_qo_len,
+            decode.paged_kv_indptr,
+            decode.paged_kv_indices,
+            decode.paged_kv_last_page_len,
             **mla_kwargs,
         )
 

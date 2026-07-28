@@ -341,9 +341,7 @@ def _runtime_ok(x: torch.Tensor, weight: torch.Tensor) -> bool:
     )
 
 
-def _residual_ok(
-    x: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor
-) -> bool:
+def _residual_ok(x: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor) -> bool:
     return (
         residual.dim() == 2
         and residual.dtype == torch.bfloat16
@@ -427,7 +425,7 @@ class _KimiK3LowLatencyApply:
             output = _run_plan(self._plan, x, layer.weight)
             if output is not None:
                 return output
-        return super().apply(layer, x, bias)
+        return super().apply(layer, x, bias)  # type: ignore[misc]
 
 
 class KimiK3LowLatencyLinearMethod(_KimiK3LowLatencyApply, UnquantizedLinearMethod):
@@ -450,9 +448,7 @@ class KimiK3LowLatencyLinearMethod(_KimiK3LowLatencyApply, UnquantizedLinearMeth
             and _runtime_ok(x, layer.weight)
             and _residual_ok(x, layer.weight, residual)
         ):
-            output = _run_residual_plan(
-                self._residual_plan, x, layer.weight, residual
-            )
+            output = _run_residual_plan(self._residual_plan, x, layer.weight, residual)
             if output is not None:
                 return output
         return torch.addmm(residual, x, layer.weight.t())

@@ -186,7 +186,7 @@ def graph_samples(
     outputs = [torch.empty_like(residual) for residual in residuals]
     for weight, residual, output in zip(weights, residuals, outputs):
         launch(activation, weight, residual, output)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
@@ -194,7 +194,7 @@ def graph_samples(
             launch(activation, weight, residual, output)
     for _ in range(20):
         graph.replay()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     samples = []
     for _ in range(repeats):
@@ -276,7 +276,7 @@ def main() -> None:
         raise ValueError("expected 1 <= M <= 16")
     if not 0 <= args.config_shard < args.num_config_shards:
         raise ValueError("config shard must be in [0, num_config_shards)")
-    torch.cuda.set_device(0)
+    torch.accelerator.set_device_index(0)
     if torch.cuda.get_device_capability() != (10, 3):
         raise RuntimeError("this benchmark requires SM103")
 
@@ -360,7 +360,7 @@ def main() -> None:
                 print(json.dumps(row, sort_keys=True), flush=True)
 
             del activation, weights, residuals
-            torch.cuda.empty_cache()
+            torch.accelerator.empty_cache()
 
 
 if __name__ == "__main__":
