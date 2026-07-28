@@ -158,6 +158,7 @@ class MLAPrefillBackend(ABC):
         return_softmax_lse: bool,
         out: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
+        window_size: tuple[int, int] | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError
 

@@ -73,7 +73,13 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
         return_softmax_lse: bool,
         out: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
+        window_size: tuple[int, int] | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if window_size is not None:
+            raise NotImplementedError(
+                "AiterFlashAttnPrefillBackend does not support sliding "
+                "window attention (window_size) for new-token prefill."
+            )
         assert output_scale is None, (
             "AiterFlashAttnPrefillBackend does not support fused quantized output."
         )

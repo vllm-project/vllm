@@ -97,6 +97,7 @@ def _fwd_kernel_stage1(
     logit_cap: tl.constexpr,
     Lk: tl.constexpr,
     Lv: tl.constexpr,
+    SLIDING_WINDOW: tl.constexpr = 0,
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
@@ -114,8 +115,15 @@ def _fwd_kernel_stage1(
     off_q = cur_batch * stride_qbs + cur_head * stride_qh + offs_d
     q = tl.load(Q + off_q, mask=mask_d, other=0.0)
 
-    kv_len_per_split = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS)
-    split_kv_start = kv_len_per_split * split_kv_id
+    if SLIDING_WINDOW > 0:
+        sw_start = tl.maximum(cur_batch_seq_len - SLIDING_WINDOW, 0)
+        effective_len = cur_batch_seq_len - sw_start
+    else:
+        sw_start = 0
+        effective_len = cur_batch_seq_len
+
+    kv_len_per_split = tl.cdiv(effective_len, NUM_KV_SPLITS)
+    split_kv_start = sw_start + kv_len_per_split * split_kv_id
     split_kv_end = tl.minimum(split_kv_start + kv_len_per_split, cur_batch_seq_len)
 
     e_max = -float("inf")
@@ -220,6 +228,7 @@ def _decode_att_m_fwd(
     logit_cap,
     k_scale,
     v_scale,
+    sliding_window=0,
 ):
     BLOCK = 64 if not is_hip_ else 8
 
@@ -272,6 +281,7 @@ def _decode_att_m_fwd(
         num_stages=2,
         Lk=Lk,
         Lv=Lv,
+        SLIDING_WINDOW=sliding_window,
     )
 
 
@@ -311,6 +321,7 @@ def _fwd_grouped_kernel_stage1(
     Lk: tl.constexpr,
     Lv: tl.constexpr,
     IS_MLA: tl.constexpr = False,
+    SLIDING_WINDOW: tl.constexpr = 0,
 ):
     cur_batch = tl.program_id(0)
     cur_head_id = tl.program_id(1)
@@ -350,8 +361,15 @@ def _fwd_grouped_kernel_stage1(
             cache_modifier=".ca",
         )
 
-    kv_len_per_split = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS)
-    split_kv_start = kv_len_per_split * split_kv_id
+    if SLIDING_WINDOW > 0:
+        sw_start = tl.maximum(cur_batch_seq_len - SLIDING_WINDOW, 0)
+        effective_len = cur_batch_seq_len - sw_start
+    else:
+        sw_start = 0
+        effective_len = cur_batch_seq_len
+
+    kv_len_per_split = tl.cdiv(effective_len, NUM_KV_SPLITS)
+    split_kv_start = sw_start + kv_len_per_split * split_kv_id
     split_kv_end = tl.minimum(split_kv_start + kv_len_per_split, cur_batch_seq_len)
 
     e_max = tl.zeros([BLOCK_H], dtype=tl.float32) - float("inf")
@@ -481,6 +499,7 @@ def _decode_grouped_att_m_fwd(
     k_scale,
     v_scale,
     is_mla=False,
+    sliding_window=0,
 ):
     # with is_mla there is only a single c_kv in smem.
     # could increase BLOCK or num_stages.
@@ -568,6 +587,7 @@ def _decode_grouped_att_m_fwd(
         Lk=Lk,
         Lv=Lv,
         IS_MLA=is_mla,
+        SLIDING_WINDOW=sliding_window,
         **extra_kargs,
     )
 
@@ -588,6 +608,7 @@ def _fwd_kernel_stage2(
     BLOCK_DV: tl.constexpr,
     Lv: tl.constexpr,
     OUTPUT_FP16: tl.constexpr = 0,
+    SLIDING_WINDOW: tl.constexpr = 0,
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
@@ -604,9 +625,20 @@ def _fwd_kernel_stage2(
     offs_v = cur_batch * stride_mid_ob + cur_head * stride_mid_oh + offs_d
     offs_logic = cur_batch * stride_mid_ob + cur_head * stride_mid_oh + Lv
 
+    # Must tile the KV range exactly as stage 1 did, otherwise the splits this
+    # kernel includes won't match the splits stage 1 actually wrote and we would
+    # merge uninitialized `Mid_O` entries. With a sliding window stage 1 only
+    # covers [seq_len - SLIDING_WINDOW, seq_len); default (0) covers the full seq.
+    if SLIDING_WINDOW > 0:
+        sw_start = tl.maximum(cur_batch_seq_len - SLIDING_WINDOW, 0)
+        effective_len = cur_batch_seq_len - sw_start
+    else:
+        sw_start = 0
+        effective_len = cur_batch_seq_len
+    kv_len_per_split = tl.cdiv(effective_len, NUM_KV_SPLITS)
+
     for split_kv_id in range(0, NUM_KV_SPLITS):
-        kv_len_per_split = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS)
-        split_kv_start = kv_len_per_split * split_kv_id
+        split_kv_start = sw_start + kv_len_per_split * split_kv_id
         split_kv_end = tl.minimum(split_kv_start + kv_len_per_split, cur_batch_seq_len)
 
         if split_kv_end > split_kv_start:
@@ -647,6 +679,7 @@ def _decode_softmax_reducev_fwd(
     v_buffer,
     b_seq_len,
     num_kv_splits,
+    sliding_window=0,
 ):
     batch, head_num = q.shape[0], q.shape[1]
     Lv = v_buffer.shape[-1]
@@ -675,6 +708,7 @@ def _decode_softmax_reducev_fwd(
         NUM_KV_SPLITS=NUM_KV_SPLITS,
         BLOCK_DV=BLOCK_DV,
         Lv=Lv,
+        SLIDING_WINDOW=sliding_window,
         num_warps=4,
         num_stages=2,
         **extra_kargs,
@@ -696,6 +730,7 @@ def decode_attention_fwd_normal(
     logit_cap=0.0,
     k_scale=None,
     v_scale=None,
+    sliding_window=0,
 ):
     _decode_att_m_fwd(
         q,
@@ -710,9 +745,10 @@ def decode_attention_fwd_normal(
         logit_cap,
         k_scale,
         v_scale,
+        sliding_window=sliding_window,
     )
     _decode_softmax_reducev_fwd(
-        attn_logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits
+        attn_logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits, sliding_window
     )
 
 
@@ -732,6 +768,7 @@ def decode_attention_fwd_grouped(
     k_scale=None,
     v_scale=None,
     is_mla=False,
+    sliding_window=0,
 ):
     _decode_grouped_att_m_fwd(
         q,
@@ -747,9 +784,10 @@ def decode_attention_fwd_grouped(
         k_scale,
         v_scale,
         is_mla=is_mla,
+        sliding_window=sliding_window,
     )
     _decode_softmax_reducev_fwd(
-        attn_logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits
+        attn_logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits, sliding_window
     )
 
 
@@ -769,6 +807,7 @@ def decode_attention_fwd(
     k_scale=None,
     v_scale=None,
     is_mla=False,
+    sliding_window=0,
 ):
     assert num_kv_splits == attn_logits.shape[2]
 
@@ -796,6 +835,7 @@ def decode_attention_fwd(
             logit_cap,
             k_scale,
             v_scale,
+            sliding_window=sliding_window,
         )
     else:
         # GQA/MQA/MLA
@@ -815,4 +855,5 @@ def decode_attention_fwd(
             k_scale,
             v_scale,
             is_mla=is_mla,
+            sliding_window=sliding_window,
         )

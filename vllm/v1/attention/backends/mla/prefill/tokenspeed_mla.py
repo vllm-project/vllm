@@ -126,7 +126,13 @@ class TokenspeedMLAPrefillBackend(MLAPrefillBackend):
         return_softmax_lse: bool,
         out: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
+        window_size: tuple[int, int] | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if window_size is not None:
+            raise NotImplementedError(
+                "TokenspeedMLAPrefillBackend does not support sliding "
+                "window attention (window_size) for new-token prefill."
+            )
         from tokenspeed_mla import tokenspeed_mla_prefill
 
         # `v` arrives as the second half of `kv_nope.split(...)` in

@@ -27,6 +27,7 @@ class MLAModules:
     is_sparse: bool
     topk_indices_buffer: torch.Tensor | None
     indexer_rotary_emb: torch.nn.Module | None = None
+    per_layer_sliding_window: int | None = None
 
 
 # --8<-- [start:multi_head_latent_attention]
@@ -118,6 +119,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             use_sparse=self.is_sparse,
             indexer=self.indexer,
             topk_indices_buffer=mla_modules.topk_indices_buffer,
+            per_layer_sliding_window=mla_modules.per_layer_sliding_window,
         )
 
         self.prefix = prefix
