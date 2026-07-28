@@ -1765,6 +1765,7 @@ class MooncakeConnectorWorker:
             self.kv_block_len_per_layer,
         )
 
+        # No need to launch server for D node.
         # Only the canonical PCP replica owns Mooncake sending.
         if self.is_kv_consumer or self.pcp_rank != 0:
             return
@@ -1957,6 +1958,7 @@ class MooncakeConnectorWorker:
                 remote_bootstrap_addr,
                 e,
             )
+
         # Always notify others regardless of connection success or failure.
         self._pending_bootstrap_queries[remote_bootstrap_addr].set()
         del self._pending_bootstrap_queries[remote_bootstrap_addr]
