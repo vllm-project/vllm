@@ -236,6 +236,22 @@ class SpeculativeConfig:
     synthetic_acceptance_rates. Only valid when rejection_sample_method is 'synthetic'.
     Mutually exclusive with synthetic_acceptance_rates."""
 
+    dspark_enable_confidence_based_verification: bool = True
+    """Whether to enable DSpark confidence-based verification."""
+
+    dspark_confidence_ema_alpha: float = 0.8
+    """Weight of the latest DSpark confidence observation in the per-request
+    exponential moving average. Set to 1 to disable smoothing. Smoothing trades
+    less noise for more lag; lag does not average out across a batch, so
+    heavier smoothing helps small batches but hurts large ones. 0.8 is the
+    point where the estimator is unbiased at every batch size measured."""
+
+    @property
+    def use_confidence_based_verification(self) -> bool:
+        return (
+            self.method == "dspark" and self.dspark_enable_confidence_based_verification
+        )
+
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
         """Mean acceptance length to unconditional per-position rates, using
@@ -1331,6 +1347,9 @@ class SpeculativeConfig:
                 "Expected num_speculative_tokens to be greater "
                 f"than zero ({self.num_speculative_tokens})."
             )
+
+        if not 0 < self.dspark_confidence_ema_alpha <= 1:
+            raise ValueError("dspark_confidence_ema_alpha must be in (0, 1].")
 
         if self.rejection_sample_method == "synthetic":
             # Consolidate to per-position rates

@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 import torch
@@ -14,6 +17,87 @@ from vllm.v1.outputs import (
     RoutedExpertsTensors,
 )
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.input_batch import InputBatch
+
+
+@dataclass(frozen=True)
+class StepTimingSample:
+    forward_ms: float
+    drafter_ms: float
+    num_target_tokens: int
+    num_reqs: int
+    full_cudagraph: bool
+
+
+class StepTimingEvents(NamedTuple):
+    forward_start: torch.cuda.Event
+    forward_end: torch.cuda.Event
+    drafter_start: torch.cuda.Event
+    drafter_end: torch.cuda.Event
+
+
+class StepTimingCollector:
+    """Times startup profiling steps, which run strictly one at a time.
+
+    Only enabled alongside a drafter, so every step it times has one. Record
+    calls no-op unless ``start`` armed the collector, so callers need no guards.
+    """
+
+    def __init__(self, enabled: bool):
+        self._events = (
+            StepTimingEvents(
+                *(
+                    torch.cuda.Event(enable_timing=True)
+                    for _ in StepTimingEvents._fields
+                )
+            )
+            if enabled
+            else None
+        )
+        self._armed: StepTimingEvents | None = None
+        self._batch = (False, 0, 0)
+        self.consumer: Callable[[StepTimingSample], None] | None = None
+
+    def start(self, enabled: bool) -> None:
+        self._armed = self._events if enabled else None
+
+    def record_batch(self, input_batch: "InputBatch", full_cudagraph: bool) -> None:
+        """Costs from different execution modes must not share a cost curve."""
+        self._batch = (full_cudagraph, input_batch.num_tokens, input_batch.num_reqs)
+
+    def forward_start(self) -> None:
+        if self._armed is not None:
+            self._armed.forward_start.record()
+
+    def forward_end(self) -> None:
+        if self._armed is not None:
+            self._armed.forward_end.record()
+
+    def drafter_start(self) -> None:
+        if self._armed is not None:
+            self._armed.drafter_start.record()
+
+    def drafter_end(self) -> None:
+        if self._armed is not None:
+            self._armed.drafter_end.record()
+
+    def finish(self) -> None:
+        events, self._armed = self._armed, None
+        if events is None:
+            return
+        events.drafter_end.synchronize()
+        full_cudagraph, num_target_tokens, num_reqs = self._batch
+        sample = StepTimingSample(
+            events.forward_start.elapsed_time(events.forward_end),
+            events.drafter_start.elapsed_time(events.drafter_end),
+            num_target_tokens,
+            num_reqs,
+            full_cudagraph,
+        )
+        if self.consumer is not None:
+            self.consumer(sample)
 
 
 class AsyncOutput(AsyncModelRunnerOutput):

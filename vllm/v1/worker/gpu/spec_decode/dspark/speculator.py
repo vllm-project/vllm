@@ -76,6 +76,13 @@ class DSparkSpeculator(DFlashSpeculator):
             self.draft_model_config.hf_config, "dspark_draft_topk", None
         )
 
+        self.draft_token_confidence_probs = torch.empty_like(
+            self.draft_tokens, dtype=torch.float32
+        )
+        self.use_confidence_based_verification = (
+            self.speculative_config.use_confidence_based_verification
+        )
+
     def load_draft_model(
         self,
         target_model: torch.nn.Module,
@@ -149,6 +156,7 @@ class DSparkSpeculator(DFlashSpeculator):
 
         idx_map = self.sample_idx_mapping[:num_sample].view(num_reqs, n_spec)
         sample_pos = self.sample_pos[:num_sample].view(num_reqs, n_spec)
+        confidence_markov_embeds = []
 
         # Anchor (bonus) token per request = the input id at query offset 0,
         # read via the precomputed persistent index (fixed buffer for capture).
@@ -157,6 +165,8 @@ class DSparkSpeculator(DFlashSpeculator):
         for i in range(n_spec):
             # Sequential stage: Markov bias from the previously sampled token.
             markov_embed = self.model.markov_embed(prev)
+            if self.use_confidence_based_verification:
+                confidence_markov_embeds.append(markov_embed)
             bias = self.model.markov_bias(markov_embed)
             logits_i = base_logits[:, i] + bias
             draft_sampled_i = self._sample_logits(
@@ -201,6 +211,15 @@ class DSparkSpeculator(DFlashSpeculator):
             )
             self.draft_tokens[:num_reqs, i] = draft_sampled_i
             prev = draft_sampled_i
+
+        if self.use_confidence_based_verification:
+            torch.sigmoid(
+                self.model.compute_confidence(
+                    sample_hidden,
+                    torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1),
+                ).view(num_reqs, n_spec),
+                out=self.draft_token_confidence_probs[:num_reqs],
+            )
 
     def _generate_draft(
         self,

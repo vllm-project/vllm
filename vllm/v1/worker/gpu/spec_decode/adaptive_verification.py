@@ -1,0 +1,475 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Adaptive verification for DSpark speculative decoding."""
+
+from collections import defaultdict
+from collections.abc import Iterable, Iterator
+from typing import TYPE_CHECKING
+
+import numpy as np
+import torch
+
+from vllm.distributed.parallel_state import get_tp_group
+from vllm.logger import init_logger
+from vllm.triton_utils import tl, triton
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.gpu.async_utils import StepTimingSample, stream
+from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
+
+logger = init_logger(__name__)
+_FIXED_OVERHEAD_MS = 1.0
+_PROFILE_REPLAYS = 5
+# KV context each profiling request pretends to carry, so the profiled step reads
+# a realistic amount of cache rather than attending over nothing.
+_PROFILE_CONTEXT_LEN = 8192
+# Median-filter width for cost curves; 5 also survives two adjacent outliers.
+_OUTLIER_FILTER_WIDTH = 5
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.input_batch import InputBatch
+    from vllm.v1.worker.gpu.states import RequestState
+
+
+@triton.jit
+def _keyed_product(left_value, left_key, right_value, right_key):
+    value = tl.where(left_key == right_key, left_value * right_value, right_value)
+    return value, right_key
+
+
+@triton.jit(do_not_specialize=["num_reqs", "draft_token_budget"])
+def _assign_draft_token_budget_kernel(
+    confidence_probs_ptr,
+    confidence_probs_stride,
+    idx_mapping_ptr,
+    capacities_ptr,
+    num_reqs,
+    draft_token_budget,
+    NUM_STEPS: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    candidate_idx = tl.arange(0, BLOCK_SIZE)
+    req_idx = candidate_idx // NUM_STEPS
+    step = candidate_idx % NUM_STEPS
+    valid_candidate = req_idx < num_reqs
+    req_state_idx = tl.load(idx_mapping_ptr + req_idx, mask=valid_candidate, other=0)
+    probability = tl.load(
+        confidence_probs_ptr + req_state_idx * confidence_probs_stride + step,
+        mask=valid_candidate,
+        other=0.0,
+    )
+    survival, _ = tl.associative_scan(
+        (probability, req_idx),
+        axis=0,
+        combine_fn=_keyed_product,
+    )
+    num_valid = tl.load(
+        capacities_ptr + req_idx,
+        mask=valid_candidate,
+        other=0,
+    )
+    survival = tl.where(valid_candidate & (step < num_valid), survival, -float("inf"))
+
+    min_int32: tl.constexpr = -2147483648
+    score_bits = survival.to(tl.int32, bitcast=True)
+    sort_key = tl.where(
+        score_bits >> 31 == 0,
+        score_bits ^ -1,
+        score_bits ^ min_int32,
+    )
+    packed = ((sort_key.to(tl.int64) & 0xFFFFFFFF) << 32) | candidate_idx.to(tl.int64)
+    admitted_idx = (tl.sort(packed) & 0xFFFFFFFF).to(tl.int32)
+
+    tl.store(capacities_ptr + candidate_idx, 0, mask=candidate_idx < num_reqs)
+    tl.debug_barrier()
+    tl.atomic_add(
+        capacities_ptr + admitted_idx // NUM_STEPS,
+        1,
+        mask=candidate_idx < draft_token_budget,
+    )
+
+
+def build_cost_tables_from_curves(
+    draft_curve: list[tuple[int, float]],
+    verify_curve: list[tuple[int, float]],
+    max_num_reqs: int,
+    max_batch_tokens: int,
+    cudagraph_limit: int = 0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build cost tables: graph-padded below the capture limit, smooth above.
+
+    Args:
+        cudagraph_limit: Largest cudagraph-captured size. At or below it,
+            execution pads up to the next captured size, so cost is a step
+            function. Above it there is no padding, so cost is continuous.
+    """
+
+    def build_table(limit: int, curve: list[tuple[int, float]]) -> np.ndarray:
+        xs, ys = np.asarray(curve, dtype=np.float64).T
+        # Drop isolated outliers before enforcing monotonicity: the cumulative
+        # max propagates a single bad point across every larger size, so an
+        # unfiltered spike corrupts the whole tail. A median filter is exact on
+        # monotone data, so genuine steps survive untouched.
+        if len(ys) >= _OUTLIER_FILTER_WIDTH:
+            k = _OUTLIER_FILTER_WIDTH // 2
+            padded = np.pad(ys, k, mode="edge")
+            ys = np.array(
+                [
+                    np.median(padded[i : i + _OUTLIER_FILTER_WIDTH])
+                    for i in range(len(ys))
+                ]
+            )
+        ys = np.maximum.accumulate(ys)
+        values = np.arange(limit + 1)
+        # Execution pads to the next captured size, so cost is a step
+        # function of the padded size: smooth interpolation would invent
+        # marginal per-token costs that don't exist within a pad bucket.
+        idx = np.searchsorted(xs, values, side="left")
+        result = ys[np.minimum(idx, len(xs) - 1)]
+        # Past the capture limit nothing pads, so cost really is continuous in
+        # size; snapping to the next profiled point overestimates badly when
+        # the profiled points are far apart. Interpolate only between points
+        # that are themselves past the limit: crossing the limit loses
+        # cudagraphs entirely, which is a genuine discontinuity, so the first
+        # point above it must not be blended with the last one below.
+        if cudagraph_limit:
+            smooth = values > cudagraph_limit
+            above = xs > cudagraph_limit
+            if smooth.any() and above.any():
+                result[smooth] = np.interp(values[smooth], xs[above], ys[above])
+        if len(xs) > 1:
+            after = values > xs[-1]
+            slope = (ys[-1] - ys[-2]) / (xs[-1] - xs[-2])
+            result[after] = ys[-1] + slope * (values[after] - xs[-1])
+        return result
+
+    draft_table = np.maximum(build_table(max_num_reqs, draft_curve), 0.0)
+    verify_table = np.maximum(build_table(max_batch_tokens, verify_curve), 1e-6)
+    verify_table += _FIXED_OVERHEAD_MS
+    return draft_table, verify_table
+
+
+class AdaptiveVerificationManager:
+    def __init__(
+        self,
+        req_states: "RequestState",
+        query_start_loc: torch.Tensor,
+        num_bonus_tokens: int,
+        confidence_ema_alpha: float,
+    ):
+        self.req_states = req_states
+        self.num_speculative_steps = req_states.num_speculative_steps
+        device = req_states.device
+        self._copy_stream = torch.cuda.Stream(device)
+
+        self.num_bonus_tokens = num_bonus_tokens
+        self.confidence_ema_alpha = confidence_ema_alpha
+        self.query_start_loc = query_start_loc
+        self.cost_tables: tuple[np.ndarray, np.ndarray] | None = None
+        # Largest cudagraph-captured token count; above it nothing pads.
+        self._cudagraph_limit = 0
+        self._profile_samples: list[StepTimingSample] = []
+        self._batch_budget: tuple[dict[str, int], dict[str, int], int] | None = None
+        max_num_reqs = req_states.max_num_reqs
+        self._confidence_ema = torch.empty(
+            (max_num_reqs, self.num_speculative_steps),
+            dtype=torch.float32,
+            device=device,
+        )
+        self._batch_draft_capacity = torch.empty(
+            max_num_reqs, dtype=torch.int32, device=device
+        )
+        self._num_non_draft_tokens = torch.empty_like(query_start_loc[:-1])
+        self._cu_num_logits = torch.empty_like(query_start_loc)
+
+        # Two D2H slots preserve stale inputs for budget selection.
+        self._stale_confidences = [
+            CpuGpuBuffer(
+                max_num_reqs,
+                self.num_speculative_steps,
+                dtype=torch.float32,
+                device=device,
+            )
+            for _ in range(2)
+        ]
+        self._copy_events = [torch.cuda.Event(blocking=True) for _ in range(2)]
+        self._pending_resets: list[int] = []
+        self._stale_idx = 0
+        for slot in self._stale_confidences:
+            slot.np.fill(1.0)
+
+    def consume_step_timing(self, sample: StepTimingSample) -> None:
+        """Collect startup profiling timings; only profiling steps are timed."""
+        self._profile_samples.append(sample)
+
+    def add_request(self, req_idx: int) -> None:
+        self._stale_confidences[self._stale_idx].np[req_idx].fill(1.0)
+        self._pending_resets.append(req_idx)
+        self._confidence_ema[req_idx].fill_(1.0)
+
+    def batches_to_profile(self, capture_sizes: list[int]) -> Iterator[dict[str, int]]:
+        """Dummy-run kwargs whose step timings seed the cost tables.
+
+        Timings flow back through consume_step_timing; call
+        set_initial_cost_curves once every batch has run."""
+        max_num_tokens = self.req_states.max_num_batched_tokens
+        size = self._cudagraph_limit = capture_sizes[-1] if capture_sizes else 0
+        # Also profile beyond the capture limit: real steps run there
+        # (piecewise/eager) and linear extrapolation badly underestimates
+        # them. These runs double as JIT warmup for the piecewise shapes.
+        tail_sizes: set[int] = set()
+        if size:
+            tail_sizes.add(min(size + size // 2, max_num_tokens))
+            while size < max_num_tokens:
+                size = min(size * 2, max_num_tokens)
+                tail_sizes.add(size)
+            tail_sizes -= set(capture_sizes)
+        for num_tokens in capture_sizes + sorted(tail_sizes):
+            for _ in range(_PROFILE_REPLAYS):
+                yield {
+                    "num_tokens": num_tokens,
+                    "context_len": _PROFILE_CONTEXT_LEN,
+                    "timing_enabled": True,
+                }
+
+    def set_initial_cost_curves(self) -> None:
+        samples, self._profile_samples = self._profile_samples, []
+
+        def median_curve(
+            points: Iterable[tuple[int, float]],
+        ) -> list[tuple[int, float]]:
+            grouped: defaultdict[int, list[float]] = defaultdict(list)
+            for key, value in points:
+                grouped[key].append(value)
+            return [(k, float(np.median(v))) for k, v in sorted(grouped.items())]
+
+        # Draft curve: eager-target steps inflate drafter timings (the CPU is
+        # still launching kernels, opening gaps between the drafter's events),
+        # and request counts — unlike token counts — collide across execution
+        # modes, so only graph-replay samples may price the draft curve.
+        draft_curve = median_curve(
+            (s.num_reqs, s.drafter_ms) for s in samples if s.full_cudagraph
+        )
+        verify_curve = median_curve(
+            (s.num_target_tokens, s.forward_ms) for s in samples
+        )
+        self.set_cost_curves(draft_curve, verify_curve)
+
+    def set_cost_curves(
+        self,
+        draft_curve: list[tuple[int, float]],
+        verify_curve: list[tuple[int, float]],
+    ) -> None:
+        draft_curve, verify_curve = get_tp_group().broadcast_object(
+            (draft_curve, verify_curve), src=0
+        )
+        if not draft_curve or not verify_curve:
+            logger.warning_once("DSpark could not profile step costs.")
+            return
+        self.cost_tables = build_cost_tables_from_curves(
+            draft_curve,
+            verify_curve,
+            self.req_states.max_num_reqs,
+            self.req_states.max_num_batched_tokens,
+            self._cudagraph_limit,
+        )
+        logger.debug("DSpark cost tables: %s", self.cost_tables)
+
+    def record_confidences(
+        self,
+        confidence_probs: torch.Tensor,
+        input_batch: "InputBatch",
+    ) -> None:
+        """Fold this step's confidences into the EMA and start copying them to
+        the CPU, where a later step's budget reads them as stale inputs."""
+        num_reqs = input_batch.num_reqs
+        ready_idx = self._stale_idx ^ 1
+        with gpu_sync_allowed():
+            self._copy_events[ready_idx].synchronize()
+        if self._pending_resets:
+            self._stale_confidences[ready_idx].np[self._pending_resets] = 1.0
+            self._pending_resets.clear()
+        # Last step's copy has landed: budgets read it, this step overwrites the
+        # slot they were reading before.
+        self._stale_idx, write_idx = ready_idx, self._stale_idx
+
+        # Fold this step's scores into the per-request EMA in place. New
+        # requests blend with the optimistic 1.0 seed, which washes out of the
+        # average within a couple of steps.
+        idx_mapping = input_batch.idx_mapping
+        ema = self._confidence_ema[idx_mapping]
+        ema.lerp_(confidence_probs[:num_reqs], self.confidence_ema_alpha)
+        self._confidence_ema[idx_mapping] = ema
+        write_slot = self._stale_confidences[write_idx]
+        write_slot.gpu.copy_(self._confidence_ema)
+
+        current_stream = torch.cuda.current_stream(self.req_states.device)
+        self._copy_stream.wait_stream(current_stream)
+        with stream(self._copy_stream, current_stream):
+            write_slot.copy_to_cpu()
+            self._copy_events[write_idx].record()
+
+    def get_num_tokens(
+        self,
+        num_tokens_per_req: dict[str, int],
+        draft_tokens: dict[str, list[int]],
+        has_structured_output: bool = False,
+    ) -> int:
+        """Token count once the draft budget is trimmed to fit.
+
+        Stashes the chosen budget in ``_batch_budget`` for the compaction and
+        reallocation that follow in the same step.
+        """
+        assert self.cost_tables is not None
+        req_ids = list(num_tokens_per_req)
+        num_reqs = len(req_ids)
+        scheduled_tokens = np.fromiter(
+            num_tokens_per_req.values(), dtype=np.int32, count=num_reqs
+        )
+        scheduled_drafts = np.fromiter(
+            (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
+            dtype=np.int32,
+            count=num_reqs,
+        )
+        valid_drafts = scheduled_drafts
+        if has_structured_output:
+            valid_drafts = np.fromiter(
+                (
+                    sum(token >= 0 for token in draft_tokens.get(req_id, ()))
+                    for req_id in req_ids
+                ),
+                dtype=np.int32,
+                count=len(req_ids),
+            )
+        num_non_draft_tokens = scheduled_tokens - scheduled_drafts
+        slots = np.fromiter(
+            (self.req_states.req_id_to_index[req_id] for req_id in req_ids),
+            dtype=np.int32,
+            count=len(req_ids),
+        )
+        stale_confidences = self._stale_confidences[self._stale_idx].np[slots]
+        survival_probability = np.cumprod(stale_confidences.astype(np.float64), axis=1)
+        steps = np.arange(self.num_speculative_steps)
+        valid = steps[None, :] < valid_drafts[:, None]
+        scores = np.sort(survival_probability[valid])[::-1]
+        num_non_draft_tokens_total = int(num_non_draft_tokens.sum())
+        max_draft_budget = int(valid_drafts.sum())
+        draft_cost_ms, verify_cost_ms = self.cost_tables
+        num_sampling_requests = np.count_nonzero(
+            self.req_states.num_computed_tokens_np[slots] + num_non_draft_tokens
+            >= self.req_states.prefill_len.np[slots]
+        )
+        num_tokens_to_estimated_accepted_tokens = np.concatenate(
+            ([num_sampling_requests], num_sampling_requests + np.cumsum(scores))
+        )
+        costs = (
+            draft_cost_ms[len(req_ids)]
+            + verify_cost_ms[
+                num_non_draft_tokens_total : num_non_draft_tokens_total
+                + max_draft_budget
+                + 1
+            ]
+        )
+        valid_drafts_per_req = {
+            req_id: int(num_valid_drafts)
+            for req_id, num_valid_drafts in zip(req_ids, valid_drafts, strict=True)
+        }
+        num_non_draft_tokens_per_req = {
+            req_id: int(num_tokens)
+            for req_id, num_tokens in zip(req_ids, num_non_draft_tokens, strict=True)
+        }
+        draft_budget = int(np.argmax(num_tokens_to_estimated_accepted_tokens / costs))
+        self._batch_budget = (
+            valid_drafts_per_req,
+            num_non_draft_tokens_per_req,
+            draft_budget,
+        )
+        return sum(num_non_draft_tokens_per_req.values()) + draft_budget
+
+    def compact_batch(
+        self,
+        num_draft_tokens_per_req: np.ndarray,
+        num_scheduled_tokens: np.ndarray,
+    ) -> np.ndarray:
+        batch_budget = self._batch_budget
+        assert batch_budget is not None
+        _, _, draft_budget = batch_budget
+        num_drafts = int(num_draft_tokens_per_req.sum())
+        if draft_budget == num_drafts:
+            return num_scheduled_tokens
+
+        num_non_draft_tokens = num_scheduled_tokens - num_draft_tokens_per_req
+        is_verification_request = num_draft_tokens_per_req > 0
+        num_verification_reqs = int(is_verification_request.sum())
+        # sort_batch_req_ids keeps verification requests at the front.
+        assert np.all(is_verification_request[:num_verification_reqs])
+        # for the CPU side buffer we distribute draft tokens evenly
+        draft_lens_cpu = np.zeros_like(num_non_draft_tokens)
+        draft_lens_cpu[:num_verification_reqs] = draft_budget // num_verification_reqs
+        draft_lens_cpu[: draft_budget % num_verification_reqs] += 1
+        return num_non_draft_tokens + draft_lens_cpu
+
+    def reallocate_drafts(
+        self, req_ids: list[str], idx_mapping: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, int]:
+        batch_budget, self._batch_budget = self._batch_budget, None
+        assert batch_budget is not None
+        valid_drafts_per_req, num_non_draft_tokens_per_req, draft_budget = batch_budget
+        num_reqs = idx_mapping.shape[0]
+        valid_drafts = np.fromiter(
+            (valid_drafts_per_req[req_id] for req_id in req_ids),
+            dtype=np.int32,
+            count=num_reqs,
+        )
+        num_non_draft_tokens = np.fromiter(
+            (num_non_draft_tokens_per_req[req_id] for req_id in req_ids),
+            dtype=np.int32,
+            count=num_reqs,
+        )
+        num_tokens = int(num_non_draft_tokens.sum()) + draft_budget
+
+        # Rank draft slots by survival probability and admit the best prefix.
+        capacities = self._batch_draft_capacity[:num_reqs]
+        if draft_budget == 0:
+            capacities.zero_()
+        else:
+            async_copy_to_gpu(valid_drafts, out=capacities)
+            if draft_budget != int(valid_drafts.sum()):
+                block_size = triton.next_power_of_2(
+                    num_reqs * self.num_speculative_steps
+                )
+                _assign_draft_token_budget_kernel[(1,)](
+                    self._confidence_ema,
+                    self._confidence_ema.stride(0),
+                    idx_mapping,
+                    capacities,
+                    num_reqs,
+                    draft_budget,
+                    NUM_STEPS=self.num_speculative_steps,
+                    BLOCK_SIZE=block_size,
+                    num_warps=4 if block_size <= 256 else 8,
+                )
+
+        num_non_draft_tokens_gpu = self._num_non_draft_tokens[:num_reqs]
+        async_copy_to_gpu(
+            num_non_draft_tokens,
+            out=num_non_draft_tokens_gpu,
+        )
+        self._cu_num_logits[:1].zero_()
+        torch.cumsum(
+            capacities + self.num_bonus_tokens,
+            dim=0,
+            out=self._cu_num_logits[1 : num_reqs + 1],
+        )
+        self.query_start_loc[:1].zero_()
+        torch.cumsum(
+            capacities + num_non_draft_tokens_gpu,
+            dim=0,
+            out=self.query_start_loc[1 : num_reqs + 1],
+        )
+        self.query_start_loc[num_reqs + 1 :].fill_(num_tokens)
+        return (
+            self._cu_num_logits[: num_reqs + 1],
+            self.query_start_loc,
+            draft_budget,
+        )

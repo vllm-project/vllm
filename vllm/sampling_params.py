@@ -891,6 +891,17 @@ class SamplingParams(
         if speculative_config is None:
             return
 
+        # Adaptive verification compacts logits after the forward pass, while
+        # compute_topk_scores uses the scheduled layout in cu_num_logits_np.
+        if (
+            speculative_config.use_confidence_based_verification
+            and self.num_logprobs is not None
+        ):
+            raise ValueError(
+                "Output logprobs are not supported with DSpark confidence-based "
+                "verification."
+            )
+
         # Some sampling parameters are not yet compatible with spec decoding.
         if self.min_p > _SAMPLING_EPS or self.logit_bias:
             raise VLLMValidationError(

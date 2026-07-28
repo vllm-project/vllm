@@ -99,12 +99,19 @@ class InputBatch:
     # [num_reqs] per-request prompt length, only populated for R-SWA.
     prompt_lens: torch.Tensor | None
 
+    # Longest query the batch may contain. Set when a cudagraph descriptor promises
+    # a query length this batch's own split does not reach, so attention metadata
+    # stays valid for every replay the graph serves.
+    max_query_len: int | None = None
+
     @classmethod
     def make_dummy(
         cls,
         num_reqs: int,
         num_tokens: int,
         input_buffers: InputBuffers,
+        context_len: int = 0,
+        max_query_len: int | None = None,
     ) -> "InputBatch":
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
@@ -116,9 +123,12 @@ class InputBatch:
         expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=device)
 
         # Distribute the remainder evenly so that no dummy request exceeds
-        # ceil(num_tokens / num_reqs) <= max_model_len tokens.
+        # ceil(num_tokens / num_reqs) <= max_model_len tokens. Varlen graphs
+        # accept any split with non-empty slots, so this shape works for them
+        # too; attention metadata is built from the promised max_query_len.
         base_tokens = num_tokens // num_reqs
         num_extra = num_tokens % num_reqs
+        assert max_query_len is None or base_tokens + (num_extra > 0) <= max_query_len
         num_scheduled_tokens = np.full(num_reqs, base_tokens, dtype=np.int32)
         if num_extra > 0:
             num_scheduled_tokens[-num_extra:] += 1
@@ -144,6 +154,14 @@ class InputBatch:
 
         input_ids = input_buffers.input_ids[:num_tokens].zero_()
         positions = input_buffers.positions[:num_tokens].zero_()
+        if context_len:
+            # Decode-like shape: each request continues after context_len
+            # already-computed tokens.
+            seq_lens += context_len
+            local_pos = np.arange(num_tokens, dtype=np.int64) - np.repeat(
+                query_start_loc_np[:-1], num_scheduled_tokens
+            )
+            positions.copy_(torch.from_numpy(local_pos + context_len))
 
         input_buffers.is_padding[:num_tokens].fill_(True)
         is_padding = input_buffers.is_padding[:num_tokens]
@@ -151,8 +169,7 @@ class InputBatch:
         logits_indices = query_start_loc[1:] - 1
         cu_num_logits = torch.arange(num_reqs + 1, device=device, dtype=torch.int32)
         cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
-        # Dummy: seq_len == query_len (fresh-prefill shape).
-        seq_lens_cpu_upper_bound = torch.from_numpy(num_scheduled_tokens.copy())
+        seq_lens_cpu_upper_bound = torch.from_numpy(num_scheduled_tokens + context_len)
         return cls(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -171,9 +188,11 @@ class InputBatch:
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=None,
-            num_computed_tokens_np=np.zeros(num_reqs, dtype=np.int32),
+            num_computed_tokens_np=np.full(num_reqs, context_len, dtype=np.int32),
             prefill_len_np=np.zeros(num_reqs, dtype=np.int32),
-            num_computed_prefill_tokens_np=np.zeros(num_reqs, dtype=np.int32),
+            num_computed_prefill_tokens_np=np.full(
+                num_reqs, context_len, dtype=np.int32
+            ),
             is_prefilling_np=np.zeros(num_reqs, dtype=np.bool_),
             max_seq_len_np=None,
             input_ids=input_ids,
@@ -184,6 +203,7 @@ class InputBatch:
             cu_num_logits_np=cu_num_logits_np,
             has_structured_output_reqs=False,
             prompt_lens=None,
+            max_query_len=max_query_len,
         )
 
 

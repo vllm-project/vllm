@@ -21,6 +21,7 @@ def sync_cudagraph_and_dp_padding(
     uniform_token_count: int | None,
     dp_size: int,
     dp_rank: int,
+    max_query_len: int | None = None,
     num_active_loras: int = 0,
 ) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
     """
@@ -77,6 +78,7 @@ def sync_cudagraph_and_dp_padding(
         synced_num_tokens,
         synced_uniform_token_count,
         num_active_loras=num_active_loras,
+        max_query_len=max_query_len,
     )
 
     # Update num_tokens_across_dp to reflect padded size.
@@ -92,6 +94,7 @@ def dispatch_cg_and_sync_dp(
     uniform_token_count: int | None,
     dp_size: int,
     dp_rank: int,
+    max_query_len: int | None = None,
     need_eager: bool = False,
     num_active_loras: int = 0,
 ) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
@@ -112,6 +115,7 @@ def dispatch_cg_and_sync_dp(
             num_tokens,
             uniform_token_count,
             num_active_loras=num_active_loras,
+            max_query_len=max_query_len,
         )
 
     if dp_size == 1:
@@ -125,5 +129,6 @@ def dispatch_cg_and_sync_dp(
         uniform_token_count,
         dp_size,
         dp_rank,
+        max_query_len=max_query_len,
         num_active_loras=num_active_loras,
     )
