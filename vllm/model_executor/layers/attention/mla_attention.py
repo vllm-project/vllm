@@ -515,29 +515,36 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         compilation_config.static_forward_context[prefix] = self
 
         self.prefill_backend: MLAPrefillBackend | None
-        try:
-            prefill_backend_cls = get_mla_prefill_backend(vllm_config)
-        except ValueError:
-            if (
-                not self.impl.is_sparse
-                or vllm_config.attention_config.mla_prefill_backend is not None
-            ):
-                raise
+        if self.impl.is_sparse and not self.impl.supports_dense_mha_prefill:
             logger.warning_once(
-                "No MLA prefill backend supports this model; sparse MLA will use the "
-                "top-k MQA path only (no dense-MHA prefill)."
+                "Sparse MLA impl has no dense-MHA prefill path; using the top-k "
+                "MQA path only."
             )
             self.prefill_backend = None
         else:
-            self.prefill_backend = prefill_backend_cls(
-                num_heads=self.num_heads,
-                scale=self.scale,
-                kv_lora_rank=self.kv_lora_rank,
-                qk_nope_head_dim=self.qk_nope_head_dim,
-                qk_rope_head_dim=self.qk_rope_head_dim,
-                v_head_dim=self.v_head_dim,
-                vllm_config=vllm_config,
-            )
+            try:
+                prefill_backend_cls = get_mla_prefill_backend(vllm_config)
+            except ValueError:
+                if (
+                    not self.impl.is_sparse
+                    or vllm_config.attention_config.mla_prefill_backend is not None
+                ):
+                    raise
+                logger.warning_once(
+                    "No MLA prefill backend supports this model; sparse MLA will "
+                    "use the top-k MQA path only (no dense-MHA prefill)."
+                )
+                self.prefill_backend = None
+            else:
+                self.prefill_backend = prefill_backend_cls(
+                    num_heads=self.num_heads,
+                    scale=self.scale,
+                    kv_lora_rank=self.kv_lora_rank,
+                    qk_nope_head_dim=self.qk_nope_head_dim,
+                    qk_rope_head_dim=self.qk_rope_head_dim,
+                    v_head_dim=self.v_head_dim,
+                    vllm_config=vllm_config,
+                )
 
         self.kv_cache = torch.tensor([])
 
@@ -762,13 +769,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         num_mha_tokens = q.size(0) - num_mqa_tokens
 
         if self.impl.is_sparse and num_mha_tokens > 0:
-            prefill_max_seq_len = attn_metadata.prefill_max_seq_len  # type: ignore[attr-defined]
-            use_mha = (
-                self.prefill_backend is not None
-                and prefill_max_seq_len <= attn_metadata.topk_tokens  # type: ignore[attr-defined]
-                and not self._vllm_config.attention_config.sparse_mla_force_mqa
-            )
-            if not use_mha:
+            prefill_metadata = getattr(attn_metadata, "prefill", None)
+            if not getattr(prefill_metadata, "use_dense_mha", False):
                 num_mqa_tokens = q.size(0)
                 num_mha_tokens = 0
 
@@ -1402,6 +1404,10 @@ class MLACommonPrefillMetadata:
     q_data_type: torch.dtype | None = None
     output_dtype: torch.dtype | None = None
     prefill_backend: MLAPrefillBackend | None = None
+    # Whether the prefill suffix is routed through dense MHA.
+    # Indexer scoring may be skipped only for a pure-prefill batch,
+    # since decode tokens still consume top-k indices.
+    use_dense_mha: bool = False
 
 
 @dataclass

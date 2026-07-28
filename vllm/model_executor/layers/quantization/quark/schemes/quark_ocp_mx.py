@@ -9,8 +9,8 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear import init_mxfp4_linear_kernel
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     dequant_mxfp4,
     quant_dequant_mxfp4,
@@ -36,120 +36,6 @@ from .quark_scheme import QuarkScheme
 logger = init_logger(__name__)
 
 
-# NOTE: Do not import aiter at module scope. Importing aiter eagerly initializes HIP
-# which can force the engine core to spawn instead of fork.
-# is_aiter_found_and_supported() checks platform + arch + library availability via
-# find_spec/amdsmi, so it stays HIP-free.
-# Actual aiter imports are deferred to the functions/methods that need them,
-# where HIP initialization is expected.
-if is_aiter_found_and_supported():
-    from vllm.utils.torch_utils import direct_register_custom_op
-
-    def gemm_with_dynamic_quant(
-        x: torch.Tensor,
-        weight: torch.Tensor,
-        weight_scale: torch.Tensor,
-        rocm_use_aiter_fp4_asm_gemm: bool = False,
-        out_dtype: torch.dtype | None = torch.bfloat16,
-        x_scales: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        from aiter.ops.triton.gemm_afp4wfp4 import (
-            gemm_afp4wfp4,
-            gemm_afp4wfp4_preshuffled_weight_scales,
-        )
-        from aiter.ops.triton.quant import dynamic_mxfp4_quant
-
-        if rocm_use_aiter_fp4_asm_gemm:
-            from aiter import gemm_a4w4, per_1x32_f4_quant_hip
-
-        M = x.shape[0]
-        N = weight.shape[0]
-        K = weight.shape[1]
-        if rocm_use_aiter_fp4_asm_gemm:
-            if M <= 64 and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(N, K):
-                if x_scales is None:
-                    # use hip quant kernel for performance
-                    if M >= 32:
-                        x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=True)
-                    else:
-                        x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=False)
-                else:
-                    x_q = x
-                    x_s = x_scales
-
-                if M >= 32:
-                    x_s = x_s.view(torch.uint8).view(x_s.shape[0] // 32, -1)
-                else:
-                    x_s = x_s[:M, ...].view(torch.uint8)
-
-                y = torch.empty(M, N, device=x_q.device, dtype=out_dtype)
-                gemm_afp4wfp4_preshuffled_weight_scales(
-                    x_q.view(torch.uint8),
-                    weight.view(torch.uint8).view(weight.shape[0] // 16, -1),
-                    x_s,
-                    weight_scale.view(torch.uint8).view(
-                        weight_scale.shape[0] // 32, -1
-                    ),
-                    out_dtype,
-                    y,
-                )
-            else:
-                if x_scales is None:
-                    # use hip quant kernel for performance
-                    x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=True)
-                else:
-                    x_q = x
-                    x_s = x_scales
-
-                y = gemm_a4w4(
-                    x_q,
-                    weight.view(x_q.dtype),
-                    x_s,
-                    weight_scale.view(x_s.dtype),
-                    dtype=out_dtype,
-                    bpreshuffle=True,
-                )
-            return y[:M]
-        else:
-            if x_scales is None:
-                x_q, x_s = dynamic_mxfp4_quant(x)
-            else:
-                x_q = x
-                x_s = x_scales
-            y = torch.empty(
-                x_q.shape[0], weight.shape[0], device=x_q.device, dtype=out_dtype
-            )
-
-            gemm_afp4wfp4(x_q, weight, x_s, weight_scale.T, out_dtype, y)
-            return y
-
-    def gemm_with_dynamic_quant_fake(
-        x: torch.Tensor,
-        weight: torch.Tensor,
-        weight_scale: torch.Tensor,
-        x_scales: torch.Tensor = None,
-        rocm_use_aiter_fp4_asm_gemm: bool = False,
-        out_dtype: torch.dtype | None = torch.bfloat16,
-    ) -> torch.Tensor:
-        return torch.empty(
-            (*x.shape[:-1], weight.shape[0]), dtype=out_dtype, device=x.device
-        )
-
-    direct_register_custom_op(
-        op_name="gemm_with_dynamic_quant",
-        op_func=gemm_with_dynamic_quant,
-        mutates_args=[],
-        fake_impl=gemm_with_dynamic_quant_fake,
-        dispatch_key=current_platform.dispatch_key,
-    )
-elif current_platform.is_rocm():
-    logger.warning(
-        "AITER is not found or not supported on the current platform, "
-        "QuarkOCP_MX will fall back to emulation."
-        "Native MXFP4/MXFP6 acceleration will not be available."
-    )
-
-
 class QuarkOCP_MX(QuarkScheme):
     def __init__(
         self,
@@ -157,8 +43,6 @@ class QuarkOCP_MX(QuarkScheme):
         input_quant_spec: dict[str, Any] | None,
         dynamic_mxfp4_quant: bool = False,
     ):
-        self.out_dtype = torch.get_default_dtype()
-        self.qscheme = "per_group"
         self.weight_quant_spec = weight_quant_spec
         self.input_quant_spec = input_quant_spec
         self.dynamic_mxfp4_quant = dynamic_mxfp4_quant
@@ -211,17 +95,10 @@ class QuarkOCP_MX(QuarkScheme):
             self.input_dtype != "mxfp4" or self.weight_dtype != "mxfp4"
         )
 
-        self.rocm_use_aiter_fp4_asm_gemm = (
-            rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled()
-        )
-
-        if not self.emulate and not is_aiter_found_and_supported():
-            # Currently need AITER kernels if not emulating
-            raise NotImplementedError(
-                f"{self.__class__.__name__} requires AITER to be installed "
-                "for non-emulation mode! Please refer to "
-                "https://github.com/ROCm/aiter for installation details."
-            )
+        # TODO: Move emulation code path as a kernel, and always
+        # use init_mxfp4_linear_kernel.
+        if not self.emulate:
+            self.ocp_mx_linear = init_mxfp4_linear_kernel()
 
         if not current_platform.supports_mx():
             logger.warning_once(
@@ -268,7 +145,7 @@ class QuarkOCP_MX(QuarkScheme):
         from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
         w_q, w_s = dynamic_mxfp4_quant(layer.weight)
-        layer.weight_scale = torch.nn.Parameter(w_s.T.contiguous(), requires_grad=False)
+        layer.weight_scale = torch.nn.Parameter(w_s, requires_grad=False)
         layer.weight = torch.nn.Parameter(w_q, requires_grad=False)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -284,31 +161,7 @@ class QuarkOCP_MX(QuarkScheme):
         else:
             if self.dynamic_mxfp4_quant:
                 self.process_dynamic_mxfp4_weights_after_loading(layer)
-            elif self.rocm_use_aiter_fp4_asm_gemm:
-                from aiter.ops.shuffle import shuffle_weight
-
-                # shuffle weight scale
-                weight_scale_shuffle = layer.weight_scale.data
-                sm, sn = weight_scale_shuffle.shape
-                weight_scale_shuffle = weight_scale_shuffle.view(
-                    sm // 32, 2, 16, sn // 8, 2, 4, 1
-                )
-                weight_scale_shuffle = weight_scale_shuffle.permute(
-                    0, 3, 5, 2, 4, 1, 6
-                ).contiguous()
-                weight_scale_shuffle = weight_scale_shuffle.view(sm, sn)
-                layer.weight_scale = torch.nn.Parameter(
-                    weight_scale_shuffle, requires_grad=False
-                )
-
-                # shuffle weight
-                weight_shuffle = layer.weight.data
-                weight_shuffle = shuffle_weight(weight_shuffle, layout=(16, 16))
-                layer.weight = torch.nn.Parameter(weight_shuffle, requires_grad=False)
-            else:
-                layer.weight_scale = torch.nn.Parameter(
-                    layer.weight_scale.data.T.contiguous(), requires_grad=False
-                )
+            self.ocp_mx_linear.process_weights_after_loading(layer)
 
     def create_weights(
         self,
@@ -375,15 +228,4 @@ class QuarkOCP_MX(QuarkScheme):
             dq_w = self.dequant_func(layer.weight, layer.weight_scale, x.dtype)
             qdq_x = self.quant_dequant_func(x)
             return F.linear(qdq_x, dq_w, bias)
-        y = torch.ops.vllm.gemm_with_dynamic_quant(
-            x,
-            layer.weight,
-            layer.weight_scale,
-            self.rocm_use_aiter_fp4_asm_gemm,
-            self.out_dtype,
-        )
-        # gemm_with_dynamic_quant has no bias argument; add it here so the
-        # native path matches F.linear (e.g. qkv_proj with qkv_bias=True).
-        if bias is not None:
-            y = y + bias
-        return y
+        return self.ocp_mx_linear.apply_weights(layer, x, bias)
