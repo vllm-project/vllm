@@ -186,6 +186,10 @@ class KVCacheManager:
             tuple(() for _ in range(self.num_kv_cache_groups))
         )
 
+        # Off-table cow blocks handed to a KV connector for partial-tail
+        # offload; pinned until the request's blocks are freed.
+        self._partial_tail_pins: dict[str, list[tuple[int, KVCacheBlock]]] = {}
+
     @property
     def usage(self) -> float:
         """Get the KV cache usage.
@@ -583,6 +587,20 @@ class KVCacheManager:
 
         return self.create_kv_cache_blocks(new_blocks)
 
+    def _pop_partial_tail_pins(
+        self, request_id: str
+    ) -> tuple[list[KVCacheBlock], ...] | None:
+        pins = self._partial_tail_pins.pop(request_id, None)
+        if not pins:
+            return None
+
+        pins_by_group: list[list[KVCacheBlock]] = [
+            [] for _ in range(self.num_kv_cache_groups)
+        ]
+        for group_id, block in pins:
+            pins_by_group[group_id].append(block)
+        return tuple(pins_by_group)
+
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
         We free the blocks in reverse order so that the tail blocks are evicted
@@ -591,6 +609,14 @@ class KVCacheManager:
         Args:
             request: The request to free the blocks.
         """
+        pins_by_group = self._pop_partial_tail_pins(request.request_id)
+        if pins_by_group is not None:
+            for manager, pins in zip(
+                self.coordinator.single_type_managers,
+                pins_by_group,
+                strict=True,
+            ):
+                manager.block_pool.free_blocks(pins)
         self.coordinator.free(request.request_id)
 
     def remove_skipped_blocks(
@@ -623,7 +649,20 @@ class KVCacheManager:
         Returns:
             The request's blocks in allocation order.
         """
-        return KVCacheBlocks(self.coordinator.pop_blocks_for_free(request.request_id))
+        blocks_by_group = self.coordinator.pop_blocks_for_free(request.request_id)
+        # Pins ride the same (possibly deferred) free as the request blocks.
+        # Keep each pin with its owning group so it returns to the right pool.
+        pins_by_group = self._pop_partial_tail_pins(request.request_id)
+        if pins_by_group is not None:
+            blocks_by_group = tuple(
+                pins + blocks
+                for pins, blocks in zip(
+                    pins_by_group,
+                    blocks_by_group,
+                    strict=True,
+                )
+            )
+        return KVCacheBlocks(blocks_by_group)
 
     def free_popped_blocks(self, blocks: KVCacheBlocks) -> None:
         self.coordinator.free_popped_blocks(blocks.blocks)
@@ -789,6 +828,25 @@ class KVCacheManager:
         # Only create new KVCacheBlocks for non-empty blocks
         return KVCacheBlocks(blocks) if any(blocks) else self.empty_kv_cache_blocks
 
+    def truncate_computed_blocks(
+        self, blocks: KVCacheBlocks, num_computed_tokens: int
+    ) -> KVCacheBlocks:
+        """Return a lookup-result view truncated at an aligned token endpoint.
+
+        Pure slicing: refcounts are untouched and ``blocks`` is not mutated.
+        """
+        truncated: list[list[KVCacheBlock]] = []
+        for group_blocks, manager in zip(
+            blocks.blocks,
+            self.coordinator.single_type_managers,
+            strict=True,
+        ):
+            assert num_computed_tokens % manager.block_size == 0
+            num_blocks = num_computed_tokens // manager.block_size
+            assert num_blocks <= len(group_blocks)
+            truncated.append(list(group_blocks[:num_blocks]))
+        return self.create_kv_cache_blocks(tuple(truncated))
+
     def take_new_block_ids(self) -> list[int]:
         """Drain and return new attention block IDs for zeroing."""
         ids: list[int] = []
@@ -846,6 +904,34 @@ class KVCacheManager:
             for source_block, cow_block in pending_copies
         ]
         return copies, KVCacheBlocks(tuple(retained_blocks_by_group))
+
+    def take_partial_tail_offloads(self) -> dict[str, list[tuple[int, int, int]]]:
+        """Drain producer partial-tail offload hand-offs per request.
+
+        Returns ``{request_id: [(group_id, block_id, boundary_tokens), ...]}``
+        for the durable boundary blocks of producers' last-prompt-boundary
+        partial tails. Only mamba "align" groups contribute; empty otherwise.
+        A KV connector reads the referenced blocks and offloads them so a later
+        request can hit the sub-block prefix.
+
+        Each handed-off block lives off the request block table, so it is
+        pinned here and unpinned when the request's blocks are freed — for a
+        producer with saved tokens, after the connector reports sends done.
+        """
+        offloads: dict[str, list[tuple[int, int, int]]] = {}
+        for mgr in self.coordinator.single_type_managers:
+            for (
+                req_id,
+                group_id,
+                block,
+                boundary_tokens,
+            ) in mgr.take_pending_partial_tail_offloads():
+                mgr.block_pool.touch((block,))
+                self._partial_tail_pins.setdefault(req_id, []).append((group_id, block))
+                offloads.setdefault(req_id, []).append(
+                    (group_id, block.block_id, boundary_tokens)
+                )
+        return offloads
 
     def new_step_starts(self) -> None:
         """Notify the coordinator that a new step is starting."""
