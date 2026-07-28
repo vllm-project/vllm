@@ -87,10 +87,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         self._configure_fused_decode_graph()
 
     def _configure_fused_decode_graph(self) -> None:
-        if (
-            not self.speculative_config.enable_fused_decode_graph
-            or self.num_speculative_steps == 1
-        ):
+        if self.num_speculative_steps == 1:
             self.use_fused_decode_graph = False
             return
 
@@ -167,7 +164,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         # Capture either the fused decode loop or one decode step per graph.
         assert self.decode_cudagraph_manager is not None
         decode_fn = (
-            self._run_draft_decode_loop
+            self._generate_fused_drafts
             if self.use_fused_decode_graph
             else self._generate_draft
         )
@@ -319,7 +316,12 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         )
 
         # Generate the remaining num_speculative_steps - 1 draft tokens.
-        self._multi_step_decode(
+        decode_fn = (
+            self._fused_multi_step_decode
+            if self.use_fused_decode_graph
+            else self._multi_step_decode
+        )
+        decode_fn(
             num_reqs,
             dummy_run and skip_attn_for_dummy_run,
             decode_batch_desc,
@@ -440,27 +442,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
         idx_mapping = self.idx_mapping[:num_reqs]
 
-        if batch_desc.cg_mode == CUDAGraphMode.FULL and self.use_fused_decode_graph:
-            if not skip_attn:
-                self.block_tables.compute_slot_mappings(
-                    idx_mapping,
-                    query_start_loc,
-                    positions,
-                    batch_desc.num_tokens,
-                )
-                # Continuous draft decode replays usually consume only device metadata,
-                # so the host-side vars should have no effect and therefore pinned.
-                self._build_draft_attn_metadata(
-                    num_reqs=num_reqs,
-                    num_reqs_padded=batch_desc.num_reqs or num_reqs,
-                    num_tokens_padded=batch_desc.num_tokens,
-                    seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
-                    step=1,
-                )
-            assert self.decode_cudagraph_manager is not None
-            self.decode_cudagraph_manager.run_fullgraph(batch_desc)
-            return
-
         attn_metadata = None
         slot_mappings_by_layer = None
         for step in range(1, self.num_speculative_steps):
@@ -499,7 +480,54 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                     cudagraph_runtime_mode=batch_desc.cg_mode,
                 )
 
-    def _run_draft_decode_loop(
+    def _fused_multi_step_decode(
+        self,
+        num_reqs: int,
+        skip_attn: bool,
+        batch_desc: BatchExecutionDescriptor,
+        num_tokens_across_dp: torch.Tensor | None,
+        seq_lens_cpu_upper_bound: torch.Tensor,
+    ) -> None:
+        positions = self.input_buffers.positions[:num_reqs]
+        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
+        idx_mapping = self.idx_mapping[:num_reqs]
+
+        attn_metadata = None
+        slot_mappings_by_layer = None
+        if not skip_attn:
+            slot_mappings = self.block_tables.compute_slot_mappings(
+                idx_mapping,
+                query_start_loc,
+                positions,
+                batch_desc.num_tokens,
+            )
+            if batch_desc.cg_mode != CUDAGraphMode.FULL:
+                slot_mappings_by_layer = build_slot_mappings_by_layer(
+                    slot_mappings, self.kv_cache_config
+                )
+            attn_metadata = self._build_draft_attn_metadata(
+                num_reqs=num_reqs,
+                num_reqs_padded=batch_desc.num_reqs or num_reqs,
+                num_tokens_padded=batch_desc.num_tokens,
+                seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                step=1,
+            )
+
+        if batch_desc.cg_mode == CUDAGraphMode.FULL:
+            assert self.decode_cudagraph_manager is not None
+            self.decode_cudagraph_manager.run_fullgraph(batch_desc)
+            return
+
+        self._generate_fused_drafts(
+            num_reqs,
+            batch_desc.num_tokens,
+            attn_metadata,
+            slot_mappings_by_layer,
+            num_tokens_across_dp,
+            batch_desc.cg_mode,
+        )
+
+    def _generate_fused_drafts(
         self,
         num_reqs: int,
         num_tokens_padded: int,
@@ -527,14 +555,17 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 num_tokens_across_dp,
                 cudagraph_runtime_mode,
             )
-            if step < self.num_speculative_steps - 1 and attn_metadata is not None:
-                if self.advance_draft_positions:
-                    self.block_tables.compute_slot_mappings(
-                        idx_mapping,
-                        query_start_loc,
-                        positions,
-                        num_tokens_padded,
-                    )
+            if (
+                step < self.num_speculative_steps - 1
+                and attn_metadata is not None
+                and self.advance_draft_positions
+            ):
+                self.block_tables.compute_slot_mappings(
+                    idx_mapping,
+                    query_start_loc,
+                    positions,
+                    num_tokens_padded,
+                )
                 for attn_group in attn_groups:
                     attn_group.refresh_meta_for_draft_decodes(attn_metadata)
 

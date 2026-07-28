@@ -286,20 +286,21 @@ def test_run_model_reuses_tensor_return_for_mtp(monkeypatch):
 
 @pytest.mark.parametrize(
     (
+        "method_name",
         "cg_mode",
-        "use_fused_decode_graph",
         "expected_eager_calls",
         "expected_graph_replays",
     ),
     [
-        (CUDAGraphMode.NONE, True, 3, 0),
-        (CUDAGraphMode.FULL, True, 0, 1),
-        (CUDAGraphMode.FULL, False, 0, 3),
+        ("_multi_step_decode", CUDAGraphMode.NONE, 3, 0),
+        ("_multi_step_decode", CUDAGraphMode.FULL, 0, 3),
+        ("_fused_multi_step_decode", CUDAGraphMode.NONE, 3, 0),
+        ("_fused_multi_step_decode", CUDAGraphMode.FULL, 0, 1),
     ],
 )
 def test_multi_step_decode_replays_captured_graph_as_expected(
+    method_name,
     cg_mode,
-    use_fused_decode_graph,
     expected_eager_calls,
     expected_graph_replays,
 ):
@@ -311,7 +312,6 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
         query_start_loc=torch.arange(3),
     )
     speculator.idx_mapping = torch.arange(2)
-    speculator.use_fused_decode_graph = use_fused_decode_graph
     generate_draft = Mock()
     speculator._generate_draft = generate_draft
     run_fullgraph = Mock()
@@ -322,7 +322,7 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
         num_reqs=2,
     )
 
-    speculator._multi_step_decode(
+    getattr(speculator, method_name)(
         num_reqs=2,
         skip_attn=True,
         batch_desc=batch_desc,
