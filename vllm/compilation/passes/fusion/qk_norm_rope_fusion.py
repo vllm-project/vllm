@@ -19,7 +19,7 @@ from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
-from .matcher_utils import MatcherRMSNorm, MatcherRotaryEmbedding
+from .matcher_utils import MatcherRotaryEmbedding
 from .rms_quant_fusion import empty_bf16, empty_fp32, empty_i64
 
 logger = init_logger(__name__)
@@ -72,7 +72,6 @@ class QkNormRopePattern:
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.eps = eps
-        self.rmsnorm_matcher = MatcherRMSNorm(eps)
         self.is_neox = is_neox
         self.rope_flashinfer = rope_flashinfer
         self.rope_matcher = MatcherRotaryEmbedding(
@@ -253,18 +252,23 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
         rope_flashinfer_options = (
             [False, True] if RotaryEmbedding.enabled() else [False]
         )
+        aiter_rope_variants = [False]
+        if rocm_aiter_ops.is_triton_rotary_embed_enabled():
+            aiter_rope_variants.append(True)
         for head_dim, num_heads, num_kv_heads in self._attention_geometries:
-            for epsilon in [1e-5, 1e-6]:
-                for neox in [True, False]:
-                    for rope_flashinfer in rope_flashinfer_options:
-                        QkNormRopePattern(
-                            head_dim=head_dim,
-                            num_heads=num_heads,
-                            num_kv_heads=num_kv_heads,
-                            eps=epsilon,
-                            is_neox=neox,
-                            match_rocm_aiter_rope=aiter_rope,
-                        ).register(self.patterns)
+            for aiter_rope in aiter_rope_variants:
+                for epsilon in [1e-5, 1e-6]:
+                    for neox in [True, False]:
+                        for rope_flashinfer in rope_flashinfer_options:
+                            QkNormRopePattern(
+                                head_dim=head_dim,
+                                num_heads=num_heads,
+                                num_kv_heads=num_kv_heads,
+                                eps=epsilon,
+                                is_neox=neox,
+                                rope_flashinfer=rope_flashinfer,
+                                match_rocm_aiter_rope=aiter_rope,
+                            ).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 
