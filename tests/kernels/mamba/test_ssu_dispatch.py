@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from unittest.mock import Mock
+
 import pytest
 import torch
 
@@ -67,6 +69,39 @@ def test_flashinfer_backend_init():
     backend = get_mamba_ssu_backend()
     assert isinstance(backend, FlashInferSSUBackend)
     assert backend.name == "flashinfer"
+
+
+@pytest.mark.skipif(not HAS_FLASHINFER, reason="flashinfer not installed")
+@pytest.mark.parametrize("algorithm", ["auto", "simple", "vertical", "horizontal"])
+def test_flashinfer_forwards_ssu_algorithm(algorithm: str, monkeypatch):
+    import flashinfer.mamba
+
+    kernel = Mock()
+    monkeypatch.setattr(flashinfer.mamba, "selective_state_update", kernel)
+    backend = FlashInferSSUBackend(
+        MambaConfig(
+            backend=MambaBackendEnum.FLASHINFER,
+            ssu_algorithm=algorithm,
+        )
+    )
+
+    tensor = torch.empty(1)
+    backend(
+        tensor,
+        tensor,
+        tensor,
+        tensor,
+        tensor,
+        tensor,
+        tensor,
+        tensor,
+    )
+
+    kwargs = kernel.call_args.kwargs
+    if algorithm == "auto":
+        assert "algorithm" not in kwargs
+    else:
+        assert kwargs["algorithm"] == algorithm
 
 
 def test_uninitialized_backend_raises():

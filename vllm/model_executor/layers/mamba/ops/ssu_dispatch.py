@@ -10,6 +10,7 @@ the backend defaults to 'cpu'.
 """
 
 from abc import ABC, abstractmethod
+from functools import partial
 
 import torch
 
@@ -126,7 +127,14 @@ class FlashInferSSUBackend(MambaSSUBackend):
                 "Please install flashinfer (>= 0.6.4): "
                 "pip install flashinfer-python"
             ) from e
-        self._kernel = _fi_ssu
+        # Keep the default call identical to the pre-selector path, including
+        # compatibility with manually installed FlashInfer 0.6.4. Bind an
+        # explicit selection once instead of adding work to every SSU call.
+        self._kernel = (
+            partial(_fi_ssu, algorithm=mamba_config.ssu_algorithm)
+            if mamba_config.ssu_algorithm != "auto"
+            else _fi_ssu
+        )
 
     @property
     def name(self) -> str:
@@ -157,7 +165,6 @@ class FlashInferSSUBackend(MambaSSUBackend):
             if self._mamba_config.enable_stochastic_rounding
             else None
         )
-
         self._kernel(
             state,
             x,

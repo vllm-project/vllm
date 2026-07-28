@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from enum import Enum, EnumMeta
-from typing import Any
+from typing import Any, Literal, get_args
 
 from pydantic import field_validator
 
@@ -30,6 +30,9 @@ class MambaBackendEnum(Enum, metaclass=_MambaBackendEnumMeta):
     CPU = "cpu"
 
 
+MambaSSUAlgorithm = Literal["auto", "simple", "vertical", "horizontal"]
+
+
 @config
 class MambaConfig:
     """Configuration for Mamba SSM backends."""
@@ -46,6 +49,12 @@ class MambaConfig:
     generation. 0 uses the Triton default. Higher values improve randomness
     quality at the cost of compute."""
 
+    ssu_algorithm: MambaSSUAlgorithm = "auto"
+    """Selective state update algorithm to use with the FlashInfer backend.
+    "auto" preserves FlashInfer's automatic algorithm selection. Forced
+    algorithms must be supported by FlashInfer for the active GPU, state
+    dtype, and decoding mode."""
+
     @field_validator("backend", mode="before")
     @classmethod
     def validate_backend_before(cls, value: Any) -> Any:
@@ -54,7 +63,26 @@ class MambaConfig:
             return MambaBackendEnum[value.upper()]
         return value
 
+    def validate_ssu_algorithm(self) -> None:
+        valid_algorithms = get_args(MambaSSUAlgorithm)
+        if self.ssu_algorithm not in valid_algorithms:
+            valid = ", ".join(valid_algorithms)
+            raise ValueError(
+                f"Unknown Mamba SSU algorithm: '{self.ssu_algorithm}'. "
+                f"Valid options are: {valid}"
+            )
+        if (
+            self.ssu_algorithm != "auto"
+            and self.backend != MambaBackendEnum.FLASHINFER
+        ):
+            raise ValueError(
+                "Mamba SSU algorithm selection is only supported with the "
+                "FlashInfer backend. Please set `--mamba-backend flashinfer`, "
+                "or leave `--mamba-ssu-algorithm` as `auto`."
+            )
+
     def __post_init__(self):
+        self.validate_ssu_algorithm()
         if self.enable_stochastic_rounding:
             from vllm.platforms import current_platform
 
