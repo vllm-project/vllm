@@ -1,4 +1,5 @@
 #include <array>
+#include <limits>
 #include <cub/cub.cuh>
 
 #include <cuda_runtime.h>
@@ -11,6 +12,9 @@
 #include "../../cuda_compat.h"
 #include "libtorch_stable/core/math.hpp"
 #include "libtorch_stable/dispatch_utils.h"
+#ifndef USE_ROCM
+  #include "libtorch_stable/moe/permute_unpermute_kernels/moe_permute_unpermute_kernel.h"
+#endif
 #include "libtorch_stable/quantization/vectorization.cuh"
 #include "libtorch_stable/torch_utils.h"
 
@@ -349,6 +353,175 @@ __global__ void count_and_sort_expert_tokens_kernel(
       max_num_tokens_padded, nullptr, 0, topk_num, has_expert_map);
 }
 
+// Decode-sized inputs fit in one block. Shared-memory counts and offsets build
+// the padded expert ranges; comparing only earlier routes gives a stable rank.
+// The O(num_routes^2 + num_experts) work is explicitly capped by max_routes.
+template <typename scalar_t, int32_t max_routes>
+__global__ void stable_small_route_align_kernel(
+    const scalar_t* __restrict__ topk_ids,
+    int32_t* __restrict__ sorted_token_ids, int32_t* __restrict__ expert_ids,
+    int32_t* __restrict__ total_tokens_post_pad,
+    const int32_t* __restrict__ expert_map, int32_t num_experts,
+    int32_t block_size, int32_t numel, int32_t max_num_tokens_padded,
+    int32_t max_num_m_blocks, bool has_expert_map) {
+  __shared__ int32_t expert_counts[1024];
+  __shared__ int32_t expert_offsets[1024];
+  __shared__ int32_t route_experts[max_routes];
+  using BlockScan = cub::BlockScan<int32_t, 1024>;
+  __shared__ typename BlockScan::TempStorage scan_storage;
+
+  const int32_t tid = threadIdx.x;
+  for (int32_t index = tid; index < max_num_tokens_padded;
+       index += blockDim.x) {
+    sorted_token_ids[index] = numel;
+  }
+  if (tid < num_experts) {
+    expert_counts[tid] = 0;
+  }
+  __syncthreads();
+
+  if (tid < numel) {
+    const int32_t global_expert_id = static_cast<int32_t>(topk_ids[tid]);
+    int32_t output_expert_id = -1;
+    if (global_expert_id >= 0 && global_expert_id < num_experts) {
+      output_expert_id =
+          has_expert_map ? expert_map[global_expert_id] : global_expert_id;
+    }
+    route_experts[tid] = output_expert_id;
+    if (output_expert_id >= 0) {
+      atomicAdd(&expert_counts[output_expert_id], 1);
+    }
+  }
+  __syncthreads();
+
+  int32_t padded_count = 0;
+  if (tid < num_experts) {
+    padded_count = CEILDIV(expert_counts[tid], block_size) * block_size;
+  }
+  int32_t padded_offset;
+  BlockScan(scan_storage).ExclusiveSum(padded_count, padded_offset);
+  if (tid <= num_experts) {
+    expert_offsets[tid] = padded_offset;
+  }
+  if (tid == num_experts) {
+    total_tokens_post_pad[0] = padded_offset;
+  }
+  __syncthreads();
+
+  if (tid < num_experts) {
+    for (int32_t index = expert_offsets[tid]; index < expert_offsets[tid + 1];
+         index += block_size) {
+      expert_ids[index / block_size] = tid;
+    }
+  }
+  const int32_t first_inactive_block = expert_offsets[num_experts] / block_size;
+  for (int32_t index = first_inactive_block + tid; index < max_num_m_blocks;
+       index += blockDim.x) {
+    expert_ids[index] = -1;
+  }
+
+  if (tid < numel) {
+    const int32_t output_expert_id = route_experts[tid];
+    if (output_expert_id >= 0) {
+      int32_t rank = 0;
+      for (int32_t previous = 0; previous < tid; ++previous) {
+        rank += route_experts[previous] == output_expert_id;
+      }
+      sorted_token_ids[expert_offsets[output_expert_id] + rank] = tid;
+    }
+  }
+}
+
+template <typename scalar_t>
+__global__ void prepare_radix_sort_keys_kernel(
+    const scalar_t* __restrict__ topk_ids, int32_t* __restrict__ keys,
+    const int32_t* __restrict__ expert_map, size_t numel, int32_t num_experts,
+    bool has_expert_map) {
+  for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < numel;
+       index += blockDim.x * gridDim.x) {
+    const int32_t expert_id = static_cast<int32_t>(topk_ids[index]);
+    if (expert_id < 0 || expert_id >= num_experts) {
+      keys[index] = 2 * num_experts - 1;
+    } else if (has_expert_map) {
+      const int32_t local_expert_id = expert_map[expert_id];
+      keys[index] =
+          local_expert_id < 0 ? num_experts + expert_id : local_expert_id;
+    } else {
+      keys[index] = expert_id;
+    }
+  }
+}
+
+__global__ void copy_compact_tokens_to_padded_kernel(
+    const int32_t* __restrict__ compact_sorted_token_ids,
+    int32_t* __restrict__ sorted_token_ids,
+    const int32_t* __restrict__ padded_expert_offsets,
+    const int64_t* __restrict__ unpadded_expert_offsets, int32_t num_experts) {
+  const int32_t expert_id = blockIdx.x;
+  if (expert_id >= num_experts) {
+    return;
+  }
+
+  const int64_t compact_start = unpadded_expert_offsets[expert_id];
+  const int64_t compact_end = unpadded_expert_offsets[expert_id + 1];
+  const int32_t padded_start = padded_expert_offsets[expert_id];
+  for (int64_t index = compact_start + threadIdx.x; index < compact_end;
+       index += blockDim.x) {
+    sorted_token_ids[padded_start + index - compact_start] =
+        compact_sorted_token_ids[index];
+  }
+}
+
+__global__ void build_padded_metadata_from_offsets_kernel(
+    int32_t* __restrict__ sorted_token_ids, int32_t* __restrict__ expert_ids,
+    int32_t* __restrict__ total_tokens_post_pad,
+    int32_t* __restrict__ padded_expert_offsets,
+    const int64_t* __restrict__ unpadded_expert_offsets, int32_t num_experts,
+    int32_t block_size, int32_t numel, int32_t max_num_tokens_padded,
+    int32_t max_num_m_blocks) {
+  if (blockIdx.x == 1) {
+    for (int32_t index = threadIdx.x; index < max_num_tokens_padded;
+         index += blockDim.x) {
+      sorted_token_ids[index] = numel;
+    }
+    return;
+  }
+
+  using BlockScan = cub::BlockScan<int32_t, 1024>;
+  __shared__ typename BlockScan::TempStorage scan_storage;
+
+  const int32_t expert_id = threadIdx.x;
+  int32_t padded_count = 0;
+  if (expert_id < num_experts) {
+    const int64_t count = unpadded_expert_offsets[expert_id + 1] -
+                          unpadded_expert_offsets[expert_id];
+    padded_count = CEILDIV(count, block_size) * block_size;
+  }
+
+  int32_t padded_offset;
+  BlockScan(scan_storage).ExclusiveSum(padded_count, padded_offset);
+  if (expert_id <= num_experts) {
+    padded_expert_offsets[expert_id] = padded_offset;
+  }
+  if (expert_id == num_experts) {
+    total_tokens_post_pad[0] = padded_offset;
+  }
+  __syncthreads();
+
+  if (expert_id < num_experts) {
+    for (int32_t index = padded_expert_offsets[expert_id];
+         index < padded_expert_offsets[expert_id + 1]; index += block_size) {
+      expert_ids[index / block_size] = expert_id;
+    }
+  }
+  const int32_t fill_start =
+      padded_expert_offsets[num_experts] / block_size + threadIdx.x;
+  for (int32_t index = fill_start; index < max_num_m_blocks;
+       index += blockDim.x) {
+    expert_ids[index] = -1;
+  }
+}
+
 // Reduce the topk expert outputs per token (summed in fp32). The output is
 // dense [num_tokens, d]; the input is addressed by its strides so non-
 // contiguous inputs work without a copy. A 16B-vectorized path is used when
@@ -622,11 +795,12 @@ __global__ void moe_lora_align_block_size_small_batch_expert_kernel(
 
 // taken from
 // https://github.com/sgl-project/sglang/blob/8b5f83ed3b7d2a49ad5c5cd5aa61c5d502f47dbc
-void moe_align_block_size(
+static void moe_align_block_size_impl(
     torch::stable::Tensor topk_ids, int64_t num_experts, int64_t block_size,
     torch::stable::Tensor sorted_token_ids, torch::stable::Tensor experts_ids,
     torch::stable::Tensor num_tokens_post_pad,
-    std::optional<torch::stable::Tensor> maybe_expert_map) {
+    std::optional<torch::stable::Tensor> maybe_expert_map,
+    bool stable_token_order) {
   const torch::stable::accelerator::DeviceGuard device_guard(
       topk_ids.get_device_index());
   const cudaStream_t stream =
@@ -641,6 +815,9 @@ void moe_align_block_size(
   // BlockScan uses 1024 threads and assigns one thread per expert.
   STD_TORCH_CHECK(padded_num_experts < 1024,
                   "padded_num_experts must be less than 1024");
+  STD_TORCH_CHECK(!stable_token_order || topk_ids.numel() <= 256,
+                  "stable alignment supports at most 256 routed entries; "
+                  "use moe_align_block_size_radix for larger inputs");
   bool has_expert_map = maybe_expert_map.has_value();
   torch::stable::Tensor expert_map;
   if (has_expert_map) {
@@ -652,6 +829,22 @@ void moe_align_block_size(
 
   VLLM_STABLE_DISPATCH_INTEGRAL_AND_UNSIGNED_TYPES(
       topk_ids.scalar_type(), "moe_align_block_size_kernel", [&] {
+        constexpr int32_t stable_small_route_limit = 256;
+        if (stable_token_order &&
+            topk_ids.numel() <= stable_small_route_limit) {
+          vllm::moe::stable_small_route_align_kernel<
+              scalar_t, stable_small_route_limit><<<1, 1024, 0, stream>>>(
+              reinterpret_cast<const scalar_t*>(topk_ids.const_data_ptr()),
+              reinterpret_cast<int32_t*>(sorted_token_ids.mutable_data_ptr()),
+              reinterpret_cast<int32_t*>(experts_ids.mutable_data_ptr()),
+              reinterpret_cast<int32_t*>(
+                  num_tokens_post_pad.mutable_data_ptr()),
+              reinterpret_cast<const int32_t*>(expert_map.const_data_ptr()),
+              num_experts, block_size, topk_ids.numel(),
+              sorted_token_ids.size(0), experts_ids.size(0), has_expert_map);
+          return;
+        }
+
         // calc needed amount of shared mem for `cumsum` tensors
         bool small_batch_expert_mode =
             (topk_ids.numel() < 1024) && (num_experts <= 64);
@@ -720,6 +913,161 @@ void moe_align_block_size(
               topk_ids.size(1), has_expert_map);
         }
       });
+}
+
+void moe_align_block_size(
+    torch::stable::Tensor topk_ids, int64_t num_experts, int64_t block_size,
+    torch::stable::Tensor sorted_token_ids, torch::stable::Tensor experts_ids,
+    torch::stable::Tensor num_tokens_post_pad,
+    std::optional<torch::stable::Tensor> maybe_expert_map) {
+  moe_align_block_size_impl(topk_ids, num_experts, block_size, sorted_token_ids,
+                            experts_ids, num_tokens_post_pad, maybe_expert_map,
+                            false);
+}
+
+void moe_align_block_size_stable_small(
+    torch::stable::Tensor topk_ids, int64_t num_experts, int64_t block_size,
+    torch::stable::Tensor sorted_token_ids, torch::stable::Tensor experts_ids,
+    torch::stable::Tensor num_tokens_post_pad,
+    std::optional<torch::stable::Tensor> maybe_expert_map) {
+  moe_align_block_size_impl(topk_ids, num_experts, block_size, sorted_token_ids,
+                            experts_ids, num_tokens_post_pad, maybe_expert_map,
+                            true);
+}
+
+void moe_align_block_size_radix(
+    torch::stable::Tensor topk_ids, int64_t num_experts, int64_t block_size,
+    torch::stable::Tensor sorted_token_ids, torch::stable::Tensor experts_ids,
+    torch::stable::Tensor num_tokens_post_pad,
+    torch::stable::Tensor sort_workspace,
+    torch::stable::Tensor sorted_expert_ids,
+    torch::stable::Tensor compact_sorted_token_ids,
+    torch::stable::Tensor token_indices,
+    torch::stable::Tensor topk_ids_for_sort,
+    torch::stable::Tensor padded_expert_offsets,
+    torch::stable::Tensor unpadded_expert_offsets,
+    std::optional<torch::stable::Tensor> maybe_expert_map) {
+#ifdef USE_ROCM
+  STD_TORCH_CHECK(false, "moe_align_block_size_radix is not supported on ROCm");
+#else
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      topk_ids.get_device_index());
+  const cudaStream_t stream =
+      get_current_cuda_stream(topk_ids.get_device_index());
+  const int64_t numel = topk_ids.numel();
+
+  STD_TORCH_CHECK(num_experts > 0 && num_experts < 1024,
+                  "num_experts must be in [1, 1024)");
+  STD_TORCH_CHECK(block_size > 0, "block_size must be positive");
+  STD_TORCH_CHECK(numel > 0, "topk_ids must not be empty");
+  STD_TORCH_CHECK(numel <= std::numeric_limits<int32_t>::max(),
+                  "topk_ids contains too many entries for int32 token indices");
+  const int64_t max_padding = num_experts * (block_size - 1);
+  STD_TORCH_CHECK(numel <= std::numeric_limits<int32_t>::max() - max_padding,
+                  "padded token count exceeds the int32 alignment ABI");
+  STD_TORCH_CHECK(topk_ids.is_contiguous(), "topk_ids must be contiguous");
+
+  auto check_scratch = [&](const torch::stable::Tensor& tensor,
+                           torch::headeronly::ScalarType dtype,
+                           const char* name) {
+    STD_TORCH_CHECK(tensor.device() == topk_ids.device(), name,
+                    " must be on the same device as topk_ids");
+    STD_TORCH_CHECK(tensor.scalar_type() == dtype, name,
+                    " has an unexpected dtype");
+    STD_TORCH_CHECK(tensor.is_contiguous(), name, " must be contiguous");
+  };
+  check_scratch(sort_workspace, torch::headeronly::ScalarType::Char,
+                "sort_workspace");
+  check_scratch(sorted_expert_ids, torch::headeronly::ScalarType::Int,
+                "sorted_expert_ids");
+  check_scratch(compact_sorted_token_ids, torch::headeronly::ScalarType::Int,
+                "compact_sorted_token_ids");
+  check_scratch(token_indices, torch::headeronly::ScalarType::Int,
+                "token_indices");
+  check_scratch(topk_ids_for_sort, torch::headeronly::ScalarType::Int,
+                "topk_ids_for_sort");
+  check_scratch(padded_expert_offsets, torch::headeronly::ScalarType::Int,
+                "padded_expert_offsets");
+  check_scratch(unpadded_expert_offsets, torch::headeronly::ScalarType::Long,
+                "unpadded_expert_offsets");
+  STD_TORCH_CHECK(sorted_expert_ids.numel() >= numel,
+                  "sorted_expert_ids is too small");
+  STD_TORCH_CHECK(compact_sorted_token_ids.numel() >= numel,
+                  "compact_sorted_token_ids is too small");
+  STD_TORCH_CHECK(token_indices.numel() >= numel, "token_indices is too small");
+  STD_TORCH_CHECK(topk_ids_for_sort.numel() >= numel,
+                  "topk_ids_for_sort is too small");
+  STD_TORCH_CHECK(padded_expert_offsets.numel() >= num_experts + 1,
+                  "padded_expert_offsets is too small");
+  STD_TORCH_CHECK(unpadded_expert_offsets.numel() >= num_experts + 1,
+                  "unpadded_expert_offsets is too small");
+
+  bool has_expert_map = maybe_expert_map.has_value();
+  if (has_expert_map) {
+    check_scratch(maybe_expert_map.value(), torch::headeronly::ScalarType::Int,
+                  "expert_map");
+    STD_TORCH_CHECK(maybe_expert_map.value().numel() >= num_experts,
+                    "expert_map is too small");
+  }
+  const int32_t* expert_map_ptr =
+      has_expert_map ? reinterpret_cast<const int32_t*>(
+                           maybe_expert_map.value().const_data_ptr())
+                     : nullptr;
+
+  VLLM_STABLE_DISPATCH_INTEGRAL_AND_UNSIGNED_TYPES(
+      topk_ids.scalar_type(), "moe_align_block_size_radix", [&] {
+        constexpr int32_t key_threads = 256;
+        // Conservative portable CUDA grid cap. The key-prep kernel uses a
+        // grid-stride loop, so larger inputs are still processed correctly.
+        constexpr int32_t max_key_grid_blocks = 65535;
+        const int32_t key_blocks =
+            std::min<int64_t>(CEILDIV(numel, key_threads), max_key_grid_blocks);
+        vllm::moe::prepare_radix_sort_keys_kernel<scalar_t>
+            <<<key_blocks, key_threads, 0, stream>>>(
+                reinterpret_cast<const scalar_t*>(topk_ids.const_data_ptr()),
+                reinterpret_cast<int32_t*>(
+                    topk_ids_for_sort.mutable_data_ptr()),
+                expert_map_ptr, numel, num_experts, has_expert_map);
+      });
+
+  // CUB radix sort is stable. Monotonic input values therefore preserve
+  // flattened route order within equal expert keys without a composite key.
+  CubKeyValueSorter sorter(num_experts);
+  sorter.run(
+      sort_workspace.mutable_data_ptr(), sort_workspace.numel(),
+      reinterpret_cast<const int32_t*>(topk_ids_for_sort.const_data_ptr()),
+      reinterpret_cast<int32_t*>(sorted_expert_ids.mutable_data_ptr()),
+      reinterpret_cast<const int32_t*>(token_indices.const_data_ptr()),
+      reinterpret_cast<int32_t*>(compact_sorted_token_ids.mutable_data_ptr()),
+      numel, stream);
+
+  computeExpertFirstTokenOffset(
+      reinterpret_cast<const int32_t*>(sorted_expert_ids.const_data_ptr()),
+      numel, num_experts,
+      reinterpret_cast<int64_t*>(unpadded_expert_offsets.mutable_data_ptr()),
+      stream);
+
+  vllm::moe::build_padded_metadata_from_offsets_kernel<<<2, 1024, 0, stream>>>(
+      reinterpret_cast<int32_t*>(sorted_token_ids.mutable_data_ptr()),
+      reinterpret_cast<int32_t*>(experts_ids.mutable_data_ptr()),
+      reinterpret_cast<int32_t*>(num_tokens_post_pad.mutable_data_ptr()),
+      reinterpret_cast<int32_t*>(padded_expert_offsets.mutable_data_ptr()),
+      reinterpret_cast<const int64_t*>(
+          unpadded_expert_offsets.const_data_ptr()),
+      num_experts, block_size, numel, sorted_token_ids.size(0),
+      experts_ids.size(0));
+
+  vllm::moe::
+      copy_compact_tokens_to_padded_kernel<<<num_experts, 256, 0, stream>>>(
+          reinterpret_cast<const int32_t*>(
+              compact_sorted_token_ids.const_data_ptr()),
+          reinterpret_cast<int32_t*>(sorted_token_ids.mutable_data_ptr()),
+          reinterpret_cast<const int32_t*>(
+              padded_expert_offsets.const_data_ptr()),
+          reinterpret_cast<const int64_t*>(
+              unpadded_expert_offsets.const_data_ptr()),
+          num_experts);
+#endif
 }
 
 void batched_moe_align_block_size(int64_t max_tokens_per_batch,

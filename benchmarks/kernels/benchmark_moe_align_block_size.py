@@ -6,7 +6,11 @@ import itertools
 import torch
 
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
+    RADIX_SORT_MIN_ROUTED_ENTRIES,
+    MoEAlignRadixScratch,
     moe_align_block_size,
+    moe_align_block_size_radix,
+    moe_align_block_size_stable_small,
 )
 from vllm.triton_utils import triton
 from vllm.utils.torch_utils import set_random_seed
@@ -36,8 +40,8 @@ configs = list(
         x_names=["num_tokens", "num_experts", "topk", "ep_size"],
         x_vals=configs,
         line_arg="provider",
-        line_vals=["vllm"],
-        line_names=["vLLM"],
+        line_vals=["vllm", "deterministic"],
+        line_names=["vLLM", "deterministic"],
         plot_name="moe-align-block-size-performance",
         args={},
     )
@@ -56,12 +60,39 @@ def benchmark(num_tokens, num_experts, topk, ep_size, provider):
         e_map[e_ids] = torch.arange(local_e, device="cuda", dtype=torch.int32)
 
     quantiles = [0.5, 0.2, 0.8]
+    scratch = None
+    if topk_ids.numel() >= RADIX_SORT_MIN_ROUTED_ENTRIES:
+        scratch = MoEAlignRadixScratch(
+            max_num_tokens=num_tokens,
+            topk=topk,
+            num_experts=num_experts,
+            device=torch.device("cuda"),
+        )
 
     if provider == "vllm":
         ms, min_ms, max_ms = triton.testing.do_bench(
             lambda: moe_align_block_size(
                 topk_ids, block_size, num_experts, e_map, ignore_invalid_experts=True
             ),
+            quantiles=quantiles,
+        )
+    elif provider == "deterministic":
+        if scratch is None:
+
+            def align():
+                return moe_align_block_size_stable_small(
+                    topk_ids, block_size, num_experts, e_map
+                )
+
+        else:
+
+            def align():
+                return moe_align_block_size_radix(
+                    topk_ids, block_size, num_experts, scratch, e_map
+                )
+
+        ms, min_ms, max_ms = triton.testing.do_bench(
+            align,
             quantiles=quantiles,
         )
 
