@@ -144,6 +144,25 @@ class GateLinear(ReplicatedLinear):
                 and is_available()
             )
 
+        if self.allow_bf16x3_router_gemm:
+            from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_cutedsl import (  # noqa: E501
+                _BF16X3_ROUTER_GEMM_KERNEL,
+                _BF16X3_SPLITK_REDUCE_KERNEL,
+            )
+
+            _BF16X3_ROUTER_GEMM_KERNEL.register_warmup()
+            _BF16X3_SPLITK_REDUCE_KERNEL.register_warmup()
+
+        if self.allow_ll_bf16_gemm:
+            from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
+                LL_BF16_GEMM_KERNEL,
+            )
+
+            LL_BF16_GEMM_KERNEL.register_warmup(
+                shapes=((input_size, output_size),),
+                m_values=range(1, 17),
+            )
+
     def set_out_dtype(self, out_dtype: torch.dtype) -> None:
         """Set output dtype for the router logits after init.
 
@@ -175,6 +194,15 @@ class GateLinear(ReplicatedLinear):
                 and out_dtype == torch.float32
                 and is_available()
             )
+            if self.allow_ll_bf16_gemm:
+                from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
+                    LL_BF16_GEMM_KERNEL,
+                )
+
+                LL_BF16_GEMM_KERNEL.register_warmup(
+                    shapes=((self.weight.shape[1], self.weight.shape[0]),),
+                    m_values=range(1, 17),
+                )
 
     def forward(
         self, x: torch.Tensor
@@ -182,10 +210,10 @@ class GateLinear(ReplicatedLinear):
         # Tier 1: cuteDSL ll_bf16_gemm (SM90+, any dims)
         if self.allow_ll_bf16_gemm and x.shape[0] <= 16 and x.dtype == torch.bfloat16:
             from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
-                ll_bf16_gemm,
+                LL_BF16_GEMM_KERNEL,
             )
 
-            output = ll_bf16_gemm(x, self.weight)
+            output = LL_BF16_GEMM_KERNEL(x, self.weight)
             return output, None
 
         # Tier 2: DSV3 specialized kernel (fallback for when cuteDSL unavailable)
@@ -212,10 +240,10 @@ class GateLinear(ReplicatedLinear):
         # Tier 4: experimental bf16x3 CuteDSL kernel for fp32 router weights
         if self.allow_bf16x3_router_gemm and x.dtype == torch.bfloat16:
             from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_cutedsl import (  # noqa: E501
-                bf16x3_router_gemm,
+                _BF16X3_ROUTER_GEMM_KERNEL,
             )
 
-            output = bf16x3_router_gemm(x, self.weight)
+            output = _BF16X3_ROUTER_GEMM_KERNEL(x, self.weight)
             return output, None
 
         # Tier 5: cuBLAS bf16→fp32
@@ -252,10 +280,10 @@ def fp32_router_gemm_dispatch_impl(
 
     if allow_bf16x3_router_gemm and x.dtype == torch.bfloat16:
         from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_cutedsl import (  # noqa: E501
-            bf16x3_router_gemm,
+            _BF16X3_ROUTER_GEMM_KERNEL,
         )
 
-        return bf16x3_router_gemm(x, weight)
+        return _BF16X3_ROUTER_GEMM_KERNEL(x, weight)
 
     return torch.nn.functional.linear(x.float(), weight)
 
