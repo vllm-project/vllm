@@ -21,7 +21,6 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -54,13 +53,13 @@ class DSparkMarkovHead(nn.Module):
         prefix: str,
     ) -> None:
         super().__init__()
-        self.markov_w1 = nn.Embedding(vocab_size, markov_rank, _freeze=True)
-        self.markov_w2 = ReplicatedLinear(
-            markov_rank,
+        self.markov_w1 = nn.Embedding(vocab_size, markov_rank)
+        self.markov_w2 = ParallelLMHead(
             draft_vocab_size,
+            markov_rank,
             bias=False,
-            return_bias=False,
             prefix=maybe_prefix(prefix, "markov_w2"),
+            disable_tp=True,
         )
 
     def embed(self, token_ids: torch.Tensor) -> torch.Tensor:
@@ -70,10 +69,10 @@ class DSparkMarkovHead(nn.Module):
     def bias(
         self,
         markov_embed: torch.Tensor,
-        _logits_processor: LogitsProcessor,
+        logits_processor: LogitsProcessor,
     ) -> torch.Tensor:
         """Vocab-size transition bias from a Markov embedding ([B, r] -> [B, V])."""
-        return self.markov_w2(markov_embed)
+        return logits_processor(self.markov_w2, markov_embed)
 
 
 class Qwen3DSparkModel(DFlashQwen3Model):
