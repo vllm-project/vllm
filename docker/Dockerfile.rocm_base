@@ -3,7 +3,7 @@ ARG TRITON_BRANCH="release/3.6.x"
 ARG TRITON_REPO="https://github.com/triton-lang/triton.git"
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
-ARG AITER_BRANCH="v0.1.16.post5"
+ARG AITER_BRANCH="v0.1.16.post6"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 
 # TheRock configuration

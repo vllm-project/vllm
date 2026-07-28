@@ -40,7 +40,6 @@ tokenizers==0.22.2
 schemathesis>=4.0.0 # Required for openai schema test
 # quantization
 # bitsandbytes from rasmith fork (builds HIP .so via pip install)
-# This commit (main, 0.50.0.dev0) fixes the formula so the .so matches torch.version.hip.
 bitsandbytes @ git+https://github.com/rasmith/bitsandbytes.git@release_0_50_0_hip_wheel
 buildkite-test-collector==0.1.9
 tilelang==0.1.10
