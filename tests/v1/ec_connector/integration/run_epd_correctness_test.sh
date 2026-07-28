@@ -488,10 +488,10 @@ run_baseline
 run_epd_1e_1pd
 
 # Step 3: Test baseline 1P + 1D
-# run_baseline_1p_1d
+run_baseline_1p_1d
 
 # # Step 4: Test 1E + 1P + 1D
-# run_epd_1e_1p_1d
+run_epd_1e_1p_1d
 
 # Cleanup output file
 rm -f "$BASELINE_FILE"
