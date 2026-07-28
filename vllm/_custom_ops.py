@@ -2460,8 +2460,8 @@ def topk_hash_softplus_sqrt(
             input_tokens,
             hash_indices_table,
         )
+        return
 
-    return
     torch.ops._moe_C.topk_softplus_sqrt(
         topk_weights,
         topk_indices,
@@ -2744,6 +2744,33 @@ def concat_and_cache_mla(
     torch.ops._C_cache_ops.concat_and_cache_mla(
         kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale
     )
+
+
+def kimi_k3_attn_res(
+    prefix: torch.Tensor,
+    delta: torch.Tensor,
+    blocks: torch.Tensor,
+    norm_weight: torch.Tensor,
+    qk_weight: torch.Tensor,
+    output_norm_weight: torch.Tensor,
+    num_blocks: int,
+    eps: float,
+    output_norm_eps: float,
+) -> torch.Tensor:
+    output = torch.empty_like(prefix)
+    torch.ops._C.kimi_k3_attn_res(
+        prefix,
+        delta,
+        blocks,
+        norm_weight,
+        qk_weight,
+        output_norm_weight,
+        output,
+        num_blocks,
+        eps,
+        output_norm_eps,
+    )
+    return output
 
 
 def concat_and_cache_mla_rope_fused(
@@ -3505,6 +3532,7 @@ def causal_conv1d_update_cpu(
     silu_activation: bool,
     conv_state_indices: torch.Tensor | None,
     is_vnni: bool,
+    num_accepted_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.ops._C.causal_conv1d_update_cpu(
         x,
@@ -3512,7 +3540,7 @@ def causal_conv1d_update_cpu(
         weight,
         bias,
         silu_activation,
-        None,
+        num_accepted_tokens,
         conv_state_indices,
         -1,
         is_vnni,
@@ -3787,6 +3815,15 @@ def cpu_prepack_moe_weight(
     return output
 
 
+def cpu_prepack_moe_weight_int8(
+    weight: torch.Tensor,
+    isa: str,
+) -> torch.Tensor:
+    output = torch.empty_like(weight)
+    torch.ops._C.prepack_moe_weight_int8(weight, output, isa)
+    return output
+
+
 def cpu_fused_moe(
     input: torch.Tensor,
     w13: torch.Tensor,
@@ -3805,6 +3842,39 @@ def cpu_fused_moe(
         input,
         w13,
         w2,
+        w13_bias,
+        w2_bias,
+        topk_weights,
+        topk_ids,
+        skip_weighted,
+        act,
+        isa,
+    )
+    return output
+
+
+def cpu_fused_moe_int8(
+    input: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w13_bias: torch.Tensor | None,
+    w2_bias: torch.Tensor | None,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    act: str,
+    isa: str,
+    skip_weighted: bool = False,
+) -> torch.Tensor:
+    output = torch.empty_like(input)
+    torch.ops._C.cpu_fused_moe_int8(
+        output,
+        input,
+        w13,
+        w2,
+        w13_scale,
+        w2_scale,
         w13_bias,
         w2_bias,
         topk_weights,

@@ -350,6 +350,31 @@ Instead of NumPy arrays, you can also pass `'torch.Tensor'` instances, as shown 
 
 Full example: [examples/generate/multimodal/vision_language_offline.py](../../examples/generate/multimodal/vision_language_offline.py)
 
+#### Video Token Pruning
+
+For supported models, vLLM can prune video tokens after the vision encoder to
+reduce prefill time and KV cache usage, at some cost in accuracy. Set
+`--video-pruning-rate <q>` to prune the fraction `q` of video tokens from each
+video, and `--video-pruning-method` to choose the training-free algorithm:
+
+- **`evs`** (Efficient Video Sampling, default): drops the tokens with the
+  lowest temporal dissimilarity to the previous frame. The first frame is
+  always fully retained.
+- **`vidcom2`** (Video Compression Commander): scores tokens by similarity to
+  video-level and frame-level feature centers and gives distinctive frames a
+  larger share of the budget. At least one token per frame is retained.
+
+```bash
+vllm serve Qwen/Qwen3-VL-8B-Instruct \
+    --video-pruning-rate 0.75 --video-pruning-method vidcom2
+```
+
+!!! note
+    `evs` is supported by all models implementing multimodal pruning;
+    `vidcom2` is currently supported by Qwen3-VL only. Unsupported combinations
+    are rejected at startup. Enabling video pruning also disables encoder CUDA
+    graphs, since the retained token count becomes data-dependent.
+
 ### Audio Inputs
 
 You can pass a tuple `(array, sampling_rate)` to the `'audio'` field of the multi-modal dictionary.
@@ -818,16 +843,18 @@ Full example: [examples/generate/multimodal/openai_chat_completion_client_for_mu
 
 #### Video Decoding Backend
 
-vLLM decodes video bytes into frames using a selectable decoding backend. Three
+vLLM decodes video bytes into frames using a selectable decoding backend. Five
 backends are supported:
 
 - `opencv` (default): OpenCV-based decoder.
 - `pyav`: PyAV decoder.
 - `torchcodec`: TorchCodec (PyTorch-native) decoder.
+- `pynvvideocodec`: NVIDIA NVDEC-based decoder.
+- `deepstream`: NVIDIA DeepStream NVDEC-based decoder.
 
-All three backends are ultimately backed by FFmpeg. `torchcodec` lets
-you choose which FFmpeg version is used while `opencv` and `pyav` rely on
-whichever FFmpeg build they were linked against.
+The CPU backends are backed by FFmpeg. `torchcodec` lets you choose which FFmpeg
+version is used while `opencv` and `pyav` rely on whichever FFmpeg build they
+were linked against.
 
 Select the backend by passing the `backend` parameter via `--media-io-kwargs`:
 
@@ -852,6 +879,21 @@ The following parameters only apply to the `torchcodec` backend:
 # Example: TorchCodec with approximate seek mode and 4 FFmpeg threads
 vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
   --media-io-kwargs '{"video": {"backend": "torchcodec", "seek_mode": "approximate", "num_ffmpeg_threads": 4}}'
+```
+
+**PyNvVideoCodec-specific parameters:**
+
+- `hw_decoders`: Maximum number of concurrent hardware decoder slots retained
+  by each API server process. It must be a positive integer and defaults to `2`,
+  which is the recommended starting point for concurrent video workloads.
+  Because vLLM reserves GPU memory for these slots at startup, this value cannot
+  be overridden per request. Benchmark before increasing it because each
+  additional slot increases the GPU memory reservation.
+
+```bash
+# Example: explicitly use the recommended 2 hardware decoders
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --media-io-kwargs '{"video": {"backend": "pynvvideocodec", "hw_decoders": 2}}'
 ```
 
 #### Video Frame Recovery
