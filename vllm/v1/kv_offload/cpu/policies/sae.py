@@ -238,6 +238,11 @@ class SAECachePolicy(CachePolicy):
             "insert called without an open session — the manager must call "
             "open_session before its insert loop"
         )
+        assert key not in self.key_to_session, (
+            f"insert called for key {key!r} already owned by session "
+            f"{self.key_to_session[key]}; the manager filters already-stored "
+            "keys before insert and must not re-insert a resident key"
+        )
         session_id = self.open_session_id
         self.session_keys[session_id].append(key)
         self.key_to_session[key] = session_id
@@ -257,11 +262,12 @@ class SAECachePolicy(CachePolicy):
         session_id = self.key_to_session.pop(key, None)
         if session_id is not None:
             keys = self.session_keys.get(session_id)
-            if keys is not None and key in keys:
-                keys.remove(key)
-            if not keys:
-                self.session_keys.pop(session_id, None)
-                self.session_stats.pop(session_id, None)
+            if keys is not None:
+                if key in keys:
+                    keys.remove(key)
+                if not keys:
+                    self.session_keys.pop(session_id, None)
+                    self.session_stats.pop(session_id, None)
         self.evictable_blocks.pop(key, None)
 
     @override
