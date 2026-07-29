@@ -13,8 +13,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, NewType, TypeVar
 import numpy as np
 import torch
 
-from vllm.logger import init_logger
-
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
         OffloadingConnectorStats,
@@ -26,8 +24,6 @@ from vllm.v1.kv_offload.config import OffloadingConfig
 # its KV cache group index, encoded as raw bytes to avoid tuple GC overhead.
 # Use the helper functions below to construct / decompose keys.
 OffloadKey = NewType("OffloadKey", bytes)
-
-logger = init_logger(__name__)
 
 
 def make_offload_key(block_hash: bytes, group_idx: int) -> OffloadKey:
@@ -540,10 +536,6 @@ class OffloadingSpec(ABC):
         return {}
 
     def __init__(self, config: OffloadingConfig):
-        logger.warning(
-            "Initializing OffloadingSpec. This API is experimental and "
-            "subject to change in the future as we iterate the design."
-        )
         self.config = config
         self.extra_config = config.extra_config
         self.replicated_layout: bool = False
