@@ -752,7 +752,7 @@ class TestAudioChunking:
         """
         stereo = np.ones((2, 16000 * 65), dtype=np.float32)
 
-        with pytest.raises(AssertionError, match="expects mono audio"):
+        with pytest.raises(ValueError, match="expects mono audio"):
             split_audio(
                 audio_data=stereo,
                 sample_rate=16000,
