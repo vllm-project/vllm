@@ -9,7 +9,10 @@ import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.distributed import get_dcp_group
+from vllm.distributed import (
+    get_dcp_group,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBaseImpl,
@@ -41,8 +44,25 @@ GLOBAL_TOPK_MASK_MAX_BYTES = 64 * 1024 * 1024  # 64 MB
 
 
 def _is_masked_mha_available(
-    qk_head_dim: int, v_head_dim: int, kv_cache_dtype: str
+    num_heads_total: int,
+    kv_lora_rank: int,
+    qk_nope_head_dim: int,
+    qk_rope_head_dim: int,
+    v_head_dim: int,
+    kv_cache_dtype: str,
 ) -> bool:
+    """Check if masked MHA can ever fire for this model configuration."""
+    if not current_platform.is_device_capability_family(100):
+        return False
+    if (
+        num_heads_total != 128
+        or kv_lora_rank != 512
+        or qk_nope_head_dim != 128
+        or qk_rope_head_dim != 64
+        or v_head_dim != 128
+    ):
+        return False
+    qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
     fa_version = get_flash_attn_version(head_size=qk_head_dim, head_size_v=v_head_dim)
     return fa_version == 4 and not is_quantized_kv_cache(kv_cache_dtype)
 
@@ -99,7 +119,10 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         )
         self.topk_mask_workspace: torch.Tensor | None = None
         if _is_masked_mha_available(
-            self.mla_dims.qk_nope_head_dim + self.mla_dims.qk_rope_head_dim,
+            self.model_config.model_arch_config.total_num_attention_heads,
+            self.mla_dims.kv_lora_rank,
+            self.mla_dims.qk_nope_head_dim,
+            self.mla_dims.qk_rope_head_dim,
             self.mla_dims.v_head_dim,
             vllm_config.cache_config.cache_dtype,
         ):
@@ -448,7 +471,12 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             and (self.qk_rope_head_dim == 64)
         )
         self.masked_mha_available = _is_masked_mha_available(
-            qk_head_dim, v_head_dim, kv_cache_dtype
+            num_heads_total=num_heads * get_tensor_model_parallel_world_size(),
+            kv_lora_rank=kv_lora_rank,
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=qk_rope_head_dim,
+            v_head_dim=v_head_dim,
+            kv_cache_dtype=kv_cache_dtype,
         )
 
     @staticmethod
