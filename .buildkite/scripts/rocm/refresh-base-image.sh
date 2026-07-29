@@ -47,24 +47,53 @@ hash_content_file() {
 
 compute_content_hash() {
     local path=""
-    local file=""
 
     for path in "$@"; do
         if [[ -L "${path}" ]]; then
-            hash_content_file "${path}"
+            hash_content_file "${path}" || return $?
         elif [[ -d "${path}" ]]; then
-            while IFS= read -r -d '' file; do
-                hash_content_file "${file}"
-            done < <(
-                find "${path}" \( -type f -o -type l \) -print0 \
-                    | LC_ALL=C sort -z
-            )
+            hash_content_directory "${path}" || return $?
         elif [[ -f "${path}" ]]; then
-            hash_content_file "${path}"
+            hash_content_file "${path}" || return $?
         else
             printf 'missing:%s\n' "${path}"
         fi
     done | sha256sum | cut -d' ' -f1
+}
+
+list_content_files() {
+    local path="$1"
+
+    find "${path}" \( -type f -o -type l \) -print0 \
+        | LC_ALL=C sort -z
+}
+
+hash_content_directory() {
+    local path="$1"
+    local file=""
+    local hash_status=0
+    local list_fd=""
+    local list_pid=""
+    local list_status=0
+
+    exec {list_fd}< <(list_content_files "${path}")
+    list_pid=$!
+    while IFS= read -r -d '' -u "${list_fd}" file; do
+        if ((hash_status == 0)); then
+            hash_content_file "${file}" || hash_status=$?
+        fi
+    done
+    exec {list_fd}<&-
+
+    wait "${list_pid}" || list_status=$?
+    if ((list_status != 0)); then
+        echo "Error: failed to enumerate content files under ${path}" >&2
+        return "${list_status}"
+    fi
+    if ((hash_status != 0)); then
+        echo "Error: failed to hash a content file under ${path}" >&2
+        return "${hash_status}"
+    fi
 }
 
 clean_docker_tag() {
@@ -88,10 +117,79 @@ extract_arg_default() {
 
 resolve_image_digest() {
     local image_ref="$1"
+    local attempts="${ROCM_IMAGE_DIGEST_ATTEMPTS:-4}"
+    local initial_delay_secs="${ROCM_IMAGE_DIGEST_RETRY_DELAY:-2}"
+    local max_delay_secs="${ROCM_IMAGE_DIGEST_RETRY_MAX_DELAY:-8}"
+    local attempt=0
+    local delay_secs=0
+    local digest=""
+    local inspect_output=""
+    local inspect_status=0
 
-    docker buildx imagetools inspect "${image_ref}" 2>/dev/null \
-        | sed -n -E 's/^Digest:[[:space:]]+//p' \
-        | head -1 || true
+    if [[ "${image_ref}" =~ @(sha256:[0-9a-f]{64})$ ]]; then
+        printf '%s\n' "${BASH_REMATCH[1]}"
+        return 0
+    fi
+
+    if [[ ! "${attempts}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Error: ROCM_IMAGE_DIGEST_ATTEMPTS must be a positive integer" >&2
+        return 1
+    fi
+    if [[ ! "${initial_delay_secs}" =~ ^[0-9]+$ ]]; then
+        echo "Error: ROCM_IMAGE_DIGEST_RETRY_DELAY must be a non-negative integer" >&2
+        return 1
+    fi
+    if [[ ! "${max_delay_secs}" =~ ^[0-9]+$ ]]; then
+        echo "Error: ROCM_IMAGE_DIGEST_RETRY_MAX_DELAY must be a non-negative integer" >&2
+        return 1
+    fi
+
+    delay_secs="${initial_delay_secs}"
+    if ((delay_secs > max_delay_secs)); then
+        delay_secs="${max_delay_secs}"
+    fi
+
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+        inspect_output=""
+        inspect_status=0
+        if inspect_output=$(docker buildx imagetools inspect "${image_ref}" 2>&1); then
+            inspect_status=0
+        else
+            inspect_status=$?
+        fi
+        digest=$(
+            sed -n -E 's/^Digest:[[:space:]]+//p' <<< "${inspect_output}" \
+                | head -1 || true
+        )
+        if ((inspect_status == 0)) \
+            && [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            printf '%s\n' "${digest}"
+            return 0
+        fi
+
+        if ((attempt < attempts)); then
+            printf \
+                'Warning: image digest lookup for %s failed (attempt %d/%d, exit status %d); retrying in %ss\n' \
+                "${image_ref}" "${attempt}" "${attempts}" \
+                "${inspect_status}" "${delay_secs}" >&2
+            sleep "${delay_secs}"
+            delay_secs=$((delay_secs * 2))
+            if ((delay_secs > max_delay_secs)); then
+                delay_secs="${max_delay_secs}"
+            fi
+        fi
+    done
+
+    printf \
+        'Error: failed to resolve image digest for %s after %d attempts (last exit status %d)\n' \
+        "${image_ref}" "${attempts}" "${inspect_status}" >&2
+    if [[ -n "${inspect_output}" ]]; then
+        echo "Last docker buildx imagetools inspect output:" >&2
+        printf '%s\n' "${inspect_output}" >&2
+    else
+        echo "docker buildx imagetools inspect produced no output" >&2
+    fi
+    return 1
 }
 
 resolve_rocm_base_arg_value() {
@@ -339,14 +437,19 @@ compute_base_content_hash() {
     local base_image_digest="$2"
     local content_files="${ROCM_BASE_CONTENT_FILES:-${DEFAULT_ROCM_BASE_CONTENT_FILES}}"
     local content_args="${ROCM_BASE_CONTENT_ARGS:-${DEFAULT_ROCM_BASE_CONTENT_ARGS}}"
+    local content_files_hash=""
     local -a content_paths=()
     local -a content_arg_names=()
 
     read -r -a content_paths <<< "${content_files}"
     read -r -a content_arg_names <<< "${content_args}"
+    if ! content_files_hash=$(compute_content_hash "${content_paths[@]}"); then
+        echo "Failed to hash ROCm base content files" >&2
+        return 1
+    fi
 
     {
-        printf 'content-files-hash:%s\n' "$(compute_content_hash "${content_paths[@]}")"
+        printf 'content-files-hash:%s\n' "${content_files_hash}"
         printf 'dockerfile:%s\n' "${DOCKERFILE}"
         printf 'resolved-build-args:\n'
         hash_rocm_base_arg_values \
@@ -399,16 +502,21 @@ build_base_image() {
         build_suffix="_bk_${BUILDKITE_BUILD_NUMBER}"
     fi
     base_image_arg="$(extract_arg_default BASE_IMAGE)"
-    base_image_digest="$(resolve_image_digest "${base_image_arg}")"
-    if [[ -z "${base_image_digest}" ]]; then
+    if ! base_image_digest="$(resolve_image_digest "${base_image_arg}")"; then
         echo "Error: could not resolve base image digest for ${base_image_arg}" >&2
         echo "Refusing to publish cache metadata for a mutable base tag." >&2
         return 1
     fi
     base_image_pinned="${base_image_arg%@*}@${base_image_digest}"
     read -r -a content_paths <<< "${content_files}"
-    content_files_hash="$(compute_content_hash "${content_paths[@]}")"
-    base_hash=$(compute_base_content_hash "${use_sccache}" "${base_image_digest}")
+    if ! content_files_hash="$(compute_content_hash "${content_paths[@]}")"; then
+        echo "Failed to hash ROCm base metadata content files" >&2
+        return 1
+    fi
+    if ! base_hash=$(compute_base_content_hash "${use_sccache}" "${base_image_digest}"); then
+        echo "Failed to compute ROCm base content hash" >&2
+        return 1
+    fi
     rocm_version="$(rocm_version_from_base_image "${base_image_arg}")"
     triton_arg="$(extract_arg_default TRITON_BRANCH)"
     pytorch_arg="$(extract_arg_default PYTORCH_BRANCH)"
@@ -542,4 +650,6 @@ main() {
     build_base_image
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

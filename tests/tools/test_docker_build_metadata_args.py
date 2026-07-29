@@ -50,12 +50,19 @@ def build_args(args: list[str]) -> dict[str, str]:
     return values
 
 
-def run_ci_bake_shell(
+def run_sourced_shell(
+    script: Path,
     command: str,
     *,
     env: Mapping[str, str | None] | None = None,
-) -> str:
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
     helper_env = os.environ.copy()
+    for key in tuple(helper_env):
+        if key.startswith(("CI_BASE_", "ROCM_IMAGE_DIGEST_")):
+            helper_env.pop(key)
+    for key in ("BASE_IMAGE", "REMOTE_VLLM", "VLLM_REPO", "VLLM_BRANCH"):
+        helper_env.pop(key, None)
     for key, value in (env or {}).items():
         if value is None:
             helper_env.pop(key, None)
@@ -68,15 +75,35 @@ def run_ci_bake_shell(
             "-c",
             f'source "$1"\n{command}',
             "ci-bake-rocm-test",
-            str(CI_BAKE),
+            str(script),
         ],
-        check=True,
+        check=False,
         cwd=REPO_ROOT,
         env=helper_env,
         capture_output=True,
         text=True,
     )
-    return result.stdout
+    if check:
+        result.check_returncode()
+    return result
+
+
+def run_ci_bake_shell(
+    command: str,
+    *,
+    env: Mapping[str, str | None] | None = None,
+) -> str:
+    return run_sourced_shell(CI_BAKE, command, env=env).stdout
+
+
+def write_fake_docker(tmp_path: Path, body: str) -> tuple[Path, Path]:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    count_file = tmp_path / "docker-count"
+    docker = fake_bin / "docker"
+    docker.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + body)
+    docker.chmod(0o755)
+    return fake_bin, count_file
 
 
 def compute_ci_base_hash(
@@ -238,25 +265,27 @@ def test_rocm_ci_base_bake_embeds_content_hash_label() -> None:
 
 
 def test_rocm_ci_base_metadata_inputs_cover_ci_base_files() -> None:
-    ci_bake = (REPO_ROOT / ".buildkite" / "scripts" / "ci-bake-rocm.sh").read_text()
-    default_files = next(
-        line
-        for line in ci_bake.splitlines()
-        if line.startswith("DEFAULT_CI_BASE_CONTENT_FILES=")
+    output = run_ci_bake_shell(
+        'printf "files=%s\\ndockerfile=%s\\n" '
+        '"${DEFAULT_CI_BASE_CONTENT_FILES}" '
+        '"${DEFAULT_CI_BASE_DOCKERFILE}"'
     )
+    defaults = dict(line.split("=", 1) for line in output.splitlines())
+    default_files = set(defaults["files"].split())
 
     for expected in (
+        ".dockerignore",
         "requirements/common.txt",
         "requirements/rocm.txt",
         "requirements/test/rocm.txt",
-        "docker/Dockerfile.rocm",
         "docker/ci-rocm.hcl",
         "docker/docker-bake-rocm.hcl",
         "rust-toolchain.toml",
         "tools/install_protoc.sh",
         ".buildkite/scripts/ci-bake-rocm.sh",
     ):
-        assert expected in ci_bake
+        assert expected in default_files
+    assert defaults["dockerfile"] == "docker/Dockerfile.rocm"
     assert "docker/Dockerfile.rocm_base" not in default_files
 
 
@@ -321,6 +350,138 @@ def test_rocm_content_hash_tracks_relevant_inputs(tmp_path: Path) -> None:
     assert changed_hash != first_hash
 
 
+@pytest.mark.parametrize("script", (CI_BAKE, ROCM_BASE_REFRESH))
+def test_rocm_content_hash_propagates_enumeration_failure(script: Path) -> None:
+    result = run_sourced_shell(
+        script,
+        ('list_content_files() { return 42; }\ncompute_content_hash "tests"'),
+        check=False,
+    )
+
+    assert result.returncode == 42
+    assert "failed to enumerate content files under tests" in result.stderr
+
+
+@pytest.mark.parametrize("script", (CI_BAKE, ROCM_BASE_REFRESH))
+def test_rocm_image_digest_retries_transient_failures(
+    script: Path,
+    tmp_path: Path,
+) -> None:
+    digest = "sha256:" + "a" * 64
+    fake_bin, count_file = write_fake_docker(
+        tmp_path,
+        f"""
+count=0
+if [[ -f "${{FAKE_DOCKER_COUNT_FILE}}" ]]; then
+    read -r count < "${{FAKE_DOCKER_COUNT_FILE}}"
+fi
+count=$((count + 1))
+printf '%s\\n' "${{count}}" > "${{FAKE_DOCKER_COUNT_FILE}}"
+if ((count < 3)); then
+    echo "transient registry failure ${{count}}" >&2
+    exit 42
+fi
+printf 'Name: rocm/example:base\\nDigest: {digest}\\n'
+""",
+    )
+    result = run_sourced_shell(
+        script,
+        'resolve_image_digest "rocm/example:base"',
+        env={
+            "FAKE_DOCKER_COUNT_FILE": str(count_file),
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "ROCM_IMAGE_DIGEST_ATTEMPTS": "4",
+            "ROCM_IMAGE_DIGEST_RETRY_DELAY": "0",
+            "ROCM_IMAGE_DIGEST_RETRY_MAX_DELAY": "0",
+        },
+    )
+
+    assert result.stdout.strip() == digest
+    assert count_file.read_text().strip() == "3"
+    assert "attempt 1/4" in result.stderr
+    assert "attempt 2/4" in result.stderr
+
+
+@pytest.mark.parametrize("script", (CI_BAKE, ROCM_BASE_REFRESH))
+def test_rocm_image_digest_reports_the_final_failure(
+    script: Path,
+    tmp_path: Path,
+) -> None:
+    fake_bin, count_file = write_fake_docker(
+        tmp_path,
+        """
+count=0
+if [[ -f "${FAKE_DOCKER_COUNT_FILE}" ]]; then
+    read -r count < "${FAKE_DOCKER_COUNT_FILE}"
+fi
+count=$((count + 1))
+printf '%s\\n' "${count}" > "${FAKE_DOCKER_COUNT_FILE}"
+echo "registry failure ${count}" >&2
+exit 42
+""",
+    )
+    result = run_sourced_shell(
+        script,
+        'resolve_image_digest "rocm/example:base"',
+        env={
+            "FAKE_DOCKER_COUNT_FILE": str(count_file),
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "ROCM_IMAGE_DIGEST_ATTEMPTS": "2",
+            "ROCM_IMAGE_DIGEST_RETRY_DELAY": "0",
+            "ROCM_IMAGE_DIGEST_RETRY_MAX_DELAY": "0",
+        },
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert count_file.read_text().strip() == "2"
+    assert "after 2 attempts (last exit status 42)" in result.stderr
+    assert "registry failure 2" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("inspect_output", "inspect_status"),
+    [
+        ("Name: rocm/example:base", 0),
+        ("Digest: sha256:not-a-digest", 0),
+        ("Digest: sha256:" + "a" * 64, 42),
+    ],
+)
+def test_rocm_image_digest_rejects_unreliable_inspect_results(
+    inspect_output: str,
+    inspect_status: int,
+) -> None:
+    result = run_sourced_shell(
+        CI_BAKE,
+        (
+            "docker() {\n"
+            f"  printf '%s\\n' {shlex.quote(inspect_output)}\n"
+            f"  return {inspect_status}\n"
+            "}\n"
+            'resolve_image_digest "rocm/example:base"'
+        ),
+        env={"ROCM_IMAGE_DIGEST_ATTEMPTS": "1"},
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert inspect_output in result.stderr
+
+
+def test_rocm_image_digest_accepts_an_already_pinned_ref_without_a_lookup() -> None:
+    digest = "sha256:" + "a" * 64
+    result = run_sourced_shell(
+        CI_BAKE,
+        (
+            "docker() { echo unexpected-docker-call >&2; return 42; }\n"
+            f'resolve_image_digest "rocm/example:base@{digest}"'
+        ),
+    )
+
+    assert result.stdout.strip() == digest
+    assert result.stderr == ""
+
+
 def test_rocm_ci_base_local_hash_ignores_checkout_coordinates(
     tmp_path: Path,
 ) -> None:
@@ -353,6 +514,16 @@ def test_rocm_ci_base_local_hash_ignores_checkout_coordinates(
         content_file,
         env=inputs | {"REMOTE_VLLM": "1"},
     )
+    relocated_remote_hash = compute_ci_base_hash(
+        dockerfile,
+        content_file,
+        env=inputs
+        | {
+            "REMOTE_VLLM": "1",
+            "VLLM_REPO": "https://github.com/fork/vllm.git",
+            "VLLM_BRANCH": "second-commit",
+        },
+    )
     changed_arg_hash = compute_ci_base_hash(
         dockerfile,
         content_file,
@@ -367,6 +538,7 @@ def test_rocm_ci_base_local_hash_ignores_checkout_coordinates(
 
     assert relocated_hash == first_hash
     assert remote_hash != first_hash
+    assert relocated_remote_hash != remote_hash
     assert changed_arg_hash != first_hash
     assert changed_file_hash != first_hash
 
@@ -406,25 +578,54 @@ def test_rocm_build_uses_the_base_image_digest_that_was_hashed(
     dockerfile.write_text(
         "ARG BASE_IMAGE=rocm/example:base\nFROM ${BASE_IMAGE} AS base\n"
     )
+    content_file = tmp_path / "content.txt"
+    content_file.write_text("cache input\n")
     bake_file = docker_dir / "docker-bake-rocm.hcl"
     bake_file.write_text("")
     override_file = tmp_path / "rocm-arg-override.hcl"
     digest = "sha256:" + "a" * 64
+    moving_digest = "sha256:" + "b" * 64
+    fake_bin, count_file = write_fake_docker(
+        tmp_path,
+        f"""
+count=0
+if [[ -f "${{FAKE_DOCKER_COUNT_FILE}}" ]]; then
+    read -r count < "${{FAKE_DOCKER_COUNT_FILE}}"
+fi
+count=$((count + 1))
+printf '%s\\n' "${{count}}" > "${{FAKE_DOCKER_COUNT_FILE}}"
+if ((count == 1)); then
+    printf 'Digest: {digest}\\n'
+else
+    printf 'Digest: {moving_digest}\\n'
+fi
+""",
+    )
 
     output = run_ci_bake_shell(
         (
             f'CI_BASE_DOCKERFILE="{dockerfile}"\n'
+            f'CI_BASE_CONTENT_FILES="{content_file}"\n'
             f'VLLM_BAKE_FILE="{bake_file}"\n'
             f'ROCM_ARG_OVERRIDE_PATH="{override_file}"\n'
             'CI_BASE_DOCKERFILE_STAGES="base"\n'
-            f'resolve_image_digest() {{ printf "%s\\n" "{digest}"; }}\n'
             "prime_base_image_digest_cache >/dev/null\n"
+            f'hash_dockerfile_arg_values "{dockerfile}" BASE_IMAGE\n'
+            "ci_base_metadata_pairs\n"
             "write_rocm_build_arg_override >/dev/null\n"
             f'cat "{override_file}"'
         ),
+        env={
+            "FAKE_DOCKER_COUNT_FILE": str(count_file),
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        },
     )
 
+    assert count_file.read_text().strip() == "1"
+    assert f"arg:BASE_IMAGE.digest={digest}" in output
+    assert f"vllm.rocm.base_image_digest\t{digest}" in output
     assert f'BASE_IMAGE = "rocm/example:base@{digest}"' in output
+    assert moving_digest not in output
 
 
 def test_rocm_base_refresh_builds_from_its_resolved_digest() -> None:
@@ -531,6 +732,8 @@ def test_rocm_ci_base_stable_cache_is_read_only_in_bake() -> None:
 
 
 def test_rocm_ci_base_finds_an_exact_stable_image_after_a_stale_primary() -> None:
+    digest = "sha256:" + "a" * 64
+    stable_ref = f"rocm/example:stable@{digest}"
     output = run_ci_bake_shell(
         (
             'CI_BASE_CONTENT_HASH="expected"\n'
@@ -540,21 +743,91 @@ def test_rocm_ci_base_finds_an_exact_stable_image_after_a_stale_primary() -> Non
             'CI_BASE_IMAGE_TAG_CONTENT_EXTRA="rocm/example:content"\n'
             'CI_BASE_STABLE_CACHE_REF="rocm/example:stable"\n'
             "remote_image_exists() { return 0; }\n"
+            f'resolve_image_digest() {{ printf "%s\\n" "{digest}"; }}\n'
             "get_remote_image_label() {\n"
-            '  if [[ "$1" == "rocm/example:stable" ]]; then\n'
+            f'  if [[ "$1" == "{stable_ref}" ]]; then\n'
             '    printf "expected\\n"\n'
             "  else\n"
             '    printf "stale\\n"\n'
             "  fi\n"
             "}\n"
             "remote_ci_base_metadata_is_current() {\n"
-            '  [[ "$1" == "rocm/example:stable" ]]\n'
+            f'  [[ "$1" == "{stable_ref}" ]]\n'
             "}\n"
             "find_matching_ci_base_ref"
         ),
     )
 
-    assert output.strip() == "rocm/example:stable"
+    assert output.strip() == stable_ref
+
+
+def test_rocm_ci_base_reads_multiarch_labels_from_a_pinned_ref(
+    tmp_path: Path,
+) -> None:
+    root_digest = "sha256:" + "a" * 64
+    child_digest = "sha256:" + "b" * 64
+    root_ref = f"rocm/example:cache@{root_digest}"
+    child_ref = f"rocm/example:cache@{child_digest}"
+    fake_bin, call_log = write_fake_docker(
+        tmp_path,
+        f"""
+printf '%s\\n' "$*" >> "${{FAKE_DOCKER_COUNT_FILE}}"
+case "${{4:-}}" in
+    "{root_ref}")
+        printf '%s\\n' \
+            '{{"manifests":[{{"digest":"{child_digest}","platform":{{"os":"linux","architecture":"amd64"}}}}]}}'
+        ;;
+    "{child_ref}")
+        printf '%s\\n' \
+            '{{"annotations":{{"vllm.ci_base.content_hash":"expected"}}}}'
+        ;;
+    *)
+        echo "unexpected docker ref: ${{4:-}}" >&2
+        exit 42
+        ;;
+esac
+""",
+    )
+    output = run_ci_bake_shell(
+        (f'get_remote_image_label "{root_ref}" "vllm.ci_base.content_hash"'),
+        env={
+            "FAKE_DOCKER_COUNT_FILE": str(call_log),
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        },
+    )
+    calls = call_log.read_text()
+
+    assert output.strip() == "expected"
+    assert child_ref in calls
+    assert f"{root_ref}@{child_digest}" not in calls
+
+
+def test_rocm_ci_base_retags_from_a_validated_immutable_ref() -> None:
+    digest = "sha256:" + "a" * 64
+    immutable_ref = f"rocm/example:primary@{digest}"
+    output = run_ci_bake_shell(
+        (
+            'TARGET="ci-base-rocm-ci"\n'
+            'CI_BASE_CONTENT_HASH="expected"\n'
+            'IMAGE_TAG="rocm/example:primary"\n'
+            'CI_BASE_IMAGE_TAG="rocm/example:primary"\n'
+            'CI_BASE_IMAGE_TAG_CONTENT_EXTRA="rocm/example:content"\n'
+            "remote_image_exists() { return 0; }\n"
+            f'resolve_image_digest() {{ printf "%s\\n" "{digest}"; }}\n'
+            "get_remote_image_label() {\n"
+            f'  [[ "$1" == "{immutable_ref}" ]] '
+            '&& printf "expected\\n" || printf "stale\\n"\n'
+            "}\n"
+            "remote_ci_base_metadata_is_current() {\n"
+            f'  [[ "$1" == "{immutable_ref}" ]]\n'
+            "}\n"
+            'docker() { printf "docker:%s\\n" "$*"; }\n'
+            "maybe_skip_existing_image"
+        ),
+    )
+
+    assert f"create -t rocm/example:primary {immutable_ref}" in output
+    assert f"create -t rocm/example:content {immutable_ref}" in output
 
 
 def test_rocm_ci_base_refresh_never_writes_its_stable_cache_source() -> None:
@@ -575,6 +848,45 @@ def test_rocm_ci_base_refresh_never_writes_its_stable_cache_source() -> None:
     assert "create -t rocm/example:commit rocm/example:stable" in output
     assert "create -t rocm/example:content rocm/example:stable" in output
     assert "create -t rocm/example:stable" not in output
+
+
+def test_rocm_ci_base_refreshes_a_matching_hash_with_stale_metadata() -> None:
+    output = run_ci_bake_shell(
+        (
+            'CI_BASE_CONTENT_HASH="expected"\n'
+            'IMAGE_TAG="rocm/example:commit"\n'
+            'CI_BASE_IMAGE_TAG="rocm/example:commit"\n'
+            'get_remote_image_label() { printf "expected\\n"; }\n'
+            "remote_ci_base_metadata_is_current() { return 1; }\n"
+            'docker() { printf "docker:%s\\n" "$*"; }\n'
+            'refresh_ci_base_tags_from_ref "rocm/example:source"'
+        ),
+    )
+
+    assert (
+        "docker:buildx imagetools create -t rocm/example:commit rocm/example:source"
+    ) in output
+
+
+def test_rocm_ci_base_refresh_does_not_mask_a_failed_retag() -> None:
+    result = run_sourced_shell(
+        CI_BAKE,
+        (
+            'CI_BASE_CONTENT_HASH="expected"\n'
+            'IMAGE_TAG="rocm/example:commit"\n'
+            'CI_BASE_IMAGE_TAG="rocm/example:commit"\n'
+            'CI_BASE_IMAGE_TAG_CONTENT_EXTRA="rocm/example:content"\n'
+            'get_remote_image_label() { printf "stale\\n"; }\n'
+            'docker() { printf "docker:%s\\n" "$*"; return 42; }\n'
+            'refresh_ci_base_tags_from_ref "rocm/example:source"'
+        ),
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "create -t rocm/example:commit" in result.stdout
+    assert "create -t rocm/example:content" not in result.stdout
+    assert "Failed to update ci_base tag rocm/example:commit" in result.stderr
 
 
 def test_rocm_ci_base_uses_local_sparse_inputs() -> None:

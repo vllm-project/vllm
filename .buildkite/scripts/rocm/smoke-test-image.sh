@@ -18,14 +18,25 @@ docker run --rm --network=none --entrypoint /bin/bash "${image_ref}" -ec '
   rustup --version
   protoc --version
 
+  if ! find /opt/rocshmem \( -type f -o -type l \) -print -quit | grep -q .; then
+    echo Missing ROCShmem runtime files >&2
+    exit 1
+  fi
+
   if ! command -v amd-smi >/dev/null 2>&1 && ! command -v rocminfo >/dev/null 2>&1; then
     echo No ROCm CLI found in image >&2
     exit 1
   fi
 
   python3 - <<PY
+import importlib.util
+
 import torch
 import vllm
+
+for module_name in ("deep_ep", "nixl"):
+    if importlib.util.find_spec(module_name) is None:
+        raise RuntimeError(f"Missing Python module: {module_name}")
 
 print(torch.__version__)
 print(vllm.__version__)
