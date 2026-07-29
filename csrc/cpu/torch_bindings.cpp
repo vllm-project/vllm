@@ -147,7 +147,7 @@ at::Tensor causal_conv1d_fwd_cpu(
 at::Tensor causal_conv1d_update_cpu(
     const at::Tensor& x, const at::Tensor& conv_states,
     const at::Tensor& weight, const std::optional<at::Tensor>& bias,
-    bool silu_activation, const std::optional<at::Tensor>& cache_seqlens,
+    bool silu_activation, const std::optional<at::Tensor>& num_accepted_tokens,
     const std::optional<at::Tensor>& conv_state_indices, int64_t pad_slot_id,
     bool is_vnni);
 
@@ -163,7 +163,8 @@ torch::Tensor get_scheduler_metadata(
     const torch::Tensor& query_start_loc, const bool casual,
     const int64_t window_size, const std::string& isa_hint,
     const bool enable_kv_split,
-    const std::optional<torch::Tensor>& dynamic_causal);
+    const std::optional<torch::Tensor>& dynamic_causal,
+    const std::string& kv_cache_dtype);
 
 void cpu_attn_reshape_and_cache(const torch::Tensor& key,
                                 const torch::Tensor& value,
@@ -206,6 +207,20 @@ void cpu_fused_moe(torch::Tensor& output, const torch::Tensor& input,
                    const torch::Tensor& topk_weights,
                    const torch::Tensor& topk_id, const bool skip_weighted,
                    const std::string& act, const std::string& isa);
+
+void prepack_moe_weight_int8(const torch::Tensor& weight,
+                             torch::Tensor& packed_weight,
+                             const std::string& isa);
+
+void cpu_fused_moe_int8(torch::Tensor& output, const torch::Tensor& input,
+                        const torch::Tensor& w13, const torch::Tensor& w2,
+                        const torch::Tensor& w13_scale,
+                        const torch::Tensor& w2_scale,
+                        const std::optional<torch::Tensor>& w13_bias,
+                        const std::optional<torch::Tensor>& w2_bias,
+                        const torch::Tensor& topk_weights,
+                        const torch::Tensor& topk_id, const bool skip_weighted,
+                        const std::string& act, const std::string& isa);
 
 void compute_slot_mapping_kernel_impl(const torch::Tensor query_start_loc,
                                       const torch::Tensor positions,
@@ -502,7 +517,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "causal_conv1d_update_cpu(Tensor x, Tensor(a!) conv_states, Tensor "
       "weight, Tensor? bias, bool silu_activation,"
-      "Tensor? cache_seqlens, Tensor? conv_state_indices, int pad_slot_id, "
+      "Tensor? num_accepted_tokens, Tensor? conv_state_indices, int "
+      "pad_slot_id, "
       "bool is_vnni) -> Tensor");
   ops.impl("causal_conv1d_update_cpu", torch::kCPU, &causal_conv1d_update_cpu);
 #endif
@@ -562,7 +578,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "get_scheduler_metadata(int num_req, int num_heads_q, int num_heads_kv, "
       "int head_dim, Tensor seq_lens, ScalarType dtype, Tensor "
       "query_start_loc, bool casual, int window_size, str isa_hint, bool "
-      "enable_kv_split, Tensor? dynamic_causal) -> Tensor",
+      "enable_kv_split, Tensor? dynamic_causal, "
+      "str kv_cache_dtype=\"auto\") -> Tensor",
       &get_scheduler_metadata);
   ops.def(
       "cpu_attn_reshape_and_cache(Tensor key, Tensor value, Tensor(a2!) "
@@ -596,8 +613,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 #endif
 
   // fused moe
-#if defined(__AVX512F__) || \
-    (defined(__aarch64__) && !defined(__APPLE__) && defined(ARM_BF16_SUPPORT))
+#if defined(__AVX512F__) || (defined(ARM_BF16_SUPPORT) && !defined(__APPLE__))
   ops.def(
       "prepack_moe_weight(Tensor weight, Tensor(a1!) packed_weight, str isa) "
       "-> ()");
@@ -608,7 +624,22 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "bool skip_weighted, "
       "str act, str isa) -> ()");
   ops.impl("cpu_fused_moe", torch::kCPU, &cpu_fused_moe);
-#endif
+#endif  // #if defined(__AVX512F__) || (defined(ARM_BF16_SUPPORT) &&
+        // !defined(__APPLE__))
+#if defined(ARM_I8MM_SUPPORT) && defined(ARM_BF16_SUPPORT) && \
+    !defined(__APPLE__)
+  ops.def(
+      "prepack_moe_weight_int8(Tensor weight, Tensor(a1!) packed_weight, "
+      "str isa) -> ()");
+  ops.impl("prepack_moe_weight_int8", torch::kCPU, &prepack_moe_weight_int8);
+  ops.def(
+      "cpu_fused_moe_int8(Tensor(a0!) output, Tensor input, Tensor w13, "
+      "Tensor w2, Tensor w13_scale, Tensor w2_scale, Tensor? w13_bias, "
+      "Tensor? w2_bias, Tensor topk_weights, Tensor topk_id, bool "
+      "skip_weighted, str act, str isa) -> ()");
+  ops.impl("cpu_fused_moe_int8", torch::kCPU, &cpu_fused_moe_int8);
+#endif  // #if defined(ARM_I8MM_SUPPORT) && defined(ARM_BF16_SUPPORT) &&
+        // !defined(__APPLE__)
   ops.def(
       "mla_decode_kvcache("
       "   Tensor! out, Tensor query, Tensor kv_cache,"

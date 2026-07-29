@@ -26,6 +26,12 @@ Block Transfer Flow (happy path)
 
 1. Client sends FetchMsg with a kv_request_id and lists of
    block keys + remote indexes where it wants the data written.
+   A request may run several lookup→fetch rounds; symmetric-P2P
+   messages carry ROUND_SEQ so each round's supply, demand, and
+   completion stay isolated. The terminal empty FetchMsg is the
+   server-side "request finished" signal for the id: parked
+   LookupMsg batches are popped and ``cb.finish_request`` fires on
+   each.
 2. Server matches requested blocks against locally stored blocks:
    - Blocks already available are transferred immediately via RDMA.
    - Blocks not yet available are recorded as "demanded" and
@@ -119,6 +125,9 @@ class ConnectMsg:
         BLOCK_LEN: Size in bytes of each block (must match between peers).
         CONFIG_FINGERPRINT: SHA-256 prefix of the model configuration.
             Peers with different fingerprints are incompatible.
+        HASH_SEED: The peer's PYTHONHASHSEED. Block hashes chain from a seed
+            derived from it, so peers with different values compute different
+            hashes for identical content and must not exchange blocks.
     """
 
     TYPE = "connect"
@@ -128,6 +137,7 @@ class ConnectMsg:
     NUM_BLOCKS = "num_blocks"
     BLOCK_LEN = "block_len"
     CONFIG_FINGERPRINT = "config_fingerprint"
+    HASH_SEED = "hash_seed"
 
     @staticmethod
     def validate(msg: dict) -> None:
@@ -137,6 +147,7 @@ class ConnectMsg:
         _require_non_neg_int(msg, ConnectMsg.BASE_ADDR)
         _require_pos_int(msg, ConnectMsg.NUM_BLOCKS)
         _require_pos_int(msg, ConnectMsg.BLOCK_LEN)
+        _require(msg, ConnectMsg.HASH_SEED, str)
 
 
 class ConnectAckMsg:
@@ -165,35 +176,107 @@ class DisconnectMsg:
 
 
 class FetchMsg:
-    """Client → Server: request blocks by key.
+    """Client → Server: request blocks for one lookup round.
+
+    A non-empty fetch closes only its round. The terminal empty FetchMsg
+    (``KEYS`` and ``BLOCK_INDEXES`` both empty) is the "request
+    finished" signal: the server pops parked LookupMsg batches, calls
+    ``cb.finish_request`` on each, and drains any leftover supply.
 
     Fields:
         KV_REQUEST_ID: Identifies this block transfer request.
-        BLOCK_HASHES: List of block keys (OffloadKey bytes).
-        BLOCK_INDEXES: List of remote block indexes (same length as BLOCK_HASHES).
+        KEYS: List of block keys (OffloadKey bytes). May be empty.
+        BLOCK_INDEXES: List of remote block indexes (same length as KEYS).
+        ROUND_SEQ: Lookup round this fetch closes. PD clients never probe
+            and stay on their single round 0.
     """
 
     TYPE = "fetch"
     KV_REQUEST_ID = "kv_request_id"
-    BLOCK_HASHES = "block_hashes"
+    KEYS = "keys"
     BLOCK_INDEXES = "block_indexes"
+    ROUND_SEQ = "round_seq"
 
     @staticmethod
     def validate(msg: dict) -> None:
         """Raise ValueError if any field has an invalid type or value."""
         _require(msg, FetchMsg.KV_REQUEST_ID, str)
-        _require_list(msg, FetchMsg.BLOCK_HASHES)
+        _require_non_neg_int(msg, FetchMsg.ROUND_SEQ)
+        _require_list(msg, FetchMsg.KEYS)
         _require_list(msg, FetchMsg.BLOCK_INDEXES)
-        hashes = msg[FetchMsg.BLOCK_HASHES]
+        keys = msg[FetchMsg.KEYS]
         indexes = msg[FetchMsg.BLOCK_INDEXES]
-        if len(hashes) != len(indexes):
+        if len(keys) != len(indexes):
             raise ValueError(
-                f"block_hashes/block_indexes length mismatch: "
-                f"{len(hashes)} vs {len(indexes)}"
+                f"keys/block_indexes length mismatch: {len(keys)} vs {len(indexes)}"
             )
         for idx in indexes:
             if not isinstance(idx, int) or idx < 0:
                 raise ValueError(f"block_indexes: invalid index {idx!r}")
+
+
+class LookupMsg:
+    """Client → Server: probe which block keys the peer holds.
+
+    Sent on the consumer side under symmetric P2P (do_p2p_fetch=true)
+    after the consumer has aggregated per-block lookups across a
+    scheduler step. The producer replies with one or more LookupRespMsg
+    covering the requested keys.
+
+    Fields:
+        KV_REQUEST_ID: Identifies this lookup transaction.
+        KEYS: List of block keys (OffloadKey bytes) to probe.
+        ROUND_SEQ: Lookup round these probes belong to; pinned supply is
+            parked under it for that round's fetch.
+    """
+
+    TYPE = "lookup"
+    KV_REQUEST_ID = "kv_request_id"
+    KEYS = "keys"
+    ROUND_SEQ = "round_seq"
+
+    @staticmethod
+    def validate(msg: dict) -> None:
+        """Raise ValueError if any field has an invalid type or value."""
+        _require(msg, LookupMsg.KV_REQUEST_ID, str)
+        _require_list(msg, LookupMsg.KEYS)
+        _require_non_neg_int(msg, LookupMsg.ROUND_SEQ)
+
+
+class LookupRespMsg:
+    """Server → Client: per-key hit/miss answer for a prior LookupMsg.
+
+    Carries two parallel arrays of equal length so each (key,
+    hit) pair is self-describing. The producer is free to split or
+    coalesce responses across multiple LookupMsgs for the same
+    KV_REQUEST_ID — the consumer matches each pair back to its
+    pending entry by (KV_REQUEST_ID, key).
+
+    Fields:
+        KV_REQUEST_ID: The lookup transaction this responds to.
+        KEYS: List of block keys answered by this message.
+        HITS: Parallel list of bools — True if the producer holds the
+            corresponding block, False otherwise.
+    """
+
+    TYPE = "lookup_resp"
+    KV_REQUEST_ID = "kv_request_id"
+    KEYS = "keys"
+    HITS = "hits"
+
+    @staticmethod
+    def validate(msg: dict) -> None:
+        """Raise ValueError if any field has an invalid type or value."""
+        _require(msg, LookupRespMsg.KV_REQUEST_ID, str)
+        _require_list(msg, LookupRespMsg.KEYS)
+        _require_list(msg, LookupRespMsg.HITS)
+        keys = msg[LookupRespMsg.KEYS]
+        hits = msg[LookupRespMsg.HITS]
+        if len(keys) != len(hits):
+            raise ValueError(f"keys/hits length mismatch: {len(keys)} vs {len(hits)}")
+        for hit in hits:
+            if not isinstance(hit, bool):
+                raise ValueError(f"hits: invalid value {hit!r}")
 
 
 class TransferDoneMsg:
@@ -202,17 +285,22 @@ class TransferDoneMsg:
     Fields:
         KV_REQUEST_ID: The request that completed.
         SUCCESS: Whether the transfer completed successfully.
+        ROUND_SEQ: The fetch round that completed. Several loads can be
+            in flight per id (the scheduler submits loads incrementally),
+            so completions are matched by round.
     """
 
     TYPE = "transfer_done"
     KV_REQUEST_ID = "kv_request_id"
     SUCCESS = "success"
+    ROUND_SEQ = "round_seq"
 
     @staticmethod
     def validate(msg: dict) -> None:
         """Raise ValueError if any field has an invalid type or value."""
         _require(msg, TransferDoneMsg.KV_REQUEST_ID, str)
         _require(msg, TransferDoneMsg.SUCCESS, bool)
+        _require_non_neg_int(msg, TransferDoneMsg.ROUND_SEQ)
 
 
 class AbortFetchMsg:
@@ -220,15 +308,18 @@ class AbortFetchMsg:
 
     Fields:
         KV_REQUEST_ID: The request to cancel.
+        ROUND_SEQ: The fetch round to cancel.
     """
 
     TYPE = "abort_fetch"
     KV_REQUEST_ID = "kv_request_id"
+    ROUND_SEQ = "round_seq"
 
     @staticmethod
     def validate(msg: dict) -> None:
         """Raise ValueError if any field has an invalid type or value."""
         _require(msg, AbortFetchMsg.KV_REQUEST_ID, str)
+        _require_non_neg_int(msg, AbortFetchMsg.ROUND_SEQ)
 
 
 class AbortAckMsg:
@@ -236,12 +327,15 @@ class AbortAckMsg:
 
     Fields:
         KV_REQUEST_ID: The request that was cancelled.
+        ROUND_SEQ: The round that was cancelled; echoes AbortFetchMsg.
     """
 
     TYPE = "abort_ack"
     KV_REQUEST_ID = "kv_request_id"
+    ROUND_SEQ = "round_seq"
 
     @staticmethod
     def validate(msg: dict) -> None:
         """Raise ValueError if any field has an invalid type or value."""
         _require(msg, AbortAckMsg.KV_REQUEST_ID, str)
+        _require_non_neg_int(msg, AbortAckMsg.ROUND_SEQ)
