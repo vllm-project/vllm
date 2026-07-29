@@ -6,11 +6,6 @@ import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
-    _AR_RESIDUAL_RMS_NORM,
-    _can_use_flashinfer,
-    flashinfer_trtllm_fused_allreduce_norm,
-)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.utils.torch_utils import aux_stream, current_stream
 
@@ -224,6 +219,12 @@ class LatentMoERunner(MoERunner):
         norm: RMSNorm,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """All-reduce + add residual + (standard) RMSNorm, fused via flashinfer."""
+        from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
+            _AR_RESIDUAL_RMS_NORM,
+            _can_use_flashinfer,
+            flashinfer_trtllm_fused_allreduce_norm,
+        )
+
         if self.moe_config.tp_size == 1:
             return norm(hidden_states)
 
