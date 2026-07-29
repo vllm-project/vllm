@@ -619,6 +619,60 @@ def test_writer_loop_drains_deferred_push_inbox():
     assert w.start_push_calls[0][0] == "req-retry"
 
 
+def _eviction_worker(engine_ttl: float) -> NixlPushConnectorWorker:
+    """A push worker wired to drive the base ``_ensure_handshake`` eviction
+    path (``_evict_stale_engines`` + ``_cleanup_remote_engine``)."""
+    w = _StubWriterWorker.fresh()
+    w._engine_ttl = engine_ttl
+    w._engine_last_active = {}
+    w._engine_clock_offset = {}
+    w._handshake_lock = threading.RLock()
+    # _cleanup_remote_engine touches these when reaping an engine.
+    w.nixl_wrapper = MagicMock()
+    w.dst_xfer_side_handles = {}
+    w.kv_caches_base_addr = {}
+    w.dst_num_blocks = {}
+    w.tp_mappings = {}
+    w.transfer_topo = None
+    w._logical_to_kernel_block_ids = lambda blocks, ratio: blocks
+    w.writes = []
+    w._xfer_blocks_for_req = lambda req_id, meta: w.writes.append(req_id)
+    return w
+
+
+def test_active_push_refreshes_engine_last_active():
+    """The base ``_ensure_handshake`` refreshes liveness only on a new
+    handshake, so an active push to an already-connected engine must refresh
+    ``_engine_last_active`` itself or it is reaped mid-stream (S1)."""
+    w = _eviction_worker(engine_ttl=3600.0)
+    # Already-connected D -> _ensure_handshake returns None, WRITE runs inline.
+    w._remote_agents["decode-engine"] = {(0, 0): "agent-decode"}
+    stale = time.perf_counter() - 5.0
+    w._engine_last_active["decode-engine"] = stale
+
+    _real_do_start_push_kv(w, "req", ([1, 2, 3],), _registration_data("req"))
+
+    assert w._engine_last_active["decode-engine"] > stale
+    assert w.writes == ["req"]
+
+
+def test_stale_engine_evicted_on_push():
+    """A push drives ``_ensure_handshake`` -> ``_evict_stale_engines``, so a D
+    engine silent past its TTL is reaped -- no _remote_agents / NIXL agent leak
+    across D scale up/down (S1)."""
+    w = _eviction_worker(engine_ttl=30.0)
+    w._remote_agents["D-old"] = {(0, 0): "agent-D-old"}
+    w._engine_last_active["D-old"] = time.perf_counter() - 10_000.0
+    # The engine being pushed to is already connected.
+    w._remote_agents["decode-engine"] = {(0, 0): "agent-decode"}
+
+    _real_do_start_push_kv(w, "req", ([1, 2, 3],), _registration_data("req"))
+
+    assert "D-old" not in w._remote_agents
+    assert "D-old" not in w._engine_last_active
+    w.nixl_wrapper.remove_remote_agent.assert_called_once_with("agent-D-old")
+
+
 class TestPushWriterNotifs:
     def test_get_new_notifs_processes_forwarded_completion_notif(self):
         """Non-PUSH_REG notifs forwarded by the writer thread are drained
