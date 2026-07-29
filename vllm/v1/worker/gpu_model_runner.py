@@ -996,9 +996,16 @@ class GPUModelRunner(
             return
 
         kv_caches = getattr(self, "kv_caches", [])
-        for cache_tensor in kv_caches:
-            if cache_tensor is not None:
-                cache_tensor.zero_()
+        for cache_entry in kv_caches:
+            if cache_entry is None:
+                continue
+            # Hybrid models (Mamba, DeltaNet) store per-layer state as a
+            # list of tensors rather than a single tensor.
+            if isinstance(cache_entry, list):
+                for t in cache_entry:
+                    t.zero_()
+            else:
+                cache_entry.zero_()
 
         k_attr_names = ("_k_scale", "k_scale")
         v_attr_names = ("_v_scale", "v_scale")
@@ -6062,7 +6069,13 @@ class GPUModelRunner(
                     num_reqs=num_reqs_padded,
                     max_query_len=max_query_len,
                     ubatch_slices=(ubatch_slices_padded if pad_attn else ubatch_slices),
-                    for_cudagraph_capture=is_graph_capturing,
+                    # FULL replay reads capture-time metadata buffers. Re-stage them
+                    # from the zeroed dummy block tables instead of retaining state
+                    # indices from the previous real batch.
+                    for_cudagraph_capture=(
+                        is_graph_capturing
+                        or cudagraph_runtime_mode == CUDAGraphMode.FULL
+                    ),
                     slot_mappings=slot_mappings_by_group,
                     use_spec_decode=self.speculative_config is not None,
                 )
