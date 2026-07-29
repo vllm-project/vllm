@@ -1,12 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Low-latency routed all-to-all prepare/finalize for the batched Triton MoE.
-
-Routes each (token, expert) to the rank that owns the expert, into the
-[E_local, max_num_tokens, K] batched format, via fixed-capacity
-all_to_all_single collectives. Tokens over the per-rank capacity are dropped.
-Linear expert placement: expert e lives on rank e // num_local_experts.
-"""
+"""Low-latency routed all-to-all prepare/finalize for the batched Triton MoE."""
 
 import torch
 
@@ -30,9 +24,7 @@ class NaiveLowLatencyPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         is_sequence_parallel: bool = False,
     ) -> None:
         super().__init__()
-        # Per-rank capacity: batched buffer token dim and per-dest send capacity.
-        # Not scaled by world size; overflow tokens are dropped.
-        self.cap = max_num_tokens
+        self.max_num_tokens = max_num_tokens
         self.num_local_experts = num_local_experts
         self._num_dispatchers = num_dispatchers
         self.rank = rank
@@ -44,7 +36,7 @@ class NaiveLowLatencyPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         return mk.FusedMoEActivationFormat.BatchedExperts
 
     def max_num_tokens_per_rank(self) -> int | None:
-        return self.cap
+        return self.max_num_tokens
 
     def topk_indices_dtype(self) -> torch.dtype | None:
         return None
@@ -52,9 +44,14 @@ class NaiveLowLatencyPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     def num_dispatchers(self) -> int:
         return self._num_dispatchers
 
+    def capacities(self, topk: int) -> tuple[int, int, int]:
+        """Returns token slots per rank, expert slots per token, rows per expert."""
+        tok_cap = self.max_num_tokens
+        slots_per_token = min(topk, self.num_local_experts)
+        expert_cap = self.max_num_tokens * self._num_dispatchers
+        return tok_cap, slots_per_token, expert_cap
+
     def output_is_reduced(self) -> bool:
-        # finalize() returns this rank's fully-combined tokens; no further
-        # cross-rank reduction is needed (same as DeepEP-LL).
         return True
 
     def prepare(
@@ -77,11 +74,15 @@ class NaiveLowLatencyPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         assert comm is not None
         world = self._num_dispatchers
         e_local = self.num_local_experts
-        cap = self.cap
         h = a1.size(1)
         num_tokens = a1.size(0)
         topk = topk_ids.size(1)
         dev = a1.device
+
+        assert num_tokens <= self.max_num_tokens, (
+            f"{num_tokens} tokens exceeds max_num_tokens={self.max_num_tokens}"
+        )
+        cap, slots, expert_cap = self.capacities(topk)
 
         if apply_router_weight_on_input:
             assert topk == 1, (
@@ -98,55 +99,74 @@ class NaiveLowLatencyPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             flat_weight = torch.ones_like(flat_weight)
         dest = torch.div(flat_expert, e_local, rounding_mode="floor")
 
-        # Fixed-capacity send buffers: one [cap] block per dest rank.
-        send_x = torch.zeros((world, cap, h), dtype=a1.dtype, device=dev)
-        send_eloc = torch.full((world, cap), -1, dtype=torch.int64, device=dev)
-        send_meta = torch.full((world, cap), -1, dtype=torch.int64, device=dev)
-        send_cnt = torch.zeros(world, dtype=torch.int64, device=dev)
-        for r in range(world):
-            idx = (dest == r).nonzero(as_tuple=True)[0][:cap]
-            n = idx.numel()
-            if n == 0:
-                continue
-            send_cnt[r] = n
-            send_x[r, :n] = a1.index_select(0, flat_token[idx])
-            send_eloc[r, :n] = flat_expert[idx] - r * e_local
-            send_meta[r, :n] = idx
+        # deduplicated (dest, token) pairs: a token goes to a rank once with its
+        # local expert ids as metadata, so send_x stays token-sized, not topk-sized.
+        order = torch.argsort(dest * (num_tokens + 1) + flat_token)
+        d_sorted, t_sorted = dest[order], flat_token[order]
+        new_slot = torch.ones_like(t_sorted, dtype=torch.bool)
+        new_slot[1:] = (d_sorted[1:] != d_sorted[:-1]) | (t_sorted[1:] != t_sorted[:-1])
+        slot_of_pair = new_slot.cumsum(0) - 1
+        uniq_dest = d_sorted[new_slot]
+        uniq_token = t_sorted[new_slot]
+        base = torch.zeros(world + 1, dtype=torch.int64, device=dev)
+        base[1:] = torch.bincount(uniq_dest, minlength=world).cumsum(0)
+        send_cnt = base[1:] - base[:-1]
+        local_slot = torch.arange(uniq_dest.numel(), device=dev) - base[uniq_dest]
 
-        # Fixed-size all-to-all (desync-tolerant). Fuse the two small int
-        # metadata collectives (send_eloc + send_cnt) into a single
-        # [world, cap + 1] packet: column 0 carries the per-dest count, the
-        # rest carries the per-slot local expert ids. Two collectives instead
-        # of three, no extra host sync (all shapes are static).
-        send_meta_pkt = torch.empty((world, cap + 1), dtype=torch.int64, device=dev)
+        send_x = torch.zeros((world, cap, h), dtype=a1.dtype, device=dev)
+        send_x[uniq_dest, local_slot] = a1.index_select(0, uniq_token)
+
+        # `pick` is a pair's index within its (dest, token) group, so the k-th
+        # expert a token wants on a rank lands in column k. -1 marks unused slots.
+        pair_ar = torch.arange(slot_of_pair.numel(), device=dev)
+        group_start = pair_ar[new_slot]
+        pair_slot = local_slot[slot_of_pair]
+        pick = pair_ar - group_start[slot_of_pair]
+        send_eloc = torch.full((world, cap, slots), -1, dtype=torch.int64, device=dev)
+        send_eloc[d_sorted, pair_slot, pick] = flat_expert[order] - d_sorted * e_local
+
+        send_w = torch.zeros((world, cap, slots), dtype=torch.float32, device=dev)
+        send_w[d_sorted, pair_slot, pick] = flat_weight[order].to(torch.float32)
+
+        # fixed-size all-to-all, no host sync
+        send_meta_pkt = torch.empty(
+            (world, cap * slots + 1), dtype=torch.int64, device=dev
+        )
         send_meta_pkt[:, 0] = send_cnt
-        send_meta_pkt[:, 1:] = send_eloc
+        send_meta_pkt[:, 1:] = send_eloc.reshape(world, cap * slots)
         recv_x = comm.all_to_all_single(send_x.reshape(world, cap * h)).reshape(
             world, cap, h
         )
         recv_meta_pkt = comm.all_to_all_single(send_meta_pkt)
+        recv_w = comm.all_to_all_single(send_w.reshape(world, cap * slots)).reshape(
+            world, cap, slots
+        )
         recv_cnt = recv_meta_pkt[:, 0].contiguous()
-        recv_eloc = recv_meta_pkt[:, 1:]
+        recv_eloc = recv_meta_pkt[:, 1:].reshape(world, cap, slots)
 
-        # Flatten valid received rows (first recv_cnt[s] slots per source).
+        # expand back to one row per (token, expert) pair.
         slot_ar = torch.arange(cap, device=dev)
-        recv_valid = slot_ar.view(1, -1) < recv_cnt.view(-1, 1)
-        vsrc, vslot = recv_valid.nonzero(as_tuple=True)
+        recv_valid = (slot_ar.view(1, -1) < recv_cnt.view(-1, 1)).unsqueeze(-1) & (
+            recv_eloc >= 0
+        )
+        vsrc, vslot, vpick = recv_valid.nonzero(as_tuple=True)
         rows_x = recv_x[vsrc, vslot]
-        rows_e = recv_eloc[vsrc, vslot].clamp_(0, e_local - 1)
+        rows_e = recv_eloc[vsrc, vslot, vpick].clamp_(0, e_local - 1)
+        rows_w = recv_w[vsrc, vslot, vpick]
         n_recv = rows_x.size(0)
 
-        # Bucket into [E_local, cap, H] in received order (capped at cap).
-        b_a1 = torch.zeros((e_local, cap, h), dtype=a1.dtype, device=dev)
+        b_a1 = torch.zeros((e_local, expert_cap, h), dtype=a1.dtype, device=dev)
         tokens_per_expert = torch.zeros(num_experts, dtype=torch.int32, device=dev)
         if n_recv > 0:
             local_ids = torch.arange(e_local, device=dev).view(-1, 1)
             hits = rows_e.view(1, -1) == local_ids
             slots_all = hits.to(torch.int64).cumsum(dim=1) - 1
             row_slot = slots_all[rows_e, torch.arange(n_recv, device=dev)]
-            keep = row_slot < cap
+            keep = row_slot < expert_cap
             b_a1[rows_e[keep], row_slot[keep]] = rows_x[keep]
-            tokens_per_expert[:e_local] = hits.sum(dim=1).clamp(max=cap).to(torch.int32)
+            tokens_per_expert[:e_local] = (
+                hits.sum(dim=1).clamp(max=expert_cap).to(torch.int32)
+            )
         else:
             row_slot = torch.zeros(0, dtype=torch.int64, device=dev)
             keep = torch.zeros(0, dtype=torch.bool, device=dev)
@@ -155,8 +175,6 @@ class NaiveLowLatencyPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             expert_num_tokens=tokens_per_expert, expert_num_tokens_cpu=None
         )
 
-        # Stash geometry so finalize() can reverse the dispatch (same idiom as
-        # DeepEP-LL storing its dispatch handle).
         self._combine_ctx = {
             "world": world,
             "cap": cap,
@@ -167,13 +185,14 @@ class NaiveLowLatencyPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             "vsrc": vsrc,
             "vslot": vslot,
             "rows_e": rows_e,
+            "rows_w": rows_w,
             "row_slot": row_slot,
             "keep": keep,
             "n_recv": n_recv,
             "send_cnt": send_cnt,
-            "send_meta": send_meta,
-            "flat_token": flat_token,
-            "flat_weight": flat_weight,
+            "uniq_dest": uniq_dest,
+            "uniq_token": uniq_token,
+            "local_slot": local_slot,
         }
         return b_a1, None, expert_tokens_meta, None, None
 
@@ -193,36 +212,26 @@ class NaiveLowLatencyPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         world, cap, h = ctx["world"], ctx["cap"], ctx["h"]
         dev, dtype = ctx["device"], ctx["dtype"]
 
-        # Un-bucket expert output back into received-row order.
-        rows_out = torch.zeros((ctx["n_recv"], h), dtype=dtype, device=dev)
+        # weight and reduce a token's experts on the rank that owns them, so the
+        # return transfer is token-sized like the dispatch.
+        recv_out = torch.zeros((world, cap, h), dtype=torch.float32, device=dev)
         keep = ctx["keep"]
         if ctx["n_recv"] > 0 and keep.any():
-            rows_out[keep] = fused_expert_output[
-                ctx["rows_e"][keep], ctx["row_slot"][keep]
-            ]
-
-        # Scatter back into a [world, cap, H] per-source buffer.
-        recv_out = torch.zeros((world, cap, h), dtype=dtype, device=dev)
-        if ctx["n_recv"] > 0:
-            recv_out[ctx["vsrc"], ctx["vslot"]] = rows_out
-
-        # Reverse all-to-all: return each rank's tokens to their origin.
-        send_out = comm.all_to_all_single(recv_out.reshape(world, cap * h)).reshape(
-            world, cap, h
-        )
-
-        # Apply router weights and reduce over topk into the local tokens.
-        slot_ar = torch.arange(cap, device=dev)
-        send_valid = slot_ar.view(1, -1) < ctx["send_cnt"].view(-1, 1)
-        gsrc, gslot = send_valid.nonzero(as_tuple=True)
-        rows = send_out[gsrc, gslot]
-        meta = ctx["send_meta"][gsrc, gslot]
-        origin_token = ctx["flat_token"][meta]
-        weight = ctx["flat_weight"][meta].to(rows.dtype)
-
-        output.zero_()
-        if rows.size(0) > 0:
-            output.index_add_(
-                0, origin_token, (rows * weight.unsqueeze(1)).to(output.dtype)
+            rows_out = fused_expert_output[ctx["rows_e"][keep], ctx["row_slot"][keep]]
+            rows_out = rows_out.to(torch.float32) * ctx["rows_w"][keep].unsqueeze(1)
+            recv_out.index_put_(
+                (ctx["vsrc"][keep], ctx["vslot"][keep]), rows_out, accumulate=True
             )
+
+        send_out = comm.all_to_all_single(
+            recv_out.to(dtype).reshape(world, cap * h)
+        ).reshape(world, cap, h)
+
+        # sum each token's per-rank partials.
+        output.zero_()
+        output.index_add_(
+            0,
+            ctx["uniq_token"],
+            send_out[ctx["uniq_dest"], ctx["local_slot"]].to(output.dtype),
+        )
         self._combine_ctx = None
