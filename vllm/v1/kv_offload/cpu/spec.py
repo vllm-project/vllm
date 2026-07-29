@@ -26,7 +26,7 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 class CPUOffloadingSpec(OffloadingSpec):
     BLOCK_SIZE_ALIGNMENT = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
-    SUPPORTS_REPLICATED_LAYOUT = False
+    SUPPORTS_REPLICATED_LAYOUT = True
 
     @classmethod
     def build_metric_definitions(
@@ -89,7 +89,9 @@ class CPUOffloadingSpec(OffloadingSpec):
         self.kv_bytes_per_chunk = 0
         self.cpu_page_size_per_worker = 0
         self.replicated_layout = (
-            config.replicated_layout and self.SUPPORTS_REPLICATED_LAYOUT
+            config.replicated_layout
+            and self.SUPPORTS_REPLICATED_LAYOUT
+            and self._uses_shared_region()
         )
         if config.worker_kv_bytes_per_block > 0 and world_size > 0:
             num_copies = 1 if self.replicated_layout else world_size
@@ -144,17 +146,32 @@ class CPUOffloadingSpec(OffloadingSpec):
             )
         return self._manager
 
+    def _uses_shared_region(self) -> bool:
+        """Whether this deployment backs the worker CPU buffer with the shared
+        mmap region rather than a per-rank private pinned tensor.
+
+        Single source of truth for both the replicated-layout sizing gate and
+        the ``create_worker`` allocation path: deduplication (single MLA copy +
+        rank-0 writer gate) is only safe where a shared medium actually exists,
+        so non-CUDA-alike platforms (private-tensor path) must never enable it.
+        """
+        return current_platform.is_cuda_alike()
+
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         mmap_region: SharedOffloadRegion | None = None
         # num_blocks == 0 would size the region to zero bytes, which cannot be
         # mmap'd; fall back to the tensor path (empty tensors) as before.
-        if current_platform.is_cuda_alike() and self.num_blocks > 0:
-            # Back each worker's CPU buffer with a private slot in a single
-            # shared mmap region instead of a per-rank pinned tensor. Fold the
-            # global physical device index into this replica's
+        if self._uses_shared_region() and self.num_blocks > 0:
+            # Back each worker's CPU buffer with a slot in a single shared mmap
+            # region instead of a per-rank pinned tensor. Under replicated
+            # layout every rank maps slot 0 (a single MLA copy); otherwise fold
+            # the global physical device index into this replica's
             # [0, world_size) slot range.
-            world_size = self.config.parallel.world_size
-            rank = torch.accelerator.current_device_index() % world_size
+            if self.replicated_layout:
+                rank = 0
+            else:
+                world_size = self.config.parallel.world_size
+                rank = torch.accelerator.current_device_index() % world_size
             mmap_region = SharedOffloadRegion(
                 engine_id=self.config.engine_id,
                 num_blocks=self.num_blocks,
