@@ -12,7 +12,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorRole,
     SupportsHMA,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorMetadata,
+    KVConnectorSidecarConfig,
+    KVConnectorSidecarTransfers,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
     KVConnectorStats,
@@ -32,6 +36,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.sidecar import (
+    build_sidecar_config,
+    normalize_sidecar_transfers,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
     OffloadingConnectorWorker,
@@ -61,6 +69,7 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
 
         offloading_config = build_offloading_config(vllm_config, kv_cache_config)
         spec = OffloadingSpecFactory.create_spec(offloading_config)
+        self._block_sidecar_config = build_sidecar_config(spec)
 
         self.connector_scheduler: OffloadingConnectorScheduler | None = None
         self.connector_worker: OffloadingConnectorWorker | None = None
@@ -70,6 +79,33 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
             )
         elif role == KVConnectorRole.WORKER:
             self.connector_worker = OffloadingConnectorWorker(spec, kv_cache_config)
+
+    def get_block_sidecar_config(self) -> KVConnectorSidecarConfig | None:
+        return self._block_sidecar_config
+
+    def get_block_sidecar_transfers(
+        self,
+        connector_metadata: KVConnectorMetadata,
+        kv_group_id: int,
+        expected_num_groups: int,
+    ) -> KVConnectorSidecarTransfers:
+        if self._block_sidecar_config is None:
+            return super().get_block_sidecar_transfers(
+                connector_metadata,
+                kv_group_id,
+                expected_num_groups,
+            )
+        if not isinstance(connector_metadata, OffloadingConnectorMetadata):
+            raise RuntimeError(
+                "OffloadingConnector expected OffloadingConnectorMetadata, got "
+                f"{type(connector_metadata).__name__}"
+            )
+        return normalize_sidecar_transfers(
+            connector_metadata,
+            config=self._block_sidecar_config,
+            kv_group_id=kv_group_id,
+            expected_num_groups=expected_num_groups,
+        )
 
     def shutdown(self) -> None:
         if self.connector_worker is not None:

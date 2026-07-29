@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
 from concurrent.futures import Future
-from types import SimpleNamespace
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 
@@ -48,36 +48,82 @@ from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 pytestmark = pytest.mark.cpu_test
 
 
-def test_validate_routed_experts_offload_uses_spec_blocks_per_chunk():
-    from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
-        OffloadingConnector,
+def test_routed_experts_uses_public_connector_sidecar_config():
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        KVConnectorSidecarConfig,
     )
-    from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 
-    offloading_spec = CPUOffloadingSpec.__new__(CPUOffloadingSpec)
-    offloading_spec.num_blocks = 17
-    offloading_spec.blocks_per_chunk = 3
-    connector = OffloadingConnector.__new__(OffloadingConnector)
-    connector.connector_scheduler = SimpleNamespace(spec=offloading_spec)
+    connector = Mock()
+    connector.get_block_sidecar_config.return_value = KVConnectorSidecarConfig(
+        num_connector_blocks=17,
+        blocks_per_connector_block=3,
+    )
     scheduler = Scheduler.__new__(Scheduler)
     scheduler.connector = connector
-    kv_cache_config = KVCacheConfig(
-        num_blocks=1,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["layer"],
-                FullAttentionSpec(
-                    block_size=16,
-                    num_kv_heads=1,
-                    head_size=1,
-                    dtype=torch.float32,
-                ),
+
+    assert scheduler._get_routed_experts_sidecar_config() == (17, 3)
+    connector.get_block_sidecar_config.assert_called_once_with()
+
+
+def test_offloading_connector_normalizes_internal_jobs_for_sidecars():
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+        OffloadingConnectorMetadata,
+        TransferJob,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.sidecar import (
+        build_sidecar_config,
+        normalize_sidecar_transfers,
+    )
+    from vllm.v1.kv_offload.base import GPULoadStoreSpec
+    from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
+    from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+
+    spec = CPUOffloadingSpec.__new__(CPUOffloadingSpec)
+    spec.num_blocks = 17
+    spec.blocks_per_chunk = 2
+    config = build_sidecar_config(spec)
+    assert config is not None
+
+    gpu_spec = GPULoadStoreSpec(
+        block_ids=[10, 11, 12, 20],
+        group_sizes=[3, 1],
+        block_indices=[1, 0],
+    )
+    connector_spec = CPULoadStoreSpec([100, 101, 200])
+    metadata = OffloadingConnectorMetadata(
+        load_jobs={
+            1: TransferJob(
+                req_id="load",
+                src_spec=connector_spec,
+                dst_spec=gpu_spec,
             )
-        ],
+        },
+        store_jobs={
+            2: TransferJob(
+                req_id="store",
+                src_spec=gpu_spec,
+                dst_spec=connector_spec,
+            )
+        },
     )
 
-    assert scheduler._validate_routed_experts_offload(kv_cache_config) == (17, 3)
+    transfers = normalize_sidecar_transfers(
+        metadata,
+        config=config,
+        kv_group_id=0,
+        expected_num_groups=2,
+    )
+
+    for transfer in (*transfers.loads, *transfers.stores):
+        np.testing.assert_array_equal(transfer.gpu_block_ids, [10, 11, 12])
+        np.testing.assert_array_equal(
+            transfer.connector_block_ids,
+            [100, 101, 101],
+        )
+        np.testing.assert_array_equal(
+            transfer.connector_block_offsets,
+            [1, 0, 1],
+        )
 
 
 def test_make_scheduled_encoder_input_stats_output_embeddings():
