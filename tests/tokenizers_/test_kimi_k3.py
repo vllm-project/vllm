@@ -11,8 +11,6 @@ from vllm.tokenizers.encoding_k3 import EncodeSegment
 from vllm.tokenizers.kimi_k3 import get_kimi_k3_tokenizer
 from vllm.tokenizers.registry import TokenizerRegistry
 
-pytestmark = pytest.mark.skip_global_cleanup
-
 
 class FakeKimiTokenizer:
     def __init__(self) -> None:

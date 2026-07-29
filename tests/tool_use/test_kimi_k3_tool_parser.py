@@ -17,8 +17,6 @@ from vllm.reasoning.kimi_k3_reasoning_parser import KimiK3ReasoningParser
 from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.kimi_k3_tool_parser import KimiK3ToolParser
 
-pytestmark = pytest.mark.skip_global_cleanup
-
 OPEN = "<|open|>"
 CLOSE = "<|close|>"
 SEP = "<|sep|>"

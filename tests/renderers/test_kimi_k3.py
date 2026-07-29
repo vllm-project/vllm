@@ -11,8 +11,6 @@ from vllm.renderers.kimi_k3 import KimiK3Renderer, _merge_k3_media_io_kwargs
 from vllm.renderers.registry import RENDERER_REGISTRY
 from vllm.tokenizers.registry import TokenizerRegistry
 
-pytestmark = pytest.mark.skip_global_cleanup
-
 
 class StubTokenizer:
     def __init__(self, token_ids: list[int]) -> None:

@@ -43,9 +43,12 @@ class _ParserInfo(NamedTuple):
     name: str
     samples: tuple
     terminals: list[str]
-    tool_end: str
+    tool_end: str | None
     think_end: str
     tool_start: str
+    tool_block_end: str
+    response_start: str
+    response_end: str
 
 
 def _discover_parsers() -> list[_ParserInfo]:
@@ -73,10 +76,6 @@ def _discover_parsers() -> list[_ParserInfo]:
             # structural blocks; its replay coverage lives in test_inkling.py.
             continue
         tool_end = cfg.token_id_terminals.get("TOOL_END")
-        if not tool_end:
-            raise RuntimeError(
-                f"{obj.__name__} config missing 'TOOL_END' in token_id_terminals"
-            )
         all_vals = set(cfg.terminals.values()) | set(cfg.token_id_terminals.values())
         found.append(
             _ParserInfo(
@@ -85,12 +84,21 @@ def _discover_parsers() -> list[_ParserInfo]:
                 samples=build_samples(cfg.name),
                 terminals=sorted(v for v in all_vals if len(v) > 1),
                 tool_end=tool_end,
-                think_end=cfg.terminals.get("THINK_END", ""),
+                think_end=cfg.terminals.get(
+                    "THINK_END", cfg.terminals.get("THINK_CLOSE", "")
+                ),
                 tool_start=(
                     cfg.terminals["TOOL_SECTION_START"]
                     if (ParserState.CONTENT, "TOOL_SECTION_START") in cfg.transitions
-                    else cfg.terminals.get("TOOL_START", "")
+                    else cfg.terminals.get(
+                        "TOOL_START", cfg.terminals.get("TOOLS_OPEN", "")
+                    )
                 ),
+                tool_block_end=cfg.terminals.get(
+                    "TOOL_END", cfg.terminals.get("TOOLS_CLOSE", "")
+                ),
+                response_start=cfg.terminals.get("RESPONSE_OPEN", ""),
+                response_end=cfg.terminals.get("RESPONSE_CLOSE", ""),
             )
         )
     if missing_builders:
@@ -220,7 +228,7 @@ _DEFERRAL_SAMPLES = [
     (p.parser_cls, s, p.tool_end)
     for p in _PARSERS
     for s in p.samples
-    if s.expected_tool_calls
+    if s.expected_tool_calls and p.tool_end is not None
 ]
 
 
@@ -300,7 +308,15 @@ class TestParserEngineAdjustRequest:
 
 
 _TOOL_CALL_SAMPLES = [
-    (p.parser_cls, s, p.think_end, p.tool_start)
+    (
+        p.parser_cls,
+        s,
+        p.think_end,
+        p.tool_start,
+        p.tool_block_end,
+        p.response_start,
+        p.response_end,
+    )
     for p in _PARSERS
     for s in p.samples
     if s.expected_tool_calls
@@ -313,7 +329,14 @@ _TOOL_CALL_SAMPLES = [
 
 
 def _tool_suppression_expectations(
-    sample, think_end: str, tool_start: str, *, include_tool_block: bool
+    sample,
+    think_end: str,
+    tool_start: str,
+    tool_block_end: str,
+    response_start: str,
+    response_end: str,
+    *,
+    include_tool_block: bool,
 ) -> tuple[str, str]:
     """Expected (reasoning, content) when tool calls are not extracted.
 
@@ -334,15 +357,25 @@ def _tool_suppression_expectations(
     if think_end:
         pos = after_reasoning.find(think_end)
         if pos >= 0:
-            if include_tool_block:
+            if include_tool_block and not response_start:
                 return (reasoning, after_reasoning[pos + len(think_end) :])
             after_reasoning = after_reasoning[pos + len(think_end) :]
     if tool_start:
         pos = after_reasoning.find(tool_start)
         if pos >= 0:
+            content = after_reasoning[:pos]
+            if response_start and content.startswith(response_start):
+                content = content[len(response_start) :]
+            if response_end and content.endswith(response_end):
+                content = content[: -len(response_end)]
             if include_tool_block:
-                return (reasoning, after_reasoning[pos:])
-            return (reasoning, after_reasoning[:pos])
+                tool_block = after_reasoning[pos:]
+                if response_start and tool_block_end:
+                    end = tool_block.find(tool_block_end)
+                    if end >= 0:
+                        tool_block = tool_block[: end + len(tool_block_end)]
+                return (reasoning, content + tool_block)
+            return (reasoning, content)
     if include_tool_block:
         return (full_text, "")
     return (reasoning, after_reasoning)
@@ -355,7 +388,10 @@ def _tool_suppression_expectations(
     ids=["skip_tool_parsing", "suppress_tool_calls"],
 )
 @pytest.mark.parametrize(
-    "parser_cls,sample,think_end,tool_start",
+    (
+        "parser_cls,sample,think_end,tool_start,tool_block_end,"
+        "response_start,response_end"
+    ),
     _TOOL_CALL_SAMPLES,
     ids=lambda v: v.id if hasattr(v, "id") else getattr(v, "__name__", ""),
 )
@@ -369,7 +405,18 @@ class TestToolCallFilteringReplay:
     consumed by the state machine and do not leak into content.
     """
 
-    def test_replay(self, parser_cls, sample, think_end, tool_start, mode, chunk_size):
+    def test_replay(
+        self,
+        parser_cls,
+        sample,
+        think_end,
+        tool_start,
+        tool_block_end,
+        response_start,
+        response_end,
+        mode,
+        chunk_size,
+    ):
         tokenizer = make_mock_tokenizer(sample)
         kwargs = {}
         if sample.chat_template_kwargs:
@@ -408,7 +455,13 @@ class TestToolCallFilteringReplay:
 
         include_block = mode == "skip_tool_parsing"
         expected_reasoning, expected_content = _tool_suppression_expectations(
-            sample, think_end, tool_start, include_tool_block=include_block
+            sample,
+            think_end,
+            tool_start,
+            tool_block_end,
+            response_start,
+            response_end,
+            include_tool_block=include_block,
         )
 
         assert output.reasoning == expected_reasoning, (
@@ -427,7 +480,10 @@ class TestToolCallFilteringReplay:
 
 
 @pytest.mark.parametrize(
-    "parser_cls,sample,think_end,tool_start",
+    (
+        "parser_cls,sample,think_end,tool_start,tool_block_end,"
+        "response_start,response_end"
+    ),
     _TOOL_CALL_SAMPLES,
     ids=lambda v: v.id if hasattr(v, "id") else getattr(v, "__name__", ""),
 )
@@ -435,7 +491,16 @@ class TestToolCallFilteringNonStreaming:
     """Non-streaming parse() with tool_choice='none' must suppress tool
     calls and not leak special tokens into content."""
 
-    def test_parse(self, parser_cls, sample, think_end, tool_start):
+    def test_parse(
+        self,
+        parser_cls,
+        sample,
+        think_end,
+        tool_start,
+        tool_block_end,
+        response_start,
+        response_end,
+    ):
         tokenizer = make_mock_tokenizer(sample)
         kwargs = {}
         if sample.chat_template_kwargs:
@@ -449,7 +514,13 @@ class TestToolCallFilteringNonStreaming:
         output = parse_non_streaming(parser, sample, request)
 
         expected_reasoning, expected_content = _tool_suppression_expectations(
-            sample, think_end, tool_start, include_tool_block=False
+            sample,
+            think_end,
+            tool_start,
+            tool_block_end,
+            response_start,
+            response_end,
+            include_tool_block=False,
         )
         assert output.reasoning == expected_reasoning, (
             f"Reasoning mismatch:\n"
@@ -521,14 +592,20 @@ _DROP_TOKENS = {"<bos>": 99990, "<eos>": 99991}
 
 
 def _inject_drop_tokens(sample):
-    """Insert <bos> at stream start and <eos> between the first two tokens."""
+    """Insert drop tokens without splitting a multi-token terminal."""
     new_vocab = {**sample.vocab, **_DROP_TOKENS}
     tokens = list(sample.tokens)
     tokens.insert(0, (99990, "<bos>"))
-    if len(tokens) >= 3:
-        tokens.insert(2, (99991, "<eos>"))
-    else:
-        tokens.append((99991, "<eos>"))
+    special_ids = set(sample.vocab.values())
+    insert_at = next(
+        (
+            i + 1
+            for i, (token_id, _) in enumerate(tokens)
+            if token_id not in special_ids
+        ),
+        len(tokens),
+    )
+    tokens.insert(insert_at, (99991, "<eos>"))
     return dataclasses.replace(sample, vocab=new_vocab, tokens=tokens)
 
 

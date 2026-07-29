@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import pytest
-
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
@@ -11,8 +9,6 @@ from vllm.parser.kimi_k3 import KimiK3Parser
 from vllm.parser.parser_manager import ParserManager
 from vllm.reasoning import ReasoningParserManager
 from vllm.reasoning.kimi_k3_reasoning_parser import KimiK3ReasoningParser
-
-pytestmark = pytest.mark.skip_global_cleanup
 
 OPEN = "<|open|>"
 CLOSE = "<|close|>"
