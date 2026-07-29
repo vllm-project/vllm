@@ -253,6 +253,143 @@ def _merge_local_topks_global_with_fake_dcp(
         sparse_indexer.get_dcp_group = original_get_dcp_group
 
 
+@pytest.mark.parametrize(
+    ("enabled", "rows", "is_prefill", "expected"),
+    [
+        (False, 32, False, "explicit"),
+        (True, 15, False, "explicit"),
+        (True, 16, False, "symm"),
+        (True, 32, False, "symm"),
+        (True, 128, False, "symm"),
+        (True, 129, False, "explicit"),
+        (True, 32, True, "explicit"),
+    ],
+)
+def test_dcp_topk_symm_serving_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    enabled: bool,
+    rows: int,
+    is_prefill: bool,
+    expected: str,
+):
+    from vllm.model_executor.kernels.attention.dsa import (
+        dcp_indexer_cutedsl,
+        dcp_topk_symm,
+    )
+
+    calls = []
+
+    class FakeSymmWorkspace:
+        def merge(self, *args):
+            calls.append("symm")
+
+    class FakeDcpGroup:
+        def all_gather(self, input_: torch.Tensor, dim: int) -> torch.Tensor:
+            assert dim == 1
+            calls.append("all_gather")
+            return input_
+
+    def get_symm_workspace(max_rows: int, candidates: int, world: int):
+        assert max_rows == sparse_indexer.DCP_TOPK_SYMM_MAX_DECODE_ROWS
+        assert candidates == 4
+        assert world == 4
+        calls.append("symm_init")
+        return FakeSymmWorkspace()
+
+    def pack(*args):
+        calls.append("pack")
+
+    def stable_topk(*args, **kwargs):
+        calls.append("stable_topk")
+
+    monkeypatch.setattr(
+        sparse_indexer,
+        "_assert_cutedsl_dcp_merge_supported",
+        lambda *args: None,
+    )
+    monkeypatch.setattr(sparse_indexer.envs, "VLLM_DCP_TOPK_SYMM", enabled)
+    monkeypatch.setattr(sparse_indexer, "get_dcp_group", lambda: FakeDcpGroup())
+    monkeypatch.setattr(
+        dcp_topk_symm,
+        "get_dcp_topk_symm_workspace",
+        get_symm_workspace,
+    )
+    monkeypatch.setattr(
+        dcp_indexer_cutedsl,
+        "pack_dcp_topk_candidates_cutedsl",
+        pack,
+    )
+    monkeypatch.setattr(
+        dcp_indexer_cutedsl,
+        "stable_topk_from_gathered_candidates_cutedsl",
+        stable_topk,
+    )
+
+    logits = torch.zeros((rows, 8), dtype=torch.float32)
+    topk_indices = torch.zeros((rows, 4), dtype=torch.int32)
+    row_starts = torch.zeros((rows,), dtype=torch.int32) if is_prefill else None
+    sparse_indexer._merge_dcp_topk_global(
+        logits,
+        topk_indices,
+        topk_tokens=4,
+        dcp_rank=0,
+        dcp_world_size=4,
+        cp_interleave=1,
+        row_starts=row_starts,
+    )
+
+    if expected == "symm":
+        assert calls == ["symm_init", "symm"]
+    else:
+        assert calls == ["pack", "all_gather", "stable_topk"]
+
+
+@pytest.mark.parametrize("failure_stage", ["initialization", "merge"])
+def test_dcp_topk_symm_failure_is_fatal(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+):
+    from vllm.model_executor.kernels.attention.dsa import dcp_topk_symm
+
+    class FailingWorkspace:
+        def merge(self, *args):
+            raise RuntimeError("merge failed")
+
+    def get_symm_workspace(*args):
+        if failure_stage == "initialization":
+            raise RuntimeError("initialization failed")
+        return FailingWorkspace()
+
+    def unexpected_recovery(*args, **kwargs):
+        raise AssertionError("selected symmetric-memory failure must not recover")
+
+    monkeypatch.setattr(
+        sparse_indexer,
+        "_assert_cutedsl_dcp_merge_supported",
+        lambda *args: None,
+    )
+    monkeypatch.setattr(sparse_indexer.envs, "VLLM_DCP_TOPK_SYMM", True)
+    monkeypatch.setattr(sparse_indexer, "get_dcp_group", unexpected_recovery)
+    monkeypatch.setattr(
+        dcp_topk_symm,
+        "get_dcp_topk_symm_workspace",
+        get_symm_workspace,
+    )
+
+    logits = torch.zeros((32, 8), dtype=torch.float32)
+    topk_indices = torch.zeros((32, 4), dtype=torch.int32)
+    with pytest.raises(RuntimeError, match=f"{failure_stage} failed"):
+        sparse_indexer._merge_dcp_topk_global(
+            logits,
+            topk_indices,
+            topk_tokens=4,
+            dcp_rank=0,
+            dcp_world_size=4,
+            cp_interleave=1,
+            row_starts=None,
+        )
+
+
 @pytest.mark.parametrize("world", [1, 2, 4])
 @pytest.mark.parametrize("interleave", [1, 2, 4])
 def test_get_dcp_local_seq_lens_matches_naive(world: int, interleave: int):

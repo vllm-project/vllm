@@ -40,6 +40,9 @@ from vllm.v1.worker.workspace import current_workspace_manager
 logger = init_logger(__name__)
 
 RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
+DCP_TOPK_SYMM_MIN_DECODE_ROWS = 16
+DCP_TOPK_SYMM_MAX_DECODE_ROWS = 128
+_logged_dcp_topk_symm_rows: set[int] = set()
 
 # MXFP4 layout: 2 values packed per byte, ue8m0 (1-byte) scale per block of 32.
 MXFP4_BLOCK_SIZE = 32
@@ -104,6 +107,49 @@ def _merge_dcp_topk_global(
         stable_topk_from_gathered_candidates_cutedsl,
     )
 
+    rows = topk_indices.shape[0]
+    use_symm = (
+        envs.VLLM_DCP_TOPK_SYMM
+        and row_starts is None
+        and DCP_TOPK_SYMM_MIN_DECODE_ROWS <= rows <= DCP_TOPK_SYMM_MAX_DECODE_ROWS
+    )
+    if use_symm:
+        from vllm.model_executor.kernels.attention.dsa.dcp_topk_symm import (
+            get_dcp_topk_symm_workspace,
+        )
+
+        workspace = get_dcp_topk_symm_workspace(
+            DCP_TOPK_SYMM_MAX_DECODE_ROWS,
+            topk_indices.shape[1],
+            dcp_world_size,
+        )
+        if workspace is None:
+            raise RuntimeError(
+                "DCP top-k symmetric-memory dispatch selected without a workspace."
+            )
+        # Keep one reachability marker for integration validation without
+        # synchronously logging each first-seen dynamic batch size.
+        if rows == 32 and rows not in _logged_dcp_topk_symm_rows:
+            _logged_dcp_topk_symm_rows.add(rows)
+            logger.info(
+                "Executing owner-sharded symmetric-memory DCP top-k merge "
+                "for decode rows=%d.",
+                rows,
+            )
+        workspace.merge(
+            logits,
+            topk_indices,
+            topk_tokens,
+            dcp_rank,
+            dcp_world_size,
+            cp_interleave,
+            row_starts,
+        )
+        return
+
+    # Flag-off, prefill, and decode shapes outside the bounded direct-consumer
+    # policy use the original explicit exchange. This is phase/shape routing,
+    # never recovery from a selected symmetric-memory path.
     packed = torch.empty(
         (*topk_indices.shape, 2),
         dtype=torch.float32,
@@ -775,6 +821,24 @@ class SparseAttnIndexer(CustomOp):
                 "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
                 "the current vLLM environment."
             )
+        if envs.VLLM_DCP_TOPK_SYMM and self.dcp_world_size > 1:
+            if not current_platform.is_cuda():
+                raise NotImplementedError(
+                    "DCP top-k symmetric memory is only supported on CUDA."
+                )
+            from vllm.model_executor.kernels.attention.dsa.dcp_topk_symm import (
+                get_dcp_topk_symm_workspace,
+            )
+
+            workspace = get_dcp_topk_symm_workspace(
+                DCP_TOPK_SYMM_MAX_DECODE_ROWS,
+                self.topk_tokens,
+                self.dcp_world_size,
+            )
+            if workspace is None:
+                raise RuntimeError(
+                    "DCP top-k symmetric memory was enabled without a usable workspace."
+                )
 
     def forward_native(
         self,
