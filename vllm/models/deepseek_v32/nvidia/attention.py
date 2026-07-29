@@ -690,7 +690,28 @@ class DeepseekV32Attention(MLAAttention):
                     "the sparse MLA backend."
                 )
             dcp_group = get_dcp_group()
-            if self.dcp_a2a:
+            is_decode_only = (
+                attn_metadata.num_prefills == 0  # type: ignore[attr-defined]
+                and attn_metadata.num_decode_tokens  # type: ignore[attr-defined]
+                == num_actual
+            )
+            use_bounded_vmm = (
+                envs.VLLM_DCP_OUTPUT_VMM
+                and is_decode_only
+                and num_actual <= self._dcp_output_vmm_max_rows
+            )
+            if use_bounded_vmm:
+                with record_function(
+                    f"dcp.output_lse.route.vmm.decode.rows.{num_actual}"
+                ):
+                    attn_out = cp_lse_vmm_out_gather(
+                        attn_out,
+                        lse,
+                        dcp_group,
+                        is_lse_base_on_e=self.impl.lse_base_on_e,
+                        workspace_slot=self._dcp_output_vmm_workspace_slot,
+                    )
+            elif self.dcp_a2a:
                 attn_out = dcp_a2a_lse_reduce(
                     attn_out,
                     lse,
@@ -698,40 +719,18 @@ class DeepseekV32Attention(MLAAttention):
                     is_lse_base_on_e=self.impl.lse_base_on_e,
                 )
             else:
-                is_decode_only = (
-                    attn_metadata.num_prefills == 0  # type: ignore[attr-defined]
-                    and attn_metadata.num_decode_tokens  # type: ignore[attr-defined]
-                    == num_actual
+                route = (
+                    "explicit_ag_rs.non_bounded_shape"
+                    if envs.VLLM_DCP_OUTPUT_VMM
+                    else "explicit_ag_rs.baseline"
                 )
-                use_bounded_vmm = (
-                    envs.VLLM_DCP_OUTPUT_VMM
-                    and is_decode_only
-                    and num_actual <= self._dcp_output_vmm_max_rows
-                )
-                if use_bounded_vmm:
-                    with record_function(
-                        f"dcp.output_lse.route.vmm.decode.rows.{num_actual}"
-                    ):
-                        attn_out = cp_lse_vmm_out_gather(
-                            attn_out,
-                            lse,
-                            dcp_group,
-                            is_lse_base_on_e=self.impl.lse_base_on_e,
-                            workspace_slot=self._dcp_output_vmm_workspace_slot,
-                        )
-                else:
-                    route = (
-                        "explicit_ag_rs.non_bounded_shape"
-                        if envs.VLLM_DCP_OUTPUT_VMM
-                        else "explicit_ag_rs.baseline"
+                with record_function(f"dcp.output_lse.route.{route}"):
+                    attn_out = cp_lse_ag_out_rs(
+                        attn_out,
+                        lse,
+                        dcp_group,
+                        is_lse_base_on_e=self.impl.lse_base_on_e,
                     )
-                    with record_function(f"dcp.output_lse.route.{route}"):
-                        attn_out = cp_lse_ag_out_rs(
-                            attn_out,
-                            lse,
-                            dcp_group,
-                            is_lse_base_on_e=self.impl.lse_base_on_e,
-                        )
         x = attn_out.view(
             num_actual, self.num_local_heads, self.kv_lora_rank
         ).transpose(0, 1)
