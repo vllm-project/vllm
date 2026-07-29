@@ -92,26 +92,32 @@ def _compute_global_residual_mass(
 
 
 @triton.jit
-def _compute_global_target_argmax(
-    target_local_max_ptr,
-    target_local_max_stride,
-    target_local_argmax_ptr,
-    target_local_argmax_stride,
-    logit_idx,
-    vocab_num_blocks,
-    PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
+def _gather_global_argmax(
+    # [num_rows, num_blocks]
+    local_max_ptr,
+    local_max_stride,
+    # [num_rows, num_blocks]
+    local_argmax_ptr,
+    local_argmax_stride,
+    row_idx,
+    num_blocks,
+    PADDED_NUM_BLOCKS: tl.constexpr,
 ):
-    blocks = tl.arange(0, PADDED_VOCAB_NUM_BLOCKS)
-    blocks_mask = blocks < vocab_num_blocks
+    blocks = tl.arange(0, PADDED_NUM_BLOCKS)
     local_max = tl.load(
-        target_local_max_ptr + logit_idx * target_local_max_stride + blocks,
-        mask=blocks_mask,
+        local_max_ptr + row_idx * local_max_stride + blocks,
+        mask=blocks < num_blocks,
         other=float("-inf"),
     )
-    max_block_idx = tl.argmax(local_max, axis=0)
-    return tl.load(
-        target_local_argmax_ptr + logit_idx * target_local_argmax_stride + max_block_idx
-    ).to(tl.int64)
+    # The reduction runs over the padded lanes too. Both of argmax's comparisons
+    # are false against a NaN, so a NaN in a real lane can leave a padded lane's
+    # index as the winner. The gather below is unmasked, so that index reads past
+    # the row, and past the tensor on the last row.
+    local_max = tl.where(local_max == local_max, local_max, float("-inf"))
+    max_block_idx = tl.minimum(tl.argmax(local_max, axis=0), num_blocks - 1)
+    return tl.load(local_argmax_ptr + row_idx * local_argmax_stride + max_block_idx).to(
+        tl.int64
+    )
 
 
 @triton.jit
@@ -240,7 +246,10 @@ def _compute_local_logits_stats_kernel(
             other=float("-inf"),
         ).to(tl.float32)
         value, idx = tl.max(target_logits, axis=0, return_indices=True)
-        token_id = block_idx * BLOCK_SIZE + idx
+        # A NaN can leave an out-of-vocabulary lane of the final block holding
+        # the winning index, for the same unordered-compare reason as the
+        # block reduction below.
+        token_id = tl.minimum(block_idx * BLOCK_SIZE + idx, vocab_size - 1)
         tl.store(
             target_local_argmax_ptr
             + logit_idx * target_local_argmax_stride
@@ -565,7 +574,7 @@ def _rejection_kernel(
                 # Greedy sampling. Accept IFF draft matches target argmax.
                 # NOTE: Target argmax is stored directly so that resampling
                 # can be skipped upon rejection.
-                target_argmax = _compute_global_target_argmax(
+                target_argmax = _gather_global_argmax(
                     target_local_max_ptr,
                     target_local_max_stride,
                     target_local_argmax_ptr,
@@ -789,7 +798,7 @@ def _resample_kernel(
         APPLY_TEMPERATURE=False,
         USE_FP64=USE_FP64,
     )
-    token_id = block_idx * BLOCK_SIZE + idx
+    token_id = tl.minimum(block_idx * BLOCK_SIZE + idx, vocab_size - 1)
     tl.store(
         resampled_local_argmax_ptr
         + req_idx * resampled_local_argmax_stride
@@ -842,18 +851,14 @@ def _insert_resampled_kernel(
         return
 
     # Insert the resampled token.
-    block = tl.arange(0, PADDED_RESAMPLE_NUM_BLOCKS)
-    mask = block < resample_num_blocks
-    resampled_local_max = tl.load(
-        resampled_local_max_ptr + req_idx * resampled_local_max_stride + block,
-        mask=mask,
-        other=float("-inf"),
-    )
-    resampled_max_block_idx = tl.argmax(resampled_local_max, axis=0)
-    resampled = tl.load(
-        resampled_local_argmax_ptr
-        + req_idx * resampled_local_argmax_stride
-        + resampled_max_block_idx,
+    resampled = _gather_global_argmax(
+        resampled_local_max_ptr,
+        resampled_local_max_stride,
+        resampled_local_argmax_ptr,
+        resampled_local_argmax_stride,
+        req_idx,
+        resample_num_blocks,
+        PADDED_RESAMPLE_NUM_BLOCKS,
     )
     tl.store(
         sampled_ptr + req_idx * sampled_stride + num_sampled,
