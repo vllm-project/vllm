@@ -210,7 +210,9 @@ def _lora_shrink(
     BLOCK_M = kernel_config["block_m"]
     BLOCK_N = kernel_config["block_n"]
     BLOCK_K = kernel_config["block_k"]
-    SPLIT_K = kernel_config["split_k"]
+    # Enforce deterministic reduction: tuned configs must not re-enable
+    # split_k > 1 (atomic_add in do_shrink_kernel). See #50059.
+    SPLIT_K = 1
     NUM_WARPS = kernel_config["num_warps"]
     NUM_STAGES = kernel_config["num_stages"]
     NUM_CTAS = kernel_config["num_ctas"]
