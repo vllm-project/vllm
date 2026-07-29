@@ -134,6 +134,7 @@ def test_auto_round_model(vllm_runner, model):
     assert output
     print(output[0][1])
 
+
 # ---------------------------------------------------------------------------
 # Unit tests for INCConfig and related classes
 # ---------------------------------------------------------------------------
@@ -445,14 +446,16 @@ def test_inc_resolve_scheme_selects_wna16() -> None:
 
 
 def test_inc_config_accepts_mxfp_family_llm_compressor() -> None:
-    config = INCConfig.from_config({
-        "quant_method": "auto-round",
-        "bits": 4,
-        "group_size": 32,
-        "sym": True,
-        "packing_format": "auto_round:llm_compressor",
-        "data_type": "mx_fp4e2m1",
-    })
+    config = INCConfig.from_config(
+        {
+            "quant_method": "auto-round",
+            "bits": 4,
+            "group_size": 32,
+            "sym": True,
+            "packing_format": "auto_round:llm_compressor",
+            "data_type": "mx_fp4e2m1",
+        }
+    )
 
     layer_config = config.config_parser.resolve(
         DummyLayer(), "model.layers.0.mlp.down_proj"
@@ -481,9 +484,12 @@ def test_qwen3_1p7b_mxfp4_autoround_uses_mxfp4_linear_scheme(
 
     config = make_qwen3_autoround_config("qwen3_1p7b_mxfp4")
 
-    assert INCConfig.override_quantization_method(
-        {"quant_method": "auto-round"}, user_quant=None
-    ) == "inc"
+    assert (
+        INCConfig.override_quantization_method(
+            {"quant_method": "auto-round"}, user_quant=None
+        )
+        == "inc"
+    )
     ignored_method = config.get_quant_method(
         object.__new__(LinearBase), "model.layers.0.self_attn.q_proj"
     )
@@ -573,7 +579,6 @@ def test_qwen3_30b_a3b_mxfp4_autoround_routes_to_mxfp4_moe(
     assert isinstance(resolve_scheme(layer_config), INCMxfp4Scheme)
     assert isinstance(method, DummyMxfp4MoEMethod)
     assert method.moe_config is layer.moe_config
-
 
 
 def test_inc_mxfp4_linear_method_registers_and_processes_weights(
@@ -733,6 +738,8 @@ def test_wna16_xpu_moe_routes_to_gptq_moe(monkeypatch) -> None:
     assert method is expected_method
     assert captured["layer"] is layer
     assert captured["layer_config"].is_gptq is True
+
+
 def test_inc_resolve_scheme_selects_mxfp8() -> None:
     layer_config = INCLayerConfig(
         bits=8,
