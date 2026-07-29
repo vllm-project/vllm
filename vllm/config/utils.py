@@ -415,31 +415,6 @@ class Range:
         return self.__str__()
 
 
-def handle_deprecated(
-    config: ConfigT,
-    old_name: str,
-    new_name_or_names: str | list[str],
-    removal_version: str,
-) -> None:
-    old_val = getattr(config, old_name)
-    if old_val is None:
-        return
-
-    if isinstance(new_name_or_names, str):
-        new_names = [new_name_or_names]
-    else:
-        new_names = new_name_or_names
-
-    msg = (
-        f"{old_name} is deprecated and will be removed in {removal_version}. "
-        f"Use {', '.join(new_names)} instead."
-    )
-    logger.warning(msg)
-
-    for new_name in new_names:
-        setattr(config, new_name, old_val)
-
-
 def get_from_deprecated_env_if_set(
     env_name: str,
     removal_version: str,
