@@ -64,9 +64,23 @@ steps:
     - pip install "vllm-gguf-plugin >= 0.0.2"
     - pytest -v -s plugins_tests/gguf
 
-- label: BitsAndBytes Plugin (2 GPUs)
+- label: BitsAndBytes Plugin
   key: bitsandbytes-plugin
-  timeout_in_minutes: 60
+  device: h200_18gb
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  soft_fail: true
+  optional: true
+  source_file_dependencies:
+  - vllm/model_executor/
+  - tests/plugins_tests/bitsandbytes
+  commands:
+    - pip install --system "vllm-bnb-plugin >= 0.0.1"
+    - pytest -v -s plugins_tests/bitsandbytes -m 'not distributed'
+
+- label: BitsAndBytes Plugin (2 GPUs)
+  key: bitsandbytes-plugin-2-gpus
+  timeout_in_minutes: 15
   working_dir: "/vllm-workspace/tests"
   num_devices: 2
   soft_fail: true
@@ -75,5 +89,5 @@ steps:
   - vllm/model_executor/
   - tests/plugins_tests/bitsandbytes
   commands:
-    - uv pip install --system "vllm-bnb-plugin >= 0.1.0"
-    - pytest -v -s plugins_tests/bitsandbytes
+    - pip install --system "vllm-bnb-plugin >= 0.0.1"
+    - pytest -v -s plugins_tests/bitsandbytes -m 'distributed(num_gpus=2)'
