@@ -2391,17 +2391,6 @@ def topk_softmax(
     e_score_correction_bias: torch.Tensor | None = None,
     is_padding: torch.Tensor | None = None,
 ) -> None:
-    if current_platform.is_xpu():
-        # TODO: Remove after vllm-xpu-kernels supports is_padding.
-        torch.ops._moe_C.topk_softmax(
-            topk_weights,
-            topk_ids,
-            token_expert_indices,
-            gating_output,
-            renormalize,
-            e_score_correction_bias,
-        )
-        return
     torch.ops._moe_C.topk_softmax(
         topk_weights,
         topk_ids,
@@ -2447,21 +2436,6 @@ def topk_hash_softplus_sqrt(
     hash_indices_table: torch.Tensor | None = None,
     is_padding: torch.Tensor | None = None,
 ) -> None:
-    if current_platform.is_xpu():
-        # TODO: Remove after vllm-xpu-kernels supports is_padding.
-        torch.ops._moe_C.topk_softplus_sqrt(
-            topk_weights,
-            topk_indices,
-            token_expert_indices,
-            gating_output,
-            renormalize,
-            routed_scaling_factor,
-            e_score_correction_bias,
-            input_tokens,
-            hash_indices_table,
-        )
-        return
-
     torch.ops._moe_C.topk_softplus_sqrt(
         topk_weights,
         topk_indices,
@@ -3814,6 +3788,7 @@ def cpu_attn_get_scheduler_metadata(
     isa: str,
     enable_kv_split: bool,
     dynamic_causal: torch.Tensor | None = None,
+    kv_cache_dtype: str = "auto",
 ) -> torch.Tensor:
     scheduler_metadata = torch.ops._C.get_scheduler_metadata(
         num_reqs,
@@ -3828,6 +3803,7 @@ def cpu_attn_get_scheduler_metadata(
         isa,
         enable_kv_split,
         dynamic_causal,
+        kv_cache_dtype,
     )
     return scheduler_metadata
 
