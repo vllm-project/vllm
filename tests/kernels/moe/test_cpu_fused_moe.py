@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import sys
+
 import pytest
 import torch
 
@@ -21,7 +23,8 @@ from vllm.model_executor.layers.fused_moe.config import (
     biased_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
-    _CPU_MOE_ACT_FN,
+    ArmCPUUnquantizedExperts,
+    CPUUnquantizedExperts,
     X86CPUUnquantizedExperts,
     select_experts,
 )
@@ -45,12 +48,36 @@ ACT = [
 ]
 USE_BIAS = [False, True]
 ISA = ["vec"]
-if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
+if (
+    current_platform.get_cpu_architecture() == CpuArchEnum.ARM
+    and sys.platform != "darwin"
+):
     ISA.append("neon")
 if torch.cpu._is_amx_tile_supported():
     ISA.append("amx")
 
 DTYPE = [torch.bfloat16]
+
+
+def _ref_moe_activation(
+    input: torch.Tensor,
+    activation: MoEActivation,
+) -> torch.Tensor:
+    if activation == MoEActivation.SWIGLUOAI:
+        gate = input[..., ::2].clamp(max=7.0)
+        up = input[..., 1::2].clamp(min=-7.0, max=7.0)
+        glu = gate * torch.sigmoid(gate * 1.702)
+        return (up + 1) * glu
+
+    d = input.shape[-1] // 2
+    gate, up = input[..., :d], input[..., d:]
+    if activation == MoEActivation.SILU:
+        return torch.nn.functional.silu(gate) * up
+    if activation == MoEActivation.GELU:
+        return torch.nn.functional.gelu(gate, approximate="none") * up
+    if activation == MoEActivation.GELU_TANH:
+        return torch.nn.functional.gelu(gate, approximate="tanh") * up
+    raise ValueError(f"Unsupported activation: {activation}")
 
 
 def ref_fused_moe(
@@ -96,7 +123,8 @@ def ref_fused_moe(
             tokens_for_this_expert, curr_w13, curr_w13_bias
         )
         # Note: to simulate the kernel implementation
-        gate_up = _CPU_MOE_ACT_FN[activation](gate_up).to(dtype=input.dtype).float()
+        gate_up = _ref_moe_activation(gate_up, activation)
+        gate_up = gate_up.to(dtype=input.dtype).float()
         expert_out = torch.nn.functional.linear(gate_up, curr_w2, curr_w2_bias)
 
         outputs.append(expert_out)
@@ -175,7 +203,7 @@ def ref_fused_moe_int8(
         if w13_bias is not None:
             gate_up += w13_bias[expert_idx].float()
 
-        intermediate = _CPU_MOE_ACT_FN[activation](gate_up).to(input.dtype)
+        intermediate = _ref_moe_activation(gate_up, activation).to(input.dtype)
         intermediate_int8, intermediate_scale = quantize_per_token(intermediate)
         output = torch.matmul(
             intermediate_int8.float(),
@@ -414,11 +442,46 @@ def _make_moe_config(
         has_bias=has_bias,
     )
 
+@pytest.mark.parametrize(
+    ("hidden_size", "intermediate_size", "act", "expected"),
+    [
+        (128, 128, MoEActivation.SILU, True),
+        # Hidden size is not 32-aligned.
+        (112, 128, MoEActivation.SILU, False),
+        (128, 176, MoEActivation.SILU, True),
+        # SwiGLUOAI's interleaved gate/up layout cannot be padded.
+        (128, 176, MoEActivation.SWIGLUOAI, False),
+    ],
+)
+def test_cpu_vec_fused_moe_shape_support(
+    hidden_size: int,
+    intermediate_size: int,
+    act: MoEActivation,
+    expected: bool,
+):
+    moe_config = _make_moe_config(
+        expert_num=8,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        topk_num=4,
+        dtype=torch.bfloat16,
+        act=act,
+    )
+    supported, _ = CPUUnquantizedExperts.is_supported_config(
+        CPUUnquantizedExperts,
+        moe_config,
+        None,
+        None,
+        mk.FusedMoEActivationFormat.Standard,
+    )
+    assert supported is expected
+
 
 @pytest.mark.parametrize("expert_num", EXPERT_NUM)
 @pytest.mark.parametrize("hidden_size", HIDDEN_DIM)
 @pytest.mark.parametrize("use_bias", USE_BIAS)
 @pytest.mark.parametrize("dtype", DTYPE)
+@pytest.mark.parametrize("isa", ISA)
 @pytest.mark.parametrize(
     "act",
     [MoEActivation.SILU, MoEActivation.GELU, MoEActivation.GELU_TANH],
@@ -429,14 +492,11 @@ def test_cpu_fused_moe_unaligned_intermediate_size(
     hidden_size: int,
     use_bias: bool,
     dtype: torch.dtype,
+    isa: str,
     act: MoEActivation,
 ):
-    """An unaligned per-partition moe_intermediate_size must still hit the
-    grouped-gemm fast path via automatic zero-padding, with numerically
-    correct output, instead of silently falling back to the much slower
-    per-expert torch loop."""
-    if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
-        pytest.skip("padding is only applied on the x86 AMX/vector kernels")
+    """CPU kernels handle unaligned intermediate sizes by zero-padding the
+    weights before prepacking."""
 
     set_random_seed(0)
     batch_size = 64
@@ -486,8 +546,13 @@ def test_cpu_fused_moe_unaligned_intermediate_size(
     moe_config = _make_moe_config(
         expert_num, hidden_size, intermediate_size, topk_num, dtype, act, use_bias
     )
-    supported, reason = X86CPUUnquantizedExperts.is_supported_config(
-        X86CPUUnquantizedExperts,
+    experts_cls = {
+        "vec": CPUUnquantizedExperts,
+        "amx": X86CPUUnquantizedExperts,
+        "neon": ArmCPUUnquantizedExperts,
+    }[isa]
+    supported, reason = experts_cls.is_supported_config(
+        experts_cls,
         moe_config,
         None,
         None,
@@ -505,8 +570,8 @@ def test_cpu_fused_moe_unaligned_intermediate_size(
         if use_bias
         else FusedMoEQuantConfig.make()
     )
-    experts = X86CPUUnquantizedExperts(moe_config, quant_config)
-    assert experts.isa in ("amx", "vec")
+    experts = experts_cls(moe_config, quant_config)
+    assert experts.isa == isa
     experts.process_weights_after_loading(layer)
 
     output = experts.apply(
@@ -523,30 +588,3 @@ def test_cpu_fused_moe_unaligned_intermediate_size(
 
     atol, rtol = get_default_atol(output), get_default_rtol(output)
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol)
-
-
-def test_cpu_fused_moe_unaligned_intermediate_size_swigluoai(default_vllm_config):
-    """swigluoai's interleaved gate/up layout can't be zero-padded, so an
-    unaligned per-partition intermediate size has no usable grouped-gemm
-    kernel. On x86 this must raise rather than silently falling back to the
-    (correct but much slower) per-expert torch loop."""
-    if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
-        pytest.skip("x86 is the only architecture that refuses the torch fallback")
-
-    moe_config = _make_moe_config(
-        expert_num=8,
-        hidden_size=128,
-        intermediate_size=UNALIGNED_INTERMEDIATE_DIM,
-        topk_num=2,
-        dtype=torch.bfloat16,
-        act=MoEActivation.SWIGLUOAI,
-    )
-
-    with pytest.raises(RuntimeError):
-        X86CPUUnquantizedExperts.is_supported_config(
-            X86CPUUnquantizedExperts,
-            moe_config,
-            None,
-            None,
-            mk.FusedMoEActivationFormat.Standard,
-        )

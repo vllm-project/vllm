@@ -146,16 +146,15 @@ def backend_to_kernel_cls(
     elif backend == UnquantizedMoeBackend.CPU:
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
             ArmCPUUnquantizedExperts,
-            TorchCPUUnquantizedExperts,
+            CPUUnquantizedExperts,
             X86CPUUnquantizedExperts,
         )
 
-        # The device checks make the two grouped-gemm kernels mutually
-        # exclusive; on Arm the shape checks decide between NEON and torch.
+        # Prefer architecture-specific kernels before the portable vector path.
         return [
             X86CPUUnquantizedExperts,
             ArmCPUUnquantizedExperts,
-            TorchCPUUnquantizedExperts,
+            CPUUnquantizedExperts,
         ]
 
     else:

@@ -195,9 +195,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 # The CPU experts need the layer itself for the setup that
                 # convert_to_unquantized_kernel_format cannot express, since
                 # it only sees the two weight tensors: padding and prepacking
-                # into the grouped-gemm layout (bias included), binding the
-                # per-expert torch closures, and capturing the router config
-                # that monolithic apply() cannot carry.
+                # into the grouped-gemm layout (bias included), and capturing
+                # the router config that monolithic apply() cannot carry.
                 self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def process_weights_after_loading(self, layer: "RoutedExperts") -> None:
