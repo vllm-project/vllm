@@ -1251,21 +1251,13 @@ class ModelConfig:
             )
 
         decode_context_parallel_size = parallel_config.decode_context_parallel_size
-        # When DCP spans the PCP axis (dcp == pcp, pcp > 1) it does NOT shard
-        # the TP-local KV heads: Q is replicated across PCP ranks and the
-        # partial attentions combine via all-reduce (see FlashAttention
-        # dcp_shares_pcp_ranks). So the TP-head DCP constraints below apply
-        # only when DCP reuses the TP ranks (pcp == 1) or spans the full
-        # TP x PCP axis (dcp == tp*pcp).
-        dcp_shares_pcp_ranks = (
-            parallel_config.prefill_context_parallel_size > 1
-            and decode_context_parallel_size
-            == parallel_config.prefill_context_parallel_size
-        )
+        # DCP groups span the PCP axis before TP, so DCP only splits query heads
+        # when it reaches past PCP (see pcp.maybe_all_gather_q_for_dcp). When
+        # dcp == pcp the group holds replicated Q and none of these TP-head
+        # constraints apply.
         if (
-            decode_context_parallel_size > 1
+            decode_context_parallel_size > parallel_config.prefill_context_parallel_size
             and not self.use_mla
-            and not dcp_shares_pcp_ranks
         ):
             total_num_kv_heads = self.get_total_num_kv_heads()
             assert tensor_parallel_size > total_num_kv_heads, (
