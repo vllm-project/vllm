@@ -3,6 +3,8 @@
 
 from math import lcm
 
+import torch
+
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     ExternalCachedBlockPool,
     MooncakeStoreCoordinator,
@@ -14,8 +16,18 @@ from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
+    MambaSpec,
     SlidingWindowSpec,
 )
+
+
+def _mamba_align(block_size=32):
+    return MambaSpec(
+        block_size=block_size,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
 
 
 def _make_coord(groups, hash_block_size, use_eagle=False, retention_interval=None):
@@ -194,6 +206,49 @@ def test_coordinator_group_block_size_double_hash():
     )
     assert hit == 64
     assert hit % 32 == 0
+
+
+# ----- Fine-grained partial hits (full attention + mamba "align") -----
+
+
+def test_coordinator_fine_grained_partial_tail_hit():
+    """K3 shape: FA + mamba-align, block_size=32 over hash_block_size=16. When
+    both groups have the sub-block boundary hash, the reconciled hit lands on
+    the hash boundary (48), not the block boundary (32)."""
+    groups = [
+        KVCacheGroupSpec(["L0"], _full(32)),
+        KVCacheGroupSpec(["L1"], _mamba_align(32)),
+    ]
+    coord = _make_coord(groups, hash_block_size=16)
+    assert coord.enable_partial_hash_hits
+    hs = _hashes(4)  # 4 hash units of 16 = 64 tokens; block 0 = [0,32), etc.
+    # Both groups: full block 0 (key = last sub-hash hs[1]) + partial boundary
+    # at token 48 (key = hs[2]). No hs[3] -> block 1 is not full.
+    exists = {(g, bytes(h)) for g in (0, 1) for h in (hs[1], hs[2])}
+    cmap = ExternalCachedBlockPool(16, exists)
+    _masks, hit = coord.find_longest_cache_hit(
+        hs, max_length=64, cached_block_pool=cmap
+    )
+    assert hit == 48
+
+
+def test_coordinator_fine_grained_clips_when_one_group_missing_tail():
+    """If only one group has the sub-block boundary, min-convergence clips the
+    reconciled hit back to the block boundary (32)."""
+    groups = [
+        KVCacheGroupSpec(["L0"], _full(32)),
+        KVCacheGroupSpec(["L1"], _mamba_align(32)),
+    ]
+    coord = _make_coord(groups, hash_block_size=16)
+    hs = _hashes(4)
+    # Full block 0 for both; partial boundary hs[2] only for FA (group 0).
+    exists = {(g, bytes(hs[1])) for g in (0, 1)}
+    exists |= {(0, bytes(hs[2]))}
+    cmap = ExternalCachedBlockPool(16, exists)
+    _masks, hit = coord.find_longest_cache_hit(
+        hs, max_length=64, cached_block_pool=cmap
+    )
+    assert hit == 32
 
 
 # ----- store_mask -----
@@ -476,3 +531,39 @@ def test_load_mask_without_eagle_unchanged():
     assert hit == 64
     masks = coord.load_mask(hs, token_len=hit)
     assert masks[0] == [True, True, True, True]
+
+
+def _mamba(block_size=16):
+    return MambaSpec(
+        block_size=block_size,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+
+
+def test_lookup_with_eagle_hybrid_full_plus_mamba_no_overrun():
+    """Full+Mamba with eagle must not overrun the attention-verified hit.
+
+    ``MambaManager`` ignores ``drop_eagle_block`` (a Mamba block at position
+    p IS the recurrent state after (p + 1) * block_size tokens; there is
+    nothing to recompute), so granting the Mamba group the one-block eagle
+    peek margin lets it match one block PAST the eagle-pruned full-attention
+    hit, and adopting that length resumes the recurrent state ahead of the
+    verified token prefix (#43559). Gating the margin on ``not
+    isinstance(spec, MambaSpec)`` pins the hit to the attention-verified 48.
+    """
+    groups = [
+        KVCacheGroupSpec(["L0"], _full(16)),
+        KVCacheGroupSpec(["L1"], _mamba(16)),
+    ]
+    coord = _make_coord(groups, hash_block_size=16, use_eagle=True)
+    hs = _hashes(4)
+    exists = {(g, bytes(h)) for g in (0, 1) for h in hs}
+    cmap = ExternalCachedBlockPool(16, exists)
+    _masks, hit = coord.find_longest_cache_hit(
+        hs, max_length=64, cached_block_pool=cmap
+    )
+    # FullAttn matches 4 blocks, eagle pops 1 -> 48 verified tokens. The
+    # Mamba group must serve its state@48 snapshot, not peek to state@64.
+    assert hit == 48

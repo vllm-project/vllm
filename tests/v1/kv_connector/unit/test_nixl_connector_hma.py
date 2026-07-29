@@ -709,6 +709,120 @@ def test_get_block_descs_ids_kernel_block_mismatch():
 
 
 @pytest.mark.cpu_test
+def test_get_block_descs_ids_hetero_block_size_hybrid():
+    """With a block-size ratio, FA desc ids are ratio-expanded while SSM
+    desc ids keep the unexpanded logical stride (state blocks are never
+    sub-split)."""
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+
+    worker = _make_mock_worker_for_desc_ids(
+        num_regions=2,
+        has_mamba=True,
+        group_spec_types=(FullAttentionSpec, MambaSpec),
+        block_len_per_layer=[100],
+    )
+
+    ratio = 4
+    # FA ids are already remote-granularity (expanded) sub-block ids.
+    fa_sub_blocks = [3, 5]
+    ssm_blocks = [1]
+    result = worker._compute_desc_ids(
+        block_ids=(fa_sub_blocks, ssm_blocks),
+        dst_num_blocks=100,
+        block_size_ratio=ratio,
+        physical_blocks_per_logical=1,
+    )
+
+    # FA regions have 100*4 entries each; SSM regions (4 per layer) start at
+    # 2*400 and stride by the unexpanded 100 logical blocks.
+    expected = [3, 5, 403, 405, 801, 901, 1001, 1101]
+    assert list(result) == expected, f"Expected {expected}, got {list(result)}"
+
+
+def _bind_worker_method(worker, name):
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    method = getattr(NixlConnectorWorker, name)
+    setattr(worker, name, method.__get__(worker, NixlConnectorWorker))
+
+
+@pytest.mark.cpu_test
+def test_map_block_ids_for_block_size_ratio_hybrid():
+    """Attention groups expand to remote granularity and clip to the remote
+    coverage; mamba state blocks pass through 1:1."""
+    from unittest.mock import MagicMock
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+
+    worker = MagicMock(spec=NixlConnectorWorker)
+    worker._group_spec_types = (FullAttentionSpec, MambaSpec)
+    _bind_worker_method(worker, "get_mapped_blocks")
+    _bind_worker_method(worker, "_map_block_ids_for_block_size_ratio")
+
+    local, remote = worker._map_block_ids_for_block_size_ratio(
+        [[1, 2, 3], [7]],
+        [list(range(30, 40)), [42]],
+        4,
+    )
+    # [1, 2, 3] expand to sub-blocks [4..15], clipped to the 10 remote blocks.
+    assert local == [list(range(4, 14)), [7]]
+    assert remote == [list(range(30, 40)), [42]]
+
+    # Attention-only full prefix hit: empty local list is preserved.
+    worker._group_spec_types = (FullAttentionSpec,)
+    local, remote = worker._map_block_ids_for_block_size_ratio([[]], [[30, 31]], 4)
+    assert local == []
+
+
+@pytest.mark.cpu_test
+def test_post_process_zeroes_untransferred_tail():
+    """The untransferred sub-blocks of the last local block are zeroed on
+    receive; mamba state caches are untouched by the attention permute."""
+    from unittest.mock import MagicMock
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+
+    ratio = 4
+    block_tokens = 8  # 2 tokens per remote sub-block
+
+    worker = MagicMock(spec=NixlConnectorWorker)
+    worker._group_spec_types = (FullAttentionSpec, MambaSpec)
+    worker.transfer_topo = MagicMock()
+    worker.device_type = "cpu"
+    worker.enable_permute_local_kv = False
+    attn_cache = torch.ones(6, block_tokens, 2, 4)
+    mamba_cache = torch.ones(6, 16)
+    worker.device_kv_caches = {"attn.0": attn_cache, "mamba.0": mamba_cache}
+    fa_group = MagicMock(layer_names=["attn.0"])
+    ssm_group = MagicMock(layer_names=["mamba.0"])
+    worker.kv_cache_config = MagicMock(kv_cache_groups=[fa_group, ssm_group])
+    # The cached property filters mamba layers out of the permuted caches.
+    attn_caches = NixlConnectorWorker._attention_kv_caches.func(worker)
+    assert len(attn_caches) == 1 and attn_caches[0] is attn_cache
+    worker._attention_kv_caches = attn_caches
+    _bind_worker_method(worker, "post_process_device_kv_on_receive")
+
+    # Request occupies blocks [2, 3]; only 6 of 8 sub-blocks were received.
+    worker.post_process_device_kv_on_receive(ratio, [([2, 3], 6)])
+
+    # Block 2 fully covered; block 3 covered for 2 sub-blocks (4 tokens).
+    assert torch.all(attn_cache[2] == 1)
+    assert torch.all(attn_cache[3, :4] == 1)
+    assert torch.all(attn_cache[3, 4:] == 0)
+    # Untouched blocks and the mamba cache keep their content.
+    assert torch.all(attn_cache[4] == 1)
+    assert torch.all(mamba_cache == 1)
+
+
+@pytest.mark.cpu_test
 def test_nixl_metadata_hybrid_ssm_block_ids():
     """Test NixlConnectorMetadata correctly stores block IDs for FA + SSM
     groups with different block counts (kernel mismatch active)."""
