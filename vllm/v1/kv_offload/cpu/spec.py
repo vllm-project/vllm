@@ -26,7 +26,6 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 class CPUOffloadingSpec(OffloadingSpec):
     BLOCK_SIZE_ALIGNMENT = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
-    SUPPORTS_REPLICATED_LAYOUT = True
 
     @classmethod
     def build_metric_definitions(
@@ -88,11 +87,7 @@ class CPUOffloadingSpec(OffloadingSpec):
         self.num_blocks = 0
         self.kv_bytes_per_chunk = 0
         self.cpu_page_size_per_worker = 0
-        self.replicated_layout = (
-            config.replicated_layout
-            and self.SUPPORTS_REPLICATED_LAYOUT
-            and self._uses_shared_region()
-        )
+        self.replicated_layout = config.replicated_layout and self._uses_shared_region()
         if config.worker_kv_bytes_per_block > 0 and world_size > 0:
             num_copies = 1 if self.replicated_layout else world_size
             kv_bytes_per_block = config.worker_kv_bytes_per_block * num_copies
