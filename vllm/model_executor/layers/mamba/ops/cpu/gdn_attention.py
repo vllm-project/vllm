@@ -103,14 +103,8 @@ def _cpu_gdn_attention_nonspec(
     assert state_indices_tensor is not None
     assert query_start_loc is not None
 
-    # The C++ causal_conv1d kernels (conv.cpp) use VDPBF16PS vector
-    # instructions, not AMX tiles, so they run on any AVX-512BF16 CPU.
-    # AMX is a strict subset of AVX-512BF16,
-    # so GNR keeps its existing code path unchanged; only non-AMX AVX-512BF16
-    # CPUs move from the pure-torch fallback onto the C++ conv path. The conv
-    # weight is VNNI-packed at load time on the same predicate (see
-    # dispatch_cpu_unquantized_gemm), so `layer.conv1d.weight` is packed here
-    # and must only be fed to the C++ ops, never to the torch `.view()` path.
+    # C++ conv (conv.cpp) uses VDPBF16PS, not AMX tiles, so it runs on any
+    # AVX-512BF16 CPU; weight is VNNI-packed on this same predicate at load time.
     use_cpp_conv = torch.cpu._is_avx512_bf16_supported()
 
     conv_state = layer.kv_cache[0]
