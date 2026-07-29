@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping
-from copy import deepcopy
+from copy import copy
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
@@ -18,6 +18,13 @@ if TYPE_CHECKING:
     from ..auto_gptq import AutoGPTQConfig
 else:
     AutoGPTQConfig = object
+
+
+def _clone_config(config: AutoGPTQConfig) -> AutoGPTQConfig:
+    # Per-layer overrides only mutate scalar fields; large rule tables are shared.
+    cloned_config = copy(config)
+    cloned_config.full_config = config.full_config.copy()
+    return cloned_config
 
 
 # Match dynamic rules with module name (prefix) and override quantize
@@ -86,6 +93,8 @@ def _get_dynamic_rule_matcher(config: AutoGPTQConfig) -> dict[str, Any]:
     exact_rules: dict[str, tuple[int, bool, dict]] = {}
     regex_rules: list[tuple[int, Any, bool, dict]] = []
     for index, (pattern, pattern_dict) in enumerate(config.dynamic.items()):
+        # GPTQModel often emits thousands of exact rules. Index those rules
+        # while preserving the original first-match order for real regexes.
         is_negative = pattern.startswith("-:")
         regex_pattern = pattern.removeprefix("-:").removeprefix("+:")
         literal_pattern = _get_literal_pattern(regex_pattern)
@@ -155,18 +164,22 @@ def _format_shard_values(
     return dict(zip(shard_proj_names, shard_values, strict=True))
 
 
-def _get_fused_shard_names(
+def _get_fused_shards(
     layer_name: str,
     fused_mapping: Mapping[str, list[str]],
-) -> tuple[str | None, list[str] | None]:
+) -> tuple[str, list[str]] | None:
+    def is_module_suffix(module_name: str) -> bool:
+        suffix = module_name if module_name.startswith(".") else f".{module_name}"
+        return layer_name == module_name or layer_name.endswith(suffix)
+
     fused_name = max(
-        (name for name in fused_mapping if layer_name.endswith(name)),
+        (name for name in fused_mapping if is_module_suffix(name)),
         key=len,
         default=None,
     )
     if fused_name is None:
-        return None, None
-    return fused_name, fused_mapping[fused_name]
+        return None
+    return (fused_name, fused_mapping[fused_name])
 
 
 def get_dynamic_override(
@@ -179,12 +192,12 @@ def get_dynamic_override(
     if matched:
         return value
 
-    fused_name, shard_proj_names = _get_fused_shard_names(
-        layer_name, config.packed_modules_mapping
-    )
-    if fused_name is None or shard_proj_names is None:
+    fused_shards = _get_fused_shards(layer_name, config.packed_modules_mapping)
+    if fused_shards is None:
         return default_value
 
+    # Dynamic rules use unfused checkpoint names, so retry each logical shard.
+    fused_name, shard_proj_names = fused_shards
     layer_prefix = layer_name.removesuffix(fused_name)
     shard_matches = [
         _match_dynamic_override(
@@ -261,8 +274,9 @@ def is_layer_gptq_quantized(
     # in the safetensors checkpoint. So, we convert the name
     # from the fused version to unfused + check to make sure that
     # each shard of the fused layer has the same scheme.
-    fused_name, shard_names = _get_fused_shard_names(prefix, fused_mapping)
-    if fused_name is not None and shard_names is not None:
+    fused_shards = _get_fused_shards(prefix, fused_mapping)
+    if fused_shards is not None:
+        fused_name, shard_names = fused_shards
         layer_prefix = prefix.removesuffix(fused_name)
         shard_prefixes = [f"{layer_prefix}{shard_name}" for shard_name in shard_names]
 
@@ -293,7 +307,7 @@ def get_linear_quant_method(
     prefix: str,
     linear_method_cls: type,
 ):
-    cloned_config = deepcopy(config)
+    cloned_config = _clone_config(config)
     parallel_lm_head_quantized = (
         isinstance(layer, ParallelLMHead) and cloned_config.lm_head_quantized
     )

@@ -25,6 +25,9 @@ MODELS = [
     "TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ",
 ]
 
+_MOE_PREFIX = "model.layers.0.mlp.experts"
+_ESCAPED_MOE_PREFIX = _MOE_PREFIX.replace(".", r"\.")
+
 
 @pytest.mark.skipif(
     not is_quant_method_supported("auto_gptq"),
@@ -75,15 +78,7 @@ def _make_auto_gptq_config(
         "quant_method": "gptq",
         "dynamic": dynamic,
     }
-    return AutoGPTQConfig(
-        4,
-        group_size,
-        desc_act,
-        True,
-        False,
-        dynamic,
-        full_config,
-    )
+    return AutoGPTQConfig.from_config(full_config)
 
 
 def _make_routed_experts_stub(num_experts: int = 3) -> SimpleNamespace:
@@ -96,35 +91,38 @@ def _make_routed_experts_stub(num_experts: int = 3) -> SimpleNamespace:
     )
 
 
-def test_auto_gptq_moe_resolves_mixed_expert_group_sizes():
-    prefix = "model.layers.0.mlp.experts"
-    escaped_prefix = prefix.replace(".", r"\.")
+def test_auto_gptq_moe_resolves_mixed_expert_group_sizes() -> None:
+    """Choose the smallest compatible group while retaining source metadata."""
     dynamic = {
-        rf"+:^{escaped_prefix}\.1\..*_proj$": {
+        rf"+:^{_ESCAPED_MOE_PREFIX}\.1\..*_proj$": {
             "bits": 4,
             "group_size": 32,
         },
-        rf"+:^{escaped_prefix}\.2\.down_proj$": {
+        rf"+:^{_ESCAPED_MOE_PREFIX}\.2\.down_proj$": {
             "bits": 4,
             "group_size": 32,
         },
     }
 
+    config = _make_auto_gptq_config(dynamic)
     resolved, source_group_sizes = _resolve_moe_quant_config(
-        _make_auto_gptq_config(dynamic),
+        config,
         _make_routed_experts_stub(),
-        prefix,
+        _MOE_PREFIX,
     )
 
     assert resolved is not None
     assert resolved.group_size == 32
+    assert resolved.full_config["group_size"] == 32
+    assert config.full_config["group_size"] == 128
     assert source_group_sizes[(0, "w1")] == 128
     assert source_group_sizes[(1, "w1")] == 32
     assert source_group_sizes[(2, "w1")] == 128
     assert source_group_sizes[(2, "w2")] == 32
 
 
-def test_auto_gptq_moe_normalizes_larger_group_metadata():
+def test_auto_gptq_moe_normalizes_larger_group_metadata() -> None:
+    """Expand scales, zero points, and sequential group indices losslessly."""
     method = object.__new__(AutoGPTQMoEMethod)
     method.quant_config = _make_auto_gptq_config({}, group_size=32)
     method.source_group_sizes = {(0, "w1"): 128}
@@ -172,11 +170,25 @@ def test_auto_gptq_moe_normalizes_larger_group_metadata():
     )
 
 
-def test_auto_gptq_moe_rejects_mixed_groups_with_desc_act():
-    prefix = "model.layers.0.mlp.experts"
-    escaped_prefix = prefix.replace(".", r"\.")
+def test_auto_gptq_moe_rejects_non_sequential_group_indices() -> None:
+    """Only the standard non-act-order g_idx layout can be normalized."""
+    method = object.__new__(AutoGPTQMoEMethod)
+    method.quant_config = _make_auto_gptq_config({}, group_size=32)
+    method.source_group_sizes = {(0, "w1"): 128}
+
+    with pytest.raises(ValueError, match="non-sequential g_idx"):
+        method._normalize_group_metadata(
+            torch.zeros(256, dtype=torch.int32),
+            "experts.w13_g_idx",
+            "w1",
+            0,
+        )
+
+
+def test_auto_gptq_moe_rejects_mixed_groups_with_desc_act() -> None:
+    """Activation-order metadata cannot be expanded losslessly."""
     dynamic = {
-        rf"+:^{escaped_prefix}\.1\..*_proj$": {
+        rf"+:^{_ESCAPED_MOE_PREFIX}\.1\..*_proj$": {
             "group_size": 32,
         }
     }
@@ -185,15 +197,28 @@ def test_auto_gptq_moe_rejects_mixed_groups_with_desc_act():
         _resolve_moe_quant_config(
             _make_auto_gptq_config(dynamic, desc_act=True),
             _make_routed_experts_stub(num_experts=2),
-            prefix,
+            _MOE_PREFIX,
         )
 
 
-def test_auto_gptq_moe_rejects_incompatible_group_sizes():
-    prefix = "model.layers.0.mlp.experts"
-    escaped_prefix = prefix.replace(".", r"\.")
+def test_auto_gptq_moe_rejects_partially_unquantized_shards() -> None:
+    """A fused MoE layer cannot mix quantized and unquantized shards."""
     dynamic = {
-        rf"+:^{escaped_prefix}\.1\..*_proj$": {
+        rf"-:^{_ESCAPED_MOE_PREFIX}\.1\.down_proj$": {},
+    }
+
+    with pytest.raises(ValueError, match="excludes only some expert shards"):
+        _resolve_moe_quant_config(
+            _make_auto_gptq_config(dynamic),
+            _make_routed_experts_stub(num_experts=2),
+            _MOE_PREFIX,
+        )
+
+
+def test_auto_gptq_moe_rejects_incompatible_group_sizes() -> None:
+    """Only divisible group sizes have a lossless common representation."""
+    dynamic = {
+        rf"+:^{_ESCAPED_MOE_PREFIX}\.1\..*_proj$": {
             "group_size": 96,
         }
     }
@@ -202,7 +227,7 @@ def test_auto_gptq_moe_rejects_incompatible_group_sizes():
         _resolve_moe_quant_config(
             _make_auto_gptq_config(dynamic),
             _make_routed_experts_stub(num_experts=2),
-            prefix,
+            _MOE_PREFIX,
         )
 
 

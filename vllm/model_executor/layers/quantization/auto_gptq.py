@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -39,6 +38,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.gptq_utils import (
+    _clone_config,
     get_dynamic_override,
     get_linear_quant_method,
 )
@@ -95,21 +95,20 @@ def _clone_quant_config(
     config: "AutoGPTQConfig",
     values: _GPTQQuantConfigValues,
 ) -> "AutoGPTQConfig":
-    cloned_config = deepcopy(config)
+    quant_type = config.TYPE_MAP.get((values.weight_bits, values.is_sym))
+    if quant_type is None:
+        raise ValueError(
+            "Unsupported quantization config: "
+            f"bits={values.weight_bits}, sym={values.is_sym}"
+        )
+
+    cloned_config = _clone_config(config)
     cloned_config.weight_bits = values.weight_bits
     cloned_config.group_size = values.group_size
     cloned_config.desc_act = values.desc_act
     cloned_config.is_sym = values.is_sym
     cloned_config.pack_factor = 32 // values.weight_bits
-
-    if (values.weight_bits, values.is_sym) not in cloned_config.TYPE_MAP:
-        raise ValueError(
-            "Unsupported quantization config: "
-            f"bits={values.weight_bits}, sym={values.is_sym}"
-        )
-    cloned_config.quant_type = cloned_config.TYPE_MAP[
-        (values.weight_bits, values.is_sym)
-    ]
+    cloned_config.quant_type = quant_type
     cloned_config.full_config.update(
         {
             "bits": values.weight_bits,
@@ -215,6 +214,7 @@ def _resolve_moe_quant_config(
                 f"AutoGPTQ FusedMoE layer '{prefix}' cannot mix channelwise and "
                 f"group quantization: {sorted(unique_group_sizes)}"
             )
+        # Larger groups can be represented by repeating their metadata rows.
         group_size = min(unique_group_sizes)
         if any(
             source_group_size % group_size for source_group_size in unique_group_sizes
@@ -685,6 +685,7 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             intermediate_size_per_partition == intermediate_size_full
         )
 
+        # Normalize metadata before the generic MoE loader validates its shape.
         source_group_sizes = getattr(self, "source_group_sizes", {})
         if source_group_sizes:
             assert "weight_loader" in extra_weight_attrs
@@ -855,6 +856,9 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         shard_id: str,
         expert_id: int,
     ) -> torch.Tensor:
+        if not weight_name.endswith(("scales", "qzeros", "g_idx")):
+            return loaded_weight
+
         source_group_sizes = getattr(self, "source_group_sizes", {})
         source_group_size = source_group_sizes.get((expert_id, shard_id))
         if source_group_size is None:
@@ -879,31 +883,23 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             )
 
         repeat_factor = source_group_size // target_group_size
+        # Repeating metadata rows preserves the dequantized qweight values.
         if weight_name.endswith(("scales", "qzeros")):
             return loaded_weight.repeat_interleave(repeat_factor, dim=0)
 
         if weight_name.endswith("g_idx"):
-            expected_g_idx = (
-                torch.arange(
-                    loaded_weight.numel(),
-                    dtype=loaded_weight.dtype,
-                    device=loaded_weight.device,
-                )
-                // source_group_size
-            ).reshape_as(loaded_weight)
+            positions = torch.arange(
+                loaded_weight.numel(),
+                dtype=loaded_weight.dtype,
+                device=loaded_weight.device,
+            )
+            expected_g_idx = (positions // source_group_size).reshape_as(loaded_weight)
             if not torch.equal(loaded_weight, expected_g_idx):
                 raise ValueError(
                     "Cannot normalize non-sequential g_idx for mixed-group "
                     f"AutoGPTQ FusedMoE expert {expert_id} shard {shard_id}."
                 )
-            return (
-                torch.arange(
-                    loaded_weight.numel(),
-                    dtype=loaded_weight.dtype,
-                    device=loaded_weight.device,
-                )
-                // target_group_size
-            ).reshape_as(loaded_weight)
+            return (positions // target_group_size).reshape_as(loaded_weight)
 
         return loaded_weight
 

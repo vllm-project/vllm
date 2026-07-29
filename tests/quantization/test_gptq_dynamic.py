@@ -7,16 +7,19 @@ Run `pytest tests/quantization/test_gptq_dynamic.py --forked`.
 Note: Only symmetric GPTQ models are supported after consolidation to Marlin.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
-from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.auto_gptq import (
     AutoGPTQConfig,
     AutoGPTQLinearMethod,
 )
 from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     get_dynamic_override,
+    get_linear_quant_method,
 )
 
 PROMPT = "On the surface of Mars, we found"
@@ -39,7 +42,24 @@ def _make_dynamic_config(
     return config
 
 
-def test_dynamic_override_resolves_fused_qkv_shards():
+@pytest.mark.parametrize(
+    "packed_modules_mapping",
+    [
+        {"qkv_proj": ["q_proj", "k_proj", "v_proj"]},
+        {
+            "self_attn.qkv_proj": [
+                "self_attn.q_proj",
+                "self_attn.k_proj",
+                "self_attn.v_proj",
+            ]
+        },
+    ],
+    ids=["module-name", "dotted-module-name"],
+)
+def test_dynamic_override_resolves_fused_qkv_shards(
+    packed_modules_mapping: dict[str, list[str]],
+) -> None:
+    """Resolve unfused checkpoint rules for either fused mapping format."""
     dynamic = {
         rf"+:^model\.layers\.0\.self_attn\.{projection}$": {
             "bits": 4,
@@ -47,10 +67,8 @@ def test_dynamic_override_resolves_fused_qkv_shards():
         }
         for projection in ("q_proj", "k_proj", "v_proj")
     }
-    config = _make_dynamic_config(
-        dynamic,
-        {"qkv_proj": ["q_proj", "k_proj", "v_proj"]},
-    )
+    dynamic[r"+:^model\.layers\.0\.self_attn\.notq_proj$"] = {"group_size": 64}
+    config = _make_dynamic_config(dynamic, packed_modules_mapping)
 
     assert (
         get_dynamic_override(
@@ -70,36 +88,53 @@ def test_dynamic_override_resolves_fused_qkv_shards():
         )
         == 128
     )
+    assert (
+        get_dynamic_override(
+            config,
+            "model.layers.0.self_attn.notqkv_proj",
+            "group_size",
+            config.group_size,
+        )
+        == 128
+    )
 
 
-def test_dynamic_override_resolves_dotted_fused_mapping():
+def test_dynamic_override_skips_fused_layer_when_all_shards_are_excluded() -> None:
+    """A fused layer is skipped when every checkpoint shard is excluded."""
     dynamic = {
-        rf"+:^model\.layers\.0\.self_attn\.{projection}$": {"group_size": 32}
+        rf"-:^model\.layers\.0\.self_attn\.{projection}$": {}
         for projection in ("q_proj", "k_proj", "v_proj")
     }
     config = _make_dynamic_config(
         dynamic,
-        {
-            "self_attn.qkv_proj": [
-                "self_attn.q_proj",
-                "self_attn.k_proj",
-                "self_attn.v_proj",
-            ]
-        },
+        {"qkv_proj": ["q_proj", "k_proj", "v_proj"]},
     )
 
     assert (
         get_dynamic_override(
             config,
             "model.layers.0.self_attn.qkv_proj",
-            "group_size",
-            config.group_size,
         )
-        == 32
+        is False
     )
 
 
-def test_dynamic_override_rejects_mixed_fused_shards():
+def test_dynamic_override_rejects_partially_excluded_fused_layer() -> None:
+    """A fused layer cannot contain both skipped and quantized shards."""
+    config = _make_dynamic_config(
+        {r"-:^model\.layers\.0\.self_attn\.q_proj$": {}},
+        {"qkv_proj": ["q_proj", "k_proj", "v_proj"]},
+    )
+
+    with pytest.raises(ValueError, match="does not match across shards"):
+        get_dynamic_override(
+            config,
+            "model.layers.0.self_attn.qkv_proj",
+        )
+
+
+def test_dynamic_override_rejects_mixed_fused_shards() -> None:
+    """Reject fused shards whose effective settings differ."""
     config = _make_dynamic_config(
         {r"+:^model\.layers\.0\.self_attn\.q_proj$": {"group_size": 32}},
         {"qkv_proj": ["q_proj", "k_proj", "v_proj"]},
@@ -133,7 +168,8 @@ def test_dynamic_override_rejects_mixed_fused_shards():
         ),
     ],
 )
-def test_dynamic_override_preserves_first_match_order(dynamic, expected):
+def test_dynamic_override_preserves_first_match_order(dynamic, expected) -> None:
+    """The exact-rule index must retain dict insertion order semantics."""
     config = _make_dynamic_config(dynamic, {})
 
     assert (
@@ -145,6 +181,27 @@ def test_dynamic_override_preserves_first_match_order(dynamic, expected):
         )
         == expected
     )
+
+
+def test_linear_dynamic_override_does_not_mutate_base_config() -> None:
+    """Per-layer overrides must leave the shared model config unchanged."""
+    config = _make_dynamic_config(
+        {r"+:^model\.layers\.0\.q_proj$": {"group_size": 32}},
+        {},
+    )
+    config.modules_in_block_to_quantize = ["q_proj"]
+    layer = object.__new__(LinearBase)
+
+    method = get_linear_quant_method(
+        config,
+        layer,
+        "model.layers.0.q_proj",
+        lambda quant_config: SimpleNamespace(quant_config=quant_config),
+    )
+
+    assert method.quant_config.group_size == 32
+    assert method.quant_config.full_config is not config.full_config
+    assert config.group_size == 128
 
 
 @pytest.mark.parametrize("model_id", MODELS)

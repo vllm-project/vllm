@@ -175,6 +175,7 @@ class LagunaMoE(nn.Module):
         )
 
         # Shared expert (optional) - passed to FusedMoE for overlap optimization
+        # Keep this name aligned with the HF module and checkpoint prefix.
         self.shared_experts: LagunaMLP | None
         if config.shared_expert_intermediate_size > 0:
             self.shared_experts = LagunaMLP(
