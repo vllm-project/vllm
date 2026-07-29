@@ -52,6 +52,7 @@ from .interfaces import HasInnerState, IsHybrid, MixtureOfExperts, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
     make_layers,
     maybe_prefix,
@@ -600,7 +601,7 @@ class KimiLinearForCausalLM(
     def get_mamba_state_dtype_from_config(
         cls,
         vllm_config: "VllmConfig",
-    ) -> tuple[torch.dtype, torch.dtype, torch.dtype, torch.dtype]:
+    ) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.kda_state_dtype(
             vllm_config.model_config.dtype, vllm_config.cache_config.mamba_cache_dtype
         )
@@ -608,7 +609,7 @@ class KimiLinearForCausalLM(
     @classmethod
     def get_mamba_state_shape_from_config(
         cls, vllm_config: "VllmConfig"
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_config
         tp_size = parallel_config.tensor_parallel_size
@@ -628,9 +629,7 @@ class KimiLinearForCausalLM(
     @classmethod
     def get_mamba_state_copy_func(
         cls,
-    ) -> tuple[
-        MambaStateCopyFunc, MambaStateCopyFunc, MambaStateCopyFunc, MambaStateCopyFunc
-    ]:
+    ) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
         return MambaStateCopyFuncCalculator.kda_state_copy_func()
 
     def compute_logits(
@@ -645,16 +644,3 @@ class KimiLinearForCausalLM(
             skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)
-
-
-def get_spec_layer_idx_from_weight_name(
-    config: KimiLinearConfig, weight_name: str
-) -> int | None:
-    if hasattr(config, "num_nextn_predict_layers") and (
-        config.num_nextn_predict_layers > 0
-    ):
-        layer_idx = config.num_hidden_layers
-        for i in range(config.num_nextn_predict_layers):
-            if weight_name.startswith(f"model.layers.{layer_idx + i}."):
-                return layer_idx + i
-    return None

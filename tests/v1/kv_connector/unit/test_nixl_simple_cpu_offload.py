@@ -44,7 +44,7 @@ from vllm.v1.simple_kv_offload.metadata import (
 )
 
 NIXL_WRAPPER_PATCH = (
-    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper"
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper"
 )
 
 
