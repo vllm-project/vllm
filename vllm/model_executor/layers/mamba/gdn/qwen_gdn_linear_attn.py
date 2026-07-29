@@ -374,13 +374,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if current_platform.is_xpu():
             self._forward_method = self.forward_xpu
         elif current_platform.is_cpu():
+            import vllm.envs as envs
             from vllm.triton_utils import HAS_TRITON
 
-            # On a CPU build HAS_TRITON is True only when the triton-cpu backend
-            # is installed. Prefer the FLA Triton kernels (compiled by
-            # triton-cpu) when available; otherwise fall back to the native
-            # torch/AMX CPU path.
-            if HAS_TRITON:
+            # Use the FLA Triton kernels only when triton-cpu is installed and
+            # opted in via VLLM_CPU_USE_TRITON; else the native torch/AMX path.
+            if HAS_TRITON and envs.VLLM_CPU_USE_TRITON:
                 self._forward_method = self.forward_cuda
             else:
                 from vllm.model_executor.layers.mamba.ops.cpu.gdn_attention import (
