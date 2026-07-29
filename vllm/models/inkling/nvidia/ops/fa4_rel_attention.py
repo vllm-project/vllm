@@ -130,13 +130,20 @@ def inkling_fa4_rel_attention(
     cute_window = (None, None) if window_size == (-1, -1) else window_size
 
     rel_logits = rel_logits.contiguous()
+    flash_attn_varlen_func: Callable[..., Any]
     if _use_sheared_bias():
-        from vllm.third_party.tml_fa4 import flash_attn_varlen_func
+        from vllm.third_party.tml_fa4 import (
+            flash_attn_varlen_func as tml_flash_attn_varlen_func,
+        )
 
+        flash_attn_varlen_func = tml_flash_attn_varlen_func
         bias_kwargs: dict[str, Any] = {"rel_bias": rel_logits}
     else:
-        from vllm.vllm_flash_attn.cute import flash_attn_varlen_func
+        from vllm.vllm_flash_attn.cute import (
+            flash_attn_varlen_func as cute_flash_attn_varlen_func,
+        )
 
+        flash_attn_varlen_func = cute_flash_attn_varlen_func
         bias_kwargs = {
             "score_mod": _get_score_mod(rel_extent),
             "aux_tensors": [rel_logits],

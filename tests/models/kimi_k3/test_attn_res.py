@@ -5,6 +5,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from vllm.models.kimi_k3.common.mtp import fused_mtp_input
 from vllm.models.kimi_k3.nvidia.ops import attn_res
 from vllm.platforms import current_platform
 
@@ -191,3 +192,35 @@ def test_attn_res_without_output_norm():
     )
 
     torch.testing.assert_close(actual, expected, atol=8e-2, rtol=3e-2)
+
+
+@pytest.mark.parametrize("num_tokens", [0, 1, 17])
+def test_fused_mtp_input(num_tokens: int):
+    positions = torch.arange(num_tokens, device="cuda")
+    inputs_embeds = _randn_with_row_padding(num_tokens, HIDDEN_SIZE, padding=7)
+    previous_hidden_states = _randn_with_row_padding(
+        num_tokens, HIDDEN_SIZE, padding=11
+    )
+    enorm_weight = torch.randn(HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16)
+    hnorm_weight = torch.randn(HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16)
+
+    masked_inputs_embeds = torch.where(positions.unsqueeze(-1) == 0, 0, inputs_embeds)
+    expected = torch.cat(
+        (
+            F.rms_norm(masked_inputs_embeds, (HIDDEN_SIZE,), enorm_weight, EPS),
+            F.rms_norm(previous_hidden_states, (HIDDEN_SIZE,), hnorm_weight, EPS),
+        ),
+        dim=-1,
+    )
+    actual = fused_mtp_input(
+        positions,
+        inputs_embeds,
+        previous_hidden_states,
+        enorm_weight,
+        hnorm_weight,
+        EPS,
+    )
+
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+    assert actual.shape == (num_tokens, 2 * HIDDEN_SIZE)
+    assert actual.is_contiguous()

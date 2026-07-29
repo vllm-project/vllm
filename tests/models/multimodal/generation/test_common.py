@@ -1242,7 +1242,7 @@ def test_custom_inputs_models(
         create_new_process_for_each_test=True,
     ),
 )
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_single_image_models_heavy(
     tmp_path: PosixPath,
     model_type: str,

@@ -890,6 +890,8 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         beta: float = 0.0,
         topk_ids: torch.Tensor | None = None,
         expert_map: torch.Tensor | None = None,
+        activation_situ_beta: float | None = None,
+        activation_situ_linear_beta: float | None = None,
     ) -> None:
         apply_moe_activation(
             activation,
@@ -900,6 +902,16 @@ class FusedMoEExpertsModular(FusedMoEExperts):
             beta=beta,
             topk_ids=topk_ids,
             expert_map=expert_map,
+            activation_situ_beta=(
+                self.moe_config.activation_situ_beta
+                if activation_situ_beta is None
+                else activation_situ_beta
+            ),
+            activation_situ_linear_beta=(
+                self.moe_config.activation_situ_linear_beta
+                if activation_situ_linear_beta is None
+                else activation_situ_linear_beta
+            ),
         )
 
     @abstractmethod
@@ -1307,6 +1319,14 @@ class FusedMoEKernelModularImpl:
             activation,
         )
 
+        use_output_alias = (
+            output_alias is not None
+            and output_alias.shape == fused_out.shape
+            and output_alias.dtype == fused_out.dtype
+            and output_alias.device == fused_out.device
+            and output_alias.is_contiguous()
+        )
+
         # If caller's output buffer already matches fused_out shape/dtype, alias
         # to skip the redundant copy in TopKWeightAndReduceNoOP.apply downstream.
         # This eliminates ~94% of __amd_rocclr_copyBuffer events (Copy 2 of the
@@ -1314,15 +1334,10 @@ class FusedMoEKernelModularImpl:
         if current_platform.is_rocm():
             from vllm._aiter_ops import rocm_aiter_ops
 
-            if (
-                rocm_aiter_ops.is_fused_moe_enabled()
-                and output_alias is not None
-                and output_alias.shape == fused_out.shape
-                and output_alias.dtype == fused_out.dtype
-                and output_alias.device == fused_out.device
-                and output_alias.is_contiguous()
-            ):
+            if use_output_alias and rocm_aiter_ops.is_fused_moe_enabled():
                 fused_out = output_alias
+        elif use_output_alias:
+            fused_out = output_alias
 
         self.fused_experts.apply(
             output=fused_out,
