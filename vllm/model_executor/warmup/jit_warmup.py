@@ -104,17 +104,6 @@ def zip_inputs(*rows: Mapping[str, WarmupValues]) -> _WarmupInputRows:
     return _WarmupInputRows(rows=tuple(input_rows))
 
 
-def _expand_warmup_value_axes(
-    values: Mapping[str, WarmupValues],
-    input_names: frozenset[str],
-) -> tuple[tuple[str, tuple[Any, ...]], ...]:
-    return tuple(
-        (name, _expand_warmup_values(value))
-        for name, value in values.items()
-        if name in input_names
-    )
-
-
 def _expand_warmup_input_rows(
     rows: tuple[Mapping[str, WarmupValues], ...],
     input_names: frozenset[str],
@@ -411,19 +400,6 @@ def _collect_expression_body(
     raise ValueError(f"Expected {fn.__name__} to return an expression")
 
 
-def _collect_dispatch_body(
-    fn: CompileKeyDispatchFn[Any],
-    function_def: ast.FunctionDef,
-) -> tuple[list[tuple[str, ast.AST]], ast.Call]:
-    local_exprs, return_expr = _collect_expression_body(fn, function_def)
-    if not isinstance(return_expr, ast.Call):
-        raise _dispatch_expr_error(
-            return_expr,
-            "Dispatch must return one CompileKey(...) call",
-        )
-    return local_exprs, return_expr
-
-
 def _function_trace_inputs(
     fn: Callable[..., Any],
 ) -> tuple[dict[str, Any], set[str]]:
@@ -446,7 +422,12 @@ def _trace_compile_key_dispatch(
     globals_ = source_fn.__globals__
     function_def = get_function_source_node(fn)
 
-    local_exprs, return_call = _collect_dispatch_body(fn, function_def)
+    local_exprs, return_expr = _collect_expression_body(fn, function_def)
+    if not isinstance(return_expr, ast.Call):
+        raise _dispatch_expr_error(
+            return_expr,
+            "Dispatch must return one CompileKey(...) call",
+        )
 
     field_exprs: list[tuple[str, ast.AST]] = []
     defaults, candidate_names = _function_trace_inputs(fn)
@@ -454,7 +435,7 @@ def _trace_compile_key_dispatch(
     local_names = {name for name, _ in local_exprs}
     for _, expr in local_exprs:
         input_names.update(_collect_input_names(expr, candidate_names))
-    for keyword in return_call.keywords:
+    for keyword in return_expr.keywords:
         if keyword.arg is None:
             raise ValueError(f"{fn.__name__} cannot use **kwargs in CompileKey")
         field_exprs.append((keyword.arg, keyword.value))
@@ -532,7 +513,12 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
                 _expand_warmup_input_rows(group.rows, input_names)
                 for group in input_groups
             )
-            expanded_kwarg_axes = _expand_warmup_value_axes(kwargs, input_names)
+            # Expand independent keyword inputs into cartesian-product axes.
+            expanded_kwarg_axes = tuple(
+                (name, _expand_warmup_values(value))
+                for name, value in kwargs.items()
+                if name in input_names
+            )
             dispatch_value_axes = (
                 *expanded_input_groups,
                 *(values for _, values in expanded_kwarg_axes),

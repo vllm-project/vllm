@@ -105,13 +105,6 @@ def cutedsl_warmup() -> None:
         logger.info("Skipping CuTeDSL warmup because no compile units were requested.")
         return
 
-    if is_global_first_rank():
-        logger.warning(
-            "The legacy CuTeDSL warmup registry is deprecated and will be removed. "
-            "Migrate providers to the shared JIT warmup contract: "
-            "https://github.com/vllm-project/vllm/issues/49349"
-        )
-
     unit_names = list(dict.fromkeys(unit.name for unit in compile_units))
     logger.info(
         "Warming up CuTeDSL compile_units=%d names=%s.",
