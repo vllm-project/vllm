@@ -896,12 +896,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             num_experts, output_size, input_size = weight_f32.shape
             weight_bf16 = (
                 (
-                    weight_f32.view(
-                        num_experts, output_size, input_size // 32, 32
-                    )
-                    * scale_f32.view(
-                        num_experts, output_size, input_size // 32, 1
-                    )
+                    weight_f32.view(num_experts, output_size, input_size // 32, 32)
+                    * scale_f32.view(num_experts, output_size, input_size // 32, 1)
                 )
                 .view(num_experts, output_size, input_size)
                 .to(torch.bfloat16)
@@ -939,10 +935,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         # the bf16 correction bias to match on every step -- a per-layer,
         # per-token bf16->fp32 copy kernel. Keep the tiny [num_experts] bias in
         # fp32 so the runtime cast becomes a no-op.
-        if getattr(layer, "e_score_correction_bias", None) is not None:
-            layer.e_score_correction_bias.data = (
-                layer.e_score_correction_bias.data.to(torch.float32)
-            )
+        correction_bias = getattr(layer, "e_score_correction_bias", None)
+        if correction_bias is not None:
+            correction_bias.data = correction_bias.data.to(torch.float32)
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config is not None and self.experts_cls is not None:
