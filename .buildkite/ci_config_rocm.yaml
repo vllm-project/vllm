@@ -11,6 +11,8 @@ run_all_patterns:
   - ".buildkite/scripts/rocm/"
   - ".buildkite/scripts/hardware_ci/run-amd-test.py"
   - ".buildkite/scripts/hardware_ci/run-amd-test.sh"
+  - ".buildkite/scripts/hardware_ci/amd-hf-client-mode.sh"
+  - ".buildkite/scripts/hardware_ci/amd-hf-client-mode-self-test.sh"
   - "CMakeLists.txt"
   - "requirements/common.txt"
   - "requirements/rocm.txt"

@@ -1,4 +1,5 @@
 name: vllm_ci
+amd_hf_offline_retry: true
 job_dirs:
   - ".buildkite/image_build"
   - ".buildkite/test_areas"
@@ -15,6 +16,9 @@ run_all_patterns:
   - "csrc/"
   - "cmake/"
   - ".buildkite/check-torch-abi.py"
+  - ".buildkite/scripts/hardware_ci/amd-hf-client-mode.sh"
+  - ".buildkite/scripts/hardware_ci/amd-hf-client-mode-self-test.sh"
+  - ".buildkite/scripts/hardware_ci/run-amd-test.sh"
 run_all_exclude_patterns:
   - "docker/Dockerfile."
   - "csrc/cpu/"

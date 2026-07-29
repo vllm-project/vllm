@@ -25,9 +25,11 @@
 #     and $$BUILDKITE_PARALLEL_JOB_COUNT environment variables.
 # working_dir(str): specify the place where the command should execute, default to /vllm-workspace/tests
 # source_file_dependencies(list): the list of prefixes to opt-in the test for, if empty, the test will always run.
-# hf_offline_retry(bool): for single-node run-amd-test jobs, run offline first
-#     and retry eligible failures online. May be set as the file default or a
-#     per-step override.
+# amd_hf_offline_retry(bool): runner capability gate. Missing or false disables
+#     the cohort; individual steps still require an explicit opt-in.
+# hf_offline_retry(bool): per-step opt-in for eligible single-node AMD jobs.
+#     When true, use cache-only clients on the first Buildkite attempt and
+#     online clients on a retry. This is not network isolation.
 
 # When adding a test
 # - If the test belongs to an existing group, add it there
@@ -106,8 +108,8 @@
 #####################################################################################################################################
 
 
-# AMD-only pilot: test jobs inherit this; non-test jobs opt out below.
-hf_offline_retry: true
+# The runner supports the policy; only selected jobs opt in below.
+amd_hf_offline_retry: true
 steps:
 
 #########################################################################################################################################
@@ -218,6 +220,7 @@ steps:
 #----------------------------------------------------  mi250 · models / multimodal  ----------------------------------------------------#
 
 - label: "Multi-Modal Models (Standard) 3: llava + qwen2_vl" # TBD
+  hf_offline_retry: true
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
@@ -428,7 +431,6 @@ steps:
 #------------------------------------------------------------  mi250 · rust  -----------------------------------------------------------#
 
 - label: Rust Frontend Cargo Style + Clippy # TBD
-  hf_offline_retry: false
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
@@ -443,7 +445,6 @@ steps:
   - bash .buildkite/scripts/run-rust-frontend-cargo-ci.sh style-clippy
 
 - label: Rust Frontend Cargo Tests # TBD
-  hf_offline_retry: false
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
@@ -460,7 +461,6 @@ steps:
 #-----------------------------------------------------------  mi250 · docker  ----------------------------------------------------------#
 
 - label: Docker Build Metadata (ROCm) # TBD
-  hf_offline_retry: false
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
@@ -1192,6 +1192,7 @@ steps:
   - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_prefetch_offload.sh 0.25 200 8030
 
 - label: LM Eval Small Models # TBD
+  hf_offline_retry: true
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
@@ -2484,7 +2485,6 @@ steps:
 #---------------------------------------------------------  mi300 · ray_compat  ---------------------------------------------------------#
 
 - label: Ray Dependency Compatibility Check # TBD
-  hf_offline_retry: false
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
