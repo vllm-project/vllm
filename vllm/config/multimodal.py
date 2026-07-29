@@ -8,6 +8,7 @@ from typing import Any, Literal, TypeAlias, TypedDict, final
 from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 
+import vllm.envs as envs
 from vllm.config.utils import config
 from vllm.utils.hashing import safe_hash
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -60,6 +61,7 @@ class MultiModalDummyOptionsBuiltins(TypedDict, total=False):
 
 MMEncoderTPMode = Literal["weights", "data"]
 MMCacheType = Literal["shm", "lru"]
+VideoPruningMethod = Literal["evs", "vidcom2"]
 MMTensorIPC = Literal["direct_rpc", "torch_shm"]
 MMDummyOptions: TypeAlias = dict[str, BaseDummyOptions]
 """
@@ -188,9 +190,14 @@ class MultiModalConfig:
     estimating the peak memory usage of the activation of multimodal encoder and
     embedding cache."""
     video_pruning_rate: float | None = Field(default=None, ge=0.0, lt=1.0)
-    """Sets pruning rate for video pruning via Efficient Video Sampling.
-    Value sits in range [0;1) and determines fraction of media tokens
-    from each video to be pruned.
+    """Fraction of video tokens to prune from each video. Value sits in range
+    [0;1); pruning is enabled when it is greater than 0. The pruning algorithm
+    is selected by `video_pruning_method`.
+    """
+    video_pruning_method: VideoPruningMethod = "evs"
+    """Video token pruning algorithm applied when `video_pruning_rate` > 0:
+    - "evs": Efficient Video Sampling.
+    - "vidcom2": Video Compression Commander.
     """
     mm_tensor_ipc: MMTensorIPC = "direct_rpc"
     """IPC (inter-process communication) method for multimodal tensors.
@@ -344,5 +351,26 @@ class MultiModalConfig:
         kwargs = self.mm_processor_kwargs or {}
         return kwargs | dict(inference_kwargs)
 
+    def use_gpu_video_backend(self) -> bool:
+        """Return whether the configured video loader or codec uses the GPU."""
+        from vllm.multimodal.video import VIDEO_LOADER_REGISTRY
+
+        video_kwargs = self.media_io_kwargs.get("video", {})
+        video_loader_backend = (
+            video_kwargs.get("video_backend") or envs.VLLM_VIDEO_LOADER_BACKEND
+        )
+        codec_backend = video_kwargs.get("backend")
+        return VIDEO_LOADER_REGISTRY.backend_requires_gpu(video_loader_backend) or (
+            codec_backend is not None
+            and VIDEO_LOADER_REGISTRY.backend_requires_gpu(codec_backend)
+        )
+
     def is_multimodal_pruning_enabled(self):
-        return self.video_pruning_rate is not None and self.video_pruning_rate > 0
+        return self.get_video_pruning_spec() is not None
+
+    def get_video_pruning_spec(self) -> tuple[VideoPruningMethod, float] | None:
+        """Return `(method, rate)` when video pruning is enabled, else None.
+        `rate` is the fraction of video tokens to prune."""
+        if self.video_pruning_rate is not None and self.video_pruning_rate > 0:
+            return (self.video_pruning_method, float(self.video_pruning_rate))
+        return None

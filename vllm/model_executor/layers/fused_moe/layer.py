@@ -186,9 +186,10 @@ def FusedMoE(
         has_bias: Whether expert layers have bias terms
         is_sequence_parallel: Whether sequence parallelism is enabled
         reduce_results: Whether to all-reduce the final output. Setting this
-        to False (to fuse the all-reduce downstream) is only honored on the
-        late-AR path.
-        expert_mapping: Expert parameter mapping for weight loading
+            to False (to fuse the all-reduce downstream) is only honored on
+            the late-AR path.
+        ckpt_names: Checkpoint parameter name tuple (gate_proj, down_proj,
+            up_proj) used for weight loading
         n_shared_experts: Number of shared experts to fuse into the routed
             grouped GEMM (ROCm; requires aiter FSE or the router-append path)
         router_logits_dtype: Data type for router logits buffers

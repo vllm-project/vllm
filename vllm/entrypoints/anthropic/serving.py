@@ -53,47 +53,43 @@ from vllm.renderers.online_renderer import OnlineRenderer
 logger = logging.getLogger(__name__)
 
 
-def _get_cached_tokens(usage: UsageInfo | None) -> int | None:
-    """Extract cached token count from OpenAI UsageInfo."""
-    if usage is None or usage.prompt_tokens_details is None:
-        return None
-    return usage.prompt_tokens_details.cached_tokens
-
-
 def _build_anthropic_usage(
-    prompt_tokens: int,
-    completion_tokens: int | None,
     usage: UsageInfo | None,
 ) -> AnthropicUsage:
-    """Build an AnthropicUsage from OpenAI-style token counts.
+    """Build an AnthropicUsage from UsageInfo.
 
     Anthropic defines ``total_input == input_tokens + cache_read +
     cache_creation``.  vLLM's ``prompt_tokens`` is the total, so
-    ``input_tokens = prompt_tokens - cached_tokens``.
+    ``input_tokens = prompt_tokens - cache_read - cache_creation``.
 
-    OpenAI usage only exposes ``cached_tokens`` (hits); there is no
-    cache-creation analog, so ``cache_creation_input_tokens`` is ``0``
-    when cache info is present.  When cache info is absent (e.g.
-    ``--enable-prompt-tokens-details`` off, or a streaming chunk that
-    hasn't carried it yet), cache fields are left **unset** so
-    ``exclude_unset=True`` serialization omits them entirely.
+    Cache fields are taken from ``UsageInfo.prompt_tokens_details``.
+    When cache info is absent (e.g. ``--enable-prompt-tokens-details``
+    off, or a streaming chunk that hasn't carried it yet), cache fields
+    are left **unset** so ``exclude_unset=True`` serialization omits them
+    entirely.
 
     ``completion_tokens`` follows ``UsageInfo`` and may be ``None`` on
     intermediate stream chunks; we coerce to ``0`` for the wire format.
     """
-    output_tokens = completion_tokens or 0
-    cached = _get_cached_tokens(usage)
-    if cached is not None:
-        return AnthropicUsage(
-            input_tokens=prompt_tokens - cached,
-            output_tokens=output_tokens,
-            cache_read_input_tokens=cached,
-            cache_creation_input_tokens=0,
-        )
-    return AnthropicUsage(
-        input_tokens=prompt_tokens,
-        output_tokens=output_tokens,
-    )
+    kwargs = {}
+    if usage is None:
+        kwargs["input_tokens"] = 0
+        kwargs["output_tokens"] = 0
+    else:
+        kwargs["output_tokens"] = usage.completion_tokens or 0
+        input_tokens = usage.prompt_tokens
+
+        if (details := usage.prompt_tokens_details) is not None:
+            if (cache_read := details.cached_tokens) is not None:
+                input_tokens -= cache_read
+                kwargs["cache_read_input_tokens"] = cache_read
+
+            if (cache_creation := details.created_cache_tokens) is not None:
+                input_tokens -= cache_creation
+                kwargs["cache_creation_input_tokens"] = cache_creation
+
+        kwargs["input_tokens"] = max(0, input_tokens)
+    return AnthropicUsage(**kwargs)
 
 
 def wrap_data_with_event(data: str, event: str):
@@ -491,6 +487,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             top_p=anthropic_request.top_p,
             top_k=anthropic_request.top_k,
             kv_transfer_params=anthropic_request.kv_transfer_params,
+            ec_transfer_params=anthropic_request.ec_transfer_params,
             chat_template_kwargs=anthropic_request.chat_template_kwargs,
         )
 
@@ -624,12 +621,9 @@ class AnthropicServingMessages(OpenAIServingChat):
             id=generator.id,
             content=[],
             model=generator.model,
-            usage=_build_anthropic_usage(
-                generator.usage.prompt_tokens,
-                generator.usage.completion_tokens,
-                generator.usage,
-            ),
+            usage=_build_anthropic_usage(generator.usage),
             kv_transfer_params=generator.kv_transfer_params,
+            ec_transfer_params=generator.ec_transfer_params,
         )
         choice = generator.choices[0]
         if choice.finish_reason == "stop":
@@ -814,13 +808,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     model=origin_chunk.model,
                                     stop_reason=None,
                                     stop_sequence=None,
-                                    usage=_build_anthropic_usage(
-                                        origin_chunk.usage.prompt_tokens
-                                        if origin_chunk.usage
-                                        else 0,
-                                        0,
-                                        origin_chunk.usage,
-                                    ),
+                                    usage=_build_anthropic_usage(origin_chunk.usage),
                                 ),
                             )
                             first_item = False
@@ -838,15 +826,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                             chunk = AnthropicStreamEvent(
                                 type="message_delta",
                                 delta=AnthropicDelta(stop_reason=stop_reason),
-                                usage=_build_anthropic_usage(
-                                    origin_chunk.usage.prompt_tokens
-                                    if origin_chunk.usage
-                                    else 0,
-                                    origin_chunk.usage.completion_tokens
-                                    if origin_chunk.usage
-                                    else 0,
-                                    origin_chunk.usage,
-                                ),
+                                usage=_build_anthropic_usage(origin_chunk.usage),
                             )
                             data = chunk.model_dump_json(exclude_unset=True)
                             yield wrap_data_with_event(data, "message_delta")
