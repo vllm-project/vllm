@@ -25,9 +25,8 @@ class TraceReplayState:
 
     def __init__(self, max_num_reqs: int, device: torch.device):
         self.max_num_reqs = max_num_reqs
-        self.trace_token_ids = StagedWriteTensor(
-            (max_num_reqs, MAX_TRACE_LEN), dtype=torch.int32, device=device
-        )
+        self.device = device
+        self.trace_token_ids: StagedWriteTensor | None = None
         self.trace_len = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
         # CPU mirror used to skip the kernel launch when no request replays.
         self.use_trace = np.zeros(max_num_reqs, dtype=bool)
@@ -41,6 +40,12 @@ class TraceReplayState:
                     f"The max length is {MAX_TRACE_LEN}."
                 )
             self.trace_len.np[req_idx] = len(trace)
+            if self.trace_token_ids is None:
+                self.trace_token_ids = StagedWriteTensor(
+                    (self.max_num_reqs, MAX_TRACE_LEN),
+                    dtype=torch.int32,
+                    device=self.device,
+                )
             self.trace_token_ids.stage_write(req_idx, 0, trace)
             self.use_trace[req_idx] = True
         else:
@@ -49,7 +54,8 @@ class TraceReplayState:
 
     def apply_staged_writes(self) -> None:
         self.trace_len.copy_to_uva()
-        self.trace_token_ids.apply_write()
+        if self.trace_token_ids is not None:
+            self.trace_token_ids.apply_write()
 
     def apply_trace(
         self,
@@ -59,13 +65,14 @@ class TraceReplayState:
         total_len: torch.Tensor,
         prompt_len: torch.Tensor,
     ) -> None:
-        if not np.any(self.use_trace[idx_mapping_np]):
+        trace_token_ids = self.trace_token_ids
+        if trace_token_ids is None or not np.any(self.use_trace[idx_mapping_np]):
             # No request in this batch replays a trace. Skip the kernel launch.
             return
         apply_trace_tokens(
             sampled,
             idx_mapping,
-            self.trace_token_ids.gpu,
+            trace_token_ids.gpu,
             self.trace_len.gpu,
             total_len,
             prompt_len,
