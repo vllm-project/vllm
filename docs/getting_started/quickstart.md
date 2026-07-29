@@ -139,10 +139,10 @@ prompts = [
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 ```
 
-The [LLM][vllm.LLM] class initializes vLLM's engine and the [OPT-125M model](https://arxiv.org/abs/2205.01068) for offline inference. The list of supported models can be found [here](../models/supported_models.md).
+The [LLM][vllm.LLM] class initializes vLLM's engine and the [Qwen2.5-0.5B model](https://huggingface.co/Qwen/Qwen2.5-0.5B) for offline inference. The list of supported models can be found [here](../models/supported_models.md).
 
 ```python
-llm = LLM(model="facebook/opt-125m")
+llm = LLM(model="Qwen/Qwen2.5-0.5B")
 ```
 
 !!! note
@@ -151,6 +151,13 @@ llm = LLM(model="facebook/opt-125m")
     ```shell
     export VLLM_USE_MODELSCOPE=True
     ```
+
+!!! note "Apple Silicon (Metal) users"
+    The vLLM-Metal backend requires model weights in `.safetensors` format.
+    If you encounter a `FileNotFoundError` regarding safetensors when following
+    this guide, switch to a model repository that contains safetensors files.
+    The example above uses `Qwen/Qwen2.5-0.5B` which works on all platforms
+    including Metal.
 
 Now, the fun part! The outputs are generated using `llm.generate`. It adds the input prompts to the vLLM engine's waiting queue and executes the vLLM engine to generate the outputs with high throughput. The outputs are returned as a list of `RequestOutput` objects, which include all of the output tokens.
 
