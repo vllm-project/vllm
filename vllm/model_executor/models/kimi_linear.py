@@ -54,6 +54,7 @@ from .utils import (
     PPMissingLayer,
     get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
 )
@@ -420,6 +421,17 @@ class KimiLinearModel(nn.Module):
             "num_attention_heads must be divisible by world_size"
         )
 
+        # Register the factory used by GPUModelRunner to pre-allocate the
+        # buffers that carry intermediate tensors between pipeline stages.
+        # forward() emits {"hidden_states", "residual"} when not the last PP
+        # rank; without this the non-first PP rank hits an AssertionError in
+        # gpu_model_runner.sync_and_gather_intermediate_tensors.
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], config.hidden_size
+            )
+        )
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -579,6 +591,12 @@ class KimiLinearForCausalLM(
         logit_scale = getattr(self.config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(
             self.config.vocab_size, scale=logit_scale
+        )
+        # gpu_model_runner calls self.model.make_empty_intermediate_tensors,
+        # so mirror the attribute from the inner KimiLinearModel here to
+        # match the SupportsPP protocol at both class levels.
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
