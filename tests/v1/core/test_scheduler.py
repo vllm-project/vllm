@@ -38,7 +38,12 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
 )
-from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.outputs import (
+    DraftTokenIds,
+    KVConnectorOutput,
+    ModelRunnerOutput,
+    make_empty_encoder_model_runner_output,
+)
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputManager
 
@@ -5730,3 +5735,117 @@ def test_hybrid_per_group_hit_divergence_fa_deeper_no_external():
     num_scheduled = output.num_scheduled_tokens[replay.request_id]
     # Must resume at the convergent boundary (block 0), not the deep FA hit.
     assert replay.num_tokens - num_scheduled == block_size
+
+
+def _prompt_done_req_ids(scheduler, scheduler_output):
+    """Mirror of `GPUModelRunner._prompt_done_req_ids` for scheduler-only tests."""
+    return {
+        req_id
+        for req_id, num_scheduled in scheduler_output.num_scheduled_tokens.items()
+        if scheduler.requests[req_id].num_computed_tokens + num_scheduled
+        >= scheduler.requests[req_id].num_prompt_tokens
+    }
+
+
+def _make_encoder_instance_request(scheduler, text_prefix=8, image_tokens=16):
+    """One request whose image sits after some text, as an EPD proxy sends it.
+
+    `create_scheduler` builds a text-only model, so `compute_mm_encoder_budget`
+    leaves the encoder cache at zero capacity; give it room so the admitted path
+    is reachable.
+    """
+    ecm = scheduler.encoder_cache_manager
+    ecm.cache_size = ecm.num_free_slots = ecm.num_freeable_slots = 8 * image_tokens
+    scheduler.max_num_encoder_input_tokens = 8 * image_tokens
+
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=text_prefix + image_tokens + 4,
+        # The EPD proxy caps the encoder request at one token so the server
+        # runs the encoder path and returns immediately.
+        max_tokens=1,
+        mm_hashes_list=[["img-hash-0"]],
+        mm_positions=[[PlaceholderRange(offset=text_prefix, length=image_tokens)]],
+    )
+    scheduler.add_request(request)
+    return request
+
+
+def test_encoder_instance_defers_stop_until_prompt_is_consumed():
+    """An encoder instance must not finish a request that has not encoded yet.
+
+    When the encoder cache cannot admit the multi-modal item, the scheduler
+    schedules only the tokens before it. The encoder instance replies without
+    sampling, so if that reply carried a token anyway the request would hit
+    max_tokens=1 and finish having never produced an embedding — silently, with
+    a successful completion for the client.
+    """
+    scheduler = create_scheduler(
+        max_num_seqs=8,
+        max_num_batched_tokens=1024,
+        use_ec_connector=True,
+        ec_role="ec_producer",
+    )
+    request = _make_encoder_instance_request(scheduler)
+    req_id = request.request_id
+
+    # Encoder budget exhausted: the item cannot be admitted this step.
+    scheduler.encoder_cache_manager.can_allocate = lambda *a, **k: False
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[req_id] > 0
+    assert not output.scheduled_encoder_inputs.get(req_id)
+    assert output.num_scheduled_tokens[req_id] < request.num_prompt_tokens
+
+    scheduler.update_from_output(
+        output,
+        make_empty_encoder_model_runner_output(
+            output, _prompt_done_req_ids(scheduler, output)
+        ),
+    )
+
+    assert not request.is_finished(), (
+        "request finished before its image was encoded, so no embedding was "
+        "published to the EC connector"
+    )
+    assert request.num_output_tokens == 0
+
+    # With the budget restored the item is encoded and only then does the
+    # request finish.
+    del scheduler.encoder_cache_manager.can_allocate  # unshadow the real method
+
+    output = scheduler.schedule()
+    assert output.scheduled_encoder_inputs.get(req_id) == [0]
+
+    scheduler.update_from_output(
+        output,
+        make_empty_encoder_model_runner_output(
+            output, _prompt_done_req_ids(scheduler, output)
+        ),
+    )
+    assert request.is_finished()
+
+
+def test_encoder_instance_finishes_request_once_prompt_is_consumed():
+    """The unblocked path still completes in a single step."""
+    scheduler = create_scheduler(
+        max_num_seqs=8,
+        max_num_batched_tokens=1024,
+        use_ec_connector=True,
+        ec_role="ec_producer",
+    )
+    request = _make_encoder_instance_request(scheduler)
+    req_id = request.request_id
+
+    output = scheduler.schedule()
+    assert output.scheduled_encoder_inputs.get(req_id) == [0]
+    assert output.num_scheduled_tokens[req_id] == request.num_prompt_tokens
+
+    scheduler.update_from_output(
+        output,
+        make_empty_encoder_model_runner_output(
+            output, _prompt_done_req_ids(scheduler, output)
+        ),
+    )
+    assert request.is_finished()
+    assert request.num_output_tokens == 1

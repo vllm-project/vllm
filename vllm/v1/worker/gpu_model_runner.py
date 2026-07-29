@@ -2990,6 +2990,25 @@ class GPUModelRunner(
 
         return mm_hashes, mm_kwargs, mm_lora_refs
 
+    def _prompt_done_req_ids(self, scheduler_output: "SchedulerOutput") -> set[str]:
+        """Scheduled requests whose prompt is fully consumed after this step.
+
+        The encoder instance returns without sampling, so it cannot rely on
+        `discard_request_mask` (built in `_prepare_inputs`) to hold back tokens
+        for requests that are still prefilling.
+        """
+        done = set[str]()
+        for req_id, num_scheduled in scheduler_output.num_scheduled_tokens.items():
+            req_state = self.requests.get(req_id)
+            if req_state is None:
+                continue
+            if (
+                req_state.num_computed_tokens + num_scheduled
+                >= req_state.num_prompt_tokens
+            ):
+                done.add(req_id)
+        return done
+
     def _cache_encoder_output(
         self,
         mm_hash: str,
@@ -4213,7 +4232,10 @@ class GPUModelRunner(
                     encoder_cache=self.encoder_cache,
                 ) as ec_connector_output:
                     self._execute_mm_encoder(scheduler_output)
-                    return make_empty_encoder_model_runner_output(scheduler_output)
+                    return make_empty_encoder_model_runner_output(
+                        scheduler_output,
+                        self._prompt_done_req_ids(scheduler_output),
+                    )
 
             if not num_scheduled_tokens:
                 if (
