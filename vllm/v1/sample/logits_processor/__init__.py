@@ -202,9 +202,6 @@ def build_logitsprocs(
     if vllm_config.speculative_config:
         if custom_logitsprocs:
             raise ValueError(STR_SPEC_DEC_REJECTS_LOGITSPROCS)
-        logger.warning(
-            "min_p and logit_bias parameters won't work with speculative decoding."
-        )
         return LogitsProcessors(
             [MinTokensLogitsProcessor(vllm_config, device, is_pin_memory)]
         )
