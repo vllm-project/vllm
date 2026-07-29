@@ -833,7 +833,15 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                 Tensor(b!)? newest_indices=None,"
       "                 Tensor(c!)? stats=None,"
       "                 Tensor(d!)? attention_indices=None,"
-      "                 int attention_block_stride=0) -> ()");
+      "                 int attention_block_stride=0,"
+      "                 Tensor? request_ids=None,"
+      "                 Tensor? source_block_table=None,"
+      "                 int source_block_size=0,"
+      "                 Tensor(e!)? resolved_global_indices=None,"
+      "                 Tensor(f!)? valid_counts=None,"
+      "                 Tensor(g!)? compact_miss_globals=None,"
+      "                 Tensor(h!)? compact_miss_hots=None,"
+      "                 Tensor(i!)? compact_miss_counts=None) -> ()");
 
   ops.def(
       "hisparse_gather_plan(Tensor host_cache,"
@@ -844,6 +852,13 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                     Tensor? request_state_indices,"
       "                     Tensor(a!)? attention_indices=None,"
       "                     int attention_block_stride=0) -> ()");
+
+  ops.def(
+      "hisparse_gather_compact(Tensor host_cache,"
+      "                        Tensor! hot_cache,"
+      "                        Tensor miss_global_indices,"
+      "                        Tensor miss_hot_indices,"
+      "                        Tensor miss_counts) -> ()");
 
   ops.def(
       "hisparse_backup(Tensor src_cache,"
@@ -978,6 +993,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C_cache_ops, CUDA, ops) {
 #ifndef USE_ROCM
   ops.impl("hisparse_swap_in", TORCH_BOX(&hisparse_swap_in));
   ops.impl("hisparse_gather_plan", TORCH_BOX(&hisparse_gather_plan));
+  ops.impl("hisparse_gather_compact", TORCH_BOX(&hisparse_gather_compact));
   ops.impl("hisparse_backup", TORCH_BOX(&hisparse_backup));
   ops.impl("hisparse_backup_layers", TORCH_BOX(&hisparse_backup_layers));
   ops.impl("hisparse_backup_indexer", TORCH_BOX(&hisparse_backup_indexer));

@@ -38,9 +38,6 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv, round_up
-from vllm.v1.attention.backends.mla.sparse_utils import (
-    triton_convert_req_index_to_global_index,
-)
 from vllm.v1.metrics.stats import HiSparseStats
 from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
 
@@ -398,6 +395,7 @@ def _has_hisparse_ops() -> bool:
     return (
         hasattr(torch.ops._C_cache_ops, "hisparse_swap_in")
         and hasattr(torch.ops._C_cache_ops, "hisparse_gather_plan")
+        and hasattr(torch.ops._C_cache_ops, "hisparse_gather_compact")
         and hasattr(torch.ops._C_cache_ops, "hisparse_backup")
         and hasattr(torch.ops._C_cache_ops, "hisparse_backup_layers")
     )
@@ -415,27 +413,27 @@ class _GroupPlan:
     """
 
     __slots__ = (
-        "global_indices",
         "hot_indices",
-        "miss_mask",
+        "miss_global_indices",
+        "miss_hot_indices",
+        "miss_counts",
         "newest_indices",
         "valid_counts",
     )
 
     def __init__(self, device: torch.device, max_rows: int, top_k: int) -> None:
-        self.global_indices = torch.full(
-            (max_rows, top_k), -1, dtype=torch.int32, device=device
-        )
         self.hot_indices = torch.full(
             (max_rows, top_k), -1, dtype=torch.int32, device=device
         )
-        self.miss_mask = torch.zeros(
+        self.miss_global_indices = torch.empty(
             (max_rows, top_k), dtype=torch.int32, device=device
         )
+        self.miss_hot_indices = torch.empty_like(self.miss_global_indices)
+        self.miss_counts = torch.empty(max_rows, dtype=torch.int32, device=device)
         self.newest_indices = torch.full(
             (max_rows,), -1, dtype=torch.int64, device=device
         )
-        self.valid_counts: torch.Tensor | None = None
+        self.valid_counts = torch.empty(max_rows, dtype=torch.int32, device=device)
 
 
 _GROUP_PLANS: dict[tuple[str, int, int], _GroupPlan] = {}
@@ -512,6 +510,9 @@ class HiSparseCoordinator:
             (max_num_reqs, config.top_k), dtype=torch.int32, device=self.device
         )
         self._attention_indices = torch.empty_like(self._hot_indices)
+        self._valid_counts = torch.empty(
+            max_num_reqs, dtype=torch.int32, device=self.device
+        )
         # Per-request LRU state; released in join_group for index-sharing
         # "shared" layers, which replay their leader's plan and never resolve
         # the LRU themselves.
@@ -911,24 +912,10 @@ class HiSparseCoordinator:
         MLA KV cache; ``hot_indices`` are global token ids within it.
         """
         num_tokens = topk_indices.shape[0]
-        top_k = topk_indices.shape[1]
         self.bind_source_cache(kv_cache)
         assert self.hot_cache is not None and self.hot_block_table is not None
 
-        converted = triton_convert_req_index_to_global_index(
-            req_id_per_token[:num_tokens],
-            block_table,
-            topk_indices,
-            BLOCK_SIZE=block_size,
-            NUM_TOPK_TOKENS=top_k,
-            BLOCK_N=128 if top_k % 128 == 0 else top_k,
-            return_valid_counts=return_valid_counts,
-        )
-        if return_valid_counts:
-            global_indices, valid_counts = converted
-        else:
-            global_indices = converted
-            valid_counts = None
+        relative_indices = topk_indices[:num_tokens].contiguous()
 
         # Newest tokens resolve to the reserved hot slot the KV update wrote
         # this step, keyed by their global slot id from the slot mapping.
@@ -946,15 +933,21 @@ class HiSparseCoordinator:
         )
 
         if produce_plan:
-            self._plan.global_indices[:num_tokens].copy_(global_indices)
             hot_indices = self._plan.hot_indices[:num_tokens]
-            miss_mask = self._plan.miss_mask[:num_tokens]
             newest_indices = self._plan.newest_indices[:num_tokens]
-            hot_indices.fill_(-1)
+            valid_counts = self._plan.valid_counts[:num_tokens]
+            compact_miss_globals = self._plan.miss_global_indices[:num_tokens]
+            compact_miss_hots = self._plan.miss_hot_indices[:num_tokens]
+            compact_miss_counts = self._plan.miss_counts[:num_tokens]
         else:
             hot_indices = self._hot_indices[:num_tokens]
-            miss_mask = None
             newest_indices = None
+            valid_counts = (
+                self._valid_counts[:num_tokens] if return_valid_counts else None
+            )
+            compact_miss_globals = None
+            compact_miss_hots = None
+            compact_miss_counts = None
 
         attention_indices = self._attention_indices[:num_tokens]
 
@@ -964,7 +957,7 @@ class HiSparseCoordinator:
             self._host_cache,
             self.hot_cache,
             self.hot_block_table,
-            global_indices,
+            relative_indices,
             newest_global,
             hot_indices,
             self.device_global_indices,
@@ -972,36 +965,40 @@ class HiSparseCoordinator:
             self.reserved_slots,
             self.request_state_indices,
             self.region_stride,
-            miss_mask,
+            None,
             newest_indices,
             self._swap_stats,
             attention_indices,
             self.attention_block_stride,
+            req_id_per_token[:num_tokens].contiguous(),
+            block_table,
+            block_size,
+            None,
+            valid_counts,
+            compact_miss_globals,
+            compact_miss_hots,
+            compact_miss_counts,
         )
 
-        if produce_plan:
-            self._plan.valid_counts = valid_counts
-            if self.group_shared:
-                if slot_mapping is not None:
-                    self._prefetch_group(num_tokens)
-                else:
-                    for shared in self.group_shared:
-                        shared._prefetch_event = None
+        if produce_plan and self.group_shared:
+            if slot_mapping is not None:
+                self._prefetch_group(num_tokens)
+            else:
+                for shared in self.group_shared:
+                    shared._prefetch_event = None
 
-        if valid_counts is None:
+        if not return_valid_counts:
             return self.hot_cache_paged(block_size), attention_indices
+        assert valid_counts is not None
         return self.hot_cache_paged(block_size), attention_indices, valid_counts
 
     def _gather_plan_into(self, num_tokens: int) -> None:
-        torch.ops._C_cache_ops.hisparse_gather_plan(
+        torch.ops._C_cache_ops.hisparse_gather_compact(
             self._host_cache,
             self.hot_cache,
-            self._plan.global_indices[:num_tokens],
-            self._plan.hot_indices[:num_tokens],
-            self._plan.miss_mask[:num_tokens],
-            self.request_state_indices,
-            self._attention_indices[:num_tokens],
-            self.attention_block_stride,
+            self._plan.miss_global_indices[:num_tokens],
+            self._plan.miss_hot_indices[:num_tokens],
+            self._plan.miss_counts[:num_tokens],
         )
 
     def _prefetch_group(self, num_tokens: int) -> None:
@@ -1035,7 +1032,9 @@ class HiSparseCoordinator:
         planned hot slots, with no LRU resolution. Fixed shape -> capture-safe.
         """
         n = num_tokens
-        attention_indices = self._attention_indices[:n]
+        assert self.leader is not None
+        assert self.attention_block_stride == self.leader.attention_block_stride
+        attention_indices = self.leader._attention_indices[:n]
         if self._prefetch_event is not None:
             torch.accelerator.current_stream(self.device).wait_event(
                 self._prefetch_event
@@ -1045,7 +1044,6 @@ class HiSparseCoordinator:
             self.bind_source_cache(kv_cache)
             self._gather_plan_into(num_tokens)
         if return_valid_counts:
-            assert self._plan.valid_counts is not None
             return (
                 self.hot_cache_paged(block_size),
                 attention_indices,

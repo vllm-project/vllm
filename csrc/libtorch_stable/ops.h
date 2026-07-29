@@ -504,7 +504,15 @@ void hisparse_swap_in(
     std::optional<torch::stable::Tensor> const& newest_indices,
     std::optional<torch::stable::Tensor> const& stats,
     std::optional<torch::stable::Tensor> const& attention_indices,
-    int64_t attention_block_stride);
+    int64_t attention_block_stride,
+    std::optional<torch::stable::Tensor> const& request_ids,
+    std::optional<torch::stable::Tensor> const& source_block_table,
+    int64_t source_block_size,
+    std::optional<torch::stable::Tensor> const& resolved_global_indices,
+    std::optional<torch::stable::Tensor> const& valid_counts,
+    std::optional<torch::stable::Tensor> const& compact_miss_globals,
+    std::optional<torch::stable::Tensor> const& compact_miss_hots,
+    std::optional<torch::stable::Tensor> const& compact_miss_counts);
 
 void hisparse_gather_plan(
     torch::stable::Tensor const& host_cache, torch::stable::Tensor& hot_cache,
@@ -514,6 +522,12 @@ void hisparse_gather_plan(
     std::optional<torch::stable::Tensor> const& request_state_indices,
     std::optional<torch::stable::Tensor> const& attention_indices,
     int64_t attention_block_stride);
+
+void hisparse_gather_compact(torch::stable::Tensor const& host_cache,
+                             torch::stable::Tensor& hot_cache,
+                             torch::stable::Tensor const& miss_global_indices,
+                             torch::stable::Tensor const& miss_hot_indices,
+                             torch::stable::Tensor const& miss_counts);
 
 void hisparse_backup(torch::stable::Tensor const& src_cache,
                      torch::stable::Tensor const& src_indices,

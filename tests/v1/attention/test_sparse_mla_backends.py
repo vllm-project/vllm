@@ -1539,13 +1539,14 @@ def test_hisparse_kernel_matches_fallback():
                 scale,
             )
 
-        hot_k, idx_k = kernel_c.swap_in(
+        hot_k, idx_k, valid_counts = kernel_c.swap_in(
             kv_cache=kv_pool,
             req_id_per_token=req_ids,
             block_table=block_table,
             topk_indices=topk.clone(),
             block_size=block_size,
             slot_mapping=slot_mapping,
+            return_valid_counts=True,
         )
         # Reference path: same conversion swap_in performs, then the local
         # Python reference resolution.
@@ -1581,6 +1582,12 @@ def test_hisparse_kernel_matches_fallback():
         valid = idx_k >= 0
         global_ref = _triton_convert_reference_impl(
             req_ids, block_table, topk, block_size, top_k
+        )
+        torch.testing.assert_close(
+            valid_counts,
+            (global_ref >= 0).sum(dim=1, dtype=torch.int32),
+            rtol=0,
+            atol=0,
         )
         gathered = flat_hot[idx_k[valid].to(torch.long)].cpu()
         expected = flat_pool[global_ref[valid].cpu().to(torch.long)]
@@ -1623,6 +1630,7 @@ def test_hisparse_apply_plan_matches_independent():
 
     hisparse._GROUP_PLANS.clear()
     producer, shared, indep = make(), make(), make()
+    shared.join_group(producer)
     for _ in range(8):
         topk = torch.stack(
             [
