@@ -5,8 +5,8 @@
 from __future__ import annotations
 
 import os
-import queue
 import threading
+from collections import deque
 
 import torch
 
@@ -52,12 +52,17 @@ class DiskBackend:
         self._load_params: BatchMemcpyParams | None = None
         self._load_stream: torch.cuda.Stream | None = None
         self._store_stream: torch.cuda.Stream | None = None
-        self._queue: queue.SimpleQueue | None = None
+        # Loads are latency-critical (a request is waiting on them) while stores
+        # are background work, so they get separate queues and loads win.
+        self._load_q: deque = deque()
+        self._store_q: deque = deque()
+        self._cond = threading.Condition()
         self._thread: threading.Thread | None = None
         self._shutdown: bool = False
         self._fd: int = -1
         self._total_block_bytes: int = 0
         self._buffer_caches: dict[str, torch.Tensor] = {}
+        self._slot_views: list[list[memoryview]] = []
         self._per_tensor_bpb: list[int] = []
         self._tensor_names: list[str] = []
 
@@ -92,6 +97,17 @@ class DiskBackend:
             pin_tensor(buf)
             self._buffer_caches[name] = buf
 
+        # One iovec list per buffer slot, built once. A block spans one segment
+        # per tensor, so rebuilding these per transfer cost len(gpu_caches)
+        # tensor slices plus .numpy() calls on every block.
+        self._slot_views = [
+            [
+                memoryview(self._buffer_caches[name][slot].numpy())
+                for name in self._tensor_names
+            ]
+            for slot in range(num_buffer_slots)
+        ]
+
         self._store_params = build_params(
             gpu_caches,
             self._buffer_caches,
@@ -120,10 +136,9 @@ class DiskBackend:
             total_block_bytes,
         )
 
-        self._queue = queue.SimpleQueue()
         self._thread = threading.Thread(
             target=self._io_loop,
-            args=(self._queue, device, load_stream, store_stream),
+            args=(device, load_stream, store_stream),
             daemon=True,
         )
         self._thread.start()
@@ -137,24 +152,17 @@ class DiskBackend:
         events_list: list[tuple[int, torch.Event]],
         wait_event: torch.Event | None = None,
     ) -> None:
-        assert self._queue is not None
-        self._queue.put(
-            (
-                src_blocks,
-                dst_blocks,
-                is_store,
-                event_idx,
-                events_list,
-                wait_event,
-            )
-        )
+        item = (src_blocks, dst_blocks, is_store, event_idx, events_list, wait_event)
+        with self._cond:
+            (self._store_q if is_store else self._load_q).append(item)
+            self._cond.notify()
 
     def shutdown(self) -> None:
         if self._shutdown:
             return
-        self._shutdown = True
-        if self._queue is not None:
-            self._queue.put(None)
+        with self._cond:
+            self._shutdown = True
+            self._cond.notify_all()
         if self._thread is not None:
             self._thread.join(timeout=10.0)
         if self._fd >= 0:
@@ -163,19 +171,27 @@ class DiskBackend:
 
     def _io_loop(
         self,
-        q: queue.SimpleQueue,
         device: torch.device,
         load_stream: torch.cuda.Stream,
         store_stream: torch.cuda.Stream,
     ) -> None:
         current_platform.set_device(device)
         while True:
-            item = q.get()
-            if item is None:
-                return
-            (src_blocks, dst_blocks, is_store, event_idx, events_list, wait_event) = (
-                item
-            )
+            with self._cond:
+                self._cond.wait_for(
+                    lambda: self._shutdown or self._load_q or self._store_q
+                )
+                if self._shutdown:
+                    return
+                q = self._load_q if self._load_q else self._store_q
+                (
+                    src_blocks,
+                    dst_blocks,
+                    is_store,
+                    event_idx,
+                    events_list,
+                    wait_event,
+                ) = q.popleft()
             stream = store_stream if is_store else load_stream
             if wait_event is not None:
                 stream.wait_event(wait_event)
@@ -188,10 +204,7 @@ class DiskBackend:
             events_list.append((event_idx, event))
 
     def _writev_slot(self, buf_slot: int, file_offset: int) -> None:
-        bufs = [
-            self._buffer_caches[name][buf_slot].numpy() for name in self._tensor_names
-        ]
-        written = os.pwritev(self._fd, bufs, file_offset)
+        written = os.pwritev(self._fd, self._slot_views[buf_slot], file_offset)
         if written < self._total_block_bytes:
             raise OSError(
                 f"Short write: expected {self._total_block_bytes} bytes, "
@@ -199,11 +212,7 @@ class DiskBackend:
             )
 
     def _readv_slot(self, buf_slot: int, file_offset: int) -> None:
-        views = [
-            memoryview(self._buffer_caches[name][buf_slot].numpy())
-            for name in self._tensor_names
-        ]
-        bytes_read = os.preadv(self._fd, views, file_offset)
+        bytes_read = os.preadv(self._fd, self._slot_views[buf_slot], file_offset)
         if bytes_read < self._total_block_bytes:
             raise OSError(
                 f"Short read: expected {self._total_block_bytes} bytes, "
