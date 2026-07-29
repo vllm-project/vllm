@@ -103,7 +103,7 @@ steps:
     'uv pip install --no-build-isolation git+https://github.com/state-spaces/mamba@v2.3.0 || true &&
     uv pip install --no-build-isolation git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0 || true &&
     cd tests &&
-    pytest -v -s models/language/generation -m hybrid_model -k granite-4.0-tiny-preview  || true'
+    pytest -v -s models/language/generation -m hybrid_model -k granite-4.0-tiny-preview || true'
 - label: Language Models Test (Extended Generation)
   device: intel_gpu
   timeout_in_minutes: 65
