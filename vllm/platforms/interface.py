@@ -873,11 +873,12 @@ class Platform:
 
         # Get kernel block alignment from the backend's supported sizes
         with set_current_vllm_config(vllm_config):
+            backend_min_block_size = min(
+                s.base if isinstance(s, MultipleOf) else s
+                for s in backend_cls.get_supported_kernel_block_sizes()
+            )
             kernel_block_alignment_size = max(
-                min(
-                    s.base if isinstance(s, MultipleOf) else s
-                    for s in backend_cls.get_supported_kernel_block_sizes()
-                ),
+                backend_min_block_size,
                 cache_config.block_size,
             )
             if model_config.use_mla:
@@ -886,6 +887,36 @@ class Platform:
                 # For hybrid MLA/Mamba models, make the manager block size a
                 # multiple of 128 so split kernel blocks keep that invariant.
                 kernel_block_alignment_size = max(kernel_block_alignment_size, 128)
+
+        # The `max`es above silently discard a user `--block-size` below the
+        # alignment finally chosen, so such a value is indistinguishable from
+        # passing nothing -- including from the resulting logs, since the line
+        # below reports the derived attention block size rather than the input
+        # that produced it. On a hybrid model the derived size also sets the
+        # prefix-cache match granularity, so two lanes that differ only in an
+        # ignored `--block-size` can end up with different cache behaviour for
+        # reasons nothing in the output explains. Say so once.
+        #
+        # Test against the final alignment rather than the backend minimum: an
+        # MLA model floors it at 128 whatever the backend asks for, and that
+        # floor is the case most likely to surprise. Strictly below, because a
+        # value equal to the alignment is the one the `max` returns and is
+        # therefore honoured.
+        if (
+            cache_config.user_specified_block_size
+            and cache_config.block_size < kernel_block_alignment_size
+        ):
+            logger.warning_once(
+                "--block-size %d has no effect: block size alignment uses %d "
+                "instead (%s requires at least %d%s). Pass a value above %d to "
+                "change the derived attention block size.",
+                cache_config.block_size,
+                kernel_block_alignment_size,
+                backend_cls.__name__,
+                backend_min_block_size,
+                ", and MLA requires a multiple of 128" if model_config.use_mla else "",
+                kernel_block_alignment_size,
+            )
 
         if cache_config.mamba_cache_mode == "all":
             # With prefix caching, align to mamba chunk size for kernel perf
