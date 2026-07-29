@@ -1546,9 +1546,6 @@ def convert_to_wna16_moe_kernel_format(
         )
     elif backend == WNA16MoEBackend.XPU:
         assert quant_config is not None
-        from vllm.model_executor.layers.quantization.moe_wna16 import (
-            MoeWNA16Config,
-        )
 
         is_inc = (
             hasattr(quant_config, "full_config")
