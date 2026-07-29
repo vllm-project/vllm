@@ -1293,6 +1293,7 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
+        layer.output_partition_sizes = output_partition_sizes
 
         if input_size_per_partition % 16 != 0:
             raise ValueError(
@@ -1348,6 +1349,9 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
         layer.register_parameter("input_scale", input_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if not hasattr(layer, "has_bias"):
+            layer.has_bias = getattr(layer, "bias", None) is not None
+
         # Discard the input_scale placeholder. Whether it carries values
         # (W4A4 ckpt loaded as W4A16) or is uninitialized (native W4A16
         # ckpt), W4A16 mode does not quantize activations, so this is unused.
