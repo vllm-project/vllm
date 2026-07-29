@@ -223,6 +223,38 @@ def eager_allreduce(
         torch.testing.assert_close(out, inp * (tp_size**num_communication))
 
 
+@ray.remote(num_gpus=1, max_calls=1)
+def batch_invariant_allreduce(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size,
+    pp_size,
+    rank,
+    distributed_init_port,
+):
+    with monkeypatch.context() as m:
+        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        m.delenv("HIP_VISIBLE_DEVICES", raising=False)
+        m.setenv("VLLM_BATCH_INVARIANT", "1")
+        m.delenv("VLLM_CUSTOM_ALLREDUCE_ALGO", raising=False)
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+
+        custom_allreduce = get_tp_group().device_communicator.ca_comm
+        assert custom_allreduce is not None
+        assert not custom_allreduce.disabled
+
+        torch.manual_seed(rank)
+        target = torch.randn((1, 65536), dtype=torch.bfloat16, device=device)
+        target_alone = custom_allreduce.all_reduce(target)
+
+        batch = torch.randn((8, 65536), dtype=torch.bfloat16, device=device)
+        batch[3].copy_(target[0])
+        target_in_batch = custom_allreduce.all_reduce(batch)[3]
+
+        assert torch.equal(target_alone[0], target_in_batch)
+
+
 @pytest.mark.parametrize("tp_size", [2])
 @pytest.mark.parametrize("pipeline_parallel_size", [1, 2])
 @pytest.mark.parametrize("test_target", [eager_allreduce, graph_allreduce])
@@ -247,3 +279,13 @@ def test_custom_collectives_world_size_four(
     if torch.accelerator.device_count() < 4:
         pytest.skip("Not enough GPUs to run the test.")
     multi_process_parallel(monkeypatch, 4, 1, test_target)
+
+
+@pytest.mark.parametrize("tp_size", [2, 4])
+def test_batch_invariant_custom_allreduce(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size,
+):
+    if torch.accelerator.device_count() < tp_size:
+        pytest.skip("Not enough GPUs to run the test.")
+    multi_process_parallel(monkeypatch, tp_size, 1, batch_invariant_allreduce)

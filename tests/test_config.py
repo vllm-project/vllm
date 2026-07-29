@@ -25,7 +25,7 @@ from vllm.config import (
     VllmConfig,
     update_config,
 )
-from vllm.config.compilation import CompilationMode, CUDAGraphMode
+from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
 from vllm.config.utils import get_field
@@ -37,6 +37,47 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionCGSupport
 
 DEVICE_TYPE = current_platform.device_type
+
+
+@pytest.mark.parametrize(
+    ("tensor_parallel_size", "expected_disabled"),
+    [(1, True), (2, False), (4, False), (8, True)],
+)
+def test_batch_invariant_custom_all_reduce_policy(
+    monkeypatch,
+    tensor_parallel_size,
+    expected_disabled,
+):
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    monkeypatch.setattr(current_platform, "use_custom_allreduce", lambda: True)
+
+    config = ParallelConfig(tensor_parallel_size=tensor_parallel_size)
+
+    assert config.disable_custom_all_reduce is expected_disabled
+
+
+def test_batch_invariant_preserves_explicit_custom_all_reduce_disable(monkeypatch):
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    monkeypatch.setattr(current_platform, "use_custom_allreduce", lambda: True)
+
+    config = ParallelConfig(
+        tensor_parallel_size=2,
+        disable_custom_all_reduce=True,
+    )
+
+    assert config.disable_custom_all_reduce is True
+
+
+def test_batch_invariant_disables_allreduce_rms_fusion(monkeypatch):
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+
+    config = VllmConfig(
+        compilation_config=CompilationConfig(
+            pass_config=PassConfig(fuse_allreduce_rms=True)
+        )
+    )
+
+    assert config.compilation_config.pass_config.fuse_allreduce_rms is False
 
 
 def test_compile_config_repr_succeeds():

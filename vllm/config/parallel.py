@@ -999,8 +999,9 @@ class ParallelConfig:
         # Lazy import to avoid circular import
         from vllm.v1.executor import Executor
 
-        # Enable batch invariance settings if requested
-        if envs.VLLM_BATCH_INVARIANT:
+        # The one-stage custom all-reduce is batch invariant for TP2 and TP4.
+        # Other TP sizes continue to use the PyNCCL fallback.
+        if envs.VLLM_BATCH_INVARIANT and self.tensor_parallel_size not in (2, 4):
             self.disable_custom_all_reduce = True
 
         if (
