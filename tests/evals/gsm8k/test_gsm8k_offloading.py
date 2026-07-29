@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 import pytest
 import requests
 
+from tests.evals.metrics import assert_no_nan_logits
 from tests.utils import RemoteOpenAIServer
 from vllm.platforms import current_platform
 
@@ -259,7 +260,11 @@ def test_gsm8k_offloading_correctness(cfg: OffloadingModelConfig):
         cfg.model,
         server_args,
         # /reset_prefix_cache requires dev mode.
-        env_dict={"VLLM_SERVER_DEV_MODE": "1", **cfg.env_dict},
+        env_dict={
+            "VLLM_SERVER_DEV_MODE": "1",
+            **cfg.env_dict,
+            "VLLM_COMPUTE_NANS_IN_LOGITS": "1",
+        },
         max_wait_seconds=cfg.startup_timeout,
     ) as server:
         base_url = f"http://{server.host}:{server.port}"
@@ -287,3 +292,5 @@ def test_gsm8k_offloading_correctness(cfg: OffloadingModelConfig):
 
             if run_idx == 1:
                 _reset_gpu_prefix_cache(base_url)
+
+        assert_no_nan_logits(server.url_for("metrics"))

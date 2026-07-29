@@ -18,6 +18,7 @@ from pathlib import Path
 import regex as re
 import yaml
 
+from tests.evals.metrics import assert_no_nan_logits
 from tests.utils import RemoteOpenAIServer
 
 TOL = 0.05  # Absolute tolerance for accuracy comparison
@@ -134,6 +135,7 @@ def test_gpqa_correctness(config_filename):
     server_env = {"TIKTOKEN_ENCODINGS_BASE": str(TIKTOKEN_DATA_DIR)}
     if eval_config.get("env"):
         server_env.update(eval_config["env"])
+    server_env["VLLM_COMPUTE_NANS_IN_LOGITS"] = "1"
 
     reasoning_effort = eval_config.get("reasoning_effort", "low")
 
@@ -156,6 +158,7 @@ def test_gpqa_correctness(config_filename):
         measured_metric = run_gpqa_eval(
             eval_config["model_name"], base_url, reasoning_effort
         )
+        assert_no_nan_logits(remote_server.url_for("metrics"))
         expected_metric = eval_config["metric_threshold"]
 
         print(f"GPQA Results for {eval_config['model_name']}:")

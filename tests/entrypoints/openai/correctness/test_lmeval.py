@@ -11,6 +11,7 @@ AsyncLLMEngine are working correctly.
 
 import lm_eval
 
+from tests.evals.metrics import assert_no_nan_logits
 from vllm.platforms import current_platform
 
 from ....utils import RemoteOpenAIServer
@@ -41,9 +42,14 @@ def run_test(more_args):
     args = list(DEFAULT_ARGS)
     args.extend(more_args)
     print(f"Running with: {args}")
+    check_nan_logits = current_platform.is_cuda_alike()
+    server_env = {"VLLM_COMPUTE_NANS_IN_LOGITS": "1"} if check_nan_logits else None
 
     with RemoteOpenAIServer(
-        MODEL_NAME, args, max_wait_seconds=MAX_WAIT_SECONDS
+        MODEL_NAME,
+        args,
+        env_dict=server_env,
+        max_wait_seconds=MAX_WAIT_SECONDS,
     ) as remote_server:
         url = f"{remote_server.url_for('v1')}/completions"
 
@@ -58,6 +64,8 @@ def run_test(more_args):
             model_args=model_args,
             tasks=TASK,
         )
+        if check_nan_logits:
+            assert_no_nan_logits(remote_server.url_for("metrics"))
 
         measured_value = results["results"][TASK][FILTER]
         assert (

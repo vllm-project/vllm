@@ -53,7 +53,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-vllm serve "$MODEL" \
+VLLM_COMPUTE_NANS_IN_LOGITS=1 vllm serve "$MODEL" \
   --max-model-len 2048 \
   --offload-group-size 8 \
   --offload-num-in-group 2 \
@@ -67,7 +67,7 @@ wait_for_server "$PORT"
 
 TAG=$(echo "$MODEL" | tr '/: \\n' '_____')
 OUT="${OUT_DIR}/${TAG}_prefetch_offload.json"
-python3 tests/evals/gsm8k/gsm8k_eval.py --host http://127.0.0.1 --port "$PORT" --num-questions "${NUM_Q}" --save-results "${OUT}"
+python3 tests/evals/gsm8k/gsm8k_eval.py --host http://127.0.0.1 --port "$PORT" --num-questions "${NUM_Q}" --save-results "${OUT}" --check-nan-logits
 python3 - <<PY
 import json; acc=json.load(open('${OUT}'))['accuracy']
 print(f"${MODEL} prefetch_offload: accuracy {acc:.3f}")
