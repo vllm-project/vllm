@@ -468,6 +468,14 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "int block_size, Tensor!? q_out, Tensor!? index_q_out, "
       "str kv_cache_dtype, bool skip_index_branch=False) -> ()");
 
+#ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
+  ops.def(
+      "kimi_k3_attn_res("
+      "Tensor! prefix, Tensor delta, Tensor blocks, Tensor norm_weight, "
+      "Tensor qk_weight, Tensor output_norm_weight, Tensor! output, "
+      "int num_blocks, float eps, float output_norm_eps) -> ()");
+#endif
+
   // Apply repetition penalties to logits in-place.
   ops.def(
       "apply_repetition_penalties_(Tensor! logits, Tensor prompt_mask, "
@@ -703,6 +711,9 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 #endif
   ops.impl("fused_minimax_m3_qknorm_rope_kv_insert",
            TORCH_BOX(&fused_minimax_m3_qknorm_rope_kv_insert));
+#ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
+  ops.impl("kimi_k3_attn_res", TORCH_BOX(&kimi_k3_attn_res));
+#endif
 
   // Sampler kernels (shared CUDA/ROCm)
   ops.impl("apply_repetition_penalties_",

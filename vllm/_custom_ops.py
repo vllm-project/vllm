@@ -2782,6 +2782,33 @@ def concat_and_cache_mla(
     )
 
 
+def kimi_k3_attn_res(
+    prefix: torch.Tensor,
+    delta: torch.Tensor,
+    blocks: torch.Tensor,
+    norm_weight: torch.Tensor,
+    qk_weight: torch.Tensor,
+    output_norm_weight: torch.Tensor,
+    num_blocks: int,
+    eps: float,
+    output_norm_eps: float,
+) -> torch.Tensor:
+    output = torch.empty_like(prefix)
+    torch.ops._C.kimi_k3_attn_res(
+        prefix,
+        delta,
+        blocks,
+        norm_weight,
+        qk_weight,
+        output_norm_weight,
+        output,
+        num_blocks,
+        eps,
+        output_norm_eps,
+    )
+    return output
+
+
 def concat_and_cache_mla_rope_fused(
     positions: torch.Tensor,
     q_pe: torch.Tensor,
@@ -3541,6 +3568,7 @@ def causal_conv1d_update_cpu(
     silu_activation: bool,
     conv_state_indices: torch.Tensor | None,
     is_vnni: bool,
+    num_accepted_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.ops._C.causal_conv1d_update_cpu(
         x,
@@ -3548,7 +3576,7 @@ def causal_conv1d_update_cpu(
         weight,
         bias,
         silu_activation,
-        None,
+        num_accepted_tokens,
         conv_state_indices,
         -1,
         is_vnni,
@@ -3823,6 +3851,15 @@ def cpu_prepack_moe_weight(
     return output
 
 
+def cpu_prepack_moe_weight_int8(
+    weight: torch.Tensor,
+    isa: str,
+) -> torch.Tensor:
+    output = torch.empty_like(weight)
+    torch.ops._C.prepack_moe_weight_int8(weight, output, isa)
+    return output
+
+
 def cpu_fused_moe(
     input: torch.Tensor,
     w13: torch.Tensor,
@@ -3841,6 +3878,39 @@ def cpu_fused_moe(
         input,
         w13,
         w2,
+        w13_bias,
+        w2_bias,
+        topk_weights,
+        topk_ids,
+        skip_weighted,
+        act,
+        isa,
+    )
+    return output
+
+
+def cpu_fused_moe_int8(
+    input: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w13_bias: torch.Tensor | None,
+    w2_bias: torch.Tensor | None,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    act: str,
+    isa: str,
+    skip_weighted: bool = False,
+) -> torch.Tensor:
+    output = torch.empty_like(input)
+    torch.ops._C.cpu_fused_moe_int8(
+        output,
+        input,
+        w13,
+        w2,
+        w13_scale,
+        w2_scale,
         w13_bias,
         w2_bias,
         topk_weights,
@@ -3960,9 +4030,40 @@ def fusedQuantizeNv(
         padded_rows, padded_cols, dtype=torch.float8_e4m3fn, device=a.device
     )
 
-    return torch.ops._qutlass_C.fusedQuantizeNvAbsMax(
-        a, b, xh_e2m1, xh_e4m3, global_scale
-    )
+    safeFusedQuantizeNv(a, b, xh_e2m1, xh_e4m3, global_scale)
+    return xh_e2m1, xh_e4m3
+
+
+@torch.library.custom_op(
+    "vllm::safeFusedQuantizeNv", mutates_args=("xh_e2m1", "xh_e4m3")
+)
+def safeFusedQuantizeNv(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    xh_e2m1: torch.Tensor,
+    xh_e4m3: torch.Tensor,
+    global_scale: torch.Tensor,
+) -> None:
+    """
+    Wrapper for QUTLASS fusedQuantizeNv method that operates on tensors in-place
+    rather than returning them, to prevent torch 2.12+ errors that outputs of custom
+    operators may not alias any inputs to the custom operator.
+    """
+    torch.ops._qutlass_C.fusedQuantizeNvAbsMax(a, b, xh_e2m1, xh_e4m3, global_scale)
+    return
+
+
+if hasattr(torch.ops._qutlass_C, "fusedQuantizeNv"):
+
+    @register_fake("vllm::safeFusedQuantizeNv")
+    def _fake_fused_quantize_nv(
+        a: torch.Tensor,
+        b: torch.Tensor,
+        xh_e2m1: torch.Tensor,
+        xh_e4m3: torch.Tensor,
+        global_scale: torch.Tensor,
+    ) -> None:
+        return
 
 
 def hadacore_transform(x: torch.Tensor, inplace: bool = True) -> torch.Tensor:
