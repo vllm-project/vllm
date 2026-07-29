@@ -4224,19 +4224,24 @@ class GPUModelRunner(
                 if not has_kv_transfer_group() and not has_ec_transfer():
                     # Return empty ModelRunnerOutput if no work to do.
                     return EMPTY_MODEL_RUNNER_OUTPUT
-                if has_kv_transfer_group():
-                    output = self.kv_connector_no_forward(
-                        scheduler_output, self.vllm_config
-                    )
-                    if has_ec_transfer():
-                        ec_output = self.ec_connector_no_forward(
-                            scheduler_output, self.vllm_config, self.encoder_cache
-                        )
-                        output.ec_connector_output = ec_output.ec_connector_output
-                    return output
-                return self.ec_connector_no_forward(
-                    scheduler_output, self.vllm_config, self.encoder_cache
+                output = (
+                    self.kv_connector_no_forward(scheduler_output, self.vllm_config)
+                    if has_kv_transfer_group()
+                    else EMPTY_MODEL_RUNNER_OUTPUT
                 )
+                # EC transfer only ever runs on the first PP rank (that's
+                # where the multimodal encoder lives, see the is_first_rank
+                # gate above in _preprocess); other ranks have nothing of
+                # their own to report and must not touch encoder_cache.
+                if has_ec_transfer() and get_pp_group().is_first_rank:
+                    ec_output = self.ec_connector_no_forward(
+                        scheduler_output, self.vllm_config, self.encoder_cache
+                    )
+                    if output is EMPTY_MODEL_RUNNER_OUTPUT:
+                        # Don't mutate the shared singleton in place.
+                        output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
+                    output.ec_connector_output = ec_output.ec_connector_output
+                return output
 
             if self.cache_config.kv_sharing_fast_prefill:
                 assert not self.num_prompt_logprobs, (
