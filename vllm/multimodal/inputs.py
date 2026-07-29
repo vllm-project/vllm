@@ -66,7 +66,10 @@ these are directly passed to the model without HF processing.
 """
 
 VideoItem: TypeAlias = Union[
-    HfVideoItem, "torch.Tensor", tuple[HfVideoItem, dict[str, Any]]
+    HfVideoItem,
+    "torch.Tensor",
+    tuple[HfVideoItem, dict[str, Any]],
+    MediaWithBytes[tuple[HfVideoItem, dict[str, Any]]],
 ]
 """
 A `transformers.video_utils.VideoInput` representing a single video item. 
@@ -453,6 +456,8 @@ class BaseMultiModalField(ABC):
         if device is not None and self.keep_on_cpu:
             device = "cpu"
         if pin_memory and self.keep_on_cpu:
+            pin_memory = False
+        if device == "cpu" or device == torch.device("cpu"):
             pin_memory = False
 
         batch = [elem.data for elem in elems]

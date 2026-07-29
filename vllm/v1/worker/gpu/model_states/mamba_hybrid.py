@@ -9,10 +9,6 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.model_executor.layers.mamba.mamba_utils import (
-    get_conv_copy_spec,
-    is_conv_state_dim_first,
-)
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
@@ -101,12 +97,12 @@ class MambaHybridModelState(DefaultModelState):
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
         # Must reset the speculative acceptance count in this idx which could be stale.
-        self.num_accepted_tokens_gpu[req_index] = 1
+        self.num_accepted_tokens_gpu[req_index].fill_(1)
         if self._align_mode:
             # Seed the running state block from the resumed/prefilled position.
-            self._mamba_state_idx_gpu[req_index] = (
-                new_req_data.num_computed_tokens - 1
-            ) // self.cache_config.block_size
+            self._mamba_state_idx_gpu[req_index].fill_(
+                (new_req_data.num_computed_tokens - 1) // self.cache_config.block_size
+            )
 
     def _get_mamba_group_info(
         self, kv_cache_config: KVCacheConfig
@@ -133,14 +129,11 @@ class MambaHybridModelState(DefaultModelState):
     ) -> MambaSpecDecodeGPUContext:
         if self._mamba_ctx is None:
             copy_funcs = self.model.get_mamba_state_copy_func()
-            # The fused copy kernels shift conv windows assuming the SD layout;
-            # the DS layout cannot express a >0 spec-decode shift as a single
-            # contiguous copy (mirrors get_conv_copy_spec's NotImplementedError).
-            if get_conv_copy_spec in copy_funcs and is_conv_state_dim_first():
-                assert self.vllm_config.speculative_config is None, (
-                    "DS conv state layout does not support mamba align state "
-                    "copies with speculative decoding"
-                )
+            # Both SD and DS conv layouts support a >0 spec-decode shift: the
+            # fused pre-copy kernel (``_copy_mamba_state_block``) applies the
+            # ``token_bias = num_accepted - 1`` window shift per conv layout
+            # (SD: contiguous slice; DS: per-dim-row strided slice), matching
+            # the V1 ``get_conv_copy_spec`` semantics.
             self._mamba_ctx = MambaSpecDecodeGPUContext.create(
                 max_num_reqs=self.max_num_reqs,
                 kv_cache_config=kv_cache_config,
