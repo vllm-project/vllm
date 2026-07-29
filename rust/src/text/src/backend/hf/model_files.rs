@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::path::{Path, PathBuf};
 
 use hf_hub::Cache;
@@ -41,6 +44,10 @@ pub struct ResolvedModelFiles {
     pub tokenizer_config_path: Option<PathBuf>,
     pub generation_config_path: Option<PathBuf>,
     pub preprocessor_config_path: Option<PathBuf>,
+    /// Video-specific preprocessor config, when provided by the model repo.
+    pub video_preprocessor_config_path: Option<PathBuf>,
+    /// Combined processor config, which may embed a `video_processor` section.
+    pub processor_config_path: Option<PathBuf>,
     pub chat_template_path: Option<PathBuf>,
     pub config_path: Option<PathBuf>,
 }
@@ -70,6 +77,11 @@ fn resolve_local_model_files(model_dir: &Path) -> Result<ResolvedModelFiles> {
         tokenizer_config_path,
         generation_config_path: local_file_if_exists(model_dir, "generation_config.json"),
         preprocessor_config_path: local_file_if_exists(model_dir, "preprocessor_config.json"),
+        video_preprocessor_config_path: local_file_if_exists(
+            model_dir,
+            "video_preprocessor_config.json",
+        ),
+        processor_config_path: local_file_if_exists(model_dir, "processor_config.json"),
         chat_template_path: discover_chat_template_in_dir(model_dir),
         config_path: local_file_if_exists(model_dir, "config.json"),
     })
@@ -107,6 +119,10 @@ async fn resolve_remote_model_files(model_id: &str) -> Result<ResolvedModelFiles
         download_if_present(&repo, model_id, &siblings, "generation_config.json").await?;
     let preprocessor_config_path =
         download_if_present(&repo, model_id, &siblings, "preprocessor_config.json").await?;
+    let video_preprocessor_config_path =
+        download_if_present(&repo, model_id, &siblings, "video_preprocessor_config.json").await?;
+    let processor_config_path =
+        download_if_present(&repo, model_id, &siblings, "processor_config.json").await?;
     let chat_template_name = siblings
         .contains("chat_template.json")
         .then_some("chat_template.json")
@@ -123,6 +139,8 @@ async fn resolve_remote_model_files(model_id: &str) -> Result<ResolvedModelFiles
         tokenizer_config_path,
         generation_config_path,
         preprocessor_config_path,
+        video_preprocessor_config_path,
+        processor_config_path,
         chat_template_path,
         config_path,
     })
@@ -143,6 +161,8 @@ fn resolve_cached_model_files(model_id: &str) -> Result<Option<ResolvedModelFile
     })?;
     let generation_config_path = cache_repo.get("generation_config.json");
     let preprocessor_config_path = cache_repo.get("preprocessor_config.json");
+    let video_preprocessor_config_path = cache_repo.get("video_preprocessor_config.json");
+    let processor_config_path = cache_repo.get("processor_config.json");
     let chat_template_path = discover_chat_template_in_dir(model_dir);
     let config_path = cache_repo.get("config.json");
 
@@ -151,6 +171,8 @@ fn resolve_cached_model_files(model_id: &str) -> Result<Option<ResolvedModelFile
         tokenizer_config_path,
         generation_config_path,
         preprocessor_config_path,
+        video_preprocessor_config_path,
+        processor_config_path,
         chat_template_path,
         config_path,
     }))

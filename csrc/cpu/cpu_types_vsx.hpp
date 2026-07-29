@@ -287,7 +287,7 @@ struct FP32Vec4 : public Vec<FP32Vec4> {
 
   explicit FP32Vec4(__vector float data) : reg(data) {}
 
-  explicit FP32Vec4(const FP32Vec4& data) : reg(data.reg) {}
+  FP32Vec4(const FP32Vec4& data) : reg(data.reg) {}
 };
 
 struct FP32Vec8 : public Vec<FP32Vec8> {
@@ -316,7 +316,7 @@ struct FP32Vec8 : public Vec<FP32Vec8> {
 
   explicit FP32Vec8(f32x4x2_t data) : reg(data) {}
 
-  explicit FP32Vec8(const FP32Vec8& data) {
+  FP32Vec8(const FP32Vec8& data) {
     reg.val[0] = data.reg.val[0];
     reg.val[1] = data.reg.val[1];
   }
@@ -336,13 +336,14 @@ struct FP32Vec8 : public Vec<FP32Vec8> {
     reg.val[1] = fp16_to_fp32_bits(raw_lo);
   }
   float reduce_sum() const {
-    AliasReg ar;
-    ar.reg = reg;
-    float result = 0;
-    unroll_loop<int, VEC_ELEM_NUM>(
-        [&result, &ar](int i) { result += ar.values[i]; });
-
-    return result;
+    // VSX horizontal reduction: 3 vector ops instead of 8 scalar adds.
+    // Step 1: pairwise sum of the two 4-wide halves
+    __vector float s = vec_add(reg.val[0], reg.val[1]);
+    // Step 2: rotate by 8 bytes (2 floats) and add
+    s = vec_add(s, vec_sld(s, s, 8));
+    // Step 3: rotate by 4 bytes (1 float) and add  => all lanes hold total
+    s = vec_add(s, vec_sld(s, s, 4));
+    return vec_extract(s, 0);
   }
   FP32Vec8 exp() const {
     f32x4x2_t out;
@@ -592,7 +593,7 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   explicit FP32Vec16(bool, const float* ptr) : FP32Vec16(ptr) {}
   explicit FP32Vec16(f32x4x4_t data) : reg(data) {}
 
-  explicit FP32Vec16(const FP32Vec16& data) {
+  FP32Vec16(const FP32Vec16& data) {
     reg.val[0] = data.reg.val[0];
     reg.val[1] = data.reg.val[1];
     reg.val[2] = data.reg.val[2];
@@ -744,6 +745,15 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   FP32Vec16 abs() const {
     return FP32Vec16(f32x4x4_t({vec_abs(reg.val[0]), vec_abs(reg.val[1]),
                                 vec_abs(reg.val[2]), vec_abs(reg.val[3])}));
+  }
+
+  FP32Vec16 exp() const {
+    FP32Vec8 lo(f32x4x2_t{reg.val[0], reg.val[1]});
+    FP32Vec8 hi(f32x4x2_t{reg.val[2], reg.val[3]});
+    auto lo_e = lo.exp();
+    auto hi_e = hi.exp();
+    return FP32Vec16(f32x4x4_t{lo_e.reg.val[0], lo_e.reg.val[1],
+                               hi_e.reg.val[0], hi_e.reg.val[1]});
   }
 
   float reduce_max() {
