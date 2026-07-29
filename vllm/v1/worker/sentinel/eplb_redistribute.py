@@ -76,7 +76,7 @@ def redistribute_expert_placement(
     for balanced weight loading. Modifies physical_to_logical_map in place.
 
     Returns:
-        Set of (layer_idx, logical_id) pairs needing weight reload.
+        Set of (moe_layer_idx, logical_id) pairs needing weight reload.
 
     Raises:
         RuntimeError: If not enough slots to cover missing experts.
@@ -179,36 +179,16 @@ def rebuild_logical_expert_maps(
             logical_replica_count[layer_idx, lid] += 1
 
 
-def _parse_layer_expert(name: str) -> tuple[int, int] | None:
-    """Extract (layer_idx, logical_expert_id) from a checkpoint tensor name.
-
-    Returns None for non-expert tensors. Expects HF convention:
-    model.layers.{L}.mlp.experts.{E}.{shard}.weight
-    """
-    parts = name.split(".")
-    try:
-        layer_pos = parts.index("layers")
-        expert_pos = parts.index("experts")
-    except ValueError:
-        return None
-    try:
-        layer_idx = int(parts[layer_pos + 1])
-        expert_id = int(parts[expert_pos + 1])
-    except (IndexError, ValueError):
-        return None
-    return layer_idx, expert_id
-
-
 def reload_experts_from_disk(
     model: torch.nn.Module,
     vllm_config: VllmConfig,
     reload_set: set[tuple[int, int]],
 ) -> int:
-    """Reload specific (layer, logical_expert) weights from disk.
+    """Reload specific (moe_layer_idx, logical_expert) weights from disk.
 
     Args:
-        reload_set: {(layer_idx, logical_expert_id), ...} from
-            redistribute_expert_placement.
+        reload_set: {(moe_layer_idx, logical_expert_id), ...} from
+        redistribute_expert_placement.
 
     Returns:
         Number of parameter names loaded.
@@ -220,31 +200,35 @@ def reload_experts_from_disk(
         DefaultModelLoader,
     )
 
+    moe_layers = list(model.moe_layers)
+    prefixes = {f"{moe_layers[i].layer_name}.{e}.": (i, e) for i, e in reload_set}
+
     loader = DefaultModelLoader(vllm_config.load_config)
     loader.local_expert_ids = None
 
     all_weights = loader.get_all_weights(vllm_config.model_config, model)
 
-    matched: set[tuple[int, int]] = set()
+    matched: set[str] = set()
 
     def filtered_iter() -> Generator[tuple[str, torch.Tensor], None, None]:
         for name, tensor in all_weights:
-            parsed = _parse_layer_expert(name)
-            if parsed is not None and parsed in reload_set:
-                matched.add(parsed)
-                yield name, tensor
+            for prefix in prefixes:
+                if name.startswith(prefix):
+                    matched.add(prefix)
+                    yield name, tensor
+                    break
 
     logger.info("[FT] Reloading %d (layer, expert) pair(s) from disk.", len(reload_set))
 
     loaded = model.load_weights(filtered_iter())
 
-    unmatched = reload_set - matched
+    unmatched = [pair for p, pair in prefixes.items() if p not in matched]
     if unmatched:
         raise RuntimeError(
             f"[FT] {len(unmatched)} (layer, expert) pair(s) had no matching "
-            f"checkpoint weight, e.g. {sorted(unmatched)[:5]}. The model's "
-            f"expert weights likely use a layout _parse_layer_expert does not "
-            f"support (fused experts or non-'layers'/'experts' tokens)."
+            f"checkpoint weight, e.g. {unmatched[:5]}. The model's expert "
+            f"weights likely use a layout that does not follow "
+            f"'<layer_name>.<expert_id>.' (e.g. fused experts)."
         )
 
     logger.info(
