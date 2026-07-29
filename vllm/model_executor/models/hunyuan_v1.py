@@ -238,10 +238,10 @@ class HunYuanAttention(nn.Module):
         ori_k = k
         if self.use_qk_norm:
             q = self.query_layernorm(
-                q.view(-1, self.num_heads, self.head_dim).contiguous()
+                q.view(-1, self.num_heads, self.head_dim),
             )
             k = self.key_layernorm(
-                k.view(-1, self.num_kv_heads, self.head_dim).contiguous()
+                k.view(-1, self.num_kv_heads, self.head_dim),
             )
 
         attn_output = self.attn(q, k, v)
@@ -346,10 +346,10 @@ class HunYuanCrossAttention(nn.Module):
         q, _ = self.rotary_emb(positions, q, k_tmp)
         if self.use_qk_norm:
             q = self.query_layernorm(
-                q.view(-1, self.num_heads, self.head_dim).contiguous()
+                q.view(-1, self.num_heads, self.head_dim),
             )
             k = self.key_layernorm(
-                k.view(-1, self.num_kv_heads, self.head_dim).contiguous()
+                k.view(-1, self.num_kv_heads, self.head_dim),
             )
 
         attn_output = self.attn(q, k, v)

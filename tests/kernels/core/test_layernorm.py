@@ -60,7 +60,9 @@ def test_rms_norm(
     x = x[..., :hidden_size]
     assert x.is_contiguous() != strided_input
     x *= scale
-    residual = torch.randn_like(x) * scale if add_residual else None
+    residual = x.new_empty_strided(x.size(), x.stride()) if add_residual else None
+    if residual is not None:
+        residual.normal_(std=scale)
 
     # NOTE(woosuk): The reference implementation should be executed first
     # because the custom kernel is in-place.
