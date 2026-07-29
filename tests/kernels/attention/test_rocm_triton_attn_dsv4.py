@@ -196,6 +196,72 @@ def _ragged_from_rows(
     )
 
 
+def _dense_topk_case(
+    layout: str,
+    num_queries: int,
+    width: int,
+    num_kv: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # Build a dense (indices, lengths) pair for one adversarial top-k layout
+    indices = torch.randint(
+        0, num_kv, (num_queries, width), dtype=torch.int32, device=device
+    )
+    # Random lengths keep live slots in the ignored tail; row 0 is always empty.
+    lengths = torch.randint(
+        0, width + 1, (num_queries,), dtype=torch.int32, device=device
+    )
+    lengths[0] = 0
+
+    if layout == "invalid_within_len":
+        # Full width so every injected slot lands inside the length.
+        lengths[1:] = width
+        indices[:, ::3] = num_kv + 999
+        indices[:, 1::4] = -1
+    elif layout == "over_length":
+        lengths = torch.full(
+            (num_queries,), width + 25, dtype=torch.int32, device=device
+        )
+    elif layout == "non_contiguous":
+        wide = torch.randint(
+            0, num_kv, (num_queries, width + 17), dtype=torch.int32, device=device
+        )
+        indices = wide[:, 3 : 3 + width]
+        assert not indices.is_contiguous()
+    else:
+        raise AssertionError(f"unknown dense layout: {layout}")
+    return indices, lengths
+
+
+def _pack_then_ragged_reference(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    indices: torch.Tensor,
+    lengths: torch.Tensor,
+    scale: float,
+    attn_sink: torch.Tensor | None,
+) -> torch.Tensor:
+    # Pack the prefix to ragged first then launch
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_sparse_attn_prefill_triton_impl,
+        build_ragged_indices_from_dense,
+    )
+
+    ragged_indices, ragged_indptr = build_ragged_indices_from_dense(
+        indices, lengths, num_rows=kv.shape[0]
+    )
+    return _rocm_sparse_attn_prefill_triton_impl(
+        q=q,
+        kv=kv,
+        indices=ragged_indices,
+        indptr=ragged_indptr,
+        scale=scale,
+        attn_sink=attn_sink,
+        nope_head_dim=NOPE_HEAD_DIM,
+        rope_head_dim=ROPE_HEAD_DIM,
+    )
+
+
 @torch.inference_mode()
 def test_compute_global_topk_ragged_indices_and_indptr() -> None:
     from vllm.models.deepseek_v4.amd.rocm import (
@@ -278,6 +344,101 @@ def test_sparse_attn_prefill_ragged_kernel() -> None:
     )
 
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize("with_sink", [True, False])
+@torch.inference_mode()
+def test_sparse_attn_prefill_dense_kernel(with_sink: bool) -> None:
+    """Dense [sq, width] top-k layout gated by per-row kv_lengths.
+
+    Uses the production layout the DSv4 index builders emit: a valid prefix per
+    row, -1 padding past kv_lengths, and slots the kernel must mask itself.
+    """
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_sparse_attn_prefill_triton_impl,
+    )
+
+    device = torch.device("cuda")
+    torch.manual_seed(0)
+    num_kv = 5
+    q = torch.randn(3, 3, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
+    kv = torch.randn(num_kv, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
+    indices = torch.tensor(
+        [
+            [0, 2, -1, 7],  # padding and a live slot past the length
+            [1, 99, 3, 4],  # 99 is out of range and must be masked
+            [0, 1, 2, 3],  # zero length: the whole row is ignored
+        ],
+        dtype=torch.int32,
+        device=device,
+    )
+    kv_lengths = torch.tensor([2, 4, 0], dtype=torch.int32, device=device)
+    attn_sink = (
+        torch.tensor([-0.25, 0.0, 0.25], dtype=torch.float32, device=device)
+        if with_sink
+        else None
+    )
+    scale = HEAD_DIM**-0.5
+
+    actual = _rocm_sparse_attn_prefill_triton_impl(
+        q=q,
+        kv=kv,
+        indices=indices,
+        indptr=None,
+        scale=scale,
+        attn_sink=attn_sink,
+        nope_head_dim=NOPE_HEAD_DIM,
+        rope_head_dim=ROPE_HEAD_DIM,
+        kv_lengths=kv_lengths,
+    )
+    expected = _ref_sparse_prefill_ragged(
+        q, kv, [[0, 2], [1, 3, 4], []], scale, attn_sink
+    )
+
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+# BLOCK_K is 16 at HEAD_DIM=512: width 5 keeps every row inside a single K block;
+# width 70 spans several blocks and ends on a masked tail.
+@pytest.mark.parametrize("width", [5, 70])
+@pytest.mark.parametrize(
+    "layout", ["invalid_within_len", "over_length", "non_contiguous"]
+)
+@torch.inference_mode()
+def test_sparse_attn_prefill_dense_matches_pack_path(width: int, layout: str) -> None:
+    """Dense indices must be bit-identical to packing them first"""
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_sparse_attn_prefill_triton_impl,
+    )
+
+    device = torch.device("cuda")
+    torch.manual_seed(3)
+    num_queries, num_heads, num_kv = 8, 3, 32
+    q = (
+        torch.randn(
+            num_queries, num_heads, HEAD_DIM, dtype=torch.bfloat16, device=device
+        )
+        * 0.125
+    )
+    kv = torch.randn(num_kv, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
+    indices, lengths = _dense_topk_case(layout, num_queries, width, num_kv, device)
+    attn_sink = torch.tensor([-0.1, 0.0, 0.1], dtype=torch.float32, device=device)
+    scale = HEAD_DIM**-0.5
+
+    actual = _rocm_sparse_attn_prefill_triton_impl(
+        q=q,
+        kv=kv,
+        indices=indices,
+        indptr=None,
+        scale=scale,
+        attn_sink=attn_sink,
+        nope_head_dim=NOPE_HEAD_DIM,
+        rope_head_dim=ROPE_HEAD_DIM,
+        kv_lengths=lengths,
+    )
+    expected = _pack_then_ragged_reference(q, kv, indices, lengths, scale, attn_sink)
+
+    assert torch.equal(actual, expected)
 
 
 @torch.inference_mode()
