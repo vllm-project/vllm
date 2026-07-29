@@ -84,9 +84,19 @@ from .utils import (
 
 logger = init_logger(__name__)
 
+# Rewrites the MoE parent module `...layers.N.experts` to the name vLLM
+# registers it under, `...layers.N.moe.experts`. The lookahead keeps the
+# original end-anchored behaviour (ModelOpt `quantized_layers` entries name the
+# parent module exactly) and additionally covers PEFT `target_parameters` LoRA
+# tensors, whose names continue past the module
+# (`...experts[.base_layer].lora_{A,B}.weight`). Names of the form
+# `...experts.<child>` (`gate_up_proj`, `w13_weight`, `0.down_proj`, ...) are
+# left untouched, as before.
 _GEMMA4_EXPERT_PARENT_MAPPER = WeightsMapper(
     orig_to_new_regex={
-        re.compile(r"(?<!\.moe)\.experts$"): ".moe.experts",
+        re.compile(
+            r"(?<!\.moe)\.experts(?=$|\.(?:base_layer\.)?lora_)"
+        ): ".moe.experts",
     }
 )
 
