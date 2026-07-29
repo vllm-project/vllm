@@ -89,6 +89,16 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
  | `use_heterogeneous_vocab` | `boolean` | `false` | Allow draft and target models with different vocabularies. Builds a token-level intersection at initialisation and constrains draft logits to shared tokens only. Only compatible with `method=draft_model`. Probabilistic draft sampling (`draft_sample_method='probabilistic'`) is not yet supported when this option is enabled. |
 
 !!! note
+    Nemotron Parse ships a single dependent auxiliary prediction head rather than
+    a transformer draft model. It is also activated with `"method": "mtp"` and is
+    routed to a lightweight, draft-model-free speculator:
+
+    ```bash
+    vllm serve nvidia/NVIDIA-Nemotron-Parse-2.0 \
+        --speculative-config '{"method":"mtp","num_speculative_tokens":1}'
+    ```
+
+!!! note
     Gemma 4 assistant checkpoints are handled as Gemma 4 MTP speculators, not
     as generic draft models. Use `"method": "mtp"` with the assistant
     checkpoint in `model`, as shown in the [MTP guide](mtp.md#gemma-4-assistant-models).

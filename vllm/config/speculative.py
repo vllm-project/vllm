@@ -705,7 +705,10 @@ class SpeculativeConfig:
             self.method = "mtp"
 
         if self.model is None and self.num_speculative_tokens is not None:
-            if self.method == "mtp":
+            if self.method == "mtp" and self.use_nemotron_parse_mtp():
+                # Draft-model-free MTP; the target model owns the head.
+                pass
+            elif self.method == "mtp":
                 if self.target_model_config is None:
                     raise ValueError("target_model_config must be present for mtp")
                 if self.target_model_config.hf_text_config.model_type == "deepseek_v32":
@@ -796,6 +799,12 @@ class SpeculativeConfig:
             self.prompt_lookup_min = 0
             self.draft_model_config = self.target_model_config
             self.draft_parallel_config = self.target_parallel_config
+        elif self.method == "mtp" and self.use_nemotron_parse_mtp():
+            # No draft model to resolve.
+            self.prompt_lookup_max = 0
+            self.prompt_lookup_min = 0
+            self.draft_model_config = None
+            self.draft_parallel_config = None
         elif self.method == "extract_hidden_states":
             from vllm.transformers_utils.configs.extract_hidden_states import (
                 ExtractHiddenStatesConfig,
@@ -1419,11 +1428,29 @@ class SpeculativeConfig:
             == "step3p5_mtp"
         )
 
+    def use_nemotron_parse_mtp(self) -> bool:
+        """Nemotron Parse MTP: a lightweight, draft-model-free ``mtp`` variant.
+
+        The target owns a single dependent auxiliary prediction head rather than
+        a transformer draft model.
+        """
+        if self.method != "mtp" or self.target_model_config is None:
+            return False
+        hf_config = self.target_model_config.hf_config
+        architectures = getattr(hf_config, "architectures", ()) or ()
+        return "NemotronParseForConditionalGeneration" in architectures
+
     def use_eagle(self) -> bool:
         # NOTE: This method is usually a stand-in for "speculative decoding using
         # target model hidden states"
         # TODO(ben): Refactor this so the naming is clearer
-        return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
+        # Nemotron Parse MTP is a lightweight, draft-model-free head that must not
+        # take the eagle/draft-KV scheduling path (no shifted computed tokens, no
+        # draft KV cache), so it is excluded here.
+        return (
+            self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
+            and not self.use_nemotron_parse_mtp()
+        )
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"
@@ -1462,6 +1489,7 @@ class SpeculativeConfig:
                 "extract_hidden_states",
                 "custom_class",
             )
+            or self.use_nemotron_parse_mtp()
             else self.draft_model_config.model
         )
         num_spec_tokens = self.num_speculative_tokens

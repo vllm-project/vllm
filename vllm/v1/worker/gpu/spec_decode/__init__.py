@@ -26,6 +26,12 @@ def init_speculator(vllm_config: VllmConfig, device: torch.device):
         )
 
         return Gemma4Speculator(vllm_config, device)
+    elif speculative_config.use_nemotron_parse_mtp():
+        from vllm.v1.worker.gpu.spec_decode.nemotron_parse_mtp.speculator import (
+            NemotronParseMTPSpeculator,
+        )
+
+        return NemotronParseMTPSpeculator(vllm_config, device)
     elif speculative_config.method == "mtp":
         from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
