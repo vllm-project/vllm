@@ -156,8 +156,9 @@ def _worker(rank: int, world_size: int, port: int) -> None:
     assert workspace.payload_bytes_per_rank == 10_526_720
     assert workspace.peer_partial_outputs.shape == (
         world_size,
+        world_size,
         max_rows,
-        total_heads,
+        total_heads // world_size,
         head_dim,
     )
 
@@ -272,9 +273,8 @@ def _worker(rank: int, world_size: int, port: int) -> None:
                 expected_lse,
             )
 
-        # Consecutive normal layers alternate two slots. The publication
-        # barrier for the intervening slot proves every rank finished reading
-        # the previous slot, so this mode needs no explicit reuse wait or ack.
+        # Consecutive layers alternate two receive slots. Exercise their
+        # producer generation and consumer acquire protocol in one graph.
         ring_inputs = [
             _make_inputs(
                 rank,
@@ -295,7 +295,6 @@ def _worker(rank: int, world_size: int, port: int) -> None:
                     lse,
                     is_lse_base_on_e=False,
                     return_lse=True,
-                    barrier_protected_reuse=True,
                 )
                 for slot, (output, lse) in enumerate(ring_inputs)
             ]

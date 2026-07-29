@@ -232,12 +232,6 @@ class DeepseekV32Attention(MLAAttention):
         num_hidden_layers = getattr(config, "num_hidden_layers", None)
         is_mtp_layer = num_hidden_layers is not None and layer_id >= num_hidden_layers
         dcp_output_vmm_workspace_slot = layer_id % 2
-        dcp_output_vmm_barrier_protected_reuse = (
-            num_hidden_layers is not None
-            and num_hidden_layers >= 2
-            and num_hidden_layers % 2 == 0
-            and not is_mtp_layer
-        )
 
         # Build kv_b_proj + indexer first; they are passed to MLAAttention.__init__
         # (which runs nn.Module.__init__ and registers them).
@@ -285,9 +279,6 @@ class DeepseekV32Attention(MLAAttention):
         self.indexer = indexer
         self.topk_indices_buffer = topk_indices_buffer
         self._dcp_output_vmm_workspace_slot = dcp_output_vmm_workspace_slot
-        self._dcp_output_vmm_barrier_protected_reuse = (
-            dcp_output_vmm_barrier_protected_reuse
-        )
         # Runtime toggle for index_share_for_mtp_iteration: MTP draft step 0
         # computes the top-k, steps 1+ set this True to reuse it.
         self.skip_topk = False
@@ -391,9 +382,8 @@ class DeepseekV32Attention(MLAAttention):
                     get_dcp_output_vmm_workspace,
                 )
 
-                # Consecutive normal layers alternate two fail-closed slots.
-                # The publish barrier on the intervening layer proves all
-                # ranks finished reading a slot before it is reused.
+                # Consecutive layers alternate two fail-closed receive slots.
+                # Each consumer acquires the producer generation before use.
                 get_dcp_output_vmm_workspace(
                     DEFAULT_MAX_ROWS,
                     num_local_heads * dcp_group.world_size,
@@ -728,9 +718,6 @@ class DeepseekV32Attention(MLAAttention):
                             dcp_group,
                             is_lse_base_on_e=self.impl.lse_base_on_e,
                             workspace_slot=self._dcp_output_vmm_workspace_slot,
-                            barrier_protected_reuse=(
-                                self._dcp_output_vmm_barrier_protected_reuse
-                            ),
                         )
                 else:
                     route = (

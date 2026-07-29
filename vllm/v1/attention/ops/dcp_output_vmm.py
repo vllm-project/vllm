@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Consumer-side DCP output/LSE merge over owner-local CUDA VMM storage.
+"""Producer-direct DCP output/LSE merge over owner-local CUDA VMM storage.
 
-Every rank publishes its local-KV attention output and LSE into its own physical
-allocation. The consumer on rank ``r`` directly reads only query heads owned by
-``r`` from every peer mapping, combines the shard LSEs, scales each partial
-output, and writes the final local-head result. This replaces the decode-time
-LSE AllGather and output ReduceScatter without materializing a gathered tensor.
+Every rank publishes each destination's head slice directly into that owner's
+physical allocation. The consumer combines only local receive storage after
+acquiring one generation signal from every producer. This replaces the
+decode-time LSE AllGather and output ReduceScatter without materializing a
+gathered tensor.
 
 The workspace is reusable and CUDA-graph safe. Device-side sequence counters
 prevent an owner from overwriting a generation before every consumer has read
@@ -230,6 +230,195 @@ def _ack_kernel(
     )
 
 
+@triton.jit
+def _direct_publish_kernel(
+    partial_output,
+    partial_lse,
+    peer_outputs,
+    peer_lses,
+    output_token_stride,
+    output_head_stride,
+    output_dim_stride,
+    lse_token_stride,
+    lse_head_stride,
+    peer_output_dest_stride,
+    peer_output_source_stride,
+    peer_output_token_stride,
+    peer_output_head_stride,
+    peer_output_dim_stride,
+    peer_lse_dest_stride,
+    peer_lse_source_stride,
+    peer_lse_token_stride,
+    peer_lse_head_stride,
+    my_rank: tl.constexpr,
+    local_heads: tl.constexpr,
+    head_dim: tl.constexpr,
+    block_items: tl.constexpr,
+    head_block_size: tl.constexpr,
+):
+    token_idx = tl.program_id(0).to(tl.int64)
+    destination_rank = tl.program_id(1).to(tl.int64)
+    item = tl.arange(0, block_items)
+    item_mask = item < local_heads * head_dim
+    local_head_idx = item // head_dim
+    dim = item % head_dim
+    source_head_idx = destination_rank * local_heads + local_head_idx
+
+    source_output_offset = (
+        token_idx * output_token_stride
+        + source_head_idx * output_head_stride
+        + dim * output_dim_stride
+    )
+    destination_output_offset = (
+        destination_rank * peer_output_dest_stride
+        + my_rank * peer_output_source_stride
+        + token_idx * peer_output_token_stride
+        + local_head_idx * peer_output_head_stride
+        + dim * peer_output_dim_stride
+    )
+    value = tl.load(partial_output + source_output_offset, mask=item_mask)
+    tl.store(peer_outputs + destination_output_offset, value, mask=item_mask)
+
+    lse_local_head_idx = tl.arange(0, head_block_size)
+    lse_mask = lse_local_head_idx < local_heads
+    lse_source_head_idx = destination_rank * local_heads + lse_local_head_idx
+    source_lse_offset = (
+        token_idx * lse_token_stride + lse_source_head_idx * lse_head_stride
+    )
+    destination_lse_offset = (
+        destination_rank * peer_lse_dest_stride
+        + my_rank * peer_lse_source_stride
+        + token_idx * peer_lse_token_stride
+        + lse_local_head_idx * peer_lse_head_stride
+    )
+    tl.store(
+        peer_lses + destination_lse_offset,
+        tl.load(partial_lse + source_lse_offset, mask=lse_mask),
+        mask=lse_mask,
+    )
+
+
+@triton.jit
+def _direct_signal_kernel(
+    local_epoch,
+    peer_signals,
+    peer_signal_dest_stride,
+    my_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    block_size: tl.constexpr,
+):
+    epoch = tl.atomic_add(local_epoch, 1, sem="acq_rel", scope="gpu") + 1
+    destination_rank = tl.arange(0, block_size)
+    mask = destination_rank < world_size
+    tl.atomic_xchg(
+        peer_signals + destination_rank * peer_signal_dest_stride + my_rank,
+        epoch,
+        mask=mask,
+        sem="release",
+        scope="sys",
+    )
+
+
+@triton.jit
+def _direct_consumer_merge_kernel(
+    local_outputs,
+    local_lses,
+    local_signals,
+    local_epoch,
+    merged_output,
+    merged_lse,
+    local_output_source_stride,
+    local_output_token_stride,
+    local_output_head_stride,
+    local_output_dim_stride,
+    local_lse_source_stride,
+    local_lse_token_stride,
+    local_lse_head_stride,
+    merged_output_token_stride,
+    merged_output_head_stride,
+    merged_output_dim_stride,
+    merged_lse_token_stride,
+    merged_lse_head_stride,
+    world_size: tl.constexpr,
+    is_base_e: tl.constexpr,
+    head_dim: tl.constexpr,
+    block_dim: tl.constexpr,
+    signal_block_size: tl.constexpr,
+    max_spins: tl.constexpr,
+):
+    token_idx = tl.program_id(0).to(tl.int64)
+    local_head_idx = tl.program_id(1).to(tl.int64)
+    expected_epoch = tl.atomic_add(
+        local_epoch,
+        0,
+        sem="acquire",
+        scope="gpu",
+    )
+    signal_source = tl.arange(0, signal_block_size)
+    signal_mask = signal_source < world_size
+    observed = tl.atomic_add(
+        local_signals + signal_source,
+        0,
+        mask=signal_mask,
+        sem="acquire",
+        scope="sys",
+    )
+    pending = tl.max(tl.where(signal_mask & (observed < expected_epoch), 1, 0))
+    spins = 0
+    while (pending != 0) & (spins < max_spins):
+        observed = tl.atomic_add(
+            local_signals + signal_source,
+            0,
+            mask=signal_mask,
+            sem="acquire",
+            scope="sys",
+        )
+        pending = tl.max(tl.where(signal_mask & (observed < expected_epoch), 1, 0))
+        spins += 1
+    _trap_if_nonzero(pending)
+
+    source_rank = tl.arange(0, world_size)
+    lse_offset = (
+        source_rank * local_lse_source_stride
+        + token_idx * local_lse_token_stride
+        + local_head_idx * local_lse_head_stride
+    )
+    lse = tl.load(local_lses + lse_offset)
+    lse = tl.where((lse != lse) | (lse == float("inf")), -float("inf"), lse)
+    lse_max = tl.max(lse, axis=0)
+    lse_max = tl.where(lse_max == -float("inf"), 0.0, lse_max)
+    if is_base_e:
+        weights = tl.exp(lse - lse_max)
+        weight_sum = tl.sum(weights, axis=0)
+        final_lse = tl.log(weight_sum) + lse_max
+    else:
+        weights = tl.exp2(lse - lse_max)
+        weight_sum = tl.sum(weights, axis=0)
+        final_lse = tl.log2(weight_sum) + lse_max
+    weights = tl.where(weight_sum == 0.0, 0.0, weights / weight_sum)
+
+    dim = tl.arange(0, block_dim)
+    dim_mask = dim < head_dim
+    output_offset = (
+        source_rank[:, None] * local_output_source_stride
+        + token_idx * local_output_token_stride
+        + local_head_idx * local_output_head_stride
+        + dim[None, :] * local_output_dim_stride
+    )
+    partial_output = tl.load(local_outputs + output_offset, mask=dim_mask[None, :])
+    output = tl.sum(partial_output.to(tl.float32) * weights[:, None], axis=0)
+    merged_output_offset = (
+        token_idx * merged_output_token_stride
+        + local_head_idx * merged_output_head_stride
+        + dim * merged_output_dim_stride
+    )
+    tl.store(merged_output + merged_output_offset, output, mask=dim_mask)
+    merged_lse_offset = (
+        token_idx * merged_lse_token_stride + local_head_idx * merged_lse_head_stride
+    )
+    tl.store(merged_lse + merged_lse_offset, final_lse)
+
+
 @dataclass
 class DcpOutputVmmWorkspace:
     my_rank: int
@@ -247,6 +436,7 @@ class DcpOutputVmmWorkspace:
     peer_partial_outputs: torch.Tensor
     peer_partial_lses: torch.Tensor
     peer_flags: torch.Tensor
+    local_epoch: torch.Tensor
 
     @property
     def local_heads(self) -> int:
@@ -275,7 +465,6 @@ class DcpOutputVmmWorkspace:
         *,
         is_lse_base_on_e: bool,
         return_lse: bool = False,
-        barrier_protected_reuse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if self.allocation.closed:
             raise RuntimeError("DCP output VMM workspace is closed.")
@@ -326,67 +515,73 @@ class DcpOutputVmmWorkspace:
                 rows,
             )
 
-        if not barrier_protected_reuse:
-            with record_function("dcp.output_lse.vmm.wait_reuse"):
-                _wait_writable_kernel[(1,)](
-                    self.peer_flags,
-                    self.peer_flags.stride(0),
-                    my_rank=self.my_rank,
-                    world_size=self.world_size,
-                    block_size=triton.next_power_of_2(self.world_size),
-                    max_spins=_MAX_FENCE_SPINS,
-                )
-        with record_function("dcp.output_lse.vmm.publish_owner_and_acquire_peers"):
-            self.local_partial_output[:rows].copy_(partial_output)
-            self.local_partial_lse[:rows].copy_(partial_lse)
-            _publish_and_wait_kernel[(1,)](
+        block_dim = min(512, triton.next_power_of_2(self.head_dim))
+        with record_function("dcp.output_lse.vmm.producer_direct_publish"):
+            _direct_publish_kernel[(rows, self.world_size)](
+                partial_output,
+                partial_lse,
+                self.peer_partial_outputs,
+                self.peer_partial_lses,
+                partial_output.stride(0),
+                partial_output.stride(1),
+                partial_output.stride(2),
+                partial_lse.stride(0),
+                partial_lse.stride(1),
+                self.peer_partial_outputs.stride(0),
+                self.peer_partial_outputs.stride(1),
+                self.peer_partial_outputs.stride(2),
+                self.peer_partial_outputs.stride(3),
+                self.peer_partial_outputs.stride(4),
+                self.peer_partial_lses.stride(0),
+                self.peer_partial_lses.stride(1),
+                self.peer_partial_lses.stride(2),
+                self.peer_partial_lses.stride(3),
+                my_rank=self.my_rank,
+                local_heads=self.local_heads,
+                head_dim=self.head_dim,
+                block_items=triton.next_power_of_2(self.local_heads * self.head_dim),
+                head_block_size=triton.next_power_of_2(self.local_heads),
+                num_warps=8,
+            )
+            _direct_signal_kernel[(1,)](
+                self.local_epoch,
                 self.peer_flags,
                 self.peer_flags.stride(0),
                 my_rank=self.my_rank,
                 world_size=self.world_size,
                 block_size=triton.next_power_of_2(self.world_size),
-                max_spins=_MAX_FENCE_SPINS,
             )
 
         output = self.local_merged_output[:rows]
         lse = self.local_merged_lse[:rows]
-        # GLM-5.2 uses D=512. Keep one consumer program per (row, local
-        # head), avoiding duplicate peer-LSE work across two D tiles.
-        block_dim = min(512, triton.next_power_of_2(self.head_dim))
         with record_function("dcp.output_lse.vmm.consumer_compute_gather"):
-            _consumer_merge_kernel[
-                (rows, self.local_heads, triton.cdiv(self.head_dim, block_dim))
-            ](
-                self.peer_partial_outputs,
-                self.peer_partial_lses,
+            _direct_consumer_merge_kernel[(rows, self.local_heads)](
+                self.local_partial_output,
+                self.local_partial_lse,
+                self.peer_flags[self.my_rank],
+                self.local_epoch,
                 output,
                 lse,
-                self.peer_partial_outputs.stride(0),
-                self.peer_partial_outputs.stride(1),
-                self.peer_partial_outputs.stride(2),
-                self.peer_partial_outputs.stride(3),
-                self.peer_partial_lses.stride(0),
-                self.peer_partial_lses.stride(1),
-                self.peer_partial_lses.stride(2),
+                self.local_partial_output.stride(0),
+                self.local_partial_output.stride(1),
+                self.local_partial_output.stride(2),
+                self.local_partial_output.stride(3),
+                self.local_partial_lse.stride(0),
+                self.local_partial_lse.stride(1),
+                self.local_partial_lse.stride(2),
                 output.stride(0),
                 output.stride(1),
                 output.stride(2),
                 lse.stride(0),
                 lse.stride(1),
-                local_heads=self.local_heads,
-                head_dim=self.head_dim,
-                my_rank=self.my_rank,
                 world_size=self.world_size,
                 is_base_e=is_lse_base_on_e,
+                head_dim=self.head_dim,
                 block_dim=block_dim,
+                signal_block_size=triton.next_power_of_2(self.world_size),
+                max_spins=_MAX_FENCE_SPINS,
+                num_warps=4,
             )
-        if not barrier_protected_reuse:
-            with record_function("dcp.output_lse.vmm.ack"):
-                _ack_kernel[(1,)](
-                    self.peer_flags,
-                    self.peer_flags.stride(0),
-                    my_rank=self.my_rank,
-                )
         if return_lse:
             return output, lse
         return output
@@ -399,6 +594,7 @@ class DcpOutputVmmWorkspace:
         self.peer_flags = None
         self.peer_partial_lses = None
         self.peer_partial_outputs = None
+        self.local_epoch = None
         self.local_merged_lse = None
         self.local_merged_output = None
         self.local_partial_lse = None
@@ -462,21 +658,21 @@ def create_dcp_output_vmm_workspace_for_group(
     torch.accelerator.synchronize()
     dist.barrier(group=group)
 
-    local_flags = allocation.local_view[: 2 * 8].view(torch.int64)
+    local_flags = allocation.local_view[: world_size * 4].view(torch.int32)
     peer_flags = make_rank_major_tensor_view(allocation, local_flags)
     local_partial_output = (
         allocation.local_view[
             partial_output_offset : partial_output_offset + partial_output_bytes
         ]
         .view(torch.bfloat16)
-        .view(max_rows, total_heads, head_dim)
+        .view(world_size, max_rows, local_heads, head_dim)
     )
     local_partial_lse = (
         allocation.local_view[
             partial_lse_offset : partial_lse_offset + partial_lse_bytes
         ]
         .view(torch.float32)
-        .view(max_rows, total_heads)
+        .view(world_size, max_rows, local_heads)
     )
     local_merged_output = (
         allocation.local_view[
@@ -509,6 +705,7 @@ def create_dcp_output_vmm_workspace_for_group(
         ),
         peer_partial_lses=make_rank_major_tensor_view(allocation, local_partial_lse),
         peer_flags=peer_flags,
+        local_epoch=torch.zeros(1, dtype=torch.int32, device=device),
     )
 
 

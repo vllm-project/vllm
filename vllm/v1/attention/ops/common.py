@@ -258,7 +258,6 @@ def cp_lse_vmm_out_gather(
     return_lse: bool = False,
     is_lse_base_on_e=True,
     workspace_slot: int = 0,
-    barrier_protected_reuse: bool = False,
 ):
     """Run the bounded owner-local VMM merge with no collective fallback."""
     from vllm.v1.attention.ops.dcp_output_vmm import (
@@ -292,7 +291,6 @@ def cp_lse_vmm_out_gather(
             cp_attn_lse,
             is_lse_base_on_e=is_lse_base_on_e,
             return_lse=return_lse,
-            barrier_protected_reuse=barrier_protected_reuse,
         )
 
 
