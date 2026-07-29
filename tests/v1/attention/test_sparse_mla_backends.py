@@ -1511,8 +1511,8 @@ def test_hisparse_kernel_matches_fallback():
     req_ids = torch.arange(num_reqs, dtype=torch.int32, device=device)
     seq_len = blocks_per_req * block_size
     scale = torch.tensor(1.0, device=device)
-    for step in range(8):
-        newest_pos = seq_len - 8 + step
+    for step in range(128):
+        newest_pos = seq_len - 128 + step
         slot_mapping = (
             block_table[:, newest_pos // block_size].to(torch.int64) * block_size
             + newest_pos % block_size
@@ -1520,8 +1520,7 @@ def test_hisparse_kernel_matches_fallback():
         newest_global = slot_mapping.to(torch.int32).contiguous()
         topk_rows = []
         for _ in range(num_reqs):
-            permutation = torch.randperm(seq_len - 1, device=device)
-            permutation += permutation >= newest_pos
+            permutation = torch.randperm(newest_pos, device=device)
             topk_rows.append(permutation[:top_k].to(torch.int32))
         topk = torch.stack(topk_rows)
         # Sprinkle in padding and the newest position.

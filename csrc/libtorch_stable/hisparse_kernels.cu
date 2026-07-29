@@ -1087,8 +1087,11 @@ void hisparse_swap_in(
   const cudaStream_t stream = get_current_cuda_stream();
   auto kernel = hisparse_swap_in_kernel;
   if (smem_bytes > 48 * 1024) {
-    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                         smem_bytes);
+    const cudaError_t attribute_error = cudaFuncSetAttribute(
+        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
+    STD_TORCH_CHECK(attribute_error == cudaSuccess,
+                    "failed to configure HiSparse swap-in shared memory: ",
+                    cudaGetErrorString(attribute_error));
   }
   kernel<<<num_rows, kBlockSize, smem_bytes, stream>>>(
       static_cast<const char*>(host_cache.const_data_ptr()),
@@ -1106,6 +1109,10 @@ void hisparse_swap_in(
       hot_block_size, top_k, hot_size, hash_size, region_stride,
       attention_block_stride, source_bt_stride, source_num_reqs,
       source_num_blocks, static_cast<int32_t>(source_block_size));
+  const cudaError_t launch_error = cudaGetLastError();
+  STD_TORCH_CHECK(launch_error == cudaSuccess,
+                  "HiSparse swap-in kernel launch failed: ",
+                  cudaGetErrorString(launch_error));
 }
 
 void hisparse_gather_plan(
