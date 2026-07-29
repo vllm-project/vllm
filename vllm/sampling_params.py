@@ -616,6 +616,8 @@ class SamplingParams(
         if self.trace_decode_token_ids is not None:
             if not self.trace_decode_token_ids:
                 raise ValueError("trace_decode_token_ids must be a non-empty list.")
+            if self.n != 1:
+                raise ValueError("trace_decode_token_ids requires n=1.")
             if not all(
                 isinstance(t, int) and t >= 0 for t in self.trace_decode_token_ids
             ):
@@ -908,6 +910,11 @@ class SamplingParams(
     ) -> None:
         if speculative_config is None:
             return
+
+        if self.trace_decode_token_ids is not None:
+            raise ValueError(
+                "trace_decode_token_ids is not supported with speculative decoding."
+            )
 
         # Some sampling parameters are not yet compatible with spec decoding.
         if self.min_p > _SAMPLING_EPS or self.logit_bias:
