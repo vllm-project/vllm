@@ -766,6 +766,115 @@ def test_resolve_gptq_moe_uses_auto_gptq_when_supported(monkeypatch) -> None:
     assert captured["moe"] is DummyLayer.moe_config
 
 
+def test_get_moe_method_xpu_keeps_dequant_for_unsupported_config(
+    monkeypatch,
+) -> None:
+    """On XPU only sym int4 GPTQ has a working quantized MoE path; anything
+    else must keep the pre-existing bf16 fallback rather than be routed into
+    MoeWNA16Method, whose N-first layout the oracle's XPU branch corrupts."""
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+
+    class DummyMoeConfig:
+        pass
+
+    class DummyLayer:
+        moe_config = DummyMoeConfig()
+
+    class DummyUnquantized:
+        def __init__(self, moe_config) -> None:
+            self.moe_config = moe_config
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.UnquantizedFusedMoEMethod",
+        DummyUnquantized,
+    )
+
+    method = INCWna16Scheme().get_moe_method(
+        make_config(), DummyLayer(), "layer", make_layer_config(bits=8)
+    )
+
+    assert isinstance(method, DummyUnquantized)
+    assert method.moe_config is DummyLayer.moe_config
+
+
+def test_get_moe_method_xpu_keeps_auto_gptq_for_sym_int4(monkeypatch) -> None:
+    """Sym int4 GPTQ must still reach AutoGPTQMoEMethod, which selects
+    XPUExpertsWNA16 through the oracle — this is the path the PR enables."""
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+
+    class DummyMoeConfig:
+        pass
+
+    class DummyLayer:
+        moe_config = DummyMoeConfig()
+
+    class DummyMethod:
+        def __init__(self, cfg, moe) -> None:
+            self.cfg = cfg
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.utils.marlin_utils.check_marlin_supported",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.utils.marlin_utils."
+        "check_moe_marlin_supports_layer",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.auto_gptq.AutoGPTQMoEMethod",
+        DummyMethod,
+    )
+
+    method = INCWna16Scheme().get_moe_method(
+        make_config(), DummyLayer(), "layer", make_layer_config()
+    )
+
+    assert isinstance(method, DummyMethod)
+    assert isinstance(method.cfg, AutoGPTQConfig)
+
+
+def test_get_moe_method_xpu_keeps_dequant_when_layer_shape_unsupported(
+    monkeypatch,
+) -> None:
+    """Sym int4 whose (possibly sharded) layer shape Marlin rejects would fall
+    through to MoeWNA16Method, so it must keep the bf16 fallback too."""
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+
+    class DummyMoeConfig:
+        pass
+
+    class DummyLayer:
+        moe_config = DummyMoeConfig()
+
+    class DummyUnquantized:
+        def __init__(self, moe_config) -> None:
+            self.moe_config = moe_config
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.utils.marlin_utils.check_marlin_supported",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.utils.marlin_utils."
+        "check_moe_marlin_supports_layer",
+        lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.UnquantizedFusedMoEMethod",
+        DummyUnquantized,
+    )
+
+    method = INCWna16Scheme().get_moe_method(
+        make_config(), DummyLayer(), "layer", make_layer_config()
+    )
+
+    assert isinstance(method, DummyUnquantized)
+
+
 def test_resolve_awq_moe_uses_marlin_when_supported(monkeypatch) -> None:
     captured = {}
 

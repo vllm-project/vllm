@@ -98,10 +98,29 @@ class INCWna16Scheme(INCScheme):
     ):
         del config, prefix
         # CPU does not support quantized MoE yet; fall back to dequantized bf16.
-        # XPU is supported via the WNA16 oracle backend (routes through
-        # _resolve_gptq_moe -> MoeWNA16Method -> XPUExpertsWNA16), so it must
-        # NOT take this dequant fallback, which OOMs materializing bf16 experts.
-        if current_platform.is_cpu():
+        # XPU has a quantized MoE path, but only via AutoGPTQMoEMethod, whose
+        # K-first layout the oracle's XPU branch expects. Any config that would
+        # instead land on MoeWNA16Method is fed to _process_weights_xpu in
+        # MoeWNA16's N-first layout, which it transposes and corrupts, so those
+        # keep the bf16 fallback until that conversion is fixed.
+        xpu_supported = (
+            layer_config.is_gptq and layer_config.bits == 4 and layer_config.sym
+        )
+        if xpu_supported and current_platform.is_xpu():
+            # Same checks _resolve_gptq_moe uses to pick AutoGPTQMoEMethod over
+            # the MoeWNA16Method fallback; e.g. a sharded intermediate size can
+            # fail these even when the checkpoint itself is supported.
+            from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+                check_marlin_supported,
+                check_moe_marlin_supports_layer,
+            )
+
+            xpu_supported = check_marlin_supported(
+                scalar_types.uint4b8, layer_config.group_size, has_zp=False
+            ) and check_moe_marlin_supports_layer(layer, layer_config.group_size)
+        if current_platform.is_cpu() or (
+            current_platform.is_xpu() and not xpu_supported
+        ):
             from vllm.model_executor.layers.fused_moe import (
                 UnquantizedFusedMoEMethod,
             )
@@ -131,12 +150,7 @@ def _resolve_gptq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
         (4, True): scalar_types.uint4b8,
         (8, True): scalar_types.uint8b128,
     }
-    # Marlin is a CUDA-only path; XPU uses the WNA16 oracle backend instead
-    # (check_moe_marlin_supports_layer is platform-agnostic, so gate it here).
-    use_marlin = (
-        layer_config.bits,
-        layer_config.sym,
-    ) in gptq_type_map and not current_platform.is_xpu()
+    use_marlin = (layer_config.bits, layer_config.sym) in gptq_type_map
     if use_marlin:
         use_marlin = check_marlin_supported(
             gptq_type_map[(layer_config.bits, layer_config.sym)],
