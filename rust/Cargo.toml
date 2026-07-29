@@ -61,7 +61,7 @@ itertools = "0.14.0"
 libc = "0.2.177"
 llm-multimodal = { git = "https://github.com/smg-project/llm-multimodal", rev = "15adba5e025d8636ba4a334fb379b1371f6196a1", default-features = false, features = ["native-tls"] }
 mimalloc = "0.1.52"
-minijinja = { version = "2.0", features = ["unstable_machinery", "json", "builtins", "loader", "loop_controls", "preserve_order"] }
+minijinja = { version = "2.0", features = ["unstable_machinery", "json", "builtins", "loader", "loop_controls", "preserve_order", "fuel"] }
 minijinja-contrib = { version = "2.0", features = ["pycompat"] }
 native-tls-vendored = { package = "native-tls", version = "0.2.18", features = ["vendored"] }
 ndarray = { version = "0.17", features = ["serde"] }
