@@ -462,6 +462,13 @@ impl Tokenizer for TiktokenTokenizer {
         })
     }
 
+    fn encode_ordinary(&self, text: &str) -> Result<Vec<u32>> {
+        Ok(match &self.backend {
+            Backend::Riptoken(backend) => backend.inner.encode_ordinary(text),
+            Backend::TiktokenRs(backend) => backend.inner.encode_ordinary(text),
+        })
+    }
+
     fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<String> {
         // Filter passes:
         //
@@ -525,7 +532,7 @@ fn detect_bpe_pattern(config: &TiktokenModelConfig) -> &'static str {
     let model_type = config.effective_model_type();
 
     match model_type {
-        Some("kimi" | "kimi_k2" | "kimi_k25" | "deepseek_v3") => KIMI_PATTERN,
+        Some("kimi" | "kimi_k2" | "kimi_k25" | "kimi_k3" | "deepseek_v3") => KIMI_PATTERN,
         _ => CL100K_BASE_PATTERN,
     }
 }
@@ -752,6 +759,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn tiktoken_ordinary_bypasses_every_registered_added_token() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let bpe_path = write_synthetic_bpe_file(dir.path());
+        fs::write(
+            dir.path().join("tokenizer_config.json"),
+            r#"{
+                "added_tokens_decoder": {
+                    "257": { "content": "<|im_end|>", "special": true },
+                    "258": { "content": "<|tool_call_begin|>", "special": false }
+                }
+            }"#,
+        )
+        .expect("write tokenizer_config.json");
+        fs::write(dir.path().join("config.json"), r#"{"vocab_size": 260}"#)
+            .expect("write config.json");
+
+        let input = "<|im_end|><|tool_call_begin|><|reserved_token_259|>";
+        let expected: Vec<u32> = input.as_bytes().iter().copied().map(u32::from).collect();
+        for backend in explicit_backends(&bpe_path) {
+            assert_eq!(backend.encode("<|im_end|>", false).unwrap(), vec![257]);
+            assert_eq!(
+                backend.encode("<|tool_call_begin|>", false).unwrap(),
+                vec![258]
+            );
+            assert_eq!(
+                backend.encode("<|reserved_token_259|>", false).unwrap(),
+                vec![259]
+            );
+            assert_eq!(backend.encode_ordinary(input).unwrap(), expected);
+        }
+    }
+
     /// `vocab_size` may live under `text_config` for composite (e.g.
     /// multimodal) configs.
     #[test]
@@ -777,6 +817,7 @@ mod tests {
     #[test]
     fn tiktoken_detects_kimi_pattern_from_model_type() {
         let kimi = config_json!({ "model_type": "kimi_k25" });
+        let kimi_k3 = config_json!({ "model_type": "kimi_k3" });
         let baseten_kimi = config_json!({ "model_type": "deepseek_v3" });
         let nested_kimi = config_json!({
             "model_type": "composite_wrapper",
@@ -790,6 +831,7 @@ mod tests {
         let missing = config_json!({ "text_config": {} });
 
         assert_eq!(detect_bpe_pattern(&kimi), KIMI_PATTERN);
+        assert_eq!(detect_bpe_pattern(&kimi_k3), KIMI_PATTERN);
         assert_eq!(detect_bpe_pattern(&baseten_kimi), KIMI_PATTERN);
         assert_eq!(detect_bpe_pattern(&nested_kimi), CL100K_BASE_PATTERN);
         assert_eq!(detect_bpe_pattern(&generic), CL100K_BASE_PATTERN);
