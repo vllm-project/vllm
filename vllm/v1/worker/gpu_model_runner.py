@@ -64,6 +64,9 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_ma
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
 )
+from vllm.model_executor.layers.mamba.ops.replayssm_spec_flashinfer import (
+    initialize_replayssm_spec_flashinfer_backend,
+)
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
@@ -727,7 +730,8 @@ class GPUModelRunner(
             is_pooling_model=self.is_pooling_model,
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
             reasoning_config=self.vllm_config.reasoning_config,
-            use_replayssm=self.cache_config.use_replayssm,
+            use_replayssm=self.cache_config.use_replayssm
+            or self.cache_config.use_replayssm_spec,
         )
 
         # Separate cuda stream for overlapping transfer of sampled token ids from
@@ -2422,9 +2426,13 @@ class GPUModelRunner(
             rswa_prefix_lens = num_prompt_tokens_cpu
 
         replayssm_decode_base_cpu = None
-        if self.cache_config.use_replayssm:
+        replayssm_needs_reset_cpu = None
+        if self.cache_config.use_replayssm or self.cache_config.use_replayssm_spec:
             replayssm_decode_base_cpu = (
                 self.input_batch.replayssm_decode_base_cpu_tensor[:num_reqs_padded]
+            )
+            replayssm_needs_reset_cpu = (
+                self.input_batch.replayssm_needs_reset_cpu_tensor[:num_reqs_padded]
             )
 
         cm_base = CommonAttentionMetadata(
@@ -2435,6 +2443,7 @@ class GPUModelRunner(
             _num_computed_tokens_cpu=num_computed_tokens_cpu,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             replayssm_decode_base_cpu=replayssm_decode_base_cpu,
+            replayssm_needs_reset_cpu=replayssm_needs_reset_cpu,
             num_reqs=num_reqs_padded,
             num_actual_tokens=num_tokens_padded,
             max_query_len=max_query_len,
@@ -2478,6 +2487,10 @@ class GPUModelRunner(
             tuple[KVCacheSpec, type[AttentionMetadataBuilder]], AttentionMetadata
         ] = {}
 
+        # Unpadded decode prefix consumed by FlashInfer ReplaySSM-spec builders
+        # this step; None means no such builder ran, so no flag may be cleared.
+        fi_replayssm_consumed_decodes: int | None = None
+
         def _build_attn_group_metadata(
             kv_cache_gid: int,
             attn_gid: int,
@@ -2498,7 +2511,16 @@ class GPUModelRunner(
             )
 
             extra_attn_metadata_args = {}
-            if use_spec_decode and isinstance(
+            # use_spec_decode is step-level: it is False whenever the drafter
+            # proposed nothing anywhere in the batch. ReplaySSM-spec still needs
+            # the cursors on those steps, or the rows fall through to the
+            # baseline kernel and advance a checkpoint the ring has moved past.
+            needs_replayssm_spec_args = (
+                self.cache_config.use_replayssm_spec
+                and self.speculative_config is not None
+                and isinstance(builder, Mamba2AttentionMetadataBuilder)
+            )
+            if (use_spec_decode or needs_replayssm_spec_args) and isinstance(
                 builder,
                 (
                     Mamba2AttentionMetadataBuilder,
@@ -2552,6 +2574,23 @@ class GPUModelRunner(
                 assert isinstance(attn_metadata, list)
                 attn_metadata_dict = attn_metadata[ubid]
 
+            if getattr(builder, "use_replayssm_spec_flashinfer", False):
+                # Unpadded decode count: CUDA-graph padding must never consume
+                # a request's admission flag. Every FlashInfer Mamba group sees
+                # the same batch, so disagreement means a row one group treats
+                # as prefill would have its flag cleared by another.
+                nonlocal fi_replayssm_consumed_decodes
+                group_decodes = attn_metadata_i.num_decodes
+                if fi_replayssm_consumed_decodes is None:
+                    fi_replayssm_consumed_decodes = group_decodes
+                else:
+                    assert fi_replayssm_consumed_decodes == group_decodes, (
+                        "FlashInfer ReplaySSM Mamba groups disagree on the "
+                        f"decode prefix ({fi_replayssm_consumed_decodes} vs "
+                        f"{group_decodes}); clearing admission flags would "
+                        "drop a reset"
+                    )
+
             for layer_name in attn_group.layer_names:
                 attn_metadata_dict[layer_name] = attn_metadata_i
 
@@ -2604,6 +2643,12 @@ class GPUModelRunner(
 
                 else:
                     _build_attn_group_metadata(kv_cache_gid, attn_gid, cm)
+
+        # Every Mamba group has now consumed the admission flags, so the rows in
+        # the decode prefix have had their ring reset and must not reset again.
+        # Rows still prefilling in this step keep their flag for a later step.
+        if fi_replayssm_consumed_decodes:
+            self.input_batch.replayssm_needs_reset[:fi_replayssm_consumed_decodes] = 0
 
         if spec_decode_common_attn_metadata is not None and (
             num_reqs != num_reqs_padded or num_tokens != num_tokens_padded
@@ -7283,7 +7328,8 @@ class GPUModelRunner(
                 is_pooling_model=self.is_pooling_model,
                 cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
                 reasoning_config=self.vllm_config.reasoning_config,
-                use_replayssm=self.cache_config.use_replayssm,
+                use_replayssm=self.cache_config.use_replayssm
+                or self.cache_config.use_replayssm_spec,
                 slot_mapping_modes=slot_mapping_modes,
             )
 
@@ -7627,6 +7673,10 @@ class GPUModelRunner(
         self.initialize_attn_backend(kv_cache_config, is_profiling=is_profiling)
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config, self.kv_cache_config
+        )
+        initialize_replayssm_spec_flashinfer_backend(
+            self.vllm_config,
+            self.kv_cache_config,
         )
         # The kernel block size for all KV cache groups. For example, if
         # kv_cache_manager uses block_size 256 for a given group, but the attention

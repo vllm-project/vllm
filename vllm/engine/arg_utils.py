@@ -77,7 +77,7 @@ from vllm.config.device import Device
 from vllm.config.kernel import IrOpPriorityConfig, LinearBackend, MoEBackend
 from vllm.config.load import SafetensorsLoadStrategy
 from vllm.config.lora import MaxLoRARanks
-from vllm.config.mamba import MambaBackendEnum
+from vllm.config.mamba import MambaBackendEnum, ReplaySSMSpecAlgorithm
 from vllm.config.model import (
     ConvertOption,
     HfOverrides,
@@ -698,12 +698,16 @@ class EngineArgs:
     mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
     replayssm_buffer_len: int = CacheConfig.replayssm_buffer_len
     use_replayssm: bool = CacheConfig.use_replayssm
+    use_replayssm_spec: bool = CacheConfig.use_replayssm_spec
 
     mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON
     enable_mamba_cache_stochastic_rounding: bool = (
         MambaConfig.enable_stochastic_rounding
     )
     mamba_cache_philox_rounds: int = MambaConfig.stochastic_rounding_philox_rounds
+    replayssm_spec_algorithm: ReplaySSMSpecAlgorithm = (
+        MambaConfig.replayssm_spec_algorithm
+    )
 
     additional_config: dict[str, Any] = get_field(VllmConfig, "additional_config")
 
@@ -960,6 +964,10 @@ class EngineArgs:
         mamba_group.add_argument(
             "--mamba-cache-philox-rounds",
             **mamba_kwargs["stochastic_rounding_philox_rounds"],
+        )
+        mamba_group.add_argument(
+            "--replayssm-spec-algorithm",
+            **mamba_kwargs["replayssm_spec_algorithm"],
         )
 
         # Structured outputs arguments
@@ -1229,6 +1237,9 @@ class EngineArgs:
             "--replayssm-buffer-len", **cache_kwargs["replayssm_buffer_len"]
         )
         cache_group.add_argument("--use-replayssm", **cache_kwargs["use_replayssm"])
+        cache_group.add_argument(
+            "--use-replayssm-spec", **cache_kwargs["use_replayssm_spec"]
+        )
         cache_group.add_argument(
             "--kv-offloading-size", **cache_kwargs["kv_offloading_size"]
         )
@@ -1947,6 +1958,7 @@ class EngineArgs:
             mamba_cache_mode=self.mamba_cache_mode,
             replayssm_buffer_len=self.replayssm_buffer_len,
             use_replayssm=self.use_replayssm,
+            use_replayssm_spec=self.use_replayssm_spec,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
         )
@@ -2349,6 +2361,8 @@ class EngineArgs:
             mamba_config.stochastic_rounding_philox_rounds = (
                 self.mamba_cache_philox_rounds
             )
+        if self.replayssm_spec_algorithm != MambaConfig.replayssm_spec_algorithm:
+            mamba_config.replayssm_spec_algorithm = self.replayssm_spec_algorithm
 
         # Kernel config overrides
         kernel_config = copy.deepcopy(self.kernel_config)

@@ -6,6 +6,7 @@ import torch
 from torch import nn
 
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
+from vllm.config.mamba import MambaBackendEnum
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -32,8 +33,14 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_update,
 )
 from vllm.model_executor.layers.mamba.ops.layernorm_gated import rms_norm_gated
+from vllm.model_executor.layers.mamba.ops.replayssm_spec_flashinfer import (
+    get_replayssm_spec_flashinfer_backend,
+)
 from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_output_only import (  # noqa: E501
     selective_state_update_replayssm_output_only,
+)
+from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_spec import (
+    selective_state_update_replayssm_spec,
 )
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
@@ -504,22 +511,44 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self.use_replayssm = (
             cache_config.use_replayssm if cache_config is not None else False
         )
+        self.use_replayssm_spec = (
+            cache_config.use_replayssm_spec if cache_config is not None else False
+        )
         self.replayssm_buffer_len = (
             cache_config.replayssm_buffer_len
-            if cache_config is not None and cache_config.use_replayssm
+            if cache_config is not None
+            and (cache_config.use_replayssm or cache_config.use_replayssm_spec)
             else None
         )
         self.mamba_config = vllm_config.mamba_config
-        if self.use_replayssm and self.num_heads % self.tp_size != 0:
+        # ReplaySSM-spec runs on either the Triton kernel or the FlashInfer
+        # checkpointing_ssu kernel; the two use different page layouts.
+        self.replayssm_spec_backend = self.mamba_config.backend
+        self.use_replayssm_spec_flashinfer = (
+            self.use_replayssm_spec
+            and self.replayssm_spec_backend == MambaBackendEnum.FLASHINFER
+        )
+        if (
+            self.use_replayssm or self.use_replayssm_spec
+        ) and self.num_heads % self.tp_size != 0:
             raise ValueError(
-                "--use-replayssm requires tensor-parallel heads to divide evenly"
+                "ReplaySSM requires tensor-parallel heads to divide evenly"
             )
         # The tuple is (conv_state, ssm_state); with the cached (ReplaySSM) decode
-        # kernel enabled it is (conv_state, ssm_state, x_cache, dt_cache, B_cache).
-        _n_state = 5 if self.use_replayssm else 2
+        # kernel enabled it is (conv_state, ssm_state, x_cache, dt_cache, B_cache),
+        # with the Triton cached-spec kernel (conv_state, ssm_state,
+        # post_conv_cache, dt_cache), and with the FlashInfer cached-spec kernel
+        # (conv_state, ssm_state, x_cache, B_cache, dt_cache).
+        if self.use_replayssm_spec:
+            _n_state = 5 if self.use_replayssm_spec_flashinfer else 4
+        elif self.use_replayssm:
+            _n_state = 5
+        else:
+            _n_state = 2
         self.kv_cache = tuple(torch.tensor([]) for _ in range(_n_state))
 
         self.num_spec = vllm_config.num_speculative_tokens
+        self.max_spec_len = 1 + self.num_spec
         if self.num_spec > 0:
             self.register_buffer(
                 "_decode_state_offsets",
@@ -720,10 +749,15 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 else self.kv_cache[0].transpose(-1, -2)
             )
             ssm_state = self.kv_cache[1]
-            if self.use_replayssm:
+            spec_post_conv_cache = spec_dt_cache = None
+            spec_x_cache = spec_B_cache = None
+            x_cache = dt_cache = B_cache = None
+            if self.use_replayssm_spec_flashinfer:
+                spec_x_cache, spec_B_cache, spec_dt_cache = self.kv_cache[2:]
+            elif self.use_replayssm_spec:
+                spec_post_conv_cache, spec_dt_cache = self.kv_cache[2:]
+            elif self.use_replayssm:
                 x_cache, dt_cache, B_cache = self.kv_cache[2:]
-            else:
-                x_cache = dt_cache = B_cache = None
             has_initial_states_p = attn_metadata.has_initial_states_p
             prep_initial_states = attn_metadata.prep_initial_states
             chunk_size = attn_metadata.chunk_size
@@ -1021,8 +1055,17 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 initial_state_idx=block_idx_last_computed_token_d,
                 num_accepted_tokens=num_accepted_tokens,
                 query_start_loc=query_start_loc_d,
-                max_query_len=state_indices_tensor_d.size(-1),
+                max_query_len=(
+                    self.max_spec_len
+                    if self.use_replayssm_spec
+                    else state_indices_tensor_d.size(-1)
+                ),
             )
+
+            # The spec kernel consumes the full channel-last post-conv output and
+            # the raw dt; capture both before the split reshapes them.
+            conv_out_spec = hidden_states_B_C_d
+            dt_d_raw = dt_d
 
             hidden_states_d, B_d, C_d = self.split_hidden_states_B_C_fn(
                 hidden_states_B_C_d
@@ -1052,7 +1095,73 @@ class MambaMixer2(MambaBase, PluggableLayer):
             preallocated_ssm_out_d = preallocated_ssm_out_d.view(
                 num_decode_tokens, -1, self.head_dim
             )
-            if self.use_replayssm:
+            if self.use_replayssm_spec_flashinfer:
+                assert self.replayssm_buffer_len is not None
+                assert spec_x_cache is not None
+                assert spec_B_cache is not None
+                assert spec_dt_cache is not None
+                assert query_start_loc_d is not None
+                assert attn_metadata.spec_write_pos_d is not None
+                assert attn_metadata.spec_post_origin_d is not None
+                # FlashInfer takes the split post-conv tensors in varlen form,
+                # not the packed conv_out the Triton kernel scatters itself.
+                get_replayssm_spec_flashinfer_backend()(
+                    ssm_state,
+                    spec_x_cache,
+                    spec_B_cache,
+                    spec_dt_cache,
+                    attn_metadata.spec_post_origin_d,
+                    attn_metadata.spec_write_pos_d,
+                    hidden_states_d.unsqueeze(0),
+                    dt_d.unsqueeze(0),
+                    A_d,
+                    B_d.unsqueeze(0),
+                    C_d.unsqueeze(0),
+                    preallocated_ssm_out_d.unsqueeze(0),
+                    D=D_d,
+                    dt_bias=dt_bias,
+                    dt_softplus=True,
+                    state_batch_indices=state_indices_tensor_d_input[:, 0],
+                    query_start_loc=query_start_loc_d,
+                    max_spec_len=self.max_spec_len,
+                    replayssm_buffer_len=self.replayssm_buffer_len,
+                    # None under algorithm="monolith"; otherwise all three,
+                    # which is what makes the two-kernel path available.
+                    cb_scaled=attn_metadata.spec_fi_cb_scaled_scratch,
+                    cumAdt_vec=attn_metadata.spec_fi_cumadt_scratch,
+                    cb_old=attn_metadata.spec_fi_cb_old_scratch,
+                )
+            elif self.use_replayssm_spec:
+                assert self.replayssm_buffer_len is not None
+                assert spec_post_conv_cache is not None
+                assert spec_dt_cache is not None
+                assert query_start_loc_d is not None
+                assert attn_metadata.spec_write_pos_d is not None
+                selective_state_update_replayssm_spec(
+                    ssm_state,
+                    spec_post_conv_cache,
+                    spec_dt_cache,
+                    conv_out_spec,
+                    dt_d_raw,
+                    A_d,
+                    write_pos=attn_metadata.spec_write_pos_d,
+                    post_conv_state_pos=attn_metadata.spec_post_origin_d,
+                    is_flush=attn_metadata.spec_is_flush_d,
+                    query_start_loc=query_start_loc_d,
+                    state_batch_indices=state_indices_tensor_d_input[:, 0],
+                    max_cache_len=self.replayssm_buffer_len + self.max_spec_len,
+                    max_spec_len=self.max_spec_len,
+                    d_inner=self.intermediate_size // self.tp_size,
+                    ngroups=n_groups,
+                    dstate=self.ssm_state_size,
+                    D=D_d,
+                    z=None,
+                    dt_bias=dt_bias,
+                    dt_softplus=True,
+                    out=preallocated_ssm_out_d,
+                    bc_pre=attn_metadata.spec_bc_pre_scratch,
+                )
+            elif self.use_replayssm:
                 assert self.replayssm_buffer_len is not None
                 selective_state_update_replayssm_output_only(
                     ssm_state,
@@ -1110,6 +1219,14 @@ class MambaMixer2(MambaBase, PluggableLayer):
             self.cache_config.mamba_cache_dtype,
             self.cache_config.mamba_ssm_cache_dtype,
         )
+        if self.use_replayssm_spec:
+            if self.use_replayssm_spec_flashinfer:
+                return MambaStateDtypeCalculator.append_replayssm_spec_flashinfer_ring(
+                    base_dtype, self.model_config.dtype
+                )
+            return MambaStateDtypeCalculator.append_replayssm_spec_ring(
+                base_dtype, self.model_config.dtype
+            )
         if self.use_replayssm:
             return MambaStateDtypeCalculator.append_replayssm_ring(
                 base_dtype, self.model_config.dtype
@@ -1128,6 +1245,24 @@ class MambaMixer2(MambaBase, PluggableLayer):
             conv_kernel=self.conv_kernel_size,
             num_spec=self.num_spec,
         )
+        if self.use_replayssm_spec:
+            assert self.replayssm_buffer_len is not None
+            if self.use_replayssm_spec_flashinfer:
+                return MambaStateShapeCalculator.append_replayssm_spec_flashinfer_ring(
+                    base_shape,
+                    self.n_groups,
+                    tp_world_size,
+                    self.replayssm_buffer_len,
+                    self.num_spec,
+                )
+            return MambaStateShapeCalculator.append_replayssm_spec_ring(
+                base_shape,
+                self.intermediate_size,
+                self.n_groups,
+                tp_world_size,
+                self.replayssm_buffer_len,
+                self.num_spec,
+            )
         if self.use_replayssm:
             assert self.replayssm_buffer_len is not None
             return MambaStateShapeCalculator.append_replayssm_ring(

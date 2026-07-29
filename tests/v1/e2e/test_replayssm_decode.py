@@ -136,3 +136,108 @@ def test_replayssm_prefix_caching_matches_baseline_tp2(vllm_runner, model_name):
     _check_replayssm_prefix_caching_parity(
         vllm_runner, model_name, tensor_parallel_size=2
     )
+
+
+def _check_replayssm_spec_parity(vllm_runner, model_name, *, num_spec_tokens=3):
+    # Speculative verify must reproduce the baseline spec path token for token:
+    # the ring replays the same recurrence the per-draft snapshots would have.
+    # Exercises the block-keyed cursors, the commit/rollback, the flush cadence
+    # and CUDA-graph capture of the fixed two-launch decode sequence.
+    common = dict(
+        max_model_len=1024,
+        trust_remote_code=True,
+        enable_prefix_caching=False,
+        mamba_cache_mode="none",
+        speculative_config={
+            "method": "ngram",
+            "num_speculative_tokens": num_spec_tokens,
+            "prompt_lookup_max": 3,
+        },
+    )
+    with vllm_runner(model_name, **common) as llm:
+        baseline = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
+    with vllm_runner(
+        model_name, use_replayssm_spec=True, replayssm_buffer_len=16, **common
+    ) as llm:
+        replay = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
+
+    check_logprobs_close(
+        outputs_0_lst=baseline,
+        outputs_1_lst=replay,
+        name_0="baseline_spec",
+        name_1="replayssm_spec",
+    )
+
+
+@pytest.mark.parametrize("model_name", MODELS)
+def test_replayssm_spec_decode_matches_baseline(vllm_runner, model_name):
+    _check_replayssm_spec_parity(vllm_runner, model_name)
+
+
+def _check_replayssm_spec_flashinfer_parity(
+    vllm_runner,
+    model_name,
+    *,
+    num_spec_tokens=3,
+    algorithm="auto",
+    enforce_eager=False,
+):
+    # Separate from the Triton cases on purpose: the FlashInfer ring is a
+    # different page layout and a different cursor state machine, so it is
+    # compared against the baseline spec path directly rather than against
+    # Triton ReplaySSM.
+    common = dict(
+        max_model_len=1024,
+        trust_remote_code=True,
+        enable_prefix_caching=False,
+        mamba_cache_mode="none",
+        enforce_eager=enforce_eager,
+        speculative_config={
+            "method": "ngram",
+            "num_speculative_tokens": num_spec_tokens,
+            "prompt_lookup_max": 3,
+        },
+    )
+    with vllm_runner(model_name, **common) as llm:
+        baseline = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
+    with vllm_runner(
+        model_name,
+        use_replayssm_spec=True,
+        replayssm_buffer_len=16,
+        mamba_backend="flashinfer",
+        replayssm_spec_algorithm=algorithm,
+        **common,
+    ) as llm:
+        replay = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
+
+    check_logprobs_close(
+        outputs_0_lst=baseline,
+        outputs_1_lst=replay,
+        name_0="baseline_spec",
+        name_1="replayssm_spec_flashinfer",
+    )
+
+
+@pytest.mark.parametrize("model_name", MODELS)
+@pytest.mark.parametrize("algorithm", ["monolith", "two-kernel", "auto"])
+def test_replayssm_spec_flashinfer_matches_baseline(vllm_runner, model_name, algorithm):
+    # Force each path before trusting 'auto': the crossover depends on
+    # batch * nheads against the device SM count, so 'auto' alone may never
+    # reach the two-kernel kernel on a small test batch.
+    _check_replayssm_spec_flashinfer_parity(
+        vllm_runner, model_name, algorithm=algorithm
+    )
+
+
+@pytest.mark.parametrize("model_name", MODELS)
+def test_replayssm_spec_flashinfer_matches_baseline_eager(vllm_runner, model_name):
+    # Eager must not allocate scratch per step; graphs must not capture a JIT.
+    _check_replayssm_spec_flashinfer_parity(vllm_runner, model_name, enforce_eager=True)
+
+
+@pytest.mark.parametrize("model_name", MODELS)
+def test_replayssm_spec_flashinfer_no_proposal_step(vllm_runner, model_name):
+    # prompt_lookup_max=1 with unrepeated prompts makes ngram propose nothing on
+    # most steps. Those steps must still run the ReplaySSM path: falling through
+    # to the ordinary SSU would advance a checkpoint the ring has moved past.
+    _check_replayssm_spec_flashinfer_parity(vllm_runner, model_name, num_spec_tokens=1)

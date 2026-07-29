@@ -9,6 +9,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.config.mamba import MambaBackendEnum
 from vllm.model_executor.layers.mamba.mamba_utils import (
     get_conv_copy_spec,
     is_conv_state_dim_first,
@@ -36,6 +37,10 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     is_prefilling: torch.Tensor
     num_accepted_tokens: torch.Tensor | None = None
     num_decode_draft_tokens_cpu: torch.Tensor | None = None
+    # FlashInfer ReplaySSM-spec admission state. Epochs are request-slot keyed;
+    # request_state_indices maps the current batch into those persistent slots.
+    replayssm_admission_epoch: torch.Tensor | None = None
+    replayssm_request_state_indices: torch.Tensor | None = None
 
     def get_extra_common_attn_kwargs(
         self,
@@ -54,7 +59,7 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
             (Mamba2AttentionMetadataBuilder, GDNAttentionMetadataBuilder),
         ):
             return {}
-        return {
+        kwargs: dict[str, Any] = {
             "num_accepted_tokens": None
             if self.num_accepted_tokens is None
             else self.num_accepted_tokens[:num_reqs],
@@ -62,6 +67,17 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
             if self.num_decode_draft_tokens_cpu is None
             else self.num_decode_draft_tokens_cpu[:num_reqs],
         }
+        # Triton ReplaySSM-spec builders must keep receiving exactly their
+        # existing arguments, so this is passed only where it is consumed.
+        if self.replayssm_admission_epoch is not None and getattr(
+            attn_metadata_builder, "use_replayssm_spec_flashinfer", False
+        ):
+            assert self.replayssm_request_state_indices is not None
+            kwargs["replayssm_admission_epoch"] = self.replayssm_admission_epoch
+            kwargs["replayssm_request_state_indices"] = (
+                self.replayssm_request_state_indices
+            )
+        return kwargs
 
 
 class MambaHybridModelState(DefaultModelState):
@@ -79,6 +95,18 @@ class MambaHybridModelState(DefaultModelState):
         self.num_accepted_tokens_gpu = torch.ones(
             self.max_num_reqs, dtype=torch.int32, device=self.device
         )
+        # FlashInfer ReplaySSM-spec admission epochs, keyed by persistent
+        # request slot. Each metadata builder consumes an epoch independently,
+        # so multiple Mamba cache groups need no shared clear operation.
+        self._replayssm_spec_flashinfer = (
+            self.cache_config.use_replayssm_spec
+            and vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
+        )
+        self.replayssm_admission_epoch_gpu: torch.Tensor | None = None
+        if self._replayssm_spec_flashinfer:
+            self.replayssm_admission_epoch_gpu = torch.zeros(
+                self.max_num_reqs, dtype=torch.int64, device=self.device
+            )
         # Pre-copy "align" prefix-cache state (V2). The migration of each
         # request's mamba state across block boundaries runs as a fused GPU
         # kernel reusing the postprocess copy machinery, so the per-step src
@@ -102,6 +130,9 @@ class MambaHybridModelState(DefaultModelState):
         super().add_request(req_index, new_req_data)
         # Must reset the speculative acceptance count in this idx which could be stale.
         self.num_accepted_tokens_gpu[req_index].fill_(1)
+        if self.replayssm_admission_epoch_gpu is not None:
+            # add_request also runs on resumption after preemption.
+            self.replayssm_admission_epoch_gpu[req_index].add_(1)
         if self._align_mode:
             # Seed the running state block from the resumed/prefilled position.
             self._mamba_state_idx_gpu[req_index].fill_(
@@ -269,12 +300,20 @@ class MambaHybridModelState(DefaultModelState):
                 )
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
+        replayssm_admission_epoch = None
+        replayssm_request_state_indices = None
+        if not for_capture and self.replayssm_admission_epoch_gpu is not None:
+            replayssm_admission_epoch = self.replayssm_admission_epoch_gpu
+            replayssm_request_state_indices = input_batch.idx_mapping
+
         mamba_attn_metadata = MambaHybridAttnMetadata(
             is_prefilling=is_prefilling,
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
+            replayssm_admission_epoch=replayssm_admission_epoch,
+            replayssm_request_state_indices=replayssm_request_state_indices,
         )
-        return build_attn_metadata(
+        attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
             num_tokens=num_tokens,
@@ -292,6 +331,7 @@ class MambaHybridModelState(DefaultModelState):
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
         )
+        return attn_metadata
 
     def postprocess_state(
         self,

@@ -66,6 +66,10 @@ else:
 
 logger = init_logger(__name__)
 
+# FlashInfer's checkpointing_ssu asserts max_window <= 16 (it fits the replayed
+# window into one MMA K tile), and max_window is our replayssm_buffer_len.
+_REPLAYSSM_SPEC_FLASHINFER_MAX_WINDOW = 16
+
 DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     {
         "DeepseekV2ForCausalLM",
@@ -2347,6 +2351,134 @@ class VllmConfig:
                 "(P/D disaggregation, KV cache offload)"
             )
         return self
+
+    @model_validator(mode="after")
+    def validate_mamba_cached_spec_kernel(self) -> "VllmConfig":
+        if not self.cache_config.use_replayssm_spec:
+            return self
+        if self.cache_config.use_replayssm:
+            raise ValueError(
+                "--use-replayssm-spec is mutually exclusive with --use-replayssm "
+                "(different page shapes and decode paths)"
+            )
+        if self.model_config is not None and not self.model_config.supports_replayssm:
+            raise ValueError(
+                "--use-replayssm-spec is only supported for Nemotron-H models "
+                f"(got architecture {self.model_config.architecture!r})"
+            )
+        # Inverted against --use-replayssm, which forbids speculative decoding.
+        if self.num_speculative_tokens <= 0:
+            raise ValueError(
+                "--use-replayssm-spec requires speculative decoding "
+                "(num_speculative_tokens > 0)"
+            )
+        if self.cache_config.mamba_cache_mode != "none":
+            raise ValueError(
+                "--use-replayssm-spec does not support prefix caching; "
+                "pass --mamba-cache-mode none"
+            )
+        if self.mamba_config.backend not in (
+            MambaBackendEnum.TRITON,
+            MambaBackendEnum.FLASHINFER,
+        ):
+            raise ValueError(
+                "--use-replayssm-spec requires --mamba-backend triton or "
+                f"flashinfer (got {self.mamba_config.backend.value})"
+            )
+        if (
+            self.mamba_config.enable_stochastic_rounding
+            and self.mamba_config.backend != MambaBackendEnum.FLASHINFER
+        ):
+            raise ValueError(
+                "--use-replayssm-spec supports Mamba cache stochastic rounding "
+                "only on --mamba-backend flashinfer (got "
+                f"{self.mamba_config.backend.value})"
+            )
+        if (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.is_kv_transfer_instance
+        ):
+            raise ValueError(
+                "--use-replayssm-spec is incompatible with KV connectors "
+                "(P/D disaggregation, KV cache offload)"
+            )
+        # The ring holds L = B + max_spec_len slots and flushes once the next
+        # window would not fit, so B below max_spec_len can never seat a window.
+        max_spec_len = 1 + self.num_speculative_tokens
+        if self.cache_config.replayssm_buffer_len < max_spec_len:
+            raise ValueError(
+                "--use-replayssm-spec requires --replayssm-buffer-len >= "
+                f"1 + num_speculative_tokens ({max_spec_len}); got "
+                f"{self.cache_config.replayssm_buffer_len}"
+            )
+        if self.mamba_config.backend == MambaBackendEnum.FLASHINFER:
+            self._validate_replayssm_spec_flashinfer(max_spec_len)
+        elif self.mamba_config.replayssm_spec_algorithm != "auto":
+            raise ValueError(
+                "--replayssm-spec-algorithm is only meaningful with "
+                "--mamba-backend flashinfer; got "
+                f"{self.mamba_config.replayssm_spec_algorithm!r} on the "
+                f"{self.mamba_config.backend.value} backend"
+            )
+        return self
+
+    def _validate_replayssm_spec_flashinfer(self, max_spec_len: int) -> None:
+        """FlashInfer-specific limits for the checkpointing_ssu ring kernel.
+
+        The ring is exactly B + max_spec_len rows and the kernel derives its
+        replay window as ring_len - max_spec_len, so B is capped at the kernel's
+        16-token window and must seat a whole verify window.
+        """
+        buffer_len = self.cache_config.replayssm_buffer_len
+        if buffer_len > _REPLAYSSM_SPEC_FLASHINFER_MAX_WINDOW:
+            raise ValueError(
+                "--use-replayssm-spec on --mamba-backend flashinfer supports at "
+                f"most {_REPLAYSSM_SPEC_FLASHINFER_MAX_WINDOW} cached tokens; "
+                f"got --replayssm-buffer-len {buffer_len}"
+            )
+        # Redundant with the shared B >= max_spec_len check above, but the
+        # FlashInfer kernel asserts it directly, so fail here with its wording.
+        if max_spec_len > buffer_len:
+            raise ValueError(
+                "--use-replayssm-spec on --mamba-backend flashinfer requires "
+                f"1 + num_speculative_tokens ({max_spec_len}) <= "
+                f"--replayssm-buffer-len ({buffer_len})"
+            )
+        # The global gate already requires float16 whenever stochastic rounding
+        # is on; restate it here so the ReplaySSM path fails with its own
+        # wording if that gate is ever widened for another backend. The kernel's
+        # Philox path is compiled only for state_t == __half.
+        if (
+            self.mamba_config.enable_stochastic_rounding
+            and self.cache_config.mamba_ssm_cache_dtype != "float16"
+        ):
+            raise ValueError(
+                "--use-replayssm-spec on --mamba-backend flashinfer supports "
+                "Mamba cache stochastic rounding only with "
+                "--mamba-ssm-cache-dtype float16 (got "
+                f"{self.cache_config.mamba_ssm_cache_dtype})"
+            )
+        # find_spec only -- importing flashinfer here would initialise CUDA
+        # during config validation. The ring-API symbol, and the cvt.rs hardware
+        # support stochastic rounding needs, are checked when the backend is
+        # constructed in initialize_kv_cache.
+        from vllm.utils.flashinfer import has_flashinfer
+
+        if not has_flashinfer():
+            raise ValueError(
+                "--use-replayssm-spec on --mamba-backend flashinfer requires the "
+                "flashinfer-python package, which was not found"
+            )
+        logger.info_once(
+            "Using FlashInfer ReplaySSM speculative SSU: B=%d, T=%d, "
+            "ring_len=%d, algorithm=%s, state_dtype=%s, stochastic_rounding=%s",
+            buffer_len,
+            max_spec_len,
+            buffer_len + max_spec_len,
+            self.mamba_config.replayssm_spec_algorithm,
+            self.cache_config.mamba_ssm_cache_dtype,
+            self.mamba_config.enable_stochastic_rounding,
+        )
 
 
 _current_vllm_config: VllmConfig | None = None
