@@ -34,7 +34,7 @@ NUM_TOKENS_HIDDEN_SIZES = [
 
 ADD_RESIDUAL = [False, True]
 SCALE_UBS = [True, False]
-GROUP_SIZES = [None, [1, 64], [1, 128]]
+GROUP_SIZES = [[1, 64], [1, 128]]
 TMA_ALIGNMENTS = [0, 4]
 SEEDS = [0]
 CUDA_DEVICES = [
@@ -42,6 +42,86 @@ CUDA_DEVICES = [
 ]
 
 EPS = 1e-6
+
+
+def _is_valid_config(
+    hidden_size: int,
+    has_scale_ub: bool,
+    quant_dtype: torch.dtype,
+    group_size: list[int] | None,
+    tma_alignment: int,
+) -> bool:
+    if group_size is not None and hidden_size % group_size[1] != 0:
+        return False
+    if group_size is not None and has_scale_ub:
+        return False
+    if (
+        group_size is None or quant_dtype != current_platform.fp8_dtype()
+    ) and tma_alignment != 0:
+        return False
+    if (
+        group_size is not None
+        and tma_alignment != 0
+        and hidden_size // group_size[1] % tma_alignment == 0
+    ):
+        return False
+    return not (has_scale_ub and quant_dtype != current_platform.fp8_dtype())
+
+
+def _config_id(
+    num_tokens: int,
+    hidden_size: int,
+    has_scale_ub: bool,
+    quant_dtype: torch.dtype,
+    group_size: list[int] | None,
+    tma_alignment: int,
+) -> str:
+    quant = str(quant_dtype).removeprefix("torch.")
+    group = "per-token" if group_size is None else f"group-{group_size[1]}"
+    return (
+        f"{num_tokens}x{hidden_size}-{quant}-{group}-"
+        f"tma-{tma_alignment}-scale-ub-{has_scale_ub}"
+    )
+
+
+# Filter unsupported combinations during collection. Letting each case call
+# pytest.skip still runs the global per-test teardown and dominates this suite.
+RMS_NORM_CONFIGS = [
+    pytest.param(
+        num_tokens,
+        hidden_size,
+        has_scale_ub,
+        quant_dtype,
+        group_size,
+        tma_alignment,
+        id=_config_id(
+            num_tokens,
+            hidden_size,
+            has_scale_ub,
+            quant_dtype,
+            group_size,
+            tma_alignment,
+        ),
+    )
+    for (
+        (num_tokens, hidden_size),
+        has_scale_ub,
+        quant_dtype,
+        (group_size, tma_alignment),
+    ) in itertools.product(
+        NUM_TOKENS_HIDDEN_SIZES,
+        SCALE_UBS,
+        QUANT_DTYPES,
+        [(None, 0), *itertools.product(GROUP_SIZES, TMA_ALIGNMENTS)],
+    )
+    if _is_valid_config(
+        hidden_size,
+        has_scale_ub,
+        quant_dtype,
+        group_size,
+        tma_alignment,
+    )
+]
 
 ## Helpers
 
@@ -157,15 +237,19 @@ def ops_impl(
     )
 
 
-@pytest.mark.parametrize("num_tokens, hidden_size", NUM_TOKENS_HIDDEN_SIZES)
-@pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
-@pytest.mark.parametrize("has_scale_ub", SCALE_UBS)
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("quant_dtype", QUANT_DTYPES)
 @pytest.mark.parametrize(
-    "group_size, tma_alignment",
-    [(None, 0), *itertools.product(GROUP_SIZES, TMA_ALIGNMENTS)],
+    (
+        "num_tokens",
+        "hidden_size",
+        "has_scale_ub",
+        "quant_dtype",
+        "group_size",
+        "tma_alignment",
+    ),
+    RMS_NORM_CONFIGS,
 )
+@pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
+@pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("strided_input", [False, True])
@@ -187,32 +271,6 @@ def test_rms_norm(
     set_random_seed(seed)
     torch.set_default_device(device)
     torch.accelerator.set_device_index(device)
-
-    if group_size is not None and hidden_size % group_size[1] != 0:
-        # skip
-        pytest.skip("Skip non-divisible group sizes")
-
-    if group_size is not None and has_scale_ub:
-        # blockwise baseline doesn't support scale_ub
-        pytest.skip("scale_ub not supported for blockwise/group quantization")
-
-    if (
-        group_size is None or quant_dtype != current_platform.fp8_dtype()
-    ) and tma_alignment != 0:
-        # TMA alignment is only supported for groupwise fp8 kernels
-        pytest.skip("tma alignment not supported for per-token or int8 quantization")
-
-    if (
-        group_size is not None
-        and tma_alignment != 0
-        and hidden_size // group_size[1] % tma_alignment == 0
-    ):
-        # Skip tests where TMA alignment doesn't create extra padding to save time
-        pytest.skip("Skip TMA alignment cases where no extra padding is added")
-
-    if has_scale_ub and quant_dtype != current_platform.fp8_dtype():
-        # skip
-        pytest.skip("scale_ub only supported for fp8 quantization")
 
     layer = RMSNorm(hidden_size, EPS).to(dtype=dtype)
 
