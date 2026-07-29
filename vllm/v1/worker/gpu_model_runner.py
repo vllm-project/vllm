@@ -941,6 +941,7 @@ class GPUModelRunner(
         # Ephemeral state transferred between execute_model() and sample_tokens().
         self.execute_model_state: ExecuteModelState | None = None
         self.kv_connector_output: KVConnectorOutput | None = None
+        self.ec_connector_output: ECConnectorOutput | None = None
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_bufs: mamba_utils.MambaBuffers | None = None
         self.mamba_prev_last_scheduled_idx: CpuGpuBuffer | None = None
@@ -4479,6 +4480,7 @@ class GPUModelRunner(
                     # Return the intermediate tensors.
                     assert isinstance(hidden_states, IntermediateTensors)
                     self.kv_connector_output = kv_connector_output
+                    self.ec_connector_output = ec_connector_output
                     return hidden_states
 
                 if self.is_pooling_model:
@@ -4565,12 +4567,21 @@ class GPUModelRunner(
         if self.execute_model_state is None:
             kv_connector_output = self.kv_connector_output
             self.kv_connector_output = None
+            ec_connector_output = self.ec_connector_output
+            self.ec_connector_output = None
             # receive sampled token ids from the last PP rank.
             if self.use_async_scheduling and not get_pp_group().is_last_rank:
                 self._pp_receive_prev_sampled_token_ids_to_input_batch()
-            # In case of PP with kv transfer, we need to pass through the
-            # kv_connector_output
-            return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
+            # In case of PP with kv/ec transfer, we need to pass through their
+            # outputs -- this rank never has a "real" ModelRunnerOutput of its
+            # own (see the is_last_rank early return in execute_model above).
+            output = ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
+            if ec_connector_output is not None and not ec_connector_output.is_empty():
+                if output is EMPTY_MODEL_RUNNER_OUTPUT:
+                    # Don't mutate the shared singleton in place.
+                    output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
+                output.ec_connector_output = ec_connector_output
+            return output
 
         # Unpack ephemeral state.
         (
