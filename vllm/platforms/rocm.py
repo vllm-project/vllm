@@ -352,7 +352,7 @@ def get_cdna_version() -> int:
         return 4
     if on_gfx1250():
         return 5
-    return -1
+    return 0
 
 
 # Enable HIP online tuning early, before hipBLASLt initializes.
