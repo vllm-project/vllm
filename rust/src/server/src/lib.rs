@@ -103,6 +103,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
                 .default_chat_template_kwargs
                 .clone()
                 .unwrap_or_default(),
+            limit_mm_per_prompt: config.limit_mm_per_prompt.clone(),
         },
     )
     .await
@@ -189,7 +190,7 @@ where
     let model = state.primary_model_name().to_owned();
     let app = extend_router(build_router(state.clone()));
 
-    // Optionally bind the gRPC Generate server on a separate port. Bind
+    // Optionally bind the gRPC Inference server on a separate port. Bind
     // synchronously here so bind errors (port in use, permission denied, ...)
     // surface before serving rather than being deferred until shutdown.
     let grpc_setup = if let Some(grpc_port) = config.grpc_port {
@@ -208,19 +209,19 @@ where
             .context("invalid gRPC TLS configuration")?;
         let (health_reporter, health_service) = health_reporter();
         let engine_health = state.engine_core_client().subscribe_health();
-        health_reporter.set_serving::<grpc::GenerateGrpcService>().await;
+        health_reporter.set_serving::<grpc::InferenceGrpcService>().await;
         health_reporter.set_serving::<grpc::ControlGrpcService>().await;
         let control_service =
             grpc::ControlGrpcService::new(grpc::ControlServiceImpl::new(state.clone()));
-        let generate_service =
-            grpc::GenerateGrpcService::new(grpc::GenerateServiceImpl::new(state.clone()));
+        let inference_service =
+            grpc::InferenceGrpcService::new(grpc::InferenceServiceImpl::new(state.clone()));
         let svc = TonicServer::builder()
             .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
             .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
             .layer(middleware::request_runtime_layer(state.clone()))
             .add_service(health_service)
             .add_service(control_service)
-            .add_service(generate_service);
+            .add_service(inference_service);
         info!(%addr, tls = grpc_tls.is_some(), "starting gRPC server");
         Some((grpc_listener, svc, grpc_tls, health_reporter, engine_health))
     } else {

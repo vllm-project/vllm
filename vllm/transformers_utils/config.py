@@ -72,6 +72,7 @@ class LazyConfigDict(dict):
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     afmoe="AfmoeConfig",
     arctic="ArcticConfig",
+    axk1="AXK1Config",
     bagel="BagelConfig",
     umm="CheersConfig",
     chatglm="ChatGLMConfig",
@@ -123,7 +124,9 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     qwen3_asr="Qwen3ASRConfig",
     qwen3_next="Qwen3NextConfig",
     qwen3_5="Qwen3_5Config",
+    qwen3_5_text="Qwen3_5TextConfig",
     qwen3_5_moe="Qwen3_5MoeConfig",
+    qwen3_5_moe_text="Qwen3_5MoeTextConfig",
     laguna="LagunaConfig",
     lfm2_moe="Lfm2MoeConfig",
     **{"unlimited-ocr": "UnlimitedOCRConfig"},
@@ -597,16 +600,6 @@ def is_encoder_decoder(config: PretrainedConfig) -> bool:
         return getattr(config, "is_encoder_decoder", False)
 
     return _is_encoder_decoder(config) or _is_encoder_decoder(config.get_text_config())
-
-
-def is_interleaved(config: PretrainedConfig) -> bool:
-    """
-    Detect if the model with this config is used with interleaved attention.
-    """
-    text_config = config.get_text_config()
-    if layer_types := getattr(text_config, "layer_types", None):
-        return len(set(layer_types)) > 1
-    return False
 
 
 def _maybe_update_auto_config_kwargs(kwargs: dict[str, Any], model_type: str):
