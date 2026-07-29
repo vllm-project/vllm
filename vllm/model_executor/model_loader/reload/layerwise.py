@@ -14,7 +14,7 @@ from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBa
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from .meta import (
-    SKIP_TENSORS,
+    SKIP_LOAD_TENSORS,
     capture_layer_to_meta,
     get_numel_loaded,
     materialize_layer,
@@ -140,7 +140,7 @@ def _wrap_parameters_weight_loader(layer: torch.nn.Module) -> None:
     """Wrap each parameter's weight loader."""
     # Note that nested wrapping will occur for shared tensors
     for name, tensor in get_layer_tensors(layer).items():
-        if name in SKIP_TENSORS:
+        if name in SKIP_LOAD_TENSORS:
             continue
         if _get_weight_loader(tensor).__name__ != "online_process_loader":
             tensor.weight_loader = make_online_process_loader(layer, name)
