@@ -3,6 +3,7 @@
 """Inference-only Qwen3Next model."""
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 from itertools import islice
 
 import torch
@@ -80,6 +81,25 @@ logger = init_logger(__name__)
 KVCache = tuple[torch.Tensor, torch.Tensor]
 
 
+@dataclass(frozen=True)
+class _Qwen3NextRoutingPolicy:
+    scoring_func: str = "softmax"
+    renormalize: bool | None = None
+    use_grouped_topk: bool = False
+    routed_scaling_factor: float = 1.0
+    has_e_score_correction_bias: bool = False
+
+
+_QWEN3_NEXT_ROUTING_POLICY = _Qwen3NextRoutingPolicy()
+_DEEPSEEK_ROUTING_POLICY = _Qwen3NextRoutingPolicy(
+    scoring_func="sigmoid",
+    renormalize=True,
+    use_grouped_topk=False,
+    routed_scaling_factor=1.0,
+    has_e_score_correction_bias=True,
+)
+
+
 def _is_shared_expert_fse_compatible(quant_config) -> bool:
     """Check if shared expert can be fused with routed experts.
 
@@ -101,7 +121,13 @@ def _is_shared_expert_fse_compatible(quant_config) -> bool:
 
 
 class Qwen3NextSparseMoeBlock(nn.Module):
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        *,
+        routing_policy: _Qwen3NextRoutingPolicy = _QWEN3_NEXT_ROUTING_POLICY,
+    ):
         super().__init__()
 
         config = vllm_config.model_config.hf_text_config
@@ -144,6 +170,11 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             quant_config=None,
             prefix=f"{prefix}.gate",
         )
+        if routing_policy.has_e_score_correction_bias:
+            self.gate.e_score_correction_bias = nn.Parameter(
+                torch.empty(config.num_experts, dtype=torch.float32),
+                requires_grad=False,
+            )
 
         self.shared_expert_gate = ReplicatedLinear(
             config.hidden_size,
@@ -182,9 +213,21 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            renormalize=getattr(config, "norm_topk_prob", True),
+            renormalize=(
+                routing_policy.renormalize
+                if routing_policy.renormalize is not None
+                else getattr(config, "norm_topk_prob", True)
+            ),
+            use_grouped_topk=routing_policy.use_grouped_topk,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
+            scoring_func=routing_policy.scoring_func,
+            routed_scaling_factor=routing_policy.routed_scaling_factor,
+            e_score_correction_bias=getattr(
+                self.gate,
+                "e_score_correction_bias",
+                None,
+            ),
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
