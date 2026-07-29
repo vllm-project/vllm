@@ -442,6 +442,7 @@ def _make_moe_config(
         has_bias=has_bias,
     )
 
+
 @pytest.mark.parametrize(
     ("hidden_size", "intermediate_size", "act", "expected"),
     [

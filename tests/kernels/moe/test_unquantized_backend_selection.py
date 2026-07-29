@@ -19,6 +19,7 @@ skipif_not_cuda_rocm = pytest.mark.skipif(
     reason="Only supported on CUDA/ROCm platforms.",
 )
 
+
 @pytest.mark.parametrize(
     ("amx_supported", "in_dtype", "expect_amx_kernel"),
     [

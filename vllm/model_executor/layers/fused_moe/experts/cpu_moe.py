@@ -5,6 +5,7 @@
 import math
 import sys
 from collections.abc import Callable
+from typing import cast
 
 import torch
 
@@ -158,6 +159,7 @@ def select_experts(
 # Unquantized (BF16/FP16/FP32) MoE
 # ===========================================================================
 
+
 class CPUUnquantizedExperts(mk.FusedMoEExpertsMonolithic):
     """Portable vector grouped-gemm unquantized MoE experts."""
 
@@ -238,7 +240,8 @@ class CPUUnquantizedExperts(mk.FusedMoEExpertsMonolithic):
         )
         if not supported:
             return supported, reason
-        return cls._supports_grouped_gemm(moe_config)
+        cpu_cls = cast(type[CPUUnquantizedExperts], cls)
+        return cpu_cls._supports_grouped_gemm(moe_config)
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -429,7 +432,8 @@ class X86CPUUnquantizedExperts(CPUUnquantizedExperts):
             return supported, reason
         if moe_config.in_dtype != torch.bfloat16:
             return False, "kernel requires bfloat16 activations"
-        return cls._supports_grouped_gemm(moe_config)
+        cpu_cls = cast(type[CPUUnquantizedExperts], cls)
+        return cpu_cls._supports_grouped_gemm(moe_config)
 
 
 class ArmCPUUnquantizedExperts(CPUUnquantizedExperts):
@@ -462,7 +466,8 @@ class ArmCPUUnquantizedExperts(CPUUnquantizedExperts):
             return supported, reason
         if moe_config.in_dtype != torch.bfloat16:
             return False, "kernel requires bfloat16 activations"
-        return cls._supports_grouped_gemm(moe_config)
+        cpu_cls = cast(type[CPUUnquantizedExperts], cls)
+        return cpu_cls._supports_grouped_gemm(moe_config)
 
 
 # ===========================================================================
