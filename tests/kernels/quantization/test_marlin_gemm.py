@@ -288,6 +288,7 @@ def test_gptq_marlin_repack(
     torch.testing.assert_close(marlin_q_w_1, marlin_q_w_2)
 
 
+@pytest.mark.marlin_ldmatrix_s4
 @pytest.mark.skipif(
     not is_quant_method_supported("gptq_marlin"),
     reason="Marlin is not supported on this GPU type.",
@@ -326,6 +327,45 @@ def test_gptq_marlin_repack_ldmatrix_s4_all_nibbles():
         )
 
         torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.marlin_ldmatrix_s4
+@pytest.mark.skipif(
+    not is_quant_method_supported("gptq_marlin"),
+    reason="Marlin is not supported on this GPU type.",
+)
+@pytest.mark.parametrize("nk_factors", MARLIN_REPACK_NK_FACTORS)
+def test_gptq_marlin_repack_ldmatrix_s4_random(nk_factors):
+    n_factor, k_factor = nk_factors
+    size_k = MARLIN_K_CHUNKS[0] * k_factor
+    size_n = MARLIN_N_CHUNKS[0] * n_factor
+
+    q_w = torch.randint(0, 16, (size_k, size_n), dtype=torch.int32, device="cuda")
+    if not ops.marlin_uses_ldmatrix_s4(q_w):
+        pytest.skip("Requires the CUDA 13.4 Hopper ldmatrix.s8.s4 path.")
+
+    q_w_gptq = gptq_pack(q_w, 4, size_k, size_n)
+    perm = torch.empty(0, dtype=torch.int32, device="cuda")
+    expected = marlin_weights(
+        q_w,
+        size_k,
+        size_n,
+        4,
+        get_weight_perm(4, True, use_ldmatrix_s4=True),
+        is_a_8bit=True,
+        use_ldmatrix_s4=True,
+    )
+    actual = ops.gptq_marlin_repack(
+        q_w_gptq,
+        perm,
+        size_k,
+        size_n,
+        4,
+        is_a_8bit=True,
+        is_w4a8_int8=True,
+    )
+
+    torch.testing.assert_close(actual, expected)
 
 
 @pytest.mark.skipif(
@@ -450,7 +490,16 @@ def marlin_generate_valid_test_cases():
                 continue
             args = sub_case + (size_m, size_n, size_k) + case[4:]
             if is_invalid(*args):
-                cases.append(args)
+                if (
+                    sub_case[0] == scalar_types.int8
+                    and sub_case[1] == scalar_types.uint4b8
+                    and not act_order
+                ):
+                    cases.append(
+                        pytest.param(*args, marks=pytest.mark.marlin_ldmatrix_s4)
+                    )
+                else:
+                    cases.append(args)
     return cases
 
 
