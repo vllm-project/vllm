@@ -410,11 +410,7 @@ class RequestState:
             logprobs = logprobs[-len(token_ids) :]
 
         sampling_mask = None
-        if (
-            finished
-            and self.output_kind == RequestOutputKind.FINAL_ONLY
-            and self.sampling_mask_chunks
-        ):
+        if finished and self.sampling_mask_chunks:
             merged = SamplingMaskLists.merge(self.sampling_mask_chunks)
             sampling_mask = SamplingMask(merged.token_ids, merged.offsets)
 
@@ -665,10 +661,7 @@ class OutputProcessor:
             if pooling_output is None:
                 assert req_state.detokenizer is not None
                 assert req_state.logprobs_processor is not None
-                if (
-                    engine_core_output.new_sampling_mask is not None
-                    and req_state.output_kind == RequestOutputKind.FINAL_ONLY
-                ):
+                if engine_core_output.new_sampling_mask is not None:
                     req_state.sampling_mask_chunks.append(
                         engine_core_output.new_sampling_mask
                     )

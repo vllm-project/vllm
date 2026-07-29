@@ -332,6 +332,7 @@ class Scheduler(SchedulerInterface):
         self.enable_return_routed_experts = (
             vllm_config.model_config.enable_return_routed_experts
         )
+        
         if self.enable_return_routed_experts:
             assert self.dcp_world_size == 1 and self.pcp_world_size == 1, (
                 "enable_return_routed_experts does not support context parallelism "
