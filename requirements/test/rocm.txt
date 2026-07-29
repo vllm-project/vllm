@@ -956,7 +956,7 @@ rapidfuzz==3.12.1
     # via
     #   -r requirements/test/rocm.in
     #   jiwer
-ray==2.54.0
+ray==2.55.1
     # via -r requirements/test/rocm.in
 redis==7.3.0
     # via tensorizer
