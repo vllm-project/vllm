@@ -39,6 +39,20 @@ class DictStore:
         return self.values[key]
 
 
+def test_external_elastic_ep_calculates_target_expert_redundancy():
+    client = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            model_config=SimpleNamespace(get_num_experts=lambda: 128),
+            parallel_config=SimpleNamespace(
+                eplb_config=SimpleNamespace(num_redundant_experts=0)
+            ),
+        )
+    )
+    coordinator = ExternalElasticEPScaleCoordinator(client)
+
+    assert coordinator._calculate_num_redundant_experts(2, 3) == 64
+
+
 @pytest.mark.asyncio
 async def test_external_elastic_ep_late_rank_observes_epoch_error():
     coordinator = ExternalElasticEPScaleCoordinator(SimpleNamespace())
@@ -225,39 +239,19 @@ def _send_scale_command(
     )
 
 
-def _wait_for_scale_requests(
-    servers: list[RemoteOpenAIServer],
+def _assert_scale_requests_are_waiting(
     scale_requests: list[Future[requests.Response]],
-    timeout: float = 30,
 ) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        for request in scale_requests:
-            if request.done():
-                response = request.result()
-                pytest.fail(
-                    "Scale request finished before the new rank was launched: "
-                    f"{response.status_code} {response.text}"
-                )
-
-        scaling = []
-        for server in servers:
-            try:
-                response = requests.post(
-                    server.url_for("is_scaling_elastic_ep"), timeout=1
-                )
-                if response.status_code == 503:
-                    scaling.append(True)
-                    continue
-                response.raise_for_status()
-                scaling.append(response.json()["is_scaling_elastic_ep"])
-            except requests.RequestException:
-                scaling.append(False)
-        if all(scaling):
-            return
-        time.sleep(0.1)
-
-    pytest.fail("Timed out waiting for all existing ranks to start scaling")
+    # Preparation blocks until the externally managed new rank joins. The
+    # serving middleware enters scaling mode only after preparation completes.
+    time.sleep(1)
+    for request in scale_requests:
+        if request.done():
+            response = request.result()
+            pytest.fail(
+                "Scale request finished before the new rank was launched: "
+                f"{response.status_code} {response.text}"
+            )
 
 
 def test_external_lb_server_info(server_manager):
@@ -319,7 +313,7 @@ def test_external_lb_elastic_ep_scale_up(default_server_args) -> None:
                 executor.submit(_send_scale_command, server, 3)
                 for server in existing_servers
             ]
-            _wait_for_scale_requests(existing_servers, scale_requests)
+            _assert_scale_requests_are_waiting(scale_requests)
             server_manager.start_rank(
                 rank=2,
                 dp_size=3,
@@ -331,7 +325,11 @@ def test_external_lb_elastic_ep_scale_up(default_server_args) -> None:
                 assert response.status_code == 200, response.text
 
         for server, _ in server_manager.servers:
-            assert _get_parallel_config(server)["data_parallel_size"] == 3
+            parallel_config = _get_parallel_config(server)
+            assert parallel_config["data_parallel_size"] == 3
+            assert (
+                parallel_config["eplb_config"]["num_redundant_experts"] == 32
+            )
             with server.get_client() as client:
                 completion = client.completions.create(
                     model=ELASTIC_EP_MODEL_NAME,
