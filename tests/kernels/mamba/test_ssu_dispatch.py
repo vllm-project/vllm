@@ -72,8 +72,19 @@ def test_flashinfer_backend_init():
 
 
 @pytest.mark.skipif(not HAS_FLASHINFER, reason="flashinfer not installed")
-@pytest.mark.parametrize("algorithm", ["auto", "simple", "vertical", "horizontal"])
-def test_flashinfer_forwards_ssu_algorithm(algorithm: str, monkeypatch):
+@pytest.mark.parametrize(
+    ("algorithm", "expected"),
+    [
+        (None, "auto"),
+        ("auto", "auto"),
+        ("simple", "simple"),
+        ("vertical", "vertical"),
+        ("horizontal", "horizontal"),
+    ],
+)
+def test_flashinfer_forwards_ssu_algorithm(
+    algorithm: str | None, expected: str, monkeypatch
+):
     import flashinfer.mamba
 
     kernel = Mock()
@@ -97,7 +108,7 @@ def test_flashinfer_forwards_ssu_algorithm(algorithm: str, monkeypatch):
         tensor,
     )
 
-    assert kernel.call_args.kwargs["algorithm"] == algorithm
+    assert kernel.call_args.kwargs["algorithm"] == expected
 
 
 def test_uninitialized_backend_raises():

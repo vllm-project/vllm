@@ -962,9 +962,9 @@ class EngineArgs:
             description=MambaConfig.__doc__,
         )
         mamba_group.add_argument("--mamba-backend", **mamba_kwargs["backend"])
-        mamba_ssu_algorithm_kwargs = mamba_kwargs["ssu_algorithm"]
-        mamba_ssu_algorithm_kwargs["default"] = None
-        mamba_group.add_argument("--mamba-ssu-algorithm", **mamba_ssu_algorithm_kwargs)
+        mamba_group.add_argument(
+            "--mamba-ssu-algorithm", **mamba_kwargs["ssu_algorithm"]
+        )
         mamba_group.add_argument(
             "--enable-mamba-cache-stochastic-rounding",
             **mamba_kwargs["enable_stochastic_rounding"],

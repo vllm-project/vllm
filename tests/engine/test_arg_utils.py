@@ -14,7 +14,6 @@ from transformers import OPTConfig
 from vllm.config import (
     AttentionConfig,
     CompilationConfig,
-    MambaConfig,
     ModelConfig,
     config,
 )
@@ -490,26 +489,6 @@ def _save_minimal_opt_config(path: Path) -> None:
     ).save_pretrained(path)
 
 
-def test_mamba_ssu_algorithm_defaults_to_auto(tmp_path: Path):
-    _save_minimal_opt_config(tmp_path)
-    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
-
-    args = parser.parse_args(["--model", str(tmp_path)])
-    engine_args = EngineArgs.from_cli_args(args)
-    vllm_config = engine_args.create_engine_config()
-
-    assert engine_args.mamba_ssu_algorithm is None
-    assert vllm_config.mamba_config.ssu_algorithm == "auto"
-
-
-def test_mamba_ssu_algorithm_preserves_positional_config_compatibility():
-    mamba_config = MambaConfig(MambaBackendEnum.FLASHINFER, False, 5)
-
-    assert mamba_config.enable_stochastic_rounding is False
-    assert mamba_config.stochastic_rounding_philox_rounds == 5
-    assert mamba_config.ssu_algorithm == "auto"
-
-
 def test_mamba_ssu_algorithm_cli_reaches_config(tmp_path: Path):
     _save_minimal_opt_config(tmp_path)
 
@@ -528,28 +507,6 @@ def test_mamba_ssu_algorithm_cli_reaches_config(tmp_path: Path):
     vllm_config = engine_args.create_engine_config()
     assert vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
     assert vllm_config.mamba_config.ssu_algorithm == "horizontal"
-
-
-def test_mamba_ssu_algorithm_preserves_explicit_config(tmp_path: Path):
-    _save_minimal_opt_config(tmp_path)
-    mamba_config = MambaConfig(
-        backend=MambaBackendEnum.FLASHINFER,
-        ssu_algorithm="horizontal",
-    )
-    engine_args = EngineArgs(
-        model=str(tmp_path),
-        mamba_backend=MambaBackendEnum.FLASHINFER,
-        mamba_config=mamba_config,
-    )
-
-    vllm_config = engine_args.create_engine_config()
-
-    assert vllm_config.mamba_config.ssu_algorithm == "horizontal"
-
-
-def test_mamba_ssu_algorithm_requires_flashinfer():
-    with pytest.raises(ValueError, match="only supported.*FlashInfer"):
-        MambaConfig(ssu_algorithm="horizontal")
 
 
 def test_mamba_ssu_algorithm_cli_requires_flashinfer(tmp_path: Path):

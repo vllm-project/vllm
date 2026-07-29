@@ -49,11 +49,11 @@ class MambaConfig:
     generation. 0 uses the Triton default. Higher values improve randomness
     quality at the cost of compute."""
 
-    ssu_algorithm: MambaSSUAlgorithm = "auto"
+    ssu_algorithm: MambaSSUAlgorithm | None = None
     """Selective state update algorithm to use with the FlashInfer backend.
-    "auto" preserves FlashInfer's automatic algorithm selection. Forced
-    algorithms must be supported by FlashInfer for the active GPU, state
-    dtype, and decoding mode."""
+    None defaults to FlashInfer's "auto" algorithm. Forced algorithms must
+    be supported by FlashInfer for the active GPU, state dtype, and decoding
+    mode."""
 
     @field_validator("backend", mode="before")
     @classmethod
@@ -64,6 +64,8 @@ class MambaConfig:
         return value
 
     def validate_ssu_algorithm(self) -> None:
+        if self.ssu_algorithm is None:
+            return
         valid_algorithms = get_args(MambaSSUAlgorithm)
         if self.ssu_algorithm not in valid_algorithms:
             valid = ", ".join(valid_algorithms)
@@ -71,11 +73,11 @@ class MambaConfig:
                 f"Unknown Mamba SSU algorithm: '{self.ssu_algorithm}'. "
                 f"Valid options are: {valid}"
             )
-        if self.ssu_algorithm != "auto" and self.backend != MambaBackendEnum.FLASHINFER:
+        if self.backend != MambaBackendEnum.FLASHINFER:
             raise ValueError(
                 "Mamba SSU algorithm selection is only supported with the "
                 "FlashInfer backend. Please set `--mamba-backend flashinfer`, "
-                "or leave `--mamba-ssu-algorithm` as `auto`."
+                "or omit `--mamba-ssu-algorithm`."
             )
 
     def __post_init__(self):
