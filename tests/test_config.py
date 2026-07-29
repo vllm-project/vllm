@@ -1648,6 +1648,50 @@ def test_draft_sample_method_gumbel_is_rejected():
         )
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"method": "ngram"}, "FLy currently requires"),
+        (
+            {"method": "draft_model", "fly_window_size": 8},
+            "fly_window_size to be smaller",
+        ),
+        (
+            {"method": "draft_model", "use_heterogeneous_vocab": True},
+            "shared target/draft vocabulary",
+        ),
+        (
+            {"method": "draft_model", "parallel_drafting": True},
+            "linear serial drafting",
+        ),
+    ],
+)
+def test_fly_rejects_unsupported_configurations(kwargs: dict[str, object], match: str):
+    with (
+        patch.object(SpeculativeConfig, "__post_init__", lambda self: None),
+        pytest.raises(ValidationError, match=match),
+    ):
+        SpeculativeConfig(
+            num_speculative_tokens=8,
+            rejection_sample_method="fly",
+            **kwargs,
+        )
+
+
+def test_fly_accepts_plain_draft_model():
+    with patch.object(SpeculativeConfig, "__post_init__", lambda self: None):
+        config = SpeculativeConfig(
+            method="draft_model",
+            num_speculative_tokens=8,
+            rejection_sample_method="fly",
+            fly_window_size=6,
+            fly_entropy_threshold=0.3,
+        )
+
+    assert config.fly_window_size == 6
+    assert config.fly_entropy_threshold == 0.3
+
+
 def test_ir_op_priority_default():
     """Test that IR op priority defaults are set correctly."""
     from vllm.config.kernel import IrOpPriorityConfig

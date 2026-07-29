@@ -76,6 +76,37 @@ The code used to request as completions as a client remains unchanged:
         print(completion)
     ```
 
+## FLy verification
+
+[FLy](https://arxiv.org/abs/2511.22972) is an approximate verification policy
+that can override a native rejection at an ambiguous position when the following
+native acceptance decisions remain aligned. It is intentionally lossy: unlike
+standard speculative decoding, it does not preserve the target distribution.
+
+```python
+llm = LLM(
+    model="Qwen/Qwen3-8B",
+    speculative_config={
+        "method": "draft_model",
+        "model": "Qwen/Qwen3-0.6B",
+        "num_speculative_tokens": 8,
+        "rejection_sample_method": "fly",
+        "fly_window_size": 6,
+        "fly_entropy_threshold": 0.3,
+    },
+)
+```
+
+`fly_window_size` is the number of subsequent tokens checked and must be
+smaller than `num_speculative_tokens`. The entropy gate uses the top three
+probabilities after target-side temperature, top-k, and top-p processing. FLy
+supports greedy requests, target-only acceptance with the default greedy draft
+sampling, and probability-ratio acceptance with
+`draft_sample_method="probabilistic"`.
+
+FLy currently requires a GPU, a shared vocabulary, and serial drafting. It is
+not available with parallel drafting or heterogeneous vocabularies.
+
 ## Draft Model Method with heterogeneous vocabs
 
   By default, vLLM requires the draft and target models to share the same vocabulary. Setting `use_heterogeneous_vocab: true` enables the **Token-Level Intersection (TLI)** algorithm, which allows draft models from a different model family with a different tokenizer.

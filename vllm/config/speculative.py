@@ -75,7 +75,7 @@ SpeculativeMethod = Literal[
     NgramGPUTypes,
     DSparkModelTypes,
 ]
-RejectionSampleMethod = Literal["standard", "synthetic", "block"]
+RejectionSampleMethod = Literal["standard", "synthetic", "block", "fly"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
 
 
@@ -220,7 +220,8 @@ class SpeculativeConfig:
     draft_sample_method). 'synthetic' accepts draft tokens with a decaying
     probability calibrated to synthetic_acceptance_rate. 'block' uses block
     verification (Sun et al.), which jointly verifies the draft tokens as a
-    block instead of one at a time."""
+    block instead of one at a time. 'fly' applies FLy's lossy, entropy-gated
+    deferred window to the native per-token acceptance decisions."""
 
     synthetic_acceptance_rates: list[float] | None = None
     """Per-position *unconditional* acceptance rates for synthetic rejection
@@ -288,6 +289,12 @@ class SpeculativeConfig:
     distribution and uses the full draft logits for the probability ratio test
     during rejection sampling. This comes at the cost of additional GPU memory
     usage."""
+
+    fly_window_size: int = Field(default=6, ge=1)
+    """Number of subsequent native acceptance decisions checked by FLy."""
+
+    fly_entropy_threshold: float = Field(default=0.3, ge=0)
+    """Target top-3 entropy lower bound for FLy loose acceptance."""
 
     def compute_hash(self) -> str:
         """
@@ -1332,6 +1339,21 @@ class SpeculativeConfig:
                 "sampling. Set draft_sample_method='greedy' (the default) or "
                 "omit it."
             )
+
+        if self.rejection_sample_method == "fly":
+            if not self.uses_draft_model():
+                raise ValueError("FLy currently requires method='draft_model'.")
+            if self.fly_window_size >= self.num_speculative_tokens:
+                raise ValueError(
+                    "FLy requires fly_window_size to be smaller than "
+                    "num_speculative_tokens."
+                )
+            if self.use_heterogeneous_vocab:
+                raise ValueError(
+                    "FLy currently requires a shared target/draft vocabulary."
+                )
+            if self.parallel_drafting:
+                raise ValueError("FLy currently supports only linear serial drafting.")
 
         if not self.use_heterogeneous_vocab:
             self.verify_equal_vocab_size_if_draft_model()
