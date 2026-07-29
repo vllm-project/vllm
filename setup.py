@@ -657,8 +657,8 @@ class precompiled_wheel_utils:
         3. the default variant from nightly repo
 
         If downloading from the nightly repo, the commit can be specified via
-        VLLM_PRECOMPILED_WHEEL_COMMIT; otherwise, the head commit in the main branch
-        is used.
+        VLLM_PRECOMPILED_WHEEL_COMMIT. The special value ``nightly`` selects the
+        latest built wheel; otherwise, the head commit in the main branch is used.
         """
         wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION", None)
         if wheel_location is not None:
@@ -679,7 +679,7 @@ class precompiled_wheel_utils:
             if variant is None:
                 variant = precompiled_wheel_utils.detect_system_cuda_variant()
             commit = os.getenv("VLLM_PRECOMPILED_WHEEL_COMMIT", "").lower()
-            if not commit or len(commit) != 40:
+            if commit != "nightly" and (not commit or len(commit) != 40):
                 print(
                     f"VLLM_PRECOMPILED_WHEEL_COMMIT not valid: {commit}"
                     ", trying to fetch base commit in main branch"
