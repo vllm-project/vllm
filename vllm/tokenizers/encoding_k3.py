@@ -20,6 +20,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
+from vllm.exceptions import VLLMValidationError
+
 OPEN_TOKEN = "<|open|>"
 CLOSE_TOKEN = "<|close|>"
 SEP_TOKEN = "<|sep|>"
@@ -389,6 +391,33 @@ def is_batched_conversation(conversation: Any) -> bool:
     )
 
 
+def _normalize_vllm_chat_options(
+    *,
+    thinking: bool | None,
+    enable_thinking: bool | None,
+    reasoning_effort: str | None,
+    thinking_effort: str | None,
+) -> tuple[bool, str]:
+    if thinking is None:
+        thinking = True if enable_thinking is None else enable_thinking
+
+    if reasoning_effort == "none":
+        thinking = False
+    elif thinking_effort is None and reasoning_effort is not None:
+        thinking_effort = reasoning_effort
+
+    if thinking_effort is None:
+        thinking_effort = "max"
+    if thinking_effort not in _VALID_THINKING_EFFORTS:
+        supported = ", ".join(sorted(_VALID_THINKING_EFFORTS))
+        raise VLLMValidationError(
+            f"Kimi K3 supports thinking_effort values: {supported}",
+            parameter="thinking_effort",
+            value=thinking_effort,
+        )
+    return thinking, thinking_effort
+
+
 def _render_content_segments(
     content: Any,
     image_state: _ImagePromptState,
@@ -497,10 +526,22 @@ def build_chat_segments(
     tools: list[dict] | None = None,
     *,
     add_generation_prompt: bool = True,
-    thinking: bool = True,
+    # vLLM compatibility
+    thinking: bool | None = None,
+    enable_thinking: bool | None = None,
+    reasoning_effort: str | None = None,
+    thinking_effort: str | None = None,
     image_prompts: list[str] | None = None,
     **kwargs: Any,
 ) -> list[EncodeSegment]:
+    # vLLM compatibility
+    thinking, thinking_effort = _normalize_vllm_chat_options(
+        thinking=thinking,
+        enable_thinking=enable_thinking,
+        reasoning_effort=reasoning_effort,
+        thinking_effort=thinking_effort,
+    )
+
     # Re-sort tool results by tool_call_id at the lowest layer so every caller
     # (processor or direct tokenizer) gets correctly ordered XTML. The helper is
     # side-effect free, so the caller's message objects are left untouched.
@@ -526,12 +567,6 @@ def build_chat_segments(
     if tools:
         segments.extend(_render_tool_declare(tools))
 
-    thinking_effort = kwargs.get("thinking_effort")
-    if thinking and thinking_effort is not None:
-        assert thinking_effort in _VALID_THINKING_EFFORTS, (
-            f"Unsupported thinking_effort={thinking_effort!r}; "
-            f"supported values are {sorted(_VALID_THINKING_EFFORTS)}."
-        )
     if thinking and thinking_effort in _VALID_THINKING_EFFORTS:
         segments.extend(
             _internal_system_message(
