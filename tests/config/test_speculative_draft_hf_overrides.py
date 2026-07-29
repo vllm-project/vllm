@@ -29,6 +29,31 @@ def _make_hf_config(**kwargs) -> PretrainedConfig:
     return PretrainedConfig(**defaults)
 
 
+class _DummyDraftModelConfig:
+    def __init__(self, hf_config: PretrainedConfig) -> None:
+        self.hf_config = hf_config
+
+    def compute_hash(self) -> str:
+        return "draft-model-hash"
+
+
+@pytest.mark.cpu_test
+def test_compute_hash_reads_aux_layers_from_draft_hf_config():
+    base = SpeculativeConfig(model="ngram", num_speculative_tokens=1)
+    base.method = "dflash"
+    base.draft_model_config = _DummyDraftModelConfig(
+        _make_hf_config(dflash_config={"target_layer_ids": [0]})
+    )
+
+    changed = SpeculativeConfig(model="ngram", num_speculative_tokens=1)
+    changed.method = "dflash"
+    changed.draft_model_config = _DummyDraftModelConfig(
+        _make_hf_config(dflash_config={"target_layer_ids": [1]})
+    )
+
+    assert base.compute_hash() != changed.compute_hash()
+
+
 @pytest.mark.cpu_test
 def test_dict_overrides_are_not_forwarded_to_draft():
     """Dict overrides are target-specific key patches; the draft must get

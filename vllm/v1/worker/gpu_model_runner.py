@@ -935,7 +935,7 @@ class GPUModelRunner(
                 self.max_num_reqs,
                 dtype=torch.int32,
                 device="cpu",
-                pin_memory=self.pin_memory,
+                pin_memory=PIN_MEMORY,
             )
             if self.use_async_scheduling:
                 self.valid_sampled_token_count_event = torch.Event()

@@ -346,6 +346,7 @@ class SpeculativeConfig:
             factors.append(self.draft_model_config.compute_hash())
 
             # The specific layers used also affect the computation graph.
+            hf_config = self.draft_model_config.hf_config
             layer_ids = getattr(
                 hf_config,
                 "eagle_aux_hidden_state_layer_ids",
