@@ -7,8 +7,9 @@ from unittest.mock import MagicMock
 import pytest
 
 from vllm import SamplingParams
+from vllm.v1.core.sched.utils import check_stop
 from vllm.v1.engine.core import EngineCore
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -70,6 +71,27 @@ def test_add_request_clears_cached_eos_for_trace_replay():
     assert request.sampling_params.eos_token_id is None
     assert request.sampling_params.ignore_eos is True
     assert request.sampling_params.max_tokens == 3
+
+
+def test_trace_replay_ignores_min_tokens_and_stop_token_ids():
+    params = SamplingParams(
+        max_tokens=16,
+        min_tokens=10,
+        stop_token_ids=[20],
+        trace_decode_token_ids=[10, 20, 30],
+    )
+    request = _make_request(params)
+    engine_core = _make_engine_core()
+
+    engine_core.add_request(request)
+
+    assert request.sampling_params.min_tokens == 0
+    assert request.sampling_params.stop_token_ids == []
+    assert request.sampling_params.all_stop_token_ids == set()
+
+    request.append_output_token_ids([10, 20, 30])
+    assert check_stop(request, max_model_len=128)
+    assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
 
 
 @pytest.mark.parametrize(
