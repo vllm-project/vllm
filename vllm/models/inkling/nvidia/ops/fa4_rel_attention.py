@@ -242,9 +242,7 @@ class InklingFA4RelAttentionKernel(
             window_size=window_size,
             max_seqlen_q=max_seqlen_q,
             num_splits=num_splits,
-            num_warps_bucket=(
-                _num_warps_bucket(num_reqs) if num_splits > 1 else None
-            ),
+            num_warps_bucket=(_num_warps_bucket(num_reqs) if num_splits > 1 else None),
             large_num_reqs=num_reqs > 1024,
         )
 

@@ -484,4 +484,5 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
             return_softmax_lse=True,
         )
 
+
 FA4_MLA_PREFILL_KERNEL = FA4MLAPrefillKernel()

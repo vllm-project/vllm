@@ -73,9 +73,7 @@ def _expand_warmup_values(values: WarmupValues) -> tuple[Any, ...]:
             expanded.append(value)
             next_value = values.advance(value)
             if next_value <= value:
-                raise ValueError(
-                    "WarmupIntRange.advance must return a greater value"
-                )
+                raise ValueError("WarmupIntRange.advance must return a greater value")
             value = next_value
         return tuple(expanded)
     if isinstance(values, (list, tuple)):

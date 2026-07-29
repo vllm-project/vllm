@@ -176,11 +176,11 @@ class KernelConfig:
     enable_flashinfer_autotune: bool = None  # type: ignore[assignment]
     """If True, run FlashInfer autotuning during kernel warmup."""
 
-    """Deprecated: run legacy CuTeDSL warmup providers."""
     # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
     # to the shared JIT warmup infrastructure.
     # https://github.com/vllm-project/vllm/pull/47451
     enable_cutedsl_warmup: bool = True
+    """Deprecated: run legacy CuTeDSL warmup providers."""
 
     enable_jit_warmup: bool = True
     """If True, run JIT compile warmup during kernel warmup."""
