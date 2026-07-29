@@ -991,7 +991,8 @@ class Platform:
             # Pinned memory support under WSL depends on the vendor and driver
             # version. Conservative default: return False. Platform subclasses
             # that can verify support (e.g. CudaPlatformBase) override this.
-            logger.warning_once(
+            # warning_once() causes a circular import on WSL, see #48397.
+            logger.warning(
                 "Using 'pin_memory=False' as WSL is detected. "
                 "This may slow down performance."
             )
