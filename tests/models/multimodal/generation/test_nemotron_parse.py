@@ -88,6 +88,10 @@ def run_test(
                 num_logprobs=num_logprobs,
                 images=images,
                 tokenization_kwargs={"add_special_tokens": False},
+                # The model's generation config forces EOS at max_new_tokens.
+                # vLLM stops at the limit without replacing the model-selected
+                # final token, so disable forced EOS for a like-for-like check.
+                forced_eos_token_id=None,
             )
             for prompts, images in inputs
         ]

@@ -490,6 +490,7 @@ class RadioWithNeck(nn.Module):
         self.sum_proj = ColumnParallelLinear(
             3840,
             last_hidden_state,
+            gather_output=True,
             quant_config=quant_config,
             prefix=f"{prefix}.sum_proj",
         )
@@ -549,8 +550,8 @@ class RadioWithNeck(nn.Module):
                 model_encoder_weights.append((".".join(name.split(".")[1:]), w))
             else:
                 param = adaptor_dict[name]
-                with torch.no_grad():
-                    default_weight_loader(param, w)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, w)
 
         self.model_encoder.load_weights(model_encoder_weights)
 
