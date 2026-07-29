@@ -163,7 +163,8 @@ torch::Tensor get_scheduler_metadata(
     const torch::Tensor& query_start_loc, const bool casual,
     const int64_t window_size, const std::string& isa_hint,
     const bool enable_kv_split,
-    const std::optional<torch::Tensor>& dynamic_causal);
+    const std::optional<torch::Tensor>& dynamic_causal,
+    const std::string& kv_cache_dtype);
 
 void cpu_attn_reshape_and_cache(const torch::Tensor& key,
                                 const torch::Tensor& value,
@@ -577,7 +578,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "get_scheduler_metadata(int num_req, int num_heads_q, int num_heads_kv, "
       "int head_dim, Tensor seq_lens, ScalarType dtype, Tensor "
       "query_start_loc, bool casual, int window_size, str isa_hint, bool "
-      "enable_kv_split, Tensor? dynamic_causal) -> Tensor",
+      "enable_kv_split, Tensor? dynamic_causal, "
+      "str kv_cache_dtype=\"auto\") -> Tensor",
       &get_scheduler_metadata);
   ops.def(
       "cpu_attn_reshape_and_cache(Tensor key, Tensor value, Tensor(a2!) "

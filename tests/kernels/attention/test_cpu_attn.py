@@ -534,6 +534,7 @@ def varlen_with_paged_kv(
         isa=isa,
         enable_kv_split=False,
         dynamic_causal=dynamic_causal_tensor,
+        kv_cache_dtype=kv_cache_dtype,
     )
 
     out_without_split = torch.empty_like(query)
@@ -569,6 +570,7 @@ def varlen_with_paged_kv(
         isa=isa,
         enable_kv_split=True,
         dynamic_causal=dynamic_causal_tensor,
+        kv_cache_dtype=kv_cache_dtype,
     )
 
     out_with_split = torch.empty_like(query)
@@ -800,6 +802,24 @@ def test_varlen_with_paged_kv_normal_amx(
         use_sink=use_sink,
         isa=isa,
         kv_cache_dtype=kv_cache_dtype,
+    )
+
+
+@pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support.")
+def test_varlen_with_paged_kv_fp8_large_prefill_amx() -> None:
+    varlen_with_paged_kv(
+        seq_lens=[(1024, 1024)] * 4,
+        num_heads=(16, 2),
+        head_size=256,
+        sliding_window=None,
+        dtype=torch.bfloat16,
+        block_size=2176,
+        soft_cap=None,
+        num_blocks=4,
+        use_alibi=False,
+        use_sink=False,
+        isa="amx",
+        kv_cache_dtype="fp8_e4m3",
     )
 
 
