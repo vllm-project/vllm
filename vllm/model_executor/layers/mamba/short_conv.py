@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import os
+
 import torch
 
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
@@ -23,11 +25,17 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
+from vllm.model_executor.layers.mamba.ops.lfm25_fused_short_conv import (
+    FUSED_DECODE_ENABLED,
+    fused_lfm25_short_conv_decode,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionMetadata
+
+_BYPASS_SINGLE_VSTACK = os.environ.get("VLLM_LFM25_BYPASS_SINGLE_VSTACK", "0") == "1"
 
 
 # --8<-- [start:short_conv]
@@ -278,20 +286,40 @@ class ShortConv(MambaBase, CustomOp):
             conv_output_list.append(y)
 
         if has_decode:
-            Bx_d = (B_d * x_d).contiguous()
-            Bx = causal_conv1d_update(
-                Bx_d,
-                conv_state,
-                conv_weights,
-                self.conv.bias,
-                activation=None,
-                conv_state_indices=state_indices_tensor_d,
+            can_fuse_decode = (
+                FUSED_DECODE_ENABLED
+                and self.L_cache == 3
+                and self.conv.bias is None
+                and state_indices_tensor_d is not None
             )
-            y = C_d * Bx
+            if can_fuse_decode:
+                y = fused_lfm25_short_conv_decode(
+                    B_d,
+                    C_d,
+                    x_d,
+                    conv_state,
+                    conv_weights,
+                    state_indices_tensor_d,
+                )
+            else:
+                Bx_d = (B_d * x_d).contiguous()
+                Bx = causal_conv1d_update(
+                    Bx_d,
+                    conv_state,
+                    conv_weights,
+                    self.conv.bias,
+                    activation=None,
+                    conv_state_indices=state_indices_tensor_d,
+                )
+                y = C_d * Bx
             conv_output_list.insert(0, y)
 
         # Merge prefill and decode outputs before passing to gated MLP
-        hidden_states = torch.vstack(conv_output_list)
+        hidden_states = (
+            conv_output_list[0]
+            if _BYPASS_SINGLE_VSTACK and len(conv_output_list) == 1
+            else torch.vstack(conv_output_list)
+        )
 
         # Final linear projection
         output[:num_actual_tokens], _ = self.out_proj(hidden_states)
