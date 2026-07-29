@@ -6,7 +6,12 @@ import numpy as np
 import torch
 
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
-from vllm.v1.outputs import AsyncModelRunnerOutput, LogprobsTensors, ModelRunnerOutput
+from vllm.v1.outputs import (
+    AsyncModelRunnerOutput,
+    LogprobsTensors,
+    ModelRunnerOutput,
+    PoolerOutput,
+)
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
 
@@ -89,34 +94,42 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
     def __init__(
         self,
         model_runner_output: ModelRunnerOutput,
-        pooler_output: torch.Tensor,
-        is_valid: torch.Tensor | None,
+        pooler_output: PoolerOutput,
+        finished_mask: list[bool],
         main_stream: torch.cuda.Stream,
         copy_stream: torch.cuda.Stream,
     ):
         self.model_runner_output = model_runner_output
         self.pooler_output = pooler_output
-        self.is_valid = is_valid
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
 
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
-            self.pooler_output_cpu = self.pooler_output.to("cpu", non_blocking=True)
-            if self.is_valid is not None:
-                self.is_valid_cpu = self.is_valid.to("cpu", non_blocking=True)
+            if isinstance(self.pooler_output, torch.Tensor) and all(finished_mask):
+                self.pooler_output_cpu: PoolerOutput = self.pooler_output.to(
+                    "cpu", non_blocking=True
+                )
             else:
-                self.is_valid_cpu = None
+                outputs = (
+                    self.pooler_output.unbind()
+                    if isinstance(self.pooler_output, torch.Tensor)
+                    else self.pooler_output
+                )
+                self.pooler_output_cpu = [
+                    None
+                    if output is None or not is_finished
+                    else output.to("cpu", non_blocking=True)
+                    for output, is_finished in zip(outputs, finished_mask, strict=True)
+                ]
             self.copy_event.record(copy_stream)
 
     def get_output(self) -> ModelRunnerOutput:
-        pooler_output = list(self.pooler_output_cpu.unbind(dim=0))
+        if isinstance(self.pooler_output_cpu, torch.Tensor):
+            pooler_output = list(self.pooler_output_cpu.unbind(dim=0))
+        else:
+            pooler_output = self.pooler_output_cpu
         self.copy_event.synchronize()
-        if self.is_valid_cpu is not None:
-            is_valid_cpu = self.is_valid_cpu.tolist()
-            for i, is_valid in enumerate(is_valid_cpu):
-                if not is_valid:
-                    pooler_output[i] = None
         self.model_runner_output.pooler_output = pooler_output
         return self.model_runner_output
 
