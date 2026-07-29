@@ -69,7 +69,7 @@ class EPLBConfig:
     of the last `lb_window_size` steps will be used for rearranging experts.
     """
 
-    num_redundant_experts: int | None = Field(default=None, ge=0)
+    num_redundant_experts: int = Field(default=None, ge=0)  # type: ignore[assignment]
     """Number of redundant experts to use for expert parallelism.
     If None (default), the minimum valid value will be computed automatically
     based on the number of logical experts and the expert parallel size.
@@ -569,8 +569,12 @@ class ParallelConfig:
             return
 
         if self.enable_eplb:
-            # EP size is TP * DP for EPLB
-            ep_size = self.tensor_parallel_size * self.data_parallel_size
+            # The EP group spans the TP x PCP x DP ranks.
+            ep_size = (
+                self.tensor_parallel_size
+                * self.prefill_context_parallel_size
+                * self.data_parallel_size
+            )
             # Ensure (num_logical_experts + num_redundant_experts) is
             # divisible by ep_size, supporting non-standard ep_size values
             min_redundant = (ep_size - num_logical_experts % ep_size) % ep_size

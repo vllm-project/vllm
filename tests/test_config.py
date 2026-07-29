@@ -1544,24 +1544,28 @@ def test_eplb_num_redundant_experts_default():
 
 
 @pytest.mark.parametrize(
-    "num_experts,tp_size,dp_size,expected",
+    "num_experts,tp_size,pcp_size,dp_size,expected",
     [
-        (8, 8, 1, 0),  # ep_size=8, divisible: 8 % 8 = 0
-        (8, 8, 2, 8),  # ep_size=16, ep_size > experts: need 8 redundant
-        (8, 2, 3, 4),  # ep_size=6, non-divisible: need 4 redundant
-        (16, 4, 2, 0),  # ep_size=8, divisible: 16 % 8 = 0
-        (10, 4, 2, 6),  # ep_size=8, non-divisible: need 6 redundant
-        (7, 2, 2, 1),  # ep_size=4, non-divisible: need 1 redundant
-        (1, 2, 2, 3),  # ep_size=4, single expert: need 3 redundant
+        (8, 8, 1, 1, 0),  # ep_size=8, divisible: 8 % 8 = 0
+        (8, 8, 1, 2, 8),  # ep_size=16, ep_size > experts: need 8 redundant
+        (8, 2, 1, 3, 4),  # ep_size=6, non-divisible: need 4 redundant
+        (16, 4, 1, 2, 0),  # ep_size=8, divisible: 16 % 8 = 0
+        (10, 4, 1, 2, 6),  # ep_size=8, non-divisible: need 6 redundant
+        (7, 2, 1, 2, 1),  # ep_size=4, non-divisible: need 1 redundant
+        (1, 2, 1, 2, 3),  # ep_size=4, single expert: need 3 redundant
+        # The EP group spans TP x PCP x DP, so PCP must be accounted for.
+        (8, 2, 2, 1, 0),  # ep_size=4, divisible: 8 % 4 = 0
+        (10, 2, 2, 1, 2),  # ep_size=4, non-divisible: need 2 redundant
+        (8, 2, 3, 1, 4),  # ep_size=6, non-divisible: need 4 redundant
     ],
 )
 def test_eplb_num_redundant_experts_auto_computation(
-    num_experts, tp_size, dp_size, expected
+    num_experts, tp_size, pcp_size, dp_size, expected
 ):
     """Test that num_redundant_experts is correctly computed by ParallelConfig.
 
     The computation ensures (num_logical_experts + num_redundant_experts)
-    is divisible by ep_size (= tp_size * dp_size).
+    is divisible by ep_size (= tp_size * pcp_size * dp_size).
     """
     from vllm.config.parallel import ParallelConfig
 
@@ -1572,11 +1576,12 @@ def test_eplb_num_redundant_experts_auto_computation(
         ),
         patch(
             "vllm.config.parallel.current_platform.device_count",
-            return_value=tp_size * dp_size,
+            return_value=tp_size * pcp_size * dp_size,
         ),
     ):
         parallel_config = ParallelConfig(
             tensor_parallel_size=tp_size,
+            prefill_context_parallel_size=pcp_size,
             data_parallel_size=dp_size,
             enable_expert_parallel=True,
             enable_eplb=True,
@@ -1590,11 +1595,11 @@ def test_eplb_num_redundant_experts_auto_computation(
     # Verify the computed value matches expected
     assert parallel_config.eplb_config.num_redundant_experts == expected, (
         f"Expected num_redundant_experts={expected} for "
-        f"num_experts={num_experts}, ep_size={tp_size * dp_size}, "
+        f"num_experts={num_experts}, ep_size={tp_size * pcp_size * dp_size}, "
         f"got {parallel_config.eplb_config.num_redundant_experts}"
     )
     # Verify divisibility constraint
-    ep_size = tp_size * dp_size
+    ep_size = tp_size * pcp_size * dp_size
     total = num_experts + parallel_config.eplb_config.num_redundant_experts
     assert total % ep_size == 0, (
         f"Divisibility check failed: ({num_experts} + "
