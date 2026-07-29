@@ -497,16 +497,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Qwen2MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen1.5-MoE-A2.7B-Chat"),
     "Qwen3ForCausalLM": _HfExamplesInfo("Qwen/Qwen3-8B"),
     "Qwen3MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen3-30B-A3B"),
-    "Qwen3_5ForCausalLM": _HfExamplesInfo(
-        "Qwen/Qwen3.5-0.8B",
-        max_model_len=4096,
-        hf_overrides={"architectures": ["Qwen3_5ForCausalLM"]},
-    ),
-    "Qwen3_5MoeForCausalLM": _HfExamplesInfo(
-        "Qwen/Qwen3.5-35B-A3B",
-        max_model_len=4096,
-        hf_overrides={"architectures": ["Qwen3_5MoeForCausalLM"]},
-    ),
+    "Qwen3_5ForCausalLM": _HfExamplesInfo("codecho/Qwen3.5-0.8B-text-only"),
+    "Qwen3_5MoeForCausalLM": _HfExamplesInfo("codecho/Qwen3.5-35B-A3B-text-only"),
     "MellumForCausalLM": _HfExamplesInfo("JetBrains/Mellum2-12B-A2.5B-Base"),
     "Qwen3NextForCausalLM": _HfExamplesInfo(
         "Qwen/Qwen3-Next-80B-A3B-Instruct",
