@@ -430,7 +430,10 @@ class Glm4MoeModel(nn.Module):
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
-                config.vocab_size, config.hidden_size, prefix=f"{prefix}.embed_tokens"
+                config.vocab_size,
+                config.hidden_size,
+                prefix=f"{prefix}.embed_tokens",
+                quant_config=quant_config,
             )
         else:
             self.embed_tokens = PPMissingLayer()

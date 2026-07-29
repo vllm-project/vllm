@@ -88,6 +88,8 @@ class OpenPanguMultiTokenPredictor(DeepSeekMultiTokenPredictor):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
+            quant_config=vllm_config.quant_config,
+            prefix=f"{prefix}.embed_tokens",
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
