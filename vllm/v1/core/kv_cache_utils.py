@@ -964,8 +964,10 @@ def _pool_bytes_per_block(
         # buckets = {page_size: [[layer_names], [layer_names], ...]}
         buckets = _bucket_layers_by_page_size(kv_cache_groups)
         return sum(ps * len(slots) for ps, slots in buckets.items())
+    page_size = get_uniform_page_size(
+        [group.kv_cache_spec for group in kv_cache_groups]
+    )
     group_size = max(len(g.layer_names) for g in kv_cache_groups)
-    page_size = get_uniform_page_size([g.kv_cache_spec for g in kv_cache_groups])
     return page_size * group_size
 
 
@@ -987,6 +989,22 @@ def get_num_blocks(
     num_blocks = int(available_memory // page_size // num_layers)
     num_blocks = max(num_blocks, 0)
     return may_override_num_blocks(vllm_config, num_blocks)
+
+
+def _exclude_draft_groups(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> list[KVCacheGroupSpec]:
+    """Filter out groups belonging to the draft model.
+
+    Draft groups have a fundamentally different page size (Mamba state vs
+    attention KV), so they must not participate in page-size unification.
+    If the result is empty (all-draft worker), return the original list so
+    the caller's assertion gives a clear error instead of a silent skip.
+    """
+    filtered = [
+        g for g in kv_cache_groups if not any("draft_model" in n for n in g.layer_names)
+    ]
+    return filtered if filtered else kv_cache_groups
 
 
 def get_uniform_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
@@ -1082,9 +1100,9 @@ def unify_kv_cache_spec_page_size(
                 ratio = max_page_size // layer_page_size
                 new_block_size = layer_spec.block_size * ratio
                 new_spec = replace(layer_spec, block_size=new_block_size)
-            elif (
-                isinstance(layer_spec, AttentionSpec)
-                and layer_spec.indexes_kv_by_block_stride
+            elif isinstance(layer_spec, (AttentionSpec, MambaSpec)) and (
+                not isinstance(layer_spec, AttentionSpec)
+                or layer_spec.indexes_kv_by_block_stride
             ):
                 new_spec = replace(layer_spec, page_size_padded=max_page_size)
             else:
@@ -1409,7 +1427,7 @@ def get_kv_cache_config_from_groups(
         group_size = max(len(group.layer_names) for group in kv_cache_groups)
 
         page_size = get_uniform_page_size(
-            [group.kv_cache_spec for group in kv_cache_groups]
+            [group.kv_cache_spec for group in _exclude_draft_groups(kv_cache_groups)]
         )
         assert group_size > 0, "group_size must be greater than 0"
         num_blocks = get_num_blocks(
@@ -1828,14 +1846,16 @@ def get_kv_cache_groups(
     # Classical draft models are detected by the 'draft_model' name prefix;
     # EAGLE-style drafters are detected by layer index >= target layer count.
     speculator_layers = _identify_speculator_layers(
-        vllm_config, list(filtered_spec.keys()))
+        vllm_config, list(filtered_spec.keys())
+    )
 
     # As KVCacheManager can only allocate memory of one size, we need to unify
-    # the page size of the layers. For cases cannot be unified, this function
-    # will raise an error.
+    # the page size of ALL layers (target + draft). unify_kv_cache_spec_page_size
+    # now handles MambaSpec via page_size_padded.
     filtered_spec = unify_kv_cache_spec_page_size(filtered_spec)
     groups = _get_kv_cache_groups_uniform_page_size(
-        filtered_spec, speculator_layers=speculator_layers)
+        filtered_spec, speculator_layers=speculator_layers
+    )
 
     # Add hidden-state layers back with page aligned to the common page.
     if hidden_specs:
@@ -1935,7 +1955,9 @@ def _max_memory_usage_bytes_from_groups(
 
     # General case: group_size pools, each shared by one layer per group
     # Memory = group_size * page_size * blocks_for_max_len
-    group_size = max(len(group.layer_names) for group in kv_cache_groups)
+    group_size = max(
+        len(group.layer_names) for group in _exclude_draft_groups(kv_cache_groups)
+    )
     page_size = get_uniform_page_size(
         [group.kv_cache_spec for group in kv_cache_groups]
     )

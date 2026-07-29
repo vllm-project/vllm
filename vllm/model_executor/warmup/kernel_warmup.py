@@ -94,6 +94,26 @@ def kernel_warmup(worker: "Worker"):
     elif has_flashinfer() and current_platform.has_device_capability(90):
         flashinfer_autotune(worker.model_runner)
 
+    # Hybrid/Mamba model (HasInnerState protocol) warmup.
+    # Run a small dummy forward pass to compile all Triton kernels
+    # (causal_conv1d, zero_kv_blocks, batch_memcpy) before graph capture.
+    from vllm.model_executor.models.interfaces import HasInnerState
+
+    model = worker.get_model()
+    is_hybrid_or_mamba = isinstance(model, HasInnerState)
+
+    if is_hybrid_or_mamba and not worker.model_runner.is_pooling_model:
+        logger.info("Warming up hybrid/Mamba Triton kernels.")
+        # Running a dummy pass with mixed batch to JIT compile both prefill and decode
+        # kernels for Mamba/ShortConv layers.
+        worker.model_runner._dummy_run(
+            num_tokens=16,
+            skip_eplb=True,
+            is_profile=True,
+            force_attention=True,
+            create_mixed_batch=True,
+        )
+
     # FlashInfer attention warmup
     # Only warmup if the model has FlashInfer attention groups
     # and is not a pooling model

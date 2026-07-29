@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import abstractmethod
 from collections.abc import Iterable
+from math import prod
 
 import torch
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.selector import get_mamba_attn_backend
@@ -45,9 +47,21 @@ class MambaBase(AttentionLayerBase):
         mamba_block_size = vllm_config.cache_config.mamba_block_size
         assert mamba_block_size is not None
         page_size_padded = vllm_config.cache_config.mamba_page_size_padded
+        shapes = tuple(self.get_state_shape())
+        dtypes = self.get_state_dtype()
+        # mamba_page_size_padded may be computed before num_speculative_tokens
+        # changes the state shape; discard it if it would fail the assertion
+        # inside page_size_bytes.
+        if page_size_padded is not None:
+            actual_page = sum(
+                prod(shape) * get_dtype_size(dtype)
+                for shape, dtype in zip(shapes, dtypes)
+            )
+            if page_size_padded < actual_page:
+                page_size_padded = None
         return MambaSpec(
-            shapes=tuple(self.get_state_shape()),
-            dtypes=self.get_state_dtype(),
+            shapes=shapes,
+            dtypes=dtypes,
             block_size=mamba_block_size,
             page_size_padded=page_size_padded,
             mamba_type=self.mamba_type,

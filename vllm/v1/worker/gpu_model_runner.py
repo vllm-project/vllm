@@ -7174,7 +7174,13 @@ class GPUModelRunner(
                     _, blk_stride = packing
                     num_blocks = raw_tensor.numel() // blk_stride
                 else:
-                    assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
+                    assert (
+                        raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
+                        or isinstance(kv_cache_spec, MambaSpec)
+                    ), (
+                        f"raw_tensor.numel()={raw_tensor.numel()} not divisible by"
+                        f" page_size_bytes={kv_cache_spec.page_size_bytes}"
+                    )
                     num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
                 if isinstance(kv_cache_spec, AttentionSpec):
                     has_attn = True
