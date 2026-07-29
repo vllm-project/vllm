@@ -1447,6 +1447,11 @@ def test_register_kv_caches_hybrid_mla_dual_purpose_regions():
     kv_cache_config = _make_hybrid_mla_kv_cache_config()
     unified_page = kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
     vllm_config = create_vllm_config(block_size=12)
+    # kv_buffer_device defaults to the *real* platform's device type, which on
+    # a CPU-only test host would make this a host-buffer worker: host xfer
+    # buffers are per-layer, so the HMA shared tensors would not be
+    # deduplicated. Pin it to the faked device type.
+    vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
 
     fake_backend = MagicMock()
     fake_backend.get_supported_kernel_block_sizes.return_value = [4]

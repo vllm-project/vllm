@@ -1180,6 +1180,9 @@ class DeepseekV2MLAAttention(nn.Module):
             # never-written topk buffer.
             skip_topk=_skip_topk and not is_mtp_layer,
             non_causal_multi_token_decode=non_causal_multi_token_decode,
+            # Do not skip scoring for MTP layers: their top-k buffer may be
+            # reused by later draft iterations through index sharing.
+            allow_short_prefill_indexer_scoring_skip=not is_mtp_layer,
         )
 
     def forward(

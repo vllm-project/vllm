@@ -171,11 +171,20 @@ def apply_moe_activation(
         # Fused CUDA kernel: writes straight to `output`, no fp32 temporaries.
         # (The pure-torch fallback below upcast both halves to fp32 and
         # allocated ~8 temporaries per call, blowing up MoE memory.)
-        # linear_beta <= 0 signals "unset" to the kernel (up passed through).
-        beta = 1.0 if activation_situ_beta is None else activation_situ_beta
-        linear_beta = activation_situ_linear_beta
+        # Both betas come from FusedMoEConfig; a missing beta means the caller
+        # bypassed the config plumbing, so fail rather than silently use 1.0.
+        # linear_beta is genuinely optional: <= 0 signals "unset" to the kernel
+        # (up passed through), matching SituAndMul(linear_beta=None).
+        assert activation_situ_beta is not None, (
+            "SITU requires activation_situ_beta from FusedMoEConfig"
+        )
         torch.ops._C.situ_and_mul(
-            output, input, beta, -1.0 if linear_beta is None else linear_beta
+            output,
+            input,
+            activation_situ_beta,
+            -1.0
+            if activation_situ_linear_beta is None
+            else activation_situ_linear_beta,
         )
     elif activation == MoEActivation.SWIGLUOAI:
         torch.ops._C.swigluoai_and_mul(output, input)

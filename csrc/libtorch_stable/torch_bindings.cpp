@@ -591,7 +591,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "limit=7.0) "
       "-> ()");
 
-  // Kimi SITU (SituGLU) gated activation. linear_beta<=0 means unset.
+  // SituGLU implementation used in Kimi models.
   ops.def(
       "situ_and_mul(Tensor! out, Tensor input, float beta=1.0, float "
       "linear_beta=-1.0) -> ()");

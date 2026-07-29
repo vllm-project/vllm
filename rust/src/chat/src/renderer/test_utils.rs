@@ -48,7 +48,10 @@ pub(crate) struct FixtureRequest {
     messages: Vec<FixtureMessage>,
     add_generation_prompt: Option<bool>,
     reasoning_effort: Option<ReasoningEffort>,
-    /// Extra chat-template kwargs (thinking, preserve_thinking, response_format, …).
+    /// Standard response format passed to model-specific renderers.
+    #[serde(default)]
+    response_format: Option<Value>,
+    /// Extra chat-template kwargs (thinking, preserve_thinking, …).
     #[serde(default)]
     template_kwargs: HashMap<String, Value>,
     /// When omitted, defaults to `auto` if tools are present, otherwise `none`.
@@ -65,6 +68,7 @@ impl FixtureFile {
                 messages,
                 add_generation_prompt: None,
                 reasoning_effort: None,
+                response_format: None,
                 template_kwargs: HashMap::new(),
                 tool_choice: None,
             },
@@ -182,6 +186,7 @@ impl FixtureRequest {
             request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
         }
         request.chat_options.reasoning_effort = self.reasoning_effort;
+        request.chat_options.response_format = self.response_format;
         request.chat_options.template_kwargs.extend(self.template_kwargs);
 
         // Options supply a default thinking toggle only when the fixture did not.

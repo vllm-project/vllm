@@ -4,23 +4,49 @@
 //! Golden fixtures generated from HF remote-code `encoding_k3.py`.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use expect_test::{expect, expect_file};
 use serde_json::json;
+use vllm_text::Prompt;
+use vllm_text::tokenizer::DynTokenizer;
+use vllm_tokenizer::Tokenizer;
+use vllm_tokenizer::test_utils::TestTokenizer;
 
 use super::KimiK3ChatRenderer;
 use crate::AssistantContentBlock;
 use crate::ChatRenderer;
+use crate::renderer::kimi_k3::encoding::{CLOSE, END_OF_MSG, IMAGE_PLACEHOLDER, OPEN, SEP};
 use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
-use crate::request::{ChatMessage, GenerationPromptMode, ReasoningEffort};
+use crate::request::{ChatContentPart, ChatMessage, GenerationPromptMode, ReasoningEffort};
+
+const OPEN_ID: u32 = 256;
+const CLOSE_ID: u32 = 257;
+const SEP_ID: u32 = 258;
+const END_OF_MSG_ID: u32 = 259;
+const MEDIA_ID: u32 = 260;
+
+fn test_tokenizer() -> TestTokenizer {
+    TestTokenizer::new()
+        .with_special_token(OPEN, OPEN_ID)
+        .with_special_token(CLOSE, CLOSE_ID)
+        .with_special_token(SEP, SEP_ID)
+        .with_special_token(END_OF_MSG, END_OF_MSG_ID)
+        .with_special_token(IMAGE_PLACEHOLDER, MEDIA_ID)
+}
+
+fn render_token_ids(request: &crate::request::ChatRequest, tokenizer: DynTokenizer) -> Vec<u32> {
+    let prompt = KimiK3ChatRenderer::new(tokenizer).render(request).unwrap().prompt;
+    let Prompt::TokenIds(token_ids) = prompt else {
+        panic!("kimi k3 renderer should return token IDs")
+    };
+    token_ids
+}
 
 fn render_request(request: &crate::request::ChatRequest) -> String {
-    KimiK3ChatRenderer::new()
-        .render(request)
-        .unwrap()
-        .prompt
-        .into_text()
-        .expect("kimi k3 renderer should return text prompt")
+    let tokenizer: DynTokenizer = Arc::new(test_tokenizer());
+    let token_ids = render_token_ids(request, tokenizer.clone());
+    tokenizer.decode(&token_ids, false).unwrap()
 }
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -62,6 +88,44 @@ fn golden_controls_thinking_off() {
 #[test]
 fn golden_dynamic_system_tool_declare() {
     assert_golden("dynamic_system_tool_declare");
+}
+
+#[test]
+fn token_writer_protects_literal_control_and_media_markers() {
+    let tokenizer = Arc::new(test_tokenizer());
+    let user_text = format!("literal {OPEN} and {}", super::encoding::IMAGE_PLACEHOLDER);
+    let mut request = crate::request::ChatRequest::for_test();
+    request.messages = vec![ChatMessage::user(vec![
+        ChatContentPart::text(user_text),
+        ChatContentPart::image_url("data:image/png;base64,test"),
+    ])];
+    request
+        .chat_options
+        .template_kwargs
+        .insert("thinking".to_string(), json!(false));
+    request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
+
+    let token_ids = render_token_ids(&request, tokenizer.clone());
+
+    assert_eq!(
+        token_ids.iter().filter(|&&token_id| token_id == OPEN_ID).count(),
+        1
+    );
+    assert_eq!(
+        token_ids.iter().filter(|&&token_id| token_id == MEDIA_ID).count(),
+        1
+    );
+
+    let flattened = tokenizer.decode(&token_ids, false).unwrap();
+    let flattened_ids = tokenizer.encode(&flattened, false).unwrap();
+    assert_eq!(
+        flattened_ids.iter().filter(|&&token_id| token_id == OPEN_ID).count(),
+        2
+    );
+    assert_eq!(
+        flattened_ids.iter().filter(|&&token_id| token_id == MEDIA_ID).count(),
+        2
+    );
 }
 
 #[test]
@@ -190,7 +254,9 @@ fn rejects_removed_medium_thinking_effort() {
         .template_kwargs
         .insert("thinking_effort".to_string(), json!("medium"));
 
-    let error = KimiK3ChatRenderer::new().render(&request).unwrap_err();
+    let error = KimiK3ChatRenderer::new(Arc::new(test_tokenizer()))
+        .render(&request)
+        .unwrap_err();
 
     expect![[r#"
         ChatTemplate(

@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
+from vllm.model_executor.layers.fused_moe.utils import trtllm_moe_pack_topk_ids_weights
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp4Static,
@@ -78,7 +79,7 @@ class TrtLlmMxfp4ExpertsBase:
         else:
             self.gemm1_clamp_limit = None
 
-        # SITU (Kimi SituGLU) TRTLLM-Gen kernel computes
+        # SITU (SituGLU) TRTLLM-Gen kernel computes
         #   left  = alpha * tanh(x0 / alpha) * sigmoid(x0)   # gate (x0)
         #   right = beta  * tanh(x1 / beta)                  # up   (x1)
         # which matches vLLM's situ_and_mul with (beta, linear_beta), so map
@@ -261,7 +262,6 @@ class TrtLlmMxfp4ExpertsMonolithic(
             routing_method_type=self.routing_method_type,
             do_finalize=True,
             activation_type=self._flashinfer_activation_type(activation),
-            is_private=True,
             tune_max_num_tokens=max(self.max_capture_size, 1),
             output=output,
             routing_replay_out=routing_replay_out,
@@ -348,8 +348,9 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
     ) -> None:
         from flashinfer import trtllm_fp4_block_scale_routed_moe
 
+        packed_tensor = trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights)
         trtllm_fp4_block_scale_routed_moe(
-            topk_ids=(topk_ids, topk_weights),
+            topk_ids=packed_tensor,
             routing_bias=None,
             hidden_states=x_quant,
             hidden_states_scale=x_scale,
@@ -379,7 +380,6 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
             do_finalize=True,
             enable_pdl=True,
             activation_type=self._flashinfer_activation_type(activation),
-            is_private=True,
             output=output,
             tune_max_num_tokens=max(self.max_capture_size, 1),
         )

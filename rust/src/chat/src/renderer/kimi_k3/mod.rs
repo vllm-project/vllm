@@ -8,19 +8,22 @@ mod encoding;
 mod tests;
 
 use vllm_text::Prompt;
+use vllm_text::tokenizer::DynTokenizer;
 
 use super::{ChatRenderer, RenderedPrompt, request_template_kwargs};
 use crate::Result;
 use crate::request::ChatRequest;
 
 /// Dedicated Kimi K3 XTML renderer.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct KimiK3ChatRenderer;
+#[derive(Clone)]
+pub struct KimiK3ChatRenderer {
+    tokenizer: DynTokenizer,
+}
 
 impl KimiK3ChatRenderer {
     /// Create a Kimi K3 renderer.
-    pub fn new() -> Self {
-        Self
+    pub fn new(tokenizer: DynTokenizer) -> Self {
+        Self { tokenizer }
     }
 }
 
@@ -29,7 +32,7 @@ impl ChatRenderer for KimiK3ChatRenderer {
         request.validate()?;
 
         Ok(RenderedPrompt {
-            prompt: Prompt::Text(encoding::render_request(request)?),
+            prompt: Prompt::TokenIds(encoding::render_request(request, self.tokenizer.as_ref())?),
             effective_template_kwargs: request_template_kwargs(request),
         })
     }

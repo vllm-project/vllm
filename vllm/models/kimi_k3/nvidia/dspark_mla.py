@@ -35,7 +35,8 @@ class ReplicatedDSparkMarkovHead(DSparkMarkovHead):
         markov_rank: int,
         prefix: str,
     ) -> None:
-        super().__init__(
+        # TODO: Remove this mypy workaround once the K3 PR is fully merged.
+        super().__init__(  # type: ignore[call-arg]
             vocab_size,
             draft_vocab_size,
             markov_rank,

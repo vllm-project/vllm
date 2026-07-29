@@ -131,6 +131,22 @@ steps:
         - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
         - HYBRID_SSM=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
+- label: NixlConnector PD edge case test (2 GPUs)
+  key: nixlconnector-pd-edge-cases-2-gpus
+  timeout_in_minutes: 40
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 2
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+    - vllm/v1/core/sched/
+    - tests/v1/kv_connector/nixl_integration/
+  env:
+    PREFILL_GPU_ID: "0"
+    DECODE_GPU_ID: "1"
+  commands:
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - bash v1/kv_connector/nixl_integration/run_edge_case_test.sh
+
 - label: Hybrid SSM NixlConnector PD prefix cache test (2 GPUs)
   key: hybrid-ssm-nixlconnector-pd-prefix-cache-2-gpus
   timeout_in_minutes: 25

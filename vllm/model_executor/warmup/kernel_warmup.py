@@ -96,7 +96,7 @@ def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
     )
 
 
-def kernel_warmup(worker: "Worker"):
+def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
         minimax_m3_msa_warmup,
     )
@@ -105,7 +105,8 @@ def kernel_warmup(worker: "Worker"):
         # Pooling models do not use the generation slot-mapping path.
         if not worker.model_runner.is_pooling_model:
             warm_v1_block_table_kernels(worker.model_runner)
-        # No dummy run reaches the scheduler-driven KV-block zeroing path.
+        # The KV-block zeroing kernel is driven by the scheduler's
+        # `new_block_ids_to_zero`, so no dummy run ever reaches it.
         zeroer = getattr(worker.model_runner, "_kv_block_zeroer", None)
         if zeroer is not None:
             zeroer.warmup(worker.model_runner.kv_cache_config.num_blocks)
@@ -124,6 +125,23 @@ def kernel_warmup(worker: "Worker"):
     )
 
     # Run next so input-prep kernels JIT against pristine runner state.
+    if worker.vllm_config.kernel_config.enable_jit_warmup:
+        kimi_k3_triton_warmup(worker)
+        fa4_cutedsl_warmup(worker)
+        sparse_mla_triton_warmup(worker)
+
+    if current_platform.has_device_capability(90):
+        _warmup_ll_bf16_router_gemm(worker.get_model())
+
+    if worker.vllm_config.kernel_config.enable_cutedsl_warmup:
+        # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
+        # to the shared JIT warmup infrastructure.
+        # https://github.com/vllm-project/vllm/pull/47451
+        cutedsl_warmup()
+
+    if process_local_only:
+        return
+
     flashinfer_sparse_mla_decode_autotune_warmup(worker)
     deepseek_v4_sparse_mla_attention_warmup(worker)
 
@@ -148,9 +166,6 @@ def kernel_warmup(worker: "Worker"):
         logger.info("Skipping FlashInfer autotune because it is disabled.")
     elif has_flashinfer() and current_platform.has_device_capability(90):
         flashinfer_autotune(worker.model_runner)
-
-    if current_platform.has_device_capability(90):
-        _warmup_ll_bf16_router_gemm(worker.get_model())
 
     # FlashInfer attention warmup
     # Only warmup if the model has FlashInfer attention groups
@@ -183,17 +198,6 @@ def kernel_warmup(worker: "Worker"):
             force_attention=True,
             create_mixed_batch=True,
         )
-
-    if worker.vllm_config.kernel_config.enable_cutedsl_warmup:
-        # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
-        # to the shared JIT warmup infrastructure.
-        # https://github.com/vllm-project/vllm/pull/47451
-        cutedsl_warmup()
-
-    if worker.vllm_config.kernel_config.enable_jit_warmup:
-        kimi_k3_triton_warmup(worker)
-        fa4_cutedsl_warmup(worker)
-        sparse_mla_triton_warmup(worker)
 
 
 def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:

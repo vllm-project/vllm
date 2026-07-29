@@ -407,7 +407,8 @@ class KimiMLAAttention(nn.Module):
                 prefix=f"{prefix}.g_proj",
             )
 
-        mla_modules = MLAModules(
+        # TODO: Remove this mypy workaround once the K3 PR is fully merged.
+        mla_modules = MLAModules(  # type: ignore[call-arg]
             kv_a_layernorm=self.kv_a_layernorm,
             kv_b_proj=self.kv_b_proj,
             rotary_emb=None,

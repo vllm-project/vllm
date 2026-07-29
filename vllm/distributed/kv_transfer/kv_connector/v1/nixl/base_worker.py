@@ -68,6 +68,7 @@ from vllm.distributed.parallel_state import (
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import make_zmq_path
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -172,11 +173,6 @@ class NixlBaseConnectorWorker:
         Split counts are derived from source_ranks_per_group lengths.
         FA uses rank_to_attention_slot for the slot offset;
         SSM uses the rank's positional index.
-
-        With ``block_size_ratio`` > 1 the FA descriptors are remote-granularity
-        sub-blocks; replicated regions and single-source FA pass through whole,
-        and SSM descriptors are never ratio-expanded, so only genuinely
-        head-sharded FA reads are incompatible with a block-size mismatch.
         """
         fa_idx = next(
             i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)
@@ -458,7 +454,7 @@ class NixlBaseConnectorWorker:
         self.src_xfer_handles_by_block_size: dict[int, int] = {}
         # Local descriptor arrays per remote block size (block_size_ratio>1),
         # kept for building per-tp-ratio splits at the same granularity.
-        self._src_blocks_data_by_block_size: dict[int, np.ndarray] = {}
+        self.src_blocks_data_by_block_size: dict[int, np.ndarray] = {}
         # Populated dynamically during handshake based on remote configuration.
         # Per-source split handles, keyed by (tp_ratio, remote_block_size).
         self.src_xfer_handles_by_tp_ratio: dict[tuple[int, int], list[int]] = {}
@@ -717,8 +713,9 @@ class NixlBaseConnectorWorker:
                     )
                 setup_agent_time = time.perf_counter()
                 logger.debug(
-                    "NIXL handshake: add agent took: %s",
+                    "NIXL handshake: add agent took: %s (notif_agents_only=%s)",
                     setup_agent_time - got_metadata_time,
+                    notif_agents_only,
                 )
                 remote_ranks = (remote_pp_rank, remote_rank)
                 remote_rank_to_agent_name[remote_ranks] = remote_agent_name
@@ -1141,19 +1138,20 @@ class NixlBaseConnectorWorker:
             # [`num_blocks` * `page_size`]
             curr_tensor_size_bytes = num_blocks * physical_page_size
 
+            base_addr = cache.data_ptr()
             is_mla_region = isinstance(
                 layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
             )
-            base_addr = cache.data_ptr()
             if base_addr in seen_base_addresses:
-                region_idx = seen_base_addresses.index(base_addr)
-                self._region_is_mla[region_idx] = (
-                    self._region_is_mla[region_idx] or is_mla_region
-                )
                 # NOTE (NickLucche) HMA employs memory pooling to share tensors
                 # across groups. This results in skipping all tensors but the ones
                 # pointed to by group0. Also, generally we will have more blocks
                 # per tensor but fewer regions.
+                # A shared tensor may back both SSM and attention layers (e.g.
+                # KDA+MLA in KimiLinear); the region's FA view is MLA whichever
+                # layer registered it first.
+                idx = seen_base_addresses.index(base_addr)
+                self._region_is_mla[idx] |= is_mla_region
                 logger.debug("Skipping %s because it's already seen", layer_name)
                 continue
             logger.debug(
@@ -1632,8 +1630,8 @@ class NixlBaseConnectorWorker:
                     remote_block_size
                 )
                 self.src_xfer_handles_by_block_size[remote_block_size] = handle
-                self._src_blocks_data_by_block_size[remote_block_size] = blocks_data
-            src_blocks_data = self._src_blocks_data_by_block_size[remote_block_size]
+                self.src_blocks_data_by_block_size[remote_block_size] = blocks_data
+            src_blocks_data = self.src_blocks_data_by_block_size[remote_block_size]
 
         ### (Optional) Register local agent memory regions. MLA is not split.
         split_key = (tp_ratio, remote_block_size)
@@ -1811,12 +1809,16 @@ class NixlBaseConnectorWorker:
         if self._has_mamba and self.use_mla:
             # Hybrid MLA+SSM (e.g. KimiLinear's KDA+MLA): regions are
             # kernel-granularity views of the mamba-unified page. The MLA
-            # per-token page and the kernel block size are TP-independent,
-            # so block_lens must match exactly even under heterogeneous TP.
+            # per-token page is TP-independent, so the block lengths must
+            # match up to the kernel block size ratio even under
+            # heterogeneous TP (remote kernel blocks may be smaller).
             # SSM geometry is validated via ssm_sizes/conv offsets instead.
-            assert self.block_len_per_layer == nixl_agent_meta.block_lens, (
+            assert self.block_len_per_layer == [
+                block_len * block_size_ratio for block_len in nixl_agent_meta.block_lens
+            ], (
                 "Hybrid MLA kernel-granularity block lengths must match "
-                f"between P and D: local={self.block_len_per_layer}, "
+                f"between P and D (block_size_ratio={block_size_ratio}): "
+                f"local={self.block_len_per_layer}, "
                 f"remote={nixl_agent_meta.block_lens}."
             )
         elif not self._has_mamba:
@@ -1932,29 +1934,38 @@ class NixlBaseConnectorWorker:
     def post_process_device_kv_on_receive(
         self,
         block_size_ratio: int,
-        block_ids_list: list[tuple[list[int], int | None]],
+        block_ids_list: list[tuple[list[int], int]],
+        convert: bool = True,
     ):
         """
         Post process device kv cache after receiving from remote.
 
-        3 types of post processing supported:
+        3 types of conversion supported (``convert``):
             * kv_cache_postprocess_layout => convert from HND to NHD
             * kv_cache_postprocess_blksize => convert from small block size
               to large block size
             * kv_cache_postprocess_blksize_and_layout => convert from small
               block size to large block size and convert from HND to NHD
 
-        With a block-size ratio, the last local block of a request may have
-        received fewer than ``block_size_ratio`` remote sub-blocks; its
-        untransferred token tail is zeroed here, since these freshly
-        allocated blocks were excluded from the scheduler's KV zeroing
-        (stale bytes could otherwise surface as NaNs on hybrid models).
+        The transfer only covers ``covered_sub_blocks`` remote-sized
+        sub-blocks of each request's local attention blocks; the rest was
+        clipped, either by remote-block pairing (block-size ratio) or by the
+        hetero-ppl front trim in ``_apply_prefix_caching``. Those blocks were
+        excluded from the scheduler's alloc-time KV zeroing (which would race
+        the RDMA write), so everything past the covered range is zeroed here.
+        Stale bytes would otherwise surface as garbage or NaNs once decode
+        grows into the untransferred tail.
         """
         if len(self.device_kv_caches) == 0:
             return
         assert block_size_ratio >= 1, "Only nP < nD supported currently."
         assert self.transfer_topo is not None
-        if self.enable_permute_local_kv and block_size_ratio > 1:
+        if not convert:
+            logger.debug(
+                "Post-processing device kv cache on receive by zeroing "
+                "untransferred blocks."
+            )
+        elif self.enable_permute_local_kv and block_size_ratio > 1:
             logger.debug(
                 "Post-processing device kv cache on receive by converting "
                 "block_size with %sx bigger and permuting layout from HND"
@@ -1974,63 +1985,44 @@ class NixlBaseConnectorWorker:
             )
 
         attn_caches = self._attention_kv_caches
+        device = attn_caches[0].device
         for block_ids, covered_sub_blocks in block_ids_list:
-            indices = torch.tensor(block_ids, device=self.device_type, dtype=torch.long)
+            # Blocks the transfer didn't write: the token tail of the last
+            # partially covered block, then everything beyond it.
+            covered_blocks, sub_blocks_in_last = divmod(
+                covered_sub_blocks, block_size_ratio
+            )
+            first_stale = covered_blocks + (1 if sub_blocks_in_last else 0)
+            has_stale = first_stale < len(block_ids)
+            indices = None
+            if convert or has_stale:
+                indices = async_tensor_h2d(block_ids, device, torch.long)
 
-            for cache in attn_caches:
-                if self.enable_permute_local_kv and block_size_ratio > 1:
-                    kv_postprocess_blksize_and_layout_on_receive(
-                        cache, indices, block_size_ratio
-                    )
-                elif self.enable_permute_local_kv:
-                    kv_postprocess_layout_on_receive(cache, indices)
-                else:
-                    kv_postprocess_blksize_on_receive(cache, indices, block_size_ratio)
+            if convert:
+                for cache in attn_caches:
+                    if self.enable_permute_local_kv and block_size_ratio > 1:
+                        kv_postprocess_blksize_and_layout_on_receive(
+                            cache, indices, block_size_ratio
+                        )
+                    elif self.enable_permute_local_kv:
+                        kv_postprocess_layout_on_receive(cache, indices)
+                    else:
+                        kv_postprocess_blksize_on_receive(
+                            cache, indices, block_size_ratio
+                        )
 
-            if covered_sub_blocks is None:
-                continue
-            # Zero the untransferred token tail of the last covered block
-            # (blocks wholly beyond the data are never read and stay as-is).
-            last_idx = (covered_sub_blocks - 1) // block_size_ratio
-            covered_in_last = covered_sub_blocks - last_idx * block_size_ratio
-            if covered_in_last == block_size_ratio:
-                continue
-            last_block_id = block_ids[last_idx]
-            for cache in attn_caches:
-                # Both post-processed layouts leave tokens on dim 1.
-                sub_block_tokens = cache.shape[1] // block_size_ratio
-                cache[last_block_id, covered_in_last * sub_block_tokens :].zero_()
-
-    def _zero_untransferred_hetero_ppl_tail(self, meta: ReqMeta, remote_info) -> None:
-        """Zero attention kernel blocks the hetero-ppl transfer clipped.
-
-        With equal kernel pages but differing logical block sizes (hybrid
-        heterogeneous TP), the transfer is front-trimmed to
-        min(local, remote) kernel blocks, leaving the tail of the last
-        local logical block unwritten. Those blocks were excluded from the
-        scheduler's alloc-time KV zeroing (it would race the RDMA write),
-        so stale bytes would otherwise surface as garbage once decode
-        grows into them.
-        """
-        assert meta.remote is not None
-        if (
-            not self._has_mamba
-            or remote_info.remote_physical_blocks_per_logical
-            == self._physical_blocks_per_logical_kv_block
-        ):
-            return
-        stale_ids: list[int] = []
-        for g, local_group in enumerate(meta.local_physical_block_ids):
-            if not local_group or _is_ssm_spec(self._group_spec_types[g]):
-                continue
-            covered = min(len(local_group), len(meta.remote.block_ids[g]))
-            stale_ids.extend(local_group[covered:])
-        if not stale_ids:
-            return
-        caches = self._attention_kv_caches
-        indices = torch.tensor(stale_ids, device=caches[0].device, dtype=torch.long)
-        for cache in caches:
-            cache.index_fill_(0, indices, 0)
+            if sub_blocks_in_last:
+                last_block_id = block_ids[covered_blocks]
+                for cache in attn_caches:
+                    # Both post-processed layouts leave tokens on dim 1.
+                    sub_block_tokens = cache.shape[1] // block_size_ratio
+                    zero_from = sub_blocks_in_last * sub_block_tokens
+                    cache[last_block_id, zero_from:].zero_()
+            if has_stale:
+                assert indices is not None
+                stale_ids = indices[first_stale:]
+                for cache in attn_caches:
+                    cache.index_fill_(0, stale_ids, 0)
 
     def post_process_device_kv_on_receive_heterogeneous_attn(
         self, block_ids: list[int]
@@ -2100,30 +2092,33 @@ class NixlBaseConnectorWorker:
             if self.use_host_buffer:
                 self.sync_recved_kv_to_device(req_id, meta)
 
-            # post processing for heteroblocksize
+            # Post processing for heteroblocksize/layout, and for blocks the
+            # transfer clipped. The latter happens either at remote-block
+            # granularity (block_size_ratio > 1) or at kernel-block
+            # granularity, when equal kernel pages meet differing logical
+            # block sizes and _apply_prefix_caching front-trims to the
+            # minimum count (hybrid heterogeneous TP).
             remote_info = self.transfer_topo.get_engine_info(meta.remote.engine_id)
             block_size_ratio = self.transfer_topo.block_size_ratio(
                 remote_info.remote_block_size
             )
-            if not self.use_mla and (
-                block_size_ratio > 1 or self.enable_permute_local_kv
-            ):
+            hetero_ppl = (
+                remote_info.remote_physical_blocks_per_logical
+                != self._physical_blocks_per_logical_kv_block
+            )
+            if block_size_ratio > 1 or self.enable_permute_local_kv or hetero_ppl:
                 for g, local_group in enumerate(meta.local_physical_block_ids):
                     if not local_group or _is_ssm_spec(self._group_spec_types[g]):
                         continue
                     # Number of remote-sized sub-blocks the transfer covered;
-                    # the remainder of the last local block was clipped from
-                    # the transfer and must be zeroed.
-                    covered_sub_blocks = None
-                    if block_size_ratio > 1:
-                        covered_sub_blocks = min(
-                            len(local_group) * block_size_ratio,
-                            len(meta.remote.block_ids[g]),
-                        )
+                    # everything past this was clipped and must be zeroed.
+                    covered_sub_blocks = min(
+                        len(local_group) * block_size_ratio,
+                        len(meta.remote.block_ids[g]),
+                    )
                     block_ids_for_blocksize_post_process[block_size_ratio].append(
                         (local_group, covered_sub_blocks)
                     )
-            self._zero_untransferred_hetero_ppl_tail(meta, remote_info)
             # post processing for heterogeneous attention
             if self.enable_heterogeneous_attn_post_process:
                 block_ids_for_heterogeneous_attn_post_process.append(
@@ -2133,7 +2128,14 @@ class NixlBaseConnectorWorker:
             block_size_ratio,
             block_ids_list,
         ) in block_ids_for_blocksize_post_process.items():
-            self.post_process_device_kv_on_receive(block_size_ratio, block_ids_list)
+            # MLA never needs the block-size/layout conversion, but its
+            # clipped blocks still need zeroing.
+            convert = not self.use_mla and (
+                block_size_ratio > 1 or self.enable_permute_local_kv
+            )
+            self.post_process_device_kv_on_receive(
+                block_size_ratio, block_ids_list, convert
+            )
 
         for block_ids in block_ids_for_heterogeneous_attn_post_process:
             self.post_process_device_kv_on_receive_heterogeneous_attn(block_ids)

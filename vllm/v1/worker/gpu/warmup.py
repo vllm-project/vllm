@@ -169,9 +169,12 @@ def warmup_kernels(
     # a uniform decode batch.
     prompt_len = decode_query_len + 1
     prompt_token_ids = list(range(prompt_len))
+    # Upper bound on the decode steps built in `decode_steps` below.
     num_decode_steps = 1
     if not model_runner.is_pooling_model:
         num_decode_steps = 5 if num_spec_steps > 0 else 3
+    # Size the block allocation for the worst case: every request advancing
+    # decode_query_len tokens on every decode step.
     decode_len = prompt_len + num_decode_steps * decode_query_len
 
     kv_cache_groups = model_runner.kv_cache_config.kv_cache_groups
@@ -239,6 +242,8 @@ def warmup_kernels(
         nonlocal next_block_id
         return list(range(next_block_id, next_block_id := next_block_id + num_blocks))
 
+    # The KV-block zeroing kernel is driven by the scheduler's
+    # new_block_ids_to_zero, so none of the steps below reach it.
     if model_runner.kv_block_zeroer is not None:
         model_runner.kv_block_zeroer.warmup(model_runner.kv_cache_config.num_blocks)
 
@@ -286,10 +291,12 @@ def warmup_kernels(
 
         worker_sample_tokens(grammar_output)
 
+        # Per-request state carried across the decode steps.
         req_computed = [prompt_len] * num_reqs
         req_blocks = [list(prefill_block_counts) for _ in range(num_reqs)]
 
         def _run_decode_step(indices: list[int], spec_flags: list[bool]) -> None:
+            """Decode `indices`, spec-decoding the ones flagged in `spec_flags`."""
             cached_req_data = CachedRequestData.make_empty()
             cached_req_data.req_ids = [req_ids[i] for i in indices]
             cached_req_data.num_computed_tokens = [req_computed[i] for i in indices]
@@ -326,13 +333,22 @@ def warmup_kernels(
 
             worker_execute_model(decode_output)
             worker_sample_tokens(None)
+
             for i, use_spec in zip(indices, spec_flags):
                 req_computed[i] += decode_query_len if use_spec else 1
 
         all_indices = list(range(num_reqs))
         use_spec_decode = num_spec_steps > 0
-        decode_steps = [(all_indices, [use_spec_decode] * num_reqs)]
+
+        # Decode steps to warm, as (request indices, per-request spec flag).
+        # Under spec decoding the scheduler drops requests the drafter proposed
+        # nothing for, so warm each batch shape with and without draft tokens.
+        decode_steps: list[tuple[list[int], list[bool]]] = [
+            (all_indices, [use_spec_decode] * num_reqs),
+        ]
         if num_reqs >= 2:
+            # Mixed spec / non-spec: GDN and KDA reclassify the non-spec decode
+            # as a prefill and split the batch into spec/non-spec token indices.
             decode_steps.append(([0, 1], [use_spec_decode, False]))
             if use_spec_decode:
                 # Exercise the model paths that split a batch by whether each
@@ -345,8 +361,8 @@ def warmup_kernels(
         elif use_spec_decode:
             decode_steps.append(([0], [False]))
 
-        for indices, spec_flags in decode_steps:
-            _run_decode_step(indices, spec_flags)
+        for step_indices, step_spec_flags in decode_steps:
+            _run_decode_step(step_indices, step_spec_flags)
 
     # Clean up - process finish_req_ids.
     cleanup_output = SchedulerOutput.make_empty()
