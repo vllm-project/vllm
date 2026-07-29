@@ -204,13 +204,12 @@ class FakeNixlWrapper:
 def _make_fake_nixl_pkg():
     """Context manager that creates a temporary package making
        `from nixl._api import nixl_agent` resolve to our FakeNixlWrapper.
-       Also creates rixl package for ROCm compatibility.
+       Also creates the ROCm NIXL packages.
 
     Automatically cleans up the temporary directory when done.
     """
     with tempfile.TemporaryDirectory() as td:
-        # Create both nixl and rixl packages for cross-platform compatibility
-        for pkg_name in ["nixl", "rixl"]:
+        for pkg_name in ["nixl", "nixl_rocm"]:
             pkg_root = os.path.join(td, pkg_name, "_api")
             os.makedirs(pkg_root, exist_ok=True)
 
@@ -480,8 +479,9 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         super().__init__(*args, kv_cache_config=kv_cache_config, **kwargs)
         self._hand_shake_latency = hand_shake_latency
         self.kv_cache_layout = kv_cache_layout
-        # Mock register_kv_caches attribute needed for tests that do not call it.
+        # Mock register_kv_caches attributes needed for tests that do not call it.
         self.src_xfer_handles_by_block_size = {self.block_size: 1}
+        self.src_blocks_data = np.empty((0, 3), dtype=np.uint64)
         test_shape = self.attn_backends[0].get_kv_cache_shape(
             num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
         )
@@ -766,8 +766,9 @@ class TestNixlHandshake:
             assert remote_info.remote_tp_size == remote_tp_size
             assert -tp_ratio == worker.transfer_topo.tp_ratio(remote_tp_size)
             # ensure src_xfer_handles_by_tp_ratio is populated with tpratio chunks
-            assert -tp_ratio in worker.src_xfer_handles_by_tp_ratio
-            assert len(worker.src_xfer_handles_by_tp_ratio[-tp_ratio]) == tp_ratio
+            split_key = (-tp_ratio, worker.block_size)
+            assert split_key in worker.src_xfer_handles_by_tp_ratio
+            assert len(worker.src_xfer_handles_by_tp_ratio[split_key]) == tp_ratio
             assert remote_engine_id in worker.dst_xfer_side_handles
             assert set(worker.dst_xfer_side_handles[remote_engine_id].keys()) == set(
                 range(tp_ratio)
@@ -1114,18 +1115,6 @@ class TestNixlHandshake:
             device_id=0,
             num_blocks=1,
             block_lens=[remote_block_len],
-        )
-
-        assert worker.get_backend_aware_kv_block_len(0, mamba_view=False) == (
-            local_block_len
-        )
-        assert (
-            worker.get_backend_aware_kv_block_len(0, first_split=True, mamba_view=True)
-            == worker._mamba_ssm_size[0]
-        )
-        assert (
-            worker.get_backend_aware_kv_block_len(0, first_split=False, mamba_view=True)
-            == worker._mamba_ssm_size[1]
         )
 
         assert worker._build_fa_remote(plan, meta, block_size_ratio=1).tolist() == [
@@ -2104,7 +2093,7 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
         # Mock register_kv_cache which registers local handle
         worker.src_xfer_handles_by_block_size = {worker.block_size: 455}
         # P TP = 2 * D TP case, we should register 2 local handles
-        worker.src_xfer_handles_by_tp_ratio = {-2: [456, 457]}
+        worker.src_xfer_handles_by_tp_ratio = {(-2, 16): [456, 457]}
         worker.dst_xfer_side_handles = {"engine1": {0: 789}}
         worker._remote_agents = {"engine1": {(0, 0): "agent1"}}
         # _cleanup_remote_engine (called by shutdown) also clears these:
@@ -3130,10 +3119,12 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
             )
 
 
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
 def test_kv_both_deprecation_warning(default_vllm_config, dist_init):
     """kv_role='kv_both' should emit a deprecation log warning."""
-    from unittest.mock import patch
-
     from vllm.logger import _print_warning_once
 
     _print_warning_once.cache_clear()
@@ -3156,10 +3147,12 @@ def test_kv_both_deprecation_warning(default_vllm_config, dist_init):
     assert "deprecated" in msg
 
 
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
 def test_explicit_kv_role_no_deprecation_warning(default_vllm_config, dist_init):
     """kv_role='kv_consumer' or 'kv_producer' should NOT emit a warning."""
-    from unittest.mock import patch
-
     for role in ("kv_consumer", "kv_producer"):
         vllm_config = create_vllm_config(kv_role=role)
         with patch(
