@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+from vllm.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams
 from vllm.renderers.kimi_k3 import KimiK3Renderer, _merge_k3_media_io_kwargs
 from vllm.renderers.registry import RENDERER_REGISTRY
@@ -121,9 +122,71 @@ def test_apply_chat_template_translates_standard_thinking_kwargs():
 
     kwargs = tokenizer.calls[-1]
     assert kwargs["thinking"] is False
-    assert kwargs["thinking_effort"] == "none"
+    assert "thinking_effort" not in kwargs
     assert "enable_thinking" not in kwargs
     assert "reasoning_effort" not in kwargs
+
+
+@pytest.mark.parametrize("reasoning_effort", ["low", "high", "max"])
+def test_apply_chat_template_translates_supported_reasoning_effort(
+    reasoning_effort: str,
+):
+    tokenizer = StubTokenizer([7, 8, 9])
+    renderer = _make_renderer(tokenizer)
+    params = ChatParams(chat_template_kwargs={"reasoning_effort": reasoning_effort})
+
+    renderer._apply_chat_template([{"role": "user", "content": "hi"}], params)
+
+    kwargs = tokenizer.calls[-1]
+    assert kwargs["thinking_effort"] == reasoning_effort
+    assert "reasoning_effort" not in kwargs
+
+
+@pytest.mark.parametrize("reasoning_effort", ["minimal", "medium", "xhigh"])
+def test_apply_chat_template_rejects_unsupported_reasoning_effort(
+    reasoning_effort: str,
+):
+    tokenizer = StubTokenizer([7, 8, 9])
+    renderer = _make_renderer(tokenizer)
+    params = ChatParams(chat_template_kwargs={"reasoning_effort": reasoning_effort})
+
+    with pytest.raises(VLLMValidationError, match="thinking_effort") as exc_info:
+        renderer._apply_chat_template([{"role": "user", "content": "hi"}], params)
+
+    assert exc_info.value.parameter == "thinking_effort"
+    assert exc_info.value.value == reasoning_effort
+    assert tokenizer.calls == []
+
+
+def test_apply_chat_template_validates_canonical_native_thinking_effort():
+    tokenizer = StubTokenizer([7, 8, 9])
+    renderer = _make_renderer(tokenizer)
+    params = ChatParams(
+        chat_template_kwargs={
+            "thinking_effort": "low",
+            "reasoning_effort": "medium",
+        }
+    )
+
+    renderer._apply_chat_template([{"role": "user", "content": "hi"}], params)
+
+    assert tokenizer.calls[-1]["thinking_effort"] == "low"
+
+
+@pytest.mark.parametrize("thinking_effort", ["none", "minimal", "medium", "xhigh"])
+def test_apply_chat_template_rejects_unsupported_native_thinking_effort(
+    thinking_effort: str,
+):
+    tokenizer = StubTokenizer([7, 8, 9])
+    renderer = _make_renderer(tokenizer)
+    params = ChatParams(chat_template_kwargs={"thinking_effort": thinking_effort})
+
+    with pytest.raises(VLLMValidationError, match="thinking_effort") as exc_info:
+        renderer._apply_chat_template([{"role": "user", "content": "hi"}], params)
+
+    assert exc_info.value.parameter == "thinking_effort"
+    assert exc_info.value.value == thinking_effort
+    assert tokenizer.calls == []
 
 
 def test_apply_chat_template_native_k3_kwargs_take_precedence():

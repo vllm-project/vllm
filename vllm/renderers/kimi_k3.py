@@ -9,6 +9,7 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.multimodal.media.connector import merge_media_io_kwargs
 from vllm.tokenizers.hf import HfTokenizer
 from vllm.utils.async_utils import make_async
@@ -22,6 +23,7 @@ from .params import ChatParams
 # flattening images onto a background color. Server-level (--media-io-kwargs)
 # and request-level media_io_kwargs still take precedence over this default.
 _K3_MEDIA_IO_DEFAULTS: dict[str, dict[str, Any]] = {"image": {"image_mode": None}}
+_K3_THINKING_EFFORTS = ("low", "high", "max")
 
 
 def _merge_k3_media_io_kwargs(
@@ -40,6 +42,26 @@ def _dump_k3_template_value(value: Any) -> Any:
         return to_dict()
 
     return value
+
+
+def _apply_k3_thinking_kwargs(kwargs: dict[str, Any]) -> None:
+    if (enable_thinking := kwargs.pop("enable_thinking", None)) is not None:
+        kwargs.setdefault("thinking", enable_thinking)
+
+    reasoning_effort = kwargs.pop("reasoning_effort", None)
+    if reasoning_effort == "none":
+        kwargs.setdefault("thinking", False)
+    elif reasoning_effort is not None:
+        kwargs.setdefault("thinking_effort", reasoning_effort)
+
+    thinking_effort = kwargs.get("thinking_effort")
+    if thinking_effort is not None and thinking_effort not in _K3_THINKING_EFFORTS:
+        supported = ", ".join(_K3_THINKING_EFFORTS)
+        raise VLLMValidationError(
+            f"Kimi K3 supports thinking_effort values: {supported}",
+            parameter="thinking_effort",
+            value=thinking_effort,
+        )
 
 
 def _normalize_k3_tool_messages(
@@ -142,12 +164,7 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
         # user/tool text as ordinary tokens, so we cannot defer to a plain
         # re-tokenization of the rendered string downstream.
         kwargs = params.get_apply_chat_template_kwargs()
-        # Translate the standard enable_thinking/reasoning_effort kwargs to
-        # K3's native thinking/thinking_effort (native kwargs take precedence).
-        if (enable_thinking := kwargs.pop("enable_thinking", None)) is not None:
-            kwargs.setdefault("thinking", enable_thinking)
-        if (reasoning_effort := kwargs.pop("reasoning_effort", None)) is not None:
-            kwargs.setdefault("thinking_effort", reasoning_effort)
+        _apply_k3_thinking_kwargs(kwargs)
         if params.tool_choice not in (None, "auto"):
             kwargs["tool_choice"] = _dump_k3_template_value(params.tool_choice)
         if params.response_format is not None:
