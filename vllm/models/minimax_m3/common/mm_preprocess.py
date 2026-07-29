@@ -32,12 +32,6 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.video import (
-    VIDEO_LOADER_REGISTRY,
-    VideoBackend,
-    VideoSourceMetadata,
-    VideoTargetMetadata,
-)
 from vllm.transformers_utils.configs.minimax_m3 import MiniMaxM3Config
 from vllm.transformers_utils.processors.minimax_m3 import (
     MIN_SHORT_SIDE_PIXEL,
@@ -467,48 +461,3 @@ class MiniMaxM3VLMultiModalProcessor(
                 replacement=get_video_replacement,
             ),
         ]
-
-
-# TODO(Isotr0py): Tie with MinimaxVideoProcessor
-# after https://github.com/vllm-project/vllm/pull/44126
-@VIDEO_LOADER_REGISTRY.register("minimax_m3_vl")
-class MiniMaxM3VideoBackend(VideoBackend):
-    @classmethod
-    def compute_frames_index_to_sample(
-        cls,
-        source: VideoSourceMetadata,
-        target: VideoTargetMetadata,
-        **kwargs,
-    ) -> list[int]:
-        total_frames = source.total_frames_num
-        video_fps = source.original_fps
-        fps = target.fps
-
-        if total_frames <= 0 or video_fps <= 0 or fps <= 0:
-            return [0] if total_frames > 0 else []
-
-        read_time_interval = 1.0 / fps
-        eps = 1e-4
-
-        indices: list[int] = []
-        prev_kept_ts = -float("inf")
-        while True:
-            if not indices:
-                target_frame = 0
-            else:
-                target_ts = prev_kept_ts + read_time_interval - eps
-                target_frame = math.ceil(target_ts * video_fps)
-                target_frame = max(target_frame, indices[-1] + 1)
-            if target_frame >= total_frames:
-                break
-            indices.append(target_frame)
-            prev_kept_ts = target_frame / video_fps
-
-        last_frame_idx = total_frames - 1
-        last_ts = last_frame_idx / video_fps
-        if indices and indices[-1] != last_frame_idx and last_ts - prev_kept_ts > eps:
-            indices.append(last_frame_idx)
-
-        if not indices:
-            indices = [0]
-        return indices

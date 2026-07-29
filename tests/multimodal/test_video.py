@@ -20,6 +20,7 @@ from vllm.multimodal.video import (
     VIDEO_LOADER_REGISTRY,
     DynamicVideoBackend,
     GLM46VVideoBackend,
+    MiniMaxM3VideoBackend,
     Molmo2VideoBackend,
     PyNvVideoCodecDecoderSlot,
     PyNvVideoCodecVideoBackend,
@@ -387,6 +388,12 @@ def test_cosmos3_edge_uses_qwen3_vl_video_backend():
             Qwen2VLVideoBackend,
             {"fps": 2},
             id="qwen2_5_vl",
+        ),
+        pytest.param(
+            "MiniMaxAI/MiniMax-M3",
+            MiniMaxM3VideoBackend,
+            None,
+            id="minimax_m3_vl",
         ),
     ],
 )
