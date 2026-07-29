@@ -363,7 +363,7 @@ def get_minimax_structural_tag(
 #       <|close|>call<|sep|> ...
 #     <|close|>tools<|sep|> ]
 # See ``encoding_k3.py`` (_render_assistant_segments / _open_tag / _attr) and
-# ``kimi_k3_tool_parser.py`` for the exact byte-level encoding this mirrors.
+# ``vllm.parser.kimi_k3`` for the exact byte-level encoding this mirrors.
 _K3_OPEN = "<|open|>"
 _K3_CLOSE = "<|close|>"
 _K3_SEP = "<|sep|>"

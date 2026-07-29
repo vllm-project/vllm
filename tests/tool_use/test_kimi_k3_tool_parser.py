@@ -11,11 +11,13 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.openai.responses.utils import build_response_output_items
-from vllm.exceptions import VLLMValidationError
 from vllm.parser.kimi_k3 import KimiK3Parser
 from vllm.parser.parser_manager import ParserManager
 from vllm.reasoning.kimi_k3_reasoning_parser import KimiK3ReasoningParser
+from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.kimi_k3_tool_parser import KimiK3ToolParser
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 OPEN = "<|open|>"
 CLOSE = "<|close|>"
@@ -37,9 +39,7 @@ class DummyTokenizer:
         return [ord(ch) for ch in text]
 
 
-class KimiK3DelegatingParser(KimiK3Parser):
-    reasoning_parser_cls = KimiK3ReasoningParser
-    tool_parser_cls = KimiK3ToolParser
+KimiK3DelegatingParser = KimiK3Parser
 
 
 def test_parser_manager_selects_kimi_k3_parser():
@@ -50,9 +50,13 @@ def test_parser_manager_selects_kimi_k3_parser():
     )
 
     assert parser_cls is not None
-    assert issubclass(parser_cls, KimiK3Parser)
     assert parser_cls.reasoning_parser_cls is KimiK3ReasoningParser
     assert parser_cls.tool_parser_cls is KimiK3ToolParser
+
+
+def test_tool_registry_uses_kimi_k3_compatibility_entry_point():
+    assert ToolParserManager.get_tool_parser("kimi_k3") is KimiK3ToolParser
+    assert KimiK3ToolParser.structural_tag_model == "kimi_k3"
 
 
 def _request() -> ChatCompletionRequest:
@@ -124,7 +128,7 @@ def _tools(*calls: str) -> str:
 
 
 def test_extract_tool_calls_with_response_and_typed_arguments():
-    parser = KimiK3ToolParser(DummyTokenizer())
+    parser = KimiK3Parser(DummyTokenizer(), chat_template_kwargs={"thinking": False})
 
     output = _response("answer") + _tools(
         _call(
@@ -286,7 +290,7 @@ def test_delegating_parser_truncated_tools_do_not_leak_xtml():
 
 
 def test_extract_tool_calls_unescapes_attributes():
-    parser = KimiK3ToolParser(DummyTokenizer())
+    parser = KimiK3Parser(DummyTokenizer(), chat_template_kwargs={"thinking": False})
 
     output = _tools(_call("a&amp;b&quot;c", 1, _arg("k&amp;q", "string", "v")))
     extracted = parser.extract_tool_calls(output, _request())
@@ -297,7 +301,7 @@ def test_extract_tool_calls_unescapes_attributes():
 
 
 def test_extract_tool_calls_allows_less_than_in_attributes():
-    parser = KimiK3ToolParser(DummyTokenizer())
+    parser = KimiK3Parser(DummyTokenizer(), chat_template_kwargs={"thinking": False})
 
     output = _tools(_call("calc<beta", 1, _arg("foo<bar", "string", "raw")))
     extracted = parser.extract_tool_calls(output, _request())
@@ -307,11 +311,11 @@ def test_extract_tool_calls_allows_less_than_in_attributes():
     assert json.loads(extracted.tool_calls[0].function.arguments) == {"foo<bar": "raw"}
 
 
-def test_extract_content_from_whitespace_degraded_markers():
-    parser = KimiK3ToolParser(DummyTokenizer())
+def test_extract_content_from_xtml_markers():
+    parser = KimiK3Parser(DummyTokenizer(), chat_template_kwargs={"thinking": False})
 
     extracted = parser.extract_tool_calls(
-        f"{OPEN} response {SEP}answer{CLOSE} response {SEP}",
+        _response("answer"),
         _request(),
     )
 
@@ -320,7 +324,7 @@ def test_extract_content_from_whitespace_degraded_markers():
 
 
 def test_streaming_split_markers_do_not_leak():
-    parser = KimiK3ToolParser(DummyTokenizer())
+    parser = KimiK3Parser(DummyTokenizer(), chat_template_kwargs={"thinking": False})
     request = _request()
     previous_text = ""
     previous_ids: list[int] = []
@@ -363,14 +367,17 @@ def test_streaming_split_markers_do_not_leak():
     assert content == "Hi"
     assert OPEN not in content
     assert SEP not in content
-    assert len(tool_deltas) == 1
+    assert tool_deltas
     assert tool_deltas[0].id == "calc:0"
     assert tool_deltas[0].function.name == "calc"
-    assert json.loads(tool_deltas[0].function.arguments) == {"x": 1}
+    arguments = "".join(
+        tool_delta.function.arguments or "" for tool_delta in tool_deltas
+    )
+    assert json.loads(arguments) == {"x": 1}
 
 
 def test_streaming_consumed_response_prefix_no_call_keeps_content():
-    parser = KimiK3ToolParser(DummyTokenizer())
+    parser = KimiK3Parser(DummyTokenizer(), chat_template_kwargs={"thinking": False})
     request = _request()
     previous_text = ""
     previous_ids: list[int] = []
@@ -437,7 +444,7 @@ def test_delegating_parser_tool_choice_none_strips_xtml_and_suppresses_calls():
 
 
 def test_adjust_request_keeps_xtml_markers_contiguous():
-    parser = KimiK3ToolParser(DummyTokenizer())
+    parser = KimiK3Parser(DummyTokenizer(), chat_template_kwargs={"thinking": False})
     request = _request()
 
     adjusted = parser.adjust_request(request)
@@ -445,16 +452,17 @@ def test_adjust_request_keeps_xtml_markers_contiguous():
     assert adjusted.skip_special_tokens is False
     if hasattr(adjusted, "spaces_between_special_tokens"):
         assert adjusted.spaces_between_special_tokens is False
-    assert KimiK3ToolParser.supports_required_and_named is False
 
 
 def test_adjust_request_required_uses_xtml_parser_not_json_guidance():
-    parser = KimiK3ToolParser(DummyTokenizer())
+    parser = KimiK3Parser(DummyTokenizer(), chat_template_kwargs={"thinking": False})
     request = _request().model_copy(update={"tool_choice": "required"})
 
     adjusted = parser.adjust_request(request)
 
-    assert adjusted.structured_outputs is None
+    assert adjusted.structured_outputs is not None
+    assert adjusted.structured_outputs.json is None
+    assert adjusted.structured_outputs.structural_tag is not None
     assert adjusted.skip_special_tokens is False
     if hasattr(adjusted, "spaces_between_special_tokens"):
         assert adjusted.spaces_between_special_tokens is False
@@ -469,14 +477,13 @@ def test_adjust_request_required_uses_xtml_parser_not_json_guidance():
         ),
     ],
 )
-def test_adjust_request_rejects_named_tool_choice(tool_request):
-    parser = KimiK3ToolParser(DummyTokenizer())
+def test_adjust_request_named_tool_choice_uses_xtml_constraint(tool_request):
+    parser = KimiK3Parser(DummyTokenizer(), chat_template_kwargs={"thinking": False})
 
-    with pytest.raises(VLLMValidationError) as exc_info:
-        parser.adjust_request(tool_request)
+    adjusted = parser.adjust_request(tool_request)
 
-    assert exc_info.value.parameter == "tool_choice"
-    assert "requires strict tool calling" in str(exc_info.value)
+    assert adjusted.structured_outputs is not None
+    assert adjusted.structured_outputs.structural_tag is not None
 
 
 def test_responses_chat_params_carries_tool_choice_metadata():

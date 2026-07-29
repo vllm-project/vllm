@@ -1,135 +1,307 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Kimi K3 parser for the XTML channel format."""
 
 from __future__ import annotations
 
+import functools
+import json
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaMessage,
-    FunctionCall,
+import regex as re
+from openai.types.responses import ToolChoiceFunction
+
+from vllm import envs
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
+    ChatCompletionRequest,
 )
-from vllm.parser.abstract_parser import DelegatingParser
-from vllm.reasoning.kimi_k3_reasoning_parser import KimiK3ReasoningParser
+from vllm.entrypoints.openai.engine.protocol import DeltaToolCall, FunctionCall
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.exceptions import VLLMValidationError
+from vllm.parser.engine.events import EventType
+from vllm.parser.engine.parser_engine import ParserEngine, ToolCallSlot
+from vllm.parser.engine.parser_engine_config import (
+    ParserEngineConfig,
+    ParserState,
+    Transition,
+)
+from vllm.sampling_params import StructuredOutputsParams
+from vllm.tool_parsers.structural_tag_registry import get_model_structural_tag
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.openai.chat_completion.protocol import (
-        ChatCompletionRequest,
+    from vllm.tokenizers import TokenizerLike
+    from vllm.tool_parsers.abstract_tool_parser import Tool
+
+OPEN = "<|open|>"
+CLOSE = "<|close|>"
+SEP = "<|sep|>"
+
+THINK_OPEN = f"{OPEN}think{SEP}"
+THINK_CLOSE = f"{CLOSE}think{SEP}"
+RESPONSE_OPEN = f"{OPEN}response{SEP}"
+RESPONSE_CLOSE = f"{CLOSE}response{SEP}"
+TOOLS_OPEN = f"{OPEN}tools{SEP}"
+TOOLS_CLOSE = f"{CLOSE}tools{SEP}"
+CALL_PREFIX = f'{OPEN}call tool="'
+CALL_NAME_END = '" index="'
+CALL_HEADER_END = f'"{SEP}'
+CALL_CLOSE = f"{CLOSE}call{SEP}"
+MESSAGE_CLOSE = f"{CLOSE}message{SEP}"
+
+_O = re.escape(OPEN)
+_C = re.escape(CLOSE)
+_S = re.escape(SEP)
+_ARG_RE = re.compile(
+    rf"{_O}argument\s+(?P<attrs>(?:(?!{_S}).)*?){_S}"
+    rf"(?P<value>.*?){_C}argument{_S}",
+    re.DOTALL,
+)
+_PARTIAL_ARG_RE = re.compile(
+    rf"{_O}argument\s+(?P<attrs>(?:(?!{_S}).)*?){_S}(?P<value>.*)$",
+    re.DOTALL,
+)
+_ATTR_RE = re.compile(r'(?P<key>\w+)="(?P<value>[^"]*)"')
+
+
+def _attrs(text: str) -> dict[str, str]:
+    return {
+        match["key"]: match["value"].replace("&quot;", '"').replace("&amp;", "&")
+        for match in _ATTR_RE.finditer(text)
+    }
+
+
+def _decode_argument(attrs_text: str, raw_value: str) -> tuple[str, Any] | None:
+    attrs = _attrs(attrs_text)
+    key = attrs.get("key")
+    if key is None:
+        return None
+    if attrs.get("type", "string") == "string":
+        return key, raw_value
+    try:
+        return key, json.loads(raw_value)
+    except json.JSONDecodeError:
+        return key, raw_value
+
+
+def _kimi_k3_arg_converter(raw_args: str, partial: bool) -> str:
+    arguments: dict[str, Any] = {}
+    last_end = 0
+    for match in _ARG_RE.finditer(raw_args):
+        decoded = _decode_argument(match["attrs"], match["value"])
+        if decoded is not None:
+            arguments[decoded[0]] = decoded[1]
+        last_end = match.end()
+
+    if partial:
+        match = _PARTIAL_ARG_RE.search(raw_args, last_end)
+        if match is not None:
+            decoded = _decode_argument(match["attrs"], match["value"])
+            if decoded is not None:
+                arguments[decoded[0]] = decoded[1]
+
+    return json.dumps(arguments, ensure_ascii=False)
+
+
+@functools.cache
+def kimi_k3_config(thinking: bool = True) -> ParserEngineConfig:
+    return ParserEngineConfig(
+        name="kimi_k3",
+        initial_state=ParserState.REASONING if thinking else ParserState.CONTENT,
+        terminals={
+            "THINK_OPEN": THINK_OPEN,
+            "THINK_CLOSE": THINK_CLOSE,
+            "RESPONSE_OPEN": RESPONSE_OPEN,
+            "RESPONSE_CLOSE": RESPONSE_CLOSE,
+            "TOOLS_OPEN": TOOLS_OPEN,
+            "TOOLS_CLOSE": TOOLS_CLOSE,
+            "CALL_PREFIX": CALL_PREFIX,
+            "CALL_NAME_END": CALL_NAME_END,
+            "CALL_HEADER_END": CALL_HEADER_END,
+            "CALL_CLOSE": CALL_CLOSE,
+            "MESSAGE_CLOSE": MESSAGE_CLOSE,
+        },
+        transitions={
+            (ParserState.REASONING, "THINK_OPEN"): Transition(ParserState.REASONING),
+            (ParserState.REASONING, "THINK_CLOSE"): Transition(
+                ParserState.CONTENT,
+                (EventType.REASONING_END,),
+            ),
+            (ParserState.CONTENT, "THINK_OPEN"): Transition(
+                ParserState.REASONING,
+                (EventType.REASONING_START,),
+            ),
+            (ParserState.CONTENT, "THINK_CLOSE"): Transition(ParserState.CONTENT),
+            (ParserState.CONTENT, "RESPONSE_OPEN"): Transition(ParserState.CONTENT),
+            (ParserState.CONTENT, "RESPONSE_CLOSE"): Transition(ParserState.CONTENT),
+            (ParserState.CONTENT, "TOOLS_OPEN"): Transition(ParserState.TOOL_PREAMBLE),
+            (ParserState.TOOL_PREAMBLE, "CALL_PREFIX"): Transition(
+                ParserState.TOOL_NAME,
+                (EventType.TOOL_CALL_START,),
+            ),
+            (ParserState.TOOL_BETWEEN, "CALL_PREFIX"): Transition(
+                ParserState.TOOL_NAME,
+                (EventType.TOOL_CALL_START,),
+            ),
+            (ParserState.TOOL_NAME, "CALL_NAME_END"): Transition(
+                ParserState.MESSAGE_HEADER
+            ),
+            (ParserState.MESSAGE_HEADER, "CALL_HEADER_END"): Transition(
+                ParserState.TOOL_ARGS
+            ),
+            (ParserState.TOOL_ARGS, "CALL_CLOSE"): Transition(
+                ParserState.TOOL_BETWEEN,
+                (EventType.TOOL_CALL_END,),
+            ),
+            (ParserState.TOOL_PREAMBLE, "TOOLS_CLOSE"): Transition(ParserState.CONTENT),
+            (ParserState.TOOL_BETWEEN, "TOOLS_CLOSE"): Transition(ParserState.CONTENT),
+            (ParserState.TOOL_ARGS, "TOOLS_CLOSE"): Transition(
+                ParserState.CONTENT,
+                (EventType.TOOL_CALL_END,),
+            ),
+            (ParserState.CONTENT, "MESSAGE_CLOSE"): Transition(ParserState.CONTENT),
+        },
+        arg_converter=_kimi_k3_arg_converter,
+        arg_structural_chars=frozenset("<>"),
+        stream_arg_deltas=False,
+        tool_args_json=False,
+        preserve_tokens=frozenset((OPEN, CLOSE, SEP)),
+        strip_content_whitespace_with_tools=False,
+        validate_tool_names=False,
     )
-    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 
-class KimiK3Parser(DelegatingParser):
-    """Compose the Kimi K3 reasoning and tool parsers for XTML output."""
+class KimiK3Parser(ParserEngine):
+    """Parse Kimi K3 reasoning, response, and tool channels in one engine."""
 
-    # TODO: Switch Kimi K3 to the parser engine once its XTML reasoning/tool
-    # path is covered there.
-    def _extract_tool_calls(
+    supports_required_and_named = False
+    structural_tag_model = "kimi_k3"
+    engine_based_streaming = True
+
+    def __init__(
         self,
-        content: str | None,
+        tokenizer: TokenizerLike,
+        tools: list[Tool] | None = None,
+        **kwargs,
+    ) -> None:
+        chat_kwargs = kwargs.pop("chat_template_kwargs", None) or {}
+        thinking = chat_kwargs.get("thinking")
+        if thinking is None:
+            thinking = chat_kwargs.get("enable_thinking", True)
+        super().__init__(
+            tokenizer,
+            tools,
+            parser_engine_config=kimi_k3_config(bool(thinking)),
+            **kwargs,
+        )
+        self._think_open_ids = tokenizer.encode(THINK_OPEN, add_special_tokens=False)
+        self._think_close_ids = tokenizer.encode(THINK_CLOSE, add_special_tokens=False)
+
+    def adjust_request(
+        self,
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        request.skip_special_tokens = False
+        if hasattr(request, "spaces_between_special_tokens"):
+            request.spaces_between_special_tokens = False
+
+        if not request.tools or request.tool_choice == "none":
+            return request
+
+        named = isinstance(
+            request.tool_choice,
+            (ChatCompletionNamedToolChoiceParam, ToolChoiceFunction),
+        )
+        structured_outputs = getattr(request, "structured_outputs", None)
+        has_structural_tag = (
+            structured_outputs is not None
+            and structured_outputs.structural_tag is not None
+        )
+        if has_structural_tag:
+            return request
+        if not envs.VLLM_ENFORCE_STRICT_TOOL_CALLING:
+            if named:
+                raise VLLMValidationError(
+                    "Named tool choice for Kimi K3 requires strict tool calling "
+                    "(VLLM_ENFORCE_STRICT_TOOL_CALLING) so the XTML structural "
+                    "tag can force the call. Otherwise use `tool_choice` set to "
+                    '"auto", "required", or "none".',
+                    parameter="tool_choice",
+                    value=request.tool_choice,
+                )
+            return request
+
+        structural_tag = get_model_structural_tag(
+            model="kimi_k3",
+            tools=request.tools,
+            tool_choice=request.tool_choice,
+            reasoning=False,
+        )
+        if structural_tag is None:
+            return request
+        request.structured_outputs = StructuredOutputsParams(
+            structural_tag=json.dumps(structural_tag.model_dump())
+        )
+        if isinstance(request, ResponsesRequest):
+            request.text = None
+        else:
+            request.response_format = None
+        return request
+
+    def _ensure_tool_id(self, slot: ToolCallSlot, name: str) -> None:
+        if not slot.id:
+            slot.id = f"{name}:{self._tool_slots.index(slot)}"
+
+    def _emit_name_delta(
+        self,
+        idx: int,
+        deltas: list[DeltaToolCall],
+        name: str | None,
+    ) -> None:
+        if name:
+            name = name.replace("&quot;", '"').replace("&amp;", "&")
+        super()._emit_name_delta(idx, deltas, name)
+
+    def parse(
+        self,
+        model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
         enable_auto_tools: bool = False,
-    ) -> tuple[list[FunctionCall] | None, str | None]:
-        if self._tool_parser is None or not enable_auto_tools:
-            return super()._extract_tool_calls(content, request, enable_auto_tools)
-
-        tool_call_info = self.extract_tool_calls(content or "", request=request)
-        if request.tool_choice == "none":
-            return [], tool_call_info.content
-        if not tool_call_info.tools_called:
-            return None, tool_call_info.content
-
-        tool_calls = [
-            FunctionCall(
-                id=tool_call.id,
-                name=tool_call.function.name,
-                arguments=tool_call.function.arguments,
-            )
-            for tool_call in tool_call_info.tool_calls
-        ]
-        parsed_content = tool_call_info.content
-        if parsed_content and parsed_content.strip() == "":
-            parsed_content = None
-        return tool_calls, parsed_content
-
-    def _extract_tool_calls_streaming(
-        self,
-        previous_text: str,
-        current_text: str,
-        delta_text: str,
-        previous_token_ids: Sequence[int],
-        current_token_ids: Sequence[int],
-        delta_token_ids: Sequence[int],
-        request: ChatCompletionRequest | ResponsesRequest,
-        tool_call_idx: int | None = None,
-        tool_call_id_type: str = "random",
-        function_name_returned: bool = False,
-    ) -> tuple[DeltaMessage | None, bool]:
-        if request.tool_choice != "none":
-            return super()._extract_tool_calls_streaming(
-                previous_text,
-                current_text,
-                delta_text,
-                previous_token_ids,
-                current_token_ids,
-                delta_token_ids,
-                request,
-                tool_call_idx=tool_call_idx,
-                tool_call_id_type=tool_call_id_type,
-                function_name_returned=function_name_returned,
-            )
-
-        delta_message = self.extract_tool_calls_streaming(
-            previous_text,
-            current_text,
-            delta_text,
-            previous_token_ids,
-            current_token_ids,
-            delta_token_ids,
+        model_output_token_ids: Sequence[int] = (),
+    ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
+        reasoning, content, tool_calls = super().parse(
+            model_output,
             request,
+            enable_auto_tools,
+            model_output_token_ids,
         )
-        if delta_message is not None:
-            delta_message.tool_calls = []
-        return delta_message, False
+        if tool_calls is not None:
+            tool_calls = tool_calls[: model_output.count(CALL_CLOSE)] or None
+        return reasoning, content, tool_calls
 
-    def parse_delta(
-        self,
-        delta_text: str,
-        delta_token_ids: list[int],
-        request: ChatCompletionRequest | ResponsesRequest,
-        prompt_token_ids: list[int] | None = None,
-        *,
-        finished: bool,
-    ) -> DeltaMessage | None:
-        state = self._stream_state
-        previous_content = state.previous_text if state.reasoning_ended else ""
-        delta_message = super().parse_delta(
-            delta_text,
-            delta_token_ids,
-            request,
-            prompt_token_ids,
-            finished=finished,
-        )
+    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+        if self.parser_engine_config.initial_state != ParserState.REASONING:
+            return True
+        last_open = _subsequence_index(input_ids, self._think_open_ids)
+        last_close = _subsequence_index(input_ids, self._think_close_ids)
+        if last_open == -1:
+            return last_close != -1
+        return last_close > last_open
 
-        if (
-            self._tool_parser is not None
-            or not isinstance(self._reasoning_parser, KimiK3ReasoningParser)
-            or not state.reasoning_ended
-            or delta_message is None
-        ):
-            return delta_message
+    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
+        if self.parser_engine_config.initial_state != ParserState.REASONING:
+            return input_ids
+        close = _subsequence_index(input_ids, self._think_close_ids)
+        if close == -1:
+            return []
+        return input_ids[close + len(self._think_close_ids) :]
 
-        stripped = self._reasoning_parser.strip_content_streaming(
-            previous_text=previous_content,
-            current_text=state.previous_text,
-        )
-        delta_message.content = stripped.content if stripped is not None else None
-        if (
-            delta_message.role is None
-            and delta_message.content is None
-            and delta_message.reasoning is None
-            and not delta_message.tool_calls
-        ):
-            return None
-        return delta_message
+
+def _subsequence_index(haystack: Sequence[int], needle: Sequence[int]) -> int:
+    if not needle:
+        return -1
+    for index in range(len(haystack) - len(needle), -1, -1):
+        if list(haystack[index : index + len(needle)]) == list(needle):
+            return index
+    return -1

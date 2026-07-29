@@ -5,11 +5,15 @@ attached (strict tool calling), rejected otherwise."""
 
 import pytest
 
+from vllm import envs
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.exceptions import VLLMValidationError
+from vllm.parser.kimi_k3 import KimiK3Parser
 from vllm.sampling_params import StructuredOutputsParams
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 
 class _DummyTokenizer:
@@ -47,9 +51,7 @@ def _request(with_tag: bool) -> ChatCompletionRequest:
 
 
 def _parser():
-    from vllm.tool_parsers.kimi_k3_tool_parser import KimiK3ToolParser
-
-    return KimiK3ToolParser(_DummyTokenizer())
+    return KimiK3Parser(_DummyTokenizer(), chat_template_kwargs={"thinking": False})
 
 
 def test_named_choice_allowed_with_structural_tag():
@@ -57,6 +59,7 @@ def test_named_choice_allowed_with_structural_tag():
     assert req.skip_special_tokens is False
 
 
-def test_named_choice_rejected_without_structural_tag():
+def test_named_choice_rejected_without_structural_tag(monkeypatch):
+    monkeypatch.setattr(envs, "VLLM_ENFORCE_STRICT_TOOL_CALLING", False)
     with pytest.raises(VLLMValidationError):
         _parser().adjust_request(_request(with_tag=False))
