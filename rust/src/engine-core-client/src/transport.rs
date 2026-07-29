@@ -512,14 +512,14 @@ pub async fn send_message(
     input_send: &mut RouterSendHalf,
     engine_id: &EngineId,
     request_type: Bytes,
-    payload: Vec<u8>,
+    payload: Bytes,
+    aux_frames: Vec<Bytes>,
 ) -> Result<()> {
-    let message = ZmqMessage::try_from(vec![
-        engine_id.to_frame(),
-        request_type,
-        Bytes::from(payload),
-    ])
-    .expect("router messages must contain identity and payload");
+    let mut frames = Vec::with_capacity(3 + aux_frames.len());
+    frames.extend([engine_id.to_frame(), request_type, payload]);
+    frames.extend(aux_frames);
+    let message =
+        ZmqMessage::try_from(frames).expect("router messages must contain identity and payload");
 
     trace!(
         ?engine_id,
