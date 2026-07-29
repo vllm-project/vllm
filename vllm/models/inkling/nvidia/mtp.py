@@ -27,11 +27,11 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from ..configs import InklingModelConfig
 from .layernorm import InklingRMSNorm
-from .logits_processor import can_fold_fp32_head
 from .model import InklingDecoderLayer, InklingReplicatedEmbedding
 from .ops.norm import embed_dual_rmsnorm_cat, embed_rmsnorm
 
@@ -285,7 +285,7 @@ class InklingMTP(nn.Module):
         # consistency) the same way the target's InklingLogitsProcessor does,
         # so the draft's logits do not diverge from the target's.
         if head_dtype is not None and head_dtype != hidden_states.dtype:
-            if not can_fold_fp32_head(self.lm_head, hidden_states, head_dtype, None):
+            if not hidden_states.is_cuda or current_platform.is_rocm():
                 logits = self.logits_processor._get_logits(
                     hidden_states, self.lm_head, None
                 )

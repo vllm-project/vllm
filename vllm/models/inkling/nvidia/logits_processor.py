@@ -23,34 +23,8 @@ from __future__ import annotations
 import torch
 
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    UnquantizedEmbeddingMethod,
-    VocabParallelEmbedding,
-)
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.platforms import current_platform
-
-
-def can_fold_fp32_head(
-    lm_head: VocabParallelEmbedding,
-    hidden_states: torch.Tensor,
-    head_dtype: torch.dtype,
-    embedding_bias: torch.Tensor | None,
-) -> bool:
-    """Whether muP can be folded into an fp32-accumulate ``addmm`` epilogue.
-
-    Mirrors ``LogitsProcessor._apply_head``'s fast fp32 branch: the
-    ``addmm(out_dtype=float32)`` op accumulates bf16/fp16 inputs into fp32
-    without materializing an fp32 weight copy, but is only implemented for
-    CUDA/ROCm and an unquantized lm_head. A fused fold also cannot carry an
-    embedding bias.
-    """
-    return (
-        embedding_bias is None
-        and head_dtype == torch.float32
-        and isinstance(lm_head.quant_method, UnquantizedEmbeddingMethod)
-        and hidden_states.is_cuda
-        and (current_platform.is_cuda() or current_platform.is_rocm())
-    )
 
 
 class InklingLogitsProcessor(LogitsProcessor):
@@ -146,12 +120,7 @@ class InklingLogitsProcessor(LogitsProcessor):
         # The default ``addmm`` below emits logits in ``hidden_states``' dtype
         # and would silently drop the promotion.
         if head_dtype is not None and head_dtype != hidden_states.dtype:
-            if not can_fold_fp32_head(
-                lm_head, hidden_states, head_dtype, embedding_bias
-            ):
-                # No fp32-accumulate GEMM to fold into (non-CUDA cast path,
-                # quantized head, or a bias to add): project through the
-                # dtype-aware head and apply muP as an elementwise multiply.
+            if not hidden_states.is_cuda or current_platform.is_rocm():
                 logits = self._get_logits(hidden_states, lm_head, embedding_bias)
                 if logits is not None:
                     logits = logits * inv_mup
