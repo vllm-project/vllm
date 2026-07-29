@@ -41,3 +41,33 @@ You can quantize your own huggingface model with torchao, e.g. [transformers](ht
     ```
 
 Alternatively, you can use the [TorchAO Quantization space](https://huggingface.co/spaces/medmekk/TorchAO_Quantization) for quantizing models with a simple UI.
+
+## Quantizing at Load Time
+
+TorchAO can also quantize an FP16/BF16 checkpoint while vLLM loads it. For
+example, the following uses the packed INT4 weight-only kernel:
+
+```python
+import json
+
+from torchao.core.config import config_to_dict
+from torchao.quantization import Int4WeightOnlyConfig
+from vllm import LLM
+
+config = Int4WeightOnlyConfig(
+    group_size=128,
+    int4_packing_format="tile_packed_to_4d",
+)
+llm = LLM(
+    "RWKV/RWKV7-Goose-World2.8-1.5B-HF",
+    dtype="bfloat16",
+    quantization="torchao",
+    hf_overrides={
+        "quantization_config_dict_json": json.dumps(config_to_dict(config))
+    },
+)
+```
+
+For models with an untied output embedding, TorchAO also quantizes the
+`ParallelLMHead`; leaving a large LM head unquantized can otherwise dominate
+both memory use and decode time.

@@ -242,7 +242,15 @@ class TorchAOConfig(QuantizationConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
-        if not isinstance(layer, LinearBase):
+        # ParallelLMHead is implemented on top of VocabParallelEmbedding, but
+        # its sampler path is a linear projection and accepts LinearMethodBase
+        # implementations. Treat it like the other linear layers so TorchAO
+        # can quantize large untied output heads.
+        from vllm.model_executor.layers.vocab_parallel_embedding import (
+            ParallelLMHead,
+        )
+
+        if not isinstance(layer, (LinearBase, ParallelLMHead)):
             return None
 
         from torchao.quantization import ModuleFqnToConfig

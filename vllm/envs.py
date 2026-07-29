@@ -122,6 +122,7 @@ if TYPE_CHECKING:
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
+    VLLM_RWKV7_KERNEL: Literal["auto", "torch", "triton"] = "auto"
     VLLM_DISABLE_PYNCCL: bool = False
     VLLM_USE_OINK_OPS: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
@@ -1166,6 +1167,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE": lambda: bool(
         int(os.getenv("VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE", "1"))
+    ),
+    # Select the RWKV7 recurrent implementation. ``auto`` is intentionally
+    # fail-closed to the PyTorch reference path until the Triton kernel passes
+    # the long-horizon greedy-token parity gate.
+    "VLLM_RWKV7_KERNEL": env_with_choices(
+        "VLLM_RWKV7_KERNEL",
+        "auto",
+        ["auto", "torch", "triton"],
+        case_sensitive=False,
     ),
     # Disable pynccl (using torch.distributed instead)
     "VLLM_DISABLE_PYNCCL": lambda: (
