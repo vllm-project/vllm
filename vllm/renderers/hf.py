@@ -1122,6 +1122,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             and mm_uuids is not None
             and mm_data is not None
         ):
+            mm_uuids = rebuild_mm_uuids_from_mm_data(mm_uuids, mm_data)
+
             # get video placeholder, replace it with runtime video-chunk prompts
             video_placeholder = getattr(
                 model_config.hf_config, "video_placeholder", None

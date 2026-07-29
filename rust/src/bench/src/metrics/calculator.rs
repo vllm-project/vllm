@@ -7,6 +7,22 @@ use crate::datasets::SampleRequest;
 use crate::metrics::{BenchmarkMetrics, MultiTurnMetrics};
 use crate::multi_turn::ConversationOutput;
 
+fn log_failed_requests(outputs: &[RequestFuncOutput]) {
+    let failed_outputs: Vec<_> = outputs.iter().filter(|output| !output.success).collect();
+    if failed_outputs.is_empty() {
+        return;
+    }
+
+    tracing::warn!(
+        failed_requests = failed_outputs.len(),
+        displayed_errors = failed_outputs.len().min(10),
+        "benchmark requests failed"
+    );
+    for (index, output) in failed_outputs.into_iter().take(10).enumerate() {
+        tracing::warn!(index, error = %output.error, "benchmark request failed");
+    }
+}
+
 /// Calculate benchmark metrics from request outputs.
 ///
 /// Mirrors Python's `calculate_metrics()` from serve.py:392-599.
@@ -63,14 +79,7 @@ pub fn calculate_metrics(
 
     let failed = outputs.len() - completed;
 
-    // Print failed request errors (capped to 10)
-    let failed_outputs: Vec<&RequestFuncOutput> = outputs.iter().filter(|o| !o.success).collect();
-    if !failed_outputs.is_empty() {
-        eprintln!("Failed requests during benchmark run detected (capping to 10):");
-        for (i, err) in failed_outputs.iter().take(10).enumerate() {
-            eprintln!("Error {i}: {}", err.error);
-        }
-    }
+    log_failed_requests(outputs);
 
     // Calculate max output tokens per second and max concurrent requests
     let mut max_output_tokens_per_s = 0.0_f64;
@@ -295,14 +304,7 @@ pub fn calculate_embedding_metrics(
 
     let failed = outputs.len() - completed;
 
-    // Print failed request errors (capped to 10)
-    let failed_outputs: Vec<&RequestFuncOutput> = outputs.iter().filter(|o| !o.success).collect();
-    if !failed_outputs.is_empty() {
-        eprintln!("Failed requests during benchmark run detected (capping to 10):");
-        for (i, err) in failed_outputs.iter().take(10).enumerate() {
-            eprintln!("Error {i}: {}", err.error);
-        }
-    }
+    log_failed_requests(outputs);
 
     // Compute peak concurrent requests from start_time + latency windows
     let successful_outputs: Vec<&RequestFuncOutput> =

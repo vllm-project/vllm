@@ -33,6 +33,7 @@ from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
 import vllm._custom_ops as ops
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig, get_current_vllm_config
@@ -56,6 +57,7 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    DCPGroupColumnParallelLinear,
     MergedColumnParallelLinear,
     QKVParallelLinear,
     ReplicatedLinear,
@@ -849,11 +851,16 @@ def _try_load_fp8_indexer_wk(
     # We have both weight and scale: dequantize FP8 to BF16.
     weight_fp8, scale_inv = entry["weight"], entry["scale"]
     del buf[layer_prefix]
-    block_size = weight_fp8.shape[1] // scale_inv.shape[1]
+    if scale_inv.ndim == 1:
+        # Per-channel scale: one scale per row of [out, in]
+        group_shape = GroupShape(1, weight_fp8.shape[1])
+    else:
+        block_size = weight_fp8.shape[1] // scale_inv.shape[1]
+        group_shape = GroupShape(block_size, block_size)
     weight_bf16 = scaled_dequantize(
         weight_fp8,
         scale_inv,
-        group_shape=GroupShape(block_size, block_size),
+        group_shape=group_shape,
         out_dtype=torch.bfloat16,
     )
 
@@ -1015,9 +1022,17 @@ class DeepseekV2MLAAttention(nn.Module):
                 prefix=f"{prefix}.kv_a_proj_with_mqa",
             )
 
+        qrep_enabled = (
+            envs.VLLM_DCP_Q_REPLICATE
+            and vllm_config.parallel_config.decode_context_parallel_size > 1
+            and vllm_config.parallel_config.prefill_context_parallel_size <= 1
+        )
+        q_proj_cls = (
+            DCPGroupColumnParallelLinear if qrep_enabled else ColumnParallelLinear
+        )
         if self.q_lora_rank is not None:
             self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
-            self.q_b_proj = ColumnParallelLinear(
+            self.q_b_proj = q_proj_cls(
                 self.q_lora_rank,
                 self.num_heads * self.qk_head_dim,
                 bias=False,
@@ -1025,7 +1040,7 @@ class DeepseekV2MLAAttention(nn.Module):
                 prefix=f"{prefix}.q_b_proj",
             )
         else:
-            self.q_proj = ColumnParallelLinear(
+            self.q_proj = q_proj_cls(
                 proj_input_size,
                 self.num_heads * self.qk_head_dim,
                 bias=False,
@@ -1163,6 +1178,9 @@ class DeepseekV2MLAAttention(nn.Module):
             # the V1 proposer. A frozen True would leave the draft reading a
             # never-written topk buffer.
             skip_topk=_skip_topk and not is_mtp_layer,
+            # Do not skip scoring for MTP layers: their top-k buffer may be
+            # reused by later draft iterations through index sharing.
+            allow_short_prefill_indexer_scoring_skip=not is_mtp_layer,
         )
 
     def forward(
