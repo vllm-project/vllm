@@ -284,8 +284,9 @@ def test_qwen2vl_multiple_lora_types(
     the multimodal encoder cache correctly manages state transitions between
     language-only and vision-enabled LoRA adapters.
     """
-    # Exact greedy outputs require deterministic LoRA shrink reductions rather
-    # than the default split-K atomic reduction.
+    # NOTE(ROCm): We are not actually targeting full batch invariance on ROCm,
+    # we are using this flag to set batch size to 1 through split_k override in
+    # Triton and use store instead of atomic_add.
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
 
     config = TestConfig(
