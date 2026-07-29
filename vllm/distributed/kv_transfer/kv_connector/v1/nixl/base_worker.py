@@ -388,7 +388,12 @@ class NixlBaseConnectorWorker:
         except AssertionError:
             self.pcp_size = 1
             self.pcp_rank = 0
-        self.dcp_rank = (self.tp_rank * self.pcp_size + self.pcp_rank) % self.dcp_size
+        self.dcp_rank = TransferTopology.get_dcp_rank(
+            tp_rank=self.tp_rank,
+            pcp_rank=self.pcp_rank,
+            pcp_size=self.pcp_size,
+            dcp_size=self.dcp_size,
+        )
         self.local_worker_key: RemoteAgentKey = (
             self.pp_rank,
             self.pcp_rank,
@@ -768,9 +773,12 @@ class NixlBaseConnectorWorker:
                         f"({remote_pcp_rank}, {remote_tp_rank}), got "
                         f"({metadata.pcp_rank}, {metadata.tp_rank})."
                     )
-                inferred_dcp_rank = (
-                    metadata.tp_rank * metadata.pcp_size + metadata.pcp_rank
-                ) % metadata.dcp_size
+                inferred_dcp_rank = TransferTopology.get_dcp_rank(
+                    metadata.tp_rank,
+                    metadata.pcp_rank,
+                    metadata.pcp_size,
+                    metadata.dcp_size,
+                )
                 if (
                     inferred_dcp_rank != remote_dcp_rank
                     or metadata.dcp_rank != inferred_dcp_rank
