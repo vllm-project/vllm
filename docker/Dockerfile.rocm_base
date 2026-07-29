@@ -189,6 +189,7 @@ RUN pip install pyyaml && cd aiter \
            export HIP_CLANG_PATH=/opt/sccache-wrappers \
            && sccache --show-stats; \
        fi \
+    && sed -i 's/pool = ProcessPoolExecutor(max_workers=max_workers)/import multiprocessing; pool = ProcessPoolExecutor(max_workers=max_workers, mp_context=multiprocessing.get_context("fork"))/' aiter/aot/flydsl/common.py 2>/dev/null || true \
     && PREBUILD_KERNELS=${AITER_PREBUILD_AITER_KERNELS} AITER_USE_SYSTEM_TRITON=1 GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist \
     && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
     && ls /app/aiter/dist/*.whl
