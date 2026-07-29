@@ -21,7 +21,7 @@ import msgspec
 import zmq
 
 import vllm.envs as envs
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS
 from vllm.distributed import (
     cleanup_dist_env_and_memory,
@@ -1979,7 +1979,10 @@ class DPEngineCoreProc(EngineCoreProc):
 
         self.dp_rank = dp_rank
         self.dp_size = dp_size
-        dp_group, dp_store = parallel_config.stateless_init_dp_group(return_store=True)
+        with set_current_vllm_config(vllm_config):
+            dp_group, dp_store = parallel_config.stateless_init_dp_group(
+                return_store=True
+            )
         self.dp_group, self.dp_store = dp_group, dp_store
 
     def shutdown(self):
