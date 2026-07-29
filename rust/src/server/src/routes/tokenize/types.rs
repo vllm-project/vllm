@@ -82,6 +82,7 @@ impl TokenizeChatRequest {
                 generation_prompt_mode,
                 chat_template: self.chat_template,
                 reasoning_effort: None,
+                response_format: None,
                 template_kwargs: self.chat_template_kwargs.unwrap_or_default(),
             },
             tools: convert_tools(self.tools)?,

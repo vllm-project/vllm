@@ -412,3 +412,65 @@ def test_block_verification_accepts_at_least_as_many(num_speculative_steps: int)
         f"Block verification mean accepted length {mean_block:.4f} is worse "
         f"than standard {mean_standard:.4f}."
     )
+
+
+@pytest.mark.parametrize("has_draft_logits", [True, False])
+def test_chunked_requests_match_full_batch(has_draft_logits: bool):
+    torch.manual_seed(7)
+    device = "cuda"
+    num_reqs = 5
+    num_speculative_steps = 3
+    vocab_size = 257
+
+    target_logits = torch.randn(vocab_size, device=device)
+    draft_logits = torch.randn(vocab_size, device=device)
+    inputs = _build_rejection_sample_inputs(
+        target_logits,
+        draft_logits,
+        num_speculative_steps,
+        temperature=0.6,
+        num_trials=num_reqs,
+    )
+    padded_target_logits = torch.empty(
+        inputs["target_logits"].shape[0], vocab_size + 3, device=device
+    )
+    padded_target_logits[:, :vocab_size].copy_(inputs["target_logits"])
+    inputs["target_logits"] = padded_target_logits[:, :vocab_size]
+    assert inputs["target_logits"].stride(-1) == 1
+    assert not inputs["target_logits"].is_contiguous()
+    if not has_draft_logits:
+        inputs["draft_logits"] = None
+
+    sampled, num_sampled = rejection_sample(
+        **inputs, num_speculative_steps=num_speculative_steps
+    )
+
+    sampled_chunks = []
+    num_sampled_chunks = []
+    for start, end in ((0, 2), (2, 5)):
+        lo = start * (num_speculative_steps + 1)
+        hi = end * (num_speculative_steps + 1)
+        chunk_inputs = dict(inputs)
+        for name in (
+            "target_logits",
+            "draft_sampled",
+            "pos",
+            "expanded_idx_mapping",
+            "expanded_local_pos",
+        ):
+            chunk_inputs[name] = inputs[name][lo:hi]
+        chunk_inputs["cu_num_logits"] = inputs["cu_num_logits"][start : end + 1] - lo
+        chunk_inputs["idx_mapping"] = inputs["idx_mapping"][start:end]
+
+        chunk_sampled, chunk_num_sampled = rejection_sample(
+            **chunk_inputs, num_speculative_steps=num_speculative_steps
+        )
+        sampled_chunks.append(chunk_sampled)
+        num_sampled_chunks.append(chunk_num_sampled)
+
+    chunked_sampled = torch.cat(sampled_chunks)
+    chunked_num_sampled = torch.cat(num_sampled_chunks)
+    assert torch.equal(chunked_num_sampled, num_sampled)
+    steps = torch.arange(num_speculative_steps + 1, device=device)
+    valid = steps.unsqueeze(0) < num_sampled.unsqueeze(1)
+    assert torch.equal(chunked_sampled[valid], sampled[valid])
