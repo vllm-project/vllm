@@ -354,28 +354,57 @@ def test_reshape_and_cache_flash(
             dequant_nvfp4_kv_cache,
         )
 
-        def dequant_nvfp4_cache_nhd(data_cache, scale_cache, global_scale):
+        def dequant_nvfp4_cache_nhd(
+            data_cache,
+            scale_cache,
+            global_scale,
+            scales_are_swizzled,
+        ):
             # data_cache:  [N, T, H, data_dim]  NHD (contiguous inner dims)
             # scale_cache: [N, T, H, scale_dim] NHD (contiguous inner dims)
             # Permute to HND layout for the dequant utility.
             data_hnd = data_cache.permute(0, 2, 1, 3)
             scale_hnd = scale_cache.permute(0, 2, 1, 3)
             result_hnd = dequant_nvfp4_kv_cache(
-                data_hnd, scale_hnd, global_scale, head_size, block_size
+                data_hnd,
+                scale_hnd,
+                global_scale,
+                head_size,
+                block_size,
+                scales_are_swizzled=scales_are_swizzled,
             )
             return result_hnd.permute(0, 2, 1, 3)  # back to [N, T, H, D]
 
+        # The current writer stores K scales linearly and V scales in the
+        # TRT-LLM 4x4 layout. Keep both contracts explicit in the reference.
         result_key_cache = dequant_nvfp4_cache_nhd(
-            nvfp4_key_data, key_scale_cache, k_scale.item()
+            nvfp4_key_data,
+            key_scale_cache,
+            k_scale.item(),
+            scales_are_swizzled=False,
         )
         result_value_cache = dequant_nvfp4_cache_nhd(
-            nvfp4_value_data, value_scale_cache, v_scale.item()
+            nvfp4_value_data,
+            value_scale_cache,
+            v_scale.item(),
+            scales_are_swizzled=True,
         )
 
         # Flatten [num_blocks, block_size] → [num_slots] and index by slot_mapping.
         num_slots = num_blocks * block_size
         result_key_flat = result_key_cache.reshape(num_slots, num_heads, head_size)
         result_value_flat = result_value_cache.reshape(num_slots, num_heads, head_size)
+
+        # The elementwise tolerance below can hide a structurally wrong scale
+        # ordering. Normal NVFP4 loss is about 0.1 relative L2 for these inputs.
+        for name, actual, expected in (
+            ("key", result_key_flat[slot_mapping], key.float()),
+            ("value", result_value_flat[slot_mapping], value.float()),
+        ):
+            rel_l2 = torch.linalg.vector_norm(
+                actual - expected
+            ) / torch.linalg.vector_norm(expected)
+            assert rel_l2 < 0.15, f"{name} NVFP4 relative L2 error: {rel_l2}"
 
         torch.testing.assert_close(
             result_key_flat[slot_mapping], key.float(), atol=1.5, rtol=0.5
