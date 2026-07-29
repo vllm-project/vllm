@@ -1558,3 +1558,51 @@ def test_mxfp4_emulation_rounds_up_to_block_size(
     # The block-scale buffer (dim // OCP_MX_BLOCK_SIZE) must not floor-truncate.
     assert rounded_hidden % OCP_MX_BLOCK_SIZE == 0
     assert rounded_intermediate % OCP_MX_BLOCK_SIZE == 0
+
+
+def test_select_mxfp4_moe_backend_raises_with_unsupported_reasons(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    select_mxfp4_moe_backend() must raise NotImplementedError, with the
+    collected per-backend unsupported reasons in the message, when no
+    backend supports the requested deployment configuration.
+    """
+    import vllm.model_executor.layers.fused_moe.oracle.mxfp4 as mxfp4_oracle
+    from vllm.model_executor.layers.fused_moe import FusedMoEConfig
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+    )
+
+    class UnsupportedExperts:
+        @staticmethod
+        def is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        ):
+            return False, f"unsupported reason for {cls.__name__}"
+
+    monkeypatch.setattr(
+        mxfp4_oracle, "backend_to_kernel_cls", lambda backend: [UnsupportedExperts]
+    )
+    monkeypatch.setattr(mxfp4_oracle, "_user_moe_activation_override", lambda: None)
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+
+    moe_config = FusedMoEConfig(
+        num_experts=8,
+        experts_per_token=2,
+        hidden_dim=256,
+        intermediate_size=256,
+        num_local_experts=8,
+        num_logical_experts=8,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation=MoEActivation.SILU,
+        in_dtype=torch.bfloat16,
+        device="cpu",
+        routing_method=RoutingMethodType.Renormalize,
+    )
+
+    with pytest.raises(NotImplementedError, match="Unsupported reasons"):
+        mxfp4_oracle.select_mxfp4_moe_backend(moe_config)
