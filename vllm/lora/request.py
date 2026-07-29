@@ -28,6 +28,13 @@ class LoRARequest(
     base_model_name: str | None = msgspec.field(default=None)
     tensorizer_config_dict: dict | None = None
     load_inplace: bool = False
+    is_3d_lora_weight: bool = False
+    """Whether this adapter's MoE weights are stored in the 3D fused
+    `gate_up_proj` / `down_proj` layout (one fused tensor per layer) or the
+    2D per-expert split layout (separate `gate_proj` / `up_proj` / `down_proj`
+    tensors per expert). Only consulted when the engine is started with
+    `enable_mixed_moe_lora_format=True`; otherwise it is ignored and the
+    on-disk format is inferred from the base model."""
 
     def __post_init__(self):
         if self.lora_int_id < 1:

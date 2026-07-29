@@ -9,6 +9,7 @@ from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear
@@ -22,6 +23,7 @@ from vllm.model_executor.models.exaone_moe_mtp import (
     ExaoneMoeMTP,
     ExaoneMoeMultiTokenPredictor,
 )
+from vllm.sequence import IntermediateTensors
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -48,6 +50,7 @@ class Exaone4_5MultiTokenPredictor(ExaoneMoeMultiTokenPredictor):
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
         config = model_config.hf_config
+        text_config = config.text_config
 
         self.config = config
         lora_vocab = (
@@ -58,18 +61,18 @@ class Exaone4_5MultiTokenPredictor(ExaoneMoeMultiTokenPredictor):
         self.vocab_size = config.vocab_size + lora_vocab
         self.org_vocab_size = config.vocab_size
 
-        self.mtp_start_layer_idx = config.num_hidden_layers
+        self.mtp_start_layer_idx = text_config.num_hidden_layers
         self.num_mtp_layers = getattr(config, "num_nextn_predict_layers", 1)
 
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
-            config.hidden_size,
+            text_config.hidden_size,
             org_num_embeddings=config.vocab_size,
         )
 
         self.fc = ColumnParallelLinear(
-            self.config.hidden_size * 2,
-            self.config.hidden_size,
+            text_config.hidden_size * 2,
+            text_config.hidden_size,
             gather_output=True,
             bias=False,
             return_bias=False,
@@ -78,27 +81,68 @@ class Exaone4_5MultiTokenPredictor(ExaoneMoeMultiTokenPredictor):
         )
         self.layers = nn.ModuleList(
             Exaone4DecoderLayer(
-                vllm_config.model_config.hf_config,
+                text_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.layers.{idx}",
             )
             for idx in range(self.num_mtp_layers)
         )
 
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.pre_fc_norm_hidden = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = RMSNorm(text_config.hidden_size, eps=text_config.rms_norm_eps)
+        self.pre_fc_norm_hidden = RMSNorm(
+            text_config.hidden_size, eps=text_config.rms_norm_eps
+        )
         self.pre_fc_norm_embedding = RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
+            text_config.hidden_size, eps=text_config.rms_norm_eps
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        spec_step_idx: int = 0,
+    ) -> torch.Tensor:
+        if get_pp_group().is_first_rank:
+            if inputs_embeds is None:
+                inputs_embeds = self.get_input_embeddings(input_ids)
+            assert hidden_states.shape[-1] == inputs_embeds.shape[-1]
+            inputs_embeds = self.pre_fc_norm_embedding(inputs_embeds)
+            hidden_states = self.pre_fc_norm_hidden(hidden_states)
+            hidden_states = torch.cat([inputs_embeds, hidden_states], dim=-1)
+            hidden_states = self.fc(hidden_states)
+            residual = None
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+            residual = intermediate_tensors["residual"]
+
+        current_step_idx = spec_step_idx % self.num_mtp_layers
+        hidden_states, residual = self.layers[current_step_idx](
+            positions=positions,
+            hidden_states=hidden_states,
+            residual=residual,
+        )
+
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors(
+                {"hidden_states": hidden_states, "residual": residual}
+            )
+
+        hidden_states = self.norm(hidden_states)
+        return hidden_states
 
 
 @support_torch_compile
 class Exaone4_5_MTP(ExaoneMoeMTP, SupportsMultiModal):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
+        text_config = config.text_config
         self.vllm_config = vllm_config
         self.quant_config = vllm_config.quant_config
 
@@ -110,7 +154,7 @@ class Exaone4_5_MTP(ExaoneMoeMTP, SupportsMultiModal):
         self.unpadded_vocab_size = config.vocab_size
         self.lm_head = ParallelLMHead(
             self.unpadded_vocab_size,
-            config.hidden_size,
+            text_config.hidden_size,
             org_num_embeddings=config.vocab_size,
             prefix=maybe_prefix(prefix, "lm_head"),
         )

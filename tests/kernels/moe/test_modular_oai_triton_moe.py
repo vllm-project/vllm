@@ -190,7 +190,6 @@ def oai_triton_moe_impl(
             use_monolithic=False,
         ),
         fused_experts,
-        inplace=False,
     )
 
     return mk.apply(

@@ -66,6 +66,7 @@ class Request:
         client_index: int = 0,
         arrival_time: float | None = None,
         prompt_embeds: torch.Tensor | None = None,
+        prompt_is_token_ids: list[bool] | None = None,
         mm_features: list[MultiModalFeatureSpec] | None = None,
         lora_request: "LoRARequest | None" = None,
         cache_salt: str | None = None,
@@ -74,6 +75,8 @@ class Request:
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
         resumable: bool = False,
         reasoning_ended: bool | None = None,
+        reasoning_parser_kwargs: dict[str, Any] | None = None,
+        abort_immediately: bool = False,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -86,6 +89,9 @@ class Request:
         )
         if self.structured_output_request is not None:
             self.structured_output_request.reasoning_ended = reasoning_ended
+            self.structured_output_request.reasoning_parser_kwargs = (
+                reasoning_parser_kwargs
+            )
         self.arrival_time = arrival_time if arrival_time is not None else time.time()
 
         self.status = RequestStatus.WAITING
@@ -94,6 +100,8 @@ class Request:
 
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: dict[str, Any] | None = None
+        # E/P/D: Connector-specific encoder-cache transfer parameters.
+        self.ec_transfer_params: dict[str, Any] | None = None
 
         if pooling_params is not None:
             # Pooling models.
@@ -109,11 +117,23 @@ class Request:
                 self.kv_transfer_params = sampling_params.extra_args.get(
                     "kv_transfer_params"
                 )
+                self.ec_transfer_params = sampling_params.extra_args.get(
+                    "ec_transfer_params"
+                )
+                self.kv_cache_report_mode = sampling_params.extra_args.get(
+                    "kv_cache_report_mode", "incremental"
+                )
+            else:
+                self.kv_cache_report_mode = "incremental"
         else:
             raise ValueError("sampling_params and pooling_params can't both be unset")
 
         self.prompt_token_ids = prompt_token_ids
         self.prompt_embeds = prompt_embeds
+        # Per-position mask used in mixed-mode (chat completion with
+        # prompt_embeds). `None` except when both `prompt_token_ids` and
+        # `prompt_embeds` are set and their positions are interleaved.
+        self.prompt_is_token_ids = prompt_is_token_ids
         # Cache per-block prompt-embed hashes to avoid rehashing the same
         # tensor slices when generating extra keys.
         self._prompt_embeds_per_block_hashes: dict[tuple[int, int], bytes] = {}
@@ -129,8 +149,20 @@ class Request:
 
         # Used in async scheduling.
         self.num_output_placeholders = 0
-        # Used in forced preemption (reset_prefix_cache) with async scheduling.
-        self.discard_latest_async_tokens = False
+        self.async_tokens_to_discard = 0
+
+        # Tokens of steps whose output is not yet processed (async scheduling
+        # and PP run ahead of the GPU); `num_computed_tokens` counts them
+        # optimistically.
+        self.num_in_flight_tokens = 0
+
+        # V2+PP+async: Enforces `pp_size` cadence between same-request decode steps
+        # so the worker's broadcast slot ring stays consistent.
+        self.next_decode_eligible_step = 0
+
+        # Seq of the most recent step this request was scheduled in; fences
+        # deferred block freeing (see Scheduler._free_request_blocks).
+        self.last_sched_seq = 0
 
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
@@ -149,6 +181,11 @@ class Request:
 
         # True if this request is scheduled as a non-final prefill chunk.
         self.is_prefill_chunk = False
+
+        # Block-aligned token position of a proven shared prefix worth pinning
+        # in the (sparse) prefix cache; 0 means none. Set at admission for
+        # hybrid/Mamba models when a shared prefix is detected (Marconi-style).
+        self.shared_prefix_boundary = 0
 
         # The number of NaNs in logits. A value greater than 0
         # indicates that the output is corrupted
@@ -173,6 +210,10 @@ class Request:
         # None entry in the queue means finished.
         self.streaming_queue: deque[StreamingUpdate | None] | None = None
 
+        # If True, request should be aborted immediately after being added to
+        # the scheduler so the connector's request_finished hook runs.
+        self.abort_immediately = abort_immediately
+
     @classmethod
     def from_engine_core_request(
         cls,
@@ -184,6 +225,7 @@ class Request:
             client_index=request.client_index,
             prompt_token_ids=request.prompt_token_ids,
             prompt_embeds=request.prompt_embeds,
+            prompt_is_token_ids=request.prompt_is_token_ids,
             mm_features=request.mm_features,
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
@@ -195,6 +237,8 @@ class Request:
             block_hasher=block_hasher,
             resumable=request.resumable,
             reasoning_ended=request.reasoning_ended,
+            reasoning_parser_kwargs=request.reasoning_parser_kwargs,
+            abort_immediately=request.abort_immediately,
         )
 
     def append_output_token_ids(

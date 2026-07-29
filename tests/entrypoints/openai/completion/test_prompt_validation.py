@@ -18,7 +18,7 @@ from vllm.renderers.embed_utils import safe_load_prompt_embeds
 
 @pytest.mark.asyncio
 async def test_empty_prompt():
-    model_name = "gpt2"
+    model_name = "openai-community/gpt2"
     server_args = ["--enforce-eager"]
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
         client = remote_server.get_async_client()
@@ -38,7 +38,7 @@ async def test_empty_prompt():
 
 @pytest.mark.asyncio
 async def test_out_of_vocab_token_ids():
-    model_name = "gpt2"
+    model_name = "openai-community/gpt2"
     server_args = ["--enforce-eager"]
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
         client = remote_server.get_async_client()
@@ -62,6 +62,8 @@ def test_load_prompt_embeds(
 ):
     model_config = Mock(spec=ModelConfig)
     model_config.enable_prompt_embeds = True
+    model_config.get_hidden_size.return_value = hidden_size
+    model_config.dtype = dtype
 
     # construct arbitrary tensors of various dtypes, layouts, and sizes.
     # We need to check against different layouts to make sure that if a user

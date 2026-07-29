@@ -17,6 +17,7 @@ from vllm.forward_context import (
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     LinearBase,
+    QuantizeMethodBase,
     ReplicatedLinear,
     RowParallelLinear,
 )
@@ -25,16 +26,9 @@ from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from .base import BaseLayerWithLoRA
-from .utils import _get_lora_device
+from .utils import _get_lora_aux_cuda_stream, _get_lora_device
 
 if envs.VLLM_LORA_ENABLE_DUAL_STREAM:
-    _lora_aux_cuda_stream: torch.cuda.Stream | None = None
-
-    def _get_lora_aux_cuda_stream() -> torch.cuda.Stream | None:
-        global _lora_aux_cuda_stream
-        if _lora_aux_cuda_stream is None and current_platform.is_cuda_alike():
-            _lora_aux_cuda_stream = torch.cuda.Stream()
-        return _lora_aux_cuda_stream
 
     def lora_linear_async(
         layer_name: str,
@@ -189,6 +183,14 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             lora_b, non_blocking=True
         )
 
+    def _get_quant_method(self) -> QuantizeMethodBase:
+        quant_method = self.base_layer.quant_method
+        if quant_method is None:
+            raise RuntimeError(
+                f"{type(self.base_layer).__name__} must define quant_method for LoRA."
+            )
+        return quant_method
+
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         # is_forward_context_available for tower modules
         if self._enable_aux_cuda_stream and is_forward_context_available():
@@ -202,8 +204,17 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
     def _apply_sync(
         self, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
-        output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
+        output = self._get_quant_method().apply(self.base_layer, x, bias)
+        return self._apply_lora_to_output(x, output)
 
+    def _apply_base_forward(self, x: torch.Tensor) -> torch.Tensor:
+        base_output = self.base_layer(x)
+        output = base_output[0] if isinstance(base_output, tuple) else base_output
+        return self._apply_lora_to_output(x, output)
+
+    def _apply_lora_to_output(
+        self, x: torch.Tensor, output: torch.Tensor
+    ) -> torch.Tensor:
         original_shape = output.shape if output.ndim == 3 else None
 
         # In transformers backend, x and output have extra batch dimension like
@@ -240,7 +251,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         output_size = sum(self.output_slices)
 
         def base_fn() -> torch.Tensor:
-            return self.base_layer.quant_method.apply(self.base_layer, x, bias)
+            return self._get_quant_method().apply(self.base_layer, x, bias)
 
         def lora_fn() -> torch.Tensor:
             # Must be zeros, not empty: _lora_expand_kernel exits early (without

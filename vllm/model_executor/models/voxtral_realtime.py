@@ -4,22 +4,19 @@
 import asyncio
 import math
 from collections.abc import AsyncGenerator, Iterable, Iterator, Mapping
-from typing import Literal
 
 import numpy as np
 import torch
-from mistral_common.audio import Audio
-from mistral_common.protocol.instruct.chunk import RawAudio
 from mistral_common.protocol.transcription.request import (
     StreamingMode,
     TranscriptionRequest,
 )
-from mistral_common.tokens.tokenizers.audio import AudioConfig
+from mistral_common.tokens.tokenizers.audio import Audio, AudioConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.engine.protocol import StreamingInput
-from vllm.envs import VLLM_ENGINE_ITERATION_TIMEOUT_S
 from vllm.inputs import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsRealtime
@@ -267,13 +264,11 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
             await buffer.append_audio(right_pad.audio_array)
             await buffer.append_audio(None)  # signal end
 
-        # Feed output tokens back into buffer in background
+        # Feed output tokens back into the buffer. Idle waits are normal here;
+        # request cleanup still cancels this task through the finally block.
         async def feed_tokens():
             while True:
-                all_outputs = await asyncio.wait_for(
-                    input_stream.get(),
-                    timeout=VLLM_ENGINE_ITERATION_TIMEOUT_S,
-                )
+                all_outputs = await input_stream.get()
                 await buffer.append_tokens(all_outputs[-1:])
 
         audio_task = asyncio.create_task(feed_audio())
@@ -465,20 +460,19 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
     # for speech-to-text transcription
     def get_generation_prompt(
         cls,
-        audio: np.ndarray,
-        model_config: ModelConfig,
-        stt_config: SpeechToTextConfig,
-        language: str | None,
-        task_type: Literal["transcribe", "translate"],
-        request_prompt: str,
-        to_language: str | None,
+        stt_params: SpeechToTextParams,
     ) -> PromptType:
+        audio = stt_params.audio
+        model_config = stt_params.model_config
+        stt_config = stt_params.stt_config
+        language = stt_params.language
+
         tokenizer = cached_tokenizer_from_config(model_config)
         audio = Audio(audio, int(stt_config.sample_rate), format="wav")  # lossless
 
         req = TranscriptionRequest(
             model=model_config.model,
-            audio=RawAudio.from_audio(audio),
+            audio=audio.to_base64(audio.format),
             language=language,
             streaming=StreamingMode.OFFLINE,
         )

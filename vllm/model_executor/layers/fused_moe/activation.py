@@ -15,8 +15,14 @@ class MoEActivation(Enum):
     # and produce output of shape [..., d]
     SILU = "silu"
     GELU = "gelu"
+    GELU_TANH = "gelu_tanh"
     RELU2 = "relu2"
+    # SWIGLUOAI expects gate/up *interleaved* in w13 ([gate0, up0, gate1, ...]),
+    # as in gpt-oss checkpoints. SWIGLUOAI_UNINTERLEAVE has identical math but
+    # expects the *packed* layout ([all gates; all ups]), as produced by a
+    # MergedColumnParallelLinear gate_up_proj (e.g. MiniMax-M3).
     SWIGLUOAI = "swigluoai"
+    SWIGLUOAI_UNINTERLEAVE = "swigluoai_uninterleave"
     SWIGLUSTEP = "swiglustep"
 
     # Non-gated activations (no mul with gate) expect input of shape [..., d]
@@ -24,6 +30,7 @@ class MoEActivation(Enum):
     # NOTE: Non-gated activations require the "_no_mul" suffix to be present.
     SILU_NO_MUL = "silu_no_mul"
     GELU_NO_MUL = "gelu_no_mul"
+    GELU_TANH_NO_MUL = "gelu_tanh_no_mul"
     RELU2_NO_MUL = "relu2_no_mul"
 
     @property
@@ -53,6 +60,7 @@ class MoEActivation(Enum):
     @classmethod
     def from_str(cls, s: str) -> "MoEActivation":
         """Parse from string for backward compatibility."""
+        s = _STR_ALIASES.get(s, s)
         for member in cls:
             if member.value == s:
                 return member
@@ -61,20 +69,28 @@ class MoEActivation(Enum):
 
 
 # Module-level lookup tables used by MoEActivation functions.
+_STR_ALIASES: dict[str, str] = {
+    "gelu_pytorch_tanh": "gelu_tanh",
+}
+
 _CUSTOM_OP_NAMES: dict[MoEActivation, str] = {
     MoEActivation.SILU: "silu_and_mul",
     MoEActivation.GELU: "gelu_and_mul",
+    MoEActivation.GELU_TANH: "gelu_tanh_and_mul",
     MoEActivation.SWIGLUOAI: "swigluoai_and_mul",
+    MoEActivation.SWIGLUOAI_UNINTERLEAVE: "silu_and_mul_with_clamp",
     MoEActivation.SWIGLUSTEP: "swiglustep_and_mul",
     MoEActivation.RELU2: "relu2",
     MoEActivation.SILU_NO_MUL: "silu_and_mul",
     MoEActivation.GELU_NO_MUL: "gelu_and_mul",
+    MoEActivation.GELU_TANH_NO_MUL: "gelu_tanh_and_mul",
     MoEActivation.RELU2_NO_MUL: "relu2",
 }
 
 _WITHOUT_MUL: dict[MoEActivation, MoEActivation] = {
     MoEActivation.SILU: MoEActivation.SILU_NO_MUL,
     MoEActivation.GELU: MoEActivation.GELU_NO_MUL,
+    MoEActivation.GELU_TANH: MoEActivation.GELU_TANH_NO_MUL,
     MoEActivation.RELU2: MoEActivation.RELU2_NO_MUL,
 }
 
@@ -91,12 +107,39 @@ def activation_without_mul(activation: str) -> str:
     return MoEActivation.from_str(activation).without_mul().value
 
 
+def silu_and_mul_with_clamp(
+    output: torch.Tensor,
+    input: torch.Tensor,
+    clamp_limit: float,
+    topk_ids: torch.Tensor | None = None,
+    expert_map: torch.Tensor | None = None,
+) -> None:
+    if topk_ids is not None and expert_map is not None:
+        from vllm.model_executor.layers.fused_moe.utils import swiglu_limit_func
+
+        swiglu_limit_func(output, input, clamp_limit, topk_ids, expert_map)
+    else:
+        # Fused silu(clamp(gate)) * clamp(up); equivalent to swiglu_limit_func.
+        torch.ops._C.silu_and_mul_with_clamp(output, input, clamp_limit, 1.0, 0.0)
+
+
 def apply_moe_activation(
     activation: MoEActivation,
     output: torch.Tensor,
     input: torch.Tensor,
+    *,
+    clamp_limit: float | None = None,
+    alpha: float = 1.0,
+    beta: float = 0.0,
+    topk_ids: torch.Tensor | None = None,
+    expert_map: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Apply MoE activation function."""
+    """Apply MoE activation function.
+
+    ``clamp_limit``/``alpha``/``beta`` (from the quant config) drive the clamped
+    SwiGLU kernels: ``SILU`` + ``clamp_limit`` and ``SWIGLUOAI_UNINTERLEAVE`` both
+    map to ``silu_and_mul_with_clamp``. Other activations ignore them.
+    """
     assert input.dim() == 2, "Input must be 2D"
     assert output.dim() == 2, "Output must be 2D"
     if activation.is_gated:
@@ -112,11 +155,20 @@ def apply_moe_activation(
 
     # Activations with gated multiplication (gate × activation(up))
     if activation == MoEActivation.SILU:
-        torch.ops._C.silu_and_mul(output, input)
+        if clamp_limit is not None:
+            silu_and_mul_with_clamp(output, input, clamp_limit, topk_ids, expert_map)
+        else:
+            torch.ops._C.silu_and_mul(output, input)
     elif activation == MoEActivation.GELU:
         torch.ops._C.gelu_and_mul(output, input)
+    elif activation == MoEActivation.GELU_TANH:
+        torch.ops._C.gelu_tanh_and_mul(output, input)
     elif activation == MoEActivation.SWIGLUOAI:
         torch.ops._C.swigluoai_and_mul(output, input)
+    elif activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
+        # SwiGLU-OAI on packed w13 (gate = first half, up = second half).
+        assert clamp_limit is not None, "SWIGLUOAI_UNINTERLEAVE requires clamp_limit"
+        torch.ops._C.silu_and_mul_with_clamp(output, input, clamp_limit, alpha, beta)
     elif activation == MoEActivation.SWIGLUSTEP:
         from vllm.model_executor.layers.activation import swiglustep_and_mul_triton
 
@@ -127,6 +179,8 @@ def apply_moe_activation(
         output.copy_(F.silu(input))
     elif activation == MoEActivation.GELU_NO_MUL:
         output.copy_(F.gelu(input))
+    elif activation == MoEActivation.GELU_TANH_NO_MUL:
+        output.copy_(F.gelu(input, approximate="tanh"))
     elif activation == MoEActivation.RELU2_NO_MUL:
         F.relu(input, inplace=True)
         torch.square(input, out=output)
