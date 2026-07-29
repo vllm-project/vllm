@@ -1,6 +1,41 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Kimi K3 parser for the XTML channel format."""
+"""Kimi K3 parser for the XTML channel format.
+
+A complete assistant output has the following shape::
+
+    <|open|>think<|sep|>
+    reasoning
+    <|close|>think<|sep|>
+    <|open|>response<|sep|>
+    user-visible content
+    <|close|>response<|sep|>
+    <|open|>tools<|sep|>
+    <|open|>call tool="get_weather" index="1"<|sep|>
+    <|open|>argument key="city" type="string"<|sep|>
+    Hangzhou
+    <|close|>argument<|sep|>
+    <|open|>argument key="days" type="number"<|sep|>
+    3
+    <|close|>argument<|sep|>
+    <|open|>argument key="include_details" type="boolean"<|sep|>
+    true
+    <|close|>argument<|sep|>
+    <|close|>call<|sep|>
+    <|open|>call tool="search" index="2"<|sep|>
+    <|open|>argument key="query" type="string"<|sep|>
+    vLLM parser
+    <|close|>argument<|sep|>
+    <|close|>call<|sep|>
+    <|close|>tools<|sep|>
+    <|close|>message<|sep|>
+
+The response and tools channels are independent: either may be empty, and
+multiple call blocks may occur inside the tools channel. Argument ``type`` is
+used to restore JSON values such as numbers, booleans, objects, and arrays.
+The chat template may consume the opening think or response marker as the
+generation prefix, so generated text can begin directly with channel content.
+"""
 
 from __future__ import annotations
 
