@@ -23,6 +23,7 @@ def _nvcc_version(nvcc: str) -> tuple[int, int] | None:
     return int(match.group(1)), int(match.group(2))
 
 
+@pytest.mark.marlin_ldmatrix_s4
 @pytest.mark.skipif(
     not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0),
     reason="Requires a Hopper GPU.",
