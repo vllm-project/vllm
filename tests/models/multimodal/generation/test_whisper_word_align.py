@@ -78,12 +78,11 @@ def test_neg_weights_only_reads_alignment_heads():
 
 
 def _capture_buffers(slots, layers, max_tgt, max_src, d_model, max_q, max_k):
+    """Layer-major capture buffers plus the row-index buffers the runner fills."""
     return (
-        torch.zeros(slots, layers, max_tgt, d_model),
-        torch.zeros(slots, layers, max_src, d_model),
+        torch.zeros(layers, slots, max_tgt, d_model),
+        torch.zeros(layers, slots, max_src, d_model),
         torch.zeros(max_q, dtype=torch.long),
-        torch.zeros(max_q, dtype=torch.long),
-        torch.zeros(max_k, dtype=torch.long),
         torch.zeros(max_k, dtype=torch.long),
     )
 
@@ -91,47 +90,45 @@ def _capture_buffers(slots, layers, max_tgt, max_src, d_model, max_q, max_k):
 def test_capture_scatters_batched_requests_into_their_own_slots():
     """Two requests decoding in one batch must not land in the same slot."""
     layers, d_model, max_tgt, max_src = 2, 4, 6, 8
-    qbuf, kbuf, qslot, qpos, kslot, kpos = _capture_buffers(
+    qbuf, kbuf, qidx, kidx = _capture_buffers(
         2, layers, max_tgt, max_src, d_model, 4, 6
     )
     # Row 0 -> slot 0 position 3, row 1 -> slot 1 position 0.
-    qslot[:2] = torch.tensor([0, 1])
-    qpos[:2] = torch.tensor([3, 0])
+    qidx[:2] = torch.tensor([0 * max_tgt + 3, 1 * max_tgt + 0])
     # Encoder frames: 3 for slot 0, then 3 for slot 1.
-    kslot[:6] = torch.tensor([0, 0, 0, 1, 1, 1])
-    kpos[:6] = torch.tensor([0, 1, 2, 0, 1, 2])
+    kidx[:6] = torch.tensor([0, 1, 2, max_src, max_src + 1, max_src + 2])
 
     q = torch.tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])
     k = torch.arange(6 * d_model, dtype=torch.float32).view(6, d_model)
     layer = 1
-    _word_align_capture(q, k, qbuf, kbuf, qslot, qpos, kslot, kpos, layer)
+    _word_align_capture(q, k, qbuf, kbuf, qidx, kidx, layer)
 
-    torch.testing.assert_close(qbuf[0, layer, 3], q[0])
-    torch.testing.assert_close(qbuf[1, layer, 0], q[1])
-    torch.testing.assert_close(kbuf[0, layer, :3], k[:3])
-    torch.testing.assert_close(kbuf[1, layer, :3], k[3:])
+    torch.testing.assert_close(qbuf[layer, 0, 3], q[0])
+    torch.testing.assert_close(qbuf[layer, 1, 0], q[1])
+    torch.testing.assert_close(kbuf[layer, 0, :3], k[:3])
+    torch.testing.assert_close(kbuf[layer, 1, :3], k[3:])
 
     # Nothing leaked into the other layer or into unwritten positions.
-    assert qbuf[:, 0].abs().sum() == 0
-    assert kbuf[:, 0].abs().sum() == 0
-    assert qbuf[0, layer, 0].abs().sum() == 0
+    assert qbuf[0].abs().sum() == 0
+    assert kbuf[0].abs().sum() == 0
+    assert qbuf[layer, 0, 0].abs().sum() == 0
 
 
 def test_capture_skips_oversized_batches():
     """The profiling/warmup batch is larger than the index buffers: no-op."""
-    qbuf, kbuf, qslot, qpos, kslot, kpos = _capture_buffers(1, 1, 4, 4, 4, 2, 2)
+    qbuf, kbuf, qidx, kidx = _capture_buffers(1, 1, 4, 4, 4, 2, 2)
     q = torch.ones(8, 4)
-    _word_align_capture(q, None, qbuf, kbuf, qslot, qpos, kslot, kpos, 0)
+    _word_align_capture(q, None, qbuf, kbuf, qidx, kidx, 0)
     assert qbuf.abs().sum() == 0
     assert kbuf.abs().sum() == 0
 
 
 def test_capture_without_encoder_keys_leaves_kbuf_untouched():
     """Decode steps pass k=None; only the encoder prefill writes K."""
-    qbuf, kbuf, qslot, qpos, kslot, kpos = _capture_buffers(1, 1, 4, 4, 4, 2, 2)
+    qbuf, kbuf, qidx, kidx = _capture_buffers(1, 1, 4, 4, 4, 2, 2)
     kbuf.fill_(7.0)
     q = torch.ones(1, 4)
-    _word_align_capture(q, None, qbuf, kbuf, qslot, qpos, kslot, kpos, 0)
+    _word_align_capture(q, None, qbuf, kbuf, qidx, kidx, 0)
     torch.testing.assert_close(qbuf[0, 0, 0], q[0])
     assert bool((kbuf == 7.0).all())
 
@@ -153,17 +150,20 @@ def _fake_batch(req_ids, num_scheduled, num_computed):
     )
 
 
-def _capturer(num_slots=2, max_frames=4, max_tokens=16):
+def _capturer(num_slots=2, max_frames=4, max_tokens=16, max_tgt=8):
     cap = WordAlignCapturer()
     cap.enabled = True
     cap.scratch = num_slots
     cap._free = list(range(num_slots))
     cap.max_frames = max_frames
+    cap.max_tgt = max_tgt
+    cap._qlimit = (num_slots + 1) * max_tgt - 1
     cap.device = torch.device("cpu")
-    cap.qslot = torch.zeros(max_tokens, dtype=torch.int64)
-    cap.kslot = torch.zeros(num_slots * max_frames, dtype=torch.int64)
-    cap.kpos = torch.zeros(num_slots * max_frames, dtype=torch.int64)
+    cap.qidx = torch.zeros(max_tokens, dtype=torch.int64)
+    cap.kidx = torch.zeros(num_slots * max_frames, dtype=torch.int64)
+    cap.positions = torch.zeros(max_tokens, dtype=torch.int64)
     cap._arange = torch.arange(max_tokens, dtype=torch.int32)
+    cap._frames = np.arange(max_frames, dtype=np.int64)
     return cap
 
 
@@ -175,10 +175,25 @@ def test_capture_pool_routes_each_request_to_its_own_slot():
     assert cap.slot_of["a"] != cap.slot_of["b"]
     # Two tokens for "a" then three for "b", each on its own slot.
     expected = [cap.slot_of["a"]] * 2 + [cap.slot_of["b"]] * 3
-    assert cap.qslot[:5].tolist() == expected
+    assert (cap.qidx[:5] // cap.max_tgt).tolist() == expected
     # Both are prefilling, so each contributes one full encoder window.
-    assert cap.kslot[:4].tolist() == [cap.slot_of["a"]] * 4
-    assert cap.kslot[4:8].tolist() == [cap.slot_of["b"]] * 4
+    frames = list(range(cap.max_frames))
+    assert cap.kidx[:4].tolist() == [
+        cap.slot_of["a"] * cap.max_frames + f for f in frames
+    ]
+    assert cap.kidx[4:8].tolist() == [
+        cap.slot_of["b"] * cap.max_frames + f for f in frames
+    ]
+
+
+def test_capture_row_index_combines_slot_and_position():
+    """The index the capture op scatters by must encode this step's position."""
+    cap = _capturer()
+    cap.positions[:2] = torch.tensor([5, 2])
+    cap.before_forward(_fake_batch(["a", "b"], [1, 1], [5, 2]))
+
+    assert cap.qidx[0].item() == cap.slot_of["a"] * cap.max_tgt + 5
+    assert cap.qidx[1].item() == cap.slot_of["b"] * cap.max_tgt + 2
 
 
 def test_capture_pool_keeps_slot_across_steps():
@@ -198,7 +213,7 @@ def test_capture_pool_exhaustion_leaves_requests_untracked():
 
     assert set(cap.slot_of) == {"a", "b"}
     assert "c" not in cap.slot_of
-    assert cap.qslot[2].item() == cap.scratch
+    assert cap.qidx[2].item() // cap.max_tgt == cap.scratch
 
 
 def test_capture_pool_releases_slot_on_removal():
@@ -217,8 +232,8 @@ def test_capture_pool_releases_slot_on_removal():
 def test_capture_pool_skips_oversized_encoder_batch():
     """The profiling run schedules more encoder rows than the pool holds."""
     cap = _capturer(num_slots=2, max_frames=4)
-    cap.kslot.fill_(7)
+    cap.kidx.fill_(7)
     cap.before_forward(_fake_batch(["a", "b", "c"], [1, 1, 1], [0, 0, 0]))
 
     # 3 prefills x 4 frames = 12 rows, buffer holds 8: left untouched.
-    assert bool((cap.kslot == 7).all())
+    assert bool((cap.kidx == 7).all())

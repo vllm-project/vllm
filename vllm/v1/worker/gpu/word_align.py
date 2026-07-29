@@ -22,10 +22,11 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# A slot holds one request's decoder Q and encoder K, a few MB at Whisper's
-# dimensions, so the pool is capped rather than following max_num_reqs, which
-# would cost tens of GiB of KV cache. One extra slot absorbs cudagraph padding.
-MAX_CAPTURE_SLOTS = 64
+# A slot holds one request's decoder Q and encoder K, and requests past the pool
+# silently get no timestamps. Sizing the pool by memory rather than by a fixed
+# count keeps that coverage as wide as the budget allows: turbo (2 alignment
+# layers) then covers a full batch where large-v3 (10) could not.
+MAX_CAPTURE_BYTES = 2 * 1024**3
 
 
 class WordAlignCapturer:
@@ -38,6 +39,18 @@ class WordAlignCapturer:
         # req_id -> capture slot, held for the request's lifetime.
         self.slot_of: dict[str, int] = {}
         self._free: list[int] = []
+
+    @staticmethod
+    def _pool_size(runner, gen_config, hf_config, max_frames: int) -> int:
+        """Largest slot count whose capture buffers fit in the budget."""
+        n_layers = len({h[0] for h in gen_config.alignment_heads})
+        per_slot = (
+            (max_frames + int(hf_config.max_target_positions))
+            * n_layers
+            * int(hf_config.d_model)
+            * runner.model_config.dtype.itemsize
+        )
+        return max(1, min(runner.max_num_reqs, MAX_CAPTURE_BYTES // per_slot))
 
     def init(self, runner: "GPUModelRunner") -> None:
         """Allocate capture buffers and turn on capture in the model.
@@ -56,8 +69,8 @@ class WordAlignCapturer:
 
         gen_config = GenerationConfig.from_pretrained(runner.model_config.model)
         hf_config = runner.model_config.hf_config
-        num_slots = min(runner.max_num_reqs, MAX_CAPTURE_SLOTS)
         max_frames = int(hf_config.max_source_positions)
+        num_slots = self._pool_size(runner, gen_config, hf_config, max_frames)
         model.enable_word_align(
             # alignment_heads is a Whisper-specific dynamic field on the HF
             # generation config, not declared on GenerationConfig.
@@ -71,20 +84,20 @@ class WordAlignCapturer:
             max_k_frames=num_slots * max_frames,
         )
         self.model = model
-        self.qslot, self.kslot, self.kpos = model.word_align_index_tensors()
+        self.qidx, self.kidx = model.word_align_index_tensors()
+        self.positions = runner.input_buffers.positions
         self.scratch = num_slots
         self.max_frames = max_frames
+        self.max_tgt = int(hf_config.max_target_positions)
+        self._qlimit = (num_slots + 1) * self.max_tgt - 1
         self._free = list(range(num_slots))
         # Token row indices, reused every step to map tokens onto batch entries.
         self._arange = torch.arange(
             runner.max_num_tokens, device=runner.device, dtype=torch.int32
         )
-        # The frame index is the same ramp on every step: fill it once.
-        self.kpos.copy_(
-            torch.arange(self.kpos.shape[0], device=runner.device) % max_frames
-        )
+        self._frames = np.arange(max_frames, dtype=np.int64)
         # Warmup and graph capture run before any real batch: park them.
-        self.qslot.fill_(self.scratch)
+        self.qidx.fill_(self.scratch * self.max_tgt)
         self.enabled = True
         logger.info("Whisper word-timestamp cross-attention capture enabled")
 
@@ -102,17 +115,22 @@ class WordAlignCapturer:
             dtype=np.int64,
             count=input_batch.num_reqs,
         )
-        slot_gpu = torch.from_numpy(slot_np).to(self.qslot.device, non_blocking=True)
+        # Rows are addressed as slot * max_tgt + position, so scaling the slot
+        # here leaves just the position to add once tokens are laid out.
+        slot_gpu = torch.from_numpy(slot_np * self.max_tgt).to(
+            self.qidx.device, non_blocking=True
+        )
         num_tokens = input_batch.num_tokens
         batch_idx = torch.searchsorted(
             input_batch.query_start_loc[1 : input_batch.num_reqs + 1],
             self._arange[:num_tokens],
             right=True,
         )
-        torch.index_select(slot_gpu, 0, batch_idx, out=self.qslot[:num_tokens])
+        torch.index_select(slot_gpu, 0, batch_idx, out=self.qidx[:num_tokens])
         pad_end = input_batch.num_tokens_after_padding
         if pad_end > num_tokens:
-            self.qslot[num_tokens:pad_end].fill_(self.scratch)
+            self.qidx[num_tokens:pad_end].fill_(self.scratch * self.max_tgt)
+        self.qidx[:pad_end].add_(self.positions[:pad_end]).clamp_(max=self._qlimit)
 
         num_scheduled = input_batch.num_scheduled_tokens
         num_computed = input_batch.num_computed_tokens_np
@@ -124,11 +142,9 @@ class WordAlignCapturer:
         # capture op skips as well, so leave the buffer alone.
         prefills = np.flatnonzero(num_computed == 0)
         num_k = prefills.size * self.max_frames
-        if num_k and num_k <= self.kslot.shape[0]:
-            self.kslot[:num_k].copy_(
-                torch.from_numpy(np.repeat(slot_np[prefills], self.max_frames)),
-                non_blocking=True,
-            )
+        if num_k and num_k <= self.kidx.shape[0]:
+            rows = slot_np[prefills, None] * self.max_frames + self._frames
+            self.kidx[:num_k].copy_(torch.from_numpy(rows.ravel()), non_blocking=True)
 
     def make_readout_fn(self) -> Callable | None:
         """Bind this step's slots for the deferred readout."""

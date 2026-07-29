@@ -94,13 +94,13 @@ logger = init_logger(__name__)
 # so the compiled forward reads the enable flag as a compile-time constant.
 _WORD_ALIGN_ENABLED = False
 # Per-slot capture buffers, keyed by a stable request slot the runner assigns.
-_WORD_ALIGN_QBUF: torch.Tensor | None = None  # [slots, layers, max_tgt, d_model]
-_WORD_ALIGN_KBUF: torch.Tensor | None = None  # [slots, layers, max_src, d_model]
-# Per-row (slot, position) destinations the runner uploads before each forward.
-_WORD_ALIGN_QSLOT: torch.Tensor | None = None  # [max_q_tokens]
-_WORD_ALIGN_QPOS: torch.Tensor | None = None  # [max_q_tokens]
-_WORD_ALIGN_KSLOT: torch.Tensor | None = None  # [max_k_frames]
-_WORD_ALIGN_KPOS: torch.Tensor | None = None  # [max_k_frames]
+_WORD_ALIGN_QBUF: torch.Tensor | None = None  # [layers, slots, max_tgt, d_model]
+_WORD_ALIGN_KBUF: torch.Tensor | None = None  # [layers, slots, max_src, d_model]
+# Destination row per captured token/frame (slot * max_positions + pos), which
+# the runner uploads before each forward. Layer-major buffers make it the same
+# row in every layer, so one index serves them all.
+_WORD_ALIGN_QIDX: torch.Tensor | None = None  # [max_q_tokens]
+_WORD_ALIGN_KIDX: torch.Tensor | None = None  # [max_k_frames]
 # Actual (pre-padding) encoder-frame count per slot, for DTW cropping. Whisper
 # pads audio to 30s so the encoder always emits 1500 frames; without cropping to
 # the real length the DTW degenerates on short clips.
@@ -114,32 +114,26 @@ def _word_align_capture(
     k: torch.Tensor | None,
     qbuf: torch.Tensor,
     kbuf: torch.Tensor,
-    qslot: torch.Tensor,
-    qpos: torch.Tensor,
-    kslot: torch.Tensor,
-    kpos: torch.Tensor,
+    qidx: torch.Tensor,
+    kidx: torch.Tensor,
     layer: int,
 ) -> None:
-    # Stateless scatter into per-slot buffers using runner-provided
-    # (slot, position) indices; CUDA-graph safe (index_copy_ + static buffers).
+    # Stateless scatter into per-slot buffers using runner-provided row
+    # indices; CUDA-graph safe (index_copy_ + static buffers).
     nq = q.shape[0]
-    if nq > qslot.shape[0]:  # skip oversized profiling/warmup batch
+    if nq > qidx.shape[0]:  # skip oversized profiling/warmup batch
         return
-    _, ql, qt, qd = qbuf.shape
-    fq = ((qslot[:nq] * ql + layer) * qt + qpos[:nq]).clamp_(max=qbuf.numel() // qd - 1)
-    qbuf.view(-1, qd).index_copy_(0, fq, q.to(qbuf.dtype))
+    ql, _, _, qd = qbuf.shape
+    qbuf.view(ql, -1, qd)[layer].index_copy_(0, qidx[:nq], q.to(qbuf.dtype))
     if k is not None:
         nk = k.shape[0]
-        if nk <= kslot.shape[0]:
-            _, kl, kt, kd = kbuf.shape
-            fk = ((kslot[:nk] * kl + layer) * kt + kpos[:nk]).clamp_(
-                max=kbuf.numel() // kd - 1
-            )
-            kbuf.view(-1, kd).index_copy_(0, fk, k.to(kbuf.dtype))
+        if nk <= kidx.shape[0]:
+            kl, _, _, kd = kbuf.shape
+            kbuf.view(kl, -1, kd)[layer].index_copy_(0, kidx[:nk], k.to(kbuf.dtype))
 
 
 @_word_align_capture.register_fake
-def _(q, k, qbuf, kbuf, qslot, qpos, kslot, kpos, layer):
+def _(q, k, qbuf, kbuf, qidx, kidx, layer):
     return None
 
 
@@ -458,10 +452,8 @@ class WhisperCrossAttention(WhisperAttention):
                 k,
                 _WORD_ALIGN_QBUF,
                 _WORD_ALIGN_KBUF,
-                _WORD_ALIGN_QSLOT,
-                _WORD_ALIGN_QPOS,
-                _WORD_ALIGN_KSLOT,
-                _WORD_ALIGN_KPOS,
+                _WORD_ALIGN_QIDX,
+                _WORD_ALIGN_KIDX,
                 self._align_layer,
             )
 
@@ -960,11 +952,10 @@ class WhisperForConditionalGeneration(
         timestamps are enabled. ``max_slots`` bounds the number of concurrent
         word-timestamp requests; ``max_k_frames`` bounds the per-forward
         encoder-frame count. ``positions`` is the runner's own per-token
-        position buffer, reused directly as the capture row index so no
-        separate buffer has to be allocated and refilled each step.
+        position buffer, which sizes the row-index buffer the runner fills.
         """
         global _WORD_ALIGN_ENABLED, _WORD_ALIGN_QBUF, _WORD_ALIGN_KBUF
-        global _WORD_ALIGN_QSLOT, _WORD_ALIGN_QPOS, _WORD_ALIGN_KSLOT, _WORD_ALIGN_KPOS
+        global _WORD_ALIGN_QIDX, _WORD_ALIGN_KIDX
         global _WORD_ALIGN_NFRAMES, _WORD_ALIGN_POOL
         cfg = self.config
         n_heads = cfg.decoder_attention_heads
@@ -983,25 +974,24 @@ class WhisperForConditionalGeneration(
         ]
         n_layers = len(align_layers)
         _WORD_ALIGN_QBUF = torch.zeros(
-            max_slots,
             n_layers,
+            max_slots,
             cfg.max_target_positions,
             cfg.d_model,
             device=device,
             dtype=dtype,
         )
         _WORD_ALIGN_KBUF = torch.zeros(
-            max_slots,
             n_layers,
+            max_slots,
             cfg.max_source_positions,
             cfg.d_model,
             device=device,
             dtype=dtype,
         )
         z = lambda n: torch.zeros(n, device=device, dtype=torch.long)  # noqa: E731
-        _WORD_ALIGN_QSLOT = z(positions.shape[0])
-        _WORD_ALIGN_QPOS = positions
-        _WORD_ALIGN_KSLOT, _WORD_ALIGN_KPOS = z(max_k_frames), z(max_k_frames)
+        _WORD_ALIGN_QIDX = z(positions.shape[0])
+        _WORD_ALIGN_KIDX = z(max_k_frames)
         _WORD_ALIGN_NFRAMES = torch.full(
             (max_slots,), cfg.max_source_positions, device=device, dtype=torch.long
         )
@@ -1014,15 +1004,9 @@ class WhisperForConditionalGeneration(
 
     @staticmethod
     def word_align_index_tensors() -> tuple[torch.Tensor, ...]:
-        """Return the (qslot, kslot, kpos) device buffers the runner fills each
-        step to route capture rows to per-request slots. The q positions come
-        from the runner's own ``positions`` buffer, bound in
-        ``enable_word_align``."""
-        return (
-            _WORD_ALIGN_QSLOT,
-            _WORD_ALIGN_KSLOT,
-            _WORD_ALIGN_KPOS,
-        )
+        """Return the (qidx, kidx) device buffers the runner fills each step to
+        route capture rows to per-request slots."""
+        return (_WORD_ALIGN_QIDX, _WORD_ALIGN_KIDX)
 
     def compute_word_align(
         self,
@@ -1053,8 +1037,8 @@ class WhisperForConditionalGeneration(
                 (
                     req_id,
                     _word_align_neg_weights(
-                        _WORD_ALIGN_QBUF[slot],
-                        _WORD_ALIGN_KBUF[slot],
+                        _WORD_ALIGN_QBUF[:, slot],
+                        _WORD_ALIGN_KBUF[:, slot],
                         n,
                         self._word_align_heads,
                         self._word_align_nheads,
@@ -1259,7 +1243,7 @@ class WhisperForConditionalGeneration(
         so ``compute_word_align`` can crop the DTW to actual content. Whisper
         pads audio to 30s with zeros, so the trailing mel columns are a constant
         floor; the last column that differs from it marks the content boundary.
-        Runs at prefill (eager), matching the encoder-K slot order in KSLOT."""
+        Runs at prefill (eager), matching the encoder-K slot order in KIDX."""
         src = int(self.config.max_source_positions)
         fs = feats if isinstance(feats, torch.Tensor) else torch.stack(list(feats))
         # fs: [N, n_mel, n_frames]; trailing zero-pad columns equal the last one.
@@ -1269,10 +1253,11 @@ class WhisperForConditionalGeneration(
         nframes = (n_mel // 2).clamp_(1, src)
         n = fs.shape[0]
         # More audio items than the slot buffer holds: the runner skipped the
-        # slot routing for this batch, so KSLOT holds nothing to read here.
-        if n * src > _WORD_ALIGN_KSLOT.shape[0]:
+        # slot routing for this batch, so KIDX holds nothing to read here.
+        if n * src > _WORD_ALIGN_KIDX.shape[0]:
             return
-        slots = _WORD_ALIGN_KSLOT[torch.arange(n, device=fs.device) * src]
+        # Each audio's first frame sits at row slot * src, so dividing recovers it.
+        slots = _WORD_ALIGN_KIDX[torch.arange(n, device=fs.device) * src] // src
         _WORD_ALIGN_NFRAMES[slots] = nframes  # GPU scatter — no host sync
 
     def embed_input_ids(
