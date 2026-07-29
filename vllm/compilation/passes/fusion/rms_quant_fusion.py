@@ -115,20 +115,24 @@ class FusedRMSQuantKey(NamedTuple):
         )
 
 
-FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {
-    FusedRMSQuantKey(
-        kFp8StaticTensorSym, False
-    ): torch.ops._C.rms_norm_static_fp8_quant.default,  # noqa: E501
-    FusedRMSQuantKey(
-        kFp8StaticTensorSym, True
-    ): torch.ops._C.fused_add_rms_norm_static_fp8_quant.default,  # noqa: E501
-    FusedRMSQuantKey(
-        kFp8DynamicTokenSym, False
-    ): torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
-    FusedRMSQuantKey(
-        kFp8DynamicTokenSym, True
-    ): torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
-}
+FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {}
+# These kernels ship together in the CUDA/ROCm extension and none of them exist on
+# CPU, so guard them as one group like rms_norm_per_block_quant below; that keeps
+# this module importable on CPU builds, where an absent key surfaces as the assert
+# in RMSNormQuantPattern instead of an AttributeError at import time.
+if hasattr(torch.ops._C, "rms_norm_static_fp8_quant"):
+    FUSED_OPS[FusedRMSQuantKey(kFp8StaticTensorSym, False)] = (
+        torch.ops._C.rms_norm_static_fp8_quant.default
+    )
+    FUSED_OPS[FusedRMSQuantKey(kFp8StaticTensorSym, True)] = (
+        torch.ops._C.fused_add_rms_norm_static_fp8_quant.default
+    )
+    FUSED_OPS[FusedRMSQuantKey(kFp8DynamicTokenSym, False)] = (
+        torch.ops._C.rms_norm_dynamic_per_token_quant.default
+    )
+    FUSED_OPS[FusedRMSQuantKey(kFp8DynamicTokenSym, True)] = (
+        torch.ops._C.rms_norm_dynamic_per_token_quant.default
+    )
 # rms_norm_per_block_quant is CUDA-only; guard it like per_token_group_fp8_quant above.
 if hasattr(torch.ops._C, "rms_norm_per_block_quant"):
     _rms_norm_per_block_quant = torch.ops._C.rms_norm_per_block_quant.default
