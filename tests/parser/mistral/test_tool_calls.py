@@ -715,6 +715,103 @@ def test_extract_tool_calls_v11_without_args_skipped(mistral_tool_parser):
     assert result.content is None
 
 
+def test_extract_tool_calls_malformed_name_before_marker_emits_empty_name(
+    mistral_tool_parser,
+):
+    model_output = 'bash[TOOL_CALLS]{"command": "cat file.py"}'
+    result = mistral_tool_parser.extract_tool_calls(
+        model_output, request=_DUMMY_REQUEST
+    )
+    assert result.tools_called
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == ""
+    assert result.tool_calls[0].function.arguments == json.dumps(
+        {"command": "cat file.py"}
+    )
+    assert result.content == "bash"
+
+
+def test_extract_tool_calls_well_formed_name_unaffected(mistral_tool_parser):
+    model_output = '[TOOL_CALLS]bash[ARGS]{"command": "ls -la"}'
+    result = mistral_tool_parser.extract_tool_calls(
+        model_output, request=_DUMMY_REQUEST
+    )
+    assert result.tools_called
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "bash"
+    assert result.tool_calls[0].function.arguments == json.dumps({"command": "ls -la"})
+    assert result.content is None
+
+
+def test_extract_tool_calls_empty_name_unparsable_args_no_crash(
+    mistral_tool_parser,
+):
+    # Empty name AND args that never form valid JSON: still emitted (raw
+    # text as arguments) instead of raising.
+    model_output = "bash[TOOL_CALLS]{not valid json at all"
+    result = mistral_tool_parser.extract_tool_calls(
+        model_output, request=_DUMMY_REQUEST
+    )
+    assert result.tools_called
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == ""
+    assert result.tool_calls[0].function.arguments == "{not valid json at all"
+    assert result.content == "bash"
+
+
+def test_extract_tool_calls_streaming_malformed_name_before_marker(
+    mistral_tool_parser,
+):
+    # Streaming counterpart: by the time TOOL_ARGS starts, the state machine
+    # can never return to TOOL_NAME, so the (empty) name is already final and
+    # streams immediately alongside the args.
+    model_output = 'bash[TOOL_CALLS]{"command": "cat file.py"}'
+    mid_delta = mistral_tool_parser.extract_tool_calls_streaming(
+        previous_text="",
+        current_text=model_output,
+        delta_text=model_output,
+        previous_token_ids=[],
+        current_token_ids=[],
+        delta_token_ids=[],
+        request=_DUMMY_REQUEST,
+    )
+    assert mid_delta is not None
+    assert mid_delta.content == "bash"
+    assert len(mid_delta.tool_calls) == 1
+    assert mid_delta.tool_calls[0].function.name == ""
+    assert mid_delta.tool_calls[0].function.arguments == '{"command": "cat file.py"'
+
+    final_delta = mistral_tool_parser.finish_streaming()
+    assert final_delta is not None
+    assert len(final_delta.tool_calls) == 1
+    assert final_delta.tool_calls[0].function.name is None
+    assert final_delta.tool_calls[0].function.arguments == "}"
+
+
+def test_extract_tool_calls_parallel_malformed_then_well_formed(
+    mistral_tool_parser,
+):
+    # A malformed empty-name call followed by a well-formed one must not
+    # regress into brace-splitting: nested braces in the second call's
+    # arguments must stay intact, and both calls must be correctly separated.
+    model_output = (
+        'bash[TOOL_CALLS]{"command": "ls"}'
+        '[TOOL_CALLS]submit[ARGS]{"answer": {"nested": 1}}'
+    )
+    result = mistral_tool_parser.extract_tool_calls(
+        model_output, request=_DUMMY_REQUEST
+    )
+    assert result.tools_called
+    assert len(result.tool_calls) == 2
+    assert result.tool_calls[0].function.name == ""
+    assert result.tool_calls[0].function.arguments == json.dumps({"command": "ls"})
+    assert result.tool_calls[1].function.name == "submit"
+    assert result.tool_calls[1].function.arguments == json.dumps(
+        {"answer": {"nested": 1}}
+    )
+    assert result.content == "bash"
+
+
 def _test_extract_tool_calls_streaming(
     tool_parser,
     tokenizer,
@@ -2262,3 +2359,257 @@ def test_guided_streaming_required_pre_v11(
     assert tool_call_id is not None
     assert len(tool_call_id) == 9
     assert json.loads(function_args) == {"city": "Dallas"}
+
+
+# ---------------------------------------------------------------------------
+# Malformed-name-before-marker matrix: {malformed, well-formed, mixed
+# parallel} x {streaming, non-streaming}.
+#
+# These tests drive a real MistralParser built from the module's
+# `mistral_tokenizer` fixture (grammar-capable v11+ tokenizer, so the
+# declarative ParserEngine path is exercised, not the pre-v11 legacy state
+# machine) with actual bash/search_replace/submit tools, mirroring the tools
+# present in the real captured traces this bug was found in.
+# ---------------------------------------------------------------------------
+
+_BASH_SEARCH_SUBMIT_TOOLS_DICTS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "Run a bash command",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_replace",
+            "description": "Search and replace text in a file",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "search": {"type": "string"},
+                    "replace": {"type": "string"},
+                },
+                "required": ["path", "search", "replace"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "submit",
+            "description": "Submit the final answer",
+            "parameters": {
+                "type": "object",
+                "properties": {"answer": {"type": "object"}},
+                "required": ["answer"],
+            },
+        },
+    },
+]
+
+
+def _malformed_matrix_request() -> ChatCompletionRequest:
+    return ChatCompletionRequest(
+        messages=[],
+        model="test",
+        tools=_BASH_SEARCH_SUBMIT_TOOLS_DICTS,
+        tool_choice="auto",
+    )
+
+
+def _stream_via_parse_delta(
+    parser: MistralParser,
+    tokenizer: MistralTokenizer,
+    model_output: str,
+    request: ChatCompletionRequest,
+) -> tuple[str, list[str | None], list[str]]:
+    """Feed `model_output` through `parser.parse_delta` token-by-token.
+
+    This is the exact API production serving drives on every generated
+    token (see `ParserEngine.parse_delta`), unlike
+    `extract_tool_calls_streaming` which some legacy call sites drive with
+    pre-computed previous/current text windows.
+    """
+    parser.initialize_streaming()
+    all_token_ids = encode_mistral_output(tokenizer, model_output)
+
+    content = ""
+    tool_call_idx = -1
+    names: list[str | None] = []
+    args: list[str] = []
+
+    previous_tokens = None
+    prefix_offset = 0
+    read_offset = 0
+    for i, token_id in enumerate(all_token_ids):
+        new_tokens, delta_text, prefix_offset, read_offset = detokenize_incrementally(
+            tokenizer=tokenizer,
+            all_input_ids=all_token_ids[: i + 1],
+            prev_tokens=previous_tokens,
+            prefix_offset=prefix_offset,
+            read_offset=read_offset,
+            skip_special_tokens=False,
+            spaces_between_special_tokens=True,
+        )
+        previous_tokens = (
+            previous_tokens + new_tokens if previous_tokens else new_tokens
+        )
+        finished = i == len(all_token_ids) - 1
+
+        delta_message = parser.parse_delta(
+            delta_text=delta_text,
+            delta_token_ids=[token_id],
+            request=request,
+            prompt_token_ids=[1],
+            finished=finished,
+        )
+        if delta_message is None:
+            continue
+        if delta_message.content:
+            content += delta_message.content
+        for tool_call in delta_message.tool_calls or []:
+            if tool_call.index != tool_call_idx:
+                tool_call_idx = tool_call.index
+                names.append(None)
+                args.append("")
+            if tool_call.function:
+                if tool_call.function.name is not None:
+                    names[tool_call.index] = tool_call.function.name
+                if tool_call.function.arguments:
+                    args[tool_call.index] += tool_call.function.arguments
+
+    return content, names, args
+
+
+_MALFORMED_MATRIX_CASES = [
+    pytest.param(
+        # well-formed single call: name intact via the `[ARGS]` separator.
+        '[TOOL_CALLS]bash[ARGS]{"command": "ls -la"}',
+        ["bash"],
+        [json.dumps({"command": "ls -la"})],
+        None,
+        id="wellformed_single",
+    ),
+    pytest.param(
+        # malformed single call: "bash" lands in content before the marker,
+        # then generation jumps straight to args (no NAME slot, no [ARGS]).
+        'bash[TOOL_CALLS]{"command": "cat file.py"}',
+        [""],
+        [json.dumps({"command": "cat file.py"})],
+        "bash",
+        id="malformed_single",
+    ),
+    pytest.param(
+        # parallel well-formed x2; the second call's nested braces in its
+        # arguments must not confuse call splitting.
+        '[TOOL_CALLS]bash[ARGS]{"command": "ls"}'
+        '[TOOL_CALLS]submit[ARGS]{"answer": {"nested": 1}}',
+        ["bash", "submit"],
+        [json.dumps({"command": "ls"}), json.dumps({"answer": {"nested": 1}})],
+        None,
+        id="parallel_wellformed",
+    ),
+    pytest.param(
+        # parallel malformed x2: both calls skip the NAME slot entirely
+        # (marker immediately followed by `{`), each ending with an empty
+        # name and correctly separated (nested-brace) arguments.
+        'bash[TOOL_CALLS]{"command": "ls"}[TOOL_CALLS]{"answer": {"nested": 1}}',
+        ["", ""],
+        [json.dumps({"command": "ls"}), json.dumps({"answer": {"nested": 1}})],
+        "bash",
+        id="parallel_malformed",
+    ),
+    pytest.param(
+        # mixed: malformed first call, well-formed second call. The
+        # important case: proves calls are split on the `[TOOL_CALLS]`
+        # marker, not on braces — the first call's simple args and the
+        # second call's nested-brace args must not bleed into each other.
+        'bash[TOOL_CALLS]{"command": "ls"}'
+        '[TOOL_CALLS]submit[ARGS]{"answer": {"nested": 1}}',
+        ["", "submit"],
+        [json.dumps({"command": "ls"}), json.dumps({"answer": {"nested": 1}})],
+        "bash",
+        id="mixed_malformed_then_wellformed",
+    ),
+    pytest.param(
+        # mixed: well-formed first call, malformed second call (NAME slot
+        # skipped entirely for the second call).
+        '[TOOL_CALLS]bash[ARGS]{"command": "ls"}[TOOL_CALLS]{"answer": {"nested": 1}}',
+        ["bash", ""],
+        [json.dumps({"command": "ls"}), json.dumps({"answer": {"nested": 1}})],
+        None,
+        id="mixed_wellformed_then_malformed",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "model_output,expected_names,expected_args,expected_content",
+    _MALFORMED_MATRIX_CASES,
+)
+def test_malformed_tool_call_matrix_non_streaming(
+    mistral_tokenizer,
+    model_output,
+    expected_names,
+    expected_args,
+    expected_content,
+):
+    parser = MistralParser(mistral_tokenizer)
+    request = _malformed_matrix_request()
+
+    result = parser.extract_tool_calls_from_content(model_output, request)
+
+    assert result.tools_called
+    assert [tc.function.name for tc in result.tool_calls] == expected_names
+    assert [tc.function.arguments for tc in result.tool_calls] == expected_args
+    assert result.content == expected_content
+
+
+@pytest.mark.parametrize(
+    "model_output,expected_names,expected_args,expected_content",
+    _MALFORMED_MATRIX_CASES,
+)
+def test_malformed_tool_call_matrix_streaming(
+    mistral_tokenizer,
+    model_output,
+    expected_names,
+    expected_args,
+    expected_content,
+):
+    parser = MistralParser(mistral_tokenizer)
+    request = _malformed_matrix_request()
+
+    content, names, args = _stream_via_parse_delta(
+        parser, mistral_tokenizer, model_output, request
+    )
+
+    assert content == (expected_content or "")
+    assert names == expected_names
+    assert args == expected_args
+
+
+# Real payload captured from a production SWE-bench-agent.
+_REAL_LEAK_CONTENT = 'bash[TOOL_CALLS]{"command": "cd /testbed && git diff xarray/core/weighted.py"}ometracediff --git a/xarray/core/weighted.py b/xarray/core/weighted.py\\nindex 5f2d138e..9c38b0b7 100644\\n--- a/xarray/core/weighted.py\\n+++ b/xarray/core/weighted.py\\n@@ -1,4 +1,6 @@\\n from typing import TYPE_CHECKING, Hashable, Iterable, Optional, Union, overload\\n+\\n+import numpy as np\\n \\n from .computation import dot\\n from .options import _get_keep_attrs\\n@@ -105,6 +107,10 @@ class Weighted:\\n         )\\n \\n         self.obj = obj\\n-        self.weights = weights\\n+        # Ensure weights are numeric (float64) to avoid boolean arithmetic issues\\n+        # in dot products and weighted operations\\n+        if not np.issubdtype(weights.dtype, np.number):\\n+            weights = weights.astype(np.float64)\\n+        self.weights = weights\\n "}现在 hareview the changes we made:bash[ARGS]{"command": "cat /testbed/xarray/core/weighted.py | head -120 | tail -20"}'  # noqa: E501
+
+
+def test_extract_tool_calls_real_captured_malformed_output(mistral_tokenizer):
+    parser = MistralParser(mistral_tokenizer)
+    request = _malformed_matrix_request()
+
+    result = parser.extract_tool_calls_from_content(_REAL_LEAK_CONTENT, request)
+
+    assert result.tools_called
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == ""
+    assert result.tool_calls[0].function.arguments == json.dumps(
+        {"command": "cd /testbed && git diff xarray/core/weighted.py"}
+    )
+    assert result.content == "bash"

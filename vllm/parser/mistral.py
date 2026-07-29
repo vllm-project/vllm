@@ -911,6 +911,21 @@ class MistralParser(ParserEngine):
             return None, model_output
         return super().extract_reasoning(model_output, request)
 
+    def _accept_tool_name(self, name: str) -> bool:
+        # Once TOOL_ARGS is reached the slot name is final, empty included.
+        # Emitting the call with "" surfaces the malformed generation instead
+        # of dropping it.
+        return self._is_valid_tool_name(name)
+
+    def _try_extract_name(self, idx: int) -> str | None:
+        # No JSON-embedded "name" key in this format; the slot name is final.
+        return self._tool_slots[idx].name
+
+    def _extract_name_and_args(self, raw_body: str) -> tuple[str, str]:
+        # Never a {"name": ..., "arguments": ...} envelope -- a literal "name"
+        # argument key must not be mistaken for the tool name.
+        return "", self._extract_args_json(raw_body, "")
+
     def _handle_arg_chunk(
         self,
         event: SemanticEvent,
