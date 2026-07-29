@@ -66,12 +66,8 @@ def predictable_llama_config_path(tmp_path_factory):
     return str(config_dir)
 
 
-# String-based model class reference for spawn-safe registration.
-# Python 3.14 changed the default multiprocessing start method from "fork"
-# to "forkserver", and CUDA initialization forces "spawn". Both create fresh
-# subprocesses that do NOT inherit the parent's ModelRegistry. Using the
-# "module:class" string format lets ModelConfig.model_class_overrides
-# re-register the model in each worker process.
+# Need for Python 3.14 compatibility, vLLM with force spawn due to CUDA
+# reinitialization, and register will not persist.
 PREDICTABLE_LLAMA_MODEL_CLS = (
     "tests.v1.kv_connector.extract_hidden_states_integration"
     ".predictable_llama:PredictableLlamaForCausalLM"
