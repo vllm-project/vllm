@@ -784,10 +784,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             "kv_cache_config",
             "block_tables",
             "kernel_block_sizes",
-            "cudagraph_manager",
         ):
             if hasattr(self, attr):
                 delattr(self, attr)
+        # Profile runs dispatch eagerly but still read this attribute.
+        self.cudagraph_manager = None
         self.cache_config.num_gpu_blocks = None
 
         for layer in self.compilation_config.static_forward_context.values():

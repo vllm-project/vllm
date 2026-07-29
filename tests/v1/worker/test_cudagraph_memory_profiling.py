@@ -1610,7 +1610,7 @@ def test_v2_cleanup_profiling_kv_cache_releases_builder_refs(monkeypatch):
     assert not hasattr(runner, "kv_cache_config")
     assert not hasattr(runner, "block_tables")
     assert not hasattr(runner, "kernel_block_sizes")
-    assert not hasattr(runner, "cudagraph_manager")
+    assert runner.cudagraph_manager is None
     assert runner.cache_config.num_gpu_blocks is None
     assert isinstance(layer.kv_cache, torch.Tensor)
     assert layer.kv_cache.numel() == 0
