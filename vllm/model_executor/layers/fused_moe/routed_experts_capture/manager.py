@@ -48,7 +48,6 @@ class RoutedExpertsManager:
         block_size_factor: int = 1,
     ) -> None:
         self.full_attn_group_id = require_full_attn_group_id(kv_cache_config)
-        self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         full_attn_group = kv_cache_config.kv_cache_groups[self.full_attn_group_id]
         self.block_size = full_attn_group.kv_cache_spec.block_size
         if block_size_factor < 1:
@@ -151,22 +150,6 @@ class RoutedExpertsManager:
             block_map.connector_block_offsets,
         ]
 
-    @staticmethod
-    def _concatenate_transfers(
-        transfers: list[KVConnectorSidecarTransfer],
-    ) -> KVConnectorSidecarTransfer:
-        return KVConnectorSidecarTransfer(
-            gpu_block_ids=np.concatenate(
-                [transfer.gpu_block_ids for transfer in transfers]
-            ),
-            connector_block_ids=np.concatenate(
-                [transfer.connector_block_ids for transfer in transfers]
-            ),
-            connector_block_offsets=np.concatenate(
-                [transfer.connector_block_offsets for transfer in transfers]
-            ),
-        )
-
     def apply_offload_transfers(self, transfers: KVConnectorSidecarTransfers) -> None:
         """Move routing rows according to a connector's public block mapping.
 
@@ -174,16 +157,10 @@ class RoutedExpertsManager:
         outputs read routing back. Stores are written as soon as prepare_store
         assigns block ids; loads stay gated by KV complete_store.
         """
-        loads = [
-            transfer for transfer in transfers.loads if len(transfer.gpu_block_ids)
-        ]
-        if loads:
-            self.load_from_offload_blocks(self._concatenate_transfers(loads))
-        stores = [
-            transfer for transfer in transfers.stores if len(transfer.gpu_block_ids)
-        ]
-        if stores:
-            self.store_to_offload_blocks(self._concatenate_transfers(stores))
+        if transfers.load is not None:
+            self.load_from_offload_blocks(transfers.load)
+        if transfers.store is not None:
+            self.store_to_offload_blocks(transfers.store)
 
     def get(
         self,

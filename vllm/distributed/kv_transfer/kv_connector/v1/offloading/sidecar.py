@@ -101,6 +101,27 @@ def _normalize_transfer(
     )
 
 
+def _merge_transfers(
+    transfers: list[KVConnectorSidecarTransfer],
+) -> KVConnectorSidecarTransfer | None:
+    non_empty = [transfer for transfer in transfers if len(transfer.gpu_block_ids)]
+    if not non_empty:
+        return None
+    if len(non_empty) == 1:
+        return non_empty[0]
+    return KVConnectorSidecarTransfer(
+        gpu_block_ids=np.concatenate(
+            [transfer.gpu_block_ids for transfer in non_empty]
+        ),
+        connector_block_ids=np.concatenate(
+            [transfer.connector_block_ids for transfer in non_empty]
+        ),
+        connector_block_offsets=np.concatenate(
+            [transfer.connector_block_offsets for transfer in non_empty]
+        ),
+    )
+
+
 def normalize_sidecar_transfers(
     metadata: OffloadingConnectorMetadata,
     *,
@@ -121,10 +142,10 @@ def normalize_sidecar_transfers(
             blocks_per_connector_block=config.blocks_per_connector_block,
         )
 
-    loads = [
-        normalize(job.dst_spec, job.src_spec) for job in metadata.load_jobs.values()
-    ]
-    stores = [
-        normalize(job.src_spec, job.dst_spec) for job in metadata.store_jobs.values()
-    ]
-    return KVConnectorSidecarTransfers(loads=loads, stores=stores)
+    load = _merge_transfers(
+        [normalize(job.dst_spec, job.src_spec) for job in metadata.load_jobs.values()]
+    )
+    store = _merge_transfers(
+        [normalize(job.src_spec, job.dst_spec) for job in metadata.store_jobs.values()]
+    )
+    return KVConnectorSidecarTransfers(load=load, store=store)

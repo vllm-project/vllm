@@ -86,7 +86,7 @@ def test_routed_experts_manager_applies_public_sidecar_transfers():
         connector_block_offsets=np.array([0, 1]),
     )
 
-    manager.apply_offload_transfers(KVConnectorSidecarTransfers(stores=[stores]))
+    manager.apply_offload_transfers(KVConnectorSidecarTransfers(store=stores))
 
     np.testing.assert_array_equal(
         manager.routed_experts_by_offload_block[1, 0],
@@ -103,7 +103,7 @@ def test_routed_experts_manager_applies_public_sidecar_transfers():
         connector_block_ids=np.array([1]),
         connector_block_offsets=np.array([1]),
     )
-    manager.apply_offload_transfers(KVConnectorSidecarTransfers(loads=[loads]))
+    manager.apply_offload_transfers(KVConnectorSidecarTransfers(load=loads))
     np.testing.assert_array_equal(
         manager._blocks_view[2],
         np.array([2, 3], dtype=np.uint8).reshape(2, 1, 1),

@@ -43,7 +43,7 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
@@ -170,8 +170,8 @@ class KVConnectorSidecarTransfer:
 class KVConnectorSidecarTransfers:
     """Normalized load/store mappings for one connector step."""
 
-    loads: list[KVConnectorSidecarTransfer] = field(default_factory=list)
-    stores: list[KVConnectorSidecarTransfer] = field(default_factory=list)
+    load: KVConnectorSidecarTransfer | None = None
+    store: KVConnectorSidecarTransfer | None = None
 
 
 class KVConnectorWorkerMetadata(ABC):
@@ -489,7 +489,6 @@ class KVConnectorBase_V1(ABC):
         self,
         connector_metadata: KVConnectorMetadata,
         kv_group_id: int,
-        expected_num_groups: int,
     ) -> KVConnectorSidecarTransfers:
         """Normalize this step's internal KV jobs for sidecar consumers."""
         raise NotImplementedError(

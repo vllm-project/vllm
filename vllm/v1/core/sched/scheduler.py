@@ -1719,9 +1719,6 @@ class Scheduler(SchedulerInterface):
                 transfers = self.connector.get_block_sidecar_transfers(
                     connector_metadata,
                     kv_group_id=self.routed_experts_manager.full_attn_group_id,
-                    expected_num_groups=(
-                        self.routed_experts_manager.num_kv_cache_groups
-                    ),
                 )
                 self.routed_experts_manager.apply_offload_transfers(transfers)
 

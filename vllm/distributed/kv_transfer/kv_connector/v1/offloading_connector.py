@@ -87,13 +87,11 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         self,
         connector_metadata: KVConnectorMetadata,
         kv_group_id: int,
-        expected_num_groups: int,
     ) -> KVConnectorSidecarTransfers:
         if self._block_sidecar_config is None:
             return super().get_block_sidecar_transfers(
                 connector_metadata,
                 kv_group_id,
-                expected_num_groups,
             )
         if not isinstance(connector_metadata, OffloadingConnectorMetadata):
             raise RuntimeError(
@@ -104,7 +102,7 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
             connector_metadata,
             config=self._block_sidecar_config,
             kv_group_id=kv_group_id,
-            expected_num_groups=expected_num_groups,
+            expected_num_groups=len(self._kv_cache_config.kv_cache_groups),
         )
 
     def shutdown(self) -> None:
