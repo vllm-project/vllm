@@ -2,78 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.import_utils import has_cutedsl
-from vllm.utils.torch_utils import direct_register_custom_op
 
 # Cache of tiny 1-element dummy tensors (per device, dtype) reused by the
 # has_indexer=False path so the indexer args don't allocate every call.
 _DUMMY_CACHE: dict[tuple, torch.Tensor] = {}
-
-
-@torch.compiler.assume_constant_result
-def _can_use_fused_q_cutedsl() -> bool:
-    return current_platform.has_device_capability(100) and has_cutedsl()
-
-
-@torch.compiler.assume_constant_result
-def _is_arch_support_pdl() -> bool:
-    return (
-        current_platform.has_device_capability(100)
-        and current_platform.is_arch_support_pdl()
-    )
-
-
-def _fused_q_cutedsl_impl(
-    positions: torch.Tensor,
-    q_pe: torch.Tensor,
-    rope_cache: torch.Tensor,
-    ql_nope: torch.Tensor,
-    q_scale: torch.Tensor,
-    mqa_output: torch.Tensor,
-    idx_q: torch.Tensor,
-    idx_rope_cache: torch.Tensor,
-    idx_weights: torch.Tensor,
-    idx_weights_softmax_scale: float,
-    idx_weights_head_scale: float,
-    idx_q_fp8: torch.Tensor,
-    idx_weights_out: torch.Tensor,
-    has_indexer: bool,
-    index_rope_interleave: bool,
-) -> None:
-    from .ops.fused_q_cutedsl import fused_q_cutedsl
-
-    fused_q_cutedsl(
-        positions,
-        q_pe,
-        rope_cache,
-        ql_nope,
-        q_scale,
-        mqa_output,
-        idx_q,
-        idx_rope_cache,
-        idx_weights,
-        idx_weights_softmax_scale,
-        idx_weights_head_scale,
-        idx_q_fp8,
-        idx_weights_out,
-        has_indexer=has_indexer,
-        index_rope_interleave=index_rope_interleave,
-    )
-
-
-def _fused_q_cutedsl_fake(*args, **kwargs) -> None:
-    pass
-
-
-direct_register_custom_op(
-    op_name="fused_q_cutedsl",
-    op_func=_fused_q_cutedsl_impl,
-    mutates_args=["mqa_output", "idx_q_fp8", "idx_weights_out"],
-    fake_impl=_fused_q_cutedsl_fake,
-    dispatch_key="CUDA",
-)
 
 
 def _dummy(shape: tuple, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
@@ -214,14 +147,9 @@ def _fused_norm_rope_kernel(
     TOPK_BLOCK_SIZE: tl.constexpr,
     HAS_INDEXER: tl.constexpr,
     INDEX_ROPE_INTERLEAVE: tl.constexpr,
-    USE_PDL: tl.constexpr,
 ):
     pid = tl.program_id(0)
     tok_idx = tl.program_id(1)
-    if USE_PDL:
-        tl.extra.cuda.gdc_wait()
-        tl.extra.cuda.gdc_launch_dependents()
-
     if pid == 3:
         if not HAS_INDEXER:
             # Shared layer: reuse the previous indexer layer's top-k; do not
@@ -238,17 +166,6 @@ def _fused_norm_rope_kernel(
             )
         return
 
-    if pid == 2:
-        # Q RMS norm does not depend on cache availability. In particular,
-        # profiling uses a negative dummy slot mapping but still consumes Q.
-        q_block = tl.arange(0, Q_BLOCK_SIZE)
-        q_mask = q_block < Q_DIM
-        q_c = tl.load(q_c_ptr + tok_idx * q_c_stride + q_block, mask=q_mask, other=0.0)
-        q_c_rms_w = tl.load(q_rms_norm_w_ptr + q_block, mask=q_mask)
-        q_c = _rms_norm(q_c, q_c_rms_w, q_rms_eps, Q_DIM)
-        tl.store(q_c_out_ptr + tok_idx * q_c_out_stride + q_block, q_c, mask=q_mask)
-        return
-
     if slot_mapping_ptr is None:
         # Memory profiling run.
         return
@@ -257,7 +174,15 @@ def _fused_norm_rope_kernel(
         # Padding
         return
 
-    if pid == 1:
+    if pid == 2:
+        # Q RMS norm
+        q_block = tl.arange(0, Q_BLOCK_SIZE)
+        q_mask = q_block < Q_DIM
+        q_c = tl.load(q_c_ptr + tok_idx * q_c_stride + q_block, mask=q_mask, other=0.0)
+        q_c_rms_w = tl.load(q_rms_norm_w_ptr + q_block, mask=q_mask)
+        q_c = _rms_norm(q_c, q_c_rms_w, q_rms_eps, Q_DIM)
+        tl.store(q_c_out_ptr + tok_idx * q_c_out_stride + q_block, q_c, mask=q_mask)
+    elif pid == 1:
         # KV RMS Norm + KV RoPE + MLA concat_and_cache.
         # Merged so the normed kv_c and RoPE'd k_pe can be written
         # to the MLA KV cache directly without a separate kernel.
@@ -286,6 +211,9 @@ def _fused_norm_rope_kernel(
         r2 = x2 * cos + x1 * sin
 
         # MLA concat_and_cache: write [kv_c_normed, k_pe_roped] to cache.
+        if mla_cache_entry_stride == 0:
+            return
+
         mla_block_size = mla_cache_block_stride // mla_cache_entry_stride
         mla_block_idx = slot_idx // mla_block_size
         mla_block_off = slot_idx % mla_block_size
@@ -435,7 +363,7 @@ def _fused_norm_rope_kernel(
         )
 
 
-def _fused_norm_rope_impl(
+def fused_norm_rope(
     positions: torch.Tensor,
     q_c: torch.Tensor,
     q_rms_norm_w: torch.Tensor,
@@ -537,17 +465,12 @@ def _fused_norm_rope_impl(
         # Dummy values — pid 2 will skip the MLA cache write because
         # slot_mapping is all -1.
         mla_kv_cache = torch.empty(0, dtype=torch.bfloat16, device=device)
-        # Torch's Triton HOP mutation analysis compiles every program-id
-        # branch even though the dummy slot mapping returns before cache
-        # access. Keep the unused strides nonzero so that analysis can lower
-        # the block-size calculation safely.
-        mla_block_stride = 1
-        mla_entry_stride = 1
+        mla_block_stride = 0
+        mla_entry_stride = 0
         mla_k_scale = torch.ones(1, dtype=torch.float32, device=device)
 
     if q_c_out is None:
         q_c_out = torch.empty_like(q_c)
-    use_pdl = _is_arch_support_pdl()
     _fused_norm_rope_kernel[(4, num_tokens)](
         positions,
         # Q RMS norm
@@ -606,157 +529,6 @@ def _fused_norm_rope_impl(
         TOPK_BLOCK_SIZE=1024,
         HAS_INDEXER=has_indexer,
         INDEX_ROPE_INTERLEAVE=index_rope_interleave,
-        USE_PDL=use_pdl,
-        launch_pdl=use_pdl,
-    )
-    return q_c_out
-
-
-def _fused_norm_rope_op(
-    positions: torch.Tensor,
-    q_c: torch.Tensor,
-    q_rms_norm_w: torch.Tensor,
-    q_rms_eps: float,
-    kv_c: torch.Tensor,
-    kv_rms_norm_w: torch.Tensor,
-    kv_rms_eps: float,
-    k_pe: torch.Tensor,
-    k_rope_cos_sin_cache: torch.Tensor,
-    index_k: torch.Tensor | None,
-    index_k_layer_norm_w: torch.Tensor | None,
-    index_k_layer_norm_bias: torch.Tensor | None,
-    index_k_layer_norm_eps: float,
-    index_k_rope_cos_sin_cache: torch.Tensor | None,
-    topk_indices_buffer: torch.Tensor,
-    slot_mapping: torch.Tensor | None,
-    indexer_k_cache: torch.Tensor | None,
-    mla_kv_cache: torch.Tensor | None,
-    mla_kv_cache_dtype: str,
-    mla_k_scale: torch.Tensor | None,
-    has_indexer: bool,
-    index_rope_interleave: bool,
-    q_c_out: torch.Tensor,
-) -> None:
-    _fused_norm_rope_impl(
-        positions,
-        q_c,
-        q_rms_norm_w,
-        q_rms_eps,
-        kv_c,
-        kv_rms_norm_w,
-        kv_rms_eps,
-        k_pe,
-        k_rope_cos_sin_cache,
-        index_k,
-        index_k_layer_norm_w,
-        index_k_layer_norm_bias,
-        index_k_layer_norm_eps,
-        index_k_rope_cos_sin_cache,
-        topk_indices_buffer,
-        slot_mapping=slot_mapping,
-        indexer_k_cache=indexer_k_cache,
-        mla_kv_cache=mla_kv_cache,
-        mla_kv_cache_dtype=mla_kv_cache_dtype,
-        mla_k_scale=mla_k_scale,
-        has_indexer=has_indexer,
-        index_rope_interleave=index_rope_interleave,
-        q_c_out=q_c_out,
-    )
-
-
-def _fused_norm_rope_fake(
-    positions: torch.Tensor,
-    q_c: torch.Tensor,
-    q_rms_norm_w: torch.Tensor,
-    q_rms_eps: float,
-    kv_c: torch.Tensor,
-    kv_rms_norm_w: torch.Tensor,
-    kv_rms_eps: float,
-    k_pe: torch.Tensor,
-    k_rope_cos_sin_cache: torch.Tensor,
-    index_k: torch.Tensor | None,
-    index_k_layer_norm_w: torch.Tensor | None,
-    index_k_layer_norm_bias: torch.Tensor | None,
-    index_k_layer_norm_eps: float,
-    index_k_rope_cos_sin_cache: torch.Tensor | None,
-    topk_indices_buffer: torch.Tensor,
-    slot_mapping: torch.Tensor | None,
-    indexer_k_cache: torch.Tensor | None,
-    mla_kv_cache: torch.Tensor | None,
-    mla_kv_cache_dtype: str,
-    mla_k_scale: torch.Tensor | None,
-    has_indexer: bool,
-    index_rope_interleave: bool,
-    q_c_out: torch.Tensor,
-) -> None:
-    return
-
-
-direct_register_custom_op(
-    op_name="fused_norm_rope_deepseek_v32",
-    op_func=_fused_norm_rope_op,
-    mutates_args=[
-        "topk_indices_buffer",
-        "indexer_k_cache",
-        "mla_kv_cache",
-        "q_c_out",
-    ],
-    fake_impl=_fused_norm_rope_fake,
-    dispatch_key="CUDA",
-)
-
-
-def fused_norm_rope(
-    positions: torch.Tensor,
-    q_c: torch.Tensor,
-    q_rms_norm_w: torch.Tensor,
-    q_rms_eps: float,
-    kv_c: torch.Tensor,
-    kv_rms_norm_w: torch.Tensor,
-    kv_rms_eps: float,
-    k_pe: torch.Tensor,
-    k_rope_cos_sin_cache: torch.Tensor,
-    index_k: torch.Tensor | None,
-    index_k_layer_norm_w: torch.Tensor | None,
-    index_k_layer_norm_bias: torch.Tensor | None,
-    index_k_layer_norm_eps: float,
-    index_k_rope_cos_sin_cache: torch.Tensor | None,
-    topk_indices_buffer: torch.Tensor,
-    slot_mapping: torch.Tensor | None = None,
-    indexer_k_cache: torch.Tensor | None = None,
-    mla_kv_cache: torch.Tensor | None = None,
-    mla_kv_cache_dtype: str = "auto",
-    mla_k_scale: torch.Tensor | None = None,
-    has_indexer: bool = True,
-    index_rope_interleave: bool = False,
-    q_c_out: torch.Tensor | None = None,
-) -> torch.Tensor:
-    if q_c_out is None:
-        q_c_out = torch.empty_like(q_c)
-    torch.ops.vllm.fused_norm_rope_deepseek_v32(
-        positions,
-        q_c,
-        q_rms_norm_w,
-        q_rms_eps,
-        kv_c,
-        kv_rms_norm_w,
-        kv_rms_eps,
-        k_pe,
-        k_rope_cos_sin_cache,
-        index_k,
-        index_k_layer_norm_w,
-        index_k_layer_norm_bias,
-        index_k_layer_norm_eps,
-        index_k_rope_cos_sin_cache,
-        topk_indices_buffer,
-        slot_mapping,
-        indexer_k_cache,
-        mla_kv_cache,
-        mla_kv_cache_dtype,
-        mla_k_scale,
-        has_indexer,
-        index_rope_interleave,
-        q_c_out,
     )
     return q_c_out
 
@@ -810,14 +582,10 @@ def _fused_q_kernel(
     HAS_INDEXER: tl.constexpr,
     INDEX_ROPE_INTERLEAVE: tl.constexpr,
     QUANTIZE_MQA: tl.constexpr,
-    USE_PDL: tl.constexpr,
 ):
     pid = tl.program_id(0)
     tok_idx = tl.program_id(1)
     head_idx = tl.program_id(2)
-    if USE_PDL:
-        tl.extra.cuda.gdc_wait()
-        tl.extra.cuda.gdc_launch_dependents()
 
     if pid == 2:
         # ql_nope quantize + pack into the front of mqa_q_fp8. On the bf16
@@ -1005,12 +773,10 @@ def fused_q(
     ``(ql_nope, q_pe)`` tuple the backend expects.
     """
     assert positions.ndim == 1
-    assert positions.dtype == torch.int64
     assert q_pe.ndim == 3
     assert q_pe_cos_sin_cache.ndim == 2
     assert ql_nope.ndim == 3
     assert ql_nope.shape[:2] == q_pe.shape[:2]
-    assert q_scale.dtype == torch.float32 and q_scale.numel() == 1
 
     num_tokens = positions.shape[0]
     num_q_heads = q_pe.shape[1]
@@ -1028,18 +794,7 @@ def fused_q(
     assert index_weights is not None
     num_index_q_heads = index_q.shape[1]
     index_q_head_dim = index_q.shape[2]
-    use_cutedsl = False
-    if _can_use_fused_q_cutedsl():
-        from .ops.fused_q_cutedsl import is_fused_q_cutedsl_supported
-
-        use_cutedsl = is_fused_q_cutedsl_supported(
-            q_pe,
-            index_q,
-            ql_nope,
-            has_indexer=has_indexer,
-            quantize_mqa=quantize_mqa,
-        )
-    grid_heads = max(mqa_grid_heads, num_index_q_heads if has_indexer else 1)
+    grid_heads = max(mqa_grid_heads, num_index_q_heads)
     if quantize_mqa:
         # fp8 path: pack [ql_nope; q_pe] into a single fp8 tensor.
         mqa_q_fp8 = torch.empty(
@@ -1060,27 +815,6 @@ def fused_q(
 
     index_q_fp8 = torch.empty_like(index_q, dtype=torch.float8_e4m3fn)
     index_weights_out = torch.empty_like(index_weights, dtype=torch.float32)
-    if use_cutedsl:
-        torch.ops.vllm.fused_q_cutedsl(
-            positions,
-            q_pe,
-            q_pe_cos_sin_cache,
-            ql_nope,
-            q_scale,
-            mqa_q,
-            index_q,
-            index_q_cos_sin_cache,
-            index_weights,
-            index_weights_softmax_scale,
-            index_weights_head_scale,
-            index_q_fp8,
-            index_weights_out,
-            has_indexer=has_indexer,
-            index_rope_interleave=index_rope_interleave,
-        )
-        return index_q_fp8, index_weights_out, mqa_q
-
-    use_pdl = _is_arch_support_pdl()
     _fused_q_kernel[(3, num_tokens, grid_heads)](
         positions,
         q_pe,
@@ -1122,8 +856,6 @@ def fused_q(
         HAS_INDEXER=has_indexer,
         INDEX_ROPE_INTERLEAVE=index_rope_interleave,
         QUANTIZE_MQA=quantize_mqa,
-        USE_PDL=use_pdl,
-        launch_pdl=use_pdl,
         # num_warps=1 is optimal here: each program is a single 128-element
         # rope+quant, so the kernel is program-count/occupancy bound, not
         # per-program compute bound (swept 1/2/4/8 — 1 wins or ties everywhere).
