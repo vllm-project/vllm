@@ -215,7 +215,9 @@ void rms_norm_static_fp8_quant(
   int num_tokens = input.numel() / hidden_size;
 
   // For large num_tokens, use smaller blocks to increase SM concurrency.
-  const int max_block_size = (num_tokens < 256) ? 1024 : 256;
+  const bool batch_invariant_launch = vllm::vllm_is_batch_invariant();
+  const int max_block_size =
+      batch_invariant_launch ? 1024 : ((num_tokens < 256) ? 1024 : 256);
   dim3 grid(num_tokens);
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
@@ -279,7 +281,9 @@ void fused_add_rms_norm_static_fp8_quant(
      When num_tokens is large, a smaller block size allows
      for increased block occupancy on CUs and better latency
      hiding on global mem ops. */
-  const int max_block_size = (num_tokens < 256) ? 1024 : 256;
+  const bool batch_invariant_launch = vllm::vllm_is_batch_invariant();
+  const int max_block_size =
+      batch_invariant_launch ? 1024 : ((num_tokens < 256) ? 1024 : 256);
   dim3 block(std::min(hidden_size, max_block_size));
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
@@ -296,7 +300,6 @@ void fused_add_rms_norm_static_fp8_quant(
   auto wt_ptr = reinterpret_cast<std::uintptr_t>(weight.data_ptr());
   bool ptrs_are_aligned =
       inp_ptr % 16 == 0 && res_ptr % 16 == 0 && wt_ptr % 16 == 0;
-  bool batch_invariant_launch = vllm::vllm_is_batch_invariant();
   if (ptrs_are_aligned && hidden_size % 8 == 0 && input_stride % 8 == 0 &&
       !batch_invariant_launch) {
     LAUNCH_FUSED_ADD_RMS_NORM(8);

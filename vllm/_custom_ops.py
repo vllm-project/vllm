@@ -2070,6 +2070,93 @@ def selective_scan_fwd(
     )
 
 
+def causal_conv1d_update_cpu_vec(
+    x: torch.Tensor,
+    conv_state: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    activation: str | None = None,
+    conv_state_indices: torch.Tensor | None = None,
+    query_start_loc: torch.Tensor | None = None,
+    pad_slot_id: int = 0,
+) -> torch.Tensor:
+    return torch.ops._C.causal_conv1d_update_cpu_vec(
+        x,
+        conv_state,
+        weight,
+        bias,
+        activation,
+        conv_state_indices,
+        query_start_loc,
+        pad_slot_id,
+    )
+
+
+def selective_state_update_cpu(
+    state: torch.Tensor,
+    x: torch.Tensor,
+    dt: torch.Tensor,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    D: torch.Tensor | None,
+    z: torch.Tensor | None,
+    dt_bias: torch.Tensor | None,
+    dt_softplus: bool,
+    state_batch_indices: torch.Tensor | None,
+    dst_state_batch_indices: torch.Tensor | None,
+    null_block_id: int,
+    out: torch.Tensor,
+    num_accepted_tokens: torch.Tensor | None,
+    cu_seqlens: torch.Tensor | None,
+):
+    torch.ops._C.selective_state_update_cpu(
+        state,
+        x,
+        dt,
+        A,
+        B,
+        C,
+        D,
+        z,
+        dt_bias,
+        dt_softplus,
+        state_batch_indices,
+        dst_state_batch_indices,
+        null_block_id,
+        out,
+        num_accepted_tokens,
+        cu_seqlens,
+    )
+
+
+def mamba_chunk_scan_fwd_cpu(
+    out: torch.Tensor,
+    final_states: torch.Tensor,
+    x: torch.Tensor,
+    dt: torch.Tensor,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    D: torch.Tensor | None,
+    z: torch.Tensor | None,
+    cu_seqlens: torch.Tensor,
+) -> None:
+    """Prefill SSM scan kernel. out and final_states are written in-place."""
+    torch.ops._C.mamba_chunk_scan_fwd_cpu(
+        out,
+        final_states,
+        x,
+        dt,
+        A,
+        B,
+        C,
+        D,
+        z,
+        cu_seqlens,
+    )
+
+
 # ROCm skinny gemms
 def LLMM1(a: torch.Tensor, b: torch.Tensor, rows_per_block: int) -> torch.Tensor:
     return torch.ops._rocm_C.LLMM1(a, b, rows_per_block)
@@ -2302,7 +2389,19 @@ def topk_softmax(
     gating_output: torch.Tensor,
     renormalize: bool = False,
     e_score_correction_bias: torch.Tensor | None = None,
+    is_padding: torch.Tensor | None = None,
 ) -> None:
+    if current_platform.is_xpu():
+        # TODO: Remove after vllm-xpu-kernels supports is_padding.
+        torch.ops._moe_C.topk_softmax(
+            topk_weights,
+            topk_ids,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            e_score_correction_bias,
+        )
+        return
     torch.ops._moe_C.topk_softmax(
         topk_weights,
         topk_ids,
@@ -2310,6 +2409,7 @@ def topk_softmax(
         gating_output,
         renormalize,
         e_score_correction_bias,
+        is_padding,
     )
 
 
@@ -2321,6 +2421,7 @@ def topk_sigmoid(
     renormalize: bool = False,
     e_score_correction_bias: torch.Tensor | None = None,
     routed_scaling_factor: float = 1.0,
+    is_padding: torch.Tensor | None = None,
 ) -> None:
     torch.ops._moe_C.topk_sigmoid(
         topk_weights,
@@ -2330,6 +2431,7 @@ def topk_sigmoid(
         renormalize,
         e_score_correction_bias,
         routed_scaling_factor,
+        is_padding,
     )
 
 
@@ -2343,7 +2445,23 @@ def topk_hash_softplus_sqrt(
     e_score_correction_bias: torch.Tensor | None = None,
     input_tokens: torch.Tensor | None = None,
     hash_indices_table: torch.Tensor | None = None,
+    is_padding: torch.Tensor | None = None,
 ) -> None:
+    if current_platform.is_xpu():
+        # TODO: Remove after vllm-xpu-kernels supports is_padding.
+        torch.ops._moe_C.topk_softplus_sqrt(
+            topk_weights,
+            topk_indices,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            routed_scaling_factor,
+            e_score_correction_bias,
+            input_tokens,
+            hash_indices_table,
+        )
+        return
+
     torch.ops._moe_C.topk_softplus_sqrt(
         topk_weights,
         topk_indices,
@@ -2354,6 +2472,7 @@ def topk_hash_softplus_sqrt(
         e_score_correction_bias,
         input_tokens,
         hash_indices_table,
+        is_padding,
     )
 
 
@@ -2625,6 +2744,33 @@ def concat_and_cache_mla(
     torch.ops._C_cache_ops.concat_and_cache_mla(
         kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale
     )
+
+
+def kimi_k3_attn_res(
+    prefix: torch.Tensor,
+    delta: torch.Tensor,
+    blocks: torch.Tensor,
+    norm_weight: torch.Tensor,
+    qk_weight: torch.Tensor,
+    output_norm_weight: torch.Tensor,
+    num_blocks: int,
+    eps: float,
+    output_norm_eps: float,
+) -> torch.Tensor:
+    output = torch.empty_like(prefix)
+    torch.ops._C.kimi_k3_attn_res(
+        prefix,
+        delta,
+        blocks,
+        norm_weight,
+        qk_weight,
+        output_norm_weight,
+        output,
+        num_blocks,
+        eps,
+        output_norm_eps,
+    )
+    return output
 
 
 def concat_and_cache_mla_rope_fused(
@@ -3386,6 +3532,7 @@ def causal_conv1d_update_cpu(
     silu_activation: bool,
     conv_state_indices: torch.Tensor | None,
     is_vnni: bool,
+    num_accepted_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.ops._C.causal_conv1d_update_cpu(
         x,
@@ -3393,7 +3540,7 @@ def causal_conv1d_update_cpu(
         weight,
         bias,
         silu_activation,
-        None,
+        num_accepted_tokens,
         conv_state_indices,
         -1,
         is_vnni,
@@ -3668,6 +3815,15 @@ def cpu_prepack_moe_weight(
     return output
 
 
+def cpu_prepack_moe_weight_int8(
+    weight: torch.Tensor,
+    isa: str,
+) -> torch.Tensor:
+    output = torch.empty_like(weight)
+    torch.ops._C.prepack_moe_weight_int8(weight, output, isa)
+    return output
+
+
 def cpu_fused_moe(
     input: torch.Tensor,
     w13: torch.Tensor,
@@ -3686,6 +3842,39 @@ def cpu_fused_moe(
         input,
         w13,
         w2,
+        w13_bias,
+        w2_bias,
+        topk_weights,
+        topk_ids,
+        skip_weighted,
+        act,
+        isa,
+    )
+    return output
+
+
+def cpu_fused_moe_int8(
+    input: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w13_bias: torch.Tensor | None,
+    w2_bias: torch.Tensor | None,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    act: str,
+    isa: str,
+    skip_weighted: bool = False,
+) -> torch.Tensor:
+    output = torch.empty_like(input)
+    torch.ops._C.cpu_fused_moe_int8(
+        output,
+        input,
+        w13,
+        w2,
+        w13_scale,
+        w2_scale,
         w13_bias,
         w2_bias,
         topk_weights,
@@ -3776,10 +3965,10 @@ def fusedQuantizeMx(
         raise ValueError(f"invalid method {method!r}, must be 'quest' or 'abs_max'")
 
 
-if hasattr(torch.ops._qutlass_C, "fusedQuantizeNv"):
+if hasattr(torch.ops._qutlass_C, "fusedQuantizeNvAbsMax"):
 
-    @register_fake("_qutlass_C::fusedQuantizeNv")
-    def _fake_fused_quantize_nv(
+    @register_fake("_qutlass_C::fusedQuantizeNvAbsMax")
+    def _fake_fused_quantize_nv_absmax(
         a: torch.Tensor,
         b: torch.Tensor,
         xh_e2m1: torch.Tensor,
@@ -3805,7 +3994,9 @@ def fusedQuantizeNv(
         padded_rows, padded_cols, dtype=torch.float8_e4m3fn, device=a.device
     )
 
-    return torch.ops._qutlass_C.fusedQuantizeNv(a, b, xh_e2m1, xh_e4m3, global_scale)
+    return torch.ops._qutlass_C.fusedQuantizeNvAbsMax(
+        a, b, xh_e2m1, xh_e4m3, global_scale
+    )
 
 
 def hadacore_transform(x: torch.Tensor, inplace: bool = True) -> torch.Tensor:

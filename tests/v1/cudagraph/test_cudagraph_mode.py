@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import weakref
 from contextlib import ExitStack
 
 import pytest
 
-from tests.utils import wait_for_gpu_memory_to_clear
+from tests.utils import create_new_process_for_each_test
 from tests.v1.attention.utils import full_cg_backend_configs as backend_configs
 from vllm import LLM
 from vllm.config import CompilationConfig, CompilationMode
@@ -32,6 +31,7 @@ else:
 
 
 @pytest.mark.parametrize("backend_name, cudagraph_mode, supported", combo_cases_1)
+@create_new_process_for_each_test("spawn")
 def test_backend_and_cudagraph_mode_combo(backend_name, cudagraph_mode, supported):
     if backend_name == "FlashInfer":
         try:
@@ -64,17 +64,6 @@ def test_backend_and_cudagraph_mode_combo(backend_name, cudagraph_mode, supporte
             ),
         )
         llm.generate(["Hello, my name is"] * 10)
-    # when above code raises, `llm` may be undefined, so we need to catch that
-    try:
-        llm = weakref.proxy(llm)
-        del llm
-    except UnboundLocalError:
-        pass
-
-    wait_for_gpu_memory_to_clear(
-        devices=[0],
-        threshold_ratio=0.1,
-    )
 
 
 # test cudagraph_mode with different compilation mode.
@@ -98,6 +87,7 @@ combo_cases_2 = [
 @pytest.mark.parametrize(
     "backend_name,cudagraph_mode,compilation_mode,supported", combo_cases_2
 )
+@create_new_process_for_each_test("spawn")
 def test_cudagraph_compilation_combo(
     backend_name, cudagraph_mode, compilation_mode, supported
 ):
@@ -120,14 +110,3 @@ def test_cudagraph_compilation_combo(
             ),
         )
         llm.generate(["Hello, my name is"] * 10)
-    # when above code raises, `llm` may be undefined, so we need to catch that
-    try:
-        llm = weakref.proxy(llm)
-        del llm
-    except UnboundLocalError:
-        pass
-    finally:
-        wait_for_gpu_memory_to_clear(
-            devices=[0],
-            threshold_ratio=0.1,
-        )

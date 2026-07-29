@@ -24,7 +24,13 @@ from .inputs import (
     MultiModalKwargsItem,
     MultiModalSharedField,
 )
-from .media import AudioMediaIO, ImageMediaIO, MediaConnector, VideoMediaIO
+from .media import (
+    AudioMediaIO,
+    ImageMediaIO,
+    MediaConnector,
+    MediaWithBytes,
+    VideoMediaIO,
+)
 
 if TYPE_CHECKING:
     import torch.types
@@ -58,13 +64,14 @@ def encode_audio_url(
 def encode_image_base64(
     image: Image.Image,
     *,
-    image_mode: str = "RGB",
+    image_mode: str | None = "RGB",
     format: str = "PNG",
 ) -> str:
     """
     Encode a pillow image to base64 format.
 
     By default, the image is converted into RGB format before being encoded.
+    Pass `image_mode=None` to keep the original image mode.
     """
     image_io = ImageMediaIO(image_mode=image_mode)
     return image_io.encode_base64(image, image_format=format)
@@ -73,13 +80,14 @@ def encode_image_base64(
 def encode_image_url(
     image: Image.Image,
     *,
-    image_mode: str = "RGB",
+    image_mode: str | None = "RGB",
     format: str = "PNG",
 ) -> str:
     """
     Encode a pillow image as a data URL.
 
     By default, the image is converted into RGB format before being encoded.
+    Pass `image_mode=None` to keep the original image mode.
     """
     image_b64 = encode_image_base64(image, image_mode=image_mode, format=format)
     mimetype = mimetypes.types_map.get("." + format.lower(), "image")
@@ -330,7 +338,7 @@ def fetch_image(
 def fetch_video(
     video_url: str,
     video_io_kwargs: dict[str, Any] | None = None,
-) -> tuple[npt.NDArray, dict[str, Any]]:
+) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
     """
     Args:
         video_url: URL of the video file to fetch.
