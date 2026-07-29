@@ -1290,6 +1290,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mappings,
                 self.attn_groups,
                 self.kv_cache_config,
+                # FULL replay reads capture-time metadata buffers. Re-stage them
+                # from the zeroed dummy block tables instead of retaining state
+                # indices from the previous real batch.
+                for_capture=dummy_run and batch_desc.cg_mode == CUDAGraphMode.FULL,
             )
 
         input_ids = input_batch.input_ids
