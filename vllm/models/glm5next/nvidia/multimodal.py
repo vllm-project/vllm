@@ -43,65 +43,24 @@ class Glm5NextVisionTransformer(GlmOcrVisionTransformer):
 
 
 class Glm5NextProcessingInfo(Glm4vProcessingInfo):
-    """Wires up the HF processor for the multimodal checkpoint.
+    """Wires up the vLLM-native processor for the multimodal checkpoint.
 
-    The checkpoint's ``processor_config.json`` names the image/video processors
-    ``Glm5NextImageProcessor`` / ``Glm5NextVideoProcessor`` -- custom classes
-    that exist only on the training side. transformers' ``AutoProcessor``
-    cannot resolve them, so it degrades to a bare ``TokenizersBackend``, which
-    vLLM rejects (it needs a ``ProcessorMixin``). The GLM5-Next vision tower is
-    architecturally identical to GLM-OCR / GLM-4V, so construct the equivalent
-    ``Glm4vProcessor`` directly from the checkpoint's image/video configs.
+    The checkpoint's ``processor_config.json`` declares a custom ``processor_class``
+    (``Glm46VProcessor``) and stores its image/video processor configs inline (no
+    standalone ``preprocessor_config.json``), so ``AutoProcessor`` cannot resolve
+    the config. We bypass it and build our own ``Glm5NextProcessor``
+    (``vllm/transformers_utils/processors/glm5next.py``), a faithful port of the
+    training-side pipeline that no longer imports transformers' ``GlmgaImageProcessor``
+    / ``GlmgaVideoProcessor`` / ``Glm46VProcessor``. The port applies
+    ``patch_expand_factor`` (checkpoint ships 2) inside ``smart_resize``'s spatial
+    factor; dropping it (as GLM-4V's processor does) yields a wrong patch grid.
     """
 
     def get_hf_processor(self, **kwargs: object):
         proc = getattr(self, "_glm5_hf_processor", None)
         if proc is None:
-            import json
-            import os
+            from vllm.transformers_utils.processors.glm5next import Glm5NextProcessor
 
-            import transformers
-            from transformers import (
-                AutoTokenizer,
-                Glm4vImageProcessor,
-                Glm4vProcessor,
-            )
-            from transformers.models.auto.image_processing_auto import (
-                get_image_processor_config,
-            )
-
-            model_path = self.ctx.model_config.model
-            tokenizer = AutoTokenizer.from_pretrained(model_path)
-            ip_cfg = get_image_processor_config(model_path)
-            # Cap max pixels: the checkpoint ships an absurd ``size.longest_edge``
-            # (9.6M image / 100M video pixels) that makes vLLM's startup
-            # encoder-profiling reserve huge activation memory and starve the KV
-            # cache (300b weights already fill the GPU). 1.25M px (~6400 patches,
-            # ~1600 vision tokens) is a sane serving cap.
-            _MM_MAX_PIXELS = 1_254_400
-            if isinstance(ip_cfg.get("size"), dict):
-                ip_cfg["size"]["longest_edge"] = min(
-                    ip_cfg["size"].get("longest_edge", _MM_MAX_PIXELS),
-                    _MM_MAX_PIXELS,
-                )
-            image_processor = Glm4vImageProcessor(
-                **{k: v for k, v in ip_cfg.items() if k != "image_processor_type"}
-            )
-            with open(os.path.join(model_path, "processor_config.json")) as f:
-                vp_cfg = json.load(f)["video_processor"]
-            if isinstance(vp_cfg.get("size"), dict):
-                vp_cfg["size"]["longest_edge"] = min(
-                    vp_cfg["size"].get("longest_edge", _MM_MAX_PIXELS),
-                    _MM_MAX_PIXELS,
-                )
-            video_cls = transformers.Glm4vVideoProcessor
-            video_processor = video_cls(
-                **{k: v for k, v in vp_cfg.items() if k != "video_processor_type"}
-            )
-            proc = Glm4vProcessor(
-                image_processor=image_processor,
-                video_processor=video_processor,
-                tokenizer=tokenizer,
-            )
+            proc = Glm5NextProcessor.from_pretrained(self.ctx.model_config.model)
             self._glm5_hf_processor = proc
         return proc
