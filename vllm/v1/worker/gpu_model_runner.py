@@ -4,7 +4,6 @@
 import functools
 import gc
 import itertools
-import os
 import threading
 import time
 from collections import defaultdict
@@ -6779,15 +6778,6 @@ class GPUModelRunner(
             elapsed_time,
             cuda_graph_size / (1 << 30),
         )
-
-        # Record module-level tensor storage as the graphs just captured it.
-        # These have no owning layer, so neither copy-back nor the reload
-        # arena covers them; the manifest is what lets a reload notice if a
-        # global cache rebinds an address a graph baked in.
-        if os.environ.get("VLLM_RELOAD_GLOBAL_MANIFEST", "warn") != "off":
-            from vllm.model_executor.reload_manifest import (
-                record_global_storage)
-            record_global_storage()
 
         return cuda_graph_size
 
