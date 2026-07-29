@@ -15,6 +15,7 @@ from vllm.envs import (
     env_with_choices,
     environment_variables,
 )
+from vllm.exceptions import VLLMValidationError
 
 
 def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
@@ -162,6 +163,15 @@ def test_cpu_sim_multi_numa_env(
         monkeypatch.setenv("VLLM_CPU_SIM_MULTI_NUMA", env_value)
 
     assert envs.VLLM_CPU_SIM_MULTI_NUMA is expected
+
+
+def test_rust_bench_auto_path_missing_fails_fast() -> None:
+    with (
+        patch.dict(os.environ, {"VLLM_USE_RUST_BENCH": "1"}, clear=True),
+        patch("vllm.envs.os.path.isfile", return_value=False),
+        pytest.raises(FileNotFoundError, match="vllm-rs binary was not found"),
+    ):
+        environment_variables["VLLM_RUST_FRONTEND_PATH"]()
 
 
 class TestEnvWithChoices:
@@ -557,7 +567,7 @@ class TestVllmMaxNSequences:
         max_n = envs.VLLM_MAX_N_SEQUENCES
         SamplingParams(n=max_n)
 
-        with pytest.raises(ValueError, match="n must be at most"):
+        with pytest.raises(VLLMValidationError, match="n must be at most"):
             SamplingParams(n=max_n + 1)
 
     def test_sampling_params_respects_custom_limit(
@@ -573,5 +583,5 @@ class TestVllmMaxNSequences:
 
         SamplingParams(n=128)
 
-        with pytest.raises(ValueError, match="n must be at most 128"):
+        with pytest.raises(VLLMValidationError, match="n must be at most 128"):
             SamplingParams(n=129)
