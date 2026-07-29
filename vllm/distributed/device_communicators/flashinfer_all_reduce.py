@@ -127,7 +127,7 @@ def _resolve_fi_ar_backend() -> tuple[str, bool]:
     # Default to mnnvl for both single- and multi-node setups. The mnnvl
     # cudagraph hang that previously forced single-node to trtllm
     # (https://github.com/vllm-project/vllm/issues/35772) was fixed upstream in
-    # FlashInfer (>= 0.6.12, vLLM pins 0.6.15), so mnnvl is safe here. trtllm
+    # FlashInfer >= 0.6.12, so mnnvl is safe here. trtllm
     # does not support multi-node allreduce, so mnnvl is required there anyway.
     # mnnvl needs NVSwitch multicast; on single-node topologies without it,
     # fall back to trtllm so fused allreduce stays enabled.

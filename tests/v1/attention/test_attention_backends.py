@@ -710,6 +710,36 @@ def test_flashinfer_xqa_bmm1_scale_matches_decode_q_dtype():
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )
+def test_flashinfer_xqa_draft_masks():
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    device = torch.device("cpu")
+    causal = flashinfer_backend._make_xqa_draft_block_mask(3, True, device)
+    full = flashinfer_backend._make_xqa_draft_block_mask(3, False, device)
+    ragged = flashinfer_backend._make_xqa_ragged_draft_block_mask(
+        [2, 3], 3, True, device
+    )
+
+    assert torch.equal(
+        causal.view(torch.int16),
+        torch.tensor([[1, 0], [3, 0], [7, 0]], dtype=torch.int16),
+    )
+    assert torch.equal(
+        full.view(torch.int16), torch.tensor([[7, 0]] * 3, dtype=torch.int16)
+    )
+    assert torch.equal(
+        ragged.view(torch.int16),
+        torch.tensor(
+            [[1, 0], [3, 0], [1, 0], [3, 0], [7, 0]],
+            dtype=torch.int16,
+        ),
+    )
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 def test_flashinfer_attention_sinks_refreshed_after_reload(dtype):
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
@@ -737,10 +767,14 @@ def test_flashinfer_attention_sinks_refreshed_after_reload(dtype):
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )
-def test_flashinfer_sm90_xqa_decode_correctness(default_vllm_config):
-    """FlashInfer should route Hopper decode through XQA and match SDPA."""
-    if not current_platform.is_cuda() or not current_platform.is_device_capability(90):
-        pytest.skip("FlashInfer XQA decode requires SM90.")
+def test_flashinfer_xqa_decode_correctness(default_vllm_config):
+    """FlashInfer should route SM90/SM12x decode through XQA and match SDPA."""
+    supported = current_platform.is_cuda() and (
+        current_platform.is_device_capability(90)
+        or current_platform.is_device_capability_family(120)
+    )
+    if not supported:
+        pytest.skip("FlashInfer XQA decode requires SM90 or SM12x.")
 
     import unittest.mock
 
@@ -809,7 +843,7 @@ def test_flashinfer_sm90_xqa_decode_correctness(default_vllm_config):
         flashinfer_backend.FlashInferMetadataBuilder.get_cudagraph_support(
             vllm_config, kv_cache_spec
         )
-        == AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+        == AttentionCGSupport.UNIFORM_BATCH
     )
     assert isinstance(
         attn_metadata.decode,
