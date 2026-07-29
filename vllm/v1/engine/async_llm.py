@@ -110,6 +110,7 @@ class AsyncLLM(EngineClient):
         maybe_register_config_serialize_by_value()
 
         self.vllm_config = vllm_config
+        self._elastic_ep_lock = asyncio.Lock()
         self.model_config = vllm_config.model_config
         self.observability_config = vllm_config.observability_config
 
@@ -999,17 +1000,27 @@ class AsyncLLM(EngineClient):
             "waiting for requests to drain."
         )
 
+    async def _drain_requests_for_elastic_ep(self, drain_timeout: int) -> None:
+        try:
+            logger.info(
+                "VLLM_ELASTIC_EP_DRAIN_REQUESTS is set, "
+                "waiting for requests to drain before scaling"
+            )
+            await self.wait_for_requests_to_drain(drain_timeout)
+        except BaseException:
+            set_scaling_elastic_ep(False)
+            raise
+
     async def scale_elastic_ep(
         self, new_data_parallel_size: int, drain_timeout: int = 300
     ):
-        """
-        Scale up or down the data parallel size by adding or removing
-        engine cores.
-        Args:
-            new_data_parallel_size: The new number of data parallel workers
-            drain_timeout:
-                Maximum time to wait for requests to drain (seconds)
-        """
+        """Scale the elastic EP data parallel size."""
+        async with self._elastic_ep_lock:
+            await self._scale_elastic_ep(new_data_parallel_size, drain_timeout)
+
+    async def _scale_elastic_ep(
+        self, new_data_parallel_size: int, drain_timeout: int
+    ) -> None:
         old_data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
         if old_data_parallel_size == new_data_parallel_size:
             logger.info(
@@ -1018,12 +1029,7 @@ class AsyncLLM(EngineClient):
             )
             return
 
-        if envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS:
-            logger.info(
-                "VLLM_ELASTIC_EP_DRAIN_REQUESTS is set, "
-                "waiting for requests to drain before scaling"
-            )
-            await self.wait_for_requests_to_drain(drain_timeout)
+        await self.engine_core.prepare_elastic_ep(new_data_parallel_size)
 
         # recreate stat loggers
         if new_data_parallel_size > old_data_parallel_size and self.log_stats:
@@ -1043,11 +1049,12 @@ class AsyncLLM(EngineClient):
             self.logger_manager.log_engine_initialized()
 
         set_scaling_elastic_ep(True)
-        try:
-            await self.engine_core.scale_elastic_ep(new_data_parallel_size)
-            self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
-        finally:
-            set_scaling_elastic_ep(False)
+        if envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS:
+            await self._drain_requests_for_elastic_ep(drain_timeout)
+
+        await self.engine_core.commit_elastic_ep()
+        self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
+        set_scaling_elastic_ep(False)
 
     async def handle_fault(
         self, fault_tolerance_request: FaultToleranceRequest
@@ -1107,6 +1114,16 @@ class AsyncLLM(EngineClient):
             "update_weights", kwargs={"update_info": request.update_info}
         )
 
-    async def finish_weight_update(self) -> None:
-        """Finish the current weight update."""
+    async def finish_weight_update(self, weight_version: str | None = None) -> None:
+        """Finish the weight update and set its version if provided."""
         await self.collective_rpc("finish_weight_update")
+        if weight_version is not None:
+            await self.update_weight_version(weight_version)
+
+    async def update_weight_version(self, new_version: str) -> None:
+        """Set the weight version without updating weights."""
+        await self.engine_core.set_weight_version_async(new_version)
+
+    async def get_weight_version(self) -> str:
+        """Return the latest committed weight version."""
+        return await self.engine_core.get_weight_version_async()
