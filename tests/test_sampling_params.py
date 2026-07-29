@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import pytest
 
 from vllm import SamplingParams
+from vllm.exceptions import VLLMValidationError
 
 
 @dataclass
@@ -32,7 +33,7 @@ class MockModelConfig:
 )
 def test_diffusion_rejects_unsupported_params(kwargs: dict):
     params = SamplingParams(**kwargs)
-    with pytest.raises(ValueError, match="not yet supported with diffusion"):
+    with pytest.raises(VLLMValidationError, match="not yet supported with diffusion"):
         params.verify(MockModelConfig(is_diffusion=True), None, None, None)
 
 

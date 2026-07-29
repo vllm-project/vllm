@@ -14,7 +14,7 @@ import aiohttp
 import pytest
 
 from vllm.entrypoints.serve.utils.error_response import create_error_response
-from vllm.exceptions import VLLMUnprocessableEntityError
+from vllm.exceptions import VLLMClientError, VLLMUnprocessableEntityError
 from vllm.multimodal.media import MediaConnector
 
 
@@ -35,9 +35,9 @@ class TestVLLMUnprocessableEntityError:
         assert "parameter=image_url" in str(exc)
         assert "value=https://example.com/image.jpg" in str(exc)
 
-    def test_is_value_error_subclass(self):
+    def test_is_client_error_subclass(self):
         exc = VLLMUnprocessableEntityError("Test")
-        assert isinstance(exc, ValueError)
+        assert isinstance(exc, VLLMClientError)
 
 
 class TestMediaConnectorErrorHandling:

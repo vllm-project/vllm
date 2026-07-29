@@ -7,6 +7,7 @@ import pytest
 import torch
 from PIL import Image as PILImage
 
+from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.models.gemma4_mm import (
     Gemma4ForConditionalGeneration,
     Gemma4ImagePixelInputs,
@@ -222,7 +223,7 @@ def test_limit_mm_per_prompt(
     mm_data = {"image": images}
 
     # Expect ValueError when exceeding limit
-    with pytest.raises(ValueError, match="At most 1 image"):
+    with pytest.raises(VLLMValidationError, match="At most 1 image"):
         processor(
             prompt,
             mm_items=processor.info.parse_mm_data(mm_data),
