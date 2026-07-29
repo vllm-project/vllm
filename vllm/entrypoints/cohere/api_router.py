@@ -18,10 +18,12 @@ body parameter into a query parameter and reject every request with
 422.
 """
 
+import json
 from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import (
@@ -31,6 +33,8 @@ from vllm.entrypoints.serve.utils.api_utils import (
     with_cancellation,
 )
 from vllm.logger import init_logger
+
+_COHERE_PATH_PREFIX = "/cohere/"
 
 logger = init_logger(__name__)
 
@@ -132,6 +136,70 @@ if _SDK_AVAILABLE:
             case _:
                 return StreamingResponse(content=result, media_type="text/event-stream")
 
+    class CohereErrorEnvelopeMiddleware(BaseHTTPMiddleware):
+        """Rewrite vLLM error bodies into the Cohere ``{message, id}`` shape.
+
+        The endpoint handler above already returns :class:`CohereError` for
+        errors it owns, but globally-registered exception handlers (e.g.
+        :func:`validation_exception_handler` for pydantic body errors,
+        :func:`http_exception_handler`, engine error handlers) fire *before*
+        the handler runs and produce vLLM's internal
+        ``ErrorResponse`` shape (``{"error": {"message": ...}}``). That
+        shape doesn't match the ``CohereError`` schema advertised on the
+        route's OpenAPI ``responses``, so clients (and schema-conformance
+        tests like ``test_openai_schema.py``) would see a mismatch on
+        those paths. This middleware normalises any error body on
+        ``/cohere/*`` responses to :class:`CohereError`.
+        """
+
+        async def dispatch(self, request: Request, call_next):
+            response = await call_next(request)
+            if not request.url.path.startswith(_COHERE_PATH_PREFIX):
+                return response
+            if response.status_code < 400:
+                return response
+            content_type = response.headers.get("content-type", "")
+            if not content_type.startswith("application/json"):
+                return response
+
+            body = b"".join([chunk async for chunk in response.body_iterator])
+            translated = _translate_vllm_error_body(body, request)
+            if translated is not None:
+                return translated
+            passthrough_headers = {
+                k: v
+                for k, v in response.headers.items()
+                if k.lower() != "content-length"
+            }
+            return Response(
+                content=body,
+                status_code=response.status_code,
+                headers=passthrough_headers,
+                media_type=content_type,
+            )
+
+    def _translate_vllm_error_body(raw: bytes, request: Request) -> JSONResponse | None:
+        """Translate a vLLM ``ErrorResponse`` body to a ``CohereError`` body.
+
+        Returns ``None`` if ``raw`` does not match the vLLM error envelope
+        (which signals the middleware to pass the body through unchanged).
+        """
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return None
+        if not (
+            isinstance(data, dict)
+            and isinstance(data.get("error"), dict)
+            and "message" in data["error"]
+        ):
+            return None
+        try:
+            err = ErrorResponse.model_validate(data)
+        except Exception:  # noqa: BLE001 - malformed envelope; pass through
+            return None
+        return _error_response(err, request)
+
 
 def attach_router(app: FastAPI) -> None:
     """Register ``POST /cohere/v2/chat`` on ``app``.
@@ -146,3 +214,4 @@ def attach_router(app: FastAPI) -> None:
         )
         return
     app.include_router(router)
+    app.add_middleware(CohereErrorEnvelopeMiddleware)

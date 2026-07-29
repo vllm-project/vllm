@@ -12,10 +12,12 @@ Covers:
 """
 
 import json
+from argparse import Namespace
 from collections.abc import AsyncGenerator
 from http import HTTPStatus
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
 
 from vllm.entrypoints.cohere import api_router as api_router_mod
@@ -25,6 +27,10 @@ from vllm.entrypoints.cohere.protocol import (
     CohereChatV2Response,
 )
 from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
+from vllm.entrypoints.serve.utils.server_utils import (
+    http_exception_handler,
+    validation_exception_handler,
+)
 
 # ----------------------------------------------------------------------
 # Fakes
@@ -54,6 +60,24 @@ def _build_app(handler: _Handler | None) -> FastAPI:
     app = FastAPI()
     attach_router(app)
     app.state.cohere_serving_chat_v2 = handler
+    return app
+
+
+def _build_app_with_vllm_handlers(handler: _Handler | None) -> FastAPI:
+    """Build a FastAPI app that mirrors the real vLLM setup by installing
+    ``validation_exception_handler`` and ``http_exception_handler``. The
+    :class:`CohereErrorEnvelopeMiddleware` registered by ``attach_router``
+    is expected to translate any resulting vLLM ``ErrorResponse`` body
+    into the ``CohereError`` wire shape.
+    """
+    app = FastAPI()
+    attach_router(app)
+    app.state.cohere_serving_chat_v2 = handler
+    # ``validation_exception_handler`` reads ``req.app.state.args``; the
+    # real cli builds this via argparse.
+    app.state.args = Namespace(log_error_stack=False)
+    app.exception_handler(RequestValidationError)(validation_exception_handler)
+    app.exception_handler(HTTPException)(http_exception_handler)
     return app
 
 
@@ -184,3 +208,114 @@ class TestEndpoint:
                 json={"messages": [{"role": "user", "content": "hi"}]},
             )
         assert r.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
+# ----------------------------------------------------------------------
+# CohereErrorEnvelopeMiddleware
+# ----------------------------------------------------------------------
+
+
+class TestCohereErrorEnvelope:
+    """When the app installs vLLM's global exception handlers, validation
+    and HTTP errors escape as ``ErrorResponse`` bodies before the route
+    handler runs. The middleware installed by ``attach_router`` must
+    normalise those bodies to the ``CohereError`` shape declared on the
+    endpoint's OpenAPI ``responses`` map so schema-conformance tests
+    (``test_openai_schema.py``) don't see a mismatch on ``/cohere/*``
+    responses.
+    """
+
+    def test_validation_error_body_is_cohere_shaped(self):
+        # ``model=""`` and ``messages=[]`` trip our custom field
+        # validators, which raise pydantic ValueErrors and are routed
+        # through ``validation_exception_handler`` in the real vLLM
+        # server (producing the ``{"error": {...}}`` shape).
+        app = _build_app_with_vllm_handlers(handler=None)
+        with TestClient(app) as client:
+            r = client.post("/cohere/v2/chat", json={"messages": [], "model": ""})
+        assert r.status_code == HTTPStatus.BAD_REQUEST
+        body = r.json()
+        # ``CohereError`` has ``message`` at the top level, not nested
+        # under an ``error`` envelope.
+        assert "error" not in body
+        assert "message" in body
+        assert isinstance(body["message"], str) and body["message"]
+
+    def test_http_error_body_is_cohere_shaped(self):
+        # A raised ``HTTPException`` from anywhere in the request cycle
+        # is routed through ``http_exception_handler`` (producing the
+        # ``ErrorResponse`` shape) and must be translated.
+        app = _build_app_with_vllm_handlers(handler=None)
+
+        @app.get("/cohere/v2/boom")
+        async def _boom():
+            raise HTTPException(status_code=418, detail="teapot")
+
+        with TestClient(app) as client:
+            r = client.get("/cohere/v2/boom")
+        assert r.status_code == 418
+        body = r.json()
+        assert body == {"message": "teapot"}
+
+    def test_non_cohere_path_is_not_translated(self):
+        app = _build_app_with_vllm_handlers(handler=None)
+
+        @app.get("/v1/other")
+        async def _other():
+            raise HTTPException(status_code=400, detail="nope")
+
+        with TestClient(app) as client:
+            r = client.get("/v1/other")
+        assert r.status_code == HTTPStatus.BAD_REQUEST
+        body = r.json()
+        # Non-cohere paths keep the vLLM ``ErrorResponse`` shape.
+        assert "error" in body
+        assert body["error"]["message"] == "nope"
+
+    def test_streaming_response_passes_through(self):
+        # SSE responses have content-type text/event-stream; the
+        # middleware must never buffer these (which would break
+        # streaming) even though they're on ``/cohere/*``.
+        async def _gen() -> AsyncGenerator[str, None]:
+            yield 'data: {"type":"message-start"}\n\n'
+            yield "data: [DONE]\n\n"
+
+        app = _build_app_with_vllm_handlers(handler=_Handler(_gen()))
+        with TestClient(app) as client:
+            r = client.post(
+                "/cohere/v2/chat",
+                json={**_minimal_request_body(), "stream": True},
+            )
+        assert r.status_code == HTTPStatus.OK
+        assert r.headers["content-type"].startswith("text/event-stream")
+        assert "message-start" in r.text
+        assert r.text.rstrip().endswith("[DONE]")
+
+    def test_already_cohere_shaped_body_passes_through(self):
+        # When the handler returns an ``ErrorResponse`` the route
+        # itself translates it to ``CohereError``; the middleware sees
+        # the ``CohereError`` shape and must leave it alone.
+        err = ErrorResponse(
+            error=ErrorInfo(message="already cohere", type="Bad Request", code=400)
+        )
+        app = _build_app_with_vllm_handlers(handler=_Handler(err))
+        with TestClient(app) as client:
+            r = client.post("/cohere/v2/chat", json=_minimal_request_body())
+        assert r.status_code == HTTPStatus.BAD_REQUEST
+        body = r.json()
+        # No ``error`` wrapper: the route already emitted the wire shape.
+        assert body == {"message": "already cohere"}
+
+    def test_request_id_preserved_in_translated_body(self):
+        # Client-provided ``X-Request-Id`` should be echoed as
+        # ``CohereError.id`` so callers can correlate failures.
+        app = _build_app_with_vllm_handlers(handler=None)
+        with TestClient(app) as client:
+            r = client.post(
+                "/cohere/v2/chat",
+                json={"messages": [], "model": ""},
+                headers={"X-Request-Id": "req-abc"},
+            )
+        assert r.status_code == HTTPStatus.BAD_REQUEST
+        body = r.json()
+        assert body.get("id") == "req-abc"
