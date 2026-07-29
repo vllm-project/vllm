@@ -313,7 +313,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest -v -s tests/distributed/test_context_parallel.py || true &&
     pytest -v -s tests/v1/distributed/test_dbo.py || true &&
-    VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py --deselect="tests/distributed/test_weight_transfer.py::test_nccl_weight_transfer_between_processes" || true &&
+    VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py --deselect="tests/distributed/test_weight_transfer.py::test_nccl_sparse_weight_transfer_between_processes" --deselect="tests/distributed/test_weight_transfer.py::test_nccl_weight_transfer_between_processes" || true &&
     pytest -v -s tests/distributed/test_packed_tensor.py || true'
 - label: Distributed Tests (2xB200)
   device: intel_gpu
