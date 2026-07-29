@@ -6,6 +6,7 @@ import functools
 import json
 import os
 from collections.abc import Callable, Sequence
+from enum import Enum
 from typing import Any
 
 import torch
@@ -36,6 +37,54 @@ from vllm.utils.deep_gemm import (
 from vllm.utils.platform_utils import get_device_name_as_file_name
 
 logger = init_logger(__name__)
+
+
+class BlockScaleLayout(str, Enum):
+    """Layout of a block-quantized weight scale tensor.
+
+    Block-FP8 checkpoints store the weight scale as ``[N/block_n, K/block_k]``
+    (``NK``). Some backends transpose it in ``process_weights_after_loading``
+    to ``[K/block_k, N/block_n]`` (``KN``) to match their kernel's expected
+    layout. Because the transpose happens in place on ``weight_scale``/
+    ``weight_scale_inv``, downstream consumers cannot tell the current layout
+    from the tensor alone. This enum, together with
+    :func:`set_weight_scale_layout` / :func:`get_weight_scale_layout`, makes the
+    layout explicit so other modules can branch correctly.
+    """
+
+    # Checkpoint layout: [N/block_n, K/block_k].
+    NK = "NK"
+    # Transposed layout: [K/block_k, N/block_n] (e.g. oneDNN fp8_gemm on XPU).
+    KN = "KN"
+
+
+# Attribute stamped onto a layer to record its current weight-scale layout.
+WEIGHT_SCALE_LAYOUT_ATTR = "_weight_scale_layout"
+
+
+def set_weight_scale_layout(layer: torch.nn.Module, layout: BlockScaleLayout) -> None:
+    """Record the current layout of ``layer``'s block weight scale.
+
+    Kernels that transpose the weight scale in
+    ``process_weights_after_loading`` should call this so downstream consumers
+    can query the layout via :func:`get_weight_scale_layout`.
+    """
+    setattr(layer, WEIGHT_SCALE_LAYOUT_ATTR, BlockScaleLayout(layout))
+
+
+def get_weight_scale_layout(layer: torch.nn.Module) -> BlockScaleLayout:
+    """Return the layout of ``layer``'s block weight scale.
+
+    Defaults to :attr:`BlockScaleLayout.NK` (checkpoint layout) when no layout
+    has been recorded, so layers and backends that never transpose the scale
+    require no changes.
+    """
+    return getattr(layer, WEIGHT_SCALE_LAYOUT_ATTR, BlockScaleLayout.NK)
+
+
+def is_weight_scale_transposed(layer: torch.nn.Module) -> bool:
+    """Return ``True`` if ``layer``'s block weight scale is in ``KN`` layout."""
+    return get_weight_scale_layout(layer) == BlockScaleLayout.KN
 
 
 def is_fp8(x: torch.dtype | torch.Tensor) -> bool:

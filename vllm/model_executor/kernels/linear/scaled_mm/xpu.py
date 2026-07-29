@@ -5,6 +5,10 @@ from collections.abc import Sequence
 
 import torch
 
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    BlockScaleLayout,
+    set_weight_scale_layout,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
@@ -207,6 +211,11 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         # oneDNN expected layout [K/128, N/128] at load time (one-time cost).
         scale_t = scale.data.t().contiguous()
         replace_parameter(layer, scale_attr, scale_t)
+        # Record the new layout so downstream consumers that expect the
+        # checkpoint [N/128, K/128] layout (e.g. get_and_maybe_dequant_weights,
+        # used by MLA to dequantize kv_b_proj) can detect the transpose instead
+        # of silently misreading the scale.
+        set_weight_scale_layout(layer, BlockScaleLayout.KN)
 
         # For BMM layers (e.g. wo_a), precompute 3D scale and weight:
         # [K/bs, N/bs] -> [batch, K/bs, N_per_batch/bs]

@@ -440,6 +440,17 @@ def get_and_maybe_dequant_weights(
         weight_scales = get_attribute_fallback(
             layer, ["weight_scale", "weight_scale_inv"]
         )
+        # Some backends (e.g. XPU oneDNN) transpose the block weight scale from
+        # checkpoint layout [N/block_n, K/block_k] to [K/block_k, N/block_n] in
+        # `process_weights_after_loading`. `scaled_dequantize` expects the
+        # checkpoint layout, so transpose it back when the layer is tagged.
+        if layer.quant_method.block_quant:
+            from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+                is_weight_scale_transposed,
+            )
+
+            if is_weight_scale_transposed(layer):
+                weight_scales = weight_scales.t()
         dequant_weights = scaled_dequantize(
             weight,
             weight_scales,
