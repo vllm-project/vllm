@@ -656,24 +656,19 @@ class TransferTopology:
         return [self.tp_rank * abs_ratio + i for i in range(abs_ratio)]
 
     def target_remote_ranks(
-        self,
-        remote_engine_id: EngineId,
-        remote_pp_rank: int = 0,
-        local_tp_rank: int | None = None,
+        self, remote_engine_id: EngineId, remote_pp_rank: int = 0
     ) -> list[int]:
         """Get the remote TP rank(s) that the current local TP rank will
         read from.  When remote tp_size > local tp_size, reads from
         multiple remote ranks.
         """
         info = self._engines[(remote_engine_id, remote_pp_rank)]
-        if local_tp_rank is None:
-            local_tp_rank = self.tp_rank
         tp_ratio = self.tp_ratio(info.remote_tp_size)
         if tp_ratio > 0:
-            return [local_tp_rank // tp_ratio]
+            return [self.tp_rank // tp_ratio]
         # remote TP > local TP: read from |tp_ratio| remote workers
         abs_ratio = -tp_ratio
-        return [local_tp_rank * abs_ratio + i for i in range(abs_ratio)]
+        return [self.tp_rank * abs_ratio + i for i in range(abs_ratio)]
 
     @staticmethod
     def get_dcp_rank(
