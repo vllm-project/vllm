@@ -612,22 +612,10 @@ _SPECULATIVE_DECODING_MODELS = {
     "Gemma4DSparkModel": ("gemma4_dspark", "Gemma4DSparkForCausalLM"),
     "DFlashHYV3ForCausalLM": ("hy_v3_dflash", "DFlashHYV3ForCausalLM"),
     "DFlareDraftModel": ("qwen3_dflare", "DFlareQwen3ForCausalLM"),
-    "DFlareV2DraftModel": (
-        "qwen3_dflarev2",
-        "DFlareV2Qwen3ForCausalLM",
-    ),
-    "DFlareV2NormDraftModel": (
-        "qwen3_dflarev2norm",
-        "DFlareV2NormQwen3ForCausalLM",
-    ),
-    "DFlareV2AllNormDraftModel": (
-        "qwen3_dflarev2allnorm",
-        "DFlareV2AllNormQwen3ForCausalLM",
-    ),
     "Qwen3DSparkModel": ("qwen3_dspark", "Qwen3DSparkForCausalLM"),
-    "Qwen3DSparkDFlareV2Model": (
-        "qwen3_dspark_dflarev2",
-        "Qwen3DSparkDFlareV2ForCausalLM",
+    "Qwen3DFlyModel": (
+        "qwen3_dfly",
+        "Qwen3DFlyForCausalLM",
     ),
     "Qwen3TreeDSparkDFlareModel": (
         "qwen3_treedspark_dflare",

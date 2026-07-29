@@ -935,30 +935,21 @@ class SpeculativeConfig:
                 elif "dflash" in self.draft_model_config.model.lower():
                     self.method = "dflash"
                 elif (
-                    "Qwen3DSparkDFlareV2Model" in self.draft_model_config.architectures
+                    "Qwen3DFlyModel" in self.draft_model_config.architectures
                     or "Qwen3TreeDSparkDFlareModel"
                     in self.draft_model_config.architectures
                 ):
-                    # Hybrid DFlare/DFlareV2 + DSpark Markov uses DSpark runtime.
+                    # DFly and TreeDSpark use sequential block drafting.
                     self.method = "dspark"
                 elif (
                     "dflare" in self.draft_model_config.model.lower()
                     or "DFlareDraftModel" in self.draft_model_config.architectures
-                    or "DFlareV2DraftModel" in self.draft_model_config.architectures
-                    or "DFlareV2NormDraftModel" in self.draft_model_config.architectures
-                    or "DFlareV2AllNormDraftModel"
-                    in self.draft_model_config.architectures
                     or getattr(
                         self.draft_model_config.hf_config,
                         "model_arch",
                         None,
                     )
-                    in (
-                        "dflare",
-                        "dflarev2",
-                        "dflarev2norm",
-                        "dflarev2allnorm",
-                    )
+                    == "dflare"
                 ):
                     # Plain DFlare / DFlareV2 (no Markov) share DFlash runtime.
                     self.method = "dflash"
@@ -1029,7 +1020,7 @@ class SpeculativeConfig:
                     arch in self.draft_model_config.architectures
                     for arch in (
                         "Qwen3DSparkModel",
-                        "Qwen3DSparkDFlareV2Model",
+                        "Qwen3DFlyModel",
                         "Qwen3TreeDSparkDFlareModel",
                         "Gemma4DSparkModel",
                     )
@@ -1043,21 +1034,7 @@ class SpeculativeConfig:
                         or {}
                     )
                     model_arch = model_arch or drafter_config.get("model_arch")
-                    if model_arch in (
-                        "dflarev2",
-                        "dflarev2norm",
-                        "dflarev2allnorm",
-                    ) or any(
-                        arch in architectures
-                        for arch in (
-                            "DFlareV2DraftModel",
-                            "DFlareV2NormDraftModel",
-                            "DFlareV2AllNormDraftModel",
-                        )
-                    ):
-                        hf_config.architectures = ["Qwen3DSparkDFlareV2Model"]
-                        self.update_arch_()
-                    elif model_arch == "dflare" or "DFlareDraftModel" in architectures:
+                    if model_arch == "dflare" or "DFlareDraftModel" in architectures:
                         hf_config.architectures = ["Qwen3TreeDSparkDFlareModel"]
                         self.update_arch_()
                     else:

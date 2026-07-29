@@ -564,17 +564,14 @@ class VllmConfig:
             else []
         )
 
-        # DFlareV2-family drafts rely on the legacy V1 proposer path
-        # (``vllm/v1/spec_decode``) for their DFlash/DSpark context-KV and
-        # sequential Markov plumbing. Keep them off the V2 runner's
+        # DFly-family drafts rely on the legacy V1 proposer path
+        # (``vllm/v1/spec_decode``) for context-KV and sequential block
+        # drafting. Keep them off the V2 runner's
         # ``vllm/v1/worker/gpu/spec_decode`` speculator path. This is a
         # compatibility requirement, so it takes precedence over an explicit
         # VLLM_USE_V2_MODEL_RUNNER=1.
         v1_proposer_draft_architectures = {
-            "DFlareV2DraftModel",
-            "DFlareV2NormDraftModel",
-            "DFlareV2AllNormDraftModel",
-            "Qwen3DSparkDFlareV2Model",
+            "Qwen3DFlyModel",
         }
         if set(draft_architectures) & v1_proposer_draft_architectures:
             return False
@@ -588,7 +585,7 @@ class VllmConfig:
             return True
 
         # DSpark drafting is supported by BOTH runners for the Qwen3
-        # DSpark / DSparkDFlareV2 / TreeDSparkDFlare draft architectures (V1 via
+        # DSpark / DFly / TreeDSparkDFlare draft architectures (V1 via
         # ``vllm/v1/spec_decode/dspark.py``). The DeepSeek-V4 style DSpark
         # (``DSparkDraftModel``) is still only implemented by the V2 runner and
         # is not otherwise a default-V2 architecture, so keep forcing V2 for it.
@@ -600,7 +597,7 @@ class VllmConfig:
         ):
             v1_supported_dspark = {
                 "Qwen3DSparkModel",
-                "Qwen3DSparkDFlareV2Model",
+                "Qwen3DFlyModel",
                 "Qwen3TreeDSparkDFlareModel",
             }
             if not (set(draft_architectures) & v1_supported_dspark):
