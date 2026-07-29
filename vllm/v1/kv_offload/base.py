@@ -8,12 +8,10 @@ from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Any, NamedTuple, NewType, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, NewType, TypeVar
 
 import numpy as np
 import torch
-
-from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
@@ -26,8 +24,6 @@ from vllm.v1.kv_offload.config import OffloadingConfig
 # its KV cache group index, encoded as raw bytes to avoid tuple GC overhead.
 # Use the helper functions below to construct / decompose keys.
 OffloadKey = NewType("OffloadKey", bytes)
-
-logger = init_logger(__name__)
 
 
 def make_offload_key(block_hash: bytes, group_idx: int) -> OffloadKey:
@@ -48,10 +44,54 @@ def get_offload_group_idx(key: OffloadKey) -> int:
 _T = TypeVar("_T")
 
 
+class Medium(Enum):
+    """Storage medium of an offloading tier."""
+
+    CPU = "CPU"
+    STORAGE = "STORAGE"
+
+
+class Locality(Enum):
+    """Locality of a tier's storage relative to the publishing instance."""
+
+    LOCAL = "LOCAL"
+    REMOTE = "REMOTE"
+
+
+class TierMatcher(NamedTuple):
+    medium: Medium | None = None
+    locality: Locality | None = None
+
+    def matches(self, medium: Medium | None, locality: Locality | None) -> bool:
+        medium_matches = self.medium is None or medium is None or self.medium == medium
+        locality_matches = (
+            self.locality is None or locality is None or self.locality == locality
+        )
+        return medium_matches and locality_matches
+
+
+@dataclass(frozen=True)
+class TierFilter:
+    """Per-request filter controlling which tiers participate."""
+
+    matchers: tuple[TierMatcher, ...] = ()
+
+    ALL: ClassVar["TierFilter"]
+
+    def allows(self, medium: Medium | None, locality: Locality | None) -> bool:
+        if self is TierFilter.ALL:
+            return True
+        return any(m.matches(medium, locality) for m in self.matchers)
+
+
+TierFilter.ALL = TierFilter(matchers=(TierMatcher(),))
+
+
 @dataclass
 class ReqContext:
     req_id: str
     kv_transfer_params: dict[str, Any] | None = None
+    load_tier_filter: TierFilter = TierFilter.ALL
     # Per-request scratch space keyed by value type, so a tier can parse
     # kv_transfer_params once (in on_new_request) and read the result back
     # on later calls for the same request.
@@ -110,17 +150,10 @@ class PrepareStoreOutput:
     evicted_keys: list[OffloadKey]
 
 
-class Locality(Enum):
-    """Locality of a tier's storage relative to the publishing instance."""
-
-    LOCAL = "LOCAL"
-    REMOTE = "REMOTE"
-
-
 @dataclass
 class OffloadingEvent:
     keys: list[OffloadKey]
-    medium: str
+    medium: Medium
     # True if blocks are removed, False if stored
     removed: bool
     locality: Locality | None = None
@@ -503,10 +536,6 @@ class OffloadingSpec(ABC):
         return {}
 
     def __init__(self, config: OffloadingConfig):
-        logger.warning(
-            "Initializing OffloadingSpec. This API is experimental and "
-            "subject to change in the future as we iterate the design."
-        )
         self.config = config
         self.extra_config = config.extra_config
         self.replicated_layout: bool = False
