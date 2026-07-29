@@ -1,5 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+#
+# Minimal single-node reference proxy for MoRI-IO prefill/decode disaggregation.
+# It demonstrates the DP-rank pinning contract the connector expects: pick one
+# prefill DP rank per request (flat_interleaved_dp_route) and pin BOTH legs to it
+# via the ``X-data-parallel-rank`` header plus ``kv_transfer_params``
+# (``remote_dp_rank`` / ``remote_dp_size`` / ``remote_tp_size``).
+#
+# Scope: single-node only. It intentionally does NOT supply the cross-pod
+# Wide-EP (2P2D) peer info -- ``remote_hosts`` / ``multi_pod_hosts``,
+# ``data_parallel_size_local``, ``is_request_leader``. In real multi-pod
+# deployments that peer info is produced by a production routing sidecar, e.g.:
+#   * llm-d-router  (https://github.com/llm-d/llm-d-router)
+#   * vLLM's own vllm-router (examples in the vllm-project org)
+#   * or any NIXL-shaped router that sets the same kv_transfer_params contract.
+# Use this file as a protocol reference, not a production router.
 import argparse
 import asyncio
 import copy
