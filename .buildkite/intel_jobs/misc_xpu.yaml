@@ -258,6 +258,7 @@ steps:
   _raw_old_commands:
   - pip install 'opentelemetry-sdk>=1.26.0' 'opentelemetry-api>=1.26.0' 'opentelemetry-exporter-otlp>=1.26.0' 'opentelemetry-semantic-conventions-ai>=0.4.1'
   - pytest -v -s v1/tracing
+  - pytest -v -s tracing
   source_file_dependencies:
   - vllm/config/
   - vllm/distributed/
@@ -272,12 +273,14 @@ steps:
   - vllm/utils/
   - vllm/v1/
   - tests/v1/tracing
+  - tests/tracing/
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pip install opentelemetry-sdk\>=1.26.0 opentelemetry-api\>=1.26.0 opentelemetry-exporter-otlp\>=1.26.0 opentelemetry-semantic-conventions-ai\>=0.4.1 || true &&
     cd tests &&
-    pytest -v -s v1/tracing || true'
+    pytest -v -s v1/tracing || true &&
+    pytest -v -s tracing || true'
 - label: Python-only Installation
   device: intel_gpu
   timeout_in_minutes: 20
@@ -344,7 +347,7 @@ steps:
     pytest -v -s utils_ || true'
 - label: Batch Invariance (A100)
   device: intel_gpu
-  timeout_in_minutes: 40
+  timeout_in_minutes: 60
   working_dir: .
   no_plugin: true
   env:
@@ -358,7 +361,7 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pip install pytest-timeout pytest-forked
   - pytest -v -s v1/determinism/test_batch_invariance.py
-  - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle[TRITON_MLA]
+  - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
   source_file_dependencies:
   - vllm/v1/attention
   - vllm/model_executor/layers
@@ -370,10 +373,10 @@ steps:
     pip install pytest-timeout pytest-forked || true &&
     cd tests &&
     pytest -v -s v1/determinism/test_batch_invariance.py || true &&
-    VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle[TRITON_MLA] || true'
+    VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA || true'
 - label: Batch Invariance (H100)
   device: intel_gpu
-  timeout_in_minutes: 40
+  timeout_in_minutes: 60
   working_dir: .
   no_plugin: true
   env:
@@ -388,8 +391,8 @@ steps:
   - pip install pytest-timeout pytest-forked
   - pytest -v -s v1/determinism/test_batch_invariance.py
   - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
-  - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle[TRITON_MLA]
-  - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle[FLASH_ATTN]
+  - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
+  - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
   source_file_dependencies:
   - vllm/v1/attention
   - vllm/model_executor/layers
@@ -402,11 +405,11 @@ steps:
     cd tests &&
     pytest -v -s v1/determinism/test_batch_invariance.py || true &&
     pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py || true &&
-    VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle[TRITON_MLA] || true &&
-    VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle[FLASH_ATTN] || true'
+    VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA || true &&
+    VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN || true'
 - label: Batch Invariance (B200)
   device: intel_gpu
-  timeout_in_minutes: 35
+  timeout_in_minutes: 45
   working_dir: .
   no_plugin: true
   env:
@@ -421,10 +424,13 @@ steps:
   - pip install pytest-timeout pytest-forked
   - pytest -v -s v1/determinism/test_batch_invariance.py
   - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
-  - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle[TRITON_MLA]
-  - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle[FLASH_ATTN]
+  - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
+  - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
   - pytest -v -s v1/determinism/test_nvfp4_batch_invariant.py
   - pytest -v -s v1/determinism/test_nvfp4_batch_invariant_scaled_mm.py
+  - pytest -v -s v1/determinism/test_matmul_batch_invariant.py
+  - pytest -v -s v1/determinism/test_cutlass_batch_invariance.py
+  - pytest -v -s v1/determinism/test_online_batch_invariance.py
   source_file_dependencies:
   - vllm/v1/attention
   - vllm/model_executor/layers
@@ -437,10 +443,13 @@ steps:
     cd tests &&
     pytest -v -s v1/determinism/test_batch_invariance.py || true &&
     pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py || true &&
-    VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle[TRITON_MLA] || true &&
-    VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle[FLASH_ATTN] || true &&
+    VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA || true &&
+    VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN || true &&
     pytest -v -s v1/determinism/test_nvfp4_batch_invariant.py || true &&
-    pytest -v -s v1/determinism/test_nvfp4_batch_invariant_scaled_mm.py || true'
+    pytest -v -s v1/determinism/test_nvfp4_batch_invariant_scaled_mm.py || true &&
+    pytest -v -s v1/determinism/test_matmul_batch_invariant.py || true &&
+    pytest -v -s v1/determinism/test_cutlass_batch_invariance.py || true &&
+    pytest -v -s v1/determinism/test_online_batch_invariance.py || true'
 - label: Acceptance Length Test (Large Models)
   device: intel_gpu
   timeout_in_minutes: 20

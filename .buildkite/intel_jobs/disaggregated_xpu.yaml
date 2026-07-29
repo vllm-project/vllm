@@ -153,6 +153,32 @@ steps:
     'cd tests &&
     bash /workspace/vllm/.buildkite/scripts/install-kv-connectors.sh || true &&
     HYBRID_SSM=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh || true'
+- label: NixlConnector PD edge case test (2 GPUs)
+  device: intel_gpu
+  timeout_in_minutes: 40
+  num_devices: 2
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - bash v1/kv_connector/nixl_integration/run_edge_case_test.sh
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - vllm/v1/core/sched/
+  - tests/v1/kv_connector/nixl_integration/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    bash /workspace/vllm/.buildkite/scripts/install-kv-connectors.sh || true &&
+    bash v1/kv_connector/nixl_integration/run_edge_case_test.sh || true'
 - label: Hybrid SSM NixlConnector PD prefix cache test (2 GPUs)
   device: intel_gpu
   timeout_in_minutes: 25
@@ -262,26 +288,3 @@ steps:
     'cd tests &&
     bash /workspace/vllm/.buildkite/scripts/install-kv-connectors.sh || true &&
     bash v1/kv_connector/nixl_integration/run_multi_connector_edge_case_test.sh || true'
-- label: DSv4-Flash Disaggregated DP EP
-  device: intel_gpu
-  timeout_in_minutes: 60
-  num_devices: 8
-  optional: true
-  working_dir: .
-  no_plugin: true
-  env:
-    REGISTRY: public.ecr.aws/q9t5s3a7
-    REPO: vllm-ci-test-repo
-    VLLM_TEST_DEVICE: xpu
-  agent_tags:
-    label: debug
-    gpu: 8+
-  _raw_old_commands:
-  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
-  - bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
-  commands:
-  - >-
-    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'cd tests &&
-    bash /workspace/vllm/.buildkite/scripts/install-kv-connectors.sh || true &&
-    bash v1/kv_connector/nixl_integration/run_accuracy_test.sh || true'
