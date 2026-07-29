@@ -212,6 +212,23 @@ impl RoundtripCase {
         }
     }
 
+    /// Kimi K3 XTML tool/reasoning channels (native renderer + unified parser).
+    ///
+    /// Needs HF tokenizer files under `HF_HOME` (`tiktoken.model` +
+    /// `tokenizer_config.json`). Weights are not required for this text-level
+    /// roundtrip.
+    fn kimi_k3() -> Self {
+        Self {
+            model_id: "moonshotai/Kimi-K3",
+            assistant_stop_suffix: "<|end_of_msg|>",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Toggleable { default: true },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+        }
+    }
+
     /// SeedOSS with `<seed:think>` / `</seed:think>` reasoning tags.
     fn seed_oss() -> Self {
         Self {
@@ -255,7 +272,7 @@ impl RoundtripCase {
     fn gpt_oss() -> Self {
         Self {
             model_id: "openai/gpt-oss-20b",
-            assistant_stop_suffix: "", // not applicable for token-id cases
+            assistant_stop_suffix: "",
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Always { value: true },
@@ -263,19 +280,32 @@ impl RoundtripCase {
             sort_json_keys: false,
         }
     }
+
+    /// Inkling typed content blocks with native token-id rendering.
+    fn inkling() -> Self {
+        Self {
+            model_id: "thinkingmachines/Inkling",
+            assistant_stop_suffix: "<|content_model_end_sampling|>",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Always { value: true },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: true,
+        }
+    }
 }
 
 macro_rules! roundtrip_tests {
-    ($($case:ident => [$($(#[$fixture_attr:meta])* $fixture:ident),* $(,)?]),+ $(,)?) => {
+    ($($case:ident => $(#[$case_attr:meta])* [$($fixture:ident),* $(,)?]),+ $(,)?) => {
         paste::paste! {
             $(
                 #[tokio::test]
                 #[file_serial([<hf_ $case>])]
+                $(#[$case_attr])*
                 async fn [<roundtrip_ $case>]() -> Result<()> {
                     let case = RoundtripCase::$case();
                     let backends = load_roundtrip_backends(&case).await?;
                     $(
-                        $(#[$fixture_attr])*
                         [<run_roundtrip_ $fixture>](&case, &backends).await?;
                     )*
                     Ok(())
@@ -294,12 +324,15 @@ roundtrip_tests! {
     deepseek_v32 => [tool_call_mix],
     glm45 => [reasoning_and_content, tool_call_mix],
     glm47 => [reasoning_and_content, tool_call_mix],
-    seed_oss => [reasoning_and_content],
+    seed_oss => [reasoning_and_content, tool_call_mix],
     step3p5 => [reasoning_and_content],
     nemotron_v3 => [reasoning_and_content],
     gemma4 => [tool_call_mix], // Gemma4 strips reasoning in history if there's no tool call
     kimi_k25 => [tool_call_mix], // Kimi K2.5 strips reasoning in history
+    // K3 drops plain-assistant reasoning in history; tool-call turns keep it.
+    kimi_k3 => [tool_call_mix],
     gpt_oss => [tool_call_mix], // Harmony strips reasoning in history if there's no tool call
+    inkling => [reasoning_and_content, tool_call_mix],
 }
 
 /// Run the fixed reasoning+content fixture for one model/parser case.
@@ -656,14 +689,23 @@ fn decoded_completion_stream(
                 .collect()
         }
         Prompt::TokenIds(token_ids) => {
-            ensure!(
-                assistant_stop_suffix.is_empty(),
-                "token-id roundtrip cases do not support text stop suffixes"
-            );
+            let body = if assistant_stop_suffix.is_empty() {
+                token_ids.as_slice()
+            } else {
+                let stop_token_ids = tokenizer
+                    .encode(assistant_stop_suffix, false)
+                    .context("failed to encode token-id completion stop suffix")?;
+                token_ids.strip_suffix(stop_token_ids.as_slice()).with_context(|| {
+                    format!(
+                        "token-id completion did not end with {:?}: {:?}",
+                        assistant_stop_suffix, token_ids
+                    )
+                })?
+            };
             incremental_decode_chunks(
                 tokenizer,
                 &prompt_token_ids,
-                token_ids,
+                body,
                 TOKEN_COMPLETION_CHUNK_TOKENS,
             )?
         }

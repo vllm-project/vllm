@@ -79,6 +79,38 @@ mod tests {
     use super::*;
 
     const AUDIO_PAD_ID: u32 = 151_676;
+    const INKLING_AUDIO_MARKER_ID: u32 = 200_020;
+    const INKLING_AUDIO_EMBED_ID: i32 = 200_053;
+
+    fn inkling_info(decoder_dmodel: serde_json::Value) -> MultimodalModelInfo {
+        let config = serde_json::json!({
+            "model_type": "inkling_mm_model",
+            "audio_config": {
+                "decoder_dmodel": decoder_dmodel,
+                "n_mel_bins": 80,
+                "mel_vocab_size": 16,
+                "dmel_min_value": -7.0,
+                "dmel_max_value": 2.0
+            }
+        });
+        let tokenizer = TestTokenizer::new()
+            .with_regular_token("<|content_image|>", 200_005)
+            .with_regular_token("<|content_audio_input|>", INKLING_AUDIO_MARKER_ID);
+        let context = MultimodalModelContext {
+            model_id: "inkling-test".to_string(),
+            model_type: Some("inkling_mm_model".to_string()),
+            config,
+            tokenizer: TokenizerResolver(Arc::new(tokenizer)),
+        };
+
+        MultimodalModelInfo::from_loaded(
+            context,
+            PreProcessorConfig::default(),
+            PreProcessorConfig::default(),
+        )
+        .unwrap()
+        .expect("Inkling multimodal support")
+    }
 
     fn qwen3_asr_info() -> MultimodalModelInfo {
         let context = MultimodalModelContext {
@@ -118,6 +150,40 @@ mod tests {
             bytes.extend_from_slice(&sample.to_le_bytes());
         }
         bytes
+    }
+
+    #[test]
+    fn resolves_inkling_audio_from_model_spec() {
+        let info = inkling_info(serde_json::json!(1024));
+        let support = info.audio.as_ref().expect("audio support");
+
+        assert_eq!(
+            info.placeholder_token(Modality::Audio),
+            Some("<|content_audio_input|>")
+        );
+        assert_eq!(support.placeholder.marker_token_id, INKLING_AUDIO_MARKER_ID);
+        assert_eq!(
+            support.placeholder.embed_token_id,
+            INKLING_AUDIO_EMBED_ID as u32
+        );
+        assert_eq!(support.spec.primary_key(), AUDIO_PRIMARY_KEY);
+        assert!(matches!(
+            &support.spec.field_layouts.encoder_input,
+            llm_multimodal::FieldLayout::Flat { sizes_key }
+                if sizes_key == "num_audio_tokens"
+        ));
+        assert!(matches!(
+            support.spec.field_layouts.model_specific.get("num_audio_tokens"),
+            Some(llm_multimodal::FieldLayout::Batched)
+        ));
+    }
+
+    #[test]
+    fn inkling_decoder_config_gates_audio_capability() {
+        let info = inkling_info(serde_json::Value::Null);
+
+        assert!(info.audio.is_none());
+        assert_eq!(info.placeholder_token(Modality::Audio), None);
     }
 
     #[test]
@@ -206,6 +272,52 @@ mod tests {
         assert!(matches!(&lengths.field, MmField::Batched(_)));
         assert!(matches!(
             lengths.data.as_ref(),
+            Some(MmKwargValue::Tensor(tensor))
+                if tensor.dtype == "int64" && tensor.shape.is_empty()
+        ));
+    }
+
+    #[tokio::test]
+    async fn inkling_tracker_and_processor_use_standard_audio_key() {
+        let info = inkling_info(serde_json::json!(1024));
+        let wav = wav_i16_mono(16_000, &[0; 1_600]);
+        let expected_hash = llm_multimodal::hasher::hash_audio(&wav);
+        let fetched = info
+            .fetch_media(vec![MediaContentPart::AudioData {
+                data: wav,
+                mime_type: Some("audio/wav".to_string()),
+                uuid: Some("audio-1".to_string()),
+            }])
+            .await
+            .unwrap();
+
+        let prepared = info.prepare_audios(fetched.audios, fetched.audio_uuids).await.unwrap();
+
+        assert_eq!(prepared.replacements.len(), 1);
+        assert_eq!(
+            prepared.replacements[0].tokens[0],
+            INKLING_AUDIO_MARKER_ID as i32
+        );
+        assert!(
+            prepared.replacements[0].tokens[1..]
+                .iter()
+                .all(|token| *token == INKLING_AUDIO_EMBED_ID)
+        );
+        let item = &prepared.items[0];
+        assert_eq!(item.hash, expected_hash);
+        assert_eq!(item.uuid.as_deref(), Some("audio-1"));
+
+        let features = &item.data[AUDIO_PRIMARY_KEY];
+        assert!(matches!(&features.field, MmField::Flat(_)));
+        assert!(matches!(
+            features.data.as_ref(),
+            Some(MmKwargValue::Tensor(tensor))
+                if tensor.dtype == "float32" && tensor.shape.get(1) == Some(&80)
+        ));
+        let count = &item.data["num_audio_tokens"];
+        assert!(matches!(&count.field, MmField::Batched(_)));
+        assert!(matches!(
+            count.data.as_ref(),
             Some(MmKwargValue::Tensor(tensor))
                 if tensor.dtype == "int64" && tensor.shape.is_empty()
         ));
