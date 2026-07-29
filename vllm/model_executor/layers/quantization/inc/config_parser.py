@@ -142,6 +142,14 @@ class INCConfigParser:
         if self._config.extra_config and layer_name in self._config.extra_config:
             return get_config(layer_name)
 
+        # Suffix match: handle cases where extra_config keys use short names
+        # (e.g. "lm_head") but the layer_name is fully qualified
+        # (e.g. "model.language_model.lm_head") due to model nesting.
+        if self._config.extra_config:
+            for cfg_key in self._config.extra_config:
+                if layer_name.endswith(f".{cfg_key}"):
+                    return get_config(cfg_key)
+
         quantized = not isinstance(layer, ParallelLMHead)
         if self._config.block_name_to_quantize:
             quantized = any(

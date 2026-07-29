@@ -16,7 +16,6 @@ steps:
     amd:
       dind: false
       device: mi300_1
-      soft_fail: true
       working_dir: "/vllm-workspace/tests"
       timeout_in_minutes: 85
       source_file_dependencies:
