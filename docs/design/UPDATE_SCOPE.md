@@ -136,7 +136,7 @@ flowchart TD
     C -- No --> G[Require declared source manifest on first real update]
     G --> H[Receive complete real update]
     H --> I{Every provisional target consumed?}
-    I -- No --> X[Fail; baseline remains provisional]
+    I -- No --> X[Fail and keep baseline provisional]
     I -- Yes --> J[Promote observed receipts to exact baseline]
     J --> F
 ```
@@ -177,7 +177,7 @@ flowchart TD
     K --> L[Finalize affected layers and reconcile required events]
     L --> M[Build rank-local LoadManifestReport]
     M --> N{Local report clean?}
-    N -- No --> Y[Fail closed; do not resume]
+    N -- No --> Y[Fail closed and do not resume]
     N -- Yes --> O{Every worker reports success?}
     O -- No --> Y
     O -- Yes --> P[Commit generation and invalidate dependent caches]
@@ -253,7 +253,7 @@ flowchart TD
     G -- Yes --> H[Collect exact consumed events]
     H --> I[Require received sources equal declared sources]
     I --> J[Require received events equal resolved local events]
-    J --> K[Finalize selected units; preserve all others]
+    J --> K[Finalize selected units and preserve all others]
     K --> L[Return rank-local report]
 ```
 
@@ -308,7 +308,7 @@ sequenceDiagram
         C->>C: Invalidate prefix, MM, and encoder caches
     else any worker failed
         E->>W: abort_lora_update(adapter_id)
-        W->>W: Drop staged adapter; keep old adapter
+        W->>W: Drop staged adapter and keep old adapter
         E-->>C: Failure
     end
 ```
@@ -336,7 +336,7 @@ flowchart TD
     G --> H[Construct TensorLoRARequest]
     H --> I[Each worker builds and validates complete LoRAModel]
     I --> J{All workers prepared?}
-    J -- No --> K[Abort staged adapters; keep old adapter]
+    J -- No --> K[Abort staged adapters and keep old adapter]
     J -- Yes --> L[Commit replacement once]
     L --> M[Invalidate dependent caches]
 ```
