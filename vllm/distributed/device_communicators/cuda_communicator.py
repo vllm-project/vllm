@@ -36,6 +36,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         global_ranks: list[int] | None = None,
         global_world_size: int | None = None,
         tcp_store_group: StatelessProcessGroup | None = None,
+        use_all2all: bool = False,
     ):
         super().__init__(
             cpu_group,
@@ -44,6 +45,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             unique_name,
             global_ranks,
             global_world_size,
+            use_all2all=use_all2all,
         )
         if "tp" not in unique_name:
             # custom allreduce or torch symm mem can be used only by tp
@@ -570,6 +572,22 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if self.all2all_manager is not None:
             self.all2all_manager.destroy()
             self.all2all_manager = None  # type: ignore[assignment]
+
+    def checkpoint_prepare(self) -> None:
+        # Only FlashInfer all-reduce and FlashInfer all2all are supported for now.
+        from .flashinfer_all_reduce import checkpoint_prepare_fi_ar_workspaces
+
+        checkpoint_prepare_fi_ar_workspaces(self.cpu_group)
+        if self.all2all_manager is not None:
+            self.all2all_manager.checkpoint_prepare()
+
+    def checkpoint_restore(self) -> None:
+        # Only FlashInfer all-reduce and FlashInfer all2all are supported for now.
+        from .flashinfer_all_reduce import checkpoint_restore_fi_ar_workspaces
+
+        checkpoint_restore_fi_ar_workspaces(self.cpu_group)
+        if self.all2all_manager is not None:
+            self.all2all_manager.checkpoint_restore()
 
     def all_gatherv(
         self,

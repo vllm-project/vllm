@@ -5,7 +5,11 @@
 from typing import TYPE_CHECKING
 
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    FullAttentionSpec,
+    MLAAttentionSpec,
+)
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
     OffloadingConfig,
@@ -40,7 +44,11 @@ def build_offloading_config(
         OffloadingGroupConfig(
             tokens_per_block=(
                 group.kv_cache_spec.block_size
-                * parallel_config.decode_context_parallel_size
+                * (
+                    parallel_config.decode_context_parallel_size
+                    if isinstance(group.kv_cache_spec, AttentionSpec)
+                    else 1
+                )
             ),
             layer_names=tuple(group.layer_names),
         )
@@ -138,6 +146,12 @@ def build_offloading_config(
     )
 
     kv_events_config = vllm_config.kv_events_config
+    cache_dtype = (
+        vllm_config.model_config.dtype
+        if vllm_config.cache_config.cache_dtype == "auto"
+        else vllm_config.cache_config.cache_dtype
+    )
+
     return OffloadingConfig(
         groups=groups,
         worker_kv_bytes_per_block=worker_kv_bytes_per_block,
@@ -148,7 +162,7 @@ def build_offloading_config(
         engine_id=engine_id,
         model=OffloadingModelConfig(
             name=vllm_config.model_config.model,
-            dtype=str(vllm_config.cache_config.cache_dtype).replace("torch.", ""),
+            dtype=str(cache_dtype).removeprefix("torch."),
         ),
         cache=OffloadingCacheConfig(
             tokens_per_hash=tokens_per_hash,

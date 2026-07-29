@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+//! Shared tracing subscriber and log formatting for vLLM Rust binaries.
+
 use std::{env, fmt, process};
 
 use time::UtcOffset;
@@ -26,8 +28,8 @@ const RESET: &str = "\x1b[0m";
 const VLLM_TIME_FORMAT: &[time::format_description::FormatItem<'static>] =
     format_description!("[month]-[day] [hour]:[minute]:[second]");
 
-/// Install the process-wide vLLM-style tracing subscriber for the CLI binary.
-pub(crate) fn init_tracing(process_label: &str) {
+/// Install the process-wide vLLM-style tracing subscriber.
+pub fn init_tracing(process_label: &str) {
     let filter = build_targets_filter(
         env::var("VLLM_LOGGING_LEVEL").ok().as_deref(),
         env::var("RUST_LOG").ok().as_deref(),
