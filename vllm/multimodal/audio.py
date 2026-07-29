@@ -362,9 +362,10 @@ def split_audio(
         >>> len(chunks)
         3
     """
-    assert audio_data.ndim == 1, (
-        f"split_audio expects mono audio, got shape {audio_data.shape}"
-    )
+    if audio_data.ndim > 1:
+        raise ValueError(
+            f"split_audio expects mono audio, got shape {audio_data.shape}"
+        )
 
     chunk_size = int(sample_rate * max_clip_duration_s)
     overlap_size = int(sample_rate * overlap_duration_s)
