@@ -1300,6 +1300,15 @@ class SpecDecodeBaseProposer:
             ),
         )
 
+        if spec_cfg.kv_cache_dtype is not None:
+            base = replace(
+                base,
+                cache_config=replace(
+                    base.cache_config,
+                    cache_dtype=spec_cfg.kv_cache_dtype,
+                ),
+            )
+
         return base
 
     def _get_model(self) -> nn.Module:
@@ -1467,6 +1476,30 @@ class SpecDecodeBaseProposer:
                     "Detected MTP model. "
                     "Sharing target model embedding weights with the draft model."
                 )
+
+            if share_embeddings and hasattr(self.model, "has_own_embed_tokens"):
+                # EAGLE drafts consume input embeddings at their own hidden
+                # size, so only share when the widths match. MTP drafts
+                # project target-width embeddings (e.g. Gemma4 MTP's
+                # pre_projection takes 2 * backbone_hidden_size), so the
+                # width check does not apply to them.
+                draft_embed = self.model.model.embed_tokens
+                # Guard with isinstance so non-Tensor weights (e.g. in tests)
+                # are not affected — mirrors the weight-equality check above.
+                if isinstance(target_embed_tokens.weight, torch.Tensor) and isinstance(
+                    draft_embed.weight, torch.Tensor
+                ):
+                    target_dim = target_embed_tokens.weight.shape[-1]
+                    draft_dim = draft_embed.weight.shape[-1]
+                    if target_dim != draft_dim:
+                        share_embeddings = False
+                        logger.info(
+                            "Target embedding dim (%d) differs from draft "
+                            "embedding dim (%d). Keeping separate embedding "
+                            "weights.",
+                            target_dim,
+                            draft_dim,
+                        )
 
             if share_embeddings:
                 if hasattr(self.model.model, "embed_tokens"):
@@ -1707,7 +1740,10 @@ class SpecDecodeBaseProposer:
 
         attention_groups: dict[tuple[str, str], AttentionGroup] = {}
         if kv_cache_spec is not None:
-            for layer_name in self._draft_attn_layer_names:
+            # _draft_attn_layer_names is a set; iterate in sorted order so
+            # that attention_groups (and anything derived from its first
+            # element) is deterministic across processes.
+            for layer_name in sorted(self._draft_attn_layer_names):
                 attn_backend = all_attn_layers[layer_name].get_attn_backend()
                 backend_key = attn_backend.full_cls_name()
                 if backend_key not in attention_groups:
@@ -1739,9 +1775,20 @@ class SpecDecodeBaseProposer:
                     attention_groups[backend_key].layer_names.append(layer_name)
 
         self.draft_attn_groups = list(attention_groups.values())
-        self.block_size = (
-            self.draft_attn_groups[0].get_metadata_builder().kv_cache_spec.block_size
-        )
+        if kernel_block_sizes is not None and 0 <= self.kv_cache_gid < len(
+            kernel_block_sizes
+        ):
+            # Slot mappings are computed against the block table, which is
+            # stored at kernel-block granularity. Use the kernel block size
+            # rather than the KV cache manager's block size; the two differ
+            # when manager blocks are split for the attention kernel.
+            self.block_size = kernel_block_sizes[self.kv_cache_gid]
+        else:
+            self.block_size = (
+                self.draft_attn_groups[0]
+                .get_metadata_builder()
+                .kv_cache_spec.block_size
+            )
         logger.debug("Using block size %d for drafting layers", self.block_size)
 
     def _determine_batch_execution_and_padding(

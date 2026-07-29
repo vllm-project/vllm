@@ -306,6 +306,37 @@ def prepare_fp4_layer_for_marlin(
     return
 
 
+def _repack_marlin_experts(
+    weight: torch.Tensor,
+    size_n: int,
+    size_k: int,
+    perm: torch.Tensor,
+    is_a_8bit: bool,
+) -> torch.Tensor:
+    """Repack each expert to marlin format into a preallocated output."""
+    num_experts = weight.shape[0]
+    out: torch.Tensor | None = None
+    for i in range(num_experts):
+        qweight = weight[i].view(torch.int32).T.contiguous()
+        marlin_qweight = ops.gptq_marlin_repack(
+            b_q_weight=qweight,
+            perm=perm,
+            size_k=size_k,
+            size_n=size_n,
+            num_bits=4,
+            is_a_8bit=is_a_8bit,
+        )
+        if out is None:
+            out = torch.empty(
+                (num_experts, *marlin_qweight.shape),
+                dtype=marlin_qweight.dtype,
+                device=marlin_qweight.device,
+            )
+        out[i] = marlin_qweight
+    assert out is not None
+    return out
+
+
 def prepare_nvfp4_moe_layer_for_marlin(
     layer: RoutedExperts,
     w13: torch.Tensor,
@@ -371,7 +402,6 @@ def prepare_nvfp4_moe_layer_for_marlin(
     # WEIGHT
     # Repack weights to marlin format
     def repack_weight(weight: torch.Tensor, name: str) -> torch.Tensor:
-        tensor_list = []
         if "w13" in name:
             size_n, size_k = N * num_shards, K
             assert weight.shape == (E, size_n, size_k // 2)
@@ -383,20 +413,7 @@ def prepare_nvfp4_moe_layer_for_marlin(
             weight = pad_w2(weight, packing=2)
             size_k = padded_N
 
-        for i in range(E):
-            qweight = weight[i].view(torch.int32).T.contiguous()
-
-            marlin_qweight = ops.gptq_marlin_repack(
-                b_q_weight=qweight,
-                perm=perm,
-                size_k=size_k,
-                size_n=size_n,
-                num_bits=4,
-                is_a_8bit=is_a_8bit,
-            )
-            tensor_list.append(marlin_qweight)
-
-        return torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
+        return _repack_marlin_experts(weight, size_n, size_k, perm, is_a_8bit)
 
     w13 = repack_weight(w13, "w13")
     w2 = repack_weight(w2, "w2")
@@ -472,7 +489,6 @@ def prepare_moe_fp4_layer_for_marlin(
     # Repack weights to marlin format
     for name in ["w13_weight", "w2_weight"]:
         weight = getattr(layer, name)
-        tensor_list = []
         if "w13" in name:
             size_n, size_k = n * 2, k
         else:
@@ -480,20 +496,7 @@ def prepare_moe_fp4_layer_for_marlin(
 
         assert weight.shape == (e, size_n, size_k // 2)
 
-        for i in range(e):
-            qweight = weight[i].view(torch.int32).T.contiguous()
-
-            marlin_qweight = ops.gptq_marlin_repack(
-                b_q_weight=qweight,
-                perm=perm,
-                size_k=size_k,
-                size_n=size_n,
-                num_bits=4,
-                is_a_8bit=is_a_8bit,
-            )
-            tensor_list.append(marlin_qweight)
-
-        weight = torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
+        weight = _repack_marlin_experts(weight, size_n, size_k, perm, is_a_8bit)
         weight = torch.nn.Parameter(weight, requires_grad=False)
 
         setattr(layer, name, weight)
@@ -615,7 +618,6 @@ def prepare_moe_mxfp4_layer_for_marlin(
 
     # WEIGHT: Repack weights to marlin format
     def repack_weight(weight: torch.Tensor, name: str) -> torch.Tensor:
-        tensor_list = []
         if "w13" in name:
             size_n, size_k = n * 2, k
         else:
@@ -623,18 +625,7 @@ def prepare_moe_mxfp4_layer_for_marlin(
 
         assert weight.shape == (e, size_n, size_k // 2)
 
-        for i in range(e):
-            qweight = weight[i].view(torch.int32).T.contiguous()
-            marlin_qweight = ops.gptq_marlin_repack(
-                b_q_weight=qweight,
-                perm=perm,
-                size_k=size_k,
-                size_n=size_n,
-                num_bits=4,
-                is_a_8bit=is_a_8bit,
-            )
-            tensor_list.append(marlin_qweight)
-        return torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
+        return _repack_marlin_experts(weight, size_n, size_k, perm, is_a_8bit)
 
     w13 = repack_weight(w13, "w13")
     w2 = repack_weight(w2, "w2")

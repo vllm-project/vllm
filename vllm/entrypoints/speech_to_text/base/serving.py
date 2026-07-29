@@ -114,6 +114,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         self.asr_config = self.model_cls.get_speech_to_text_config(
             self.model_config, task_type
         )
+        self.streaming_post_processor_cls = (
+            self.model_cls.get_streaming_post_processor_cls()
+        )
 
         self.enable_force_include_usage = enable_force_include_usage
 
@@ -255,7 +258,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         request: SpeechToTextRequest,
         audio_data: bytes,
         request_id: str,
-    ) -> tuple[list[EngineInput], float]:
+    ) -> tuple[list[EngineInput], float, list[float]]:
         # Validate request
         request.language = self.model_cls.validate_language(request.language)
         request.to_language = (
@@ -273,6 +276,13 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         # Run cpu intensive preprocess step in a separate thread pool executor.
         chunks, duration = await self._decode_and_chunk_speech_async(audio_data)
+
+        chunk_start_offsets: list[float] = [0.0]
+
+        for chunk in chunks[:-1]:
+            chunk_start_offsets.append(
+                chunk_start_offsets[-1] + chunk.shape[-1] / self.asr_config.sample_rate
+            )
 
         if request.language is None and getattr(
             self.model_cls, "supports_explicit_language_detection", False
@@ -303,7 +313,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         engine_inputs = await self.renderer.render_cmpl_async(parsed_prompts)
 
-        return engine_inputs, duration
+        return engine_inputs, duration, chunk_start_offsets
 
     def _preprocess_verbose_prompt(self, prompt: EncoderDecoderDictPrompt):
         dec_prompt = prompt["decoder_prompt"]
@@ -388,7 +398,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     SpeechToTextSegment,
                     segment_class(
                         id=len(segments),
-                        seek=start_time,
+                        seek=int(start_time),
                         start=start_time + BASE_OFFSET * start_timestamp,
                         end=start_time + BASE_OFFSET * end_timestamp,
                         temperature=request.temperature,
@@ -464,7 +474,11 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         lora_request = self._maybe_get_adapters(request)
 
-        engine_inputs, duration_s = await self._preprocess_speech_to_text(
+        (
+            engine_inputs,
+            duration_s,
+            chunk_start_offsets,
+        ) = await self._preprocess_speech_to_text(
             request=request,
             audio_data=audio_data,
             request_id=request_id,
@@ -584,11 +598,10 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 assert len(list_result_generator) == 1, (
                     "`max_audio_clip_s` is set to None, audio cannot be chunked"
                 )
+            assert len(chunk_start_offsets) == len(list_result_generator)
             result_generator = merge_async_iterators(*list_result_generator)
             async for idx, op in result_generator:
-                start_time = (
-                    float(idx * chunk_size_in_s) if chunk_size_in_s is not None else 0.0
-                )
+                start_time = chunk_start_offsets[idx]
                 if request.response_format == "verbose_json":
                     assert op.outputs[0].logprobs
                     segments: list[SpeechToTextSegment] = self._get_verbose_segments(
@@ -631,7 +644,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                         TranscriptionResponseVerbose(
                             text=text,
                             language=request.language,
-                            duration=str(duration_s),
+                            duration=duration_s,
                             segments=total_segments,
                         ),
                     )
@@ -645,7 +658,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                         TranslationResponseVerbose(
                             text=text,
                             language=request.language,
-                            duration=str(duration_s),
+                            duration=duration_s,
                             segments=total_segments,
                         ),
                     )
@@ -692,6 +705,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         try:
             for result_generator in list_result_generator:
                 beginning_of_chunk = True
+                post_processor = self.streaming_post_processor_cls()
                 async for res in result_generator:
                     # On first result.
                     if res.prompt_token_ids is not None:
@@ -709,19 +723,24 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     assert len(res.outputs) == 1
                     output = res.outputs[0]
 
+                    output_text = post_processor.process_delta(
+                        output.text, output.finish_reason is not None
+                    )
+
                     # dont add separator to the first chunk
                     if (
                         result_generator is not list_result_generator[0]
                         and beginning_of_chunk
+                        and output_text
                     ):
-                        output.text = separator + output.text
+                        output_text = separator + output_text
                         beginning_of_chunk = False
 
-                    # TODO: For models that output structured formats (e.g.,
-                    # Qwen3-ASR with "language X<asr_text>" prefix), streaming
-                    # would need buffering to strip the prefix properly since
-                    # deltas may split the tag across chunks.
-                    delta_message = DeltaMessage(content=output.text)
+                    if output.finish_reason is None and not output_text:
+                        completion_tokens += len(output.token_ids)
+                        continue
+
+                    delta_message = DeltaMessage(content=output_text)
                     completion_tokens += len(output.token_ids)
 
                     if output.finish_reason is None:

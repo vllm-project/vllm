@@ -31,10 +31,10 @@ FINISH_REASON_STRINGS = ("stop", "length", "abort", "error", "repetition")
 
 EEP_NOTIFICATION_CALL_ID = -1
 
+FT_STATUS_CALL_ID = -2
+
 
 class EEPNotificationType(enum.Enum):
-    NEW_CORE_ENGINES_INIT_READY = "NEW_CORE_ENGINES_INIT_READY"
-    NEW_CORE_ENGINES_WEIGHTS_INIT_READY = "NEW_CORE_ENGINES_WEIGHTS_INIT_READY"
     RECONFIGURE_FINISHED = "RECONFIGURE_FINISHED"
     SHUTDOWN_COMPLETE = "SHUTDOWN_COMPLETE"
 
@@ -80,6 +80,13 @@ class EngineCoreReadyResponse:
     vllm_version: str
     world_size: int
     data_parallel_size: int
+    tensor_parallel_size: int
+    pipeline_parallel_size: int
+    decode_context_parallel_size: int
+    data_parallel_rank: int
+    max_num_seqs: int
+    max_num_batched_tokens: int
+    instance_id: str
     # KV cache capacity (None for encoder-only/attention-free models).
     kv_cache_size_tokens: int | None = None
     kv_cache_max_concurrency: float | None = None
@@ -190,6 +197,7 @@ class EngineCoreOutput(
     stop_reason: int | str | None = None
     events: list[EngineCoreEvent] | None = None
     kv_transfer_params: dict[str, Any] | None = None
+    ec_transfer_params: dict[str, Any] | None = None
 
     trace_headers: Mapping[str, str] | None = None
 
@@ -281,3 +289,9 @@ class ReconfigureRankType(enum.IntEnum):
 
     KEEP_CURRENT_RANK = -1
     SHUTDOWN_CURRENT_RANK = -2
+
+
+class EngineStatusType(enum.IntEnum):
+    HEALTHY = 0
+    DEAD = 1
+    UNHEALTHY = 2

@@ -21,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
     KVCacheSpec,
+    MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
@@ -29,10 +30,15 @@ from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 class ExternalCachedBlockPool:
     """Duck-typed BlockPool backed by a ``(group_id, hash)`` exists set."""
 
-    def __init__(self, exists: set[tuple[int, bytes]] | None = None) -> None:
+    def __init__(
+        self,
+        hash_block_size: int,
+        exists: set[tuple[int, bytes]] | None = None,
+    ) -> None:
         # ``exists=None`` is used on the recv side where hit_length is already
         # determined and we just want each spec's manager to apply its own mask.
         self._exists = exists
+        self.hash_block_size = hash_block_size
         self.null_block = KVCacheBlock(block_id=0)
         # Dummy ID 1 for present block for duck-typing.
         self._present_block = KVCacheBlock(block_id=1)
@@ -78,6 +84,9 @@ class MooncakeStoreCoordinator:
         self.kv_cache_groups = kv_cache_groups
         self.hash_block_size = hash_block_size
         self.lcm_block_size = scheduler_block_size
+        self.enable_partial_hash_hits = partial_hash_hits_enabled(
+            kv_cache_groups, hash_block_size
+        )
         self.use_eagle = use_eagle
         # Mirror vLLM core's KVCacheCoordinator.retention_interval.
         self.retention_interval = retention_interval
@@ -87,6 +96,14 @@ class MooncakeStoreCoordinator:
         if use_eagle and not self.eagle_group_ids:
             self.eagle_group_ids = set(range(len(kv_cache_groups)))
         self._verify_and_split_kv_cache_groups()
+
+    def align_lookup_length(self, length: int) -> int:
+        alignment = (
+            self.hash_block_size
+            if self.enable_partial_hash_hits
+            else self.lcm_block_size
+        )
+        return length // alignment * alignment
 
     def _verify_and_split_kv_cache_groups(self) -> None:
         """Mirrors KVCacheCoordinator.verify_and_split_kv_cache_groups but
@@ -166,7 +183,7 @@ class MooncakeStoreCoordinator:
         masks, _ = self.find_longest_cache_hit(
             block_hashes,
             token_len,
-            ExternalCachedBlockPool(),
+            ExternalCachedBlockPool(self.hash_block_size),
             apply_eagle=False,
         )
         return masks
@@ -218,9 +235,14 @@ class MooncakeStoreCoordinator:
         retention_interval: int | None,
         num_prompt_tokens: int | None,
     ) -> tuple[list[bool] | None, ...]:
-        assert aligned_token_len % self.lcm_block_size == 0, (
+        mask_alignment = (
+            self.hash_block_size
+            if self.enable_partial_hash_hits
+            else self.lcm_block_size
+        )
+        assert aligned_token_len % mask_alignment == 0, (
             f"aligned_token_len ({aligned_token_len}) must be a multiple of "
-            f"lcm_block_size ({self.lcm_block_size})"
+            f"{mask_alignment}"
         )
         masks: list[list[bool] | None] = []
         for g_idx, g in enumerate(self.kv_cache_groups):
@@ -230,6 +252,9 @@ class MooncakeStoreCoordinator:
             manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
             assert manager_cls is not None
             use_eagle = g_idx in self.eagle_group_ids
+            reachable_boundaries = (
+                () if num_prompt_tokens is None else (num_prompt_tokens - 1,)
+            )
             mask = manager_cls.reachable_block_mask(
                 start_block=start_chunk,
                 end_block=end_chunk,
@@ -237,7 +262,7 @@ class MooncakeStoreCoordinator:
                 kv_cache_spec=spec,
                 use_eagle=use_eagle,
                 retention_interval=retention_interval,
-                num_prompt_tokens=num_prompt_tokens,
+                reachable_boundaries=reachable_boundaries,
             )
             if mask is not None:
                 assert len(mask) == end_chunk - start_chunk
@@ -267,27 +292,32 @@ class MooncakeStoreCoordinator:
         one already removed by the lookup.
         """
         eagle_indices = self.eagle_attn_group_indices if apply_eagle else set()
+        alignment_tokens = (
+            self.hash_block_size
+            if self.enable_partial_hash_hits
+            else self.lcm_block_size
+        )
         if len(self.attention_groups) == 1:
             spec, group_ids, manager_cls = self.attention_groups[0]
-            hashes = self.block_hashes_for_spec(block_hashes, spec)
-            hit_blocks = manager_cls.find_longest_cache_hit(
-                block_hashes=hashes,  # type: ignore[arg-type]
+            hit_blocks, hit_length = manager_cls.find_longest_cache_hit(
+                block_hashes=block_hashes,  # type: ignore[arg-type]
                 max_length=max_length,
                 kv_cache_group_ids=group_ids,
                 block_pool=cast(BlockPool, cached_block_pool),
                 kv_cache_spec=spec,
                 drop_eagle_block=(0 in eagle_indices),
-                alignment_tokens=spec.block_size,
+                alignment_tokens=alignment_tokens,
             )
             num_groups = len(self.kv_cache_groups)
             blocks_by_group: list[list[KVCacheBlock]] = [[] for _ in range(num_groups)]
             for gid, blks in zip(group_ids, hit_blocks, strict=True):
                 blocks_by_group[gid] = blks
-            return tuple(blocks_by_group), len(hit_blocks[0]) * spec.block_size
+            return tuple(blocks_by_group), hit_length
 
         num_groups = len(self.kv_cache_groups)
         hit_length = max_length
         hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups
+        hit_length_by_group: list[int] = [0] * num_groups
 
         is_simple_hybrid = len(self.attention_groups) == 2 and isinstance(
             self.attention_groups[0][0], FullAttentionSpec
@@ -298,28 +328,37 @@ class MooncakeStoreCoordinator:
             curr_hit_length = hit_length
 
             for idx, (spec, group_ids, manager_cls) in enumerate(self.attention_groups):
-                cached = hit_blocks_by_group[group_ids[0]]
+                first_group_id = group_ids[0]
+                cached = hit_blocks_by_group[first_group_id]
                 if isinstance(spec, FullAttentionSpec) and cached is not None:
-                    curr_hit_length = (
-                        curr_hit_length // spec.block_size * spec.block_size
+                    curr_hit_length = min(
+                        curr_hit_length, hit_length_by_group[first_group_id]
                     )
                     continue
 
                 drop_eagle_block = idx in eagle_indices and idx not in eagle_verified
                 _max_length = curr_hit_length
-                if drop_eagle_block:
-                    _max_length = min(curr_hit_length + spec.block_size, max_length)
-                hashes = self.block_hashes_for_spec(block_hashes, spec)
-                hit_blocks = manager_cls.find_longest_cache_hit(
-                    block_hashes=hashes,  # type: ignore[arg-type]
+                # No eagle peek margin for a recurrent (Mamba) group: its finder
+                # never drops a block, so a widened bound would match past the
+                # attention-verified hit and resume from speculative state (#43559).
+                if drop_eagle_block and not isinstance(spec, MambaSpec):
+                    eagle_margin = (
+                        self.hash_block_size
+                        if self.enable_partial_hash_hits
+                        and manager_cls.supports_fine_grained_hash_lookup
+                        and spec.block_size > self.hash_block_size
+                        else spec.block_size
+                    )
+                    _max_length = min(curr_hit_length + eagle_margin, max_length)
+                hit_blocks, _new_hit_length = manager_cls.find_longest_cache_hit(
+                    block_hashes=block_hashes,  # type: ignore[arg-type]
                     max_length=_max_length,
                     kv_cache_group_ids=group_ids,
                     block_pool=cast(BlockPool, cached_block_pool),
                     kv_cache_spec=spec,
                     drop_eagle_block=drop_eagle_block,
-                    alignment_tokens=self.lcm_block_size,
+                    alignment_tokens=alignment_tokens,
                 )
-                _new_hit_length = len(hit_blocks[0]) * spec.block_size
                 if drop_eagle_block:
                     eagle_verified.add(idx)
                 elif _new_hit_length < curr_hit_length:
@@ -327,6 +366,7 @@ class MooncakeStoreCoordinator:
                 curr_hit_length = _new_hit_length
                 for gid, blocks in zip(group_ids, hit_blocks, strict=True):
                     hit_blocks_by_group[gid] = blocks
+                    hit_length_by_group[gid] = _new_hit_length
 
             if curr_hit_length >= hit_length:
                 break
@@ -335,14 +375,16 @@ class MooncakeStoreCoordinator:
                 break
 
         # Truncate full-attention hit_blocks to final converged length;
-        # other specs already trim themselves inside their hit logic.
+        # other specs already trim themselves inside their hit logic. cdiv keeps
+        # the partial tail block when hit_length is not block-aligned.
         spec0, group_ids0, _ = self.attention_groups[0]
         if isinstance(spec0, FullAttentionSpec):
-            num_blocks = hit_length // spec0.block_size
+            num_blocks = cdiv(hit_length, spec0.block_size)
             for gid in group_ids0:
                 full_blks = hit_blocks_by_group[gid]
                 assert full_blks is not None
                 del full_blks[num_blocks:]
+                hit_length_by_group[gid] = hit_length
 
         return (
             tuple(blks if blks is not None else [] for blks in hit_blocks_by_group),
@@ -354,3 +396,18 @@ def _unwrap_spec(spec: KVCacheSpec) -> KVCacheSpec:
     if isinstance(spec, UniformTypeKVCacheSpecs):
         return next(iter(spec.kv_cache_specs.values()))
     return spec
+
+
+def partial_hash_hits_enabled(
+    kv_cache_groups: list[KVCacheGroupSpec], hash_block_size: int
+) -> bool:
+    """Mirror of core's ``HybridKVCacheCoordinator.enable_partial_hash_hits``
+    (its dcp == 1 clause holds: the connector rejects hybrid + DCP/PCP > 1).
+    Single copy on purpose — scheduler and coordinator must not disagree.
+    """
+    return any(
+        isinstance(spec := _unwrap_spec(g.kv_cache_spec), MambaSpec)
+        and spec.mamba_cache_mode == "align"
+        and spec.block_size > hash_block_size
+        for g in kv_cache_groups
+    )
