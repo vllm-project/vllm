@@ -130,8 +130,8 @@ def test_hash_collision_video_num_frames():
         return items.get_all_items_for_hash()[0]
 
     hasher = MultiModalHasher
-    assert hasher.hash_kwargs(video=item_for_hash(2)) != hasher.hash_kwargs(
-        video=item_for_hash(4)
+    assert hasher.hash_kwargs("blake3", video=item_for_hash(2)) != hasher.hash_kwargs(
+        "blake3", video=item_for_hash(4)
     )
 
 
