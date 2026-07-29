@@ -324,7 +324,11 @@ def _q_gather_layout_supported(
 
 
 class DirectDCPQGatherWorkspace(_DirectDCPWorkspace):
-    """Persistent symmetric buffers for direct DCP query gather."""
+    """Publish query shards directly into the consumer-final symmetric buffer.
+
+    The final buffer is reusable after the downstream DCP output combine. That
+    combine orders all ranks after attention has consumed the gathered query.
+    """
 
     def __init__(
         self,
@@ -370,15 +374,14 @@ class DirectDCPQGatherWorkspace(_DirectDCPWorkspace):
 
         query_shape = (
             num_ubatches,
-            2,
             max_num_tokens,
             self.padded_num_heads,
             head_dim,
         )
         signal_shape = (num_ubatches, 2, self.world_size)
-        self.received_query, _ = self._allocate(query_shape, dtype)
+        self.final_query, _ = self._allocate(query_shape, dtype)
         self.received_signal, _ = self._allocate(signal_shape, torch.int32)
-        query_multicast_ptrs = self._multicast_ptrs(self.received_query)
+        query_multicast_ptrs = self._multicast_ptrs(self.final_query)
         signal_multicast_ptrs = self._multicast_ptrs(self.received_signal)
         self.multicast_ptrs = list(
             zip(query_multicast_ptrs, signal_multicast_ptrs, strict=True)
@@ -389,7 +392,7 @@ class DirectDCPQGatherWorkspace(_DirectDCPWorkspace):
             raise RuntimeError(
                 "Direct DCP q-gather requires NVLS symmetric-memory multicast."
             )
-        self.completion = self.received_signal.new_zeros((num_ubatches, 2))
+        self.completion = self.received_signal.new_zeros((num_ubatches, 1))
         torch.accelerator.synchronize()
 
     def gather(self, local_query: torch.Tensor) -> torch.Tensor:
@@ -405,18 +408,22 @@ class DirectDCPQGatherWorkspace(_DirectDCPWorkspace):
             )
 
         num_tokens = local_query.shape[0]
-        output = local_query.new_empty(
-            (num_tokens, self.padded_num_heads, self.head_dim)
+        output = torch.as_strided(
+            self.final_query[ubatch],
+            size=(num_tokens, self.gathered_num_heads, self.head_dim),
+            stride=(
+                self.gathered_num_heads * self.head_dim,
+                self.head_dim,
+                1,
+            ),
         )
-        output.resize_(num_tokens, self.gathered_num_heads, self.head_dim)
         query_multicast_ptr, signal_multicast_ptr = self.multicast_ptrs[ubatch]
         torch.ops._C.direct_dcp_q_gather(
             local_query,
-            self.received_query[ubatch],
+            output,
             self.received_signal[ubatch],
             self.completion[ubatch],
             self.epoch[ubatch : ubatch + 1],
-            output,
             self.world_size,
             self.rank,
             self.max_num_tokens,

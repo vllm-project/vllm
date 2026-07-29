@@ -619,6 +619,11 @@ def _distributed_direct_q_gather_worker(env: dict[str, str]) -> None:
                 actual = workspace.gather(local_query)
                 torch.accelerator.synchronize()
 
+                assert (
+                    actual.data_ptr()
+                    == workspace.final_query[active_ubatch[0]].data_ptr()
+                )
+                assert workspace.completion[active_ubatch[0]].numel() == 1
                 _assert_q_gather_matches_reference(
                     actual, local_query, world_size, padded_num_heads
                 )
