@@ -55,7 +55,7 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
-from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput, PoolerOutput
+from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu import pcp_manager as pcp
 from vllm.v1.worker.gpu.async_utils import AsyncOutput, AsyncPoolingOutput
@@ -681,9 +681,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.sampler(logits, dummy_input_batch)
 
     @torch.inference_mode()
-    def _dummy_pooler_run(self, hidden_states: torch.Tensor) -> PoolerOutput:
+    def _dummy_pooler_run(self, hidden_states: torch.Tensor) -> None:
         assert self.pooling_runner is not None
-        return self.pooling_runner.dummy_pooler_run(hidden_states)
+        self.pooling_runner.dummy_pooler_run(hidden_states)
 
     @torch.inference_mode()
     def profile_run(self) -> None:
@@ -707,17 +707,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.max_num_tokens, skip_attn=True, is_profile=True
         )
 
-        pooler_output: PoolerOutput | None = None
         # Only run sampler/pooler on last PP rank (non-last ranks return None).
         if self.is_last_pp_rank:
             assert sample_hidden_states is not None
             if self.pooling_runner is None:
                 self._dummy_sampler_run(sample_hidden_states)
             else:
-                pooler_output = self._dummy_pooler_run(hidden_states)
+                self._dummy_pooler_run(hidden_states)
 
         torch.accelerator.synchronize()
-        del hidden_states, sample_hidden_states, pooler_output
+        del hidden_states, sample_hidden_states
         self.reset_encoder_cache()
         gc.collect()
 

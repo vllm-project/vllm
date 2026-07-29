@@ -186,13 +186,6 @@ class PoolingRunner:
                 "initializing the engine."
             ) from e
 
-    def dummy_pooler_run(self, hidden_states: torch.Tensor) -> PoolerOutput:
-        output_sizes: dict[PoolingTask, int] = {}
+    def dummy_pooler_run(self, hidden_states: torch.Tensor) -> None:
         for task in sorted(self.supported_tasks):
-            output = self._dummy_pooler_run_task(hidden_states, task)
-            outputs = output if isinstance(output, list) else output.unbind()
-            output_sizes[task] = sum(o.nbytes for o in outputs if o is not None)
-            del output
-
-        max_task = max(output_sizes, key=output_sizes.__getitem__)
-        return self._dummy_pooler_run_task(hidden_states, max_task)
+            self._dummy_pooler_run_task(hidden_states, task)

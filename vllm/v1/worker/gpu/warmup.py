@@ -233,12 +233,6 @@ def warmup_kernels(
         pooling_task = model_runner.model_config.get_pooling_task(
             model_runner.get_supported_tasks()
         )
-        if pooling_task is None:
-            raise ValueError(
-                "Model Runner V2 does not support any pooling task exposed by "
-                f"{model_runner.model_config.model}. Set "
-                "VLLM_USE_V2_MODEL_RUNNER=0 to use this model."
-            )
         pooling_params = PoolingParams(task=pooling_task)
         pooling_params.verify(model_runner.model_config)
     else:
