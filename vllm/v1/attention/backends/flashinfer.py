@@ -124,10 +124,7 @@ def _make_xqa_draft_block_mask(
     padded = num_packed * 32
     q_idx = torch.arange(q_len, device=device).unsqueeze(1)
     kv_idx = torch.arange(padded, device=device).unsqueeze(0)
-    if causal:
-        bool_mask = (kv_idx <= q_idx) & (kv_idx < q_len)
-    else:
-        bool_mask = (kv_idx < q_len).expand(q_len, padded)
+    bool_mask = kv_idx <= q_idx if causal else (kv_idx < q_len).expand(q_len, padded)
     return _pack_draft_block_bool_mask(bool_mask, num_packed)
 
 
@@ -137,16 +134,15 @@ def _make_xqa_ragged_draft_block_mask(
     """Build a packed XQA draft mask for a ragged batch."""
     num_packed = (max_q_len + 31) // 32
     padded = num_packed * 32
+    q_lens_t = torch.tensor(q_lens, device=device)
+    row_lens = torch.repeat_interleave(q_lens_t, q_lens_t)
+    request_starts = torch.cumsum(q_lens_t, dim=0) - q_lens_t
+    row_starts = torch.repeat_interleave(request_starts, q_lens_t)
+    q_idx = torch.arange(sum(q_lens), device=device) - row_starts
     kv_idx = torch.arange(padded, device=device).unsqueeze(0)
-    rows = []
-    for q_len in q_lens:
-        q_idx = torch.arange(q_len, device=device).unsqueeze(1)
-        if causal:
-            m = (kv_idx <= q_idx) & (kv_idx < q_len)
-        else:
-            m = (kv_idx < q_len).expand(q_len, padded)
-        rows.append(m)
-    bool_mask = torch.cat(rows, dim=0)
+    bool_mask = kv_idx < row_lens.unsqueeze(1)
+    if causal:
+        bool_mask &= kv_idx <= q_idx.unsqueeze(1)
     return _pack_draft_block_bool_mask(bool_mask, num_packed)
 
 
@@ -721,6 +717,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             if speculative_config is not None
             else 0
         )
+        self.uniform_decode_query_len = 1 + vllm_config.num_speculative_tokens
         self.enable_cuda_graph = (
             self.compilation_config.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
         )
@@ -855,9 +852,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.window_left = self.global_hyperparameters.window_left
         self.logits_soft_cap = self.global_hyperparameters.logits_soft_cap
         self.has_sinks = self.global_hyperparameters.has_sinks
-        # Resolve this while the vLLM config context is active.
-        self._supports_sink = FlashInferBackend.supports_sink()
-        if self.has_sinks and not self._supports_sink:
+        if self.has_sinks and not FlashInferBackend.supports_sink():
             raise NotImplementedError(
                 "FlashInfer backend currently does not support attention "
                 "sinks, please use trtllm on blackwell or flash attention on "
@@ -890,6 +885,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )  # Extra buffer for mutable paged_kv_indptr.cpu in cuda graph mode
         self.paged_kv_indices = self._make_buffer(max_num_pages)
         self.paged_kv_last_page_len = self._make_buffer(max_num_reqs)
+        self._xqa_q_cu_seq_lens = self._make_buffer(max_num_reqs + 1)
 
     # Keep SM90 prefill/decode Q dtype selection in one place.
     def get_q_data_type(self, is_prefill: bool) -> torch.dtype:
@@ -951,6 +947,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         kv_cache_spec: AttentionSpec,
     ) -> AttentionCGSupport:
         """Get the cudagraph support level for FlashInfer attention."""
+        # XQA lacks LSE for DCP; DCP also cannot graph variable-length trtllm-gen.
+        if vllm_config.parallel_config.decode_context_parallel_size > 1:
+            return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+
         # For UniformTypeKVCacheSpecs, check all contained specs
         kv_specs = (
             kv_cache_spec.kv_cache_specs.values()
@@ -1023,33 +1023,62 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def _compute_decode_query_lens(
         self,
-        qo_indptr: torch.Tensor,
         qo_indptr_cpu: torch.Tensor,
         num_decodes: int,
         num_decode_tokens: int,
-    ) -> tuple[int, torch.Tensor | None]:
-        """Return the maximum query length and optional ragged offsets."""
+    ) -> tuple[int, torch.Tensor | None, list[int] | None]:
+        """Return the query width, ragged offsets, and effective query lengths."""
         if num_decodes == 0 or num_decode_tokens == 0:
-            return 1, None
+            return 1, None, None
 
         if not self.use_xqa:
             if num_decode_tokens % num_decodes != 0:
-                return 1, None
-            return num_decode_tokens // num_decodes, None
+                return 1, None, None
+            return num_decode_tokens // num_decodes, None, None
 
-        decode_q_lens = qo_indptr_cpu[1 : num_decodes + 1] - qo_indptr_cpu[:num_decodes]
-        nonzero = decode_q_lens[decode_q_lens > 0]
-        uniform = nonzero.numel() <= 1 or bool((nonzero == nonzero[0]).all().item())
-        if uniform:
-            q_len_per_req = int(nonzero[0].item()) if nonzero.numel() > 0 else 1
-            return q_len_per_req, None
-        return int(decode_q_lens.max().item()), qo_indptr[: num_decodes + 1]
+        decode_q_lens = (
+            qo_indptr_cpu[1 : num_decodes + 1] - qo_indptr_cpu[:num_decodes]
+        ).numpy()
+        decode_q_lens = decode_q_lens.copy()
+        num_padding_tokens = num_decode_tokens - int(decode_q_lens.sum())
+        if num_padding_tokens < 0:
+            raise ValueError(
+                "XQA query offsets contain more tokens than the decode batch."
+            )
+        if num_padding_tokens > 0:
+            padded_reqs = decode_q_lens == 0
+            expected_padding = int(padded_reqs.sum()) * self.uniform_decode_query_len
+            if num_padding_tokens != expected_padding:
+                raise ValueError(
+                    "XQA CUDA-graph padding does not match the padded requests."
+                )
+            decode_q_lens[padded_reqs] = self.uniform_decode_query_len
+
+        if bool(np.all(decode_q_lens == decode_q_lens[0])):
+            return int(decode_q_lens[0]), None, None
+
+        q_len_per_req = int(decode_q_lens.max())
+        if q_len_per_req <= 1:
+            raise ValueError("XQA cannot represent ragged single-token queries.")
+
+        q_cu_seq_lens = self._xqa_q_cu_seq_lens
+        q_cu_seq_lens.np[0] = 0
+        np.cumsum(
+            decode_q_lens,
+            dtype=np.int32,
+            out=q_cu_seq_lens.np[1 : num_decodes + 1],
+        )
+        q_lens = [int(q_len) for q_len in decode_q_lens]
+        return (
+            q_len_per_req,
+            q_cu_seq_lens.copy_to_gpu(num_decodes + 1),
+            q_lens,
+        )
 
     def _get_decode_mask(
         self,
         q_len_per_req: int,
-        q_cu_seq_lens: torch.Tensor | None,
-        qo_indptr_cpu: torch.Tensor,
+        ragged_q_lens: list[int] | None,
         num_decodes: int,
         causal: bool,
     ) -> torch.Tensor | None:
@@ -1057,7 +1086,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if q_len_per_req <= 1:
             return None
 
-        if q_cu_seq_lens is None:
+        if ragged_q_lens is None:
             key = (q_len_per_req, causal)
             buf = self._decode_mask_cache.get(key)
             if buf is None:
@@ -1068,9 +1097,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self._decode_mask_cache[key] = buf
             return buf[:num_decodes]
 
-        decode_q_lens = qo_indptr_cpu[1 : num_decodes + 1] - qo_indptr_cpu[:num_decodes]
         return _make_xqa_ragged_draft_block_mask(
-            decode_q_lens.tolist(), q_len_per_req, causal, self.device
+            ragged_q_lens, q_len_per_req, causal, self.device
         )
 
     def _get_prefill_wrapper(
@@ -1291,7 +1319,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         if not all_uses_trtllm:
             sinks_would_be_dropped = self.use_dcp or use_cascade
-            if self.has_sinks and (not self._supports_sink or sinks_would_be_dropped):
+            if self.has_sinks and sinks_would_be_dropped:
                 raise NotImplementedError(
                     "FlashInfer backend does not support attention sinks on "
                     "the DCP prefill or cascade path."
@@ -1564,15 +1592,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     seq_lens_decode = common_attn_metadata.dcp_local_seq_lens[
                         :num_decodes
                     ]
-                q_len_per_req, q_cu_seq_lens = self._compute_decode_query_lens(
-                    qo_indptr, qo_indptr_cpu, num_decodes, num_decode_tokens
+                q_len_per_req, q_cu_seq_lens, ragged_q_lens = (
+                    self._compute_decode_query_lens(
+                        qo_indptr_cpu, num_decodes, num_decode_tokens
+                    )
                 )
                 decode_mask = None
                 if self.use_xqa:
                     decode_mask = self._get_decode_mask(
                         q_len_per_req,
-                        q_cu_seq_lens,
-                        qo_indptr_cpu,
+                        ragged_q_lens,
                         num_decodes,
                         bool(causal),
                     )
@@ -1969,8 +1998,6 @@ class FlashInferImpl(AttentionImpl):
 
         use_dcp = self.dcp_world_size > 1
 
-        sink_kwargs = {"sinks": self.sinks} if self.sinks is not None else {}
-
         # Regular attention (common case).
         # Decodes are at the front and prefills are at the back.
         if num_prefill_tokens > 0:
@@ -2049,7 +2076,7 @@ class FlashInferImpl(AttentionImpl):
                         v_scale=layer._v_scale_float,
                         out=out_prefill,
                         kv_cache_sf=kv_cache_sf,
-                        **sink_kwargs,
+                        sinks=self.sinks,
                     )
 
                     if needs_fp8_out_prefill:
@@ -2218,7 +2245,7 @@ class FlashInferImpl(AttentionImpl):
                         lse=lse,
                         return_lse=True,
                         kv_cache_sf=kv_cache_sf,
-                        **sink_kwargs,
+                        sinks=self.sinks,
                     )
                     output[:num_decode_tokens] = self.dcp_combine(
                         output_tmp,
@@ -2234,7 +2261,7 @@ class FlashInferImpl(AttentionImpl):
                         v_scale=layer._v_scale_float,
                         out=out_decode,
                         kv_cache_sf=kv_cache_sf,
-                        **sink_kwargs,
+                        sinks=self.sinks,
                     )
 
                 if needs_fp8_out:
