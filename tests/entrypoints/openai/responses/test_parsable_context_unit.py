@@ -7,7 +7,7 @@ Parser (via parse) and properly builds response output items.
 """
 
 from collections.abc import Sequence
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 
@@ -161,7 +161,9 @@ def _make_request(**overrides) -> ResponsesRequest:
 def _make_request_output(
     text: str = "Hello, world!",
     token_ids: Sequence[int] = (1, 2, 3),
-    finish_reason: str = "stop",
+    finish_reason: str | None = "stop",
+    *,
+    finished: bool = True,
 ) -> RequestOutput:
     return RequestOutput(
         request_id="test",
@@ -178,7 +180,7 @@ def _make_request_output(
                 finish_reason=finish_reason,
             )
         ],
-        finished=True,
+        finished=finished,
     )
 
 
@@ -346,6 +348,34 @@ def test_multi_turn_accumulation():
     assert len(ctx.response_messages) == 2
     texts = [m.content[0].text for m in ctx.response_messages]
     assert texts == ["First turn", "Second turn"]
+
+
+def test_reasoning_tokens_counted_per_generation():
+    """Reasoning usage preserves generation boundaries across tool turns."""
+    response_parser = MagicMock()
+    response_parser.parse.return_value = (None, None, None)
+    counter = response_parser.reasoning_parser.count_reasoning_tokens
+    counter.side_effect = [2, 3]
+    ctx = _make_context(None, response_parser=response_parser)
+
+    ctx.append_output(
+        _make_request_output(
+            text="first delta",
+            token_ids=[10],
+            finish_reason=None,
+            finished=False,
+        )
+    )
+    assert ctx.num_reasoning_tokens == 0
+
+    ctx.append_output(_make_request_output(text="first turn", token_ids=[11, 2, 20]))
+    ctx.append_output(_make_request_output(text="second turn", token_ids=[12, 13, 2]))
+
+    assert ctx.num_reasoning_tokens == 5
+    assert counter.call_args_list == [
+        call([10, 11, 2, 20]),
+        call([12, 13, 2]),
+    ]
 
 
 def test_num_init_messages_offset():
