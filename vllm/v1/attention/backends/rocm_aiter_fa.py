@@ -225,6 +225,8 @@ if current_platform.is_rocm():
         x,
         k_stride0,
         v_stride0,
+        k_cache_block_stride,
+        v_cache_block_stride,
         block_size,
         head_size,
         num_kv_heads,
@@ -241,15 +243,17 @@ if current_platform.is_rocm():
             return
         block_id = slot_id // block_size
         block_offset = slot_id % block_size
-        dst_offset = (
-            block_id * num_kv_heads * head_size * block_size
-            + head_id * head_size * block_size
+        k_dst_offset = (
+            block_id * k_cache_block_stride + head_id * head_size * block_size
         )
         dst_k_shuffle_offset = (
-            dst_offset + offset // x * block_size * x + block_offset * x + offset % x
+            k_dst_offset + offset // x * block_size * x + block_offset * x + offset % x
+        )
+        v_dst_offset = (
+            block_id * v_cache_block_stride + head_id * head_size * block_size
         )
         dst_v_shuffle_offset = (
-            dst_offset
+            v_dst_offset
             + block_offset // x * head_size * x
             + offset * x
             + block_offset % x
@@ -280,18 +284,6 @@ if current_platform.is_rocm():
         _, num_kv_heads, head_size = key.shape
         num_blocks, block_size, _, _ = key_cache.shape
         x = 16 // key_cache.element_size()
-        k_cache_template = torch.empty(
-            [num_blocks, num_kv_heads, head_size // x, block_size, x],
-            dtype=key_cache.dtype,
-            device="meta",
-        )
-        v_cache_template = torch.empty(
-            [num_blocks, num_kv_heads, block_size // x, head_size, x],
-            dtype=value_cache.dtype,
-            device="meta",
-        )
-        new_key_cache = key_cache.view_as(k_cache_template)
-        new_value_cache = value_cache.view_as(v_cache_template)
         QUANT = False
         if is_quantized_kv_cache(kv_cache_dtype):
             QUANT = True
@@ -302,14 +294,16 @@ if current_platform.is_rocm():
         reshape_and_cache_shuffle_kernel[grid](
             key,
             value,
-            new_key_cache,
-            new_value_cache,
+            key_cache,
+            value_cache,
             slot_mapping,
             k_scales,
             v_scales,
             x,
             key.stride(0),
             value.stride(0),
+            key_cache.stride(0),
+            value_cache.stride(0),
             block_size,
             head_size,
             num_kv_heads,
@@ -485,7 +479,7 @@ class AiterFlashAttentionMetadataBuilder(
             kv_cache_shape = self.vllm_config.compilation_config.static_forward_context[
                 first_layer_name
             ].kv_cache.shape
-            num_blocks = kv_cache_shape[1]
+            num_blocks = kv_cache_shape[0]
             self.scale = torch.ones(
                 [num_blocks, self.num_heads_kv, self.block_size],
                 dtype=torch.float32,
@@ -599,16 +593,19 @@ class AiterFlashAttentionMetadataBuilder(
             chunk_ends = torch.min(
                 computed_kv_lens.unsqueeze(0), chunk_starts + max_context_chunk
             )
-            chunk_seq_lens = (chunk_ends - chunk_starts).clamp(
-                min=0
-            )  # [num_chunks, num_extends]
+            chunk_seq_lens = chunk_ends - chunk_starts
+            chunk_seq_lens.clamp_(min=0)  # [num_chunks, num_extends]
             cu_seq_lens_cpu = torch.zeros(
                 [num_chunks, num_extends + 1], dtype=torch.int32, pin_memory=True
             )
             torch.cumsum(
                 chunk_seq_lens, dim=1, out=cu_seq_lens_cpu[:, 1:], dtype=torch.int32
             )
-            max_cum_tokens = cu_seq_lens_cpu[:, -1].max().item()
+            # Avoid .max() on an empty tensor when there is no context
+            # (num_chunks == 0, e.g. Whisper encoder's first pass).
+            max_cum_tokens = (
+                cu_seq_lens_cpu[:, -1].max().item() if num_chunks > 0 else 0
+            )
 
             range_idx = torch.arange(max_cum_tokens, dtype=torch.int32)[None, None, :]
             idx_to_batch_tensor = range_idx == cu_seq_lens_cpu[:, 1:][:, :, None]
@@ -715,6 +712,11 @@ class AiterFlashAttentionMetadataBuilder(
 
 class AiterFlashAttentionBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+
+    @classmethod
+    def supports_sink(cls) -> bool:
+        return True
+
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
         "float16",
@@ -747,6 +749,10 @@ class AiterFlashAttentionBackend(AttentionBackend):
     def get_name() -> str:
         return "FLASH_ATTN"
 
+    @classmethod
+    def supports_sliding_window(cls) -> bool:
+        return True
+
     @staticmethod
     def get_impl_cls() -> type["AiterFlashAttentionImpl"]:
         return AiterFlashAttentionImpl
@@ -765,7 +771,8 @@ class AiterFlashAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
+        # K and V are packed into the content dim: logical (B, H, N, 2*hs).
+        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
@@ -794,6 +801,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         logits_soft_cap: float | None = None,
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: int | None = None,
+        sinks: torch.Tensor | None = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -812,6 +820,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             logits_soft_cap = 0.0
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
+        self.sinks = sinks
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -884,6 +893,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             alibi_slopes=self.alibi_slopes,
             return_lse=False,
             out=output,
+            sink_ptr=self.sinks,
         )
 
     def extend_forward(
@@ -933,6 +943,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             window_size=self.sliding_window,
             alibi_slopes=self.alibi_slopes,
             return_lse=True,
+            sink_ptr=self.sinks,
         )
         assert attn_metadata.extend_metadata is not None
         chunk_context_metadata = attn_metadata.extend_metadata.chunk_context_metadata
@@ -980,6 +991,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 window_size=self.sliding_window,
                 alibi_slopes=self.alibi_slopes,
                 return_lse=True,
+                sink_ptr=self.sinks,
             )
             if chunked_output is None:
                 chunked_output = suf_out
@@ -1025,7 +1037,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [2, num_blocks, block_size, num_kv_heads, head_size]
+                [num_blocks, 2, block_size, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -1053,7 +1065,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
         # Whenever making a change in this method, please benchmark the
         # performance to make sure it does not introduce any overhead.
         num_actual_tokens = attn_metadata.num_actual_tokens
-        key_cache, value_cache = kv_cache.unbind(0)
+        # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
 
         if is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(current_platform.fp8_dtype())
@@ -1098,6 +1111,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     window_size=self.sliding_window,
                     alibi_slopes=self.alibi_slopes,
                     out=output_actual_tokens[num_decode_tokens + num_extend_tokens :],
+                    sink_ptr=self.sinks,
                 )
 
             # calculate for extends
@@ -1142,11 +1156,17 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 assert attn_metadata.decode_metadata is not None
                 decode_max_query_len = attn_metadata.decode_metadata.max_query_len
 
-                # Multi-token speculative decode path.
-                if decode_max_query_len > 1:
+                # Use unified_attention for speculative decoding (multi-token),
+                # sliding window, or sinks
+                # (pa_fwd_asm and paged_attention_v1 don't support sinks)
+                if (
+                    self.sliding_window[0] != -1
+                    or decode_max_query_len > 1
+                    or self.sinks is not None
+                ):
                     assert not rocm_aiter_ops.is_shuffle_kv_cache_enabled(), (
-                        "Shuffle KV cache layout is not supported with "
-                        "speculative decoding (multi-token decode)."
+                        "Shuffle KV cache layout is not supported with sliding "
+                        "window, sinks, or speculative decoding (multi-token decode)."
                     )
                     if not attn_metadata.causal:
                         from aiter.ops.triton.attention.mha_v3 import (
@@ -1213,6 +1233,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                             q_descale=None,
                             k_descale=layer._k_scale.expand(descale_shape),
                             v_descale=layer._v_scale.expand(descale_shape),
+                            sinks=self.sinks,
                         )
                     return
 
@@ -1278,18 +1299,12 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     max_logits = torch.empty_like(exp_sums)
                     num_blocks, block_size, num_kv_heads, _ = key_cache.shape
                     x = 16 // key_cache.element_size()
-                    k_cache_template = torch.empty(
-                        [num_blocks, num_kv_heads, head_size // x, block_size, x],
-                        dtype=key_cache.dtype,
-                        device="meta",
+                    new_key_cache = key_cache.reshape(
+                        num_blocks, num_kv_heads, head_size // x, block_size, x
                     )
-                    v_cache_template = torch.empty(
-                        [num_blocks, num_kv_heads, block_size // x, head_size, x],
-                        dtype=value_cache.dtype,
-                        device="meta",
+                    new_value_cache = value_cache.reshape(
+                        num_blocks, num_kv_heads, block_size // x, head_size, x
                     )
-                    new_key_cache = key_cache.view_as(k_cache_template)
-                    new_value_cache = value_cache.view_as(v_cache_template)
                     k_qscale = (
                         layer._k_scale
                         if attn_metadata.k_scale is None
@@ -1378,7 +1393,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
     ):
-        key_cache, value_cache = kv_cache.unbind(0)
+        # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
 
         # key and value may be None in the case of cross attention. They are
         # calculated once based on the output from the encoder and then cached
@@ -1402,8 +1418,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
             assert k_scale is not None and v_scale is not None, (
                 "k_scale and v_scale are required for shuffled update"
             )
-            # TODO: Add correct KV cache handling for hybrid model. KV cache
-            # may not be contiguous if mamba state exists.
             reshape_and_cache_shuffle_triton(
                 key,
                 value,
@@ -1434,6 +1448,47 @@ class AiterFlashAttentionImpl(AttentionImpl):
             and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
         )
 
+    def fused_qk_norm_rope_kvcache_supported(self):
+        return rocm_aiter_ops.is_enabled()
+
+    def do_qk_norm_rope_kvcache_update(
+        self,
+        layer: AttentionLayer,
+        qkv: torch.Tensor,
+        q_out: torch.Tensor,
+        k_out: torch.Tensor,
+        positions: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        rms_norm_eps: float,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ):
+        key_cache, value_cache = kv_cache.unbind(1)
+        rocm_aiter_ops.do_qk_norm_rope_kvcache_update(
+            qkv=qkv,
+            q_weight=q_weight,
+            k_weight=k_weight,
+            cos_sin_cache=cos_sin_cache,
+            positions=positions,
+            num_heads_q=self.num_heads,
+            num_heads_k=self.num_kv_heads,
+            head_dim=self.head_size,
+            is_neox=is_neox,
+            rms_norm_eps=rms_norm_eps,
+            q_out=q_out,
+            k_out=k_out,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            slot_mapping=layer_slot_mapping,
+            k_scale=layer._k_scale_cpu,
+            v_scale=layer._v_scale_cpu,
+            kv_cache_dtype=self.kv_cache_dtype,
+            use_shuffle_layout=rocm_aiter_ops.is_shuffle_kv_cache_enabled(),
+        )
+
     def do_rope_and_kv_cache_update(
         self,
         layer: AttentionLayer,
@@ -1446,7 +1501,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
     ):
-        key_cache, value_cache = kv_cache.unbind(0)
+        # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         flash_layout = True
 
         is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)

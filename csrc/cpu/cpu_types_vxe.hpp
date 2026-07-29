@@ -3,7 +3,9 @@
 #define CPU_TYPES_VXE_HPP
 
 #include <vecintrin.h>
+#include <bit>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <torch/all.h>
 namespace vec_op {
@@ -267,7 +269,7 @@ struct FP32Vec4 : public Vec<FP32Vec4> {
 
   explicit FP32Vec4(__vector float data) : reg(data) {}
 
-  explicit FP32Vec4(const FP32Vec4& data) : reg(data.reg) {}
+  FP32Vec4(const FP32Vec4& data) : reg(data.reg) {}
 };
 
 struct FP32Vec8 : public Vec<FP32Vec8> {
@@ -296,7 +298,7 @@ struct FP32Vec8 : public Vec<FP32Vec8> {
 
   explicit FP32Vec8(f32x4x2_t data) : reg(data) {}
 
-  explicit FP32Vec8(const FP32Vec8& data) {
+  FP32Vec8(const FP32Vec8& data) {
     reg.val[0] = data.reg.val[0];
     reg.val[1] = data.reg.val[1];
   }
@@ -641,7 +643,7 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
 
   explicit FP32Vec16(f32x4x4_t data) : reg(data) {}
 
-  explicit FP32Vec16(const FP32Vec16& data) {
+  FP32Vec16(const FP32Vec16& data) {
     reg.val[0] = data.reg.val[0];
     reg.val[1] = data.reg.val[1];
     reg.val[2] = data.reg.val[2];
@@ -817,8 +819,7 @@ inline void storeFP32<::c10::Half>(float v, ::c10::Half* ptr) {
   // intrinsics for FP32 to FP16 conversion does not use IEEE rounding and can
   // produce incorrect results for some inputs. Process each of the 4 vectors
   // separately.
-  uint32_t in;
-  std::memcpy(&in, &v, sizeof(in));
+  uint32_t in = std::bit_cast<uint32_t>(v);
 
   uint32_t s = (in & 0x80000000) >> 16;  // Sign
   uint32_t e = (in & 0x7F800000) >> 23;  // Exponent

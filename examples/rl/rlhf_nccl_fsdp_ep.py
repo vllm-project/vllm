@@ -299,7 +299,7 @@ async def main():
     print(f"[sync] Got metadata for {len(names)} parameters.")
 
     print("[sync] Starting weight update...")
-    await engine.start_weight_update(is_checkpoint_format=True)
+    await engine.start_weight_update()
 
     print("[sync] Broadcasting weights from FSDP → vLLM...")
     broadcast_handles = [
