@@ -40,6 +40,13 @@ T = TypeVar("T", bound=AttentionMetadata)
 GLOBAL_TOPK_MASK_MAX_BYTES = 64 * 1024 * 1024  # 64 MB
 
 
+def _is_masked_mha_available(
+    qk_head_dim: int, v_head_dim: int, kv_cache_dtype: str
+) -> bool:
+    fa_version = get_flash_attn_version(head_size=qk_head_dim, head_size_v=v_head_dim)
+    return fa_version == 4 and not is_quantized_kv_cache(kv_cache_dtype)
+
+
 class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
     metadata_cls: type[T]
     require_uniform_decodes: ClassVar[bool] = False
@@ -90,11 +97,17 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             dtype=self.model_config.dtype,
             device=device,
         )
-        self.topk_mask_workspace = torch.zeros(
-            GLOBAL_TOPK_MASK_MAX_BYTES // torch.int32.itemsize,
-            dtype=torch.int32,
-            device=device,
-        )
+        self.topk_mask_workspace: torch.Tensor | None = None
+        if _is_masked_mha_available(
+            self.mla_dims.qk_nope_head_dim + self.mla_dims.qk_rope_head_dim,
+            self.mla_dims.v_head_dim,
+            vllm_config.cache_config.cache_dtype,
+        ):
+            self.topk_mask_workspace = torch.zeros(
+                GLOBAL_TOPK_MASK_MAX_BYTES // torch.int32.itemsize,
+                dtype=torch.int32,
+                device=device,
+            )
         layer_prefill_backend = vllm_config.compilation_config.static_forward_context[
             layer_names[0]
         ].prefill_backend
@@ -434,12 +447,8 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             and (self.qk_nope_head_dim == 128)
             and (self.qk_rope_head_dim == 64)
         )
-        fa_version = get_flash_attn_version(
-            head_size=qk_head_dim,
-            head_size_v=v_head_dim,
-        )
-        self.masked_mha_available = fa_version == 4 and not is_quantized_kv_cache(
-            kv_cache_dtype
+        self.masked_mha_available = _is_masked_mha_available(
+            qk_head_dim, v_head_dim, kv_cache_dtype
         )
 
     @staticmethod
