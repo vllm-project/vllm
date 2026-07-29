@@ -318,6 +318,16 @@ class DeepseekV32Attention(MLAAttention):
             is_neox_style=not getattr(config, "indexer_rope_interleave", False),
         )
 
+    @property
+    def _run_indexer(self) -> bool:
+        """Whether to run the lightning indexer this step.
+
+        ``skip_topk`` is the index_share_for_mtp_iteration reuse mode: MTP draft
+        step 0 writes the top-k into the shared buffer and steps 1+ reuse it, so
+        they skip the indexer's two GEMMs and its op.
+        """
+        return self.indexer is not None and not self.skip_topk
+
     def forward(  # type: ignore[override]
         self,
         positions: torch.Tensor,
@@ -329,7 +339,7 @@ class DeepseekV32Attention(MLAAttention):
             [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
 
-        if self.indexer is not None and not self.skip_topk:
+        if self._run_indexer:
             kw = self.indexer.wk_weights_proj(hidden_states)[0]
             index_k = kw[:, : self.indexer.head_dim]
             index_weights = kw[:, self.indexer.head_dim :]
@@ -372,7 +382,7 @@ class DeepseekV32Attention(MLAAttention):
         assert isinstance(slot_mapping, dict)
         mla_slot = slot_mapping.get(self.layer_name)
 
-        if self.indexer is not None:
+        if self._run_indexer:
             has_indexer = True
             indexer_k_norm_w = self.indexer.k_norm.weight
             indexer_k_norm_bias = self.indexer.k_norm.bias
@@ -430,7 +440,7 @@ class DeepseekV32Attention(MLAAttention):
         q_nope = q_nope.transpose(0, 1)
         ql_nope = torch.bmm(q_nope, self.W_UK_T).transpose(0, 1)
 
-        if self.indexer is not None:
+        if self._run_indexer:
             index_q = self.indexer.wq_b(q_c)[0]
             index_q = index_q.view(-1, self.indexer.n_head, self.indexer.head_dim)
         else:
@@ -452,7 +462,7 @@ class DeepseekV32Attention(MLAAttention):
             quantize_mqa=self._fp8_query,
         )
 
-        if self.indexer is not None:
+        if self._run_indexer:
             sparse_attn_indexer(
                 q_c,
                 self.indexer.k_cache.prefix,
