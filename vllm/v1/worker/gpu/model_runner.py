@@ -731,10 +731,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.encoder_cache is not None:
             self.encoder_cache.reset_encoder_cache()
 
-    def _get_num_input_tokens(self, num_scheduled_tokens: int) -> int:
-        # SP is not supported yet.
-        return num_scheduled_tokens
-
     def profile_cudagraph_memory(self) -> int:
         # NOTE(woosuk): It is TBD whether we keep this API or not.
         return 0
@@ -1294,6 +1290,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mappings,
                 self.attn_groups,
                 self.kv_cache_config,
+                # FULL replay reads capture-time metadata buffers. Re-stage them
+                # from the zeroed dummy block tables instead of retaining state
+                # indices from the previous real batch.
+                for_capture=dummy_run and batch_desc.cg_mode == CUDAGraphMode.FULL,
             )
 
         input_ids = input_batch.input_ids
