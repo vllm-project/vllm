@@ -2439,16 +2439,25 @@ class NixlBaseConnectorWorker:
             for i, remote_group in enumerate(remote_block_ids):
                 num_local_blocks = len(local_block_ids[i])
                 num_remote_blocks = len(remote_group)
-                if (
-                    _is_ssm_spec(self._group_spec_types[i])
-                    and num_local_blocks < num_remote_blocks
-                ):
-                    # NOTE (NickLucche): With prefix caching on SSM, (remote) blocks
-                    # prior to the last one are placeholders (null blocks). Mind that
-                    # this doesn't really impact transfer, as we only still care about
-                    # the last "block", the full in-place state.
-                    assert num_local_blocks == 1, "SSM can only have one local block"
-                    remote_block_ids[i] = remote_group[-num_local_blocks:]
+                if _is_ssm_spec(self._group_spec_types[i]):
+                    if num_local_blocks == num_remote_blocks:
+                        continue
+                    # Only state-bearing slots reach here, single-state modes
+                    # just one (see get_exchange_clipped_blocks), so differing
+                    # counts mean position-indexed "all"-mode lists. A longer
+                    # remote list carries earlier positions the local side
+                    # already has (prefix hit) -> read its tail; a longer local
+                    # list holds the position D recomputes itself, which gets
+                    # no remote state.
+                    assert num_local_blocks - num_remote_blocks <= 1, (
+                        f"Group {i}: unpairable SSM state slots, "
+                        f"local={num_local_blocks} remote={num_remote_blocks}"
+                    )
+                    num_blocks = min(num_local_blocks, num_remote_blocks)
+                    if num_local_blocks < num_remote_blocks:
+                        remote_block_ids[i] = remote_group[-num_blocks:]
+                    else:
+                        local_block_ids[i] = local_block_ids[i][:num_blocks]
                 elif (
                     self._physical_blocks_per_logical_kv_block
                     == remote_physical_per_logical
