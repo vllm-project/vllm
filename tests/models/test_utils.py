@@ -187,3 +187,7 @@ def test_merge_multimodal_embeddings_no_sync():
         _merge_multimodal_embeddings(
             inputs_embeds, multimodal_embeddings, is_multimodal
         )
+
+
+def test_ci_retry_workflow():
+    pytest.fail("Intentional failure for /ci retry workflow validation")
