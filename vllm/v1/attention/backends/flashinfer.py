@@ -850,25 +850,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         per_layer_parameters = get_per_layer_parameters(
             vllm_config, layer_names, FlashInferImpl
         )
-        has_sliding_window_layer = any(
-            params.window_left != -1 for params in per_layer_parameters.values()
-        )
-        if (
-            current_platform.is_device_capability(90)
-            and has_sliding_window_layer
-            and self.q_data_type_prefill == FP8_DTYPE
-        ):
-            # FlashInfer SM90 sliding-window *prefill* is not reliable with
-            # FP8-Q: https://github.com/flashinfer-ai/flashinfer/issues/3578.
-            # XQA decode with a sliding window (BF16/FP16-Q) is fine, so only
-            # block the FP8-Q prefill case.
-            raise NotImplementedError(
-                "FlashInfer backend on SM90 currently crashes with "
-                "sliding-window attention layers when the prefill query is "
-                "FP8-quantized. Use the default attention backend, or disable "
-                "FlashInfer Q quantization "
-                "(--attention-config.disable_flashinfer_q_quantization=1)."
-            )
         self.global_hyperparameters = infer_global_hyperparameters(per_layer_parameters)
         self.sm_scale = self.global_hyperparameters.sm_scale
         self.window_left = self.global_hyperparameters.window_left
