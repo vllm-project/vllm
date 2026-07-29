@@ -767,6 +767,10 @@ class LlamaJsonParser(ParserEngine):
         self._engine_to_dense: dict[int, int] = {}
         self._phantom_count: int = 0
         self._drop_content: bool = False
+        # Set per request from tool_choice, and deliberately not cleared by
+        # _reset: the non-streaming path resets *after*
+        # _check_skip_tool_parsing has run.
+        self._forced_tool_choice: bool = False
         self._held_ws: list[str] = []
         self._arg_scans: dict[int, _ArgScan] = {}
         self._properties_cache: dict[str, dict] = {}
@@ -791,17 +795,31 @@ class LlamaJsonParser(ParserEngine):
         # requests without tools default to tool_choice="none" too, and a
         # bare "{" in ordinary content would otherwise be parsed as a
         # tool call and eaten.
-        if (
-            not self._suppress_tool_calls
-            and getattr(request, "tool_choice", None) == "none"
-        ):
+        tool_choice = getattr(request, "tool_choice", None)
+        if not self._suppress_tool_calls and tool_choice == "none":
             self._suppress_tool_calls = True
+        # Required/named choice constrains the model to emit nothing but
+        # tool calls, so there is no content to keep.  Without this the
+        # JSON-array schema those choices apply -- ``[{...}, {...}]`` --
+        # leaks its opening bracket as content before the first call
+        # completes (after that _drop_content already covers it).
+        self._forced_tool_choice = False
+        if tool_choice is not None and tool_choice != "none":
+            from openai.types.responses import ToolChoiceFunction
+
+            from vllm.entrypoints.openai.chat_completion.protocol import (
+                ChatCompletionNamedToolChoiceParam,
+            )
+
+            self._forced_tool_choice = tool_choice == "required" or isinstance(
+                tool_choice, (ChatCompletionNamedToolChoiceParam, ToolChoiceFunction)
+            )
 
     def finish_streaming(self) -> DeltaMessage | None:
         delta = super().finish_streaming()
         # The engine skips _events_to_delta entirely when it has nothing
         # buffered, leaving held whitespace unflushed.
-        if self._held_ws and not self._drop_content:
+        if self._held_ws and not self._suppress_content:
             ws = "".join(self._held_ws)
             self._held_ws.clear()
             if delta is None:
@@ -821,6 +839,15 @@ class LlamaJsonParser(ParserEngine):
         if dense_idx < len(self._tool_slots):
             return self._tool_slots[dense_idx].args
         return ""
+
+    @property
+    def _suppress_content(self) -> bool:
+        """Whether no further content may be emitted.
+
+        Either a real call has completed, or the request forced a tool
+        choice and the whole output is tool calls by construction.
+        """
+        return self._drop_content or self._forced_tool_choice
 
     def _flush_held_ws(self, out: list[SemanticEvent]) -> None:
         if self._held_ws:
@@ -853,7 +880,7 @@ class LlamaJsonParser(ParserEngine):
         pending: dict[int, list[str]] = {}
         for event in events:
             if event.type == EventType.TEXT_CHUNK:
-                if self._drop_content:
+                if self._suppress_content:
                     self._held_ws.clear()
                 elif not self._content_has_nonws and not event.value.strip():
                     self._held_ws.append(event.value)
@@ -890,14 +917,14 @@ class LlamaJsonParser(ParserEngine):
                         self._tool_slots[dense_idx] = ToolCallSlot()
                     self._phantom_count += 1
                     del self._engine_to_dense[engine_idx]
-                    if accumulated and not self._drop_content:
+                    if accumulated and not self._suppress_content:
                         self._flush_held_ws(out)
                         out.append(SemanticEvent(EventType.TEXT_CHUNK, accumulated))
                     continue
                 self._drop_content = True
                 self._held_ws.clear()
             out.append(SemanticEvent(event.type, event.value, dense_idx))
-        if finished and not self._drop_content:
+        if finished and not self._suppress_content:
             self._flush_held_ws(out)
         return out
 
