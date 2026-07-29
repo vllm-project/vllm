@@ -97,8 +97,11 @@ def _normalize_transfer(
         gpu_spec.block_ids[gpu_block_offset : gpu_block_offset + num_gpu_blocks]
     )
     if num_gpu_blocks == 0:
-        empty = np.empty(0, dtype=np.int64)
-        return KVConnectorSidecarTransfer(empty, empty, empty.copy())
+        return KVConnectorSidecarTransfer(
+            np.empty(0, dtype=np.int64),
+            np.empty(0, dtype=np.int64),
+            np.empty(0, dtype=np.int64),
+        )
 
     connector_block_offset = sum(connector_blocks_per_group[:kv_group_id])
     first_offset = int(block_indices[kv_group_id]) % blocks_per_connector_block
