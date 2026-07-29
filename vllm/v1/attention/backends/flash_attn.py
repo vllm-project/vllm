@@ -284,9 +284,9 @@ class FlashAttentionMetadata:
 
     sliding_window: tuple[int, int] | None = None
 
-    # PrefixLM bidirectional ranges for multimodal tokens.
-    # Shape: (num_seqs, max_ranges, 2) int32, [start, end] per range.
-    mm_prefix_range_tensor: torch.Tensor | None = None
+    # PrefixLM bidirectional range id for multimodal tokens.
+    # Shape: (num_seqs, max_seq_len) int32, -1 outside multimodal ranges.
+    mm_prefix_range_id_tensor: torch.Tensor | None = None
 
     # Reference Sliding Window Attention (R-SWA) fields.
     # rswa_prefix_lens:  per-request prompt lengths [num_reqs], int32, CUDA.
@@ -700,11 +700,11 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         mm_ranges = common_attn_metadata.mm_req_doc_ranges
         if mm_ranges is not None:
             from vllm.v1.attention.backends.utils import (
-                compute_mm_prefix_range_tensor,
+                compute_mm_prefix_range_id_tensor,
             )
 
-            attn_metadata.mm_prefix_range_tensor = compute_mm_prefix_range_tensor(
-                mm_ranges, num_reqs, seq_lens.device
+            attn_metadata.mm_prefix_range_id_tensor = compute_mm_prefix_range_id_tensor(
+                mm_ranges, num_reqs, max_seq_len, seq_lens.device
             )
 
         # R-SWA: copy prefix lengths into persistent buffers (outside the
@@ -971,16 +971,15 @@ class FlashAttentionImpl(AttentionImpl):
                 causal = attn_metadata.causal
                 is_dynamic_causal = isinstance(causal, torch.Tensor)
 
-                mm_prefix_ranges = attn_metadata.mm_prefix_range_tensor
+                mm_prefix_range_ids = attn_metadata.mm_prefix_range_id_tensor
                 mm_mask_mod = None
                 mm_aux = None
                 if (
-                    mm_prefix_ranges is not None
+                    mm_prefix_range_ids is not None
                     and not is_dynamic_causal
                     and causal is True
                     and self.vllm_flash_attn_version == 4
                 ):
-                    max_ranges = mm_prefix_ranges.shape[1]
                     # Sliding window value in Triton convention
                     # (1 + window_size[0]).  Global-attention layers
                     # store (-1, -1) → sw stays None / 0.
@@ -1000,11 +999,10 @@ class FlashAttentionImpl(AttentionImpl):
                     ):
                         mm_clamp_sw = sw_val
                     mm_mask_mod = _make_mm_prefix_mask_mod(
-                        max_ranges,
                         sliding_window=mm_clamp_sw,
                         sliding_window_left=sw_val,
                     )
-                    mm_aux = [mm_prefix_ranges]
+                    mm_aux = [mm_prefix_range_ids]
 
                 # R-SWA: use CuTE-DSL mask_mod on FA4 for exact token-level
                 # mask without block-size approximation.  The mask_mod encodes
@@ -1379,7 +1377,6 @@ class FlashAttentionImpl(AttentionImpl):
 
 
 def _make_mm_prefix_mask_mod(
-    max_ranges: int,
     sliding_window: int = 0,
     sliding_window_left: int | None = None,
 ):
@@ -1394,7 +1391,8 @@ def _make_mm_prefix_mask_mod(
     use consistent absolute positions.  This matches the Triton
     reference path (``compute_kv_seq_mask``).
 
-    ``sliding_window_left`` enforces the sliding window on the causal
+    ``aux_tensors[0]`` stores per-token range ids with -1 outside multimodal
+    ranges.  ``sliding_window_left`` enforces the sliding window on the causal
     term (None = full causal, no window).  ``sliding_window`` clamps the
     bidirectional block to the window (0 = unclamped; >0 = Gemma4 local
     layers via ``mm_prefix_clamp_sliding_window``).
@@ -1405,6 +1403,7 @@ def _make_mm_prefix_mask_mod(
 
     from vllm.vllm_flash_attn.cute.utils import (  # type: ignore[import-untyped]
         scalar_to_ssa,
+        ssa_to_scalar,
     )
 
     if sliding_window_left is not None:
@@ -1422,18 +1421,21 @@ def _make_mm_prefix_mask_mod(
             q_abs = q_idx + ctx_off
             sw = scalar_to_ssa(Int32(sliding_window_left), Int32)
             keep = (kv_idx <= q_abs) & ((q_abs - kv_idx) < sw)
-            ranges = aux_tensors[0]
+            range_ids = aux_tensors[0]
             b = batch_idx[0]
-            for i in cutlass.range_constexpr(max_ranges):  # type: ignore[attr-defined]
-                r_start = scalar_to_ssa(ranges[b, i, 0], Int32)
-                r_end = scalar_to_ssa(ranges[b, i, 1], Int32)
-                valid = r_start < r_end
-                q_in = (q_abs >= r_start) & (q_abs <= r_end) & valid
-                k_in = (kv_idx >= r_start) & (kv_idx <= r_end) & valid
-                mm = q_in & k_in
-                if sliding_window > 0:
-                    mm = mm & ((q_abs - kv_idx) < sw)
-                keep = keep | mm
+            last_kv_idx = cutlass.max(seqlen_info.seqlen_k - Int32(1), Int32(0))
+            q_lookup_idx = scalar_to_ssa(
+                cutlass.min(ssa_to_scalar(q_abs), last_kv_idx), Int32
+            )
+            kv_lookup_idx = scalar_to_ssa(
+                cutlass.min(ssa_to_scalar(kv_idx), last_kv_idx), Int32
+            )
+            q_range_id = scalar_to_ssa(range_ids[b, q_lookup_idx], Int32)
+            k_range_id = scalar_to_ssa(range_ids[b, kv_lookup_idx], Int32)
+            mm = (q_range_id >= 0) & (q_range_id == k_range_id)
+            if sliding_window > 0:
+                mm = mm & ((q_abs - kv_idx) < sw)
+            keep = keep | mm
             return keep
 
     else:
@@ -1450,15 +1452,18 @@ def _make_mm_prefix_mask_mod(
             ctx_off = scalar_to_ssa(seqlen_info.seqlen_k - seqlen_info.seqlen_q, Int32)
             q_abs = q_idx + ctx_off
             keep = kv_idx <= q_abs
-            ranges = aux_tensors[0]
+            range_ids = aux_tensors[0]
             b = batch_idx[0]
-            for i in cutlass.range_constexpr(max_ranges):  # type: ignore[attr-defined]
-                r_start = scalar_to_ssa(ranges[b, i, 0], Int32)
-                r_end = scalar_to_ssa(ranges[b, i, 1], Int32)
-                valid = r_start < r_end
-                q_in = (q_abs >= r_start) & (q_abs <= r_end) & valid
-                k_in = (kv_idx >= r_start) & (kv_idx <= r_end) & valid
-                keep = keep | (q_in & k_in)
+            last_kv_idx = cutlass.max(seqlen_info.seqlen_k - Int32(1), Int32(0))
+            q_lookup_idx = scalar_to_ssa(
+                cutlass.min(ssa_to_scalar(q_abs), last_kv_idx), Int32
+            )
+            kv_lookup_idx = scalar_to_ssa(
+                cutlass.min(ssa_to_scalar(kv_idx), last_kv_idx), Int32
+            )
+            q_range_id = scalar_to_ssa(range_ids[b, q_lookup_idx], Int32)
+            k_range_id = scalar_to_ssa(range_ids[b, kv_lookup_idx], Int32)
+            keep = keep | ((q_range_id >= 0) & (q_range_id == k_range_id))
             return keep
 
     mm_prefix_mask_mod.use_fast_sampling = True

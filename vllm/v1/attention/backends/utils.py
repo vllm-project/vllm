@@ -75,6 +75,63 @@ def compute_mm_prefix_range_tensor(
     return padded.view(num_seqs, max_ranges, 2)
 
 
+def compute_mm_prefix_range_id_tensor(
+    mm_prefix_range: dict[int, list[tuple[int, int]]] | None,
+    num_seqs: int,
+    max_seq_len: int,
+    device: torch.device,
+) -> torch.Tensor | None:
+    """Convert mm_prefix ranges to per-token range ids for FA4 mask_mod.
+
+    Returns shape: (num_seqs, max_seq_len), filled with -1 outside multimodal
+    ranges. Range ids only need to be unique within each request.
+
+    Empty / degenerate ranges (``start >= end``) are skipped to match the
+    Triton and legacy FA4 ``start < end`` validity check. Overlapping ranges
+    cannot be represented by per-token ids and raise ``ValueError``.
+    """
+    if mm_prefix_range is None or max_seq_len <= 0:
+        return None
+
+    target_device = torch.device(device)
+    range_ids = torch.full(
+        (num_seqs, max_seq_len),
+        -1,
+        dtype=torch.int32,
+        device="cpu",
+        pin_memory=PIN_MEMORY and target_device.type != "cpu",
+    )
+    has_valid_range = False
+
+    for seq_idx in range(num_seqs):
+        ranges = sorted(mm_prefix_range.get(seq_idx, ()))
+        previous_end = -1
+        range_id = 0
+        for start, end in ranges:
+            # Match Triton / legacy FA4: start >= end is not a valid range.
+            if start >= end:
+                continue
+            if start < 0 or end >= max_seq_len:
+                raise ValueError(
+                    "Invalid mm_prefix range "
+                    f"({start}, {end}) for max_seq_len={max_seq_len}"
+                )
+            if start <= previous_end:
+                raise ValueError(
+                    "Overlapping mm_prefix ranges cannot be represented by "
+                    f"range IDs: previous_end={previous_end}, start={start}"
+                )
+            range_ids[seq_idx, start : end + 1] = range_id
+            previous_end = end
+            range_id += 1
+            has_valid_range = True
+
+    if not has_valid_range:
+        return None
+
+    return range_ids.to(device=target_device, non_blocking=True)
+
+
 def is_valid_kv_cache_layout(value: str) -> bool:
     return value in get_args(KVCacheLayoutType)
 
