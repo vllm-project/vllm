@@ -649,9 +649,18 @@ def resolve_kv_cache_block_sizes(
     # Mamba groups with block_size != cache_config.block_size
     # (mamba_cache_mode != "align") break divisibility; back off to the
     # scheduler block size.
+    # Mamba groups whose cache mode is not "align" cannot support partial hash
+    # hits (mamba state is only checkpointed at block boundaries in align mode),
+    # so back off to the scheduler block size. Check ``mamba_cache_mode``
+    # directly rather than the ``block_size != cache_config.block_size`` proxy:
+    # the proxy fires a false positive whenever ``cache_config.block_size``
+    # (recomputed as the min of group block sizes) diverges from the mamba
+    # block size -- which happens routinely, e.g. GLM5Next without an explicit
+    # ``--block-size`` (block_size=1152, mamba_block_size=16) or any model whose
+    # tail/scratch group drags the min down.
     if any(
         isinstance(g.kv_cache_spec, MambaSpec)
-        and g.kv_cache_spec.block_size != cache_config.block_size
+        and g.kv_cache_spec.mamba_cache_mode != "align"
         for g in groups
     ):
         return scheduler_block_size, scheduler_block_size

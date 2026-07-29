@@ -114,6 +114,21 @@ class KVCacheSpec:
     block_size: int
 
     @property
+    def participates_in_prefix_caching(self) -> bool:
+        """Whether this spec's group participates in prefix caching.
+
+        Co-owned / transient groups that are not real block allocators (e.g.
+        GLM5Next's kpool tail, a 1-block/req circular scratch buffer whose
+        content is per-request and overwritten in place) opt out by returning
+        ``False``. The structural prefix-caching machinery (the global
+        ``cache_config.block_size`` min, the hybrid divisibility assert, and the
+        ``attention_groups`` hit-lookup) then ignores them, so a non-shareable
+        group can neither drag the block size down nor cap the hybrid hit at 0.
+        Their manager still allocates/frees blocks normally.
+        """
+        return True
+
+    @property
     def page_size_bytes(self) -> int:
         """
         The size of a page with `block_size` tokens in bytes.
@@ -745,6 +760,16 @@ class KpoolTailSpec(SlidingWindowSpec):
         self, kv_cache_specs: dict[str, KVCacheSpec]
     ) -> bool:
         return all(isinstance(spec, KpoolTailSpec) for spec in kv_cache_specs.values())
+
+    @property
+    def participates_in_prefix_caching(self) -> bool:
+        # The tail is a per-request circular scratch buffer (1 block/req,
+        # overwritten by ``pos % kpool``), not a real block allocator: its
+        # contents are transient and never shareable across requests. Exclude
+        # it from the structural prefix-caching machinery so it neither drags
+        # the global block size down to ``kpool`` nor caps the hybrid hit at 0.
+        # ``KpoolTailManager`` already no-ops the manager-level cache hooks.
+        return False
 
 
 @dataclass(frozen=True)
