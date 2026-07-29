@@ -812,8 +812,20 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
+        p = current_platform
+        if p.is_rocm():
+            from vllm.platforms.rocm import get_cdna_version, on_rdna4
+
+            is_rocm_fp8_supported = get_cdna_version() > 2 or on_rdna4()
+        else:
+            is_rocm_fp8_supported = False
+
+        device_supports_fp8 = is_rocm_fp8_supported or (
+            p.is_cuda() and p.has_device_capability((8, 9))
+        )
+
         supported: list[tuple[QuantKey | None, QuantKey | None]] = [(None, None)]
-        if current_platform.supports_fp8():
+        if device_supports_fp8:
             supported += [
                 (kFp8Static128BlockSym, kFp8Dynamic128Sym),
                 (kFp8StaticChannelSym, kFp8DynamicTokenSym),
