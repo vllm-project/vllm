@@ -38,10 +38,10 @@ from vllm.model_executor.models.utils import (
     make_layers,
     sequence_parallel_chunk,
 )
+from vllm.models.common.ops import fused_allreduce_rms_norm
 from vllm.sequence import IntermediateTensors
 
 from .attention import DeepseekV32Attention
-from .fused_ops import fused_allreduce_rms_norm
 
 
 def _all_gather_sp_states(
