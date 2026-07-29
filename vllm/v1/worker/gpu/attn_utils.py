@@ -25,19 +25,16 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
-    KVCacheSpecKind,
     KVQuantMode,
     MambaSpec,
     TQFullAttentionSpec,
     UniformTypeKVCacheSpecs,
-    get_kv_cache_spec_kind,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import (
     AttentionGroup,
     add_kv_sharing_layers_to_kv_cache_groups,
     bind_kv_cache,
-    prepare_block_table_widths,
     prepare_kernel_block_sizes,
 )
 
@@ -97,13 +94,7 @@ def init_attn_backend(
     vllm_config: VllmConfig,
     device: torch.device,
     active_layer_names: set[str] | None = None,
-    block_table_max_model_len: int | None = None,
-) -> tuple[
-    list[list[AttentionGroup]],
-    AttentionCGSupportInfo,
-    list[int],
-    list[int],
-]:
+) -> tuple[list[list[AttentionGroup]], AttentionCGSupportInfo, list[int]]:
     # Phase 1: discover attention groups for each kv cache group.
     attn_groups: list[list[AttentionGroup]] = []
 
@@ -152,39 +143,20 @@ def init_attn_backend(
     # Phase 2: pick a kernel block size per kv cache group that is supported
     # by all backends within that group.
     kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, attn_groups)
-    block_table_widths = prepare_block_table_widths(
-        kv_cache_config,
-        kernel_block_sizes,
-        vllm_config,
-        (
-            block_table_max_model_len
-            if block_table_max_model_len is not None
-            else vllm_config.model_config.max_model_len
-        ),
-    )
 
     # Phase 3: create metadata builders and determine cudagraph support.
     attn_backend_workspace: torch.Tensor | None = None
     min_cg_support = AttentionCGSupport.ALWAYS
     min_cg_attn_backend = None
-    block_table_index = 0
     for kv_cache_group_id, groups in enumerate(attn_groups):
-        kv_cache_spec = kv_cache_config.kv_cache_groups[kv_cache_group_id].kv_cache_spec
         kernel_block_size = None
-        block_table_width = None
-        if (
-            get_kv_cache_spec_kind(kv_cache_spec)
-            != KVCacheSpecKind.ENCODER_ONLY_ATTENTION
-        ):
-            kernel_block_size = kernel_block_sizes[block_table_index]
-            block_table_width = block_table_widths[block_table_index]
-            block_table_index += 1
+        if kv_cache_group_id < len(kernel_block_sizes):
+            kernel_block_size = kernel_block_sizes[kv_cache_group_id]
         for group in groups:
             group.create_metadata_builders(
                 vllm_config=vllm_config,
                 device=device,
                 kernel_block_size=kernel_block_size,
-                block_table_width=block_table_width,
                 num_metadata_builders=1,
             )
             builder = group.get_metadata_builder(0)
@@ -202,17 +174,11 @@ def init_attn_backend(
             if cg_support.value < min_cg_support.value:
                 min_cg_support = cg_support
                 min_cg_attn_backend = group.backend.__name__
-    assert block_table_index == len(block_table_widths)
 
     attn_cg_support_info = AttentionCGSupportInfo(
         min_cg_support=min_cg_support, min_cg_attn_backend=min_cg_attn_backend
     )
-    return (
-        attn_groups,
-        attn_cg_support_info,
-        kernel_block_sizes,
-        block_table_widths,
-    )
+    return attn_groups, attn_cg_support_info, kernel_block_sizes
 
 
 def _allocate_kv_cache(

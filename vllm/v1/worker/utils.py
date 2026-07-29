@@ -17,11 +17,10 @@ from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import cdiv, largest_power_of_2_divisor
+from vllm.utils.math_utils import largest_power_of_2_divisor
 from vllm.utils.mem_utils import MemorySnapshot, format_gib
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
-    BLOCK_TABLE_TOKEN_ALIGNMENT,
     AttentionBackend,
     AttentionMetadataBuilder,
     MultipleOf,
@@ -29,38 +28,17 @@ from vllm.v1.attention.backend import (
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    EncoderOnlyAttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
-    KVCacheSpecKind,
     MambaSpec,
     UniformTypeKVCacheSpecs,
-    get_kv_cache_spec_kind,
 )
+from vllm.v1.worker.block_table import get_block_table_width
 
 logger = init_logger(__name__)
-
-
-def resolve_block_table_width(
-    kv_cache_spec: KVCacheSpec,
-    kernel_block_size: int,
-    vllm_config: VllmConfig,
-    max_model_len: int,
-) -> int:
-    """Resolve the block-table width for a KV-cache group."""
-    kv_block_size = kv_cache_spec.block_size
-    if kv_block_size % kernel_block_size != 0:
-        raise ValueError(
-            f"kernel_block_size {kernel_block_size} must divide "
-            f"kv_block_size {kv_block_size} evenly"
-        )
-    max_num_blocks = kv_cache_spec.max_num_blocks_per_req(vllm_config, max_model_len)
-    width = max_num_blocks * kv_block_size // kernel_block_size
-    alignment = BLOCK_TABLE_TOKEN_ALIGNMENT // math.gcd(
-        BLOCK_TABLE_TOKEN_ALIGNMENT, kernel_block_size
-    )
-    return cdiv(width, alignment) * alignment
 
 
 @triton.jit(do_not_specialize=["n_blocks"])
@@ -253,7 +231,6 @@ class AttentionGroup:
         vllm_config,
         device,
         kernel_block_size: int | None = None,
-        block_table_width: int | None = None,
         num_metadata_builders: int = 1,
     ):
         kv_cache_spec_builder = (
@@ -264,11 +241,13 @@ class AttentionGroup:
         builder_cls = self.backend.get_builder_cls()
         builder_kwargs = {}
         if builder_cls.requires_block_table_width:
-            if block_table_width is None:
-                raise ValueError(
-                    f"{builder_cls.__name__} requires the block-table width"
-                )
-            builder_kwargs["block_table_width"] = block_table_width
+            kernel_block_size = kernel_block_size or self.kv_cache_spec.block_size
+            max_num_blocks = self.kv_cache_spec.max_num_blocks_per_req(
+                vllm_config, vllm_config.model_config.max_model_len
+            )
+            builder_kwargs["block_table_width"] = get_block_table_width(
+                max_num_blocks, self.kv_cache_spec.block_size, kernel_block_size
+            )
         self.metadata_builders = [
             builder_cls(
                 kv_cache_spec_builder,
@@ -378,10 +357,7 @@ def prepare_kernel_block_sizes(
             # All layers in the UniformTypeKVCacheSpecs have the same type,
             # pick an arbitrary one to dispatch.
             kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
-        if (
-            get_kv_cache_spec_kind(kv_cache_spec)
-            == KVCacheSpecKind.ENCODER_ONLY_ATTENTION
-        ):
+        if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
             continue
         if isinstance(kv_cache_spec, AttentionSpec):
             # This is an attention backend that supports virtual block splitting.
@@ -399,35 +375,6 @@ def prepare_kernel_block_sizes(
                 f"unknown kv cache spec {kv_cache_group.kv_cache_spec}"
             )
     return kernel_block_sizes
-
-
-def prepare_block_table_widths(
-    kv_cache_config: KVCacheConfig,
-    kernel_block_sizes: list[int],
-    vllm_config: VllmConfig,
-    max_model_len: int,
-) -> list[int]:
-    """Resolve block-table widths for all worker-side KV-cache groups."""
-    widths = []
-    kernel_index = 0
-    for kv_cache_group in kv_cache_config.kv_cache_groups:
-        kv_cache_spec = kv_cache_group.kv_cache_spec
-        if (
-            get_kv_cache_spec_kind(kv_cache_spec)
-            == KVCacheSpecKind.ENCODER_ONLY_ATTENTION
-        ):
-            continue
-        widths.append(
-            resolve_block_table_width(
-                kv_cache_spec,
-                kernel_block_sizes[kernel_index],
-                vllm_config,
-                max_model_len,
-            )
-        )
-        kernel_index += 1
-    assert kernel_index == len(kernel_block_sizes)
-    return widths
 
 
 def sanity_check_mm_encoder_outputs(

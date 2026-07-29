@@ -50,15 +50,13 @@ from vllm.multimodal.encoder_budget import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
+from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.kv_cache_interface import (
-    KVCacheConfig,
-    KVCacheSpecKind,
-    get_kv_cache_spec_kind,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu import pcp_manager as pcp
 from vllm.v1.worker.gpu.async_utils import AsyncOutput, AsyncPoolingOutput
@@ -436,24 +434,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 getattr(self.model_config.hf_config, "max_source_positions", 0),
             )
 
-        (
-            self.attn_groups,
-            attn_cg_support,
-            self.kernel_block_sizes,
-            block_table_widths,
-        ) = init_attn_backend(
-            self.kv_cache_config,
-            self.vllm_config,
-            self.device,
-            block_table_max_model_len=block_table_max_model_len,
-        )
-        block_sizes = [
-            group.kv_cache_spec.block_size
-            for group in kv_cache_config.kv_cache_groups
-            if get_kv_cache_spec_kind(group.kv_cache_spec)
-            != KVCacheSpecKind.ENCODER_ONLY_ATTENTION
-        ]
+        block_sizes = []
+        max_num_blocks_per_group = []
+        for kv_cache_group in kv_cache_config.kv_cache_groups:
+            spec = kv_cache_group.kv_cache_spec
+            block_sizes.append(spec.block_size)
+            # When using DCP, each request's KV cache is sharded among different ranks.
+            # As a result, one block on the current rank covers `block_size * cp_size`
+            # tokens in the full, global (unsharded) sequence.
+            max_num_blocks = cdiv(
+                block_table_max_model_len, spec.block_size * self.dcp_size
+            )
+            # For Mamba/Hybrid Model, KVCaches need extra blocks for speculative tokens
+            if isinstance(spec, MambaSpec):
+                max_num_blocks = (
+                    max_num_blocks if self.cache_config.enable_prefix_caching else 1
+                ) + spec.num_speculative_blocks
+            max_num_blocks = get_block_table_width(
+                max_num_blocks, spec.block_size, spec.block_size
+            )
+            max_num_blocks_per_group.append(max_num_blocks)
 
+        self.attn_groups, attn_cg_support, self.kernel_block_sizes = init_attn_backend(
+            self.kv_cache_config, self.vllm_config, self.device
+        )
         attn_cg_support = attn_cg_support.narrow(
             *self.model_state.get_additional_cg_support()
         )
@@ -461,7 +465,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             block_sizes=block_sizes,
             max_num_reqs=self.max_num_reqs,
             max_num_batched_tokens=self.max_num_tokens,
-            block_table_widths=block_table_widths,
+            max_num_blocks_per_group=max_num_blocks_per_group,
             device=self.device,
             kernel_block_sizes=self.kernel_block_sizes,
             cp_size=self.dcp_size,

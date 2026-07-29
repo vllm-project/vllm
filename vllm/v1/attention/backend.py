@@ -29,8 +29,6 @@ if TYPE_CHECKING:
 
 from vllm.v1.kv_cache_interface import get_kv_quant_mode
 
-BLOCK_TABLE_TOKEN_ALIGNMENT = 128
-
 
 class AttentionType(str, Enum):
     """
