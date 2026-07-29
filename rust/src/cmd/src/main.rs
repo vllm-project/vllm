@@ -2,7 +2,6 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 mod cli;
-mod logging;
 
 use std::env;
 use std::ffi::OsStr;
@@ -89,7 +88,7 @@ fn main() -> Result<()> {
             "serve" | "frontend" => "RustFrontend",
             _ => "Rust",
         };
-    logging::init_tracing(process_label);
+    vllm_tracing::init_tracing(process_label);
 
     let cli = Cli::parse();
 
