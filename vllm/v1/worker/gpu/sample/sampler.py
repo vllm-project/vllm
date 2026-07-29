@@ -6,7 +6,6 @@ from collections.abc import Sequence
 import numpy as np
 import torch
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.sampling_params import SamplingParams
@@ -53,9 +52,10 @@ class Sampler:
         enable_trace_replay: bool = False,
         return_sampling_mask: bool = False,
         custom_logits_processors: Sequence[LogitsProcessor] = (),
+        detect_nans_in_logits: bool = False,
     ):
         self.logprobs_mode = logprobs_mode
-        self.compute_nans = envs.VLLM_COMPUTE_NANS_IN_LOGITS  # False by default.
+        self.compute_nans = detect_nans_in_logits
         self.use_fp64_gumbel = use_fp64_gumbel
 
         self.req_states = req_states
