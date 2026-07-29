@@ -17,6 +17,7 @@ steps:
   _raw_old_commands:
   - pytest -v -s cuda/test_cuda_context.py
   - pytest -v -s cuda/test_platform_no_cuda_init.py
+  - pytest -v -s cuda/test_cuda_compatibility_path.py
   source_file_dependencies:
   - vllm/envs.py
   - vllm/logger.py
@@ -29,7 +30,8 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s cuda/test_cuda_context.py || true &&
-    pytest -v -s cuda/test_platform_no_cuda_init.py || true'
+    pytest -v -s cuda/test_platform_no_cuda_init.py || true &&
+    pytest -v -s cuda/test_cuda_compatibility_path.py || true'
 - label: Cudagraph
   device: intel_gpu
   timeout_in_minutes: 30

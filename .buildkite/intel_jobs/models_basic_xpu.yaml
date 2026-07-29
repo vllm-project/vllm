@@ -97,3 +97,26 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s models/inkling || true'
+- label: Kimi K3 Unit Tests (B200)
+  device: intel_gpu
+  timeout_in_minutes: 40
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s models/kimi_k3
+  source_file_dependencies:
+  - vllm/models/kimi_k3/
+  - csrc/libtorch_stable/kimi_k3/
+  - tests/models/kimi_k3/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s models/kimi_k3 || true'

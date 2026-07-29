@@ -54,15 +54,18 @@ steps:
   _raw_old_commands:
   - pytest -v -s v1/engine/test_preprocess_error_handling.py
   - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
+  - pytest -v -s v1/test_tensor_ipc_queue.py
   source_file_dependencies:
   - vllm/v1/engine/
   - tests/v1/engine/
+  - tests/v1/test_tensor_ipc_queue.py
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s v1/engine/test_preprocess_error_handling.py || true &&
-    pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py || true'
+    pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py || true &&
+    pytest -v -s v1/test_tensor_ipc_queue.py || true'
 - label: e2e Scheduling (1 GPU)
   device: intel_gpu
   timeout_in_minutes: 53
