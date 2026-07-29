@@ -313,8 +313,10 @@ def _make_preprocess_case(token_bias):
 def test_preprocess_fused_align_matches_scalar_bookkeeping(monkeypatch, token_bias):
     block_size = 4
     mamba_spec = SimpleNamespace(block_size=block_size, num_speculative_blocks=1)
-    cache_config = SimpleNamespace(enable_prefix_caching=True)
-    kv_cache_config = SimpleNamespace()
+    # Fakes stand in for real config/context objects. The fused path tests
+    # below only touch the attributes preprocess_mamba actually reads.
+    cache_config: Any = SimpleNamespace(enable_prefix_caching=True)
+    kv_cache_config: Any = SimpleNamespace()
     scalar_copy_calls = []
 
     def fake_collect(
@@ -345,7 +347,7 @@ def test_preprocess_fused_align_matches_scalar_bookkeeping(monkeypatch, token_bi
     scalar_case = _make_preprocess_case(token_bias)
     fused_case = _make_preprocess_case(token_bias)
 
-    scalar_copy_bufs = SimpleNamespace(
+    scalar_copy_bufs: Any = SimpleNamespace(
         mamba_group_ids=[0],
         mamba_spec=mamba_spec,
         offset=0,
@@ -362,8 +364,8 @@ def test_preprocess_fused_align_matches_scalar_bookkeeping(monkeypatch, token_bi
         copy_bufs=scalar_copy_bufs,
     )
 
-    ctx = _FakePrecopyContext(len(fused_case[1].req_ids))
-    fused_copy_bufs = SimpleNamespace(
+    ctx: Any = _FakePrecopyContext(len(fused_case[1].req_ids))
+    fused_copy_bufs: Any = SimpleNamespace(
         mamba_group_ids=[0],
         mamba_spec=mamba_spec,
         offset=0,
