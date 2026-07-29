@@ -297,22 +297,6 @@ class DictEmbeddingItems(
         return self.data
 
 
-class DictProcessorOutputItems(DictEmbeddingItems):
-    """Data items for pre-computed HF processor outputs (e.g.
-    ``pixel_values`` + ``image_grid_thw``).
-
-    Unlike :class:`DictEmbeddingItems`, the tensors are still consumed by
-    the model's multimodal encoder inside vLLM; only the CPU-side HF
-    processor step (resize/normalize/patchify) is skipped.
-
-    Gated by ``--enable-mm-processor-outputs``. Shape validation is
-    performed by the model-specific parser that constructs this object,
-    because the relationship between tensor size and metadata fields
-    (e.g. ``pixel_values.shape[0] == image_grid_thw.prod(-1).sum()``)
-    is model-dependent.
-    """
-
-
 class AudioProcessorItems(ProcessorBatchItems[HfAudioItem | None]):
     def __init__(self, data: Sequence[HfAudioItem | None]) -> None:
         super().__init__(data, "audio")

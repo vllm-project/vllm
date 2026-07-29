@@ -109,19 +109,6 @@ class MultiModalConfig:
 
     WARNING: The vLLM engine may crash if incorrect shape of embeddings is passed.
     Only enable this flag for trusted users!"""
-    enable_mm_processor_outputs: bool = False
-    """If `True`, enables passing pre-computed HF processor outputs
-    (e.g. `pixel_values` + `image_grid_thw`) under `multi_modal_data`,
-    skipping the HF processor inside vLLM. This allows the CPU-side
-    multimodal preprocessing to run in a separate process or service.
-
-    Unlike `enable_mm_embeds`, the vision encoder still runs inside vLLM;
-    only the CPU-side processing (resize/rescale/normalize/patchify) is
-    skipped. The processor outputs must be produced with the same HF
-    processor version and settings that vLLM would use.
-
-    WARNING: The vLLM engine may crash if inconsistent tensors are passed.
-    Only enable this flag for trusted users!"""
     media_io_kwargs: dict[str, dict[str, Any]] = Field(default_factory=dict)
     """Additional args passed to process media inputs, keyed by modalities.
     For example, to set num_frames for video, set

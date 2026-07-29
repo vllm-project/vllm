@@ -71,7 +71,6 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import (
     DictEmbeddingItems,
-    DictProcessorOutputItems,
     ImageSize,
     ModalityDataItems,
     MultiModalDataItems,
@@ -806,16 +805,13 @@ class Qwen2VLMultiModalDataParser(MultiModalDataParser):
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             if "pixel_values" in data:
-                return self._make_processor_output_items(
-                    data, "image",
-                    pixel_key="pixel_values",
-                    grid_key="image_grid_thw",
-                )
-
+                required_fields = {"pixel_values", "image_grid_thw"}
+            else:
+                required_fields = {"image_embeds", "image_grid_thw"}
             return DictEmbeddingItems(
                 data,
                 modality="image",
-                required_fields={"image_embeds", "image_grid_thw"},
+                required_fields=required_fields,
                 fields_factory=_create_qwen2vl_field_factory(self._spatial_merge_size),
             )
 
@@ -827,67 +823,17 @@ class Qwen2VLMultiModalDataParser(MultiModalDataParser):
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             if "pixel_values_videos" in data:
-                return self._make_processor_output_items(
-                    data, "video",
-                    pixel_key="pixel_values_videos",
-                    grid_key="video_grid_thw",
-                )
-
+                required_fields = {"pixel_values_videos", "video_grid_thw"}
+            else:
+                required_fields = {"video_embeds", "video_grid_thw"}
             return DictEmbeddingItems(
                 data,
                 modality="video",
-                required_fields={"video_embeds", "video_grid_thw"},
+                required_fields=required_fields,
                 fields_factory=_create_qwen2vl_field_factory(self._spatial_merge_size),
             )
 
         return super()._parse_video_data(data)
-
-    def _make_processor_output_items(
-        self,
-        data: dict[str, torch.Tensor],
-        modality: str,
-        pixel_key: str,
-        grid_key: str,
-    ) -> DictProcessorOutputItems:
-        """Build ``DictProcessorOutputItems`` with model-specific shape
-        validation: ``pixel_values.shape[0]`` must equal
-        ``image_grid_thw.prod(-1).sum()``.
-        """
-        grid = data.get(grid_key)
-        pv = data.get(pixel_key)
-
-        # Type check: must be torch.Tensor
-        if pv is not None and not isinstance(pv, torch.Tensor):
-            raise ValueError(
-                f"Pre-computed processor output {pixel_key!r} must be a "
-                f"torch.Tensor, got {type(pv).__name__}."
-            )
-        if grid is not None and not isinstance(grid, torch.Tensor):
-            raise ValueError(
-                f"Pre-computed processor output {grid_key!r} must be a "
-                f"torch.Tensor, got {type(grid).__name__}."
-            )
-
-        # Shape check: pixel_values rows must match grid_thw
-        if grid is not None and pv is not None:
-            expected = int(grid.prod(-1).sum().item())
-            actual = pv.shape[0]
-            if actual != expected:
-                raise ValueError(
-                    f"Pre-computed processor output {pixel_key!r} has "
-                    f"size {actual} along dim 0, but {grid_key!r} implies "
-                    f"{expected}. Please check that the tensors were "
-                    f"produced by the same HF processor settings that "
-                    f"vLLM uses."
-                )
-        return DictProcessorOutputItems(
-            data,
-            modality=modality,
-            required_fields={pixel_key, grid_key},
-            fields_factory=_create_qwen2vl_field_factory(
-                self._spatial_merge_size
-            ),
-        )
 
 
 class Qwen2VLProcessingInfo(BaseProcessingInfo):

@@ -568,58 +568,6 @@ You can pass pre-computed audio embeddings similar to image embeddings:
         print(generated_text)
     ```
 
-### Processor Output Inputs
-
-To input pre-computed HF processor outputs (e.g. `pixel_values` + `image_grid_thw`)
-instead of raw media, pass a dictionary of tensors to the corresponding field
-of the multi-modal dictionary. The vision encoder (ViT) still runs inside vLLM;
-only the CPU-side HF processor step (resize/normalize/patchify) is skipped.
-
-This allows the CPU-side multimodal preprocessing to run in a separate process
-or service, decoupling it from the vLLM engine's scheduler loop.
-
-You must enable this feature via `enable_mm_processor_outputs=True`.
-
-!!! warning
-    The vLLM engine may crash if inconsistent tensors are passed.
-    Only enable this flag for trusted users!
-
-??? code
-
-    ```python
-    from vllm import LLM
-    from transformers import AutoProcessor
-
-    llm = LLM(
-        model="Qwen/Qwen3-VL-2B-Instruct",
-        enable_mm_processor_outputs=True,
-    )
-
-    # Run the HF processor externally (e.g. in a separate process pool)
-    processor = AutoProcessor.from_pretrained("Qwen/Qwen3-VL-2B-Instruct")
-    prompt = "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>Describe.<|im_end|>\n<|im_start|>assistant\n"
-    mm = processor(text=[prompt], images=[pil_image], return_tensors="pt")
-
-    outputs = llm.generate({
-        "prompt": prompt,
-        "multi_modal_data": {
-            "image": {
-                "pixel_values": mm["pixel_values"],
-                "image_grid_thw": mm["image_grid_thw"],
-            },
-        },
-    })
-    ```
-
-#### Supported Models
-
-- Qwen2-VL, Qwen2.5-VL (via shared `Qwen2VLMultiModalDataParser`)
-- Qwen3-VL, Qwen3.5 (dense & MoE, inherit the same parser)
-- Qwen2.5-Omni (Thinker, inherits the same parser)
-
-Support for additional model families can be added by extending their
-model-specific data parsers.
-
 ### Cached Inputs
 
 When using multi-modal inputs, vLLM normally hashes each media item by content to enable caching across requests. You can optionally pass `multi_modal_uuids` to provide your own stable IDs for each item so caching can reuse work across requests without rehashing the raw content.
