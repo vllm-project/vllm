@@ -6,6 +6,27 @@ from vllm.triton_utils import tl, triton
 
 
 @triton.jit
+def _rmsnorm_row(
+    row_in,
+    weight_ptr,
+    row_out,
+    eps,
+    SIZE: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    # fp32 throughout, single cast at store. BLOCK is next_pow2(SIZE) so narrow
+    # Q rows avoid KV-wide reductions that waste ALU on masked lanes.
+    block = tl.arange(0, BLOCK)
+    mask = block < SIZE
+    x = tl.load(row_in + block, mask=mask, other=0.0).to(tl.float32)
+    variance = tl.sum(x * x, axis=0) / SIZE
+    rrms = tl.rsqrt(variance + eps)
+    w = tl.load(weight_ptr + block, mask=mask, other=0.0).to(tl.float32)
+    y = x * rrms * w
+    tl.store(row_out + block, y.to(row_out.dtype.element_ty), mask=mask)
+
+
+@triton.jit
 def _fused_q_kv_rmsnorm_kernel(
     q_ptr,
     q_out_ptr,
@@ -20,7 +41,8 @@ def _fused_q_kv_rmsnorm_kernel(
     eps,
     Q_SIZE: tl.constexpr,
     KV_SIZE: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
+    Q_BLOCK: tl.constexpr,
+    KV_BLOCK: tl.constexpr,
 ):
     # num_tokens goes on grid-x (max 2**31 - 1); task goes on grid-y.
     # CUDA's grid-y/z are capped at 65535, so putting num_tokens there crashes
@@ -31,27 +53,23 @@ def _fused_q_kv_rmsnorm_kernel(
     pid_task = tl.program_id(1)
 
     if pid_task == 0:
-        SIZE = Q_SIZE
-        row_in = q_ptr + token_idx * q_in_stride
-        weight_ptr = q_weight_ptr
-        row_out = q_out_ptr + token_idx * q_out_stride
+        _rmsnorm_row(
+            q_ptr + token_idx * q_in_stride,
+            q_weight_ptr,
+            q_out_ptr + token_idx * q_out_stride,
+            eps,
+            Q_SIZE,
+            Q_BLOCK,
+        )
     else:
-        SIZE = KV_SIZE
-        row_in = kv_ptr + token_idx * kv_in_stride
-        weight_ptr = kv_weight_ptr
-        row_out = kv_out_ptr + token_idx * kv_out_stride
-
-    # RMSNorm in fp32 throughout — matches csrc/layernorm_kernels.cu's
-    # `(scalar_t)(x * s_variance * w)` and DeepseekV4's compressor kernel, which
-    # keep x, rrms, and w all in fp32 and perform a single cast at store.
-    block = tl.arange(0, BLOCK_SIZE)
-    mask = block < SIZE
-    x = tl.load(row_in + block, mask=mask, other=0.0).to(tl.float32)
-    variance = tl.sum(x * x, axis=0) / SIZE
-    rrms = tl.rsqrt(variance + eps)
-    w = tl.load(weight_ptr + block, mask=mask, other=0.0).to(tl.float32)
-    y = x * rrms * w
-    tl.store(row_out + block, y.to(row_out.dtype.element_ty), mask=mask)
+        _rmsnorm_row(
+            kv_ptr + token_idx * kv_in_stride,
+            kv_weight_ptr,
+            kv_out_ptr + token_idx * kv_out_stride,
+            eps,
+            KV_SIZE,
+            KV_BLOCK,
+        )
 
 
 def fused_q_kv_rmsnorm(
@@ -76,7 +94,8 @@ def fused_q_kv_rmsnorm(
     if num_tokens == 0:
         return qr_out, kv_out
 
-    block_size = triton.next_power_of_2(max(q_size, kv_size))
+    q_block = triton.next_power_of_2(q_size)
+    kv_block = triton.next_power_of_2(kv_size)
     _fused_q_kv_rmsnorm_kernel[(num_tokens, 2)](
         qr,
         qr_out,
@@ -91,6 +110,7 @@ def fused_q_kv_rmsnorm(
         eps,
         Q_SIZE=q_size,
         KV_SIZE=kv_size,
-        BLOCK_SIZE=block_size,
+        Q_BLOCK=q_block,
+        KV_BLOCK=kv_block,
     )
     return qr_out, kv_out
