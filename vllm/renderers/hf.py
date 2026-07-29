@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
+import asyncio
 import copy
 import inspect
 import itertools
 import weakref
 from collections import defaultdict, deque
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Final, Literal, cast, overload
 
@@ -20,6 +22,7 @@ import jinja2.sandbox
 import torch
 from typing_extensions import override
 
+from vllm import envs
 from vllm.entrypoints.chat_utils import (
     PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
     ChatTemplateResolutionError,
@@ -969,6 +972,48 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 self.tokenizer, config.model_config.renderer_num_workers + 1
             )
 
+    def _replace_executor(self) -> None:
+        """Replace the render executor with a fresh pool.
+
+        Called after a render timeout so that the stuck thread (which CPython
+        cannot interrupt) does not permanently block all subsequent renders.
+        The old executor is abandoned with wait=False — its thread will
+        eventually finish or be reaped on process exit.
+        """
+        old = self._executor
+        old.shutdown(wait=False)
+        pool_workers = self.model_config.renderer_num_workers
+        self._executor = ThreadPoolExecutor(max_workers=pool_workers)
+        self._apply_chat_template_async = make_async(
+            safe_apply_chat_template, executor=self._executor
+        )
+        logger.warning(
+            "Chat template render timed out — executor pool replaced "
+            "(%d worker(s)). The stuck thread may continue consuming "
+            "CPU until the process exits.",
+            pool_workers,
+        )
+
+    async def _render_with_timeout(self, coro):
+        """Run a template-rendering coroutine with a timeout.
+
+        On timeout, replaces the executor so subsequent renders are not
+        permanently blocked by the stuck thread.
+        """
+        timeout = envs.VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT
+        if timeout <= 0:
+            return await coro
+        try:
+            return await asyncio.wait_for(coro, timeout=timeout)
+        except asyncio.TimeoutError:
+            self._replace_executor()
+            raise TimeoutError(
+                f"Chat template rendering timed out after "
+                f"{timeout}s. This may indicate a malicious or "
+                f"excessively complex template. Adjust "
+                f"VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT to override."
+            ) from None
+
     def _can_produce_offsets(self) -> bool:
         # Only fast tokenizers expose offset_mapping.
         return self.tokenizer is not None and self.tokenizer.is_fast
@@ -1124,11 +1169,13 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 logger.warning_once(_TOKENIZE_OVERRIDE_WARNING)
             chat_template_kwargs["tokenize"] = True
 
-        prompt_raw = await self._apply_chat_template_async(
-            model_config,
-            tokenizer,
-            conversation,
-            **chat_template_kwargs,
+        prompt_raw = await self._render_with_timeout(
+            self._apply_chat_template_async(
+                model_config,
+                tokenizer,
+                conversation,
+                **chat_template_kwargs,
+            )
         )
 
         # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5
