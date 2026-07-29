@@ -2,11 +2,11 @@ group: Fault Tolerance
 depends_on:
   - image-build
 steps:
-- label: Fault Tolerance E2E (2xH100)
-  key: fault-tolerance-e2e-2xh100
+- label: Fault Tolerance E2E (4xH100)
+  key: fault-tolerance-e2e-4xh100
   timeout_in_minutes: 35
   device: h100
-  num_devices: 2
+  num_devices: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/v1/fault_tolerance/

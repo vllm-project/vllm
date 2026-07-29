@@ -1084,6 +1084,8 @@ class EngineCoreProc(EngineCore):
                 vllm_config.parallel_config.enable_fault_tolerance
             )
             if self.enable_fault_tolerance:
+                # FT sentinel requires DP-specific state (e.g. dp_store).
+                assert isinstance(self, DPEngineCoreProc)
                 self.ft_sentinel = EngineCoreSentinel(
                     engine=self,
                     parallel_config=vllm_config.parallel_config,
