@@ -303,3 +303,49 @@ fn rejects_non_none_cu_num_generated_tokens() {
         "messagepack ext value decode failed: new_logprobs.cu_num_generated_tokens: expected None for per-request engine-core logprobs payload, got [0, 1]"
     );
 }
+
+#[test]
+fn decodes_zero_row_logprobs_as_empty() {
+    for shape in [[0usize, 0], [0, 3]] {
+        let frames = vec![Bytes::from(encode_value(&output_wire_with_custom_fields(
+            None,
+            Some(Value::Array(vec![
+                ndarray_value("<i8", &shape, Value::Ext(3, Vec::new())),
+                ndarray_value("<f4", &shape, Value::Ext(3, Vec::new())),
+                ndarray_value("<i8", &[0], Value::Ext(3, Vec::new())),
+                Value::Nil,
+            ])),
+        )))];
+        let decoded = decode_engine_core_outputs(&frames).unwrap().into_request_batch().unwrap();
+        let logprobs = decoded.outputs[0]
+            .new_prompt_logprobs_tensors
+            .clone()
+            .unwrap()
+            .into_direct()
+            .unwrap();
+        assert!(logprobs.is_empty());
+    }
+}
+
+#[test]
+fn rejects_zero_column_logprobs_with_rows() {
+    let ranks = Value::Ext(3, vec![1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
+    let frames = vec![Bytes::from(encode_value(&output_wire_with_custom_fields(
+        Some(Value::Array(vec![
+            ndarray_value("<i8", &[2, 0], Value::Ext(3, Vec::new())),
+            ndarray_value("<f4", &[2, 0], Value::Ext(3, Vec::new())),
+            ndarray_value("<i8", &[2], ranks),
+            Value::Nil,
+        ])),
+        None,
+    )))];
+
+    let error = decode_engine_core_outputs(&frames).unwrap_err();
+    let crate::error::Error::ExtValueDecode { message } = &error else {
+        panic!("expected ExtValueDecode");
+    };
+    assert_eq!(
+        message,
+        "new_logprobs: zero-column logprobs payload with 2 rows"
+    );
+}

@@ -4,8 +4,9 @@
 Dispatch module for Mamba selective state update (SSU) backends.
 
 Provides a unified `selective_state_update` function that dispatches to
-either the Triton or FlashInfer backend based on the configured
-`MambaBackendEnum`. Follows SGLang's dispatch pattern adapted for vLLM.
+the Triton, FlashInfer, or CPU backend based on the configured
+`MambaBackendEnum`. On CPU-only platforms (PowerPC, x86 without CUDA)
+the backend defaults to 'cpu'.
 """
 
 from abc import ABC, abstractmethod
@@ -182,9 +183,75 @@ class FlashInferSSUBackend(MambaSSUBackend):
         )
 
 
+class CPUSSUBackend(MambaSSUBackend):
+    """CPU SSU backend using the compiled C++ VSX/scalar kernel.
+
+    On CPU-only platforms (PowerPC, x86 without CUDA) this dispatches to
+    the vectorized C++ kernel registered as ``torch.ops._C.selective_state_update_cpu``.
+    That kernel uses vec_op SIMD intrinsics (VSX on ppc64le, AVX2 on x86,
+    scalar fallback elsewhere) and is parallelised with OpenMP across heads.
+
+    Falls back to the pure-PyTorch implementation only if the C++ op is
+    unavailable (e.g. a CPU-less build).
+    """
+
+    def __init__(self, mamba_config: MambaConfig):
+        super().__init__(mamba_config)
+        from vllm import _custom_ops as ops
+
+        self._cpp_kernel = ops.selective_state_update_cpu
+        logger.info("CPUSSUBackend: using compiled C++ selective_state_update kernel.")
+
+    @property
+    def name(self) -> str:
+        return "cpu"
+
+    def __call__(
+        self,
+        state: torch.Tensor,
+        x: torch.Tensor,
+        dt: torch.Tensor,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        C: torch.Tensor,
+        D: torch.Tensor,
+        dt_bias: torch.Tensor,
+        z: torch.Tensor | None = None,
+        dt_softplus: bool = False,
+        state_batch_indices: torch.Tensor | None = None,
+        dst_state_batch_indices: torch.Tensor | None = None,
+        null_block_id: int = NULL_BLOCK_ID,
+        out: torch.Tensor | None = None,
+        num_accepted_tokens: torch.Tensor | None = None,
+        cu_seqlens: torch.Tensor | None = None,
+        is_blackwell: bool = False,
+    ) -> None:
+        # C++ kernel: state shape expected as (nstates, nheads, dim, dstate)
+        # The kernel writes in-place into `out` and updates `state`.
+        self._cpp_kernel(
+            state,
+            x,
+            dt,
+            A,
+            B,
+            C,
+            D,
+            z,
+            dt_bias,
+            dt_softplus,
+            state_batch_indices,
+            dst_state_batch_indices,
+            null_block_id,
+            out,
+            num_accepted_tokens,
+            cu_seqlens,
+        )
+
+
 _BACKEND_REGISTRY: dict[MambaBackendEnum, type[MambaSSUBackend]] = {
     MambaBackendEnum.TRITON: TritonSSUBackend,
     MambaBackendEnum.FLASHINFER: FlashInferSSUBackend,
+    MambaBackendEnum.CPU: CPUSSUBackend,
 }
 
 _mamba_ssu_backend: MambaSSUBackend | None = None
@@ -210,6 +277,20 @@ def initialize_mamba_ssu_backend(
     global _mamba_ssu_backend
 
     backend = mamba_config.backend
+
+    # On CPU-only platforms (PowerPC, x86 without CUDA) Triton JIT is
+    # unstable or unavailable.  Silently fall back to the CPU
+    # backend unless the user explicitly chose something other than "triton".
+    if backend == MambaBackendEnum.TRITON:
+        from vllm.platforms import current_platform
+
+        if current_platform.is_cpu():
+            logger.info(
+                "CPU platform detected: overriding Mamba SSU backend "
+                "from 'triton' to 'cpu'."
+            )
+            backend = MambaBackendEnum.CPU
+
     if backend not in _BACKEND_REGISTRY:
         raise ValueError(
             f"Unknown Mamba SSU backend: {backend}. "
