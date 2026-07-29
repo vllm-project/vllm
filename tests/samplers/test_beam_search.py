@@ -12,7 +12,9 @@ import pytest
 from transformers import AutoModelForSeq2SeqLM
 
 from vllm.assets.audio import AudioAsset
+from vllm.config.model import ModelDType
 from vllm.entrypoints.llm import LLM
+from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams, StructuredOutputsParams
 
@@ -235,7 +237,7 @@ def test_beam_search_passes_multimodal_data(
 @pytest.mark.parametrize("beam_width", BEAM_WIDTHS)
 def test_beam_search_structured_output(
     model: str,
-    dtype: str,
+    dtype: ModelDType,
     beam_width: int,
 ) -> None:
     """Ensure beam search with structured output produces valid JSON."""
@@ -266,8 +268,8 @@ def test_beam_search_structured_output(
         structured_outputs=StructuredOutputsParams(json=json_schema),
     )
 
-    prompts = [
-        "Generate a JSON object for a person with name and age:",
+    prompts: list[TextPrompt | TokensPrompt] = [
+        TextPrompt(prompt="Generate a JSON object for a person with name and age:"),
     ]
 
     outputs = llm.beam_search(prompts, params)

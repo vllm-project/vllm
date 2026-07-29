@@ -41,7 +41,9 @@ def _make_backend() -> tuple[DmaCopyBackend, torch.Tensor, torch.Tensor]:
     gpu = {"k": torch.zeros((NUM_BLOCKS, BLOCK_BYTES), dtype=torch.int8, device="cuda")}
     cpu = {"k": torch.zeros((NUM_BLOCKS, BLOCK_BYTES), dtype=torch.int8, device="cpu")}
     pin_tensor(cpu["k"])
-    low_pri, _ = torch.cuda.Stream.priority_range()
+    # torch's stub for _CudaStreamBase.priority_range is missing @classmethod;
+    # the real implementation is callable on the class, as used here.
+    low_pri, _ = torch.cuda.Stream.priority_range()  # type: ignore[call-arg]
     backend = DmaCopyBackend()
     backend.init(
         gpu,
@@ -145,10 +147,12 @@ class _RecordingBackend:
 def test_get_finished_passes_wait_event_for_store_only():
     """get_finished gates stores on a compute-done event but not loads."""
     worker = SimpleCPUOffloadWorker(
-        vllm_config=None, kv_cache_config=None, cpu_capacity_bytes=0
+        vllm_config=None,  # type: ignore[arg-type]
+        kv_cache_config=None,
+        cpu_capacity_bytes=0,
     )
     recording = _RecordingBackend()
-    worker._backend = recording
+    worker._backend = recording  # type: ignore[assignment]
     worker._connector_metadata = SimpleCPUOffloadMetadata(
         load_event=0,
         load_gpu_blocks=[0],

@@ -5,6 +5,7 @@ import pytest
 
 from vllm import CompletionOutput, RequestOutput
 from vllm.entrypoints.generate.beam_search.online import BeamSearchOnlineMixin
+from vllm.inputs import TokensInput
 from vllm.logprobs import Logprob
 from vllm.sampling_params import BeamSearchParams
 
@@ -51,13 +52,13 @@ class _EngineClient:
 
 
 class _Serving(BeamSearchOnlineMixin):
-    renderer = _Renderer()
-    engine_client = _EngineClient()
+    renderer = _Renderer()  # type: ignore[assignment]
+    engine_client = _EngineClient()  # type: ignore[assignment]
 
 
 @pytest.mark.asyncio
 async def test_beam_search_handles_extra_logprob_candidates() -> None:
-    prompt = {
+    prompt: TokensInput = {
         "type": "token",
         "prompt": "prompt",
         "prompt_token_ids": [1],

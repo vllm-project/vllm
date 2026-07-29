@@ -54,9 +54,11 @@ def check_model_outputs(
     tokenizer = AutoTokenizer.from_pretrained(model.original_model)
     if tokenizer.chat_template is not None:
         messages = [[{"role": "user", "content": prompt}] for prompt in prompts]
+        # tokenize=False with a batch of conversations always returns list[str];
+        # the stub's return type covers other tokenize/batch combinations too.
         prompts = tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
-        )
+        )  # type: ignore[assignment]
 
     # Run gguf model.
     with vllm_runner(

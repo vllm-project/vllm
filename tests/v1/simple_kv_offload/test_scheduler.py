@@ -896,7 +896,7 @@ def test_preemption_no_cpu_block_leak() -> None:
         block_hasher=req._block_hasher,
     )
     hit_tokens, is_async = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
-    assert hit_tokens > 0
+    assert hit_tokens is not None and hit_tokens > 0
 
     gpu_blocks2 = fix.gpu_block_pool.get_new_blocks(num_blocks)
     kv_blocks2 = KVCacheBlocks(blocks=(gpu_blocks2,))
@@ -991,7 +991,7 @@ def test_inflight_finish_deferred_cleanup() -> None:
         block_hasher=req._block_hasher,
     )
     hit_tokens, _ = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
-    assert hit_tokens > 0
+    assert hit_tokens is not None and hit_tokens > 0
 
     gpu_blocks2 = fix.gpu_block_pool.get_new_blocks(num_blocks)
     kv_blocks2 = KVCacheBlocks(blocks=(gpu_blocks2,))
@@ -1493,7 +1493,7 @@ def test_reset_pending_loads() -> None:
         block_hasher=req._block_hasher,
     )
     hit_tokens, is_async = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
-    assert hit_tokens > 0
+    assert hit_tokens is not None and hit_tokens > 0
 
     gpu_blocks2 = gpu_pool.get_new_blocks(num_blocks)
     kv_blocks2 = KVCacheBlocks(blocks=(gpu_blocks2,))

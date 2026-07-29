@@ -6,6 +6,7 @@ import pytest
 from tests.utils import create_new_process_for_each_test
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
+from vllm.inputs import TextPrompt
 from vllm.multimodal.image import convert_image_mode
 
 
@@ -68,7 +69,7 @@ def test_oot_registration_multimodal(
 ):
     with monkeypatch.context() as m:
         m.setenv("VLLM_PLUGINS", "register_dummy_model")
-        prompts = [
+        prompts: list[TextPrompt] = [
             {
                 "prompt": "What's in the image?<image>",
                 "multi_modal_data": {"image": image},
