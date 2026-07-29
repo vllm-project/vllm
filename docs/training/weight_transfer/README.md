@@ -51,6 +51,7 @@ When running vLLM as an HTTP server, the following endpoints are available for w
 | Endpoint | Method | Description |
 | -------- | ------ | ----------- |
 | `/init_weight_transfer_engine` | POST | Initialize the weight transfer engine with backend-specific info |
+| `/weight_update_baseline` | GET | Get checkpoint sources grouped into legal partial-update units |
 | `/start_weight_update` | POST | Start a weight update |
 | `/update_weights` | POST | Transfer a batch of weights with backend-specific metadata |
 | `/finish_weight_update` | POST | Finish the weight update and run post-processing |
@@ -60,6 +61,30 @@ When running vLLM as an HTTP server, the following endpoints are available for w
 
 !!! note
     The HTTP weight transfer endpoints require `VLLM_SERVER_DEV_MODE=1` to be set.
+
+### Discovering legal partial-update scopes
+
+Call `GET /weight_update_baseline` after model loading. The response includes
+all source names observed during the initial checkpoint load and
+`atomic_source_groups`. The corresponding `atomic_update_scopes` entries can
+be sent directly to `/start_weight_update`. A larger legal partial scope is a
+union of complete atomic groups:
+
+```json
+{
+  "kind": "base_checkpoint",
+  "mode": "partial",
+  "source_names": [
+    "model.layers.0.input_layernorm.weight",
+    "model.layers.0.post_attention_layernorm.weight"
+  ]
+}
+```
+
+The groups are merged across workers, so TP, PP, and EP closure constraints
+are preserved. Use the scope only when the response has `"ready": true`.
+A dummy model without metadata probing returns a provisional baseline until it
+has completed one real full base-weight update.
 
 ## Trainer-Side API
 

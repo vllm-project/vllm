@@ -1094,6 +1094,15 @@ class AsyncLLM(EngineClient):
             "start_weight_update", kwargs={"update_scope": update_scope}
         )
 
+    async def get_weight_update_baseline(self) -> dict:
+        """Return the global initial-load manifest used to build partial scopes."""
+        from vllm.model_executor.model_loader.reload.baseline import (
+            aggregate_weight_update_baselines,
+        )
+
+        reports = await self.collective_rpc("get_weight_update_baseline")
+        return aggregate_weight_update_baselines(reports)
+
     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
         """
         Batched weight update for RL training.

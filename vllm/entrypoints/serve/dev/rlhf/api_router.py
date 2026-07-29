@@ -139,6 +139,13 @@ async def start_weight_update(raw_request: Request):
     return JSONResponse(content={"message": "Weight update started"})
 
 
+@router.get("/weight_update_baseline")
+async def get_weight_update_baseline(raw_request: Request):
+    """Return checkpoint sources grouped by the smallest legal update units."""
+    baseline = await engine_client(raw_request).get_weight_update_baseline()
+    return JSONResponse(content=baseline)
+
+
 @router.post("/update_weights")
 async def update_weights(raw_request: Request):
     try:

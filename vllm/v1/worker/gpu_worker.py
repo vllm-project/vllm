@@ -1208,6 +1208,14 @@ class Worker(WorkerBase):
             self.weight_transfer_engine.start_weight_update(update_scope)
         self._weight_update_active = True
 
+    def get_weight_update_baseline(self):
+        """Return this rank's initial-load manifest for partial update scopes."""
+        from vllm.model_executor.model_loader.reload.baseline import (
+            get_weight_update_baseline,
+        )
+
+        return get_weight_update_baseline(self.get_model())
+
     def update_weights(self, update_info: dict) -> None:
         """
         Receive one weight update chunk from the trainer.

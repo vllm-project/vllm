@@ -253,6 +253,10 @@ class EngineClient(ABC):
         """Start a new weight update."""
         raise NotImplementedError
 
+    async def get_weight_update_baseline(self) -> dict:
+        """Return the initial-load manifest used to build partial scopes."""
+        raise NotImplementedError
+
     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
         """Batched weight update for RL training."""
         raise NotImplementedError

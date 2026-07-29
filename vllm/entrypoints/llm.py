@@ -879,6 +879,15 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             "start_weight_update", kwargs={"update_scope": update_scope}
         )
 
+    def get_weight_update_baseline(self) -> dict:
+        """Return the global initial-load manifest used to build partial scopes."""
+        from vllm.model_executor.model_loader.reload.baseline import (
+            aggregate_weight_update_baselines,
+        )
+
+        reports = self.llm_engine.collective_rpc("get_weight_update_baseline")
+        return aggregate_weight_update_baselines(reports)
+
     def update_weights(self, request: WeightTransferUpdateRequest | dict) -> None:
         """
         Update the weights of the model.

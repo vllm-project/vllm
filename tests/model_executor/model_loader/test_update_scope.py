@@ -10,6 +10,13 @@ from vllm.lora.update import (
     config_digest,
     validate_complete_lora_weights,
 )
+from vllm.model_executor.model_loader.reload.baseline import (
+    WeightUpdateBaselineEvent,
+    WeightUpdateBaselineGroup,
+    WeightUpdateBaselineReport,
+    aggregate_weight_update_baselines,
+    get_weight_update_baseline,
+)
 from vllm.model_executor.model_loader.reload.layerwise import (
     finalize_layerwise_reload,
     finalize_load_recording,
@@ -25,6 +32,7 @@ from vllm.model_executor.model_loader.reload.scope import (
     normalize_update_scope,
 )
 from vllm.model_executor.model_loader.reload.source import observe_weight_sources
+from vllm.model_executor.model_loader.reload.types import LoadManifestScope
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 pytestmark = pytest.mark.skip_global_cleanup
@@ -124,6 +132,99 @@ def test_partial_scope_rejects_split_processing_unit_before_mutation() -> None:
 
     assert model.layer.left is left_before
     assert not model.layer.left.is_meta
+
+
+def test_weight_update_baseline_exposes_atomic_source_groups() -> None:
+    model = nn.Module()
+    model.layer = _WeightLayer(("left", "right"))
+
+    def load(weights):
+        for source_name, weight in weights:
+            parameter = getattr(model.layer, source_name.rsplit(".", 1)[-1])
+            parameter.weight_loader(parameter, weight)
+
+    record_metadata_for_reloading(model)
+    record_load_consumption(model)
+    load(
+        observe_weight_sources(
+            [
+                ("checkpoint.left", torch.ones(2)),
+                ("checkpoint.right", torch.ones(2)),
+            ]
+        )
+    )
+    finalize_load_recording(model)
+
+    report = get_weight_update_baseline(model)
+    assert report.state == "exact"
+    assert len(report.groups) == 1
+    assert report.groups[0].module_name == "layer"
+    assert report.groups[0].source_names == (
+        "checkpoint.left",
+        "checkpoint.right",
+    )
+    assert {event.target_name for event in report.groups[0].events} == {
+        "layer.left",
+        "layer.right",
+    }
+
+
+def test_weight_update_baseline_merges_cross_rank_closure_constraints() -> None:
+    def report(*groups: tuple[str, ...]) -> WeightUpdateBaselineReport:
+        return WeightUpdateBaselineReport(
+            scope=LoadManifestScope(),
+            state="exact",
+            groups=tuple(
+                WeightUpdateBaselineGroup(
+                    module_name=f"layer.{index}",
+                    events=tuple(
+                        WeightUpdateBaselineEvent(name, name, ()) for name in names
+                    ),
+                )
+                for index, names in enumerate(groups)
+            ),
+        )
+
+    baseline = aggregate_weight_update_baselines(
+        [
+            report(("q", "k"), ("mlp",)),
+            report(("k", "v"), ("expert.3",)),
+        ]
+    )
+
+    assert baseline["ready"] is True
+    assert baseline["atomic_source_groups"] == [
+        ["expert.3"],
+        ["k", "q", "v"],
+        ["mlp"],
+    ]
+    assert baseline["scope_template"] == {
+        "kind": "base_checkpoint",
+        "mode": "partial",
+        "source_names": [],
+    }
+    assert baseline["atomic_update_scopes"][1]["source_names"] == [
+        "k",
+        "q",
+        "v",
+    ]
+
+
+def test_weight_update_baseline_reports_dummy_target_baseline() -> None:
+    model = _ScopedModel()
+    record_metadata_for_reloading(model)
+    from vllm.model_executor.model_loader.reload.layerwise import (
+        record_dummy_load_manifest,
+    )
+
+    record_dummy_load_manifest(model)
+    report = get_weight_update_baseline(model)
+    baseline = aggregate_weight_update_baselines([report])
+
+    assert report.state == "provisional"
+    assert baseline["ready"] is False
+    assert "first.weight" in report.provisional_target_names
+    assert "complete real base-weight update" in baseline["reason"]
 
 
 def test_scope_normalization_rejects_duplicates() -> None:

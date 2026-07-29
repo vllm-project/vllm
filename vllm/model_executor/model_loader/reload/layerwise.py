@@ -57,6 +57,7 @@ __all__ = [
     "finalize_load_recording",
     "get_layer_completion_findings",
     "get_load_manifest_report",
+    "get_load_manifest_scope",
     "record_dummy_load_manifest",
     "record_direct_load_consumption",
     "record_external_tensor_manifest",
@@ -105,7 +106,7 @@ def get_layer_completion_findings() -> list[str]:
     return list(_LAYER_COMPLETION_FINDINGS)
 
 
-def _get_load_manifest_scope() -> LoadManifestScope:
+def get_load_manifest_scope() -> LoadManifestScope:
     """Best-effort distributed coordinates without requiring distributed init."""
     try:
         from vllm.distributed.parallel_state import (
@@ -164,7 +165,7 @@ def get_load_manifest_report(
         else FullBaseWeightScope()
     )
     return LoadManifestReport(
-        scope=_get_load_manifest_scope(),
+        scope=get_load_manifest_scope(),
         required_event_count=(
             _LAST_RELOAD_REQUIRED_EVENT_COUNTS.get(model, 0)
             if model is not None
