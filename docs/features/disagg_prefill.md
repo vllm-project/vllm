@@ -17,7 +17,21 @@ Two main reasons:
 
 ## Usage example
 
-Now supports 9 types of connectors:
+!!! note "Migration note: SharedStorageConnector renamed to ExampleConnector"
+    As of PR [#30201](https://github.com/vllm-project/vllm/pull/30201),
+    `SharedStorageConnector` has been renamed to `ExampleConnector`.
+    This connector is intended for **debug and example purposes only** — it is
+    **not suitable for production** PD deployments.
+
+    If you were using `SharedStorageConnector` in your configuration, update
+    `kv_connector` to `ExampleConnector`. The `shared_storage_path`
+    configuration key remains unchanged.
+
+    For production disaggregated prefilling, use one of the production-grade
+    connectors such as **NixlConnector**, **MooncakeConnector**, or
+    **FlexKVConnectorV1**.
+
+Now supports the following connectors (see [`factory.py`](https://github.com/vllm-project/vllm/blob/main/vllm/distributed/kv_transfer/kv_connector/factory.py) for the complete registry):
 
 - **ExampleConnector**: refer to [examples/disaggregated/example_connector/run.sh](../../examples/disaggregated/example_connector/run.sh) for the example usage of ExampleConnector disaggregated prefilling.
 - **LMCacheConnectorV1**: refer to [examples/disaggregated/lmcache/disagg_prefill_lmcache_v1/disagg_example_nixl.sh](../../examples/disaggregated/lmcache/disagg_prefill_lmcache_v1/disagg_example_nixl.sh) for the example usage of LMCacheConnectorV1 disaggregated prefilling which uses NIXL as the underlying KV transmission. LMCache also offers a multi-process (MP) mode via `LMCacheMPConnector`, where a standalone `lmcache server` holds the KV cache shared by one or more vLLM instances; see the [LMCache examples](../../examples/disaggregated/lmcache/README.md) and the [LMCache docs](https://docs.lmcache.ai) for setup.
