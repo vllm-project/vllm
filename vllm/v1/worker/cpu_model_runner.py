@@ -80,16 +80,16 @@ class CPUModelRunner(GPUModelRunner):
 
         # Speculative decoding fallbacks
         import vllm.v1.sample.rejection_sampler
-        import vllm.v1.spec_decode.llm_base_proposer
+        import vllm.v1.spec_decode.llm_base_proposer as proposer
         import vllm.v1.spec_decode.utils as spec_decode_utils
 
-        vllm.v1.spec_decode.llm_base_proposer.eagle_prepare_inputs_padded_kernel = (
+        proposer._EAGLE_PREPARE_INPUTS_KERNEL.kernel = (
             cpu_tl.eagle_prepare_inputs_padded_kernel
         )
-        vllm.v1.spec_decode.llm_base_proposer.eagle_prepare_next_token_padded_kernel = (
+        proposer._EAGLE_PREPARE_NEXT_TOKEN_KERNEL.kernel = (
             cpu_tl.eagle_prepare_next_token_padded_kernel
         )
-        vllm.v1.spec_decode.llm_base_proposer.copy_and_expand_eagle_inputs_kernel = (
+        proposer.copy_and_expand_eagle_inputs_kernel = (
             cpu_tl.copy_and_expand_eagle_inputs_kernel
         )
         spec_decode_utils.copy_and_expand_dflash_inputs_kernel = (
@@ -103,7 +103,7 @@ class CPUModelRunner(GPUModelRunner):
                 dflash_kernel_name,
                 cpu_tl.copy_and_expand_dflash_inputs_kernel,
             )
-        spec_decode_utils.eagle_step_slot_mapping_metadata_kernel = (
+        spec_decode_utils._EAGLE_STEP_SLOT_MAPPING_KERNEL.kernel = (
             cpu_tl.eagle_step_slot_mapping_metadata_kernel
         )
         vllm.v1.sample.rejection_sampler.rejection_greedy_sample_kernel = (
