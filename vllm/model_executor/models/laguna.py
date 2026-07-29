@@ -199,7 +199,7 @@ class LagunaMoE(nn.Module):
             requires_grad=False,
         )
         # MoERunner with SIGMOID routing. Passing `shared_experts=` lets the
-# layer overlap the shared-expert compute with the all2all dispatch.
+        # layer overlap the shared-expert compute with the all2all dispatch.
         # `apply_routed_scale_to_output=True` makes MoERunner handle the
         # FusedMoEFactory with SIGMOID routing. Passing `shared_experts=` lets the
         # layer overlap the shared-expert compute with the all2all dispatch.
