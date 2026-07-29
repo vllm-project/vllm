@@ -590,6 +590,71 @@ def test_truncate_computed_blocks_preserves_sparse_prefix_positions():
     assert [len(group) for group in blocks.blocks] == [3, 2]
 
 
+def test_truncate_computed_blocks_clamps_short_hybrid_group():
+    """Hybrid groups may hold fewer blocks than the truncation point covers
+    (sparse retention / divergent per-group hits): truncate_computed_blocks
+    must clamp to what each group has instead of tripping
+    ``assert num_blocks <= len(group_blocks)`` and killing the engine, and
+    floor token counts that are not aligned to a group's own block size."""
+    hash_block_size = 2
+    kv_cache_config = KVCacheConfig(
+        num_blocks=24,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=2 * hash_block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    producer = make_request("producer", [0, 0, 1, 1, 2, 2], hash_block_size, sha256)
+    blocks, num_computed, _ = manager.get_computed_blocks(producer)
+    assert manager.allocate_slots(producer, 6, num_computed, blocks) is not None
+    manager.free(producer)
+    manager.new_step_starts()
+
+    consumer = make_request(
+        "consumer", [0, 0, 1, 1, 2, 2, 3, 3], hash_block_size, sha256
+    )
+    blocks, num_computed, _ = manager.get_computed_blocks(consumer)
+    assert num_computed == 6
+    assert [len(group) for group in blocks.blocks] == [3, 2]
+
+    # Aligned to both groups but beyond the full-attention group's blocks
+    # (8 tokens -> 4 full-attn blocks, only 3 present): previously a fatal
+    # AssertionError, now clamped to the group's own coverage.
+    clamped = manager.truncate_computed_blocks(blocks, 8)
+    assert [len(group) for group in clamped.blocks] == [3, 2]
+
+    # Not aligned to the mamba group's block size (6 % 4 != 0): floored to
+    # that group's block boundary instead of asserting.
+    floored = manager.truncate_computed_blocks(blocks, 6)
+    assert [len(group) for group in floored.blocks] == [3, 1]
+
+    # The lookup result itself is never mutated.
+    assert [len(group) for group in blocks.blocks] == [3, 2]
+
+
 def test_hybrid_mamba_partial_tail_owner_continue_preserves_later_hit():
     hash_block_size = 2
     block_size = 2 * hash_block_size
