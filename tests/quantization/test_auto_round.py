@@ -85,7 +85,7 @@ QWEN3_AUTOROUND_MODELS = [
         id="auto_round:mxfp4:qwen3-1p7b",
     ),
     pytest.param(
-        "INCModel/INCModel/Qwen3-30B-A3B-12L-W4A16-test",
+        "INCModel/Qwen3-30B-A3B-12L-W4A16-test",
         marks=pytest.mark.skipif(
             not (current_platform.is_cuda() or current_platform.is_xpu()),
             reason="Qwen3-30B-A3B W4A16 AutoRound model requires CUDA/XPU.",
