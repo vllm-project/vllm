@@ -3016,6 +3016,11 @@ class VllmConfig:
             if getattr(speculative_config, "use_heterogeneous_vocab", False):
                 unsupported.append("heterogeneous-vocabulary draft models")
 
+            # FLy overrides rejections by rewriting the V1 acceptance kernels'
+            # inputs; the V2 sampler fuses acceptance and exposes no equivalent.
+            if speculative_config.rejection_sample_method == "fly":
+                unsupported.append("FLy verification (rejection_sample_method='fly')")
+
         if self.parallel_config.use_ubatching:
             unsupported.extend(self._get_dbo_unsupported_features())
 
