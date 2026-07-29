@@ -136,7 +136,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 
 
-ENV LD_LIBRARY_PATH=/opt/intel/oneapi/ccl/2021.15/lib:/opt/intel/oneapi/mpi/2021.15/lib:/opt/intel/oneapi/compiler/2025.3/lib:/usr/local/lib
+ENV LD_LIBRARY_PATH=/opt/venv/lib:/opt/intel/oneapi/ccl/2021.15/lib:/opt/intel/oneapi/mpi/2021.15/lib:/opt/intel/oneapi/compiler/2025.3/lib:/usr/local/lib
 CMD ["/bin/bash"]
 
 ######################### UCX + NIXL BUILD STAGE #########################
