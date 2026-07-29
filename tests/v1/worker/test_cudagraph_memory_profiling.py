@@ -54,6 +54,7 @@ class _FakeFlashInferWrapper:
         self._vllm_flashinfer_int_workspace_finalized = False
         self.is_cuda_graph_enabled = False
         self.reset_calls = 0
+        self.workspace_size: object | None = None
 
     def reset_workspace_buffer(
         self,
@@ -230,6 +231,111 @@ def test_flashinfer_workspace_size_parses_sequence_like_array():
     assert flashinfer_backend._parse_workspace_sizes(
         _FakeWorkspaceSizeArray([1024, 64])
     ) == WorkspaceSizes(1024, 64, True)
+
+
+@pytest.mark.parametrize("use_custom_mask", [False, True])
+def test_flashinfer_prefill_workspace_size_uses_public_wrapper(use_custom_mask):
+    pytest.importorskip("flashinfer")
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    WorkspaceSizes = flashinfer_backend.WorkspaceSizes
+    builder = _make_flashinfer_builder(flashinfer_backend)
+    builder.model_config = SimpleNamespace(dtype=torch.float16)
+    builder.num_qo_heads = 8
+    builder.num_kv_heads = 2
+    builder.head_dim = 128
+    builder.page_size = 16
+    builder.sm_scale = 0.125
+    builder.logits_soft_cap = 0.0
+    builder.q_data_type_prefill = torch.float16
+    builder.kv_cache_dtype = torch.float16
+    qo_indptr = torch.tensor([0, 3], dtype=torch.int32)
+    paged_kv_indptr = torch.tensor([0, 2], dtype=torch.int32)
+    paged_kv_indices = torch.tensor([0, 1], dtype=torch.int32)
+    paged_kv_last_page_len = torch.tensor([8], dtype=torch.int32)
+
+    class PublicWrapper:
+        kwargs = None
+
+        def workspace_size(self, **kwargs):
+            self.kwargs = kwargs
+            return _FakeWorkspaceSizeArray([1024, 64])
+
+    wrapper = PublicWrapper()
+    assert builder._get_prefill_workspace_size(
+        prefill_wrapper=wrapper,
+        qo_indptr=qo_indptr,
+        paged_kv_indptr=paged_kv_indptr,
+        paged_kv_indices=paged_kv_indices,
+        paged_kv_last_page_len=paged_kv_last_page_len,
+        causal=True,
+        window_left=-1,
+        use_custom_mask=use_custom_mask,
+        fixed_split_size=-1,
+        disable_split_kv=False,
+    ) == WorkspaceSizes(1024, 64, True)
+
+    assert wrapper.kwargs is not None
+    assert wrapper.kwargs["qo_indptr"] is qo_indptr
+    assert wrapper.kwargs["paged_kv_indptr"] is paged_kv_indptr
+    assert wrapper.kwargs["paged_kv_indices"] is paged_kv_indices
+    assert wrapper.kwargs["paged_kv_last_page_len"] is paged_kv_last_page_len
+    assert wrapper.kwargs["causal"] is True
+    assert wrapper.kwargs["fixed_split_size"] == -1
+    assert wrapper.kwargs["disable_split_kv"] is False
+    custom_mask = wrapper.kwargs["custom_mask"]
+    assert (custom_mask is not None) is use_custom_mask
+    if custom_mask is not None:
+        assert custom_mask.dtype == torch.bool
+        assert custom_mask.numel() == 0
+
+
+def test_flashinfer_decode_workspace_size_uses_public_wrapper():
+    pytest.importorskip("flashinfer")
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    WorkspaceSizes = flashinfer_backend.WorkspaceSizes
+    builder = _make_flashinfer_builder(flashinfer_backend)
+    builder.model_config = SimpleNamespace(dtype=torch.float16)
+    builder.num_qo_heads = 8
+    builder.dcp_world_size = 2
+    builder.num_kv_heads = 2
+    builder.head_dim = 128
+    builder.page_size = 16
+    builder.sm_scale = 0.125
+    builder.window_left = -1
+    builder.logits_soft_cap = 0.0
+    builder.q_data_type_decode = torch.float16
+    builder.kv_cache_dtype = torch.float16
+    indptr = torch.tensor([0, 2], dtype=torch.int32)
+    indices = torch.tensor([0, 1], dtype=torch.int32)
+    last_page_len = torch.tensor([8], dtype=torch.int32)
+
+    class PublicWrapper:
+        kwargs = None
+
+        def workspace_size(self, **kwargs):
+            self.kwargs = kwargs
+            return _FakeWorkspaceSizeArray([2048, 128])
+
+    wrapper = PublicWrapper()
+    assert builder._get_decode_workspace_size(
+        decode_wrapper=wrapper,
+        indptr_cpu=indptr,
+        indices=indices,
+        last_page_len_cpu=last_page_len,
+        fixed_split_size=-1,
+        disable_split_kv=False,
+    ) == WorkspaceSizes(2048, 128, True)
+
+    assert wrapper.kwargs is not None
+    assert wrapper.kwargs["indptr"] is indptr
+    assert wrapper.kwargs["indices"] is indices
+    assert wrapper.kwargs["last_page_len"] is last_page_len
+    assert wrapper.kwargs["num_qo_heads"] == 16
+    assert wrapper.kwargs["fixed_split_size"] == -1
+    assert wrapper.kwargs["disable_split_kv"] is False
+    assert wrapper.kwargs["q_len_per_req"] == 1
 
 
 def test_flashinfer_workspace_size_float_only_keeps_default_int_workspace():
@@ -779,9 +885,11 @@ def test_flashinfer_reserves_prefill_tail_workspace(monkeypatch):
     builder.window_left = -1
     builder.prefill_fixed_split_size = -1
     builder.disable_split_kv = False
+    builder.paged_kv_indices = SimpleNamespace(gpu=torch.empty(0, dtype=torch.int32))
 
     class FakeWrapper:
-        pass
+        def workspace_size(self, **kwargs):
+            raise AssertionError("workspace_size should be mocked at the builder seam")
 
     ensured = []
     observed_query_lens = []
@@ -796,11 +904,6 @@ def test_flashinfer_reserves_prefill_tail_workspace(monkeypatch):
             else WorkspaceSizes(0, 0)
         )
 
-    monkeypatch.setattr(
-        builder,
-        "_get_prefill_workspace_size_func",
-        lambda **kwargs: ("fa2", object()),
-    )
     monkeypatch.setattr(
         builder,
         "_get_workspace_routes",
@@ -863,9 +966,6 @@ def test_flashinfer_memory_profile_materializes_runtime_wrapper_fallbacks(
         calls: list[tuple[str, int | None]]
         reserve_decode_calls: list[tuple[int, bool]]
 
-        def _get_prefill_workspace_size_func(self, **kwargs):
-            return ("fa2", object()) if self.helper_available else None
-
         def _call_prefill_workspace_size(self, **kwargs):
             return None
 
@@ -880,11 +980,13 @@ def test_flashinfer_memory_profile_materializes_runtime_wrapper_fallbacks(
 
         def _get_prefill_wrapper(self, causal=True):
             assert causal
-            self.calls.append(("prefill", None))
             if self._prefill_wrapper is None:
+                self.calls.append(("prefill", None))
                 self._prefill_wrapper = _FakeFlashInferWrapper(
                     self._get_workspace_buffer(1), int_workspace_bytes=64
                 )
+                if self.helper_available:
+                    self._prefill_wrapper.workspace_size = lambda **kwargs: None
                 self._register_workspace_wrapper(self._prefill_wrapper)
             return self._prefill_wrapper
 
@@ -936,6 +1038,7 @@ def test_flashinfer_memory_profile_materializes_runtime_wrapper_fallbacks(
     builder.window_left = -1
     builder.prefill_fixed_split_size = -1
     builder.disable_split_kv = False
+    builder.paged_kv_indices = SimpleNamespace(gpu=torch.empty(0, dtype=torch.int32))
     builder.enable_cuda_graph = True
     builder._decode_cudagraph_max_bs = 4
     builder._prefill_wrapper = None
@@ -1046,6 +1149,7 @@ def test_flashinfer_reserves_decode_cudagraph_int_workspace(monkeypatch):
     builder = _make_flashinfer_builder(flashinfer_backend)
     builder.decode_fixed_split_size = -1
     builder.disable_split_kv = False
+    builder.paged_kv_indices = SimpleNamespace(gpu=torch.empty(0, dtype=torch.int32))
 
     wrapper = _FakeFlashInferWrapper()
     wrapper.is_cuda_graph_enabled = True
