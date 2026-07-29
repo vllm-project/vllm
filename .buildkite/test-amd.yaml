@@ -1576,10 +1576,14 @@ steps:
   - vllm/third_party/flash_linear_attention/ops/kda.py
   - vllm/third_party/flash_linear_attention/ops/chunk_delta_h.py
   - vllm/third_party/flash_linear_attention/ops/l2norm.py
-  - tests/kernels/test_kda.py
+  - vllm/models/kimi_k3/nvidia/kda.py
+  - vllm/models/kimi_k3/nvidia/kda_metadata.py
+  - vllm/models/kimi_k3/nvidia/ops/third_party/kda/
+  - tests/models/kimi_k3/test_kda.py
+  - tests/models/kimi_k3/test_kda_metadata.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s kernels/test_kda.py
+  - pytest -v -s models/kimi_k3/test_kda.py models/kimi_k3/test_kda_metadata.py
 
 - label: Kernels Mamba Test # TBD
   timeout_in_minutes: 180
