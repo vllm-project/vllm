@@ -19,6 +19,8 @@ from vllm.platforms import current_platform
 
 from .gsm8k_eval import evaluate_gsm8k
 
+DEFAULT_STARTUP_MAX_WAIT_SECONDS = 1200
+
 
 def run_gsm8k_eval(eval_config: dict, server_url: str) -> dict:
     """Run GSM8K evaluation using our isolated script."""
@@ -39,11 +41,25 @@ def run_gsm8k_eval(eval_config: dict, server_url: str) -> dict:
         host = f"http://{host}"
 
     # Run GSM8K evaluation
+    request_timeout_seconds = eval_config.get("request_timeout_seconds", 600)
+    if current_platform.is_rocm():
+        request_timeout_seconds = eval_config.get(
+            "rocm_request_timeout_seconds", request_timeout_seconds
+        )
+
     results = evaluate_gsm8k(
         num_questions=eval_config["num_questions"],
         num_shots=eval_config["num_fewshot"],
+        max_tokens=eval_config.get("max_tokens", 256),
+        model=eval_config["model_name"],
+        use_chat_completions=eval_config.get("use_chat_completions", False),
         host=host,
         port=port,
+        temperature=eval_config.get("temperature", 0.0),
+        seed=eval_config.get("seed", 42),
+        request_timeout_seconds=request_timeout_seconds,
+        gen_prefix=eval_config.get("gen_prefix", ""),
+        max_concurrency=eval_config.get("max_concurrency"),
     )
 
     return results
@@ -62,6 +78,15 @@ def test_gsm8k_correctness(config_filename):
             "Marlin kernels are not supported."
         )
 
+    if (
+        not current_platform.is_cuda()
+        and "gemma-4-E4B-it-qat-mobile-ct" in eval_config["model_name"]
+    ):
+        pytest.skip(
+            "Skipping gemma-4-E4B-it-qat-mobile-ct on non-CUDA platforms. "
+            "Its W2A16 (uint2b2) scheme has no kernel outside CUDA."
+        )
+
     # TODO(akaratza): Enable DeepSeek-V3.2 and DeepSeek-R1 on ROCm platforms
     if current_platform.is_rocm() and (
         "deepseek-ai/DeepSeek-V3.2" in eval_config["model_name"]
@@ -71,7 +96,16 @@ def test_gsm8k_correctness(config_filename):
             "Skipping DeepSeek-V3.2 and DeepSeek-R1 on ROCm platforms "
             "due to agent pool disk space issues and pod evictions."
         )
+    if current_platform.is_rocm() and (
+        "Qwen3.5-35B-A3B-MXFP4-AITER-TP2" in config_filename.name
+    ):
+        from vllm.platforms.rocm import on_gfx950
 
+        if not on_gfx950():
+            pytest.skip(
+                "Skipping Qwen3.5-35B-A3B-MXFP4-AITER-TP2 on non-GFX950 platforms. "
+                "The quantization scheme is not supported on non-GFX950 platforms."
+            )
     # Parse server arguments from config (use shlex to handle quoted strings)
     server_args_str = eval_config.get("server_args", "")
     server_args = shlex.split(server_args_str) if server_args_str else []
@@ -84,12 +118,23 @@ def test_gsm8k_correctness(config_filename):
         ]
     )
 
-    env_dict = eval_config.get("env", None)
+    startup_max_wait_seconds = eval_config.get(
+        "startup_max_wait_seconds", DEFAULT_STARTUP_MAX_WAIT_SECONDS
+    )
+    env_dict = dict(eval_config.get("env") or {})
+    env_dict["VLLM_ENGINE_READY_TIMEOUT_S"] = str(int(startup_max_wait_seconds))
 
     print(f"Starting GSM8K evaluation for model: {eval_config['model_name']}")
     print(f"Expected metric threshold: {eval_config['accuracy_threshold']}")
     print(f"Number of questions: {eval_config['num_questions']}")
     print(f"Number of few-shot examples: {eval_config['num_fewshot']}")
+    request_timeout_seconds = eval_config.get("request_timeout_seconds", 600)
+    if current_platform.is_rocm():
+        request_timeout_seconds = eval_config.get(
+            "rocm_request_timeout_seconds", request_timeout_seconds
+        )
+    print(f"Request timeout: {request_timeout_seconds}s")
+    print(f"Startup max wait: {startup_max_wait_seconds}s")
     print(f"Server args: {' '.join(server_args)}")
     print(f"Environment variables: {env_dict}")
 
@@ -98,7 +143,7 @@ def test_gsm8k_correctness(config_filename):
         eval_config["model_name"],
         server_args,
         env_dict=env_dict,
-        max_wait_seconds=eval_config.get("startup_max_wait_seconds", 600),
+        max_wait_seconds=startup_max_wait_seconds,
     ) as remote_server:
         server_url = remote_server.url_for("v1")
         print(f"Server started at: {server_url}")

@@ -34,20 +34,18 @@ def _set_spawn_method(monkeypatch):
 
 
 def _make_region(
-    instance_id: str,
+    engine_id: str,
     num_blocks: int = 4,
     cpu_page_size: int = PAGE_SIZE,
     num_workers: int = 1,
     rank: int = 0,
 ) -> SharedOffloadRegion:
-    total_size_bytes = num_blocks * num_workers * cpu_page_size
-    assert total_size_bytes % PAGE_SIZE == 0
+    assert cpu_page_size % PAGE_SIZE == 0
     return SharedOffloadRegion(
-        instance_id=instance_id,
-        total_size_bytes=total_size_bytes,
+        engine_id=engine_id,
         num_blocks=num_blocks,
         rank=rank,
-        num_workers=num_workers,
+        kv_bytes_per_block=num_workers * cpu_page_size,
         cpu_page_size=cpu_page_size,
     )
 
@@ -59,9 +57,9 @@ def _cleanup_file(path: str) -> None:
 
 
 @contextlib.contextmanager
-def _region(instance_id: str, **kwargs):
+def _region(engine_id: str, **kwargs):
     """Context manager: create one region, clean up on exit."""
-    r = _make_region(instance_id, **kwargs)
+    r = _make_region(engine_id, **kwargs)
     try:
         yield r
     finally:
@@ -71,20 +69,18 @@ def _region(instance_id: str, **kwargs):
 
 @contextlib.contextmanager
 def _multi_region(
-    instance_id: str,
+    engine_id: str,
     num_workers: int,
     num_blocks: int = 4,
     cpu_page_size: int = PAGE_SIZE,
 ):
     """Context manager: create one SharedOffloadRegion per rank, clean up on exit."""
-    total = num_blocks * num_workers * cpu_page_size
     regions = [
         SharedOffloadRegion(
-            instance_id=instance_id,
-            total_size_bytes=total,
+            engine_id=engine_id,
             num_blocks=num_blocks,
             rank=rank,
-            num_workers=num_workers,
+            kv_bytes_per_block=num_workers * cpu_page_size,
             cpu_page_size=cpu_page_size,
         )
         for rank in range(num_workers)
@@ -98,13 +94,12 @@ def _multi_region(
 
 
 def _race_construct(
-    instance_id: str,
+    engine_id: str,
     num_workers: int,
     num_blocks: int = 4,
     cpu_page_size: int = PAGE_SIZE,
 ) -> tuple[list[SharedOffloadRegion], list[Exception]]:
     """Spawn num_workers threads that all race to construct SharedOffloadRegion."""
-    total = num_blocks * num_workers * cpu_page_size
     regions: list[SharedOffloadRegion | None] = [None] * num_workers
     errors: list[Exception] = []
     barrier = threading.Barrier(num_workers)
@@ -113,11 +108,10 @@ def _race_construct(
         barrier.wait()  # all threads start at the same instant
         try:
             regions[rank] = SharedOffloadRegion(
-                instance_id=instance_id,
-                total_size_bytes=total,
+                engine_id=engine_id,
                 num_blocks=num_blocks,
                 rank=rank,
-                num_workers=num_workers,
+                kv_bytes_per_block=num_workers * cpu_page_size,
                 cpu_page_size=cpu_page_size,
             )
         except Exception as e:
@@ -133,8 +127,7 @@ def _race_construct(
 
 
 def _mp_race_construct_and_write(
-    instance_id: str,
-    total_bytes: int,
+    engine_id: str,
     num_blocks: int,
     rank: int,
     num_workers: int,
@@ -148,11 +141,10 @@ def _mp_race_construct_and_write(
     parent a window to read the raw mmap before the creator removes the file."""
     try:
         region = SharedOffloadRegion(
-            instance_id=instance_id,
-            total_size_bytes=total_bytes,
+            engine_id=engine_id,
             num_blocks=num_blocks,
             rank=rank,
-            num_workers=num_workers,
+            kv_bytes_per_block=num_workers * cpu_page_size,
             cpu_page_size=cpu_page_size,
         )
         t = region.create_next_view(cpu_page_size)
@@ -309,7 +301,6 @@ def test_create_next_view_multiprocess_slots(iid):
     the parent verifies each slot lands at the correct interleaved offset."""
     num_workers = 2
     num_blocks = 4
-    total_bytes = num_blocks * num_workers * PAGE_SIZE
 
     ctx = get_mp_context()
     done_queue = ctx.Queue()
@@ -317,11 +308,10 @@ def test_create_next_view_multiprocess_slots(iid):
 
     # Parent is rank 0 (creator); child is rank 1 (joiner).
     region = SharedOffloadRegion(
-        instance_id=iid,
-        total_size_bytes=total_bytes,
+        engine_id=iid,
         num_blocks=num_blocks,
         rank=0,
-        num_workers=num_workers,
+        kv_bytes_per_block=num_workers * PAGE_SIZE,
         cpu_page_size=PAGE_SIZE,
     )
     try:
@@ -329,7 +319,6 @@ def test_create_next_view_multiprocess_slots(iid):
             target=_mp_race_construct_and_write,
             args=(
                 iid,
-                total_bytes,
                 num_blocks,
                 1,
                 num_workers,
@@ -464,7 +453,6 @@ def test_multiprocess_race_construct_and_write(iid):
     fill_value = rank+1 into their slot; parent verifies interleaved layout."""
     num_workers = 4
     num_blocks = 3
-    total_bytes = num_blocks * num_workers * PAGE_SIZE
 
     ctx = get_mp_context()
     done_queue = ctx.Queue()
@@ -475,7 +463,6 @@ def test_multiprocess_race_construct_and_write(iid):
             target=_mp_race_construct_and_write,
             args=(
                 iid,
-                total_bytes,
                 num_blocks,
                 rank,
                 num_workers,

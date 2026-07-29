@@ -73,7 +73,10 @@ def _bf16_mla_sparse_kernel(
             q_buffer + off_qpe, mask=(mask_h[:, None]) & (mask_dpe[None, :]), other=0.0
         )
 
-    e_max = tl.zeros([BLOCK_H], dtype=tl.float32) - float("inf")
+    # Use a finite sentinel rather than -inf: if every key in a chunk is
+    # masked (e.g. leading -1 padding in `indices`) an -inf running max gives
+    # re_scale = exp2(-inf - -inf) = NaN, permanently poisoning acc / e_sum.
+    e_max = tl.zeros([BLOCK_H], dtype=tl.float32) - 1.0e30
     e_sum = tl.zeros([BLOCK_H], dtype=tl.float32)
     acc = tl.zeros([BLOCK_H, BLOCK_DV], dtype=tl.float32)
 
@@ -122,7 +125,7 @@ def _bf16_mla_sparse_kernel(
 
         # apply scaling
         qk *= sm_scale
-        qk = tl.where((mask_h[:, None]) & (mask_kv[None, :]), qk, -float("inf"))
+        qk = tl.where((mask_h[:, None]) & (mask_kv[None, :]), qk, -1.0e30)
 
         # load v
         mask_v_d = offs_dv < dim_v
@@ -180,11 +183,17 @@ def triton_bf16_mla_sparse_interface(
     indices: torch.Tensor,  # [num_tokens, num_heads_kv, topk]
     sm_scale: float,
     d_v: int = 512,
+    block_dpe: int = 64,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     out : [num_tokens, num_heads_q, d_v]
     max_logits : [num_tokens, num_heads_q]
     lse : logsumexp, [num_tokens, num_heads_q]
+
+    Args:
+        block_dpe: Size of positional embedding portion of dim_qk.
+            Set to 0 when q/kv contain only the nope latent (e.g. DSv4
+            prefill where RoPE is not split out).
     """
     num_tokens, num_heads_q, dim_qk = q.shape
     _, num_heads_kv, _ = kv.shape
@@ -194,8 +203,8 @@ def triton_bf16_mla_sparse_interface(
     _, _, index_topk = indices.shape
 
     BLOCK_H = 16
-    BLOCK_DMODEL = 512
-    BLOCK_DPE = 64
+    BLOCK_DPE = block_dpe
+    BLOCK_DMODEL = dim_qk - BLOCK_DPE
     BLOCK_M = 32
     BLOCK_N = 16
     BLOCK_DV = 512

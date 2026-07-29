@@ -81,7 +81,18 @@ class MultiModalHasher:
             ):
                 return (exif[Image.ExifTags.Base.ImageID].bytes,)
 
+            if obj.io_config:
+                return cls.iter_item_to_bytes(
+                    "image",
+                    {"io_config": obj.io_config, "data": obj.original_bytes},
+                )
             return cls.iter_item_to_bytes("image", obj.original_bytes)
+
+        if isinstance(obj, MediaWithBytes) and isinstance(obj.media, np.ndarray):
+            frames = obj.media
+            if frames.nbytes < len(obj.original_bytes):
+                return cls.iter_item_to_bytes("video", frames)
+            return cls.iter_item_to_bytes("video", obj.original_bytes)
 
         if isinstance(obj, torch.Tensor):
             tensor_obj: torch.Tensor = obj.cpu()

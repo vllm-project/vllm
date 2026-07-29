@@ -5,8 +5,11 @@ from http import HTTPStatus
 from fastapi import APIRouter, Depends, Request
 
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
-from vllm.entrypoints.openai.utils import validate_json_request
-from vllm.entrypoints.utils import load_aware_call, with_cancellation
+from vllm.entrypoints.serve.utils.api_utils import (
+    load_aware_call,
+    validate_json_request,
+    with_cancellation,
+)
 from vllm.logger import init_logger
 
 from .protocol import RerankRequest, ScoreRequest
@@ -17,12 +20,18 @@ router = APIRouter()
 logger = init_logger(__name__)
 
 
-def score(request: Request) -> ServingScores | None:
-    return request.app.state.serving_scores
+def score(request: Request) -> ServingScores:
+    handler = getattr(request.app.state, "serving_scores", None)
+    if handler is None:
+        raise NotImplementedError("The model does not support Score API")
+    return handler
 
 
-def rerank(request: Request) -> ServingScores | None:
-    return request.app.state.serving_scores
+def rerank(request: Request) -> ServingScores:
+    handler = getattr(request.app.state, "serving_scores", None)
+    if handler is None:
+        raise NotImplementedError("The model does not support Rerank (Score) API")
+    return handler
 
 
 @router.post(
@@ -37,9 +46,6 @@ def rerank(request: Request) -> ServingScores | None:
 @load_aware_call
 async def create_score(request: ScoreRequest, raw_request: Request):
     handler = score(raw_request)
-    if handler is None:
-        raise NotImplementedError("The model does not support Score API")
-
     return await handler(request, raw_request)
 
 
@@ -74,9 +80,6 @@ async def create_score_v1(request: ScoreRequest, raw_request: Request):
 @load_aware_call
 async def do_rerank(request: RerankRequest, raw_request: Request):
     handler = rerank(raw_request)
-    if handler is None:
-        raise NotImplementedError("The model does not support Rerank (Score) API")
-
     return await handler(request, raw_request)
 
 

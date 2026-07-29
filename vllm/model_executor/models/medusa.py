@@ -136,6 +136,26 @@ class Medusa(nn.Module):
 
         return logits_lst
 
+    @staticmethod
+    def _remap_old_checkpoint_key(name: str) -> str:
+        """Map old FasterDecoding checkpoint keys to vLLM parameter names.
+
+        Old format uses bare numeric prefixes:
+          '{head}.{layer}.linear.weight' -> 'blocks.{head}.layers.{layer}.weight'
+          '{head}.{layer}.linear.bias'   -> 'blocks.{head}.layers.{layer}.bias'
+          '{head}.{N}.weight'            -> 'lm_heads.{head}.weight'
+        """
+        parts = name.split(".")
+        if len(parts) >= 3 and parts[0].isdigit() and parts[1].isdigit():
+            head, layer = parts[0], parts[1]
+            rest = parts[2:]
+            if "linear" in rest:
+                param = ".".join(rest[rest.index("linear") + 1 :])
+                return f"blocks.{head}.layers.{layer}.{param}"
+            else:
+                return f"lm_heads.{head}.{'.'.join(rest)}"
+        return name
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -144,6 +164,7 @@ class Medusa(nn.Module):
 
         for name, loaded_weight in weights:
             name = name.replace("medusa_heads.", "")
+            name = self._remap_old_checkpoint_key(name)
 
             if name == "token_map":
                 if self.truncated_vocab_size < self.orig_vocab_size:

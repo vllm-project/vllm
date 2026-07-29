@@ -3,7 +3,6 @@
 import contextlib
 import importlib.metadata
 import os
-import platform
 import random
 import threading
 from collections.abc import Callable, Collection
@@ -18,6 +17,7 @@ from torch.library import Library, infer_schema
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.utils.platform_utils import is_pin_memory_available
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -39,6 +39,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8_e4m3": torch.uint8,
     "fp8_e5m2": torch.uint8,
     "int8": torch.int8,
+    "int4_per_token_head": torch.uint8,
     "int8_per_token_head": torch.int8,
     "fp8_per_token_head": torch.uint8,
     "fp8_inc": torch.float8_e4m3fn,
@@ -68,9 +69,7 @@ MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
 T = TypeVar("T")
 
 
-# Pin memory in non-WSL case.
-# Logic duplicated here for now to avoid circular import.
-PIN_MEMORY = "microsoft" not in " ".join(platform.uname()).lower()
+PIN_MEMORY = is_pin_memory_available()
 
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
@@ -417,26 +416,24 @@ def nvfp4_kv_cache_full_dim(head_size: int) -> int:
     return head_size // 2 + head_size // 16
 
 
-def _nvfp4_split_data_scale(
+def nvfp4_split_data_scale(
     kv_side: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Split a single NVFP4 KV-side buffer into data and scale views.
+    """Split one side (K or V) of an NVFP4 KV cache into data and scale.
 
-    The input is a 4D tensor for one KV side (K or V) whose last
-    dimension is ``full_dim = data_dim + scale_dim``.  The physical
-    layout within each side is [data | scale], both packed contiguously.
+    The input is a 4D uint8 tensor whose last dimension is
+    ``full_dim = data_dim + scale_dim``.  The physical layout within each
+    side is ``[data | scale]``, both packed contiguously.
+
+    The caller is responsible for slicing K and V from the combined cache
+    first (e.g. ``kv_cache.split(num_kv_heads, dim=1)``).
 
     Args:
-        kv_side: 4D uint8 tensor with shape
-            ``(num_pages, dim_1, dim_2, full_dim)``.
-            May be in any permutation order (NHD or HND).
+        kv_side: 4D uint8 tensor ``(B, H, N, full_dim)``.
 
     Returns:
-        ``(data, scale)`` where
-        ``data`` is a uint8 view with shape
-        ``(num_pages, dim_1, dim_2, data_dim)``.
-        ``scale`` is a float8_e4m3fn view with shape
-        ``(num_pages, dim_1, dim_2, scale_dim)``.
+        ``(data, scale)`` where *data* is uint8 and *scale* is
+        float8_e4m3fn, both views of the same storage.
     """
     num_pages = kv_side.shape[0]
     dim_1, dim_2 = kv_side.shape[1], kv_side.shape[2]
@@ -467,38 +464,6 @@ def _nvfp4_split_data_scale(
     ).view(torch.float8_e4m3fn)
 
     return data, scale
-
-
-def nvfp4_kv_cache_split_views(kv_cache: torch.Tensor) -> tuple[tuple, tuple]:
-    """Split an NVFP4 KV cache tensor into data and scale views.
-
-    Accepts either a 5D tensor ``(num_pages, 2, dim_2, dim_3, full_dim)``
-    or a 4D single-side tensor ``(num_pages, dim_2, dim_3, full_dim)``.
-
-    Per-page layout: [K_data | K_scale | V_data | V_scale].
-    Each KV side is self-contained (data followed by its scale), so the
-    5D case simply splits each side independently.
-
-    The returned views are in the same dim order as the input (NHD or
-    HND), so callers get views matching whichever order they passed in.
-
-    Args:
-        kv_cache: 5D or 4D uint8 tensor where the last dimension is
-            ``full_dim = data_dim + scale_dim = 9 * head_size / 16``.
-
-    Returns:
-        For 5D input:
-            ``(k_data, v_data), (k_scale, v_scale)``
-        For 4D input (single KV side):
-            ``(data,), (scale,)``
-    """
-    if kv_cache.dim() == 4:
-        data, scale = _nvfp4_split_data_scale(kv_cache)
-        return (data,), (scale,)
-
-    k_data, k_scale = _nvfp4_split_data_scale(kv_cache[:, 0])
-    v_data, v_scale = _nvfp4_split_data_scale(kv_cache[:, 1])
-    return (k_data, v_data), (k_scale, v_scale)
 
 
 def create_kv_caches_with_random_flash(
@@ -606,14 +571,24 @@ def create_kv_caches_with_random(
 
 
 def async_tensor_h2d(
-    data: list,
-    dtype: torch.dtype,
+    data: list | np.ndarray | torch.Tensor,
     device: str | torch.device,
-    pin_memory: bool = PIN_MEMORY,
+    dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
-    """Asynchronously create a tensor and copy it from host to device."""
-    t = torch.tensor(data, dtype=dtype, pin_memory=pin_memory, device="cpu")
-    return t.to(device=device, non_blocking=True)
+    """Copy list/numpy array/tensor async from host to device."""
+    if isinstance(data, np.ndarray):
+        data = torch.from_numpy(data)
+    if isinstance(data, torch.Tensor):
+        t = data.pin_memory() if PIN_MEMORY else data
+    else:
+        t = torch.tensor(data, dtype=dtype, pin_memory=PIN_MEMORY, device="cpu")
+    assert t.is_cpu
+    return t.to(device=device, dtype=dtype, non_blocking=True)
+
+
+def np_to_pinned_tensor(array: np.ndarray) -> torch.Tensor:
+    t = torch.from_numpy(array)
+    return t.pin_memory() if PIN_MEMORY else t
 
 
 def make_ndarray_with_pad(
@@ -912,11 +887,6 @@ def _resolve_layer_name(layer_name: str | LayerName) -> str:
 def _encode_layer_name(layer_name: str) -> str | LayerName:
     """Wrap a str layer name as LayerName when enabled."""
     return LayerName(layer_name) if _USE_LAYERNAME else layer_name
-
-
-# Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform
-def supports_xccl() -> bool:
-    return torch.distributed.is_xccl_available()
 
 
 # Supports XPU Graph with PyTorch versions >= 2.11.0.dev for XPU platform

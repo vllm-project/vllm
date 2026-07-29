@@ -56,5 +56,8 @@ class ModelArchitectureConfig:
     is_mm_prefix_lm: bool
     """Whether the model uses image bidirectional attention."""
 
+    rswa_window: int | None
+    """Reference Sliding Window Attention window size (None disables R-SWA)."""
+
     derived_max_model_len_and_key: tuple[float, str | None]
     """Derived maximum model length and key from the hf config."""

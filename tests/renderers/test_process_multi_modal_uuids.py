@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from http import HTTPStatus
+
 import pytest
 
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.entrypoints.serve.utils.error_response import create_error_response
 from vllm.multimodal.parse import parse_mm_uuids
 from vllm.renderers.hf import HfRenderer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
@@ -33,6 +36,33 @@ def _build_renderer(
         vllm_config,
         cached_tokenizer_from_config(model_config),
     )
+
+
+def _build_text_only_renderer() -> HfRenderer:
+    model_config = ModelConfig(model="openai-community/gpt2", max_model_len=128)
+
+    return HfRenderer(
+        VllmConfig(model_config=model_config),
+        cached_tokenizer_from_config(model_config),
+    )
+
+
+def test_text_only_model_mm_data_maps_to_bad_request():
+    """Sending multimodal data to a text-only model is a client mistake, so it
+    must surface as a ValueError and reach the client as HTTP 400, not 500."""
+    renderer = _build_text_only_renderer()
+
+    with pytest.raises(ValueError, match="text-only") as exc_info:
+        renderer._process_multimodal(
+            prompt="What is in this image?",
+            mm_data={"image": [cherry_pil_image]},
+            mm_uuids=None,
+            mm_processor_kwargs=None,
+            tokenization_kwargs=None,
+        )
+
+    error_response = create_error_response(exc_info.value)
+    assert error_response.error.code == HTTPStatus.BAD_REQUEST
 
 
 def test_multi_modal_uuids_length_mismatch_raises():

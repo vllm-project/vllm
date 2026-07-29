@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config, replace
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -81,11 +82,16 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
         """
         per_group_attn_metadata: list[object] = []
         per_layer_attn_metadata: dict[str, object] = {}
+        batch_size = common_attn_metadata.batch_size()
         for attn_group in self.draft_attn_groups:
             gid = attn_group.kv_cache_group_id
             if gid in self._per_group_block_tables:
                 cm = copy(common_attn_metadata)
-                cm.block_table_tensor = self._per_group_block_tables[gid]
+                # Slice to actual batch size to match cu_seqlens_q dimension.
+                # The stored block tables may be padded (num_reqs_padded) from
+                # the target forward pass, but the drafter operates on the
+                # unpadded batch.
+                cm.block_table_tensor = self._per_group_block_tables[gid][:batch_size]
             else:
                 cm = common_attn_metadata
             attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
@@ -159,6 +165,29 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
                 ),
             )
         return base
+
+    def _maybe_share_embeddings(self, target_language_model: nn.Module) -> None:
+        """Gemma4 MTP requires dim-mismatched embedding sharing.
+
+        The draft checkpoint's embed_tokens is a draft-dim placeholder
+        (tied to lm_head so load_weights populates both); the model
+        expects it to be replaced by the target's backbone-dim embedding,
+        so the base class's embedding-dim equality guard must not apply.
+        """
+        if get_pp_group().world_size != 1:
+            return
+        inner_model = getattr(target_language_model, "model", None)
+        target_embed_tokens = getattr(inner_model, "embed_tokens", None)
+        if target_embed_tokens is None:
+            raise AttributeError(
+                "Target model does not have an 'embed_tokens' attribute"
+            )
+        del self.model.model.embed_tokens
+        self.model.model.embed_tokens = target_embed_tokens
+        logger.info(
+            "Gemma4 MTP: sharing target model's backbone-dim embed_tokens "
+            "with the draft model."
+        )
 
     def _maybe_share_lm_head(self, target_language_model: nn.Module) -> None:
         """Gemma4 MTP always keeps its own draft-dim lm_head.

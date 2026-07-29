@@ -10,7 +10,6 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
-from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import make_tensor_with_pad
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import LogitsProcessors
@@ -236,10 +235,10 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
         max_model_len=1024,
         max_num_batched_tokens=1024,
         device=torch.device(device),
-        pin_memory=is_pin_memory_available(),
         vocab_size=1024,
         block_sizes=[1],
         kernel_block_sizes=[1],
+        max_num_blocks_per_req=[1024],
     )
     reqs: list[CachedRequestState] = []
     req_id_reqs = {}
@@ -331,20 +330,20 @@ def test_swap_states_in_input_batch(device: str, batch_size: int, swap_list: lis
         max_model_len=1024,
         max_num_batched_tokens=1024,
         device=torch.device(device),
-        pin_memory=is_pin_memory_available(),
         vocab_size=1024,
         block_sizes=[1],
         kernel_block_sizes=[1],
+        max_num_blocks_per_req=[1024],
     )
     ref_input_batch: InputBatch = InputBatch(
         max_num_reqs=batch_size,
         max_model_len=1024,
         max_num_batched_tokens=1024,
         device=torch.device(device),
-        pin_memory=is_pin_memory_available(),
         vocab_size=1024,
         block_sizes=[1],
         kernel_block_sizes=[1],
+        max_num_blocks_per_req=[1024],
     )
 
     reqs: list[CachedRequestState] = []
@@ -410,10 +409,10 @@ def test_pooling_prompt_lens_not_aliased(device: str):
         max_model_len=MAX_PROMPT_SIZE + NUM_OUTPUT_TOKENS,
         max_num_batched_tokens=batch_size * (MAX_PROMPT_SIZE + NUM_OUTPUT_TOKENS),
         device=torch.device(device),
-        pin_memory=is_pin_memory_available(),
         vocab_size=VOCAB_SIZE,
         block_sizes=[16],
         kernel_block_sizes=[16],
+        max_num_blocks_per_req=[64],
         is_pooling_model=True,
     )
 
@@ -440,6 +439,41 @@ def test_pooling_prompt_lens_not_aliased(device: str):
     )
 
 
+def test_placeholder_spec_token_ids_written_verbatim():
+    input_batch = InputBatch(
+        max_num_reqs=1,
+        max_model_len=8,
+        max_num_batched_tokens=8,
+        device=torch.device("cpu"),
+        vocab_size=VOCAB_SIZE,
+        block_sizes=[16],
+        kernel_block_sizes=[16],
+        max_num_blocks_per_req=[1],
+    )
+    req = CachedRequestState(
+        req_id="req",
+        prompt_token_ids=[10, 11],
+        mm_features=[],
+        sampling_params=SamplingParams(),
+        block_ids=([],),
+        generator=None,
+        num_computed_tokens=3,
+        output_token_ids=[12],
+    )
+    input_batch.add_request(req)
+
+    input_batch.update_req_spec_token_ids(
+        req,
+        {"req": [13, -1, -1]},
+    )
+
+    # Placeholders (-1) are kept verbatim in both the spec_token_ids list and
+    # the token buffer; they are clamped to 0 only at the embedding boundary
+    # (GPUModelRunner._preprocess).
+    assert input_batch.spec_token_ids[0] == [13, -1, -1]
+    assert input_batch.token_ids_cpu[0, 3:6].tolist() == [13, -1, -1]
+
+
 @pytest.mark.parametrize(
     ("pooling_params", "expect_device_prompt_token_ids", "expect_cpu_prompt_token_ids"),
     [
@@ -459,10 +493,10 @@ def test_pooling_metadata_token_id_buffers(
         max_model_len=MAX_PROMPT_SIZE + NUM_OUTPUT_TOKENS,
         max_num_batched_tokens=MAX_PROMPT_SIZE + NUM_OUTPUT_TOKENS,
         device=torch.device("cpu"),
-        pin_memory=False,
         vocab_size=VOCAB_SIZE,
         block_sizes=[16],
         kernel_block_sizes=[16],
+        max_num_blocks_per_req=[64],
         is_pooling_model=True,
     )
     req = _construct_pooling_request(0, PoolingParams(**pooling_params))

@@ -21,7 +21,10 @@ __global__ void merge_attn_states_kernel(
     const float* prefix_lse, const scalar_t* suffix_output,
     const float* suffix_lse, const uint num_tokens, const uint num_heads,
     const uint head_size, const uint prefix_head_stride,
-    const uint output_head_stride, const uint prefix_num_tokens,
+    const uint output_head_stride, const uint prefix_lse_head_stride,
+    const uint prefix_lse_token_stride, const uint suffix_lse_head_stride,
+    const uint suffix_lse_token_stride, const uint output_lse_head_stride,
+    const uint output_lse_token_stride, const uint prefix_num_tokens,
     const float* output_scale) {
   // Inputs always load 128-bit packs (pack_size elements of scalar_t).
   // Outputs store pack_size elements of output_t, which is smaller for FP8.
@@ -84,15 +87,19 @@ __global__ void merge_attn_states_kernel(
       }
     }
     if (output_lse != nullptr && pack_idx == 0) {
-      float s_lse = suffix_lse[head_idx * num_tokens + token_idx];
-      output_lse[head_idx * num_tokens + token_idx] = s_lse;
+      float s_lse = suffix_lse[head_idx * suffix_lse_head_stride +
+                               token_idx * suffix_lse_token_stride];
+      output_lse[head_idx * output_lse_head_stride +
+                 token_idx * output_lse_token_stride] = s_lse;
     }
     return;
   }
 
   // For tokens within prefix range, merge prefix and suffix
-  float p_lse = prefix_lse[head_idx * num_tokens + token_idx];
-  float s_lse = suffix_lse[head_idx * num_tokens + token_idx];
+  float p_lse = prefix_lse[head_idx * prefix_lse_head_stride +
+                           token_idx * prefix_lse_token_stride];
+  float s_lse = suffix_lse[head_idx * suffix_lse_head_stride +
+                           token_idx * suffix_lse_token_stride];
   p_lse = std::isinf(p_lse) ? -std::numeric_limits<float>::infinity() : p_lse;
   s_lse = std::isinf(s_lse) ? -std::numeric_limits<float>::infinity() : s_lse;
 
@@ -132,7 +139,8 @@ __global__ void merge_attn_states_kernel(
     }
     // We only need to write to output_lse once per head.
     if (output_lse != nullptr && pack_idx == 0) {
-      output_lse[head_idx * num_tokens + token_idx] = max_lse;
+      output_lse[head_idx * output_lse_head_stride +
+                 token_idx * output_lse_token_stride] = max_lse;
     }
     return;
   }
@@ -187,7 +195,8 @@ __global__ void merge_attn_states_kernel(
   // We only need to write to output_lse once per head.
   if (output_lse != nullptr && pack_idx == 0) {
     float out_lse = logf(out_se) + max_lse;
-    output_lse[head_idx * num_tokens + token_idx] = out_lse;
+    output_lse[head_idx * output_lse_head_stride +
+               token_idx * output_lse_token_stride] = out_lse;
   }
 }
 
@@ -221,6 +230,9 @@ __global__ void merge_attn_states_kernel(
             reinterpret_cast<scalar_t*>(suffix_output.data_ptr()),          \
             reinterpret_cast<float*>(suffix_lse.data_ptr()), num_tokens,    \
             num_heads, head_size, prefix_head_stride, output_head_stride,   \
+            prefix_lse_head_stride, prefix_lse_token_stride,                \
+            suffix_lse_head_stride, suffix_lse_token_stride,                \
+            output_lse_head_stride, output_lse_token_stride,                \
             prefix_num_tokens, output_scale_ptr);                           \
   }
 
@@ -259,6 +271,19 @@ void merge_attn_states_launcher(
   const uint head_size = output.size(2);
   const uint prefix_head_stride = prefix_output.stride(1);
   const uint output_head_stride = output.stride(1);
+  // lse tensors are [NUM_HEADS, NUM_TOKENS] but may be non-contiguous views
+  // (e.g. a transpose of a backend's [NUM_TOKENS, NUM_HEADS] output), so index
+  // them by their actual strides rather than assuming a contiguous layout.
+  const uint prefix_lse_head_stride = prefix_lse.stride(0);
+  const uint prefix_lse_token_stride = prefix_lse.stride(1);
+  const uint suffix_lse_head_stride = suffix_lse.stride(0);
+  const uint suffix_lse_token_stride = suffix_lse.stride(1);
+  uint output_lse_head_stride = 0;
+  uint output_lse_token_stride = 0;
+  if (output_lse.has_value()) {
+    output_lse_head_stride = output_lse.value().stride(0);
+    output_lse_token_stride = output_lse.value().stride(1);
+  }
   // Thread mapping is based on input BF16 pack_size
   const uint pack_size = 16 / sizeof(scalar_t);
   STD_TORCH_CHECK(head_size % pack_size == 0,

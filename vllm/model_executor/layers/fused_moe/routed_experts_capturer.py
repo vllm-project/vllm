@@ -90,10 +90,20 @@ class RoutedExpertsCapturer:
     ) -> None:
         hf_config = vllm_config.model_config.hf_text_config
         num_experts_per_tok = _get_num_experts_per_tok(hf_config)
+        num_layers = hf_config.num_hidden_layers
+        logger.info(
+            "RoutedExpertsCapturer: allocating buffer with "
+            "max_tokens=%d, num_layers=%d, num_experts_per_tok=%d "
+            "(hf_config.model_type=%s)",
+            max_num_batched_tokens,
+            num_layers,
+            num_experts_per_tok,
+            getattr(hf_config, "model_type", "unknown"),
+        )
         self.device_buffer = torch.zeros(
             (
                 max_num_batched_tokens,
-                hf_config.num_hidden_layers,
+                num_layers,
                 num_experts_per_tok,
             ),
             # Use int32 for the device / host transit buffers: it

@@ -11,7 +11,7 @@ import os
 HEAD_DIMS_32 = [32, 64, 96, 128, 160, 192, 224, 256, 512]
 
 # Head dimensions divisible by 16 but not 32 (VEC16 only)
-HEAD_DIMS_16 = [80, 112]
+HEAD_DIMS_16 = [48, 80, 112]
 
 # ISA types
 ISA_TYPES = {

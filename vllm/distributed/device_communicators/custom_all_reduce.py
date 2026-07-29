@@ -34,17 +34,18 @@ def _can_p2p(rank: int, world_size: int) -> bool:
             continue
         if envs.VLLM_SKIP_P2P_CHECK:
             logger.debug("Skipping P2P check and trusting the driver's P2P report.")
-            return torch.cuda.can_device_access_peer(rank, i)
+            # can_device_access_peer takes visible device ordinals, while
+            # rank and i are logical local IDs.
+            return torch.cuda.can_device_access_peer(
+                current_platform.logical_device_id_to_visible_device_id(rank),
+                current_platform.logical_device_id_to_visible_device_id(i),
+            )
         if not gpu_p2p_access_check(rank, i):
             return False
     return True
 
 
-def is_weak_contiguous(inp: torch.Tensor):
-    return inp.is_contiguous() or (
-        inp.storage().nbytes() - inp.storage_offset() * inp.element_size()
-        == inp.numel() * inp.element_size()
-    )
+from vllm.distributed.utils import is_weak_contiguous  # noqa: E402
 
 
 class CustomAllreduce:
@@ -130,13 +131,10 @@ class CustomAllreduce:
                     CUSTOM_ALL_REDUCE_MAX_SIZES[device_capability_str][world_size],
                     max_size,
                 )
-        cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
-        if cuda_visible_devices:
-            device_ids = list(map(int, cuda_visible_devices.split(",")))
-        else:
-            device_ids = list(range(current_platform.device_count()))
-
-        physical_device_id = device_ids[device.index]
+        # device.index is a visible ordinal, not a logical local ID.
+        physical_device_id = current_platform.visible_device_id_to_physical_device_id(
+            device.index
+        )
         tensor = torch.tensor([physical_device_id], dtype=torch.int, device="cpu")
         gather_list = [
             torch.tensor([0], dtype=torch.int, device="cpu") for _ in range(world_size)

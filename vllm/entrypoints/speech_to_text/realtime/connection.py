@@ -14,6 +14,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from vllm import envs
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse, UsageInfo
+from vllm.entrypoints.serve.utils.api_utils import sanitize_message
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 
@@ -72,7 +73,7 @@ class RealtimeConnection:
                     await self.send_error("Invalid JSON", "invalid_json")
                 except Exception as e:
                     logger.exception("Error handling event: %s", e)
-                    await self.send_error(str(e), "processing_error")
+                    await self.send_error(sanitize_message(str(e)), "processing_error")
         except WebSocketDisconnect:
             logger.debug("WebSocket disconnected: %s", self.connection_id)
             self._is_connected = False
@@ -262,7 +263,7 @@ class RealtimeConnection:
 
         except Exception as e:
             logger.exception("Error in generation: %s", e)
-            await self.send_error(str(e), "processing_error")
+            await self.send_error(sanitize_message(str(e)), "processing_error")
 
     async def send(
         self, event: SessionCreated | TranscriptionDelta | TranscriptionDone

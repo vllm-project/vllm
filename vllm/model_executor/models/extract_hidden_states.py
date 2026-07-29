@@ -83,7 +83,10 @@ def basic_cache(
     kv_cache: torch.Tensor,  # shape: [num_blocks, block_size, num_heads, head_size]
     slot_mapping: torch.Tensor,  # shape: [seq_len]
 ):
+    # Padding slots are -1; redirect them to the null block (block 0, never
+    # allocated to a request) so the scatter stays branch-free and sync-free.
     block_size = kv_cache.shape[1]
+    slot_mapping = slot_mapping.clamp_min(0)
     kv_cache[slot_mapping // block_size, slot_mapping % block_size] = to_cache
 
 

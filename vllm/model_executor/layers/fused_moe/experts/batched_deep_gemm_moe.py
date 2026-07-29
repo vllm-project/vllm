@@ -210,7 +210,7 @@ def persistent_masked_m_silu_mul_quant(
         DeepGemmQuantScaleFMT.UE8M0,
     ]
 
-    device_capability = current_platform.get_device_capability(device_id=y.device.index)
+    device_capability = current_platform.get_device_capability()
     assert device_capability is not None
     cuda_arch = device_capability.to_int()
 
@@ -318,11 +318,12 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
 
     def supports_packed_ue8m0_act_scales(self) -> bool:
         """
-        DeepGemm supports packed ue8m0 activation scales format in devices == sm100
+        DeepGemm supports packed ue8m0 activation scales on Blackwell-family
+        GPUs (SM100 datacenter and SM120 consumer).
         """
-        return (
-            is_deep_gemm_e8m0_used()
-            and current_platform.is_device_capability_family(100)
+        return is_deep_gemm_e8m0_used() and (
+            current_platform.is_device_capability_family(100)
+            or current_platform.is_device_capability_family(120)
         )
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:

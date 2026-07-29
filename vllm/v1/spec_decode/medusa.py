@@ -35,15 +35,18 @@ class MedusaProposer:
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.hidden_size = self.spec_config.draft_model_config.get_hidden_size()
         self.dtype = vllm_config.model_config.dtype
+        self.num_speculative_tokens = self.spec_config.num_speculative_tokens
 
     def propose(
         self,
+        num_speculative_tokens: int,
         target_hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
         slot_mappings: dict[str, torch.Tensor]
         | list[dict[str, torch.Tensor]]
         | None = None,  # unused
     ) -> torch.Tensor:
+        assert num_speculative_tokens == self.num_speculative_tokens
         # Generate blocks and compute logits
         blocks = self.model(target_hidden_states)
         logits = self.model.compute_logits(blocks)

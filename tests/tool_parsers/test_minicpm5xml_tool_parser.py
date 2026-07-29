@@ -733,3 +733,55 @@ def test_extract_tool_calls_streaming_multiple(parser: ToolParser) -> None:
         "nums": [7, 8, 9],
         "exact": False,
     }
+
+
+def make_tools_write() -> list[ChatCompletionToolsParam]:
+    return [
+        _tool(
+            "write_file",
+            {
+                "type": "object",
+                "properties": {"content": {"type": "string"}},
+                "required": ["content"],
+            },
+        )
+    ]
+
+
+class TestParameterWhitespace:
+    """CDATA is verbatim, so its whitespace must survive."""
+
+    def test_cdata_whitespace_preserved(self, parser: ToolParser) -> None:
+        request = make_request(make_tools_write())
+        text = (
+            '<function name="write_file">'
+            '<param name="content"><![CDATA[    def foo():\n        pass\n]]></param>'
+            "</function>\n"
+        )
+
+        out = parser.extract_tool_calls(text, request)
+
+        assert len(out.tool_calls) == 1
+        args = json.loads(out.tool_calls[0].function.arguments)
+        assert args["content"] == "    def foo():\n        pass\n"
+
+    def test_cdata_whitespace_preserved_streaming(self, parser: ToolParser) -> None:
+        """Value split across chunks, i.e. the partial path."""
+        request = make_request(make_tools_write())
+        chunks = [
+            '<function name="write_file">',
+            '<param name="content"><![CDATA[    def foo():\n',
+            "        pass\n]]></param></function>\n",
+        ]
+
+        reconstructor = run_tool_extraction_streaming(
+            parser,
+            chunks,
+            request,
+            assert_one_tool_per_delta=False,
+        )
+
+        assert len(reconstructor.tool_calls) == 1
+        assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
+            "content": "    def foo():\n        pass\n"
+        }

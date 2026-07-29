@@ -1,10 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from unittest.mock import MagicMock
+
 import pytest
 
-from vllm.config import ProfilerConfig
+from vllm.config import CUDAGraphMode, ProfilerConfig
 from vllm.config.profiler import _is_uri_path
 from vllm.profiler.wrapper import WorkerProfiler
+from vllm.v1.core.sched.output import CachedRequestData
+from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.worker.gpu_worker import Worker
 
 
 class ConcreteWorkerProfiler(WorkerProfiler):
@@ -236,3 +241,60 @@ class TestIsUriPath:
     def test_is_uri_path(self, path, expected):
         """Test that _is_uri_path correctly identifies URI vs local paths."""
         assert _is_uri_path(path) == expected
+
+
+class TestAnnotateProfile:
+    """Tests for Worker.annotate_profile() annotation string formatting."""
+
+    def _annotate(self, detailed: bool) -> str:
+        worker = MagicMock()
+        worker.vllm_config.profiler_config.detailed_trace_annotation = detailed
+        worker.profiler = MagicMock()
+
+        ctx_req = MagicMock(req_id="ctx1", num_computed_tokens=0)
+        cached = CachedRequestData(
+            req_ids=["gen1"],
+            resumed_req_ids=set(),
+            new_token_ids=[],
+            all_token_ids={},
+            new_block_ids=[],
+            num_computed_tokens=[10],
+            num_output_tokens=[1],
+        )
+        sched = MagicMock(
+            scheduled_new_reqs=[ctx_req],
+            scheduled_cached_reqs=cached,
+            num_scheduled_tokens={"ctx1": 4, "gen1": 1},
+        )
+
+        Worker.annotate_profile(worker, sched)
+        return worker.profiler.annotate_context_manager.call_args[0][0]
+
+    def test_simple_format_mixed(self):
+        assert self._annotate(detailed=False) == (
+            "execute_context_1(4)_generation_1(1)"
+        )
+
+    def test_detailed_format_mixed(self):
+        # ctx1: sq=4, sk=4, sqsq=16, sqsk=16 | gen1: sq=1, sk=11, sqsq=1, sqsk=11 | bs=5
+        assert self._annotate(detailed=True) == (
+            "execute_5_context_1(sq4sk4sqsq16sqsk16)_generation_1(sq1sk11sqsq1sqsk11)"
+        )
+
+
+def test_profiler_entered_during_capture():
+    """Profiler is used as a context manager in _warmup_and_capture,
+    confirming it is active during the actual graph capture run."""
+    runner = MagicMock()
+    runner.compilation_config.cudagraph_num_of_warmups = 0
+    mock_profiler = MagicMock()
+
+    GPUModelRunner._warmup_and_capture(
+        runner,
+        desc=MagicMock(num_tokens=4, uniform=True),
+        cudagraph_runtime_mode=CUDAGraphMode.FULL,
+        profiler=mock_profiler,
+    )
+
+    mock_profiler.__enter__.assert_called_once()
+    mock_profiler.__exit__.assert_called_once()

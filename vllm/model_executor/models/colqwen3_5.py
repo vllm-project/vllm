@@ -15,6 +15,7 @@ Based on: Qwen3.5 backbone with custom text projection
 
 Target models:
 - athrael-soju/colqwen3.5-4.5B-v3
+- vultr/VultronRetrieverPrime-Qwen3.5-8B
 """
 
 from collections.abc import Iterable, Mapping
@@ -166,12 +167,19 @@ class ColQwen3_5Model(
             or 128  # default from reference implementation
         )
 
+        # ColPali defines `custom_text_proj = nn.Linear(hidden, dim)`, i.e.
+        # bias=True by default, and the trained ColQwen3.5 checkpoints ship a
+        # `custom_text_proj.bias`. Construct with a bias and zero-initialize it:
+        # a (legacy) bias-less checkpoint then behaves identically to bias=False,
+        # while load_weights() below picks up a trained bias instead of silently
+        # dropping it (which shifts every per-token vector and the MaxSim ranking).
         self.custom_text_proj = nn.Linear(
             hidden_size,
             self.embed_dim,
-            bias=False,
+            bias=True,
             dtype=head_dtype,
         )
+        nn.init.zeros_(self.custom_text_proj.bias)
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None

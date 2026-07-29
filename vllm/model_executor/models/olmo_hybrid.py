@@ -63,16 +63,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-)
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import HasInnerState, IsHybrid, SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
+    WeightsMapper,
     extract_layer_index,
-    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -302,6 +299,23 @@ class OlmoHybridDecoderLayer(nn.Module):
 
 @support_torch_compile
 class OlmoHybridModel(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".self_attn.q_proj": (".self_attn.qkv_proj", "q"),
+            ".self_attn.k_proj": (".self_attn.qkv_proj", "k"),
+            ".self_attn.v_proj": (".self_attn.qkv_proj", "v"),
+            ".linear_attn.q_proj": (".linear_attn.in_proj_qkvg", 0),
+            ".linear_attn.k_proj": (".linear_attn.in_proj_qkvg", 1),
+            ".linear_attn.v_proj": (".linear_attn.in_proj_qkvg", 2),
+            ".linear_attn.g_proj": (".linear_attn.in_proj_qkvg", 3),
+            ".q_conv1d": (".conv1d", 0),
+            ".k_conv1d": (".conv1d", 1),
+            ".v_conv1d": (".conv1d", 2),
+            ".gate_proj": (".gate_up_proj", 0),
+            ".up_proj": (".gate_up_proj", 1),
+        }
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
@@ -359,79 +373,8 @@ class OlmoHybridModel(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-
-        linear_attn_stacked_params_mapping = [
-            ("in_proj_qkvg", "q_proj", 0),
-            ("in_proj_qkvg", "k_proj", 1),
-            ("in_proj_qkvg", "v_proj", 2),
-            ("in_proj_qkvg", "g_proj", 3),
-            ("conv1d", "q_conv1d", 0),
-            ("conv1d", "k_conv1d", 1),
-            ("conv1d", "v_conv1d", 2),
-        ]
-
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            if is_pp_missing_parameter(name, self):
-                continue
-
-            handled = False
-
-            if "linear_attn" in name:
-                for (
-                    param_name,
-                    weight_name,
-                    shard_id,
-                ) in linear_attn_stacked_params_mapping:
-                    if weight_name not in name:
-                        continue
-                    mapped_name = name.replace(weight_name, param_name)
-                    if mapped_name.endswith(".bias") and (
-                        mapped_name not in params_dict
-                    ):
-                        continue
-                    if mapped_name not in params_dict:
-                        continue
-                    param = params_dict[mapped_name]
-                    weight_loader = param.weight_loader
-                    weight_loader(param, loaded_weight, shard_id)
-                    name = mapped_name
-                    handled = True
-                    break
-            else:
-                for param_name, weight_name, shard_id in stacked_params_mapping:
-                    if weight_name not in name:
-                        continue
-                    name = name.replace(weight_name, param_name)
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
-                    if name not in params_dict:
-                        continue
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(param, loaded_weight, shard_id)
-                    handled = True
-                    break
-
-            if not handled:
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class OlmoHybridForCausalLM(

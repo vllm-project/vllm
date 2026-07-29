@@ -186,6 +186,67 @@ async def test_load(
             )
 
 
+@pytest.mark.parametrize("prefill_schedule_interval", [1, 4])
+@pytest.mark.asyncio
+async def test_dp_prefill_schedule_interval(prefill_schedule_interval: int):
+    """Throttling new prefills to every Nth step (DP balancing) must not break
+    generation: a stream of staggered requests should still all complete with
+    the expected number of tokens.
+
+    The throttle only engages in the DP MoE/EP engine-core path
+    (`DPEngineCoreProc`), so this uses an MoE model with expert parallel.
+    """
+    with ExitStack() as after:
+        prompt = "This is a test of data parallel"
+
+        engine_args = AsyncEngineArgs(
+            model="ibm-research/PowerMoE-3b",
+            enforce_eager=True,
+            tensor_parallel_size=int(os.getenv("TP_SIZE", 1)),
+            data_parallel_size=DP_SIZE,
+            data_parallel_backend="mp",
+            enable_expert_parallel=True,
+            prefill_schedule_interval=prefill_schedule_interval,
+        )
+        engine = AsyncLLM.from_engine_args(engine_args)
+        after.callback(engine.shutdown)
+
+        NUM_REQUESTS = 50
+        NUM_EXPECTED_TOKENS = 10
+
+        request_ids = [f"request-{i}" for i in range(NUM_REQUESTS)]
+
+        # Create requests with a small stagger so they arrive across many
+        # steps and (with interval > 1) accumulate in the waiting queue
+        # before being admitted together on cadence-aligned steps.
+        tasks = []
+        for request_id in request_ids:
+            tasks.append(
+                asyncio.create_task(
+                    generate(
+                        engine,
+                        request_id,
+                        prompt,
+                        RequestOutputKind.DELTA,
+                        NUM_EXPECTED_TOKENS,
+                    )
+                )
+            )
+            await asyncio.sleep(0.01)
+
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+        for task in pending:
+            task.cancel()
+        for task in done:
+            num_generated_tokens, request_id = await task
+            assert num_generated_tokens == NUM_EXPECTED_TOKENS, (
+                f"{request_id} generated {num_generated_tokens} but "
+                f"expected {NUM_EXPECTED_TOKENS}"
+            )
+
+        assert not engine.output_processor.has_unfinished_requests()
+
+
 # =============================================================================
 # DP Pause/Resume Tests
 # =============================================================================

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -10,6 +11,7 @@ from tests.tool_parsers.common_tests import (
     ToolParserTests,
 )
 from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers.internlm2_tool_parser import Internlm2ToolParser
 
 
 class TestInternLM2ToolParser(ToolParserTests):
@@ -120,3 +122,44 @@ class TestInternLM2ToolParser(ToolParserTests):
                 ),
             },
         )
+
+
+def test_streaming_arguments_in_single_delta(default_tokenizer: TokenizerLike) -> None:
+    """Arguments arriving whole in one delta must not be dropped."""
+    tokenizer_vocab = default_tokenizer.get_vocab()
+    default_tokenizer.get_vocab = MagicMock()
+    tokenizer_vocab.update(
+        {
+            "<|action_start|>": 92540,
+            "<|plugin|>": 92541,
+            "<|action_end|>": 92542,
+        }
+    )
+    default_tokenizer.get_vocab.return_value = tokenizer_vocab
+    parser = Internlm2ToolParser(default_tokenizer)
+
+    deltas = [
+        '<|action_start|><|plugin|>{"name": "get_weather"',
+        ', "parameters": {"city": "Dallas", "state": "TX"}}<|action_end|>',
+    ]
+
+    streamed = ""
+    current_text = ""
+    for delta_text in deltas:
+        previous_text = current_text
+        current_text += delta_text
+        delta_message = parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=None,
+        )
+        if delta_message and delta_message.tool_calls:
+            arguments = delta_message.tool_calls[0].function.arguments
+            if arguments:
+                streamed += arguments
+
+    assert json.loads(streamed) == {"city": "Dallas", "state": "TX"}

@@ -283,6 +283,29 @@ __quickreduce_device_inline__ int packed_rcp<nv_bfloat16>(int a) {
   return R.i;
 }
 
+template <typename T>
+__quickreduce_device_inline__ int packed_from_int16_pair(int16_t low,
+                                                         int16_t high);
+
+template <>
+__quickreduce_device_inline__ int packed_from_int16_pair<half>(int16_t low,
+                                                               int16_t high) {
+  // Convert two signed integers to one fp16x2 packed 32-bit lane.
+  half2 h = __halves2half2(__int2half_rn(static_cast<int>(low)),
+                           __int2half_rn(static_cast<int>(high)));
+  return __builtin_bit_cast(int, h);
+}
+
+template <>
+__quickreduce_device_inline__ int packed_from_int16_pair<nv_bfloat16>(
+    int16_t low, int16_t high) {
+  // Convert two signed integers to one bf16x2 packed 32-bit lane.
+  nv_bfloat16 bf_low = __float2bfloat16(static_cast<float>(low));
+  nv_bfloat16 bf_high = __float2bfloat16(static_cast<float>(high));
+  nv_bfloat162 bf2 = __halves2bfloat162(bf_low, bf_high);
+  return *reinterpret_cast<int*>(&bf2);
+}
+
 // changes dtype
 __quickreduce_device_inline__ float T2float_cast(half a) {
   return __half2float(a);

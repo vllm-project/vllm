@@ -66,7 +66,10 @@ these are directly passed to the model without HF processing.
 """
 
 VideoItem: TypeAlias = Union[
-    HfVideoItem, "torch.Tensor", tuple[HfVideoItem, dict[str, Any]]
+    HfVideoItem,
+    "torch.Tensor",
+    tuple[HfVideoItem, dict[str, Any]],
+    MediaWithBytes[tuple[HfVideoItem, dict[str, Any]]],
 ]
 """
 A `transformers.video_utils.VideoInput` representing a single video item. 
@@ -454,6 +457,8 @@ class BaseMultiModalField(ABC):
             device = "cpu"
         if pin_memory and self.keep_on_cpu:
             pin_memory = False
+        if device == "cpu" or device == torch.device("cpu"):
+            pin_memory = False
 
         batch = [elem.data for elem in elems]
         out = self._reduce_data(batch, pin_memory=pin_memory)
@@ -488,7 +493,13 @@ class MultiModalBatchedField(BaseMultiModalField):
                 # An optimization when `batch` contains only one tensor:
                 # - produce exactly same result as `torch.stack(batch)`
                 # - will achieve zero-copy if the tensor is contiguous
-                return batch[0].unsqueeze(0).contiguous()
+                out = batch[0].unsqueeze(0)
+                if not pin_memory:
+                    return out.contiguous()
+                # Avoid extra copy - pinning unpinned memory will make it contiguous
+                if not out.is_contiguous() and out.is_pinned():
+                    out = out.contiguous()
+                return out.pin_memory()
             first_shape = batch[0].shape
             if all(elem.shape == first_shape for elem in batch):
                 out = torch.empty(
@@ -538,7 +549,13 @@ class MultiModalFlatField(BaseMultiModalField):
                 # An optimization when `batch` contains only one tensor:
                 # - produce exactly same result as `torch.concat(batch)`
                 # - will achieve zero-copy if the tensor is contiguous
-                return batch[0].contiguous()
+                out = batch[0]
+                if not pin_memory:
+                    return out.contiguous()
+                # Avoid extra copy - pinning unpinned memory will make it contiguous
+                if not out.is_contiguous() and out.is_pinned():
+                    out = out.contiguous()
+                return out.pin_memory()
 
             dim = self.dim + (self.dim < 0) * len(batch[0].shape)
 

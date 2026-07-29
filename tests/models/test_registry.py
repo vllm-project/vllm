@@ -20,6 +20,7 @@ from vllm.model_executor.models.registry import (
     _SPECULATIVE_DECODING_MODELS,
     _TEXT_GENERATION_MODELS,
     ModelRegistry,
+    _LazyRegisteredModel,
 )
 from vllm.platforms import current_platform
 
@@ -46,6 +47,12 @@ def test_registry_imports(model_arch):
                 "temporarily skipped while PyPI has `lightning` quarantined "
                 "(see #41376)"
             )
+
+    # DSpark draft model is supported on CUDA and ROCm; stubbed to None on XPU.
+    if model_arch == "DSparkDraftModel" and not (
+        current_platform.is_cuda() or current_platform.is_rocm()
+    ):
+        pytest.skip("DSparkDraftModel is only supported on CUDA and ROCm")
 
     # Ensure all model classes can be imported successfully
     model_cls = ModelRegistry._try_load_model_cls(model_arch)
@@ -125,6 +132,38 @@ def test_registry_is_pp(model_arch, is_pp, init_cuda):
                 "Please test using a different one.",
                 stacklevel=2,
             )
+
+
+@create_new_process_for_each_test()
+@pytest.mark.parametrize(
+    "model_arch,supported",
+    [
+        # ReplaySSM is opt-in per model; only Nemotron-H sets the flag today.
+        ("NemotronHForCausalLM", True),
+        ("Mamba2ForCausalLM", False),
+        ("Zamba2ForCausalLM", False),
+    ],
+)
+def test_registry_supports_replayssm(model_arch, supported):
+    model_info = ModelRegistry._try_inspect_model_cls(model_arch)
+    assert model_info is not None
+    assert model_info.supports_replayssm is supported
+
+
+def test_lazy_modelinfo_package_hash_includes_submodules(tmp_path):
+    package_dir = tmp_path / "model_package"
+    package_dir.mkdir()
+    init_file = package_dir / "__init__.py"
+    init_file.write_text("from .model import Model\n", encoding="utf-8")
+    model_file = package_dir / "model.py"
+    model_file.write_text("class Model: pass\n", encoding="utf-8")
+
+    first_hash = _LazyRegisteredModel._get_modelinfo_module_hash(init_file)
+
+    model_file.write_text("class Model:\n    supports_pp = True\n", encoding="utf-8")
+    second_hash = _LazyRegisteredModel._get_modelinfo_module_hash(init_file)
+
+    assert first_hash != second_hash
 
 
 def test_hf_registry_coverage():

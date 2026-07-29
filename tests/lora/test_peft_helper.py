@@ -22,6 +22,8 @@ ERROR_CASES = [
         {"modules_to_save": ["lm_head"]},
         "only supports modules_to_save being None",
     ),
+    ("test_rank_zero", {"r": 0}, "must be a positive integer"),
+    ("test_rank_negative", {"r": -8}, "must be a positive integer"),
 ]
 
 
@@ -97,3 +99,18 @@ def test_peft_helper_error(
         PEFTHelper.from_local_dir(
             test_dir, max_position_embeddings=4096
         ).validate_legal(lora_config)
+
+
+@pytest.mark.parametrize("bad_rank", [0, -1, -8])
+def test_peft_helper_invalid_rank_direct(bad_rank: int):
+    """Regression test: constructing a PEFTHelper with a non-positive rank
+    must raise a clear ValueError instead of crashing with an unrelated
+    ZeroDivisionError (r=0) or silently succeeding with a sign-flipped
+    scaling factor that validate_legal() never catches (r<0, since its only
+    rank check is the upper bound against max_lora_rank).
+
+    Network-free: constructs PEFTHelper directly rather than going through
+    from_local_dir(), which needs an on-disk adapter_config.json.
+    """
+    with pytest.raises(ValueError, match="must be a positive integer"):
+        PEFTHelper(r=bad_rank, lora_alpha=16, target_modules=["q_proj"])

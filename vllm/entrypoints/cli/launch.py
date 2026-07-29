@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
+import inspect
 import signal
 
 import uvloop
@@ -18,7 +19,7 @@ from vllm.entrypoints.openai.cli_args import (
     make_arg_parser,
     validate_parsed_serve_args,
 )
-from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
+from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -36,9 +37,12 @@ class LaunchSubcommandBase(CLISubcommand):
     def add_cli_args(cls, parser: FlexibleArgumentParser) -> None:
         """Add the CLI arguments to the parser.
 
-        By default, adds the standard vLLM serving arguments.
+        By default, uses the subcommand's docstring as the description and adds
+        the standard vLLM serving arguments.
         Subclasses can override to add component-specific arguments.
         """
+        if cls.__doc__:
+            parser.description = inspect.cleandoc(cls.__doc__)
         make_arg_parser(parser)
 
     @staticmethod
@@ -47,7 +51,17 @@ class LaunchSubcommandBase(CLISubcommand):
 
 
 class RenderSubcommand(LaunchSubcommandBase):
-    """The `render` subcommand for `vllm launch`."""
+    """`vllm launch render` starts a GPU-less rendering server for preprocessing
+    and postprocessing only.
+
+    ```bash
+    vllm launch render meta-llama/Llama-3.2-1B-Instruct --port 8100
+    ```
+
+    This command reuses the standard serving parser, so model, frontend,
+    networking, and related CLI options follow the same conventions as
+    [`vllm serve`](https://docs.vllm.ai/en/latest/cli/serve/).
+    """
 
     name = "render"
     help = "Launch a GPU-less rendering server (preprocessing and postprocessing only)."
@@ -93,7 +107,6 @@ class LaunchSubcommand(CLISubcommand):
             cmd_subparser = launch_subparsers.add_parser(
                 cmd_cls.name,
                 help=cmd_cls.help,
-                description=cmd_cls.help,
                 usage=f"vllm {self.name} {cmd_cls.name} [options]",
             )
             cmd_subparser.set_defaults(launch_command=cmd_cls.cmd)
@@ -120,7 +133,7 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
     signal.signal(signal.SIGTERM, _interrupt_init)
 
     # 1. Socket binding
-    listen_address, sock = setup_server(args)
+    listen_address, sock = setup_server(args, reuse_port=False)
 
     # 2. Build and serve the API server
     engine_args = AsyncEngineArgs.from_cli_args(args)

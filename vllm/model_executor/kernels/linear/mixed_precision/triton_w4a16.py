@@ -400,12 +400,29 @@ class TritonW4A16LinearKernel(MPLinearKernel):
         if self.w_zp_name is not None:
             zp = getattr(layer, self.w_zp_name, None)
             if zp is not None:
-                # Checkpoint: [N//8, K//G] int32 (N packed at dim 0, K//G at dim 1)
-                # Kernel needs: [K//G, N//8] — just transpose
+                c = self.config
+                K, N = c.partition_weight_shape
+                group_size = c.group_size if c.group_size != -1 else K
+                expected_shape = (K // group_size, N // 8)
+                transposed_shape = (N // 8, K // group_size)
+
+                if tuple(zp.data.shape) == expected_shape:
+                    # GPTQ/AutoGPTQ already stores qzeros in the kernel layout.
+                    qzeros = zp.data.contiguous()
+                elif tuple(zp.data.shape) == transposed_shape:
+                    # Compressed-tensors stores qzeros transposed from what the
+                    # kernel needs.
+                    qzeros = zp.data.t().contiguous()
+                else:
+                    raise AssertionError(
+                        f"{self.w_zp_name} shape mismatch: {zp.data.shape}; "
+                        f"expected {expected_shape} or {transposed_shape}"
+                    )
+
                 replace_parameter(
                     layer,
                     self.w_zp_name,
-                    torch.nn.Parameter(zp.data.t().contiguous(), requires_grad=False),
+                    torch.nn.Parameter(qzeros, requires_grad=False),
                 )
 
     def apply_weights(
@@ -420,14 +437,17 @@ class TritonW4A16LinearKernel(MPLinearKernel):
         K = c.partition_weight_shape[0]
         group_size = c.group_size if c.group_size != -1 else K
 
-        # For symmetric types (uint4b8), use the scalar bias; no zeros tensor
+        # For symmetric types (uint4b8), use the scalar bias; no zeros tensor.
+        # Some checkpoint loaders still register qzeros parameters for GPTQ
+        # layers, but they are not part of the symmetric kernel contract.
         zp_bias = c.weight_type.bias if c.weight_type.has_bias() else 0
+        qzeros = None if c.weight_type.has_bias() else w_zp
 
         output = triton_w4a16_gemm(
             a=x_2d,
             b_q=w_q,
             scales=w_s,
-            qzeros=w_zp,
+            qzeros=qzeros,
             group_size=group_size,
             zp_bias=zp_bias,
         )

@@ -4,8 +4,10 @@
 """Common utilities for attention benchmarking."""
 
 import csv
+import gc
 import json
 import math
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -14,6 +16,8 @@ import torch
 from batch_spec import get_batch_type, parse_batch_spec
 from rich.console import Console
 from rich.table import Table
+
+from vllm.triton_utils import triton
 
 
 def batch_spec_sort_key(spec: str) -> tuple[int, int, int]:
@@ -32,6 +36,33 @@ def batch_spec_sort_key(spec: str) -> tuple[int, int, int]:
     except Exception:
         # Fallback for unparsable specs
         return (0, 0, 0)
+
+
+def run_do_bench(
+    benchmark_fn,
+    use_cuda_graphs: bool,
+    warmup_ms: int | None = None,
+) -> list[float]:
+    kwargs: dict[str, Any] = {"return_mode": "all"}
+    if use_cuda_graphs:
+        result = triton.testing.do_bench_cudagraph(benchmark_fn, **kwargs)
+        gc.collect()
+        torch.accelerator.empty_cache()
+    else:
+        if warmup_ms is not None:
+            kwargs["warmup"] = warmup_ms
+        result = triton.testing.do_bench(benchmark_fn, **kwargs)
+    torch.accelerator.synchronize()
+    return result
+
+
+def run_ncu_profile(benchmark_fn) -> None:
+    benchmark_fn()
+    torch.accelerator.synchronize()
+    torch.cuda.cudart().cudaProfilerStart()
+    benchmark_fn()
+    torch.accelerator.synchronize()
+    torch.cuda.cudart().cudaProfilerStop()
 
 
 # Mock classes for vLLM attention infrastructure
@@ -65,42 +96,6 @@ except ImportError:
     AttentionLayerBase = object  # Fallback
 
 
-class MockKVBProj:
-    """Mock KV projection layer for MLA prefill mode.
-
-    Mimics ColumnParallelLinear behavior for kv_b_proj in MLA backends.
-    Projects kv_c_normed to [qk_nope_head_dim + v_head_dim] per head.
-    """
-
-    def __init__(self, num_heads: int, qk_nope_head_dim: int, v_head_dim: int):
-        self.num_heads = num_heads
-        self.qk_nope_head_dim = qk_nope_head_dim
-        self.v_head_dim = v_head_dim
-        self.out_dim = qk_nope_head_dim + v_head_dim
-        self.weight = torch.empty(0, dtype=torch.bfloat16)
-
-    def __call__(self, x: torch.Tensor) -> tuple[torch.Tensor]:
-        """
-        Project kv_c_normed to output space.
-
-        Args:
-            x: Input tensor [num_tokens, kv_lora_rank]
-
-        Returns:
-            Tuple containing output tensor
-                [num_tokens, num_heads, qk_nope_head_dim + v_head_dim]
-        """
-        num_tokens = x.shape[0]
-        result = torch.randn(
-            num_tokens,
-            self.num_heads,
-            self.out_dim,
-            device=x.device,
-            dtype=x.dtype,
-        )
-        return (result,)  # Return as tuple to match ColumnParallelLinear API
-
-
 class MockIndexer:
     """Mock Indexer for sparse MLA backends.
 
@@ -131,6 +126,60 @@ class MockIndexer:
             device=self.topk_indices_buffer.device,
         )
         self.topk_indices_buffer[:num_tokens] = indices
+
+    def fill_indices(
+        self,
+        num_tokens: int,
+        max_kv_len: int,
+        pattern: str = "random",
+        requests: Sequence[Any] | None = None,
+    ):
+        if pattern == "random":
+            self.fill_random_indices(num_tokens, max_kv_len)
+            return
+        if pattern == "prefix":
+            indices = torch.arange(
+                self.topk_tokens,
+                dtype=torch.int32,
+                device=self.topk_indices_buffer.device,
+            )
+            indices = (indices % max_kv_len).expand(num_tokens, -1)
+            self.topk_indices_buffer[:num_tokens] = indices
+            return
+        if pattern == "sliding_window":
+            if requests is None:
+                start = max(max_kv_len - self.topk_tokens, 0)
+                indices = torch.arange(
+                    start,
+                    start + self.topk_tokens,
+                    dtype=torch.int32,
+                    device=self.topk_indices_buffer.device,
+                )
+                indices = indices.clamp(max=max_kv_len - 1).expand(num_tokens, -1)
+                self.topk_indices_buffer[:num_tokens] = indices
+                return
+
+            rows = []
+            offsets = torch.arange(
+                self.topk_tokens,
+                dtype=torch.int32,
+                device=self.topk_indices_buffer.device,
+            ) - (self.topk_tokens - 1)
+            for request in requests:
+                q_len = request.q_len
+                kv_len = request.kv_len
+                context_len = kv_len - q_len
+                positions = torch.arange(
+                    context_len,
+                    kv_len,
+                    dtype=torch.int32,
+                    device=self.topk_indices_buffer.device,
+                )
+                row_indices = positions[:, None] + offsets[None, :]
+                rows.append(row_indices.clamp(min=0, max=kv_len - 1))
+            self.topk_indices_buffer[:num_tokens] = torch.cat(rows, dim=0)
+            return
+        raise ValueError(f"Unknown sparse MLA topk pattern: {pattern}")
 
 
 class MockLayer(AttentionLayerBase):
@@ -182,17 +231,36 @@ class ParameterSweep:
 
 @dataclass
 class ModelParameterSweep:
-    """Configuration for sweeping a model configuration parameter."""
+    """Configuration for sweeping model configuration parameter(s).
 
-    param_name: str  # Name of the model config parameter to sweep (e.g., "num_q_heads")
-    values: list[Any]  # List of values to test
-    label_format: str = "{backend}_{param_name}_{value}"  # Result label template
+    Supports two modes:
+    - Single param: param_name="head_dim", values=[128, 256, 512]
+    - Multi param: values=[{head_dim: 192, v_head_dim: 128}, {head_dim: 256}]
+      When values are dicts, each dict's keys are applied as config overrides.
+    """
+
+    param_name: str | None = None
+    values: list[Any] | None = None
+    label_format: str = "{backend}_{param_name}_{value}"
 
     def get_label(self, backend: str, value: Any) -> str:
         """Generate a label for a specific parameter value."""
+        if isinstance(value, dict):
+            return self.label_format.format(
+                backend=backend, param_name=self.param_name, value=value, **value
+            )
         return self.label_format.format(
             backend=backend, param_name=self.param_name, value=value
         )
+
+    def apply(self, config_args: dict, value: Any) -> None:
+        """Apply a sweep value to config args."""
+        if isinstance(value, dict):
+            config_args.update(value)
+        elif self.param_name is not None:
+            config_args[self.param_name] = value
+        else:
+            raise ValueError("param_name must be set if sweep values are not dicts")
 
 
 @dataclass
@@ -207,11 +275,15 @@ class BenchmarkConfig:
     num_kv_heads: int
     block_size: int
     device: str
+    max_model_len: int | None = None
     dtype: torch.dtype = torch.float16
-    repeats: int = 1
-    warmup_iters: int = 3
     profile_memory: bool = False
-    use_cuda_graphs: bool = False
+    use_cuda_graphs: bool = True
+    ncu_profile: bool = False
+    torch_profile: bool = False
+    torch_profile_dir: str | None = None
+    torch_profile_iters: int = 3
+    warmup_ms: int | None = None
 
     # "auto" or "fp8"
     kv_cache_dtype: str = "auto"
@@ -226,6 +298,11 @@ class BenchmarkConfig:
     # Backend-specific tuning
     num_kv_splits: int | None = None  # CUTLASS MLA
     reorder_batch_threshold: int | None = None  # FlashAttn MLA, FlashMLA
+    sparse_mla_force_mqa: bool = False  # Force MQA path for sparse MLA
+    sparse_mla_mha_mode: str = "auto"  # "auto" or "dense"
+    sparse_mla_dense_mha_max_seq_len: int | None = None
+    sparse_mla_topk_pattern: str = "random"  # "random", "prefix", "sliding_window"
+    num_splits: int | None = None  # FlashAttention split-K (0=auto, 1=disabled)
 
 
 @dataclass
@@ -234,6 +311,7 @@ class BenchmarkResult:
 
     config: BenchmarkConfig
     mean_time: float  # seconds
+    median_time: float  # seconds
     std_time: float  # seconds
     min_time: float  # seconds
     max_time: float  # seconds
@@ -252,6 +330,7 @@ class BenchmarkResult:
         return {
             "config": asdict(self.config),
             "mean_time": self.mean_time,
+            "median_time": self.median_time,
             "std_time": self.std_time,
             "min_time": self.min_time,
             "max_time": self.max_time,

@@ -15,6 +15,7 @@ from vllm.model_executor.layers.activation import (
     MulAndSilu,
     NewGELU,
     QuickGELU,
+    ReLUSquaredActivation,
     SiluAndMul,
     SiluAndMulWithClamp,
     SwigluOAIAndMul,
@@ -196,12 +197,53 @@ def test_silu_and_mul_with_clamp(
     opcheck(torch.ops._C.silu_and_mul_with_clamp, (out_buf, x, swiglu_limit))
 
 
+@pytest.mark.parametrize("linear_beta", [-1.0, 2.0])
+@pytest.mark.parametrize("dtype", [torch.half, torch.bfloat16])
+@torch.inference_mode()
+def test_masked_situ_and_mul(
+    default_vllm_config,
+    linear_beta: float,
+    dtype: torch.dtype,
+) -> None:
+    """Masked SITU computes valid expert rows and preserves padded zeros."""
+    device = CUDA_DEVICES[0]
+    num_experts, max_num_tokens, d = 4, 7, 512
+    beta = 1.5
+    input = torch.randn(num_experts, max_num_tokens, 2 * d, dtype=dtype, device=device)
+    expert_num_tokens = torch.tensor([0, 1, 4, 7], dtype=torch.int32, device=device)
+    output = torch.zeros(num_experts, max_num_tokens, d, dtype=dtype, device=device)
+
+    torch.ops._C.masked_situ_and_mul(
+        output, input, expert_num_tokens, beta, linear_beta
+    )
+
+    gate, up = input.float().chunk(2, dim=-1)
+    expected = beta * torch.tanh(gate / beta) * torch.sigmoid(gate)
+    if linear_beta > 0:
+        up = linear_beta * torch.tanh(up / linear_beta)
+    expected = (expected * up).to(dtype)
+    for expert, num_tokens in enumerate(expert_num_tokens.cpu().tolist()):
+        torch.testing.assert_close(
+            output[expert, :num_tokens],
+            expected[expert, :num_tokens],
+            atol=get_default_atol(output),
+            rtol=get_default_rtol(output),
+        )
+        assert torch.count_nonzero(output[expert, num_tokens:]) == 0
+
+    opcheck(
+        torch.ops._C.masked_situ_and_mul,
+        (output, input, expert_num_tokens, beta, linear_beta),
+    )
+
+
 @pytest.mark.parametrize(
     "activation",
     [
         (FastGELU, torch.ops._C.gelu_fast),
         (NewGELU, torch.ops._C.gelu_new),
         (QuickGELU, torch.ops._C.gelu_quick),
+        (ReLUSquaredActivation, torch.ops._C.relu_squared),
     ],
 )
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)

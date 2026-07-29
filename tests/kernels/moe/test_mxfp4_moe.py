@@ -244,5 +244,224 @@ def test_mxfp4_experts_quant_basic():
     print("PASSED")
 
 
+def untile_cutlass_scale(scale_raw: torch.Tensor, rows: int, K: int) -> torch.Tensor:
+    """Convert CUTLASS tiled scale back to flat [M, K//32] layout.
+
+    CUTLASS tiled layout: [numMTiles, numKTiles, 32(outerM), 4(innerM), 4(innerK)]
+    Produced by: padded.reshape(numMTiles, 4, 32, numKTiles, 4).permute(0,3,2,1,4)
+    To undo: tiled.permute(0, 3, 2, 1, 4).reshape(padded_M, padded_sK)
+    """
+    num_scale_cols = K // MXFP4_BLOCK_SIZE
+    num_m_tiles = (rows + 127) // 128
+    num_k_tiles = (num_scale_cols + 3) // 4
+    padded_M = num_m_tiles * 128
+    padded_sK = num_k_tiles * 4
+
+    scale_bytes = scale_raw.view(torch.uint8).flatten()
+    total_bytes = padded_M * padded_sK
+    tiled = scale_bytes[:total_bytes].reshape(num_m_tiles, num_k_tiles, 32, 4, 4)
+    undone = tiled.permute(0, 3, 2, 1, 4).contiguous()
+    return undone.reshape(padded_M, padded_sK)[:rows, :num_scale_cols]
+
+
+def compute_reference_e8m0_scale(block_max: float) -> int:
+    """Compute the expected OCP MX spec E8M0 scale for a given block max.
+
+    The CUTLASS kernel uses round-to-nearest on the mantissa:
+      rounded_bits = (float_bits + (1 << 21)) & 0xFF800000
+      biased_exp = (rounded_bits >> 23) & 0xFF
+      scale_exp = max(biased_exp - 2, 0)
+
+    This ensures max_val / scale <= 6.0 for most inputs.
+    """
+    import struct
+
+    if block_max <= 0:
+        return 0
+    # Replicate the kernel's rounding logic in Python
+    float_bytes = struct.pack("f", block_max)
+    max_bits = struct.unpack("I", float_bytes)[0]
+    rounded_bits = (max_bits + (1 << 21)) & 0xFF800000
+    biased_exp = (rounded_bits >> 23) & 0xFF
+    scale_exp = max(int(biased_exp) - 2, 0)
+    scale_exp = min(scale_exp, 254)
+    return scale_exp
+
+
+@pytest.mark.skipif(
+    not is_sm100_supported(),
+    reason="mxfp4_experts_quant requires CUDA SM100",
+)
+@pytest.mark.parametrize("k", [256, 7168])
+@pytest.mark.parametrize("m", [16, 64])
+def test_mxfp4_experts_quant_e8m0_scale_correctness(m, k):
+    """
+    Test that mxfp4_experts_quant computes E8M0 block scales correctly
+    per OCP MX spec (not the NVFP4 formula).
+
+    The old buggy kernel used: floor(log2(max/6)) + 127
+    The fixed kernel uses:     round_nearest_exp(max) - 2
+
+    This test verifies:
+    1. Scales match the expected OCP MX formula for all blocks
+    2. No block max exceeds the representable range (no unexpected saturation)
+    3. Reconstruction error is within expected bounds for MXFP4
+    """
+    device = "cuda"
+
+    # Generate input with controlled range
+    input_tensor = torch.randn(m, k, device=device, dtype=torch.bfloat16) * 0.5
+
+    # Quantize
+    num_experts = 1
+    expert_offsets = torch.tensor([0, m], device=device, dtype=torch.int32)
+    num_k_tiles = (k // MXFP4_BLOCK_SIZE + 3) // 4
+    blockscale_offsets = torch.tensor(
+        [0, align(m, 128) * num_k_tiles], device=device, dtype=torch.int32
+    )
+
+    output_fp4, output_sf = ops.mxfp4_experts_quant(
+        input_tensor, expert_offsets, blockscale_offsets, num_experts, topk=1
+    )
+
+    # Untile scale to flat layout for verification
+    scale_flat = untile_cutlass_scale(output_sf, m, k)
+    assert scale_flat.shape == (m, k // MXFP4_BLOCK_SIZE)
+
+    # Verify each block's scale matches the OCP MX spec formula
+    num_blocks = k // MXFP4_BLOCK_SIZE
+    mismatches = 0
+    buggy_pattern = 0  # count blocks where scale is 1-2 lower than expected
+
+    for row in range(m):
+        for blk in range(num_blocks):
+            block_start = blk * MXFP4_BLOCK_SIZE
+            block_end = block_start + MXFP4_BLOCK_SIZE
+            block_max = (
+                input_tensor[row, block_start:block_end].float().abs().max().item()
+            )
+
+            actual_scale = scale_flat[row, blk].item()
+            expected_scale = compute_reference_e8m0_scale(block_max)
+
+            if actual_scale != expected_scale:
+                mismatches += 1
+                if actual_scale < expected_scale:
+                    buggy_pattern += 1
+
+    total_blocks = m * num_blocks
+    match_rate = (total_blocks - mismatches) / total_blocks
+
+    print(
+        f"  m={m}, k={k}: scale match rate = {match_rate * 100:.2f}% "
+        f"({mismatches}/{total_blocks} mismatches)"
+    )
+
+    # The fixed kernel should match the reference formula exactly
+    assert match_rate > 0.99, (
+        f"E8M0 scale match rate too low: {match_rate * 100:.2f}%. "
+        f"Buggy pattern (scale too low): {buggy_pattern}/{mismatches}. "
+        f"This suggests the NVFP4 formula bug is present."
+    )
+
+    # Extra check: if most mismatches show scale < expected, it's the old bug
+    if mismatches > 0:
+        assert buggy_pattern / mismatches < 0.5, (
+            f"Most scale mismatches show scale too LOW ({buggy_pattern}/{mismatches}). "
+            "This is the signature of the NVFP4 formula bug in nvfp4_utils.cuh."
+        )
+
+    # Verify reconstruction error is within MXFP4 expected bounds
+    # Dequantize and check cosine similarity
+    fp4_lut = torch.tensor(
+        [0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6],
+        device=device,
+        dtype=torch.float32,
+    )
+    lo = (output_fp4 & 0x0F).long()
+    hi = ((output_fp4 >> 4) & 0x0F).long()
+    unpacked = torch.stack([lo, hi], dim=-1).reshape(m, k)
+    fp4_vals = fp4_lut[unpacked]
+
+    scales_expanded = 2.0 ** (scale_flat.float() - 127.0)
+    scales_expanded = scales_expanded.unsqueeze(-1).expand(-1, -1, MXFP4_BLOCK_SIZE)
+    scales_expanded = scales_expanded.reshape(m, k)
+    recon = (fp4_vals * scales_expanded).bfloat16()
+
+    # Cosine similarity should be > 0.99 for well-behaved MXFP4 quantization
+    cos_sim = torch.nn.functional.cosine_similarity(
+        recon.float().flatten().unsqueeze(0),
+        input_tensor.float().flatten().unsqueeze(0),
+    ).item()
+    max_abs_diff = (recon.float() - input_tensor.float()).abs().max().item()
+
+    print(
+        f"  Reconstruction: cosine_sim={cos_sim:.6f}, max_abs_diff={max_abs_diff:.4f}"
+    )
+
+    assert cos_sim > 0.99, (
+        f"Reconstruction cosine similarity too low: {cos_sim:.6f}. "
+        f"Expected > 0.99 for correct MXFP4 quantization."
+    )
+    # With correct E8M0, max abs diff should be bounded by scale * 6
+    # (worst case: value just below threshold rounds to wrong FP4 code)
+    assert max_abs_diff < 1.0, (
+        f"Max reconstruction error too large: {max_abs_diff:.4f}. "
+        "Likely caused by incorrect E8M0 scale (values saturating to ±6)."
+    )
+
+
+@pytest.mark.skipif(
+    not is_sm100_supported(),
+    reason="mxfp4_experts_quant requires CUDA SM100",
+)
+def test_mxfp4_experts_quant_no_saturation():
+    """
+    Test that the E8M0 scale is large enough to avoid unexpected saturation.
+
+    With the buggy NVFP4 formula, the scale was too small causing most values
+    to saturate to ±6 in FP4. The fixed OCP MX formula should ensure that
+    block_max / scale <= 6.0 (the max E2M1 value) in almost all cases.
+    """
+    device = "cuda"
+
+    m, k = 128, 1024
+    # Use inputs with known range to make saturation detectable
+    input_tensor = torch.randn(m, k, device=device, dtype=torch.bfloat16) * 0.5
+
+    num_experts = 1
+    expert_offsets = torch.tensor([0, m], device=device, dtype=torch.int32)
+    num_k_tiles = (k // MXFP4_BLOCK_SIZE + 3) // 4
+    blockscale_offsets = torch.tensor(
+        [0, align(m, 128) * num_k_tiles], device=device, dtype=torch.int32
+    )
+
+    output_fp4, output_sf = ops.mxfp4_experts_quant(
+        input_tensor, expert_offsets, blockscale_offsets, num_experts, topk=1
+    )
+
+    # Check saturation rate: count FP4 values that are ±6 (codes 7 and 15)
+    lo = output_fp4 & 0x0F
+    hi = (output_fp4 >> 4) & 0x0F
+    # Code 7 = +6.0, code 15 = -6.0
+    saturated = ((lo == 7) | (lo == 15) | (hi == 7) | (hi == 15)).sum().item()
+    total_values = m * k
+    saturation_rate = saturated / total_values
+
+    print(
+        f"  Saturation rate: {saturation_rate * 100:.2f}% "
+        f"({saturated}/{total_values} values at ±6)"
+    )
+
+    # For Gaussian input with std=0.5, saturation should be very rare
+    # (±6 * scale is far from the typical range).
+    # The buggy kernel had ~30-50% saturation; fixed should be < 5%.
+    assert saturation_rate < 0.05, (
+        f"FP4 saturation rate too high: {saturation_rate * 100:.2f}%. "
+        "This suggests the E8M0 scale is too small (NVFP4 formula bug). "
+        "Expected < 5% for Gaussian(0, 0.5) input with correct OCP MX scale."
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])

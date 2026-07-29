@@ -124,7 +124,7 @@ struct AttentionMetadata {
         workitem_group_num(workitem_group_num),
         reduction_item_num(reduction_item_num),
         reduction_split_num(reduction_split_num),
-        thread_num(omp_get_max_threads()),
+        thread_num(cpu_utils::get_max_threads()),
         effective_thread_num(thread_num),
         split_kv_q_token_num_threshold(split_kv_q_token_num_threshold),
         attention_scratchpad_size_per_thread(0),
@@ -388,13 +388,13 @@ class AttentionScheduler {
     int32_t head_dim;
     int32_t* query_start_loc;
     int32_t* seq_lens;
-    int32_t left_sliding_window_size;
-    int32_t right_sliding_window_size;
-    bool casual;
+    int32_t sliding_window_size;
+    bool causal;
     cpu_attention::ISA isa;
     int32_t max_num_q_per_iter;  // max Q head num can be hold in registers
     int32_t kv_block_alignment;  // context length alignment requirement
     bool enable_kv_split;
+    bool* dynamic_causal;
   };
 
   static constexpr int32_t MaxQTileIterNum = 128;
@@ -403,8 +403,9 @@ class AttentionScheduler {
       : available_cache_size_(cpu_utils::get_available_l2_size()) {}
 
   torch::Tensor schedule(const ScheduleInput& input) const {
-    const bool casual = input.casual;
-    const int32_t thread_num = omp_get_max_threads();
+    const bool causal = input.causal;
+    const bool is_dynamic_causal = input.dynamic_causal != nullptr;
+    const int32_t thread_num = cpu_utils::get_max_threads();
     const int64_t cache_size = cpu_utils::get_available_l2_size();
     const int32_t max_num_q_per_iter = input.max_num_q_per_iter;
     const int32_t kv_len_alignment = input.kv_block_alignment;
@@ -416,8 +417,10 @@ class AttentionScheduler {
       has_decode_request = has_decode_request || (q_token_num == 1);
       decode_only_batch = decode_only_batch && (q_token_num == 1);
     }
-    int32_t q_head_per_kv = input.num_heads_q / input.num_heads_kv;
-    const bool supports_gqa = q_head_per_kv <= max_num_q_per_iter;
+    const int32_t original_q_head_per_kv =
+        input.num_heads_q / input.num_heads_kv;
+    int32_t q_head_per_kv = original_q_head_per_kv;
+    const bool supports_gqa = original_q_head_per_kv <= max_num_q_per_iter;
     const bool use_gqa_fast_path = supports_gqa && decode_only_batch;
     const bool use_gqa_scratchpad = supports_gqa && has_decode_request;
     if (!use_gqa_scratchpad) {
@@ -434,8 +437,7 @@ class AttentionScheduler {
     const int32_t default_tile_token_num = default_tile_size / q_head_per_kv;
     const int32_t split_kv_q_token_num_threshold =
         input.enable_kv_split ? 1 : 0;
-    const int32_t left_sliding_window_size = input.left_sliding_window_size;
-    const int32_t right_sliding_window_size = input.right_sliding_window_size;
+    const int32_t sliding_window_size = input.sliding_window_size;
     TORCH_CHECK_LE(split_kv_q_token_num_threshold * q_head_per_kv, 16);
 
     // get total kv len
@@ -444,7 +446,9 @@ class AttentionScheduler {
       const int32_t seq_len = input.seq_lens[req_id];
       const int32_t q_token_num =
           input.query_start_loc[req_id + 1] - input.query_start_loc[req_id];
-      const int32_t q_start_pos = (casual ? (seq_len - q_token_num) : 0);
+      const bool req_causal =
+          is_dynamic_causal ? input.dynamic_causal[req_id] : causal;
+      const int32_t q_start_pos = seq_len - q_token_num;
       const int32_t kv_start_pos = 0;
       const int32_t kv_end_pos = seq_len;
 
@@ -456,7 +460,7 @@ class AttentionScheduler {
         const int32_t q_tile_pos_right = q_tile_pos_left + q_tile_token_num;
         const auto [kv_tile_pos_left, kv_tile_pos_right] = calcu_kv_tile_pos(
             kv_start_pos, kv_end_pos, q_tile_pos_left, q_tile_pos_right,
-            left_sliding_window_size, right_sliding_window_size);
+            sliding_window_size, req_causal);
         const auto [aligned_kv_tile_pos_left, aligned_kv_tile_pos_right] =
             align_kv_tile_pos(kv_tile_pos_left, kv_tile_pos_right,
                               kv_len_alignment);
@@ -484,7 +488,9 @@ class AttentionScheduler {
       const int32_t seq_len = input.seq_lens[req_id];
       const int32_t q_token_num =
           input.query_start_loc[req_id + 1] - input.query_start_loc[req_id];
-      const int32_t q_start_pos = (casual ? (seq_len - q_token_num) : 0);
+      const bool req_causal =
+          is_dynamic_causal ? input.dynamic_causal[req_id] : causal;
+      const int32_t q_start_pos = seq_len - q_token_num;
       const int32_t kv_start_pos = 0;
       const int32_t kv_end_pos = seq_len;
       int32_t local_split_id = 0;
@@ -498,7 +504,7 @@ class AttentionScheduler {
         const int32_t q_tile_pos_right = q_tile_pos_left + q_tile_token_num;
         const auto [kv_tile_pos_left, kv_tile_pos_right] = calcu_kv_tile_pos(
             kv_start_pos, kv_end_pos, q_tile_pos_left, q_tile_pos_right,
-            left_sliding_window_size, right_sliding_window_size);
+            sliding_window_size, req_causal);
         const auto [aligned_kv_tile_pos_left, aligned_kv_tile_pos_right] =
             align_kv_tile_pos(kv_tile_pos_left, kv_tile_pos_right,
                               kv_len_alignment);
@@ -667,22 +673,62 @@ class AttentionScheduler {
     metadata_ptr->effective_thread_num = effective_thread_num;
 
     {
-      // when q_tile_size = max_num_q_per_iter, requires max
-      // attention_scratchpad_size
       AttentionScratchPad sc(0, *metadata_ptr, 0x0);
-      int64_t n = AttentionScheduler::calcu_tile_size_with_constant_q(
-          cache_size, input.head_dim, input.elem_size, input.q_buffer_elem_size,
-          input.logits_buffer_elem_size, input.output_buffer_elem_size,
-          max_num_q_per_iter, kv_len_alignment, max_num_q_per_iter, true);
-      sc.update(input.head_dim, input.q_buffer_elem_size,
-                input.logits_buffer_elem_size, input.output_buffer_elem_size,
-                max_num_q_per_iter, max_num_q_per_iter, n);
+      int64_t max_attention_scratchpad_size = 0;
+
+      for (const AttentionWorkItemGroup& item : workitems) {
+        const bool curr_use_gqa =
+            use_gqa_fast_path || (supports_gqa && item.q_token_num == 1);
+        const int32_t curr_q_heads_per_kv =
+            curr_use_gqa ? original_q_head_per_kv : 1;
+        const int32_t curr_default_q_tile_token_num =
+            default_tile_size / curr_q_heads_per_kv;
+
+        for (int32_t q_token_offset = 0; q_token_offset < item.q_token_num;
+             q_token_offset += curr_default_q_tile_token_num) {
+          const int32_t actual_q_token_num = std::min(
+              curr_default_q_tile_token_num, item.q_token_num - q_token_offset);
+          const int32_t q_head_tile_size =
+              actual_q_token_num * curr_q_heads_per_kv;
+          const int32_t rounded_q_head_tile_size =
+              ((q_head_tile_size + max_num_q_per_iter - 1) /
+               max_num_q_per_iter) *
+              max_num_q_per_iter;
+
+          const int64_t n = AttentionScheduler::calcu_tile_size_with_constant_q(
+              cache_size, input.head_dim, input.elem_size,
+              input.q_buffer_elem_size, input.logits_buffer_elem_size,
+              input.output_buffer_elem_size, max_num_q_per_iter,
+              kv_len_alignment, rounded_q_head_tile_size,
+              rounded_q_head_tile_size <= max_num_q_per_iter);
+
+          sc.update(input.head_dim, input.q_buffer_elem_size,
+                    input.logits_buffer_elem_size,
+                    input.output_buffer_elem_size, max_num_q_per_iter,
+                    rounded_q_head_tile_size, n);
+
+          max_attention_scratchpad_size = std::max(
+              max_attention_scratchpad_size, sc.get_thread_scratchpad_size());
+        }
+      }
+
       metadata_ptr->attention_scratchpad_size_per_thread =
-          ((sc.get_thread_scratchpad_size() + 63) / 64) * 64;
+          ((max_attention_scratchpad_size + 63) / 64) * 64;
+
+      int32_t max_reduction_q_head_tile_size = 0;
+      for (const ReductionWorkItemGroup& item : reduce_workitems) {
+        const bool curr_use_gqa =
+            use_gqa_fast_path || (supports_gqa && item.q_token_id_num == 1);
+        const int32_t curr_q_heads_per_kv =
+            curr_use_gqa ? original_q_head_per_kv : 1;
+
+        max_reduction_q_head_tile_size =
+            std::max(max_reduction_q_head_tile_size,
+                     item.q_token_id_num * curr_q_heads_per_kv);
+      }
 
       sc.update(0, metadata_ptr->reduction_split_num, input.head_dim,
-                q_head_per_kv * split_kv_q_token_num_threshold,
-                input.output_buffer_elem_size);
+                max_reduction_q_head_tile_size, input.output_buffer_elem_size);
       metadata_ptr->reduction_scratchpad_size_per_kv_head =
           ((sc.get_reduction_scratchpad_size() + 63) / 64) * 64;
     }
@@ -708,15 +754,41 @@ class AttentionScheduler {
     return metadata_tensor;
   }
 
+  FORCE_INLINE static std::pair<int32_t, int32_t> calcu_sliding_window_size(
+      int32_t window_size, bool causal) {
+    int32_t left_sliding_window_size, right_sliding_window_size;
+    if (window_size != -1) {
+      left_sliding_window_size = window_size - 1;
+      if (causal) {
+        right_sliding_window_size = 0;
+      } else {
+        right_sliding_window_size = window_size - 1;
+      }
+    } else {
+      left_sliding_window_size = -1;
+      if (causal) {
+        right_sliding_window_size = 0;
+      } else {
+        right_sliding_window_size = -1;
+      }
+    }
+
+    return {left_sliding_window_size, right_sliding_window_size};
+  }
+
   FORCE_INLINE static std::pair<int32_t, int32_t> calcu_kv_tile_pos(
       int32_t kv_left_pos, int32_t kv_right_pos, int32_t q_left_pos,
-      int32_t q_right_pos, int32_t sliding_window_left,
-      int32_t sliding_window_right) {
-    if (sliding_window_left != -1) {
-      kv_left_pos = std::max(kv_left_pos, q_left_pos - sliding_window_left);
+      int32_t q_right_pos, int32_t window_size, bool causal) {
+    auto [left_sliding_window_size, right_sliding_window_size] =
+        calcu_sliding_window_size(window_size, causal);
+
+    if (left_sliding_window_size != -1) {
+      kv_left_pos =
+          std::max(kv_left_pos, q_left_pos - left_sliding_window_size);
     }
-    if (sliding_window_right != -1) {
-      kv_right_pos = std::min(kv_right_pos, q_right_pos + sliding_window_right);
+    if (right_sliding_window_size != -1) {
+      kv_right_pos =
+          std::min(kv_right_pos, q_right_pos + right_sliding_window_size);
     }
     return {kv_left_pos, kv_right_pos};
   }
@@ -805,10 +877,10 @@ struct AttentionInput {
   int32_t* block_table;
   float* alibi_slopes;
   c10::BFloat16* s_aux;
+  bool* dynamic_causal;
   float scale;
   bool causal;
-  int32_t sliding_window_left;
-  int32_t sliding_window_right;
+  int32_t sliding_window_size;
   float softcap;
   // FP8 KV cache scales (used by FP8 attention implementations)
   float k_scale_fp8 = 1.0f;
@@ -822,8 +894,8 @@ struct AttentionInput {
       logits_buffer_t *__restrict__ logits_buffer,                          \
       float *__restrict__ partial_q_buffer, float *__restrict__ max_buffer, \
       float *__restrict__ sum_buffer, int32_t *__restrict__ block_table,    \
-      const int32_t kv_tile_start_pos, const int32_t kv_tile_end_pos,       \
-      const int32_t kv_tile_token_num,                                      \
+      const int32_t kv_end_pos, const int32_t kv_tile_start_pos,            \
+      const int32_t kv_tile_end_pos, const int32_t kv_tile_token_num,       \
       const int64_t kv_cache_num_blocks_stride, const int32_t q_head_num,   \
       const int32_t q_token_num, const int32_t q_tile_start_pos,            \
       const int32_t q_heads_per_kv, const int32_t block_size,               \
@@ -834,7 +906,7 @@ struct AttentionInput {
 
 #define CPU_ATTENTION_PARAMS                                                  \
   q_heads_buffer, k_head_cache_ptr, v_head_cache_ptr, logits_buffer,          \
-      partial_q_buffer, max_buffer, sum_buffer, block_table,                  \
+      partial_q_buffer, max_buffer, sum_buffer, block_table, kv_end_pos,      \
       kv_tile_start_pos, kv_tile_end_pos, kv_tile_token_num,                  \
       kv_cache_num_blocks_stride, q_head_num, q_token_num, q_tile_start_pos,  \
       q_heads_per_kv, block_size, left_window_size, right_window_size, scale, \
@@ -857,12 +929,10 @@ struct VecTypeTrait<c10::BFloat16> {
   using vec_t = vec_op::BF16Vec16;
 };
 
-#if !defined(__powerpc__)
 template <>
 struct VecTypeTrait<c10::Half> {
   using vec_t = vec_op::FP16Vec16;
 };
-#endif
 
 template <typename T>
 void print_logits(const char* name, T* ptr, int32_t row, int32_t col,
@@ -917,6 +987,7 @@ class AttentionMainLoop {
     //  - max_buffer: [MaxQHeadNumPerIteration, 1], store max logits
     //  - sum_buffer: [MaxQHeadNumPerIteration, 1], store sum of exp
     //  - block_table
+    //  - kv_end_pos: un-aligned end position of KV cache
     //  - kv_tile_start_pos: start position of KV cache, aligned to
     //  BlockSizeAlignment
     //  - kv_tile_end_pos: end position of KV cache, aligned to
@@ -1043,7 +1114,7 @@ class AttentionMainLoop {
         }
 
         apply_mask(logits_buffer, kv_tile_token_num, q_tile_start_pos,
-                   kv_tile_start_pos, kv_tile_end_pos, q_token_num,
+                   kv_end_pos, kv_tile_start_pos, kv_tile_end_pos, q_token_num,
                    q_heads_per_kv, left_window_size, right_window_size);
 
         // if (debug_info){
@@ -1126,7 +1197,7 @@ class AttentionMainLoop {
 
     void apply_mask(logits_buffer_t* __restrict__ logits_buffer,
                     const int64_t logits_buffer_stride,
-                    const int32_t q_tile_start_pos,
+                    const int32_t q_tile_start_pos, const int32_t kv_end_pos,
                     const int32_t kv_tile_start_pos,
                     const int32_t kv_tile_end_pos, const int32_t q_token_num,
                     const int32_t q_heads_per_kv,
@@ -1154,7 +1225,7 @@ class AttentionMainLoop {
                            std::max(kv_tile_start_pos,
                                     curr_token_pos + sliding_window_right + 1));
           }
-          return pos;
+          return std::min(pos, kv_end_pos);
         }();
 
         int32_t left_invalid_token_num = left_kv_pos - kv_tile_start_pos;
@@ -1394,7 +1465,7 @@ class AttentionMainLoop {
 
  public:
   void operator()(const AttentionInput* input) {
-    const int thread_num = omp_get_max_threads();
+    const int thread_num = cpu_utils::get_max_threads();
     TORCH_CHECK_EQ(input->metadata->thread_num, thread_num);
     std::atomic<int32_t> guard_counter(0);
     std::atomic<int32_t>* guard_counter_ptr = &guard_counter;
@@ -1441,15 +1512,16 @@ class AttentionMainLoop {
       const int64_t q_head_num_stride = input->query_num_heads_stride;
       const int64_t kv_cache_head_num_stride = input->cache_num_kv_heads_stride;
       const int64_t kv_cache_block_num_stride = input->cache_num_blocks_stride;
-      const int32_t sliding_window_left = input->sliding_window_left;
-      const int32_t sliding_window_right = input->sliding_window_right;
+      const int32_t sliding_window_size = input->sliding_window_size;
       const int32_t block_size = input->block_size;
       const float scale = input->scale;
       const float softcap_scale = input->softcap;
       const float* alibi_slopes = input->alibi_slopes;
       const c10::BFloat16* s_aux = input->s_aux;
+      const bool* dynamic_causal = input->dynamic_causal;
+      const bool is_dynamic_causal = dynamic_causal != nullptr;
 
-      const bool casual = input->causal;
+      const bool causal = input->causal;
       int32_t* const block_table = input->block_table;
       const int64_t block_table_stride = input->blt_num_tokens_stride;
 
@@ -1532,6 +1604,11 @@ class AttentionMainLoop {
                 &curr_workitem_groups[workitem_group_idx];
 
             const int32_t current_group_idx = current_workitem_group->req_id;
+            const int32_t current_group_causal =
+                is_dynamic_causal ? dynamic_causal[current_group_idx] : causal;
+            auto [sliding_window_left, sliding_window_right] =
+                AttentionScheduler::calcu_sliding_window_size(
+                    sliding_window_size, current_group_causal);
             const int32_t kv_start_pos =
                 current_workitem_group->kv_split_pos_start;
             const int32_t kv_end_pos = current_workitem_group->kv_split_pos_end;
@@ -1559,8 +1636,7 @@ class AttentionMainLoop {
             const int32_t q_end = input->query_start_loc[current_group_idx + 1];
             const int32_t q_start = input->query_start_loc[current_group_idx];
             const int32_t seq_len = input->seq_lens[current_group_idx];
-            const int32_t q_start_pos =
-                (casual ? seq_len - (q_end - q_start) : 0);
+            const int32_t q_start_pos = seq_len - (q_end - q_start);
             const int32_t block_num = (seq_len + block_size - 1) / block_size;
             // Only apply sink for the first KV split
             bool use_sink = (s_aux != nullptr &&
@@ -1610,8 +1686,8 @@ class AttentionMainLoop {
               const auto [kv_tile_start_pos, kv_tile_end_pos] =
                   AttentionScheduler::calcu_kv_tile_pos(
                       kv_start_pos, kv_end_pos, q_tile_start_pos,
-                      q_tile_end_pos, sliding_window_left,
-                      sliding_window_right);
+                      q_tile_end_pos, sliding_window_size,
+                      current_group_causal);
               const auto [rounded_kv_tile_start_pos, rounded_kv_tile_end_pos] =
                   AttentionScheduler::align_kv_tile_pos(
                       kv_tile_start_pos, kv_tile_end_pos, blocksize_alignment);
@@ -1724,8 +1800,8 @@ class AttentionMainLoop {
                               actual_kv_tile_pos_right] =
                       AttentionScheduler::calcu_kv_tile_pos(
                           kv_tile_pos_left, kv_tile_pos_right, q_tile_pos_left,
-                          q_tile_pos_right, sliding_window_left,
-                          sliding_window_right);
+                          q_tile_pos_right, sliding_window_size,
+                          current_group_causal);
                   const int32_t q_iter_idx =
                       q_head_tile_token_offset / curr_max_q_token_num_per_iter;
 
@@ -1789,7 +1865,7 @@ class AttentionMainLoop {
                   attn_impl.template execute_attention<Attention>(
                       curr_q_heads_buffer, curr_k_cache, curr_v_cache,
                       logits_buffer, curr_partial_q_buffer, curr_max_buffer,
-                      curr_sum_buffer, curr_block_table,
+                      curr_sum_buffer, curr_block_table, kv_end_pos,
                       aligned_actual_kv_tile_pos_left,
                       aligned_actual_kv_tile_pos_right, actual_kv_token_num,
                       kv_cache_block_num_stride, q_tile_head_num,

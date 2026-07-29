@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::HashMap;
 
 use itertools::Itertools as _;
@@ -97,32 +100,44 @@ pub fn decoded_prompt_logprobs_to_openai(
     })
 }
 
-/// Convert decoded prompt logprobs into the vLLM-style prompt-logprobs response
-/// shape.
-pub fn decoded_prompt_logprobs_to_maps(
-    prompt_logprobs: &DecodedPromptLogprobs,
+/// Map decoded prompt logprobs into vLLM-style per-position maps, treating a
+/// missing single-token payload as `[None]`.
+pub fn prompt_logprobs_to_maps(
+    prompt_logprobs: Option<&DecodedPromptLogprobs>,
+    prompt_token_ids: &[u32],
     return_tokens_as_token_ids: bool,
-) -> Vec<Option<HashMap<String, f32>>> {
-    std::iter::once(None)
-        .chain(prompt_logprobs.scored_positions.iter().map(|position| {
-            Some(position_top_logprobs_map(
-                position,
-                return_tokens_as_token_ids,
-            ))
-        }))
-        .collect()
+) -> Result<Vec<Option<HashMap<String, f32>>>, ApiError> {
+    if let Some(prompt_logprobs) = prompt_logprobs {
+        return Ok(std::iter::once(None)
+            .chain(prompt_logprobs.scored_positions.iter().map(|position| {
+                Some(position_top_logprobs_map(
+                    position,
+                    return_tokens_as_token_ids,
+                ))
+            }))
+            .collect());
+    }
+
+    if let [_token_id] = prompt_token_ids {
+        return Ok(vec![None]);
+    }
+
+    Err(server_error!(
+        "prompt_logprobs were requested but generation returned none"
+    ))
 }
 
 /// Convert decoded token-position logprobs into the OpenAI chat `logprobs`
 /// shape.
 pub fn decoded_logprobs_to_openai_chat(
     logprobs: &DecodedLogprobs,
+    top_logprobs: i32,
     return_tokens_as_token_ids: bool,
 ) -> Result<ChatLogProbs, ApiError> {
     let content = logprobs
         .positions
         .iter()
-        .map(|pos| position_to_chat_logprobs_content(pos, return_tokens_as_token_ids))
+        .map(|pos| position_to_chat_logprobs_content(pos, top_logprobs, return_tokens_as_token_ids))
         .try_collect()?;
 
     Ok(ChatLogProbs {
@@ -221,6 +236,7 @@ fn position_top_logprobs_map(
 
 fn position_to_chat_logprobs_content(
     position: &DecodedPositionLogprobs,
+    top_logprobs: i32,
     return_tokens_as_token_ids: bool,
 ) -> Result<ChatLogProbsContent, ApiError> {
     let chosen = position.entries.first().ok_or_else(|| {
@@ -232,9 +248,7 @@ fn position_to_chat_logprobs_content(
         token: token_str.clone(),
         logprob: clamp_logprob(chosen.logprob),
         bytes: Some(token_bytes(&token_str)),
-        top_logprobs: position
-            .entries
-            .iter()
+        top_logprobs: chat_top_logprob_entries(position, top_logprobs)
             .map(|entry| {
                 let t = format_token(entry, return_tokens_as_token_ids);
                 TopLogProb {
@@ -247,10 +261,77 @@ fn position_to_chat_logprobs_content(
     })
 }
 
+fn chat_top_logprob_entries(
+    position: &DecodedPositionLogprobs,
+    top_logprobs: i32,
+) -> impl Iterator<Item = &DecodedTokenLogprob> {
+    let limit = if top_logprobs == -1 {
+        position.entries.len()
+    } else {
+        usize::try_from(top_logprobs).unwrap_or(0)
+    };
+
+    position.entries.iter().take(limit)
+}
+
 fn token_bytes(token: &str) -> Vec<u8> {
     token.as_bytes().to_vec()
 }
 
 pub fn clamp_logprob(logprob: f32) -> f32 {
     logprob.max(-9999.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedTokenLogprob};
+
+    use super::{decoded_logprobs_to_openai_chat, prompt_logprobs_to_maps};
+
+    #[test]
+    fn prompt_logprobs_maps_reject_missing_multi_token_payload() {
+        prompt_logprobs_to_maps(None, &[9707, 11], false)
+            .expect_err("multi-token prompt without payload is an engine failure");
+    }
+
+    fn sample_logprobs() -> DecodedLogprobs {
+        DecodedLogprobs {
+            positions: vec![DecodedPositionLogprobs {
+                entries: vec![
+                    DecodedTokenLogprob {
+                        token_id: 1,
+                        token: "A".to_string(),
+                        logprob: -0.1,
+                        rank: 1,
+                    },
+                    DecodedTokenLogprob {
+                        token_id: 2,
+                        token: "B".to_string(),
+                        logprob: -1.0,
+                        rank: 2,
+                    },
+                    DecodedTokenLogprob {
+                        token_id: 3,
+                        token: "C".to_string(),
+                        logprob: -2.0,
+                        rank: 3,
+                    },
+                ],
+            }],
+        }
+    }
+
+    fn chat_top_logprobs_len(top_logprobs: i32) -> usize {
+        let chat_logprobs =
+            decoded_logprobs_to_openai_chat(&sample_logprobs(), top_logprobs, false)
+                .expect("chat logprobs");
+        chat_logprobs.content.expect("content")[0].top_logprobs.len()
+    }
+
+    #[test]
+    fn chat_logprobs_respects_requested_top_logprobs_count() {
+        assert_eq!(chat_top_logprobs_len(0), 0);
+        assert_eq!(chat_top_logprobs_len(1), 1);
+        assert_eq!(chat_top_logprobs_len(-1), 3);
+    }
 }

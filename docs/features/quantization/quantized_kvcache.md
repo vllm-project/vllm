@@ -49,6 +49,32 @@ You can configure how the quantization scales are computed in vLLM using three d
 - `kv_cache_dtype="fp8_e4m3"`: Supported on CUDA 11.8+ and ROCm (AMD GPUs)
 - `kv_cache_dtype="fp8_e5m2"`: Supported on CUDA 11.8+
 
+### Skipping Specific Layers from KV-Cache Quantization
+
+Some attention layer types (e.g. sliding-window) are more sensitive to KV-cache quantization. The `--kv-cache-dtype-skip-layers` flag leaves the specified layers at the model's native dtype while keeping the rest of the layers under the chosen quantized dtype. The flag accepts either layer indices or layer-type names:
+
+```bash
+# Skip every sliding-window attention layer.
+vllm serve <model> \
+  --kv-cache-dtype fp8 \
+  --kv-cache-dtype-skip-layers sliding_window
+
+# Skip specific layer indices.
+vllm serve <model> \
+  --kv-cache-dtype fp8 \
+  --kv-cache-dtype-skip-layers 0 1 23
+```
+
+Programmatic usage:
+
+```python
+llm = LLM(
+    model="meta-llama/Llama-3.1-8B-Instruct",
+    kv_cache_dtype="fp8",
+    kv_cache_dtype_skip_layers=["sliding_window"],
+)
+```
+
 ---
 
 ## Examples

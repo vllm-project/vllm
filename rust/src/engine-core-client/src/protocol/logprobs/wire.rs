@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 
 use crate::protocol::tensor::WireNdArray;

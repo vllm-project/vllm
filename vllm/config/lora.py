@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -75,8 +76,14 @@ class LoRAConfig:
     """If True, force the engine to use the universal 2D MoE LoRA wrapper
     (`FusedMoEWithLoRA`) regardless of the model's `is_3d_moe_weight` flag, so
     that 2D-format and 3D-format MoE LoRA adapters can be served in the same
-    deployment. Only meaningful forMoE models; ignored otherwise. Default False 
+    deployment. Only meaningful for MoE models; ignored otherwise. Default False
     keeps the existing model-driven behavior."""
+    enable_moe_shared_loras: bool = False
+    """If True, load MoE expert adapters in the "shared-outer" layout, where the
+    gate/up (`w1`/`w3`) lora_A and the down (`w2`) lora_B are shared across all
+    experts (stored once with expert-dim 1) instead of per-expert. The shared
+    factors are broadcast to the expert count at kernel time. Only meaningful for
+    MoE models whose adapters use this layout; ignored otherwise."""
 
     def compute_hash(self) -> str:
         """
@@ -97,6 +104,7 @@ class LoRAConfig:
         factors.append(self.lora_dtype)
         factors.append(self.enable_tower_connector_lora)
         factors.append(self.enable_mixed_moe_lora_format)
+        factors.append(self.enable_moe_shared_loras)
         # target_modules affects which modules get LoRA applied
         factors.append(
             tuple(sorted(self.target_modules)) if self.target_modules else None
@@ -129,3 +137,13 @@ class LoRAConfig:
             self.lora_dtype = model_config.dtype
         elif isinstance(self.lora_dtype, str):
             self.lora_dtype = getattr(torch, self.lora_dtype)
+
+        architectures = getattr(model_config, "architectures", None) or []
+        is_inkling = any("Inkling" in arch for arch in architectures)
+        if is_inkling and os.environ.get("INKLING_MULTIMEM_AR", "1") != "0":
+            raise ValueError(
+                "Inkling LoRA requires INKLING_MULTIMEM_AR=0: the Lamport "
+                "fused-collective path bypasses the LoRA-wrapped wo_ud and dense "
+                "down_proj layers on decode-sized batches, silently dropping "
+                "their LoRA. Set INKLING_MULTIMEM_AR=0."
+            )

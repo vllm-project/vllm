@@ -183,27 +183,39 @@ async def test_thinking_token_budget_mixed_requests(client: openai.AsyncOpenAI):
 async def test_thinking_token_budget_limits_reasoning(client: openai.AsyncOpenAI):
     """Test that thinking_token_budget limits the number of reasoning tokens.
 
-    Counts non-empty streaming ``delta.reasoning`` chunks (coarse proxy; each
-    chunk may represent multiple decode tokens — see
-    ``_count_reasoning_decode_token_ids_between_markers`` and the Qwen3.5 MTP
-    test for id-based checks).
+    Counts reasoning decode tokens by id, which is robust to how tokens are
+    grouped into streamed chunks (a single chunk can carry several tokens under
+    async scheduling / stream_interval > 1). Counting chunks under-counts.
     """
 
-    reasoning_token_count = 0
+    tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
+    start_ids = list(tokenizer.encode(REASONING_START_STR, add_special_tokens=False))
+    end_ids = list(tokenizer.encode(REASONING_END_STR, add_special_tokens=False))
+
+    prompt_token_ids: list[int] = []
+    decode_token_ids: list[int] = []
     stream = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES,
         max_tokens=100,
         stream=True,
-        extra_body={"thinking_token_budget": THINK_BUDGET},
+        extra_body={"thinking_token_budget": THINK_BUDGET, "return_token_ids": True},
     )
     async for chunk in stream:
-        delta = chunk.choices[0].delta
-        if getattr(delta, "reasoning", None):
-            reasoning_token_count += 1
+        if not chunk.choices:
+            continue
+        if getattr(chunk, "prompt_token_ids", None):
+            prompt_token_ids = list(chunk.prompt_token_ids)
+        delta_ids = getattr(chunk.choices[0], "token_ids", None)
+        if delta_ids:
+            decode_token_ids.extend(delta_ids)
 
+    reasoning_token_count = _count_reasoning_decode_token_ids_between_markers(
+        prompt_token_ids + decode_token_ids, start_ids, end_ids
+    )
+    assert reasoning_token_count is not None, "missing reasoning start marker in ids"
     assert reasoning_token_count == THINK_BUDGET, (
-        f"reasoning tokens ({reasoning_token_count}) exceeded "
+        f"reasoning tokens ({reasoning_token_count}) != "
         f"thinking_token_budget ({THINK_BUDGET})"
     )
 

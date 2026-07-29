@@ -10,12 +10,6 @@ from vllm.tokenizers.hf import HfTokenizer
 
 from .internvl import InternVLImageProcessor, InternVLProcessor
 
-# Configure PIL to handle large images without warnings
-# This prevents DecompressionBombWarning for legitimate large images
-Image.MAX_IMAGE_PIXELS = None  # Disable the limit entirely
-# Alternative: Set a specific higher limit
-# Image.MAX_IMAGE_PIXELS = 300000000  # ~300M pixels
-
 
 def build_transform(input_size: int):
     return T.Compose(

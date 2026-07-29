@@ -26,6 +26,7 @@ from vllm.benchmarks.lib.utils import (
     write_to_json,
 )
 from vllm.engine.arg_utils import EngineArgs
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 PERCENTAGES = [10, 25, 50, 75, 90, 99]
 
@@ -190,7 +191,7 @@ def save_to_pytorch_benchmark_format(
             write_to_json(f"{base_name}.{m.key}.pytorch.json", records)
 
 
-def add_cli_args(parser: argparse.ArgumentParser):
+def add_cli_args(parser: FlexibleArgumentParser):
     parser.add_argument(
         "--num-iters-cold",
         type=int,
@@ -234,7 +235,7 @@ def main(args: argparse.Namespace):
         """
 
         # Create a queue for inter-process communication
-        result_queue = multiprocessing.Queue()
+        result_queue: multiprocessing.Queue[Any] = multiprocessing.Queue()
         process = multiprocessing.Process(
             target=run_startup_in_subprocess,
             args=(

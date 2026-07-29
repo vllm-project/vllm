@@ -178,7 +178,7 @@ incoming requests. The `AsyncLLMEngine` is designed for online serving, where it
 can handle multiple concurrent requests and stream outputs to clients.
 
 The OpenAI-compatible API server uses the `AsyncLLMEngine`. There is also a demo
-API server that serves as a simpler example in [vllm/entrypoints/api_server.py](../../vllm/entrypoints/api_server.py).
+API server that serves as a simpler example in [examples/applications/api_server/server.py](../../examples/applications/api_server/server.py).
 
 The code for `AsyncLLMEngine` can be found in [vllm/engine/async_llm_engine.py](../../vllm/engine/async_llm_engine.py).
 

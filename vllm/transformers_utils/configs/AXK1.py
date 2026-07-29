@@ -114,7 +114,7 @@ class AXK1Config(PretrainedConfig):
             The dropout ratio for the attention probabilities.
     """
 
-    model_type = "AXK1"
+    model_type = "axk1"
     keys_to_ignore_at_inference = ["past_key_values"]
 
     def __init__(

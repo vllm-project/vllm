@@ -502,7 +502,7 @@ def test_gpt2_cache_hit(monkeypatch: pytest.MonkeyPatch):
         m.setenv("VLLM_USE_AOT_COMPILE", "1")
         # First compilation - initialize model and generate
         llm_model = LLM(
-            model="gpt2",
+            model="openai-community/gpt2",
             compilation_config=CompilationConfig(
                 mode=CompilationMode.VLLM_COMPILE,
             ),
@@ -519,7 +519,7 @@ def test_gpt2_cache_hit(monkeypatch: pytest.MonkeyPatch):
         # Second compilation - should hit cache
         m.setenv("VLLM_FORCE_AOT_LOAD", "1")
         llm_model = LLM(
-            model="gpt2",
+            model="openai-community/gpt2",
             compilation_config=CompilationConfig(
                 mode=CompilationMode.VLLM_COMPILE,
             ),

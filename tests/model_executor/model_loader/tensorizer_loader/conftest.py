@@ -87,10 +87,6 @@ class DummyExecutor(UniProcExecutor):
         self.collective_rpc("init_worker", args=([kwargs],))
         self.collective_rpc("init_device")
 
-    @property
-    def max_concurrent_batches(self) -> int:
-        return 2
-
     def shutdown(self):
         if hasattr(self, "thread_pool"):
             self.thread_pool.shutdown(wait=False)

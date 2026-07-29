@@ -26,7 +26,7 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.tool_parsers.utils import extract_intermediate_diff
+from vllm.tool_parsers.utils import extract_intermediate_diff, is_complete_json
 
 logger = init_logger(__name__)
 
@@ -146,9 +146,17 @@ class Internlm2ToolParser(ToolParser):
                 elif cur_arguments and not prev_arguments:
                     cur_arguments_json = json.dumps(cur_arguments, ensure_ascii=False)
 
-                    arguments_delta = cur_arguments_json[
-                        : cur_arguments_json.index(delta_text) + len(delta_text)
-                    ]
+                    match_start = cur_arguments_json.find(delta_text)
+                    if match_start != -1:
+                        arguments_delta = cur_arguments_json[
+                            : match_start + len(delta_text)
+                        ]
+                    elif is_complete_json(parsable_arr):
+                        # Complete in this delta: send whole, don't drop.
+                        arguments_delta = cur_arguments_json
+                    else:
+                        # Still partial: wait for more text.
+                        return None
                     delta = DeltaMessage(
                         tool_calls=[
                             DeltaToolCall(

@@ -36,10 +36,12 @@ from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import (
     has_flashinfer_cutlass_fused_moe,
     has_flashinfer_nvlink_one_sided,
+    has_flashinfer_trtllm_fused_moe,
 )
 from vllm.utils.import_utils import (
     has_aiter,
     has_deep_ep,
+    has_deep_ep_v2,
     has_deep_gemm,
     has_mori,
 )
@@ -216,6 +218,19 @@ if has_deep_ep() and not current_platform.has_device_capability(100):
         backend="deepep_low_latency",
     )
 
+if has_deep_ep_v2() and current_platform.has_device_capability(100):
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_v2 import (
+        DeepEPV2PrepareAndFinalize,
+    )
+
+    register_prepare_and_finalize(
+        DeepEPV2PrepareAndFinalize,
+        standard_format,
+        common_float_types,
+        blocked_quantization_support=True,
+        backend="deepep_v2",
+    )
+
 if has_mori():
     from vllm.model_executor.layers.fused_moe.prepare_finalize.mori import (
         MoriPrepareAndFinalize,
@@ -287,6 +302,18 @@ if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability
         standard_format,
         nvfp4_types,
         blocked_quantization_support=False,
+    )
+
+if has_flashinfer_trtllm_fused_moe() and current_platform.has_device_capability(100):
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
+        TrtLlmFp8ExpertsModular,
+    )
+
+    register_experts(
+        TrtLlmFp8ExpertsModular,
+        standard_format,
+        fp8_types,
+        blocked_quantization_support=True,
     )
 
 if has_aiter():

@@ -3,7 +3,7 @@ depends_on:
   - image-build-cpu
 steps:
 - label: Docker Build Metadata
-  timeout_in_minutes: 10
+  timeout_in_minutes: 20
   device: cpu-small
   source_file_dependencies:
     - .buildkite/release-pipeline.yaml
