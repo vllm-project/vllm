@@ -16,6 +16,7 @@ Covers:
 import pytest
 
 from vllm import LLM, SamplingParams
+from vllm.exceptions import VLLMValidationError
 from vllm.outputs import RequestOutput
 
 # Test configuration
@@ -479,13 +480,13 @@ def test_min_tokens_validation():
 
     # Invalid cases
     with pytest.raises(
-        ValueError,
+        VLLMValidationError,
         match="min_tokens must be greater than or equal to 0",
     ):
         SamplingParams(min_tokens=-1, max_tokens=10)
 
     with pytest.raises(
-        ValueError,
+        VLLMValidationError,
         match="min_tokens must be less than or equal to max_tokens",
     ):
         SamplingParams(min_tokens=15, max_tokens=10)
