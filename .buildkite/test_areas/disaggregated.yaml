@@ -254,7 +254,7 @@ steps:
     DP_EP: "1"
     GPU_MEMORY_UTILIZATION: "0.85"
     MODEL_NAMES: "moonshotai/Kimi-Linear-48B-A3B-Instruct"
-    VLLM_SERVE_EXTRA_ARGS: "--trust-remote-code"
+    VLLM_SERVE_EXTRA_ARGS: "--trust-remote-code,--mamba-cache-mode align"
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
