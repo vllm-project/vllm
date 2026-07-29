@@ -453,6 +453,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 compilation_config.static_forward_context,
             )
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
+        self.update_kv_cache_when_sharing = False
         # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window
         # (read by the Triton backend impl). Default False for all other models.
         self.mm_prefix_clamp_sliding_window = mm_prefix_clamp_sliding_window
@@ -542,11 +543,17 @@ class Attention(nn.Module, AttentionLayerBase):
         kv_cache_dummy_dep = None
         if self.use_direct_call:
             # Skip this if sharing KV cache with an earlier attention layer.
+            should_update_kv_cache = (
+                key is not None
+                and value is not None
+                and (
+                    self.kv_sharing_target_layer_name is None
+                    or self.update_kv_cache_when_sharing
+                )
+            )
             if (
                 not self.attn_backend.forward_includes_kv_cache_update
-                and self.kv_sharing_target_layer_name is None
-                and key is not None
-                and value is not None
+                and should_update_kv_cache
             ):
                 kv_cache_dummy_dep = unified_kv_cache_update(
                     key, value, self.layer_name
@@ -562,11 +569,17 @@ class Attention(nn.Module, AttentionLayerBase):
         else:
             # Skip this if sharing KV cache with an earlier attention layer.
             encoded = _encode_layer_name(self.layer_name)
+            should_update_kv_cache = (
+                key is not None
+                and value is not None
+                and (
+                    self.kv_sharing_target_layer_name is None
+                    or self.update_kv_cache_when_sharing
+                )
+            )
             if (
                 not self.attn_backend.forward_includes_kv_cache_update
-                and self.kv_sharing_target_layer_name is None
-                and key is not None
-                and value is not None
+                and should_update_kv_cache
             ):
                 kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
                     key, value, encoded

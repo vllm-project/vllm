@@ -504,6 +504,7 @@ def _prepare_dflash_inputs_kernel(
     SAMPLE_FROM_ANCHOR: tl.constexpr,
     PAD_SLOT_ID: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    SAMPLE_BONUS_TOKEN: tl.constexpr = False,
 ):
     req_idx = tl.program_id(0)
     block_idx = tl.program_id(1)
@@ -567,14 +568,20 @@ def _prepare_dflash_inputs_kernel(
     tl.store(out_query_slot_mapping_ptr + query_idx, q_slot, mask=is_query)
 
     # --- Sample indices / positions / idx_mapping ---
-    # When SAMPLE_FROM_ANCHOR (DSpark), so we sample at EVERY query position
-    # and each position k predicts the NEXT token (sampled position = query_pos + 1).
-    # Otherwise (DFlash default) the anchor is the bonus token and only the mask tokens
-    # at offsets > 0 are sampled from, each AT its own position.
-    sample_off = 0 if SAMPLE_FROM_ANCHOR else 1
-    is_sample = is_query & (query_off >= sample_off)
-    sample_idx = req_idx * num_speculative_steps + (query_off - sample_off)
-    sample_pos = query_pos + 1 if SAMPLE_FROM_ANCHOR else query_pos
+    if SAMPLE_BONUS_TOKEN:
+        # Orthrus samples diffusion logits[:, :-1], i.e. query offsets
+        # [0, num_speculative_steps).
+        is_sample = is_query & (query_off < num_speculative_steps)
+        sample_idx = req_idx * num_speculative_steps + query_off
+        sample_pos = query_pos
+    else:
+        # When SAMPLE_FROM_ANCHOR (DSpark), sample at every query position and
+        # each position k predicts the next token. Otherwise (DFlash default)
+        # the anchor is the bonus token and only mask offsets > 0 are sampled.
+        sample_off = 0 if SAMPLE_FROM_ANCHOR else 1
+        is_sample = is_query & (query_off >= sample_off)
+        sample_idx = req_idx * num_speculative_steps + (query_off - sample_off)
+        sample_pos = query_pos + 1 if SAMPLE_FROM_ANCHOR else query_pos
     tl.store(out_sample_indices_ptr + sample_idx, query_idx, mask=is_sample)
     tl.store(out_sample_pos_ptr + sample_idx, sample_pos, mask=is_sample)
     tl.store(out_sample_idx_mapping_ptr + sample_idx, req_state_idx, mask=is_sample)
@@ -645,6 +652,7 @@ def prepare_dflash_inputs(
     max_num_tokens: int,
     max_model_len: int,
     sample_from_anchor: bool = False,
+    sample_bonus_token: bool = False,
 ) -> None:
     num_reqs = input_batch.num_reqs
     assert num_reqs > 0
@@ -684,4 +692,5 @@ def prepare_dflash_inputs(
         SAMPLE_FROM_ANCHOR=sample_from_anchor,
         PAD_SLOT_ID=PAD_SLOT_ID,
         BLOCK_SIZE=BLOCK_SIZE,
+        SAMPLE_BONUS_TOKEN=sample_bonus_token,
     )
