@@ -2,11 +2,86 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.import_utils import has_cutedsl
+from vllm.utils.torch_utils import direct_register_custom_op
 
 # Cache of tiny 1-element dummy tensors (per device, dtype) reused by the
 # has_indexer=False path so the indexer args don't allocate every call.
 _DUMMY_CACHE: dict[tuple, torch.Tensor] = {}
+
+
+@torch.compiler.assume_constant_result
+def _can_use_fused_q_cutedsl() -> bool:
+    return current_platform.has_device_capability(100) and has_cutedsl()
+
+
+def _fused_q_cutedsl_impl(
+    positions: torch.Tensor,
+    q_pe: torch.Tensor,
+    rope_cache: torch.Tensor,
+    ql_nope: torch.Tensor,
+    q_scale: torch.Tensor,
+    mqa_output: torch.Tensor,
+    idx_q: torch.Tensor,
+    idx_rope_cache: torch.Tensor,
+    idx_weights: torch.Tensor,
+    idx_weights_softmax_scale: float,
+    idx_weights_head_scale: float,
+    idx_q_fp8: torch.Tensor,
+    idx_weights_out: torch.Tensor,
+    has_indexer: bool,
+    index_rope_interleave: bool,
+) -> None:
+    from .ops.fused_q_cutedsl import fused_q_cutedsl
+
+    fused_q_cutedsl(
+        positions,
+        q_pe,
+        rope_cache,
+        ql_nope,
+        q_scale,
+        mqa_output,
+        idx_q,
+        idx_rope_cache,
+        idx_weights,
+        idx_weights_softmax_scale,
+        idx_weights_head_scale,
+        idx_q_fp8,
+        idx_weights_out,
+        has_indexer=has_indexer,
+        index_rope_interleave=index_rope_interleave,
+    )
+
+
+def _fused_q_cutedsl_fake(
+    positions: torch.Tensor,
+    q_pe: torch.Tensor,
+    rope_cache: torch.Tensor,
+    ql_nope: torch.Tensor,
+    q_scale: torch.Tensor,
+    mqa_output: torch.Tensor,
+    idx_q: torch.Tensor,
+    idx_rope_cache: torch.Tensor,
+    idx_weights: torch.Tensor,
+    idx_weights_softmax_scale: float,
+    idx_weights_head_scale: float,
+    idx_q_fp8: torch.Tensor,
+    idx_weights_out: torch.Tensor,
+    has_indexer: bool,
+    index_rope_interleave: bool,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="fused_q_cutedsl",
+    op_func=_fused_q_cutedsl_impl,
+    mutates_args=["mqa_output", "idx_q_fp8", "idx_weights_out"],
+    fake_impl=_fused_q_cutedsl_fake,
+    dispatch_key="CUDA",
+)
 
 
 def _dummy(shape: tuple, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
@@ -773,10 +848,12 @@ def fused_q(
     ``(ql_nope, q_pe)`` tuple the backend expects.
     """
     assert positions.ndim == 1
+    assert positions.dtype == torch.int64
     assert q_pe.ndim == 3
     assert q_pe_cos_sin_cache.ndim == 2
     assert ql_nope.ndim == 3
     assert ql_nope.shape[:2] == q_pe.shape[:2]
+    assert q_scale.dtype == torch.float32 and q_scale.numel() == 1
 
     num_tokens = positions.shape[0]
     num_q_heads = q_pe.shape[1]
@@ -794,6 +871,17 @@ def fused_q(
     assert index_weights is not None
     num_index_q_heads = index_q.shape[1]
     index_q_head_dim = index_q.shape[2]
+    use_cutedsl = False
+    if _can_use_fused_q_cutedsl():
+        from .ops.fused_q_cutedsl import is_fused_q_cutedsl_supported
+
+        use_cutedsl = is_fused_q_cutedsl_supported(
+            q_pe,
+            index_q,
+            ql_nope,
+            has_indexer=has_indexer,
+            quantize_mqa=quantize_mqa,
+        )
     grid_heads = max(mqa_grid_heads, num_index_q_heads)
     if quantize_mqa:
         # fp8 path: pack [ql_nope; q_pe] into a single fp8 tensor.
@@ -815,6 +903,26 @@ def fused_q(
 
     index_q_fp8 = torch.empty_like(index_q, dtype=torch.float8_e4m3fn)
     index_weights_out = torch.empty_like(index_weights, dtype=torch.float32)
+    if use_cutedsl:
+        torch.ops.vllm.fused_q_cutedsl(
+            positions,
+            q_pe,
+            q_pe_cos_sin_cache,
+            ql_nope,
+            q_scale,
+            mqa_q,
+            index_q,
+            index_q_cos_sin_cache,
+            index_weights,
+            index_weights_softmax_scale,
+            index_weights_head_scale,
+            index_q_fp8,
+            index_weights_out,
+            has_indexer=has_indexer,
+            index_rope_interleave=index_rope_interleave,
+        )
+        return index_q_fp8, index_weights_out, mqa_q
+
     _fused_q_kernel[(3, num_tokens, grid_heads)](
         positions,
         q_pe,
