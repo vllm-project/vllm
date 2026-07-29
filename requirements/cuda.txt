@@ -33,6 +33,3 @@ tokenspeed-mla==0.1.8; platform_system == "Linux"
 
 # Humming kernels for quantization gemm
 humming-kernels[cu13]==0.1.10
-
-# KDA
-flash-linear-attention==0.5.0
