@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Pure-CPU smoke tests for _load_per_expert_moe_weight in gpt_oss.py:
-gate/up w13 packing, w2 TP-slicing, the w2_bias rank-0 rule, and
-off-rank (EP) / non-MoE / missing-param handling."""
+"""Pure-CPU smoke tests for load_per_expert_moe_weight in moe_loading_utils.py."""
 
 import pytest
 import torch
 
-from vllm.model_executor.models.gpt_oss import _load_per_expert_moe_weight
+from vllm.model_executor.layers.quantization.compressed_tensors.moe_loading_utils import (  # noqa: E501
+    load_per_expert_moe_weight,
+)
 
 
 def _make_params(
@@ -70,7 +70,7 @@ def test_per_expert_dispatch_tp(tp_size, tp_rank):
         (".w2_bias", down_bias),
     ]:
         name = f"layers.0.mlp.experts.experts.{expert_id}{suffix}"
-        ok = _load_per_expert_moe_weight(
+        ok = load_per_expert_moe_weight(
             name,
             tensor.clone(),
             params_dict=params,
@@ -139,7 +139,7 @@ def test_per_expert_dispatch_ep_skips_off_rank_experts():
     gate_e1 = torch.randn(i, k)  # NOT owned by this rank
 
     # Local expert: global id 2 → local id 0 → write to params.data[0].
-    ok = _load_per_expert_moe_weight(
+    ok = load_per_expert_moe_weight(
         "layers.0.mlp.experts.experts.2.w1_weight",
         gate_e2,
         params_dict=params,
@@ -161,7 +161,7 @@ def test_per_expert_dispatch_ep_skips_off_rank_experts():
     # Off-rank expert: returns True (claimed by the per-expert path) but
     # MUST NOT mutate any local param.
     before = params["layers.0.mlp.experts.w13_weight"].data.clone()
-    ok = _load_per_expert_moe_weight(
+    ok = load_per_expert_moe_weight(
         "layers.0.mlp.experts.experts.1.w1_weight",
         gate_e1,
         params_dict=params,
@@ -194,7 +194,7 @@ def test_per_expert_dispatch_non_moe_returns_false(name):
     default-loader branches."""
     params = _make_params(4, 16, 32)
     loaded: set[str] = set()
-    ok = _load_per_expert_moe_weight(
+    ok = load_per_expert_moe_weight(
         name,
         torch.zeros(1),
         params_dict=params,
@@ -216,7 +216,7 @@ def test_per_expert_dispatch_missing_bias_param_is_handled():
     the default loader and KeyError on the missing param)."""
     params = _make_params(4, 16, 32, has_bias=False)
     loaded: set[str] = set()
-    ok = _load_per_expert_moe_weight(
+    ok = load_per_expert_moe_weight(
         "layers.0.mlp.experts.experts.0.w1_bias",
         torch.zeros(16),
         params_dict=params,
