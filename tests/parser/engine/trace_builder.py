@@ -33,6 +33,7 @@ from vllm.parser.engine.registered_adapters import (
     DeepSeekV32Parser,
     Gemma4Parser,
     Glm47MoeParser,
+    GraniteParser,
     InklingParser,
     KimiK2Parser,
     MinimaxM2Parser,
@@ -1020,12 +1021,96 @@ def _build_inkling(scenario: Scenario, validate: bool = True) -> Sample:
     return sample
 
 
+# ── Granite (JSON-array tool bodies, no reasoning) ───────────────────────
+
+_GRANITE_VOCAB: dict[str, int] = {
+    "<|tool_call|>": 49154,
+}
+
+
+def _granite_segments(scenario: Scenario) -> list[tuple[str, bool]]:
+    segs: list[tuple[str, bool]] = []
+    if scenario.content:
+        # Granite has no reasoning; prose is plain content preceding the marker.
+        segs.append((scenario.content, False))
+    if scenario.tool_calls:
+        segs.append(("<|tool_call|>", True))
+        payload = json.dumps(
+            [
+                {"name": tc.name, "arguments": tc.arguments}
+                for tc in scenario.tool_calls
+            ],
+            ensure_ascii=False,
+            separators=(", ", ": "),
+        )
+        segs.append((" " + payload, False))
+    return segs
+
+
+def _granite_expected_content(scenario: Scenario) -> str | None:
+    if scenario.tool_calls:
+        if not scenario.content:
+            return None
+        return scenario.content.strip() or None
+    return scenario.content
+
+
+def _build_granite(scenario: Scenario, validate: bool = True) -> Sample:
+    sample = _make_sample(
+        sample_id=f"granite-{scenario.id}",
+        description=scenario.description,
+        vocab=_GRANITE_VOCAB,
+        segments=_granite_segments(scenario),
+        expected_reasoning=None,
+        expected_content=_granite_expected_content(scenario),
+        expected_tool_calls=_expected_tc(scenario),
+        tools=_expected_tools(scenario),
+    )
+    if validate:
+        _validate_sample(sample, GraniteParser)
+    return sample
+
+
+# Granite has no reasoning, so the shared reasoning-centric SCENARIOS do not
+# apply; these exercise the JSON-array tool body (single, parallel, surrounding
+# text) instead.
+_GRANITE_SCENARIOS: list[Scenario] = [
+    Scenario(
+        id="single-tool",
+        description="Single tool call",
+        tool_calls=[_READ_TOOL],
+    ),
+    Scenario(
+        id="parallel-tools",
+        description="Parallel tool calls in one JSON array",
+        tool_calls=[_BASH_TOOL, _WEATHER_TOOL],
+    ),
+    Scenario(
+        id="complex-json-args",
+        description="Tool call with nested objects, arrays, numbers, booleans",
+        tool_calls=[_COMPLEX_TOOL],
+    ),
+    Scenario(
+        id="content-only",
+        description="Plain content response without tool calls",
+        content="Hello! How can I help you today?",
+    ),
+    Scenario(
+        id="surrounding-text",
+        description="Prose content preceding the tool call",
+        content="Let me check the weather.",
+        tool_calls=[_WEATHER_TOOL],
+    ),
+]
+
+
 # ── Registry and public API ──────────────────────────────────────────
 
 _BUILDERS: dict[str, Any] = {
     "deepseek_v32": _build_deepseek_v32,
     "deepseek_v4": _build_deepseek_v4,
     "gemma4": _build_gemma4,
+    "granite": _build_granite,
     "minimax_m2": _build_minimax_m2,
     "nemotron_v3": _build_nemotron_v3,
     "seed_oss": _build_seed_oss,
