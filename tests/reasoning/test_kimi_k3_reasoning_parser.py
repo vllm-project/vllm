@@ -34,9 +34,6 @@ class DummyTokenizer:
         return [ord(ch) for ch in text]
 
 
-ReasoningOnlyParser = KimiK3Parser
-
-
 def test_parser_manager_selects_kimi_k3_parser_for_reasoning_only():
     parser_cls = ParserManager.get_parser(reasoning_parser_name="kimi_k3")
 
@@ -49,6 +46,19 @@ def test_reasoning_registry_uses_kimi_k3_compatibility_entry_point():
     assert (
         ReasoningParserManager.get_reasoning_parser("kimi_k3") is KimiK3ReasoningParser
     )
+
+
+def test_reasoning_adapter_delegates_to_kimi_k3_engine():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    request = ChatCompletionRequest(model="test-model", messages=[])
+
+    reasoning, content = parser.extract_reasoning(
+        f"{THINK_OPEN}step{THINK_CLOSE}{RESPONSE_OPEN}answer",
+        request,
+    )
+
+    assert reasoning == "step"
+    assert content == "answer"
 
 
 def test_parser_selection_thinking_disabled():
@@ -83,8 +93,29 @@ def test_extract_reasoning_with_generation_prefix_consumed():
     assert content == "answer"
 
 
-def test_delegating_parser_strips_response_wrapper_without_tool_parser():
-    parser = ReasoningOnlyParser(DummyTokenizer())
+def test_parser_engine_parses_next_assistant_turn_after_multi_turn_prompt():
+    parser = KimiK3Parser(DummyTokenizer())
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[
+            {"role": "user", "content": "first question"},
+            {"role": "assistant", "content": "first answer"},
+            {"role": "user", "content": "follow-up question"},
+        ],
+    )
+
+    reasoning, content, tool_calls = parser.parse(
+        f"second reasoning{THINK_CLOSE}{RESPONSE_OPEN}second answer",
+        request,
+    )
+
+    assert reasoning == "second reasoning"
+    assert content == "second answer"
+    assert tool_calls is None
+
+
+def test_parser_engine_strips_response_wrapper():
+    parser = KimiK3Parser(DummyTokenizer())
     request = ChatCompletionRequest(model="test-model", messages=[])
 
     reasoning, content, tool_calls = parser.parse(
@@ -203,10 +234,8 @@ def test_thinking_disabled_streams_content():
     assert delta.reasoning is None
 
 
-def test_delegating_parser_thinking_false_streams_response_content():
-    parser = ReasoningOnlyParser(
-        DummyTokenizer(), chat_template_kwargs={"thinking": False}
-    )
+def test_parser_engine_thinking_false_streams_response_content():
+    parser = KimiK3Parser(DummyTokenizer(), chat_template_kwargs={"thinking": False})
     request = ChatCompletionRequest(
         model="test-model",
         messages=[],

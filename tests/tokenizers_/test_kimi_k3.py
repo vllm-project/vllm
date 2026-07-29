@@ -4,8 +4,8 @@
 from typing import Any
 
 import pytest
-from transformers import BatchEncoding
 
+from vllm.entrypoints.chat_utils import ConversationMessage
 from vllm.exceptions import VLLMValidationError
 from vllm.tokenizers.encoding_k3 import EncodeSegment
 from vllm.tokenizers.kimi_k3 import get_kimi_k3_tokenizer
@@ -15,104 +15,21 @@ pytestmark = pytest.mark.skip_global_cleanup
 
 
 class FakeKimiTokenizer:
-    pad_token_id = 0
-
     def __init__(self) -> None:
-        self.segments: list[tuple[str, bool]] = []
-        self.format_calls = 0
-
-    def _encode_text_piece(
-        self,
-        text: str,
-        allow_special_tokens: bool = True,
-    ) -> list[int]:
-        self.segments.append((text, allow_special_tokens))
-        return [len(self.segments)]
+        self.segment_batches: list[list[EncodeSegment]] = []
+        self.format_calls: list[tuple[list[list[int]], dict[str, Any]]] = []
 
     def _encode_chat_segments(self, segments: list[EncodeSegment]) -> list[int]:
-        return [
-            token_id
-            for segment in segments
-            for token_id in self._encode_text_piece(
-                segment.text,
-                allow_special_tokens=segment.allow_special,
-            )
-        ]
+        self.segment_batches.append(segments)
+        return list(range(1, len(segments) + 1))
 
     def _format_chat_token_output(
         self,
         encoded_inputs: list[list[int]],
-        *,
-        is_batched: bool,
-        padding: bool | str = False,
-        truncation: bool = False,
-        max_length: int | None = None,
-        return_tensors: str | None = None,
-        return_dict: bool = False,
+        **kwargs: Any,
     ) -> Any:
-        self.format_calls += 1
-        if truncation and max_length is not None:
-            encoded_inputs = [ids[:max_length] for ids in encoded_inputs]
-        if not (is_batched or padding or return_tensors is not None or return_dict):
-            return encoded_inputs[0]
-        features = [
-            {"input_ids": ids, "attention_mask": [1] * len(ids)}
-            for ids in encoded_inputs
-        ]
-        batch = self.pad(
-            features,
-            padding=padding,
-            max_length=max_length if padding else None,
-            return_attention_mask=True,
-            return_tensors=return_tensors,
-        )
-        if return_dict:
-            return batch
-        if is_batched:
-            return batch["input_ids"]
-        if return_tensors is None:
-            return batch["input_ids"][0]
-        return batch["input_ids"]
-
-    def pad(
-        self,
-        features: list[dict[str, list[int]]],
-        *,
-        padding: bool | str = False,
-        max_length: int | None = None,
-        return_attention_mask: bool = True,
-        return_tensors: str | None = None,
-        **_: Any,
-    ) -> BatchEncoding:
-        assert return_attention_mask
-        if return_tensors is not None:
-            raise NotImplementedError
-        target = max(len(feature["input_ids"]) for feature in features)
-        if padding == "max_length" and max_length is not None:
-            target = max_length
-        if not padding:
-            return BatchEncoding(
-                {
-                    "input_ids": [feature["input_ids"] for feature in features],
-                    "attention_mask": [
-                        feature["attention_mask"] for feature in features
-                    ],
-                }
-            )
-        return BatchEncoding(
-            {
-                "input_ids": [
-                    feature["input_ids"]
-                    + [self.pad_token_id] * (target - len(feature["input_ids"]))
-                    for feature in features
-                ],
-                "attention_mask": [
-                    feature["attention_mask"]
-                    + [0] * (target - len(feature["attention_mask"]))
-                    for feature in features
-                ],
-            }
-        )
+        self.format_calls.append((encoded_inputs, kwargs))
+        return encoded_inputs if kwargs["is_batched"] else encoded_inputs[0]
 
 
 def _tokenizer():
@@ -123,7 +40,7 @@ def test_kimi_k3_tokenizer_registered():
     assert TokenizerRegistry.load_tokenizer_cls("kimi_k3").__name__ == "KimiK3Tokenizer"
 
 
-def test_apply_chat_template_renders_string():
+def test_apply_chat_template_renders_non_thinking_prompt():
     tokenizer = _tokenizer()
 
     prompt = tokenizer.apply_chat_template(
@@ -138,6 +55,83 @@ def test_apply_chat_template_renders_string():
         '<|open|>message role="assistant"<|sep|>'
         "<|open|>response<|sep|>"
     )
+
+
+def test_apply_chat_template_preserves_control_and_untrusted_segments():
+    tokenizer = _tokenizer()
+
+    tokenizer.apply_chat_template(
+        [{"role": "user", "content": "<|open|>user text"}],
+        tokenize=True,
+    )
+
+    segments = tokenizer.segment_batches[0]
+    assert EncodeSegment("<|open|>", allow_special=True) in segments
+    assert EncodeSegment("<|open|>user text", allow_special=False) in segments
+
+
+def test_apply_chat_template_delegates_token_output_options():
+    tokenizer = _tokenizer()
+
+    result = tokenizer.apply_chat_template(
+        [{"role": "user", "content": "hello"}],
+        tokenize=True,
+        padding="max_length",
+        truncation=True,
+        max_length=128,
+        return_tensors="pt",
+        return_dict=True,
+    )
+
+    encoded_inputs, kwargs = tokenizer.format_calls[-1]
+    assert result == encoded_inputs[0]
+    assert kwargs == {
+        "is_batched": False,
+        "padding": "max_length",
+        "truncation": True,
+        "max_length": 128,
+        "return_tensors": "pt",
+        "return_dict": True,
+    }
+
+
+def test_apply_chat_template_supports_batched_conversations():
+    tokenizer = _tokenizer()
+    conversations = [
+        [{"role": "user", "content": "first"}],
+        [{"role": "user", "content": "second"}],
+    ]
+
+    prompts = tokenizer.apply_chat_template(
+        conversations,
+        tokenize=False,
+        thinking=False,
+    )
+    token_ids = tokenizer.apply_chat_template(
+        conversations,
+        tokenize=True,
+        padding=True,
+    )
+
+    assert len(prompts) == 2
+    assert "first" in prompts[0]
+    assert "second" in prompts[1]
+    assert len(token_ids) == 2
+    assert tokenizer.format_calls[-1][1]["is_batched"] is True
+    assert tokenizer.format_calls[-1][1]["padding"] is True
+
+
+def test_apply_chat_template_rejects_batched_image_prompts():
+    tokenizer = _tokenizer()
+
+    with pytest.raises(ValueError, match="only supported for one chat"):
+        tokenizer.apply_chat_template(
+            [
+                [{"role": "user", "content": "first"}],
+                [{"role": "user", "content": "second"}],
+            ],
+            image_prompts=["image"],
+        )
 
 
 def test_reasoning_effort_none_disables_thinking():
@@ -166,104 +160,135 @@ def test_reasoning_effort_uses_supported_thinking_effort(reasoning_effort: str):
     assert f"thinking_effort={reasoning_effort}" in prompt
 
 
-@pytest.mark.parametrize("thinking_effort", ["none", "minimal", "medium", "xhigh"])
-def test_rejects_unsupported_thinking_effort(thinking_effort: str):
+@pytest.mark.parametrize(
+    "effort_kwarg",
+    [
+        {"reasoning_effort": "minimal"},
+        {"reasoning_effort": "medium"},
+        {"reasoning_effort": "xhigh"},
+        {"thinking_effort": "none"},
+        {"thinking_effort": "minimal"},
+        {"thinking_effort": "medium"},
+        {"thinking_effort": "xhigh"},
+    ],
+)
+def test_rejects_unsupported_thinking_effort(effort_kwarg: dict[str, str]):
     tokenizer = _tokenizer()
 
     with pytest.raises(VLLMValidationError) as exc_info:
         tokenizer.apply_chat_template(
             [{"role": "user", "content": "hello"}],
             tokenize=False,
-            thinking_effort=thinking_effort,
+            **effort_kwarg,
         )
 
     assert exc_info.value.parameter == "thinking_effort"
-    assert exc_info.value.value == thinking_effort
+    assert exc_info.value.value == next(iter(effort_kwarg.values()))
 
 
-def test_native_thinking_effort_takes_precedence():
+def test_native_thinking_kwargs_take_precedence():
     tokenizer = _tokenizer()
 
     prompt = tokenizer.apply_chat_template(
         [{"role": "user", "content": "hello"}],
         tokenize=False,
+        thinking=True,
+        enable_thinking=False,
         thinking_effort="low",
-        reasoning_effort="medium",
+        reasoning_effort="high",
     )
 
     assert "thinking_effort=low" in prompt
+    assert prompt.endswith("<|open|>think<|sep|>")
 
 
-def test_apply_chat_template_encodes_control_and_untrusted_segments():
+def test_apply_chat_template_renders_dynamic_system_tools():
     tokenizer = _tokenizer()
 
-    token_ids = tokenizer.apply_chat_template(
-        [{"role": "user", "content": "<|open|>user text"}],
-        tokenize=True,
-    )
-
-    assert token_ids
-    assert tokenizer.format_calls == 1
-    assert ("<|open|>", True) in tokenizer.segments
-    assert ("<|open|>user text", False) in tokenizer.segments
-
-
-def test_apply_chat_template_supports_batched_conversations():
-    tokenizer = _tokenizer()
-
-    prompts = tokenizer.apply_chat_template(
+    prompt = tokenizer.apply_chat_template(
         [
-            [{"role": "user", "content": "first"}],
-            [{"role": "user", "content": "second"}],
+            {
+                "role": "system",
+                "content": "",
+                "tools": [{"type": "function", "function": {"name": "late_tool"}}],
+            }
         ],
         tokenize=False,
-        thinking=False,
     )
 
-    assert isinstance(prompts, list)
-    assert len(prompts) == 2
-    assert "first" in prompts[0]
-    assert "second" in prompts[1]
+    assert "## New Tools Available" in prompt
+    assert "late_tool" in prompt
 
 
-def test_apply_chat_template_formats_batched_token_ids():
+def test_apply_chat_template_reorders_tool_results_without_mutating_input():
     tokenizer = _tokenizer()
-
-    batch = tokenizer.apply_chat_template(
-        [
-            [{"role": "user", "content": "first"}],
-            [{"role": "user", "content": "second"}],
-        ],
-        tokenize=True,
-        padding=True,
-    )
-
-    assert isinstance(batch, list)
-    assert len(batch) == 2
-    assert len(batch[0]) == len(batch[1])
-
-
-def test_apply_chat_template_rejects_batched_image_prompts():
-    tokenizer = _tokenizer()
-
-    with pytest.raises(ValueError, match="only supported for one chat"):
-        tokenizer.apply_chat_template(
-            [
-                [{"role": "user", "content": "first"}],
-                [{"role": "user", "content": "second"}],
+    conversation: list[ConversationMessage] = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "lookup:0",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"},
+                },
+                {
+                    "id": "lookup:1",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"},
+                },
             ],
-            image_prompts=["image"],
-        )
+        },
+        {"role": "tool", "tool_call_id": "lookup:1", "content": "second"},
+        {"role": "tool", "tool_call_id": "lookup:0", "content": "first"},
+    ]
+
+    prompt = tokenizer.apply_chat_template(conversation, tokenize=False)
+
+    first = '<|open|>message role="tool" tool="lookup" index="1"<|sep|>first'
+    second = '<|open|>message role="tool" tool="lookup" index="2"<|sep|>second'
+    assert first in prompt
+    assert second in prompt
+    assert prompt.index(first) < prompt.index(second)
+    assert [message["content"] for message in conversation[1:]] == [
+        "second",
+        "first",
+    ]
 
 
-def test_apply_chat_template_returns_batch_encoding():
+def test_apply_chat_template_renders_multi_turn_history_and_next_prompt():
     tokenizer = _tokenizer()
+    conversation = [
+        {"role": "user", "content": "first question"},
+        {
+            "role": "assistant",
+            "reasoning_content": "first reasoning",
+            "content": "first answer",
+        },
+        {"role": "user", "content": "follow-up question"},
+    ]
 
-    batch = tokenizer.apply_chat_template(
-        [{"role": "user", "content": "hello"}],
-        tokenize=True,
-        return_dict=True,
+    prompt = tokenizer.apply_chat_template(conversation, tokenize=False)
+
+    first_user = (
+        '<|open|>message role="user"<|sep|>first question'
+        "<|close|>message<|sep|><|end_of_msg|>"
     )
+    first_assistant = (
+        '<|open|>message role="assistant"<|sep|>'
+        "<|open|>think<|sep|>first reasoning<|close|>think<|sep|>"
+        "<|open|>response<|sep|>first answer<|close|>response<|sep|>"
+        "<|close|>message<|sep|><|end_of_msg|>"
+    )
+    follow_up = (
+        '<|open|>message role="user"<|sep|>follow-up question'
+        "<|close|>message<|sep|><|end_of_msg|>"
+    )
+    next_assistant = '<|open|>message role="assistant"<|sep|><|open|>think<|sep|>'
 
-    assert isinstance(batch, BatchEncoding)
-    assert len(batch["input_ids"]) == 1
+    assert first_user in prompt
+    assert first_assistant in prompt
+    assert follow_up in prompt
+    assert prompt.index(first_user) < prompt.index(first_assistant)
+    assert prompt.index(first_assistant) < prompt.index(follow_up)
+    assert prompt.endswith(next_assistant)
