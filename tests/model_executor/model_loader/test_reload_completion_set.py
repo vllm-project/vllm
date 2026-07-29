@@ -17,20 +17,24 @@ import pytest
 import torch
 from torch import nn
 
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.load_receipt import (
     LoadCollisionPolicy,
     LoadReceipt,
     returns_load_receipt,
 )
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizeMethodBase)
 from vllm.model_executor.model_loader.reload.layerwise import (
-    finalize_layerwise_reload, finalize_load_recording,
-    get_layer_completion_findings, get_layerwise_info,
+    finalize_layerwise_reload,
+    finalize_load_recording,
+    get_layer_completion_findings,
+    get_layerwise_info,
     get_load_manifest_report,
-    initialize_layerwise_reload, record_load_consumption,
-    record_direct_load_consumption, record_dummy_load_manifest,
-    record_metadata_for_reloading)
+    initialize_layerwise_reload,
+    record_direct_load_consumption,
+    record_dummy_load_manifest,
+    record_load_consumption,
+    record_metadata_for_reloading,
+)
 from vllm.model_executor.model_loader.reload.source import observe_weight_sources
 from vllm.model_executor.model_loader.weight_utils import (
     composed_weight_loader,
@@ -539,12 +543,18 @@ class TestObservation:
 
         required = get_layerwise_info(layer).required_keys
         assert required == {
-            "model.layers.0.self_attn.q_proj.weight"
-            "=>weight[loaded_shard_id='q']",
-            "model.layers.0.self_attn.k_proj.weight"
-            "=>weight[loaded_shard_id='k']",
-            "model.layers.0.self_attn.v_proj.weight"
-            "=>weight[loaded_shard_id='v']",
+            (
+                "model.layers.0.self_attn.q_proj.weight"
+                "=>weight[loaded_shard_id='q']"
+            ),
+            (
+                "model.layers.0.self_attn.k_proj.weight"
+                "=>weight[loaded_shard_id='k']"
+            ),
+            (
+                "model.layers.0.self_attn.v_proj.weight"
+                "=>weight[loaded_shard_id='v']"
+            ),
         }
 
     def test_source_keys_cover_one_to_one_and_merged_mlp(self):

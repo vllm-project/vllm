@@ -436,7 +436,6 @@ def probe_dummy_load_manifest(
         for layer, info in infos.items()
     }
     global_state = {
-        "_LAYER_ARENA_FINDINGS": list(layerwise._LAYER_ARENA_FINDINGS),
         "_LAYER_COMPLETION_FINDINGS": list(layerwise._LAYER_COMPLETION_FINDINGS),
         "_DUMMY_BASELINE_FAILURES": list(layerwise._DUMMY_BASELINE_FAILURES),
     }

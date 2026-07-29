@@ -98,6 +98,7 @@ class BaseModelLoader(ABC):
 
     def finalize_load_manifest(self, model: nn.Module) -> None:
         """Allow source-less loaders to establish a post-processing baseline."""
+        return None
 
     def _ensure_manifest_observed(self, model: nn.Module) -> None:
         """Fail closed when a loader bypasses every supported observer."""

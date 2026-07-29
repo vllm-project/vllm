@@ -3,9 +3,9 @@
 """Structured result of one logical weight-loader invocation."""
 
 import inspect
-from enum import Enum
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
 from functools import wraps
 from typing import TypeAlias
 
