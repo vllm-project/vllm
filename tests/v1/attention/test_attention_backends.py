@@ -771,29 +771,50 @@ def test_flashinfer_xqa_draft_masks():
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )
-def test_flashinfer_xqa_query_lens_include_cudagraph_padding():
-    """The last DBO microbatch must include virtual CUDA-graph query rows."""
+def test_flashinfer_xqa_query_lens_preserve_cudagraph_padding():
+    """CUDA-graph padding stays as zero-length requests in ragged offsets."""
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
-    from vllm.v1.utils import CpuGpuBuffer
 
     device = torch.device("cpu")
     builder = object.__new__(flashinfer_backend.FlashInferMetadataBuilder)
     builder.use_xqa = True
-    builder.uniform_decode_query_len = 6
-    builder._xqa_q_cu_seq_lens = CpuGpuBuffer(
-        5, dtype=torch.int32, device=device, pin_memory=False
-    )
+    qo_indptr = torch.tensor([0, 3, 9, 15, 15], dtype=torch.int32, device=device)
 
     q_len, q_cu_seq_lens, q_lens = builder._compute_decode_query_lens(
-        torch.tensor([0, 3, 9, 15, 15], dtype=torch.int32),
+        qo_indptr,
+        qo_indptr,
         num_decodes=4,
         num_decode_tokens=21,
     )
 
     assert q_len == 6
-    assert q_lens == [3, 6, 6, 6]
+    assert q_lens == [3, 6, 6, 0]
     assert q_cu_seq_lens is not None
-    assert q_cu_seq_lens.tolist() == [0, 3, 9, 15, 21]
+    assert q_cu_seq_lens.tolist() == [0, 3, 9, 15, 15]
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_xqa_query_lens_require_exact_uniform_product():
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    builder = object.__new__(flashinfer_backend.FlashInferMetadataBuilder)
+    builder.use_xqa = True
+    qo_indptr = torch.tensor([0, 3, 3, 3], dtype=torch.int32)
+
+    q_len, q_cu_seq_lens, q_lens = builder._compute_decode_query_lens(
+        qo_indptr,
+        qo_indptr,
+        num_decodes=3,
+        num_decode_tokens=6,
+    )
+
+    assert q_len == 3
+    assert q_lens == [3, 0, 0]
+    assert q_cu_seq_lens is not None
+    assert q_cu_seq_lens.tolist() == [0, 3, 3, 3]
 
 
 @pytest.mark.skipif(

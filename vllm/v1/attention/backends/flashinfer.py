@@ -717,7 +717,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             if speculative_config is not None
             else 0
         )
-        self.uniform_decode_query_len = 1 + vllm_config.num_speculative_tokens
         self.enable_cuda_graph = (
             self.compilation_config.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
         )
@@ -885,7 +884,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )  # Extra buffer for mutable paged_kv_indptr.cpu in cuda graph mode
         self.paged_kv_indices = self._make_buffer(max_num_pages)
         self.paged_kv_last_page_len = self._make_buffer(max_num_reqs)
-        self._xqa_q_cu_seq_lens = self._make_buffer(max_num_reqs + 1)
 
     # Keep SM90 prefill/decode Q dtype selection in one place.
     def get_q_data_type(self, is_prefill: bool) -> torch.dtype:
@@ -1023,6 +1021,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def _compute_decode_query_lens(
         self,
+        qo_indptr: torch.Tensor,
         qo_indptr_cpu: torch.Tensor,
         num_decodes: int,
         num_decode_tokens: int,
@@ -1036,42 +1035,20 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 return 1, None, None
             return num_decode_tokens // num_decodes, None, None
 
-        decode_q_lens = (
-            qo_indptr_cpu[1 : num_decodes + 1] - qo_indptr_cpu[:num_decodes]
-        ).numpy()
-        decode_q_lens = decode_q_lens.copy()
-        num_padding_tokens = num_decode_tokens - int(decode_q_lens.sum())
-        if num_padding_tokens < 0:
-            raise ValueError(
-                "XQA query offsets contain more tokens than the decode batch."
-            )
-        if num_padding_tokens > 0:
-            padded_reqs = decode_q_lens == 0
-            expected_padding = int(padded_reqs.sum()) * self.uniform_decode_query_len
-            if num_padding_tokens != expected_padding:
-                raise ValueError(
-                    "XQA CUDA-graph padding does not match the padded requests."
-                )
-            decode_q_lens[padded_reqs] = self.uniform_decode_query_len
+        decode_q_lens = qo_indptr_cpu[1 : num_decodes + 1] - qo_indptr_cpu[:num_decodes]
+        nonzero = decode_q_lens[decode_q_lens > 0]
+        q_len_per_req = int(nonzero.max().item()) if nonzero.numel() > 0 else 1
+        uniform = nonzero.numel() <= 1 or bool((nonzero == nonzero[0]).all().item())
+        if uniform and num_decode_tokens == num_decodes * q_len_per_req:
+            return q_len_per_req, None, None
 
-        if bool(np.all(decode_q_lens == decode_q_lens[0])):
-            return int(decode_q_lens[0]), None, None
-
-        q_len_per_req = int(decode_q_lens.max())
         if q_len_per_req <= 1:
-            raise ValueError("XQA cannot represent ragged single-token queries.")
+            return 1, None, None
 
-        q_cu_seq_lens = self._xqa_q_cu_seq_lens
-        q_cu_seq_lens.np[0] = 0
-        np.cumsum(
-            decode_q_lens,
-            dtype=np.int32,
-            out=q_cu_seq_lens.np[1 : num_decodes + 1],
-        )
-        q_lens = [int(q_len) for q_len in decode_q_lens]
+        q_lens = decode_q_lens.tolist()
         return (
             q_len_per_req,
-            q_cu_seq_lens.copy_to_gpu(num_decodes + 1),
+            qo_indptr[: num_decodes + 1],
             q_lens,
         )
 
@@ -1594,7 +1571,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     ]
                 q_len_per_req, q_cu_seq_lens, ragged_q_lens = (
                     self._compute_decode_query_lens(
-                        qo_indptr_cpu, num_decodes, num_decode_tokens
+                        qo_indptr, qo_indptr_cpu, num_decodes, num_decode_tokens
                     )
                 )
                 decode_mask = None
