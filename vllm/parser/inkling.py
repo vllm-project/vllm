@@ -39,6 +39,7 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
+from vllm.parser.utils import extract_json_member_object
 
 if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
@@ -64,84 +65,6 @@ INKLING_SPECIAL_TOKENS = (
     END_MESSAGE,
 )
 
-_WS = " \t\r\n"
-
-
-def _scan_json_value(raw: str, start: int) -> int | None:
-    """Return the end index (exclusive) of the JSON object starting at
-    ``raw[start]``, or ``None`` when the object is still unterminated."""
-    depth = 0
-    in_string = False
-    escape = False
-    for i in range(start, len(raw)):
-        ch = raw[i]
-        if escape:
-            escape = False
-            continue
-        if in_string:
-            if ch == "\\":
-                escape = True
-            elif ch == '"':
-                in_string = False
-            continue
-        if ch == '"':
-            in_string = True
-        elif ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return i + 1
-    return None
-
-
-def _args_value_span(raw: str) -> str | None:
-    """Extract the raw text span of the top-level ``"args"`` value from a
-    (possibly incomplete) ``{"name":...,"args":{...}}`` wrapper.
-
-    Returns the verbatim substring (prefix-stable across growing input,
-    which the engine's argument-delta diffing relies on), possibly an
-    unterminated object prefix; ``None`` when the value has not started.
-    Raises ``ValueError`` when the value is not a JSON object.
-    """
-    depth = 0
-    in_string = False
-    escape = False
-    string_start = -1
-    last_string: str | None = None
-    for i, ch in enumerate(raw):
-        if escape:
-            escape = False
-            continue
-        if in_string:
-            if ch == "\\":
-                escape = True
-            elif ch == '"':
-                in_string = False
-                if depth == 1:
-                    last_string = raw[string_start + 1 : i]
-            continue
-        if ch == '"':
-            in_string = True
-            string_start = i
-        elif ch == ":" and depth == 1 and last_string == "args":
-            value_start = i + 1
-            while value_start < len(raw) and raw[value_start] in _WS:
-                value_start += 1
-            if value_start >= len(raw):
-                return None
-            if raw[value_start] != "{":
-                raise ValueError("Inkling tool call args must be a JSON object")
-            value_end = _scan_json_value(raw, value_start)
-            if value_end is None:
-                return raw[value_start:]
-            return raw[value_start:value_end]
-        elif ch in "{[":
-            depth += 1
-        elif ch in "}]":
-            depth -= 1
-    return None
-
 
 def _inkling_arg_converter(raw_args: str, partial: bool) -> str:
     """Carve the ``args`` object out of the tool-call JSON wrapper.
@@ -152,19 +75,10 @@ def _inkling_arg_converter(raw_args: str, partial: bool) -> str:
     converter, ``_compute_arg_delta`` streams the wrapper verbatim into
     the OpenAI ``arguments`` field (``converter is None -> raw delta``,
     unconditionally; ``stream_arg_deltas=False`` does not stop it).
-
-    Why a hand-rolled scanner instead of (partial) ``json.loads`` +
-    ``json.dumps``: the engine diffs successive converter outputs and
-    requires each to extend the previous one (``startswith``); a
-    violation silently drops argument deltas. Re-serialization changes
-    whitespace and closes unterminated structures differently across
-    ticks, so the only prefix-stable output is a verbatim substring of
-    the input. The scanner is also string/escape-aware so an ``"args"``
-    literal inside the name or a string value cannot mislead it, and it
-    still recovers a partial span when EOS truncates the wrapper (where
-    ``json.loads`` would fail).
+    :func:`extract_json_member_object` returns a prefix-stable verbatim
+    substring, which the engine's argument-delta diffing requires.
     """
-    span = _args_value_span(raw_args)
+    span = extract_json_member_object(raw_args, "args")
     if span is None:
         # No args value yet (streaming) or none at all (treat as empty).
         return "" if partial else "{}"
