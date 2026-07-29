@@ -234,6 +234,10 @@ class SchedulerInterface(ABC):
         """Returns (num_running_reqs, num_waiting_reqs)."""
         raise NotImplementedError
 
+    def get_kv_cache_usage(self) -> float:
+        """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
+        return 0.0
+
     @abstractmethod
     def make_stats(self) -> "SchedulerStats | None":
         """Make a SchedulerStats object for logging.

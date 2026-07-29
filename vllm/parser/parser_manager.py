@@ -116,6 +116,18 @@ class ParserManager:
             HarmonyParser.tool_parser_cls = tool_parser_cls
             return HarmonyParser
 
+        if reasoning_parser_name == "kimi_k3" or tool_parser_name == "kimi_k3":
+            from vllm.parser.kimi_k3 import KimiK3Parser
+
+            r_cls = reasoning_parser_cls
+            t_cls = tool_parser_cls
+
+            class _KimiK3Parser(KimiK3Parser):
+                reasoning_parser_cls = r_cls
+                tool_parser_cls = t_cls
+
+            return _KimiK3Parser
+
         from vllm.parser.abstract_parser import DelegatingParser
 
         r_cls = reasoning_parser_cls
