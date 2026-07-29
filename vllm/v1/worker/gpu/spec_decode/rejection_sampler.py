@@ -137,6 +137,10 @@ class RejectionSampler:
         idx_mapping_np: np.ndarray,
         expanded_idx_mapping: torch.Tensor,
         expanded_local_pos: torch.Tensor,
+        draft_topk_logits: torch.Tensor | None = None,
+        draft_topk_token_ids: torch.Tensor | None = None,
+        draft_topk_logsumexp: torch.Tensor | None = None,
+        draft_topk_sampled_logprobs: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         processed_logits = self.sampler.apply_sampling_params(
             logits,
@@ -161,6 +165,10 @@ class RejectionSampler:
             self.synthetic_conditional_rates,
             use_fp64=self.sampler.use_fp64_gumbel,
             use_block_verification=self.use_block_verification,
+            draft_topk_logits=draft_topk_logits,
+            draft_topk_token_ids=draft_topk_token_ids,
+            draft_topk_logsumexp=draft_topk_logsumexp,
+            draft_topk_sampled_logprobs=draft_topk_sampled_logprobs,
         )
         return processed_logits, sampled, num_sampled
 
@@ -173,6 +181,10 @@ class RejectionSampler:
         pos: torch.Tensor,
         max_chunk_logits: int,
         max_num_logprobs: int,
+        draft_topk_logits: torch.Tensor | None = None,
+        draft_topk_token_ids: torch.Tensor | None = None,
+        draft_topk_logsumexp: torch.Tensor | None = None,
+        draft_topk_sampled_logprobs: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, LogprobsTensors | None]:
         cu_num_logits_np = input_batch.cu_num_logits_np
         use_processed_logits = self.sampler.logprobs_mode in PROCESSED_LOGPROBS_MODES
@@ -196,6 +208,10 @@ class RejectionSampler:
                 input_batch.idx_mapping_np[start:end],
                 input_batch.expanded_idx_mapping[lo:hi],
                 input_batch.expanded_local_pos[lo:hi],
+                draft_topk_logits,
+                draft_topk_token_ids,
+                draft_topk_logsumexp,
+                draft_topk_sampled_logprobs,
             )
             chunk_logprobs = self._get_logprobs_tensors(
                 sampled,
@@ -234,6 +250,11 @@ class RejectionSampler:
         logits: torch.Tensor,
         input_batch: InputBatch,
         draft_logits: torch.Tensor | None = None,
+        *,
+        draft_topk_logits: torch.Tensor | None = None,
+        draft_topk_token_ids: torch.Tensor | None = None,
+        draft_topk_logsumexp: torch.Tensor | None = None,
+        draft_topk_sampled_logprobs: torch.Tensor | None = None,
     ) -> SamplerOutput:
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
@@ -254,6 +275,10 @@ class RejectionSampler:
             pos,
             max_chunk_logits,
             max_num_logprobs,
+            draft_topk_logits,
+            draft_topk_token_ids,
+            draft_topk_logsumexp,
+            draft_topk_sampled_logprobs,
         )
 
         num_sampled, num_rejected = get_num_sampled_and_rejected(

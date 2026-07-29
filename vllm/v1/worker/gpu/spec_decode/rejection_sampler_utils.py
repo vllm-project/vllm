@@ -508,11 +508,15 @@ def _rejection_kernel(
     # [num_logits, num_blocks]
     local_residual_mass_ptr,
     local_residual_mass_stride,
+    draft_topk_sampled_logprobs_ptr,
+    draft_topk_logsumexp_ptr,
+    draft_compact_stride_0,
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     SYNTHETIC_MODE: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
+    TOPK_DRAFT: tl.constexpr = False,
 ):
     req_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
@@ -612,9 +616,22 @@ def _rejection_kernel(
                         draft_local_sumexp_stride,
                         vocab_num_blocks,
                         PADDED_VOCAB_NUM_BLOCKS,
-                        HAS_DRAFT_LOGITS,
+                        HAS_DRAFT_LOGITS and not TOPK_DRAFT,
                     )
                 )
+                if TOPK_DRAFT:
+                    # The compact proposer already computed q(sampled) and the
+                    # normalization over its truncated candidate set.
+                    draft_logprob = tl.load(
+                        draft_topk_sampled_logprobs_ptr
+                        + req_state_idx * draft_compact_stride_0
+                        + i
+                    ).to(tl.float32)
+                    draft_lse = tl.load(
+                        draft_topk_logsumexp_ptr
+                        + req_state_idx * draft_compact_stride_0
+                        + i
+                    ).to(tl.float32)
                 if SYNTHETIC_MODE:
                     rate = tl.load(synthetic_conditional_rates_ptr + i)
                     accepted &= u < rate
@@ -688,11 +705,14 @@ def _resample_kernel(
     pos_ptr,
     # [num_logits]
     cumulative_log_p_ptr,
+    draft_resample_dense_ptr,
+    draft_resample_dense_stride,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     USE_FP64: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
+    TOPK_DRAFT: tl.constexpr = False,
 ):
     req_idx = tl.program_id(0)
     resample_idx = tl.load(rejected_step_ptr + req_idx)
@@ -721,6 +741,24 @@ def _resample_kernel(
     if is_bonus:
         # Bonus token (no rejections). Directly use the target logits.
         residual_logits = target_logits
+    elif TOPK_DRAFT:
+        # The reconstructed row is -inf outside the candidate set, which
+        # represents q(x) = 0 there.
+        draft_logits = tl.load(
+            draft_resample_dense_ptr + req_idx * draft_resample_dense_stride + block,
+            mask=mask,
+            other=float("-inf"),
+        ).to(tl.float32)
+        target_lse = tl.load(target_rejected_logsumexp_ptr + req_idx)
+        draft_lse = tl.load(draft_rejected_logsumexp_ptr + req_idx)
+        target_log_probs = target_logits - target_lse
+        draft_log_probs = draft_logits - draft_lse
+        ratio = tl.exp(draft_log_probs - target_log_probs)
+        residual_logits = tl.where(
+            ratio < 1.0,
+            target_log_probs + tldevice.log1p(-ratio),
+            float("-inf"),
+        ).to(tl.float32)
     elif HAS_DRAFT_LOGITS:
         draft_logits = tl.load(
             draft_logits_ptr
@@ -861,6 +899,58 @@ def _insert_resampled_kernel(
     )
 
 
+# Residual sampling needs q(x) over the vocabulary only for the first rejected
+# step. Reconstruct one row per active request instead of retaining a dense
+# [request, step, vocab] proposal throughout decoding.
+@triton.jit
+def _scatter_compact_draft_kernel(
+    draft_resample_dense_ptr,
+    draft_resample_dense_stride,
+    rejected_step_ptr,
+    cu_num_logits_ptr,
+    idx_mapping_ptr,
+    draft_topk_logits_ptr,
+    draft_topk_logits_stride_0,
+    draft_topk_logits_stride_1,
+    draft_topk_token_ids_ptr,
+    draft_topk_token_ids_stride_0,
+    draft_topk_token_ids_stride_1,
+    k,
+    BLOCK_K: tl.constexpr,
+):
+    req_idx = tl.program_id(0)
+    start_idx = tl.load(cu_num_logits_ptr + req_idx)
+    end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
+    step = tl.load(rejected_step_ptr + req_idx)
+    if step >= end_idx - start_idx - 1:
+        return
+
+    req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
+    offsets = tl.arange(0, BLOCK_K)
+    mask = offsets < k
+    logits = tl.load(
+        draft_topk_logits_ptr
+        + req_state_idx * draft_topk_logits_stride_0
+        + step * draft_topk_logits_stride_1
+        + offsets,
+        mask=mask,
+        other=0.0,
+    )
+    token_ids = tl.load(
+        draft_topk_token_ids_ptr
+        + req_state_idx * draft_topk_token_ids_stride_0
+        + step * draft_topk_token_ids_stride_1
+        + offsets,
+        mask=mask,
+        other=0,
+    )
+    tl.store(
+        draft_resample_dense_ptr + req_idx * draft_resample_dense_stride + token_ids,
+        logits,
+        mask=mask,
+    )
+
+
 def rejection_sample(
     # [num_logits, V]
     target_logits: torch.Tensor,
@@ -887,11 +977,27 @@ def rejection_sample(
     synthetic_conditional_rates: torch.Tensor | None = None,
     use_fp64: bool = False,
     use_block_verification: bool = False,
+    draft_topk_logits: torch.Tensor | None = None,
+    draft_topk_token_ids: torch.Tensor | None = None,
+    draft_topk_logsumexp: torch.Tensor | None = None,
+    draft_topk_sampled_logprobs: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
     assert draft_logits is None or (
         draft_logits.ndim == 3 and draft_logits.stride(-1) == 1
     )
+    topk_draft = draft_topk_logits is not None
+    draft_compact_stride_0 = 0
+    if topk_draft:
+        assert draft_topk_logits is not None
+        assert draft_logits is None
+        assert not use_block_verification
+        assert synthetic_conditional_rates is None
+        assert draft_topk_token_ids is not None
+        assert draft_topk_logsumexp is not None
+        assert draft_topk_sampled_logprobs is not None
+        draft_compact_stride_0 = draft_topk_logsumexp.stride(0)
+
     num_reqs = cu_num_logits.shape[0] - 1
     num_logits, vocab_size = target_logits.shape
     draft_logits_stride_0 = 0
@@ -1064,13 +1170,42 @@ def rejection_sample(
         cumulative_log_p,
         local_residual_mass,
         local_residual_mass.stride(0) if local_residual_mass is not None else 0,
+        draft_topk_sampled_logprobs,
+        draft_topk_logsumexp,
+        draft_compact_stride_0,
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
         HAS_DRAFT_LOGITS=has_draft_logits,
         SYNTHETIC_MODE=synthetic_conditional_rates is not None,
         USE_BLOCK_VERIFICATION=use_block_verification,
+        TOPK_DRAFT=topk_draft,
         num_warps=1,
     )
+
+    draft_resample_dense = None
+    draft_resample_dense_stride = 0
+    if draft_topk_logits is not None:
+        assert draft_topk_token_ids is not None
+        k = draft_topk_logits.shape[-1]
+        draft_resample_dense = target_logits.new_full(
+            (num_reqs, vocab_size), float("-inf")
+        )
+        draft_resample_dense_stride = draft_resample_dense.stride(0)
+        _scatter_compact_draft_kernel[(num_reqs,)](
+            draft_resample_dense,
+            draft_resample_dense_stride,
+            num_sampled,
+            cu_num_logits,
+            idx_mapping,
+            draft_topk_logits,
+            draft_topk_logits.stride(0),
+            draft_topk_logits.stride(1),
+            draft_topk_token_ids,
+            draft_topk_token_ids.stride(0),
+            draft_topk_token_ids.stride(1),
+            k,
+            BLOCK_K=triton.next_power_of_2(k),
+        )
 
     # Resample the rejected/bonus tokens.
     RESAMPLE_BLOCK_SIZE = 1024
@@ -1104,11 +1239,14 @@ def rejection_sample(
         seed,
         pos,
         cumulative_log_p,
+        draft_resample_dense,
+        draft_resample_dense_stride,
         vocab_size,
         BLOCK_SIZE=RESAMPLE_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
         USE_FP64=use_fp64,
         USE_BLOCK_VERIFICATION=use_block_verification,
+        TOPK_DRAFT=topk_draft,
     )
 
     # Insert the resampled tokens into the output sampled.

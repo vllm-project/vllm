@@ -29,7 +29,10 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.gpu.sample.gumbel import (
+    gathered_gumbel_argmax,
+    gumbel_sample,
+)
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
 
@@ -72,6 +75,28 @@ class DSparkSpeculator(DFlashSpeculator):
         # Reduced-vocab probabilistic drafting only; set in load_draft_model.
         self._d2t_scatter_index: torch.Tensor | None = None
         self._draft_scatter_buf: torch.Tensor | None = None
+        self._draft_topk: int | None = getattr(
+            self.draft_model_config.hf_config, "dspark_draft_topk", None
+        )
+        self._probabilistic = (
+            self.speculative_config.draft_sample_method == "probabilistic"
+        )
+        self._trash_row = self.max_num_reqs
+        if self._draft_topk is not None and self._probabilistic:
+            num_rows = self.max_num_reqs + 1
+            shape = (num_rows, self.num_speculative_steps)
+            self.draft_topk_logits = torch.zeros(
+                *shape, self._draft_topk, dtype=torch.float32, device=device
+            )
+            self.draft_topk_token_ids = torch.zeros(
+                *shape, self._draft_topk, dtype=torch.int64, device=device
+            )
+            self.draft_topk_logsumexp = torch.zeros(
+                *shape, dtype=torch.float32, device=device
+            )
+            self.draft_topk_sampled_logprobs = torch.zeros(
+                *shape, dtype=torch.float32, device=device
+            )
 
     def load_draft_model(
         self,
@@ -98,6 +123,10 @@ class DSparkSpeculator(DFlashSpeculator):
         return model
 
     def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
+        if self._draft_topk is not None:
+            self._sample_sequential_topk(num_reqs, head_hidden)
+            return
+
         # Sequential Markov sampling over the backbone's output hidden states.
         n_spec = self.num_speculative_steps
         num_sample = num_reqs * n_spec
@@ -145,6 +174,88 @@ class DSparkSpeculator(DFlashSpeculator):
                 draft_sampled_i = self.model.map_draft_to_target(
                     logits_i.argmax(dim=-1)
                 )
+            self.draft_tokens[:num_reqs, i] = draft_sampled_i
+            prev = draft_sampled_i
+
+    def _sample_sequential_topk(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
+        """Apply the sequential Markov head only to top-k base-logit candidates.
+
+        Candidate selection is done once for all draft positions before the
+        sequential loop. Greedy drafting keeps only the winning token.
+        Probabilistic drafting also records the exact truncated proposal over
+        the candidate set for rejection and residual sampling.
+        """
+        assert self._draft_topk is not None
+        n_spec = self.num_speculative_steps
+        num_sample = num_reqs * n_spec
+        sample_hidden = head_hidden[self.sample_indices[:num_sample]]
+        base_logits = self.model.compute_draft_logits(sample_hidden)
+        base_logits = base_logits.view(num_reqs, n_spec, -1)
+        base_values, draft_indices = base_logits.topk(self._draft_topk, dim=-1)
+        # markov_w2 is indexed by draft IDs; Gumbel sampling and verification
+        # use the corresponding target-vocabulary IDs.
+        target_indices = self.model.map_draft_to_target(draft_indices)
+
+        draft_topk_logits = self.draft_topk_logits
+        draft_topk_token_ids = self.draft_topk_token_ids
+        draft_topk_logsumexp = self.draft_topk_logsumexp
+        draft_topk_sampled_logprobs = self.draft_topk_sampled_logprobs
+
+        idx_map = self.sample_idx_mapping[:num_sample].view(num_reqs, n_spec)
+        sample_pos = self.sample_pos[:num_sample].view(num_reqs, n_spec)
+        prev = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
+
+        for i in range(n_spec):
+            markov_embed = self.model.markov_embed(prev)
+            bias = self.model.markov_bias_gathered(markov_embed, draft_indices[:, i])
+            logits = base_values[:, i] + bias
+
+            if self._probabilistic:
+                assert (
+                    draft_topk_logits is not None
+                    and draft_topk_token_ids is not None
+                    and draft_topk_logsumexp is not None
+                    and draft_topk_sampled_logprobs is not None
+                )
+                req_state = idx_map[:, i]
+                req_state_long = req_state.long()
+                temperature = self.temperature[req_state_long.clamp_min(0)].unsqueeze(1)
+                temperature = torch.where(
+                    temperature == 0, torch.ones_like(temperature), temperature
+                )
+                processed_logits = (logits / temperature).float()
+                lse = torch.logsumexp(processed_logits, dim=-1)
+                # Store by persistent request-state ID because batch rows can
+                # move between draft and verify. CUDA-graph padding uses -1 and
+                # is redirected to the extra trash row.
+                rows = torch.where(
+                    req_state >= 0,
+                    req_state_long,
+                    torch.full_like(req_state_long, self._trash_row),
+                )
+
+                draft_topk_logits[rows, i] = processed_logits
+                draft_topk_token_ids[rows, i] = target_indices[:, i]
+                draft_topk_logsumexp[rows, i] = lse
+                winner = gathered_gumbel_argmax(
+                    processed_logits,
+                    target_indices[:, i],
+                    req_state,
+                    self.seeds,
+                    sample_pos[:, i] - 1,
+                    self.temperature,
+                    use_fp64=self.use_fp64_gumbel,
+                )
+                sampled_logit = processed_logits.gather(1, winner.unsqueeze(1)).squeeze(
+                    1
+                )
+                draft_topk_sampled_logprobs[rows, i] = sampled_logit - lse
+            else:
+                winner = logits.argmax(dim=-1)
+
+            draft_sampled_i = (
+                target_indices[:, i].gather(1, winner.unsqueeze(1)).squeeze(1)
+            )
             self.draft_tokens[:num_reqs, i] = draft_sampled_i
             prev = draft_sampled_i
 

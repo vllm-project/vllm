@@ -262,3 +262,94 @@ def gumbel_sample(
     max_block_idx = local_max.argmax(dim=-1, keepdim=True)
     sampled = local_argmax.gather(dim=-1, index=max_block_idx).view(-1)
     return sampled
+
+
+# Dense Gumbel sampling keys each random draw by its vocabulary position.
+# A compact top-k row has different slot positions, so this kernel uses the
+# original target-vocabulary IDs as offsets to preserve the same random field.
+@triton.jit
+def _gathered_gumbel_kernel(
+    out_slot_ptr,
+    logits_ptr,
+    logits_stride,
+    index_ptr,
+    index_stride,
+    expanded_idx_mapping_ptr,
+    seeds_ptr,
+    pos_ptr,
+    temp_ptr,
+    k,
+    BLOCK_K: tl.constexpr,
+    USE_FP64: tl.constexpr,
+):
+    token_idx = tl.program_id(0).to(tl.int64)
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx).to(tl.int64)
+    is_valid_req = req_state_idx >= 0
+    temperature = tl.load(temp_ptr + req_state_idx, mask=is_valid_req, other=0.0).to(
+        tl.float32
+    )
+    offsets = tl.arange(0, BLOCK_K)
+    mask = offsets < k
+    logits = tl.load(
+        logits_ptr + token_idx * logits_stride + offsets,
+        mask=mask,
+        other=float("-inf"),
+    ).to(tl.float32)
+    if USE_FP64:
+        logits = logits.to(tl.float64)
+    if temperature != 0.0:
+        vocab_ids = tl.load(
+            index_ptr + token_idx * index_stride + offsets,
+            mask=mask,
+            other=0,
+        )
+        seed = tl.load(seeds_ptr + req_state_idx, mask=is_valid_req, other=0)
+        pos = tl.load(pos_ptr + token_idx)
+        gumbel_seed = tl.randint(seed, pos)
+        if USE_FP64:
+            uniform = tl_rand64(gumbel_seed, vocab_ids, includes_zero=False)
+            noise = -tl.log(-tl.log(uniform))
+        else:
+            uniform = tl_rand32(gumbel_seed, vocab_ids, includes_zero=False)
+            noise = -tl.log(-tldevice.log1p(-uniform))
+        logits = tl.where(mask, logits + noise, float("-inf"))
+    else:
+        logits = tl.where(mask, logits, float("-inf"))
+
+    tl.store(out_slot_ptr + token_idx, tl.argmax(logits, axis=0))
+
+
+def gathered_gumbel_argmax(
+    logits: torch.Tensor,
+    index: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    seed: torch.Tensor,
+    pos: torch.Tensor,
+    temperature: torch.Tensor,
+    use_fp64: bool = False,
+) -> torch.Tensor:
+    """Gumbel-max sample over per-token candidate sets.
+
+    ``index`` contains the true target-vocabulary IDs used as RNG offsets. The
+    result is a slot in each compact row so the caller can gather the matching
+    logit and token ID without expanding back to the full vocabulary.
+    """
+    expanded_idx_mapping = expanded_idx_mapping.contiguous()
+    pos = pos.contiguous()
+    num_tokens, k = logits.shape
+    out_slot = logits.new_empty(num_tokens, dtype=torch.int64)
+    _gathered_gumbel_kernel[(num_tokens,)](
+        out_slot,
+        logits,
+        logits.stride(0),
+        index,
+        index.stride(0),
+        expanded_idx_mapping,
+        seed,
+        pos,
+        temperature,
+        k,
+        BLOCK_K=triton.next_power_of_2(k),
+        USE_FP64=use_fp64,
+    )
+    return out_slot
