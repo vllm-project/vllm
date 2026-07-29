@@ -59,7 +59,7 @@ fn fixture_request(input_name: &str) -> ChatRequest {
 
 fn deepseek_fixture_options() -> FixtureRequestOptions {
     FixtureRequestOptions {
-        enable_thinking: true,
+        enable_thinking: Some(true),
         no_generation_prompt_when_last_assistant: true,
     }
 }
