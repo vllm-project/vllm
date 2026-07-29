@@ -533,6 +533,11 @@ def build_mamba_offset_template(
             f"(tp_ratio={tp_ratio}); use equal prefill/decode TP for "
             "hybrid models"
         )
+    # Past the gate above this is always the homogeneous path (the reviewer's
+    # "is tp_ratio always 1 here?"): make that invariant explicit.
+    assert tp_ratio == 1, (
+        f"homogeneous KDA offset path requires tp_ratio == 1, got {tp_ratio}"
+    )
     geom = get_mamba_transfer_geometry(layer_name, conv, ssm, layer_to_spec)
     local_offset = tp_rank % max(tp_ratio, 1)
     conv_local_offsets = split_info.local_conv_offsets

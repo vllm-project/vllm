@@ -41,6 +41,10 @@ ssm_conv_transfer_utils = importlib.import_module(
 )
 MambaConvSplitInfo = ssm_conv_transfer_utils.MambaConvSplitInfo
 MoRIIOMode = moriio_connector.MoRIIOMode
+moriio_common = importlib.import_module(
+    "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common"
+)
+as_attn_mamba = moriio_common.as_attn_mamba
 
 
 class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):
@@ -117,7 +121,7 @@ def test_split_block_groups_no_mamba_reduces_to_prior_behavior():
 # --------------------------------------------------------------------------
 # request_finished_all_groups
 # --------------------------------------------------------------------------
-def test_request_finished_all_groups_routes_attn_and_mamba_ids():
+def test_request_finished_all_groups_carries_attn_and_mamba_in_one_field():
     seen = {}
 
     def _fake_request_finished(request, attn_block_ids):
@@ -133,13 +137,17 @@ def test_request_finished_all_groups_routes_attn_and_mamba_ids():
     delay_free, params = conn.request_finished_all_groups(request, block_ids)
 
     assert delay_free is True
-    # attention ids went to request_finished; mamba slot attached separately.
+    # Attention ids drive request_finished; the mamba slot rides the SAME
+    # remote_block_ids channel as [attn, mamba] -- no separate wire field, so
+    # the proxy/router need no KDA-specific field.
     assert seen["attn"] == [10, 11]
-    assert params["remote_block_ids"] == [10, 11]
-    assert params["remote_mamba_block_ids"] == [42]
+    assert params["remote_block_ids"] == [[10, 11], [42]]
+    assert "remote_mamba_block_ids" not in params
+    # Round-trips through the consumer-side unpacker.
+    assert as_attn_mamba(params["remote_block_ids"]) == ([10, 11], [42])
 
 
-def test_request_finished_all_groups_no_mamba_omits_mamba_ids():
+def test_request_finished_all_groups_pure_attention_stays_flat():
     def _fake_request_finished(request, attn_block_ids):
         return True, {"remote_block_ids": attn_block_ids}
 
@@ -150,8 +158,25 @@ def test_request_finished_all_groups_no_mamba_omits_mamba_ids():
     delay_free, params = conn.request_finished_all_groups(
         SimpleNamespace(request_id="r1"), ([7, 8],)
     )
+    # Pure attention: remote_block_ids stays a flat list; no KDA field added.
     assert params["remote_block_ids"] == [7, 8]
     assert "remote_mamba_block_ids" not in params
+    assert as_attn_mamba(params["remote_block_ids"]) == ([7, 8], [])
+
+
+# --------------------------------------------------------------------------
+# as_attn_mamba (carried block-ids unpacker)
+# --------------------------------------------------------------------------
+def test_as_attn_mamba_unpacks_flat_and_paired():
+    # Empty / None -> no blocks.
+    assert as_attn_mamba(None) == ([], [])
+    assert as_attn_mamba([]) == ([], [])
+    # Flat list (attention-only / legacy) -> all attention, no mamba.
+    assert as_attn_mamba([1, 2, 3]) == ([1, 2, 3], [])
+    # [attn, mamba] pair (hybrid) unpacks both halves.
+    assert as_attn_mamba([[1, 2], [9]]) == ([1, 2], [9])
+    # Tuple form with empty mamba half.
+    assert as_attn_mamba(([4, 5], [])) == ([4, 5], [])
 
 
 # --------------------------------------------------------------------------

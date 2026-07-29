@@ -48,6 +48,28 @@ class MoRIIOTransferAck(NamedTuple):
     consumer_tp_size: int = 1
 
 
+def as_attn_mamba(
+    block_ids: "list[int] | tuple | list | None",
+) -> "tuple[list[int], list[int]]":
+    """Unpack a carried block-ids value into (attention, mamba) block ids.
+
+    Hybrid (mamba/KDA) requests carry both halves in the SAME block-ids
+    channel as ``[attn_block_ids, mamba_block_ids]`` (a ``tuple[list[int],
+    ...]``), so the mamba recurrent-state slot rides the existing
+    ``remote_block_ids`` / notify / ReqMeta plumbing instead of a separate
+    wire field. A plain ``list[int]`` (attention-only / legacy) unpacks to
+    ``(that_list, [])``. Consumers on the worker/engine side split at the
+    point of use rather than threading a parallel mamba field through.
+    """
+    if not block_ids:
+        return [], []
+    if isinstance(block_ids[0], (list, tuple)):
+        attn = list(block_ids[0])
+        mamba = list(block_ids[1]) if len(block_ids) > 1 else []
+        return attn, mamba
+    return list(block_ids), []
+
+
 @dataclass
 class WriteTask:
     request_id: ReqId
@@ -61,8 +83,6 @@ class WriteTask:
     remote_ip: str
     enqueue_time: float = field(default_factory=time.perf_counter)
     retried: int = 0
-    # Local KDA recurrent-state slot ids for this write (empty for attention).
-    local_mamba_block_ids: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -94,10 +114,10 @@ class LayerTransferPlan:
 class RemoteAllocInfo:
     """Information about remote block allocation."""
 
-    block_ids: list[int]
-    # Remote KDA recurrent-state slot ids sent by the decoder (empty for
-    # attention-only models).
-    mamba_block_ids: list[int] = field(default_factory=list)
+    # Carried block ids: attention-only requests hold a flat ``list[int]``;
+    # hybrid requests hold ``[attn_block_ids, mamba_block_ids]`` (unpack with
+    # ``as_attn_mamba``), so the decoder's KDA slot rides this same field.
+    block_ids: list
     writes_done: int = 0
     writes_expected: int | None = None
     decode_dp_rank: int = 0
@@ -438,10 +458,6 @@ class ReqMeta:
     remote_engine_id: str
     tp_size: int
     remote_dp_size: int
-    # Hybrid (mamba/KDA) per-request recurrent-state slot ids; one logical
-    # slot per request. Empty for attention-only models.
-    mamba_local_block_ids: list[int] = field(default_factory=list)
-    mamba_remote_block_ids: list[int] = field(default_factory=list)
 
 
 class MoRIIOConnectorMetadata(KVConnectorMetadata):
@@ -465,7 +481,6 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         local_block_ids: list[int],
         kv_transfer_params: dict[str, Any],
         write_mode=False,
-        local_mamba_block_ids: list[int] | None = None,
     ):
         transfer_id = kv_transfer_params["transfer_id"]
 
@@ -494,15 +509,15 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             remote_port=int(remote_handshake_port),
             remote_handshake_port=int(remote_handshake_port),
             remote_notify_port=int(remote_notify_port),
+            # Use the REMOTE tp size for producer<->consumer rank mapping: the
+            # decode side must know the prefiller's TP degree to map producer
+            # ranks onto the correct decode rank (and vice versa). The old plain
+            # "tp_size" key defaulted to 1, collapsing every producer rank onto
+            # decode rank 0 and corrupting the transfer; prefer "remote_tp_size".
             tp_size=kv_transfer_params.get(
                 "remote_tp_size", kv_transfer_params.get("tp_size", 1)
             ),
             remote_dp_size=kv_transfer_params.get("remote_dp_size", 1),
-            mamba_local_block_ids=local_mamba_block_ids or [],
-            mamba_remote_block_ids=kv_transfer_params.get(
-                "remote_mamba_block_ids", []
-            )
-            or [],
         )
         if write_mode:
             self.reqs_to_save[request_id] = _req

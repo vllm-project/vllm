@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from mori.io import BackendType
 
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+    as_attn_mamba,
     ROLE,
     HandshakeError,
     LayerTransferPlan,
@@ -381,10 +382,14 @@ class MoRIIOWriter:
         geometry_key = _get_write_geometry_key(layer_cache)
         offsets = request_info.transfer_offsets.get(geometry_key)
         if offsets is None:
+            # local/remote block ids carry [attn, mamba]; attention layers use
+            # the attention half.
+            local_attn, _ = as_attn_mamba(task.local_block_ids)
+            remote_attn, _ = as_attn_mamba(request_info.block_ids)
             offsets = self.worker._compute_block_transfer_offsets(
                 task.layer_name,
-                task.local_block_ids,
-                request_info.block_ids,
+                local_attn,
+                remote_attn,
                 remote_moriio_meta,
             )
             request_info.transfer_offsets[geometry_key] = offsets
@@ -419,10 +424,13 @@ class MoRIIOWriter:
         per task regardless of how many session writes fire), so no attention-
         layer-count threshold is needed.
         """
+        # KDA layers use the mamba half of the carried [attn, mamba] block ids.
+        _, local_mamba = as_attn_mamba(task.local_block_ids)
+        _, remote_mamba = as_attn_mamba(request_info.block_ids)
         local, remote, sizes, n_conv = self.worker._compute_mamba_transfer_offsets(
             task.layer_name,
-            task.local_mamba_block_ids,
-            request_info.mamba_block_ids,
+            local_mamba,
+            remote_mamba,
         )
         region_sessions = self.worker._region_session_indices(task.layer_name)
         return LayerTransferPlan(
@@ -829,7 +837,6 @@ class MoRIIOWrapper:
         assert get_role() == ROLE.PRODUCER, "Only prefill can get block messages"
         transfer_id = data["transfer_id"]
         block_notify_list = data.get("block_notify_list", [])
-        mamba_block_notify_list = data.get("mamba_block_notify_list", [])
         decode_dp_rank = data.get("decode_rank", 0)
         if not block_notify_list:
             raise MoRIIOError(
@@ -845,7 +852,6 @@ class MoRIIOWrapper:
                 return
             self.done_remote_allocate_req_dict[transfer_id] = RemoteAllocInfo(
                 block_ids=block_notify_list,
-                mamba_block_ids=mamba_block_notify_list,
                 decode_dp_rank=decode_dp_rank,
             )
 
