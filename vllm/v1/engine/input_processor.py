@@ -329,8 +329,7 @@ class InputProcessor:
             if self.model_config.enable_return_sampling_mask:
                 if sampling_params.output_kind != RequestOutputKind.FINAL_ONLY:
                     raise ValueError(
-                        "sampling distribution replay requires "
-                        "output_kind=FINAL_ONLY"
+                        "sampling distribution replay requires output_kind=FINAL_ONLY"
                     )
                 if sampling_params.temperature <= 0:
                     raise ValueError(
