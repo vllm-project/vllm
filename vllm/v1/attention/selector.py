@@ -193,6 +193,12 @@ def _cached_get_attn_backend(
         )
     backend = resolve_obj_by_qualname(attention_cls)
 
+    if backend.get_name() == "FLEX_ATTENTION":
+        logger.warning_once(
+            "The FLEX_ATTENTION backend is deprecated and will be removed in "
+            "v0.30.0. Use TRITON_ATTN or FLASH_ATTN instead."
+        )
+
     # Adjust kv cache layout if the selected backend requires a specific one
     required_layout = backend.get_required_kv_cache_layout()
     if required_layout is not None:
