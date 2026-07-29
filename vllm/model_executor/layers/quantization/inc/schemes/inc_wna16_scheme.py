@@ -165,6 +165,7 @@ def _resolve_gptq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
             "group_size": layer_config.group_size,
             "sym": layer_config.sym,
             "lm_head": False,
+            "source": "inc",
         }
     )
     return MoeWNA16Method(moe_config, layer.moe_config)
@@ -213,6 +214,7 @@ def _resolve_awq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
             "group_size": layer_config.group_size,
             "zero_point": not layer_config.sym,
             "lm_head": False,
+            "source": "inc",
         }
     )
     return MoeWNA16Method(moe_config, layer.moe_config)

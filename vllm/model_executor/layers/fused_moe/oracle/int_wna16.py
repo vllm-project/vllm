@@ -1546,29 +1546,43 @@ def convert_to_wna16_moe_kernel_format(
         )
     elif backend == WNA16MoEBackend.XPU:
         assert quant_config is not None
-        (
-            w13_xpu,
-            w2_xpu,
-            w13_scale_xpu,
-            w2_scale_xpu,
-            w13_bias_out,
-            w2_bias_out,
-        ) = _process_weights_xpu(
-            layer,
-            quant_config,
+        from vllm.model_executor.layers.quantization.moe_wna16 import (
+            MoeWNA16Config,
+        )
+
+        is_inc = (
+            hasattr(quant_config, "full_config")
+            and quant_config.full_config is not None
+            and quant_config.full_config.get("source") == "inc"
+        )
+
+        if not is_inc:
+            # INC registers weights and scales already in the XPU
+            # kernel's N-first layout (w13 [E, 2N, K//2] uint8, scales
+            # [E, 2N, K//group_size]);
+            (
+                w13,
+                w2,
+                w13_scale,
+                w2_scale,
+                w13_bias,
+                w2_bias,
+            ) = _process_weights_xpu(
+                layer,
+                quant_config,
+                w13,
+                w2,
+                w13_scale,
+                w2_scale,
+                w13_bias,
+                w2_bias,
+            )
+        empty = torch.empty((0,), dtype=torch.int32, device=w13.device)
+        return (
             w13,
             w2,
             w13_scale,
             w2_scale,
-            w13_bias,
-            w2_bias,
-        )
-        empty = torch.empty((0,), dtype=torch.int32, device=w13.device)
-        return (
-            w13_xpu,
-            w2_xpu,
-            w13_scale_xpu,
-            w2_scale_xpu,
             empty,  # w13_g_idx
             empty,  # w2_g_idx
             empty,  # w13_g_idx_sort_indices
@@ -1577,8 +1591,8 @@ def convert_to_wna16_moe_kernel_format(
             None,  # w2_qzeros
             None,  # w13_input_global_scale
             None,  # w2_input_global_scale
-            w13_bias_out,
-            w2_bias_out,
+            w13_bias,
+            w2_bias,
         )
     elif backend == WNA16MoEBackend.EMULATION:
         from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
