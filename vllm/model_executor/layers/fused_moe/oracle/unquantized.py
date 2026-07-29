@@ -151,6 +151,7 @@ def map_unquantized_backend(runner_backend: MoEBackend) -> UnquantizedMoeBackend
     """Map user's MoEBackend to UnquantizedMoeBackend."""
     mapping = {
         "triton": UnquantizedMoeBackend.TRITON,
+        "batched_triton": UnquantizedMoeBackend.BATCHED_TRITON,
         "flashinfer_trtllm": UnquantizedMoeBackend.FLASHINFER_TRTLLM,
         "flashinfer_cutlass": UnquantizedMoeBackend.FLASHINFER_CUTLASS,
         "aiter": UnquantizedMoeBackend.AITER,
@@ -233,6 +234,7 @@ def select_unquantized_moe_backend(
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
         if moe_config.moe_parallel_config.use_batched_activation_format
+        or moe_config.moe_backend == "batched_triton"
         else mk.FusedMoEActivationFormat.Standard
     )
 
@@ -360,6 +362,13 @@ def make_unquantized_moe_kernel(
     experts_cls: type[mk.FusedMoEExperts],
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> mk.FusedMoEKernel:
+    from vllm.model_executor.layers.fused_moe.utils import (
+        warn_if_moe_use_td_ineffective,
+    )
+
+    # Warn against the selected backend, not each probed candidate.
+    warn_if_moe_use_td_ineffective(backend.value, is_quantized=False)
+
     # Create Prepare/Finalize
     is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
     prepare_finalize = maybe_make_prepare_finalize(

@@ -195,6 +195,8 @@ _TEXT_GENERATION_MODELS = {
     "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
     "Qwen3ForCausalLM": ("qwen3", "Qwen3ForCausalLM"),
     "Qwen3MoeForCausalLM": ("qwen3_moe", "Qwen3MoeForCausalLM"),
+    "Qwen3_5ForCausalLM": ("qwen3_5", "Qwen3_5ForCausalLM"),
+    "Qwen3_5MoeForCausalLM": ("qwen3_5", "Qwen3_5MoeForCausalLM"),
     "RWForCausalLM": ("falcon", "FalconForCausalLM"),
     "SarvamMoEForCausalLM": ("sarvam", "SarvamMoEForCausalLM"),
     "SarvamMLAForCausalLM": ("sarvam", "SarvamMLAForCausalLM"),
@@ -797,6 +799,7 @@ class _ModelInfo:
     supports_replayssm: bool
     supports_transcription: bool
     supports_transcription_only: bool
+    supported_video_pruning_methods: tuple[str, ...]
 
     @staticmethod
     def from_model_cls(model: type[nn.Module]) -> "_ModelInfo":
@@ -827,6 +830,9 @@ class _ModelInfo:
                 supports_transcription(model) and model.supports_transcription_only
             ),
             has_noops=has_noops(model),
+            supported_video_pruning_methods=getattr(
+                model, "supported_video_pruning_methods", ()
+            ),
         )
 
 

@@ -1736,13 +1736,9 @@ def disable_deepgemm_ue8m0(monkeypatch):
 
 
 def _should_clean_gpu_memory_between_tests() -> bool:
-    setting = os.getenv("VLLM_TEST_CLEAN_GPU_MEMORY")
-    if setting == "1":
-        return True
-    if setting == "0":
-        return False
-    # ROCm reclaims VRAM lazily; default to waiting between tests on ROCm CI.
-    return current_platform.is_rocm()
+    # This must stay opt-in: a function-scoped fixture cannot distinguish
+    # stale VRAM from allocations owned by longer-lived module/session fixtures.
+    return os.getenv("VLLM_TEST_CLEAN_GPU_MEMORY", "0") == "1"
 
 
 @pytest.fixture(autouse=True)
