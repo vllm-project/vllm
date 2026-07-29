@@ -66,6 +66,7 @@ steps:
     label: debug
     gpu: 4+
   _raw_old_commands:
+  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - pytest -v -s distributed/test_elastic_ep.py
   source_file_dependencies:
   - vllm/distributed/
@@ -77,4 +78,5 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
+    bash /workspace/vllm/.buildkite/scripts/install-kv-connectors.sh || true &&
     pytest -v -s distributed/test_elastic_ep.py || true'

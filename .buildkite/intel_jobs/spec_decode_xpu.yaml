@@ -64,10 +64,12 @@ steps:
     gpu: 1+
   _raw_old_commands:
   - pytest -v -s v1/e2e/spec_decode -k "ngram or suffix"
+  - python3 spec_decode/test_custom_proposer.py
   source_file_dependencies:
   - vllm/v1/spec_decode/
   - vllm/v1/worker/gpu/spec_decode/
   - tests/v1/e2e/spec_decode/
+  - tests/spec_decode/
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
@@ -177,3 +179,27 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s v1/e2e/spec_decode/test_mtp_parallel_load.py || true'
+- label: Spec Decode Acceptance Rates Nightly
+  device: intel_gpu
+  timeout_in_minutes: 60
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "acceptance_rates"
+  source_file_dependencies:
+  - vllm/v1/spec_decode/
+  - vllm/v1/worker/gpu/spec_decode/
+  - tests/v1/e2e/spec_decode/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k acceptance_rates || true'

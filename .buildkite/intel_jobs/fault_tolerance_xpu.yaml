@@ -1,0 +1,38 @@
+group: Fault Tolerance XPU
+depends_on:
+  - image-build-xpu
+steps:
+- label: Fault Tolerance E2E (2xH100)
+  device: intel_gpu
+  timeout_in_minutes: 35
+  num_devices: 2
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - export NCCL_CUMEM_HOST_ENABLE=0
+  - pytest -v -s v1/fault_tolerance/test_fault_tolerance_e2e.py
+  source_file_dependencies:
+  - vllm/v1/fault_tolerance/
+  - vllm/v1/worker/sentinel/
+  - vllm/entrypoints/serve/fault_tolerance/
+  - vllm/distributed/elastic_ep/
+  - vllm/distributed/device_communicators/
+  - vllm/v1/engine/
+  - vllm/v1/worker/
+  - tests/v1/fault_tolerance/
+  - tests/v1/distributed/test_external_lb_dp.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    bash /workspace/vllm/.buildkite/scripts/install-kv-connectors.sh || true &&
+    export NCCL_CUMEM_HOST_ENABLE=0 || true &&
+    pytest -v -s v1/fault_tolerance/test_fault_tolerance_e2e.py || true'
