@@ -31,6 +31,12 @@ from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
 logger = init_logger(__name__)
 
 
+def _slice_is_padding(
+    is_padding: torch.Tensor | None, token_slice: slice
+) -> torch.Tensor | None:
+    return is_padding[token_slice] if is_padding is not None else None
+
+
 def _cat_ubatch_outputs(
     sorted_results: list,
 ) -> "torch.Tensor | tuple[torch.Tensor, ...]":
@@ -353,6 +359,7 @@ class UBatchWrapper:
         dp_metadata,
         batch_descriptor,
         cudagraph_runtime_mode,
+        is_padding,
     ) -> list[UbatchMetadata]:
         # Create one forward context per ubatch
         forward_contexts = []
@@ -368,6 +375,7 @@ class UBatchWrapper:
                     batch_descriptor=batch_descriptor,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     slot_mapping=slot_mapping[i] if has_slot_mapping else None,
+                    is_padding=_slice_is_padding(is_padding, ubatch_slice.token_slice),
                 )
             )
 
@@ -506,6 +514,7 @@ class UBatchWrapper:
                 dp_metadata=ubatch_dp_metadata,
                 batch_descriptor=batch_descriptor,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                is_padding=forward_context.is_padding,
             )
             with self.sm_control:
                 return self._capture_ubatches(ubatch_metadata, self.runnable)
@@ -532,6 +541,7 @@ class UBatchWrapper:
                 dp_metadata=ubatch_dp_metadata,
                 batch_descriptor=batch_descriptor,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                is_padding=forward_context.is_padding,
             )
             with self.sm_control:
                 return self._run_ubatches(ubatch_metadata, self.runnable)

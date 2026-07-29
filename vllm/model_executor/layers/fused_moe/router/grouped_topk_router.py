@@ -8,6 +8,7 @@ from vllm import _custom_ops as ops
 from vllm import envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
@@ -23,6 +24,17 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
+
+
+def _mask_padding(
+    topk_weights: torch.Tensor, topk_ids: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+        is_padding = get_forward_context().is_padding
+        if is_padding is not None:
+            mask = is_padding[: topk_ids.shape[0]].unsqueeze(1)
+            topk_ids.masked_fill_(mask, -1)
+    return topk_weights, topk_ids
 
 
 def fused_grouped_topk(
@@ -321,7 +333,7 @@ class GroupedTopKRouter(BaseRouter):
                     renormalize=self.renormalize,
                     indices_type=indices_type,
                 )
-            return topk_weights, topk_ids
+            return _mask_padding(topk_weights, topk_ids)
 
         # Select grouped_topk implementation
         if rocm_aiter_ops.is_fused_moe_enabled():
@@ -346,4 +358,4 @@ class GroupedTopKRouter(BaseRouter):
             e_score_correction_bias=self.e_score_correction_bias,
         )
 
-        return topk_weights, topk_ids
+        return _mask_padding(topk_weights, topk_ids)
