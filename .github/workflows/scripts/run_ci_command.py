@@ -381,6 +381,7 @@ def create_build_payload(
         "pull_request_base_branch": pr["base"]["ref"],
         "pull_request_repository": pr["head"]["repo"]["clone_url"],
         "pull_request_labels": [label["name"] for label in pr["labels"]],
+        "ignore_pipeline_branch_filters": True,
         "env": {
             "VLLM_CI_GITHUB_COMMENT_ID": str(comment_id),
             "VLLM_CI_TRIGGERED_BY": actor,
