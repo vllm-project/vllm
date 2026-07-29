@@ -37,7 +37,7 @@ _HEADER_BYTES = 256
 _WRITE_SEQ = tl.constexpr(0)
 _READ_SEQ = tl.constexpr(1)
 _MAX_FENCE_SPINS = 100_000_000
-DEFAULT_MAX_ROWS = 128
+DEFAULT_MAX_ROWS = 512
 _logged_merge_rows: set[int] = set()
 
 
